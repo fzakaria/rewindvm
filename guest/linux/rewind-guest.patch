@@ -1,0 +1,812 @@
+diff -ruN a/arch/x86/include/asm/hypervisor.h b/arch/x86/include/asm/hypervisor.h
+--- a/arch/x86/include/asm/hypervisor.h	2026-09-30 09:16:35.084212648 -0700
++++ b/arch/x86/include/asm/hypervisor.h	2026-09-30 09:16:50.675875623 -0700
+@@ -30,6 +30,7 @@
+ 	X86_HYPER_KVM,
+ 	X86_HYPER_JAILHOUSE,
+ 	X86_HYPER_ACRN,
++	X86_HYPER_REWIND,
+ };
+ 
+ #ifdef CONFIG_HYPERVISOR_GUEST
+@@ -64,9 +65,15 @@
+ extern const struct hypervisor_x86 x86_hyper_kvm;
+ extern const struct hypervisor_x86 x86_hyper_jailhouse;
+ extern const struct hypervisor_x86 x86_hyper_acrn;
++extern const struct hypervisor_x86 x86_hyper_rewind;
+ extern struct hypervisor_x86 x86_hyper_xen_hvm;
+ 
+ extern bool nopv;
++
++#ifdef CONFIG_REWIND_GUEST
++struct pt_regs;
++bool rewind_fixup_rdtsc(struct pt_regs *regs);
++#endif
+ extern enum x86_hypervisor_type x86_hyper_type;
+ extern void init_hypervisor_platform(void);
+ static inline bool hypervisor_is_type(enum x86_hypervisor_type type)
+diff -ruN a/arch/x86/include/asm/idtentry.h b/arch/x86/include/asm/idtentry.h
+--- a/arch/x86/include/asm/idtentry.h	2026-09-30 09:16:35.102986376 -0700
++++ b/arch/x86/include/asm/idtentry.h	2026-09-30 09:16:35.147101045 -0700
+@@ -767,6 +767,10 @@
+ DECLARE_IDTENTRY_SYSVEC(HYPERVISOR_CALLBACK_VECTOR,	sysvec_acrn_hv_callback);
+ #endif
+ 
++#if IS_ENABLED(CONFIG_REWIND_GUEST)
++DECLARE_IDTENTRY_SYSVEC(HYPERVISOR_CALLBACK_VECTOR,	sysvec_rewind_callback);
++#endif
++
+ #ifdef CONFIG_XEN_PVHVM
+ DECLARE_IDTENTRY_SYSVEC(HYPERVISOR_CALLBACK_VECTOR,	sysvec_xen_hvm_callback);
+ #endif
+diff -ruN a/arch/x86/include/asm/timex.h b/arch/x86/include/asm/timex.h
+--- a/arch/x86/include/asm/timex.h	2026-09-30 09:16:35.133567909 -0700
++++ b/arch/x86/include/asm/timex.h	2026-09-30 09:24:42.142214084 -0700
+@@ -5,12 +5,21 @@
+ #include <asm/processor.h>
+ #include <asm/tsc.h>
+ 
++#ifdef CONFIG_REWIND_GUEST
++/* See arch/x86/kernel/cpu/rewind.c. */
++unsigned long rewind_get_entropy(void);
++#endif
++
+ static inline unsigned long random_get_entropy(void)
+ {
++#ifdef CONFIG_REWIND_GUEST
++	return rewind_get_entropy();
++#else
+ 	if (!IS_ENABLED(CONFIG_X86_TSC) &&
+ 	    !cpu_feature_enabled(X86_FEATURE_TSC))
+ 		return random_get_entropy_fallback();
+ 	return rdtsc();
++#endif
+ }
+ #define random_get_entropy random_get_entropy
+ 
+diff -ruN a/arch/x86/include/asm/tsc.h b/arch/x86/include/asm/tsc.h
+--- a/arch/x86/include/asm/tsc.h	2026-09-30 09:16:35.143394675 -0700
++++ b/arch/x86/include/asm/tsc.h	2026-09-30 09:16:50.675807885 -0700
+@@ -21,7 +21,7 @@
+ 
+ static inline cycles_t get_cycles(void)
+ {
+-	if (!IS_ENABLED(CONFIG_X86_TSC) &&
++	if ((!IS_ENABLED(CONFIG_X86_TSC) || IS_ENABLED(CONFIG_REWIND_GUEST)) &&
+ 	    !cpu_feature_enabled(X86_FEATURE_TSC))
+ 		return 0;
+ 	return rdtsc();
+diff -ruN a/arch/x86/Kconfig b/arch/x86/Kconfig
+--- a/arch/x86/Kconfig	2026-09-30 09:16:35.073831026 -0700
++++ b/arch/x86/Kconfig	2026-09-30 09:16:35.147312552 -0700
+@@ -889,6 +889,18 @@
+ 	  IOT with small footprint and real-time features. More details can be
+ 	  found in https://projectacrn.org/.
+ 
++config REWIND_GUEST
++	bool "Rewind VM guest support"
++	depends on X86_64 && !SMP
++	select X86_HV_CALLBACK_VECTOR
++	select TRACEPOINTS
++	help
++	  This option allows Linux to run as a guest of Rewind VM, a
++	  deterministic virtual machine monitor on KVM. Time is virtual and
++	  moves only when the guest exits to the monitor, interrupts arrive
++	  only at those exits, and the kernel reports process, file and
++	  output events to the monitor through port I/O.
++
+ config INTEL_TDX_GUEST
+ 	bool "Intel TDX (Trust Domain Extensions) - Guest Support"
+ 	depends on X86_64 && CPU_SUP_INTEL
+diff -ruN a/arch/x86/kernel/cpu/hypervisor.c b/arch/x86/kernel/cpu/hypervisor.c
+--- a/arch/x86/kernel/cpu/hypervisor.c	2026-09-30 09:16:35.093264237 -0700
++++ b/arch/x86/kernel/cpu/hypervisor.c	2026-09-30 09:16:35.147671537 -0700
+@@ -45,6 +45,9 @@
+ #ifdef CONFIG_ACRN_GUEST
+ 	&x86_hyper_acrn,
+ #endif
++#ifdef CONFIG_REWIND_GUEST
++	&x86_hyper_rewind,
++#endif
+ };
+ 
+ enum x86_hypervisor_type x86_hyper_type;
+diff -ruN a/arch/x86/kernel/cpu/Makefile b/arch/x86/kernel/cpu/Makefile
+--- a/arch/x86/kernel/cpu/Makefile	2026-09-30 09:16:35.112660945 -0700
++++ b/arch/x86/kernel/cpu/Makefile	2026-09-30 09:16:35.147805518 -0700
+@@ -56,6 +56,7 @@
+ 
+ obj-$(CONFIG_HYPERVISOR_GUEST)		+= vmware.o hypervisor.o mshyperv.o
+ obj-$(CONFIG_ACRN_GUEST)		+= acrn.o
++obj-$(CONFIG_REWIND_GUEST)		+= rewind.o
+ 
+ obj-$(CONFIG_DEBUG_FS)			+= debugfs.o
+ 
+diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
+--- a/arch/x86/kernel/cpu/rewind.c	1969-12-31 16:00:00.000000000 -0800
++++ b/arch/x86/kernel/cpu/rewind.c	2026-09-30 09:27:28.213388638 -0700
+@@ -0,0 +1,662 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Rewind VM guest platform.
++ *
++ * Rewind VM runs this kernel on KVM with one vCPU and makes the run a pure
++ * function of its inputs. The monitor never interrupts the guest on its own
++ * schedule: time is virtual, it moves only when the guest exits to the
++ * monitor, and interrupts are injected only at those exits. Every exit is a
++ * guest instruction (a port read or write), so the sequence of exits, and
++ * with it everything the guest does, is the same on every run.
++ *
++ * This file supplies the pieces a normal x86 platform gets from hardware:
++ *
++ *   - a clocksource and a one-shot clock event device backed by the
++ *     monitor's virtual clock,
++ *   - an idle routine that tells the monitor nothing is runnable, in place
++ *     of HLT, so virtual time can jump to the next armed timer,
++ *   - the wall clock at boot (the monitor passes SOURCE_DATE_EPOCH),
++ *   - power off, restart and halt as port writes,
++ *   - a console, and an event stream of exec, fork, exit, signals, file
++ *     writes and program output, each written to the monitor with the
++ *     guest physical address of a record.
++ *
++ * The port layout and record format must match crates/rewind-vmm.
++ */
++
++#include <linux/clockchips.h>
++#include <linux/clocksource.h>
++#include <linux/console.h>
++#include <linux/fcntl.h>
++#include <linux/fs.h>
++#include <linux/init.h>
++#include <linux/miscdevice.h>
++#include <linux/mm.h>
++#include <linux/mutex.h>
++#include <linux/pm.h>
++#include <linux/sched.h>
++#include <linux/sched/mm.h>
++#include <linux/binfmts.h>
++#include <linux/static_call.h>
++#include <linux/string.h>
++#include <linux/uaccess.h>
++
++#include <trace/events/sched.h>
++#include <trace/events/signal.h>
++#include <trace/events/syscalls.h>
++
++#include <asm/apic.h>
++#include <asm/cpufeatures.h>
++#include <asm/hypervisor.h>
++#include <asm/i8259.h>
++#include <asm/idtentry.h>
++#include <asm/io.h>
++#include <asm/irq_regs.h>
++#include <asm/reboot.h>
++#include <asm/setup.h>
++#include <asm/tsc.h>
++#include <asm/syscall.h>
++#include <asm/unistd.h>
++#include <asm/x86_init.h>
++
++/* The CPUID signature the monitor advertises at leaf 0x40000000. */
++#define REWIND_SIGNATURE "RewindRewind"
++
++/* Ports the monitor traps. Each access is one exit, and one step. */
++#define REWIND_PORT_EMIT	0x5e0	/* outl: physical address of a record */
++#define REWIND_PORT_CLOCK	0x5e4	/* inl: refresh rewind_shared.now */
++#define REWIND_PORT_TIMER	0x5ec	/* outl: arm the timer, ns from now */
++#define REWIND_PORT_IDLE	0x5f0	/* outl: nothing is runnable */
++#define REWIND_PORT_EXIT	0x5f4	/* outl: stop the machine */
++#define REWIND_PORT_SETUP	0x5f8	/* outl: physical address of rewind_shared */
++
++/* Values written to REWIND_PORT_EXIT. */
++enum rewind_exit {
++	REWIND_EXIT_POWER_OFF = 0,
++	REWIND_EXIT_RESTART = 1,
++	REWIND_EXIT_HALT = 2,
++};
++
++/* Record kinds. The payload of each is described next to it. */
++enum rewind_kind {
++	REWIND_EV_CONSOLE = 1,	/* kernel log text */
++	REWIND_EV_OUTPUT = 2,	/* aux: fd (1 or 2); payload: bytes written */
++	REWIND_EV_EXEC = 3,	/* aux: old pid; payload: filename NUL argv */
++	REWIND_EV_FORK = 4,	/* aux: child tid; flags: REWIND_FLAG_THREAD */
++	REWIND_EV_EXIT = 5,	/* aux: exit code; payload: comm */
++	REWIND_EV_SIGNAL = 6,	/* aux: signal; payload: s32 code, u64 addr */
++	REWIND_EV_OPEN = 7,	/* aux: open flags; payload: path */
++	REWIND_EV_UNLINK = 8,	/* payload: path */
++	REWIND_EV_RENAME = 9,	/* payload: old path NUL new path */
++	REWIND_EV_MARK = 10,	/* payload: text written to /dev/rewind */
++};
++
++#define REWIND_FLAG_THREAD	BIT(0)
++
++/*
++ * One record, as the monitor reads it out of guest memory. len covers the
++ * whole record including this header.
++ */
++struct rewind_record {
++	u32 len;
++	u16 kind;
++	u16 flags;
++	u32 pid;
++	u32 tid;
++	u32 aux;
++	u8 data[];
++} __packed;
++
++#define REWIND_RECORD_MAX	8192
++#define REWIND_PAYLOAD_MAX	(REWIND_RECORD_MAX - sizeof(struct rewind_record))
++
++/*
++ * The page the monitor writes into: the virtual clock on every
++ * REWIND_PORT_CLOCK read, and the boot wall clock once at setup.
++ */
++struct rewind_shared {
++	u64 now;
++	u64 epoch;
++};
++
++static struct rewind_shared rewind_shared __aligned(PAGE_SIZE);
++static u8 rewind_buf[REWIND_RECORD_MAX] __aligned(PAGE_SIZE);
++
++/*
++ * Write one record to the monitor. The record is assembled in a single
++ * static buffer with interrupts off: the vCPU is the only CPU, and nothing
++ * in this kernel raises an NMI, so nothing else can touch the buffer
++ * between the copy and the port write.
++ */
++static void rewind_emit(u16 kind, u16 flags, u32 pid, u32 tid, u32 aux,
++			const void *a, size_t alen, const void *b, size_t blen)
++{
++	struct rewind_record *rec = (struct rewind_record *)rewind_buf;
++	unsigned long irqflags;
++
++	alen = min(alen, REWIND_PAYLOAD_MAX);
++	blen = min(blen, REWIND_PAYLOAD_MAX - alen);
++
++	local_irq_save(irqflags);
++	rec->len = sizeof(*rec) + alen + blen;
++	rec->kind = kind;
++	rec->flags = flags;
++	rec->pid = pid;
++	rec->tid = tid;
++	rec->aux = aux;
++	if (alen)
++		memcpy(rec->data, a, alen);
++	if (blen)
++		memcpy(rec->data + alen, b, blen);
++	outl(__pa_symbol(rewind_buf), REWIND_PORT_EMIT);
++	local_irq_restore(irqflags);
++}
++
++/* Set once the platform is initialized, and read where tracing is off. */
++static bool rewind_running __ro_after_init;
++
++/*
++ * The kernel's "cycle counter" for entropy collection. Hardware kernels
++ * read the TSC here; this one has none, and reading the virtual clock would
++ * cost an exit per sample, which the jitter entropy collector takes by the
++ * million at boot. A splitmix64 sequence instead: it varies like a counter
++ * of real cycles as far as the health tests can tell, costs nothing, and is
++ * the same on every run. The RNG's actual entropy is the seed the monitor
++ * passes at boot.
++ */
++noinstr unsigned long rewind_get_entropy(void)
++{
++	static u64 state;
++	u64 z;
++
++	/*
++	 * Entropy is sampled before the platform is detected, too. A CPU
++	 * with no TSC in CPUID is either this monitor's or one where RDTSC
++	 * would be wrong anyway.
++	 */
++	if (!rewind_running)
++		return cpu_feature_enabled(X86_FEATURE_TSC) ? rdtsc() : 0;
++
++	z = (state += 0x9e3779b97f4a7c15ULL);
++	z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
++	z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
++	return z ^ (z >> 31);
++}
++
++static u32 __init rewind_detect(void)
++{
++	if (boot_cpu_data.cpuid_level < 0 ||
++	    !boot_cpu_has(X86_FEATURE_HYPERVISOR))
++		return 0;
++
++	return hypervisor_cpuid_base(REWIND_SIGNATURE, 0);
++}
++
++/* The clock: one exit per read, and each read moves virtual time. */
++
++static u64 rewind_clock_read(struct clocksource *cs)
++{
++	inl(REWIND_PORT_CLOCK);
++	barrier();
++	return READ_ONCE(rewind_shared.now);
++}
++
++static struct clocksource rewind_clocksource = {
++	.name	= "rewind",
++	.rating	= 400,
++	.read	= rewind_clock_read,
++	.mask	= CLOCKSOURCE_MASK(64),
++	.flags	= CLOCK_SOURCE_IS_CONTINUOUS,
++};
++
++/* The timer: armed in nanoseconds, fired by the monitor at an exit. */
++
++static int rewind_set_next_event(unsigned long delta,
++				 struct clock_event_device *evt)
++{
++	outl(delta, REWIND_PORT_TIMER);
++	return 0;
++}
++
++static int rewind_timer_shutdown(struct clock_event_device *evt)
++{
++	outl(0, REWIND_PORT_TIMER);
++	return 0;
++}
++
++static struct clock_event_device rewind_clockevent = {
++	.name			= "rewind",
++	.features		= CLOCK_EVT_FEAT_ONESHOT,
++	.rating			= 400,
++	.set_next_event		= rewind_set_next_event,
++	.set_state_shutdown	= rewind_timer_shutdown,
++	.set_state_oneshot_stopped = rewind_timer_shutdown,
++};
++
++DEFINE_IDTENTRY_SYSVEC(sysvec_rewind_callback)
++{
++	struct pt_regs *old_regs = set_irq_regs(regs);
++
++	apic_eoi();
++	inc_irq_stat(irq_hv_callback_count);
++
++	if (rewind_clockevent.event_handler)
++		rewind_clockevent.event_handler(&rewind_clockevent);
++
++	set_irq_regs(old_regs);
++}
++
++static void __init rewind_timer_init(void)
++{
++	/*
++	 * A nonzero period tells the local APIC code its timer is already
++	 * calibrated. The calibration loop would otherwise spin waiting for
++	 * ticks that only an exit can deliver.
++	 */
++	lapic_timer_period = 1;
++
++	clocksource_register_hz(&rewind_clocksource, NSEC_PER_SEC);
++
++	rewind_clockevent.cpumask = cpumask_of(0);
++	clockevents_config_and_register(&rewind_clockevent, NSEC_PER_SEC,
++					NSEC_PER_USEC, 0x7fffffff);
++}
++
++/*
++ * Idle: interrupts on, then tell the monitor nothing is runnable. The
++ * monitor advances virtual time to the armed timer and injects it before
++ * the port write completes, so the interrupt is taken right after it,
++ * exactly where HLT would have woken.
++ */
++DECLARE_STATIC_CALL(x86_idle, default_idle);
++
++static void __cpuidle rewind_idle(void)
++{
++	raw_local_irq_enable();
++	outl(0, REWIND_PORT_IDLE);
++	raw_local_irq_disable();
++}
++
++static void rewind_get_wallclock(struct timespec64 *now)
++{
++	now->tv_sec = READ_ONCE(rewind_shared.epoch);
++	now->tv_nsec = 0;
++}
++
++static int rewind_set_wallclock(const struct timespec64 *now)
++{
++	return -ENODEV;
++}
++
++/* Stopping the machine: every way out is a port write. */
++
++static void rewind_power_off(void)
++{
++	outl(REWIND_EXIT_POWER_OFF, REWIND_PORT_EXIT);
++}
++
++static void rewind_restart(char *cmd)
++{
++	outl(REWIND_EXIT_RESTART, REWIND_PORT_EXIT);
++}
++
++static void rewind_emergency_restart(void)
++{
++	outl(REWIND_EXIT_RESTART, REWIND_PORT_EXIT);
++}
++
++static void rewind_halt(void)
++{
++	outl(REWIND_EXIT_HALT, REWIND_PORT_EXIT);
++}
++
++static void rewind_console_write(struct console *con, const char *s,
++				 unsigned int n)
++{
++	rewind_emit(REWIND_EV_CONSOLE, 0, 0, 0, 0, s, n, NULL, 0);
++}
++
++static struct console rewind_console = {
++	.name	= "rewind",
++	.write	= rewind_console_write,
++	.flags	= CON_PRINTBUFFER | CON_ANYTIME,
++	.index	= -1,
++};
++
++/*
++ * The one local APIC, at its architectural address. There is no MP table,
++ * no ACPI and no I/O APIC: the only interrupt is the monitor's, sent as an
++ * MSI to HYPERVISOR_CALLBACK_VECTOR.
++ */
++static void __init rewind_parse_smp_config(void)
++{
++	register_lapic_address(APIC_DEFAULT_PHYS_BASE);
++	topology_register_apic(0, CPU_ACPIID_INVALID, true);
++	smp_found_config = 1;
++}
++
++static void __init rewind_init_platform(void)
++{
++	rewind_running = true;
++	outl(__pa_symbol(&rewind_shared), REWIND_PORT_SETUP);
++
++	sysvec_install(HYPERVISOR_CALLBACK_VECTOR, sysvec_rewind_callback);
++
++	x86_init.irqs.pre_vector_init		= x86_init_noop;
++	x86_init.timers.timer_init		= rewind_timer_init;
++	x86_init.mpparse.find_mptable		= x86_init_noop;
++	x86_init.mpparse.early_parse_smp_cfg	= x86_init_noop;
++	x86_init.mpparse.parse_smp_cfg		= rewind_parse_smp_config;
++
++	x86_platform.get_wallclock		= rewind_get_wallclock;
++	x86_platform.set_wallclock		= rewind_set_wallclock;
++	x86_platform.legacy.rtc			= 0;
++	x86_platform.legacy.warm_reset		= 0;
++	x86_platform.legacy.i8042		= X86_LEGACY_I8042_PLATFORM_ABSENT;
++
++	legacy_pic				= &null_legacy_pic;
++
++	pm_power_off				= rewind_power_off;
++	machine_ops.power_off			= rewind_power_off;
++	machine_ops.restart			= rewind_restart;
++	machine_ops.emergency_restart		= rewind_emergency_restart;
++	machine_ops.halt			= rewind_halt;
++
++	static_call_update(x86_idle, rewind_idle);
++
++	register_console(&rewind_console);
++}
++
++static bool __init rewind_x2apic_available(void)
++{
++	return false;
++}
++
++const __initconst struct hypervisor_x86 x86_hyper_rewind = {
++	.name			= "Rewind",
++	.detect			= rewind_detect,
++	.type			= X86_HYPER_REWIND,
++	.init.init_platform	= rewind_init_platform,
++	.init.x2apic_available	= rewind_x2apic_available,
++	.ignore_nopv		= true,
++};
++
++/*
++ * Events. Everything below reports what the guest does; none of it changes
++ * what the guest does, beyond the exit each record costs.
++ */
++
++static inline bool rewind_active(void)
++{
++	return hypervisor_is_type(X86_HYPER_REWIND);
++}
++
++/*
++ * RDTSC and RDTSCP from user space. KVM cannot trap them for the monitor,
++ * so the kernel does: every user task runs with CR4.TSD set (see
++ * rewind_events_init), the instruction raises #GP, and the fault handler
++ * lands here. The counter a program reads is the virtual clock in
++ * nanoseconds, which moves the way the rest of the guest's time does.
++ */
++bool rewind_fixup_rdtsc(struct pt_regs *regs)
++{
++	u8 insn[3];
++	unsigned int len;
++	u64 now;
++
++	if (!rewind_active())
++		return false;
++	if (copy_from_user(insn, (void __user *)regs->ip, 2))
++		return false;
++
++	if (insn[0] == 0x0f && insn[1] == 0x31) {
++		len = 2;
++	} else if (insn[0] == 0x0f && insn[1] == 0x01) {
++		if (copy_from_user(&insn[2], (void __user *)(regs->ip + 2), 1) ||
++		    insn[2] != 0xf9)
++			return false;
++		len = 3;
++		regs->cx = 0;
++	} else {
++		return false;
++	}
++
++	now = rewind_clock_read(&rewind_clocksource);
++	regs->ax = lower_32_bits(now);
++	regs->dx = upper_32_bits(now);
++	regs->ip += len;
++	return true;
++}
++
++static void rewind_probe_exec(void *data, struct task_struct *p,
++			      pid_t old_pid, struct linux_binprm *bprm)
++{
++	static char args[1024];
++	struct mm_struct *mm = p->mm;
++	size_t len = 0;
++
++	/*
++	 * The arguments sit on the new stack, written moments ago by exec, so
++	 * a no-fault copy finds them resident.
++	 */
++	if (mm && mm->arg_end > mm->arg_start) {
++		len = min_t(size_t, mm->arg_end - mm->arg_start, sizeof(args));
++		if (copy_from_user_nofault(args, (void __user *)mm->arg_start,
++					   len))
++			len = 0;
++	}
++
++	rewind_emit(REWIND_EV_EXEC, 0, p->tgid, p->pid, old_pid,
++		    bprm->filename, strlen(bprm->filename) + 1, args, len);
++}
++
++static void rewind_probe_fork(void *data, struct task_struct *parent,
++			      struct task_struct *child)
++{
++	u16 flags = child->tgid == parent->tgid ? REWIND_FLAG_THREAD : 0;
++
++	rewind_emit(REWIND_EV_FORK, flags, parent->tgid, parent->pid,
++		    child->pid, NULL, 0, NULL, 0);
++}
++
++static void rewind_probe_exit(void *data, struct task_struct *p)
++{
++	u16 flags = p->pid != p->tgid ? REWIND_FLAG_THREAD : 0;
++
++	rewind_emit(REWIND_EV_EXIT, flags, p->tgid, p->pid, p->exit_code,
++		    p->comm, strnlen(p->comm, TASK_COMM_LEN), NULL, 0);
++}
++
++static void rewind_probe_signal(void *data, int sig,
++				struct kernel_siginfo *info,
++				struct k_sigaction *ka)
++{
++	struct {
++		s32 code;
++		u64 addr;
++	} __packed detail = {};
++
++	if (info) {
++		detail.code = info->si_code;
++		if (sig == SIGSEGV || sig == SIGBUS || sig == SIGILL ||
++		    sig == SIGFPE)
++			detail.addr = (u64)info->si_addr;
++	}
++
++	rewind_emit(REWIND_EV_SIGNAL, 0, current->tgid, current->pid, sig,
++		    &detail, sizeof(detail), NULL, 0);
++}
++
++/* A path argument, copied without faulting; false when it is not resident. */
++static bool rewind_user_path(char *dst, size_t size, unsigned long src)
++{
++	return strncpy_from_user_nofault(dst, (const char __user *)src, size) > 0;
++}
++
++static void rewind_report_open(unsigned long path, unsigned long flags)
++{
++	static char buf[PATH_MAX];
++
++	/* Only opens that can change a file are interesting. */
++	if ((flags & O_ACCMODE) == O_RDONLY && !(flags & (O_CREAT | O_TRUNC)))
++		return;
++	if (!rewind_user_path(buf, sizeof(buf), path))
++		return;
++
++	rewind_emit(REWIND_EV_OPEN, 0, current->tgid, current->pid, flags,
++		    buf, strlen(buf), NULL, 0);
++}
++
++static void rewind_report_unlink(unsigned long path)
++{
++	static char buf[PATH_MAX];
++
++	if (!rewind_user_path(buf, sizeof(buf), path))
++		return;
++
++	rewind_emit(REWIND_EV_UNLINK, 0, current->tgid, current->pid, 0,
++		    buf, strlen(buf), NULL, 0);
++}
++
++static void rewind_report_rename(unsigned long from, unsigned long to)
++{
++	static char a[PATH_MAX], b[PATH_MAX];
++
++	if (!rewind_user_path(a, sizeof(a), from) ||
++	    !rewind_user_path(b, sizeof(b), to))
++		return;
++
++	rewind_emit(REWIND_EV_RENAME, 0, current->tgid, current->pid, 0,
++		    a, strlen(a) + 1, b, strlen(b));
++}
++
++static void rewind_probe_sys_enter(void *data, struct pt_regs *regs, long id)
++{
++	if (in_ia32_syscall())
++		return;
++
++	switch (id) {
++	case __NR_open:
++		rewind_report_open(regs->di, regs->si);
++		break;
++	case __NR_openat:
++		rewind_report_open(regs->si, regs->dx);
++		break;
++	case __NR_creat:
++		rewind_report_open(regs->di, O_CREAT | O_WRONLY | O_TRUNC);
++		break;
++	case __NR_unlink:
++		rewind_report_unlink(regs->di);
++		break;
++	case __NR_unlinkat:
++		rewind_report_unlink(regs->si);
++		break;
++	case __NR_rename:
++		rewind_report_rename(regs->di, regs->si);
++		break;
++	case __NR_renameat:
++	case __NR_renameat2:
++		rewind_report_rename(regs->si, regs->r10);
++		break;
++	}
++}
++
++/*
++ * /dev/rewind-stdout and /dev/rewind-stderr. The guest init points the
++ * workload's standard output and error at these, so every write arrives
++ * with the pid that made it. /dev/rewind takes marks: a line written there
++ * becomes a labelled point on the timeline.
++ */
++
++static DEFINE_MUTEX(rewind_write_lock);
++static u8 rewind_bounce[4096];
++
++static ssize_t rewind_write(struct file *file, const char __user *ubuf,
++			    size_t len, u16 kind, u32 aux)
++{
++	size_t done = 0;
++
++	mutex_lock(&rewind_write_lock);
++	while (done < len) {
++		size_t n = min(len - done, sizeof(rewind_bounce));
++
++		if (copy_from_user(rewind_bounce, ubuf + done, n)) {
++			mutex_unlock(&rewind_write_lock);
++			return done ? done : -EFAULT;
++		}
++		rewind_emit(kind, 0, current->tgid, current->pid, aux,
++			    rewind_bounce, n, NULL, 0);
++		done += n;
++	}
++	mutex_unlock(&rewind_write_lock);
++	return done;
++}
++
++static ssize_t rewind_stdout_write(struct file *file, const char __user *buf,
++				   size_t len, loff_t *off)
++{
++	return rewind_write(file, buf, len, REWIND_EV_OUTPUT, 1);
++}
++
++static ssize_t rewind_stderr_write(struct file *file, const char __user *buf,
++				   size_t len, loff_t *off)
++{
++	return rewind_write(file, buf, len, REWIND_EV_OUTPUT, 2);
++}
++
++static ssize_t rewind_mark_write(struct file *file, const char __user *buf,
++				 size_t len, loff_t *off)
++{
++	return rewind_write(file, buf, len, REWIND_EV_MARK, 0);
++}
++
++static const struct file_operations rewind_stdout_fops = {
++	.owner	= THIS_MODULE,
++	.write	= rewind_stdout_write,
++};
++
++static const struct file_operations rewind_stderr_fops = {
++	.owner	= THIS_MODULE,
++	.write	= rewind_stderr_write,
++};
++
++static const struct file_operations rewind_mark_fops = {
++	.owner	= THIS_MODULE,
++	.write	= rewind_mark_write,
++};
++
++static struct miscdevice rewind_devices[] = {
++	{ MISC_DYNAMIC_MINOR, "rewind-stdout", &rewind_stdout_fops,
++	  .mode = 0666 },
++	{ MISC_DYNAMIC_MINOR, "rewind-stderr", &rewind_stderr_fops,
++	  .mode = 0666 },
++	{ MISC_DYNAMIC_MINOR, "rewind", &rewind_mark_fops, .mode = 0666 },
++};
++
++static int __init rewind_events_init(void)
++{
++	int i, err;
++
++	if (!rewind_active())
++		return 0;
++
++	/*
++	 * Initcalls run as pid 1, and every user task descends from it, so
++	 * setting TIF_NOTSC here traps RDTSC in all of them.
++	 */
++	disable_TSC();
++
++	for (i = 0; i < ARRAY_SIZE(rewind_devices); i++) {
++		err = misc_register(&rewind_devices[i]);
++		if (err)
++			return err;
++	}
++
++	WARN_ON(register_trace_sched_process_exec(rewind_probe_exec, NULL));
++	WARN_ON(register_trace_sched_process_fork(rewind_probe_fork, NULL));
++	WARN_ON(register_trace_sched_process_exit(rewind_probe_exit, NULL));
++	WARN_ON(register_trace_signal_deliver(rewind_probe_signal, NULL));
++	WARN_ON(register_trace_sys_enter(rewind_probe_sys_enter, NULL));
++	return 0;
++}
++device_initcall(rewind_events_init);
+diff -ruN a/arch/x86/kernel/traps.c b/arch/x86/kernel/traps.c
+--- a/arch/x86/kernel/traps.c	2026-09-30 09:16:35.121940813 -0700
++++ b/arch/x86/kernel/traps.c	2026-09-30 09:19:13.206281395 -0700
+@@ -45,6 +45,7 @@
+ #include <linux/ubsan.h>
+ 
+ #include <asm/stacktrace.h>
++#include <asm/hypervisor.h>
+ #include <asm/processor.h>
+ #include <asm/debugreg.h>
+ #include <asm/realmode.h>
+@@ -768,6 +769,10 @@
+ 	}
+ 
+ 	if (user_mode(regs)) {
++#ifdef CONFIG_REWIND_GUEST
++		if (rewind_fixup_rdtsc(regs))
++			goto exit;
++#endif
+ 		if (fixup_iopl_exception(regs))
+ 			goto exit;
+ 

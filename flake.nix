@@ -24,9 +24,21 @@
         in
         {
           inherit pkgs;
+          kernel = import ./nix/kernel.nix { inherit pkgs; };
         };
     in
     {
+      packages = forAllSystems (
+        system:
+        let
+          p = per system;
+        in
+        {
+          # the guest kernel with the Rewind platform (nix/kernel.nix)
+          kernel = p.kernel;
+        }
+      );
+
       checks = forAllSystems (
         system:
         let

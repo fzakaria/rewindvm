@@ -1,0 +1,78 @@
+# Kernel configuration for the Rewind guest, merged over x86_64_defconfig by
+# nix/kernel.nix. Everything here serves one of two ends: the run must be
+# deterministic, and a boot should cost as few exits as possible.
+
+# One vCPU, and a uniprocessor kernel: no other CPU to race with, and
+# spinlocks compile away, so nothing in the kernel ever spins waiting on
+# another processor.
+# CONFIG_SMP is not set
+
+# The Rewind platform, and no other hypervisor's: KVM's paravirtual clock
+# reads host time.
+CONFIG_HYPERVISOR_GUEST=y
+CONFIG_REWIND_GUEST=y
+# CONFIG_PARAVIRT is not set
+# CONFIG_KVM_GUEST is not set
+# CONFIG_XEN is not set
+# CONFIG_HYPERV is not set
+# CONFIG_JAILHOUSE_GUEST is not set
+# CONFIG_ACRN_GUEST is not set
+
+# KASLR picks the kernel's address from RDRAND and the timestamp counter at
+# decompression time, before any of the platform code runs.
+# CONFIG_RANDOMIZE_BASE is not set
+
+# No firmware tables and no buses: the platform code describes the one
+# local APIC itself, and the only device is the input image, which the
+# monitor maps as legacy persistent memory.
+# CONFIG_ACPI is not set
+# CONFIG_PCI is not set
+CONFIG_X86_PMEM_LEGACY=y
+CONFIG_LIBNVDIMM=y
+CONFIG_BLK_DEV_PMEM=y
+
+# Filesystems: the read-only input image, an overlay for writes on top of
+# it, and tmpfs for /build and /tmp.
+CONFIG_EROFS_FS=y
+CONFIG_EROFS_FS_ZIP=y
+CONFIG_OVERLAY_FS=y
+CONFIG_TMPFS=y
+CONFIG_DEVTMPFS=y
+CONFIG_DEVTMPFS_MOUNT=y
+CONFIG_BLK_DEV_INITRD=y
+CONFIG_BLK_DEV_LOOP=y
+
+# The early serial console, for debugging a boot before the Rewind console
+# registers.
+CONFIG_SERIAL_8250=y
+CONFIG_SERIAL_8250_CONSOLE=y
+CONFIG_EARLY_PRINTK=y
+
+# Fewer ticks mean fewer timer interrupts, and each one costs exits.
+CONFIG_HZ_100=y
+CONFIG_NO_HZ_IDLE=y
+CONFIG_PREEMPT_NONE=y
+
+# Everything built in, so the initramfs carries only the init.
+# CONFIG_MODULES is not set
+
+# Watchdogs and pollers wake on host-independent timers here, but they
+# still cost exits and do nothing useful in a guest this simple.
+# CONFIG_SOFTLOCKUP_DETECTOR is not set
+# CONFIG_HARDLOCKUP_DETECTOR is not set
+# CONFIG_DETECT_HUNG_TASK is not set
+# CONFIG_WATCHDOG is not set
+# CONFIG_X86_MCE is not set
+# CONFIG_CPU_FREQ is not set
+# CONFIG_CPU_IDLE is not set
+# CONFIG_SUSPEND is not set
+# CONFIG_HIBERNATION is not set
+# CONFIG_AUDIT is not set
+
+# No display, no sound, no USB. The virtual terminal and input layers stay:
+# they are only optional under CONFIG_EXPERT, and with no keyboard and no
+# i8042 they do nothing.
+# CONFIG_DRM is not set
+# CONFIG_FB is not set
+# CONFIG_SOUND is not set
+# CONFIG_USB_SUPPORT is not set
