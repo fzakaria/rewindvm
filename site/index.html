@@ -13,7 +13,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=Caveat:wght@600&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap"
       rel="stylesheet"
     />
     <link rel="stylesheet" href="style.css" />
@@ -70,6 +70,16 @@
         <!-- The scrubber from the desktop app, redrawn in HTML and driven by
              demo.js on one example run. Every number in it is example data. -->
         <figure class="hero-demo">
+          <!-- A hint that the scrubber is live. It sits above the demo, in the
+               flow, so it never covers a control; demo.js fades it out on the
+               first touch, click or key press inside the demo. -->
+          <div class="try-me" id="try-me" aria-hidden="true">
+            <span>Try me: drag the timeline</span>
+            <svg viewBox="0 0 64 44">
+              <path d="M4,8 C22,2 44,6 52,34" />
+              <path d="M43,28 L52,36 L57,25" />
+            </svg>
+          </div>
           <div class="demo" id="demo">
             <div class="demo-bar">
               <span class="demo-brand">
@@ -218,10 +228,6 @@
 
       <section class="features">
         <h2>In the desktop app</h2>
-        <p class="lede">
-          A native app built with GPUI, the Rust UI framework from Zed. Everything below works on
-          any step of any run.
-        </p>
         <div class="grid">
           <div class="card">
             <h3>Scrub the timeline</h3>
@@ -407,6 +413,10 @@
             <a class="btn ghost" href="#buy">Buy commercial</a>
           </div>
         </div>
+        <p class="note refund">
+          Every license comes with a full refund within 30 days, for any reason. See the
+          <a href="refunds.html">refund policy</a>.
+        </p>
         <p class="note" id="buy">
           Rewind VM is in early access and checkout is not open yet.
           <a href="mailto:tacos@lunchtimesurf.com?subject=Rewind%20VM%20early%20access">Email us</a>
@@ -431,17 +441,11 @@
 
     <footer class="wrap footer">
       <p>
-        Prior art we learned from: <a href="https://antithesis.com/">Antithesis</a>,
-        <a href="https://rr-project.org/">rr</a>,
-        <a href="https://github.com/facebookexperimental/hermit">Hermit</a> and QEMU record and
-        replay. The desktop app is built with
-        <a href="https://github.com/zed-industries/zed/tree/main/crates/gpui">GPUI</a>.
-      </p>
-      <p>
         &copy; 2026 <a href="https://lunchtimesurf.com/">Lunch Time Surf LLC</a> &middot; Santa
         Cruz, California &middot;
         <a href="mailto:tacos@lunchtimesurf.com">tacos@lunchtimesurf.com</a> &middot;
-        <a href="privacy.html">Privacy</a>
+        <a href="privacy.html">Privacy</a> &middot;
+        <a href="refunds.html">Refunds</a>
       </p>
     </footer>
   </body>

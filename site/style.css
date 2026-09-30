@@ -22,6 +22,8 @@
   --red-soft: #ff9a8e;
   --display: "Bricolage Grotesque", "Helvetica Neue", Arial, sans-serif;
   --body: "IBM Plex Sans", system-ui, "Helvetica Neue", Arial, sans-serif;
+  /* Only for the "Try me" note on the scrubber. */
+  --hand: "Caveat", "Comic Sans MS", cursive;
   --mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
   color-scheme: dark;
 }
@@ -225,6 +227,48 @@ a:focus-visible {
 .hero-demo {
   margin: 0;
 }
+/* "Try me" above the scrubber: a handwritten note with an arrow down into
+   the demo. It takes its own row so it never covers a control, and keeps
+   that row after it fades so the demo does not jump. */
+.try-me {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  margin: 0 0 -6px 28px;
+  color: var(--amber);
+  font: 600 1.45rem/1 var(--hand);
+  transition: opacity 0.5s ease;
+}
+.try-me span {
+  padding-bottom: 14px;
+}
+.try-me svg {
+  width: 56px;
+  height: 40px;
+  flex-shrink: 0;
+  fill: none;
+  stroke: var(--amber);
+  stroke-width: 2.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  animation: nudge 1.8s ease-in-out infinite;
+}
+.try-me.gone {
+  opacity: 0;
+  visibility: hidden;
+  transition:
+    opacity 0.5s ease,
+    visibility 0s linear 0.5s;
+}
+@keyframes nudge {
+  0%,
+  100% {
+    transform: translate(0, 0);
+  }
+  50% {
+    transform: translate(2px, 4px);
+  }
+}
 .demo-caption {
   color: var(--muted);
   font-size: 0.88rem;
@@ -423,7 +467,6 @@ a:focus-visible {
 }
 .fork-btn {
   margin-left: auto;
-  font-family: var(--body);
   height: 34px;
   padding: 0 14px;
   border-radius: 7px;
@@ -435,6 +478,10 @@ a:focus-visible {
   display: inline-flex;
   align-items: center;
   gap: 7px;
+}
+/* Outranks `.demo button`, which would otherwise hand the readout's mono down. */
+.demo .fork-btn {
+  font-family: var(--body);
 }
 .fork-btn:hover {
   background: var(--amber-hi);
@@ -785,6 +832,9 @@ a:focus-visible {
   margin-top: 22px;
   scroll-margin-top: 24px;
 }
+.pricing .note + .note {
+  margin-top: 6px;
+}
 
 /* Caution */
 .caution {
@@ -895,10 +945,16 @@ a:focus-visible {
   }
 }
 
-/* Reduced motion: the playhead jumps instead of gliding, and demo.js skips
-   its opening sweep. */
+/* Reduced motion: the playhead jumps instead of gliding, the "Try me" arrow
+   holds still and vanishes without a fade, and demo.js skips its opening
+   sweep. */
 @media (prefers-reduced-motion: reduce) {
-  .playhead {
+  .playhead,
+  .try-me,
+  .try-me.gone {
     transition: none;
+  }
+  .try-me svg {
+    animation: none;
   }
 }

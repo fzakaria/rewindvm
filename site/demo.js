@@ -568,6 +568,19 @@
     render();
   });
 
+  // The "Try me" note goes away on the first pointer or key press anywhere in
+  // the demo. The opening sweep is not the visitor's doing, so it does not count.
+  const tryMe = document.getElementById("try-me");
+  function dismissTryMe() {
+    if (tryMe) {
+      tryMe.classList.add("gone");
+    }
+    root.removeEventListener("pointerdown", dismissTryMe);
+    root.removeEventListener("keydown", dismissTryMe);
+  }
+  root.addEventListener("pointerdown", dismissTryMe);
+  root.addEventListener("keydown", dismissTryMe);
+
   resetNote();
   render();
 
