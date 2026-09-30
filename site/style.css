@@ -1,0 +1,904 @@
+/* Brand palette, taken from the scrubber in the desktop app's design. */
+:root {
+  --bg: #0e1013;
+  --panel: #15181d;
+  --panel-2: #121418;
+  --raised: #171a1f;
+  --line: #262a31;
+  --line-2: #2f343c;
+  --text: #ebe7df;
+  --soft: #c9c5bd;
+  --muted: #a19d95;
+  --faint: #5f6571;
+  /* The playhead and anything you can act on. */
+  --amber: #f2a541;
+  --amber-hi: #ffc978;
+  --amber-ink: #1a1206;
+  /* The first step where two runs differ. */
+  --blue: #7fb2ff;
+  --blue-soft: #a9cbff;
+  /* The failure. */
+  --red: #ff7a6b;
+  --red-soft: #ff9a8e;
+  --display: "Bricolage Grotesque", "Helvetica Neue", Arial, sans-serif;
+  --body: "IBM Plex Sans", system-ui, "Helvetica Neue", Arial, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 17px/1.55 var(--body);
+}
+
+a {
+  color: var(--amber);
+}
+a:hover {
+  color: var(--amber-hi);
+}
+
+img {
+  max-width: 100%;
+  display: block;
+}
+
+code {
+  font-family: var(--mono);
+  font-size: 0.88em;
+  color: var(--text);
+  background: #1d2127;
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+h1,
+h2,
+h3 {
+  font-family: var(--display);
+  font-weight: 700;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  margin: 0 0 0.5em;
+}
+h1 {
+  font-size: clamp(2.3rem, 4.6vw, 3.7rem);
+  letter-spacing: -0.035em;
+  line-height: 1;
+}
+h2 {
+  font-size: clamp(1.7rem, 3.2vw, 2.5rem);
+}
+h3 {
+  font-size: 1.15rem;
+  letter-spacing: -0.01em;
+}
+
+.wrap {
+  max-width: 1240px;
+  margin: 0 auto;
+  padding-inline: 20px;
+}
+
+section {
+  padding-block: 72px;
+}
+
+/* Visible to screen readers only. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* Header */
+.nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding-block: 20px;
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text);
+  text-decoration: none;
+  font: 700 1.35rem var(--display);
+  letter-spacing: -0.02em;
+}
+.brand:hover {
+  color: var(--text);
+}
+/* The mark: two chevrons pointing back, drawn in the accent. */
+.brand svg,
+.demo-brand svg {
+  width: 28px;
+  height: 28px;
+  fill: none;
+  stroke: var(--amber);
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.nav-links {
+  display: flex;
+  align-items: center;
+  gap: 22px;
+}
+.nav-links a:not(.btn) {
+  color: var(--soft);
+  text-decoration: none;
+  font-size: 0.95rem;
+}
+.nav-links a:not(.btn):hover {
+  color: var(--text);
+}
+
+/* Buttons */
+.btn {
+  display: inline-block;
+  background: var(--amber);
+  color: var(--amber-ink);
+  font-weight: 600;
+  text-decoration: none;
+  padding: 13px 22px;
+  border-radius: 8px;
+}
+.btn:hover {
+  background: var(--amber-hi);
+  color: var(--amber-ink);
+}
+.btn:focus-visible,
+button:focus-visible,
+input:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: 3px;
+}
+.btn.small {
+  padding: 8px 14px;
+  font-size: 0.9rem;
+}
+.btn.ghost {
+  background: transparent;
+  color: var(--text);
+  border: 1px solid #3a3f48;
+}
+.btn.ghost:hover {
+  border-color: var(--amber);
+  color: var(--text);
+}
+
+/* Hero: the copy on the left, the scrubber on the right. */
+.hero {
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.25fr);
+  gap: 48px;
+  align-items: start;
+  padding-top: 40px;
+}
+.hero-copy {
+  padding-top: 24px;
+}
+.eyebrow {
+  color: var(--amber);
+  font: 500 0.85rem var(--mono);
+  letter-spacing: 0.04em;
+  margin: 0 0 14px;
+}
+.lede {
+  color: var(--soft);
+  font-size: 1.15rem;
+  max-width: 36em;
+}
+.cta-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-top: 28px;
+}
+.soon {
+  font: 0.85rem var(--mono);
+  color: var(--muted);
+  border: 1px solid #2c3139;
+  border-radius: 999px;
+  padding: 4px 10px;
+}
+.fine {
+  color: var(--muted);
+  font-size: 0.95rem;
+  margin-top: 22px;
+  max-width: 34em;
+}
+.hero-demo {
+  margin: 0;
+}
+.demo-caption {
+  color: var(--muted);
+  font-size: 0.88rem;
+  margin-top: 12px;
+}
+
+/* The scrubber demo. Everything inside is sized for a panel of about 700px
+   and falls back to one column on a phone. */
+.demo {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  overflow: hidden;
+  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.45);
+  font-size: 14px;
+}
+.demo button {
+  font-family: inherit;
+  cursor: pointer;
+}
+.demo svg {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.demo-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+  background: #101216;
+  font: 12px var(--mono);
+}
+.demo-brand {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font: 700 15px var(--display);
+}
+.demo-brand svg {
+  width: 16px;
+  height: 16px;
+}
+.demo-path {
+  color: var(--muted);
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.badge {
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid;
+  white-space: nowrap;
+}
+.badge.fail {
+  background: #2a1a18;
+  color: var(--red-soft);
+  border-color: #4a2723;
+}
+.badge.pass {
+  background: #16202e;
+  color: var(--blue-soft);
+  border-color: #25364d;
+}
+.badge.example {
+  margin-left: auto;
+  color: var(--amber);
+  border-color: #5a4520;
+  background: #221a0e;
+}
+
+/* Timeline: phase segments with the markers and playhead laid over them. */
+.timeline {
+  padding: 22px 16px 14px;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.track {
+  position: relative;
+  height: 36px;
+  cursor: pointer;
+  touch-action: none;
+}
+.segments {
+  display: flex;
+  gap: 2px;
+  height: 100%;
+  font: 11px var(--mono);
+}
+.segments div {
+  border-radius: 3px;
+  display: flex;
+  align-items: center;
+  padding-left: 7px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: clip;
+  color: var(--soft);
+}
+.segments div.active {
+  background: #5a4520 !important;
+  color: #f2d3a0;
+}
+.flag,
+.playhead {
+  position: absolute;
+  top: -6px;
+  bottom: -6px;
+  width: 2px;
+  pointer-events: none;
+}
+.flag.divergence {
+  background: var(--blue);
+}
+.flag.failure {
+  width: 3px;
+  background: var(--red);
+}
+.flag.fork {
+  width: 2px;
+  background: repeating-linear-gradient(
+    var(--amber) 0 4px,
+    transparent 4px 7px
+  );
+}
+.playhead {
+  top: -10px;
+  bottom: -10px;
+  width: 3px;
+  margin-left: -1px;
+  background: var(--amber);
+  border-radius: 2px;
+  box-shadow: 0 0 0 3px rgba(242, 165, 65, 0.18);
+  transition: left 90ms linear;
+}
+#scrub {
+  width: 100%;
+  margin: 8px 0 0;
+  accent-color: var(--amber);
+}
+
+.controls,
+.readout {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.readout {
+  gap: 8px 20px;
+  font: 12.5px var(--mono);
+}
+.readout b {
+  color: var(--amber);
+  font-weight: 600;
+}
+.dim {
+  color: var(--muted);
+}
+.ctl {
+  height: 34px;
+  padding: 0 11px;
+  border-radius: 7px;
+  border: 1px solid var(--line-2);
+  background: var(--raised);
+  color: var(--text);
+  font-size: 13px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.ctl:hover {
+  border-color: #464c57;
+}
+.ctl svg {
+  width: 14px;
+  height: 14px;
+}
+.ctl.blue {
+  border-color: #25364d;
+  background: #131b26;
+  color: var(--blue-soft);
+}
+.ctl.red {
+  border-color: #4a2723;
+  background: #1f1513;
+  color: var(--red-soft);
+}
+.fork-btn {
+  margin-left: auto;
+  font-family: var(--body);
+  height: 34px;
+  padding: 0 14px;
+  border-radius: 7px;
+  border: 0;
+  background: var(--amber);
+  color: var(--amber-ink);
+  font-weight: 600;
+  font-size: 13px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+.fork-btn:hover {
+  background: var(--amber-hi);
+}
+.fork-btn svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* Panels: the log across the top, then processes and files beside the
+   step's detail. One pixel gaps over the line color draw the rules. */
+.panels {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 1px;
+  background: var(--line);
+}
+.panel {
+  background: var(--panel-2);
+  min-width: 0;
+}
+.panel-log {
+  grid-column: 1 / -1;
+}
+.panel-head {
+  margin: 0;
+  padding: 9px 16px;
+  font: 500 11px var(--body);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border-bottom: 1px solid #1f2329;
+}
+.panel-procs .panel-head + .rows + .panel-head {
+  border-top: 1px solid #1f2329;
+}
+.rows {
+  list-style: none;
+  margin: 0;
+  padding: 8px 0;
+  font: 12px/1.8 var(--mono);
+}
+.rows li {
+  display: flex;
+  gap: 12px;
+  padding: 0 16px;
+  white-space: nowrap;
+}
+.rows .n {
+  color: var(--faint);
+  min-width: 46px;
+  text-align: right;
+  flex-shrink: 0;
+}
+.rows .t {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--soft);
+}
+/* The log holds its last lines against the bottom, like a terminal. */
+.log {
+  height: calc(9 * 1.8 * 12px + 16px);
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  overflow: hidden;
+}
+.log li.now {
+  background: #1c2026;
+}
+.procs {
+  min-height: calc(6 * 1.8 * 12px + 16px);
+}
+.procs .n {
+  color: var(--blue);
+  min-width: 30px;
+  text-align: left;
+}
+.procs .t {
+  color: var(--text);
+}
+.files {
+  min-height: calc(5 * 1.8 * 12px + 16px);
+}
+.t.phase {
+  color: var(--amber);
+}
+.t.err {
+  color: var(--red);
+}
+.t.recent {
+  color: var(--amber);
+}
+.t.thread {
+  color: var(--muted);
+}
+
+.step-body {
+  padding: 14px 16px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.card-ev,
+.card-diff,
+.card-note {
+  border-radius: 9px;
+  padding: 11px 13px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.card-ev {
+  background: var(--raised);
+  border: 1px solid var(--line);
+}
+.ev-meta {
+  font: 11px var(--mono);
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+.ev-text {
+  font: 12.5px/1.5 var(--mono);
+  overflow-wrap: anywhere;
+}
+.ev-text.err {
+  color: var(--red);
+}
+.ev-text.div {
+  color: var(--blue-soft);
+}
+.card-diff {
+  background: #131b26;
+  border: 1px solid #25364d;
+  color: var(--soft);
+}
+.card-diff strong {
+  display: block;
+  color: var(--blue-soft);
+  font-weight: 600;
+}
+.card-note {
+  background: #1a160f;
+  border: 1px solid #3a2e19;
+  color: var(--soft);
+}
+.card-note strong {
+  color: #f2d3a0;
+  font-weight: 600;
+}
+.inspect {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+.inspect .ctl {
+  justify-content: center;
+}
+
+/* How it works */
+.steps {
+  list-style: none;
+  padding: 0;
+  margin: 32px 0 0;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 18px;
+  counter-reset: step;
+}
+.steps li {
+  counter-increment: step;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 24px;
+}
+.steps li::before {
+  content: counter(step);
+  display: block;
+  font: 2.2rem var(--mono);
+  color: #4d5463;
+  margin-bottom: 10px;
+}
+.steps p {
+  color: var(--soft);
+  margin: 0;
+  font-size: 0.97rem;
+}
+
+/* Features */
+.features {
+  background: var(--panel-2);
+  border-block: 1px solid var(--line);
+  padding-inline: 20px;
+}
+.features > * {
+  max-width: 1200px;
+  margin-inline: auto;
+}
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 16px;
+  margin-top: 28px;
+}
+.card {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 22px;
+}
+.card p {
+  color: var(--soft);
+  margin: 0;
+  font-size: 0.97rem;
+}
+.card.marker {
+  border-color: #5a4520;
+}
+.card.marker h3 {
+  color: var(--amber);
+}
+.card.marker-blue {
+  border-color: #25364d;
+}
+.card.marker-blue h3 {
+  color: var(--blue);
+}
+.card.marker-red {
+  border-color: #4a2723;
+}
+.card.marker-red h3 {
+  color: var(--red);
+}
+
+/* Workloads: any root filesystem on the left, Nix on the right. */
+.lanes {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px;
+  margin-top: 28px;
+}
+.lane {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  padding: 30px;
+  min-width: 0;
+}
+.lane.nix {
+  border-color: #5a4520;
+  background:
+    linear-gradient(180deg, rgba(242, 165, 65, 0.07), transparent 60%),
+    var(--panel);
+}
+.lane h3 {
+  font-size: 1.5rem;
+}
+.lane-lede {
+  color: var(--soft);
+}
+.term {
+  margin: 18px 0;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 14px 16px;
+  overflow-x: auto;
+  font: 13.5px/1.7 var(--mono);
+}
+.term code {
+  background: none;
+  padding: 0;
+  font-size: inherit;
+}
+.prompt {
+  color: var(--muted);
+  user-select: none;
+}
+.rows-def {
+  margin: 22px 0 0;
+}
+.rows-def div {
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+  gap: 16px;
+  padding-block: 14px;
+  border-top: 1px solid var(--line);
+}
+.rows-def dt {
+  font: 13.5px/1.6 var(--mono);
+  color: var(--blue);
+  padding-top: 1px;
+}
+.rows-def dd {
+  margin: 0;
+  color: var(--soft);
+  font-size: 0.97rem;
+}
+
+/* Pricing */
+.note {
+  color: var(--muted);
+}
+.plans {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 18px;
+  margin-top: 28px;
+}
+.plan {
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  padding: 28px;
+  display: flex;
+  flex-direction: column;
+}
+.plan.pro {
+  border-color: var(--amber);
+  background: linear-gradient(180deg, rgba(242, 165, 65, 0.08), transparent);
+}
+.price {
+  font: 700 2.4rem var(--display);
+  letter-spacing: -0.02em;
+  margin: 0;
+}
+.price span {
+  font: 500 1rem var(--body);
+  letter-spacing: 0;
+  color: var(--muted);
+}
+.alt {
+  color: var(--soft);
+  margin: 4px 0 0;
+}
+.plan ul {
+  padding-left: 1.1em;
+  margin: 18px 0 24px;
+}
+.plan li {
+  margin: 6px 0;
+}
+/* Buttons sit at the bottom of each plan so they line up across plans. */
+.plan .btn {
+  margin-top: auto;
+  text-align: center;
+}
+.pricing .note {
+  margin-top: 22px;
+  scroll-margin-top: 24px;
+}
+
+/* Caution */
+.caution {
+  border-left: 3px solid var(--amber);
+  padding-block: 8px;
+  margin-block: 16px 72px;
+}
+.caution p {
+  color: var(--soft);
+  max-width: 46em;
+}
+
+/* Footer */
+.footer {
+  border-top: 1px solid var(--line);
+  padding-block: 28px 48px;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+.footer p {
+  margin: 6px 0;
+}
+
+/* Privacy page */
+.prose {
+  max-width: 720px;
+  padding-block: 24px 64px;
+}
+.prose p,
+.prose li {
+  color: var(--soft);
+}
+.prose h2 {
+  margin-top: 1.6em;
+  font-size: 1.35rem;
+}
+
+@media (max-width: 1080px) {
+  .hero {
+    grid-template-columns: 1fr;
+    gap: 36px;
+  }
+  .hero-copy {
+    padding-top: 0;
+  }
+  .steps {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 860px) {
+  section {
+    padding-block: 48px;
+  }
+  .hero {
+    padding-top: 16px;
+  }
+  .nav-links a:not(.btn) {
+    display: none;
+  }
+  .lanes,
+  .plans {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* A phone: the scrubber's panels stack, and definitions sit above their text. */
+@media (max-width: 600px) {
+  .panels {
+    grid-template-columns: 1fr;
+  }
+  /* The log scrolls sideways instead of cutting its lines short. */
+  .log {
+    overflow-x: auto;
+  }
+  .log .t {
+    overflow: visible;
+    text-overflow: clip;
+  }
+  .steps {
+    grid-template-columns: 1fr;
+  }
+  .lane {
+    padding: 22px 18px;
+  }
+  .rows-def div {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
+  .demo-bar {
+    flex-wrap: wrap;
+  }
+  .demo-path {
+    flex-basis: 100%;
+    order: 1;
+  }
+  .badge.example {
+    margin-left: 0;
+  }
+  .fork-btn {
+    margin-left: 0;
+  }
+}
+
+@media (max-width: 420px) {
+  .nav .btn.small {
+    display: none;
+  }
+}
+
+/* Reduced motion: the playhead jumps instead of gliding, and demo.js skips
+   its opening sweep. */
+@media (prefers-reduced-motion: reduce) {
+  .playhead {
+    transition: none;
+  }
+}

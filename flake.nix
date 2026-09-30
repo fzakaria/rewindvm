@@ -25,6 +25,7 @@
         {
           inherit pkgs;
           kernel = import ./nix/kernel.nix { inherit pkgs; };
+          site = import ./nix/site.nix { inherit pkgs; };
         };
     in
     {
@@ -36,6 +37,23 @@
         {
           # the guest kernel with the Rewind platform (nix/kernel.nix)
           kernel = p.kernel;
+
+          # the marketing site the pages workflow deploys (nix/site.nix)
+          site = p.site;
+        }
+      );
+
+      apps = forAllSystems (
+        system:
+        let
+          p = per system;
+        in
+        {
+          # `nix run .#serve [port]`: the built site on a local port
+          serve = {
+            type = "app";
+            program = "${import ./nix/serve.nix { inherit (p) pkgs site; }}/bin/serve-site";
+          };
         }
       );
 

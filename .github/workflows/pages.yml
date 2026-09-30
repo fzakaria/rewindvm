@@ -1,0 +1,51 @@
+# Publishes the marketing site. The deployed tree is exactly `nix build
+# .#site`, the same one `nix run .#serve` previews, so what gets tested
+# locally is what ships.
+name: pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - site/**
+      - nix/site.nix
+      - flake.lock
+      - .github/workflows/pages.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      # The upload action wants a plain directory, not the result symlink
+      # into the store.
+      - name: Build the site
+        run: |
+          nix build .#site -L
+          cp -rL result _site
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4

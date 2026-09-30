@@ -1,0 +1,448 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <title>Rewind VM: deterministic Linux VMs you can scrub, rewind and fork</title>
+    <meta
+      name="description"
+      content="Rewind VM runs a Nix build, a test suite or any Linux command inside a deterministic KVM virtual machine. Scrub the run back to any step, attach gdb there, and fork it with a new seed."
+    />
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="canonical" href="https://rewindvm.dev/" />
+    <link rel="icon" href="img/mark.svg" type="image/svg+xml" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="style.css" />
+    <script src="demo.js" defer></script>
+  </head>
+  <body>
+    <header class="wrap nav">
+      <a class="brand" href="./">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M11 19l-7-7 7-7" />
+          <path d="M20 19l-7-7 7-7" />
+        </svg>
+        <span>Rewind VM</span>
+      </a>
+      <nav class="nav-links">
+        <a href="#how">How it works</a>
+        <a href="#workloads">Nix and containers</a>
+        <a href="#pricing">Pricing</a>
+        <a
+          class="btn small"
+          href="mailto:tacos@lunchtimesurf.com?subject=Rewind%20VM%20early%20access"
+        >
+          Get early access
+        </a>
+      </nav>
+    </header>
+
+    <main>
+      <section class="wrap hero">
+        <div class="hero-copy">
+          <p class="eyebrow">Deterministic Linux VMs</p>
+          <h1>Scrub any run back to the step that broke it.</h1>
+          <p class="lede">
+            Rewind VM runs a Nix build, a test suite or any Linux command inside a deterministic KVM
+            virtual machine. The same inputs produce the same run, instruction for instruction,
+            every time. When it fails, drag the timeline back to where it went wrong, look around,
+            and fork from there.
+          </p>
+          <div class="cta-row">
+            <a
+              class="btn"
+              href="mailto:tacos@lunchtimesurf.com?subject=Rewind%20VM%20early%20access"
+            >
+              Get early access
+            </a>
+            <span class="soon">Coming soon</span>
+          </div>
+          <p class="fine">
+            The engine and CLI are open source under the MIT license. The desktop app is $49 for
+            personal use and free to evaluate.
+          </p>
+        </div>
+
+        <!-- The scrubber from the desktop app, redrawn in HTML and driven by
+             demo.js on one example run. Every number in it is example data. -->
+        <figure class="hero-demo">
+          <div class="demo" id="demo">
+            <div class="demo-bar">
+              <span class="demo-brand">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M11 19l-7-7 7-7" />
+                  <path d="M20 19l-7-7 7-7" />
+                </svg>
+                Rewind
+              </span>
+              <span class="demo-path">/nix/store/9x2k&hellip;-mylib-0.3.0.drv</span>
+              <span class="badge fail">run #3 &middot; failed</span>
+              <span class="badge pass">run #2 &middot; passed</span>
+              <span class="badge example">example data</span>
+            </div>
+
+            <div class="timeline">
+              <div class="track" id="track">
+                <div class="segments" id="segments"></div>
+                <div class="flag divergence" id="mark-divergence" title="First divergence"></div>
+                <div class="flag failure" id="mark-failure" title="Failure"></div>
+                <div class="flag fork" id="mark-fork" hidden title="Fork"></div>
+                <div class="playhead" id="playhead"></div>
+              </div>
+              <label class="sr-only" for="scrub">Step in the run</label>
+              <input id="scrub" type="range" min="0" max="11760" step="1" value="11742" />
+
+              <div class="controls">
+                <button type="button" class="ctl" data-go="start" aria-label="Go to start">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M6 5v14" />
+                    <path d="M18 5l-9 7 9 7z" />
+                  </svg>
+                </button>
+                <button type="button" class="ctl" data-go="prev">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 18l-6-6 6-6" /></svg>
+                  Previous event
+                </button>
+                <button type="button" class="ctl" data-go="next">
+                  Next event
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18l6-6-6-6" /></svg>
+                </button>
+                <button type="button" class="ctl blue" data-go="divergence">
+                  Jump to divergence
+                </button>
+                <button type="button" class="ctl red" data-go="failure">Jump to failure</button>
+              </div>
+
+              <div class="readout">
+                <span><span class="dim">step</span> <b id="step-label"></b></span>
+                <span><span class="dim">virtual time</span> <span id="clock"></span></span>
+                <span><span class="dim">phase</span> <span id="phase"></span></span>
+                <button type="button" class="fork-btn" id="fork">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <circle cx="6" cy="5" r="2" />
+                    <circle cx="6" cy="19" r="2" />
+                    <circle cx="18" cy="8" r="2" />
+                    <path d="M6 7v10" />
+                    <path d="M18 10c0 4-6 3-12 7" />
+                  </svg>
+                  Fork from here
+                </button>
+              </div>
+            </div>
+
+            <div class="panels">
+              <div class="panel panel-log" role="group" aria-label="Build log">
+                <h3 class="panel-head">Build log &middot; up to this step</h3>
+                <ol class="rows log" id="log"></ol>
+              </div>
+
+              <div class="panel panel-procs" role="group" aria-label="Processes and files">
+                <h3 class="panel-head">Process tree &middot; alive</h3>
+                <ul class="rows procs" id="procs"></ul>
+                <h3 class="panel-head">Files &middot; newest first</h3>
+                <ul class="rows files" id="files"></ul>
+              </div>
+
+              <div class="panel panel-step" role="group" aria-label="At this step">
+                <h3 class="panel-head">At this step</h3>
+                <div class="step-body">
+                  <div class="card-ev">
+                    <div class="ev-meta" id="ev-meta"></div>
+                    <div class="ev-text" id="ev-text"></div>
+                  </div>
+                  <div class="card-diff" id="diff"></div>
+                  <div class="card-note" id="note" aria-live="polite"></div>
+                  <div class="inspect">
+                    <button type="button" class="ctl" data-inspect="gdb">Attach gdb</button>
+                    <button type="button" class="ctl" data-inspect="shell">Open shell</button>
+                    <button type="button" class="ctl" data-inspect="diff">Diff vs run #2</button>
+                    <button type="button" class="ctl" data-inspect="export">Export run</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <figcaption class="demo-caption">
+            Example data: a failing build of mylib-0.3.0 where one test segfaults only on some runs.
+            Drag the slider, or focus it and use the arrow keys for one step, or Page Up and Page
+            Down for the next and previous event.
+            <noscript>The scrubber needs JavaScript to run.</noscript>
+          </figcaption>
+        </figure>
+      </section>
+
+      <section class="wrap how" id="how">
+        <h2>How it works</h2>
+        <p class="lede">
+          Nothing is recorded while the workload runs. A run is a function of its inputs, so any
+          step of it can be computed again.
+        </p>
+        <ol class="steps">
+          <li>
+            <h3>Pack the inputs</h3>
+            <p>
+              The inputs, a Nix closure or any root filesystem, become a read-only erofs image
+              mapped straight into guest memory. A small Linux kernel boots and runs your command.
+            </p>
+          </li>
+          <li>
+            <h3>Run deterministically</h3>
+            <p>
+              One vCPU. The guest kernel carries a small Rewind hypervisor platform: virtual time
+              moves only when the guest yields, interrupts are injected only at those points, and
+              the timestamp counter and hardware RNG are hidden. Each guest-triggered exit is one
+              step.
+            </p>
+          </li>
+          <li>
+            <h3>Keep keyframes</h3>
+            <p>
+              Snapshots use KVM dirty-page logging and go into a content-addressed page store
+              (BLAKE3, zstd). A page that is identical across keyframes, runs and forks is stored
+              once.
+            </p>
+          </li>
+          <li>
+            <h3>Seek</h3>
+            <p>
+              To reach a step, Rewind restores the nearest keyframe and runs forward to the exact
+              step. Same inputs, same steps, same machine state.
+            </p>
+          </li>
+        </ol>
+      </section>
+
+      <section class="features">
+        <h2>In the desktop app</h2>
+        <p class="lede">
+          A native app built with GPUI, the Rust UI framework from Zed. Everything below works on
+          any step of any run.
+        </p>
+        <div class="grid">
+          <div class="card">
+            <h3>Scrub the timeline</h3>
+            <p>
+              Drag through the run and see the log up to that step, the processes alive at that
+              step, the files written so far and the event at the step.
+            </p>
+          </div>
+          <div class="card marker-blue">
+            <h3>Jump to the divergence</h3>
+            <p>
+              Put a passing run next to a failing one and land on the first step where they differ.
+            </p>
+          </div>
+          <div class="card marker-red">
+            <h3>Jump to the failure</h3>
+            <p>The crash, the non-zero exit or the failed test, one click from anywhere.</p>
+          </div>
+          <div class="card">
+            <h3>Attach gdb at any step</h3>
+            <p>
+              Break into a process as it was at step 11,204 or step 3. Attaching does not change the
+              run, so a race that hides from a debugger stays put.
+            </p>
+          </div>
+          <div class="card">
+            <h3>Open a shell at a step</h3>
+            <p>
+              Look at the filesystem, the environment and the half-written output files exactly as
+              they were.
+            </p>
+          </div>
+          <div class="card marker">
+            <h3>Fork with a new seed</h3>
+            <p>
+              Branch from any step with a different seed and the threads interleave differently.
+              Explore what else could have happened, Antithesis-style.
+            </p>
+          </div>
+          <div class="card marker">
+            <h3>Fork with a changed file</h3>
+            <p>
+              Patch a source file or a config at a step and run on from there, without redoing
+              everything before it.
+            </p>
+          </div>
+          <div class="card">
+            <h3>Share a failure as a file</h3>
+            <p>
+              Export a failing run as a small file, attach it to an issue, and anyone with Rewind
+              lands on the same step.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="wrap workloads" id="workloads">
+        <h2>Bring a command, or bring a derivation</h2>
+        <div class="lanes">
+          <div class="lane">
+            <p class="eyebrow">Any Linux workload</p>
+            <h3>A root filesystem and a command</h3>
+            <pre
+              class="term"
+            ><code><span class="prompt">$</span> rewind run --image rootfs/ -- make check</code></pre>
+            <p class="lane-lede">
+              The root filesystem can be a directory or an OCI or Docker image. Whatever runs in it
+              runs deterministically.
+            </p>
+            <dl class="rows-def">
+              <div>
+                <dt>flaky tests</dt>
+                <dd>
+                  Run a test under many seeds until it fails. That failing run can now be reached
+                  again, every time.
+                </dd>
+              </div>
+              <div>
+                <dt>CI failures</dt>
+                <dd>
+                  CI keeps the failing run as a file. Open it on your laptop and scrub back from the
+                  red line instead of reading a log that ends at the crash.
+                </dd>
+              </div>
+              <div>
+                <dt>heisenbugs</dt>
+                <dd>
+                  Races that vanish under a debugger stay put here. The run is fixed before gdb
+                  attaches.
+                </dd>
+              </div>
+              <div>
+                <dt>exploration</dt>
+                <dd>
+                  Fork a passing run at a step with new seeds to try other thread interleavings from
+                  that point on.
+                </dd>
+              </div>
+            </dl>
+          </div>
+
+          <div class="lane nix">
+            <p class="eyebrow">For Nix users</p>
+            <h3>Nix builds are already almost a closed world</h3>
+            <pre class="term"><code><span class="prompt">$</span> rewind nix ./#mylib
+<span class="prompt">$</span> rewind check ./#mylib</code></pre>
+            <p class="lane-lede">
+              Pinned inputs, no network, fixed paths. Point Rewind at a flake attribute or a
+              <code>.drv</code> and most of the work of making the run deterministic is already
+              done.
+            </p>
+            <dl class="rows-def">
+              <div>
+                <dt>.drv</dt>
+                <dd>The derivation hash is the unit of reproduction.</dd>
+              </div>
+              <div>
+                <dt>the machine</dt>
+                <dd>
+                  The guest kernel and the VMM are derivations too, so the whole machine is pinned.
+                </dd>
+              </div>
+              <div>
+                <dt>rewind check</dt>
+                <dd>
+                  <code>nix build --check</code> says the output "may not be deterministic".
+                  <code>rewind check</code> runs the derivation twice with different seeds and jumps
+                  to the first step where the runs diverge.
+                </dd>
+              </div>
+              <div>
+                <dt>a file</dt>
+                <dd>A failing build becomes a small file anyone can replay.</dd>
+              </div>
+              <div>
+                <dt>the clock</dt>
+                <dd>Wall clock time in the guest starts at <code>SOURCE_DATE_EPOCH</code>.</dd>
+              </div>
+            </dl>
+          </div>
+        </div>
+      </section>
+
+      <section class="wrap pricing" id="pricing">
+        <h2>Pricing</h2>
+        <p class="lede">
+          Sold the way Sublime Text is. Evaluate the app free for as long as you like, with an
+          occasional reminder. Buy a license when it earns its keep.
+        </p>
+        <div class="plans">
+          <div class="plan">
+            <h3>Engine and CLI</h3>
+            <p class="price">Free <span>MIT license</span></p>
+            <p class="alt">The VMM, the guest kernel platform and the command line.</p>
+            <ul>
+              <li>
+                <code>rewind run</code>, <code>rewind nix</code> and <code>rewind check</code>
+              </li>
+              <li>Open source, for any use</li>
+            </ul>
+          </div>
+          <div class="plan pro">
+            <h3>Personal</h3>
+            <p class="price">$49 <span>once</span></p>
+            <p class="alt">The desktop app, for you.</p>
+            <ul>
+              <li>All your machines</li>
+              <li>3 years of updates</li>
+              <li>Offline license key by email</li>
+            </ul>
+            <!-- [CHECKOUT LINK]: point this button at the personal checkout. -->
+            <a class="btn" href="#buy">Buy personal</a>
+          </div>
+          <div class="plan">
+            <h3>Commercial</h3>
+            <p class="price">$99 <span>per seat</span></p>
+            <p class="alt">The desktop app, for use at a company.</p>
+            <ul>
+              <li>One seat per person using the app</li>
+              <li>Offline license key by email</li>
+            </ul>
+            <!-- [CHECKOUT LINK]: point this button at the commercial checkout. -->
+            <a class="btn ghost" href="#buy">Buy commercial</a>
+          </div>
+        </div>
+        <p class="note" id="buy">
+          Rewind VM is in early access and checkout is not open yet.
+          <a href="mailto:tacos@lunchtimesurf.com?subject=Rewind%20VM%20early%20access">Email us</a>
+          to get on the list.
+        </p>
+      </section>
+
+      <section class="wrap caution">
+        <h2>Limits, today</h2>
+        <p>
+          Userspace is never preempted. A thread spinning without syscalls stalls the guest.
+          Futex-based code is fine.
+        </p>
+        <p>
+          Only interleavings that cross a syscall or a yield can be explored. Pure load and store
+          data races between two threads are out of reach.
+        </p>
+        <p>One vCPU per VM. Throughput comes from running many VMs at once.</p>
+        <p>x86_64 Linux hosts with KVM only, for now.</p>
+      </section>
+    </main>
+
+    <footer class="wrap footer">
+      <p>
+        Prior art we learned from: <a href="https://antithesis.com/">Antithesis</a>,
+        <a href="https://rr-project.org/">rr</a>,
+        <a href="https://github.com/facebookexperimental/hermit">Hermit</a> and QEMU record and
+        replay. The desktop app is built with
+        <a href="https://github.com/zed-industries/zed/tree/main/crates/gpui">GPUI</a>.
+      </p>
+      <p>
+        &copy; 2026 <a href="https://lunchtimesurf.com/">Lunch Time Surf LLC</a> &middot; Santa
+        Cruz, California &middot;
+        <a href="mailto:tacos@lunchtimesurf.com">tacos@lunchtimesurf.com</a> &middot;
+        <a href="privacy.html">Privacy</a>
+      </p>
+    </footer>
+  </body>
+</html>
