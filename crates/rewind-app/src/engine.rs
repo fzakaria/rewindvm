@@ -8,10 +8,12 @@
 //! thread. The engine's environment, REWIND_HOME among it, is the app's.
 
 use std::ffi::OsString;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::run::MANIFEST_FILE;
+use crate::viewer::{self, FetchedAll};
 
 /// The engine's command, looked up on PATH.
 pub const DEFAULT_PROGRAM: &str = "rewind";
@@ -45,7 +47,7 @@ impl Feature {
     pub fn describe(self) -> &'static str {
         match self {
             Feature::Gdb => "Attaching gdb",
-            Feature::Shell => "Opening a shell in the guest",
+            Feature::Shell => "Opening a shell inside the VM",
             Feature::Export => "Exporting a run",
         }
     }
@@ -138,12 +140,30 @@ pub trait Engine: Send + Sync {
     /// address to attach to, as host:port.
     fn gdb(&self, run: &Path, step: u64) -> EngineResult<String>;
 
-    /// Opens a shell inside the guest as it was at `step`.
+    /// Opens a shell inside the VM as it was at `step`.
     fn shell(&self, run: &Path, step: u64) -> EngineResult<()>;
 
     /// Writes `run` out as a single file others can replay, and returns
     /// its path.
     fn export(&self, run: &Path) -> EngineResult<PathBuf>;
+
+    /// Reads `path` inside the VM as it was at `step` of `run`, as process
+    /// `pid` saw it when one is given. The engine brings the run back to
+    /// the step to read it, which takes seconds.
+    fn cat(&self, run: &Path, step: u64, pid: Option<u32>, path: &str) -> EngineResult<FileAtStep>;
+}
+
+/// A file as it was at a step.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FileAtStep {
+    /// The file existed; `bytes` holds all of it unless `complete` says
+    /// the engine's answer was cut at `viewer::MAX_SHOWN` bytes.
+    Exists {
+        bytes: Vec<u8>,
+        complete: FetchedAll,
+    },
+    /// The file did not exist at the step.
+    Missing,
 }
 
 /// The engine as the `rewind` command line.
@@ -236,6 +256,76 @@ impl Engine for CliEngine {
 
     fn export(&self, _run: &Path) -> EngineResult<PathBuf> {
         Err(EngineError::NotYet(Feature::Export))
+    }
+
+    fn cat(&self, run: &Path, step: u64, pid: Option<u32>, path: &str) -> EngineResult<FileAtStep> {
+        // `rewind cat` exits 2 for a file that did not exist at the step.
+        const MISSING_STATUS: i32 = 2;
+
+        // rewind cat <run> <step> <path> [--pid P]
+        let mut args: Vec<OsString> = vec![
+            "cat".into(),
+            run.into(),
+            step.to_string().into(),
+            path.into(),
+        ];
+        if let Some(pid) = pid {
+            args.push("--pid".into());
+            args.push(pid.to_string().into());
+        }
+        let command = self.command_line(&args);
+        let failed = |message: String| EngineError::Failed {
+            command: command.clone(),
+            message,
+        };
+        let mut child = Command::new(&self.program)
+            .args(&args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => EngineError::Missing {
+                    program: self.program.to_string_lossy().into_owned(),
+                },
+                _ => failed(e.to_string()),
+            })?;
+
+        // Read no more than the viewer shows, and one byte more to know
+        // whether there was more; stop the engine if there was.
+        let limit = viewer::MAX_SHOWN as u64 + 1;
+        let mut bytes = Vec::new();
+        let stdout = child.stdout.take().expect("stdout is piped");
+        stdout
+            .take(limit)
+            .read_to_end(&mut bytes)
+            .map_err(|e| failed(e.to_string()))?;
+        if bytes.len() > viewer::MAX_SHOWN {
+            bytes.truncate(viewer::MAX_SHOWN);
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(FileAtStep::Exists {
+                bytes,
+                complete: FetchedAll::No,
+            });
+        }
+        let mut stderr = String::new();
+        if let Some(mut pipe) = child.stderr.take() {
+            let _ = pipe.read_to_string(&mut stderr);
+        }
+        let status = child.wait().map_err(|e| failed(e.to_string()))?;
+        match status.code() {
+            Some(0) => Ok(FileAtStep::Exists {
+                bytes,
+                complete: FetchedAll::Yes,
+            }),
+            Some(MISSING_STATUS) => Ok(FileAtStep::Missing),
+            _ => Err(failed(
+                last_line(&stderr)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| status.to_string()),
+            )),
+        }
     }
 }
 
@@ -371,5 +461,37 @@ mod tests {
         );
         assert!(engine.shell(Path::new("/run"), 1).unwrap_err().is_not_yet());
         assert!(engine.export(Path::new("/run")).unwrap_err().is_not_yet());
+    }
+
+    #[test]
+    fn cat_returns_the_file_or_says_it_was_missing() {
+        // The stand-in prints a file and exits 0, exits 2 for a file that
+        // did not exist, or exits 1 with a reason; the arguments name the
+        // step, the process and the path.
+        let dir = temp_dir("cat");
+        let run = dir.join("run");
+        let engine = fake_engine(&dir, "CFLAGS = -O1\\n", "", 0);
+        let read = retrying(|| engine.cat(&run, 3_795, Some(174), "/build/Makefile")).unwrap();
+        assert_eq!(
+            read,
+            FileAtStep::Exists {
+                bytes: b"CFLAGS = -O1\n".to_vec(),
+                complete: FetchedAll::Yes
+            }
+        );
+        let args = std::fs::read_to_string(dir.join("args")).unwrap();
+        assert!(args.contains("cat") && args.contains("3795 /build/Makefile --pid 174"));
+
+        let engine = fake_engine(&dir, "", "rewind: no such file then\\n", 2);
+        let read = retrying(|| engine.cat(&run, 10, None, "/build/core")).unwrap();
+        assert_eq!(read, FileAtStep::Missing);
+
+        let engine = fake_engine(&dir, "", "rewind: no keyframes for this run\\n", 1);
+        let err = retrying(|| engine.cat(&run, 10, None, "/x")).unwrap_err();
+        let EngineError::Failed { message, .. } = err else {
+            panic!("{err:?}");
+        };
+        assert_eq!(message, "rewind: no keyframes for this run");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

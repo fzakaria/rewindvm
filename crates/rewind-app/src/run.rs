@@ -17,6 +17,7 @@ use serde_json::Value;
 use rewind_trace::signal_name;
 
 use crate::archive;
+use crate::describe::{self, thousands};
 use crate::model::{Comparison, ExitStatus, Timeline};
 
 /// The trace inside a run directory.
@@ -142,8 +143,10 @@ fn seed(value: Option<&Value>) -> Option<u64> {
 /// Where a run came from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Origin {
-    /// A run directory or a bare trace file on this machine.
+    /// A run directory on this machine.
     Local,
+    /// A bare trace file, without the run directory around it.
+    TraceFile,
     /// A `.rwd` export, unpacked into the cache.
     Export(PathBuf),
     /// One of the example runs compiled into the app.
@@ -169,7 +172,12 @@ impl Run {
             let dir = archive::import_file(path)?;
             return Run::open_at(&dir, Origin::Export(path.to_path_buf()));
         }
-        Run::open_at(path, Origin::Local)
+        let origin = if path.is_dir() {
+            Origin::Local
+        } else {
+            Origin::TraceFile
+        };
+        Run::open_at(path, origin)
     }
 
     /// Opens an example run compiled into the app.
@@ -397,6 +405,87 @@ impl Session {
     pub fn divergence_step(&self) -> Option<u64> {
         self.comparison.as_ref().and_then(Comparison::step)
     }
+
+    /// How the run on screen and the compared run relate, in words. None
+    /// without a compared run.
+    pub fn agreement(&self) -> Option<Agreement> {
+        let other = self.other.as_ref()?;
+        let comparison = self.comparison.as_ref()?;
+        let other_label = other.label();
+        let program = comparison
+            .program
+            .as_ref()
+            .map(|argv| crate::model::command_name(&argv.join(" ")));
+
+        let Some(point) = &comparison.point else {
+            let line = match &program {
+                Some(p) => format!("{p} did the same things in the same order in both runs."),
+                None => "Both runs did the same things in the same order.".to_string(),
+            };
+            return Some(Agreement::Same {
+                title: format!("Same as {other_label}"),
+                lines: vec![line],
+            });
+        };
+
+        // What each run did next, and what differs.
+        let name_here = |pid: u32| self.run.timeline.name_of(pid).map(str::to_string);
+        let difference = describe::difference(
+            party(&self.run, point.here),
+            party(other, point.there),
+            program.as_deref(),
+            &name_here,
+        );
+        let before = match &program {
+            Some(p) => {
+                format!("Up to here {p} did the same things in the same order in both runs.")
+            }
+            None => "Up to here both runs did the same things in the same order.".to_string(),
+        };
+        let other_run =
+            if other.verdict() == Verdict::Passed && self.run.verdict() == Verdict::Failed {
+                "The passing run".to_string()
+            } else {
+                format!("Run {other_label}")
+            };
+        let mut lines = vec![
+            before,
+            format!("Next, this run: {}.", difference.here),
+            format!("{other_run}: {}.", difference.there),
+        ];
+        lines.extend(difference.detail);
+        Some(Agreement::Parted {
+            step: point.step,
+            title: format!(
+                "Diverged from {other_label} at step {}",
+                thousands(point.step)
+            ),
+            lines,
+        })
+    }
+}
+
+/// One run's side of a divergence as the event it names.
+fn party(run: &Run, side: Option<crate::model::Side>) -> Option<describe::Party<'_>> {
+    let side = side?;
+    let event = run.timeline.event(side.index)?;
+    Some(describe::Party {
+        event,
+        thread: side.thread,
+    })
+}
+
+/// How two runs relate, in words for the divergence card and notice.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Agreement {
+    /// The runs did the same things.
+    Same { title: String, lines: Vec<String> },
+    /// The runs part at `step` of the run on screen.
+    Parted {
+        step: u64,
+        title: String,
+        lines: Vec<String>,
+    },
 }
 
 #[cfg(test)]

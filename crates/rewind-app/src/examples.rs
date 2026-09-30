@@ -52,5 +52,18 @@ mod tests {
         assert_eq!(passing.verdict(), Verdict::Passed);
         let divergence = session.divergence_step().unwrap();
         assert!(divergence < failure.step);
+
+        // In words: the first thing test_pool_shutdown does differently.
+        let Some(crate::run::Agreement::Parted { lines, .. }) = session.agreement() else {
+            panic!("the examples do not part");
+        };
+        assert_eq!(
+            lines,
+            vec![
+                "Up to here test_pool_shutdown did the same things in the same order in both runs.",
+                "Next, this run: thread 2 of test_pool_shutdown writes \"job 17 done: 43360\" to stdout.",
+                "The passing run: thread 3 of test_pool_shutdown exits.",
+            ]
+        );
     }
 }

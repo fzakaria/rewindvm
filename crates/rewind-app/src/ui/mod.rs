@@ -8,6 +8,7 @@ mod licensing;
 mod render;
 mod scrubber;
 mod tour;
+mod viewer;
 mod widgets;
 
 use std::sync::Arc;

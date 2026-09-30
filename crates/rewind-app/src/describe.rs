@@ -235,6 +235,161 @@ pub fn short_store_paths(text: &str) -> String {
     out
 }
 
+/// Quoted text in a plain sentence is cut to this many characters.
+const MAX_PLAIN_QUOTE: usize = 48;
+
+/// One run's side of a divergence, for describing it in words.
+#[derive(Clone, Copy, Debug)]
+pub struct Party<'a> {
+    pub event: &'a Event,
+    /// The event's thread number within the compared program, 0 for its
+    /// first thread; None when the comparison is not about one program.
+    pub thread: Option<usize>,
+}
+
+/// A divergence in words: what each run did next, and, when both did the
+/// same kind of thing, what exactly differs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Difference {
+    pub here: String,
+    pub there: String,
+    pub detail: Option<String>,
+}
+
+/// Describes where two runs part. `program` names the compared program,
+/// and `name_of` names a process by pid for comparisons of whole runs.
+pub fn difference(
+    here: Option<Party>,
+    there: Option<Party>,
+    program: Option<&str>,
+    name_of: &dyn Fn(u32) -> Option<String>,
+) -> Difference {
+    let said = |party: Option<Party>| match party {
+        Some(p) => plain(p, program, name_of),
+        None => match program {
+            Some(program) => format!("{program} does nothing more"),
+            None => "the run ends".to_string(),
+        },
+    };
+    Difference {
+        here: said(here),
+        there: said(there),
+        detail: match (here, there) {
+            (Some(h), Some(t)) => detail(h, t),
+            _ => None,
+        },
+    }
+}
+
+/// Who did something: a thread of the compared program, or a process.
+fn subject(party: Party, program: Option<&str>, name_of: &dyn Fn(u32) -> Option<String>) -> String {
+    const MAIN_THREAD: usize = 0;
+    let event = party.event;
+    match (program, party.thread) {
+        (Some(program), Some(MAIN_THREAD)) => program.to_string(),
+        (Some(program), Some(n)) => format!("thread {} of {program}", n + 1),
+        _ => {
+            let name = name_of(event.pid).unwrap_or_else(|| format!("pid {}", event.pid));
+            if event.tid == event.pid {
+                name
+            } else {
+                format!("thread {} of {name}", event.tid)
+            }
+        }
+    }
+}
+
+/// What an event did, as a short sentence without its full stop:
+/// "thread 2 of pool gets SIGSEGV at 0x108".
+pub fn plain(
+    party: Party,
+    program: Option<&str>,
+    name_of: &dyn Fn(u32) -> Option<String>,
+) -> String {
+    let who = subject(party, program, name_of);
+    let quoted = |text: &str| format!("\"{}\"", clip(text.trim_end(), MAX_PLAIN_QUOTE));
+    match &party.event.kind {
+        EventKind::Output { fd, bytes } => {
+            let text = String::from_utf8_lossy(bytes);
+            let stream = match fd {
+                1 => "stdout".to_string(),
+                2 => "stderr".to_string(),
+                n => format!("file descriptor {n}"),
+            };
+            format!("{who} writes {} to {stream}", quoted(&text))
+        }
+        EventKind::Signal { signo, addr, .. } => {
+            let name = signal_name(*signo);
+            if signo::FATAL.contains(signo) {
+                return format!("{who} gets {name} at {addr:#x}");
+            }
+            format!("{who} gets {name}")
+        }
+        EventKind::Exit { status, .. } => match ExitStatus::from_raw(*status) {
+            ExitStatus::Code(0) => format!("{who} exits"),
+            ExitStatus::Code(code) => format!("{who} exits with status {code}"),
+            ExitStatus::Signal { signo, .. } => {
+                format!("{who} is killed by {}", signal_name(signo))
+            }
+        },
+        EventKind::Fork { thread: true, .. } => format!("{who} starts a thread"),
+        EventKind::Fork { thread: false, .. } => format!("{who} starts a child process"),
+        EventKind::Exec { argv, .. } => format!("{who} runs {}", quoted(&argv.join(" "))),
+        EventKind::Open { path, .. } => format!("{who} opens {path} for writing"),
+        EventKind::Unlink { path } => format!("{who} deletes {path}"),
+        EventKind::Rename { from, to } => format!("{who} renames {from} to {to}"),
+        EventKind::Mark { text } => format!("{who} writes the mark {}", quoted(text)),
+        EventKind::Console { text } => format!("the kernel logs {}", quoted(text)),
+        EventKind::Unknown { kind, .. } => format!("{who} reports a record of kind {kind}"),
+    }
+}
+
+/// When both runs did the same kind of thing, the part that differs.
+fn detail(here: Party, there: Party) -> Option<String> {
+    use std::mem::discriminant;
+    let (a, b) = (&here.event.kind, &there.event.kind);
+    if discriminant(a) != discriminant(b) {
+        return None;
+    }
+    if a == b {
+        let (x, y) = (here.thread?, there.thread?);
+        return Some(format!(
+            "Both do the same thing, but from thread {} in this run and thread {} in the other.",
+            x + 1,
+            y + 1
+        ));
+    }
+    let text = match (a, b) {
+        (EventKind::Output { fd: f, .. }, EventKind::Output { fd: g, .. }) if f == g => {
+            "Both write to the same stream; the text differs."
+        }
+        (EventKind::Signal { signo: s, .. }, EventKind::Signal { signo: t, .. }) if s != t => {
+            return Some(format!(
+                "Both get a signal: {} in this run, {} in the other.",
+                signal_name(*s),
+                signal_name(*t)
+            ));
+        }
+        (EventKind::Signal { .. }, EventKind::Signal { .. }) => {
+            "Both get the same signal, at a different address."
+        }
+        (EventKind::Exit { .. }, EventKind::Exit { .. }) => "Both exit, with a different status.",
+        (EventKind::Exec { .. }, EventKind::Exec { .. }) => {
+            "Both run a program, with a different command line."
+        }
+        (EventKind::Open { .. }, EventKind::Open { .. })
+        | (EventKind::Unlink { .. }, EventKind::Unlink { .. })
+        | (EventKind::Rename { .. }, EventKind::Rename { .. }) => {
+            "Both change a file, but not the same one."
+        }
+        (EventKind::Fork { .. }, EventKind::Fork { .. }) => {
+            "Both start a new thread or process, with a different id."
+        }
+        _ => return None,
+    };
+    Some(text.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     // Event descriptions and number formatting: each test describes one
@@ -361,6 +516,102 @@ mod tests {
         assert_eq!(
             summary(&e),
             "step 3,495 \u{b7} pid 7 tid 9: write(1, \"job 0\\n\")"
+        );
+    }
+
+    #[test]
+    fn a_divergence_reads_as_what_each_run_did_next() {
+        // A crash in one run against a thread exit in the other names the
+        // threads by their number in the program; two writes of different
+        // text say that the text is what differs.
+        let crash = ev(EventKind::Signal {
+            signo: 11,
+            code: 1,
+            addr: 0x108,
+        });
+        let exit = ev(EventKind::Exit {
+            status: 0,
+            comm: "pool".into(),
+            thread: true,
+        });
+        let nobody = |_| None;
+        let d = difference(
+            Some(Party {
+                event: &crash,
+                thread: Some(2),
+            }),
+            Some(Party {
+                event: &exit,
+                thread: Some(1),
+            }),
+            Some("pool-test"),
+            &nobody,
+        );
+        assert_eq!(d.here, "thread 3 of pool-test gets SIGSEGV at 0x108");
+        assert_eq!(d.there, "thread 2 of pool-test exits");
+        assert_eq!(d.detail, None);
+
+        let write = |text: &str| {
+            ev(EventKind::Output {
+                fd: 1,
+                bytes: text.as_bytes().to_vec(),
+            })
+        };
+        let (a, b) = (write("job 17 done\n"), write("job 16 done\n"));
+        let party = |event| Party {
+            event,
+            thread: Some(1),
+        };
+        let d = difference(Some(party(&a)), Some(party(&b)), Some("pool-test"), &nobody);
+        assert_eq!(
+            d.here,
+            "thread 2 of pool-test writes \"job 17 done\" to stdout"
+        );
+        assert_eq!(
+            d.detail.as_deref(),
+            Some("Both write to the same stream; the text differs.")
+        );
+    }
+
+    #[test]
+    fn a_run_that_stops_early_and_a_same_event_from_another_thread() {
+        // A side with no more events says so; the same event from another
+        // thread names both threads.
+        let exit = ev(EventKind::Exit {
+            status: 2 << 8,
+            comm: "make".into(),
+            thread: false,
+        });
+        let named = |pid: u32| (pid == 7).then(|| "make".to_string());
+        let d = difference(
+            Some(Party {
+                event: &exit,
+                thread: None,
+            }),
+            None,
+            None,
+            &named,
+        );
+        assert_eq!(d.here, "make exits with status 2");
+        assert_eq!(d.there, "the run ends");
+
+        let d = difference(
+            Some(Party {
+                event: &exit,
+                thread: Some(1),
+            }),
+            Some(Party {
+                event: &exit,
+                thread: Some(2),
+            }),
+            Some("make"),
+            &named,
+        );
+        assert_eq!(
+            d.detail.as_deref(),
+            Some(
+                "Both do the same thing, but from thread 2 in this run and thread 3 in the other."
+            )
         );
     }
 }

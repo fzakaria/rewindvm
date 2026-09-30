@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-use rewind_trace::{Divergence, Event, EventKind, Trace};
+use rewind_trace::{Event, EventKind, Trace};
 
 /// Signal numbers the app treats as a crash.
 pub mod signo {
@@ -316,6 +316,9 @@ pub struct Timeline {
     pub failure: Option<Failure>,
     /// The job's exit, when init reported it.
     pub job_exit: Option<JobExit>,
+    /// The step the job started on, when init wrote its start mark:
+    /// before it the VM is still booting.
+    pub job_start: Option<u64>,
     /// A display name per process row pid, for describing events.
     names: HashMap<u32, String>,
 }
@@ -331,6 +334,7 @@ impl Timeline {
         let rows = process_rows(&trace);
         let files = file_events(&trace);
         let job_exit = job_exit(&trace);
+        let job_start = job_start(&trace);
         let failure = find_failure(&trace, job_exit);
 
         // Command names for event descriptions: the latest process per pid
@@ -350,6 +354,7 @@ impl Timeline {
             files,
             failure,
             job_exit,
+            job_start,
             names,
         }
     }
@@ -467,23 +472,115 @@ impl Timeline {
     }
 }
 
-/// Two runs side by side: where the one on screen first differs from the
-/// other one.
+/// Two runs side by side: where the one on screen first behaves
+/// differently from the other.
+///
+/// When the failing run names a culprit program (the one that crashed or
+/// failed first), only that program's own events are compared, with
+/// threads numbered by the order they appear and steps ignored, as
+/// `Trace::divergence_in` does. Otherwise, or when the program behaved the
+/// same in both runs, every event is compared by what happened and in
+/// which process and thread, still ignoring steps. Either way a difference
+/// that is only a shift in steps is not a divergence.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Comparison {
-    pub divergence: Option<Divergence>,
+    /// The program compared, when the comparison is about one.
+    pub program: Option<Vec<String>>,
+    /// Where the runs part; None when they did the same things.
+    pub point: Option<DivergencePoint>,
+}
+
+/// One run's side of a divergence: the first event that differs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Side {
+    /// The index of the event in the run's trace.
+    pub index: usize,
+    /// The event's thread number within the program (0 for its first
+    /// thread), when the comparison is about one program.
+    pub thread: Option<usize>,
+}
+
+/// Where two runs part.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DivergencePoint {
+    /// How many events matched before.
+    pub matched: usize,
+    /// The first differing event on this run's side and on the other's;
+    /// None on a side whose events ran out first.
+    pub here: Option<Side>,
+    pub there: Option<Side>,
+    /// The step the difference is at in this run: its differing event,
+    /// or the last matching one when this run's events ran out first.
+    pub step: u64,
 }
 
 impl Comparison {
     pub fn new(this: &Timeline, other: &Timeline) -> Comparison {
+        let (a, b) = (&this.trace, &other.trace);
+
+        // The culprit's own events first.
+        let program = a.culprit().or_else(|| b.culprit());
+        if let Some(argv) = &program
+            && let Some(d) = a.divergence_in(b, argv)
+        {
+            let side = |event: Option<(usize, usize)>| {
+                event.map(|(index, thread)| Side {
+                    index,
+                    thread: Some(thread),
+                })
+            };
+            let here = side(d.left_event());
+            let last_same = d.position.checked_sub(1).map(|i| d.left.indices[i]);
+            let point = DivergencePoint {
+                matched: d.position,
+                here,
+                there: side(d.right_event()),
+                step: step_of(a, here.map(|s| s.index).or(last_same), this.total),
+            };
+            return Comparison {
+                program,
+                point: Some(point),
+            };
+        }
+
+        // Every event, by what happened and where, but not when.
+        let same = |x: &Event, y: &Event| x.pid == y.pid && x.tid == y.tid && x.kind == y.kind;
+        let n = a.events.len().min(b.events.len());
+        let position = (0..n)
+            .find(|&i| !same(&a.events[i], &b.events[i]))
+            .or((a.events.len() != b.events.len()).then_some(n));
+        let point = position.map(|i| {
+            let side = |t: &Trace| {
+                (i < t.events.len()).then_some(Side {
+                    index: i,
+                    thread: None,
+                })
+            };
+            let here = side(a);
+            DivergencePoint {
+                matched: i,
+                here,
+                there: side(b),
+                step: step_of(a, here.map(|s| s.index).or(i.checked_sub(1)), this.total),
+            }
+        });
         Comparison {
-            divergence: this.trace.divergence(&other.trace),
+            program: None,
+            point,
         }
     }
 
     /// The step of the first divergence, in the run on screen.
     pub fn step(&self) -> Option<u64> {
-        self.divergence.as_ref().map(|d| d.left_step)
+        self.point.as_ref().map(|p| p.step)
     }
+}
+
+/// The step of event `index`, or the end of the run without one.
+fn step_of(trace: &Trace, index: Option<usize>, total: u64) -> u64 {
+    index
+        .and_then(|i| trace.events.get(i))
+        .map_or(total, |e| e.step)
 }
 
 /// Whether a line reads as an error.
@@ -620,10 +717,7 @@ fn phase_spans(trace: &Trace, lines: &[LogLine], total: u64) -> Vec<PhaseSpan> {
     }
 
     // The start mark, if init wrote one, splits boot from the job.
-    let start_mark = trace.events.iter().find_map(|e| match &e.kind {
-        EventKind::Mark { text } if text.trim() == init_mark::START => Some(e.step),
-        _ => None,
-    });
+    let start_mark = job_start(trace);
     let first = starts.first().map(|(step, _)| *step);
     let mut openers: Vec<(u64, &str)> = Vec::new();
     match (start_mark, first) {
@@ -668,6 +762,14 @@ fn short_phase_name(name: &str) -> String {
         Some(short) if !short.is_empty() => short.to_string(),
         _ => name.to_string(),
     }
+}
+
+/// The step the job started on, from init's start mark.
+fn job_start(trace: &Trace) -> Option<u64> {
+    trace.events.iter().find_map(|e| match &e.kind {
+        EventKind::Mark { text } if text.trim() == init_mark::START => Some(e.step),
+        _ => None,
+    })
 }
 
 /// The job's exit, from init's exit mark.
@@ -1398,8 +1500,9 @@ mod tests {
 
     #[test]
     fn the_divergence_marker_sits_at_the_first_differing_event() {
-        // A second run that prints a different line at step 7 diverges
-        // there, and an identical run does not diverge.
+        // A second run whose compiler prints a different line at step 7
+        // diverges there: test_pool, the culprit, behaves the same in both,
+        // so every event is compared. An identical run does not diverge.
         let a = build();
         let mut events = a.trace.events.clone();
         events[6] = out(7, 3, 2, "pool.c:3: warning: other\n");
@@ -1407,6 +1510,36 @@ mod tests {
         assert_eq!(Comparison::new(&a, &b).step(), Some(7));
         let same = Timeline::new(a.trace.clone(), None);
         assert_eq!(Comparison::new(&a, &same).step(), None);
+    }
+
+    #[test]
+    fn a_shift_in_steps_is_not_a_divergence() {
+        // The second run does everything two steps later from make's exec
+        // on, and where the first run's worker thread takes a SIGSEGV the
+        // second run's exits. The first raw difference is the shift at
+        // event 3; the comparison is about test_pool and finds the crash.
+        let a = build();
+        let mut events = a.trace.events.clone();
+        for e in &mut events[3..] {
+            e.step += 2;
+        }
+        events[13] = exit(16, 4, 5, 0, "worker-0", true);
+        let b = Timeline::new(Trace { events }, None);
+        assert_eq!(a.trace.divergence(&b.trace).unwrap().index, 3);
+
+        let c = Comparison::new(&a, &b);
+        assert_eq!(c.program, Some(vec!["test_pool".to_string()]));
+        let p = c.point.unwrap();
+        assert_eq!(p.matched, 2);
+        assert_eq!(
+            p.here,
+            Some(Side {
+                index: 13,
+                thread: Some(1)
+            })
+        );
+        assert_eq!(p.there.map(|s| s.index), Some(13));
+        assert_eq!(p.step, 14);
     }
 
     #[test]

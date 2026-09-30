@@ -61,77 +61,28 @@ pub fn start_step(trace: &Trace) -> u64 {
 /// The command line of the process a failed run's failure came from: the
 /// first to receive a fatal signal, else the first to exit non-zero.
 pub fn culprit(trace: &Trace) -> Option<Vec<String>> {
-    const FATAL: [u32; 5] = [4, 6, 7, 8, 11];
-    let procs = trace.processes();
-    let argv_of = |pid: u32| {
-        procs
-            .iter()
-            .rev()
-            .find(|p| p.pid == pid && !p.argv.is_empty())
-            .map(|p| p.argv.clone())
-    };
-    let signalled = trace.events.iter().find_map(|e| match &e.kind {
-        EventKind::Signal { signo, .. } if FATAL.contains(signo) => argv_of(e.pid),
-        _ => None,
-    });
-    signalled.or_else(|| {
-        trace.events.iter().find_map(|e| match &e.kind {
-            EventKind::Exit {
-                status,
-                thread: false,
-                ..
-            } if *status != 0 => argv_of(e.pid),
-            _ => None,
-        })
-    })
+    trace.culprit()
 }
 
-/// Where one program's own events first differ between two runs. Only
-/// events of processes running `argv` count, and threads are compared by
-/// the order they first appear rather than by their ids, which a
-/// perturbed run may hand out differently.
+/// Where one program's own events first differ between two runs (see
+/// `Trace::divergence_in`), with the events around it on each side.
 pub fn divergence_in(left: &Trace, right: &Trace, argv: &[String]) -> String {
-    use std::collections::HashMap;
-
-    fn of<'a>(trace: &'a Trace, argv: &[String]) -> Vec<(&'a Event, usize)> {
-        let pids: Vec<u32> = trace
-            .processes()
-            .iter()
-            .filter(|p| p.argv == argv)
-            .map(|p| p.pid)
-            .collect();
-        let mut threads: HashMap<u32, usize> = HashMap::new();
-        trace
-            .events
-            .iter()
-            .filter(|e| pids.contains(&e.pid))
-            .map(|e| {
-                let n = threads.len();
-                (e, *threads.entry(e.tid).or_insert(n))
-            })
-            .collect()
-    }
-    let (l, r) = (of(left, argv), of(right, argv));
-    let same = |a: &(&Event, usize), b: &(&Event, usize)| a.1 == b.1 && a.0.kind == b.0.kind;
-    let n = l.len().min(r.len());
-    let Some(i) = (0..n)
-        .find(|&i| !same(&l[i], &r[i]))
-        .or((l.len() != r.len()).then_some(n))
-    else {
+    let Some(d) = left.divergence_in(right, argv) else {
         return "  no difference in its own events\n".into();
     };
+    let i = d.position;
 
     const BEFORE: usize = 3;
     const AFTER: usize = 4;
     let mut out = String::new();
-    for (e, _) in &l[i.saturating_sub(BEFORE)..i] {
-        let _ = writeln!(out, "  both  {}", event(e));
+    for &e in &d.left.indices[i.saturating_sub(BEFORE)..i] {
+        let _ = writeln!(out, "  both  {}", event(&left.events[e]));
     }
-    for (e, _) in l.iter().skip(i).take(AFTER) {
-        let _ = writeln!(out, "  left  {}", event(e));
+    for &e in d.left.indices.iter().skip(i).take(AFTER) {
+        let _ = writeln!(out, "  left  {}", event(&left.events[e]));
     }
-    for (e, _) in r.iter().skip(i).take(AFTER) {
-        let _ = writeln!(out, "  right {}", event(e));
+    for &e in d.right.indices.iter().skip(i).take(AFTER) {
+        let _ = writeln!(out, "  right {}", event(&right.events[e]));
     }
     out
 }

@@ -284,6 +284,123 @@ impl Trace {
             right_step: step_of(other),
         })
     }
+
+    /// The command line of the process a failed run's failure came from:
+    /// the first to receive a fatal signal, else the first to exit
+    /// non-zero.
+    pub fn culprit(&self) -> Option<Vec<String>> {
+        let procs = self.processes();
+        let argv_of = |pid: u32| {
+            procs
+                .iter()
+                .rev()
+                .find(|p| p.pid == pid && !p.argv.is_empty())
+                .map(|p| p.argv.clone())
+        };
+        let signalled = self.events.iter().find_map(|e| match &e.kind {
+            EventKind::Signal { signo, .. } if FATAL_SIGNALS.contains(signo) => argv_of(e.pid),
+            _ => None,
+        });
+        signalled.or_else(|| {
+            self.events.iter().find_map(|e| match &e.kind {
+                EventKind::Exit {
+                    status,
+                    thread: false,
+                    ..
+                } if *status != 0 => argv_of(e.pid),
+                _ => None,
+            })
+        })
+    }
+
+    /// The events of the processes running `argv`, each with its thread
+    /// numbered by the order the program's threads first appear.
+    pub fn program_events(&self, argv: &[String]) -> ProgramEvents {
+        let pids: Vec<u32> = self
+            .processes()
+            .iter()
+            .filter(|p| p.argv == argv)
+            .map(|p| p.pid)
+            .collect();
+        let mut numbers: BTreeMap<u32, usize> = BTreeMap::new();
+        let mut events = ProgramEvents::default();
+        for (index, e) in self.events.iter().enumerate() {
+            if !pids.contains(&e.pid) {
+                continue;
+            }
+            let next = numbers.len();
+            events.indices.push(index);
+            events.threads.push(*numbers.entry(e.tid).or_insert(next));
+        }
+        events
+    }
+
+    /// Where one program's own events first differ between two traces.
+    /// Only events of processes running `argv` count, steps are ignored,
+    /// and threads are compared by the order they first appear rather
+    /// than by their ids, which a rescheduled run may hand out
+    /// differently. None when the program did the same things in the same
+    /// order in both.
+    pub fn divergence_in(&self, other: &Trace, argv: &[String]) -> Option<ProgramDivergence> {
+        let (left, right) = (self.program_events(argv), other.program_events(argv));
+        let same = |i: usize| {
+            left.threads[i] == right.threads[i]
+                && self.events[left.indices[i]].kind == other.events[right.indices[i]].kind
+        };
+        let n = left.indices.len().min(right.indices.len());
+        let position = (0..n)
+            .find(|&i| !same(i))
+            .or((left.indices.len() != right.indices.len()).then_some(n))?;
+        Some(ProgramDivergence {
+            position,
+            left,
+            right,
+        })
+    }
+}
+
+/// Signals that end a process unless it handles them: SIGILL, SIGABRT,
+/// SIGBUS, SIGFPE and SIGSEGV.
+pub const FATAL_SIGNALS: [u32; 5] = [4, 6, 7, 8, 11];
+
+/// One program's events in a trace.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProgramEvents {
+    /// Indices into the trace's events, in order.
+    pub indices: Vec<usize>,
+    /// The thread number of each event: 0 for the program's first thread
+    /// to appear, 1 for the next, and so on.
+    pub threads: Vec<usize>,
+}
+
+/// Where one program's own events first differ between two traces.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProgramDivergence {
+    /// How many of the program's events matched before the difference.
+    pub position: usize,
+    pub left: ProgramEvents,
+    pub right: ProgramEvents,
+}
+
+impl ProgramDivergence {
+    /// The left trace's first differing event, as an index into its
+    /// events and the event's thread number; None when the program's
+    /// events ran out there first.
+    pub fn left_event(&self) -> Option<(usize, usize)> {
+        Self::at(&self.left, self.position)
+    }
+
+    /// The right trace's first differing event, as `left_event`.
+    pub fn right_event(&self) -> Option<(usize, usize)> {
+        Self::at(&self.right, self.position)
+    }
+
+    fn at(events: &ProgramEvents, position: usize) -> Option<(usize, usize)> {
+        Some((
+            *events.indices.get(position)?,
+            *events.threads.get(position)?,
+        ))
+    }
 }
 
 /// Appends events to a trace file as the guest emits them.
@@ -511,5 +628,111 @@ mod tests {
         assert_eq!(t.events.len(), 1);
         assert_eq!(t.events[0].step, 99);
         assert_eq!(t.events[0].kind, EventKind::Mark { text: "hi".into() });
+    }
+
+    /// A test program run as pid 7 with two worker threads, 8 and 9, each
+    /// writing a line; the steps and the order the lines come in are the
+    /// caller's.
+    fn pool(steps: [u64; 6], first: (u32, &str), second: (u32, &str), crash: Option<u32>) -> Trace {
+        use EventKind::*;
+        let fork = |step, child| {
+            ev(
+                step,
+                7,
+                7,
+                Fork {
+                    child,
+                    thread: true,
+                },
+            )
+        };
+        let write = |step, tid, text: &str| {
+            ev(
+                step,
+                7,
+                tid,
+                Output {
+                    fd: 1,
+                    bytes: text.as_bytes().to_vec(),
+                },
+            )
+        };
+        let mut events = vec![
+            ev(
+                steps[0],
+                1,
+                1,
+                Fork {
+                    child: 7,
+                    thread: false,
+                },
+            ),
+            ev(
+                steps[1],
+                7,
+                7,
+                Exec {
+                    filename: "/t/pool".into(),
+                    argv: vec!["./pool".into()],
+                    old_pid: 7,
+                },
+            ),
+            fork(steps[2], 8),
+            fork(steps[3], 9),
+            write(steps[4], first.0, first.1),
+            write(steps[5], second.0, second.1),
+        ];
+        if let Some(tid) = crash {
+            events.push(ev(
+                steps[5] + 1,
+                7,
+                tid,
+                Signal {
+                    signo: 11,
+                    code: 1,
+                    addr: 0x108,
+                },
+            ));
+        }
+        Trace { events }
+    }
+
+    #[test]
+    fn a_step_shift_is_not_where_a_program_diverges() {
+        // Two runs where every event of the program is the same but moved
+        // a few steps by a reschedule, until the second write comes from
+        // the other thread. The raw comparison stops at the first shifted
+        // step; the program's comparison finds the write.
+        let passing = pool([1, 2, 3, 4, 5, 6], (8, "a\n"), (9, "b\n"), None);
+        let failing = pool([1, 2, 5, 6, 9, 12], (8, "a\n"), (8, "b\n"), Some(8));
+
+        let raw = failing.divergence(&passing).unwrap();
+        assert_eq!(raw.index, 2);
+        assert_eq!(failing.events[2].kind, passing.events[2].kind);
+
+        let argv = failing.culprit().unwrap();
+        assert_eq!(argv, vec!["./pool".to_string()]);
+        let d = failing.divergence_in(&passing, &argv).unwrap();
+        assert_eq!(d.position, 4);
+        assert_eq!(d.left_event(), Some((5, 1)));
+        assert_eq!(d.right_event(), Some((5, 2)));
+    }
+
+    #[test]
+    fn threads_are_compared_by_the_order_they_appear() {
+        // The same writes from threads with other ids do not diverge, and
+        // neither do the writes from the two threads swapped: each run
+        // numbers its first writer 1 and its second 2.
+        let argv = vec!["./pool".to_string()];
+        let a = pool([1, 2, 3, 4, 5, 6], (8, "a\n"), (9, "b\n"), None);
+        let renumbered = pool([1, 2, 3, 4, 5, 6], (18, "a\n"), (19, "b\n"), None);
+        assert_eq!(a.divergence_in(&renumbered, &argv), None);
+        assert_eq!(
+            a.program_events(&argv).threads,
+            renumbered.program_events(&argv).threads
+        );
+
+        let swapped = pool([1, 2, 3, 4, 5, 6], (9, "a\n"), (8, "b\n"), None);
+        assert_eq!(a.divergence_in(&swapped, &argv), None);
     }
 }

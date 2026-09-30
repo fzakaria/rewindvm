@@ -12,7 +12,7 @@ use gpui::{
 
 use crate::describe::{self, EventTone, short_store_paths, thousands};
 use crate::model::{FileOp, FileTone, LogFilter, Motion, RowKind, Tone, ticks};
-use crate::run::{Session, Verdict, short_id};
+use crate::run::{Agreement, Session, Verdict, short_id};
 use crate::theme::{self, layout, size};
 use crate::tour::Anchor;
 use crate::ui::chrome::client_tiling;
@@ -127,13 +127,18 @@ impl Scrubber {
         let timeline = self.render_timeline(window, cx);
         let log = self.render_log(cx);
         let middle = self.render_middle(cx);
-        let at_step = self.render_at_step(cx);
+        // The right column: the file viewer when a file is open, which
+        // takes the log's share of the width, else "At this step".
+        let (at_step, right_flex) = match self.render_viewer(cx) {
+            Some(viewer) => (viewer, layout::LOG_FLEX),
+            None => (self.render_at_step(cx), layout::SIDE_FLEX),
+        };
 
         // The panel row: three columns with one pixel rules between them,
         // drawn by the row's background showing through the gaps.
         let log_column = log.flex_grow(layout::LOG_FLEX);
         let middle_column = middle.flex_grow(layout::SIDE_FLEX);
-        let at_step_column = at_step.flex_grow(layout::SIDE_FLEX);
+        let at_step_column = at_step.flex_grow(right_flex);
         let panels = div()
             .flex()
             .flex_grow(layout::FILL)
@@ -806,7 +811,7 @@ impl Scrubber {
         let file_list = uniform_list(
             "files",
             files,
-            cx.processor(move |this, range: std::ops::Range<usize>, _window, _cx| {
+            cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
                 let t = &this.session().run.timeline;
                 range
                     .map(|i| {
@@ -824,8 +829,18 @@ impl Scrubber {
                             FileOp::Rename => "mv",
                             FileOp::Output => "out",
                         };
+
+                        // A click opens the file in the viewer.
+                        let (path, pid) = (file.path.clone(), file.pid);
+                        let open = cx
+                            .listener(move |this, _, _, cx| this.open_file(path.clone(), pid, cx));
                         div()
                             .id(i)
+                            .role(Role::Button)
+                            .aria_label(format!("Show {} at this step", file.path))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(theme::ROW_HOVER)))
+                            .on_click(open)
                             .w_full()
                             .h(px(size::LIST_ROW_HEIGHT))
                             .flex()
@@ -921,8 +936,9 @@ impl Scrubber {
                 let diverged_here = session
                     .comparison
                     .as_ref()
-                    .and_then(|c| c.divergence.as_ref())
-                    .is_some_and(|d| d.index == index);
+                    .and_then(|c| c.point.as_ref())
+                    .and_then(|p| p.here)
+                    .is_some_and(|here| here.index == index);
                 let color = if diverged_here {
                     theme::BLUE_SOFT
                 } else if described.tone == EventTone::Error {
@@ -956,6 +972,26 @@ impl Scrubber {
                             .text_color(rgb(color))
                             .child(short_store_paths(&described.text)),
                     )
+                    .when_some(file_named_by(event), |card, path| {
+                        // An event on a file links to the file at this step.
+                        let pid = event.pid;
+                        let label = format!(
+                            "Show {} at this step",
+                            describe::clip(&path, MAX_NAME_CHARS)
+                        );
+                        card.child(
+                            div()
+                                .id("show-event-file")
+                                .role(Role::Button)
+                                .cursor_pointer()
+                                .text_color(rgb(theme::AMBER))
+                                .hover(|s| s.text_color(rgb(theme::AMBER_HI)))
+                                .child(label)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.open_file(path.clone(), pid, cx)
+                                })),
+                        )
+                    })
             }
         };
 
@@ -970,54 +1006,28 @@ impl Scrubber {
             .p(px(size::PANEL_PAD_X))
             .child(self.with_callout(event_card, Anchor::EventCard, cx));
 
-        // Against the compared run: where the two first differ, once the
-        // playhead is past it, or that they never differ.
-        if let (Some(other), Some(comparison)) = (&session.other, &session.comparison) {
-            let other_name = other.label();
-            match &comparison.divergence {
-                Some(d) if step >= d.left_step => {
-                    let here = t
-                        .event(d.index)
-                        .map_or_else(|| "the run ends".to_string(), describe::summary);
-                    let there = other
-                        .timeline
-                        .event(d.index)
-                        .map_or_else(|| "the run ends".to_string(), describe::summary);
-                    column = column.child(
-                        card(theme::BLUE_CARD, theme::BLUE_BORDER)
-                            .child(card_title(
-                                format!(
-                                    "Diverged from {other_name} at step {}",
-                                    thousands(d.left_step)
-                                ),
-                                theme::BLUE_SOFT,
-                            ))
-                            .child(card_body(
-                                short_store_paths(&format!("This run: {here}")),
-                                &mono,
-                            ))
-                            .child(card_body(
-                                short_store_paths(&format!("{other_name}: {there}")),
-                                &mono,
-                            )),
-                    );
-                }
-                Some(_) => {}
-                None => {
-                    column = column.child(
-                        card(theme::BLUE_CARD, theme::BLUE_BORDER)
-                            .child(card_title(
-                                format!("Same as {other_name}"),
-                                theme::BLUE_SOFT,
-                            ))
-                            .child(
-                                div()
-                                    .text_color(rgb(theme::SOFT))
-                                    .child("The two traces are identical, event for event."),
-                            ),
-                    );
-                }
+        // Against the compared run: where the two first part, once the
+        // playhead is past it, or that they never do.
+        let shown = match session.agreement() {
+            Some(Agreement::Parted {
+                step: at,
+                title,
+                lines,
+            }) if step >= at => Some((title, lines)),
+            Some(Agreement::Same { title, lines }) => Some((title, lines)),
+            _ => None,
+        };
+        if let Some((title, lines)) = shown {
+            let mut divergence = card(theme::BLUE_CARD, theme::BLUE_BORDER)
+                .child(card_title(title, theme::BLUE_SOFT));
+            for line in lines {
+                divergence = divergence.child(
+                    div()
+                        .text_color(rgb(theme::SOFT))
+                        .child(short_store_paths(&line)),
+                );
             }
+            column = column.child(divergence);
         }
 
         // The latest fork made from the playhead.
@@ -1309,14 +1319,6 @@ fn card_title(text: String, color: u32) -> Div {
         .child(text)
 }
 
-fn card_body(text: String, mono: &SharedString) -> Div {
-    div()
-        .font_family(mono.clone())
-        .text_size(px(size::TEXT_MONO))
-        .text_color(rgb(theme::SOFT))
-        .child(text)
-}
-
 /// Muted text standing in for an empty list.
 fn placeholder(text: &'static str) -> Div {
     div()
@@ -1324,4 +1326,15 @@ fn placeholder(text: &'static str) -> Div {
         .py(px(size::LIST_PAD_Y))
         .text_color(rgb(theme::MUTED))
         .child(text)
+}
+
+/// The file an event wrote, deleted or renamed onto, if it names one.
+fn file_named_by(event: &rewind_trace::Event) -> Option<String> {
+    match &event.kind {
+        rewind_trace::EventKind::Open { path, .. } | rewind_trace::EventKind::Unlink { path } => {
+            Some(path.clone())
+        }
+        rewind_trace::EventKind::Rename { to, .. } => Some(to.clone()),
+        _ => None,
+    }
 }

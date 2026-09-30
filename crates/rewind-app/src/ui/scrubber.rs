@@ -13,13 +13,14 @@ use gpui::{
     Window,
 };
 
-use crate::describe::{self, thousands};
+use crate::describe::thousands;
 use crate::engine::{Engine, EngineError, EngineResult, Forked};
 use crate::model::{LogFilter, Motion};
-use crate::run::{Origin, Session, short_id};
+use crate::run::{Agreement, Origin, Session, short_id};
 use crate::tour::Tour;
 use crate::ui::Launch;
 use crate::ui::licensing::Licensing;
+use crate::ui::viewer::FileViewer;
 use crate::ui::widgets::Fonts;
 
 /// How long a notice stays up.
@@ -127,6 +128,8 @@ pub struct Scrubber {
     /// The guided tour, while it runs, and the focus its callout takes.
     pub(super) tour: Option<Tour>,
     pub(super) tour_focus: FocusHandle,
+    /// The file viewer, while a file is open in it.
+    pub(super) viewer: Option<FileViewer>,
     /// A press on the title bar that the next motion turns into a window
     /// move.
     pub(super) titlebar_armed: bool,
@@ -158,6 +161,7 @@ impl Scrubber {
             tour: None,
             tour_focus: cx.focus_handle(),
             titlebar_armed: false,
+            viewer: None,
             next_notice: 0,
             title: None,
         };
@@ -182,6 +186,7 @@ impl Scrubber {
         self.step = start;
         self.forks.clear();
         self.tour = None;
+        self.viewer = None;
         self.log_followed = None;
         self.files_followed = None;
         self.session = Some(session);
@@ -211,6 +216,7 @@ impl Scrubber {
             return;
         }
         self.step = step;
+        self.playhead_moved(cx);
         cx.notify();
     }
 
@@ -491,43 +497,18 @@ impl Scrubber {
     /// Compares with the other run: jumps to where the two first differ
     /// and says what each run did there.
     pub(super) fn diff_runs(&mut self, cx: &mut Context<Self>) {
-        let Some(session) = &self.session else {
+        let Some(agreement) = self.session.as_ref().and_then(Session::agreement) else {
             return;
         };
-        let Some(other) = &session.other else {
-            return;
-        };
-        let other_name = other.label();
-        let Some(d) = session
-            .comparison
-            .as_ref()
-            .and_then(|c| c.divergence.clone())
-        else {
-            self.notify_user(
-                NoticeTone::Info,
-                format!("Same as {other_name}"),
-                "The two traces are identical, event for event.",
-                cx,
-            );
-            return;
-        };
-        let here = session
-            .run
-            .timeline
-            .event(d.index)
-            .map_or_else(|| "the end of the run".to_string(), describe::summary);
-        let there = other
-            .timeline
-            .event(d.index)
-            .map_or_else(|| "the end of the run".to_string(), describe::summary);
-        let step = d.left_step;
-        self.go_to(step, cx);
-        self.notify_user(
-            NoticeTone::Info,
-            format!("First difference at step {}", thousands(step)),
-            format!("Here: {here}\n{other_name}: {there}"),
-            cx,
-        );
+        match agreement {
+            Agreement::Same { title, lines } => {
+                self.notify_user(NoticeTone::Info, title, lines.join("\n"), cx);
+            }
+            Agreement::Parted { step, title, lines } => {
+                self.go_to(step, cx);
+                self.notify_user(NoticeTone::Info, title, lines.join("\n"), cx);
+            }
+        }
     }
 
     /// Asks for a run to open, and opens it.

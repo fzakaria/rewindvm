@@ -16,3 +16,4 @@ pub mod synth;
 pub mod theme;
 pub mod tour;
 pub mod ui;
+pub mod viewer;
