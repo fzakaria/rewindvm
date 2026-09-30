@@ -101,7 +101,7 @@
   const PROCS = [
     {
       pid: 1,
-      cmd: "init (rewind-guest)",
+      cmd: "init (rewind)",
       depth: 0,
       start: 0,
       end: TOTAL_STEPS + 1,
@@ -186,7 +186,7 @@
     return 2;
   }
 
-  // Every event on the timeline, as the app would list the guest's syscalls:
+  // Every event on the timeline, as the app would list the VM's syscalls:
   // writes for log lines, execve, clone and exit for processes, openat for
   // files, and the two steps the story hangs on.
   function buildEvents() {
@@ -457,7 +457,7 @@
       "Planned:",
       `gdb attached to pid ${ev.pid} as it was at step ${fmt(s)}.`,
     ],
-    shell: (s) => ["Planned:", `a shell inside the guest at step ${fmt(s)}.`],
+    shell: (s) => ["Planned:", `a shell inside the VM at step ${fmt(s)}.`],
     diff: () => [
       "In the app,",
       `run #3 and run #2 are identical up to step ${fmt(DIVERGENCE_STEP)}.`,

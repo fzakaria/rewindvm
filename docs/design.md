@@ -14,16 +14,16 @@ Linux 7.1.
 
 ## At a glance
 
-| Piece              | Where                            | What it does                                                                                       |
-| ------------------ | -------------------------------- | -------------------------------------------------------------------------------------------------- |
+| Piece              | Where                            | What it does                                                                                      |
+| ------------------ | -------------------------------- | ------------------------------------------------------------------------------------------------- |
 | Guest kernel patch | `guest/linux/rewind-guest.patch` | A "Rewind" x86 hypervisor platform in Linux 7.2: virtual clock and timer, idle as an exit, events |
-| Guest init         | `crates/rewind-init`             | PID 1: mounts the input image, runs the job, reports its exit status and output hashes             |
-| Monitor            | `crates/rewind-vmm`              | One vCPU on KVM: boots the kernel, handles exits, owns time and interrupts, takes keyframes        |
-| Trace              | `crates/rewind-trace`            | Decodes guest records into events and answers questions about a run at a step                      |
-| Page store         | `crates/rewind-store`            | Content-addressed, compressed 4 KiB pages shared by every keyframe                                 |
-| Engine             | `crates/rewind-core`             | Input images, Nix derivations as jobs, runs on disk, keyframes, seeking                            |
-| Command            | `crates/rewind`                  | `rewind run`, `nix`, `check`, `fork`, `replay`, `log`, `ps`, `events`, `diff`, `ls`                |
-| App                | `crates/rewind-app`              | The GPUI scrubber (proprietary; see Product)                                                       |
+| Guest init         | `crates/rewind-init`             | PID 1: mounts the input image, runs the job, reports its exit status and output hashes            |
+| Monitor            | `crates/rewind-vmm`              | One vCPU on KVM: boots the kernel, handles exits, owns time and interrupts, takes keyframes       |
+| Trace              | `crates/rewind-trace`            | Decodes guest records into events and answers questions about a run at a step                     |
+| Page store         | `crates/rewind-store`            | Content-addressed, compressed 4 KiB pages shared by every keyframe                                |
+| Engine             | `crates/rewind-core`             | Input images, Nix derivations as jobs, runs on disk, keyframes, seeking                           |
+| Command            | `crates/rewind`                  | `rewind run`, `nix`, `check`, `fork`, `replay`, `log`, `ps`, `events`, `diff`, `ls`               |
+| App                | `crates/rewind-app`              | The GPUI scrubber (proprietary; see Product)                                                      |
 
 ## Determinism
 

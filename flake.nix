@@ -24,6 +24,7 @@
           kernel = import ./nix/kernel.nix { inherit pkgs; };
           guest = import ./nix/guest.nix { inherit pkgs; };
           release = import ./nix/release.nix { inherit pkgs kernel guest; };
+          example = import ./nix/example-tarball.nix { inherit pkgs; };
         in
         {
           inherit
@@ -31,9 +32,10 @@
             kernel
             guest
             release
+            example
             ;
           rewind = import ./nix/rewind.nix { inherit pkgs kernel guest; };
-          site = import ./nix/site.nix { inherit pkgs release; };
+          site = import ./nix/site.nix { inherit pkgs release example; };
           examples = import ./nix/examples.nix { inherit pkgs; };
           app = import ./nix/app.nix { inherit pkgs; };
         };
@@ -67,6 +69,10 @@
 
           # the tutorials' flaky thread pool (nix/examples.nix)
           mylib = p.examples.mylib;
+
+          # the same thread pool as a tarball with its own flake, which the
+          # site serves for the tutorials (nix/example-tarball.nix)
+          example = p.example;
         }
       );
 

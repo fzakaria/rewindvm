@@ -1,6 +1,6 @@
 # Counter time
 
-Rewind VM can let the guest's clock follow the work the guest does, counted
+Rewind VM can let the VM's clock follow the work done inside the VM, counted
 by your CPU's performance counters. It does so only when the counter is exact
 on your machine. When it is not, `rewind` records with exit time instead and
 says so:
@@ -10,29 +10,31 @@ rewind: recording with exit time: this AMD CPU's branch counter is not exact unt
 ```
 
 This page explains what the difference is, and how to turn counter time on.
+The site publishes it at <https://rewindvm.dev/counter-time.html>, the link
+`rewind` prints.
 
 ## Exit time and counter time
 
-A run is deterministic because the guest only ever hears from the outside
-world at exits: points where the guest itself hands control to the monitor,
-such as a system call that reports an event, a clock read, or going idle.
-Virtual time moves at those exits and nowhere else.
+A run is deterministic because the VM only ever hears from the outside world
+at exits: points where the VM itself hands control to Rewind, such as a
+system call that reports an event, a clock read, or going idle. Virtual time
+moves at those exits and nowhere else.
 
 With **exit time**, each exit adds 5 microseconds, and idling jumps to the
 next timer. Computation between exits takes no time at all. Two things
 follow:
 
-- The guest's clock does not reflect computation. A thread that computes
-  for a second of real time sees microseconds pass, so timeouts and anything
-  timed behave unrealistically in CPU-bound code.
+- The VM's clock does not reflect computation. A thread that computes for a
+  second of real time sees microseconds pass, so timeouts and anything timed
+  behave unrealistically in CPU-bound code.
 - A thread that computes without system calls is never preempted. Races
   that need a switch in the middle of pure computation are out of reach, and
-  a thread spinning on a flag another thread should set stalls the guest.
+  a thread spinning on a flag another thread should set stalls the VM.
 
 With **counter time**, every exit also adds the work done since the previous
-one. The host's performance counter counts the guest's retired conditional
-branches, and each branch adds about a nanosecond. The count is read only at
-exits, which are fixed points in the guest's instruction stream, so it is the
+one. The host's performance counter counts the conditional branches the VM
+retires, and each branch adds about a nanosecond. The count is read only at
+exits, which are fixed points in the VM's instruction stream, so it is the
 same on every run, provided the counter is exact. This is the counter rr
 uses.
 
@@ -43,8 +45,8 @@ $ rewind pmu status
 cpu: Amd { family: 25 }
 amd workaround (MSR 0xc0011020 bit 54): unknown (reading it needs root)
 perf_event_paranoid: 2
-self-test: 40047802 and 40047812 branches, NOT exact
-runs will use exit time; see https://github.com/fzakaria/rewind/blob/main/docs/pmu.md
+self-test: 40046091 and 40046089 branches, NOT exact
+runs will use exit time; see https://rewindvm.dev/counter-time.html
 ```
 
 `rewind pmu status` runs a small workload twice in the VM: threads adding to
@@ -75,16 +77,19 @@ MSRs through `/dev/cpu/*/msr`, and it lasts until you reboot. It changes how
 the CPU speculates around locked instructions for everything on the machine;
 Rewind VM has not measured what that costs other programs.
 
-To set it at every boot on NixOS, with `rewind` being this flake's package:
+To set it at every boot on NixOS, use the `programs.rewind` module from the
+release tarball's flake:
 
 ```nix
-boot.kernelModules = [ "msr" ];
-systemd.services.rewind-pmu = {
-  wantedBy = [ "multi-user.target" ];
-  serviceConfig.Type = "oneshot";
-  serviceConfig.ExecStart = "${rewind}/bin/rewind pmu enable";
-};
+inputs.rewind.url = "https://rewindvm.dev/download/rewind-0.1.0-x86_64-linux.tar.gz";
+
+# in your configuration, with inputs.rewind.nixosModules.default imported
+programs.rewind.enable = true;
+programs.rewind.amdBranchCounterWorkaround = true;
 ```
+
+The module loads the `msr` kernel module and runs `rewind pmu enable` once
+at boot.
 
 ## Choosing explicitly
 

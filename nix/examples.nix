@@ -1,14 +1,11 @@
 # The examples the tutorials use. mylib is a small C thread pool whose
 # shutdown test fails only under some thread interleavings: the Nix
-# tutorial builds it with `rewind check .#mylib` and scrubs the failure.
+# tutorial builds it with `rewind check` and scrubs the failure. Its
+# derivation is nix/mylib.nix, which the example tarball shares.
 { pkgs }:
 {
-  mylib = pkgs.stdenv.mkDerivation {
-    pname = "mylib";
-    version = "0.3.0";
+  mylib = import ./mylib.nix {
+    inherit pkgs;
     src = ../examples/mylib;
-    makeFlags = [ "PREFIX=$(out)" ];
-    doCheck = true;
-    meta.description = "A thread pool with a shutdown race, for the Rewind VM tutorials";
   };
 }

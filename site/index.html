@@ -187,16 +187,17 @@
             <h3>Pack the inputs</h3>
             <p>
               The inputs, a Nix closure or any root filesystem, become a read-only erofs image
-              mapped straight into guest memory. A small Linux kernel boots and runs your command.
+              mapped straight into the VM's memory. A small Linux kernel boots and runs your
+              command.
             </p>
           </li>
           <li>
             <h3>Run deterministically</h3>
             <p>
-              One vCPU on stock KVM, so guest code runs on the real CPU. The guest kernel carries a
-              small Rewind hypervisor platform: interrupts arrive only at exits the guest made,
-              virtual time moves only at exits, and the timestamp counter and hardware RNG are
-              hidden. A step is one exit from the guest to the monitor.
+              One vCPU on stock KVM, so code in the VM runs on the real CPU. The VM's kernel carries
+              a small Rewind platform: interrupts arrive only when the VM hands control to Rewind,
+              time moves only then, and the timestamp counter and hardware RNG are hidden. A step is
+              one of those handoffs.
             </p>
           </li>
           <li>
@@ -311,7 +312,7 @@
             ><code><span class="prompt">$</span> rewind run --root mylib.tar --cwd /src -- make check</code></pre>
             <p class="lane-lede">
               The root is a directory, an erofs image, or a tarball such as
-              <code>docker export</code> writes. The guest mounts it under a writable overlay, and
+              <code>docker export</code> writes. The VM mounts it under a writable overlay, and
               nothing the command writes reaches your disk.
             </p>
             <dl class="rows-def">
@@ -362,7 +363,7 @@
               </div>
               <div>
                 <dt>the machine</dt>
-                <dd>The guest kernel is a derivation too, so the whole machine is pinned.</dd>
+                <dd>The VM's kernel is a derivation too, so the whole machine is pinned.</dd>
               </div>
               <div>
                 <dt>rewind check</dt>
@@ -375,14 +376,14 @@
               <div>
                 <dt>the output</dt>
                 <dd>
-                  GNU hello built in the guest runs at native speed and is bit for bit the host's
+                  GNU hello built in the VM runs at native speed and is bit for bit the host's
                   build. <code>rewind nix</code> compares output hashes with the host's copy.
                 </dd>
               </div>
               <div>
                 <dt>the clock</dt>
                 <dd>
-                  The guest's wall clock starts at midnight UTC of the day the run was made, and a
+                  The VM's wall clock starts at midnight UTC of the day the run was made, and a
                   replay uses it again.
                 </dd>
               </div>
@@ -422,7 +423,7 @@
       <section class="wrap download" id="download">
         <h2>Download</h2>
         <p class="lede">
-          One tarball for x86_64 Linux with KVM. It holds the <code>rewind</code> command, the guest
+          One tarball for x86_64 Linux with KVM. It holds the <code>rewind</code> command, the VM's
           kernel and everything it needs to build input images, so the host needs nothing else.
         </p>
         <pre
@@ -464,8 +465,7 @@ programs.rewind.amdBranchCounterWorkaround = true;</code></pre>
             <h3>Engine and CLI</h3>
             <p class="price">Free <span>MIT license</span></p>
             <p class="alt">
-              The monitor, the engine and the command line. The guest kernel patch is GPL-2.0, as
-              Linux is.
+              The engine and the command line. The kernel patch is GPL-2.0, as Linux is.
             </p>
             <ul>
               <li>

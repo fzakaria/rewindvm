@@ -8,7 +8,7 @@
 //! Rather than trust any of that, [`selftest`] runs a workload that
 //! provokes the overcount twice and compares every count.
 //!
-//! The explanation for users is docs/pmu.md.
+//! The explanation for users is docs/pmu.md, published at [`DOCS_URL`].
 
 use std::fs::{self, OpenOptions};
 use std::os::unix::fs::FileExt;
@@ -23,7 +23,7 @@ use crate::home::Guest;
 use crate::run::{BASE_CMDLINE, DEFAULT_QUANTUM, Spec};
 
 /// Where to read about all this.
-pub const DOCS_URL: &str = "https://github.com/fzakaria/rewind/blob/main/docs/pmu.md";
+pub const DOCS_URL: &str = "https://rewindvm.dev/counter-time.html";
 
 /// AMD's load-store configuration MSR and the bit rr sets in it
 /// ("SpecLockMap" off), which makes Zen's branch counter exact.
@@ -188,7 +188,7 @@ pub fn exit_time_warning(vendor: &Vendor) -> String {
         "this CPU's branch counter is not exact"
     };
     format!(
-        "recording with exit time: {why}. Computation will not move the guest's clock, \
+        "recording with exit time: {why}. Computation will not move the VM's clock, \
          and a thread that computes without system calls is not preempted. \
          Fix it with `sudo rewind pmu enable` (until reboot), then `rewind pmu status`. \
          Why: {DOCS_URL}"
