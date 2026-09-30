@@ -4,6 +4,7 @@
 resolver = "3"
 members = [
     "crates/rewind",
+    "crates/rewind-trace",
     "crates/rewind-vmm",
 ]
 exclude = ["crates/rewind-app"]
