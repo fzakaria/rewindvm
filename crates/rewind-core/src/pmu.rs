@@ -224,6 +224,7 @@ pub fn selftest(guest: &Guest) -> Result<SelfTest> {
         schedule_until: u64::MAX,
         cpu: rewind_vmm::cpu::Model::default(),
         clock: rewind_vmm::ClockSource::Exits,
+        preemption: rewind_vmm::Preemption::AtExits,
         cmdline: BASE_CMDLINE.to_string(),
         job: Job {
             argv: vec!["/init".into(), "--selftest".into()],

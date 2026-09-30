@@ -85,6 +85,9 @@ pub struct Spec {
     /// What moves virtual time besides exits and idling.
     #[serde(default)]
     pub clock: rewind_vmm::ClockSource,
+    /// Where a computing guest can be interrupted.
+    #[serde(default)]
+    pub preemption: rewind_vmm::Preemption,
     pub cmdline: String,
     pub job: Job,
 }
@@ -174,6 +177,7 @@ impl Spec {
             },
             cpu: self.cpu,
             clock: self.clock,
+            preemption: self.preemption,
         })
     }
 }

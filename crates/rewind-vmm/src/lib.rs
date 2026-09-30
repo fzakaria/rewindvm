@@ -63,6 +63,26 @@ pub struct Config {
     pub cpu: cpu::Model,
     /// What moves virtual time besides exits and idling.
     pub clock: ClockSource,
+    /// Where a guest that computes without exits can be interrupted.
+    pub preemption: Preemption,
+}
+
+/// Where the monitor may interrupt the guest.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Preemption {
+    /// Only at exits the guest makes: a thread computing without system
+    /// calls runs until it makes one.
+    #[default]
+    AtExits,
+    /// Experimental, with counter time only: also at the branch count
+    /// where the armed timer falls due, reached by arming the counter's
+    /// overflow short of it and single-stepping the rest. Single-stepping
+    /// sets the trap flag, which the guest can see through pushf and
+    /// syscall; a process that saves and restores it takes a SIGTRAP that
+    /// would not happen outside the VM, as a nixpkgs build of GNU hello
+    /// does. So it stays off until the steps are made invisible.
+    AtBranchCounts,
 }
 
 /// What virtual time follows.
@@ -78,6 +98,14 @@ pub enum ClockSource {
     Branches(pmu::Event),
 }
 
+/// Whether a step adds the per-exit quantum: an exit does, a step the
+/// monitor forced at the timer's branch count does not.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Quantum {
+    Add,
+    Skip,
+}
+
 /// Virtual time per retired conditional branch: about one nanosecond, what
 /// current cores average.
 pub const PS_PER_BRANCH: u64 = 1000;
@@ -85,25 +113,45 @@ pub const PS_PER_BRANCH: u64 = 1000;
 /// The guest's work so far, when virtual time follows it.
 pub(crate) struct Work {
     counter: pmu::Counter,
+    overflow: pmu::Overflow,
     /// Branches counted before the counter was opened, from a keyframe.
     base: u64,
-    /// The branch count at the last exit.
+    /// The branch count at the last step.
     pub(crate) total: u64,
+    /// The branch count at which the armed timer is due, while the guest
+    /// runs toward it.
+    target: Option<u64>,
+    /// Whether the vCPU is being single-stepped onto the target.
+    stepping: bool,
 }
+
+/// How far before the target the overflow is armed. The overflow interrupt
+/// lands some way past the point it was armed for (the counter's skid);
+/// the rest of the way is single-stepped. On a Zen 4 laptop the skid was 9
+/// to 73 branches over a hundred preemptions, with one outlier of 1269. A
+/// count that ever lands past the target stops the run rather than let it
+/// go on unrepeatably.
+const PREEMPT_MARGIN: u64 = 256;
 
 impl Work {
     fn open(event: pmu::Event, base: u64) -> Result<Work> {
-        let counter = pmu::Counter::open(event, pmu::Modes::UserOnly)?;
         Ok(Work {
-            counter,
+            counter: pmu::Counter::open(event, pmu::Modes::UserOnly)?,
+            overflow: pmu::Overflow::open(event, pmu::Modes::UserOnly)?,
             base,
             total: base,
+            target: None,
+            stepping: false,
         })
     }
 
-    /// Branches since the last exit.
+    fn count(&self) -> Result<u64> {
+        Ok(self.base + self.counter.read()?)
+    }
+
+    /// Branches since the last step.
     fn advance(&mut self) -> Result<u64> {
-        let now = self.base + self.counter.read()?;
+        let now = self.count()?;
         let delta = now - self.total;
         self.total = now;
         Ok(delta)
@@ -300,6 +348,10 @@ impl Machine {
         }
 
         loop {
+            if self.work.is_some() && self.config.preemption == Preemption::AtBranchCounts {
+                self.aim_preemption()?;
+            }
+
             // The port of a counted exit; MMIO exits count under MMIO_PORT.
             const MMIO_PORT: u16 = 0xffff;
             let counted = match self.vcpu.run() {
@@ -327,9 +379,10 @@ impl Machine {
                         self.dev.stop = Some(Stop::TripleFault);
                         None
                     }
-                    // A signal to the monitor thread: not the guest's doing,
-                    // so not a step.
-                    VcpuExit::Intr => None,
+                    // A signal to the monitor thread, a counter overflow
+                    // among them, or one single step: not the guest's
+                    // doing, so not a step of its own.
+                    VcpuExit::Intr | VcpuExit::Debug(_) => None,
                     VcpuExit::Hlt => bail!("the guest executed HLT; is it a Rewind kernel?"),
                     other => bail!("unexpected exit at step {}: {other:?}", self.dev.step),
                 },
@@ -341,6 +394,18 @@ impl Machine {
                 return Ok(Outcome::Stopped(stop));
             }
             let Some(port) = counted else {
+                // Close in on the timer's branch count; reaching it is a
+                // step, the one where the timer fires.
+                if self.work.is_some()
+                    && self.config.preemption == Preemption::AtBranchCounts
+                    && self.reached_preemption()?
+                {
+                    self.dev.step += 1;
+                    self.after_step(Quantum::Skip)?;
+                    if until.is_some_and(|u| self.dev.step >= u) {
+                        return Ok(Outcome::Paused);
+                    }
+                }
                 continue;
             };
             if let Some(profile) = &mut self.profile {
@@ -356,40 +421,119 @@ impl Machine {
                 }
                 *profile.entry((port, at)).or_default() += 1;
             }
-
             if let Some((counter, hash)) = &mut self.pmu {
                 let count = counter.read()?;
                 *hash = (*hash ^ count).wrapping_mul(0x100_0000_01b3);
             }
-            self.dev.clock.tick();
-            if let Some(work) = &mut self.work {
-                self.dev.clock.now += work.advance()? * PS_PER_BRANCH / 1000;
-            }
-            // The guest's scheduler clock reads this without an exit, so it
-            // is refreshed at every one.
-            if let Some(shared) = self.dev.shared {
-                let now = self.dev.clock.now.to_le_bytes();
-                self.dev.ram.write(shared + pv::SHARED_NOW, &now)?;
-            }
-            let mut reasons = 0;
-            if self.dev.clock.due() {
-                reasons |= pv::PENDING_TIMER;
-            }
-            if self.dev.schedule.preempt_at(self.dev.step) {
-                reasons |= pv::PENDING_PREEMPT;
-            }
-            if reasons != 0 && self.inject(reasons)? {
-                // A timer counts as delivered once the APIC takes it; until
-                // then it stays due and goes again at the next exit.
-                if reasons & pv::PENDING_TIMER != 0 {
-                    self.dev.clock.deadline = None;
-                }
-            }
+            self.after_step(Quantum::Add)?;
 
             if until.is_some_and(|u| self.dev.step >= u) {
                 return Ok(Outcome::Paused);
             }
         }
+    }
+
+    /// Moves time for the step just taken, and sends the interrupt if the
+    /// timer is due or the schedule asks for a reschedule here.
+    fn after_step(&mut self, quantum: Quantum) -> Result<()> {
+        if quantum == Quantum::Add {
+            self.dev.clock.tick();
+        }
+        if let Some(work) = &mut self.work {
+            self.dev.clock.now += work.advance()? * PS_PER_BRANCH / 1000;
+            // Whatever the guest was stepping toward, this step settles it.
+            if work.stepping {
+                work.stepping = false;
+                self.vcpu
+                    .set_guest_debug(&kvm_bindings::kvm_guest_debug::default())?;
+            }
+            work.target = None;
+            work.overflow.disarm()?;
+        }
+        // The guest's scheduler clock reads this without an exit, so it is
+        // refreshed at every step.
+        if let Some(shared) = self.dev.shared {
+            let now = self.dev.clock.now.to_le_bytes();
+            self.dev.ram.write(shared + pv::SHARED_NOW, &now)?;
+        }
+        let mut reasons = 0;
+        if self.dev.clock.due() {
+            reasons |= pv::PENDING_TIMER;
+        }
+        if self.dev.schedule.preempt_at(self.dev.step) {
+            reasons |= pv::PENDING_PREEMPT;
+        }
+        if reasons != 0 && self.inject(reasons)? {
+            // A timer counts as delivered once the APIC takes it; until
+            // then it stays due and goes again at the next exit.
+            if reasons & pv::PENDING_TIMER != 0 {
+                self.dev.clock.deadline = None;
+            }
+        }
+        Ok(())
+    }
+
+    /// Before entering the guest: the branch count where the armed timer
+    /// falls due, and the overflow set a margin short of it, so a guest
+    /// computing without exits is still interrupted there.
+    fn aim_preemption(&mut self) -> Result<()> {
+        let work = self.work.as_mut().unwrap();
+        if work.target.is_some() {
+            return Ok(());
+        }
+        let Some(deadline) = self.dev.clock.deadline else {
+            return Ok(());
+        };
+        if deadline <= self.dev.clock.now {
+            return Ok(());
+        }
+        let branches = (deadline - self.dev.clock.now) * 1000 / PS_PER_BRANCH;
+        let target = work.total + branches.max(1);
+        work.target = Some(target);
+        if branches > PREEMPT_MARGIN {
+            work.overflow.arm(branches - PREEMPT_MARGIN)?;
+        } else {
+            self.start_stepping()?;
+        }
+        Ok(())
+    }
+
+    /// After an interruption or a single step: true once the count is
+    /// exactly on the target; single-stepping once it is within the margin.
+    fn reached_preemption(&mut self) -> Result<bool> {
+        let work = self.work.as_ref().unwrap();
+        let Some(target) = work.target else {
+            return Ok(false);
+        };
+        let count = work.count()?;
+        if count > target {
+            bail!(
+                "the branch counter ran {} past a preemption point at step {}; \
+                 its skid exceeds the margin of {PREEMPT_MARGIN}",
+                count - target,
+                self.dev.step
+            );
+        }
+        if count == target {
+            return Ok(true);
+        }
+        if !work.stepping && target - count <= PREEMPT_MARGIN {
+            self.start_stepping()?;
+        }
+        Ok(false)
+    }
+
+    fn start_stepping(&mut self) -> Result<()> {
+        use kvm_bindings::{
+            KVM_GUESTDBG_BLOCKIRQ, KVM_GUESTDBG_ENABLE, KVM_GUESTDBG_SINGLESTEP, kvm_guest_debug,
+        };
+        let debug = kvm_guest_debug {
+            control: KVM_GUESTDBG_ENABLE | KVM_GUESTDBG_SINGLESTEP | KVM_GUESTDBG_BLOCKIRQ,
+            ..Default::default()
+        };
+        self.vcpu.set_guest_debug(&debug)?;
+        self.work.as_mut().unwrap().stepping = true;
+        Ok(())
     }
 
     /// Records why in the shared page and sends the monitor's interrupt as

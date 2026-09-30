@@ -47,6 +47,10 @@ struct MachineArgs {
     /// `auto` uses the counter when this host's self-test finds it exact.
     #[arg(long, value_enum, default_value_t = ClockArg::Auto)]
     clock: ClockArg,
+    /// Experimental: with counter time, also interrupt a guest computing
+    /// without exits at the timer's branch count. See docs/pmu.md.
+    #[arg(long, hide = true)]
+    experimental_preempt: bool,
     /// The clock `clock` resolved to, once per command.
     #[arg(skip)]
     resolved_clock: Option<rewind_vmm::ClockSource>,
@@ -862,6 +866,11 @@ fn execute(
         schedule_until: machine.schedule_until,
         cpu: machine.cpu.into(),
         clock: machine.resolved_clock.unwrap_or_default(),
+        preemption: if machine.experimental_preempt {
+            rewind_vmm::Preemption::AtBranchCounts
+        } else {
+            rewind_vmm::Preemption::AtExits
+        },
         cmdline: format!("{BASE_CMDLINE} {}", machine.kernel_args)
             .trim()
             .to_string(),
