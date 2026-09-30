@@ -197,6 +197,8 @@ pub(crate) struct Devices {
     pub epoch: u64,
     pub step: u64,
     pub stop: Option<Stop>,
+    /// An inspection request waiting for the VM's APIC to take it.
+    pub inspect: bool,
 }
 
 pub struct Machine {
@@ -279,6 +281,7 @@ impl Machine {
                 epoch: config.epoch,
                 step: 0,
                 stop: None,
+                inspect: false,
             },
             pmem,
             config: config.clone(),
@@ -460,13 +463,51 @@ impl Machine {
         if self.dev.schedule.preempt_at(self.dev.step) {
             reasons |= pv::PENDING_PREEMPT;
         }
+        if self.dev.inspect {
+            reasons |= pv::PENDING_INSPECT;
+        }
         if reasons != 0 && self.inject(reasons)? {
-            // A timer counts as delivered once the APIC takes it; until
-            // then it stays due and goes again at the next exit.
+            // A timer or a request counts as delivered once the APIC takes
+            // it; until then it stays pending and goes again at the next
+            // exit.
             if reasons & pv::PENDING_TIMER != 0 {
                 self.dev.clock.deadline = None;
             }
+            self.dev.inspect = false;
         }
+        Ok(())
+    }
+
+    /// Asks the VM to start an inspection: `/init --inspect` with `args`,
+    /// whose answer arrives as records like any process's output. The
+    /// request goes out with the next step's interrupt. Only for machines
+    /// forked from a run, since the request is not part of any recording.
+    pub fn request_inspection(&mut self, args: &[&str]) -> Result<()> {
+        let shared = self
+            .dev
+            .shared
+            .context("the VM has not finished booting at this step")?;
+        let mut request = Vec::new();
+        for arg in args {
+            if arg.contains('\0') {
+                bail!("an inspection argument contains NUL: {arg:?}");
+            }
+            request.extend_from_slice(arg.as_bytes());
+            request.push(0);
+        }
+        if request.len() > pv::REQUEST_MAX {
+            bail!(
+                "the inspection request is {} bytes; the most is {}",
+                request.len(),
+                pv::REQUEST_MAX
+            );
+        }
+        self.dev.ram.write(
+            shared + pv::SHARED_REQUEST_LEN,
+            &(request.len() as u32).to_le_bytes(),
+        )?;
+        self.dev.ram.write(shared + pv::SHARED_REQUEST, &request)?;
+        self.dev.inspect = true;
         Ok(())
     }
 
@@ -581,7 +622,8 @@ impl Devices {
                 self.clock.arm(delta + slack);
             }
             pv::PORT_IDLE => {
-                if !self.clock.idle() {
+                // A pending request wakes the VM like a timer would.
+                if !self.clock.idle() && !self.inspect {
                     self.stop = Some(Stop::Stalled);
                 }
             }

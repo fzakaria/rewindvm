@@ -7,10 +7,14 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
+use rewind_core::inspect::Inspection;
 use rewind_core::run::{BASE_CMDLINE, DEFAULT_QUANTUM, default_epoch};
 use rewind_core::{Echo, Guest, Home, Keyframes, Run, Source, Spec};
 use rewind_core::{export, image, nix};
 use rewind_init::{Job, Root};
+
+/// `rewind cat`'s exit status when the file did not exist at the step.
+const CAT_NOT_FOUND: u8 = 2;
 
 #[derive(Parser)]
 #[command(
@@ -213,6 +217,20 @@ enum Command {
         /// programs such as the desktop app.
         #[arg(long)]
         json: bool,
+    },
+    /// Print a file as it was at a step of a run. Rewind forks the run at
+    /// the step and reads the file inside the VM, so this takes about as
+    /// long as seeking there. Exits 2 when the file did not exist then.
+    Cat {
+        run: String,
+        step: u64,
+        /// The path, absolute or relative to the process's working
+        /// directory.
+        path: String,
+        /// Resolve the path as this process saw it, in its root and working
+        /// directory. By default, and once it has exited, the job's.
+        #[arg(long)]
+        pid: Option<u32>,
     },
     /// Whether this host's performance counters can drive virtual time.
     Pmu {
@@ -536,6 +554,26 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 ),
             }
             Ok(exit_status(&child))
+        }
+        Command::Cat {
+            run,
+            step,
+            path,
+            pid,
+        } => {
+            let run = Run::find(&home, &run)?;
+            match rewind_core::inspect::cat(&home, &run, step, pid, &path)? {
+                Inspection::Contents(bytes) => {
+                    use std::io::Write;
+                    std::io::stdout().write_all(&bytes)?;
+                    Ok(ExitCode::SUCCESS)
+                }
+                Inspection::NotFound(message) => {
+                    eprintln!("rewind: {message}");
+                    Ok(ExitCode::from(CAT_NOT_FOUND))
+                }
+                Inspection::Failed(message) => bail!("reading {path} at step {step}: {message}"),
+            }
         }
         Command::Pmu { action } => {
             let vendor = rewind_core::pmu::Vendor::detect()?;

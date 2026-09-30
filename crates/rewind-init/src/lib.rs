@@ -22,6 +22,46 @@ pub const START_MARK: &str = "rewind-start";
 /// a space, and the output's tree hash in hex.
 pub const OUTPUT_MARK: &str = "rewind-output ";
 
+/// The argument the kernel starts this binary with when Rewind asks what a
+/// forked run looks like inside at some step, followed by the request.
+/// Today the one request is `cat <pid> <path>`: the file's bytes on
+/// standard output, with the path resolved in the root and working
+/// directory of process `pid`, or the job's when `pid` is 0 or gone.
+pub const INSPECT_ARG: &str = "--inspect";
+pub const INSPECT_CAT: &str = "cat";
+
+/// The marks around an inspection's answer: everything its process writes
+/// between them is the answer, and the end mark carries an
+/// [`InspectStatus`] code in decimal.
+pub const INSPECT_BEGIN_MARK: &str = "rewind-inspect-begin";
+pub const INSPECT_END_MARK: &str = "rewind-inspect-end ";
+
+/// How an inspection ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InspectStatus {
+    Done,
+    Failed,
+    NotFound,
+}
+
+impl InspectStatus {
+    pub fn code(self) -> u32 {
+        match self {
+            InspectStatus::Done => 0,
+            InspectStatus::Failed => 1,
+            InspectStatus::NotFound => 2,
+        }
+    }
+
+    pub fn from_code(code: u32) -> InspectStatus {
+        match code {
+            0 => InspectStatus::Done,
+            2 => InspectStatus::NotFound,
+            _ => InspectStatus::Failed,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Job {
     /// The program and its arguments. A program without a slash is looked

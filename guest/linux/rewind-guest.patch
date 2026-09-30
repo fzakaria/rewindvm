@@ -1,6 +1,6 @@
 diff -ruN a/arch/x86/include/asm/hypervisor.h b/arch/x86/include/asm/hypervisor.h
---- a/arch/x86/include/asm/hypervisor.h	2026-09-30 09:16:35.084212648 -0700
-+++ b/arch/x86/include/asm/hypervisor.h	2026-09-30 10:09:50.319576100 -0700
+--- a/arch/x86/include/asm/hypervisor.h	2026-09-30 14:57:20.177853980 -0700
++++ b/arch/x86/include/asm/hypervisor.h	2026-09-30 14:57:20.339620094 -0700
 @@ -30,6 +30,7 @@
  	X86_HYPER_KVM,
  	X86_HYPER_JAILHOUSE,
@@ -28,8 +28,8 @@ diff -ruN a/arch/x86/include/asm/hypervisor.h b/arch/x86/include/asm/hypervisor.
  extern void init_hypervisor_platform(void);
  static inline bool hypervisor_is_type(enum x86_hypervisor_type type)
 diff -ruN a/arch/x86/include/asm/idtentry.h b/arch/x86/include/asm/idtentry.h
---- a/arch/x86/include/asm/idtentry.h	2026-09-30 09:16:35.102986376 -0700
-+++ b/arch/x86/include/asm/idtentry.h	2026-09-30 09:16:35.147101045 -0700
+--- a/arch/x86/include/asm/idtentry.h	2026-09-30 14:57:20.189279746 -0700
++++ b/arch/x86/include/asm/idtentry.h	2026-09-30 14:57:20.339861927 -0700
 @@ -767,6 +767,10 @@
  DECLARE_IDTENTRY_SYSVEC(HYPERVISOR_CALLBACK_VECTOR,	sysvec_acrn_hv_callback);
  #endif
@@ -42,8 +42,8 @@ diff -ruN a/arch/x86/include/asm/idtentry.h b/arch/x86/include/asm/idtentry.h
  DECLARE_IDTENTRY_SYSVEC(HYPERVISOR_CALLBACK_VECTOR,	sysvec_xen_hvm_callback);
  #endif
 diff -ruN a/arch/x86/include/asm/timex.h b/arch/x86/include/asm/timex.h
---- a/arch/x86/include/asm/timex.h	2026-09-30 09:16:35.133567909 -0700
-+++ b/arch/x86/include/asm/timex.h	2026-09-30 09:24:42.142214084 -0700
+--- a/arch/x86/include/asm/timex.h	2026-09-30 14:57:20.199185737 -0700
++++ b/arch/x86/include/asm/timex.h	2026-09-30 14:57:20.340049989 -0700
 @@ -5,12 +5,21 @@
  #include <asm/processor.h>
  #include <asm/tsc.h>
@@ -67,8 +67,8 @@ diff -ruN a/arch/x86/include/asm/timex.h b/arch/x86/include/asm/timex.h
  #define random_get_entropy random_get_entropy
  
 diff -ruN a/arch/x86/include/asm/tsc.h b/arch/x86/include/asm/tsc.h
---- a/arch/x86/include/asm/tsc.h	2026-09-30 09:16:35.143394675 -0700
-+++ b/arch/x86/include/asm/tsc.h	2026-09-30 09:16:50.675807885 -0700
+--- a/arch/x86/include/asm/tsc.h	2026-09-30 14:57:20.212610655 -0700
++++ b/arch/x86/include/asm/tsc.h	2026-09-30 14:57:20.340169021 -0700
 @@ -21,7 +21,7 @@
  
  static inline cycles_t get_cycles(void)
@@ -79,8 +79,8 @@ diff -ruN a/arch/x86/include/asm/tsc.h b/arch/x86/include/asm/tsc.h
  		return 0;
  	return rdtsc();
 diff -ruN a/arch/x86/Kconfig b/arch/x86/Kconfig
---- a/arch/x86/Kconfig	2026-09-30 09:16:35.073831026 -0700
-+++ b/arch/x86/Kconfig	2026-09-30 09:16:35.147312552 -0700
+--- a/arch/x86/Kconfig	2026-09-30 14:57:20.228393777 -0700
++++ b/arch/x86/Kconfig	2026-09-30 14:57:20.340422105 -0700
 @@ -889,6 +889,18 @@
  	  IOT with small footprint and real-time features. More details can be
  	  found in https://projectacrn.org/.
@@ -101,8 +101,8 @@ diff -ruN a/arch/x86/Kconfig b/arch/x86/Kconfig
  	bool "Intel TDX (Trust Domain Extensions) - Guest Support"
  	depends on X86_64 && CPU_SUP_INTEL
 diff -ruN a/arch/x86/kernel/cpu/hypervisor.c b/arch/x86/kernel/cpu/hypervisor.c
---- a/arch/x86/kernel/cpu/hypervisor.c	2026-09-30 09:16:35.093264237 -0700
-+++ b/arch/x86/kernel/cpu/hypervisor.c	2026-09-30 09:16:35.147671537 -0700
+--- a/arch/x86/kernel/cpu/hypervisor.c	2026-09-30 14:57:20.241376808 -0700
++++ b/arch/x86/kernel/cpu/hypervisor.c	2026-09-30 14:57:20.340860876 -0700
 @@ -45,6 +45,9 @@
  #ifdef CONFIG_ACRN_GUEST
  	&x86_hyper_acrn,
@@ -114,8 +114,8 @@ diff -ruN a/arch/x86/kernel/cpu/hypervisor.c b/arch/x86/kernel/cpu/hypervisor.c
  
  enum x86_hypervisor_type x86_hyper_type;
 diff -ruN a/arch/x86/kernel/cpu/Makefile b/arch/x86/kernel/cpu/Makefile
---- a/arch/x86/kernel/cpu/Makefile	2026-09-30 09:16:35.112660945 -0700
-+++ b/arch/x86/kernel/cpu/Makefile	2026-09-30 09:16:35.147805518 -0700
+--- a/arch/x86/kernel/cpu/Makefile	2026-09-30 14:57:20.272129078 -0700
++++ b/arch/x86/kernel/cpu/Makefile	2026-09-30 14:57:20.340988305 -0700
 @@ -56,6 +56,7 @@
  
  obj-$(CONFIG_HYPERVISOR_GUEST)		+= vmware.o hypervisor.o mshyperv.o
@@ -126,8 +126,8 @@ diff -ruN a/arch/x86/kernel/cpu/Makefile b/arch/x86/kernel/cpu/Makefile
  
 diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 --- a/arch/x86/kernel/cpu/rewind.c	1969-12-31 16:00:00.000000000 -0800
-+++ b/arch/x86/kernel/cpu/rewind.c	2026-09-30 10:09:50.319745969 -0700
-@@ -0,0 +1,706 @@
++++ b/arch/x86/kernel/cpu/rewind.c	2026-09-30 15:05:38.587057648 -0700
+@@ -0,0 +1,802 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Rewind VM guest platform.
@@ -164,12 +164,17 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +#include <linux/mm.h>
 +#include <linux/mutex.h>
 +#include <linux/pm.h>
++#include <linux/reboot.h>
 +#include <linux/sched.h>
 +#include <linux/sched/mm.h>
++#include <linux/sched/signal.h>
 +#include <linux/binfmts.h>
 +#include <linux/static_call.h>
 +#include <linux/string.h>
 +#include <linux/uaccess.h>
++#include <linux/umh.h>
++#include <linux/wait.h>
++#include <linux/workqueue.h>
 +
 +#include <trace/events/sched.h>
 +#include <trace/events/signal.h>
@@ -241,20 +246,26 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +#define REWIND_RECORD_MAX	8192
 +#define REWIND_PAYLOAD_MAX	(REWIND_RECORD_MAX - sizeof(struct rewind_record))
 +
++#define REWIND_REQUEST_MAX	2048
++
 +/*
 + * The page the monitor writes into: the virtual clock on every
 + * REWIND_PORT_CLOCK read, the boot wall clock once at setup, and, before
-+ * each interrupt it sends, why it sent it.
++ * each interrupt it sends, why it sent it. An inspection request comes
++ * with its arguments.
 + */
 +struct rewind_shared {
 +	u64 now;
 +	u64 epoch;
 +	u32 pending;
++	u32 request_len;
++	u8 request[REWIND_REQUEST_MAX];
 +};
 +
 +/* Reasons for an interrupt, in rewind_shared.pending. */
 +#define REWIND_PENDING_TIMER	BIT(0)	/* the armed timer is due */
 +#define REWIND_PENDING_PREEMPT	BIT(1)	/* reschedule at this point */
++#define REWIND_PENDING_INSPECT	BIT(2)	/* run the request in rewind_shared */
 +
 +static struct rewind_shared rewind_shared __aligned(PAGE_SIZE);
 +static u8 rewind_buf[REWIND_RECORD_MAX] __aligned(PAGE_SIZE);
@@ -381,11 +392,87 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +};
 +
 +/*
++ * Inspection: in a run forked from a recording, the monitor asks what the
++ * machine looks like inside at that step, such as a file's contents. The
++ * request is a list of NUL-terminated arguments in rewind_shared.request,
++ * and the answer comes from /init started with --inspect and those
++ * arguments, which reports through the Rewind devices like any process.
++ * A recording never carries a request, so this changes no recorded run.
++ *
++ * While an inspection runs, every other user process but init is stopped,
++ * and power off waits for it to finish, so the job can neither change
++ * what the inspection reads nor end the machine under it.
++ */
++#define REWIND_INSPECT_ARGS	8
++
++static bool rewind_inspecting;
++static DECLARE_WAIT_QUEUE_HEAD(rewind_inspect_done);
++
++/*
++ * Stops every user process except init where it stands. Called from the
++ * interrupt, so the job stops at the step the monitor asked about rather
++ * than whenever the worker gets to run.
++ */
++static void rewind_stop_user_tasks(void)
++{
++	struct task_struct *p;
++
++	rcu_read_lock();
++	for_each_process(p) {
++		if ((p->flags & PF_KTHREAD) || is_global_init(p))
++			continue;
++		send_sig(SIGSTOP, p, 1);
++	}
++	rcu_read_unlock();
++}
++
++static void rewind_inspect(struct work_struct *work)
++{
++	static char request[REWIND_REQUEST_MAX + 1];
++	static char *argv[REWIND_INSPECT_ARGS + 3];
++	static char *envp[] = { "PATH=/bin", NULL };
++	u32 len = min_t(u32, READ_ONCE(rewind_shared.request_len),
++			REWIND_REQUEST_MAX);
++	int argc = 0;
++	char *arg;
++
++	memcpy(request, rewind_shared.request, len);
++	request[len] = '\0';
++
++	argv[argc++] = "/init";
++	argv[argc++] = "--inspect";
++	for (arg = request; arg < request + len && argc < ARRAY_SIZE(argv) - 1;
++	     arg += strlen(arg) + 1)
++		argv[argc++] = arg;
++	argv[argc] = NULL;
++
++	call_usermodehelper(argv[0], argv, envp, UMH_WAIT_PROC);
++
++	WRITE_ONCE(rewind_inspecting, false);
++	wake_up_all(&rewind_inspect_done);
++}
++
++/* Power off, restart and halt wait for a running inspection. */
++static int rewind_reboot_notify(struct notifier_block *nb,
++				unsigned long action, void *data)
++{
++	wait_event(rewind_inspect_done, !READ_ONCE(rewind_inspecting));
++	return NOTIFY_DONE;
++}
++
++static struct notifier_block rewind_reboot_nb = {
++	.notifier_call = rewind_reboot_notify,
++};
++
++static DECLARE_WORK(rewind_inspect_work, rewind_inspect);
++
++/*
 + * The monitor's one interrupt. A timer that is due runs the clock event
 + * handler. A preemption request marks the current task for rescheduling,
 + * so the scheduler picks again on the way back to user space: this is how
 + * the monitor explores other interleavings of the same run, at a chosen
-+ * step and without moving time.
++ * step and without moving time. An inspection request is handed to a
++ * worker, which can start a process.
 + */
 +DEFINE_IDTENTRY_SYSVEC(sysvec_rewind_callback)
 +{
@@ -399,6 +486,14 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +		rewind_clockevent.event_handler(&rewind_clockevent);
 +
 +	if (pending & REWIND_PENDING_PREEMPT) {
++		set_tsk_need_resched(current);
++		set_preempt_need_resched();
++	}
++
++	if (pending & REWIND_PENDING_INSPECT) {
++		WRITE_ONCE(rewind_inspecting, true);
++		rewind_stop_user_tasks();
++		schedule_work(&rewind_inspect_work);
 +		set_tsk_need_resched(current);
 +		set_preempt_need_resched();
 +	}
@@ -831,12 +926,13 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +	WARN_ON(register_trace_sched_process_exit(rewind_probe_exit, NULL));
 +	WARN_ON(register_trace_signal_deliver(rewind_probe_signal, NULL));
 +	WARN_ON(register_trace_sys_enter(rewind_probe_sys_enter, NULL));
++	WARN_ON(register_reboot_notifier(&rewind_reboot_nb));
 +	return 0;
 +}
 +device_initcall(rewind_events_init);
 diff -ruN a/arch/x86/kernel/traps.c b/arch/x86/kernel/traps.c
---- a/arch/x86/kernel/traps.c	2026-09-30 09:16:35.121940813 -0700
-+++ b/arch/x86/kernel/traps.c	2026-09-30 09:19:13.206281395 -0700
+--- a/arch/x86/kernel/traps.c	2026-09-30 14:57:20.313857643 -0700
++++ b/arch/x86/kernel/traps.c	2026-09-30 14:57:20.342243665 -0700
 @@ -45,6 +45,7 @@
  #include <linux/ubsan.h>
  
@@ -857,8 +953,8 @@ diff -ruN a/arch/x86/kernel/traps.c b/arch/x86/kernel/traps.c
  			goto exit;
  
 diff -ruN a/arch/x86/kernel/tsc.c b/arch/x86/kernel/tsc.c
---- a/arch/x86/kernel/tsc.c	2026-09-30 10:09:50.231534027 -0700
-+++ b/arch/x86/kernel/tsc.c	2026-09-30 10:09:50.319164267 -0700
+--- a/arch/x86/kernel/tsc.c	2026-09-30 14:57:20.332200116 -0700
++++ b/arch/x86/kernel/tsc.c	2026-09-30 14:57:20.343073067 -0700
 @@ -238,6 +238,16 @@
  		return __cycles_2_ns(tsc_now);
  	}

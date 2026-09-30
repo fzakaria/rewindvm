@@ -14,7 +14,10 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use rewind_init::{EXIT_MARK, JOB_PATH, Job, OUTPUT_MARK, Root, START_MARK, tree_hash};
+use rewind_init::{
+    EXIT_MARK, INSPECT_ARG, INSPECT_BEGIN_MARK, INSPECT_CAT, INSPECT_END_MARK, InspectStatus,
+    JOB_PATH, Job, OUTPUT_MARK, Root, START_MARK, tree_hash,
+};
 
 /// The image the monitor maps as persistent memory.
 const IMAGE_DEVICE: &str = "/dev/pmem0";
@@ -42,9 +45,21 @@ const SELFTEST_ARG: &str = "--selftest";
 const SELFTEST_THREADS: usize = 4;
 const SELFTEST_ADDS: u64 = 5_000_000;
 
+/// Where an image job's root is mounted; init chroots into it, and takes
+/// /dev and /proc along.
+const IMAGE_ROOT: &str = "/newroot";
+
+/// How much of a file an inspection reads at a time.
+const INSPECT_CHUNK: usize = 64 * 1024;
+
 fn main() {
-    if std::env::args().nth(1).as_deref() == Some(SELFTEST_ARG) {
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some(SELFTEST_ARG) {
         selftest();
+        return;
+    }
+    if args.get(1).map(String::as_str) == Some(INSPECT_ARG) {
+        inspect(&args[2..]);
         return;
     }
     if let Err(e) = run() {
@@ -79,22 +94,32 @@ fn run() -> Result<()> {
     if job.root != Root::Initramfs {
         wait_for(IMAGE_DEVICE)?;
     }
-    match job.root {
-        Root::Store => store_root(&job)?,
-        Root::Image => image_root()?,
-        Root::Initramfs => {}
-    }
+    // The job's root. Only the job is chrooted into an image, never init:
+    // init shares its root with the kernel's threads, and the kernel starts
+    // inspections from this root.
+    let root = match job.root {
+        Root::Store => {
+            store_root(&job)?;
+            "/"
+        }
+        Root::Image => {
+            image_root()?;
+            IMAGE_ROOT
+        }
+        Root::Initramfs => "/",
+    };
 
     for f in &job.files {
-        fs::write(&f.path, &f.contents).map_err(|e| format!("writing {}: {e}", f.path))?;
-        chown(&f.path, job.uid, job.gid)?;
+        let path = within(root, &f.path);
+        fs::write(&path, &f.contents).map_err(|e| format!("writing {}: {e}", f.path))?;
+        chown(&path.to_string_lossy(), job.uid, job.gid)?;
     }
 
     mark(START_MARK);
-    let status = spawn_and_reap(&job)?;
+    let status = spawn_and_reap(&job, root)?;
     if status == 0 {
         for output in &job.outputs {
-            match tree_hash(Path::new(output)) {
+            match tree_hash(&within(root, output)) {
                 Ok(hash) => mark(&format!("{OUTPUT_MARK}{output} {hash}")),
                 Err(e) => eprintln!("rewind-init: hashing {output}: {e}"),
             }
@@ -134,8 +159,14 @@ fn store_root(job: &Job) -> Result<()> {
     Ok(())
 }
 
-/// Image mode: the image is a root filesystem; overlay it writable and
-/// chroot into it, taking /dev, /proc and /sys along.
+/// A path inside the job's root, as init sees it.
+fn within(root: &str, path: &str) -> PathBuf {
+    Path::new(root).join(path.trim_start_matches('/'))
+}
+
+/// Image mode: the image is a root filesystem; overlay it writable at
+/// IMAGE_ROOT, with /dev, /proc and /sys bound into it, for the job to be
+/// chrooted into.
 fn image_root() -> Result<()> {
     mkdir("/lower")?;
     mount(IMAGE_DEVICE, "/lower", "erofs", libc::MS_RDONLY, "")?;
@@ -152,28 +183,22 @@ fn image_root() -> Result<()> {
         "lowerdir=/lower,upperdir=/rw/upper,workdir=/rw/work",
     )?;
     for dir in ["/dev", "/proc", "/sys"] {
-        let target = format!("/newroot{dir}");
+        let target = format!("{IMAGE_ROOT}{dir}");
         mkdir(&target)?;
-        mount(dir, &target, "", libc::MS_MOVE, "")?;
+        mount(dir, &target, "", libc::MS_BIND | libc::MS_REC, "")?;
     }
-    for dir in ["/newroot/tmp", "/newroot/build"] {
-        mkdir(dir)?;
-        chmod(dir, 0o1777)?;
+    for dir in ["/tmp", "/build"] {
+        let dir = format!("{IMAGE_ROOT}{dir}");
+        mkdir(&dir)?;
+        chmod(&dir, 0o1777)?;
     }
-
-    let root = CString::new("/newroot").unwrap();
-    // SAFETY: a valid path; the process is single threaded.
-    if unsafe { libc::chroot(root.as_ptr()) } != 0 {
-        return Err(format!("chroot: {}", std::io::Error::last_os_error()));
-    }
-    std::env::set_current_dir("/").map_err(|e| format!("chdir /: {e}"))?;
     Ok(())
 }
 
 /// Runs the job and reaps every process until its main process exits,
 /// then stops the rest. Returns the main process's wait status.
-fn spawn_and_reap(job: &Job) -> Result<i32> {
-    let program = resolve(job)?;
+fn spawn_and_reap(job: &Job, root: &str) -> Result<i32> {
+    let program = resolve(job, root)?;
     let stdout = open_device(STDOUT_DEVICE)?;
     let stderr = open_device(STDERR_DEVICE)?;
 
@@ -182,15 +207,32 @@ fn spawn_and_reap(job: &Job) -> Result<i32> {
         .args(&job.argv[1..])
         .env_clear()
         .envs(job.env.iter().map(|(k, v)| (k, v)))
-        .current_dir(&job.cwd)
         .stdin(Stdio::null())
         .stdout(stdout)
-        .stderr(stderr)
-        .uid(job.uid)
-        .gid(job.gid);
-    // SAFETY: setsid is async-signal-safe.
+        .stderr(stderr);
+
+    // In the child: into the root, then the working directory, then the
+    // job's identity, in that order, since a chroot needs root and the
+    // working directory is inside it. The strings are made before the fork.
+    let root_c = CString::new(root).map_err(|e| e.to_string())?;
+    let cwd_c = CString::new(job.cwd.as_str()).map_err(|e| e.to_string())?;
+    let (uid, gid) = (job.uid, job.gid);
+    // SAFETY: chroot, chdir, setgroups, setgid, setuid and setsid are
+    // async-signal-safe, and the pointers outlive the call.
     unsafe {
-        cmd.pre_exec(|| {
+        cmd.pre_exec(move || {
+            let check = |rc: libc::c_int| {
+                if rc == 0 {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::last_os_error())
+                }
+            };
+            check(libc::chroot(root_c.as_ptr()))?;
+            check(libc::chdir(cwd_c.as_ptr()))?;
+            check(libc::setgroups(0, std::ptr::null()))?;
+            check(libc::setgid(gid))?;
+            check(libc::setuid(uid))?;
             libc::setsid();
             Ok(())
         });
@@ -250,9 +292,127 @@ fn selftest() {
     println!("selftest {}", total.load(Ordering::SeqCst));
 }
 
-/// The program to exec: as given if it contains a slash, else the first
-/// match on the job's PATH.
-fn resolve(job: &Job) -> Result<PathBuf> {
+/// An inspection, started by the kernel in a forked run at Rewind's
+/// request, outside the job and with init's root. The kernel has stopped
+/// every other process, so what it reads is the machine at the step asked
+/// about.
+fn inspect(request: &[String]) {
+    // The devices are opened now, before entering the job's view, which
+    // may not have them.
+    let answer = |status: InspectStatus| {
+        mark(&format!("{INSPECT_END_MARK}{}", status.code()));
+    };
+    mark(INSPECT_BEGIN_MARK);
+
+    // Errors go to standard error, where Rewind shows them.
+    let (Ok(mut out), Ok(mut err)) = (open_device(STDOUT_DEVICE), open_device(STDERR_DEVICE))
+    else {
+        answer(InspectStatus::Failed);
+        return;
+    };
+
+    // The one request: cat <pid> <path>.
+    let [op, pid, path] = request else {
+        let _ = writeln!(err, "inspect: expected cat <pid> <path>, got {request:?}");
+        answer(InspectStatus::Failed);
+        return;
+    };
+    if op != INSPECT_CAT {
+        let _ = writeln!(err, "inspect: unknown request {op}");
+        answer(InspectStatus::Failed);
+        return;
+    }
+    let pid: i32 = pid.parse().unwrap_or(0);
+
+    // See the file as the process did: its root and working directory
+    // when it is still alive, else the job's.
+    if let Err(e) = enter_view_of(pid) {
+        let _ = writeln!(err, "inspect: {e}");
+        answer(InspectStatus::Failed);
+        return;
+    }
+    let mut file = match File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let _ = writeln!(err, "{path}: no such file at this step");
+            answer(InspectStatus::NotFound);
+            return;
+        }
+        Err(e) => {
+            let _ = writeln!(err, "{path}: {e}");
+            answer(InspectStatus::Failed);
+            return;
+        }
+    };
+
+    // The bytes, in chunks; the device splits them into records.
+    let mut buf = vec![0u8; INSPECT_CHUNK];
+    loop {
+        match std::io::Read::read(&mut file, &mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                if out.write_all(&buf[..n]).is_err() {
+                    answer(InspectStatus::Failed);
+                    return;
+                }
+            }
+            Err(e) => {
+                let _ = writeln!(err, "{path}: {e}");
+                answer(InspectStatus::Failed);
+                return;
+            }
+        }
+    }
+    answer(InspectStatus::Done);
+}
+
+/// Moves this process into the root and working directory of `pid`, or of
+/// the job when `pid` is 0 or has exited.
+fn enter_view_of(pid: i32) -> Result<()> {
+    let live = pid > 0 && Path::new(&format!("/proc/{pid}/cwd")).exists();
+    let (root, cwd) = if live {
+        (format!("/proc/{pid}/root"), format!("/proc/{pid}/cwd"))
+    } else {
+        let root = if Path::new(IMAGE_ROOT).exists() {
+            IMAGE_ROOT
+        } else {
+            "/"
+        };
+        let job: Job = serde_json::from_slice(
+            &fs::read(JOB_PATH).map_err(|e| format!("reading {JOB_PATH}: {e}"))?,
+        )
+        .map_err(|e| format!("parsing {JOB_PATH}: {e}"))?;
+        (
+            root.to_string(),
+            within(root, &job.cwd).display().to_string(),
+        )
+    };
+
+    // The working directory is opened before the chroot, which would hide
+    // it, and entered after.
+    let dir = File::open(&cwd).map_err(|e| format!("opening {cwd}: {e}"))?;
+    let root_c = CString::new(root.as_str()).unwrap();
+    // SAFETY: a valid path and a valid descriptor.
+    unsafe {
+        if libc::chroot(root_c.as_ptr()) != 0 {
+            return Err(format!(
+                "chroot {root}: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        if libc::fchdir(std::os::fd::AsRawFd::as_raw_fd(&dir)) != 0 {
+            return Err(format!(
+                "entering {cwd}: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The program to exec, as a path inside the job's root: as given if it
+/// contains a slash, else the first match on the job's PATH.
+fn resolve(job: &Job, root: &str) -> Result<PathBuf> {
     let name = job.argv.first().ok_or("the job has no program")?;
     if name.contains('/') {
         return Ok(PathBuf::from(name));
@@ -264,7 +424,7 @@ fn resolve(job: &Job) -> Result<PathBuf> {
         .map_or("/usr/local/bin:/usr/bin:/bin", |(_, v)| v.as_str());
     for dir in path.split(':') {
         let candidate = Path::new(dir).join(name);
-        let executable = fs::metadata(&candidate)
+        let executable = fs::metadata(within(root, &candidate.to_string_lossy()))
             .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
             .unwrap_or(false);
         if executable {

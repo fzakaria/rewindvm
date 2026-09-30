@@ -109,6 +109,14 @@ impl Clock {
 pub const SHARED_PENDING: u64 = 16;
 pub const PENDING_TIMER: u32 = 1 << 0;
 pub const PENDING_PREEMPT: u32 = 1 << 1;
+pub const PENDING_INSPECT: u32 = 1 << 2;
+
+/// Offsets of an inspection request in the shared page: its length, then
+/// its arguments, each ending in NUL. The kernel reads at most
+/// REQUEST_MAX bytes.
+pub const SHARED_REQUEST_LEN: u64 = 20;
+pub const SHARED_REQUEST: u64 = 24;
+pub const REQUEST_MAX: usize = 2048;
 
 /// Under a schedule seed, one exit in this many asks the guest to
 /// reschedule. A request with nothing else runnable changes nothing, so

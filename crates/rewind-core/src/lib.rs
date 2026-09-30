@@ -5,6 +5,7 @@ pub mod cpio;
 pub mod export;
 pub mod home;
 pub mod image;
+pub mod inspect;
 pub mod keyframes;
 pub mod nix;
 pub mod pmu;
