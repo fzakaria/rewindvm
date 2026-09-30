@@ -223,10 +223,7 @@ impl Machine {
     /// either [`Machine::boot`] or a snapshot restore supplies that.
     fn create(config: &Config) -> Result<Machine> {
         if config.mem_bytes > RAM_MAX || config.mem_bytes < (64 << 20) {
-            bail!(
-                "guest memory must be between 64 MiB and {} MiB",
-                RAM_MAX >> 20
-            );
+            bail!("VM memory must be between 64 MiB and {} MiB", RAM_MAX >> 20);
         }
 
         let kvm = Kvm::new().context("opening /dev/kvm")?;
@@ -383,7 +380,7 @@ impl Machine {
                     // among them, or one single step: not the guest's
                     // doing, so not a step of its own.
                     VcpuExit::Intr | VcpuExit::Debug(_) => None,
-                    VcpuExit::Hlt => bail!("the guest executed HLT; is it a Rewind kernel?"),
+                    VcpuExit::Hlt => bail!("the VM executed HLT; is its kernel built for Rewind?"),
                     other => bail!("unexpected exit at step {}: {other:?}", self.dev.step),
                 },
                 Err(e) if e.errno() == libc::EINTR || e.errno() == libc::EAGAIN => None,
@@ -568,7 +565,7 @@ impl Devices {
                 self.ram.read(value as u64, &mut len)?;
                 let len = u32::from_le_bytes(len) as usize;
                 if !(pv::RECORD_HEADER..=pv::RECORD_MAX).contains(&len) {
-                    bail!("guest record at step {} has length {len}", self.step);
+                    bail!("VM record at step {} has length {len}", self.step);
                 }
                 let mut record = vec![0u8; len];
                 self.ram.read(value as u64, &mut record)?;
@@ -604,7 +601,7 @@ impl Devices {
     fn io_in(&mut self, port: u16, data: &mut [u8]) -> Result<()> {
         match port {
             pv::PORT_CLOCK => {
-                let shared = self.shared.context("guest read the clock before setup")?;
+                let shared = self.shared.context("the VM read the clock before setup")?;
                 let now = self.clock.now;
                 self.ram
                     .write(shared + pv::SHARED_NOW, &now.to_le_bytes())?;

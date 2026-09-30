@@ -124,9 +124,9 @@ impl Mapping {
 
     fn range(&self, offset: u64, len: usize) -> Result<std::ops::Range<usize>> {
         let start = usize::try_from(offset)?;
-        let end = start.checked_add(len).context("guest address overflow")?;
+        let end = start.checked_add(len).context("VM address overflow")?;
         if end > self.len {
-            bail!("guest range {start:#x}..{end:#x} is outside RAM");
+            bail!("VM range {start:#x}..{end:#x} is outside its RAM");
         }
         Ok(start..end)
     }

@@ -25,11 +25,11 @@ struct Cli {
 /// The machine options every way of starting a run shares.
 #[derive(clap::Args, Clone)]
 struct MachineArgs {
-    /// Seeds the guest's randomness. Runs with the same inputs and seed are
+    /// Seeds the VM's randomness. Runs with the same inputs and seed are
     /// identical; a different seed explores a different run.
     #[arg(long, default_value_t = 0)]
     seed: u64,
-    /// Asks the guest to reschedule at steps this seed picks, to explore
+    /// Asks the VM to reschedule at steps this seed picks, to explore
     /// other thread interleavings with everything else, time included,
     /// unchanged. 0 is the unperturbed schedule.
     #[arg(long, default_value_t = 0)]
@@ -38,16 +38,17 @@ struct MachineArgs {
     /// unperturbed one.
     #[arg(long, default_value_t = 0)]
     schedule_from: u64,
-    /// The CPU the guest sees: a fixed x86-64-v3 model that replays on
-    /// any host supporting it, or the host's own features.
+    /// The CPU the VM sees: a fixed x86-64-v3 model that replays on any
+    /// machine supporting it, or this machine's own features.
     #[arg(long, value_enum, default_value_t = CpuArg::V3)]
     cpu: CpuArg,
-    /// What moves the guest's clock besides exits: the guest's work, counted
-    /// by the host's branch counter (`branches`), or nothing (`exits`).
-    /// `auto` uses the counter when this host's self-test finds it exact.
+    /// What moves the VM's clock besides exits: the work done inside it,
+    /// counted by this machine's branch counter (`branches`), or nothing
+    /// (`exits`). `auto` uses the counter when `rewind pmu status` finds it
+    /// exact.
     #[arg(long, value_enum, default_value_t = ClockArg::Auto)]
     clock: ClockArg,
-    /// Experimental: with counter time, also interrupt a guest computing
+    /// Experimental: with counter time, also interrupt a VM computing
     /// without exits at the timer's branch count. See docs/pmu.md.
     #[arg(long, hide = true)]
     experimental_preempt: bool,
@@ -57,10 +58,10 @@ struct MachineArgs {
     /// The step after which no more reschedules are asked.
     #[arg(long, default_value_t = u64::MAX)]
     schedule_until: u64,
-    /// Guest memory in MiB.
+    /// The VM's memory in MiB.
     #[arg(long, default_value_t = 1024)]
     mem: u64,
-    /// The guest's wall clock at boot, in seconds since the Unix epoch.
+    /// The VM's wall clock at boot, in seconds since the Unix epoch.
     /// Defaults to the start of today, UTC.
     #[arg(long)]
     epoch: Option<u64>,
@@ -137,7 +138,7 @@ struct ImageArgs {
     /// Environment variables for the command, as KEY=VALUE.
     #[arg(long = "env", short = 'e')]
     env: Vec<String>,
-    /// The working directory in the guest.
+    /// The working directory inside the VM.
     #[arg(long, default_value = "/")]
     cwd: String,
     /// The command and its arguments.
@@ -224,8 +225,9 @@ enum Command {
         /// Where to write it; <id>.rwd by default.
         #[arg(long, short)]
         output: Option<PathBuf>,
-        /// Include keyframes, their pages, the input image and the guest,
-        /// so another machine with a compatible CPU can replay the run.
+        /// Include keyframes, their pages, the input image and the VM's
+        /// kernel, so another machine with a compatible CPU can replay the
+        /// run.
         #[arg(long)]
         replayable: bool,
     },

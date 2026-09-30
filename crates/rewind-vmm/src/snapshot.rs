@@ -245,7 +245,7 @@ impl Machine {
                 let at = *index as usize * PAGE_SIZE;
                 let page = ram
                     .get_mut(at..at + PAGE_SIZE)
-                    .context("keyframe page is outside guest memory")?;
+                    .context("keyframe page is outside the VM's memory")?;
                 if *hash == ZERO_PAGE {
                     page.fill(0);
                 } else {
