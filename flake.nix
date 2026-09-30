@@ -21,11 +21,12 @@
         system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
-        in
-        {
-          inherit pkgs;
           kernel = import ./nix/kernel.nix { inherit pkgs; };
           guest = import ./nix/guest.nix { inherit pkgs; };
+        in
+        {
+          inherit pkgs kernel guest;
+          rewind = import ./nix/rewind.nix { inherit pkgs kernel guest; };
           site = import ./nix/site.nix { inherit pkgs; };
         };
     in
@@ -36,6 +37,10 @@
           p = per system;
         in
         {
+          # the rewind command with its guest (nix/rewind.nix)
+          rewind = p.rewind;
+          default = p.rewind;
+
           # the guest kernel with the Rewind platform (nix/kernel.nix)
           kernel = p.kernel;
 
@@ -54,6 +59,11 @@
           p = per system;
         in
         {
+          default = {
+            type = "app";
+            program = "${p.rewind}/bin/rewind";
+          };
+
           # `nix run .#serve [port]`: the built site on a local port
           serve = {
             type = "app";
