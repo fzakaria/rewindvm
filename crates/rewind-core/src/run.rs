@@ -33,9 +33,19 @@ pub const BASE_CMDLINE: &str = "nolapic_timer lpj=1000000 panic=-1 rdinit=/init 
 /// Nanoseconds of virtual time per exit.
 pub const DEFAULT_QUANTUM: u64 = 1000;
 
-/// The guest's wall clock at boot when nothing else is asked for: one
-/// second past the epoch, as SOURCE_DATE_EPOCH is in nixpkgs.
-pub const DEFAULT_EPOCH: u64 = 1;
+/// The guest's wall clock at boot when nothing else is asked for: the
+/// start of the current day, UTC. Builds compare the clock against the
+/// timestamps in source tarballs, so it must be later than those, and
+/// certificates in test suites expire, so it should not be far later. The
+/// value chosen is part of the run's inputs, so a replay uses it again.
+pub fn default_epoch() -> u64 {
+    const DAY: u64 = 24 * 60 * 60;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_secs();
+    now - now % DAY
+}
 
 /// Everything that determines a run. Two equal specs make equal runs.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

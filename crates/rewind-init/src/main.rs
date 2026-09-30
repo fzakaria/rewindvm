@@ -14,7 +14,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use rewind_init::{EXIT_MARK, JOB_PATH, Job, Root};
+use rewind_init::{EXIT_MARK, JOB_PATH, Job, OUTPUT_MARK, Root, tree_hash};
 
 /// The image the monitor maps as persistent memory.
 const IMAGE_DEVICE: &str = "/dev/pmem0";
@@ -73,7 +73,20 @@ fn run() -> Result<()> {
         Root::Initramfs => {}
     }
 
+    for f in &job.files {
+        fs::write(&f.path, &f.contents).map_err(|e| format!("writing {}: {e}", f.path))?;
+        chown(&f.path, job.uid, job.gid)?;
+    }
+
     let status = spawn_and_reap(&job)?;
+    if status == 0 {
+        for output in &job.outputs {
+            match tree_hash(Path::new(output)) {
+                Ok(hash) => mark(&format!("{OUTPUT_MARK}{output} {hash}")),
+                Err(e) => eprintln!("rewind-init: hashing {output}: {e}"),
+            }
+        }
+    }
     mark(&format!("{EXIT_MARK}{status}"));
     // SAFETY: sync has no preconditions.
     unsafe { libc::sync() };

@@ -7,9 +7,9 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use rewind_core::image;
-use rewind_core::run::{BASE_CMDLINE, DEFAULT_EPOCH, DEFAULT_QUANTUM};
+use rewind_core::run::{BASE_CMDLINE, DEFAULT_QUANTUM, default_epoch};
 use rewind_core::{Echo, Guest, Home, Run, Source, Spec};
+use rewind_core::{image, nix};
 use rewind_init::{Job, Root};
 
 #[derive(Parser)]
@@ -33,8 +33,9 @@ struct MachineArgs {
     #[arg(long, default_value_t = 1024)]
     mem: u64,
     /// The guest's wall clock at boot, in seconds since the Unix epoch.
-    #[arg(long, env = "SOURCE_DATE_EPOCH", default_value_t = DEFAULT_EPOCH)]
-    epoch: u64,
+    /// Defaults to the start of today, UTC.
+    #[arg(long)]
+    epoch: Option<u64>,
     /// A name to find the run by later.
     #[arg(long)]
     name: Option<String>,
@@ -66,6 +67,23 @@ enum Command {
         /// The command and its arguments.
         #[arg(last = true, required = true)]
         argv: Vec<String>,
+    },
+    /// Build a Nix derivation in the deterministic VM.
+    Nix {
+        /// A .drv path or an installable such as `nixpkgs#hello`.
+        installable: String,
+        #[command(flatten)]
+        machine: MachineArgs,
+    },
+    /// Build a Nix derivation with several seeds and show where the builds
+    /// first differ, if they do.
+    Check {
+        installable: String,
+        /// How many seeds to try, starting from 0.
+        #[arg(long, default_value_t = 2)]
+        seeds: u64,
+        #[command(flatten)]
+        machine: MachineArgs,
     },
     /// List runs, newest first.
     Ls,
@@ -131,12 +149,54 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 gid: 0,
                 hostname: "localhost".into(),
                 root: Root::Image,
+                files: Vec::new(),
+                outputs: Vec::new(),
             };
             let name = machine.name.clone().unwrap_or_else(|| argv.join(" "));
             let source = Source::Image {
                 root: root.display().to_string(),
             };
             execute(&home, &guest, name, source, Some(image), job, &machine)
+        }
+        Command::Nix {
+            installable,
+            machine,
+        } => {
+            let guest = Guest::from_env()?;
+            let run = nix_run(&home, &guest, &installable, &machine)?;
+            report_outputs(&run)?;
+            Ok(exit_status(&run))
+        }
+        Command::Check {
+            installable,
+            seeds,
+            mut machine,
+        } => {
+            let guest = Guest::from_env()?;
+            machine.quiet = true;
+            let mut runs = Vec::new();
+            for seed in 0..seeds {
+                machine.seed = seed;
+                runs.push(nix_run(&home, &guest, &installable, &machine)?);
+            }
+            let first = runs[0].trace()?;
+            let mut same = true;
+            for other in &runs[1..] {
+                let trace = other.trace()?;
+                if first.divergence(&trace).is_some() {
+                    same = false;
+                    println!(
+                        "seed 0 ({}) and seed {} ({}) differ:",
+                        runs[0].manifest.id, other.manifest.spec.seed, other.manifest.id
+                    );
+                    print!("{}", show::divergence(&first, &trace));
+                }
+            }
+            if same {
+                println!("identical across {seeds} seeds");
+                return Ok(ExitCode::SUCCESS);
+            }
+            Ok(ExitCode::FAILURE)
         }
         Command::Ls => {
             for r in Run::list(&home)? {
@@ -215,6 +275,78 @@ fn run(cli: Cli) -> Result<ExitCode> {
     }
 }
 
+/// Runs a derivation's builder in the guest.
+fn nix_run(home: &Home, guest: &Guest, installable: &str, machine: &MachineArgs) -> Result<Run> {
+    let drv_path = nix::resolve(installable)?;
+    let drv = nix::show(&drv_path)?;
+    let extra: Vec<PathBuf> = guest.sandbox_shell.iter().cloned().collect();
+    let closure = nix::input_closure(&drv, &extra)?;
+
+    // Images of store paths are named by the paths, which already name
+    // their contents.
+    let key = blake3::hash(
+        closure
+            .iter()
+            .map(|p| p.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("\n")
+            .as_bytes(),
+    )
+    .to_hex();
+    let image = home.images().join(format!("store-{}.erofs", &key[..32]));
+    if !image.exists() {
+        eprintln!(
+            "rewind: packing {} store paths for {}",
+            closure.len(),
+            drv.name
+        );
+        let tmp = image.with_extension("building");
+        image::from_store_paths(&closure, &tmp)?;
+        std::fs::rename(&tmp, &image)?;
+    }
+
+    let job = nix::job(&drv)?;
+    let name = machine.name.clone().unwrap_or_else(|| drv.name.clone());
+    let source = Source::Nix {
+        drv: drv_path.display().to_string(),
+        outputs: drv
+            .outputs
+            .iter()
+            .map(|(_, p)| p.display().to_string())
+            .collect(),
+    };
+    let run = execute_spec(home, guest, name, source, Some(image), job, machine)?;
+    Ok(run)
+}
+
+/// Prints each output's hash from the guest, and whether it matches the
+/// copy of that output the host already has, if it has one.
+fn report_outputs(run: &Run) -> Result<()> {
+    for e in run.trace()?.events {
+        let rewind_trace::EventKind::Mark { text } = e.kind else {
+            continue;
+        };
+        let Some(rest) = text.strip_prefix(rewind_init::OUTPUT_MARK) else {
+            continue;
+        };
+        let Some((path, hash)) = rest.split_once(' ') else {
+            continue;
+        };
+        let host = std::path::Path::new(path);
+        let verdict = if host.exists() {
+            match rewind_init::tree_hash(host) {
+                Ok(h) if h.to_hex().as_str() == hash => "same as the host's build",
+                Ok(_) => "DIFFERENT from the host's build",
+                Err(_) => "host copy unreadable",
+            }
+        } else {
+            "not built on the host"
+        };
+        println!("{path} {} ({verdict})", &hash[..16]);
+    }
+    Ok(())
+}
+
 /// Builds or reuses the erofs image for a root filesystem argument.
 fn root_image(home: &Home, root: &std::path::Path) -> Result<PathBuf> {
     if root.extension().is_some_and(|e| e == "erofs") {
@@ -262,6 +394,29 @@ fn execute(
     job: Job,
     machine: &MachineArgs,
 ) -> Result<ExitCode> {
+    let run = execute_spec(home, guest, name, source, image, job, machine)?;
+    Ok(exit_status(&run))
+}
+
+/// The job's wait status as the process exit code, the way a shell reports
+/// a child.
+fn exit_status(run: &Run) -> ExitCode {
+    match run.manifest.outcome.as_ref().and_then(|o| o.status) {
+        Some(0) => ExitCode::SUCCESS,
+        Some(s) => ExitCode::from(show::exit_code(s)),
+        None => ExitCode::FAILURE,
+    }
+}
+
+fn execute_spec(
+    home: &Home,
+    guest: &Guest,
+    name: String,
+    source: Source,
+    image: Option<PathBuf>,
+    job: Job,
+    machine: &MachineArgs,
+) -> Result<Run> {
     let image_hash = match &image {
         Some(path) => Some(image::hash_file(path)?),
         None => None,
@@ -273,7 +428,7 @@ fn execute(
         image_hash,
         mem_mib: machine.mem,
         seed: machine.seed,
-        epoch: machine.epoch,
+        epoch: machine.epoch.unwrap_or_else(default_epoch),
         quantum: DEFAULT_QUANTUM,
         cmdline: format!("{BASE_CMDLINE} {}", machine.kernel_args)
             .trim()
@@ -287,10 +442,5 @@ fn execute(
     };
     let run = Run::execute(home, name, source, spec, None, echo)?;
     eprintln!("{}", show::finished(&run));
-    let status = run.manifest.outcome.as_ref().and_then(|o| o.status);
-    Ok(match status {
-        Some(0) => ExitCode::SUCCESS,
-        Some(s) => ExitCode::from(show::exit_code(s)),
-        None => ExitCode::FAILURE,
-    })
+    Ok(run)
 }
