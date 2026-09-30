@@ -95,7 +95,7 @@
         let
           p = per system;
         in
-        import ./nix/checks.nix { inherit (p) pkgs; }
+        import ./nix/checks.nix { inherit (p) pkgs rewind; }
       );
 
       devShells = forAllSystems (
