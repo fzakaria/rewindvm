@@ -1,10 +1,10 @@
 <!doctype html>
 <html lang="en">
   <head>
-    <title>Counter time: Rewind VM</title>
+    <title>Time inside the VM: Rewind VM</title>
     <meta
       name="description"
-      content="Why rewind prints 'recording with exit time', what counter time changes, and how to make the branch counter exact on AMD Zen."
+      content="How Rewind keeps time inside the VM, what exit time and counter time mean, and the one setting AMD machines need."
     />
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -38,102 +38,133 @@
          Edit the Markdown and this page together. -->
     <main class="wrap article">
       <p class="eyebrow">Reference</p>
-      <h1>Counter time</h1>
+      <h1>Time inside the VM</h1>
       <p>
-        Rewind VM can let the VM's clock follow the work done inside the VM, counted by your CPU's
-        performance counters. It does so only when the counter is exact on your machine. When it is
-        not, <code>rewind</code> records with exit time instead and says so:
+        Rewind replays a run exactly, so the programs inside the VM cannot read your machine's real
+        clock: two runs would see different times and could go different ways. Rewind keeps a clock
+        of its own for the VM instead, in one of two ways. This page explains both, and the one
+        setting AMD machines need.
       </p>
-      <pre
-        class="console"
-      ><code>rewind: recording with exit time: this AMD CPU's branch counter is not exact until rr's workaround is set. ...</code></pre>
-      <p>This page explains what the difference is, and how to turn counter time on.</p>
 
       <section class="step">
-        <h2 id="exit-time-and-counter-time">Exit time and counter time</h2>
-        <p>
-          A run is deterministic because the VM only ever hears from the outside world at exits:
-          points where the VM itself hands control to Rewind, such as a system call that reports an
-          event, a clock read, or going idle. Virtual time moves at those exits and nowhere else.
-        </p>
-        <p>
-          With <strong>exit time</strong>, each exit adds 5 microseconds, and idling jumps to the
-          next timer. Computation between exits takes no time at all. Two things follow:
-        </p>
+        <h2 id="the-short-version">The short version</h2>
         <ul>
+          <li><strong>Intel:</strong> nothing to do. Rewind uses counter time.</li>
           <li>
-            The VM's clock does not reflect computation. A thread that computes for a second of real
-            time sees microseconds pass, so timeouts and anything timed behave unrealistically in
-            CPU-bound code.
+            <strong>AMD Ryzen or EPYC:</strong> run <code>sudo rewind pmu enable</code> once after
+            each boot, or turn on the <a href="#every-boot-on-nixos">NixOS setting</a> below. Until
+            then Rewind records with exit time and prints the warning below. Runs still work and
+            still replay exactly. What changes is how the VM's clock moves.
           </li>
-          <li>
-            A thread that computes without system calls is never preempted. Races that need a switch
-            in the middle of pure computation are out of reach, and a thread spinning on a flag
-            another thread should set stalls the VM.
-          </li>
+          <li><code>rewind pmu status</code> says which clock your runs will use.</li>
         </ul>
-        <p>
-          With <strong>counter time</strong>, every exit also adds the work done since the previous
-          one. The host's performance counter counts the conditional branches the VM retires, and
-          each branch adds about a nanosecond. The count is read only at exits, which are fixed
-          points in the VM's instruction stream, so it is the same on every run, provided the
-          counter is exact. This is the counter rr uses.
-        </p>
-      </section>
-
-      <section class="step">
-        <h2 id="is-my-counter-exact">Is my counter exact?</h2>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind pmu status</span>
-cpu: Amd { family: 25 }
-amd workaround (MSR 0xc0011020 bit 54): not known to be set this boot
-perf_event_paranoid: 2
-self-test: 40045844 and 40045844 branches, exact at every exit
-the self-test agreed this time, but without the workaround this CPU's counter is not reliably exact; set it with `sudo rewind pmu enable`
-runs will use exit time; see https://rewindvm.dev/counter-time.html</code></pre>
-        <p>
-          <code>rewind pmu status</code> runs a small workload twice in the VM: threads adding to
-          one atomic variable, the pattern that trips the known miscount. It compares the count at
-          every exit. The result is cached for the current boot, and <code>rewind run</code>,
-          <code>nix</code> and <code>check</code> use it when <code>--clock auto</code>, the
-          default, decides.
-        </p>
-        <ul>
-          <li><strong>Intel:</strong> the counter is exact on the cores rr supports.</li>
-          <li>
-            <strong>AMD Zen (Ryzen, EPYC):</strong> the counter miscounts by a few branches in tens
-            of millions, around lock-prefixed instructions, because of a speculation feature. Tens
-            of millions of branches pass in a fraction of a second, so two runs of the same inputs
-            disagree almost at once. rr documents the same problem and its fix. The self-test cannot
-            catch this every time: its two runs sometimes agree by chance, as in the output above.
-            So on AMD, runs use counter time only when the workaround is known to be set, and the
-            self-test passes too.
-          </li>
-        </ul>
+        ><code>rewind: recording with exit time: this AMD CPU's branch counter is not exact until rr's workaround is set. ...</code></pre>
       </section>
 
       <section class="step">
-        <h2 id="turning-it-on-for-amd">Turning it on for AMD</h2>
+        <h2 id="what-the-two-clocks-do">What the two clocks do</h2>
+        <p>
+          Rewind sees the VM only at the points where the VM stops and hands control to Rewind: a
+          system call that reports a file or a process, a read of the clock, going idle. Each of
+          those points is a step. Steps happen at the same places in every run, so a clock that
+          moves only at steps is the same in every run.
+        </p>
+        <p>
+          <strong>Exit time</strong> moves the clock 5 microseconds per step. When nothing is
+          runnable, it jumps straight to the next timer, so <code>sleep 10</code> costs nothing.
+          Computation between steps takes no time at all: a program that computes for a second of
+          real time sees a few microseconds pass.
+        </p>
+        <p>
+          <strong>Counter time</strong> also adds the work done since the last step. Your CPU's
+          performance counter counts the conditional branches the VM's programs run, and each one
+          adds a nanosecond. Rewind reads the count only at steps, so it is the same in every run,
+          as long as the counter counts exactly.
+        </p>
+        <p>Building GNU hello in the VM shows the difference:</p>
+        <table class="times">
+          <thead>
+            <tr>
+              <th>Clock</th>
+              <th>Time inside the VM</th>
+              <th>Time on your machine</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Exit time</td>
+              <td>2.1 s</td>
+              <td>15.7 s</td>
+            </tr>
+            <tr>
+              <td>Counter time</td>
+              <td>11.7 s</td>
+              <td>14.2 s</td>
+            </tr>
+          </tbody>
+        </table>
+        <p>
+          With exit time, timing in code that computes is off. A check that some computation
+          finishes within a second always passes, and a timeout that should fire during a long
+          computation never does. Counter time gives such code a clock close to the real one.
+        </p>
+        <p>
+          With either clock, a thread gives up the CPU only at a step. A loop that spins waiting for
+          another thread, without making a system call, keeps the CPU and the run hangs. Locks,
+          sleeps and I/O all make system calls, so they are fine.
+        </p>
+      </section>
+
+      <section class="step">
+        <h2 id="why-amd-needs-a-setting">Why AMD needs a setting</h2>
+        <p>
+          Counter time needs the branch count to be the same on every run. On AMD Zen CPUs it is
+          not, out of the box: a speculation feature around locked instructions makes the counter
+          count a few extra branches, a few in tens of millions. A second of work is billions of
+          branches, so two runs disagree almost at once and a recording would not replay. rr, the
+          record and replay debugger, has the same problem and documents the same fix: set bit 54 of
+          the model-specific register <code>0xc0011020</code> on every CPU, which turns that
+          speculation off.
+        </p>
+        <p><code>sudo rewind pmu enable</code> makes that change:</p>
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> sudo rewind pmu enable</span>
-set the branch counter workaround on 16 CPUs, until reboot
-<span class="cmd"><span class="prompt">$</span> rewind pmu status</span></code></pre>
+set the branch counter workaround on 16 CPUs, until reboot</code></pre>
         <p>
-          This sets bit 54 of the <code>LS_CFG</code> model-specific register
-          (<code>0xc0011020</code>) on every CPU. That disables the speculation the counter
-          miscounts. It is the same change rr's <code>zen_workaround.py</code> makes, it needs root
-          because it writes MSRs through <code>/dev/cpu/*/msr</code>, and it lasts until you reboot.
-          Reading the MSRs needs root too, so the command also leaves a note for this boot in
-          <code>/run/rewind/amd-branch-workaround</code>, which is how runs as your own user know
-          the workaround is set. It changes how the CPU speculates around locked instructions for
-          everything on the machine; Rewind VM has not measured what that costs other programs.
+          It needs root, because it writes the register through <code>/dev/cpu/*/msr</code>, and it
+          lasts until you reboot. It changes how the CPU speculates for every program on the
+          machine; Rewind has not measured what that costs them. It also leaves a note in
+          <code>/run/rewind/amd-branch-workaround</code>. Reading the register back needs root too,
+          and the note is how Rewind, running as you, knows the setting is on.
         </p>
+      </section>
+
+      <section class="step">
+        <h2 id="checking">Checking</h2>
+        <pre
+          class="console"
+        ><code><span class="cmd"><span class="prompt">$</span> rewind pmu status</span>
+cpu: AMD Zen (family 25)
+amd workaround (MSR 0xc0011020 bit 54): set by `rewind pmu enable` this boot
+perf_event_paranoid: 2
+self-test: 40045844 and 40045844 branches, exact at every exit
+runs will use counter time</code></pre>
         <p>
-          To set it at every boot on NixOS, use the <code>programs.rewind</code> module from the
-          release tarball's flake:
+          The self-test runs a small program twice in the VM, threads adding to one shared number,
+          which is the pattern the miscount comes from, and compares the branch count at every step.
+          Rewind uses counter time when the self-test passes and, on AMD, the setting is on. On AMD
+          the self-test alone is not enough: without the setting, its two runs sometimes agree by
+          chance. Rewind remembers the verdict until the next boot, and
+          <code>rewind pmu status</code> runs the test again.
         </p>
+      </section>
+
+      <section class="step">
+        <h2 id="every-boot-on-nixos">Every boot on NixOS</h2>
+        <p>Use the <code>programs.rewind</code> module from the release tarball's flake:</p>
         <pre
           class="console"
         ><code>inputs.rewind.url = "https://rewindvm.dev/download/rewind-0.1.0-x86_64-linux.tar.gz";
@@ -143,16 +174,18 @@ programs.rewind.enable = true;
 programs.rewind.amdBranchCounterWorkaround = true;</code></pre>
         <p>
           The module loads the <code>msr</code> kernel module and runs
-          <code>rewind pmu enable</code> once at boot.
+          <code>rewind pmu enable</code> at boot.
         </p>
       </section>
 
       <section class="step">
-        <h2 id="choosing-explicitly">Choosing explicitly</h2>
+        <h2 id="choosing-yourself">Choosing yourself</h2>
         <p>
-          <code>--clock exits</code> and <code>--clock branches</code> override the self-test. A run
-          records which clock it used, and a replay uses the same one. A run made with counter time
-          replays exactly only where the counter is exact too.
+          <code>--clock exits</code> or <code>--clock branches</code> on <code>rewind run</code>,
+          <code>nix</code> or <code>check</code> overrides Rewind's choice. A run remembers its
+          clock and replays with it. A run recorded with counter time replays exactly only on a
+          machine whose counter is exact too; one recorded with exit time does not depend on the
+          counter.
         </p>
       </section>
     </main>

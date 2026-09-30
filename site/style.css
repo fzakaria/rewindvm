@@ -1154,6 +1154,25 @@ a.card:hover {
   margin-top: 1.9em;
   scroll-margin-top: 20px;
 }
+/* A small comparison table in an article, such as the two clocks. */
+.article table.times {
+  border-collapse: collapse;
+  margin: 18px 0;
+  font-size: 0.95rem;
+}
+.article table.times th,
+.article table.times td {
+  padding: 8px 16px 8px 0;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+}
+.article table.times th {
+  color: var(--muted);
+  font-weight: 500;
+}
+.article table.times td {
+  color: var(--soft);
+}
 .article .console,
 .article .shot {
   --bleed: min(960px, 100vw - 40px);

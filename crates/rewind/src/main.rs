@@ -580,7 +580,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             match action {
                 PmuAction::Enable => {
                     if !vendor.needs_workaround() {
-                        println!("{vendor:?}: no workaround needed");
+                        println!("{vendor}: no workaround needed");
                         return Ok(ExitCode::SUCCESS);
                     }
                     let n = rewind_core::pmu::enable_workaround()?;
@@ -588,7 +588,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     Ok(ExitCode::SUCCESS)
                 }
                 PmuAction::Status => {
-                    println!("cpu: {vendor:?}");
+                    println!("cpu: {vendor}");
                     let needs = vendor.needs_workaround();
                     let known = needs && rewind_core::pmu::workaround_known();
                     if needs {

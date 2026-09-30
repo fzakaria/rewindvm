@@ -83,6 +83,19 @@ impl Vendor {
     }
 }
 
+impl std::fmt::Display for Vendor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Vendor::Intel => write!(f, "Intel"),
+            Vendor::Amd { family } if *family >= AMD_ZEN_FAMILY => {
+                write!(f, "AMD Zen (family {family})")
+            }
+            Vendor::Amd { family } => write!(f, "AMD (family {family})"),
+            Vendor::Other(name) => write!(f, "{name}"),
+        }
+    }
+}
+
 /// The MSR device files, one per CPU.
 fn msr_devices() -> Result<Vec<PathBuf>> {
     let mut devices: Vec<PathBuf> = fs::read_dir("/dev/cpu")?
