@@ -27,6 +27,7 @@
         {
           inherit pkgs kernel guest;
           rewind = import ./nix/rewind.nix { inherit pkgs kernel guest; };
+          release = import ./nix/release.nix { inherit pkgs kernel guest; };
           site = import ./nix/site.nix { inherit pkgs; };
           examples = import ./nix/examples.nix { inherit pkgs; };
           app = import ./nix/app.nix { inherit pkgs; };
@@ -42,6 +43,9 @@
           # the rewind command with its guest (nix/rewind.nix)
           rewind = p.rewind;
           default = p.rewind;
+
+          # the tarball for people without Nix (nix/release.nix)
+          release = p.release;
 
           # the guest kernel with the Rewind platform (nix/kernel.nix)
           kernel = p.kernel;
