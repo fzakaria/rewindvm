@@ -53,7 +53,7 @@
       </p>
       <p>
         Every transcript below is real output from <code>rewind</code> 0.1.0 on a 16 core AMD
-        laptop.
+        laptop, with <code>sudo rewind pmu enable</code> run since boot.
       </p>
 
       <nav class="toc" aria-label="Steps">
@@ -82,7 +82,7 @@
 <span class="cmd"><span class="prompt">$</span> curl -L https://rewindvm.dev/download/rewind-0.1.0-x86_64-linux.tar.gz | tar -xz -C ~/.local/opt</span>
 <span class="cmd"><span class="prompt">$</span> ln -s ~/.local/opt/rewind-0.1.0-x86_64-linux/bin/rewind ~/.local/bin/rewind</span>
 <span class="cmd"><span class="prompt">$</span> ls -l /dev/kvm</span>
-crw-rw-rw- 1 root kvm 10, 232 Sep 30 15:38 /dev/kvm
+crw-rw-rw- 1 root kvm 10, 232 Sep 30 16:32 /dev/kvm
 <span class="cmd"><span class="prompt">$</span> sudo usermod -aG kvm $USER          # if /dev/kvm is not yours to use; log in again after</span></code></pre>
         <p>
           The tarball holds a static <code>rewind</code>, the VM's kernel and initramfs, and static
@@ -120,15 +120,19 @@ crw-rw-rw- 1 root kvm 10, 232 Sep 30 15:38 /dev/kvm
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind run --root mylib.tar --cwd /src -- make check</span>
-rewind: recording with exit time: this AMD CPU's branch counter is not exact until rr's workaround is set. Computation will not move the VM's clock, and a thread that computes without system calls is not preempted. Fix it with `sudo rewind pmu enable` (until reboot), then `rewind pmu status`. Why: https://rewindvm.dev/counter-time.html
 ...
 round 3: ok
 test_pool_shutdown: ok
-rewind: run 28ce179fd23930e4 exited:0 after 1361 steps, 0.018s virtual, 1.363s wall (poweroff)</code></pre>
+rewind: run 79283455177422d7 exited:0 after 1305 steps, 0.019s virtual, 1.448s wall (poweroff)</code></pre>
         <p>
-          The first line is there because this laptop's AMD branch counter is not exact, so the VM's
-          clock moves only at exits; <a href="../counter-time.html">Counter time</a> explains what
-          that changes and how to fix it, and the transcripts below leave the line out.
+          On AMD, until <code>sudo rewind pmu enable</code> has been run since boot,
+          <code>rewind</code> first prints a warning that begins
+          <code
+            >rewind: recording with exit time: this AMD CPU's branch counter is not exact until rr's
+            workaround is set.</code
+          >
+          and records with exit time, where the VM's clock does not follow the work done inside it.
+          <a href="../counter-time.html">Counter time</a> explains the difference.
         </p>
         <p>
           The tests pass, and they pass every time with this root and this command: runs in Rewind
@@ -142,50 +146,50 @@ rewind: run 28ce179fd23930e4 exited:0 after 1361 steps, 0.018s virtual, 1.363s w
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind check --root mylib.tar --cwd /src -- make check</span>
-schedule   0: exited:0             1361 steps    run 28ce179fd23930e4
-schedule   1: exited:0             1508 steps    run 7f3a578275a0fc8b
-schedule   2: exited:0             1522 steps    run 9e2c600973c4b6d5
-schedule   3: exited:2             1022 steps    run 622f538b82beff8a
-schedule   4: exited:2              773 steps    run ec6ddf5bf37d2ba3
-schedule   5: exited:2              987 steps    run 77961e97dc3fc005
-schedule   6: exited:0             1484 steps    run 1474c5c7dfb4f4e2
-schedule   7: exited:0             1495 steps    run 8c1d519e59569cf8
-schedule   8: exited:0             1441 steps    run f14ce2c3e58683ad
-schedule   9: exited:0             1471 steps    run 497396b1c64da60b
-schedule  10: exited:0             1505 steps    run 64abcf444d9c27c7
-schedule  11: exited:2             1458 steps    run 13fb38e56cad2d3f
-schedule  12: exited:2             1231 steps    run 9da1bb2998aae284
-schedule  13: exited:0             1456 steps    run 668a9b5916b7af00
-schedule  14: exited:0             1500 steps    run 59379d55ae78e2aa
-schedule  15: exited:0             1494 steps    run d6f1e55c173e1421
-schedule  16: exited:0             1492 steps    run a1acab0a27d446d0
+schedule   0: exited:0             1305 steps    run 79283455177422d7
+schedule   1: exited:0             1409 steps    run b9641e8d36ff0f51
+schedule   2: exited:2             1452 steps    run d42556e3360a5a9e
+schedule   3: exited:0             1416 steps    run e47b63db448c242a
+schedule   4: exited:0             1425 steps    run f49c5fde2c94bb15
+schedule   5: exited:0             1440 steps    run 6fbf8cf6d833ea44
+schedule   6: exited:0             1420 steps    run f52b4ec6878c9832
+schedule   7: exited:0             1435 steps    run 128275ec37380116
+schedule   8: exited:2              747 steps    run c63e17bb3cd4685c
+schedule   9: exited:0             1460 steps    run 97c9fd2b7b144fd2
+schedule  10: exited:0             1447 steps    run 3432e7f1a4e2037f
+schedule  11: exited:0             1436 steps    run 5178802e05c5904b
+schedule  12: exited:0             1523 steps    run ca8cac3ece9fd6a8
+schedule  13: exited:0             1469 steps    run d7bc5e7d18dfdf6e
+schedule  14: exited:0             1505 steps    run a1150ba93cf84fda
+schedule  15: exited:0             1462 steps    run b670f085515314f0
+schedule  16: exited:0             1474 steps    run f78c66b9ff7d4c33
 
-schedule 3 ends differently; narrowing the steps it perturbs
-perturbing only steps 541..976 still ends differently
+schedule 2 ends differently; narrowing the steps it perturbs
+perturbing only steps 298..1403 still ends differently
 
-passing: run 28ce179fd23930e4
-failing: run f225481037a971dd
+passing: run 79283455177422d7
+failing: run 789a563810bbe13c
 
 where ./tests/test_pool_shutdown first behaves differently:
-  both         551    38/40    write(1, "worker picked job 6\n")
-  both         554    38/39    write(1, "job 5 done: 45034\n")
-  both         555    38/39    write(1, "worker picked job 7\n")
-  left         566    38/39    write(1, "job 7 done: 5785\n")
-  left         567    38/39    write(1, "worker picked job 8\n")
-  left         575    38/40    write(1, "job 6 done: 13750\n")
-  left         576    38/40    write(1, "worker picked job 9\n")
-  right        567    38/40    write(1, "job 6 done: 13750\n")
-  right        568    38/40    write(1, "worker picked job 8\n")
-  right        577    38/40    write(1, "job 8 done: 21929\n")
-  right        578    38/40    write(1, "worker picked job 9\n")</code></pre>
+  both         507    38/39    write(1, "worker picked job 2\n")
+  both         517    38/40    write(1, "job 1 done: 35269\n")
+  both         518    38/40    write(1, "worker picked job 3\n")
+  left         527    38/40    write(1, "job 3 done: 58758\n")
+  left         528    38/40    write(1, "worker picked job 4\n")
+  left         536    38/39    write(1, "job 2 done: 30213\n")
+  left         537    38/39    write(1, "worker picked job 5\n")
+  right        571    38/40    write(1, "job 2 done: 30213\n")
+  right        572    38/40    write(1, "worker picked job 4\n")
+  right        579    38/39    write(1, "job 3 done: 58758\n")
+  right        580    38/39    write(1, "worker picked job 5\n")</code></pre>
         <p>
           <code>check</code> runs the command again under perturbed schedules, one machine per CPU
           at a time: at some points the VM's kernel is asked to reschedule, and timers fire a little
-          late, as timer slack does on real hardware. Schedule 3 is the first to make the test
-          crash, and 5 of the first 16 do. <code>check</code> narrows schedule 3's perturbation to
-          steps 541 to 976 and keeps that run. The last block shows where the test's own events
-          first differ: in the failing run the workers finish jobs 6 and 7 in the other order, and
-          the interleaving drifts from there until shutdown lands inside the unlocked window.
+          late, as timer slack does on real hardware. Schedules 2 and 8 make the test crash.
+          <code>check</code> narrows schedule 2's perturbation to steps 298 to 1403 and keeps that
+          run. The last block shows where the test's own events first differ: in the failing run the
+          workers finish jobs 2 and 3 in the other order, and the interleaving drifts from there
+          until shutdown lands inside the unlocked window.
         </p>
         <p>
           This took 6 seconds. <code>--all</code> tries every schedule and reports a failure rate:
@@ -193,32 +197,32 @@ where ./tests/test_pool_shutdown first behaves differently:
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind check --all --schedules 32 --root mylib.tar --cwd /src -- make check | grep 'ended differently'</span>
-11 of 32 perturbed schedules ended differently</code></pre>
+2 of 32 perturbed schedules ended differently</code></pre>
       </section>
 
       <section class="step">
         <h2 id="look-at-it-and-keep-it">Look at it, and keep it</h2>
         <p>
-          The failing run's last output, the processes alive at its SIGSEGV (step 980, which
-          <code>rewind events f2254810</code> shows), and a replay:
+          The failing run's last output, the processes alive at its SIGSEGV (step 1407, which
+          <code>rewind events 789a5638</code> shows), and a replay:
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind log f2254810 --steps | tail -3</span>
-       975    38  job 17 done: 43360
-       997    34  Segmentation fault
-      1001    33  make: *** [Makefile:18: check] Error 1
+        ><code><span class="cmd"><span class="prompt">$</span> rewind log 789a5638 --steps | tail -3</span>
+      1402    38  job 16 done: 5986
+      1426    34  Segmentation fault
+      1430    33  make: *** [Makefile:18: check] Error 1
 
-<span class="cmd"><span class="prompt">$</span> rewind ps f2254810 --at 980</span>
+<span class="cmd"><span class="prompt">$</span> rewind ps 789a5638 --at 1407</span>
      1 /init
     33   make check
     34     /bin/sh -c for t in tests/test_pool_basic tests/test_pool_shutdown; do echo "running $t"; ./$t || exit 1; done
     38       ./tests/test_pool_shutdown
-    41         (thread)
-    42         (thread)
+    45         (thread)
+    46         (thread)
 
-<span class="cmd"><span class="prompt">$</span> rewind replay f2254810</span>
-identical: 324 events over 1011 steps</code></pre>
+<span class="cmd"><span class="prompt">$</span> rewind replay 789a5638</span>
+identical: 393 events over 1442 steps</code></pre>
         <p>
           <code>replay</code> runs the failing run's inputs again and checks every event comes out
           the same, at the same step. The failure is now a directory you can keep and bring back
@@ -228,7 +232,7 @@ identical: 324 events over 1011 steps</code></pre>
         <p>To scrub it in the desktop app:</p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind-app ~/.local/share/rewind/runs/f225481037a971dd --compare ~/.local/share/rewind/runs/28ce179fd23930e4</span></code></pre>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind-app ~/.local/share/rewind/runs/789a563810bbe13c --compare ~/.local/share/rewind/runs/79283455177422d7</span></code></pre>
       </section>
 
       <section class="step">
