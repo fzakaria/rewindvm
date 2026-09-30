@@ -1,9 +1,12 @@
 [package]
 name = "rewind-init"
 description = "The Rewind VM guest's init, and the job it runs"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+# Built on its own, static against musl, by nix/guest.nix.
+[workspace]
 
 [[bin]]
 name = "rewind-init"

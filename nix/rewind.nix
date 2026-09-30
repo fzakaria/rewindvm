@@ -14,13 +14,18 @@ let
     pname = "rewind";
     version = "0.1.0";
     # The engine's workspace without the desktop app, which is a workspace
-    # of its own.
+    # of its own, and without build directories.
     src = lib.fileset.toSource {
       root = ../.;
       fileset = lib.fileset.unions [
         ../Cargo.toml
         ../Cargo.lock
-        (lib.fileset.difference ../crates ../crates/rewind-app)
+        (lib.fileset.difference ../crates (
+          lib.fileset.unions [
+            ../crates/rewind-app
+            (lib.fileset.maybeMissing ../crates/rewind-init/target)
+          ]
+        ))
       ];
     };
     cargoLock.lockFile = ../Cargo.lock;

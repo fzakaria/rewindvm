@@ -11,14 +11,14 @@
 let
   inherit (pkgs) lib;
 
-  # The engine's workspace without the desktop app, which is a workspace
-  # of its own with its own build directory.
+  # The init is a workspace of its own, so nothing else in the tree
+  # changes its source.
   src = lib.fileset.toSource {
-    root = ../.;
+    root = ../crates/rewind-init;
     fileset = lib.fileset.unions [
-      ../Cargo.toml
-      ../Cargo.lock
-      (lib.fileset.difference ../crates ../crates/rewind-app)
+      ../crates/rewind-init/Cargo.toml
+      ../crates/rewind-init/Cargo.lock
+      ../crates/rewind-init/src
     ];
   };
 
@@ -26,15 +26,7 @@ let
     pname = "rewind-init";
     version = "0.1.0";
     inherit src;
-    cargoLock.lockFile = ../Cargo.lock;
-    cargoBuildFlags = [
-      "-p"
-      "rewind-init"
-    ];
-    cargoTestFlags = [
-      "-p"
-      "rewind-init"
-    ];
+    cargoLock.lockFile = ../crates/rewind-init/Cargo.lock;
     meta.mainProgram = "rewind-init";
   };
 

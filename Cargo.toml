@@ -1,15 +1,17 @@
 # The open engine. The desktop app is a separate workspace under
 # crates/rewind-app, so its dependencies and license stay out of this one.
+# The guest's init is a workspace of its own too, so the guest is rebuilt
+# only when the init changes, not with every change to the engine.
 [workspace]
 resolver = "3"
 members = [
     "crates/rewind",
     "crates/rewind-core",
-    "crates/rewind-init",
+    "crates/rewind-store",
     "crates/rewind-trace",
     "crates/rewind-vmm",
 ]
-exclude = ["crates/rewind-app"]
+exclude = ["crates/rewind-app", "crates/rewind-init"]
 
 [workspace.package]
 version = "0.1.0"
