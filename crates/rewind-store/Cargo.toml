@@ -1,0 +1,13 @@
+[package]
+name = "rewind-store"
+description = "A content-addressed store for the pages of Rewind VM keyframes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = "1"
+blake3 = "1"
+# Per-page compression; guest pages are mostly sparse.
+zstd = "0.13"
+libc = "0.2"
