@@ -59,6 +59,8 @@ pub struct Config {
     pub quantum: u64,
     /// Where to ask the guest to reschedule; see [`pv::Schedule`].
     pub schedule: Schedule,
+    /// The CPU the guest is shown.
+    pub cpu: cpu::Model,
 }
 
 /// Why a run stopped.
@@ -166,7 +168,7 @@ impl Machine {
         };
 
         let vcpu = vm.create_vcpu(0).context("creating the vCPU")?;
-        vcpu.set_cpuid2(&cpu::cpuid(&kvm)?)?;
+        vcpu.set_cpuid2(&cpu::cpuid(&kvm, config.cpu)?)?;
 
         Ok(Machine {
             kvm,

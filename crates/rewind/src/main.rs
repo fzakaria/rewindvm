@@ -38,6 +38,10 @@ struct MachineArgs {
     /// unperturbed one.
     #[arg(long, default_value_t = 0)]
     schedule_from: u64,
+    /// The CPU the guest sees: a fixed x86-64-v3 model that replays on
+    /// any host supporting it, or the host's own features.
+    #[arg(long, value_enum, default_value_t = CpuArg::V3)]
+    cpu: CpuArg,
     /// The step after which no more reschedules are asked.
     #[arg(long, default_value_t = u64::MAX)]
     schedule_until: u64,
@@ -61,6 +65,21 @@ struct MachineArgs {
     /// messages in the trace.
     #[arg(long, default_value = "")]
     kernel_args: String,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy)]
+enum CpuArg {
+    V3,
+    Host,
+}
+
+impl From<CpuArg> for rewind_vmm::cpu::Model {
+    fn from(c: CpuArg) -> Self {
+        match c {
+            CpuArg::V3 => rewind_vmm::cpu::Model::V3,
+            CpuArg::Host => rewind_vmm::cpu::Model::Host,
+        }
+    }
 }
 
 /// A command in a root filesystem, for `run` and `check`.
@@ -727,6 +746,7 @@ fn execute_spec(
         schedule: machine.schedule,
         schedule_from: machine.schedule_from,
         schedule_until: machine.schedule_until,
+        cpu: machine.cpu.into(),
         cmdline: format!("{BASE_CMDLINE} {}", machine.kernel_args)
             .trim()
             .to_string(),

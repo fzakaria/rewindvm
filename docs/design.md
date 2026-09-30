@@ -33,20 +33,20 @@ breaks determinism is everything that reaches the guest from outside that
 stream of instructions. Each such source is removed or replaced with a value
 the monitor controls.
 
-| Source                | What a normal VM does                                               | What Rewind VM does                                                                                          |
-| --------------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| Interrupts            | A timer or device interrupts the guest whenever the host gets to it | Only one interrupt exists, and the monitor sends it only while the vCPU is stopped at an exit the guest made |
-| Time                  | TSC, kvmclock, HPET and the PIT read host time                      | The monitor's virtual clock, read through a port. No PIT or HPET, TSC and kvmclock hidden                    |
-| Idle                  | `HLT` waits for the next interrupt                                  | The idle routine writes a port; the monitor jumps virtual time to the armed timer                            |
-| `RDTSC` in the kernel | Read directly                                                       | `random_get_entropy()` and `get_cycles()` in a Rewind kernel respect the missing CPUID bit                   |
-| `RDTSC` in user space | Read directly                                                       | CR4.TSD is set for every task, and the kernel emulates the instruction with virtual time                     |
-| Randomness            | `RDRAND`, `RDSEED`, interrupt timing                                | Hidden in CPUID. The kernel's RNG is seeded from a 32-byte seed the monitor passes at boot                   |
-| KASLR                 | Picks addresses from `RDRAND` and the TSC                           | Built without it                                                                                             |
-| Jitter entropy        | Samples the cycle counter a million times at boot                   | Gets a splitmix64 sequence, which is free and the same every run                                             |
-| CPUID                 | The host's topology and features                                    | The host's features, minus the above, and one CPU with one thread                                            |
-| Scheduler clock       | TSC, or jiffies without one                                         | The virtual clock, from a shared page the monitor refreshes at every exit                                    |
-| Devices               | Timers, disks and NICs complete work on their own schedule          | No asynchronous devices. The input image is memory-mapped, and output is a port write                        |
-| Host scheduling       | Invisible to the guest                                              | Also invisible: a host interrupt or preemption causes a VM exit the guest cannot observe                     |
+| Source                | What a normal VM does                                               | What Rewind VM does                                                                                                                  |
+| --------------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| Interrupts            | A timer or device interrupts the guest whenever the host gets to it | Only one interrupt exists, and the monitor sends it only while the vCPU is stopped at an exit the guest made                         |
+| Time                  | TSC, kvmclock, HPET and the PIT read host time                      | The monitor's virtual clock, read through a port. No PIT or HPET, TSC and kvmclock hidden                                            |
+| Idle                  | `HLT` waits for the next interrupt                                  | The idle routine writes a port; the monitor jumps virtual time to the armed timer                                                    |
+| `RDTSC` in the kernel | Read directly                                                       | `random_get_entropy()` and `get_cycles()` in a Rewind kernel respect the missing CPUID bit                                           |
+| `RDTSC` in user space | Read directly                                                       | CR4.TSD is set for every task, and the kernel emulates the instruction with virtual time                                             |
+| Randomness            | `RDRAND`, `RDSEED`, interrupt timing                                | Hidden in CPUID. The kernel's RNG is seeded from a 32-byte seed the monitor passes at boot                                           |
+| KASLR                 | Picks addresses from `RDRAND` and the TSC                           | Built without it                                                                                                                     |
+| Jitter entropy        | Samples the cycle counter a million times at boot                   | Gets a splitmix64 sequence, which is free and the same every run                                                                     |
+| CPUID                 | The host's topology and features                                    | A fixed x86-64-v3 CPU: the same features, cache sizes, family and address widths on every host (see [The CPU model](#the-cpu-model)) |
+| Scheduler clock       | TSC, or jiffies without one                                         | The virtual clock, from a shared page the monitor refreshes at every exit                                                            |
+| Devices               | Timers, disks and NICs complete work on their own schedule          | No asynchronous devices. The input image is memory-mapped, and output is a port write                                                |
+| Host scheduling       | Invisible to the guest                                              | Also invisible: a host interrupt or preemption causes a VM exit the guest cannot observe                                             |
 
 Determinism is checked rather than assumed. `rewind replay` runs a run's
 inputs again and compares every event and its step. A busybox workload with
@@ -118,6 +118,28 @@ stamps it with the step.
 | Signal               | Signal, `si_code`, and the fault address                        |
 | Open, Unlink, Rename | Paths of files opened for writing, removed or renamed           |
 | Mark                 | A line written to `/dev/rewind`                                 |
+
+### The CPU model
+
+Software picks code paths by the CPU it sees. glibc chooses its string
+functions by the vector extensions and cache sizes CPUID reports, and the
+kernel chooses mitigations by the CPU's known bugs. A run made on one CPU
+therefore takes different steps on another. By default the guest sees a fixed
+CPU instead of the host's:
+
+- x86-64-v3 features (AVX2, BMI, FMA, MOVBE), plus AES, PCLMULQDQ, ERMS,
+  FSGSBASE and INVPCID, which Haswell and Zen 2 onward all have;
+- no AVX-512, SHA, protection keys or speculation control bits;
+- an XSAVE area of exactly x87, SSE and AVX state;
+- a fixed family, model and brand string per vendor, fixed cache sizes, and
+  39 physical and 48 virtual address bits.
+
+A host that lacks any of it refuses the run and names the missing bits. The
+model is part of a run's inputs, and `--cpu host` shows the host's features
+instead, for hosts older than the baseline. The guest boots with
+`mitigations=off`. Its processes need no protection from each other, and KVM
+still guards the host. With the fixed CPU, the mitigations the kernel had
+chosen more than doubled a build's time.
 
 ### The monitor
 
@@ -210,7 +232,7 @@ keyframe checked this way reproduces the rest of its run exactly.
 
 | Workload                      | Steps | Wall time | With keyframes | Keyframes | New pages stored |
 | ----------------------------- | ----- | --------- | -------------- | --------- | ---------------- |
-| GNU hello, full nixpkgs build | 86712 | 11.9 s    | 15.8 s         | 58        | 165 MB           |
+| GNU hello, full nixpkgs build | 86693 | 11.7 s    | 15.8 s         | 58        | 165 MB           |
 | mylib, full nixpkgs build     | 5115  | 0.6 s     | 1.4 s          | 4         | 51 MB            |
 
 For comparison, `nix build --rebuild nixpkgs#hello` takes 14.3 s on the same
@@ -290,11 +312,10 @@ Two earlier designs did not work, and why is worth keeping.
 - **One vCPU.** Threads interleave but never run at the same instant.
   Throughput comes from running many machines at once, one per core, which
   `check` could do in parallel and does not yet.
-- **The host CPU is part of the input.** CPUID passes the host's instruction
-  set extensions through. glibc picks string functions by them, so the same
-  run on a CPU with different extensions takes different steps. Replays are
-  exact on the machine that made the run, and on machines with the same CPU
-  model. Pinning a CPUID baseline would lift this, at some cost in speed.
+- **The CPU vendor is part of the input.** The fixed CPU model keeps the
+  host's vendor, since Intel and AMD differ in ways CPUID cannot hide, so a
+  run made on AMD replays on any AMD host from Zen 2 on but not on Intel,
+  and the other way around.
 - **User-space RDRAND and RDSEED** still work if a program executes them
   without checking CPUID. KVM does not let the monitor trap them. Hardly any
   program does this.
@@ -348,7 +369,6 @@ the cooperative deterministic hypervisor described at
 - **Exporting runs.** A single file holding the manifest, trace, keyframes
   and the pages they reference, to attach to an issue.
 - **Parallel `check`**, one machine per core.
-- **A pinned CPUID baseline**, so runs replay across CPU models.
 - **Work-proportional time** once a counter is exact, or with rr's AMD
   workaround where the user can apply it.
 - **More than one vCPU**, serialized, as the Red Vice design does.

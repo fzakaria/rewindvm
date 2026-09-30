@@ -29,8 +29,13 @@ const MANIFEST_VERSION: u32 = 1;
 /// kernel from waiting on hardware time. loglevel=7 sends informational
 /// messages to the console, and so into the trace, the segfault report
 /// with its instruction pointer among them: a message reaches the console
-/// only when its level is below the loglevel.
-pub const BASE_CMDLINE: &str = "nolapic_timer lpj=1000000 panic=-1 rdinit=/init loglevel=7";
+/// only when its level is below the loglevel. mitigations=off because the
+/// guest's processes need no protection from each other, KVM still guards
+/// the host, and a kernel that picks mitigations by the CPU's bugs would
+/// take different code paths on different hosts; with the fixed CPU model
+/// the mitigations it picked more than doubled a build's time.
+pub const BASE_CMDLINE: &str =
+    "nolapic_timer lpj=1000000 panic=-1 rdinit=/init loglevel=7 mitigations=off";
 
 /// Nanoseconds of virtual time per exit: about what a system call and a
 /// context switch cost on current hardware, which is what an exit stands
@@ -73,12 +78,20 @@ pub struct Spec {
     pub schedule_from: u64,
     #[serde(default = "forever")]
     pub schedule_until: u64,
+    /// The CPU the guest is shown. Runs from before this field showed the
+    /// host's.
+    #[serde(default = "host_cpu")]
+    pub cpu: rewind_vmm::cpu::Model,
     pub cmdline: String,
     pub job: Job,
 }
 
 fn forever() -> u64 {
     u64::MAX
+}
+
+fn host_cpu() -> rewind_vmm::cpu::Model {
+    rewind_vmm::cpu::Model::Host
 }
 
 /// What kind of workload a run is, for display.
@@ -156,6 +169,7 @@ impl Spec {
                 seed: self.schedule,
                 window: self.schedule_from..self.schedule_until,
             },
+            cpu: self.cpu,
         })
     }
 }

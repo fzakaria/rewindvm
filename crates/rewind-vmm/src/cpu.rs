@@ -177,8 +177,178 @@ pub const SIGNATURE: &[u8; 12] = b"RewindRewind";
 
 const HYPERVISOR_LEAF: u32 = 0x4000_0000;
 
+/// The CPU a guest is shown.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Model {
+    /// The host's features, less the ones that break determinism. A run
+    /// made this way replays only on the same CPU model: software picks
+    /// code paths by the features it sees.
+    Host,
+    /// A fixed x86-64-v3 CPU: the same features, cache sizes, family and
+    /// address widths on every host that supports them, so a run replays
+    /// across machines.
+    #[default]
+    V3,
+}
+
+/// The host's CPUID shaped for a deterministic guest of the given model.
+pub fn cpuid(kvm: &Kvm, model: Model) -> Result<CpuId> {
+    let host = host_cpuid(kvm)?;
+    match model {
+        Model::Host => CpuId::from_entries(&host).context("building CPUID"),
+        Model::V3 => {
+            let entries = baseline(&host)?;
+            CpuId::from_entries(&entries).context("building CPUID")
+        }
+    }
+}
+
+/// The feature bits the baseline keeps, by leaf, subleaf and register.
+/// x86-64-v3, plus AES, PCLMULQDQ, ERMS, FSGSBASE and INVPCID, which
+/// Haswell and Zen 2 onward all have.
+mod v3 {
+    // OSXSAVE (bit 27) is left out: KVM sets it itself from the guest's
+    // CR4.
+    pub const LEAF1_ECX: u32 = bits(&[0, 1, 9, 12, 13, 19, 20, 22, 23, 25, 26, 28, 29]);
+    pub const LEAF1_EDX: u32 = bits(&[
+        0, 1, 2, 3, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 16, 17, 19, 23, 24, 25, 26,
+    ]);
+    pub const LEAF7_EBX: u32 = bits(&[0, 3, 5, 7, 8, 9, 10]);
+    pub const EXT1_ECX: u32 = bits(&[0, 5, 8]);
+    pub const EXT1_EDX: u32 = bits(&[11, 20, 26, 29]);
+
+    /// XSAVE components: x87, SSE and AVX.
+    pub const XCR0: u32 = 0b111;
+    /// The standard XSAVE area with those three: 512 legacy bytes, a 64
+    /// byte header, and 256 bytes of AVX upper halves.
+    pub const XSAVE_SIZE: u32 = 832;
+    /// XSAVEOPT only: compacted formats would change the kernel's layout.
+    pub const XSAVE_LEAF1_EAX: u32 = 1;
+
+    /// The highest basic and extended leaves the baseline describes.
+    pub const MAX_BASIC: u32 = 0xd;
+    pub const MAX_EXTENDED: u32 = 0x8000_0008;
+
+    /// 39 physical and 48 virtual address bits, which every v3 CPU covers.
+    pub const ADDRESS_BITS: u32 = (48 << 8) | 39;
+
+    /// Family, model and stepping, per vendor: Zen 2 and Haswell, the
+    /// first v3 cores of each.
+    pub const SIGNATURE_AMD: u32 = 0x0083_0f10;
+    pub const SIGNATURE_INTEL: u32 = 0x0003_06c3;
+
+    /// Cache sizes, in AMD's leaf 0x80000005 and 0x80000006 formats, which
+    /// glibc reads to size its copy strategies: 32 KiB 8-way L1s, a 512
+    /// KiB 8-way L2 and a 16 MiB L3, all with 64 byte lines.
+    pub const L1: u32 = (32 << 24) | (8 << 16) | (1 << 8) | 64;
+    pub const L2: u32 = (512 << 16) | (0x6 << 12) | (1 << 8) | 64;
+    pub const L3: u32 = (32 << 18) | (0x8 << 12) | (1 << 8) | 64;
+
+    pub const BRAND: &[u8; 48] =
+        b"Rewind VM x86-64-v3 virtual CPU\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
+
+    const fn bits(list: &[u32]) -> u32 {
+        let mut v = 0;
+        let mut i = 0;
+        while i < list.len() {
+            v |= 1 << list[i];
+            i += 1;
+        }
+        v
+    }
+}
+
+/// The baseline model from the host's shaped CPUID. Fails when the host
+/// lacks a feature the baseline promises.
+fn baseline(host: &[kvm_cpuid_entry2]) -> Result<Vec<kvm_cpuid_entry2>> {
+    let find = |f: u32, i: u32| {
+        host.iter()
+            .find(|e| e.function == f && e.index == i)
+            .copied()
+    };
+    let require = |have: u32, want: u32, what: &str| -> Result<()> {
+        let missing = want & !have;
+        if missing != 0 {
+            anyhow::bail!(
+                "this CPU lacks the x86-64-v3 baseline's {what} bits {missing:#x}; run with --cpu host"
+            );
+        }
+        Ok(())
+    };
+    let leaf0 = find(0, 0).context("no CPUID leaf 0")?;
+    let amd = leaf0.ebx == u32::from_le_bytes(*b"Auth");
+    let leaf1 = find(1, 0).context("no CPUID leaf 1")?;
+    let leaf7 = find(7, 0).unwrap_or_default();
+    let ext1 = find(0x8000_0001, 0).unwrap_or_default();
+    require(leaf1.ecx, v3::LEAF1_ECX, "leaf 1 ECX")?;
+    require(leaf1.edx, v3::LEAF1_EDX, "leaf 1 EDX")?;
+    require(leaf7.ebx, v3::LEAF7_EBX, "leaf 7 EBX")?;
+    require(ext1.ecx, v3::EXT1_ECX, "leaf 0x80000001 ECX")?;
+    require(ext1.edx, v3::EXT1_EDX, "leaf 0x80000001 EDX")?;
+
+    let entry =
+        |function: u32, index: u32, eax: u32, ebx: u32, ecx: u32, edx: u32| kvm_cpuid_entry2 {
+            function,
+            index,
+            flags: find(function, index).map_or(0, |e| e.flags),
+            eax,
+            ebx,
+            ecx,
+            edx,
+            ..Default::default()
+        };
+    let signature = if amd {
+        v3::SIGNATURE_AMD
+    } else {
+        v3::SIGNATURE_INTEL
+    };
+    let brand = |i: usize| u32::from_le_bytes(v3::BRAND[i * 4..i * 4 + 4].try_into().unwrap());
+
+    let mut out = vec![
+        entry(0, 0, v3::MAX_BASIC, leaf0.ebx, leaf0.ecx, leaf0.edx),
+        // One logical processor, APIC ID 0, 64 byte cache lines.
+        entry(
+            1,
+            0,
+            signature,
+            (1 << 16) | (8 << 8),
+            v3::LEAF1_ECX | (1 << 31),
+            v3::LEAF1_EDX,
+        ),
+        entry(7, 0, 0, v3::LEAF7_EBX, 0, 0),
+        entry(0xd, 0, v3::XCR0, v3::XSAVE_SIZE, v3::XSAVE_SIZE, 0),
+        entry(0xd, 1, v3::XSAVE_LEAF1_EAX, 0, 0, 0),
+        entry(
+            0x8000_0000,
+            0,
+            v3::MAX_EXTENDED,
+            leaf0.ebx,
+            leaf0.ecx,
+            leaf0.edx,
+        ),
+        entry(0x8000_0001, 0, 0, 0, v3::EXT1_ECX, v3::EXT1_EDX),
+        entry(0x8000_0002, 0, brand(0), brand(1), brand(2), brand(3)),
+        entry(0x8000_0003, 0, brand(4), brand(5), brand(6), brand(7)),
+        entry(0x8000_0004, 0, brand(8), brand(9), brand(10), brand(11)),
+        entry(0x8000_0005, 0, 0, 0, v3::L1, v3::L1),
+        entry(0x8000_0006, 0, 0, 0, v3::L2, v3::L3),
+        entry(0x8000_0008, 0, v3::ADDRESS_BITS, 0, 0, 0),
+    ];
+    // The AVX component's size and offset, as the host reports them; they
+    // are architectural.
+    if let Some(avx) = find(0xd, 2) {
+        out.push(avx);
+    }
+    out.extend(
+        host.iter()
+            .filter(|e| e.function >= HYPERVISOR_LEAF && e.function < 0x5000_0000),
+    );
+    Ok(out)
+}
+
 /// The host's CPUID, filtered down to what a deterministic guest may see.
-pub fn cpuid(kvm: &Kvm) -> Result<CpuId> {
+fn host_cpuid(kvm: &Kvm) -> Result<Vec<kvm_cpuid_entry2>> {
     let supported = kvm.get_supported_cpuid(kvm_bindings::KVM_MAX_CPUID_ENTRIES)?;
     let mut entries: Vec<kvm_cpuid_entry2> = supported
         .as_slice()
@@ -267,6 +437,5 @@ pub fn cpuid(kvm: &Kvm) -> Result<CpuId> {
         function: HYPERVISOR_LEAF + 1,
         ..Default::default()
     });
-
-    CpuId::from_entries(&entries).context("building CPUID")
+    Ok(entries)
 }
