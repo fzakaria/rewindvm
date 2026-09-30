@@ -33,12 +33,7 @@
         <a href="#workloads">Nix and containers</a>
         <a href="#tutorials">Tutorials</a>
         <a href="#pricing">Pricing</a>
-        <a
-          class="btn small"
-          href="mailto:tacos@lunchtimesurf.com?subject=Rewind%20VM%20early%20access"
-        >
-          Get early access
-        </a>
+        <a class="btn small" href="#download">Download</a>
       </nav>
     </header>
 
@@ -54,17 +49,12 @@
             there.
           </p>
           <div class="cta-row">
-            <a
-              class="btn"
-              href="mailto:tacos@lunchtimesurf.com?subject=Rewind%20VM%20early%20access"
-            >
-              Get early access
-            </a>
-            <span class="soon">Coming soon</span>
+            <a class="btn" href="#download">Download</a>
+            <span class="soon">v0.1.0 &middot; x86_64 Linux</span>
           </div>
           <p class="fine">
-            The engine and CLI are open source under the MIT license. The desktop app is $49 for
-            personal use and free to evaluate.
+            The engine and CLI are free under the MIT license. The desktop app is $49 for personal
+            use and free to evaluate.
           </p>
         </div>
 
@@ -429,6 +419,40 @@
         </div>
       </section>
 
+      <section class="wrap download" id="download">
+        <h2>Download</h2>
+        <p class="lede">
+          One tarball for x86_64 Linux with KVM. It holds the <code>rewind</code> command, the guest
+          kernel and everything it needs to build input images, so the host needs nothing else.
+        </p>
+        <pre
+          class="term"
+        ><code><span class="prompt">$</span> curl -LO https://rewindvm.dev/download/rewind-0.1.0-x86_64-linux.tar.gz
+<span class="prompt">$</span> tar xzf rewind-0.1.0-x86_64-linux.tar.gz
+<span class="prompt">$</span> ./rewind-0.1.0-x86_64-linux/bin/rewind pmu status</code></pre>
+        <p>
+          With Nix, the same URL is a flake. Try it with <code>nix run</code>, or keep it with
+          <code>nix profile install</code>:
+        </p>
+        <pre
+          class="term"
+        ><code><span class="prompt">$</span> nix run https://rewindvm.dev/download/rewind-0.1.0-x86_64-linux.tar.gz -- pmu status
+<span class="prompt">$</span> nix profile install https://rewindvm.dev/download/rewind-0.1.0-x86_64-linux.tar.gz</code></pre>
+        <p>On NixOS, add it as a flake input and turn on the module:</p>
+        <pre
+          class="term"
+        ><code>inputs.rewind.url = "https://rewindvm.dev/download/rewind-0.1.0-x86_64-linux.tar.gz";
+
+# in your configuration, with inputs.rewind.nixosModules.default imported
+programs.rewind.enable = true;
+# AMD only: make the branch counter exact at every boot
+programs.rewind.amdBranchCounterWorkaround = true;</code></pre>
+        <p class="note">
+          If <code>/dev/kvm</code> is not readable and writable by you, add yourself to the
+          <code>kvm</code> group.
+        </p>
+      </section>
+
       <section class="wrap pricing" id="pricing">
         <h2>Pricing</h2>
         <p class="lede">
@@ -447,7 +471,7 @@
               <li>
                 <code>rewind run</code>, <code>rewind nix</code> and <code>rewind check</code>
               </li>
-              <li>Open source, for any use</li>
+              <li>Free, for any use</li>
             </ul>
           </div>
           <div class="plan pro">
@@ -479,35 +503,27 @@
           <a href="refunds.html">refund policy</a>.
         </p>
         <p class="note" id="buy">
-          Rewind VM is in early access and checkout is not open yet.
-          <a href="mailto:tacos@lunchtimesurf.com?subject=Rewind%20VM%20early%20access">Email us</a>
-          to get on the list.
+          Checkout for the desktop app is not open yet. The engine and CLI are free to
+          <a href="#download">download</a> now. To hear when the app ships, write to
+          <a href="mailto:tacos@lunchtimesurf.com">tacos@lunchtimesurf.com</a>.
         </p>
       </section>
 
       <section class="wrap caution">
-        <h2>Limits, today</h2>
-        <p>
-          Computation between exits is free, and CPU-bound threads are not preempted. A thread
-          spinning on a flag without yielding stalls the guest; futex-based waits are fine.
-        </p>
-        <p>
-          One vCPU. Threads interleave but never run at the same instant, so a race between plain
-          loads and stores with no system call between them is out of reach. Throughput comes from
-          running many machines at once.
-        </p>
-        <p>
-          The host CPU model is part of the input. A run replays exactly on the machine that made it
-          and on machines with the same CPU model.
-        </p>
-        <p>No network, other than loopback.</p>
-        <p>
-          x86_64 Linux hosts with KVM only. The
-          <a href="https://github.com/fzakaria/rewind/blob/main/docs/design.md#limits"
-            >design notes</a
-          >
-          have the details.
-        </p>
+        <h2>Limits</h2>
+        <ul>
+          <li>Linux on x86_64 with KVM.</li>
+          <li>
+            One virtual CPU. Your threads take turns, and speed comes from running many machines at
+            once.
+          </li>
+          <li>
+            A loop that spins without a system call is never interrupted. Locks, sleeps and I/O are
+            fine.
+          </li>
+          <li>A run replays on other recent machines with the same CPU vendor, Intel or AMD.</li>
+          <li>No network, other than loopback.</li>
+        </ul>
       </section>
     </main>
 

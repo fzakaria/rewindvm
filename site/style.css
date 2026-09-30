@@ -788,6 +788,18 @@ a:focus-visible {
   font-size: 0.97rem;
 }
 
+/* Download */
+.download .term {
+  max-width: 100%;
+}
+.download > p {
+  color: var(--soft);
+  max-width: 46em;
+}
+.download .note {
+  color: var(--muted);
+}
+
 /* Pricing */
 .note {
   color: var(--muted);
@@ -849,9 +861,14 @@ a:focus-visible {
   padding-block: 8px;
   margin-block: 16px 72px;
 }
-.caution p {
+.caution ul {
+  margin: 0;
+  padding-left: 1.2em;
+}
+.caution li {
   color: var(--soft);
   max-width: 46em;
+  margin-block: 6px;
 }
 
 /* Footer */
