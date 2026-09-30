@@ -1,0 +1,28 @@
+# The Rewind desktop app: the scrubber over a recorded run.
+#
+# A workspace of its own, so its dependencies and its license stay out of the
+# engine's workspace at the repository root, which excludes this directory.
+[package]
+name = "rewind-app"
+description = "The Rewind VM desktop app: scrub, compare and fork recorded runs"
+version = "0.1.0"
+edition = "2024"
+license = "LicenseRef-Proprietary"
+publish = false
+
+[workspace]
+
+[dependencies]
+anyhow = "1"
+# GPUI, Zed's UI framework, as published from zed@1a28cff under the gpui-pre
+# name. The crates.io `gpui` release is a year behind and renders through
+# blade on Linux; gpui-pre renders through wgpu on Wayland and X11.
+gpui = { package = "gpui-pre", version = "=0.3.7" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.7", features = ["wayland", "x11"] }
+rewind-trace = { path = "../rewind-trace" }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+debug = "line-tables-only"

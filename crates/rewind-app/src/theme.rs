@@ -1,0 +1,208 @@
+//! Colors, fonts and sizes of the scrubber, taken from the product design
+//! (the Scrubber mockup and the site's palette in site/style.css).
+//!
+//! Colors are 0xRRGGBB words for `gpui::rgb`, or 0xRRGGBBAA words for
+//! `gpui::rgba` where the name ends in `_A`.
+
+/// The window behind everything.
+pub const BG: u32 = 0x0e1013;
+/// Panels and the header bar.
+pub const PANEL: u32 = 0x121418;
+/// Cards and buttons raised over a panel.
+pub const RAISED: u32 = 0x171a1f;
+/// Borders between the header, the timeline and the panels.
+pub const LINE: u32 = 0x262a31;
+/// Button borders.
+pub const LINE_2: u32 = 0x2f343c;
+/// The rule under a panel title.
+pub const LINE_SOFT: u32 = 0x1f2329;
+
+/// Body text.
+pub const TEXT: u32 = 0xebe7df;
+/// Secondary text: log lines, card bodies.
+pub const SOFT: u32 = 0xc9c5bd;
+/// Labels and readout captions.
+pub const MUTED: u32 = 0xa19d95;
+/// Step numbers in the log and file lists.
+pub const FAINT: u32 = 0x5f6571;
+/// Timeline tick marks.
+pub const TICK: u32 = 0x5b6170;
+
+/// The playhead and anything the user can act on.
+pub const AMBER: u32 = 0xf2a541;
+/// The primary button's text.
+pub const AMBER_INK: u32 = 0x1a1206;
+/// The primary button under the pointer.
+pub const AMBER_HI: u32 = 0xffc978;
+/// The glow around the playhead: amber at 18 percent.
+pub const AMBER_GLOW_A: u32 = 0xf2a5412e;
+/// The phase the playhead is in, and the fork card.
+pub const AMBER_DEEP: u32 = 0x5a4520;
+/// Text on the active phase and the fork card's title.
+pub const AMBER_PALE: u32 = 0xf2d3a0;
+/// The fork card's background.
+pub const AMBER_CARD: u32 = 0x221a0e;
+/// The focus ring around the timeline.
+pub const FOCUS_RING_A: u32 = 0xf2a54140;
+
+/// The first step where two runs differ.
+pub const BLUE: u32 = 0x7fb2ff;
+pub const BLUE_SOFT: u32 = 0xa9cbff;
+pub const BLUE_CARD: u32 = 0x131b26;
+pub const BLUE_PILL: u32 = 0x16202e;
+pub const BLUE_BORDER: u32 = 0x25364d;
+
+/// The failure.
+pub const RED: u32 = 0xff7a6b;
+pub const RED_SOFT: u32 = 0xff9a8e;
+pub const RED_CARD: u32 = 0x1f1513;
+pub const RED_PILL: u32 = 0x2a1a18;
+pub const RED_BORDER: u32 = 0x4a2723;
+
+/// A run that passed.
+pub const GREEN_SOFT: u32 = 0x9fd8a4;
+pub const GREEN_PILL: u32 = 0x15221a;
+pub const GREEN_BORDER: u32 = 0x24402c;
+
+/// Standard error lines in the log: the soft text pulled toward red.
+pub const STDERR: u32 = 0xe0b4a8;
+/// The log row under the playhead.
+pub const ROW_NOW: u32 = 0x1c2026;
+/// A row under the pointer.
+pub const ROW_HOVER: u32 = 0x1a1d22;
+/// Buttons under the pointer.
+pub const RAISED_HOVER: u32 = 0x1d2127;
+
+/// Phase segments cycle through these greys, darkest first.
+pub const PHASE_GREYS: [u32; 5] = [0x2c323d, 0x323946, 0x39414f, 0x414a5a, 0x4a5466];
+
+/// Font families in order of preference. The app uses the first one the
+/// system has, so a machine without the bundled fonts still gets a
+/// sans-serif and a monospace.
+pub const UI_FONTS: &[&str] = &[
+    "IBM Plex Sans",
+    "Inter",
+    "Noto Sans",
+    "DejaVu Sans",
+    "Liberation Sans",
+    "Cantarell",
+];
+pub const MONO_FONTS: &[&str] = &[
+    "JetBrains Mono",
+    "IBM Plex Mono",
+    "Noto Sans Mono",
+    "DejaVu Sans Mono",
+    "Liberation Mono",
+];
+
+/// Sizes in pixels, from the design's 1440 by 900 layout.
+pub mod size {
+    // The header bar.
+    pub const HEADER_HEIGHT: f32 = 56.0;
+    pub const PAGE_PAD_X: f32 = 24.0;
+    pub const HEADER_GAP: f32 = 16.0;
+    pub const BRAND_GAP: f32 = 8.0;
+    pub const MARK_ICON: f32 = 20.0;
+
+    // The timeline section and its track.
+    pub const TIMELINE_PAD_TOP: f32 = 24.0;
+    pub const TIMELINE_PAD_BOTTOM: f32 = 16.0;
+    /// Room between the track and the controls, which the playhead's
+    /// overhang reaches into.
+    pub const TRACK_TO_CONTROLS: f32 = 28.0;
+    pub const TRACK_HEIGHT: f32 = 40.0;
+    pub const SEGMENT_GAP: f32 = 2.0;
+    pub const SEGMENT_LABEL_PAD: f32 = 8.0;
+    pub const TICK_WIDTH: f32 = 1.0;
+    pub const TICK_HEIGHT: f32 = 5.0;
+    /// Ticks hang this far below the track's bottom edge.
+    pub const TICK_DROP: f32 = 7.0;
+    /// Markers reach this far above and below the track.
+    pub const MARKER_OVERHANG: f32 = 6.0;
+    pub const PLAYHEAD_OVERHANG: f32 = 10.0;
+    pub const PLAYHEAD_WIDTH: f32 = 3.0;
+    pub const PLAYHEAD_GLOW_WIDTH: f32 = 9.0;
+    pub const DIVERGENCE_WIDTH: f32 = 2.0;
+    pub const FAILURE_WIDTH: f32 = 3.0;
+    pub const FORK_MARK_WIDTH: f32 = 2.0;
+    /// The focus ring sits this far outside the track.
+    pub const FOCUS_RING_OUTSET_X: f32 = 8.0;
+    pub const FOCUS_RING_OUTSET_Y: f32 = 14.0;
+
+    // Buttons and the controls row.
+    pub const BUTTON_HEIGHT: f32 = 40.0;
+    pub const BUTTON_PAD_X: f32 = 14.0;
+    pub const BUTTON_GAP: f32 = 8.0;
+    pub const INSPECT_BUTTON_HEIGHT: f32 = 44.0;
+    pub const ICON_BUTTON_WIDTH: f32 = 44.0;
+    pub const CONTROL_GAP: f32 = 8.0;
+    pub const READOUT_GAP: f32 = 24.0;
+    pub const READOUT_INNER_GAP: f32 = 6.0;
+    pub const ICON_START: f32 = 16.0;
+    pub const ICON_CHEVRON: f32 = 14.0;
+    pub const ICON_FORK: f32 = 15.0;
+    pub const ICON_CLOSE: f32 = 12.0;
+    pub const PILL_PAD_X: f32 = 9.0;
+    pub const PILL_PAD_Y: f32 = 3.0;
+
+    // Panels.
+    pub const PANEL_PAD_X: f32 = 18.0;
+    pub const PANEL_TITLE_PAD_Y: f32 = 12.0;
+    pub const LIST_PAD_Y: f32 = 10.0;
+    pub const LOG_ROW_HEIGHT: f32 = 22.0;
+    pub const LIST_ROW_HEIGHT: f32 = 24.0;
+    pub const LOG_COLUMN_GAP: f32 = 14.0;
+    pub const LIST_COLUMN_GAP: f32 = 10.0;
+    pub const PID_COLUMN_WIDTH: f32 = 44.0;
+    pub const OP_COLUMN_WIDTH: f32 = 20.0;
+    pub const TREE_INDENT: f32 = 16.0;
+    /// The width of one character of the monospace font at TEXT_MONO,
+    /// for sizing the step column to the run's longest step number.
+    pub const MONO_CHAR_WIDTH: f32 = 7.6;
+    pub const CARD_PAD: f32 = 16.0;
+    pub const CARD_GAP: f32 = 8.0;
+    pub const SECTION_GAP: f32 = 16.0;
+
+    // Notices.
+    pub const NOTICE_WIDTH: f32 = 400.0;
+    pub const NOTICE_INSET: f32 = 16.0;
+    pub const NOTICE_PAD: f32 = 12.0;
+
+    // The empty state.
+    pub const EMPTY_MARK_ICON: f32 = 44.0;
+    pub const EMPTY_GAP: f32 = 14.0;
+    pub const TEXT_EMPTY_TITLE: f32 = 26.0;
+
+    // Text.
+    pub const TEXT_UI: f32 = 14.0;
+    pub const TEXT_SMALL: f32 = 12.0;
+    pub const TEXT_CARD_TITLE: f32 = 13.0;
+    pub const TEXT_READOUT: f32 = 13.0;
+    pub const TEXT_SUBJECT: f32 = 13.0;
+    pub const TEXT_MONO: f32 = 12.5;
+    pub const TEXT_EVENT: f32 = 14.0;
+    pub const TEXT_BRAND: f32 = 18.0;
+
+    // Corners.
+    pub const RADIUS_BUTTON: f32 = 8.0;
+    pub const RADIUS_CARD: f32 = 10.0;
+    pub const RADIUS_SEGMENT: f32 = 3.0;
+    pub const RADIUS_PLAYHEAD: f32 = 2.0;
+    pub const RADIUS_FOCUS: f32 = 6.0;
+}
+
+/// Layout proportions.
+pub mod layout {
+    /// A flex item that grows to fill free space.
+    pub const FILL: f32 = 1.0;
+    /// The build log's share of the panel row against 1 for each of the
+    /// other two panels.
+    pub const LOG_FLEX: f32 = 1.5;
+    pub const SIDE_FLEX: f32 = 1.0;
+    /// A phase needs at least this share of the run to carry its label.
+    pub const LABEL_MIN_SHARE: f32 = 0.05;
+    /// About this many tick marks along the timeline.
+    pub const TICK_TARGET: u64 = 12;
+    /// A disabled button is drawn at this opacity.
+    pub const DISABLED_OPACITY: f32 = 0.4;
+}

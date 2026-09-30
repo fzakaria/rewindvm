@@ -29,6 +29,7 @@
           rewind = import ./nix/rewind.nix { inherit pkgs kernel guest; };
           site = import ./nix/site.nix { inherit pkgs; };
           examples = import ./nix/examples.nix { inherit pkgs; };
+          app = import ./nix/app.nix { inherit pkgs; };
         };
     in
     {
@@ -52,6 +53,9 @@
           # the marketing site the pages workflow deploys (nix/site.nix)
           site = p.site;
 
+          # the desktop app, the scrubber over recorded runs (nix/app.nix)
+          app = p.app;
+
           # the tutorials' flaky thread pool (nix/examples.nix)
           mylib = p.examples.mylib;
         }
@@ -66,6 +70,12 @@
           default = {
             type = "app";
             program = "${p.rewind}/bin/rewind";
+          };
+
+          # `nix run .#app -- <run>`: the desktop app
+          app = {
+            type = "app";
+            program = "${p.app}/bin/rewind-app";
           };
 
           # `nix run .#serve [port]`: the built site on a local port
