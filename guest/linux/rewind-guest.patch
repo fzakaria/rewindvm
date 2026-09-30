@@ -1,18 +1,18 @@
 diff -ruN a/arch/x86/include/asm/hypervisor.h b/arch/x86/include/asm/hypervisor.h
---- a/arch/x86/include/asm/hypervisor.h	2026-09-30 14:57:20.177853980 -0700
-+++ b/arch/x86/include/asm/hypervisor.h	2026-09-30 14:57:20.339620094 -0700
-@@ -30,6 +30,7 @@
- 	X86_HYPER_KVM,
+--- a/arch/x86/include/asm/hypervisor.h	2026-09-30 15:14:16.655903918 -0700
++++ b/arch/x86/include/asm/hypervisor.h	2026-09-30 15:14:54.734543364 -0700
+@@ -31,6 +31,7 @@
  	X86_HYPER_JAILHOUSE,
  	X86_HYPER_ACRN,
+ 	X86_HYPER_BHYVE,
 +	X86_HYPER_REWIND,
  };
  
  #ifdef CONFIG_HYPERVISOR_GUEST
-@@ -64,9 +65,17 @@
- extern const struct hypervisor_x86 x86_hyper_kvm;
+@@ -66,9 +67,17 @@
  extern const struct hypervisor_x86 x86_hyper_jailhouse;
  extern const struct hypervisor_x86 x86_hyper_acrn;
+ extern const struct hypervisor_x86 x86_hyper_bhyve;
 +extern const struct hypervisor_x86 x86_hyper_rewind;
  extern struct hypervisor_x86 x86_hyper_xen_hvm;
  
@@ -28,9 +28,9 @@ diff -ruN a/arch/x86/include/asm/hypervisor.h b/arch/x86/include/asm/hypervisor.
  extern void init_hypervisor_platform(void);
  static inline bool hypervisor_is_type(enum x86_hypervisor_type type)
 diff -ruN a/arch/x86/include/asm/idtentry.h b/arch/x86/include/asm/idtentry.h
---- a/arch/x86/include/asm/idtentry.h	2026-09-30 14:57:20.189279746 -0700
-+++ b/arch/x86/include/asm/idtentry.h	2026-09-30 14:57:20.339861927 -0700
-@@ -767,6 +767,10 @@
+--- a/arch/x86/include/asm/idtentry.h	2026-09-30 15:14:16.661400886 -0700
++++ b/arch/x86/include/asm/idtentry.h	2026-09-30 15:14:16.704105635 -0700
+@@ -745,6 +745,10 @@
  DECLARE_IDTENTRY_SYSVEC(HYPERVISOR_CALLBACK_VECTOR,	sysvec_acrn_hv_callback);
  #endif
  
@@ -42,9 +42,9 @@ diff -ruN a/arch/x86/include/asm/idtentry.h b/arch/x86/include/asm/idtentry.h
  DECLARE_IDTENTRY_SYSVEC(HYPERVISOR_CALLBACK_VECTOR,	sysvec_xen_hvm_callback);
  #endif
 diff -ruN a/arch/x86/include/asm/timex.h b/arch/x86/include/asm/timex.h
---- a/arch/x86/include/asm/timex.h	2026-09-30 14:57:20.199185737 -0700
-+++ b/arch/x86/include/asm/timex.h	2026-09-30 14:57:20.340049989 -0700
-@@ -5,12 +5,21 @@
+--- a/arch/x86/include/asm/timex.h	2026-09-30 15:14:16.666305101 -0700
++++ b/arch/x86/include/asm/timex.h	2026-09-30 15:14:54.735651234 -0700
+@@ -5,11 +5,20 @@
  #include <asm/processor.h>
  #include <asm/tsc.h>
  
@@ -58,32 +58,19 @@ diff -ruN a/arch/x86/include/asm/timex.h b/arch/x86/include/asm/timex.h
 +#ifdef CONFIG_REWIND_GUEST
 +	return rewind_get_entropy();
 +#else
- 	if (!IS_ENABLED(CONFIG_X86_TSC) &&
- 	    !cpu_feature_enabled(X86_FEATURE_TSC))
+ 	if (!cpu_feature_enabled(X86_FEATURE_TSC))
  		return random_get_entropy_fallback();
  	return rdtsc();
 +#endif
  }
  #define random_get_entropy random_get_entropy
  
-diff -ruN a/arch/x86/include/asm/tsc.h b/arch/x86/include/asm/tsc.h
---- a/arch/x86/include/asm/tsc.h	2026-09-30 14:57:20.212610655 -0700
-+++ b/arch/x86/include/asm/tsc.h	2026-09-30 14:57:20.340169021 -0700
-@@ -21,7 +21,7 @@
- 
- static inline cycles_t get_cycles(void)
- {
--	if (!IS_ENABLED(CONFIG_X86_TSC) &&
-+	if ((!IS_ENABLED(CONFIG_X86_TSC) || IS_ENABLED(CONFIG_REWIND_GUEST)) &&
- 	    !cpu_feature_enabled(X86_FEATURE_TSC))
- 		return 0;
- 	return rdtsc();
 diff -ruN a/arch/x86/Kconfig b/arch/x86/Kconfig
---- a/arch/x86/Kconfig	2026-09-30 14:57:20.228393777 -0700
-+++ b/arch/x86/Kconfig	2026-09-30 14:57:20.340422105 -0700
-@@ -889,6 +889,18 @@
- 	  IOT with small footprint and real-time features. More details can be
- 	  found in https://projectacrn.org/.
+--- a/arch/x86/Kconfig	2026-09-30 15:14:16.676167241 -0700
++++ b/arch/x86/Kconfig	2026-09-30 15:14:16.704399691 -0700
+@@ -894,6 +894,18 @@
+ 	  when doing so. More details about Bhyve can be found at https://bhyve.org
+ 	  and https://wiki.freebsd.org/bhyve/.
  
 +config REWIND_GUEST
 +	bool "Rewind VM guest support"
@@ -101,11 +88,11 @@ diff -ruN a/arch/x86/Kconfig b/arch/x86/Kconfig
  	bool "Intel TDX (Trust Domain Extensions) - Guest Support"
  	depends on X86_64 && CPU_SUP_INTEL
 diff -ruN a/arch/x86/kernel/cpu/hypervisor.c b/arch/x86/kernel/cpu/hypervisor.c
---- a/arch/x86/kernel/cpu/hypervisor.c	2026-09-30 14:57:20.241376808 -0700
-+++ b/arch/x86/kernel/cpu/hypervisor.c	2026-09-30 14:57:20.340860876 -0700
-@@ -45,6 +45,9 @@
- #ifdef CONFIG_ACRN_GUEST
- 	&x86_hyper_acrn,
+--- a/arch/x86/kernel/cpu/hypervisor.c	2026-09-30 15:14:16.681196891 -0700
++++ b/arch/x86/kernel/cpu/hypervisor.c	2026-09-30 15:14:16.704818324 -0700
+@@ -48,6 +48,9 @@
+ #ifdef CONFIG_BHYVE_GUEST
+ 	&x86_hyper_bhyve,
  #endif
 +#ifdef CONFIG_REWIND_GUEST
 +	&x86_hyper_rewind,
@@ -114,11 +101,11 @@ diff -ruN a/arch/x86/kernel/cpu/hypervisor.c b/arch/x86/kernel/cpu/hypervisor.c
  
  enum x86_hypervisor_type x86_hyper_type;
 diff -ruN a/arch/x86/kernel/cpu/Makefile b/arch/x86/kernel/cpu/Makefile
---- a/arch/x86/kernel/cpu/Makefile	2026-09-30 14:57:20.272129078 -0700
-+++ b/arch/x86/kernel/cpu/Makefile	2026-09-30 14:57:20.340988305 -0700
-@@ -56,6 +56,7 @@
- 
+--- a/arch/x86/kernel/cpu/Makefile	2026-09-30 15:14:16.686075608 -0700
++++ b/arch/x86/kernel/cpu/Makefile	2026-09-30 15:14:16.704901170 -0700
+@@ -60,6 +60,7 @@
  obj-$(CONFIG_HYPERVISOR_GUEST)		+= vmware.o hypervisor.o mshyperv.o
+ obj-$(CONFIG_BHYVE_GUEST)		+= bhyve.o
  obj-$(CONFIG_ACRN_GUEST)		+= acrn.o
 +obj-$(CONFIG_REWIND_GUEST)		+= rewind.o
  
@@ -126,8 +113,8 @@ diff -ruN a/arch/x86/kernel/cpu/Makefile b/arch/x86/kernel/cpu/Makefile
  
 diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 --- a/arch/x86/kernel/cpu/rewind.c	1969-12-31 16:00:00.000000000 -0800
-+++ b/arch/x86/kernel/cpu/rewind.c	2026-09-30 15:05:38.587057648 -0700
-@@ -0,0 +1,802 @@
++++ b/arch/x86/kernel/cpu/rewind.c	2026-09-30 15:18:31.949324564 -0700
+@@ -0,0 +1,804 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Rewind VM guest platform.
@@ -182,6 +169,7 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +
 +#include <asm/apic.h>
 +#include <asm/cpufeatures.h>
++#include <asm/cpuid/api.h>
 +#include <asm/e820/api.h>
 +#include <asm/hypervisor.h>
 +#include <asm/i8259.h>
@@ -347,7 +335,7 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +	    !boot_cpu_has(X86_FEATURE_HYPERVISOR))
 +		return 0;
 +
-+	return hypervisor_cpuid_base(REWIND_SIGNATURE, 0);
++	return cpuid_base_hypervisor(REWIND_SIGNATURE, 0);
 +}
 +
 +/* The clock: one exit per read, and each read moves virtual time. */
@@ -480,7 +468,7 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +	u32 pending = xchg(&rewind_shared.pending, 0);
 +
 +	apic_eoi();
-+	inc_irq_stat(irq_hv_callback_count);
++	inc_irq_stat(HYPERVISOR_CALLBACK);
 +
 +	if ((pending & REWIND_PENDING_TIMER) && rewind_clockevent.event_handler)
 +		rewind_clockevent.event_handler(&rewind_clockevent);
@@ -728,7 +716,8 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +		    child->pid, NULL, 0, NULL, 0);
 +}
 +
-+static void rewind_probe_exit(void *data, struct task_struct *p)
++static void rewind_probe_exit(void *data, struct task_struct *p,
++			      bool group_dead)
 +{
 +	u16 flags = p->pid != p->tgid ? REWIND_FLAG_THREAD : 0;
 +
@@ -931,9 +920,9 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +}
 +device_initcall(rewind_events_init);
 diff -ruN a/arch/x86/kernel/traps.c b/arch/x86/kernel/traps.c
---- a/arch/x86/kernel/traps.c	2026-09-30 14:57:20.313857643 -0700
-+++ b/arch/x86/kernel/traps.c	2026-09-30 14:57:20.342243665 -0700
-@@ -45,6 +45,7 @@
+--- a/arch/x86/kernel/traps.c	2026-09-30 15:14:16.695108029 -0700
++++ b/arch/x86/kernel/traps.c	2026-09-30 15:14:16.705151220 -0700
+@@ -46,6 +46,7 @@
  #include <linux/ubsan.h>
  
  #include <asm/stacktrace.h>
@@ -941,7 +930,7 @@ diff -ruN a/arch/x86/kernel/traps.c b/arch/x86/kernel/traps.c
  #include <asm/processor.h>
  #include <asm/debugreg.h>
  #include <asm/realmode.h>
-@@ -768,6 +769,10 @@
+@@ -930,6 +931,10 @@
  	}
  
  	if (user_mode(regs)) {
@@ -953,9 +942,9 @@ diff -ruN a/arch/x86/kernel/traps.c b/arch/x86/kernel/traps.c
  			goto exit;
  
 diff -ruN a/arch/x86/kernel/tsc.c b/arch/x86/kernel/tsc.c
---- a/arch/x86/kernel/tsc.c	2026-09-30 14:57:20.332200116 -0700
-+++ b/arch/x86/kernel/tsc.c	2026-09-30 14:57:20.343073067 -0700
-@@ -238,6 +238,16 @@
+--- a/arch/x86/kernel/tsc.c	2026-09-30 15:14:16.700568339 -0700
++++ b/arch/x86/kernel/tsc.c	2026-09-30 15:14:16.705317743 -0700
+@@ -243,6 +243,16 @@
  		return __cycles_2_ns(tsc_now);
  	}
  

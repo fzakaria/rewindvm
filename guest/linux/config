@@ -51,7 +51,11 @@ CONFIG_EARLY_PRINTK=y
 # Fewer ticks mean fewer timer interrupts, and each one costs exits.
 CONFIG_HZ_100=y
 CONFIG_NO_HZ_IDLE=y
-CONFIG_PREEMPT_NONE=y
+# x86 offers only full and lazy preemption. Either is deterministic here,
+# since the kernel is only ever interrupted at an exit; lazy is upstream's
+# default, and the model is fixed at build time rather than at boot.
+CONFIG_PREEMPT_LAZY=y
+# CONFIG_PREEMPT_DYNAMIC is not set
 
 # Everything built in, so the initramfs carries only the init.
 # CONFIG_MODULES is not set

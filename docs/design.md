@@ -16,7 +16,7 @@ Linux 7.1.
 
 | Piece              | Where                            | What it does                                                                                       |
 | ------------------ | -------------------------------- | -------------------------------------------------------------------------------------------------- |
-| Guest kernel patch | `guest/linux/rewind-guest.patch` | A "Rewind" x86 hypervisor platform in Linux 6.12: virtual clock and timer, idle as an exit, events |
+| Guest kernel patch | `guest/linux/rewind-guest.patch` | A "Rewind" x86 hypervisor platform in Linux 7.2: virtual clock and timer, idle as an exit, events |
 | Guest init         | `crates/rewind-init`             | PID 1: mounts the input image, runs the job, reports its exit status and output hashes             |
 | Monitor            | `crates/rewind-vmm`              | One vCPU on KVM: boots the kernel, handles exits, owns time and interrupts, takes keyframes        |
 | Trace              | `crates/rewind-trace`            | Decodes guest records into events and answers questions about a run at a step                      |
@@ -73,7 +73,7 @@ nothing preempts it. See [Limits](#limits).
 
 ### The guest kernel
 
-The kernel is upstream Linux 6.12 with one patch and a small config, built by
+The kernel is upstream Linux 7.2 with one patch and a small config, built by
 `nix/kernel.nix`. The patch adds a hypervisor platform to
 `arch/x86/kernel/cpu/rewind.c`, in the pattern of the Jailhouse and ACRN guest
 platforms. The platform is detected by the CPUID signature `RewindRewind`.
@@ -85,7 +85,19 @@ platforms. The platform is detected by the CPUID signature `RewindRewind`.
   port writes.
 - The monitor's interrupt arrives as an MSI on `HYPERVISOR_CALLBACK_VECTOR`.
   A reason word in the shared page says whether the timer is due, a
-  reschedule is requested, or both.
+  reschedule is requested, or an inspection is.
+
+An inspection is how `rewind cat` reads a file as it was at a step. Rewind
+forks the run at the step and writes a request, a list of arguments, into the
+shared page. The kernel stops every user process except init right in the
+interrupt, then starts `/init --inspect` with the request as a usermode
+helper, and makes power off wait until the helper exits. The helper enters the
+root and working directory of the process named in the request and writes the
+file through `/dev/rewind-stdout` between two marks. A recording never carries
+a request, so none of this changes a recorded run. Init chroots only the job's
+process into an image root, never itself: Linux starts init sharing its
+filesystem root with the kernel's threads, and a chroot there would hide
+`/init` from the helper.
 
 The kernel is uniprocessor (`CONFIG_SMP=n`), so spinlocks compile away and
 nothing in the kernel waits on another CPU. It has no PCI, ACPI or modules.

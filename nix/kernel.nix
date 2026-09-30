@@ -9,7 +9,9 @@
 { pkgs }:
 let
   inherit (pkgs) lib;
-  upstream = pkgs.linux_6_12;
+  # A named series rather than linux_latest, so updating nixpkgs never
+  # moves the guest to a new major version without the patch being ported.
+  upstream = pkgs.linux_7_2;
 in
 pkgs.stdenv.mkDerivation {
   pname = "rewind-guest-kernel";
