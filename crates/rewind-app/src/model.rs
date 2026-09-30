@@ -29,12 +29,43 @@ const STDERR_FD: u32 = 2;
 /// The line nixpkgs' setup.sh prints as each phase starts.
 const NIX_PHASE_PREFIX: &str = "Running phase: ";
 
+/// nixpkgs' setup.sh writes structured messages for nix itself on lines
+/// starting with this; nix-build never shows them, and neither does the log.
+const NIX_LOG_PREFIX: &str = "@nix ";
+
 /// The suffix nixpkgs puts on phase names, dropped on the timeline.
 const NIX_PHASE_SUFFIX: &str = "Phase";
 
-/// The name of the stretch before the first phase or mark, where the guest
-/// kernel boots and whatever runs before the first phase starts.
+/// The name of the stretch before the first phase or mark, in a trace
+/// without init's start mark to say where boot ends.
 const OPENING_PHASE: &str = "start";
+
+/// The segment before init's start mark: the guest kernel booting.
+const BOOT_PHASE: &str = "boot";
+/// The segment from the start mark to the first phase: nixpkgs' setup,
+/// before unpackPhase.
+const SETUP_PHASE: &str = "setup";
+/// The segment from the start mark on, in a job without phases.
+const JOB_PHASE: &str = "job";
+
+/// Marks the guest's init writes to /dev/rewind (the constants in
+/// crates/rewind-init/src/lib.rs). They shape the timeline and the verdict
+/// and never show in the log.
+mod init_mark {
+    /// Every init mark starts with this.
+    pub const PREFIX: &str = "rewind-";
+    /// Written right before the job starts: everything before is boot.
+    pub const START: &str = "rewind-start";
+    /// Written when the job exits, followed by its wait status.
+    pub const EXIT: &str = "rewind-exit ";
+    /// Written per output after a successful job: the path, a space, and
+    /// the output's tree hash.
+    pub const OUTPUT: &str = "rewind-output ";
+}
+
+/// Opens of device files (/dev/null, /dev/rewind and the like) are not
+/// files the job wrote, and are left out of the files list.
+const DEVICE_PREFIX: &str = "/dev/";
 
 /// The name of the whole run when it has no phases or marks at all.
 const WHOLE_RUN_PHASE: &str = "run";
@@ -163,6 +194,9 @@ pub enum FileOp {
     Unlink,
     /// Renamed onto `path`.
     Rename,
+    /// Built by the job, as init reported after it succeeded; `from` holds
+    /// the tree hash.
+    Output,
 }
 
 /// One change to the guest's files.
@@ -202,6 +236,8 @@ pub enum FileTone {
     Gone,
     /// A core dump.
     Error,
+    /// Something the job built.
+    Output,
 }
 
 /// A process's end, decoded from the kernel's exit_code.
@@ -259,6 +295,14 @@ pub enum Motion {
     Divergence,
 }
 
+/// The job's exit, as the guest's init reported it with its exit mark.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct JobExit {
+    pub step: u64,
+    /// The job's wait status.
+    pub status: u32,
+}
+
 /// One run, indexed for scrubbing.
 pub struct Timeline {
     pub trace: Trace,
@@ -270,6 +314,8 @@ pub struct Timeline {
     pub rows: Vec<ProcRow>,
     pub files: Vec<FileEvent>,
     pub failure: Option<Failure>,
+    /// The job's exit, when init reported it.
+    pub job_exit: Option<JobExit>,
     /// A display name per process row pid, for describing events.
     names: HashMap<u32, String>,
 }
@@ -281,10 +327,11 @@ impl Timeline {
         let total = trace.last_step().max(total_hint.unwrap_or(0));
         let output_lines = output_lines(&trace);
         let all_lines = merge_by_step(&output_lines, &console_lines(&trace));
-        let phases = phase_spans(&trace, total);
+        let phases = phase_spans(&trace, &output_lines, total);
         let rows = process_rows(&trace);
         let files = file_events(&trace);
-        let failure = find_failure(&trace);
+        let job_exit = job_exit(&trace);
+        let failure = find_failure(&trace, job_exit);
 
         // Command names for event descriptions: the latest process per pid
         // wins, which is the right one for any pid that was not reused.
@@ -302,6 +349,7 @@ impl Timeline {
             rows,
             files,
             failure,
+            job_exit,
             names,
         }
     }
@@ -359,6 +407,9 @@ impl Timeline {
         }
         if file.op == FileOp::Unlink {
             return FileTone::Gone;
+        }
+        if file.op == FileOp::Output {
+            return FileTone::Output;
         }
         let recent = (self.total as f64 * RECENT_SHARE) as u64;
         if step.saturating_sub(file.step) <= recent {
@@ -441,11 +492,18 @@ pub fn is_error_text(text: &str) -> bool {
     ERROR_MARKERS.iter().any(|m| lower.contains(m))
 }
 
-/// Standard output and error as lines, plus marks, in step order.
+/// A mark someone wrote to /dev/rewind on purpose: not empty, and not one
+/// of init's own.
+fn is_user_mark(text: &str) -> bool {
+    !text.trim().is_empty() && !text.starts_with(init_mark::PREFIX)
+}
+
+/// Standard output and error as lines, plus user marks, in step order.
 fn output_lines(trace: &Trace) -> Vec<LogLine> {
     let mut lines: Vec<LogLine> = trace
         .lines_until(u64::MAX)
         .into_iter()
+        .filter(|line| !line.text.starts_with(NIX_LOG_PREFIX))
         .map(|line| {
             let stream = if line.fd == STDERR_FD {
                 Stream::Stderr
@@ -463,16 +521,17 @@ fn output_lines(trace: &Trace) -> Vec<LogLine> {
         })
         .collect();
 
-    // Marks join the log as lines of their own, in step order.
+    // User marks join the log as lines of their own, in step order. Init's
+    // marks and empty ones stay out.
     let marks: Vec<LogLine> = trace
         .events
         .iter()
         .filter_map(|e| match &e.kind {
-            EventKind::Mark { text } => Some(LogLine {
+            EventKind::Mark { text } if is_user_mark(text) => Some(LogLine {
                 step: e.step,
                 pid: e.pid,
                 stream: Stream::Mark,
-                text: format!("mark: {text}"),
+                text: format!("{MARK_LINE_PREFIX}{text}"),
                 tone: Tone::Phase,
             }),
             _ => None,
@@ -540,47 +599,69 @@ fn merge_by_step(a: &[LogLine], b: &[LogLine]) -> Vec<LogLine> {
     merged
 }
 
-/// The timeline's segments: the trace's phases with nixpkgs' "Phase"
-/// suffix dropped, an opening segment before the first one, and one segment
-/// for the whole run when there are none.
-fn phase_spans(trace: &Trace, total: u64) -> Vec<PhaseSpan> {
-    let mut spans: Vec<PhaseSpan> = trace
-        .phases()
-        .into_iter()
-        .map(|p| PhaseSpan {
-            name: short_phase_name(&p.name),
-            start: p.start,
-            end: p.end,
-        })
-        .collect();
-
-    // No phases: the run is one segment.
-    let Some(first) = spans.first() else {
-        return vec![PhaseSpan {
-            name: WHOLE_RUN_PHASE.to_string(),
-            start: 0,
-            end: total,
-        }];
-    };
-
-    // The stretch before the first phase gets a segment of its own.
-    if first.start > 0 {
-        spans.insert(
-            0,
-            PhaseSpan {
-                name: OPENING_PHASE.to_string(),
-                start: 0,
-                end: first.start,
-            },
-        );
+/// The timeline's segments: nixpkgs' phases with the "Phase" suffix
+/// dropped and user marks, each running to the next. Before them come boot
+/// (up to init's start mark) and setup (from the start mark to the first
+/// phase); a trace without a start mark gets one opening segment instead.
+fn phase_spans(trace: &Trace, lines: &[LogLine], total: u64) -> Vec<PhaseSpan> {
+    // Where each named stretch starts: phase lines from the log, and user
+    // marks, which the log already holds as lines of their own.
+    let mut starts: Vec<(u64, String)> = Vec::new();
+    for line in lines {
+        let text = line.text.trim();
+        if let Some(name) = text.strip_prefix(NIX_PHASE_PREFIX) {
+            starts.push((line.step, short_phase_name(name.trim())));
+            continue;
+        }
+        if line.stream == Stream::Mark {
+            let name = line.text.trim_start_matches(MARK_LINE_PREFIX);
+            starts.push((line.step, name.to_string()));
+        }
     }
 
-    // The last phase runs to the end of the timeline.
-    if let Some(last) = spans.last_mut() {
-        last.end = last.end.max(total);
+    // The start mark, if init wrote one, splits boot from the job.
+    let start_mark = trace.events.iter().find_map(|e| match &e.kind {
+        EventKind::Mark { text } if text.trim() == init_mark::START => Some(e.step),
+        _ => None,
+    });
+    let first = starts.first().map(|(step, _)| *step);
+    let mut openers: Vec<(u64, &str)> = Vec::new();
+    match (start_mark, first) {
+        (Some(mark), Some(first)) => {
+            openers.push((0, BOOT_PHASE));
+            if first > mark {
+                openers.push((mark, SETUP_PHASE));
+            }
+        }
+        (Some(mark), None) => {
+            openers.push((0, BOOT_PHASE));
+            openers.push((mark, JOB_PHASE));
+        }
+        (None, Some(first)) if first > 0 => openers.push((0, OPENING_PHASE)),
+        (None, Some(_)) => {}
+        (None, None) => openers.push((0, WHOLE_RUN_PHASE)),
+    }
+    let mut all: Vec<(u64, String)> = openers
+        .into_iter()
+        .map(|(step, name)| (step, name.to_string()))
+        .collect();
+    all.extend(starts);
+
+    // Each stretch runs to the next one's start, the last to the end.
+    let mut spans = Vec::with_capacity(all.len());
+    for (i, (start, name)) in all.iter().enumerate() {
+        let end = all.get(i + 1).map_or(total, |(next, _)| *next);
+        spans.push(PhaseSpan {
+            name: name.clone(),
+            start: *start,
+            end: end.max(*start),
+        });
     }
     spans
 }
+
+/// How a user mark's log line starts.
+const MARK_LINE_PREFIX: &str = "mark: ";
 
 fn short_phase_name(name: &str) -> String {
     match name.strip_suffix(NIX_PHASE_SUFFIX) {
@@ -589,11 +670,31 @@ fn short_phase_name(name: &str) -> String {
     }
 }
 
-/// The first crash signal, or failing that the first process to exit
-/// nonzero, or nothing for a run that did neither.
-fn find_failure(trace: &Trace) -> Option<Failure> {
-    // A crash signal anywhere wins over an earlier nonzero exit: the exit
-    // is usually a consequence and the signal is the cause.
+/// The job's exit, from init's exit mark.
+fn job_exit(trace: &Trace) -> Option<JobExit> {
+    trace.events.iter().find_map(|e| {
+        let EventKind::Mark { text } = &e.kind else {
+            return None;
+        };
+        let status = text.strip_prefix(init_mark::EXIT)?.trim().parse().ok()?;
+        Some(JobExit {
+            step: e.step,
+            status,
+        })
+    })
+}
+
+/// Where the run failed. A job whose init reports status 0 did not fail.
+/// Otherwise the first crash signal is the failure, and without one, the
+/// start of the chain of nonzero exits that ended the run: from the last
+/// process to exit nonzero, down through the child it exited after.
+fn find_failure(trace: &Trace, job_exit: Option<JobExit>) -> Option<Failure> {
+    if job_exit.is_some_and(|j| j.status == 0) {
+        return None;
+    }
+
+    // A crash signal anywhere wins: the exits after it are its
+    // consequences.
     let signal = trace.events.iter().enumerate().find_map(|(index, e)| {
         let EventKind::Signal { signo, addr, .. } = e.kind else {
             return None;
@@ -613,26 +714,47 @@ fn find_failure(trace: &Trace) -> Option<Failure> {
         return signal;
     }
 
-    // Otherwise the first process to exit nonzero. Threads are left out:
-    // a thread's exit_code says nothing about its process.
-    trace.events.iter().enumerate().find_map(|(index, e)| {
-        let EventKind::Exit { status, thread, .. } = e.kind else {
-            return None;
-        };
-        if thread || status == 0 {
-            return None;
+    // Processes that exited nonzero; threads are left out, since a
+    // thread's exit_code says nothing about its process.
+    let procs = trace.processes();
+    let failed: Vec<&rewind_trace::Process> = procs
+        .iter()
+        .filter(|p| p.end.is_some() && p.status.is_some_and(|s| s != 0))
+        .collect();
+
+    // Walk down from the last nonzero exit to the child it followed.
+    let mut current = *failed.iter().max_by_key(|p| p.end)?;
+    loop {
+        let cause = failed
+            .iter()
+            .filter(|c| c.parent == current.pid && c.start >= current.start && c.end <= current.end)
+            .max_by_key(|c| c.end);
+        match cause {
+            Some(c) => current = c,
+            None => break,
         }
-        Some(Failure {
-            step: e.step,
-            pid: e.pid,
-            tid: e.tid,
-            index,
-            kind: FailureKind::Exit { status },
-        })
+    }
+
+    // The failure is that process's exit event.
+    let step = current.end?;
+    let index = trace.events.iter().position(|e| {
+        e.step == step
+            && e.pid == current.pid
+            && matches!(e.kind, EventKind::Exit { thread: false, .. })
+    })?;
+    Some(Failure {
+        step,
+        pid: current.pid,
+        tid: current.pid,
+        index,
+        kind: FailureKind::Exit {
+            status: current.status.unwrap_or_default(),
+        },
     })
 }
 
-/// Opens for writing, unlinks and renames, in step order.
+/// Opens for writing, unlinks and renames, and init's output marks, in
+/// step order. Device files are left out.
 fn file_events(trace: &Trace) -> Vec<FileEvent> {
     trace
         .events
@@ -642,8 +764,16 @@ fn file_events(trace: &Trace) -> Vec<FileEvent> {
                 EventKind::Open { path, .. } => (FileOp::Write, path.clone(), None),
                 EventKind::Unlink { path } => (FileOp::Unlink, path.clone(), None),
                 EventKind::Rename { from, to } => (FileOp::Rename, to.clone(), Some(from.clone())),
+                EventKind::Mark { text } => {
+                    let rest = text.strip_prefix(init_mark::OUTPUT)?;
+                    let (path, hash) = rest.trim().rsplit_once(' ')?;
+                    (FileOp::Output, path.to_string(), Some(hash.to_string()))
+                }
                 _ => return None,
             };
+            if path.starts_with(DEVICE_PREFIX) {
+                return None;
+            }
             Some(FileEvent {
                 step: e.step,
                 pid: e.pid,
@@ -709,7 +839,7 @@ fn process_rows(trace: &Trace) -> Vec<ProcRow> {
         let p = &procs[i];
         let comm = p.end.and_then(|end| comms.get(&(p.pid, end)));
         let label = if !p.argv.is_empty() {
-            p.argv.join(" ")
+            program_label(&p.argv)
         } else if let Some(comm) = comm {
             comm.clone()
         } else if p.pid == KTHREADD_PID && p.parent == 0 {
@@ -758,6 +888,15 @@ fn process_rows(trace: &Trace) -> Vec<ProcRow> {
         }
     }
     rows
+}
+
+/// A command line as a process label: the program by its file name, since
+/// argv[0] is often a long store path, then the arguments as they are.
+fn program_label(argv: &[String]) -> String {
+    let program = argv[0].rsplit('/').next().unwrap_or(&argv[0]);
+    let mut parts = vec![program];
+    parts.extend(argv[1..].iter().map(String::as_str));
+    parts.join(" ")
 }
 
 /// The command name in a process label: the file name of its first word,
@@ -964,9 +1103,10 @@ mod tests {
     }
 
     #[test]
-    fn without_a_crash_the_first_nonzero_exit_is_the_failure() {
-        // Dropping the signal leaves test_pool's exit, the first nonzero
-        // process exit; the thread's exit before it does not count.
+    fn without_a_crash_the_failure_is_the_deepest_nonzero_exit() {
+        // Dropping the signal leaves make exiting 2 last; the child it
+        // failed because of is test_pool, dead by a signal. The thread's
+        // exit before it does not count.
         let mut events = build().trace.events;
         events.retain(|e| !matches!(e.kind, EventKind::Signal { .. }));
         let t = Timeline::new(Trace { events }, None);
@@ -975,6 +1115,130 @@ mod tests {
         assert_eq!(f.kind, FailureKind::Exit { status: 0x8b });
     }
 
+    fn mark(step: u64, text: &str) -> Event {
+        ev(step, 1, 1, EventKind::Mark { text: text.into() })
+    }
+
+    /// A job the way the guest's init runs one: boot, the start mark, a
+    /// shell whose subshell exits 1 along the way (as bash's do), a phase,
+    /// make failing because its compiler did, and the exit mark.
+    fn job(exit_status: u32) -> Timeline {
+        let events = vec![
+            mark(10, "rewind-start"),
+            mark(10, ""),
+            fork(11, 1, 41, false),
+            exec(
+                12,
+                41,
+                &[
+                    "/nix/store/10dxp0qxqxxsyiljrh2kp0xqhz6arhcx-bash-5.3p15/bin/bash",
+                    "-e",
+                    "builder.sh",
+                ],
+            ),
+            fork(13, 41, 42, false),
+            exit(14, 42, 42, 1 << 8, "bash", false),
+            ev(
+                15,
+                41,
+                41,
+                EventKind::Open {
+                    path: "/dev/null".into(),
+                    flags: 0o1101,
+                },
+            ),
+            out(20, 41, 1, "Running phase: buildPhase\n"),
+            out(
+                20,
+                41,
+                1,
+                "@nix { \"action\": \"setPhase\", \"phase\": \"buildPhase\" }\n",
+            ),
+            fork(21, 41, 43, false),
+            exec(22, 43, &["make"]),
+            fork(23, 43, 44, false),
+            exec(24, 44, &["cc", "-c", "bad.c"]),
+            exit(25, 44, 44, 1 << 8, "cc", false),
+            exit(26, 43, 43, 2 << 8, "make", false),
+            exit(27, 41, 41, exit_status, "bash", false),
+            mark(28, &format!("rewind-exit {exit_status}")),
+            mark(
+                29,
+                "rewind-output /nix/store/jgr1axsv7hwwf37n19ssg0fiyaj3bvk7-mylib-0.3.0 ab12",
+            ),
+        ];
+        Timeline::new(Trace { events }, None)
+    }
+
+    #[test]
+    fn init_marks_shape_the_timeline_and_stay_out_of_the_log() {
+        // The start mark ends the boot segment, the stretch up to the
+        // first phase is setup, and no init mark, empty mark or @nix line
+        // reaches the log.
+        let t = job(2 << 8);
+        let names: Vec<(&str, u64, u64)> = t
+            .phases
+            .iter()
+            .map(|p| (p.name.as_str(), p.start, p.end))
+            .collect();
+        assert_eq!(
+            names,
+            vec![("boot", 0, 10), ("setup", 10, 20), ("build", 20, 29)]
+        );
+        let texts: Vec<&str> = t
+            .lines(LogFilter::Output)
+            .iter()
+            .map(|l| l.text.as_str())
+            .collect();
+        assert_eq!(texts, vec!["Running phase: buildPhase"]);
+        assert_eq!(
+            t.job_exit,
+            Some(JobExit {
+                step: 28,
+                status: 2 << 8
+            })
+        );
+    }
+
+    #[test]
+    fn device_opens_are_left_out_and_outputs_are_listed() {
+        // /dev/null is not a file the job wrote; the output mark is.
+        let t = job(0);
+        let files: Vec<(FileOp, &str)> = t.files.iter().map(|f| (f.op, f.path.as_str())).collect();
+        assert_eq!(
+            files,
+            vec![(
+                FileOp::Output,
+                "/nix/store/jgr1axsv7hwwf37n19ssg0fiyaj3bvk7-mylib-0.3.0"
+            )]
+        );
+        assert_eq!(t.files[0].from.as_deref(), Some("ab12"));
+    }
+
+    #[test]
+    fn a_job_that_exits_zero_has_no_failure() {
+        // The subshell's and make's nonzero exits do not fail a job whose
+        // init reports status 0.
+        assert_eq!(job(0).failure, None);
+    }
+
+    #[test]
+    fn a_failing_job_fails_where_its_exit_chain_starts() {
+        // bash exits 2 because make did, because cc did: the failure is
+        // cc's exit, not the subshell's earlier one.
+        let f = job(2 << 8).failure.unwrap();
+        assert_eq!((f.step, f.pid), (25, 44));
+        assert_eq!(f.kind, FailureKind::Exit { status: 1 << 8 });
+    }
+
+    #[test]
+    fn processes_are_named_by_the_file_name_of_their_program() {
+        // A store path in argv[0] shows as its file name; the arguments
+        // stay as they are.
+        let t = job(0);
+        let bash = t.rows.iter().find(|r| r.pid == 41).unwrap();
+        assert_eq!(bash.label, "bash -e builder.sh");
+    }
     #[test]
     fn a_clean_run_has_no_failure() {
         // SIGCHLD is not a crash and a zero exit is not a failure.
@@ -1024,7 +1288,7 @@ mod tests {
         assert_eq!(
             labels,
             vec![
-                (1, "/bin/sh /init"),
+                (1, "sh /init"),
                 (40, "sh (fork)"),
                 (2, "kthreadd"),
                 (30, "kernel thread"),

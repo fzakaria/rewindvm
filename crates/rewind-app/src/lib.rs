@@ -7,6 +7,7 @@
 
 pub mod describe;
 pub mod engine;
+pub mod license;
 pub mod model;
 pub mod run;
 pub mod synth;

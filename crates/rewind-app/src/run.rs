@@ -14,7 +14,9 @@ use anyhow::{Context as _, Result, bail};
 use rewind_trace::Trace;
 use serde_json::Value;
 
-use crate::model::{Comparison, Timeline};
+use rewind_trace::signal_name;
+
+use crate::model::{Comparison, ExitStatus, Timeline};
 
 /// The trace inside a run directory.
 pub const TRACE_FILE: &str = "trace.bin";
@@ -24,13 +26,26 @@ pub const MANIFEST_FILE: &str = "manifest.json";
 /// What a run's manifest says about it. Every field may be missing.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Manifest {
+    /// The engine's id for the run: the hash of its inputs.
+    pub id: Option<String>,
     pub name: Option<String>,
     pub command: Option<Vec<String>>,
     /// "nix" or "image"; kept as text so an unknown mode still loads.
     pub mode: Option<String>,
     pub drv: Option<String>,
     pub seed: Option<u64>,
+    /// The schedule perturbation the run was made with; 0 for none.
+    pub schedule: Option<u64>,
+    /// The run this one was forked from, and the step it was forked at.
+    pub parent: Option<Parent>,
     pub outcome: Option<Outcome>,
+}
+
+/// Where a forked run branched off.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Parent {
+    pub id: String,
+    pub step: u64,
 }
 
 /// How a run ended, as the engine recorded it.
@@ -56,6 +71,7 @@ impl Manifest {
             |candidates: &[Option<&Value>]| candidates.iter().find_map(|v| strings(*v));
 
         Manifest {
+            id: text(json.get("id")),
             name: text(json.get("name")),
             command: first_list(&[
                 json.get("command"),
@@ -65,6 +81,8 @@ impl Manifest {
             mode: first_text(&[json.get("mode"), source.and_then(|s| s.get("mode"))]),
             drv: first_text(&[json.get("drv"), source.and_then(|s| s.get("drv"))]),
             seed: seed(json.get("seed")).or_else(|| seed(spec.and_then(|s| s.get("seed")))),
+            schedule: spec.and_then(|s| s.get("schedule")).and_then(Value::as_u64),
+            parent: parent(json.get("parent")),
             outcome: json
                 .get("outcome")
                 .filter(|o| o.is_object())
@@ -93,6 +111,14 @@ fn strings(value: Option<&Value>) -> Option<Vec<String>> {
         .filter_map(|v| v.as_str().map(str::to_string))
         .collect();
     (!list.is_empty()).then_some(list)
+}
+
+/// A parent written as the engine does: `[id, step]`.
+fn parent(value: Option<&Value>) -> Option<Parent> {
+    let pair = value?.as_array()?;
+    let id = pair.first()?.as_str()?.to_string();
+    let step = pair.get(1)?.as_u64()?;
+    Some(Parent { id, step })
 }
 
 /// A seed written as a number, a decimal string or a 0x-prefixed hex
@@ -184,22 +210,26 @@ impl Run {
         self.manifest.seed.unwrap_or(0)
     }
 
-    /// Whether the run failed: the trace shows a crash or a nonzero exit,
-    /// or the manifest's outcome has a nonzero wait status or says it
-    /// stopped on an error.
+    /// Whether the run failed. The job's wait status decides when the
+    /// manifest or init's exit mark gives one; otherwise a crash or
+    /// failing exit in the trace, or an outcome that says it stopped on an
+    /// error.
     pub fn verdict(&self) -> Verdict {
         const FAILING_STOPS: &[&str] = &["fail", "error", "crash", "panic", "signal", "timeout"];
+        if let Some(status) = self.status() {
+            return if status == 0 {
+                Verdict::Passed
+            } else {
+                Verdict::Failed
+            };
+        }
         if self.timeline.failure.is_some() {
             return Verdict::Failed;
         }
-        let outcome = self.manifest.outcome.as_ref();
-        if outcome
-            .and_then(|o| o.status)
-            .is_some_and(|status| status != 0)
-        {
-            return Verdict::Failed;
-        }
-        let stop = outcome
+        let stop = self
+            .manifest
+            .outcome
+            .as_ref()
             .and_then(|o| o.stop.as_deref())
             .unwrap_or_default()
             .to_lowercase();
@@ -207,6 +237,66 @@ impl Run {
             return Verdict::Failed;
         }
         Verdict::Passed
+    }
+
+    /// The job's wait status: the manifest's, else init's exit mark's.
+    pub fn status(&self) -> Option<u32> {
+        let from_manifest = self
+            .manifest
+            .outcome
+            .as_ref()
+            .and_then(|o| o.status)
+            .and_then(|s| u32::try_from(s).ok());
+        from_manifest.or(self.timeline.job_exit.map(|j| j.status))
+    }
+
+    /// How the run ended, in the engine's words when there is a wait
+    /// status (exited:2, killed:SIGSEGV), else passed or failed.
+    pub fn verdict_label(&self) -> String {
+        match self.status().map(ExitStatus::from_raw) {
+            Some(ExitStatus::Code(code)) => format!("exited:{code}"),
+            Some(ExitStatus::Signal { signo, .. }) => format!("killed:{}", signal_name(signo)),
+            None => self.verdict().label().to_string(),
+        }
+    }
+
+    /// How the run is named on screen: its id cut short when the engine
+    /// gave it one, since runs of one build share a name; else its name.
+    pub fn label(&self) -> String {
+        match &self.manifest.id {
+            Some(id) => short_id(id),
+            None => self.name(),
+        }
+    }
+
+    /// How many runs next to this one name it as their parent.
+    pub fn count_forks(&self) -> usize {
+        let Some(id) = &self.manifest.id else {
+            return 0;
+        };
+        let Some(Ok(entries)) = self.path.parent().map(std::fs::read_dir) else {
+            return 0;
+        };
+        entries
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                let Ok(text) = std::fs::read_to_string(entry.path().join(MANIFEST_FILE)) else {
+                    return false;
+                };
+                let Ok(json) = serde_json::from_str::<Value>(&text) else {
+                    return false;
+                };
+                parent(json.get("parent")).is_some_and(|p| &p.id == id)
+            })
+            .count()
+    }
+
+    /// The directory of the run this one was forked from, when it sits
+    /// next to this one, as runs in one Rewind home do.
+    pub fn parent_dir(&self) -> Option<PathBuf> {
+        let parent = self.manifest.parent.as_ref()?;
+        let dir = self.path.parent()?.join(&parent.id);
+        dir.join(MANIFEST_FILE).is_file().then_some(dir)
     }
 }
 
@@ -226,6 +316,12 @@ impl Verdict {
     }
 }
 
+/// A run id cut to the length people read and type.
+pub fn short_id(id: &str) -> String {
+    const ID_SHOWN: usize = 8;
+    id.chars().take(ID_SHOWN).collect()
+}
+
 fn read_manifest(path: &Path) -> Result<Manifest> {
     let text =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
@@ -239,6 +335,9 @@ pub struct Session {
     pub run: Run,
     pub other: Option<Run>,
     pub comparison: Option<Comparison>,
+    /// Forks of the run already on disk next to it, for picking the next
+    /// fork's schedule seed.
+    pub forks_on_disk: usize,
 }
 
 impl Session {
@@ -246,17 +345,21 @@ impl Session {
         let comparison = other
             .as_ref()
             .map(|o| Comparison::new(&run.timeline, &o.timeline));
+        let forks_on_disk = run.count_forks();
         Session {
             run,
             other,
             comparison,
+            forks_on_disk,
         }
     }
 
-    /// Opens a run and the run to compare it with, if any.
+    /// Opens a run and the run to compare it with: the one given, else
+    /// the run it was forked from when that is next to it, else none.
     pub fn open(path: &Path, compare: Option<&Path>) -> Result<Session> {
         let run = Run::open(path)?;
-        let other = compare.map(Run::open).transpose()?;
+        let compare = compare.map(Path::to_path_buf).or_else(|| run.parent_dir());
+        let other = compare.as_deref().map(Run::open).transpose()?;
         Ok(Session::new(run, other))
     }
 
@@ -377,6 +480,36 @@ mod tests {
         assert_eq!(Run::open(&dir).unwrap().verdict(), Verdict::Failed);
         std::fs::write(dir.join(MANIFEST_FILE), r#"{"outcome": {"status": 0}}"#).unwrap();
         assert_eq!(Run::open(&dir).unwrap().verdict(), Verdict::Passed);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn forks_are_counted_and_the_parent_is_compared_with() {
+        // Two runs name "base" as their parent and one does not; opening a
+        // fork without --compare picks its parent from next door.
+        let dir = temp_dir("forks");
+        let write = |name: &str, manifest: &str| {
+            let run = dir.join(name);
+            std::fs::create_dir_all(&run).unwrap();
+            small_trace(&run);
+            std::fs::write(run.join(MANIFEST_FILE), manifest).unwrap();
+        };
+        write("base", r#"{"id": "base"}"#);
+        write("f1", r#"{"id": "f1", "parent": ["base", 10]}"#);
+        write("f2", r#"{"id": "f2", "parent": ["base", 20]}"#);
+        write("other", r#"{"id": "other", "parent": ["f1", 5]}"#);
+        let session = Session::open(&dir.join("base"), None).unwrap();
+        assert_eq!(session.forks_on_disk, 2);
+        assert!(session.other.is_none());
+        let fork = Session::open(&dir.join("f1"), None).unwrap();
+        assert_eq!(fork.other.unwrap().path, dir.join("base"));
+        assert_eq!(
+            fork.run.manifest.parent,
+            Some(Parent {
+                id: "base".into(),
+                step: 10
+            })
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -71,6 +71,12 @@ pkgs.rustPlatform.buildRustPackage {
     wrapProgram $out/bin/rewind-app --set-default FONTCONFIG_FILE ${fontsConf}
   '';
 
+  # For the `app` dev shell (nix/dev-shells.nix), which runs `cargo run`
+  # against the same libraries and fonts.
+  passthru = {
+    inherit runtimeLibraries fontsConf;
+  };
+
   meta = {
     description = "Rewind VM desktop app: scrub, compare and fork recorded runs";
     # No license attribute: nixpkgs would refuse to build an unfree

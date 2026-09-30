@@ -3,6 +3,7 @@
 //! `scrubber` holds the view's state and what it does; `render` draws it.
 
 mod icons;
+mod licensing;
 mod render;
 mod scrubber;
 mod widgets;
@@ -34,12 +35,18 @@ actions!(
         JumpToDivergence,
         ForkHere,
         OpenRun,
+        EnterLicense,
+        PasteLicense,
+        CloseDialog,
         Quit,
     ]
 );
 
 /// The key context the scrubber's bindings apply in.
 const KEY_CONTEXT: &str = "Scrubber";
+
+/// The key context of the license dialog's paste field.
+const LICENSE_CONTEXT: &str = "LicenseDialog";
 
 /// The window's size on first open: the design's frame.
 const WINDOW_WIDTH: f32 = 1440.0;
@@ -115,6 +122,8 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("pagedown", NextPhase, context),
         KeyBinding::new("f", JumpToFailure, context),
         KeyBinding::new("d", JumpToDivergence, context),
+        KeyBinding::new("ctrl-v", PasteLicense, Some(LICENSE_CONTEXT)),
+        KeyBinding::new("escape", CloseDialog, Some(LICENSE_CONTEXT)),
         KeyBinding::new("ctrl-o", OpenRun, None),
         KeyBinding::new("ctrl-q", Quit, None),
     ]);

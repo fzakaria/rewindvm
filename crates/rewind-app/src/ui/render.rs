@@ -12,16 +12,16 @@ use gpui::{
 
 use crate::describe::{self, EventTone, short_store_paths, thousands};
 use crate::model::{FileOp, FileTone, LogFilter, Motion, RowKind, Tone, ticks};
-use crate::run::{Session, Verdict};
+use crate::run::{Session, Verdict, short_id};
 use crate::theme::{self, layout, size};
 use crate::ui::icons::Icon;
-use crate::ui::scrubber::{ForkState, NoticeTone, PickKind, Scrubber};
+use crate::ui::scrubber::{ForkState, NoticeAction, NoticeTone, PickKind, Scrubber};
 use crate::ui::widgets::{
     Availability, ButtonStyle, PillTone, button, icon, panel_title, pill, readout,
 };
 use crate::ui::{
-    ForkHere, GoToEnd, GoToStart, JumpToDivergence, JumpToFailure, KEY_CONTEXT, NextEvent,
-    NextPhase, OpenRun, PreviousEvent, PreviousPhase, StepBack, StepForward,
+    EnterLicense, ForkHere, GoToEnd, GoToStart, JumpToDivergence, JumpToFailure, KEY_CONTEXT,
+    NextEvent, NextPhase, OpenRun, PreviousEvent, PreviousPhase, StepBack, StepForward,
 };
 
 /// Header labels are cut to this many characters.
@@ -63,8 +63,10 @@ impl Render for Scrubber {
                     this.prompt_open(PickKind::RunDirectory, cx)
                 }),
             )
+            .on_action(cx.listener(|this, _: &EnterLicense, window, cx| {
+                this.open_license_dialog(window, cx)
+            }))
             .size_full()
-            .relative()
             .flex()
             .flex_col()
             .bg(rgb(theme::BG))
@@ -79,7 +81,20 @@ impl Render for Scrubber {
             self.render_empty(cx).into_any_element()
         };
 
-        root.child(body).child(self.render_notices(cx))
+        // The notices and the license dialog sit beside the scrubber's
+        // key context, so keys typed in the dialog do not scrub.
+        let mut window_root = div()
+            .size_full()
+            .relative()
+            .text_color(rgb(theme::TEXT))
+            .font_family(self.fonts.ui.clone())
+            .text_size(px(size::TEXT_UI))
+            .child(root.child(body))
+            .child(self.render_notices(cx));
+        if let Some(dialog) = self.render_license_dialog(cx) {
+            window_root = window_root.child(dialog);
+        }
+        window_root
     }
 }
 
@@ -91,7 +106,7 @@ impl Scrubber {
     }
 
     fn render_session(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
-        let header = self.render_header();
+        let header = self.render_header(cx);
         let timeline = self.render_timeline(window, cx);
         let log = self.render_log(cx);
         let middle = self.render_middle(cx);
@@ -123,7 +138,7 @@ impl Scrubber {
 
     /// The header: the mark, the run and what it built, verdict pills, and
     /// the run's size on the right.
-    fn render_header(&self) -> Div {
+    fn render_header(&self, cx: &mut Context<Self>) -> Div {
         let session = self.session();
         let run = &session.run;
         let fonts = &self.fonts;
@@ -159,7 +174,7 @@ impl Scrubber {
             Verdict::Failed => PillTone::Failed,
             Verdict::Passed => PillTone::Passed,
         };
-        let name = describe::clip(&run.name(), MAX_NAME_CHARS);
+        let name = describe::clip(&run.label(), MAX_NAME_CHARS);
         let mut left = div()
             .flex()
             .min_w_0()
@@ -168,17 +183,38 @@ impl Scrubber {
             .child(brand)
             .child(subject)
             .child(pill(
-                format!("{name} \u{b7} {}", verdict.label()),
+                format!("{name} \u{b7} {}", run.verdict_label()),
                 tone,
                 fonts,
             ));
         if let Some(other) = &session.other {
-            let other_name = describe::clip(&other.name(), MAX_NAME_CHARS);
+            let other_name = describe::clip(&other.label(), MAX_NAME_CHARS);
             left = left.child(pill(
-                format!("{other_name} \u{b7} {}", other.verdict().label()),
+                format!("{other_name} \u{b7} {}", other.verdict_label()),
                 PillTone::Compared,
                 fonts,
             ));
+        }
+
+        // Where a forked run branched off its parent.
+        if let Some(parent) = &run.manifest.parent {
+            let schedule = run
+                .manifest
+                .schedule
+                .map_or_else(String::new, |s| format!(" \u{b7} schedule {s}"));
+            left = left.child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .font_family(fonts.mono.clone())
+                    .text_size(px(size::TEXT_SMALL))
+                    .text_color(rgb(theme::MUTED))
+                    .child(format!(
+                        "fork of {} at {}{schedule}",
+                        short_id(&parent.id),
+                        thousands(parent.step)
+                    )),
+            );
         }
 
         let timeline = &run.timeline;
@@ -196,7 +232,7 @@ impl Scrubber {
             .text_size(px(size::TEXT_SMALL))
             .text_color(rgb(theme::MUTED))
             .child(stats)
-            .child(pill("Unregistered", PillTone::Quiet, fonts));
+            .child(self.render_license_pill(cx));
 
         div()
             .h(px(size::HEADER_HEIGHT))
@@ -292,6 +328,16 @@ impl Scrubber {
                 .w(px(width))
                 .bg(rgb(color))
         };
+        // The step this run was forked from its parent at.
+        if let Some(parent) = &session.run.manifest.parent {
+            track = track.child(
+                marker(parent.step, size::FORK_MARK_WIDTH, theme::AMBER_PALE)
+                    .bg(rgba(0))
+                    .border_l_2()
+                    .border_dashed()
+                    .border_color(rgb(theme::AMBER_PALE)),
+            );
+        }
         for fork in &self.forks {
             let color = match fork.state {
                 ForkState::Failed(_) => theme::MUTED,
@@ -698,12 +744,14 @@ impl Scrubber {
                             FileTone::Error => theme::RED,
                             FileTone::Recent => theme::AMBER,
                             FileTone::Gone => theme::FAINT,
+                            FileTone::Output => theme::GREEN_SOFT,
                             FileTone::Normal => theme::SOFT,
                         };
                         let op = match file.op {
                             FileOp::Write => "",
                             FileOp::Unlink => "rm",
                             FileOp::Rename => "mv",
+                            FileOp::Output => "out",
                         };
                         div()
                             .id(i)
@@ -737,7 +785,7 @@ impl Scrubber {
                                     .whitespace_nowrap()
                                     .text_ellipsis_start()
                                     .text_color(rgb(color))
-                                    .child(file.path.clone()),
+                                    .child(short_store_paths(&file.path)),
                             )
                     })
                     .collect::<Vec<_>>()
@@ -854,17 +902,16 @@ impl Scrubber {
         // Against the compared run: where the two first differ, once the
         // playhead is past it, or that they never differ.
         if let (Some(other), Some(comparison)) = (&session.other, &session.comparison) {
-            let other_name = other.name();
+            let other_name = other.label();
             match &comparison.divergence {
                 Some(d) if step >= d.left_step => {
-                    let here = t.event(d.index).map_or_else(
-                        || "the run ends".to_string(),
-                        |e| describe::describe(e).text,
-                    );
-                    let there = other.timeline.event(d.index).map_or_else(
-                        || "the run ends".to_string(),
-                        |e| describe::describe(e).text,
-                    );
+                    let here = t
+                        .event(d.index)
+                        .map_or_else(|| "the run ends".to_string(), describe::summary);
+                    let there = other
+                        .timeline
+                        .event(d.index)
+                        .map_or_else(|| "the run ends".to_string(), describe::summary);
                     column = column.child(
                         card(theme::BLUE_CARD, theme::BLUE_BORDER)
                             .child(card_title(
@@ -904,17 +951,23 @@ impl Scrubber {
 
         // The latest fork made from the playhead.
         if let Some(fork) = self.forks.last() {
+            let step = thousands(fork.step);
+            let schedule = fork.schedule;
             let (title, body) = match &fork.state {
                 ForkState::Pending => (
-                    format!("Forking at step {} with seed {}", thousands(fork.step), fork.seed),
-                    "Waiting for the engine.".to_string(),
+                    format!("Forking at step {step} with schedule {schedule}"),
+                    "The engine is running the branch; it takes about as long as the run did."
+                        .to_string(),
                 ),
-                ForkState::Created(path) => (
-                    format!("Forked at step {} \u{2192} {}", thousands(fork.step), path.display()),
-                    "Anything you change now, a new seed, a delayed wakeup, a patched file, happens only on this branch.".to_string(),
+                ForkState::Created(forked) => (
+                    format!(
+                        "Forked at step {step} with schedule {schedule} \u{2192} run {}",
+                        short_id(&forked.id)
+                    ),
+                    forked.summary.clone(),
                 ),
                 ForkState::Failed(error) => (
-                    format!("Fork at step {} failed", thousands(fork.step)),
+                    format!("Fork at step {step} with schedule {schedule} failed"),
                     error.clone(),
                 ),
             };
@@ -929,7 +982,7 @@ impl Scrubber {
         let diff_label = match &session.other {
             Some(other) => format!(
                 "Diff vs {}",
-                describe::clip(&other.name(), MAX_NAME_CHARS / 2)
+                describe::clip(&other.label(), MAX_NAME_CHARS / 2)
             ),
             None => "Diff vs other run".to_string(),
         };
@@ -1049,10 +1102,49 @@ impl Scrubber {
                             .text_size(px(size::TEXT_CARD_TITLE))
                             .text_color(rgb(theme::SOFT))
                             .child(line.to_string())
-                    })),
+                    }))
+                    .when(!notice.actions.is_empty(), |d| {
+                        d.child(self.render_notice_actions(id, &notice.actions, cx))
+                    }),
             );
         }
         stack
+    }
+
+    /// A notice's actions as a row of small buttons, the first one
+    /// filled.
+    fn render_notice_actions(
+        &self,
+        id: u64,
+        actions: &[NoticeAction],
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let mut row = div()
+            .flex()
+            .flex_wrap()
+            .gap(px(size::CONTROL_GAP))
+            .pt(px(size::CARD_GAP / 2.0));
+        for (i, action) in actions.iter().enumerate() {
+            let style = if i == 0 {
+                ButtonStyle::Primary
+            } else {
+                ButtonStyle::Neutral
+            };
+            let action = action.clone();
+            row = row.child(
+                button(
+                    SharedString::from(format!("notice-{id}-{i}")),
+                    style,
+                    Availability::Enabled,
+                )
+                .h(px(size::NOTICE_BUTTON_HEIGHT))
+                .child(action.label())
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.run_action(id, action.clone(), window, cx)
+                })),
+            );
+        }
+        row
     }
 
     /// Before a run is open: the mark, a line of explanation, and buttons

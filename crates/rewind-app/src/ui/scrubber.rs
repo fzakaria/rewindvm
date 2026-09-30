@@ -14,22 +14,26 @@ use gpui::{
 };
 
 use crate::describe::{self, thousands};
-use crate::engine::{Engine, EngineResult};
+use crate::engine::{Engine, EngineError, EngineResult, Forked};
 use crate::model::{LogFilter, Motion};
-use crate::run::Session;
+use crate::run::{Session, short_id};
 use crate::ui::Launch;
+use crate::ui::licensing::Licensing;
 use crate::ui::widgets::Fonts;
 
 /// How long a notice stays up.
 const NOTICE_DURATION: Duration = Duration::from_secs(8);
+
+/// Where "Buy" goes.
+pub const BUY_URL: &str = "https://rewindvm.dev/#buy";
 
 /// Where a fork made from the playhead stands.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ForkState {
     /// The engine is working on it.
     Pending,
-    /// The engine made it, in this directory.
-    Created(PathBuf),
+    /// The engine made it: its id, its directory, and how it ended.
+    Created(Forked),
     /// The engine could not make it.
     Failed(String),
 }
@@ -38,7 +42,8 @@ pub enum ForkState {
 #[derive(Clone, Debug)]
 pub struct ForkMark {
     pub step: u64,
-    pub seed: u64,
+    /// The schedule seed the fork perturbs the run with.
+    pub schedule: u64,
     pub state: ForkState,
 }
 
@@ -49,13 +54,39 @@ pub enum NoticeTone {
     Error,
 }
 
-/// A message over the bottom right corner that goes away on its own.
+/// Something a notice offers to do.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NoticeAction {
+    /// Open a run, compared with another.
+    OpenRun { dir: PathBuf, compare: PathBuf },
+    /// Open the store page in the browser.
+    Buy,
+    /// Open the license dialog.
+    EnterLicense,
+    /// Close the notice.
+    Dismiss,
+}
+
+impl NoticeAction {
+    pub fn label(&self) -> &'static str {
+        match self {
+            NoticeAction::OpenRun { .. } => "Open fork",
+            NoticeAction::Buy => "Buy",
+            NoticeAction::EnterLicense => "Enter license",
+            NoticeAction::Dismiss => "Not now",
+        }
+    }
+}
+
+/// A message over the bottom right corner. One without actions goes away
+/// on its own; one with actions stays until an action or its close button.
 #[derive(Clone, Debug)]
 pub struct Notice {
     pub id: u64,
     pub tone: NoticeTone,
     pub title: SharedString,
     pub body: SharedString,
+    pub actions: Vec<NoticeAction>,
 }
 
 /// What the "Open" prompt asks for.
@@ -86,6 +117,8 @@ pub struct Scrubber {
     pub(super) dragging: Rc<Cell<bool>>,
     pub(super) forks: Vec<ForkMark>,
     pub(super) notices: Vec<Notice>,
+    /// The license, the dialog to enter one, and the reminder.
+    pub(super) licensing: Licensing,
     next_notice: u64,
     /// The window title last set, to set it only when it changes.
     title: Option<String>,
@@ -110,12 +143,14 @@ impl Scrubber {
             dragging: Rc::new(Cell::new(false)),
             forks: Vec::new(),
             notices: Vec::new(),
+            licensing: Licensing::load(),
             next_notice: 0,
             title: None,
         };
         if let Some(session) = launch.session {
             this.show(session, launch.step, cx);
         }
+        this.start_licensing(cx);
         this
     }
 
@@ -141,7 +176,7 @@ impl Scrubber {
     /// Sets the window title to the run's name when it changes.
     pub(super) fn sync_title(&mut self, window: &mut Window) {
         let title = match &self.session {
-            Some(s) => format!("Rewind \u{b7} {}", s.run.name()),
+            Some(s) => format!("Rewind \u{b7} {}", s.run.label()),
             None => "Rewind".to_string(),
         };
         if self.title.as_deref() == Some(title.as_str()) {
@@ -202,16 +237,7 @@ impl Scrubber {
         body: impl Into<SharedString>,
         cx: &mut Context<Self>,
     ) {
-        let id = self.next_notice;
-        self.next_notice += 1;
-        self.notices.push(Notice {
-            id,
-            tone,
-            title: title.into(),
-            body: body.into(),
-        });
-        cx.notify();
-
+        let id = self.post(tone, title.into(), body.into(), Vec::new(), cx);
         let timer = cx.background_executor().timer(NOTICE_DURATION);
         cx.spawn(async move |this, cx| {
             timer.await;
@@ -220,19 +246,90 @@ impl Scrubber {
         .detach();
     }
 
+    /// Shows a notice that offers `actions` and stays until one is taken
+    /// or the notice is closed.
+    pub(super) fn offer(
+        &mut self,
+        tone: NoticeTone,
+        title: impl Into<SharedString>,
+        body: impl Into<SharedString>,
+        actions: Vec<NoticeAction>,
+        cx: &mut Context<Self>,
+    ) {
+        self.post(tone, title.into(), body.into(), actions, cx);
+    }
+
+    fn post(
+        &mut self,
+        tone: NoticeTone,
+        title: SharedString,
+        body: SharedString,
+        actions: Vec<NoticeAction>,
+        cx: &mut Context<Self>,
+    ) -> u64 {
+        // The same message again replaces the one on screen rather than
+        // stacking a copy.
+        self.notices.retain(|n| n.title != title || n.body != body);
+        let id = self.next_notice;
+        self.next_notice += 1;
+        self.notices.push(Notice {
+            id,
+            tone,
+            title,
+            body,
+            actions,
+        });
+        cx.notify();
+        id
+    }
+
     pub(super) fn dismiss(&mut self, id: u64, cx: &mut Context<Self>) {
         self.notices.retain(|n| n.id != id);
         cx.notify();
     }
 
+    /// Takes a notice's action and closes the notice.
+    pub(super) fn run_action(
+        &mut self,
+        id: u64,
+        action: NoticeAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.dismiss(id, cx);
+        match action {
+            NoticeAction::OpenRun { dir, compare } => self.open(dir, Some(compare), cx),
+            NoticeAction::Buy => cx.open_url(BUY_URL),
+            NoticeAction::EnterLicense => self.open_license_dialog(window, cx),
+            NoticeAction::Dismiss => {}
+        }
+    }
+
+    /// Shows an engine error: the engine's missing features as
+    /// information, anything else as an error titled `failed`.
+    fn report(&mut self, failed: &str, error: EngineError, cx: &mut Context<Self>) {
+        if error.is_not_yet() {
+            self.notify_user(
+                NoticeTone::Info,
+                "Not in the engine yet",
+                error.to_string(),
+                cx,
+            );
+            return;
+        }
+        self.notify_user(NoticeTone::Error, failed.to_string(), error.to_string(), cx);
+    }
+
     /// Runs an engine call on a background thread and hands its result to
-    /// `done` on the UI thread.
+    /// `done` on the UI thread. Every call counts toward the evaluation
+    /// reminder.
     fn with_engine<T: Send + 'static>(
         &mut self,
         cx: &mut Context<Self>,
         call: impl FnOnce(&dyn Engine) -> EngineResult<T> + Send + 'static,
         done: impl FnOnce(&mut Self, EngineResult<T>, &mut Context<Self>) + 'static,
     ) {
+        self.count_engine_action(cx);
         let engine = self.engine.clone();
         let task = cx
             .background_executor()
@@ -247,43 +344,56 @@ impl Scrubber {
         .detach();
     }
 
-    /// Forks the run at the playhead with the next seed, and marks the
-    /// step on the timeline while the engine works.
+    /// Forks the run at the playhead, and marks the step on the timeline
+    /// while the engine works. The schedule seed is one more than the
+    /// forks already made from this run, on disk or in this session.
     pub(super) fn fork_here(&mut self, cx: &mut Context<Self>) {
         let Some(session) = &self.session else {
             return;
         };
         let step = self.step;
-        let seed = session.run.seed() + self.forks.len() as u64 + 1;
+        let schedule = 1 + session.forks_on_disk as u64 + self.forks.len() as u64;
         let run = session.run.path.clone();
+        let parent = run.clone();
         let index = self.forks.len();
         self.forks.push(ForkMark {
             step,
-            seed,
+            schedule,
             state: ForkState::Pending,
         });
         cx.notify();
 
         self.with_engine(
             cx,
-            move |engine| engine.fork(&run, step, seed),
+            move |engine| engine.fork(&run, step, schedule),
             move |this, result, cx| {
                 let Some(mark) = this.forks.get_mut(index) else {
                     return;
                 };
                 match result {
-                    Ok(path) => {
-                        mark.state = ForkState::Created(path.clone());
-                        this.notify_user(
+                    Ok(forked) => {
+                        mark.state = ForkState::Created(forked.clone());
+                        this.offer(
                             NoticeTone::Info,
-                            format!("Forked at step {}", thousands(step)),
-                            format!("New run in {}", path.display()),
+                            format!(
+                                "Forked at step {} as run {}",
+                                thousands(step),
+                                short_id(&forked.id)
+                            ),
+                            forked.summary.clone(),
+                            vec![
+                                NoticeAction::OpenRun {
+                                    dir: forked.dir,
+                                    compare: parent,
+                                },
+                                NoticeAction::Dismiss,
+                            ],
                             cx,
                         );
                     }
                     Err(e) => {
                         mark.state = ForkState::Failed(e.to_string());
-                        this.notify_user(NoticeTone::Error, "Could not fork", e.to_string(), cx);
+                        this.report("Could not fork", e, cx);
                     }
                 }
             },
@@ -311,9 +421,7 @@ impl Scrubber {
                         cx,
                     );
                 }
-                Err(e) => {
-                    this.notify_user(NoticeTone::Error, "Could not attach gdb", e.to_string(), cx)
-                }
+                Err(e) => this.report("Could not attach gdb", e, cx),
             },
         );
     }
@@ -329,12 +437,7 @@ impl Scrubber {
             move |engine| engine.shell(&run, step),
             move |this, result, cx| {
                 if let Err(e) = result {
-                    this.notify_user(
-                        NoticeTone::Error,
-                        "Could not open a shell",
-                        e.to_string(),
-                        cx,
-                    );
+                    this.report("Could not open a shell", e, cx);
                 }
             },
         );
@@ -353,9 +456,7 @@ impl Scrubber {
                 Ok(path) => {
                     this.notify_user(NoticeTone::Info, "Exported", path.display().to_string(), cx)
                 }
-                Err(e) => {
-                    this.notify_user(NoticeTone::Error, "Could not export", e.to_string(), cx)
-                }
+                Err(e) => this.report("Could not export", e, cx),
             },
         );
     }
@@ -369,7 +470,7 @@ impl Scrubber {
         let Some(other) = &session.other else {
             return;
         };
-        let other_name = other.name();
+        let other_name = other.label();
         let Some(d) = session
             .comparison
             .as_ref()
@@ -383,14 +484,15 @@ impl Scrubber {
             );
             return;
         };
-        let here = session.run.timeline.event(d.index).map_or_else(
-            || "the end of the run".to_string(),
-            |e| describe::describe(e).text,
-        );
-        let there = other.timeline.event(d.index).map_or_else(
-            || "the end of the run".to_string(),
-            |e| describe::describe(e).text,
-        );
+        let here = session
+            .run
+            .timeline
+            .event(d.index)
+            .map_or_else(|| "the end of the run".to_string(), describe::summary);
+        let there = other
+            .timeline
+            .event(d.index)
+            .map_or_else(|| "the end of the run".to_string(), describe::summary);
         let step = d.left_step;
         self.go_to(step, cx);
         self.notify_user(
@@ -429,18 +531,19 @@ impl Scrubber {
             let Some(path) = picked else {
                 return;
             };
-            let _ = this.update(cx, |this, cx| this.open(path, cx));
+            let _ = this.update(cx, |this, cx| this.open(path, None, cx));
         })
         .detach();
     }
 
-    /// Reads a run on a background thread and shows it.
-    pub(super) fn open(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+    /// Reads a run, and the run to compare it with, on a background
+    /// thread and shows them.
+    pub(super) fn open(&mut self, path: PathBuf, compare: Option<PathBuf>, cx: &mut Context<Self>) {
         self.loading = Some(path.clone());
         cx.notify();
         let read = cx
             .background_executor()
-            .spawn(async move { Session::open(&path, None) });
+            .spawn(async move { Session::open(&path, compare.as_deref()) });
         cx.spawn(async move |this, cx| {
             let result = read.await;
             let _ = this.update(cx, |this, cx| {

@@ -154,7 +154,7 @@ pub mod size {
     pub const LOG_COLUMN_GAP: f32 = 14.0;
     pub const LIST_COLUMN_GAP: f32 = 10.0;
     pub const PID_COLUMN_WIDTH: f32 = 44.0;
-    pub const OP_COLUMN_WIDTH: f32 = 20.0;
+    pub const OP_COLUMN_WIDTH: f32 = 28.0;
     pub const TREE_INDENT: f32 = 16.0;
     /// The width of one character of the monospace font at TEXT_MONO,
     /// for sizing the step column to the run's longest step number.
@@ -167,6 +167,7 @@ pub mod size {
     pub const NOTICE_WIDTH: f32 = 400.0;
     pub const NOTICE_INSET: f32 = 16.0;
     pub const NOTICE_PAD: f32 = 12.0;
+    pub const NOTICE_BUTTON_HEIGHT: f32 = 32.0;
 
     // The empty state.
     pub const EMPTY_MARK_ICON: f32 = 44.0;

@@ -14,6 +14,9 @@ publish = false
 
 [dependencies]
 anyhow = "1"
+base64 = "0.22"
+# License keys are Ed25519 signatures, checked offline (see LICENSING.md).
+ed25519-dalek = "2"
 # GPUI, Zed's UI framework, as published from zed@1a28cff under the gpui-pre
 # name. The crates.io `gpui` release is a year behind and renders through
 # blade on Linux; gpui-pre renders through wgpu on Wayland and X11.
@@ -26,3 +29,17 @@ serde_json = "1"
 opt-level = 3
 lto = "thin"
 debug = "line-tables-only"
+
+# The license issuer: built only with --features issuer, so it never ships
+# in the app's package. See LICENSING.md.
+[features]
+issuer = []
+
+[[bin]]
+name = "rewind-app"
+path = "src/main.rs"
+
+[[bin]]
+name = "rewind-license"
+path = "src/bin/rewind-license.rs"
+required-features = ["issuer"]

@@ -119,6 +119,21 @@ pub fn describe(event: &Event) -> Described {
     }
 }
 
+/// An event with where and in which thread it happened, for comparing
+/// two runs' events that may read the same but land on different steps.
+pub fn summary(event: &Event) -> String {
+    let thread = if event.tid == event.pid {
+        format!("pid {}", event.pid)
+    } else {
+        format!("pid {} tid {}", event.pid, event.tid)
+    };
+    format!(
+        "step {} \u{b7} {thread}: {}",
+        thousands(event.step),
+        describe(event).text
+    )
+}
+
 /// The open flags a write shows: access mode, then create, exclusive,
 /// truncate and append.
 fn open_flags(flags: u32) -> String {
@@ -331,6 +346,21 @@ mod tests {
         assert_eq!(
             short_store_paths("/nix/store/short-x"),
             "/nix/store/short-x"
+        );
+    }
+
+    #[test]
+    fn a_summary_says_where_and_in_which_thread() {
+        // A write from a thread other than the main one names both ids.
+        let mut e = ev(EventKind::Output {
+            fd: 1,
+            bytes: b"job 0\n".to_vec(),
+        });
+        e.step = 3_495;
+        e.tid = 9;
+        assert_eq!(
+            summary(&e),
+            "step 3,495 \u{b7} pid 7 tid 9: write(1, \"job 0\\n\")"
         );
     }
 }
