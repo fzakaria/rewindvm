@@ -39,6 +39,15 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+      # A runner starts with about 14 GB free, and the guest kernel's build
+      # tree, the app and the static toolchain together need more. The
+      # preinstalled SDKs this workflow never uses are most of the disk.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache /usr/local/share/boost /usr/share/swift
+          df -h /
+
       - uses: cachix/install-nix-action@v31
         with:
           extra_nix_config: |
