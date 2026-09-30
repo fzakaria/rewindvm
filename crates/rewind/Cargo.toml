@@ -1,0 +1,16 @@
+[package]
+name = "rewind"
+description = "Run, scrub, rewind and fork deterministic Linux VMs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "rewind"
+path = "src/main.rs"
+
+[dependencies]
+rewind-vmm = { path = "../rewind-vmm" }
+anyhow = "1"
+# Derive-based argument parsing, as in omnibin.
+clap = { version = "4", features = ["derive", "env"] }

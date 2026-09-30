@@ -1,0 +1,20 @@
+# The open engine. The desktop app is a separate workspace under
+# crates/rewind-app, so its dependencies and license stay out of this one.
+[workspace]
+resolver = "3"
+members = [
+    "crates/rewind",
+    "crates/rewind-vmm",
+]
+exclude = ["crates/rewind-app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/fzakaria/rewind"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+debug = "line-tables-only"

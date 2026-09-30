@@ -1,0 +1,13 @@
+[package]
+name = "rewind-vmm"
+description = "A deterministic virtual machine monitor on KVM"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# The KVM ioctls and the structures they pass, from rust-vmm.
+kvm-ioctls = "0.25"
+kvm-bindings = "0.14"
+libc = "0.2"
+anyhow = "1"
