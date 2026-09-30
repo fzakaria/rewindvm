@@ -31,6 +31,7 @@
       <nav class="nav-links">
         <a href="#how">How it works</a>
         <a href="#workloads">Nix and containers</a>
+        <a href="#tutorials">Tutorials</a>
         <a href="#pricing">Pricing</a>
         <a
           class="btn small"
@@ -48,9 +49,9 @@
           <h1>Scrub any run back to the step that broke it.</h1>
           <p class="lede">
             Rewind VM runs a Nix build, a test suite or any Linux command inside a deterministic KVM
-            virtual machine. The same inputs produce the same run, instruction for instruction,
-            every time. When it fails, drag the timeline back to where it went wrong, look around,
-            and fork from there.
+            virtual machine. The same inputs produce the same events at the same steps, every time.
+            When it fails, drag the timeline back to where it went wrong, look around, and fork from
+            there.
           </p>
           <div class="cta-row">
             <a
@@ -202,25 +203,25 @@
           <li>
             <h3>Run deterministically</h3>
             <p>
-              One vCPU. The guest kernel carries a small Rewind hypervisor platform: virtual time
-              moves only when the guest yields, interrupts are injected only at those points, and
-              the timestamp counter and hardware RNG are hidden. Each guest-triggered exit is one
-              step.
+              One vCPU on stock KVM, so guest code runs on the real CPU. The guest kernel carries a
+              small Rewind hypervisor platform: interrupts arrive only at exits the guest made,
+              virtual time moves only at exits, and the timestamp counter and hardware RNG are
+              hidden. A step is one exit from the guest to the monitor.
             </p>
           </li>
           <li>
             <h3>Keep keyframes</h3>
             <p>
-              Snapshots use KVM dirty-page logging and go into a content-addressed page store
-              (BLAKE3, zstd). A page that is identical across keyframes, runs and forks is stored
-              once.
+              Every quarter second of wall time, Rewind snapshots the machine using KVM's dirty-page
+              log. Pages go into a content-addressed store (BLAKE3, zstd), so a page shared by
+              keyframes, runs and forks is stored once.
             </p>
           </li>
           <li>
             <h3>Seek</h3>
             <p>
-              To reach a step, Rewind restores the nearest keyframe and runs forward to the exact
-              step. Same inputs, same steps, same machine state.
+              To reach a step, Rewind restores the latest keyframe at or before it and runs forward.
+              Same inputs, same events at the same steps.
             </p>
           </li>
         </ol>
@@ -228,6 +229,19 @@
 
       <section class="features">
         <h2>In the desktop app</h2>
+        <figure class="shot">
+          <picture>
+            <source srcset="img/app-failure.webp" type="image/webp" />
+            <img
+              src="img/app-failure.png"
+              width="1440"
+              height="900"
+              loading="lazy"
+              alt="The Rewind desktop app on a failing mylib run: the timeline with the playhead in the check phase, the build log, the process tree, files written, and the SIGSEGV at 0x108 next to where the run diverged from its parent"
+            />
+          </picture>
+          <figcaption>The real app, on a real failing run.</figcaption>
+        </figure>
         <div class="grid">
           <div class="card">
             <h3>Scrub the timeline</h3>
@@ -239,46 +253,37 @@
           <div class="card marker-blue">
             <h3>Jump to the divergence</h3>
             <p>
-              Put a passing run next to a failing one and land on the first step where they differ.
+              Open a failing run next to the passing run it came from and land on the step where
+              they part.
             </p>
           </div>
           <div class="card marker-red">
             <h3>Jump to the failure</h3>
             <p>The crash, the non-zero exit or the failed test, one click from anywhere.</p>
           </div>
-          <div class="card">
-            <h3>Attach gdb at any step</h3>
-            <p>
-              Break into a process as it was at step 11,204 or step 3. Attaching does not change the
-              run, so a race that hides from a debugger stays put.
-            </p>
-          </div>
-          <div class="card">
-            <h3>Open a shell at a step</h3>
-            <p>
-              Look at the filesystem, the environment and the half-written output files exactly as
-              they were.
-            </p>
-          </div>
           <div class="card marker">
-            <h3>Fork with a new seed</h3>
+            <h3>Fork from the playhead</h3>
             <p>
-              Branch from any step with a different seed and the threads interleave differently.
-              Explore what else could have happened, Antithesis-style.
-            </p>
-          </div>
-          <div class="card marker">
-            <h3>Fork with a changed file</h3>
-            <p>
-              Patch a source file or a config at a step and run on from there, without redoing
-              everything before it.
+              Branch at any step under a new schedule: reschedule requests plus up to 50 &micro;s of
+              timer slack, so the threads interleave differently from there on.
             </p>
           </div>
           <div class="card">
-            <h3>Share a failure as a file</h3>
+            <h3>Attach gdb at a step <span class="tag">Planned</span></h3>
+            <p>A debugger on the restored machine, in the address space of the process you pick.</p>
+          </div>
+          <div class="card">
+            <h3>Open a shell at a step <span class="tag">Planned</span></h3>
             <p>
-              Export a failing run as a small file, attach it to an issue, and anyone with Rewind
-              lands on the same step.
+              A fork of the run with an interactive shell next to the paused job, its input recorded
+              so the fork still replays.
+            </p>
+          </div>
+          <div class="card">
+            <h3>Share a run as one file <span class="tag">Planned</span></h3>
+            <p>
+              The manifest, trace, keyframes and the pages they use in a single file, to attach to
+              an issue.
             </p>
           </div>
         </div>
@@ -292,37 +297,38 @@
             <h3>A root filesystem and a command</h3>
             <pre
               class="term"
-            ><code><span class="prompt">$</span> rewind run --image rootfs/ -- make check</code></pre>
+            ><code><span class="prompt">$</span> rewind run --root mylib.tar --cwd /src -- make check</code></pre>
             <p class="lane-lede">
-              The root filesystem can be a directory or an OCI or Docker image. Whatever runs in it
-              runs deterministically.
+              The root is a directory, an erofs image, or a tarball such as
+              <code>docker export</code> writes. The guest mounts it under a writable overlay, and
+              nothing the command writes reaches your disk.
             </p>
             <dl class="rows-def">
               <div>
                 <dt>flaky tests</dt>
                 <dd>
-                  Run a test under many seeds until it fails. That failing run can now be reached
-                  again, every time.
+                  <code>rewind check</code> reruns the command under perturbed schedules until one
+                  ends differently, then narrows the perturbation to the steps that matter.
                 </dd>
               </div>
               <div>
                 <dt>CI failures</dt>
                 <dd>
-                  CI keeps the failing run as a file. Open it on your laptop and scrub back from the
-                  red line instead of reading a log that ends at the crash.
+                  A failing run is a directory holding its inputs and every event with its step.
+                  Keep it and scrub back from the crash instead of reading a log that ends there.
                 </dd>
               </div>
               <div>
                 <dt>heisenbugs</dt>
                 <dd>
-                  Races that vanish under a debugger stay put here. The run is fixed before gdb
-                  attaches.
+                  A race that vanishes when you add a printf stays put. A failing run fails the same
+                  way every time it runs.
                 </dd>
               </div>
               <div>
                 <dt>exploration</dt>
                 <dd>
-                  Fork a passing run at a step with new seeds to try other thread interleavings from
+                  Fork a passing run at a step under new schedules to try other interleavings from
                   that point on.
                 </dd>
               </div>
@@ -332,12 +338,11 @@
           <div class="lane nix">
             <p class="eyebrow">For Nix users</p>
             <h3>Nix builds are already almost a closed world</h3>
-            <pre class="term"><code><span class="prompt">$</span> rewind nix ./#mylib
-<span class="prompt">$</span> rewind check ./#mylib</code></pre>
+            <pre class="term"><code><span class="prompt">$</span> rewind nix .#mylib
+<span class="prompt">$</span> rewind check .#mylib</code></pre>
             <p class="lane-lede">
-              Pinned inputs, no network, fixed paths. Point Rewind at a flake attribute or a
-              <code>.drv</code> and most of the work of making the run deterministic is already
-              done.
+              Pinned inputs, no network, fixed paths. Point Rewind at a flake attribute and most of
+              the work of making the build deterministic is already done.
             </p>
             <dl class="rows-def">
               <div>
@@ -346,28 +351,60 @@
               </div>
               <div>
                 <dt>the machine</dt>
-                <dd>
-                  The guest kernel and the VMM are derivations too, so the whole machine is pinned.
-                </dd>
+                <dd>The guest kernel is a derivation too, so the whole machine is pinned.</dd>
               </div>
               <div>
                 <dt>rewind check</dt>
                 <dd>
                   <code>nix build --check</code> says the output "may not be deterministic".
-                  <code>rewind check</code> runs the derivation twice with different seeds and jumps
-                  to the first step where the runs diverge.
+                  <code>rewind check</code> builds under perturbed schedules, stops at the first
+                  build that ends differently, and shows where the two runs part.
                 </dd>
               </div>
               <div>
-                <dt>a file</dt>
-                <dd>A failing build becomes a small file anyone can replay.</dd>
+                <dt>the output</dt>
+                <dd>
+                  GNU hello built in the guest runs at native speed and is bit for bit the host's
+                  build. <code>rewind nix</code> compares output hashes with the host's copy.
+                </dd>
               </div>
               <div>
                 <dt>the clock</dt>
-                <dd>Wall clock time in the guest starts at <code>SOURCE_DATE_EPOCH</code>.</dd>
+                <dd>
+                  The guest's wall clock starts at midnight UTC of the day the run was made, and a
+                  replay uses it again.
+                </dd>
               </div>
             </dl>
           </div>
+        </div>
+      </section>
+
+      <section class="wrap tutorials" id="tutorials">
+        <h2>Tutorials</h2>
+        <p class="lede">
+          Both follow one real bug, a shutdown race in a small C thread pool, from install to fix.
+          Every transcript in them is real output.
+        </p>
+        <div class="grid">
+          <a class="card" href="tutorials/nix.html">
+            <span class="eyebrow">Nix</span>
+            <h3>A flaky Nix build</h3>
+            <p>
+              Install with Nix, let <code>rewind check</code> find the interleaving that crashes a
+              derivation's tests, then replay it, fork it and check the fix.
+            </p>
+            <span class="card-link">Read the tutorial &rarr;</span>
+          </a>
+          <a class="card" href="tutorials/container.html">
+            <span class="eyebrow">Container</span>
+            <h3>A flaky test in a container</h3>
+            <p>
+              The same bug from a Docker image with no Nix: export the filesystem, find the failing
+              schedule and replay the crash exactly.
+            </p>
+            <span class="card-link">Read the tutorial &rarr;</span>
+          </a>
         </div>
       </section>
 
@@ -381,7 +418,10 @@
           <div class="plan">
             <h3>Engine and CLI</h3>
             <p class="price">Free <span>MIT license</span></p>
-            <p class="alt">The VMM, the guest kernel platform and the command line.</p>
+            <p class="alt">
+              The monitor, the engine and the command line. The guest kernel patch is GPL-2.0, as
+              Linux is.
+            </p>
             <ul>
               <li>
                 <code>rewind run</code>, <code>rewind nix</code> and <code>rewind check</code>
@@ -427,15 +467,26 @@
       <section class="wrap caution">
         <h2>Limits, today</h2>
         <p>
-          Userspace is never preempted. A thread spinning without syscalls stalls the guest.
-          Futex-based code is fine.
+          Computation between exits is free, and CPU-bound threads are not preempted. A thread
+          spinning on a flag without yielding stalls the guest; futex-based waits are fine.
         </p>
         <p>
-          Only interleavings that cross a syscall or a yield can be explored. Pure load and store
-          data races between two threads are out of reach.
+          One vCPU. Threads interleave but never run at the same instant, so a race between plain
+          loads and stores with no system call between them is out of reach. Throughput comes from
+          running many machines at once.
         </p>
-        <p>One vCPU per VM. Throughput comes from running many VMs at once.</p>
-        <p>x86_64 Linux hosts with KVM only, for now.</p>
+        <p>
+          The host CPU model is part of the input. A run replays exactly on the machine that made it
+          and on machines with the same CPU model.
+        </p>
+        <p>No network, other than loopback.</p>
+        <p>
+          x86_64 Linux hosts with KVM only. The
+          <a href="https://github.com/fzakaria/rewind/blob/main/docs/design.md#limits"
+            >design notes</a
+          >
+          have the details.
+        </p>
       </section>
     </main>
 

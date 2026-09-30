@@ -446,26 +446,25 @@
   function resetNote() {
     say(
       "Inspect.",
-      "Fork, attach gdb or open a shell at the step under the playhead.",
+      "Fork from the step under the playhead, or compare it with run #2.",
     );
   }
 
+  // gdb, the shell and export are on the roadmap; the diff is the app's
+  // comparison with the run this one came from.
   const INSPECT = {
     gdb: (s, ev) => [
-      "In the app,",
-      `gdb attaches to pid ${ev.pid} as it was at step ${fmt(s)}.`,
+      "Planned:",
+      `gdb attached to pid ${ev.pid} as it was at step ${fmt(s)}.`,
     ],
-    shell: (s) => [
+    shell: (s) => ["Planned:", `a shell inside the guest at step ${fmt(s)}.`],
+    diff: () => [
       "In the app,",
-      `a shell opens inside the guest at step ${fmt(s)}.`,
-    ],
-    diff: (s) => [
-      "In the app,",
-      `/build at step ${fmt(s)} is compared with run #2 at the same step.`,
+      `run #3 and run #2 are identical up to step ${fmt(DIVERGENCE_STEP)}.`,
     ],
     export: () => [
-      "In the app,",
-      "run #3 is saved as a small file anyone with Rewind can replay.",
+      "Planned:",
+      "run #3 as a single file to attach to an issue.",
     ],
   };
 
@@ -563,7 +562,7 @@
     state.forkStep = state.step;
     say(
       `Forked at step ${fmt(state.step)} as run #${FORK_RUN}.`,
-      "Give it a new seed to try other thread interleavings, or change a file. Either applies to this branch only.",
+      "It is run #3 up to here, then runs under a new schedule, so the threads interleave differently.",
     );
     render();
   });

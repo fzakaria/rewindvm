@@ -32,6 +32,13 @@
   box-sizing: border-box;
 }
 
+/* No programming ligatures: transcripts and code show "->" and "--" as typed. */
+code,
+pre,
+.demo {
+  font-variant-ligatures: none;
+}
+
 body {
   margin: 0;
   background: var(--bg);
@@ -872,6 +879,197 @@ a:focus-visible {
   font-size: 1.35rem;
 }
 
+/* A screenshot of the real app: a framed image with its caption below. */
+/* Only the top margin: the features band centres its children, and the
+   tutorials widen the figure with their own side margins. */
+.shot {
+  margin-top: 28px;
+  margin-bottom: 0;
+}
+.shot img {
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.45);
+}
+.shot figcaption {
+  color: var(--muted);
+  font-size: 0.9rem;
+  margin-top: 10px;
+}
+
+/* A feature on the roadmap rather than in the app today. */
+/* It sits on its own line under the card's heading. */
+.tag {
+  display: table;
+  margin-top: 6px;
+  padding: 1px 8px;
+  border: 1px solid var(--line-2);
+  border-radius: 999px;
+  font: 500 0.7rem var(--mono);
+  letter-spacing: 0;
+  color: var(--muted);
+}
+.card .eyebrow {
+  display: block;
+}
+
+/* Tutorials on the landing page: two cards that are links. */
+.tutorials .grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+a.card {
+  display: block;
+  color: var(--text);
+  text-decoration: none;
+}
+a.card:hover {
+  border-color: var(--amber);
+  color: var(--text);
+}
+.card-link {
+  display: inline-block;
+  margin-top: 14px;
+  color: var(--amber);
+  font-weight: 600;
+}
+
+/* Tutorial pages: one readable column. Console blocks and the screenshot
+   may run wider than the text, up to 960px, but never past the page's side
+   gutters; long lines scroll inside the block. */
+.page-links {
+  display: flex;
+  gap: 20px;
+}
+.page-links a {
+  color: var(--soft);
+  text-decoration: none;
+  font-size: 0.95rem;
+}
+.page-links a:hover {
+  color: var(--text);
+}
+.article {
+  max-width: 760px;
+  padding-block: 24px 72px;
+}
+.article > p,
+.article section > p,
+.article li {
+  color: var(--soft);
+}
+.article h1 {
+  font-size: clamp(2rem, 4.2vw, 3rem);
+}
+.article section {
+  padding-block: 0;
+}
+.article h2 {
+  font-size: clamp(1.4rem, 2.6vw, 1.75rem);
+  margin-top: 1.9em;
+  scroll-margin-top: 20px;
+}
+.article .console,
+.article .shot {
+  --bleed: min(960px, 100vw - 40px);
+  margin-inline: calc((var(--bleed) - 100%) / -2);
+}
+.toc {
+  margin-top: 28px;
+  padding: 18px 22px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+.toc-head {
+  margin: 0 0 6px;
+  font: 500 0.8rem var(--mono);
+  color: var(--amber);
+}
+.toc ol {
+  margin: 0;
+  padding-left: 1.4em;
+  columns: 2;
+  column-gap: 32px;
+}
+.toc li {
+  margin: 0 0 6px;
+  break-inside: avoid;
+}
+.toc a {
+  color: var(--text);
+  text-decoration: none;
+}
+.toc a:hover {
+  color: var(--amber);
+}
+.card.next {
+  margin-top: 48px;
+}
+.card.next span {
+  display: block;
+}
+.card.next .eyebrow {
+  margin-bottom: 6px;
+}
+.next-title {
+  font: 700 1.3rem var(--display);
+  letter-spacing: -0.01em;
+}
+.next-text {
+  color: var(--soft);
+  margin-top: 4px;
+}
+
+/* Console blocks: what was typed in the accent, what came back muted. */
+.console {
+  margin-block: 18px;
+  padding: 14px 18px;
+  background: #0a0c0f;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow-x: auto;
+  font: 13px/1.65 var(--mono);
+  color: var(--muted);
+  tab-size: 8;
+}
+.console code {
+  background: none;
+  padding: 0;
+  font-size: inherit;
+  color: inherit;
+}
+.console .cmd {
+  color: var(--amber);
+}
+.console .prompt {
+  color: #8a6a3a;
+  user-select: none;
+}
+/* Diff lines fill the block's width so their tint reads as a band. */
+.diff .add,
+.diff .del,
+.diff .ctx,
+.diff .hunk {
+  display: inline-block;
+  min-width: 100%;
+}
+.diff .ctx {
+  color: var(--soft);
+}
+.diff .add {
+  color: #9be3a6;
+  background: rgba(86, 196, 110, 0.13);
+}
+.diff .del {
+  color: #ffaaa0;
+  background: rgba(255, 122, 107, 0.13);
+}
+.diff .hunk {
+  color: var(--blue);
+}
+
 @media (max-width: 1080px) {
   .hero {
     grid-template-columns: 1fr;
@@ -896,8 +1094,12 @@ a:focus-visible {
     display: none;
   }
   .lanes,
-  .plans {
+  .plans,
+  .tutorials .grid {
     grid-template-columns: 1fr;
+  }
+  .toc ol {
+    columns: 1;
   }
 }
 
