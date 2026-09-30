@@ -32,7 +32,7 @@ use memory::Mapping;
 use pv::{Clock, GuestExit, Schedule};
 
 /// The memory slot of guest RAM, and of the input image.
-const SLOT_RAM: u32 = 0;
+pub(crate) const SLOT_RAM: u32 = 0;
 const SLOT_PMEM: u32 = 1;
 
 /// Where KVM places the TSS the vCPU needs for real-mode emulation. Any

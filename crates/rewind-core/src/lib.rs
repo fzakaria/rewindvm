@@ -4,6 +4,7 @@
 pub mod cpio;
 pub mod home;
 pub mod image;
+pub mod keyframes;
 pub mod nix;
 pub mod run;
 

@@ -48,6 +48,11 @@ impl Home {
     pub fn images(&self) -> PathBuf {
         self.root.join("images")
     }
+
+    /// The page store every run's keyframes share.
+    pub fn store(&self) -> PathBuf {
+        self.root.join("store")
+    }
 }
 
 /// The guest pieces named by the environment.

@@ -281,7 +281,10 @@ impl Run {
             };
             machine.pmu = Some((Counter::open(event, modes)?, 0xcbf2_9ce4_8422_2325));
         }
-        let outcome = machine.run(None, &mut recorder)?;
+        let mut store = rewind_store::Store::open(&home.store())?;
+        let outcome =
+            crate::keyframes::run_with_keyframes(&mut machine, &mut recorder, &dir, &mut store)?;
+        store.sync()?;
         if let Some((counter, hash)) = &machine.pmu {
             eprintln!("pmu: final {} hash {hash:016x}", counter.read()?);
         }
@@ -319,6 +322,53 @@ impl Run {
         let again = Trace::read(&tmp)?;
         fs::remove_file(&tmp)?;
         Ok(original.divergence(&again))
+    }
+
+    /// A machine at `step` of this run: the latest keyframe at or before
+    /// it, restored, and run forward to the step. Events on the way go to
+    /// `obs`.
+    pub fn machine_at(&self, home: &Home, step: u64, obs: &mut dyn Observer) -> Result<Machine> {
+        let config = self.manifest.spec.config()?;
+        let from = crate::keyframes::steps(&self.dir)
+            .into_iter()
+            .rfind(|s| *s <= step);
+        let mut machine = match from {
+            Some(kf) => {
+                let store = rewind_store::Store::open(&home.store())?;
+                let chain = crate::keyframes::chain(&self.dir, kf)?;
+                Machine::restore(&config, &chain, &crate::keyframes::ReadPages(&store))?
+            }
+            None => Machine::boot(&config)?,
+        };
+        machine.run(Some(step), obs)?;
+        Ok(machine)
+    }
+
+    /// Restores the keyframe at or before `step` and runs to the end.
+    /// Returns the keyframe's step, the original trace after it, and the
+    /// new one, which should be the same: the claim every keyframe makes.
+    pub fn replay_from(&self, home: &Home, step: u64) -> Result<(u64, Trace, Trace)> {
+        let original = self.trace()?;
+        let kf = crate::keyframes::steps(&self.dir)
+            .into_iter()
+            .rfind(|s| *s <= step)
+            .context("the run has no keyframe at or before that step")?;
+        let tmp = self.dir.join("replay-from.bin.tmp");
+        let mut recorder = Recorder {
+            trace: TraceWriter::new(fs::File::create(&tmp)?),
+            echo: Echo::Quiet,
+            status: None,
+            error: None,
+        };
+        let mut machine = self.machine_at(home, kf, &mut recorder)?;
+        machine.run(None, &mut recorder)?;
+        recorder.trace.finish()?;
+        let again = Trace::read(&tmp)?;
+        fs::remove_file(&tmp)?;
+        let suffix = Trace {
+            events: original.events[original.index_after(kf)..].to_vec(),
+        };
+        Ok((kf, suffix, again))
     }
 
     /// The runs in a home, newest first.

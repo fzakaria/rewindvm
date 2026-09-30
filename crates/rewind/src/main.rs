@@ -137,7 +137,12 @@ enum Command {
         json: bool,
     },
     /// Run a run's inputs again and check the trace comes out identical.
-    Replay { run: String },
+    Replay {
+        run: String,
+        /// Start from the keyframe at or before this step instead of boot.
+        #[arg(long)]
+        from: Option<u64>,
+    },
     /// Compare two runs and show where they first differ.
     Diff { left: String, right: String },
 }
@@ -391,7 +396,29 @@ fn run(cli: Cli) -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        Command::Replay { run } => {
+        Command::Replay {
+            run,
+            from: Some(step),
+        } => {
+            let run = Run::find(&home, &run)?;
+            let started = std::time::Instant::now();
+            let (kf, original, again) = run.replay_from(&home, step)?;
+            match original.divergence(&again) {
+                None => {
+                    println!(
+                        "identical from the keyframe at step {kf} to the end ({:.2}s)",
+                        started.elapsed().as_secs_f64()
+                    );
+                    Ok(ExitCode::SUCCESS)
+                }
+                Some(_) => {
+                    println!("DIFFERENT after the keyframe at step {kf}:");
+                    print!("{}", show::divergence(&original, &again));
+                    Ok(ExitCode::FAILURE)
+                }
+            }
+        }
+        Command::Replay { run, from: None } => {
             let run = Run::find(&home, &run)?;
             match run.replay()? {
                 None => {

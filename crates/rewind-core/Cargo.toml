@@ -8,7 +8,10 @@ license.workspace = true
 [dependencies]
 rewind-init = { path = "../rewind-init" }
 rewind-trace = { path = "../rewind-trace" }
+rewind-store = { path = "../rewind-store" }
 rewind-vmm = { path = "../rewind-vmm" }
+# Keyframes on disk.
+bincode = "1"
 anyhow = "1"
 # Content hashes of images and run inputs.
 blake3 = { version = "1", features = ["mmap"] }

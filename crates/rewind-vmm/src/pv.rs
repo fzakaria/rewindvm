@@ -147,7 +147,7 @@ impl Schedule {
     pub fn preempt_at(&self, step: u64) -> bool {
         self.seed != 0
             && self.window.contains(&step)
-            && mix(mix(self.seed) ^ step) % PREEMPT_ONE_IN == 0
+            && mix(mix(self.seed) ^ step).is_multiple_of(PREEMPT_ONE_IN)
     }
 
     /// Extra delay for a timer armed at `step`.
