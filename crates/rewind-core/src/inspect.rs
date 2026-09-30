@@ -8,9 +8,10 @@
 //! thrown away. The recording itself never changes.
 
 use anyhow::{Result, bail};
-use rewind_init::{INSPECT_BEGIN_MARK, INSPECT_CAT, INSPECT_END_MARK, InspectStatus};
+use rewind_init::{EXIT_MARK, INSPECT_BEGIN_MARK, INSPECT_CAT, INSPECT_END_MARK, InspectStatus};
 use rewind_trace::{Event, EventKind};
-use rewind_vmm::{Ignore, Observer, Outcome};
+use rewind_vmm::pv::GuestExit;
+use rewind_vmm::{Ignore, Observer, Outcome, Stop};
 
 use crate::home::Home;
 use crate::run::Run;
@@ -42,6 +43,15 @@ pub enum Inspection {
 /// its root and working directory, or the job's when `pid` is None or the
 /// process is gone by then.
 pub fn cat(home: &Home, run: &Run, step: u64, pid: Option<u32>, path: &str) -> Result<Inspection> {
+    // After init reports the job's exit, it only syncs and powers off, so
+    // no file changes; and once power off has begun, nothing more can run
+    // in the VM. A later step reads the files as they were at that report.
+    let exited_at = run.trace()?.events.iter().find_map(|e| match &e.kind {
+        EventKind::Mark { text } if text.trim().starts_with(EXIT_MARK.trim()) => Some(e.step),
+        _ => None,
+    });
+    let step = exited_at.map_or(step, |exited| step.min(exited));
+
     let mut machine = run.machine_at(home, step, &mut Ignore)?;
     let pid = pid.unwrap_or(0).to_string();
     machine.request_inspection(&[INSPECT_CAT, &pid, path])?;
@@ -55,7 +65,7 @@ pub fn cat(home: &Home, run: &Run, step: u64, pid: Option<u32>, path: &str) -> R
             return Ok(answer.into_inspection(status));
         }
         if let Outcome::Stopped(stop) = outcome {
-            bail!("the VM stopped ({stop:?}) before answering");
+            bail!("the VM {} before the file could be read", stopped(stop));
         }
         if answer.pid.is_none() && machine.step() >= step + START_WITHIN_STEPS {
             bail!(
@@ -63,6 +73,17 @@ pub fn cat(home: &Home, run: &Run, step: u64, pid: Option<u32>, path: &str) -> R
                  the run's kernel may predate inspections, so record it again"
             );
         }
+    }
+}
+
+/// How a machine stopped, in words.
+fn stopped(stop: Stop) -> &'static str {
+    match stop {
+        Stop::Guest(GuestExit::PowerOff) => "powered off",
+        Stop::Guest(GuestExit::Restart) => "restarted",
+        Stop::Guest(GuestExit::Halt) => "halted",
+        Stop::TripleFault => "crashed",
+        Stop::Stalled => "went idle for good",
     }
 }
 
