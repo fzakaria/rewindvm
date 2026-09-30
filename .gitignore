@@ -1,0 +1,13 @@
+# Recordings. They hold keyframes of guest memory and belong in a store, not
+# in the tree.
+*.rwd/
+recordings/
+
+# Run logs.
+*.log
+
+# Build outputs and caches.
+result
+result-*
+target/
+__pycache__/
