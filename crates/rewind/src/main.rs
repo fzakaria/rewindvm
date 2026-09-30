@@ -23,7 +23,7 @@ struct Cli {
 }
 
 /// The machine options every way of starting a run shares.
-#[derive(clap::Args)]
+#[derive(clap::Args, Clone)]
 struct MachineArgs {
     /// Seeds the guest's randomness. Runs with the same inputs and seed are
     /// identical; a different seed explores a different run.
@@ -67,7 +67,7 @@ struct MachineArgs {
     kernel_args: String,
 }
 
-#[derive(clap::ValueEnum, Clone, Copy)]
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
 enum CpuArg {
     V3,
     Host,
@@ -138,6 +138,9 @@ enum Command {
         /// of stopping at the first.
         #[arg(long)]
         all: bool,
+        /// How many machines to run at once; one per CPU by default.
+        #[arg(long, short)]
+        jobs: Option<usize>,
         #[command(flatten)]
         machine: MachineArgs,
     },
@@ -238,7 +241,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             machine,
         } => {
             let guest = Guest::from_env()?;
-            let run = nix_run(&home, &guest, &installable, &machine)?;
+            let run = run_workload(&home, &guest, &Workload::Nix(installable), &machine)?;
             report_outputs(&run)?;
             Ok(exit_status(&run))
         }
@@ -247,50 +250,74 @@ fn run(cli: Cli) -> Result<ExitCode> {
             image,
             schedules,
             all,
+            jobs,
             mut machine,
         } => {
             let guest = Guest::from_env()?;
+            let jobs = jobs
+                .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
+                .max(1);
             // Exploring compares runs; only the two reported get keyframes.
             machine.no_keyframes = true;
+            machine.quiet = true;
+            // Every run in a search boots with the same wall clock, even one
+            // that crosses midnight.
+            machine.epoch = Some(machine.epoch.unwrap_or_else(default_epoch));
             let workload = match installable {
                 Some(i) => Workload::Nix(i),
                 None => Workload::Image(image),
             };
-            machine.quiet = true;
+            let prepared = prepare(&home, &guest, &workload, &machine)?;
 
-            // The unperturbed build, and the step its job started on:
+            // The unperturbed run, and the step its job started on:
             // everything before that is boot, and perturbing it would only
             // make every run differ from the first kernel thread on.
             machine.schedule = 0;
             machine.schedule_from = 0;
-            let base = run_workload(&home, &guest, &workload, &machine)?;
+            let base = execute(&home, &guest, &prepared, &machine, Announce::No)?;
             println!("schedule   0: {}", show::outcome_line(&base)?);
             let base_trace = base.trace()?;
             let start = show::start_step(&base_trace);
             let base_key = show::outcome_key(&base)?;
+            let differs = |run: &Run| -> Result<bool> { Ok(show::outcome_key(run)? != base_key) };
 
-            let mut failing = None;
+            // Perturbed schedules, a machine per job at a time, in order.
+            let mut failing: Option<Run> = None;
             let mut differing = 0;
             let mut tried = 0;
-            for schedule in 1..=schedules {
-                machine.schedule = schedule;
-                machine.schedule_from = start;
-                let run = run_workload(&home, &guest, &workload, &machine)?;
-                println!("schedule {schedule:>3}: {}", show::outcome_line(&run)?);
-                tried += 1;
-                if show::outcome_key(&run)? != base_key {
-                    differing += 1;
-                    failing.get_or_insert(run);
-                    if !all {
-                        break;
+            let seeds: Vec<u64> = (1..=schedules).collect();
+            for batch in seeds.chunks(jobs) {
+                let machines = batch
+                    .iter()
+                    .map(|&seed| MachineArgs {
+                        schedule: seed,
+                        schedule_from: start,
+                        ..machine.clone()
+                    })
+                    .collect();
+                for run in execute_all(&home, &guest, &prepared, machines)? {
+                    println!(
+                        "schedule {:>3}: {}",
+                        run.manifest.spec.schedule,
+                        show::outcome_line(&run)?
+                    );
+                    tried += 1;
+                    if differs(&run)? {
+                        differing += 1;
+                        if failing.is_none() {
+                            failing = Some(run);
+                        }
                     }
+                }
+                if failing.is_some() && !all {
+                    break;
                 }
             }
             if all {
                 println!("{differing} of {tried} perturbed schedules ended differently");
             }
             let Some(mut worst) = failing else {
-                println!("same result under all {} schedules", schedules + 1);
+                println!("same result under all {} schedules", tried + 1);
                 return Ok(ExitCode::SUCCESS);
             };
 
@@ -299,41 +326,80 @@ fn run(cli: Cli) -> Result<ExitCode> {
             // perturbation depends only on the seed and the step, so a
             // smaller window perturbs a subset of the same steps. The two
             // runs are identical up to the window, so where they part is
-            // inside it, next to the interleaving that matters.
+            // inside it, next to the interleaving that matters. Each round
+            // tries a point per job, so a round divides the range by
+            // jobs + 1.
             machine.schedule = worst.manifest.spec.schedule;
-            machine.schedule_from = start;
             let end = worst.manifest.outcome.as_ref().map_or(start, |o| o.step);
             println!(
                 "\nschedule {} ends differently; narrowing the steps it perturbs",
                 machine.schedule
             );
-            let mut probe = |from: u64, until: u64| -> Result<Option<Run>> {
-                machine.schedule_from = from;
-                machine.schedule_until = until;
-                let run = run_workload(&home, &guest, &workload, &machine)?;
-                Ok((show::outcome_key(&run)? != base_key).then_some(run))
+            let probe_all = |windows: Vec<(u64, u64)>| -> Result<Vec<Run>> {
+                let machines = windows
+                    .into_iter()
+                    .map(|(from, until)| MachineArgs {
+                        schedule_from: from,
+                        schedule_until: until,
+                        ..machine.clone()
+                    })
+                    .collect();
+                execute_all(&home, &guest, &prepared, machines)
             };
+            let points = |lo: u64, hi: u64| -> Vec<u64> {
+                let n = (jobs as u64).min(hi - lo - 1).max(1);
+                (1..=n).map(|i| lo + (hi - lo) * i / (n + 1)).collect()
+            };
+
+            // The earliest end: `hi` fails, `lo` (an empty window) passes.
             let (mut lo, mut hi) = (start, end);
             while hi - lo > 1 {
-                let mid = lo + (hi - lo) / 2;
-                match probe(start, mid)? {
-                    Some(run) => {
-                        hi = mid;
+                let ends = points(lo, hi);
+                let runs = probe_all(ends.iter().map(|&e| (start, e)).collect())?;
+                let mut next_lo = *ends.last().unwrap();
+                let mut found = None;
+                for (e, run) in ends.iter().zip(runs) {
+                    if differs(&run)? {
+                        found = Some((*e, run));
+                        break;
+                    }
+                    next_lo = *e;
+                }
+                match found {
+                    Some((e, run)) => {
+                        hi = e;
+                        lo = ends.iter().copied().filter(|x| *x < e).max().unwrap_or(lo);
                         worst = run;
                     }
-                    None => lo = mid,
+                    None => lo = next_lo,
                 }
             }
             let until = hi;
+
+            // The latest start: `lo` fails, `hi` (an empty window) passes.
             let (mut lo, mut hi) = (start, until);
             while hi - lo > 1 {
-                let mid = lo + (hi - lo) / 2;
-                match probe(mid, until)? {
-                    Some(run) => {
-                        lo = mid;
+                let starts = points(lo, hi);
+                let runs = probe_all(starts.iter().map(|&f| (f, until)).collect())?;
+                let mut found = None;
+                for (f, run) in starts.iter().zip(runs).rev() {
+                    if differs(&run)? {
+                        found = Some((*f, run));
+                        break;
+                    }
+                }
+                match found {
+                    Some((f, run)) => {
+                        lo = f;
+                        hi = starts
+                            .iter()
+                            .copied()
+                            .filter(|x| *x > f)
+                            .min()
+                            .unwrap_or(hi);
                         worst = run;
                     }
-                    None => hi = mid,
+                    None => hi = starts[0],
                 }
             }
             println!("perturbing only steps {lo}..{until} still ends differently\n");
@@ -540,6 +606,16 @@ fn run(cli: Cli) -> Result<ExitCode> {
     }
 }
 
+/// A workload resolved to what a run needs: done once, then run under as
+/// many machine options as a search wants.
+struct Prepared {
+    name: String,
+    source: Source,
+    image: Option<PathBuf>,
+    image_hash: Option<String>,
+    job: Job,
+}
+
 /// Runs a workload with the given machine options.
 fn run_workload(
     home: &Home,
@@ -547,14 +623,35 @@ fn run_workload(
     workload: &Workload,
     machine: &MachineArgs,
 ) -> Result<Run> {
-    match workload {
-        Workload::Nix(installable) => nix_run(home, guest, installable, machine),
-        Workload::Image(image) => image_run(home, guest, image, machine),
-    }
+    let prepared = prepare(home, guest, workload, machine)?;
+    execute(home, guest, &prepared, machine, Announce::Yes)
 }
 
-/// Runs a command in a root filesystem in the guest.
-fn image_run(home: &Home, guest: &Guest, args: &ImageArgs, machine: &MachineArgs) -> Result<Run> {
+fn prepare(
+    home: &Home,
+    guest: &Guest,
+    workload: &Workload,
+    machine: &MachineArgs,
+) -> Result<Prepared> {
+    let (name, source, image, job) = match workload {
+        Workload::Nix(installable) => prepare_nix(home, guest, installable)?,
+        Workload::Image(args) => prepare_image(home, args)?,
+    };
+    let image_hash = match &image {
+        Some(path) => Some(image::hash_file(path)?),
+        None => None,
+    };
+    Ok(Prepared {
+        name: machine.name.clone().unwrap_or(name),
+        source,
+        image,
+        image_hash,
+        job,
+    })
+}
+
+/// A command in a root filesystem.
+fn prepare_image(home: &Home, args: &ImageArgs) -> Result<(String, Source, Option<PathBuf>, Job)> {
     let root = args
         .root
         .as_ref()
@@ -574,15 +671,18 @@ fn image_run(home: &Home, guest: &Guest, args: &ImageArgs, machine: &MachineArgs
         files: Vec::new(),
         outputs: Vec::new(),
     };
-    let name = machine.name.clone().unwrap_or_else(|| args.argv.join(" "));
     let source = Source::Image {
         root: root.display().to_string(),
     };
-    execute_spec(home, guest, name, source, Some(image), job, machine)
+    Ok((args.argv.join(" "), source, Some(image), job))
 }
 
-/// Runs a derivation's builder in the guest.
-fn nix_run(home: &Home, guest: &Guest, installable: &str, machine: &MachineArgs) -> Result<Run> {
+/// A derivation's builder, with its input closure as the image.
+fn prepare_nix(
+    home: &Home,
+    guest: &Guest,
+    installable: &str,
+) -> Result<(String, Source, Option<PathBuf>, Job)> {
     let drv_path = nix::resolve(installable)?;
     let drv = nix::show(&drv_path)?;
     let extra: Vec<PathBuf> = guest.sandbox_shell.iter().cloned().collect();
@@ -612,7 +712,6 @@ fn nix_run(home: &Home, guest: &Guest, installable: &str, machine: &MachineArgs)
     }
 
     let job = nix::job(&drv)?;
-    let name = machine.name.clone().unwrap_or_else(|| drv.name.clone());
     let source = Source::Nix {
         drv: drv_path.display().to_string(),
         outputs: drv
@@ -621,8 +720,84 @@ fn nix_run(home: &Home, guest: &Guest, installable: &str, machine: &MachineArgs)
             .map(|(_, p)| p.display().to_string())
             .collect(),
     };
-    let run = execute_spec(home, guest, name, source, Some(image), job, machine)?;
+    Ok((drv.name.clone(), source, Some(image), job))
+}
+
+/// Whether a run prints its one-line summary when it ends.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Announce {
+    Yes,
+    No,
+}
+
+fn execute(
+    home: &Home,
+    guest: &Guest,
+    prepared: &Prepared,
+    machine: &MachineArgs,
+    announce: Announce,
+) -> Result<Run> {
+    let spec = Spec {
+        kernel: guest.kernel.clone(),
+        initrd: guest.initrd.clone(),
+        image: prepared.image.clone(),
+        image_hash: prepared.image_hash.clone(),
+        mem_mib: machine.mem,
+        seed: machine.seed,
+        epoch: machine.epoch.unwrap_or_else(default_epoch),
+        quantum: DEFAULT_QUANTUM,
+        schedule: machine.schedule,
+        schedule_from: machine.schedule_from,
+        schedule_until: machine.schedule_until,
+        cpu: machine.cpu.into(),
+        cmdline: format!("{BASE_CMDLINE} {}", machine.kernel_args)
+            .trim()
+            .to_string(),
+        job: prepared.job.clone(),
+    };
+    let echo = if machine.quiet {
+        Echo::Quiet
+    } else {
+        Echo::Output
+    };
+    let keyframes = if machine.no_keyframes {
+        Keyframes::Skip
+    } else {
+        Keyframes::Take
+    };
+    let run = Run::execute(
+        home,
+        prepared.name.clone(),
+        prepared.source.clone(),
+        spec,
+        None,
+        echo,
+        keyframes,
+    )?;
+    if announce == Announce::Yes {
+        eprintln!("{}", show::finished(&run));
+    }
     Ok(run)
+}
+
+/// Runs each machine option set on its own VM, `jobs` at a time, and
+/// returns the runs in the order given.
+fn execute_all(
+    home: &Home,
+    guest: &Guest,
+    prepared: &Prepared,
+    machines: Vec<MachineArgs>,
+) -> Result<Vec<Run>> {
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = machines
+            .into_iter()
+            .map(|m| scope.spawn(move || execute(home, guest, prepared, &m, Announce::No)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("a run's thread panicked"))
+            .collect()
+    })
 }
 
 /// Prints each output's hash from the guest, and whether it matches the
@@ -719,50 +894,4 @@ fn exit_status(run: &Run) -> ExitCode {
         Some(s) => ExitCode::from(show::exit_code(s)),
         None => ExitCode::FAILURE,
     }
-}
-
-fn execute_spec(
-    home: &Home,
-    guest: &Guest,
-    name: String,
-    source: Source,
-    image: Option<PathBuf>,
-    job: Job,
-    machine: &MachineArgs,
-) -> Result<Run> {
-    let image_hash = match &image {
-        Some(path) => Some(image::hash_file(path)?),
-        None => None,
-    };
-    let spec = Spec {
-        kernel: guest.kernel.clone(),
-        initrd: guest.initrd.clone(),
-        image,
-        image_hash,
-        mem_mib: machine.mem,
-        seed: machine.seed,
-        epoch: machine.epoch.unwrap_or_else(default_epoch),
-        quantum: DEFAULT_QUANTUM,
-        schedule: machine.schedule,
-        schedule_from: machine.schedule_from,
-        schedule_until: machine.schedule_until,
-        cpu: machine.cpu.into(),
-        cmdline: format!("{BASE_CMDLINE} {}", machine.kernel_args)
-            .trim()
-            .to_string(),
-        job,
-    };
-    let echo = if machine.quiet {
-        Echo::Quiet
-    } else {
-        Echo::Output
-    };
-    let keyframes = if machine.no_keyframes {
-        Keyframes::Skip
-    } else {
-        Keyframes::Take
-    };
-    let run = Run::execute(home, name, source, spec, None, echo, keyframes)?;
-    eprintln!("{}", show::finished(&run));
-    Ok(run)
 }
