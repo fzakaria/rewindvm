@@ -42,7 +42,9 @@ let
 
   # Static GNU tar fails to link against static libacl, which defines the
   # same xattr helpers; images are built from the store, which has no ACLs.
-  staticTar = pkgs.pkgsStatic.gnutar.override { acl = null; };
+  # The override rebuilds tar from source, and its test suite writes sparse
+  # files larger than a CI runner's free disk, so the tests are skipped.
+  staticTar = (pkgs.pkgsStatic.gnutar.override { acl = null; }).overrideAttrs { doCheck = false; };
 
   launcher = pkgs.writeText "rewind" ''
     #!/bin/sh
