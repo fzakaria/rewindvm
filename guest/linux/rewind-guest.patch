@@ -1,6 +1,6 @@
 diff -ruN a/arch/x86/include/asm/hypervisor.h b/arch/x86/include/asm/hypervisor.h
 --- a/arch/x86/include/asm/hypervisor.h	2026-09-30 09:16:35.084212648 -0700
-+++ b/arch/x86/include/asm/hypervisor.h	2026-09-30 09:16:50.675875623 -0700
++++ b/arch/x86/include/asm/hypervisor.h	2026-09-30 10:09:50.319576100 -0700
 @@ -30,6 +30,7 @@
  	X86_HYPER_KVM,
  	X86_HYPER_JAILHOUSE,
@@ -9,7 +9,7 @@ diff -ruN a/arch/x86/include/asm/hypervisor.h b/arch/x86/include/asm/hypervisor.
  };
  
  #ifdef CONFIG_HYPERVISOR_GUEST
-@@ -64,9 +65,15 @@
+@@ -64,9 +65,17 @@
  extern const struct hypervisor_x86 x86_hyper_kvm;
  extern const struct hypervisor_x86 x86_hyper_jailhouse;
  extern const struct hypervisor_x86 x86_hyper_acrn;
@@ -21,6 +21,8 @@ diff -ruN a/arch/x86/include/asm/hypervisor.h b/arch/x86/include/asm/hypervisor.
 +#ifdef CONFIG_REWIND_GUEST
 +struct pt_regs;
 +bool rewind_fixup_rdtsc(struct pt_regs *regs);
++extern bool rewind_running;
++u64 rewind_sched_clock(void);
 +#endif
  extern enum x86_hypervisor_type x86_hyper_type;
  extern void init_hypervisor_platform(void);
@@ -124,8 +126,8 @@ diff -ruN a/arch/x86/kernel/cpu/Makefile b/arch/x86/kernel/cpu/Makefile
  
 diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 --- a/arch/x86/kernel/cpu/rewind.c	1969-12-31 16:00:00.000000000 -0800
-+++ b/arch/x86/kernel/cpu/rewind.c	2026-09-30 09:46:30.543335448 -0700
-@@ -0,0 +1,677 @@
++++ b/arch/x86/kernel/cpu/rewind.c	2026-09-30 10:09:50.319745969 -0700
+@@ -0,0 +1,706 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Rewind VM guest platform.
@@ -241,12 +243,18 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +
 +/*
 + * The page the monitor writes into: the virtual clock on every
-+ * REWIND_PORT_CLOCK read, and the boot wall clock once at setup.
++ * REWIND_PORT_CLOCK read, the boot wall clock once at setup, and, before
++ * each interrupt it sends, why it sent it.
 + */
 +struct rewind_shared {
 +	u64 now;
 +	u64 epoch;
++	u32 pending;
 +};
++
++/* Reasons for an interrupt, in rewind_shared.pending. */
++#define REWIND_PENDING_TIMER	BIT(0)	/* the armed timer is due */
++#define REWIND_PENDING_PREEMPT	BIT(1)	/* reschedule at this point */
 +
 +static struct rewind_shared rewind_shared __aligned(PAGE_SIZE);
 +static u8 rewind_buf[REWIND_RECORD_MAX] __aligned(PAGE_SIZE);
@@ -282,7 +290,7 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +}
 +
 +/* Set once the platform is initialized, and read where tracing is off. */
-+static bool rewind_running __ro_after_init;
++bool rewind_running __ro_after_init;
 +
 +/*
 + * The kernel's "cycle counter" for entropy collection. Hardware kernels
@@ -310,6 +318,16 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +	z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
 +	z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
 +	return z ^ (z >> 31);
++}
++
++/*
++ * The scheduler's clock: the virtual time the monitor wrote at the last
++ * exit. Reading it costs no exit, so the scheduler can call it as often
++ * as it likes, and it moves exactly as the rest of the guest's time does.
++ */
++noinstr u64 rewind_sched_clock(void)
++{
++	return READ_ONCE(rewind_shared.now);
 +}
 +
 +static u32 __init rewind_detect(void)
@@ -362,15 +380,28 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +	.set_state_oneshot_stopped = rewind_timer_shutdown,
 +};
 +
++/*
++ * The monitor's one interrupt. A timer that is due runs the clock event
++ * handler. A preemption request marks the current task for rescheduling,
++ * so the scheduler picks again on the way back to user space: this is how
++ * the monitor explores other interleavings of the same run, at a chosen
++ * step and without moving time.
++ */
 +DEFINE_IDTENTRY_SYSVEC(sysvec_rewind_callback)
 +{
 +	struct pt_regs *old_regs = set_irq_regs(regs);
++	u32 pending = xchg(&rewind_shared.pending, 0);
 +
 +	apic_eoi();
 +	inc_irq_stat(irq_hv_callback_count);
 +
-+	if (rewind_clockevent.event_handler)
++	if ((pending & REWIND_PENDING_TIMER) && rewind_clockevent.event_handler)
 +		rewind_clockevent.event_handler(&rewind_clockevent);
++
++	if (pending & REWIND_PENDING_PREEMPT) {
++		set_tsk_need_resched(current);
++		set_preempt_need_resched();
++	}
 +
 +	set_irq_regs(old_regs);
 +}
@@ -825,3 +856,23 @@ diff -ruN a/arch/x86/kernel/traps.c b/arch/x86/kernel/traps.c
  		if (fixup_iopl_exception(regs))
  			goto exit;
  
+diff -ruN a/arch/x86/kernel/tsc.c b/arch/x86/kernel/tsc.c
+--- a/arch/x86/kernel/tsc.c	2026-09-30 10:09:50.231534027 -0700
++++ b/arch/x86/kernel/tsc.c	2026-09-30 10:09:50.319164267 -0700
+@@ -238,6 +238,16 @@
+ 		return __cycles_2_ns(tsc_now);
+ 	}
+ 
++#ifdef CONFIG_REWIND_GUEST
++	/*
++	 * A Rewind guest has no TSC, and jiffies move too rarely for the
++	 * scheduler to tell tasks' runtimes apart. The monitor keeps its
++	 * virtual clock in a shared page at every exit instead.
++	 */
++	if (rewind_running)
++		return rewind_sched_clock();
++#endif
++
+ 	/*
+ 	 * Fall back to jiffies if there's no TSC available:
+ 	 * ( But note that we still use it if the TSC is marked
