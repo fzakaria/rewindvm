@@ -28,6 +28,7 @@
           inherit pkgs kernel guest;
           rewind = import ./nix/rewind.nix { inherit pkgs kernel guest; };
           site = import ./nix/site.nix { inherit pkgs; };
+          examples = import ./nix/examples.nix { inherit pkgs; };
         };
     in
     {
@@ -50,6 +51,9 @@
 
           # the marketing site the pages workflow deploys (nix/site.nix)
           site = p.site;
+
+          # the tutorials' flaky thread pool (nix/examples.nix)
+          mylib = p.examples.mylib;
         }
       );
 
