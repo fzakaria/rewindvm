@@ -8,7 +8,7 @@ use std::process::ExitCode;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use rewind_core::run::{BASE_CMDLINE, DEFAULT_QUANTUM, default_epoch};
-use rewind_core::{Echo, Guest, Home, Run, Source, Spec};
+use rewind_core::{Echo, Guest, Home, Keyframes, Run, Source, Spec};
 use rewind_core::{image, nix};
 use rewind_init::{Job, Root};
 
@@ -54,6 +54,9 @@ struct MachineArgs {
     /// Print nothing while the run executes.
     #[arg(long, short)]
     quiet: bool,
+    /// Skip keyframes: faster, but seeking into the run starts from boot.
+    #[arg(long)]
+    no_keyframes: bool,
     /// Extra kernel command line arguments; `loglevel=7` shows the kernel's
     /// messages in the trace.
     #[arg(long, default_value = "")]
@@ -110,7 +113,7 @@ enum Command {
         #[command(flatten)]
         image: ImageArgs,
         /// How many perturbed schedules to try besides the unperturbed one.
-        #[arg(long, default_value_t = 8)]
+        #[arg(long, default_value_t = 64)]
         schedules: u64,
         #[command(flatten)]
         machine: MachineArgs,
@@ -142,6 +145,9 @@ enum Command {
         run: String,
         #[arg(long)]
         at: Option<u64>,
+        /// Show the kernel's own threads too.
+        #[arg(long)]
+        all: bool,
     },
     /// Print a run's events.
     Events {
@@ -203,6 +209,8 @@ fn run(cli: Cli) -> Result<ExitCode> {
             mut machine,
         } => {
             let guest = Guest::from_env()?;
+            // Exploring compares runs; only the two reported get keyframes.
+            machine.no_keyframes = true;
             let workload = match installable {
                 Some(i) => Workload::Nix(i),
                 None => Workload::Image(image),
@@ -234,35 +242,6 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 println!("same result under all {} schedules", schedules + 1);
                 return Ok(ExitCode::SUCCESS);
             };
-
-            // Perturbing from the job's start finds failures, but a timer
-            // delayed while the compiler runs shifts everything after it,
-            // so the two runs part ways long before anything interesting.
-            // Look again with perturbation starting where the failing
-            // program was exec'd in the baseline: a failure found that way
-            // parts from the baseline inside the program itself.
-            let mut from = start;
-            if let Some(culprit) = show::culprit(&worst.trace()?) {
-                if let Some(exec) = show::exec_step(&base_trace, &culprit) {
-                    println!(
-                        "\n{} failed under schedule {}; searching again from its exec at step {exec}",
-                        culprit.join(" "),
-                        worst.manifest.spec.schedule
-                    );
-                    for schedule in 1..=schedules * SEARCH_FACTOR {
-                        machine.schedule = schedule;
-                        machine.schedule_from = exec;
-                        let run = run_workload(&home, &guest, &workload, &machine)?;
-                        if show::outcome_key(&run)? != base_key {
-                            println!("schedule {schedule:>3}: {}", show::outcome_line(&run)?);
-                            worst = run;
-                            from = exec;
-                            break;
-                        }
-                    }
-                }
-            }
-            let start = from;
 
             // Narrow it to a window of steps: first the earliest end that
             // still changes the outcome, then the latest start. Each step's
@@ -307,9 +286,18 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 }
             }
             println!("perturbing only steps {lo}..{until} still ends differently\n");
+            let base = base.add_keyframes(&home)?;
+            let worst = worst.add_keyframes(&home)?;
             println!("passing: run {}", base.manifest.id);
             println!("failing: run {}", worst.manifest.id);
-            print!("{}", show::divergence(&base_trace, &worst.trace()?));
+            let (bt, wt) = (base.trace()?, worst.trace()?);
+            match show::culprit(&wt) {
+                Some(argv) => {
+                    println!("\nwhere {} first behaves differently:", argv.join(" "));
+                    print!("{}", show::divergence_in(&bt, &wt, &argv));
+                }
+                None => print!("{}", show::divergence(&bt, &wt)),
+            }
             Ok(ExitCode::FAILURE)
         }
         Command::Fork {
@@ -339,6 +327,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 spec,
                 Some((m.id.clone(), step)),
                 echo,
+                Keyframes::Take,
             )?;
             eprintln!("{}", show::finished(&child));
             let (pt, ct) = (parent.trace()?, child.trace()?);
@@ -369,11 +358,16 @@ fn run(cli: Cli) -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        Command::Ps { run, at } => {
+        Command::Ps { run, at, all } => {
             let run = Run::find(&home, &run)?;
             let trace = run.trace()?;
             let at = at.unwrap_or(trace.last_step());
-            print!("{}", show::process_tree(&trace, at));
+            let threads = if all {
+                show::KernelThreads::Show
+            } else {
+                show::KernelThreads::Hide
+            };
+            print!("{}", show::process_tree(&trace, at, threads));
             Ok(ExitCode::SUCCESS)
         }
         Command::Events {
@@ -449,10 +443,6 @@ fn run(cli: Cli) -> Result<ExitCode> {
         }
     }
 }
-
-/// How many more schedules `check` tries when searching from the failing
-/// program's exec, as a multiple of the schedules asked for.
-const SEARCH_FACTOR: u64 = 2;
 
 /// Runs a workload with the given machine options.
 fn run_workload(
@@ -670,7 +660,12 @@ fn execute_spec(
     } else {
         Echo::Output
     };
-    let run = Run::execute(home, name, source, spec, None, echo)?;
+    let keyframes = if machine.no_keyframes {
+        Keyframes::Skip
+    } else {
+        Keyframes::Take
+    };
+    let run = Run::execute(home, name, source, spec, None, echo, keyframes)?;
     eprintln!("{}", show::finished(&run));
     Ok(run)
 }

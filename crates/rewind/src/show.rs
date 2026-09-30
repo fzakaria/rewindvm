@@ -86,12 +86,54 @@ pub fn culprit(trace: &Trace) -> Option<Vec<String>> {
     })
 }
 
-/// The step a command line was first exec'd on.
-pub fn exec_step(trace: &Trace, argv: &[String]) -> Option<u64> {
-    trace.events.iter().find_map(|e| match &e.kind {
-        EventKind::Exec { argv: a, .. } if a == argv => Some(e.step),
-        _ => None,
-    })
+/// Where one program's own events first differ between two runs. Only
+/// events of processes running `argv` count, and threads are compared by
+/// the order they first appear rather than by their ids, which a
+/// perturbed run may hand out differently.
+pub fn divergence_in(left: &Trace, right: &Trace, argv: &[String]) -> String {
+    use std::collections::HashMap;
+
+    fn of<'a>(trace: &'a Trace, argv: &[String]) -> Vec<(&'a Event, usize)> {
+        let pids: Vec<u32> = trace
+            .processes()
+            .iter()
+            .filter(|p| p.argv == argv)
+            .map(|p| p.pid)
+            .collect();
+        let mut threads: HashMap<u32, usize> = HashMap::new();
+        trace
+            .events
+            .iter()
+            .filter(|e| pids.contains(&e.pid))
+            .map(|e| {
+                let n = threads.len();
+                (e, *threads.entry(e.tid).or_insert(n))
+            })
+            .collect()
+    }
+    let (l, r) = (of(left, argv), of(right, argv));
+    let same = |a: &(&Event, usize), b: &(&Event, usize)| a.1 == b.1 && a.0.kind == b.0.kind;
+    let n = l.len().min(r.len());
+    let Some(i) = (0..n)
+        .find(|&i| !same(&l[i], &r[i]))
+        .or((l.len() != r.len()).then_some(n))
+    else {
+        return "  no difference in its own events\n".into();
+    };
+
+    const BEFORE: usize = 3;
+    const AFTER: usize = 4;
+    let mut out = String::new();
+    for (e, _) in &l[i.saturating_sub(BEFORE)..i] {
+        let _ = writeln!(out, "  both  {}", event(e));
+    }
+    for (e, _) in l.iter().skip(i).take(AFTER) {
+        let _ = writeln!(out, "  left  {}", event(e));
+    }
+    for (e, _) in r.iter().skip(i).take(AFTER) {
+        let _ = writeln!(out, "  right {}", event(e));
+    }
+    out
 }
 
 /// One line per run for `rewind check`.
@@ -170,10 +212,24 @@ pub fn event(e: &Event) -> String {
     format!("{:>10} {:>5}/{:<5} {what}", e.step, e.pid, e.tid)
 }
 
+/// Whether `rewind ps` lists the kernel's own threads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KernelThreads {
+    Show,
+    Hide,
+}
+
+/// kthreadd, the parent of every kernel thread.
+const KTHREADD: u32 = 2;
+
 /// The process tree alive at a step, indented by parent.
-pub fn process_tree(trace: &Trace, step: u64) -> String {
+pub fn process_tree(trace: &Trace, step: u64, kernel: KernelThreads) -> String {
     let procs = trace.processes();
-    let alive: Vec<_> = procs.iter().filter(|p| p.alive_at(step)).collect();
+    let alive: Vec<_> = procs
+        .iter()
+        .filter(|p| p.alive_at(step))
+        .filter(|p| kernel == KernelThreads::Show || (p.pid != KTHREADD && p.parent != KTHREADD))
+        .collect();
     let mut out = String::new();
     let roots = alive
         .iter()
@@ -188,13 +244,12 @@ fn tree(alive: &[&rewind_trace::Process], pid: u32, depth: usize, step: u64, out
     let Some(p) = alive.iter().find(|p| p.pid == pid) else {
         return;
     };
-    let _ = writeln!(
-        out,
-        "{:>6} {}{}",
-        p.pid,
-        "  ".repeat(depth),
+    let name = if p.argv.is_empty() {
+        "[kernel thread]".to_string()
+    } else {
         p.argv.join(" ")
-    );
+    };
+    let _ = writeln!(out, "{:>6} {}{}", p.pid, "  ".repeat(depth), name);
     for (tid, start, end) in &p.threads {
         if *start <= step && end.is_none_or(|e| step < e) {
             let _ = writeln!(out, "{:>6} {}  (thread)", tid, "  ".repeat(depth));

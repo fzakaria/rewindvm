@@ -26,9 +26,11 @@ pub const TRACE: &str = "trace.bin";
 const MANIFEST_VERSION: u32 = 1;
 
 /// The kernel command line every guest boots with. The first two keep the
-/// kernel from waiting on hardware time; loglevel=6 keeps informational
-/// messages, such as the instruction pointer of a segfault, in the trace.
-pub const BASE_CMDLINE: &str = "nolapic_timer lpj=1000000 panic=-1 rdinit=/init loglevel=6";
+/// kernel from waiting on hardware time. loglevel=7 sends informational
+/// messages to the console, and so into the trace, the segfault report
+/// with its instruction pointer among them: a message reaches the console
+/// only when its level is below the loglevel.
+pub const BASE_CMDLINE: &str = "nolapic_timer lpj=1000000 panic=-1 rdinit=/init loglevel=7";
 
 /// Nanoseconds of virtual time per exit.
 pub const DEFAULT_QUANTUM: u64 = 1000;
@@ -164,6 +166,16 @@ fn job_archive(job: &Job) -> Result<Vec<u8>> {
     Ok(a.finish())
 }
 
+/// Whether a run takes keyframes as it executes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Keyframes {
+    /// Take them, so any step can be reached quickly later.
+    Take,
+    /// Skip them: the run is only being compared. Running the same spec
+    /// again with [`Keyframes::Take`] adds them, since it is the same run.
+    Skip,
+}
+
 /// What happens to the guest's output while a run executes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Echo {
@@ -239,6 +251,7 @@ impl Run {
         spec: Spec,
         parent: Option<(String, u64)>,
         echo: Echo,
+        keyframes: Keyframes,
     ) -> Result<Run> {
         let id = spec.id();
         let dir = home.runs().join(&id);
@@ -281,10 +294,23 @@ impl Run {
             };
             machine.pmu = Some((Counter::open(event, modes)?, 0xcbf2_9ce4_8422_2325));
         }
-        let mut store = rewind_store::Store::open(&home.store())?;
-        let outcome =
-            crate::keyframes::run_with_keyframes(&mut machine, &mut recorder, &dir, &mut store)?;
-        store.sync()?;
+        let outcome = match keyframes {
+            Keyframes::Take => {
+                // Keyframes left from an earlier execution of this spec are
+                // replaced with this one's.
+                let _ = fs::remove_dir_all(dir.join(crate::keyframes::DIR));
+                let mut store = rewind_store::Store::open(&home.store())?;
+                let outcome = crate::keyframes::run_with_keyframes(
+                    &mut machine,
+                    &mut recorder,
+                    &dir,
+                    &mut store,
+                )?;
+                store.sync()?;
+                outcome
+            }
+            Keyframes::Skip => machine.run(None, &mut recorder)?,
+        };
         if let Some((counter, hash)) = &machine.pmu {
             eprintln!("pmu: final {} hash {hash:016x}", counter.read()?);
         }
@@ -322,6 +348,26 @@ impl Run {
         let again = Trace::read(&tmp)?;
         fs::remove_file(&tmp)?;
         Ok(original.divergence(&again))
+    }
+
+    /// Whether the run has keyframes to seek from.
+    pub fn has_keyframes(&self) -> bool {
+        !crate::keyframes::steps(&self.dir).is_empty()
+    }
+
+    /// Executes this run's spec again, taking keyframes. The run is the
+    /// same, so its trace and manifest come out as they were.
+    pub fn add_keyframes(&self, home: &Home) -> Result<Run> {
+        let m = &self.manifest;
+        Run::execute(
+            home,
+            m.name.clone(),
+            m.source.clone(),
+            m.spec.clone(),
+            m.parent.clone(),
+            Echo::Quiet,
+            Keyframes::Take,
+        )
     }
 
     /// A machine at `step` of this run: the latest keyframe at or before

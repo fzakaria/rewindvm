@@ -9,4 +9,4 @@ pub mod nix;
 pub mod run;
 
 pub use home::{Guest, Home};
-pub use run::{Echo, Manifest, Run, RunOutcome, Source, Spec};
+pub use run::{Echo, Keyframes, Manifest, Run, RunOutcome, Source, Spec};
