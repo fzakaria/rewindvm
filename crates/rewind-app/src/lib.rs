@@ -5,11 +5,14 @@
 //! commands for the actions that need the machine itself; `synth` writes
 //! synthetic runs for development and tests.
 
+pub mod archive;
 pub mod describe;
 pub mod engine;
+pub mod examples;
 pub mod license;
 pub mod model;
 pub mod run;
 pub mod synth;
 pub mod theme;
+pub mod tour;
 pub mod ui;

@@ -2,10 +2,12 @@
 //!
 //! `scrubber` holds the view's state and what it does; `render` draws it.
 
+mod chrome;
 mod icons;
 mod licensing;
 mod render;
 mod scrubber;
+mod tour;
 mod widgets;
 
 use std::sync::Arc;
@@ -38,6 +40,10 @@ actions!(
         EnterLicense,
         PasteLicense,
         CloseDialog,
+        StartTour,
+        TourNext,
+        TourBack,
+        TourSkip,
         Quit,
     ]
 );
@@ -47,6 +53,9 @@ const KEY_CONTEXT: &str = "Scrubber";
 
 /// The key context of the license dialog's paste field.
 const LICENSE_CONTEXT: &str = "LicenseDialog";
+
+/// The key context of the tour's callout.
+const TOUR_CONTEXT: &str = "Tour";
 
 /// The window's size on first open: the design's frame.
 const WINDOW_WIDTH: f32 = 1440.0;
@@ -92,6 +101,7 @@ pub fn run(launch: Launch) {
                     ..Default::default()
                 }),
                 app_id: Some(APP_ID.to_string()),
+                window_decorations: Some(chrome::requested_decorations()),
                 ..Default::default()
             };
             let opened = cx.open_window(options, |window, cx| {
@@ -124,6 +134,11 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("d", JumpToDivergence, context),
         KeyBinding::new("ctrl-v", PasteLicense, Some(LICENSE_CONTEXT)),
         KeyBinding::new("escape", CloseDialog, Some(LICENSE_CONTEXT)),
+        KeyBinding::new("enter", TourNext, Some(TOUR_CONTEXT)),
+        KeyBinding::new("right", TourNext, Some(TOUR_CONTEXT)),
+        KeyBinding::new("left", TourBack, Some(TOUR_CONTEXT)),
+        KeyBinding::new("escape", TourSkip, Some(TOUR_CONTEXT)),
+        KeyBinding::new("f1", StartTour, None),
         KeyBinding::new("ctrl-o", OpenRun, None),
         KeyBinding::new("ctrl-q", Quit, None),
     ]);

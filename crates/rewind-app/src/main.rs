@@ -1,6 +1,8 @@
 //! `rewind-app`: the desktop scrubber.
 //!
-//!     rewind-app [<run-dir-or-trace>] [--compare <run-dir-or-trace>] [--step <n>]
+//!     rewind-app [<run>] [--compare <run>] [--step <n>]
+//!
+//! A run is a run directory, a .rwd export or a bare trace file.
 //!
 //! Without a run, the window opens on an empty state with an "Open run"
 //! button.
@@ -13,8 +15,7 @@ use rewind_app::engine::CliEngine;
 use rewind_app::run::Session;
 use rewind_app::ui::{self, Launch};
 
-const USAGE: &str =
-    "usage: rewind-app [<run-dir-or-trace>] [--compare <run-dir-or-trace>] [--step <n>]";
+const USAGE: &str = "usage: rewind-app [<run>] [--compare <run>] [--step <n>]\n\na run is a run directory, a .rwd export, or a bare trace file";
 
 /// The command line, parsed.
 struct Args {

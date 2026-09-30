@@ -101,6 +101,8 @@ pub mod size {
     pub const HEADER_HEIGHT: f32 = 56.0;
     pub const PAGE_PAD_X: f32 = 24.0;
     pub const HEADER_GAP: f32 = 16.0;
+    /// Room right of the window controls, which carry their own padding.
+    pub const CONTROLS_PAD_RIGHT: f32 = 6.0;
     pub const BRAND_GAP: f32 = 8.0;
     pub const MARK_ICON: f32 = 20.0;
 

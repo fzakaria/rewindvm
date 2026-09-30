@@ -16,6 +16,7 @@ use serde_json::Value;
 
 use rewind_trace::signal_name;
 
+use crate::archive;
 use crate::model::{Comparison, ExitStatus, Timeline};
 
 /// The trace inside a run directory.
@@ -138,9 +139,22 @@ fn seed(value: Option<&Value>) -> Option<u64> {
 }
 
 /// A run, read and indexed.
+/// Where a run came from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Origin {
+    /// A run directory or a bare trace file on this machine.
+    Local,
+    /// A `.rwd` export, unpacked into the cache.
+    Export(PathBuf),
+    /// One of the example runs compiled into the app.
+    Example,
+}
+
 pub struct Run {
-    /// The path the run was opened from: its directory, or its trace file.
+    /// The path the run is read from: its directory, or its trace file. An
+    /// export's is the directory it was unpacked into.
     pub path: PathBuf,
+    pub origin: Origin,
     pub manifest: Manifest,
     /// Why the manifest was set aside, when it did not parse.
     pub manifest_warning: Option<String>,
@@ -149,7 +163,22 @@ pub struct Run {
 
 impl Run {
     /// Opens a run directory or a bare trace file.
+    /// Opens a run directory, a `.rwd` export, or a bare trace file.
     pub fn open(path: &Path) -> Result<Run> {
+        if path.is_file() && archive::is_export(path) {
+            let dir = archive::import_file(path)?;
+            return Run::open_at(&dir, Origin::Export(path.to_path_buf()));
+        }
+        Run::open_at(path, Origin::Local)
+    }
+
+    /// Opens an example run compiled into the app.
+    pub fn open_example(bytes: &[u8]) -> Result<Run> {
+        let dir = archive::import_bytes(bytes)?;
+        Run::open_at(&dir, Origin::Example)
+    }
+
+    fn open_at(path: &Path, origin: Origin) -> Result<Run> {
         let (trace_path, manifest_path) = if path.is_dir() {
             (path.join(TRACE_FILE), Some(path.join(MANIFEST_FILE)))
         } else {
@@ -174,6 +203,7 @@ impl Run {
         let timeline = Timeline::new(trace, total_hint);
         Ok(Run {
             path: path.to_path_buf(),
+            origin,
             manifest,
             manifest_warning,
             timeline,
@@ -510,6 +540,21 @@ mod tests {
                 step: 10
             })
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_exported_run_opens_from_its_file() {
+        // The example export written to disk and opened by path unpacks
+        // into the cache and remembers the file it came from.
+        crate::archive::test_cache();
+        let dir = temp_dir("export");
+        let file = dir.join("mylib-fail.rwd");
+        std::fs::write(&file, crate::examples::FAILING).unwrap();
+        let run = Run::open(&file).unwrap();
+        assert_eq!(run.origin, Origin::Export(file.clone()));
+        assert!(run.path.join(TRACE_FILE).is_file());
+        assert_eq!(run.verdict(), Verdict::Failed);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

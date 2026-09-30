@@ -17,16 +17,22 @@ pub enum Icon {
     ChevronRight,
     Fork,
     Close,
+    Minimize,
+    Maximize,
+    Restore,
 }
 
 impl Icon {
-    const ALL: [Icon; 6] = [
+    const ALL: [Icon; 9] = [
         Icon::Mark,
         Icon::GoToStart,
         Icon::ChevronLeft,
         Icon::ChevronRight,
         Icon::Fork,
         Icon::Close,
+        Icon::Minimize,
+        Icon::Maximize,
+        Icon::Restore,
     ];
 
     pub fn path(self) -> &'static str {
@@ -37,6 +43,9 @@ impl Icon {
             Icon::ChevronRight => "icons/chevron-right.svg",
             Icon::Fork => "icons/fork.svg",
             Icon::Close => "icons/close.svg",
+            Icon::Minimize => "icons/minimize.svg",
+            Icon::Maximize => "icons/maximize.svg",
+            Icon::Restore => "icons/restore.svg",
         }
     }
 
@@ -55,6 +64,9 @@ impl Icon {
                 r#"<circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="8" r="2"/><path d="M6 7v10"/><path d="M18 10c0 4-6 3-12 7"/>"#,
             ),
             Icon::Close => ("2", r#"<path d="M6 6l12 12"/><path d="M18 6L6 18"/>"#),
+            Icon::Minimize => ("2", r#"<path d="M6 12h12"/>"#),
+            Icon::Maximize => ("2", r#"<path d="M6 6h12v12H6z"/>"#),
+            Icon::Restore => ("2", r#"<path d="M6 9h9v9H6z"/><path d="M9 9V6h9v9h-3"/>"#),
         }
     }
 

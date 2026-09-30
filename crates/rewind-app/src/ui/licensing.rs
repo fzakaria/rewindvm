@@ -7,7 +7,8 @@
 use std::time::{Duration, Instant};
 
 use gpui::{
-    Context, Div, FocusHandle, FontWeight, SharedString, Window, div, prelude::*, px, rgb, rgba,
+    Context, Div, FocusHandle, FontWeight, MouseButton, SharedString, Window, div, prelude::*, px,
+    rgb, rgba,
 };
 
 use crate::license::{self, Coverage, License, LicenseError, Registration, Reminder};
@@ -201,6 +202,7 @@ impl Scrubber {
             div()
                 .id("license-pill")
                 .cursor_pointer()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .child(pill(label, PillTone::Quiet, fonts))
                 .on_click(cx.listener(|this, _, window, cx| this.open_license_dialog(window, cx))),
         )

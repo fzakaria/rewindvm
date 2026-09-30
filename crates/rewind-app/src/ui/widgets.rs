@@ -2,8 +2,8 @@
 //! panel titles and icons, styled after the design.
 
 use gpui::{
-    AnyElement, Div, ElementId, FontWeight, SharedString, Stateful, Svg, div, prelude::*, px, rgb,
-    svg,
+    AnyElement, Div, ElementId, FontWeight, Role, SharedString, Stateful, Svg, div, prelude::*, px,
+    rgb, svg,
 };
 
 use crate::theme::{self, layout, size};
@@ -91,6 +91,7 @@ pub fn button(
 
     let base = div()
         .id(id)
+        .role(Role::Button)
         .h(px(size::BUTTON_HEIGHT))
         .px(px(size::BUTTON_PAD_X))
         .flex()

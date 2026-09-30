@@ -16,13 +16,17 @@ use gpui::{
 use crate::describe::{self, thousands};
 use crate::engine::{Engine, EngineError, EngineResult, Forked};
 use crate::model::{LogFilter, Motion};
-use crate::run::{Session, short_id};
+use crate::run::{Origin, Session, short_id};
+use crate::tour::Tour;
 use crate::ui::Launch;
 use crate::ui::licensing::Licensing;
 use crate::ui::widgets::Fonts;
 
 /// How long a notice stays up.
 const NOTICE_DURATION: Duration = Duration::from_secs(8);
+
+/// Why an example run cannot be forked.
+const EXAMPLE_FORK: &str = "Forking runs the build again from the playhead, which needs the engine and KVM on this machine. The example's inputs, its kernel, initramfs and Nix store paths, belong to the machine that recorded it. Record a run of your own with rewind nix to fork it.";
 
 /// Where "Buy" goes.
 pub const BUY_URL: &str = "https://rewindvm.dev/#buy";
@@ -93,7 +97,8 @@ pub struct Notice {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PickKind {
     RunDirectory,
-    TraceFile,
+    /// A trace file or a .rwd export.
+    File,
 }
 
 /// The scrubber: one run, the playhead over it, and everything around.
@@ -119,6 +124,12 @@ pub struct Scrubber {
     pub(super) notices: Vec<Notice>,
     /// The license, the dialog to enter one, and the reminder.
     pub(super) licensing: Licensing,
+    /// The guided tour, while it runs, and the focus its callout takes.
+    pub(super) tour: Option<Tour>,
+    pub(super) tour_focus: FocusHandle,
+    /// A press on the title bar that the next motion turns into a window
+    /// move.
+    pub(super) titlebar_armed: bool,
     next_notice: u64,
     /// The window title last set, to set it only when it changes.
     title: Option<String>,
@@ -144,6 +155,9 @@ impl Scrubber {
             forks: Vec::new(),
             notices: Vec::new(),
             licensing: Licensing::load(),
+            tour: None,
+            tour_focus: cx.focus_handle(),
+            titlebar_armed: false,
             next_notice: 0,
             title: None,
         };
@@ -156,7 +170,7 @@ impl Scrubber {
 
     /// Puts a session on screen with the playhead at `step`, or at the
     /// failure, or at the end.
-    fn show(&mut self, session: Session, step: Option<u64>, cx: &mut Context<Self>) {
+    pub(super) fn show(&mut self, session: Session, step: Option<u64>, cx: &mut Context<Self>) {
         let timeline = &session.run.timeline;
         let start = step
             .or(timeline.failure.map(|f| f.step))
@@ -167,6 +181,7 @@ impl Scrubber {
         }
         self.step = start;
         self.forks.clear();
+        self.tour = None;
         self.log_followed = None;
         self.files_followed = None;
         self.session = Some(session);
@@ -351,6 +366,18 @@ impl Scrubber {
         let Some(session) = &self.session else {
             return;
         };
+
+        // The example's inputs are another machine's, and forking runs
+        // them again.
+        if session.run.origin == Origin::Example {
+            self.notify_user(
+                NoticeTone::Info,
+                "The example can be scrubbed, not forked",
+                EXAMPLE_FORK,
+                cx,
+            );
+            return;
+        }
         let step = self.step;
         let schedule = 1 + session.forks_on_disk as u64 + self.forks.len() as u64;
         let run = session.run.path.clone();
@@ -506,7 +533,7 @@ impl Scrubber {
     /// Asks for a run to open, and opens it.
     pub(super) fn prompt_open(&mut self, kind: PickKind, cx: &mut Context<Self>) {
         let options = PathPromptOptions {
-            files: kind == PickKind::TraceFile,
+            files: kind == PickKind::File,
             directories: kind == PickKind::RunDirectory,
             multiple: false,
             prompt: Some(SharedString::from("Open")),

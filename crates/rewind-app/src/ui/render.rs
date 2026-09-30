@@ -6,22 +6,25 @@
 
 use gpui::{
     AnyElement, Context, DispatchPhase, Div, FontWeight, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollStrategy, SharedString, Window, canvas, div,
-    prelude::*, px, relative, rgb, rgba, uniform_list,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point, Role, ScrollStrategy, SharedString, Window,
+    canvas, div, prelude::*, px, relative, rgb, rgba, uniform_list,
 };
 
 use crate::describe::{self, EventTone, short_store_paths, thousands};
 use crate::model::{FileOp, FileTone, LogFilter, Motion, RowKind, Tone, ticks};
 use crate::run::{Session, Verdict, short_id};
 use crate::theme::{self, layout, size};
+use crate::tour::Anchor;
+use crate::ui::chrome::client_tiling;
 use crate::ui::icons::Icon;
 use crate::ui::scrubber::{ForkState, NoticeAction, NoticeTone, PickKind, Scrubber};
+use crate::ui::tour::explore_button;
 use crate::ui::widgets::{
     Availability, ButtonStyle, PillTone, button, icon, panel_title, pill, readout,
 };
 use crate::ui::{
     EnterLicense, ForkHere, GoToEnd, GoToStart, JumpToDivergence, JumpToFailure, KEY_CONTEXT,
-    NextEvent, NextPhase, OpenRun, PreviousEvent, PreviousPhase, StepBack, StepForward,
+    NextEvent, NextPhase, OpenRun, PreviousEvent, PreviousPhase, StartTour, StepBack, StepForward,
 };
 
 /// Header labels are cut to this many characters.
@@ -74,11 +77,14 @@ impl Render for Scrubber {
             .font_family(self.fonts.ui.clone())
             .text_size(px(size::TEXT_UI));
 
+        let root = root
+            .on_action(cx.listener(|this, _: &StartTour, window, cx| this.start_tour(window, cx)));
+
         // A run on screen, or the empty state asking for one.
         let body: AnyElement = if self.session.is_some() {
             self.render_session(window, cx).into_any_element()
         } else {
-            self.render_empty(cx).into_any_element()
+            self.render_empty(window, cx).into_any_element()
         };
 
         // The notices and the license dialog sit beside the scrubber's
@@ -94,6 +100,17 @@ impl Render for Scrubber {
         if let Some(dialog) = self.render_license_dialog(cx) {
             window_root = window_root.child(dialog);
         }
+
+        // Drawing its own chrome, the window needs a visible edge and
+        // handles to resize it by.
+        if let Some(tiling) = client_tiling(window) {
+            if !tiling.is_tiled() {
+                window_root = window_root.border_1().border_color(rgb(theme::LINE_2));
+            }
+            if let Some(edges) = self.resize_edges(window) {
+                window_root = window_root.child(edges);
+            }
+        }
         window_root
     }
 }
@@ -106,7 +123,7 @@ impl Scrubber {
     }
 
     fn render_session(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
-        let header = self.render_header(cx);
+        let header = self.render_header(window, cx);
         let timeline = self.render_timeline(window, cx);
         let log = self.render_log(cx);
         let middle = self.render_middle(cx);
@@ -138,7 +155,7 @@ impl Scrubber {
 
     /// The header: the mark, the run and what it built, verdict pills, and
     /// the run's size on the right.
-    fn render_header(&self, cx: &mut Context<Self>) -> Div {
+    fn render_header(&self, window: &mut Window, cx: &mut Context<Self>) -> gpui::Stateful<Div> {
         let session = self.session();
         let run = &session.run;
         let fonts = &self.fonts;
@@ -223,30 +240,79 @@ impl Scrubber {
             thousands(timeline.total),
             thousands(timeline.trace.events.len() as u64)
         );
-        let right = div()
+        self.header_frame(left, Some(stats), window, cx)
+    }
+
+    /// The header bar around `left`: on the right the run's size, the
+    /// license pill, the tour's "?" button and, when the app draws its own
+    /// chrome, the window controls. The whole bar is the title bar then.
+    fn header_frame(
+        &self,
+        left: Div,
+        stats: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<Div> {
+        let mut right = div()
             .flex()
             .flex_none()
             .items_center()
             .gap(px(size::HEADER_GAP))
-            .font_family(fonts.mono.clone())
+            .font_family(self.fonts.mono.clone())
             .text_size(px(size::TEXT_SMALL))
-            .text_color(rgb(theme::MUTED))
-            .child(stats)
-            .child(self.render_license_pill(cx));
+            .text_color(rgb(theme::MUTED));
+        if let Some(stats) = stats {
+            right = right.child(stats);
+        }
+        right = right
+            .child(self.render_license_pill(cx))
+            .child(self.help_button(cx));
+        let controls = self.window_controls(window);
+        let pad_right = if controls.is_some() {
+            size::CONTROLS_PAD_RIGHT
+        } else {
+            size::PAGE_PAD_X
+        };
+        if let Some(controls) = controls {
+            right = right.child(controls);
+        }
 
-        div()
+        let header = div()
             .h(px(size::HEADER_HEIGHT))
             .flex_none()
             .flex()
             .items_center()
             .justify_between()
             .gap(px(size::HEADER_GAP))
-            .px(px(size::PAGE_PAD_X))
+            .pl(px(size::PAGE_PAD_X))
+            .pr(px(pad_right))
             .bg(rgb(theme::PANEL))
             .border_b_1()
             .border_color(rgb(theme::LINE))
             .child(left)
-            .child(right)
+            .child(right);
+        self.titlebar(header, window, cx)
+    }
+
+    /// The "?" button that starts the tour.
+    fn help_button(&self, cx: &mut Context<Self>) -> gpui::Stateful<Div> {
+        div()
+            .id("help")
+            .role(Role::Button)
+            .aria_label("Start the tour (F1)")
+            .size(px(size::ICON_BUTTON_WIDTH))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_full()
+            .cursor_pointer()
+            .font_family(self.fonts.ui.clone())
+            .text_size(px(size::TEXT_UI))
+            .text_color(rgb(theme::MUTED))
+            .hover(|s| s.text_color(rgb(theme::TEXT)).bg(rgb(theme::RAISED_HOVER)))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(|this, _, window, cx| this.start_tour(window, cx)))
+            .child("?")
     }
 
     /// The timeline: phase segments, ticks, markers and the playhead over
@@ -400,6 +466,7 @@ impl Scrubber {
         }
 
         track = track.child(self.track_input(cx));
+        let track = self.with_callout(track, Anchor::Timeline, cx);
 
         div()
             .flex_none()
@@ -487,6 +554,7 @@ impl Scrubber {
         };
 
         let start = button("to-start", ButtonStyle::Neutral, Availability::Enabled)
+            .aria_label("Go to start (Home)")
             .w(px(size::ICON_BUTTON_WIDTH))
             .px_0()
             .child(icon(Icon::GoToStart, size::ICON_START, theme::TEXT))
@@ -506,9 +574,11 @@ impl Scrubber {
         let divergence = button("to-divergence", ButtonStyle::Divergence, has_divergence)
             .child("Jump to divergence")
             .on_click(cx.listener(|this, _, _, cx| this.go(Motion::Divergence, cx)));
+        let divergence = self.with_callout(divergence, Anchor::DivergenceButton, cx);
         let failure = button("to-failure", ButtonStyle::Failure, has_failure)
             .child("Jump to failure")
             .on_click(cx.listener(|this, _, _, cx| this.go(Motion::Failure, cx)));
+        let failure = self.with_callout(failure, Anchor::FailureButton, cx);
 
         let phase = t
             .phase_index_at(self.step)
@@ -530,6 +600,7 @@ impl Scrubber {
             .child(icon(Icon::Fork, size::ICON_FORK, theme::AMBER_INK))
             .child("Fork from here")
             .on_click(cx.listener(|this, _, _, cx| this.fork_here(cx)));
+        let fork = self.with_callout(fork, Anchor::ForkButton, cx);
 
         div()
             .flex()
@@ -897,7 +968,7 @@ impl Scrubber {
             .overflow_y_scroll()
             .gap(px(size::SECTION_GAP))
             .p(px(size::PANEL_PAD_X))
-            .child(event_card);
+            .child(self.with_callout(event_card, Anchor::EventCard, cx));
 
         // Against the compared run: where the two first differ, once the
         // playhead is past it, or that they never differ.
@@ -1149,20 +1220,36 @@ impl Scrubber {
 
     /// Before a run is open: the mark, a line of explanation, and buttons
     /// to pick a run directory or a trace file.
-    fn render_empty(&self, cx: &mut Context<Self>) -> Div {
+    fn render_empty(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let status = match &self.loading {
             Some(path) => format!("Opening {}\u{2026}", path.display()),
-            None => "Open a recorded run to scrub through it.".to_string(),
+            None => "Open a recorded run to scrub through it, or look around an example first."
+                .to_string(),
         };
-        let open_run = button("open-run", ButtonStyle::Primary, Availability::Enabled)
+        let open_run = button("open-run", ButtonStyle::Neutral, Availability::Enabled)
             .child("Open run\u{2026}")
             .on_click(cx.listener(|this, _, _, cx| this.prompt_open(PickKind::RunDirectory, cx)));
-        let open_trace = button("open-trace", ButtonStyle::Neutral, Availability::Enabled)
-            .child("Open trace file\u{2026}")
-            .on_click(cx.listener(|this, _, _, cx| this.prompt_open(PickKind::TraceFile, cx)));
+        let open_file = button("open-file", ButtonStyle::Neutral, Availability::Enabled)
+            .child("Open file\u{2026}")
+            .on_click(cx.listener(|this, _, _, cx| this.prompt_open(PickKind::File, cx)));
 
-        div()
-            .size_full()
+        // The header, with only the mark on the left, is still the title
+        // bar.
+        let brand = div()
+            .flex()
+            .items_center()
+            .gap(px(size::BRAND_GAP))
+            .child(icon(Icon::Mark, size::MARK_ICON, theme::AMBER))
+            .child(
+                div()
+                    .text_size(px(size::TEXT_BRAND))
+                    .font_weight(FontWeight::BOLD)
+                    .child("Rewind"),
+            );
+        let header = self.header_frame(brand, None, window, cx);
+
+        let middle = div()
+            .flex_grow(layout::FILL)
             .flex()
             .flex_col()
             .items_center()
@@ -1180,16 +1267,24 @@ impl Scrubber {
                 div()
                     .flex()
                     .gap(px(size::CONTROL_GAP))
+                    .child(explore_button(cx))
                     .child(open_run)
-                    .child(open_trace),
+                    .child(open_file),
             )
             .child(
                 div()
                     .font_family(self.fonts.mono.clone())
                     .text_size(px(size::TEXT_SMALL))
                     .text_color(rgb(theme::MUTED))
-                    .child("rewind-app <run-dir-or-trace> [--compare <run-dir-or-trace>]"),
-            )
+                    .child("rewind-app <run-dir | run.rwd | trace> [--compare <run>]    F1 starts the tour"),
+            );
+
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(header)
+            .child(middle)
     }
 }
 
