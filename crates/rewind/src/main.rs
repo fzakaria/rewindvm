@@ -115,6 +115,10 @@ enum Command {
         /// How many perturbed schedules to try besides the unperturbed one.
         #[arg(long, default_value_t = 64)]
         schedules: u64,
+        /// Try every schedule and report how many end differently, instead
+        /// of stopping at the first.
+        #[arg(long)]
+        all: bool,
         #[command(flatten)]
         machine: MachineArgs,
     },
@@ -206,6 +210,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             installable,
             image,
             schedules,
+            all,
             mut machine,
         } => {
             let guest = Guest::from_env()?;
@@ -229,14 +234,24 @@ fn run(cli: Cli) -> Result<ExitCode> {
             let base_key = show::outcome_key(&base)?;
 
             let mut failing = None;
+            let mut differing = 0;
+            let mut tried = 0;
             for schedule in 1..=schedules {
                 machine.schedule = schedule;
                 machine.schedule_from = start;
                 let run = run_workload(&home, &guest, &workload, &machine)?;
                 println!("schedule {schedule:>3}: {}", show::outcome_line(&run)?);
-                if failing.is_none() && show::outcome_key(&run)? != base_key {
-                    failing = Some(run);
+                tried += 1;
+                if show::outcome_key(&run)? != base_key {
+                    differing += 1;
+                    failing.get_or_insert(run);
+                    if !all {
+                        break;
+                    }
                 }
+            }
+            if all {
+                println!("{differing} of {tried} perturbed schedules ended differently");
             }
             let Some(mut worst) = failing else {
                 println!("same result under all {} schedules", schedules + 1);
