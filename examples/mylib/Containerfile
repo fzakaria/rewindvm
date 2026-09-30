@@ -1,0 +1,11 @@
+# mylib's build and tests in a plain Debian image, for the container
+# tutorial: build it, export its filesystem, and run `make check` in
+# Rewind VM.
+FROM debian:bookworm-slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends gcc libc6-dev make \
+ && rm -rf /var/lib/apt/lists/*
+COPY . /src
+WORKDIR /src
+RUN make
+CMD ["make", "check"]

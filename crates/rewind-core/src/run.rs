@@ -25,10 +25,10 @@ pub const TRACE: &str = "trace.bin";
 /// The version of the manifest format.
 const MANIFEST_VERSION: u32 = 1;
 
-/// The kernel command line every guest boots with. Each argument keeps the
-/// kernel from waiting on hardware time or probing hardware that is not
-/// there.
-pub const BASE_CMDLINE: &str = "nolapic_timer lpj=1000000 panic=-1 rdinit=/init quiet";
+/// The kernel command line every guest boots with. The first two keep the
+/// kernel from waiting on hardware time; loglevel=6 keeps informational
+/// messages, such as the instruction pointer of a segfault, in the trace.
+pub const BASE_CMDLINE: &str = "nolapic_timer lpj=1000000 panic=-1 rdinit=/init loglevel=6";
 
 /// Nanoseconds of virtual time per exit.
 pub const DEFAULT_QUANTUM: u64 = 1000;

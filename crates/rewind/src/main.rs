@@ -60,25 +60,38 @@ struct MachineArgs {
     kernel_args: String,
 }
 
+/// A command in a root filesystem, for `run` and `check`.
+#[derive(clap::Args, Clone)]
+struct ImageArgs {
+    /// The root filesystem: a directory, an erofs image, or a tarball
+    /// such as `docker export` writes.
+    #[arg(long)]
+    root: Option<PathBuf>,
+    /// Environment variables for the command, as KEY=VALUE.
+    #[arg(long = "env", short = 'e')]
+    env: Vec<String>,
+    /// The working directory in the guest.
+    #[arg(long, default_value = "/")]
+    cwd: String,
+    /// The command and its arguments.
+    #[arg(last = true)]
+    argv: Vec<String>,
+}
+
+/// What a run runs.
+enum Workload {
+    Nix(String),
+    Image(ImageArgs),
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// Run a command in a root filesystem.
     Run {
-        /// The root filesystem: a directory, an erofs image, or a tarball
-        /// such as `docker export` writes.
-        #[arg(long)]
-        root: PathBuf,
-        /// Environment variables for the command, as KEY=VALUE.
-        #[arg(long = "env", short = 'e')]
-        env: Vec<String>,
-        /// The working directory in the guest.
-        #[arg(long, default_value = "/")]
-        cwd: String,
+        #[command(flatten)]
+        image: ImageArgs,
         #[command(flatten)]
         machine: MachineArgs,
-        /// The command and its arguments.
-        #[arg(last = true, required = true)]
-        argv: Vec<String>,
     },
     /// Build a Nix derivation in the deterministic VM.
     Nix {
@@ -87,10 +100,15 @@ enum Command {
         #[command(flatten)]
         machine: MachineArgs,
     },
-    /// Build a Nix derivation under several schedules and show where the
-    /// first build that ends differently went its own way.
+    /// Run a Nix derivation, or a command with --root, under several
+    /// schedules and show where the first run that ends differently went
+    /// its own way.
     Check {
-        installable: String,
+        /// A .drv or installable; leave it out and give --root and a
+        /// command to check a command instead.
+        installable: Option<String>,
+        #[command(flatten)]
+        image: ImageArgs,
         /// How many perturbed schedules to try besides the unperturbed one.
         #[arg(long, default_value_t = 8)]
         schedules: u64,
@@ -164,31 +182,10 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> Result<ExitCode> {
     let home = Home::open()?;
     match cli.command {
-        Command::Run {
-            root,
-            env,
-            cwd,
-            machine,
-            argv,
-        } => {
+        Command::Run { image, machine } => {
             let guest = Guest::from_env()?;
-            let image = root_image(&home, &root)?;
-            let job = Job {
-                argv: argv.clone(),
-                env: parse_env(&env)?,
-                cwd,
-                uid: 0,
-                gid: 0,
-                hostname: "localhost".into(),
-                root: Root::Image,
-                files: Vec::new(),
-                outputs: Vec::new(),
-            };
-            let name = machine.name.clone().unwrap_or_else(|| argv.join(" "));
-            let source = Source::Image {
-                root: root.display().to_string(),
-            };
-            execute(&home, &guest, name, source, Some(image), job, &machine)
+            let run = run_workload(&home, &guest, &Workload::Image(image), &machine)?;
+            Ok(exit_status(&run))
         }
         Command::Nix {
             installable,
@@ -201,10 +198,15 @@ fn run(cli: Cli) -> Result<ExitCode> {
         }
         Command::Check {
             installable,
+            image,
             schedules,
             mut machine,
         } => {
             let guest = Guest::from_env()?;
+            let workload = match installable {
+                Some(i) => Workload::Nix(i),
+                None => Workload::Image(image),
+            };
             machine.quiet = true;
 
             // The unperturbed build, and the step its job started on:
@@ -212,7 +214,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             // make every run differ from the first kernel thread on.
             machine.schedule = 0;
             machine.schedule_from = 0;
-            let base = nix_run(&home, &guest, &installable, &machine)?;
+            let base = run_workload(&home, &guest, &workload, &machine)?;
             println!("schedule   0: {}", show::outcome_line(&base)?);
             let base_trace = base.trace()?;
             let start = show::start_step(&base_trace);
@@ -222,7 +224,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             for schedule in 1..=schedules {
                 machine.schedule = schedule;
                 machine.schedule_from = start;
-                let run = nix_run(&home, &guest, &installable, &machine)?;
+                let run = run_workload(&home, &guest, &workload, &machine)?;
                 println!("schedule {schedule:>3}: {}", show::outcome_line(&run)?);
                 if failing.is_none() && show::outcome_key(&run)? != base_key {
                     failing = Some(run);
@@ -250,7 +252,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     for schedule in 1..=schedules * SEARCH_FACTOR {
                         machine.schedule = schedule;
                         machine.schedule_from = exec;
-                        let run = nix_run(&home, &guest, &installable, &machine)?;
+                        let run = run_workload(&home, &guest, &workload, &machine)?;
                         if show::outcome_key(&run)? != base_key {
                             println!("schedule {schedule:>3}: {}", show::outcome_line(&run)?);
                             worst = run;
@@ -278,7 +280,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             let mut probe = |from: u64, until: u64| -> Result<Option<Run>> {
                 machine.schedule_from = from;
                 machine.schedule_until = until;
-                let run = nix_run(&home, &guest, &installable, &machine)?;
+                let run = run_workload(&home, &guest, &workload, &machine)?;
                 Ok((show::outcome_key(&run)? != base_key).then_some(run))
             };
             let (mut lo, mut hi) = (start, end);
@@ -450,7 +452,48 @@ fn run(cli: Cli) -> Result<ExitCode> {
 
 /// How many more schedules `check` tries when searching from the failing
 /// program's exec, as a multiple of the schedules asked for.
-const SEARCH_FACTOR: u64 = 4;
+const SEARCH_FACTOR: u64 = 2;
+
+/// Runs a workload with the given machine options.
+fn run_workload(
+    home: &Home,
+    guest: &Guest,
+    workload: &Workload,
+    machine: &MachineArgs,
+) -> Result<Run> {
+    match workload {
+        Workload::Nix(installable) => nix_run(home, guest, installable, machine),
+        Workload::Image(image) => image_run(home, guest, image, machine),
+    }
+}
+
+/// Runs a command in a root filesystem in the guest.
+fn image_run(home: &Home, guest: &Guest, args: &ImageArgs, machine: &MachineArgs) -> Result<Run> {
+    let root = args
+        .root
+        .as_ref()
+        .context("give --root with the root filesystem to run in")?;
+    if args.argv.is_empty() {
+        bail!("give the command to run after --");
+    }
+    let image = root_image(home, root)?;
+    let job = Job {
+        argv: args.argv.clone(),
+        env: parse_env(&args.env)?,
+        cwd: args.cwd.clone(),
+        uid: 0,
+        gid: 0,
+        hostname: "localhost".into(),
+        root: Root::Image,
+        files: Vec::new(),
+        outputs: Vec::new(),
+    };
+    let name = machine.name.clone().unwrap_or_else(|| args.argv.join(" "));
+    let source = Source::Image {
+        root: root.display().to_string(),
+    };
+    execute_spec(home, guest, name, source, Some(image), job, machine)
+}
 
 /// Runs a derivation's builder in the guest.
 fn nix_run(home: &Home, guest: &Guest, installable: &str, machine: &MachineArgs) -> Result<Run> {
@@ -529,6 +572,20 @@ fn root_image(home: &Home, root: &std::path::Path) -> Result<PathBuf> {
     if root.extension().is_some_and(|e| e == "erofs") {
         return Ok(root.to_path_buf());
     }
+
+    // A tarball's image is named after the tarball's hash, so checking a
+    // command under many schedules converts it once.
+    let cached = if root.is_file() {
+        let key = image::hash_file(root)?;
+        let path = home.images().join(format!("tar-{}.erofs", &key[..32]));
+        if path.exists() {
+            return Ok(path);
+        }
+        Some(path)
+    } else {
+        None
+    };
+
     let tmp = home
         .images()
         .join(format!("building-{}.erofs", std::process::id()));
@@ -539,10 +596,16 @@ fn root_image(home: &Home, root: &std::path::Path) -> Result<PathBuf> {
     } else {
         bail!("{} is neither a directory nor a file", root.display());
     }
-    // Images are named by their contents, so the same root twice is one
-    // file on disk.
-    let hash = image::hash_file(&tmp)?;
-    let path = home.images().join(format!("{}.erofs", &hash[..32]));
+
+    // Directory images are named by their own contents, so the same tree
+    // twice is one file on disk.
+    let path = match cached {
+        Some(path) => path,
+        None => {
+            let hash = image::hash_file(&tmp)?;
+            home.images().join(format!("{}.erofs", &hash[..32]))
+        }
+    };
     std::fs::rename(&tmp, &path)?;
     Ok(path)
 }
@@ -560,19 +623,6 @@ fn parse_env(pairs: &[String]) -> Result<Vec<(String, String)>> {
         env.push((k.to_string(), v.to_string()));
     }
     Ok(env)
-}
-
-fn execute(
-    home: &Home,
-    guest: &Guest,
-    name: String,
-    source: Source,
-    image: Option<PathBuf>,
-    job: Job,
-    machine: &MachineArgs,
-) -> Result<ExitCode> {
-    let run = execute_spec(home, guest, name, source, image, job, machine)?;
-    Ok(exit_status(&run))
 }
 
 /// The job's wait status as the process exit code, the way a shell reports
