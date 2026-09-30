@@ -108,7 +108,7 @@ fn resolve_clock(home: &Home, guest: &Guest, arg: ClockArg) -> Result<rewind_vmm
         ClockArg::Exits => Ok(ClockSource::Exits),
         ClockArg::Branches => branches(),
         ClockArg::Auto => {
-            if vendor.event().is_some() && pmu::exact_this_boot(home, guest)? {
+            if vendor.event().is_some() && pmu::counter_usable_this_boot(home, guest, &vendor)? {
                 return branches();
             }
             eprintln!("rewind: {}", pmu::exit_time_warning(&vendor));
@@ -589,11 +589,14 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 }
                 PmuAction::Status => {
                     println!("cpu: {vendor:?}");
-                    if vendor.needs_workaround() {
-                        let state = match rewind_core::pmu::workaround_set() {
-                            Some(true) => "set",
-                            Some(false) => "not set",
-                            None => "unknown (reading it needs root)",
+                    let needs = vendor.needs_workaround();
+                    let known = needs && rewind_core::pmu::workaround_known();
+                    if needs {
+                        let state = match (rewind_core::pmu::workaround_set(), known) {
+                            (Some(true), _) => "set",
+                            (Some(false), _) => "not set",
+                            (None, true) => "set by `rewind pmu enable` this boot",
+                            (None, false) => "not known to be set this boot",
                         };
                         println!("amd workaround (MSR 0xc0011020 bit 54): {state}");
                     }
@@ -602,7 +605,8 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     }
                     let guest = Guest::from_env()?;
                     let t = rewind_core::pmu::selftest(&guest)?;
-                    rewind_core::pmu::remember(&home, t.exact)?;
+                    rewind_core::pmu::remember(&home, known, t.exact)?;
+                    let usable = rewind_core::pmu::counter_usable(needs, known, t.exact);
                     println!(
                         "self-test: {} and {} branches, {}",
                         t.counts[0],
@@ -613,13 +617,23 @@ fn run(cli: Cli) -> Result<ExitCode> {
                             "NOT exact"
                         }
                     );
-                    if !t.exact {
+                    // On AMD an exact self-test without the workaround is
+                    // luck, and says so.
+                    if t.exact && !usable {
+                        println!(
+                            "the self-test agreed this time, but without the workaround this \
+                             CPU's counter is not reliably exact; set it with `sudo rewind pmu enable`"
+                        );
+                    }
+                    if usable {
+                        println!("runs will use counter time");
+                    } else {
                         println!(
                             "runs will use exit time; see {}",
                             rewind_core::pmu::DOCS_URL
                         );
                     }
-                    Ok(if t.exact {
+                    Ok(if usable {
                         ExitCode::SUCCESS
                     } else {
                         ExitCode::FAILURE

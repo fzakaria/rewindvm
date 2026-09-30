@@ -43,9 +43,10 @@ uses.
 ```console
 $ rewind pmu status
 cpu: Amd { family: 25 }
-amd workaround (MSR 0xc0011020 bit 54): unknown (reading it needs root)
+amd workaround (MSR 0xc0011020 bit 54): not known to be set this boot
 perf_event_paranoid: 2
-self-test: 40046091 and 40046089 branches, NOT exact
+self-test: 40045844 and 40045844 branches, exact at every exit
+the self-test agreed this time, but without the workaround this CPU's counter is not reliably exact; set it with `sudo rewind pmu enable`
 runs will use exit time; see https://rewindvm.dev/counter-time.html
 ```
 
@@ -60,7 +61,10 @@ decides.
   of millions, around lock-prefixed instructions, because of a speculation
   feature. Tens of millions of branches pass in a fraction of a second, so
   two runs of the same inputs disagree almost at once. rr documents the same
-  problem and its fix.
+  problem and its fix. The self-test cannot catch this every time: its two
+  runs sometimes agree by chance, as in the output above. So on AMD, runs
+  use counter time only when the workaround is known to be set, and the
+  self-test passes too.
 
 ## Turning it on for AMD
 
@@ -73,7 +77,10 @@ $ rewind pmu status
 This sets bit 54 of the `LS_CFG` model-specific register (`0xc0011020`) on
 every CPU. That disables the speculation the counter miscounts. It is the
 same change rr's `zen_workaround.py` makes, it needs root because it writes
-MSRs through `/dev/cpu/*/msr`, and it lasts until you reboot. It changes how
+MSRs through `/dev/cpu/*/msr`, and it lasts until you reboot. Reading the
+MSRs needs root too, so the command also leaves a note for this boot in
+`/run/rewind/amd-branch-workaround`, which is how runs as your own user know
+the workaround is set. It changes how
 the CPU speculates around locked instructions for everything on the machine;
 Rewind VM has not measured what that costs other programs.
 

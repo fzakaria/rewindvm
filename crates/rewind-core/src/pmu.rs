@@ -5,8 +5,11 @@
 //! every run. Intel's is. AMD's Zen cores overcount around lock-prefixed
 //! instructions unless a bit in a model-specific register is set, the
 //! workaround rr documents; setting it needs root and lasts until reboot.
-//! Rather than trust any of that, [`selftest`] runs a workload that
-//! provokes the overcount twice and compares every count.
+//! [`selftest`] runs a workload that provokes the overcount twice and
+//! compares every count. On AMD that is not enough: without the workaround
+//! the two runs sometimes agree by chance, so counter time there also needs
+//! the workaround to be known to be set, from the MSR itself or from the
+//! marker `rewind pmu enable` leaves under /run.
 //!
 //! The explanation for users is docs/pmu.md, published at [`DOCS_URL`].
 
@@ -108,8 +111,37 @@ pub fn workaround_set() -> Option<bool> {
     Some(all)
 }
 
-/// Sets the AMD workaround bit on every CPU. Needs root, and the msr
-/// module, which it loads.
+/// Where `rewind pmu enable` records that it set the AMD workaround, with
+/// the boot's id. /run is cleared at boot, like the MSR bit, and anyone can
+/// read it, while the MSR can be read only by root.
+pub const WORKAROUND_MARKER: &str = "/run/rewind/amd-branch-workaround";
+
+/// This boot's id, which names the boot in caches and markers.
+fn boot_id() -> String {
+    fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
+/// Whether the AMD workaround is known to be set on every CPU this boot:
+/// read from the MSRs as root, or from the marker otherwise.
+pub fn workaround_known() -> bool {
+    if let Some(set) = workaround_set() {
+        return set;
+    }
+    fs::read_to_string(WORKAROUND_MARKER).is_ok_and(|text| text.trim() == boot_id())
+}
+
+/// Whether runs may use counter time: the self-test found the counter
+/// exact, and on a CPU that needs the workaround, the workaround is known
+/// to be set, since there the self-test can pass by chance.
+pub fn counter_usable(needs_workaround: bool, workaround_known: bool, exact: bool) -> bool {
+    exact && (workaround_known || !needs_workaround)
+}
+
+/// Sets the AMD workaround bit on every CPU and leaves the marker. Needs
+/// root, and the msr module, which it loads.
 pub fn enable_workaround() -> Result<usize> {
     if msr_devices().map_or(true, |d| d.is_empty()) {
         let status = std::process::Command::new("modprobe")
@@ -136,6 +168,14 @@ pub fn enable_workaround() -> Result<usize> {
         f.write_all_at(&value.to_le_bytes(), AMD_LS_CFG)
             .with_context(|| format!("writing {}", dev.display()))?;
     }
+
+    // The marker, for runs as users who cannot read the MSRs.
+    let marker = PathBuf::from(WORKAROUND_MARKER);
+    if let Some(dir) = marker.parent() {
+        fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    fs::write(&marker, format!("{}\n", boot_id()))
+        .with_context(|| format!("writing {}", marker.display()))?;
     Ok(devices.len())
 }
 
@@ -147,35 +187,52 @@ pub fn perf_event_paranoid() -> Option<i32> {
         .ok()
 }
 
-/// The self-test's verdict for this boot, cached in the home: the counter's
-/// exactness does not change until the workaround is set or the machine
-/// reboots, and `rewind pmu status` runs the test again.
-pub fn exact_this_boot(home: &crate::Home, guest: &Guest) -> Result<bool> {
-    let boot = fs::read_to_string("/proc/sys/kernel/random/boot_id")
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    let cache = home.root().join("pmu-selftest");
-    if let Ok(text) = fs::read_to_string(&cache) {
-        if let Some(verdict) = text.strip_prefix(&format!("{boot} ")) {
-            return Ok(verdict.trim() == "exact");
-        }
+/// Whether runs may use counter time this boot. On a CPU that needs the
+/// workaround and does not have it, no: the self-test is not run at all.
+/// Otherwise the self-test's verdict, cached in the home under the boot and
+/// whether the workaround is known, so setting it later tests again.
+pub fn counter_usable_this_boot(
+    home: &crate::Home,
+    guest: &Guest,
+    vendor: &Vendor,
+) -> Result<bool> {
+    let needs = vendor.needs_workaround();
+    let known = needs && workaround_known();
+    if needs && !known {
+        return Ok(false);
+    }
+
+    let cache = home.root().join(SELFTEST_CACHE);
+    if let Some(verdict) = fs::read_to_string(&cache)
+        .ok()
+        .and_then(|text| text.strip_prefix(&cache_key(known)).map(str::to_string))
+    {
+        return Ok(counter_usable(needs, known, verdict.trim() == EXACT));
     }
     let exact = selftest(guest).map(|t| t.exact).unwrap_or(false);
-    remember(home, exact)?;
-    Ok(exact)
+    remember(home, known, exact)?;
+    Ok(counter_usable(needs, known, exact))
+}
+
+/// The file in the home that caches the self-test's verdict, and the words
+/// for it.
+const SELFTEST_CACHE: &str = "pmu-selftest";
+const EXACT: &str = "exact";
+const INEXACT: &str = "inexact";
+
+/// What a cached verdict is filed under: this boot, and whether the
+/// workaround was known to be set when the test ran.
+fn cache_key(workaround_known: bool) -> String {
+    let workaround = if workaround_known { "+workaround" } else { "" };
+    format!("{}{workaround} ", boot_id())
 }
 
 /// Caches a self-test verdict for this boot.
-pub fn remember(home: &crate::Home, exact: bool) -> Result<()> {
-    let boot = fs::read_to_string("/proc/sys/kernel/random/boot_id")
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    let verdict = if exact { "exact" } else { "inexact" };
+pub fn remember(home: &crate::Home, workaround_known: bool, exact: bool) -> Result<()> {
+    let verdict = if exact { EXACT } else { INEXACT };
     fs::write(
-        home.root().join("pmu-selftest"),
-        format!("{boot} {verdict}\n"),
+        home.root().join(SELFTEST_CACHE),
+        format!("{}{verdict}\n", cache_key(workaround_known)),
     )?;
     Ok(())
 }
@@ -256,4 +313,25 @@ pub fn selftest(guest: &Guest) -> Result<SelfTest> {
         counts,
         exact: hashes[0] == hashes[1],
     })
+}
+
+#[cfg(test)]
+mod tests {
+    // The decision to use counter time, from the three facts it rests on.
+    use super::*;
+
+    #[test]
+    fn amd_needs_the_workaround_even_when_the_self_test_passes() {
+        // The self-test agreeing by chance is not enough on AMD.
+        assert!(!counter_usable(true, false, true));
+        assert!(counter_usable(true, true, true));
+        assert!(!counter_usable(true, true, false));
+    }
+
+    #[test]
+    fn intel_needs_only_the_self_test() {
+        // No workaround exists, so the self-test decides.
+        assert!(counter_usable(false, false, true));
+        assert!(!counter_usable(false, false, false));
+    }
 }
