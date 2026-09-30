@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use rewind_core::run::{BASE_CMDLINE, DEFAULT_QUANTUM, default_epoch};
 use rewind_core::{Echo, Guest, Home, Keyframes, Run, Source, Spec};
-use rewind_core::{image, nix};
+use rewind_core::{export, image, nix};
 use rewind_init::{Job, Root};
 
 #[derive(Parser)]
@@ -137,6 +137,19 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Write a run to a single .rwd file.
+    Export {
+        run: String,
+        /// Where to write it; <id>.rwd by default.
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+        /// Include keyframes, their pages, the input image and the guest,
+        /// so another machine with a compatible CPU can replay the run.
+        #[arg(long)]
+        replayable: bool,
+    },
+    /// Read a .rwd file into the local runs.
+    Import { file: PathBuf },
     /// List runs, newest first.
     Ls,
     /// Print a run's output, up to a step.
@@ -377,6 +390,32 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 ),
             }
             Ok(exit_status(&child))
+        }
+        Command::Export {
+            run,
+            output,
+            replayable,
+        } => {
+            let run = Run::find(&home, &run)?;
+            let out = output.unwrap_or_else(|| PathBuf::from(format!("{}.rwd", run.manifest.id)));
+            let contents = if replayable {
+                export::Contents::Replayable
+            } else {
+                export::Contents::View
+            };
+            export::export(&home, &run, contents, &out)?;
+            let size = std::fs::metadata(&out)?.len();
+            eprintln!(
+                "rewind: wrote {} ({:.1} MB)",
+                out.display(),
+                size as f64 / 1e6
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Import { file } => {
+            let run = export::import(&home, &file)?;
+            println!("{}", show::summary(&run));
+            Ok(ExitCode::SUCCESS)
         }
         Command::Ls => {
             for r in Run::list(&home)? {

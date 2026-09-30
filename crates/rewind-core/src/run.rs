@@ -117,10 +117,15 @@ pub struct Manifest {
 
 impl Spec {
     /// The run's id: the BLAKE3 hash of every input, short enough to type.
+    /// Files count by their contents, not their paths, so a run keeps its
+    /// id on another machine or after an import moves its inputs.
     pub fn id(&self) -> String {
         let mut inputs = self.clone();
-        // The image's path does not matter, only its contents.
         inputs.image = None;
+        let content =
+            |p: &Path| crate::image::hash_file(p).unwrap_or_else(|_| p.display().to_string());
+        inputs.kernel = PathBuf::from(content(&self.kernel));
+        inputs.initrd = PathBuf::from(content(&self.initrd));
         let bytes = serde_json::to_vec(&inputs).expect("a spec always serializes");
         let hash = blake3::hash(&bytes).to_hex();
         hash[..16].to_string()

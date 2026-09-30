@@ -12,6 +12,9 @@ rewind-store = { path = "../rewind-store" }
 rewind-vmm = { path = "../rewind-vmm" }
 # Keyframes on disk.
 bincode = "1"
+# .rwd exports: a zstd-compressed tar.
+tar = "0.4"
+zstd = "0.13"
 anyhow = "1"
 # Content hashes of images and run inputs.
 blake3 = { version = "1", features = ["mmap"] }
