@@ -24,6 +24,7 @@ gpui = { package = "gpui-pre", version = "=0.3.7" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.7", features = ["wayland", "x11"] }
 rewind-trace = { path = "../rewind-trace" }
 serde_json = "1"
+serde = { version = "1", features = ["derive"] }
 
 [profile.release]
 opt-level = 3

@@ -23,10 +23,6 @@ pub const PROGRAM_ENV: &str = "REWIND_BIN";
 /// The engine's home, as it reads it (crates/rewind-core/src/home.rs).
 pub const HOME_ENV: &str = "REWIND_HOME";
 
-/// The line `rewind fork` ends a run with on standard error starts with
-/// this, then the new run's id, a space, and how it ended.
-const FINISHED_PREFIX: &str = "rewind: run ";
-
 /// Where runs live inside a Rewind home.
 const RUNS_DIR: &str = "runs";
 
@@ -104,9 +100,32 @@ pub type EngineResult<T> = Result<T, EngineError>;
 pub struct Forked {
     pub id: String,
     pub dir: PathBuf,
-    /// How the fork ended, in the engine's words: "exited:2 after 3650
-    /// steps, ...".
+    /// How the fork ended, in words: "exited:2, first differs from its
+    /// parent at step 3781".
     pub summary: String,
+}
+
+/// What `rewind fork --json` prints on standard output.
+#[derive(serde::Deserialize)]
+struct ForkJson {
+    id: String,
+    dir: PathBuf,
+    status: Option<i32>,
+    first_difference: Option<u64>,
+}
+
+impl ForkJson {
+    fn summary(&self) -> String {
+        let status = match self.status {
+            None => "no exit status".to_string(),
+            Some(s) if s & 0x7f != 0 => format!("killed by signal {}", s & 0x7f),
+            Some(s) => format!("exited:{}", (s >> 8) & 0xff),
+        };
+        match self.first_difference {
+            Some(step) => format!("{status}, first differs from its parent at step {step}"),
+            None => format!("{status}, the same as its parent"),
+        }
+    }
 }
 
 /// The engine's operations on a recorded run.
@@ -160,7 +179,7 @@ impl Engine for CliEngine {
             step.to_string().into(),
             "--schedule".into(),
             schedule.to_string().into(),
-            "--quiet".into(),
+            "--json".into(),
         ];
         let command = self.command_line(&args);
         let output = Command::new(&self.program)
@@ -178,17 +197,33 @@ impl Engine for CliEngine {
             })?;
 
         // The fork's exit code is the forked job's, so a fork of a failing
-        // build exits nonzero; the finished line is what says a run was
-        // made.
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let Some((id, summary)) = finished_run(&stderr) else {
+        // build exits nonzero; the JSON on standard output is what says a
+        // run was made.
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let Some(result) = stdout
+            .lines()
+            .rev()
+            .find_map(|line| serde_json::from_str::<ForkJson>(line).ok())
+        else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
             let message = last_line(&stderr)
                 .map(str::to_string)
                 .unwrap_or_else(|| output.status.to_string());
             return Err(EngineError::Failed { command, message });
         };
-        let dir = locate_run(&id, run).ok_or(EngineError::Lost { id: id.clone() })?;
-        Ok(Forked { id, dir, summary })
+        let summary = result.summary();
+        let dir = if result.dir.join(MANIFEST_FILE).is_file() {
+            result.dir
+        } else {
+            locate_run(&result.id, run).ok_or(EngineError::Lost {
+                id: result.id.clone(),
+            })?
+        };
+        Ok(Forked {
+            id: result.id,
+            dir,
+            summary,
+        })
     }
 
     fn gdb(&self, _run: &Path, _step: u64) -> EngineResult<String> {
@@ -202,15 +237,6 @@ impl Engine for CliEngine {
     fn export(&self, _run: &Path) -> EngineResult<PathBuf> {
         Err(EngineError::NotYet(Feature::Export))
     }
-}
-
-/// The id and summary from the engine's "rewind: run <id> <summary>" line.
-fn finished_run(stderr: &str) -> Option<(String, String)> {
-    stderr.lines().rev().find_map(|line| {
-        let rest = line.trim().strip_prefix(FINISHED_PREFIX)?;
-        let (id, summary) = rest.split_once(' ').unwrap_or((rest, ""));
-        Some((id.to_string(), summary.to_string()))
-    })
 }
 
 /// Where the run with `id` is: next to its parent, else in the Rewind home
@@ -272,12 +298,13 @@ mod tests {
         call()
     }
 
-    /// A stand-in engine: a script that prints `stderr` and exits `code`.
-    fn fake_engine(dir: &Path, stderr: &str, code: i32) -> CliEngine {
+    /// A stand-in engine: a script that prints `stdout` and `stderr` and
+    /// exits `code`.
+    fn fake_engine(dir: &Path, stdout: &str, stderr: &str, code: i32) -> CliEngine {
         let script = dir.join("rewind");
         std::fs::write(
             &script,
-            format!("#!/bin/sh\nprintf '%s\\n' \"$*\" > \"{}/args\"\nprintf '{stderr}' >&2\nexit {code}\n", dir.display()),
+            format!("#!/bin/sh\nprintf '%s\\n' \"$*\" > \"{}/args\"\nprintf '{stdout}'\nprintf '{stderr}' >&2\nexit {code}\n", dir.display()),
         )
         .unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -302,17 +329,20 @@ mod tests {
         std::fs::create_dir_all(runs.join("parent")).unwrap();
         std::fs::create_dir_all(runs.join("abc123")).unwrap();
         std::fs::write(runs.join("abc123").join(MANIFEST_FILE), "{}").unwrap();
-        let engine = fake_engine(
-            &dir,
-            "rewind: run abc123 exited:2 after 3650 steps, 0.012s virtual\\nrewind: the fork first differs from its parent at step 3492\\n",
-            2,
+        let json = format!(
+            r#"{{"id":"abc123","dir":"{}","status":512,"first_difference":3492}}\n"#,
+            runs.join("abc123").display()
         );
+        let engine = fake_engine(&dir, &json, "", 2);
         let forked = retrying(|| engine.fork(&runs.join("parent"), 3480, 3)).unwrap();
         assert_eq!(forked.id, "abc123");
         assert_eq!(forked.dir, runs.join("abc123"));
-        assert!(forked.summary.starts_with("exited:2 after 3650 steps"));
+        assert_eq!(
+            forked.summary,
+            "exited:2, first differs from its parent at step 3492"
+        );
         let args = std::fs::read_to_string(dir.join("args")).unwrap();
-        assert!(args.contains("fork") && args.contains("3480 --schedule 3 --quiet"));
+        assert!(args.contains("fork") && args.contains("3480 --schedule 3 --json"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -320,7 +350,7 @@ mod tests {
     fn a_refused_fork_reports_the_engines_last_words() {
         // No finished line: the last thing on standard error is the reason.
         let dir = temp_dir("refused");
-        let engine = fake_engine(&dir, "rewind: schedule 0 is the unperturbed run\\n", 1);
+        let engine = fake_engine(&dir, "", "rewind: schedule 0 is the unperturbed run\\n", 1);
         let err = retrying(|| engine.fork(&dir, 1, 0)).unwrap_err();
         let EngineError::Failed { message, .. } = err else {
             panic!("{err:?}");

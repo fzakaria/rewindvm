@@ -4693,6 +4693,7 @@ dependencies = [
  "gpui-pre",
  "gpui-pre-platform",
  "rewind-trace",
+ "serde",
  "serde_json",
 ]
 
