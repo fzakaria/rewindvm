@@ -61,6 +61,53 @@ pub struct Config {
     pub schedule: Schedule,
     /// The CPU the guest is shown.
     pub cpu: cpu::Model,
+    /// What moves virtual time besides exits and idling.
+    pub clock: ClockSource,
+}
+
+/// What virtual time follows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClockSource {
+    /// Exits and idling only: computation between exits takes no time.
+    #[default]
+    Exits,
+    /// Also the guest's work: every retired conditional branch in guest
+    /// user mode, counted by the host's performance counter, adds
+    /// [`PS_PER_BRANCH`] picoseconds.
+    Branches(pmu::Event),
+}
+
+/// Virtual time per retired conditional branch: about one nanosecond, what
+/// current cores average.
+pub const PS_PER_BRANCH: u64 = 1000;
+
+/// The guest's work so far, when virtual time follows it.
+pub(crate) struct Work {
+    counter: pmu::Counter,
+    /// Branches counted before the counter was opened, from a keyframe.
+    base: u64,
+    /// The branch count at the last exit.
+    pub(crate) total: u64,
+}
+
+impl Work {
+    fn open(event: pmu::Event, base: u64) -> Result<Work> {
+        let counter = pmu::Counter::open(event, pmu::Modes::UserOnly)?;
+        Ok(Work {
+            counter,
+            base,
+            total: base,
+        })
+    }
+
+    /// Branches since the last exit.
+    fn advance(&mut self) -> Result<u64> {
+        let now = self.base + self.counter.read()?;
+        let delta = now - self.total;
+        self.total = now;
+        Ok(delta)
+    }
 }
 
 /// Why a run stopped.
@@ -116,6 +163,11 @@ pub struct Machine {
     /// An experiment: a guest-mode performance counter read at every exit,
     /// and a hash of every value read.
     pub pmu: Option<(pmu::Counter, u64)>,
+    /// The guest's work, when virtual time follows it. Opened lazily on the
+    /// thread that runs the vCPU, which is the thread a counter counts.
+    pub(crate) work: Option<Work>,
+    /// The branch count to resume from, set by a restore.
+    pub(crate) work_base: u64,
 }
 
 impl Machine {
@@ -187,6 +239,8 @@ impl Machine {
             config: config.clone(),
             profile: None,
             pmu: None,
+            work: None,
+            work_base: 0,
         })
     }
 
@@ -218,6 +272,11 @@ impl Machine {
         self.dev.step
     }
 
+    /// Guest branches counted so far, when virtual time follows them.
+    pub fn branches(&self) -> u64 {
+        self.work.as_ref().map_or(self.work_base, |w| w.total)
+    }
+
     /// Virtual nanoseconds since boot.
     pub fn now(&self) -> u64 {
         self.dev.clock.now
@@ -234,6 +293,10 @@ impl Machine {
         }
         if until.is_some_and(|u| u <= self.dev.step) {
             return Ok(Outcome::Paused);
+        }
+
+        if let (ClockSource::Branches(event), None) = (self.config.clock, &self.work) {
+            self.work = Some(Work::open(event, self.work_base)?);
         }
 
         loop {
@@ -299,6 +362,9 @@ impl Machine {
                 *hash = (*hash ^ count).wrapping_mul(0x100_0000_01b3);
             }
             self.dev.clock.tick();
+            if let Some(work) = &mut self.work {
+                self.dev.clock.now += work.advance()? * PS_PER_BRANCH / 1000;
+            }
             // The guest's scheduler clock reads this without an exit, so it
             // is refreshed at every one.
             if let Some(shared) = self.dev.shared {

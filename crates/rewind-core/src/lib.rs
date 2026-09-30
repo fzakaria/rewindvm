@@ -7,6 +7,7 @@ pub mod home;
 pub mod image;
 pub mod keyframes;
 pub mod nix;
+pub mod pmu;
 pub mod run;
 
 pub use home::{Guest, Home};

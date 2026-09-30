@@ -67,6 +67,9 @@ struct DeviceState {
     shared: Option<u64>,
     epoch: u64,
     step: u64,
+    /// Guest branches counted so far, when virtual time follows them.
+    #[serde(default)]
+    branches: u64,
 }
 
 /// The bytes of a plain KVM structure.
@@ -182,6 +185,7 @@ impl Machine {
                 shared: self.dev.shared,
                 epoch: self.dev.epoch,
                 step: self.dev.step,
+                branches: self.branches(),
             },
             pages: stored,
         })
@@ -297,6 +301,7 @@ impl Machine {
         m.dev.shared = d.shared;
         m.dev.epoch = d.epoch;
         m.dev.step = d.step;
+        m.work_base = d.branches;
         Ok(m)
     }
 }

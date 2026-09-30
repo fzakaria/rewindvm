@@ -55,11 +55,15 @@ const FLAG_EXCLUDE_HOST: u64 = 1 << 19;
 const PERF_EVENT_IOC_ENABLE: u64 = 0x2400;
 
 /// Which events to count.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Event {
     /// AMD Zen's retired conditional branches (PMCx0D1), what rr counts on
     /// AMD.
     AmdRetiredConditionalBranches,
+    /// Intel's retired conditional branches (BR_INST_RETIRED.CONDITIONAL,
+    /// event 0xc4 umask 0x01), what rr counts on Intel.
+    IntelRetiredConditionalBranches,
     /// Retired instructions, which some microarchitectures overcount.
     Instructions,
 }
@@ -82,6 +86,7 @@ impl Counter {
     pub fn open(event: Event, modes: Modes) -> Result<Counter> {
         let (type_, config) = match event {
             Event::AmdRetiredConditionalBranches => (PERF_TYPE_RAW, 0xd1),
+            Event::IntelRetiredConditionalBranches => (PERF_TYPE_RAW, 0x01c4),
             Event::Instructions => (PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS),
         };
         let mut flags = FLAG_DISABLED | FLAG_EXCLUDE_HV | FLAG_EXCLUDE_HOST;

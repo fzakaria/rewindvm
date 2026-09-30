@@ -82,6 +82,9 @@ pub struct Spec {
     /// host's.
     #[serde(default = "host_cpu")]
     pub cpu: rewind_vmm::cpu::Model,
+    /// What moves virtual time besides exits and idling.
+    #[serde(default)]
+    pub clock: rewind_vmm::ClockSource,
     pub cmdline: String,
     pub job: Job,
 }
@@ -170,6 +173,7 @@ impl Spec {
                 window: self.schedule_from..self.schedule_until,
             },
             cpu: self.cpu,
+            clock: self.clock,
         })
     }
 }
@@ -305,16 +309,6 @@ impl Run {
         };
         let start = Instant::now();
         let mut machine = Machine::boot(&manifest.spec.config()?)?;
-        if let Ok(which) = std::env::var("REWIND_PMU_EXPERIMENT") {
-            use rewind_vmm::pmu::{Counter, Event, Modes};
-            let (event, modes) = match which.as_str() {
-                "insn" => (Event::Instructions, Modes::UserOnly),
-                "insn-kernel" => (Event::Instructions, Modes::UserAndKernel),
-                "rcb-kernel" => (Event::AmdRetiredConditionalBranches, Modes::UserAndKernel),
-                _ => (Event::AmdRetiredConditionalBranches, Modes::UserOnly),
-            };
-            machine.pmu = Some((Counter::open(event, modes)?, 0xcbf2_9ce4_8422_2325));
-        }
         let outcome = match keyframes {
             Keyframes::Take => {
                 // Keyframes left from an earlier execution of this spec are
@@ -332,9 +326,7 @@ impl Run {
             }
             Keyframes::Skip => machine.run(None, &mut recorder)?,
         };
-        if let Some((counter, hash)) = &machine.pmu {
-            eprintln!("pmu: final {} hash {hash:016x}", counter.read()?);
-        }
+
         let wall = start.elapsed();
         if let Some(e) = recorder.error {
             return Err(e.context("writing the trace"));

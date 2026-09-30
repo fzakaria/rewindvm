@@ -34,7 +34,19 @@ const MARK_DEVICE: &str = "/dev/rewind";
 
 type Result<T> = std::result::Result<T, String>;
 
+/// The argument that turns this binary into the counter self-test's
+/// workload instead of PID 1.
+const SELFTEST_ARG: &str = "--selftest";
+
+/// Threads and atomic additions per thread in the self-test.
+const SELFTEST_THREADS: usize = 4;
+const SELFTEST_ADDS: u64 = 5_000_000;
+
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some(SELFTEST_ARG) {
+        selftest();
+        return;
+    }
     if let Err(e) = run() {
         eprintln!("rewind-init: {e}");
         mark(&format!("{EXIT_MARK}{}", 127 << 8));
@@ -206,6 +218,36 @@ fn spawn_and_reap(job: &Job) -> Result<i32> {
         }
     }
     main_status.ok_or_else(|| "the job's main process was never reaped".to_string())
+}
+
+/// The counter self-test's workload: threads adding to one atomic with
+/// lock-prefixed instructions, the pattern AMD's branch counter overcounts
+/// on, interleaved with futex handoffs. It prints the total so a broken
+/// run shows.
+fn selftest() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    let total = Arc::new(AtomicU64::new(0));
+    let handoff = Arc::new(Mutex::new(0u64));
+    let threads: Vec<_> = (0..SELFTEST_THREADS)
+        .map(|_| {
+            let total = Arc::clone(&total);
+            let handoff = Arc::clone(&handoff);
+            std::thread::spawn(move || {
+                for i in 0..SELFTEST_ADDS {
+                    total.fetch_add(i & 7, Ordering::SeqCst);
+                    if i % 4096 == 0 {
+                        *handoff.lock().unwrap() += 1;
+                    }
+                }
+            })
+        })
+        .collect();
+    for t in threads {
+        let _ = t.join();
+    }
+    println!("selftest {}", total.load(Ordering::SeqCst));
 }
 
 /// The program to exec: as given if it contains a slash, else the first

@@ -42,6 +42,14 @@ struct MachineArgs {
     /// any host supporting it, or the host's own features.
     #[arg(long, value_enum, default_value_t = CpuArg::V3)]
     cpu: CpuArg,
+    /// What moves the guest's clock besides exits: the guest's work, counted
+    /// by the host's branch counter (`branches`), or nothing (`exits`).
+    /// `auto` uses the counter when this host's self-test finds it exact.
+    #[arg(long, value_enum, default_value_t = ClockArg::Auto)]
+    clock: ClockArg,
+    /// The clock `clock` resolved to, once per command.
+    #[arg(skip)]
+    resolved_clock: Option<rewind_vmm::ClockSource>,
     /// The step after which no more reschedules are asked.
     #[arg(long, default_value_t = u64::MAX)]
     schedule_until: u64,
@@ -65,6 +73,39 @@ struct MachineArgs {
     /// messages in the trace.
     #[arg(long, default_value = "")]
     kernel_args: String,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+enum ClockArg {
+    Auto,
+    Exits,
+    Branches,
+}
+
+/// The clock a run will use: an explicit choice, or for `auto` the branch
+/// counter when this boot's self-test found it exact, with a warning when
+/// it did not.
+fn resolve_clock(home: &Home, guest: &Guest, arg: ClockArg) -> Result<rewind_vmm::ClockSource> {
+    use rewind_core::pmu::{self, Vendor};
+    use rewind_vmm::ClockSource;
+    let vendor = Vendor::detect()?;
+    let branches = || {
+        vendor
+            .event()
+            .map(ClockSource::Branches)
+            .context("this CPU has no branch counter rewind knows")
+    };
+    match arg {
+        ClockArg::Exits => Ok(ClockSource::Exits),
+        ClockArg::Branches => branches(),
+        ClockArg::Auto => {
+            if vendor.event().is_some() && pmu::exact_this_boot(home, guest)? {
+                return branches();
+            }
+            eprintln!("rewind: {}", pmu::exit_time_warning(&vendor));
+            Ok(ClockSource::Exits)
+        }
+    }
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug)]
@@ -98,6 +139,15 @@ struct ImageArgs {
     /// The command and its arguments.
     #[arg(last = true)]
     argv: Vec<String>,
+}
+
+#[derive(Subcommand)]
+enum PmuAction {
+    /// Show the CPU, the workaround's state, and a self-test of the counter.
+    Status,
+    /// Apply rr's workaround for AMD Zen's branch counter on every CPU,
+    /// until reboot. Run it as root: sudo rewind pmu enable.
+    Enable,
 }
 
 /// What a run runs.
@@ -158,6 +208,11 @@ enum Command {
         /// programs such as the desktop app.
         #[arg(long)]
         json: bool,
+    },
+    /// Whether this host's performance counters can drive virtual time.
+    Pmu {
+        #[command(subcommand)]
+        action: PmuAction,
     },
     /// Write a run to a single .rwd file.
     Export {
@@ -267,7 +322,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 Some(i) => Workload::Nix(i),
                 None => Workload::Image(image),
             };
-            let prepared = prepare(&home, &guest, &workload, &machine)?;
+            let prepared = prepare(&home, &guest, &workload, &mut machine)?;
 
             // The unperturbed run, and the step its job started on:
             // everything before that is boot, and perturbing it would only
@@ -476,6 +531,58 @@ fn run(cli: Cli) -> Result<ExitCode> {
             }
             Ok(exit_status(&child))
         }
+        Command::Pmu { action } => {
+            let vendor = rewind_core::pmu::Vendor::detect()?;
+            match action {
+                PmuAction::Enable => {
+                    if !vendor.needs_workaround() {
+                        println!("{vendor:?}: no workaround needed");
+                        return Ok(ExitCode::SUCCESS);
+                    }
+                    let n = rewind_core::pmu::enable_workaround()?;
+                    println!("set the branch counter workaround on {n} CPUs, until reboot");
+                    Ok(ExitCode::SUCCESS)
+                }
+                PmuAction::Status => {
+                    println!("cpu: {vendor:?}");
+                    if vendor.needs_workaround() {
+                        let state = match rewind_core::pmu::workaround_set() {
+                            Some(true) => "set",
+                            Some(false) => "not set",
+                            None => "unknown (reading it needs root)",
+                        };
+                        println!("amd workaround (MSR 0xc0011020 bit 54): {state}");
+                    }
+                    if let Some(p) = rewind_core::pmu::perf_event_paranoid() {
+                        println!("perf_event_paranoid: {p}");
+                    }
+                    let guest = Guest::from_env()?;
+                    let t = rewind_core::pmu::selftest(&guest)?;
+                    rewind_core::pmu::remember(&home, t.exact)?;
+                    println!(
+                        "self-test: {} and {} branches, {}",
+                        t.counts[0],
+                        t.counts[1],
+                        if t.exact {
+                            "exact at every exit"
+                        } else {
+                            "NOT exact"
+                        }
+                    );
+                    if !t.exact {
+                        println!(
+                            "runs will use exit time; see {}",
+                            rewind_core::pmu::DOCS_URL
+                        );
+                    }
+                    Ok(if t.exact {
+                        ExitCode::SUCCESS
+                    } else {
+                        ExitCode::FAILURE
+                    })
+                }
+            }
+        }
         Command::Export {
             run,
             output,
@@ -623,16 +730,20 @@ fn run_workload(
     workload: &Workload,
     machine: &MachineArgs,
 ) -> Result<Run> {
-    let prepared = prepare(home, guest, workload, machine)?;
-    execute(home, guest, &prepared, machine, Announce::Yes)
+    let mut machine = machine.clone();
+    let prepared = prepare(home, guest, workload, &mut machine)?;
+    execute(home, guest, &prepared, &machine, Announce::Yes)
 }
 
 fn prepare(
     home: &Home,
     guest: &Guest,
     workload: &Workload,
-    machine: &MachineArgs,
+    machine: &mut MachineArgs,
 ) -> Result<Prepared> {
+    if machine.resolved_clock.is_none() {
+        machine.resolved_clock = Some(resolve_clock(home, guest, machine.clock)?);
+    }
     let (name, source, image, job) = match workload {
         Workload::Nix(installable) => prepare_nix(home, guest, installable)?,
         Workload::Image(args) => prepare_image(home, args)?,
@@ -750,6 +861,7 @@ fn execute(
         schedule_from: machine.schedule_from,
         schedule_until: machine.schedule_until,
         cpu: machine.cpu.into(),
+        clock: machine.resolved_clock.unwrap_or_default(),
         cmdline: format!("{BASE_CMDLINE} {}", machine.kernel_args)
             .trim()
             .to_string(),
