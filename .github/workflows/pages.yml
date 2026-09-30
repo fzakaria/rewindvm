@@ -1,6 +1,8 @@
-# Publishes the marketing site. The deployed tree is exactly `nix build
-# .#site`, the same one `nix run .#serve` previews, so what gets tested
-# locally is what ships.
+# Publishes the marketing site and the release tarball it serves under
+# download/. The deployed tree is exactly `nix build .#site`, the same one
+# `nix run .#serve` previews, so what gets tested locally is what ships.
+# The tarball holds the engine and the guest, so a change to either
+# redeploys, and a cold run builds the guest kernel.
 name: pages
 
 on:
@@ -8,8 +10,14 @@ on:
     branches: [main]
     paths:
       - site/**
-      - nix/site.nix
+      - crates/**
+      - guest/**
+      - nix/**
+      - Cargo.toml
+      - Cargo.lock
+      - flake.nix
       - flake.lock
+      - LICENSE
       - .github/workflows/pages.yml
   workflow_dispatch:
 
@@ -25,7 +33,7 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 120
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

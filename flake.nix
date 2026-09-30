@@ -23,12 +23,17 @@
           pkgs = nixpkgs.legacyPackages.${system};
           kernel = import ./nix/kernel.nix { inherit pkgs; };
           guest = import ./nix/guest.nix { inherit pkgs; };
+          release = import ./nix/release.nix { inherit pkgs kernel guest; };
         in
         {
-          inherit pkgs kernel guest;
+          inherit
+            pkgs
+            kernel
+            guest
+            release
+            ;
           rewind = import ./nix/rewind.nix { inherit pkgs kernel guest; };
-          release = import ./nix/release.nix { inherit pkgs kernel guest; };
-          site = import ./nix/site.nix { inherit pkgs; };
+          site = import ./nix/site.nix { inherit pkgs release; };
           examples = import ./nix/examples.nix { inherit pkgs; };
           app = import ./nix/app.nix { inherit pkgs; };
         };
@@ -105,6 +110,12 @@
         in
         import ./nix/dev-shells.nix { inherit (p) pkgs kernel guest; }
       );
+
+      # `programs.rewind` for NixOS (nix/module.nix). The release tarball's
+      # flake exports the same module with the prebuilt package.
+      nixosModules.default = import ./nix/module.nix {
+        rewind = self.packages.x86_64-linux.default;
+      };
 
       formatter = forAllSystems (
         system: import ./nix/formatter.nix { pkgs = nixpkgs.legacyPackages.${system}; }
