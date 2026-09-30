@@ -14,7 +14,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use rewind_init::{EXIT_MARK, JOB_PATH, Job, OUTPUT_MARK, Root, tree_hash};
+use rewind_init::{EXIT_MARK, JOB_PATH, Job, OUTPUT_MARK, Root, START_MARK, tree_hash};
 
 /// The image the monitor maps as persistent memory.
 const IMAGE_DEVICE: &str = "/dev/pmem0";
@@ -78,6 +78,7 @@ fn run() -> Result<()> {
         chown(&f.path, job.uid, job.gid)?;
     }
 
+    mark(START_MARK);
     let status = spawn_and_reap(&job)?;
     if status == 0 {
         for output in &job.outputs {

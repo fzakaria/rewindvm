@@ -60,8 +60,21 @@ pub struct Spec {
     pub seed: u64,
     pub epoch: u64,
     pub quantum: u64,
+    /// Perturbs where timer interrupts, and so preemptions, land; 0 for
+    /// none.
+    #[serde(default)]
+    pub schedule: u64,
+    /// The steps the schedule perturbation applies to, `from..until`.
+    #[serde(default)]
+    pub schedule_from: u64,
+    #[serde(default = "forever")]
+    pub schedule_until: u64,
     pub cmdline: String,
     pub job: Job,
+}
+
+fn forever() -> u64 {
+    u64::MAX
 }
 
 /// What kind of workload a run is, for display.
@@ -130,6 +143,10 @@ impl Spec {
             seed: self.rng_seed(),
             epoch: self.epoch,
             quantum: self.quantum,
+            schedule: rewind_vmm::pv::Schedule {
+                seed: self.schedule,
+                window: self.schedule_from..self.schedule_until,
+            },
         })
     }
 }
@@ -254,7 +271,20 @@ impl Run {
         };
         let start = Instant::now();
         let mut machine = Machine::boot(&manifest.spec.config()?)?;
+        if let Ok(which) = std::env::var("REWIND_PMU_EXPERIMENT") {
+            use rewind_vmm::pmu::{Counter, Event, Modes};
+            let (event, modes) = match which.as_str() {
+                "insn" => (Event::Instructions, Modes::UserOnly),
+                "insn-kernel" => (Event::Instructions, Modes::UserAndKernel),
+                "rcb-kernel" => (Event::AmdRetiredConditionalBranches, Modes::UserAndKernel),
+                _ => (Event::AmdRetiredConditionalBranches, Modes::UserOnly),
+            };
+            machine.pmu = Some((Counter::open(event, modes)?, 0xcbf2_9ce4_8422_2325));
+        }
         let outcome = machine.run(None, &mut recorder)?;
+        if let Some((counter, hash)) = &machine.pmu {
+            eprintln!("pmu: final {} hash {hash:016x}", counter.read()?);
+        }
         let wall = start.elapsed();
         if let Some(e) = recorder.error {
             return Err(e.context("writing the trace"));

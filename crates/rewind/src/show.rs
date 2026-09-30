@@ -33,6 +33,84 @@ pub fn finished(run: &Run) -> String {
     )
 }
 
+/// How a run ended, as something two runs can be compared by: the exit
+/// status and the hash of every output.
+pub fn outcome_key(run: &Run) -> anyhow::Result<(Option<i32>, Vec<String>)> {
+    let status = run.manifest.outcome.as_ref().and_then(|o| o.status);
+    let mut outputs = Vec::new();
+    for e in run.trace()?.events {
+        if let EventKind::Mark { text } = e.kind {
+            if let Some(rest) = text.strip_prefix(rewind_init::OUTPUT_MARK) {
+                outputs.push(rest.to_string());
+            }
+        }
+    }
+    Ok((status, outputs))
+}
+
+/// The step the job started on, from init's start mark; 0 if there is
+/// none.
+pub fn start_step(trace: &Trace) -> u64 {
+    trace
+        .events
+        .iter()
+        .find(|e| matches!(&e.kind, EventKind::Mark { text } if text == rewind_init::START_MARK))
+        .map_or(0, |e| e.step)
+}
+
+/// The command line of the process a failed run's failure came from: the
+/// first to receive a fatal signal, else the first to exit non-zero.
+pub fn culprit(trace: &Trace) -> Option<Vec<String>> {
+    const FATAL: [u32; 5] = [4, 6, 7, 8, 11];
+    let procs = trace.processes();
+    let argv_of = |pid: u32| {
+        procs
+            .iter()
+            .rev()
+            .find(|p| p.pid == pid && !p.argv.is_empty())
+            .map(|p| p.argv.clone())
+    };
+    let signalled = trace.events.iter().find_map(|e| match &e.kind {
+        EventKind::Signal { signo, .. } if FATAL.contains(signo) => argv_of(e.pid),
+        _ => None,
+    });
+    signalled.or_else(|| {
+        trace.events.iter().find_map(|e| match &e.kind {
+            EventKind::Exit {
+                status,
+                thread: false,
+                ..
+            } if *status != 0 => argv_of(e.pid),
+            _ => None,
+        })
+    })
+}
+
+/// The step a command line was first exec'd on.
+pub fn exec_step(trace: &Trace, argv: &[String]) -> Option<u64> {
+    trace.events.iter().find_map(|e| match &e.kind {
+        EventKind::Exec { argv: a, .. } if a == argv => Some(e.step),
+        _ => None,
+    })
+}
+
+/// One line per run for `rewind check`.
+pub fn outcome_line(run: &Run) -> anyhow::Result<String> {
+    let (status_, outputs) = outcome_key(run)?;
+    let steps = run.manifest.outcome.as_ref().map_or(0, |o| o.step);
+    let hashes: Vec<String> = outputs
+        .iter()
+        .filter_map(|o| o.split_once(' ').map(|(_, h)| h[..12].to_string()))
+        .collect();
+    Ok(format!(
+        "{:<14} {:>10} steps  {}  run {}",
+        status(status_),
+        steps,
+        hashes.join(" "),
+        run.manifest.id
+    ))
+}
+
 /// A wait status in words.
 pub fn status(status: Option<i32>) -> String {
     match status {
@@ -140,10 +218,11 @@ pub fn divergence(left: &Trace, right: &Trace) -> String {
     for e in &left.events[context] {
         let _ = writeln!(out, "  both  {}", event(e));
     }
-    if let Some(e) = left.events.get(d.index) {
+    const AFTER: usize = 4;
+    for e in left.events.iter().skip(d.index).take(AFTER) {
         let _ = writeln!(out, "  left  {}", event(e));
     }
-    if let Some(e) = right.events.get(d.index) {
+    for e in right.events.iter().skip(d.index).take(AFTER) {
         let _ = writeln!(out, "  right {}", event(e));
     }
     out

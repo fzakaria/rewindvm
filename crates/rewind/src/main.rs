@@ -29,6 +29,18 @@ struct MachineArgs {
     /// identical; a different seed explores a different run.
     #[arg(long, default_value_t = 0)]
     seed: u64,
+    /// Asks the guest to reschedule at steps this seed picks, to explore
+    /// other thread interleavings with everything else, time included,
+    /// unchanged. 0 is the unperturbed schedule.
+    #[arg(long, default_value_t = 0)]
+    schedule: u64,
+    /// The first step a reschedule may be asked at; before it the run is the
+    /// unperturbed one.
+    #[arg(long, default_value_t = 0)]
+    schedule_from: u64,
+    /// The step after which no more reschedules are asked.
+    #[arg(long, default_value_t = u64::MAX)]
+    schedule_until: u64,
     /// Guest memory in MiB.
     #[arg(long, default_value_t = 1024)]
     mem: u64,
@@ -75,13 +87,13 @@ enum Command {
         #[command(flatten)]
         machine: MachineArgs,
     },
-    /// Build a Nix derivation with several seeds and show where the builds
-    /// first differ, if they do.
+    /// Build a Nix derivation under several schedules and show where the
+    /// first build that ends differently went its own way.
     Check {
         installable: String,
-        /// How many seeds to try, starting from 0.
-        #[arg(long, default_value_t = 2)]
-        seeds: u64,
+        /// How many perturbed schedules to try besides the unperturbed one.
+        #[arg(long, default_value_t = 8)]
+        schedules: u64,
         #[command(flatten)]
         machine: MachineArgs,
     },
@@ -169,33 +181,113 @@ fn run(cli: Cli) -> Result<ExitCode> {
         }
         Command::Check {
             installable,
-            seeds,
+            schedules,
             mut machine,
         } => {
             let guest = Guest::from_env()?;
             machine.quiet = true;
-            let mut runs = Vec::new();
-            for seed in 0..seeds {
-                machine.seed = seed;
-                runs.push(nix_run(&home, &guest, &installable, &machine)?);
-            }
-            let first = runs[0].trace()?;
-            let mut same = true;
-            for other in &runs[1..] {
-                let trace = other.trace()?;
-                if first.divergence(&trace).is_some() {
-                    same = false;
-                    println!(
-                        "seed 0 ({}) and seed {} ({}) differ:",
-                        runs[0].manifest.id, other.manifest.spec.seed, other.manifest.id
-                    );
-                    print!("{}", show::divergence(&first, &trace));
+
+            // The unperturbed build, and the step its job started on:
+            // everything before that is boot, and perturbing it would only
+            // make every run differ from the first kernel thread on.
+            machine.schedule = 0;
+            machine.schedule_from = 0;
+            let base = nix_run(&home, &guest, &installable, &machine)?;
+            println!("schedule   0: {}", show::outcome_line(&base)?);
+            let base_trace = base.trace()?;
+            let start = show::start_step(&base_trace);
+            let base_key = show::outcome_key(&base)?;
+
+            let mut failing = None;
+            for schedule in 1..=schedules {
+                machine.schedule = schedule;
+                machine.schedule_from = start;
+                let run = nix_run(&home, &guest, &installable, &machine)?;
+                println!("schedule {schedule:>3}: {}", show::outcome_line(&run)?);
+                if failing.is_none() && show::outcome_key(&run)? != base_key {
+                    failing = Some(run);
                 }
             }
-            if same {
-                println!("identical across {seeds} seeds");
+            let Some(mut worst) = failing else {
+                println!("same result under all {} schedules", schedules + 1);
                 return Ok(ExitCode::SUCCESS);
+            };
+
+            // Perturbing from the job's start finds failures, but a timer
+            // delayed while the compiler runs shifts everything after it,
+            // so the two runs part ways long before anything interesting.
+            // Look again with perturbation starting where the failing
+            // program was exec'd in the baseline: a failure found that way
+            // parts from the baseline inside the program itself.
+            let mut from = start;
+            if let Some(culprit) = show::culprit(&worst.trace()?) {
+                if let Some(exec) = show::exec_step(&base_trace, &culprit) {
+                    println!(
+                        "\n{} failed under schedule {}; searching again from its exec at step {exec}",
+                        culprit.join(" "),
+                        worst.manifest.spec.schedule
+                    );
+                    for schedule in 1..=schedules * SEARCH_FACTOR {
+                        machine.schedule = schedule;
+                        machine.schedule_from = exec;
+                        let run = nix_run(&home, &guest, &installable, &machine)?;
+                        if show::outcome_key(&run)? != base_key {
+                            println!("schedule {schedule:>3}: {}", show::outcome_line(&run)?);
+                            worst = run;
+                            from = exec;
+                            break;
+                        }
+                    }
+                }
             }
+            let start = from;
+
+            // Narrow it to a window of steps: first the earliest end that
+            // still changes the outcome, then the latest start. Each step's
+            // perturbation depends only on the seed and the step, so a
+            // smaller window perturbs a subset of the same steps. The two
+            // runs are identical up to the window, so where they part is
+            // inside it, next to the interleaving that matters.
+            machine.schedule = worst.manifest.spec.schedule;
+            machine.schedule_from = start;
+            let end = worst.manifest.outcome.as_ref().map_or(start, |o| o.step);
+            println!(
+                "\nschedule {} ends differently; narrowing the steps it perturbs",
+                machine.schedule
+            );
+            let mut probe = |from: u64, until: u64| -> Result<Option<Run>> {
+                machine.schedule_from = from;
+                machine.schedule_until = until;
+                let run = nix_run(&home, &guest, &installable, &machine)?;
+                Ok((show::outcome_key(&run)? != base_key).then_some(run))
+            };
+            let (mut lo, mut hi) = (start, end);
+            while hi - lo > 1 {
+                let mid = lo + (hi - lo) / 2;
+                match probe(start, mid)? {
+                    Some(run) => {
+                        hi = mid;
+                        worst = run;
+                    }
+                    None => lo = mid,
+                }
+            }
+            let until = hi;
+            let (mut lo, mut hi) = (start, until);
+            while hi - lo > 1 {
+                let mid = lo + (hi - lo) / 2;
+                match probe(mid, until)? {
+                    Some(run) => {
+                        lo = mid;
+                        worst = run;
+                    }
+                    None => hi = mid,
+                }
+            }
+            println!("perturbing only steps {lo}..{until} still ends differently\n");
+            println!("passing: run {}", base.manifest.id);
+            println!("failing: run {}", worst.manifest.id);
+            print!("{}", show::divergence(&base_trace, &worst.trace()?));
             Ok(ExitCode::FAILURE)
         }
         Command::Ls => {
@@ -274,6 +366,10 @@ fn run(cli: Cli) -> Result<ExitCode> {
         }
     }
 }
+
+/// How many more schedules `check` tries when searching from the failing
+/// program's exec, as a multiple of the schedules asked for.
+const SEARCH_FACTOR: u64 = 4;
 
 /// Runs a derivation's builder in the guest.
 fn nix_run(home: &Home, guest: &Guest, installable: &str, machine: &MachineArgs) -> Result<Run> {
@@ -430,6 +526,9 @@ fn execute_spec(
         seed: machine.seed,
         epoch: machine.epoch.unwrap_or_else(default_epoch),
         quantum: DEFAULT_QUANTUM,
+        schedule: machine.schedule,
+        schedule_from: machine.schedule_from,
+        schedule_until: machine.schedule_until,
         cmdline: format!("{BASE_CMDLINE} {}", machine.kernel_args)
             .trim()
             .to_string(),

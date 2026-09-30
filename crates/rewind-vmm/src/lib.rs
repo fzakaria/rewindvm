@@ -15,6 +15,7 @@ pub mod boot;
 pub mod cpu;
 pub mod layout;
 pub mod memory;
+pub mod pmu;
 pub mod pv;
 pub mod snapshot;
 
@@ -28,7 +29,7 @@ use kvm_ioctls::{Kvm, VcpuExit, VcpuFd, VmFd};
 
 use layout::*;
 use memory::Mapping;
-use pv::{Clock, GuestExit};
+use pv::{Clock, GuestExit, Schedule};
 
 /// The memory slot of guest RAM, and of the input image.
 const SLOT_RAM: u32 = 0;
@@ -56,6 +57,8 @@ pub struct Config {
     pub epoch: u64,
     /// Nanoseconds of virtual time per exit.
     pub quantum: u64,
+    /// Where to ask the guest to reschedule; see [`pv::Schedule`].
+    pub schedule: Schedule,
 }
 
 /// Why a run stopped.
@@ -92,6 +95,7 @@ impl Observer for Ignore {}
 pub(crate) struct Devices {
     pub ram: Mapping,
     pub clock: Clock,
+    pub schedule: Schedule,
     pub shared: Option<u64>,
     pub epoch: u64,
     pub step: u64,
@@ -107,6 +111,9 @@ pub struct Machine {
     pub(crate) config: Config,
     /// Exits counted by port and guest instruction pointer, when profiling.
     pub profile: Option<std::collections::HashMap<(u16, u64), u64>>,
+    /// An experiment: a guest-mode performance counter read at every exit,
+    /// and a hash of every value read.
+    pub pmu: Option<(pmu::Counter, u64)>,
 }
 
 impl Machine {
@@ -168,6 +175,7 @@ impl Machine {
             dev: Devices {
                 ram,
                 clock: Clock::new(config.quantum),
+                schedule: config.schedule.clone(),
                 shared: None,
                 epoch: config.epoch,
                 step: 0,
@@ -176,6 +184,7 @@ impl Machine {
             pmem,
             config: config.clone(),
             profile: None,
+            pmu: None,
         })
     }
 
@@ -283,9 +292,30 @@ impl Machine {
                 *profile.entry((port, at)).or_default() += 1;
             }
 
+            if let Some((counter, hash)) = &mut self.pmu {
+                let count = counter.read()?;
+                *hash = (*hash ^ count).wrapping_mul(0x100_0000_01b3);
+            }
             self.dev.clock.tick();
-            if self.dev.clock.due() && self.inject()? {
-                self.dev.clock.deadline = None;
+            // The guest's scheduler clock reads this without an exit, so it
+            // is refreshed at every one.
+            if let Some(shared) = self.dev.shared {
+                let now = self.dev.clock.now.to_le_bytes();
+                self.dev.ram.write(shared + pv::SHARED_NOW, &now)?;
+            }
+            let mut reasons = 0;
+            if self.dev.clock.due() {
+                reasons |= pv::PENDING_TIMER;
+            }
+            if self.dev.schedule.preempt_at(self.dev.step) {
+                reasons |= pv::PENDING_PREEMPT;
+            }
+            if reasons != 0 && self.inject(reasons)? {
+                // A timer counts as delivered once the APIC takes it; until
+                // then it stays due and goes again at the next exit.
+                if reasons & pv::PENDING_TIMER != 0 {
+                    self.dev.clock.deadline = None;
+                }
             }
 
             if until.is_some_and(|u| self.dev.step >= u) {
@@ -294,10 +324,19 @@ impl Machine {
         }
     }
 
-    /// Sends the timer interrupt as an MSI to the one local APIC. False when
-    /// the APIC is not accepting interrupts yet; the timer stays due and is
-    /// sent again at the next exit.
-    fn inject(&self) -> Result<bool> {
+    /// Records why in the shared page and sends the monitor's interrupt as
+    /// an MSI to the one local APIC. False when the guest has no shared page
+    /// yet or its APIC is not accepting interrupts.
+    fn inject(&mut self, reasons: u32) -> Result<bool> {
+        let Some(shared) = self.dev.shared else {
+            return Ok(false);
+        };
+        let at = shared + pv::SHARED_PENDING;
+        let mut pending = [0u8; 4];
+        self.dev.ram.read(at, &mut pending)?;
+        let pending = u32::from_le_bytes(pending) | reasons;
+        self.dev.ram.write(at, &pending.to_le_bytes())?;
+
         let msi = kvm_msi {
             address_lo: APIC_BASE as u32,
             address_hi: 0,
@@ -323,7 +362,15 @@ impl Devices {
                 self.ram.read(value as u64, &mut record)?;
                 obs.record(self.step, &record);
             }
-            pv::PORT_TIMER => self.clock.arm(value as u64),
+            pv::PORT_TIMER => {
+                let delta = value as u64;
+                let slack = if delta == 0 {
+                    0
+                } else {
+                    self.schedule.slack_at(self.step)
+                };
+                self.clock.arm(delta + slack);
+            }
             pv::PORT_IDLE => {
                 if !self.clock.idle() {
                     self.stop = Some(Stop::Stalled);

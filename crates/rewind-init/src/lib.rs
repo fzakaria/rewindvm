@@ -14,6 +14,10 @@ pub const JOB_PATH: &str = "/rewind/job.json";
 /// followed by its wait status in decimal.
 pub const EXIT_MARK: &str = "rewind-exit ";
 
+/// The mark init writes right before it starts the job, so everything
+/// before it is boot and setup, the same for every job.
+pub const START_MARK: &str = "rewind-start";
+
 /// The mark init writes for each output after a successful job: the path,
 /// a space, and the output's tree hash in hex.
 pub const OUTPUT_MARK: &str = "rewind-output ";
