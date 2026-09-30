@@ -113,8 +113,8 @@ diff -ruN a/arch/x86/kernel/cpu/Makefile b/arch/x86/kernel/cpu/Makefile
  
 diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 --- a/arch/x86/kernel/cpu/rewind.c	1969-12-31 16:00:00.000000000 -0800
-+++ b/arch/x86/kernel/cpu/rewind.c	2026-09-30 15:18:31.949324564 -0700
-@@ -0,0 +1,804 @@
++++ b/arch/x86/kernel/cpu/rewind.c	2026-09-30 16:23:51.202006137 -0700
+@@ -0,0 +1,895 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Rewind VM guest platform.
@@ -145,7 +145,9 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +#include <linux/clocksource.h>
 +#include <linux/console.h>
 +#include <linux/fcntl.h>
++#include <linux/file.h>
 +#include <linux/fs.h>
++#include <linux/fs_struct.h>
 +#include <linux/init.h>
 +#include <linux/miscdevice.h>
 +#include <linux/mm.h>
@@ -745,47 +747,133 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +		    &detail, sizeof(detail), NULL, 0);
 +}
 +
-+/* A path argument, copied without faulting; false when it is not resident. */
-+static bool rewind_user_path(char *dst, size_t size, unsigned long src)
++/*
++ * Paths for file events. The system call tracepoints may fault and sleep
++ * here, so the argument is read even when it is not resident, and one
++ * mutex guards the buffers a sleeping reporter would otherwise share.
++ */
++static DEFINE_MUTEX(rewind_path_lock);
++static char rewind_path_a[PATH_MAX], rewind_path_b[PATH_MAX];
++static char rewind_path_arg[PATH_MAX];
++
++/*
++ * Drops "." components and applies ".." ones to an absolute path, in
++ * place. Lexical, like a reader would: a ".." after a symlink names the
++ * link's parent here, where the kernel follows the link.
++ */
++static void rewind_normalize_path(char *path)
 +{
-+	return strncpy_from_user_nofault(dst, (const char __user *)src, size) > 0;
++	char *out = path, *in = path;
++
++	while (*in) {
++		char *end;
++		size_t len;
++
++		while (*in == '/')
++			in++;
++		end = strchrnul(in, '/');
++		len = end - in;
++
++		if (len == 0 || (len == 1 && in[0] == '.')) {
++			/* Nothing to keep. */
++		} else if (len == 2 && in[0] == '.' && in[1] == '.') {
++			while (out > path && *--out != '/')
++				;
++		} else {
++			*out++ = '/';
++			memmove(out, in, len);
++			out += len;
++		}
++		in = end;
++	}
++	if (out == path)
++		*out++ = '/';
++	*out = '\0';
 +}
 +
-+static void rewind_report_open(unsigned long path, unsigned long flags)
++/*
++ * A path argument as an absolute path in the process's root. A relative
++ * path is joined to the directory it is relative to, the working directory
++ * or the one dfd names, so the file can be found again after the process
++ * has moved or exited. False when the path cannot be read or resolved.
++ */
++static bool rewind_user_path(char *dst, int dfd, unsigned long src)
 +{
-+	static char buf[PATH_MAX];
++	char *rel = rewind_path_arg;
++	struct path base;
++	struct file *dir;
++	size_t len;
++	char *at;
++	long n;
 +
++	n = strncpy_from_user(rel, (const char __user *)src, PATH_MAX);
++	if (n <= 0 || n >= PATH_MAX)
++		return false;
++	if (rel[0] == '/') {
++		strscpy(dst, rel, PATH_MAX);
++		rewind_normalize_path(dst);
++		return true;
++	}
++
++	/* The directory the path is relative to. */
++	if (dfd == AT_FDCWD) {
++		get_fs_pwd(current->fs, &base);
++	} else {
++		dir = fget(dfd);
++		if (!dir)
++			return false;
++		base = dir->f_path;
++		path_get(&base);
++		fput(dir);
++	}
++	at = d_path(&base, dst, PATH_MAX);
++	path_put(&base);
++	if (IS_ERR(at))
++		return false;
++
++	/* The directory, a slash, then the path, without . and .. parts. */
++	len = strlen(at);
++	memmove(dst, at, len + 1);
++	if (len + 1 + strlen(rel) >= PATH_MAX)
++		return false;
++	dst[len++] = '/';
++	strscpy(dst + len, rel, PATH_MAX - len);
++	rewind_normalize_path(dst);
++	return true;
++}
++
++static void rewind_report_open(int dfd, unsigned long path,
++			       unsigned long flags)
++{
 +	/* Only opens that can change a file are interesting. */
 +	if ((flags & O_ACCMODE) == O_RDONLY && !(flags & (O_CREAT | O_TRUNC)))
 +		return;
-+	if (!rewind_user_path(buf, sizeof(buf), path))
++	if (!rewind_user_path(rewind_path_a, dfd, path))
 +		return;
 +
 +	rewind_emit(REWIND_EV_OPEN, 0, current->tgid, current->pid, flags,
-+		    buf, strlen(buf), NULL, 0);
++		    rewind_path_a, strlen(rewind_path_a), NULL, 0);
 +}
 +
-+static void rewind_report_unlink(unsigned long path)
++static void rewind_report_unlink(int dfd, unsigned long path)
 +{
-+	static char buf[PATH_MAX];
-+
-+	if (!rewind_user_path(buf, sizeof(buf), path))
++	if (!rewind_user_path(rewind_path_a, dfd, path))
 +		return;
 +
 +	rewind_emit(REWIND_EV_UNLINK, 0, current->tgid, current->pid, 0,
-+		    buf, strlen(buf), NULL, 0);
++		    rewind_path_a, strlen(rewind_path_a), NULL, 0);
 +}
 +
-+static void rewind_report_rename(unsigned long from, unsigned long to)
++static void rewind_report_rename(int from_dfd, unsigned long from,
++				 int to_dfd, unsigned long to)
 +{
-+	static char a[PATH_MAX], b[PATH_MAX];
-+
-+	if (!rewind_user_path(a, sizeof(a), from) ||
-+	    !rewind_user_path(b, sizeof(b), to))
++	if (!rewind_user_path(rewind_path_a, from_dfd, from) ||
++	    !rewind_user_path(rewind_path_b, to_dfd, to))
 +		return;
 +
 +	rewind_emit(REWIND_EV_RENAME, 0, current->tgid, current->pid, 0,
-+		    a, strlen(a) + 1, b, strlen(b));
++		    rewind_path_a, strlen(rewind_path_a) + 1,
++		    rewind_path_b, strlen(rewind_path_b));
 +}
 +
 +static void rewind_probe_sys_enter(void *data, struct pt_regs *regs, long id)
@@ -793,30 +881,33 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +	if (in_ia32_syscall())
 +		return;
 +
++	mutex_lock(&rewind_path_lock);
 +	switch (id) {
 +	case __NR_open:
-+		rewind_report_open(regs->di, regs->si);
++		rewind_report_open(AT_FDCWD, regs->di, regs->si);
 +		break;
 +	case __NR_openat:
-+		rewind_report_open(regs->si, regs->dx);
++		rewind_report_open(regs->di, regs->si, regs->dx);
 +		break;
 +	case __NR_creat:
-+		rewind_report_open(regs->di, O_CREAT | O_WRONLY | O_TRUNC);
++		rewind_report_open(AT_FDCWD, regs->di,
++				   O_CREAT | O_WRONLY | O_TRUNC);
 +		break;
 +	case __NR_unlink:
-+		rewind_report_unlink(regs->di);
++		rewind_report_unlink(AT_FDCWD, regs->di);
 +		break;
 +	case __NR_unlinkat:
-+		rewind_report_unlink(regs->si);
++		rewind_report_unlink(regs->di, regs->si);
 +		break;
 +	case __NR_rename:
-+		rewind_report_rename(regs->di, regs->si);
++		rewind_report_rename(AT_FDCWD, regs->di, AT_FDCWD, regs->si);
 +		break;
 +	case __NR_renameat:
 +	case __NR_renameat2:
-+		rewind_report_rename(regs->si, regs->r10);
++		rewind_report_rename(regs->di, regs->si, regs->dx, regs->r10);
 +		break;
 +	}
++	mutex_unlock(&rewind_path_lock);
 +}
 +
 +/*
