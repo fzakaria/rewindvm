@@ -124,8 +124,8 @@ diff -ruN a/arch/x86/kernel/cpu/Makefile b/arch/x86/kernel/cpu/Makefile
  
 diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 --- a/arch/x86/kernel/cpu/rewind.c	1969-12-31 16:00:00.000000000 -0800
-+++ b/arch/x86/kernel/cpu/rewind.c	2026-09-30 09:27:28.213388638 -0700
-@@ -0,0 +1,662 @@
++++ b/arch/x86/kernel/cpu/rewind.c	2026-09-30 09:46:30.543335448 -0700
+@@ -0,0 +1,677 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Rewind VM guest platform.
@@ -175,6 +175,7 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +
 +#include <asm/apic.h>
 +#include <asm/cpufeatures.h>
++#include <asm/e820/api.h>
 +#include <asm/hypervisor.h>
 +#include <asm/i8259.h>
 +#include <asm/idtentry.h>
@@ -494,6 +495,20 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +
 +	register_console(&rewind_console);
 +}
++
++/*
++ * The input image is legacy persistent memory, which the kernel leaves out
++ * of the iomem tree at boot and inserts from the PCI resource survey. This
++ * kernel has no PCI, so the platform does the insertion itself, before the
++ * e820 pmem driver looks for the range at device initcall time.
++ */
++static int __init rewind_reserve_resources(void)
++{
++	if (rewind_running)
++		e820__reserve_resources_late();
++	return 0;
++}
++subsys_initcall(rewind_reserve_resources);
 +
 +static bool __init rewind_x2apic_available(void)
 +{
