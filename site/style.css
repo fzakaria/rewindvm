@@ -899,6 +899,173 @@ a:focus-visible {
   margin-top: 10px;
 }
 
+/* The app tour: the real screenshot at about two thirds of the content
+   width with the numbered cards beside it, stacking under it on narrow
+   screens. */
+.tour {
+  display: grid;
+  grid-template-columns: minmax(0, 800px) minmax(260px, 1fr);
+  gap: 32px;
+  align-items: start;
+  margin-top: 28px;
+}
+.tour-shot {
+  margin: 0;
+}
+/* The frame: a hairline border and an amber glow behind it, so the dark
+   screenshot separates from the dark page. */
+.tour-frame {
+  position: relative;
+  border-radius: 12px;
+  box-shadow:
+    0 0 0 1px var(--line),
+    0 20px 80px -20px rgba(242, 165, 65, 0.35);
+}
+.tour-link {
+  display: block;
+  border-radius: 12px;
+  overflow: hidden;
+}
+.tour-link img {
+  width: 100%;
+  height: auto;
+}
+.tour-shot figcaption {
+  color: var(--muted);
+  font-size: 0.9rem;
+  margin-top: 12px;
+}
+
+/* Numbered pins over the screenshot. The positions were measured on the
+   1440x900 image and are percentages of it, so they hold at any size. */
+.pin {
+  position: absolute;
+  width: 26px;
+  height: 26px;
+  margin: -13px 0 0 -13px;
+  border-radius: 50%;
+  background: var(--amber);
+  color: var(--amber-ink);
+  font: 700 13px/26px var(--mono);
+  text-align: center;
+  text-decoration: none;
+  box-shadow:
+    0 0 0 4px rgba(242, 165, 65, 0.28),
+    0 2px 10px rgba(0, 0, 0, 0.6);
+  transition:
+    transform 0.15s ease,
+    box-shadow 0.15s ease;
+}
+.pin:hover {
+  color: var(--amber-ink);
+}
+/* The timeline, on the build segment. */
+.pin-1 {
+  left: 69.4%;
+  top: 11.1%;
+}
+/* The build log, in the space right of the log lines. */
+.pin-2 {
+  left: 29.9%;
+  top: 55.6%;
+}
+/* The process tree, right of the kernel threads. */
+.pin-3 {
+  left: 64.6%;
+  top: 51.1%;
+}
+/* The "At this step" card, at the end of the SIGSEGV line. */
+.pin-4 {
+  left: 95.5%;
+  top: 38%;
+}
+/* The "Fork from here" button, just under it so the label stays readable. */
+.pin-5 {
+  left: 93.3%;
+  top: 23%;
+}
+
+.tour-cards {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+  counter-reset: pin;
+}
+.tour-card {
+  counter-increment: pin;
+  position: relative;
+  padding: 14px 16px 14px 54px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  transition: border-color 0.15s ease;
+}
+/* The card's number, drawn like its pin. */
+.tour-card::before {
+  content: counter(pin);
+  position: absolute;
+  left: 16px;
+  top: 15px;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--amber);
+  color: var(--amber-ink);
+  font: 700 12px/24px var(--mono);
+  text-align: center;
+  box-shadow: 0 0 0 3px rgba(242, 165, 65, 0.22);
+}
+.tour-card h3 {
+  font-size: 1.02rem;
+  margin: 2px 0 4px;
+}
+.tour-card p {
+  margin: 0;
+  color: var(--soft);
+  font-size: 0.93rem;
+  line-height: 1.5;
+}
+.tour-card:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: 2px;
+}
+.tour-planned {
+  margin-top: 22px;
+  color: var(--muted);
+  font-size: 0.93rem;
+}
+.tour-planned .tag {
+  display: inline-block;
+  margin: 0 6px 0 0;
+}
+
+/* A card and its pin light up together: hover or focus either one, or
+   arrive at the card from its pin's link. */
+.tour:has(#tour-1:is(:hover, :focus-visible)) .pin-1,
+.tour:has(#tour-2:is(:hover, :focus-visible)) .pin-2,
+.tour:has(#tour-3:is(:hover, :focus-visible)) .pin-3,
+.tour:has(#tour-4:is(:hover, :focus-visible)) .pin-4,
+.tour:has(#tour-5:is(:hover, :focus-visible)) .pin-5,
+.pin:hover,
+.pin:focus-visible {
+  transform: scale(1.25);
+  box-shadow:
+    0 0 0 6px rgba(242, 165, 65, 0.45),
+    0 0 24px 6px rgba(242, 165, 65, 0.5);
+}
+.tour:has(.pin-1:is(:hover, :focus-visible)) #tour-1,
+.tour:has(.pin-2:is(:hover, :focus-visible)) #tour-2,
+.tour:has(.pin-3:is(:hover, :focus-visible)) #tour-3,
+.tour:has(.pin-4:is(:hover, :focus-visible)) #tour-4,
+.tour:has(.pin-5:is(:hover, :focus-visible)) #tour-5,
+.tour-card:hover,
+.tour-card:focus-visible,
+.tour-card:target {
+  border-color: var(--amber);
+}
+
 /* A feature on the roadmap rather than in the app today. */
 /* It sits on its own line under the card's heading. */
 .tag {
@@ -1071,6 +1238,17 @@ a.card:hover {
 }
 
 @media (max-width: 1080px) {
+  .tour {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .tour-shot {
+    width: 100%;
+    max-width: 800px;
+    margin-inline: auto;
+  }
+  .tour-cards {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
   .hero {
     grid-template-columns: 1fr;
     gap: 36px;
@@ -1100,6 +1278,9 @@ a.card:hover {
   }
   .toc ol {
     columns: 1;
+  }
+  .tour-cards {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -1145,15 +1326,25 @@ a.card:hover {
   .nav .btn.small {
     display: none;
   }
+  /* Smaller pins on a phone-sized screenshot. */
+  .pin {
+    width: 20px;
+    height: 20px;
+    margin: -10px 0 0 -10px;
+    font-size: 11px;
+    line-height: 20px;
+  }
 }
 
 /* Reduced motion: the playhead jumps instead of gliding, the "Try me" arrow
-   holds still and vanishes without a fade, and demo.js skips its opening
-   sweep. */
+   holds still and vanishes without a fade, pins and tour cards light up
+   without easing, and demo.js skips its opening sweep. */
 @media (prefers-reduced-motion: reduce) {
   .playhead,
   .try-me,
-  .try-me.gone {
+  .try-me.gone,
+  .pin,
+  .tour-card {
     transition: none;
   }
   .try-me svg {

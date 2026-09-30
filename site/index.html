@@ -229,64 +229,85 @@
 
       <section class="features">
         <h2>In the desktop app</h2>
-        <figure class="shot">
-          <picture>
-            <source srcset="img/app-failure.webp" type="image/webp" />
-            <img
-              src="img/app-failure.png"
-              width="1440"
-              height="900"
-              loading="lazy"
-              alt="The Rewind desktop app on a failing mylib run: the timeline with the playhead in the check phase, the build log, the process tree, files written, and the SIGSEGV at 0x108 next to where the run diverged from its parent"
-            />
-          </picture>
-          <figcaption>The real app, on a real failing run.</figcaption>
-        </figure>
-        <div class="grid">
-          <div class="card">
-            <h3>Scrub the timeline</h3>
-            <p>
-              Drag through the run and see the log up to that step, the processes alive at that
-              step, the files written so far and the event at the step.
-            </p>
-          </div>
-          <div class="card marker-blue">
-            <h3>Jump to the divergence</h3>
-            <p>
-              Open a failing run next to the passing run it came from and land on the step where
-              they part.
-            </p>
-          </div>
-          <div class="card marker-red">
-            <h3>Jump to the failure</h3>
-            <p>The crash, the non-zero exit or the failed test, one click from anywhere.</p>
-          </div>
-          <div class="card marker">
-            <h3>Fork from the playhead</h3>
-            <p>
-              Branch at any step under a new schedule: reschedule requests plus up to 50 &micro;s of
-              timer slack, so the threads interleave differently from there on.
-            </p>
-          </div>
-          <div class="card">
-            <h3>Attach gdb at a step <span class="tag">Planned</span></h3>
-            <p>A debugger on the restored machine, in the address space of the process you pick.</p>
-          </div>
-          <div class="card">
-            <h3>Open a shell at a step <span class="tag">Planned</span></h3>
-            <p>
-              A fork of the run with an interactive shell next to the paused job, its input recorded
-              so the fork still replays.
-            </p>
-          </div>
-          <div class="card">
-            <h3>Share a run as one file <span class="tag">Planned</span></h3>
-            <p>
-              The manifest, trace, keyframes and the pages they use in a single file, to attach to
-              an issue.
-            </p>
-          </div>
+        <!-- A tour of the real app: numbered pins over the screenshot, and one
+             card per pin. Hovering or focusing a card lights its pin and the
+             other way round (style.css, no script). The image links to the
+             full-size file, which is the readable version on a phone. -->
+        <div class="tour">
+          <figure class="tour-shot">
+            <div class="tour-frame">
+              <a class="tour-link" href="img/app-failure.png">
+                <picture>
+                  <source srcset="img/app-failure.webp" type="image/webp" />
+                  <img
+                    src="img/app-failure.png"
+                    width="1440"
+                    height="900"
+                    loading="lazy"
+                    alt="The Rewind desktop app on a failing mylib run: the timeline with the playhead in the check phase, the build log, the process tree, files written, and the SIGSEGV at 0x108 next to where the run diverged from its parent. Opens the full-size image."
+                  />
+                </picture>
+              </a>
+              <a
+                class="pin pin-1"
+                href="#tour-1"
+                aria-label="1: the timeline, with the run's phases, the divergence and the failure"
+                >1</a
+              >
+              <a class="pin pin-2" href="#tour-2" aria-label="2: the build log up to the step">2</a>
+              <a
+                class="pin pin-3"
+                href="#tour-3"
+                aria-label="3: the process tree alive at the step, and files written"
+                >3</a
+              >
+              <a
+                class="pin pin-4"
+                href="#tour-4"
+                aria-label="4: the step's event, a SIGSEGV, and where the run diverged"
+                >4</a
+              >
+              <a class="pin pin-5" href="#tour-5" aria-label="5: the Fork from here button">5</a>
+            </div>
+            <figcaption>The real app, on a real failing run.</figcaption>
+          </figure>
+
+          <ol class="tour-cards">
+            <li class="tour-card" id="tour-1" tabindex="0">
+              <h3>The timeline</h3>
+              <p>
+                The run's phases, the playhead, where the failing run left the passing one, and the
+                failure. Drag to any step, or jump to the divergence or the failure.
+              </p>
+            </li>
+            <li class="tour-card" id="tour-2" tabindex="0">
+              <h3>Build log</h3>
+              <p>Everything the build printed, up to the step under the playhead.</p>
+            </li>
+            <li class="tour-card" id="tour-3" tabindex="0">
+              <h3>Processes and files</h3>
+              <p>The processes and threads alive at that step, and the files written so far.</p>
+            </li>
+            <li class="tour-card" id="tour-4" tabindex="0">
+              <h3>At this step</h3>
+              <p>
+                The event at the step, here a SIGSEGV at 0x108, and the step where this run diverged
+                from the run it was forked from.
+              </p>
+            </li>
+            <li class="tour-card" id="tour-5" tabindex="0">
+              <h3>Fork from here</h3>
+              <p>
+                Branch at the playhead under a new schedule, reschedule requests plus up to 50
+                &micro;s of timer slack, so the threads interleave differently from there on.
+              </p>
+            </li>
+          </ol>
         </div>
+        <p class="tour-planned">
+          <span class="tag">Planned</span> gdb at a step, a shell at a step, and sharing a run as
+          one file.
+        </p>
       </section>
 
       <section class="wrap workloads" id="workloads">
