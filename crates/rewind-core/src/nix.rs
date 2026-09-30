@@ -138,12 +138,12 @@ pub fn show(drv: &Path) -> Result<Derivation> {
 }
 
 /// Builds or substitutes every input and returns the closure the build may
-/// see, with `extra` paths (the sandbox shell) and their closures added.
-pub fn input_closure(drv: &Derivation, extra: &[PathBuf]) -> Result<Vec<PathBuf>> {
+/// see. The sandbox shell is not part of the closure: the initramfs carries
+/// its own copy at /bin/sh.
+pub fn input_closure(drv: &Derivation) -> Result<Vec<PathBuf>> {
     let mut roots: Vec<String> = drv
         .input_srcs
         .iter()
-        .chain(extra)
         .map(|p| p.to_string_lossy().into_owned())
         .collect();
 

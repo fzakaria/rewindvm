@@ -31,7 +31,9 @@ let
   };
 
   # The shell Nix bind-mounts at /bin/sh in its sandbox, so builders see
-  # the same one here.
+  # the same one here. The static binary is copied in rather than linked
+  # to its store path, so a run needs nothing from the store beyond the
+  # derivation's own inputs, and a rewind installed without Nix works.
   sandboxShell = pkgs.busybox-sandbox-shell;
 
   passwd = pkgs.writeText "passwd" ''
@@ -57,7 +59,7 @@ let
       ''
         mkdir -p root/{dev,proc,sys,tmp,build,etc,bin,nix,rewind}
         cp ${init}/bin/rewind-init root/init
-        ln -s ${sandboxShell}/bin/busybox root/bin/sh
+        cp ${sandboxShell}/bin/busybox root/bin/sh
         cp ${passwd} root/etc/passwd
         cp ${group} root/etc/group
         cp ${hosts} root/etc/hosts
@@ -70,5 +72,5 @@ let
       '';
 in
 {
-  inherit init initrd sandboxShell;
+  inherit init initrd;
 }

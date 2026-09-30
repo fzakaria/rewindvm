@@ -27,7 +27,6 @@ in
 
     REWIND_KERNEL = "${kernel}/bzImage";
     REWIND_INITRD = "${guest.initrd}/initrd";
-    REWIND_SANDBOX_SHELL = "${guest.sandboxShell}";
   };
 
   # `nix develop .#app`: the desktop app's toolchain and libraries, for

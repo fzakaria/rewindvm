@@ -749,7 +749,7 @@ fn prepare(
         machine.resolved_clock = Some(resolve_clock(home, guest, machine.clock)?);
     }
     let (name, source, image, job) = match workload {
-        Workload::Nix(installable) => prepare_nix(home, guest, installable)?,
+        Workload::Nix(installable) => prepare_nix(home, installable)?,
         Workload::Image(args) => prepare_image(home, args)?,
     };
     let image_hash = match &image {
@@ -793,15 +793,10 @@ fn prepare_image(home: &Home, args: &ImageArgs) -> Result<(String, Source, Optio
 }
 
 /// A derivation's builder, with its input closure as the image.
-fn prepare_nix(
-    home: &Home,
-    guest: &Guest,
-    installable: &str,
-) -> Result<(String, Source, Option<PathBuf>, Job)> {
+fn prepare_nix(home: &Home, installable: &str) -> Result<(String, Source, Option<PathBuf>, Job)> {
     let drv_path = nix::resolve(installable)?;
     let drv = nix::show(&drv_path)?;
-    let extra: Vec<PathBuf> = guest.sandbox_shell.iter().cloned().collect();
-    let closure = nix::input_closure(&drv, &extra)?;
+    let closure = nix::input_closure(&drv)?;
 
     // Images of store paths are named by the paths, which already name
     // their contents.

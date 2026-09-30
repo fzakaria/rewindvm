@@ -5,11 +5,11 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-/// The guest kernel, initramfs and sandbox shell. The Nix package sets
-/// these to store paths; in a checkout, `nix develop` does.
+/// The guest kernel and initramfs. The Nix package sets these to store
+/// paths, the release tarball's launcher to the files beside it, and in a
+/// checkout `nix develop` does.
 pub const ENV_KERNEL: &str = "REWIND_KERNEL";
 pub const ENV_INITRD: &str = "REWIND_INITRD";
-pub const ENV_SANDBOX_SHELL: &str = "REWIND_SANDBOX_SHELL";
 
 /// Overrides the data directory, which is otherwise under XDG_DATA_HOME.
 pub const ENV_HOME: &str = "REWIND_HOME";
@@ -59,7 +59,6 @@ impl Home {
 pub struct Guest {
     pub kernel: PathBuf,
     pub initrd: PathBuf,
-    pub sandbox_shell: Option<PathBuf>,
 }
 
 impl Guest {
@@ -72,7 +71,6 @@ impl Guest {
         Ok(Guest {
             kernel: var(ENV_KERNEL)?,
             initrd: var(ENV_INITRD)?,
-            sandbox_shell: std::env::var_os(ENV_SANDBOX_SHELL).map(PathBuf::from),
         })
     }
 }

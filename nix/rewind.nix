@@ -61,6 +61,5 @@ pkgs.runCommand "rewind"
     makeWrapper ${unwrapped}/bin/rewind $out/bin/rewind \
       --prefix PATH : ${lib.makeBinPath runtimeTools} \
       --set-default REWIND_KERNEL ${kernel}/bzImage \
-      --set-default REWIND_INITRD ${guest.initrd}/initrd \
-      --set-default REWIND_SANDBOX_SHELL ${guest.sandboxShell}
+      --set-default REWIND_INITRD ${guest.initrd}/initrd
   ''
