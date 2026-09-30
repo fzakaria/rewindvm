@@ -132,6 +132,10 @@ enum Command {
         schedule: u64,
         #[arg(long, short)]
         quiet: bool,
+        /// Print the result as one JSON object on standard output, for
+        /// programs such as the desktop app.
+        #[arg(long)]
+        json: bool,
     },
     /// List runs, newest first.
     Ls,
@@ -320,6 +324,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             step,
             schedule,
             quiet,
+            json,
         } => {
             let parent = Run::find(&home, &run)?;
             let m = &parent.manifest;
@@ -334,7 +339,11 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 "{} (fork of {} at {step}, schedule {schedule})",
                 m.name, m.id
             );
-            let echo = if quiet { Echo::Quiet } else { Echo::Output };
+            let echo = if quiet || json {
+                Echo::Quiet
+            } else {
+                Echo::Output
+            };
             let child = Run::execute(
                 &home,
                 name,
@@ -344,8 +353,22 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 echo,
                 Keyframes::Take,
             )?;
-            eprintln!("{}", show::finished(&child));
             let (pt, ct) = (parent.trace()?, child.trace()?);
+            let first_difference = pt.divergence(&ct).map(|d| d.right_step);
+            if json {
+                let status = child.manifest.outcome.as_ref().and_then(|o| o.status);
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "id": child.manifest.id,
+                        "dir": child.dir,
+                        "status": status,
+                        "first_difference": first_difference,
+                    })
+                );
+                return Ok(exit_status(&child));
+            }
+            eprintln!("{}", show::finished(&child));
             match pt.divergence(&ct) {
                 None => eprintln!("rewind: the fork ran the same as its parent"),
                 Some(d) => eprintln!(
