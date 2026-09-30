@@ -97,6 +97,17 @@ enum Command {
         #[command(flatten)]
         machine: MachineArgs,
     },
+    /// Branch a run at a step: the same run up to the step, then another
+    /// interleaving from there.
+    Fork {
+        run: String,
+        step: u64,
+        /// The schedule seed for the new branch.
+        #[arg(long, default_value_t = 1)]
+        schedule: u64,
+        #[arg(long, short)]
+        quiet: bool,
+    },
     /// List runs, newest first.
     Ls,
     /// Print a run's output, up to a step.
@@ -132,6 +143,10 @@ enum Command {
 }
 
 fn main() -> ExitCode {
+    // Printing into a closed pipe, as `rewind ls | head` does, should end
+    // the program quietly the way it ends any other Unix tool.
+    // SAFETY: restoring a default signal disposition.
+    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
     match run(Cli::parse()) {
         Ok(code) => code,
         Err(e) => {
@@ -289,6 +304,45 @@ fn run(cli: Cli) -> Result<ExitCode> {
             println!("failing: run {}", worst.manifest.id);
             print!("{}", show::divergence(&base_trace, &worst.trace()?));
             Ok(ExitCode::FAILURE)
+        }
+        Command::Fork {
+            run,
+            step,
+            schedule,
+            quiet,
+        } => {
+            let parent = Run::find(&home, &run)?;
+            let m = &parent.manifest;
+            if schedule == 0 {
+                bail!("schedule 0 is the unperturbed run; a fork needs another seed");
+            }
+            let mut spec = m.spec.clone();
+            spec.schedule = schedule;
+            spec.schedule_from = step;
+            spec.schedule_until = u64::MAX;
+            let name = format!(
+                "{} (fork of {} at {step}, schedule {schedule})",
+                m.name, m.id
+            );
+            let echo = if quiet { Echo::Quiet } else { Echo::Output };
+            let child = Run::execute(
+                &home,
+                name,
+                m.source.clone(),
+                spec,
+                Some((m.id.clone(), step)),
+                echo,
+            )?;
+            eprintln!("{}", show::finished(&child));
+            let (pt, ct) = (parent.trace()?, child.trace()?);
+            match pt.divergence(&ct) {
+                None => eprintln!("rewind: the fork ran the same as its parent"),
+                Some(d) => eprintln!(
+                    "rewind: the fork first differs from its parent at step {}",
+                    d.right_step
+                ),
+            }
+            Ok(exit_status(&child))
         }
         Command::Ls => {
             for r in Run::list(&home)? {
