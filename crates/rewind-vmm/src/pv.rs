@@ -111,8 +111,10 @@ pub const PENDING_TIMER: u32 = 1 << 0;
 pub const PENDING_PREEMPT: u32 = 1 << 1;
 
 /// Under a schedule seed, one exit in this many asks the guest to
-/// reschedule.
-const PREEMPT_ONE_IN: u64 = 64;
+/// reschedule. A request with nothing else runnable changes nothing, so
+/// asking often costs little; asking rarely found mylib's shutdown race in
+/// one schedule of 64, asking at one exit in four in half of them.
+const PREEMPT_ONE_IN: u64 = 4;
 
 /// Under a schedule seed, a timer armed in the window fires up to this
 /// much later than asked, as Linux's default timer slack for user tasks

@@ -32,8 +32,10 @@ const MANIFEST_VERSION: u32 = 1;
 /// only when its level is below the loglevel.
 pub const BASE_CMDLINE: &str = "nolapic_timer lpj=1000000 panic=-1 rdinit=/init loglevel=7";
 
-/// Nanoseconds of virtual time per exit.
-pub const DEFAULT_QUANTUM: u64 = 1000;
+/// Nanoseconds of virtual time per exit: about what a system call and a
+/// context switch cost on current hardware, which is what an exit stands
+/// for.
+pub const DEFAULT_QUANTUM: u64 = 5000;
 
 /// The guest's wall clock at boot when nothing else is asked for: the
 /// start of the current day, UTC. Builds compare the clock against the
