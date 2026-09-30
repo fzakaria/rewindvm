@@ -4,6 +4,8 @@
 resolver = "3"
 members = [
     "crates/rewind",
+    "crates/rewind-core",
+    "crates/rewind-init",
     "crates/rewind-trace",
     "crates/rewind-vmm",
 ]

@@ -1,0 +1,16 @@
+[package]
+name = "rewind-core"
+description = "Building inputs for, executing, and finding Rewind VM runs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rewind-init = { path = "../rewind-init" }
+rewind-trace = { path = "../rewind-trace" }
+rewind-vmm = { path = "../rewind-vmm" }
+anyhow = "1"
+# Content hashes of images and run inputs.
+blake3 = { version = "1", features = ["mmap"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

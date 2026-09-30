@@ -25,6 +25,7 @@
         {
           inherit pkgs;
           kernel = import ./nix/kernel.nix { inherit pkgs; };
+          guest = import ./nix/guest.nix { inherit pkgs; };
           site = import ./nix/site.nix { inherit pkgs; };
         };
     in
@@ -37,6 +38,10 @@
         {
           # the guest kernel with the Rewind platform (nix/kernel.nix)
           kernel = p.kernel;
+
+          # the guest's init and initramfs (nix/guest.nix)
+          init = p.guest.init;
+          initrd = p.guest.initrd;
 
           # the marketing site the pages workflow deploys (nix/site.nix)
           site = p.site;
@@ -70,7 +75,7 @@
         let
           p = per system;
         in
-        import ./nix/dev-shells.nix { inherit (p) pkgs; }
+        import ./nix/dev-shells.nix { inherit (p) pkgs kernel guest; }
       );
 
       formatter = forAllSystems (
