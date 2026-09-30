@@ -4702,6 +4702,7 @@ dependencies = [
  "ed25519-dalek",
  "gpui-pre",
  "gpui-pre-platform",
+ "log",
  "rewind-trace",
  "serde",
  "serde_json",

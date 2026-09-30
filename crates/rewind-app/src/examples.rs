@@ -61,8 +61,9 @@ mod tests {
             lines,
             vec![
                 "Up to here test_pool_shutdown did the same things in the same order in both runs.",
-                "Next, this run: thread 2 of test_pool_shutdown writes \"job 17 done: 43360\" to stdout.",
-                "The passing run: thread 3 of test_pool_shutdown exits.",
+                "Next, this run: thread 2 of test_pool_shutdown writes \"job 7 done: 5785\" to stdout.",
+                "The passing run: thread 3 of test_pool_shutdown writes \"job 6 done: 13750\" to stdout.",
+                "Both write to the same stream; the text differs.",
             ]
         );
     }

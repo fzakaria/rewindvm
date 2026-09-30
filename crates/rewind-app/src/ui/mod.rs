@@ -92,6 +92,7 @@ pub fn run(launch: Launch) {
             })
             .detach();
 
+            load_bundled_fonts(cx);
             let fonts = Fonts::resolve(&cx.text_system().all_font_names());
             let bounds = Bounds::centered(None, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), cx);
             let options = WindowOptions {
@@ -115,6 +116,40 @@ pub fn run(launch: Launch) {
             }
             cx.activate(true);
         });
+}
+
+/// A directory of .ttf and .otf files the app loads at start, for installs
+/// that ship their own fonts, like the portable tarball.
+pub const FONTS_ENV: &str = "REWIND_APP_FONTS";
+
+/// Loads the fonts in the directory REWIND_APP_FONTS names, if any. A font
+/// that does not load only costs itself: the system's fonts stand in.
+fn load_bundled_fonts(cx: &App) {
+    const FONT_EXTENSIONS: [&str; 2] = ["ttf", "otf"];
+    let Some(dir) = std::env::var_os(FONTS_ENV) else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        log::warn!(
+            "{FONTS_ENV}: cannot read {}",
+            std::path::Path::new(&dir).display()
+        );
+        return;
+    };
+    let fonts: Vec<std::borrow::Cow<'static, [u8]>> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| FONT_EXTENSIONS.contains(&e))
+        })
+        .filter_map(|path| std::fs::read(path).ok())
+        .map(std::borrow::Cow::Owned)
+        .collect();
+    if let Err(e) = cx.text_system().add_fonts(fonts) {
+        log::warn!("{FONTS_ENV}: {e:#}");
+    }
 }
 
 /// The keyboard map. Arrows move between events, Shift+arrows by one

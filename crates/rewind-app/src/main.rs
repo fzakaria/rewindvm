@@ -31,6 +31,45 @@ enum Parsed {
     Version,
 }
 
+/// Set to a level (error, warn, info, debug, trace) to print what GPUI and
+/// the graphics stack log to standard error, for reporting problems.
+const LOG_ENV: &str = "REWIND_APP_LOG";
+
+/// Prints log records at or above a level to standard error.
+struct StderrLog(log::LevelFilter);
+
+impl log::Log for StderrLog {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= self.0
+    }
+
+    fn log(&self, record: &log::Record) {
+        if self.enabled(record.metadata()) {
+            eprintln!(
+                "rewind-app: {} {}: {}",
+                record.level(),
+                record.target(),
+                record.args()
+            );
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+/// Turns on logging when REWIND_APP_LOG names a level.
+fn init_log() {
+    let Some(level) = std::env::var(LOG_ENV)
+        .ok()
+        .and_then(|v| v.parse::<log::LevelFilter>().ok())
+    else {
+        return;
+    };
+    if log::set_boxed_logger(Box::new(StderrLog(level))).is_ok() {
+        log::set_max_level(level);
+    }
+}
+
 fn parse(mut args: impl Iterator<Item = String>) -> Result<Parsed, String> {
     let mut parsed = Args {
         run: None,
@@ -69,6 +108,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Parsed, String> {
 }
 
 fn main() -> ExitCode {
+    init_log();
     let args = match parse(std::env::args().skip(1)) {
         Ok(Parsed::Run(args)) => args,
         Ok(Parsed::Help) => {

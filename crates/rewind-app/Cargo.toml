@@ -24,6 +24,7 @@ zstd = "0.13"
 # name. The crates.io `gpui` release is a year behind and renders through
 # blade on Linux; gpui-pre renders through wgpu on Wayland and X11.
 gpui = { package = "gpui-pre", version = "=0.3.7" }
+log = "0.4"
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.7", features = ["wayland", "x11"] }
 rewind-trace = { path = "../rewind-trace" }
 serde_json = "1"

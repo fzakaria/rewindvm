@@ -124,12 +124,27 @@ fn place(staging: &Path, into: &Path) -> Result<PathBuf> {
         .unwrap_or(NO_ID)
         .to_string();
     let dir = into.join(&id);
-    if dir.join(MANIFEST_FILE).is_file() && dir.join(TRACE_FILE).is_file() {
+    if is_complete(&dir) {
         return Ok(dir);
     }
+
+    // The rename is atomic and fails onto a directory that has entries, so
+    // when another import of the same run wins the race, its copy stays
+    // and this one is dropped.
+    if fs::rename(staging, &dir).is_ok() || is_complete(&dir) {
+        return Ok(dir);
+    }
+
+    // What is in the way is a partial copy no import made, since renames
+    // place whole runs; replace it.
     let _ = fs::remove_dir_all(&dir);
     fs::rename(staging, &dir).with_context(|| format!("moving the run to {}", dir.display()))?;
     Ok(dir)
+}
+
+/// Whether `dir` holds an unpacked run: its manifest and its trace.
+fn is_complete(dir: &Path) -> bool {
+    dir.join(MANIFEST_FILE).is_file() && dir.join(TRACE_FILE).is_file()
 }
 
 /// A run id that is safe as one path component.
@@ -223,6 +238,35 @@ mod tests {
         let run = import(&second[..], &dir).unwrap();
         assert_eq!(fs::read(run.join("trace.bin")).unwrap(), b"one");
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// How many threads import the same run at once, and how many rounds.
+    const RACERS: usize = 8;
+    const ROUNDS: usize = 20;
+
+    #[test]
+    fn imports_of_one_run_at_once_all_succeed() {
+        // Several threads import the same archive into an empty directory
+        // at the same moment, as two windows opening the same file do;
+        // every import returns a complete copy of the run.
+        let bytes = archive(&[
+            ("manifest.json", br#"{"id": "same"}"#),
+            ("trace.bin", b"trace"),
+        ]);
+        for round in 0..ROUNDS {
+            let dir = temp_dir(&format!("race-{round}"));
+            let barrier = std::sync::Barrier::new(RACERS);
+            std::thread::scope(|s| {
+                for _ in 0..RACERS {
+                    s.spawn(|| {
+                        barrier.wait();
+                        let run = import(&bytes[..], &dir).unwrap();
+                        assert_eq!(fs::read(run.join("trace.bin")).unwrap(), b"trace");
+                    });
+                }
+            });
+            fs::remove_dir_all(&dir).unwrap();
+        }
     }
 
     #[test]
