@@ -31,15 +31,6 @@ const GDB_LOCAL: &str = "127.0.0.1:0";
 /// Where Nix keeps store paths, which `nix-store --realise` can fetch.
 const NIX_STORE: &str = "/nix/store";
 
-/// The binary cache Rewind's own builds are in, the kernel's `debug`
-/// output among them. Cachix keeps no index of DWARF by build ID, so a
-/// debuginfod server cannot find the kernel's there; `rewind gdb` fetches
-/// the output itself. Nix uses a cache named on the command line only for
-/// a user it trusts, or one already in its settings, as the flake's
-/// nixConfig puts it.
-const REWIND_CACHE: &str = "https://rewindvm.cachix.org";
-const REWIND_CACHE_KEY: &str = "rewindvm.cachix.org-1:N5gL5fQTxBxim2HQNlYVWNYLK1ttOmMU1GP43eo4V5g=";
-
 /// The kernel package's files: vmlinux with its symbol table and the
 /// kernel's gdb scripts, next to the bzImage; in the `debug` output,
 /// vmlinux's DWARF, linked by name as well as by build ID.
@@ -418,8 +409,10 @@ impl Drop for Session {
     }
 }
 
-/// Fetches `path` from a binary cache with `nix-store --realise` when it
-/// is a store path not on this machine. Whether it is here now.
+/// Fetches `path` with `nix-store --realise` when it is a store path not
+/// on this machine, from the substituters in Nix's own settings. The
+/// kernel's debug output is only in Rewind's binary cache, which the
+/// NixOS module adds to them. Whether the path is here now.
 fn realise(path: &Path, what: &str) -> bool {
     if path.exists() {
         return true;
@@ -431,10 +424,13 @@ fn realise(path: &Path, what: &str) -> bool {
     let _ = Command::new("nix-store")
         .arg("--realise")
         .arg(&root)
-        .args(["--option", "extra-substituters", REWIND_CACHE])
-        .args(["--option", "extra-trusted-public-keys", REWIND_CACHE_KEY])
         .stdout(Stdio::null())
         .status();
+    if !path.exists() {
+        eprintln!(
+            "rewind: could not fetch {what}; is Rewind's binary cache among Nix's substituters?"
+        );
+    }
     path.exists()
 }
 

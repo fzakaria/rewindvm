@@ -1,7 +1,8 @@
-# The NixOS module, `programs.rewind`: installs rewind, and on AMD Zen can
-# set the branch counter workaround at every boot so runs use counter time
-# (docs/pmu.md); `programs.rewind.app` installs the desktop app. The flake
-# passes its own packages as the defaults.
+# The NixOS module, `programs.rewind`: installs rewind, adds the binary
+# cache Rewind's builds are in, and on AMD Zen can set the branch counter
+# workaround at every boot so runs use counter time (docs/pmu.md);
+# `programs.rewind.app` installs the desktop app. The flake passes its own
+# packages as the defaults.
 { rewind, app }:
 {
   config,
@@ -10,6 +11,11 @@
 }:
 let
   cfg = config.programs.rewind;
+
+  # The cache CI pushes every build to, the same one the flake's nixConfig
+  # names.
+  cache = "https://rewindvm.cachix.org";
+  cacheKey = "rewindvm.cachix.org-1:N5gL5fQTxBxim2HQNlYVWNYLK1ttOmMU1GP43eo4V5g=";
 in
 {
   options.programs.rewind = {
@@ -19,6 +25,16 @@ in
       type = lib.types.package;
       default = rewind;
       description = "The rewind package to install.";
+    };
+
+    binaryCache = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Add ${cache} to Nix's substituters. It holds Rewind's own
+        builds, among them the VM kernel's debug output, which
+        `rewind gdb` fetches the first time it runs; nothing else has it.
+      '';
     };
 
     amdBranchCounterWorkaround = lib.mkOption {
@@ -47,6 +63,11 @@ in
   config = lib.mkMerge [
     (lib.mkIf cfg.enable {
       environment.systemPackages = [ cfg.package ];
+    })
+
+    (lib.mkIf (cfg.enable && cfg.binaryCache) {
+      nix.settings.extra-substituters = [ cache ];
+      nix.settings.extra-trusted-public-keys = [ cacheKey ];
     })
 
     (lib.mkIf cfg.app.enable {

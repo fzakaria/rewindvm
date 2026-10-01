@@ -150,8 +150,8 @@ in
     ) "crates/rewind-app/Cargo.toml says ${app}, VERSION says ${release}";
     pkgs.writeText "rewind-version" release;
 
-  # checks.module: the NixOS module installs both packages and sets the
-  # AMD workaround at boot. Only evaluates, so it needs no KVM.
+  # checks.module: the NixOS module installs both packages, adds Rewind's
+  # binary cache and sets the AMD workaround at boot. Only evaluates, so it needs no KVM.
   module =
     let
       config = moduleSystem.config;
@@ -160,5 +160,6 @@ in
     assert builtins.elem rewind.name installed;
     assert builtins.any (name: pkgs.lib.hasPrefix "rewind-app-" name) installed;
     assert builtins.elem "msr" config.boot.kernelModules;
+    assert builtins.elem "https://rewindvm.cachix.org" config.nix.settings.extra-substituters;
     pkgs.writeText "rewind-module" config.systemd.services.rewind-pmu.serviceConfig.ExecStart;
 }
