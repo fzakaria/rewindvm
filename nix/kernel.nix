@@ -4,8 +4,14 @@
 #
 # A plain derivation rather than nixpkgs' kernel builder: that builder is
 # shaped around distribution configs with thousands of modules, and this
-# kernel has no modules at all. The outputs are the bzImage the monitor
-# boots, vmlinux for symbolized backtraces and gdb, and the final .config.
+# kernel has no modules at all.
+#
+# Two outputs of one build, so they describe the same code: `out` is what
+# runs need, the bzImage the monitor boots, vmlinux with its symbol table
+# but no DWARF, System.map and the final .config; `symbols` is what
+# `rewind gdb` needs, vmlinux with compressed DWARF and the kernel's gdb
+# scripts (lx-ps, lx-dmesg and the rest). Runs depend on `out` only, so
+# the DWARF is fetched only by someone who debugs.
 { pkgs }:
 let
   inherit (pkgs) lib;
@@ -15,6 +21,10 @@ let
 in
 pkgs.stdenv.mkDerivation {
   pname = "rewind-guest-kernel";
+  outputs = [
+    "out"
+    "symbols"
+  ];
   inherit (upstream) version src;
 
   patches = [ ../guest/linux/rewind-guest.patch ];
@@ -70,14 +80,20 @@ pkgs.stdenv.mkDerivation {
 
   buildPhase = ''
     runHook preBuild
-    make -j$NIX_BUILD_CORES bzImage vmlinux
+    make -j$NIX_BUILD_CORES bzImage vmlinux scripts_gdb
     runHook postBuild
   '';
 
   installPhase = ''
     runHook preInstall
-    mkdir -p $out
-    cp arch/x86/boot/bzImage vmlinux .config System.map $out/
+    mkdir -p $out $symbols/scripts
+    cp arch/x86/boot/bzImage .config System.map $out/
+    objcopy --strip-debug vmlinux $out/vmlinux
+
+    # Compressed debug sections: gdb reads them, at a fraction of the size.
+    objcopy --compress-debug-sections=zlib vmlinux $symbols/vmlinux
+    cp -rL scripts/gdb $symbols/scripts/gdb
+    cp -L vmlinux-gdb.py $symbols/vmlinux-gdb.py
     runHook postInstall
   '';
 

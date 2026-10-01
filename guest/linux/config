@@ -80,3 +80,8 @@ CONFIG_PREEMPT_LAZY=y
 # CONFIG_FB is not set
 # CONFIG_SOUND is not set
 # CONFIG_USB_SUPPORT is not set
+
+# DWARF and the kernel's gdb scripts, for `rewind gdb`. nix/kernel.nix
+# moves them to the `symbols` output; the bzImage carries none of it.
+CONFIG_DEBUG_INFO_DWARF5=y
+CONFIG_GDB_SCRIPTS=y

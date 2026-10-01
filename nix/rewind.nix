@@ -45,6 +45,11 @@ let
     };
   };
 
+  # The kernel's DWARF, named without depending on it: runs record the
+  # path, and `rewind gdb` fetches it from the cache only when someone
+  # debugs, so the package's closure stays without it.
+  symbolsPath = builtins.unsafeDiscardStringContext "${kernel.symbols}";
+
   # gdb comes after the user's own PATH, for `rewind gdb`, so a gdb the
   # user prefers wins.
   runtimeTools = [
@@ -64,5 +69,6 @@ pkgs.runCommand "rewind"
       --prefix PATH : ${lib.makeBinPath runtimeTools} \
       --suffix PATH : ${lib.makeBinPath [ pkgs.gdb ]} \
       --set-default REWIND_KERNEL ${kernel}/bzImage \
-      --set-default REWIND_INITRD ${guest.initrd}/initrd
+      --set-default REWIND_INITRD ${guest.initrd}/initrd \
+      --set-default REWIND_KERNEL_SYMBOLS ${symbolsPath}
   ''

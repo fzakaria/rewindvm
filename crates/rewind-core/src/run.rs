@@ -61,6 +61,11 @@ pub fn default_epoch() -> u64 {
 pub struct Spec {
     pub kernel: PathBuf,
     pub initrd: PathBuf,
+    /// Where the kernel's DWARF and gdb scripts are, for `rewind gdb`: the
+    /// kernel package's `symbols` output, which may not be on this machine
+    /// until it is fetched. Not an input: it is left out of the run's id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kernel_symbols: Option<PathBuf>,
     /// The input image and its BLAKE3 hash; the hash is what makes the
     /// run's id, since the path can be reused.
     pub image: Option<PathBuf>,
@@ -141,6 +146,7 @@ impl Spec {
     pub fn id(&self) -> String {
         let mut inputs = self.clone();
         inputs.image = None;
+        inputs.kernel_symbols = None;
         let content =
             |p: &Path| crate::image::hash_file(p).unwrap_or_else(|_| p.display().to_string());
         inputs.kernel = PathBuf::from(content(&self.kernel));

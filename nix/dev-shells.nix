@@ -27,6 +27,7 @@ in
 
     REWIND_KERNEL = "${kernel}/bzImage";
     REWIND_INITRD = "${guest.initrd}/initrd";
+    REWIND_KERNEL_SYMBOLS = "${kernel.symbols}";
   };
 
   # `nix develop .#app`: the desktop app's toolchain and libraries, for

@@ -68,6 +68,9 @@
           # the guest kernel with the Rewind platform (nix/kernel.nix)
           kernel = p.kernel;
 
+          # the same kernel's DWARF and gdb scripts, for `rewind gdb`
+          kernel-symbols = p.kernel.symbols;
+
           # the guest's init and initramfs (nix/guest.nix)
           init = p.guest.init;
           initrd = p.guest.initrd;

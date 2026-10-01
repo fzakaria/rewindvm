@@ -283,6 +283,7 @@ pub fn selftest(guest: &Guest) -> Result<SelfTest> {
     let spec = Spec {
         kernel: guest.kernel.clone(),
         initrd: guest.initrd.clone(),
+        kernel_symbols: None,
         image: None,
         image_hash: None,
         mem_mib: 256,
