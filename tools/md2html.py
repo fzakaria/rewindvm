@@ -29,6 +29,7 @@ LINK_MAP = {
     "docs/tutorial-container.md": "tutorials/container.html",
     "docs/case-studies/nix-gc-closure-sigpipe.md": "case-studies/nix-gc-closure-sigpipe.html",
     "docs/case-studies/nix-schema-migration-hang.md": "case-studies/nix-schema-migration-hang.html",
+    "docs/case-studies/devenv-task-output-race.md": "case-studies/devenv-task-output-race.html",
     "examples/case-studies/flake.nix": GITHUB_BLOB + "examples/case-studies/flake.nix",
 }
 
@@ -98,6 +99,19 @@ PAGES = [
         source="docs/case-studies/nix-schema-migration-hang.md",
         eyebrow="Case study",
         description="A known hang in Nix's store schema migration, reproduced in Rewind VM and pinned to SQLITE_BUSY_SNAPSHOT with gdb inside the VM, with both upstream fixes checked.",
+        toc="Sections",
+        figure_after=None,
+        next=(
+            "case-studies/devenv-task-output-race.html",
+            "Case study",
+            "Lost task output in devenv",
+            "A known devenv bug that dropped a task's last lines, reproduced in Rewind VM and traced with gdb to a line left in a reader's buffer.",
+        ),
+    ),
+    dict(
+        source="docs/case-studies/devenv-task-output-race.md",
+        eyebrow="Case study",
+        description="A known devenv bug that dropped a task's last lines of output, reproduced in Rewind VM, traced with gdb to tokio::select! taking the child's exit before a buffered line, and the fix checked under every schedule.",
         toc="Sections",
         figure_after=None,
         next=(

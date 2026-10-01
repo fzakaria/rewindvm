@@ -1,0 +1,356 @@
+# Case study: lost task output in devenv
+
+In November 2025 devenv could drop the last lines a task printed: a task
+with `showOutput = true` showed its output two lines short. This is a known
+bug, reported by [@tebriel](https://github.com/tebriel) as
+[cachix/devenv#2281](https://github.com/cachix/devenv/issues/2281) and fixed
+by [@domenkozar](https://github.com/domenkozar) in
+[cachix/devenv#2296](https://github.com/cachix/devenv/pull/2296). The pull
+request added no test, so this case study adds one: a task that prints three
+lines and fails. On the host it passed 2000 runs out of 2000. In Rewind VM it
+failed under 216 of 257 schedules on the version before the fix, and gdb
+inside the VM shows the third line sitting in the reader's buffer when the
+task was reported finished. On the fix it passed all 257.
+
+The derivations are in
+[examples/case-studies/flake.nix](../../examples/case-studies/flake.nix), and
+the commands below run from the root of a clone of this repository.
+
+Every transcript below is real output from `rewind` 0.2.0 on a 16 thread AMD
+Zen 4 laptop running NixOS, built from commit 7408b62, with counter time on,
+trimmed where it says so.
+
+## The software
+
+[devenv](https://devenv.sh) builds developer environments with Nix and runs
+tasks in them: commands with dependencies between them, such as a database
+migration before a test suite. The `devenv-tasks` crate runs each task's
+command as a child process on tokio and collects what it prints. At
+[cecb0452](https://github.com/cachix/devenv/blob/cecb0452cacd9c524ccfc973d5caffff834cbf02/devenv-tasks/src/task_state.rs#L365-L431),
+the main branch just before the fix, `TaskState` reads the child's standard
+output and standard error a line at a time and waits for it to exit, all in
+one `tokio::select!` loop:
+
+```rust
+        loop {
+            tokio::select! {
+                result = stdout_reader.next_line(), if !stdout_closed => {
+                    match result {
+                        Ok(Some(line)) => {
+                            ...
+                            stdout_lines.push((std::time::Instant::now(), line));
+                        },
+                        Ok(None) => {
+                            stdout_closed = true;
+                        },
+                        ...
+                    }
+                }
+                result = stderr_reader.next_line(), if !stderr_closed => {
+                    ...
+                }
+                result = child.wait() => {
+                    match result {
+                        Ok(status) => {
+                            ...
+                            if status.success() {
+                                return Ok(TaskCompleted::Success(now.elapsed(), Self::get_outputs(&outputs_file).await));
+                            } else {
+                                return Ok(TaskCompleted::Failed(
+                                    now.elapsed(),
+                                    TaskFailure {
+                                        stdout: stdout_lines,
+                                        stderr: stderr_lines,
+                                        error: format!("Task exited with status: {status}"),
+                                    },
+                                ));
+                            }
+                        },
+```
+
+When the `child.wait()` branch runs, the function returns with whatever lines
+it has collected so far.
+
+## The test
+
+The derivation builds `devenv-tasks`' unit tests at cecb0452, in release mode
+with debug info, and adds one test to them:
+
+```rust
+#[tokio::test]
+async fn test_failed_task_keeps_last_lines() -> Result<(), Error> {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("tasks.db");
+    let script = create_script("#!/bin/sh\necho line1\necho line2\necho line3\nexit 1\n")?;
+    let tasks = Tasks::builder(
+        Config::try_from(json!({
+            "roots": ["myapp:task_1"],
+            "run_mode": "all",
+            "tasks": [{ "name": "myapp:task_1", "command": script.to_str().unwrap() }]
+        }))
+        .unwrap(),
+        VerbosityLevel::Verbose,
+        Shutdown::new(),
+    )
+    .with_db_path(db_path)
+    .build()
+    .await?;
+    tasks.run().await;
+    match inspect_tasks(&tasks).await.as_slice() {
+        [(_, TaskStatus::Completed(TaskCompleted::Failed(_, failure)))] => {
+            let lines: Vec<&str> = failure.stdout.iter().map(|(_, l)| l.as_str()).collect();
+            assert_eq!(lines, vec!["line1", "line2", "line3"]);
+        }
+        other => panic!("unexpected task statuses: {other:?}"),
+    }
+    Ok(())
+}
+```
+
+`create_script`, `inspect_tasks` and the builder are the test module's own
+helpers, used the same way by the tests around it. The derivation runs the
+test binary with this one test selected.
+
+## How Rewind found it
+
+The first run in the VM failed:
+
+```console
+$ rewind nix ./examples/case-studies#devenv-last-lines-before-2296
+iteration 1
+
+running 1 test
+test tests::test_failed_task_keeps_last_lines ... FAILED
+
+failures:
+
+---- tests::test_failed_task_keeps_last_lines stdout ----
+[myapp:task_1] line1
+[myapp:task_1] line2
+
+thread 'tests::test_failed_task_keeps_last_lines' (41) panicked at devenv-tasks/src/tests/mod.rs:3006:13:
+assertion `left == right` failed
+  left: ["line1", "line2"]
+ right: ["line1", "line2", "line3"]
+...
+rewind: run e8e787546e53d706 exited:101 after 1236 steps, 0.034s virtual, 4.262s wall (poweroff)
+
+$ rewind replay e8e78754
+identical: 769 events over 1236 steps
+```
+
+The task printed three lines and devenv reported two: the bug from the issue,
+which was reported on devenv 1.10.0; cecb0452 is 1.10.1. Under 256 perturbed schedules
+most runs lose the line:
+
+```console
+$ rewind check --all --schedules 256 ./examples/case-studies#devenv-last-lines-before-2296
+schedule   0: exited:101           1236 steps    run e8e787546e53d706
+schedule   1: exited:101           1304 steps    run 30e7aab93387ff1e
+schedule   2: exited:101           1329 steps    run 26f93146d1c600de
+schedule   3: exited:101           1355 steps    run c703c721231a46bc
+...
+schedule 256: exited:0             1406 steps  9ab388bedc43  run 1cfdfbba90b852a3
+schedule 0 failed; 41 of 256 perturbed schedules ended differently
+
+schedule 12 passes where schedule 0 fails; narrowing the steps it perturbs
+perturbing only steps 518..1270 still ends differently
+
+passing: run 15ef00bf9e47c733
+failing: run e8e787546e53d706
+
+where /bin/sh /build/script4dnMbS.sh first behaves differently:
+  right       1163    43/43    execve("/build/script4dnMbS.sh", ["/bin/sh", "/build/script4dnMbS.sh"])
+  right       1164    43/43    exit_group(script4dnMbS.sh) exited:1
+```
+
+216 of the 257 runs fail, all with `["line1", "line2"]`; 41 pass.
+
+## Where the third line went
+
+The events of the failing run around the task:
+
+```console
+$ rewind events e8e78754 --from 1150 --to 1170
+      1156    40/41    open("/build/devenv_task_outputvu9LqZ.json", 0o2000302)
+      1159    40/41    fork() = 43
+      1163    43/43    execve("/build/script4dnMbS.sh", ["/bin/sh", "/build/script4dnMbS.sh"])
+      1164    43/43    exit_group(script4dnMbS.sh) exited:1
+      1167    40/41    SIGCHLD code=1 addr=0x0
+```
+
+Thread 41 of the test process (40) forks the task's shell (43). The shell runs
+all three `echo`s and exits at step 1164, and the SIGCHLD that tells tokio
+the child is done reaches thread 41 at step 1167. Everything the loop will
+see is there before it reads anything.
+
+`rewind gdb` opens gdb on a fork of the run at a step, with the symbols of
+the process running there, loaded from the VM. A breakpoint on `read` for
+the stdout pipe (descriptor 13) and one on the `child.wait()` branch show
+what the loop did, from step 1156 on:
+
+```console
+$ rewind gdb e8e78754 1156 -- -batch -ex 'directory /nix/store/195dbbvj5h0yq9f4vnp833dsbgxpp8w0-devenv-tasks-tests-1.10.1/src' -ex 'break read if $rdi == 13' -ex 'break task_state.rs:409' -ex continue -ex 'set $buf = $rsi' -ex finish -ex 'x/s $buf' -ex 'delete 1' -ex continue
+rewind: step 1156 ran in process 40; loading symbols for 5 of its files
+rewind: no symbols for /build/.tmpT7mlI7/tasks.db, /build/.tmpT7mlI7/tasks.db-shm
+rewind: gdb at step 1156 of e8e787546e53d706
+0xffffffff81285085 in __outl (value=<optimized out>, port=1504) at ./arch/x86/include/asm/shared/io.h:24
+24	BUILDIO(l,  , u32)
+Breakpoint 1 at 0x7f7fd6819190: file ../sysdeps/unix/sysv/linux/read.c, line 25.
+Breakpoint 2 at 0x55d71ca158a7: task_state.rs:409. (2 locations)
+
+Breakpoint 1, __GI___libc_read (fd=13, buf=0x7f7fd0015f20, nbytes=8192) at ../sysdeps/unix/sysv/linux/read.c:25
+25	{
+0x000055d71ccec9bd in std::fs::{impl#9}::read (buf=..., self=<optimized out>) at /rustc/48a229ceaefd4985c50990b14116b6d856af0985/library/std/src/fs.rs:1335
+warning: 1335	/rustc/48a229ceaefd4985c50990b14116b6d856af0985/library/std/src/fs.rs: No such file or directory
+Value returned is $1 = 18
+0x7f7fd0015f20:	"line1\nline2\nline3\n"
+
+Breakpoint 2.1, devenv_tasks::task_state::{impl#1}::run::{async_fn#0}::{async_block#0}::{async_block#0} () at devenv-tasks/src/task_state.rs:415
+415	                            let expanded_paths = expand_glob_patterns(&self.task.exec_if_modified);
+[Inferior 1 (process 1) detached]
+```
+
+The `directory` is the test package's copy of the crate's sources on the
+host, for gdb's listing. There is one read of the pipe, and it returns all 18
+bytes: `line1\nline2\nline3\n`, into the `BufReader` that `next_line` takes
+lines from. The loop then took two lines from that buffer, which the log
+shows it printing, and the next time round ran the `child.wait()` branch
+with `line3` still in the buffer. The function returned, and the buffer was
+dropped with it.
+
+The same breakpoints on the passing run 15ef00bf, from the step where it
+opens the task's output file, hit `read` on standard output twice and on
+standard error (descriptor 15) once before the `child.wait()` branch: there,
+the loop reached the end of both pipes before it took the exit.
+
+## Root cause
+
+`tokio::select!` polls its branches in a random order each time it is
+evaluated, unless it is told `biased;`; tokio does that so a loop with one
+branch that is always ready does not starve the others. Once the child has
+exited and tokio has reaped it, `child.wait()` is ready on every pass. Lines
+already in the `BufReader` are ready too. So each pass round the loop is a
+draw between "take the next line" and "return now", and every line still
+buffered when the draw goes to `child.wait()` is lost. The more output a
+task prints just before exiting, the more draws, and the more lines it can
+lose.
+
+The window is open only when the exit is visible before the output is read.
+On the host the test process is usually reading the pipe while the shell is
+still writing to it, so it reaches the end of the pipe first. In the VM, with
+one CPU, the shell often runs from `execve` to `exit` without giving up the
+CPU, and both the output and the exit are waiting together when the loop
+starts. Perturbing the schedule changes who runs when; most of the 257
+schedules leave the shell to finish first.
+
+## The fix, checked
+
+[ef7fb697](https://github.com/cachix/devenv/commit/ef7fb6972ac033b7aa191345b93f77251ffadfb2),
+merged as
+[de0dc6a8](https://github.com/cachix/devenv/commit/de0dc6a85ae88eb8194c2f7e053f3e933b77c2ac),
+stops returning from the `child.wait()` branch. It stores the exit status,
+turns that branch off, and keeps reading until both pipes are closed:
+
+```diff
+         loop {
++            // If child has exited and both pipes are closed, we're done
++            if exit_status.is_some() && stdout_closed && stderr_closed {
++                break;
++            }
++
+             tokio::select! {
+...
+-                result = child.wait() => {
++                result = child.wait(), if exit_status.is_none() => {
+...
+-                            if status.success() {
+-                                return Ok(TaskCompleted::Success(now.elapsed(), Self::get_outputs(&outputs_file).await));
+-                            } else {
+-                                ...
+-                            }
++                            // Store exit status and continue draining pipes
++                            exit_status = Some(status);
+```
+
+The same test at the merge commit passes every schedule:
+
+```console
+$ rewind check --all --schedules 256 ./examples/case-studies#devenv-last-lines-2296
+schedule   0: exited:0             1262 steps  9ab388bedc43  run 9ff400c5f5f23381
+schedule   1: exited:0             1323 steps  9ab388bedc43  run 07915157f8e6e409
+schedule   2: exited:0             1379 steps  9ab388bedc43  run 1ae585ef451a98ca
+...
+0 of 256 perturbed schedules ended differently
+same result under all 257 schedules
+```
+
+All 44 of `devenv-tasks`' tests at the merge commit, the added one included,
+also passed under 65 schedules
+(`./examples/case-studies#devenv-tasks-2296`).
+
+## On the host
+
+The same test binary on the host:
+
+| What ran on the host                       | Failed    |
+| ------------------------------------------ | --------- |
+| the test, 16 CPUs                          | 0 of 1000 |
+| the test, pinned to one CPU with `taskset` | 0 of 1000 |
+
+The issue's reporter saw it in real use, on an aarch64 Linux machine.
+
+## The recording
+
+Both files are in the
+[case-studies release](https://github.com/fzakaria/rewindvm/releases/tag/case-studies):
+[devenv-task-output-race-replayable.rwd](https://github.com/fzakaria/rewindvm/releases/download/case-studies/devenv-task-output-race-replayable.rwd), with
+everything needed to replay the failure on another AMD machine from Zen 2 on,
+and [devenv-task-output-race.rwd](https://github.com/fzakaria/rewindvm/releases/download/case-studies/devenv-task-output-race.rwd), the trace alone, which the
+desktop app opens. `rewind import` and the app both take the URL, and
+unpack the file as it downloads:
+
+```console
+$ rewind import https://github.com/fzakaria/rewindvm/releases/download/case-studies/devenv-task-output-race-replayable.rwd
+$ rewind replay e8e78754
+$ rewind gdb e8e78754 1156
+$ rewind-app https://github.com/fzakaria/rewindvm/releases/download/case-studies/devenv-task-output-race.rwd
+```
+
+How they were made:
+
+```console
+$ rewind replay e8e78754 --from 1150
+identical from the keyframe at step 512 to the end (3.25s)
+$ rewind export e8e78754 --replayable -o devenv-task-output-race-replayable.rwd
+rewind: wrote devenv-task-output-race-replayable.rwd (185.0 MB)
+$ rewind export e8e78754 -o devenv-task-output-race.rwd
+rewind: wrote devenv-task-output-race.rwd (9.8 KB)
+```
+
+Imported into an empty `REWIND_HOME`, the replayable export replays
+identically:
+
+```console
+$ rewind import devenv-task-output-race-replayable.rwd
+e8e787546e53d706  exited:101         1236 steps  devenv-tasks-test-last-lines-before-2296
+$ rewind replay e8e78754
+identical: 769 events over 1236 steps
+```
+
+## Reproducing it
+
+The derivation builds the test binary from devenv's source with
+`rustPlatform.buildRustPackage`, appends the test above to
+`devenv-tasks/src/tests/mod.rs`, and runs `cargo test -p devenv-tasks --lib
+--release --no-run` with debug info and symbols kept. A second derivation
+runs the binary with the test's name as its filter. Both commits are inputs
+of the example flake, `devenv-before-2296` and `devenv-2296`.
+
+What the VM does before the test is part of its inputs. An earlier version of
+the derivation that copied the crate's sources into `/build` before running
+the test passed under all 257 schedules on the unfixed version: the copy
+changed when the shell and the test process got the CPU, and with it whether
+the shell finished before the loop started reading. Any change to the
+derivation is a different set of runs, and `rewind check --all --schedules
+256` is the way to find the failing ones.

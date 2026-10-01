@@ -443,7 +443,7 @@
       <section class="wrap tutorials" id="case-studies">
         <h2>Case studies</h2>
         <p class="lede">
-          Rewind VM on Nix's own test suite. Every transcript in them is real output.
+          Rewind VM on Nix's own test suite and on devenv. Every transcript in them is real output.
         </p>
         <div class="grid">
           <a class="card" href="case-studies/nix-gc-closure-sigpipe.html">
@@ -462,6 +462,16 @@
             <p>
               A known SQLite schema-migration hang in Nix master, reproduced in Rewind and pinned to
               <code>SQLITE_BUSY_SNAPSHOT</code> with gdb inside the VM.
+            </p>
+            <span class="card-link">Read the case study &rarr;</span>
+          </a>
+          <a class="card" href="case-studies/devenv-task-output-race.html">
+            <span class="eyebrow">Known bug, reproduced</span>
+            <h3>Lost task output in devenv</h3>
+            <p>
+              A known devenv bug that dropped a task's last lines, reproduced in Rewind and traced
+              with gdb to <code>tokio::select!</code> taking the child's exit before a buffered
+              line.
             </p>
             <span class="card-link">Read the case study &rarr;</span>
           </a>

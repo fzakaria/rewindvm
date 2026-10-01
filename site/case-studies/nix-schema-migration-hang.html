@@ -434,12 +434,12 @@ rewind: wrote nix-schema-migration-hang-replayable.rwd (433.5 MB)
 rewind: wrote nix-schema-migration-hang.rwd (39.6 KB)</code></pre>
       </section>
 
-      <a class="card next" href="nix-gc-closure-sigpipe.html">
+      <a class="card next" href="devenv-task-output-race.html">
         <span class="eyebrow">Case study</span>
-        <span class="next-title">A SIGPIPE in Nix's gc-closure test</span>
+        <span class="next-title">Lost task output in devenv</span>
         <span class="next-text"
-          >A Nix test flake no one had reported, found on Rewind VM's first run of the test
-          suite.</span
+          >A known devenv bug that dropped a task's last lines, reproduced in Rewind VM and traced
+          with gdb to a line left in a reader's buffer.</span
         >
       </a>
     </main>
