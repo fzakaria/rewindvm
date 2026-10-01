@@ -1,6 +1,30 @@
 # `nix flake check`: everything CI asserts, offline.
-{ pkgs, rewind }:
+{
+  pkgs,
+  rewind,
+  module,
+}:
 let
+  # A NixOS system with every option of the module turned on, evaluated
+  # but not built.
+  moduleSystem = import "${pkgs.path}/nixos/lib/eval-config.nix" {
+    inherit (pkgs.stdenv.hostPlatform) system;
+    modules = [
+      module
+      {
+        programs.rewind.enable = true;
+        programs.rewind.amdBranchCounterWorkaround = true;
+        programs.rewind.app.enable = true;
+        boot.loader.grub.enable = false;
+        fileSystems."/" = {
+          device = "none";
+          fsType = "tmpfs";
+        };
+        system.stateVersion = "25.11";
+      }
+    ];
+  };
+
   # A root filesystem of static busybox, for the determinism check.
   busyboxRoot = pkgs.runCommand "rewind-busybox-root" { } ''
     mkdir -p $out/bin
@@ -55,4 +79,16 @@ in
         grep -q 'first difference' diff
         touch $out
       '';
+
+  # checks.module: the NixOS module installs both packages and sets the
+  # AMD workaround at boot. Only evaluates, so it needs no KVM.
+  module =
+    let
+      config = moduleSystem.config;
+      installed = map (p: p.name) config.environment.systemPackages;
+    in
+    assert builtins.elem rewind.name installed;
+    assert builtins.elem "rewind-app-0.1.0" installed;
+    assert builtins.elem "msr" config.boot.kernelModules;
+    pkgs.writeText "rewind-module" config.systemd.services.rewind-pmu.serviceConfig.ExecStart;
 }

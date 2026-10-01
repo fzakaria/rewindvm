@@ -1,0 +1,62 @@
+# Publishes a GitHub release for a version tag such as v0.1.0, with the
+# assets the site and the tutorials link under releases/latest/download:
+#
+#   rewind-x86_64-linux.tar.gz      the command, for people without Nix
+#   rewind-app-x86_64-linux.tar.gz  the desktop app, for any distribution
+#
+# The tag must match the workspace version in Cargo.toml. Nix users need
+# none of this: `nix run github:fzakaria/rewindvm/v0.1.0` builds the same
+# tag, from rewindvm.cachix.org when CI has built it.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      # A runner starts with about 14 GB free, and a cold build of the
+      # guest kernel, the app and the static toolchain needs more.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache /usr/local/share/boost /usr/share/swift
+          df -h /
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - uses: cachix/cachix-action@v16
+        with:
+          name: rewindvm
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - name: Check the tag against Cargo.toml
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "${GITHUB_REF_NAME#v}" != "$version" ]; then
+            echo "tag $GITHUB_REF_NAME does not match Cargo.toml's version $version" >&2
+            exit 1
+          fi
+
+      - name: Build the assets
+        run: |
+          nix build -L .#release -o cli
+          nix build -L .#app-release -o app
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes \
+            cli/rewind-x86_64-linux.tar.gz app/rewind-app-x86_64-linux.tar.gz

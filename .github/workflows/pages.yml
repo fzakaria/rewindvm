@@ -1,9 +1,7 @@
-# Publishes the marketing site and the tarballs it serves under download/.
-# The deployed tree is exactly `nix build .#site`, the same one
-# `nix run .#serve` previews, so what gets tested locally is what ships.
-# The CLI's tarball holds the engine and the VM's kernel, and the desktop
-# app's tarball is built from crates/rewind-app and crates/rewind-trace, so
-# a change to any of them redeploys, and a cold run builds the kernel.
+# Publishes the marketing site. The deployed tree is exactly `nix build
+# .#site`, the same one `nix run .#serve` previews, so what gets tested
+# locally is what ships. Downloads are release assets (release.yml), so
+# the site depends on nothing but site/.
 name: pages
 
 on:
@@ -11,14 +9,8 @@ on:
     branches: [main]
     paths:
       - site/**
-      - crates/**
-      - guest/**
-      - nix/**
-      - Cargo.toml
-      - Cargo.lock
-      - flake.nix
+      - nix/site.nix
       - flake.lock
-      - LICENSE
       - .github/workflows/pages.yml
   workflow_dispatch:
 
@@ -34,21 +26,12 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 30
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
-      # A runner starts with about 14 GB free, and the guest kernel's build
-      # tree, the app and the static toolchain together need more. The
-      # preinstalled SDKs this workflow never uses are most of the disk.
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-            /opt/hostedtoolcache /usr/local/share/boost /usr/share/swift
-          df -h /
-
       - uses: cachix/install-nix-action@v31
         with:
           extra_nix_config: |

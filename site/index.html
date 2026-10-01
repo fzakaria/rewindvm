@@ -33,6 +33,7 @@
         <a href="#workloads">Nix and containers</a>
         <a href="#tutorials">Tutorials</a>
         <a href="#pricing">Pricing</a>
+        <a href="https://github.com/fzakaria/rewindvm">GitHub</a>
         <a class="btn small" href="#download">Download</a>
       </nav>
     </header>
@@ -53,8 +54,8 @@
             <span class="soon">v0.1.0 &middot; x86_64 Linux</span>
           </div>
           <p class="fine">
-            The engine and CLI are free under the MIT license. The desktop app is $49 for personal
-            use and free to evaluate.
+            The engine and CLI are open source under the MIT license. The desktop app is $49 for
+            personal use and free to evaluate.
           </p>
         </div>
 
@@ -422,68 +423,52 @@
       <section class="wrap download" id="download">
         <h2>Download</h2>
         <p class="lede">
-          Two tarballs for x86_64 Linux: the engine and CLI, which need KVM, and the desktop app,
-          which needs a desktop. Both are free to download.
+          For x86_64 Linux with KVM. The engine and CLI are open source on
+          <a href="https://github.com/fzakaria/rewindvm">GitHub</a>, and the desktop app is free to
+          download and use while you evaluate it.
         </p>
-        <h3>Engine and CLI</h3>
+
+        <h3>With Nix</h3>
+        <p>Run either straight from the flake, or install both into your profile:</p>
+        <pre
+          class="term"
+        ><code><span class="prompt">$</span> nix run github:fzakaria/rewindvm -- pmu status
+<span class="prompt">$</span> nix run github:fzakaria/rewindvm#app
+<span class="prompt">$</span> nix profile install github:fzakaria/rewindvm github:fzakaria/rewindvm#app</code></pre>
         <p>
-          The <code>rewind</code> command, the VM's kernel and everything it needs to build input
-          images, so the host needs nothing else.
+          The builds come from <code>rewindvm.cachix.org</code>, so nothing compiles on your
+          machine. Nix asks once whether to trust that cache; say yes, or pass
+          <code>--accept-flake-config</code>.
         </p>
-        <pre
-          class="term"
-        ><code><span class="prompt">$</span> curl -LO https://rewindvm.dev/download/rewind-0.1.0-x86_64-linux.tar.gz
-<span class="prompt">$</span> tar xzf rewind-0.1.0-x86_64-linux.tar.gz
-<span class="prompt">$</span> ./rewind-0.1.0-x86_64-linux/bin/rewind pmu status</code></pre>
-        <p>
-          With Nix, the same URL is a flake. Try it with <code>nix run</code>, or keep it with
-          <code>nix profile install</code>:
-        </p>
-        <pre
-          class="term"
-        ><code><span class="prompt">$</span> nix run https://rewindvm.dev/download/rewind-0.1.0-x86_64-linux.tar.gz -- pmu status
-<span class="prompt">$</span> nix profile install https://rewindvm.dev/download/rewind-0.1.0-x86_64-linux.tar.gz</code></pre>
-        <p>On NixOS, add it as a flake input and turn on the module:</p>
-        <pre
-          class="term"
-        ><code>inputs.rewind.url = "https://rewindvm.dev/download/rewind-0.1.0-x86_64-linux.tar.gz";
+        <p>On NixOS, add the flake as an input and turn on its module:</p>
+        <pre class="term"><code>inputs.rewind.url = "github:fzakaria/rewindvm";
 
 # in your configuration, with inputs.rewind.nixosModules.default imported
 programs.rewind.enable = true;
+programs.rewind.app.enable = true;
 # AMD only: make the branch counter exact at every boot
 programs.rewind.amdBranchCounterWorkaround = true;</code></pre>
+
+        <h3>Without Nix</h3>
+        <p>
+          Two tarballs from the latest
+          <a href="https://github.com/fzakaria/rewindvm/releases">release</a>. The CLI's holds the
+          <code>rewind</code> command, the VM's kernel and everything it needs to build input
+          images, so the host needs nothing else. The app is built against glibc 2.31, runs with
+          your own graphics drivers and has been tried on Ubuntu 24.04 and Fedora 41. Unpacked side
+          by side, the app uses that <code>rewind</code> for forks and for reading files at a step.
+        </p>
+        <pre
+          class="term"
+        ><code><span class="prompt">$</span> curl -L https://github.com/fzakaria/rewindvm/releases/latest/download/rewind-x86_64-linux.tar.gz | tar xz
+<span class="prompt">$</span> curl -L https://github.com/fzakaria/rewindvm/releases/latest/download/rewind-app-x86_64-linux.tar.gz | tar xz
+<span class="prompt">$</span> ./rewind-x86_64-linux/bin/rewind pmu status
+<span class="prompt">$</span> ./rewind-app-x86_64-linux/bin/rewind-app</code></pre>
         <p class="note">
           If <code>/dev/kvm</code> is not readable and writable by you, add yourself to the
-          <code>kvm</code> group.
-        </p>
-
-        <h3>Desktop app</h3>
-        <p>
-          The scrubber, built against glibc 2.31 and run with your own graphics drivers. It has been
-          tried on Ubuntu 24.04 and Fedora 41. It needs the X keyboard libraries every desktop has,
-          and brings its own fonts. Unpack it next to the CLI's tarball and it uses that
-          <code>rewind</code> for forks and for reading files at a step.
-        </p>
-        <pre
-          class="term"
-        ><code><span class="prompt">$</span> curl -LO https://rewindvm.dev/download/rewind-app-0.1.0-x86_64-linux.tar.gz
-<span class="prompt">$</span> tar xzf rewind-app-0.1.0-x86_64-linux.tar.gz
-<span class="prompt">$</span> ./rewind-app-0.1.0-x86_64-linux/bin/rewind-app</code></pre>
-        <p>With Nix, the same URL is a flake here too:</p>
-        <pre
-          class="term"
-        ><code><span class="prompt">$</span> nix run https://rewindvm.dev/download/rewind-app-0.1.0-x86_64-linux.tar.gz
-<span class="prompt">$</span> nix profile install https://rewindvm.dev/download/rewind-app-0.1.0-x86_64-linux.tar.gz</code></pre>
-        <p>On NixOS, add it as a second input and turn on the app:</p>
-        <pre
-          class="term"
-        ><code>inputs.rewind-app.url = "https://rewindvm.dev/download/rewind-app-0.1.0-x86_64-linux.tar.gz";
-
-# in your configuration, with inputs.rewind-app.nixosModules.default imported
-programs.rewind.app.enable = true;</code></pre>
-        <p class="note">
-          The download is the whole app, with nothing locked. Until you enter a license key it says
-          it is unregistered and reminds you now and then; see <a href="#pricing">pricing</a>.
+          <code>kvm</code> group. The app download is the whole app, with nothing locked. Until you
+          enter a license key it says it is unregistered and reminds you now and then; see
+          <a href="#pricing">pricing</a>.
         </p>
       </section>
 
@@ -499,14 +484,16 @@ programs.rewind.app.enable = true;</code></pre>
             <p class="price">Free <span>MIT license</span></p>
             <p class="alt">
               The engine and the command line. The VM's kernel is Linux with a
-              <a href="download/rewind-linux.patch">patch</a> and
-              <a href="download/rewind-linux.config">config</a> of ours, GPL-2.0 as Linux is.
+              <a href="https://github.com/fzakaria/rewindvm/tree/main/guest/linux"
+                >patch and config</a
+              >
+              of ours, GPL-2.0 as Linux is.
             </p>
             <ul>
               <li>
                 <code>rewind run</code>, <code>rewind nix</code> and <code>rewind check</code>
               </li>
-              <li>Free, for any use</li>
+              <li>Open source, for any use</li>
             </ul>
           </div>
           <div class="plan pro">
@@ -568,8 +555,8 @@ programs.rewind.app.enable = true;</code></pre>
         &copy; 2026 <a href="https://lunchtimesurf.com/">Lunch Time Surf LLC</a> &middot; Santa
         Cruz, California &middot;
         <a href="mailto:tacos@lunchtimesurf.com">tacos@lunchtimesurf.com</a> &middot;
-        <a href="privacy.html">Privacy</a> &middot;
-        <a href="refunds.html">Refunds</a>
+        <a href="privacy.html">Privacy</a> &middot; <a href="refunds.html">Refunds</a> &middot;
+        <a href="https://github.com/fzakaria/rewindvm">GitHub</a>
       </p>
     </footer>
   </body>

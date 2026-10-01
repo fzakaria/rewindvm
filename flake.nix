@@ -5,6 +5,16 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
   };
 
+  # CI pushes every build to this cache, so `nix run github:fzakaria/rewindvm`
+  # downloads the guest kernel and the app instead of compiling them. Nix
+  # asks before using a flake's substituter unless the user is trusted.
+  nixConfig = {
+    extra-substituters = [ "https://rewindvm.cachix.org" ];
+    extra-trusted-public-keys = [
+      "rewindvm.cachix.org-1:N5gL5fQTxBxim2HQNlYVWNYLK1ttOmMU1GP43eo4V5g="
+    ];
+  };
+
   # Wiring only. Everything this repository builds lives in its own file
   # under nix/, so a flake output here is one line and its definition is one
   # file over there.
@@ -23,28 +33,13 @@
           pkgs = nixpkgs.legacyPackages.${system};
           kernel = import ./nix/kernel.nix { inherit pkgs; };
           guest = import ./nix/guest.nix { inherit pkgs; };
-          release = import ./nix/release.nix { inherit pkgs kernel guest; };
-          example = import ./nix/example-tarball.nix { inherit pkgs; };
-          appRelease = import ./nix/app-release.nix { inherit pkgs; };
         in
         {
-          inherit
-            pkgs
-            kernel
-            guest
-            release
-            example
-            appRelease
-            ;
+          inherit pkgs kernel guest;
           rewind = import ./nix/rewind.nix { inherit pkgs kernel guest; };
-          site = import ./nix/site.nix {
-            inherit
-              pkgs
-              release
-              example
-              appRelease
-              ;
-          };
+          release = import ./nix/release.nix { inherit pkgs kernel guest; };
+          appRelease = import ./nix/app-release.nix { inherit pkgs; };
+          site = import ./nix/site.nix { inherit pkgs; };
           examples = import ./nix/examples.nix { inherit pkgs; };
           app = import ./nix/app.nix { inherit pkgs; };
         };
@@ -60,7 +55,8 @@
           rewind = p.rewind;
           default = p.rewind;
 
-          # the tarball for people without Nix (nix/release.nix)
+          # the command's release asset, for people without Nix
+          # (nix/release.nix)
           release = p.release;
 
           # the guest kernel with the Rewind platform (nix/kernel.nix)
@@ -76,16 +72,12 @@
           # the desktop app, the scrubber over recorded runs (nix/app.nix)
           app = p.app;
 
-          # the desktop app's tarball for rewindvm.dev: a build for other
-          # distributions with a launcher, and a flake (nix/app-release.nix)
+          # the desktop app's release asset: a build for any distribution,
+          # with a launcher (nix/app-release.nix)
           app-release = p.appRelease;
 
           # the tutorials' flaky thread pool (nix/examples.nix)
           mylib = p.examples.mylib;
-
-          # the same thread pool as a tarball with its own flake, which the
-          # site serves for the tutorials (nix/example-tarball.nix)
-          example = p.example;
         }
       );
 
@@ -119,7 +111,10 @@
         let
           p = per system;
         in
-        import ./nix/checks.nix { inherit (p) pkgs rewind; }
+        import ./nix/checks.nix {
+          inherit (p) pkgs rewind;
+          module = self.nixosModules.default;
+        }
       );
 
       devShells = forAllSystems (
@@ -130,8 +125,7 @@
         import ./nix/dev-shells.nix { inherit (p) pkgs kernel guest; }
       );
 
-      # `programs.rewind` for NixOS (nix/module.nix). The release tarball's
-      # flake exports the same module with the prebuilt package.
+      # `programs.rewind` and `programs.rewind.app` for NixOS (nix/module.nix)
       nixosModules.default = import ./nix/module.nix {
         rewind = self.packages.x86_64-linux.default;
         app = self.packages.x86_64-linux.app;

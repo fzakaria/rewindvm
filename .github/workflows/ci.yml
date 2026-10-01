@@ -8,8 +8,8 @@
 #     makes another run. It boots the guest, so it needs /dev/kvm, which
 #     GitHub's Linux runners have but do not open to the build user.
 #
-# Then the packages build: the command, the desktop app, the release
-# tarball and the site.
+# Then the packages build: the command, the desktop app, both release
+# assets and the site. Everything built is pushed to rewindvm.cachix.org.
 name: ci
 
 on:
@@ -50,6 +50,14 @@ jobs:
             experimental-features = nix-command flakes
             system-features = kvm nixos-test benchmark big-parallel
 
+      # Pulls what earlier runs built and pushes what this one builds, so
+      # the guest kernel and the app compile once per change, and users of
+      # the flake download them (flake.nix's nixConfig).
+      - uses: cachix/cachix-action@v16
+        with:
+          name: rewindvm
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
       - name: Formatting
         run: nix fmt -- --ci
 
@@ -57,4 +65,4 @@ jobs:
         run: nix flake check -L
 
       - name: Packages
-        run: nix build -L .#rewind .#app .#release .#site
+        run: nix build -L .#rewind .#app .#release .#app-release .#site

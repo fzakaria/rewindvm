@@ -1,12 +1,11 @@
-# `nix build .#release`: the tarball rewindvm.dev serves. It holds a
-# static rewind, the guest kernel and initramfs, static mkfs.erofs and GNU
-# tar for building input images, and a launcher that points rewind at all
-# of them. The host needs only /dev/kvm; `rewind nix` also needs nix on
-# PATH.
+# `nix build .#release`: the command's release asset, for people without
+# Nix. It holds a static rewind, the guest kernel and initramfs, static
+# mkfs.erofs and GNU tar for building input images, and a launcher that
+# points rewind at all of them. The host needs only /dev/kvm; `rewind nix`
+# also needs nix on PATH.
 #
-# The tarball is a flake too (nix/release-flake.nix, with this
-# repository's flake.lock), so Nix users can run or install it by URL and
-# import its NixOS module (nix/module.nix) without access to the source.
+# The file and the directory it unpacks to carry no version, so the
+# release workflow's assets have the same URL under releases/latest.
 {
   pkgs,
   kernel,
@@ -60,7 +59,7 @@ let
   '';
 in
 pkgs.runCommand "rewind-release" { } ''
-  dir=rewind-0.1.0-x86_64-linux
+  dir=rewind-x86_64-linux
   mkdir -p $dir/bin $dir/libexec $dir/share/rewind
   cp ${static}/bin/rewind $dir/libexec/rewind
   mkdir -p $dir/libexec/rewind-tools
@@ -69,9 +68,6 @@ pkgs.runCommand "rewind-release" { } ''
   install -m 755 ${launcher} $dir/bin/rewind
   cp ${kernel}/bzImage ${guest.initrd}/initrd $dir/share/rewind/
   cp ${../LICENSE} $dir/LICENSE
-  cp ${./release-flake.nix} $dir/flake.nix
-  cp ${../flake.lock} $dir/flake.lock
-  cp ${./module.nix} $dir/module.nix
   mkdir -p $out
   tar --sort=name --owner=0 --group=0 --numeric-owner --mtime=@1 \
     -czf $out/$dir.tar.gz $dir

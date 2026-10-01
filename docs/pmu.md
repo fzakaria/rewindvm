@@ -103,10 +103,10 @@ test again.
 
 ## Every boot on NixOS
 
-Use the `programs.rewind` module from the release tarball's flake:
+Use the flake's `programs.rewind` module:
 
 ```nix
-inputs.rewind.url = "https://rewindvm.dev/download/rewind-0.1.0-x86_64-linux.tar.gz";
+inputs.rewind.url = "github:fzakaria/rewindvm";
 
 # in your configuration, with inputs.rewind.nixosModules.default imported
 programs.rewind.enable = true;

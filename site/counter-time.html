@@ -164,10 +164,8 @@ runs will use counter time</code></pre>
 
       <section class="step">
         <h2 id="every-boot-on-nixos">Every boot on NixOS</h2>
-        <p>Use the <code>programs.rewind</code> module from the release tarball's flake:</p>
-        <pre
-          class="console"
-        ><code>inputs.rewind.url = "https://rewindvm.dev/download/rewind-0.1.0-x86_64-linux.tar.gz";
+        <p>Use the flake's <code>programs.rewind</code> module:</p>
+        <pre class="console"><code>inputs.rewind.url = "github:fzakaria/rewindvm";
 
 # in your configuration, with inputs.rewind.nixosModules.default imported
 programs.rewind.enable = true;
@@ -195,8 +193,8 @@ programs.rewind.amdBranchCounterWorkaround = true;</code></pre>
         &copy; 2026 <a href="https://lunchtimesurf.com/">Lunch Time Surf LLC</a> &middot; Santa
         Cruz, California &middot;
         <a href="mailto:tacos@lunchtimesurf.com">tacos@lunchtimesurf.com</a> &middot;
-        <a href="privacy.html">Privacy</a> &middot;
-        <a href="refunds.html">Refunds</a>
+        <a href="privacy.html">Privacy</a> &middot; <a href="refunds.html">Refunds</a> &middot;
+        <a href="https://github.com/fzakaria/rewindvm">GitHub</a>
       </p>
     </footer>
   </body>

@@ -2,8 +2,8 @@
 # Starts the Rewind desktop app from its tarball on any Linux distribution.
 # The app uses the system's libxkbcommon, libxcb and graphics drivers, and
 # brings its own fonts. When the rewind command is not on PATH but its
-# tarball is unpacked next to this one, the app uses that for forks and
-# for reading files at a step.
+# release tarball is unpacked next to this one, the app uses that for forks
+# and for reading files at a step.
 here=$(dirname "$(readlink -f "$0")")
 top="$here/.."
 
@@ -11,7 +11,7 @@ top="$here/.."
 export REWIND_APP_FONTS
 
 if [ -z "${REWIND_BIN:-}" ] && ! command -v rewind >/dev/null 2>&1; then
-  for candidate in "$top"/../rewind-*-x86_64-linux/bin/rewind; do
+  for candidate in "$top"/../rewind-x86_64-linux/bin/rewind; do
     if [ -x "$candidate" ]; then
       REWIND_BIN=$candidate
       export REWIND_BIN
