@@ -113,8 +113,8 @@ diff -ruN a/arch/x86/kernel/cpu/Makefile b/arch/x86/kernel/cpu/Makefile
  
 diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 --- a/arch/x86/kernel/cpu/rewind.c	1969-12-31 16:00:00.000000000 -0800
-+++ b/arch/x86/kernel/cpu/rewind.c	2026-09-30 16:23:51.202006137 -0700
-@@ -0,0 +1,895 @@
++++ b/arch/x86/kernel/cpu/rewind.c	2026-09-30 22:25:05.982926990 -0700
+@@ -0,0 +1,977 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Rewind VM guest platform.
@@ -149,10 +149,12 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +#include <linux/fs.h>
 +#include <linux/fs_struct.h>
 +#include <linux/init.h>
++#include <linux/kfifo.h>
 +#include <linux/miscdevice.h>
 +#include <linux/mm.h>
 +#include <linux/mutex.h>
 +#include <linux/pm.h>
++#include <linux/poll.h>
 +#include <linux/reboot.h>
 +#include <linux/sched.h>
 +#include <linux/sched/mm.h>
@@ -237,12 +239,15 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +#define REWIND_PAYLOAD_MAX	(REWIND_RECORD_MAX - sizeof(struct rewind_record))
 +
 +#define REWIND_REQUEST_MAX	2048
++#define REWIND_INPUT_MAX	1024
 +
 +/*
 + * The page the monitor writes into: the virtual clock on every
 + * REWIND_PORT_CLOCK read, the boot wall clock once at setup, and, before
 + * each interrupt it sends, why it sent it. An inspection request comes
-+ * with its arguments.
++ * with its arguments, and input for /dev/rewind-console with its bytes;
++ * the kernel sets input_len back to 0 once it has taken them, which is
++ * the monitor's cue to send more.
 + */
 +struct rewind_shared {
 +	u64 now;
@@ -250,12 +255,23 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +	u32 pending;
 +	u32 request_len;
 +	u8 request[REWIND_REQUEST_MAX];
++	u32 input_len;
++	u8 input[REWIND_INPUT_MAX];
 +};
 +
 +/* Reasons for an interrupt, in rewind_shared.pending. */
 +#define REWIND_PENDING_TIMER	BIT(0)	/* the armed timer is due */
 +#define REWIND_PENDING_PREEMPT	BIT(1)	/* reschedule at this point */
 +#define REWIND_PENDING_INSPECT	BIT(2)	/* run the request in rewind_shared */
++#define REWIND_PENDING_INPUT	BIT(3)	/* input for /dev/rewind-console */
++
++/*
++ * /dev/rewind-console's input: bytes the monitor sends, in arrival order.
++ * The interrupt handler is the only writer and the device's reader the
++ * only reader, which is the one case a kfifo needs no lock for.
++ */
++static DEFINE_KFIFO(rewind_input, u8, 4096);
++static DECLARE_WAIT_QUEUE_HEAD(rewind_input_wait);
 +
 +static struct rewind_shared rewind_shared __aligned(PAGE_SIZE);
 +static u8 rewind_buf[REWIND_RECORD_MAX] __aligned(PAGE_SIZE);
@@ -456,6 +472,17 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +
 +static DECLARE_WORK(rewind_inspect_work, rewind_inspect);
 +
++/* Takes the input the monitor left in the shared page. */
++static void rewind_take_input(void)
++{
++	u32 len = min_t(u32, READ_ONCE(rewind_shared.input_len),
++			REWIND_INPUT_MAX);
++
++	kfifo_in(&rewind_input, rewind_shared.input, len);
++	WRITE_ONCE(rewind_shared.input_len, 0);
++	wake_up_interruptible(&rewind_input_wait);
++}
++
 +/*
 + * The monitor's one interrupt. A timer that is due runs the clock event
 + * handler. A preemption request marks the current task for rescheduling,
@@ -480,10 +507,17 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +		set_preempt_need_resched();
 +	}
 +
++	if (pending & REWIND_PENDING_INPUT)
++		rewind_take_input();
++
 +	if (pending & REWIND_PENDING_INSPECT) {
 +		WRITE_ONCE(rewind_inspecting, true);
 +		rewind_stop_user_tasks();
-+		schedule_work(&rewind_inspect_work);
++		/*
++		 * An inspection can be a shell that runs for as long as
++		 * someone types into it, so it goes on the queue for long work.
++		 */
++		queue_work(system_long_wq, &rewind_inspect_work);
 +		set_tsk_need_resched(current);
 +		set_preempt_need_resched();
 +	}
@@ -959,6 +993,52 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +	return rewind_write(file, buf, len, REWIND_EV_MARK, 0);
 +}
 +
++/*
++ * /dev/rewind-console: a byte stream to and from the monitor, for a shell
++ * started by an inspection. Writes are output records on REWIND_TERM_FD;
++ * reads return the monitor's input.
++ */
++#define REWIND_TERM_FD	3
++
++static ssize_t rewind_term_write(struct file *file, const char __user *buf,
++				    size_t len, loff_t *off)
++{
++	return rewind_write(file, buf, len, REWIND_EV_OUTPUT,
++			    REWIND_TERM_FD);
++}
++
++static ssize_t rewind_term_read(struct file *file, char __user *buf,
++				   size_t len, loff_t *off)
++{
++	unsigned int copied;
++	int err;
++
++	if (kfifo_is_empty(&rewind_input)) {
++		if (file->f_flags & O_NONBLOCK)
++			return -EAGAIN;
++		err = wait_event_interruptible(rewind_input_wait,
++					       !kfifo_is_empty(&rewind_input));
++		if (err)
++			return err;
++	}
++	err = kfifo_to_user(&rewind_input, buf, len, &copied);
++	return err ? err : copied;
++}
++
++static __poll_t rewind_term_poll(struct file *file, poll_table *wait)
++{
++	poll_wait(file, &rewind_input_wait, wait);
++	return EPOLLOUT | EPOLLWRNORM |
++	       (kfifo_is_empty(&rewind_input) ? 0 : EPOLLIN | EPOLLRDNORM);
++}
++
++static const struct file_operations rewind_term_fops = {
++	.owner	= THIS_MODULE,
++	.read	= rewind_term_read,
++	.write	= rewind_term_write,
++	.poll	= rewind_term_poll,
++};
++
 +static const struct file_operations rewind_stdout_fops = {
 +	.owner	= THIS_MODULE,
 +	.write	= rewind_stdout_write,
@@ -980,6 +1060,8 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +	{ MISC_DYNAMIC_MINOR, "rewind-stderr", &rewind_stderr_fops,
 +	  .mode = 0666 },
 +	{ MISC_DYNAMIC_MINOR, "rewind", &rewind_mark_fops, .mode = 0666 },
++	{ MISC_DYNAMIC_MINOR, "rewind-console", &rewind_term_fops,
++	  .mode = 0600 },
 +};
 +
 +static int __init rewind_events_init(void)

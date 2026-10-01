@@ -188,6 +188,22 @@ pub trait Observer {
 pub struct Ignore;
 impl Observer for Ignore {}
 
+/// Where a forked machine's console input comes from: a person at a
+/// terminal, typing into a shell inside the VM. A machine with an input
+/// waits for it in real time whenever the VM goes idle, up to the next
+/// timer, so the VM's clock keeps pace with the person rather than racing
+/// ahead to the next timer. Recordings have no input.
+pub trait Input {
+    /// Bytes to type into the VM, waiting at most `timeout` for them, or
+    /// for as long as it takes when None. Empty when none came, and, with
+    /// no timeout, when none ever will.
+    fn wait(&mut self, timeout: Option<std::time::Duration>) -> Vec<u8>;
+}
+
+/// How often, in steps, a busy VM's input is checked without waiting, so
+/// that typing reaches a shell that is running something.
+const INPUT_POLL_STEPS: u64 = 4096;
+
 /// Device state: everything the monitor keeps besides KVM's own.
 pub(crate) struct Devices {
     pub ram: Mapping,
@@ -199,6 +215,13 @@ pub(crate) struct Devices {
     pub stop: Option<Stop>,
     /// An inspection request waiting for the VM's APIC to take it.
     pub inspect: bool,
+    /// The console's input, when a person is typing into the VM.
+    pub input: Option<Box<dyn Input>>,
+    /// Typed bytes not yet given to the VM.
+    pub typed: std::collections::VecDeque<u8>,
+    /// Input placed in the shared page whose interrupt the VM's APIC has
+    /// not yet taken.
+    pub input_sent: bool,
 }
 
 pub struct Machine {
@@ -282,6 +305,9 @@ impl Machine {
                 step: 0,
                 stop: None,
                 inspect: false,
+                input: None,
+                typed: std::collections::VecDeque::new(),
+                input_sent: false,
             },
             pmem,
             config: config.clone(),
@@ -466,6 +492,9 @@ impl Machine {
         if self.dev.inspect {
             reasons |= pv::PENDING_INSPECT;
         }
+        if self.dev.input.is_some() && self.deliver_input()? {
+            reasons |= pv::PENDING_INPUT;
+        }
         if reasons != 0 && self.inject(reasons)? {
             // A timer or a request counts as delivered once the APIC takes
             // it; until then it stays pending and goes again at the next
@@ -474,8 +503,50 @@ impl Machine {
                 self.dev.clock.deadline = None;
             }
             self.dev.inspect = false;
+            self.dev.input_sent = false;
         }
         Ok(())
+    }
+
+    /// Gives the VM console input from now on, typed through `input`.
+    pub fn set_input(&mut self, input: Box<dyn Input>) {
+        self.dev.input = Some(input);
+    }
+
+    /// Moves typed bytes into the shared page when the VM has taken the
+    /// last ones, checking for new typing every so often while the VM is
+    /// busy. True when there is input whose interrupt is still to send.
+    fn deliver_input(&mut self) -> Result<bool> {
+        if self.dev.step % INPUT_POLL_STEPS == 0 {
+            if let Some(input) = &mut self.dev.input {
+                let bytes = input.wait(Some(std::time::Duration::ZERO));
+                self.dev.typed.extend(bytes);
+            }
+        }
+        if self.dev.input_sent {
+            return Ok(true);
+        }
+        let Some(shared) = self.dev.shared else {
+            return Ok(false);
+        };
+        if self.dev.typed.is_empty() {
+            return Ok(false);
+        }
+
+        // The kernel zeroes the length when it has taken the last bytes.
+        let mut len = [0u8; 4];
+        self.dev.ram.read(shared + pv::SHARED_INPUT_LEN, &mut len)?;
+        if u32::from_le_bytes(len) != 0 {
+            return Ok(false);
+        }
+        let n = self.dev.typed.len().min(pv::INPUT_MAX);
+        let chunk: Vec<u8> = self.dev.typed.drain(..n).collect();
+        self.dev.ram.write(shared + pv::SHARED_INPUT, &chunk)?;
+        self.dev
+            .ram
+            .write(shared + pv::SHARED_INPUT_LEN, &(n as u32).to_le_bytes())?;
+        self.dev.input_sent = true;
+        Ok(true)
     }
 
     /// Asks the VM to start an inspection: `/init --inspect` with `args`,
@@ -622,6 +693,22 @@ impl Devices {
                 self.clock.arm(delta + slack);
             }
             pv::PORT_IDLE => {
+                // With a person typing, idle time passes in real time: wait
+                // for input until the next timer is due, and only jump to
+                // the timer when none came.
+                if let Some(input) = &mut self.input {
+                    if !self.typed.is_empty() || self.input_sent {
+                        return Ok(());
+                    }
+                    let timeout = self.clock.deadline.map(|deadline| {
+                        std::time::Duration::from_nanos(deadline.saturating_sub(self.clock.now))
+                    });
+                    let bytes = input.wait(timeout);
+                    if !bytes.is_empty() {
+                        self.typed.extend(bytes);
+                        return Ok(());
+                    }
+                }
                 // A pending request wakes the VM like a timer would.
                 if !self.clock.idle() && !self.inspect {
                     self.stop = Some(Stop::Stalled);

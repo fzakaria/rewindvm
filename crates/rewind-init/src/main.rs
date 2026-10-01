@@ -15,8 +15,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use rewind_init::{
-    EXIT_MARK, INSPECT_ARG, INSPECT_BEGIN_MARK, INSPECT_CAT, INSPECT_END_MARK, InspectStatus,
-    JOB_PATH, Job, OUTPUT_MARK, Root, START_MARK, tree_hash,
+    EXIT_MARK, INSPECT_ARG, INSPECT_BEGIN_MARK, INSPECT_CAT, INSPECT_END_MARK, INSPECT_SHELL,
+    InspectStatus, JOB_PATH, Job, OUTPUT_MARK, RESIZE_ESCAPE, RESIZE_LEN, RESIZE_TAG, Root,
+    START_MARK, tree_hash,
 };
 
 /// The image the monitor maps as persistent memory.
@@ -51,6 +52,14 @@ const IMAGE_ROOT: &str = "/newroot";
 
 /// How much of a file an inspection reads at a time.
 const INSPECT_CHUNK: usize = 64 * 1024;
+
+/// The device a shell inspection's terminal is relayed through.
+const CONSOLE_DEVICE: &str = "/dev/rewind-console";
+
+/// The shell when the job's environment names none, and the terminal type
+/// the shell is told it has.
+const FALLBACK_SHELL: &str = "/bin/sh";
+const SHELL_TERM: &str = "xterm-256color";
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -311,37 +320,45 @@ fn inspect(request: &[String]) {
         return;
     };
 
-    // The one request: cat <pid> <path>.
-    let [op, pid, path] = request else {
-        let _ = writeln!(err, "inspect: expected cat <pid> <path>, got {request:?}");
-        answer(InspectStatus::Failed);
-        return;
+    let status = match request {
+        [op, pid, path] if op == INSPECT_CAT => {
+            cat(pid.parse().unwrap_or(0), path, &mut out, &mut err)
+        }
+        [op, pid, cols, rows] if op == INSPECT_SHELL => {
+            let size = (cols.parse().unwrap_or(80), rows.parse().unwrap_or(24));
+            match shell(pid.parse().unwrap_or(0), size) {
+                Ok(()) => InspectStatus::Done,
+                Err(e) => {
+                    let _ = writeln!(err, "inspect: {e}");
+                    InspectStatus::Failed
+                }
+            }
+        }
+        _ => {
+            let _ = writeln!(err, "inspect: unknown request {request:?}");
+            InspectStatus::Failed
+        }
     };
-    if op != INSPECT_CAT {
-        let _ = writeln!(err, "inspect: unknown request {op}");
-        answer(InspectStatus::Failed);
-        return;
-    }
-    let pid: i32 = pid.parse().unwrap_or(0);
+    answer(status);
+}
 
+/// A file's bytes on `out`, as process `pid` sees it.
+fn cat(pid: i32, path: &str, out: &mut File, err: &mut File) -> InspectStatus {
     // See the file as the process did: its root and working directory
     // when it is still alive, else the job's.
     if let Err(e) = enter_view_of(pid) {
         let _ = writeln!(err, "inspect: {e}");
-        answer(InspectStatus::Failed);
-        return;
+        return InspectStatus::Failed;
     }
     let mut file = match File::open(path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             let _ = writeln!(err, "{path}: no such file at this step");
-            answer(InspectStatus::NotFound);
-            return;
+            return InspectStatus::NotFound;
         }
         Err(e) => {
             let _ = writeln!(err, "{path}: {e}");
-            answer(InspectStatus::Failed);
-            return;
+            return InspectStatus::Failed;
         }
     };
 
@@ -352,18 +369,238 @@ fn inspect(request: &[String]) {
             Ok(0) => break,
             Ok(n) => {
                 if out.write_all(&buf[..n]).is_err() {
-                    answer(InspectStatus::Failed);
-                    return;
+                    return InspectStatus::Failed;
                 }
             }
             Err(e) => {
                 let _ = writeln!(err, "{path}: {e}");
-                answer(InspectStatus::Failed);
+                return InspectStatus::Failed;
+            }
+        }
+    }
+    InspectStatus::Done
+}
+
+/// An interactive shell for Rewind, on a pty relayed through the console
+/// device, in the root and working directory of process `pid`, with that
+/// process's environment as it was at this step (the job's when the
+/// process is gone), and the shell that environment names. For a Nix build
+/// that is the builder's bash with stdenv's PATH. Returns when the shell
+/// exits.
+fn shell(pid: i32, (cols, rows): (u16, u16)) -> Result<()> {
+    use std::os::fd::AsRawFd;
+
+    // Everything that lives outside the job's root is opened first: the
+    // console, the pty and the job's description.
+    let console = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(CONSOLE_DEVICE)
+        .map_err(|e| format!("opening {CONSOLE_DEVICE}: {e}"))?;
+    let job: Job = serde_json::from_slice(
+        &fs::read(JOB_PATH).map_err(|e| format!("reading {JOB_PATH}: {e}"))?,
+    )
+    .map_err(|e| format!("parsing {JOB_PATH}: {e}"))?;
+    let (master, slave) = open_pty(cols, rows)?;
+    let env = live_environment(pid).unwrap_or_else(|| job.env.clone());
+
+    enter_view_of(pid)?;
+
+    // The shell the environment names if it exists here, else the job's
+    // program when that is a shell, else /bin/sh.
+    let exists = |s: &String| Path::new(s).exists();
+    let named = env
+        .iter()
+        .find(|(k, _)| k == "SHELL")
+        .map(|(_, v)| v.clone())
+        .filter(exists);
+    let program = job
+        .argv
+        .first()
+        .filter(|p| p.ends_with("sh") && p.contains('/'))
+        .cloned()
+        .filter(exists);
+    let shell = named
+        .or(program)
+        .unwrap_or_else(|| FALLBACK_SHELL.to_string());
+
+    let slave_fd = slave.as_raw_fd();
+    let mut cmd = Command::new(&shell);
+    cmd.arg("-i")
+        .env_clear()
+        .envs(env.iter().map(|(k, v)| (k, v)))
+        .env("TERM", SHELL_TERM)
+        .stdin(slave.try_clone().map_err(|e| e.to_string())?)
+        .stdout(slave.try_clone().map_err(|e| e.to_string())?)
+        .stderr(slave);
+    // SAFETY: setsid and the controlling-terminal ioctl are
+    // async-signal-safe.
+    unsafe {
+        cmd.pre_exec(move || {
+            libc::setsid();
+            libc::ioctl(slave_fd, libc::TIOCSCTTY as libc::Ioctl, 0);
+            Ok(())
+        });
+    }
+    let mut child = cmd.spawn().map_err(|e| format!("starting {shell}: {e}"))?;
+    // The command holds copies of the pty's slave end; while any is open
+    // here, the master never sees the shell hang up.
+    drop(cmd);
+
+    relay(&console, &master);
+    let _ = child.wait();
+    Ok(())
+}
+
+/// Process `pid`'s environment as it is now, when the process is alive.
+fn live_environment(pid: i32) -> Option<Vec<(String, String)>> {
+    if pid <= 0 {
+        return None;
+    }
+    let raw = fs::read(format!("/proc/{pid}/environ")).ok()?;
+    Some(
+        raw.split(|b| *b == 0)
+            .filter_map(|entry| {
+                let entry = String::from_utf8_lossy(entry);
+                let (k, v) = entry.split_once('=')?;
+                Some((k.to_string(), v.to_string()))
+            })
+            .collect(),
+    )
+}
+
+/// A pty pair of the given size: the master, and the slave opened by path.
+fn open_pty(cols: u16, rows: u16) -> Result<(File, File)> {
+    use std::os::fd::FromRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    // SAFETY: plain calls on a descriptor checked at each step.
+    unsafe {
+        let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
+        if master < 0 || libc::grantpt(master) != 0 || libc::unlockpt(master) != 0 {
+            return Err(format!(
+                "opening a pty: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let master = File::from_raw_fd(master);
+        set_size(&master, cols, rows);
+        let name = libc::ptsname(std::os::fd::AsRawFd::as_raw_fd(&master));
+        if name.is_null() {
+            return Err("ptsname failed".to_string());
+        }
+        let path = std::ffi::CStr::from_ptr(name)
+            .to_string_lossy()
+            .into_owned();
+        let slave = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOCTTY)
+            .open(&path)
+            .map_err(|e| format!("opening {path}: {e}"))?;
+        Ok((master, slave))
+    }
+}
+
+/// Sets a pty's window size, which signals the shell to redraw.
+fn set_size(master: &File, cols: u16, rows: u16) {
+    let size = libc::winsize {
+        ws_row: rows,
+        ws_col: cols,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: a valid descriptor and winsize.
+    unsafe {
+        libc::ioctl(
+            std::os::fd::AsRawFd::as_raw_fd(master),
+            libc::TIOCSWINSZ as libc::Ioctl,
+            &size,
+        )
+    };
+}
+
+/// Copies between the console and the pty until the shell's side closes:
+/// console input to the shell, with resize messages applied to the pty,
+/// and the shell's output to the console.
+fn relay(console: &File, master: &File) {
+    use std::io::Read;
+    use std::os::fd::AsRawFd;
+
+    let mut fds = [
+        libc::pollfd {
+            fd: console.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: master.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        },
+    ];
+    let mut buf = vec![0u8; INSPECT_CHUNK];
+    let mut pending: Vec<u8> = Vec::new();
+    let (mut console_w, mut master_w) = (console, master);
+    loop {
+        // SAFETY: a valid array of pollfds.
+        let n = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) };
+        if n < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return;
+        }
+
+        // The shell's output; EOF or EIO means it has exited.
+        if fds[1].revents != 0 {
+            match (&*master).read(&mut buf) {
+                Ok(0) | Err(_) => return,
+                Ok(n) => {
+                    if console_w.write_all(&buf[..n]).is_err() {
+                        return;
+                    }
+                }
+            }
+        }
+
+        // What Rewind sends, with resize messages taken out.
+        if fds[0].revents & libc::POLLIN != 0 {
+            let Ok(n) = (&*console).read(&mut buf) else {
+                return;
+            };
+            pending.extend_from_slice(&buf[..n]);
+            let typed = take_typed(&mut pending, |cols, rows| set_size(master, cols, rows));
+            if master_w.write_all(&typed).is_err() {
                 return;
             }
         }
     }
-    answer(InspectStatus::Done);
+}
+
+/// Splits console input into the bytes to type and resize messages, which
+/// go to `resize`. A message cut off at the end stays in `pending`.
+fn take_typed(pending: &mut Vec<u8>, mut resize: impl FnMut(u16, u16)) -> Vec<u8> {
+    let mut typed = Vec::with_capacity(pending.len());
+    let mut i = 0;
+    while i < pending.len() {
+        if pending[i] != RESIZE_ESCAPE {
+            typed.push(pending[i]);
+            i += 1;
+            continue;
+        }
+        if pending.len() - i < RESIZE_LEN {
+            break;
+        }
+        if pending[i + 1] == RESIZE_TAG {
+            let cols = u16::from_le_bytes([pending[i + 2], pending[i + 3]]);
+            let rows = u16::from_le_bytes([pending[i + 4], pending[i + 5]]);
+            resize(cols, rows);
+        }
+        i += RESIZE_LEN;
+    }
+    pending.drain(..i);
+    typed
 }
 
 /// Moves this process into the root and working directory of `pid`, or of
@@ -590,5 +827,39 @@ fn power_off() -> ! {
     }
     loop {
         std::hint::spin_loop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Console input for a shell: typed bytes pass through, resize messages
+    // are taken out and applied, and a message split across reads waits
+    // for the rest.
+    use super::*;
+
+    #[test]
+    fn resize_messages_are_taken_out_of_typed_input() {
+        let mut pending = b"ls".to_vec();
+        pending.extend_from_slice(&rewind_init::resize_message(120, 40));
+        pending.extend_from_slice(b"\r");
+        let mut sizes = Vec::new();
+        let typed = take_typed(&mut pending, |c, r| sizes.push((c, r)));
+        assert_eq!(typed, b"ls\r");
+        assert_eq!(sizes, [(120, 40)]);
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn a_split_resize_message_waits_for_the_rest() {
+        let message = rewind_init::resize_message(80, 24);
+        let mut pending = b"a".to_vec();
+        pending.extend_from_slice(&message[..3]);
+        let mut sizes = Vec::new();
+        assert_eq!(take_typed(&mut pending, |c, r| sizes.push((c, r))), b"a");
+        assert_eq!(pending, message[..3]);
+
+        pending.extend_from_slice(&message[3..]);
+        assert!(take_typed(&mut pending, |c, r| sizes.push((c, r))).is_empty());
+        assert_eq!(sizes, [(80, 24)]);
     }
 }

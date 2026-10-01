@@ -118,6 +118,13 @@ pub const SHARED_REQUEST_LEN: u64 = 20;
 pub const SHARED_REQUEST: u64 = 24;
 pub const REQUEST_MAX: usize = 2048;
 
+/// Input for /dev/rewind-console, after the request: its length, which the
+/// kernel sets back to 0 once it has taken the bytes, then the bytes.
+pub const PENDING_INPUT: u32 = 1 << 3;
+pub const SHARED_INPUT_LEN: u64 = SHARED_REQUEST + REQUEST_MAX as u64;
+pub const SHARED_INPUT: u64 = SHARED_INPUT_LEN + 4;
+pub const INPUT_MAX: usize = 1024;
+
 /// Under a schedule seed, one exit in this many asks the guest to
 /// reschedule. A request with nothing else runnable changes nothing, so
 /// asking often costs little; asking rarely found mylib's shutdown race in

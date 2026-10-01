@@ -30,6 +30,30 @@ pub const OUTPUT_MARK: &str = "rewind-output ";
 pub const INSPECT_ARG: &str = "--inspect";
 pub const INSPECT_CAT: &str = "cat";
 
+/// The other request: `shell <pid> <cols> <rows>`, an interactive shell in
+/// the root and working directory of process `pid` (the job's when 0 or
+/// gone), with the job's environment, on a pty of that size. Its terminal
+/// is /dev/rewind-console: what the shell prints arrives as output on
+/// [`CONSOLE_FD`], and what Rewind sends is typed into it.
+pub const INSPECT_SHELL: &str = "shell";
+
+/// The output stream /dev/rewind-console's writes are reported on.
+pub const CONSOLE_FD: u32 = 3;
+
+/// Console input that resizes the shell's terminal: this byte, which
+/// never occurs in UTF-8, then [`RESIZE_TAG`], then the columns and rows
+/// as little-endian u16s. Everything else is typed as is.
+pub const RESIZE_ESCAPE: u8 = 0xff;
+pub const RESIZE_TAG: u8 = b'W';
+pub const RESIZE_LEN: usize = 6;
+
+/// The bytes that resize the shell's terminal.
+pub fn resize_message(cols: u16, rows: u16) -> [u8; RESIZE_LEN] {
+    let [c0, c1] = cols.to_le_bytes();
+    let [r0, r1] = rows.to_le_bytes();
+    [RESIZE_ESCAPE, RESIZE_TAG, c0, c1, r0, r1]
+}
+
 /// The marks around an inspection's answer: everything its process writes
 /// between them is the answer, and the end mark carries an
 /// [`InspectStatus`] code in decimal.

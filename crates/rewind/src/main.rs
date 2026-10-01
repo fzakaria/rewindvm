@@ -1,6 +1,7 @@
 //! The `rewind` command.
 
 mod show;
+mod terminal;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -229,6 +230,18 @@ enum Command {
         path: String,
         /// Resolve the path as this process saw it, in its root and working
         /// directory. By default, and once it has exited, the job's.
+        #[arg(long)]
+        pid: Option<u32>,
+    },
+    /// A shell inside the VM at a step of a run, with the job's environment,
+    /// in a process's root and working directory, while everything else in
+    /// the VM stays stopped where it was. Nothing done in it changes the
+    /// run: it happens in a throwaway fork.
+    Shell {
+        run: String,
+        step: u64,
+        /// The process whose root and working directory the shell starts
+        /// in. By default, and once it has exited, the job's.
         #[arg(long)]
         pid: Option<u32>,
     },
@@ -574,6 +587,36 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 }
                 Inspection::Failed(message) => bail!("reading {path} at step {step}: {message}"),
             }
+        }
+        Command::Shell { run, step, pid } => {
+            use std::io::Write;
+            use std::os::fd::AsRawFd;
+
+            let run = Run::find(&home, &run)?;
+            let size =
+                terminal::size(std::io::stdout().as_raw_fd()).unwrap_or(terminal::DEFAULT_SIZE);
+            eprintln!(
+                "rewind: a shell at step {step} of {}; exit it to leave",
+                run.manifest.id
+            );
+            terminal::wake_on_resize();
+            let raw = terminal::RawMode::enter();
+            let result = rewind_core::inspect::shell(
+                &home,
+                &run,
+                step,
+                pid,
+                size,
+                Box::new(terminal::Keyboard::new(size)),
+                Box::new(|bytes: &[u8]| {
+                    let mut out = std::io::stdout().lock();
+                    let _ = out.write_all(bytes);
+                    let _ = out.flush();
+                }),
+            );
+            drop(raw);
+            result?;
+            Ok(ExitCode::SUCCESS)
         }
         Command::Pmu { action } => {
             let vendor = rewind_core::pmu::Vendor::detect()?;
