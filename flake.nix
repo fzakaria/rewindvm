@@ -82,6 +82,10 @@
           # with a launcher (nix/app-release.nix)
           app-release = p.appRelease;
 
+          # the license issuer, kept out of the app's package
+          # (nix/license.nix)
+          license = p.license;
+
           # the tutorials' flaky thread pool (nix/examples.nix)
           mylib = p.examples.mylib;
         }
