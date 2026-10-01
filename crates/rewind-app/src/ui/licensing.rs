@@ -7,15 +7,17 @@
 use std::time::{Duration, Instant};
 
 use gpui::{
-    Context, Div, FocusHandle, FontWeight, MouseButton, SharedString, Window, div, prelude::*, px,
-    rgb, rgba,
+    Context, CursorStyle, Div, FocusHandle, FontWeight, MouseButton, SharedString, Window, div,
+    prelude::*, px, rgb, rgba,
 };
 
 use crate::license::{self, Coverage, License, LicenseError, Registration, Reminder};
+use crate::selection::{Mapped, Surface, part_of_line};
 use crate::theme::{self, size};
 use crate::ui::scrubber::{NoticeAction, NoticeTone, Scrubber};
+use crate::ui::selectable::{selectable, selects};
 use crate::ui::widgets::{Availability, ButtonStyle, PillTone, button, pill};
-use crate::ui::{CloseDialog, LICENSE_CONTEXT, PasteLicense};
+use crate::ui::{CloseDialog, CopySelection, LICENSE_CONTEXT, PasteLicense, SelectAll};
 
 /// How often the reminder's clock is checked.
 const REMINDER_CHECK: Duration = Duration::from_secs(60);
@@ -29,6 +31,10 @@ const REMINDER_BODY: &str =
 const BACKDROP_A: u32 = 0x0000_00a0;
 const DIALOG_WIDTH: f32 = 600.0;
 const PASTE_FIELD_HEIGHT: f32 = 220.0;
+
+/// The dialog's title and what it asks for.
+const DIALOG_TITLE: &str = "Enter license";
+const DIALOG_HELP: &str = "Paste the whole block, from the BEGIN line to the END line. It is checked on this machine; nothing is sent anywhere.";
 
 /// The license dialog's state: what was pasted and what checking it said.
 pub struct LicenseDialog {
@@ -212,6 +218,12 @@ impl Scrubber {
     pub(super) fn render_license_dialog(&self, cx: &mut Context<Self>) -> Option<Div> {
         let dialog = self.licensing.dialog.as_ref()?;
         let mono = self.fonts.mono.clone();
+        let registry = self.selecting.registry.clone();
+        let range = self.selected_range(Surface::LicenseDialog);
+        let line = |i: usize, text: String| {
+            let part = range.as_ref().and_then(|r| part_of_line(r, i, text.len()));
+            selectable(Surface::LicenseDialog, i, text, part, &registry)
+        };
 
         // The paste field: what was pasted, or how to paste.
         let focused_border = rgba(theme::FOCUS_RING_A);
@@ -230,6 +242,10 @@ impl Scrubber {
             .track_focus(&dialog.focus)
             .key_context(LICENSE_CONTEXT)
             .on_action(cx.listener(|this, _: &PasteLicense, _, cx| this.paste_license(cx)))
+            .on_action(cx.listener(|this, _: &CopySelection, _, cx| {
+                this.copy_selection(cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectAll, _, cx| this.select_all(cx)))
             .on_action(cx.listener(|this, _: &CloseDialog, window, cx| {
                 this.close_license_dialog(window, cx)
             }))
@@ -247,29 +263,7 @@ impl Scrubber {
             .child(field_text);
 
         // What checking the pasted text said.
-        let verdict = match &dialog.result {
-            None => None,
-            Some(Ok(license)) => {
-                let coverage = match license.coverage() {
-                    Coverage::Current => String::new(),
-                    Coverage::EndedBefore(until) => {
-                        format!(" Updates ended {until}; this version still registers.")
-                    }
-                };
-                Some((
-                    theme::GREEN_SOFT,
-                    format!(
-                        "Valid: {} ({}, {} seat{}), updates until {}.{coverage}",
-                        license.name,
-                        license.edition.as_str(),
-                        license.seats,
-                        if license.seats == 1 { "" } else { "s" },
-                        license.updates_until
-                    ),
-                ))
-            }
-            Some(Err(e)) => Some((theme::RED_SOFT, e.to_string())),
-        };
+        let verdict = verdict(&dialog.result);
         let can_register = if matches!(dialog.result, Some(Ok(_))) {
             Availability::Enabled
         } else {
@@ -315,18 +309,26 @@ impl Scrubber {
                 div()
                     .text_size(px(size::TEXT_BRAND))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child("Enter license"),
+                    .cursor(CursorStyle::IBeam)
+                    .child(line(0, DIALOG_TITLE.to_string())),
             )
             .child(
                 div()
                     .text_color(rgb(theme::SOFT))
-                    .child("Paste the whole block, from the BEGIN line to the END line. It is checked on this machine; nothing is sent anywhere."),
+                    .cursor(CursorStyle::IBeam)
+                    .child(line(1, DIALOG_HELP.to_string())),
             )
             .child(field);
         if let Some((color, text)) = verdict {
-            card = card.child(div().text_color(rgb(color)).child(text));
+            card = card.child(
+                div()
+                    .text_color(rgb(color))
+                    .cursor(CursorStyle::IBeam)
+                    .child(line(2, text)),
+            );
         }
         card = card.child(buttons);
+        let card = selects(card, Surface::LicenseDialog, cx);
 
         Some(
             div()
@@ -351,5 +353,47 @@ impl Scrubber {
                 .size_full()
                 .child(backdrop)
         })
+    }
+}
+
+impl Scrubber {
+    /// The dialog's text lines: its title, its help, and the verdict on
+    /// what was pasted.
+    pub(super) fn license_dialog_lines(&self) -> Vec<Mapped> {
+        let Some(dialog) = &self.licensing.dialog else {
+            return Vec::new();
+        };
+        let mut lines = vec![Mapped::plain(DIALOG_TITLE), Mapped::plain(DIALOG_HELP)];
+        if let Some((_, text)) = verdict(&dialog.result) {
+            lines.push(Mapped::plain(text));
+        }
+        lines
+    }
+}
+
+/// What checking the pasted text said, in its color.
+fn verdict(result: &Option<Result<License, LicenseError>>) -> Option<(u32, String)> {
+    match result {
+        None => None,
+        Some(Ok(license)) => {
+            let coverage = match license.coverage() {
+                Coverage::Current => String::new(),
+                Coverage::EndedBefore(until) => {
+                    format!(" Updates ended {until}; this version still registers.")
+                }
+            };
+            Some((
+                theme::GREEN_SOFT,
+                format!(
+                    "Valid: {} ({}, {} seat{}), updates until {}.{coverage}",
+                    license.name,
+                    license.edition.as_str(),
+                    license.seats,
+                    if license.seats == 1 { "" } else { "s" },
+                    license.updates_until
+                ),
+            ))
+        }
+        Some(Err(e)) => Some((theme::RED_SOFT, e.to_string())),
     }
 }

@@ -1,6 +1,8 @@
 //! A file's contents as the viewer shows them: text as lines, anything
 //! else as a hex dump, both cut to a size a panel can hold.
 
+use crate::selection::{Mapped, Splice};
+
 /// The most bytes the viewer shows; the rest is summed up in a note.
 pub const MAX_SHOWN: usize = 1 << 20;
 
@@ -105,11 +107,45 @@ pub fn hex_line(offset: usize, chunk: &[u8]) -> String {
     format!("{offset:08x}  {hex} {ascii}")
 }
 
+/// The spaces a tab is drawn as.
+pub const TAB_WIDTH: usize = 4;
+
+/// A line of text with its tabs drawn as spaces, copying back as tabs.
+pub fn expand_tabs(line: &str) -> Mapped {
+    if !line.contains('\t') {
+        return Mapped::plain(line);
+    }
+    let mut shown = String::with_capacity(line.len() + TAB_WIDTH);
+    let mut splices = Vec::new();
+    for (i, c) in line.char_indices() {
+        if c != '\t' {
+            shown.push(c);
+            continue;
+        }
+        let start = shown.len();
+        shown.push_str(&" ".repeat(TAB_WIDTH));
+        splices.push(Splice {
+            shown: start..shown.len(),
+            original: i..i + 1,
+        });
+    }
+    Mapped::new(shown, line.to_string(), splices)
+}
+
 #[cfg(test)]
 mod tests {
     // Layouts of small byte strings: each test builds bytes, lays them
     // out, and checks the kind, the lines and the notes.
     use super::*;
+
+    #[test]
+    fn tabs_are_drawn_as_spaces_and_copied_as_tabs() {
+        let line = expand_tabs("a\tb");
+        assert_eq!(line.shown, "a    b");
+        assert_eq!(line.copy(0..line.shown.len()), "a\tb");
+        assert_eq!(line.copy(2..6), "\tb");
+        assert_eq!(expand_tabs("plain").shown, "plain");
+    }
 
     #[test]
     fn text_is_shown_as_lines() {

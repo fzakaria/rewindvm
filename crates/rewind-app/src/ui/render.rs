@@ -5,26 +5,29 @@
 //! here walks the trace.
 
 use gpui::{
-    AnyElement, Context, DispatchPhase, Div, FontWeight, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, Point, Role, ScrollStrategy, SharedString, Window,
-    canvas, div, prelude::*, px, relative, rgb, rgba, uniform_list,
+    AnyElement, ClickEvent, Context, CursorStyle, DispatchPhase, Div, FontWeight, HighlightStyle,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Role, ScrollStrategy,
+    SharedString, Window, canvas, div, prelude::*, px, relative, rgb, rgba, uniform_list,
 };
 
 use crate::describe::{self, EventTone, short_store_paths, thousands};
 use crate::model::{FileOp, FileTone, LogFilter, Motion, RowKind, Tone, ticks};
 use crate::run::{Agreement, Session, Verdict, short_id};
+use crate::selection::{Mapped, Surface, part_of_line};
 use crate::theme::{self, layout, size};
 use crate::tour::Anchor;
 use crate::ui::chrome::client_tiling;
 use crate::ui::icons::Icon;
 use crate::ui::scrubber::{ForkState, NoticeAction, NoticeTone, PickKind, Scrubber};
+use crate::ui::selectable::{PID_CHARS, mapped, process_row, selectable, selects};
 use crate::ui::tour::explore_button;
 use crate::ui::widgets::{
     Availability, ButtonStyle, PillTone, button, icon, panel_title, pill, readout,
 };
 use crate::ui::{
-    EnterLicense, ForkHere, GoToEnd, GoToStart, JumpToDivergence, JumpToFailure, KEY_CONTEXT,
-    NextEvent, NextPhase, OpenRun, PreviousEvent, PreviousPhase, StartTour, StepBack, StepForward,
+    CopySelection, EnterLicense, ForkHere, GoToEnd, GoToStart, JumpToDivergence, JumpToFailure,
+    KEY_CONTEXT, NextEvent, NextPhase, OpenRun, PreviousEvent, PreviousPhase, SelectAll, StartTour,
+    StepBack, StepForward,
 };
 
 /// Header labels are cut to this many characters.
@@ -37,6 +40,10 @@ const VCPUS: u32 = 1;
 impl Render for Scrubber {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_title(window);
+
+        // The selectable lines register where they land as this frame is
+        // laid out.
+        self.selecting.registry.clear();
 
         // The root takes the keyboard: every binding in the scrubber's
         // context lands on one of these handlers.
@@ -78,7 +85,11 @@ impl Render for Scrubber {
             .text_size(px(size::TEXT_UI));
 
         let root = root
-            .on_action(cx.listener(|this, _: &StartTour, window, cx| this.start_tour(window, cx)));
+            .on_action(cx.listener(|this, _: &StartTour, window, cx| this.start_tour(window, cx)))
+            .on_action(cx.listener(|this, _: &CopySelection, _, cx| {
+                this.copy_selection(cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectAll, _, cx| this.select_all(cx)));
 
         // A run on screen, or the empty state asking for one.
         let body: AnyElement = if self.session.is_some() {
@@ -100,6 +111,10 @@ impl Render for Scrubber {
         if let Some(dialog) = self.render_license_dialog(cx) {
             window_root = window_root.child(dialog);
         }
+        if let Some(menu) = self.render_context_menu(cx) {
+            window_root = window_root.child(menu);
+        }
+        window_root = window_root.child(self.selection_listener(cx));
 
         // Drawing its own chrome, the window needs a visible edge and
         // handles to resize it by.
@@ -149,6 +164,8 @@ impl Scrubber {
             .child(middle_column)
             .child(at_step_column);
 
+        // The terminal pane, while a shell or gdb runs, under the panels.
+        let terminal = self.render_terminal(window, cx);
         div()
             .flex()
             .flex_col()
@@ -156,6 +173,7 @@ impl Scrubber {
             .child(header)
             .child(timeline)
             .child(panels)
+            .children(terminal)
     }
 
     /// The header: the mark, the run and what it built, verdict pills, and
@@ -672,11 +690,13 @@ impl Scrubber {
             .on_click(cx.listener(|this, _, _, cx| this.toggle_console(cx)));
 
         let step_width = self.step_column_width();
+        let selected = self.selected_range(Surface::Log);
         let list = uniform_list(
             "log",
             count,
             cx.processor(move |this, range: std::ops::Range<usize>, _window, _cx| {
                 let lines = this.session().run.timeline.lines(this.log_filter);
+                let registry = this.selecting.registry.clone();
                 range
                     .map(|i| {
                         let line = &lines[i];
@@ -688,7 +708,10 @@ impl Scrubber {
                             Tone::Console => theme::MUTED,
                             Tone::Normal => theme::SOFT,
                         };
-                        let text: SharedString = short_store_paths(&line.text).into();
+                        let text = mapped(&line.text).shown;
+                        let part = selected
+                            .as_ref()
+                            .and_then(|r| part_of_line(r, i, text.len()));
                         div()
                             .id(i)
                             .w_full()
@@ -713,7 +736,7 @@ impl Scrubber {
                                     .min_w_0()
                                     .truncate()
                                     .text_color(rgb(color))
-                                    .child(text),
+                                    .child(selectable(Surface::Log, i, text, part, &registry)),
                             )
                     })
                     .collect::<Vec<_>>()
@@ -724,6 +747,18 @@ impl Scrubber {
         .min_h_0()
         .py(px(size::LIST_PAD_Y));
 
+        let body = div()
+            .flex()
+            .flex_col()
+            .flex_grow(layout::FILL)
+            .min_h_0()
+            .cursor(CursorStyle::IBeam)
+            .font_family(self.fonts.mono.clone())
+            .text_size(px(size::TEXT_MONO))
+            .when(count == 0, |d| {
+                d.child(placeholder("No output up to this step."))
+            })
+            .child(list);
         div()
             .flex()
             .flex_col()
@@ -735,19 +770,7 @@ impl Scrubber {
                 "Build log \u{b7} up to this step",
                 Some(toggle.into_any_element()),
             ))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .flex_grow(layout::FILL)
-                    .min_h_0()
-                    .font_family(self.fonts.mono.clone())
-                    .text_size(px(size::TEXT_MONO))
-                    .when(count == 0, |d| {
-                        d.child(placeholder("No output up to this step."))
-                    })
-                    .child(list),
-            )
+            .child(selects(body, Surface::Log, cx))
     }
 
     /// The middle column: processes alive at the playhead above, files
@@ -757,9 +780,13 @@ impl Scrubber {
         let t = &self.session().run.timeline;
         let mono = self.fonts.mono.clone();
 
-        // The process tree, indented by depth, threads in grey.
+        // The process tree, indented by depth, threads in grey. Each row
+        // is one line of text, the id padded to its column, so a selection
+        // copies ids and labels together.
         let rows: Vec<_> = t.alive_rows(step).collect();
         let alive = rows.len();
+        let selected = self.selected_range(Surface::Processes);
+        let registry = self.selecting.registry.clone();
         let procs = div()
             .id("procs")
             .flex()
@@ -769,37 +796,39 @@ impl Scrubber {
             .min_h_0()
             .overflow_y_scroll()
             .py(px(size::LIST_PAD_Y))
+            .cursor(CursorStyle::IBeam)
             .font_family(mono.clone())
             .text_size(px(size::TEXT_MONO))
-            .children(rows.into_iter().map(|row| {
+            .children(rows.into_iter().enumerate().map(|(i, row)| {
                 let (id_color, label_color) = match row.kind {
                     RowKind::Process => (theme::BLUE, theme::TEXT),
                     RowKind::Thread => (theme::FAINT, theme::MUTED),
                 };
+                let text = process_row(row.tid, &row.label).shown;
+                let id_end = PID_CHARS.min(text.len());
+                let part = selected
+                    .as_ref()
+                    .and_then(|r| part_of_line(r, i, text.len()));
+                let colors = [
+                    (0..id_end, color_only(id_color)),
+                    (id_end..text.len(), color_only(label_color)),
+                ];
                 div()
                     .flex()
                     .w_full()
                     .flex_none()
                     .items_center()
                     .h(px(size::LIST_ROW_HEIGHT))
-                    .gap(px(size::LIST_COLUMN_GAP))
                     .pl(px(size::PANEL_PAD_X + row.depth as f32 * size::TREE_INDENT))
                     .pr(px(size::PANEL_PAD_X))
                     .child(
-                        div()
-                            .flex_none()
-                            .w(px(size::PID_COLUMN_WIDTH))
-                            .text_color(rgb(id_color))
-                            .child(row.tid.to_string()),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_color(rgb(label_color))
-                            .child(short_store_paths(&row.label)),
+                        div().min_w_0().truncate().child(
+                            selectable(Surface::Processes, i, text, part, &registry)
+                                .with_highlights(colors),
+                        ),
                     )
             }));
+        let procs = selects(procs, Surface::Processes, cx);
 
         // Files, newest first: scroll back to the top when a new one lands.
         let files = t.file_count_at(step);
@@ -808,11 +837,13 @@ impl Scrubber {
             self.files_followed = Some(files);
         }
         let step_width = self.step_column_width();
+        let selected = self.selected_range(Surface::Files);
         let file_list = uniform_list(
             "files",
             files,
             cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
                 let t = &this.session().run.timeline;
+                let registry = this.selecting.registry.clone();
                 range
                     .map(|i| {
                         let file = &t.files[files - 1 - i];
@@ -830,10 +861,19 @@ impl Scrubber {
                             FileOp::Output => "out",
                         };
 
-                        // A click opens the file in the viewer.
+                        // A click opens the file in the viewer; a drag or a
+                        // double click selects its path instead.
                         let (path, pid) = (file.path.clone(), file.pid);
-                        let open = cx
-                            .listener(move |this, _, _, cx| this.open_file(path.clone(), pid, cx));
+                        let open = cx.listener(move |this, e: &ClickEvent, _, cx| {
+                            let selecting = this.selected_text().is_some();
+                            if e.click_count() == 1 && !selecting {
+                                this.open_file(path.clone(), pid, cx)
+                            }
+                        });
+                        let text = mapped(&file.path).shown;
+                        let part = selected
+                            .as_ref()
+                            .and_then(|r| part_of_line(r, i, text.len()));
                         div()
                             .id(i)
                             .role(Role::Button)
@@ -871,7 +911,7 @@ impl Scrubber {
                                     .whitespace_nowrap()
                                     .text_ellipsis_start()
                                     .text_color(rgb(color))
-                                    .child(short_store_paths(&file.path)),
+                                    .child(selectable(Surface::Files, i, text, part, &registry)),
                             )
                     })
                     .collect::<Vec<_>>()
@@ -884,6 +924,7 @@ impl Scrubber {
         .py(px(size::LIST_PAD_Y))
         .font_family(mono.clone())
         .text_size(px(size::TEXT_MONO));
+        let file_list = selects(file_list, Surface::Files, cx);
 
         let count = |n: usize| div().font_family(mono.clone()).child(thousands(n as u64));
         div()
@@ -921,16 +962,27 @@ impl Scrubber {
         let step = self.step;
         let mono = self.fonts.mono.clone();
 
-        // The last event at or before the playhead, as a system call.
+        // The last event at or before the playhead, as a system call: a
+        // line about where it happened, then the call itself.
+        let registry = self.selecting.registry.clone();
+        let event_range = self.selected_range(Surface::EventCard);
+        let event_lines = self.event_card_lines();
+        let event_line = |line: usize| {
+            let text = event_lines
+                .get(line)
+                .map(|m| m.shown.clone())
+                .unwrap_or_default();
+            let part = event_range
+                .as_ref()
+                .and_then(|r| part_of_line(r, line, text.len()));
+            selectable(Surface::EventCard, line, text, part, &registry)
+        };
         let event_card = match t
             .event_index_at(step)
             .and_then(|i| t.event(i).map(|e| (i, e)))
         {
-            None => card(theme::RAISED, theme::LINE).child(
-                div()
-                    .text_color(rgb(theme::MUTED))
-                    .child("Nothing has happened yet at this step."),
-            ),
+            None => card(theme::RAISED, theme::LINE)
+                .child(div().text_color(rgb(theme::MUTED)).child(event_line(0))),
             Some((index, event)) => {
                 let described = describe::describe(event);
                 let diverged_here = session
@@ -946,31 +998,20 @@ impl Scrubber {
                 } else {
                     theme::TEXT
                 };
-                let mut meta = format!(
-                    "last event \u{b7} step {} \u{b7} pid {}",
-                    thousands(event.step),
-                    event.pid
-                );
-                if event.tid != event.pid {
-                    meta.push_str(&format!(" \u{b7} tid {}", event.tid));
-                }
-                if let Some(name) = t.name_of(event.pid) {
-                    meta.push_str(&format!(" \u{b7} {}", describe::clip(name, MAX_NAME_CHARS)));
-                }
                 card(theme::RAISED, theme::LINE)
                     .child(
                         div()
                             .font_family(mono.clone())
                             .text_size(px(size::TEXT_SMALL))
                             .text_color(rgb(theme::MUTED))
-                            .child(meta),
+                            .child(event_line(0)),
                     )
                     .child(
                         div()
                             .font_family(mono.clone())
                             .text_size(px(size::TEXT_EVENT))
                             .text_color(rgb(color))
-                            .child(short_store_paths(&described.text)),
+                            .child(event_line(1)),
                     )
                     .when_some(file_named_by(event), |card, path| {
                         // An event on a file links to the file at this step.
@@ -986,6 +1027,7 @@ impl Scrubber {
                                 .cursor_pointer()
                                 .text_color(rgb(theme::AMBER))
                                 .hover(|s| s.text_color(rgb(theme::AMBER_HI)))
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                                 .child(label)
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.open_file(path.clone(), pid, cx)
@@ -994,6 +1036,11 @@ impl Scrubber {
                     })
             }
         };
+        let event_card = selects(
+            event_card.cursor(CursorStyle::IBeam),
+            Surface::EventCard,
+            cx,
+        );
 
         let mut column = div()
             .id("at-step")
@@ -1008,55 +1055,42 @@ impl Scrubber {
 
         // Against the compared run: where the two first part, once the
         // playhead is past it, or that they never do.
-        let shown = match session.agreement() {
-            Some(Agreement::Parted {
-                step: at,
-                title,
-                lines,
-            }) if step >= at => Some((title, lines)),
-            Some(Agreement::Same { title, lines }) => Some((title, lines)),
-            _ => None,
-        };
-        if let Some((title, lines)) = shown {
-            let mut divergence = card(theme::BLUE_CARD, theme::BLUE_BORDER)
-                .child(card_title(title, theme::BLUE_SOFT));
-            for line in lines {
-                divergence = divergence.child(
-                    div()
-                        .text_color(rgb(theme::SOFT))
-                        .child(short_store_paths(&line)),
-                );
+        if self.shown_agreement().is_some() {
+            let range = self.selected_range(Surface::Divergence);
+            let lines = self.divergence_lines();
+            let mut divergence =
+                card(theme::BLUE_CARD, theme::BLUE_BORDER).cursor(CursorStyle::IBeam);
+            for (i, line) in lines.into_iter().enumerate() {
+                let part = range
+                    .as_ref()
+                    .and_then(|r| part_of_line(r, i, line.shown.len()));
+                let text = selectable(Surface::Divergence, i, line.shown, part, &registry);
+                divergence = divergence.child(if i == 0 {
+                    card_title(theme::BLUE_SOFT).child(text)
+                } else {
+                    div().text_color(rgb(theme::SOFT)).child(text)
+                });
             }
-            column = column.child(divergence);
+            column = column.child(selects(divergence, Surface::Divergence, cx));
         }
 
         // The latest fork made from the playhead.
-        if let Some(fork) = self.forks.last() {
-            let step = thousands(fork.step);
-            let schedule = fork.schedule;
-            let (title, body) = match &fork.state {
-                ForkState::Pending => (
-                    format!("Forking at step {step} with schedule {schedule}"),
-                    "The engine is running the branch; it takes about as long as the run did."
-                        .to_string(),
-                ),
-                ForkState::Created(forked) => (
-                    format!(
-                        "Forked at step {step} with schedule {schedule} \u{2192} run {}",
-                        short_id(&forked.id)
-                    ),
-                    forked.summary.clone(),
-                ),
-                ForkState::Failed(error) => (
-                    format!("Fork at step {step} with schedule {schedule} failed"),
-                    error.clone(),
-                ),
-            };
-            column = column.child(
-                card(theme::AMBER_CARD, theme::AMBER_DEEP)
-                    .child(card_title(title, theme::AMBER_PALE))
-                    .child(div().text_color(rgb(theme::SOFT)).child(body)),
-            );
+        let fork_lines = self.fork_card_lines();
+        if !fork_lines.is_empty() {
+            let range = self.selected_range(Surface::ForkCard);
+            let mut fork = card(theme::AMBER_CARD, theme::AMBER_DEEP).cursor(CursorStyle::IBeam);
+            for (i, line) in fork_lines.into_iter().enumerate() {
+                let part = range
+                    .as_ref()
+                    .and_then(|r| part_of_line(r, i, line.shown.len()));
+                let text = selectable(Surface::ForkCard, i, line.shown, part, &registry);
+                fork = fork.child(if i == 0 {
+                    card_title(theme::AMBER_PALE).child(text)
+                } else {
+                    div().text_color(rgb(theme::SOFT)).child(text)
+                });
+            }
+            column = column.child(selects(fork, Surface::ForkCard, cx));
         }
 
         // Inspect: engine actions at the playhead, two by two.
@@ -1088,12 +1122,14 @@ impl Scrubber {
                     .flex()
                     .gap(px(size::CARD_GAP))
                     .child(
-                        inspect("gdb", "Attach gdb".into(), Availability::Enabled)
-                            .on_click(cx.listener(|this, _, _, cx| this.attach_gdb(cx))),
+                        inspect("gdb", "Attach gdb".into(), Availability::Enabled).on_click(
+                            cx.listener(|this, _, window, cx| this.attach_gdb(window, cx)),
+                        ),
                     )
                     .child(
-                        inspect("shell", "Open shell".into(), Availability::Enabled)
-                            .on_click(cx.listener(|this, _, _, cx| this.open_shell(cx))),
+                        inspect("shell", "Open shell".into(), Availability::Enabled).on_click(
+                            cx.listener(|this, _, window, cx| this.open_shell(window, cx)),
+                        ),
                     ),
             )
             .child(
@@ -1144,7 +1180,14 @@ impl Scrubber {
             .flex()
             .flex_col()
             .gap(px(size::CARD_GAP));
+        let registry = self.selecting.registry.clone();
         for notice in &self.notices {
+            let surface = Surface::Notice(notice.id);
+            let range = self.selected_range(surface);
+            let line = |i: usize, text: String| {
+                let part = range.as_ref().and_then(|r| part_of_line(r, i, text.len()));
+                selectable(surface, i, text, part, &registry)
+            };
             let (border, title_color) = match notice.tone {
                 NoticeTone::Info => (theme::AMBER_DEEP, theme::AMBER_PALE),
                 NoticeTone::Error => (theme::RED_BORDER, theme::RED_SOFT),
@@ -1152,12 +1195,33 @@ impl Scrubber {
             let id = notice.id;
             let close = div()
                 .id(SharedString::from(format!("close-notice-{id}")))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .flex_none()
                 .cursor_pointer()
                 .text_color(rgb(theme::MUTED))
                 .hover(|s| s.text_color(rgb(theme::TEXT)))
                 .child(icon(Icon::Close, size::ICON_CLOSE, theme::MUTED))
                 .on_click(cx.listener(move |this, _, _, cx| this.dismiss(id, cx)));
+            let body = div()
+                .flex()
+                .flex_col()
+                .gap(px(size::CARD_GAP / 2.0))
+                .cursor(CursorStyle::IBeam)
+                .child(
+                    div()
+                        .flex()
+                        .items_start()
+                        .justify_between()
+                        .gap(px(size::CARD_GAP))
+                        .child(card_title(title_color).child(line(0, notice.title.to_string())))
+                        .child(close),
+                )
+                .children(notice.body.lines().enumerate().map(|(i, text)| {
+                    div()
+                        .text_size(px(size::TEXT_CARD_TITLE))
+                        .text_color(rgb(theme::SOFT))
+                        .child(line(i + 1, mapped(text).shown))
+                }));
             stack = stack.child(
                 div()
                     .flex()
@@ -1169,21 +1233,7 @@ impl Scrubber {
                     .border_1()
                     .border_color(rgb(border))
                     .shadow_lg()
-                    .child(
-                        div()
-                            .flex()
-                            .items_start()
-                            .justify_between()
-                            .gap(px(size::CARD_GAP))
-                            .child(card_title(notice.title.to_string(), title_color))
-                            .child(close),
-                    )
-                    .children(notice.body.lines().map(|line| {
-                        div()
-                            .text_size(px(size::TEXT_CARD_TITLE))
-                            .text_color(rgb(theme::SOFT))
-                            .child(line.to_string())
-                    }))
+                    .child(selects(body, surface, cx))
                     .when(!notice.actions.is_empty(), |d| {
                         d.child(self.render_notice_actions(id, &notice.actions, cx))
                     }),
@@ -1311,12 +1361,20 @@ fn card(bg: u32, border: u32) -> Div {
         .border_color(rgb(border))
 }
 
-fn card_title(text: String, color: u32) -> Div {
+/// A card's title line; the caller adds its text.
+fn card_title(color: u32) -> Div {
     div()
         .text_size(px(size::TEXT_CARD_TITLE))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(rgb(color))
-        .child(text)
+}
+
+/// A highlight that only colors text.
+fn color_only(color: u32) -> HighlightStyle {
+    HighlightStyle {
+        color: Some(rgb(color).into()),
+        ..Default::default()
+    }
 }
 
 /// Muted text standing in for an empty list.
@@ -1336,5 +1394,110 @@ fn file_named_by(event: &rewind_trace::Event) -> Option<String> {
         }
         rewind_trace::EventKind::Rename { to, .. } => Some(to.clone()),
         _ => None,
+    }
+}
+
+/// The text of the cards, notices and lists, built once for both drawing
+/// and copying so the two always agree.
+impl Scrubber {
+    /// The process tree rows alive at the playhead.
+    pub(super) fn process_lines(&self) -> Vec<Mapped> {
+        let Some(session) = &self.session else {
+            return Vec::new();
+        };
+        session
+            .run
+            .timeline
+            .alive_rows(self.step)
+            .map(|row| process_row(row.tid, &row.label))
+            .collect()
+    }
+
+    /// The files written up to the playhead, newest first.
+    pub(super) fn file_lines(&self) -> Vec<Mapped> {
+        let Some(session) = &self.session else {
+            return Vec::new();
+        };
+        let t = &session.run.timeline;
+        let count = t.file_count_at(self.step);
+        (0..count)
+            .map(|i| mapped(&t.files[count - 1 - i].path))
+            .collect()
+    }
+
+    /// The event card: where the last event happened, then the event.
+    pub(super) fn event_card_lines(&self) -> Vec<Mapped> {
+        const NOTHING_YET: &str = "Nothing has happened yet at this step.";
+        let Some(session) = &self.session else {
+            return Vec::new();
+        };
+        let t = &session.run.timeline;
+        let Some(event) = t.event_index_at(self.step).and_then(|i| t.event(i)) else {
+            return vec![Mapped::plain(NOTHING_YET)];
+        };
+        let mut meta = format!(
+            "last event \u{b7} step {} \u{b7} pid {}",
+            thousands(event.step),
+            event.pid
+        );
+        if event.tid != event.pid {
+            meta.push_str(&format!(" \u{b7} tid {}", event.tid));
+        }
+        if let Some(name) = t.name_of(event.pid) {
+            meta.push_str(&format!(" \u{b7} {}", describe::clip(name, MAX_NAME_CHARS)));
+        }
+        vec![Mapped::plain(meta), mapped(&describe::describe(event).text)]
+    }
+
+    /// Where the run parts from the one it is compared with, once the
+    /// playhead is past it, or that the two never part.
+    fn shown_agreement(&self) -> Option<(String, Vec<String>)> {
+        match self.session.as_ref()?.agreement()? {
+            Agreement::Parted {
+                step: at,
+                title,
+                lines,
+            } if self.step >= at => Some((title, lines)),
+            Agreement::Same { title, lines } => Some((title, lines)),
+            Agreement::Parted { .. } => None,
+        }
+    }
+
+    /// The divergence card: its title, then its lines.
+    pub(super) fn divergence_lines(&self) -> Vec<Mapped> {
+        let Some((title, lines)) = self.shown_agreement() else {
+            return Vec::new();
+        };
+        std::iter::once(Mapped::plain(title))
+            .chain(lines.iter().map(|l| mapped(l)))
+            .collect()
+    }
+
+    /// The fork card for the latest fork made from the playhead.
+    pub(super) fn fork_card_lines(&self) -> Vec<Mapped> {
+        let Some(fork) = self.forks.last() else {
+            return Vec::new();
+        };
+        let step = thousands(fork.step);
+        let schedule = fork.schedule;
+        let (title, body) = match &fork.state {
+            ForkState::Pending => (
+                format!("Forking at step {step} with schedule {schedule}"),
+                "The engine is running the branch; it takes about as long as the run did."
+                    .to_string(),
+            ),
+            ForkState::Created(forked) => (
+                format!(
+                    "Forked at step {step} with schedule {schedule} \u{2192} run {}",
+                    short_id(&forked.id)
+                ),
+                forked.summary.clone(),
+            ),
+            ForkState::Failed(error) => (
+                format!("Fork at step {step} with schedule {schedule} failed"),
+                error.clone(),
+            ),
+        };
+        vec![Mapped::plain(title), mapped(&body)]
     }
 }

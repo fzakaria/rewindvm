@@ -73,6 +73,9 @@ pub const ROW_HOVER: u32 = 0x1a1d22;
 /// Buttons under the pointer.
 pub const RAISED_HOVER: u32 = 0x1d2127;
 
+/// Selected text's background: the divergence blue at 40 percent.
+pub const SELECTION_A: u32 = 0x4a77b866;
+
 /// Phase segments cycle through these greys, darkest first.
 pub const PHASE_GREYS: [u32; 5] = [0x2c323d, 0x323946, 0x39414f, 0x414a5a, 0x4a5466];
 
@@ -165,6 +168,18 @@ pub mod size {
     pub const CARD_GAP: f32 = 8.0;
     pub const SECTION_GAP: f32 = 16.0;
 
+    // Text selection and its menu.
+    /// The sliver a selection shows past a line's end for the line break.
+    pub const SELECTION_LINE_END: f32 = 4.0;
+    pub const MENU_WIDTH: f32 = 160.0;
+    pub const MENU_PAD: f32 = 4.0;
+    pub const MENU_ITEM_PAD_X: f32 = 10.0;
+    pub const MENU_ITEM_PAD_Y: f32 = 6.0;
+    pub const RADIUS_MENU_ITEM: f32 = 6.0;
+
+    // The terminal pane.
+    pub const TERMINAL_ROW_HEIGHT: f32 = 17.0;
+
     // Notices.
     pub const NOTICE_WIDTH: f32 = 400.0;
     pub const NOTICE_INSET: f32 = 16.0;
@@ -206,6 +221,8 @@ pub mod layout {
     pub const LABEL_MIN_SHARE: f32 = 0.05;
     /// About this many tick marks along the timeline.
     pub const TICK_TARGET: u64 = 12;
+    /// The terminal pane's share of the window's height.
+    pub const TERMINAL_SHARE: f32 = 0.42;
     /// A disabled button is drawn at this opacity.
     pub const DISABLED_OPACITY: f32 = 0.4;
 }

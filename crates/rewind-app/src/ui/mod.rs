@@ -7,6 +7,8 @@ mod icons;
 mod licensing;
 mod render;
 mod scrubber;
+mod selectable;
+mod terminal;
 mod tour;
 mod viewer;
 mod widgets;
@@ -45,12 +47,26 @@ actions!(
         TourNext,
         TourBack,
         TourSkip,
+        CopySelection,
+        SelectAll,
+        TerminalCopy,
+        TerminalPaste,
         Quit,
     ]
 );
 
-/// The key context the scrubber's bindings apply in.
+/// The key context of the scrubber's root.
 const KEY_CONTEXT: &str = "Scrubber";
+
+/// Where the scrubber's keys apply: anywhere in it but the terminal pane,
+/// which sends its keys to the command running in it.
+const SCRUBBER_KEYS: &str = "Scrubber && !Terminal";
+
+/// The key context of the terminal pane.
+pub const TERMINAL_CONTEXT: &str = "Terminal";
+
+/// Where the app-wide keys apply: everywhere but the terminal pane.
+const APP_KEYS: &str = "!Terminal";
 
 /// The key context of the license dialog's paste field.
 const LICENSE_CONTEXT: &str = "LicenseDialog";
@@ -154,9 +170,12 @@ fn load_bundled_fonts(cx: &App) {
 
 /// The keyboard map. Arrows move between events, Shift+arrows by one
 /// step, Page Up and Page Down between phases, Home and End to the ends,
-/// f to the failure and d to the divergence.
+/// f to the failure and d to the divergence. Ctrl+C copies the selected
+/// text and Ctrl+A selects all of the panel last clicked in; in the
+/// terminal pane, where Ctrl+C belongs to the command, Ctrl+Shift+C and
+/// Ctrl+Shift+V copy and paste.
 fn bind_keys(cx: &mut App) {
-    let context = Some(KEY_CONTEXT);
+    let context = Some(SCRUBBER_KEYS);
     cx.bind_keys([
         KeyBinding::new("left", PreviousEvent, context),
         KeyBinding::new("right", NextEvent, context),
@@ -168,14 +187,20 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("pagedown", NextPhase, context),
         KeyBinding::new("f", JumpToFailure, context),
         KeyBinding::new("d", JumpToDivergence, context),
+        KeyBinding::new("ctrl-c", CopySelection, context),
+        KeyBinding::new("ctrl-a", SelectAll, context),
+        KeyBinding::new("ctrl-c", CopySelection, Some(LICENSE_CONTEXT)),
+        KeyBinding::new("ctrl-a", SelectAll, Some(LICENSE_CONTEXT)),
+        KeyBinding::new("ctrl-shift-c", TerminalCopy, Some(TERMINAL_CONTEXT)),
+        KeyBinding::new("ctrl-shift-v", TerminalPaste, Some(TERMINAL_CONTEXT)),
         KeyBinding::new("ctrl-v", PasteLicense, Some(LICENSE_CONTEXT)),
         KeyBinding::new("escape", CloseDialog, Some(LICENSE_CONTEXT)),
         KeyBinding::new("enter", TourNext, Some(TOUR_CONTEXT)),
         KeyBinding::new("right", TourNext, Some(TOUR_CONTEXT)),
         KeyBinding::new("left", TourBack, Some(TOUR_CONTEXT)),
         KeyBinding::new("escape", TourSkip, Some(TOUR_CONTEXT)),
-        KeyBinding::new("f1", StartTour, None),
-        KeyBinding::new("ctrl-o", OpenRun, None),
-        KeyBinding::new("ctrl-q", Quit, None),
+        KeyBinding::new("f1", StartTour, Some(APP_KEYS)),
+        KeyBinding::new("ctrl-o", OpenRun, Some(APP_KEYS)),
+        KeyBinding::new("ctrl-q", Quit, Some(APP_KEYS)),
     ]);
 }

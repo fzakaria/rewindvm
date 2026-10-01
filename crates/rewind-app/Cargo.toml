@@ -13,10 +13,14 @@ publish = false
 [workspace]
 
 [dependencies]
+# The terminal pane's emulator and pty, as Zed uses with GPUI.
+alacritty_terminal = "0.26"
 anyhow = "1"
 base64 = "0.22"
 # License keys are Ed25519 signatures, checked offline (see LICENSING.md).
 ed25519-dalek = "2"
+# Channels from the terminal's reader thread to the UI.
+futures = "0.3"
 # .rwd exports: a tar archive compressed with zstd, as the engine writes them.
 tar = "0.4"
 zstd = "0.13"

@@ -1,11 +1,13 @@
-//! What the app asks of the engine: forking a run at a step, and later
-//! serving gdb at a step, opening a shell at a step, and exporting a run.
+//! What the app asks of the engine: forking a run at a step, reading a
+//! file at a step, exporting a run, and the command lines for a shell and
+//! for gdb at a step.
 //!
 //! The app talks to the engine through the `Engine` trait, and `CliEngine`
-//! implements the trait by running the `rewind` command. `rewind fork`
-//! exists; gdb, shell and export do not yet, and say so without running
-//! anything. Every call blocks, and the UI runs them on a background
-//! thread. The engine's environment, REWIND_HOME among it, is the app's.
+//! implements the trait by running the `rewind` command. Every call
+//! blocks, and the UI runs them on a background thread. The shell and gdb
+//! are terminal programs, so the engine only names their command lines and
+//! the terminal pane runs them in a pty. The engine's environment,
+//! REWIND_HOME among it, is the app's.
 
 use std::ffi::OsString;
 use std::io::Read;
@@ -34,25 +36,6 @@ const DEFAULT_HOME_DIR: &str = "rewind";
 const XDG_DATA_ENV: &str = "XDG_DATA_HOME";
 const HOME_FALLBACK_DATA: &str = ".local/share";
 
-/// Engine features the app has buttons for but the engine does not have
-/// yet.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Feature {
-    Gdb,
-    Shell,
-    Export,
-}
-
-impl Feature {
-    pub fn describe(self) -> &'static str {
-        match self {
-            Feature::Gdb => "Attaching gdb",
-            Feature::Shell => "Opening a shell inside the VM",
-            Feature::Export => "Exporting a run",
-        }
-    }
-}
-
 /// Why an engine call did not do what was asked, in words for a notice.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineError {
@@ -62,16 +45,6 @@ pub enum EngineError {
     Failed { command: String, message: String },
     /// The engine made a run the app cannot find on disk.
     Lost { id: String },
-    /// The engine does not have this yet.
-    NotYet(Feature),
-}
-
-impl EngineError {
-    /// Whether the error is the engine's limit rather than a failure,
-    /// which the app shows as information rather than an error.
-    pub fn is_not_yet(&self) -> bool {
-        matches!(self, EngineError::NotYet(_))
-    }
 }
 
 impl std::fmt::Display for EngineError {
@@ -86,9 +59,6 @@ impl std::fmt::Display for EngineError {
                 f,
                 "The engine made run {id}, but it is not next to its parent or in the Rewind home."
             ),
-            EngineError::NotYet(feature) => {
-                write!(f, "{} is coming in a later version.", feature.describe())
-            }
         }
     }
 }
@@ -136,21 +106,41 @@ pub trait Engine: Send + Sync {
     /// by seed `schedule` from that step on. Returns the new run.
     fn fork(&self, run: &Path, step: u64, schedule: u64) -> EngineResult<Forked>;
 
-    /// Brings `run` back to `step` behind a gdb server, and returns the
-    /// address to attach to, as host:port.
-    fn gdb(&self, run: &Path, step: u64) -> EngineResult<String>;
+    /// Writes `run` to `out` as a single .rwd file another machine can
+    /// replay: its trace, keyframes, pages, inputs and kernel.
+    fn export(&self, run: &Path, out: &Path) -> EngineResult<()>;
 
-    /// Opens a shell inside the VM as it was at `step`.
-    fn shell(&self, run: &Path, step: u64) -> EngineResult<()>;
+    /// The command that opens an interactive shell inside a fork of `run`
+    /// at `step`, in process `pid`'s root and working directory, or the
+    /// job's when no process is given.
+    fn shell_command(&self, run: &Path, step: u64, pid: Option<u32>) -> CommandLine;
 
-    /// Writes `run` out as a single file others can replay, and returns
-    /// its path.
-    fn export(&self, run: &Path) -> EngineResult<PathBuf>;
+    /// The command that forks `run` at `step` behind a GDB server and runs
+    /// gdb attached to it.
+    fn gdb_command(&self, run: &Path, step: u64) -> CommandLine;
 
     /// Reads `path` inside the VM as it was at `step` of `run`, as process
     /// `pid` saw it when one is given. The engine brings the run back to
     /// the step to read it, which takes seconds.
     fn cat(&self, run: &Path, step: u64, pid: Option<u32>, path: &str) -> EngineResult<FileAtStep>;
+}
+
+/// A program and its arguments, for the terminal pane to run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommandLine {
+    pub program: OsString,
+    pub args: Vec<OsString>,
+}
+
+impl CommandLine {
+    /// The command as one line, for titles and messages.
+    pub fn display(&self) -> String {
+        std::iter::once(&self.program)
+            .chain(&self.args)
+            .map(|part| part.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
 }
 
 /// A file as it was at a step.
@@ -181,6 +171,19 @@ impl CliEngine {
     pub fn new(program: impl Into<OsString>) -> CliEngine {
         CliEngine {
             program: program.into(),
+        }
+    }
+
+    /// The error for a command that did not start.
+    fn spawn_error(&self, e: std::io::Error, command: &str) -> EngineError {
+        match e.kind() {
+            std::io::ErrorKind::NotFound => EngineError::Missing {
+                program: self.program.to_string_lossy().into_owned(),
+            },
+            _ => EngineError::Failed {
+                command: command.to_string(),
+                message: e.to_string(),
+            },
         }
     }
 
@@ -246,16 +249,50 @@ impl Engine for CliEngine {
         })
     }
 
-    fn gdb(&self, _run: &Path, _step: u64) -> EngineResult<String> {
-        Err(EngineError::NotYet(Feature::Gdb))
+    fn export(&self, run: &Path, out: &Path) -> EngineResult<()> {
+        // rewind export <run> --replayable -o <out>
+        let args: [OsString; 5] = [
+            "export".into(),
+            run.into(),
+            "--replayable".into(),
+            "-o".into(),
+            out.into(),
+        ];
+        let command = self.command_line(&args);
+        let output = Command::new(&self.program)
+            .args(&args)
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|e| self.spawn_error(e, &command))?;
+        if output.status.success() {
+            return Ok(());
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let message = last_line(&stderr)
+            .map(str::to_string)
+            .unwrap_or_else(|| output.status.to_string());
+        Err(EngineError::Failed { command, message })
     }
 
-    fn shell(&self, _run: &Path, _step: u64) -> EngineResult<()> {
-        Err(EngineError::NotYet(Feature::Shell))
+    fn shell_command(&self, run: &Path, step: u64, pid: Option<u32>) -> CommandLine {
+        // rewind shell <run> <step> [--pid P]
+        let mut args: Vec<OsString> = vec!["shell".into(), run.into(), step.to_string().into()];
+        if let Some(pid) = pid {
+            args.push("--pid".into());
+            args.push(pid.to_string().into());
+        }
+        CommandLine {
+            program: self.program.clone(),
+            args,
+        }
     }
 
-    fn export(&self, _run: &Path) -> EngineResult<PathBuf> {
-        Err(EngineError::NotYet(Feature::Export))
+    fn gdb_command(&self, run: &Path, step: u64) -> CommandLine {
+        // rewind gdb <run> <step>
+        CommandLine {
+            program: self.program.clone(),
+            args: vec!["gdb".into(), run.into(), step.to_string().into()],
+        }
     }
 
     fn cat(&self, run: &Path, step: u64, pid: Option<u32>, path: &str) -> EngineResult<FileAtStep> {
@@ -450,17 +487,46 @@ mod tests {
     }
 
     #[test]
-    fn gdb_shell_and_export_are_not_there_yet() {
-        // The three say so without running anything, as information.
-        let engine = CliEngine::new("rewind-engine-that-does-not-exist");
-        let err = engine.gdb(Path::new("/run"), 1).unwrap_err();
-        assert!(err.is_not_yet());
+    fn export_asks_for_a_replayable_file_at_the_path() {
+        // The stand-in exits 0 for a written export, and 1 with a reason
+        // for a refused one; the arguments name the run and the output.
+        let dir = temp_dir("export");
+        let (run, out) = (dir.join("run"), dir.join("out.rwd"));
+        let engine = fake_engine(&dir, "", "rewind: wrote out.rwd (3.1 MB)\\n", 0);
+        retrying(|| engine.export(&run, &out)).unwrap();
+        let args = std::fs::read_to_string(dir.join("args")).unwrap();
         assert_eq!(
-            err.to_string(),
-            "Attaching gdb is coming in a later version."
+            args.trim(),
+            format!("export {} --replayable -o {}", run.display(), out.display())
         );
-        assert!(engine.shell(Path::new("/run"), 1).unwrap_err().is_not_yet());
-        assert!(engine.export(Path::new("/run")).unwrap_err().is_not_yet());
+
+        let engine = fake_engine(&dir, "", "rewind: no keyframes for this run\\n", 1);
+        let err = retrying(|| engine.export(&run, &out)).unwrap_err();
+        let EngineError::Failed { message, .. } = err else {
+            panic!("{err:?}");
+        };
+        assert_eq!(message, "rewind: no keyframes for this run");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn shell_and_gdb_name_the_run_the_step_and_the_process() {
+        // The command lines the terminal pane runs, built without running
+        // anything.
+        let engine = CliEngine::new("rewind");
+        let run = Path::new("/runs/abc");
+        assert_eq!(
+            engine.shell_command(run, 4_392, Some(165)).display(),
+            "rewind shell /runs/abc 4392 --pid 165"
+        );
+        assert_eq!(
+            engine.shell_command(run, 10, None).display(),
+            "rewind shell /runs/abc 10"
+        );
+        assert_eq!(
+            engine.gdb_command(run, 4_392).display(),
+            "rewind gdb /runs/abc 4392"
+        );
     }
 
     #[test]

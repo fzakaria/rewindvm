@@ -8,6 +8,7 @@
 use rewind_trace::{Event, EventKind, signal_name};
 
 use crate::model::{ExitStatus, signo};
+use crate::selection::{Mapped, Splice};
 
 /// Text inside a described event is cut to this many characters.
 const MAX_QUOTED_CHARS: usize = 160;
@@ -208,12 +209,19 @@ pub fn clip(text: &str, max: usize) -> String {
 /// design shows them: /nix/store/9x2k...-mylib-0.3.0.drv. Everything else,
 /// including text that only looks like a store path, is unchanged.
 pub fn short_store_paths(text: &str) -> String {
+    short_store_paths_mapped(text).shown
+}
+
+/// `short_store_paths`, keeping track of what each shortened hash stands
+/// for, so a selection of the shown text copies the full paths.
+pub fn short_store_paths_mapped(text: &str) -> Mapped {
     const STORE: &str = "/nix/store/";
     const HASH_LEN: usize = 32;
     const HASH_SHOWN: usize = 4;
     const SEPARATOR: u8 = b'-';
 
     let mut out = String::with_capacity(text.len());
+    let mut splices = Vec::new();
     let mut rest = text;
     while let Some(at) = rest.find(STORE) {
         let (before, after) = rest.split_at(at + STORE.len());
@@ -227,12 +235,21 @@ pub fn short_store_paths(text: &str) -> String {
             rest = after;
             continue;
         }
+
+        // The hash's first characters stay; the rest becomes an ellipsis
+        // that stands for them.
+        let original_start = text.len() - after.len() + HASH_SHOWN;
         out.push_str(&after[..HASH_SHOWN]);
+        let shown_start = out.len();
         out.push(ELLIPSIS);
+        splices.push(Splice {
+            shown: shown_start..out.len(),
+            original: original_start..original_start + HASH_LEN - HASH_SHOWN,
+        });
         rest = &after[HASH_LEN..];
     }
     out.push_str(rest);
-    out
+    Mapped::new(out, text.to_string(), splices)
 }
 
 /// Quoted text in a plain sentence is cut to this many characters.
@@ -498,6 +515,15 @@ mod tests {
             "building '/nix/store/9x2k\u{2026}-mylib-0.3.0.drv' with /nix/store/v6xd\u{2026}-builder.sh"
         );
         assert_eq!(short_store_paths("/tmp/run"), "/tmp/run");
+        let full = "cd /nix/store/9x2kq8v1c7m3dzf0ha5slw4n6yrbp2jt-mylib-0.3.0 && make";
+        let mapped = short_store_paths_mapped(full);
+        assert_eq!(
+            mapped.shown,
+            "cd /nix/store/9x2k\u{2026}-mylib-0.3.0 && make"
+        );
+        assert_eq!(mapped.copy(0..mapped.shown.len()), full);
+        let at = mapped.shown.find("-mylib").unwrap();
+        assert_eq!(mapped.copy(at..mapped.shown.len()), "-mylib-0.3.0 && make");
         assert_eq!(
             short_store_paths("/nix/store/short-x"),
             "/nix/store/short-x"

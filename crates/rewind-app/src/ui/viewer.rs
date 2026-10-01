@@ -11,16 +11,18 @@
 use std::time::Duration;
 
 use gpui::{
-    Context, Div, MouseButton, Role, UniformListScrollHandle, div, prelude::*, px, relative, rgb,
-    uniform_list,
+    Context, CursorStyle, Div, MouseButton, Role, ScrollStrategy, UniformListScrollHandle, div,
+    prelude::*, px, relative, rgb, uniform_list,
 };
 
 use crate::describe::{short_store_paths, thousands};
 use crate::engine::{EngineError, FileAtStep};
 use crate::run::{Origin, Session};
+use crate::selection::{Mapped, Surface, part_of_line};
 use crate::theme::{self, layout, size};
 use crate::ui::icons::Icon;
 use crate::ui::scrubber::Scrubber;
+use crate::ui::selectable::{selectable, selects, viewer_line};
 use crate::ui::widgets::{icon, panel_title};
 use crate::viewer::{self, Kind, View};
 
@@ -121,6 +123,7 @@ impl Scrubber {
             generation: 0,
             scroll: UniformListScrollHandle::new(),
         });
+        self.clear_selection_in(&[Surface::Viewer]);
         if unavailable.is_none() {
             self.count_engine_action(cx);
             self.fetch_file(cx);
@@ -130,7 +133,32 @@ impl Scrubber {
 
     pub(super) fn close_viewer(&mut self, cx: &mut Context<Self>) {
         self.viewer = None;
+        self.clear_selection_in(&[Surface::Viewer]);
         cx.notify();
+    }
+
+    /// The contents on screen, when the viewer shows a file's contents.
+    pub(super) fn viewer_view(&self) -> Option<&View> {
+        match self.viewer.as_ref()?.shown.as_ref()? {
+            Fetched::Contents { view, .. } => Some(view),
+            _ => None,
+        }
+    }
+
+    /// Scrolls the viewer so line `line` is at its top.
+    pub(super) fn scroll_viewer_to(&self, line: usize) {
+        if let Some(viewer) = &self.viewer {
+            viewer.scroll.scroll_to_item(line, ScrollStrategy::Top);
+        }
+    }
+
+    /// The message the viewer shows in place of contents, as one line.
+    pub(super) fn viewer_message_lines(&self) -> Vec<Mapped> {
+        self.viewer
+            .as_ref()
+            .and_then(viewer_message)
+            .map(|(text, _)| vec![Mapped::plain(text)])
+            .unwrap_or_default()
     }
 
     pub(super) fn toggle_pin(&mut self, cx: &mut Context<Self>) {
@@ -220,6 +248,13 @@ impl Scrubber {
                     return;
                 }
                 viewer.loading = false;
+                this.selecting.selection = this
+                    .selecting
+                    .selection
+                    .filter(|s| s.surface != Surface::Viewer);
+                let Some(viewer) = &mut this.viewer else {
+                    return;
+                };
                 viewer.shown = Some(match result {
                     Ok(FileAtStep::Exists { bytes, complete }) => Fetched::Contents {
                         step,
@@ -338,20 +373,12 @@ impl Scrubber {
                     .child(status),
             );
 
-        // The body: the contents, or a message in their place.
-        let ui_font = self.fonts.ui.clone();
-        let message = |text: String, color: u32| {
-            div()
-                .p(px(size::PANEL_PAD_X))
-                .font_family(ui_font.clone())
-                .text_size(px(size::TEXT_UI))
-                .text_color(rgb(color))
-                .child(text)
-                .into_any_element()
-        };
-        let body = match (&viewer.shown, viewer.unavailable) {
-            (_, Some(reason)) => message(reason.to_string(), theme::SOFT),
-            (Some(Fetched::Contents { view, .. }), None) => {
+        // The body: the contents, or a message in their place, both
+        // selectable.
+        let registry = self.selecting.registry.clone();
+        let selected = self.selected_range(Surface::Viewer);
+        let body = match (&viewer.shown, viewer.unavailable, viewer_message(viewer)) {
+            (Some(Fetched::Contents { view, .. }), None, _) => {
                 let lines = view.lines.len();
                 let numbered = view.kind == Kind::Text;
                 let digits = lines.max(1).to_string().len();
@@ -364,6 +391,7 @@ impl Scrubber {
                         else {
                             return Vec::new();
                         };
+                        let registry = this.selecting.registry.clone();
                         range
                             .filter_map(|i| {
                                 let line = view.lines.get(i)?;
@@ -372,6 +400,10 @@ impl Scrubber {
                                 } else {
                                     String::new()
                                 };
+                                let text = viewer_line(line).shown;
+                                let part = selected
+                                    .as_ref()
+                                    .and_then(|r| part_of_line(r, i, text.len()));
                                 Some(
                                     div()
                                         .id(i)
@@ -390,11 +422,9 @@ impl Scrubber {
                                                     .child(number),
                                             )
                                         })
-                                        .child(
-                                            div()
-                                                .text_color(rgb(theme::SOFT))
-                                                .child(line.replace('\t', "    ")),
-                                        ),
+                                        .child(div().text_color(rgb(theme::SOFT)).child(
+                                            selectable(Surface::Viewer, i, text, part, &registry),
+                                        )),
                                 )
                             })
                             .collect::<Vec<_>>()
@@ -406,30 +436,19 @@ impl Scrubber {
                 .py(px(size::LIST_PAD_Y))
                 .into_any_element()
             }
-            (Some(Fetched::Missing { step }), None) => message(
-                format!(
-                    "{} did not exist at step {}. Move the playhead to a step after the file was written.",
-                    viewer.path,
-                    thousands(*step)
-                ),
-                theme::SOFT,
-            ),
-            (Some(Fetched::Failed { message: text, .. }), None) => message(text.clone(), theme::RED_SOFT),
-            (Some(Fetched::Unreadable { message: text, .. }), None) => {
-                message(text.to_string(), theme::SOFT)
+            (_, _, Some((text, color))) => {
+                let part = selected
+                    .as_ref()
+                    .and_then(|r| part_of_line(r, 0, text.len()));
+                div()
+                    .p(px(size::PANEL_PAD_X))
+                    .font_family(self.fonts.ui.clone())
+                    .text_size(px(size::TEXT_UI))
+                    .text_color(rgb(color))
+                    .child(selectable(Surface::Viewer, 0, text, part, &registry))
+                    .into_any_element()
             }
-            (Some(Fetched::Booting { step, job_start }), None) => message(
-                format!(
-                    "At step {} the VM is still booting. The job starts at step {}; move the playhead past it to read the file.",
-                    thousands(*step),
-                    thousands(*job_start)
-                ),
-                theme::SOFT,
-            ),
-            (None, None) => message(
-                "Rewind is bringing the run back to this step to read the file. This takes a few seconds.".to_string(),
-                theme::MUTED,
-            ),
+            _ => div().into_any_element(),
         };
         let dim = if viewer.loading && viewer.shown.is_some() {
             STALE_OPACITY
@@ -447,19 +466,55 @@ impl Scrubber {
                 .bg(rgb(theme::PANEL))
                 .child(title)
                 .child(heading)
-                .child(
+                .child(selects(
                     div()
                         .flex()
                         .flex_col()
                         .flex_grow(layout::FILL)
                         .min_h_0()
                         .opacity(dim)
+                        .cursor(CursorStyle::IBeam)
                         .font_family(mono)
                         .text_size(px(size::TEXT_MONO))
                         .child(body),
-                ),
+                    Surface::Viewer,
+                    cx,
+                )),
         )
     }
+}
+
+/// The message the viewer shows in place of a file's contents, and its
+/// color, or None while it shows contents.
+fn viewer_message(viewer: &FileViewer) -> Option<(String, u32)> {
+    if let Some(reason) = viewer.unavailable {
+        return Some((reason.to_string(), theme::SOFT));
+    }
+    Some(match viewer.shown.as_ref() {
+        Some(Fetched::Contents { .. }) => return None,
+        Some(Fetched::Missing { step }) => (
+            format!(
+                "{} did not exist at step {}. Move the playhead to a step after the file was written.",
+                viewer.path,
+                thousands(*step)
+            ),
+            theme::SOFT,
+        ),
+        Some(Fetched::Failed { message, .. }) => (message.clone(), theme::RED_SOFT),
+        Some(Fetched::Unreadable { message, .. }) => (message.to_string(), theme::SOFT),
+        Some(Fetched::Booting { step, job_start }) => (
+            format!(
+                "At step {} the VM is still booting. The job starts at step {}; move the playhead past it to read the file.",
+                thousands(*step),
+                thousands(*job_start)
+            ),
+            theme::SOFT,
+        ),
+        None => (
+            "Rewind is bringing the run back to this step to read the file. This takes a few seconds.".to_string(),
+            theme::MUTED,
+        ),
+    })
 }
 
 /// The status line for a file's contents: its kind, its size, and a note

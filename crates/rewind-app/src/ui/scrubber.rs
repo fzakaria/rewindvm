@@ -3,28 +3,42 @@
 //! Drawing lives in `render`.
 
 use std::cell::Cell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui::{
-    ClipboardItem, Context, FocusHandle, PathPromptOptions, SharedString, UniformListScrollHandle,
-    Window,
+    Context, FocusHandle, PathPromptOptions, SharedString, UniformListScrollHandle, Window,
 };
 
 use crate::describe::thousands;
 use crate::engine::{Engine, EngineError, EngineResult, Forked};
 use crate::model::{LogFilter, Motion};
 use crate::run::{Agreement, Origin, Session, short_id};
+use crate::selection::Surface;
 use crate::tour::Tour;
 use crate::ui::Launch;
 use crate::ui::licensing::Licensing;
+use crate::ui::selectable::SelectionState;
+use crate::ui::terminal::{PaneKind, TerminalPane};
 use crate::ui::viewer::FileViewer;
 use crate::ui::widgets::Fonts;
 
 /// How long a notice stays up.
 const NOTICE_DURATION: Duration = Duration::from_secs(8);
+
+/// How often a running export's notice reports the size written so far.
+const EXPORT_PROGRESS_EVERY: Duration = Duration::from_millis(500);
+
+/// Bytes in the megabytes the export's progress is counted in.
+const MEGABYTE: f64 = 1_000_000.0;
+
+/// The name an export is offered under when the run has no id.
+const EXPORT_FALLBACK_NAME: &str = "run";
+
+/// The extension of Rewind's export files.
+const EXPORT_EXTENSION: &str = "rwd";
 
 /// Why an example run cannot be forked.
 const EXAMPLE_FORK: &str = "Forking runs the build again from the playhead, which needs the engine and KVM on this machine. The example's inputs, its kernel, initramfs and Nix store paths, belong to the machine that recorded it. Record a run of your own with rewind nix to fork it.";
@@ -68,6 +82,13 @@ pub enum NoticeAction {
     Buy,
     /// Open the license dialog.
     EnterLicense,
+    /// Export the run on screen to this path, when there is no file
+    /// chooser to ask with.
+    ExportTo(PathBuf),
+    /// Show a file in the desktop's file manager.
+    Reveal(PathBuf),
+    /// Put text on the clipboard.
+    CopyText(String),
     /// Close the notice.
     Dismiss,
 }
@@ -78,6 +99,9 @@ impl NoticeAction {
             NoticeAction::OpenRun { .. } => "Open fork",
             NoticeAction::Buy => "Buy",
             NoticeAction::EnterLicense => "Enter license",
+            NoticeAction::ExportTo(_) => "Export there",
+            NoticeAction::Reveal(_) => "Show in folder",
+            NoticeAction::CopyText(_) => "Copy path",
             NoticeAction::Dismiss => "Not now",
         }
     }
@@ -100,6 +124,63 @@ pub enum PickKind {
     RunDirectory,
     /// A trace file or a .rwd export.
     File,
+}
+
+/// An export the engine is writing.
+pub struct ExportJob {
+    pub out: PathBuf,
+    /// The notice that shows its progress.
+    pub notice: u64,
+    pub started: Instant,
+}
+
+/// What needs the engine to bring a run back to a step, for the message
+/// shown when a run cannot be brought back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Replay {
+    Shell,
+    Gdb,
+}
+
+impl Replay {
+    fn doing(self) -> &'static str {
+        match self {
+            Replay::Shell => "Opening a shell",
+            Replay::Gdb => "Attaching gdb",
+        }
+    }
+
+    fn to_do(self) -> &'static str {
+        match self {
+            Replay::Shell => "open a shell",
+            Replay::Gdb => "attach gdb",
+        }
+    }
+}
+
+/// Why `origin`'s runs cannot be brought back to a step for `replay`, in
+/// words for a notice, or None when they can.
+pub fn replay_unavailable(origin: &Origin, replay: Replay) -> Option<String> {
+    let needs = format!(
+        "{} forks the run at the playhead, which needs the run's inputs and Rewind with KVM on this machine.",
+        replay.doing()
+    );
+    let why = match origin {
+        Origin::Local => return None,
+        Origin::Example => format!(
+            "This example was recorded on another machine and ships as its trace only. Record a run of your own with rewind nix to {} at any step.",
+            replay.to_do()
+        ),
+        Origin::Export(file) => format!(
+            "This run was opened from {}, and the app unpacks only its trace. Import it with rewind import, then open the imported run.",
+            file.display()
+        ),
+        Origin::TraceFile => {
+            "This run was opened from a bare trace file. Open its run directory instead."
+                .to_string()
+        }
+    };
+    Some(format!("{needs} {why}"))
 }
 
 /// The scrubber: one run, the playhead over it, and everything around.
@@ -133,6 +214,12 @@ pub struct Scrubber {
     /// A press on the title bar that the next motion turns into a window
     /// move.
     pub(super) titlebar_armed: bool,
+    /// The text selection, the context menu, and where lines were drawn.
+    pub(super) selecting: SelectionState,
+    /// The terminal pane, while a shell or gdb is open in it.
+    pub(super) terminal: Option<TerminalPane>,
+    /// The export the engine is writing, if any.
+    pub(super) exporting: Option<ExportJob>,
     next_notice: u64,
     /// The window title last set, to set it only when it changes.
     title: Option<String>,
@@ -161,6 +248,9 @@ impl Scrubber {
             tour: None,
             tour_focus: cx.focus_handle(),
             titlebar_armed: false,
+            selecting: SelectionState::default(),
+            terminal: None,
+            exporting: None,
             viewer: None,
             next_notice: 0,
             title: None,
@@ -189,6 +279,7 @@ impl Scrubber {
         self.viewer = None;
         self.log_followed = None;
         self.files_followed = None;
+        self.selecting.selection = None;
         self.session = Some(session);
         cx.notify();
     }
@@ -216,6 +307,15 @@ impl Scrubber {
             return;
         }
         self.step = step;
+
+        // The lists and cards say what is true at the playhead, so a
+        // selection in them would now cover other text.
+        self.clear_selection_in(&[
+            Surface::Processes,
+            Surface::Files,
+            Surface::EventCard,
+            Surface::Divergence,
+        ]);
         self.playhead_moved(cx);
         cx.notify();
     }
@@ -247,6 +347,7 @@ impl Scrubber {
             LogFilter::Output => LogFilter::WithConsole,
             LogFilter::WithConsole => LogFilter::Output,
         };
+        self.clear_selection_in(&[Surface::Log]);
         cx.notify();
     }
 
@@ -276,8 +377,16 @@ impl Scrubber {
         body: impl Into<SharedString>,
         actions: Vec<NoticeAction>,
         cx: &mut Context<Self>,
-    ) {
-        self.post(tone, title.into(), body.into(), actions, cx);
+    ) -> u64 {
+        self.post(tone, title.into(), body.into(), actions, cx)
+    }
+
+    /// Changes the body of a notice on screen.
+    pub(super) fn update_notice(&mut self, id: u64, body: String, cx: &mut Context<Self>) {
+        if let Some(notice) = self.notices.iter_mut().find(|n| n.id == id) {
+            notice.body = body.into();
+            cx.notify();
+        }
     }
 
     fn post(
@@ -306,6 +415,7 @@ impl Scrubber {
 
     pub(super) fn dismiss(&mut self, id: u64, cx: &mut Context<Self>) {
         self.notices.retain(|n| n.id != id);
+        self.clear_selection_in(&[Surface::Notice(id)]);
         cx.notify();
     }
 
@@ -322,22 +432,17 @@ impl Scrubber {
             NoticeAction::OpenRun { dir, compare } => self.open(dir, Some(compare), cx),
             NoticeAction::Buy => cx.open_url(BUY_URL),
             NoticeAction::EnterLicense => self.open_license_dialog(window, cx),
+            NoticeAction::ExportTo(path) => self.start_export(path, cx),
+            NoticeAction::Reveal(path) => cx.reveal_path(&path),
+            NoticeAction::CopyText(text) => {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text))
+            }
             NoticeAction::Dismiss => {}
         }
     }
 
-    /// Shows an engine error: the engine's missing features as
-    /// information, anything else as an error titled `failed`.
+    /// Shows an engine error as an error titled `failed`.
     fn report(&mut self, failed: &str, error: EngineError, cx: &mut Context<Self>) {
-        if error.is_not_yet() {
-            self.notify_user(
-                NoticeTone::Info,
-                "Not in the engine yet",
-                error.to_string(),
-                cx,
-            );
-            return;
-        }
         self.notify_user(NoticeTone::Error, failed.to_string(), error.to_string(), cx);
     }
 
@@ -433,65 +538,215 @@ impl Scrubber {
         );
     }
 
-    /// Asks the engine for a gdb server at the playhead, and puts the
-    /// command to attach on the clipboard.
-    pub(super) fn attach_gdb(&mut self, cx: &mut Context<Self>) {
+    /// Runs gdb against a fork of the run at the playhead, in the
+    /// terminal pane.
+    pub(super) fn attach_gdb(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_replay(Replay::Gdb, window, cx);
+    }
+
+    /// Opens a shell inside a fork of the run at the playhead, in the
+    /// terminal pane.
+    pub(super) fn open_shell(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_replay(Replay::Shell, window, cx);
+    }
+
+    fn open_replay(&mut self, replay: Replay, window: &mut Window, cx: &mut Context<Self>) {
         let Some(session) = &self.session else {
             return;
         };
-        let (run, step) = (session.run.path.clone(), self.step);
-        self.with_engine(
-            cx,
-            move |engine| engine.gdb(&run, step),
-            move |this, result, cx| match result {
-                Ok(address) => {
-                    let command = format!("target remote {address}");
-                    cx.write_to_clipboard(ClipboardItem::new_string(command.clone()));
-                    this.notify_user(
-                        NoticeTone::Info,
-                        format!("gdb server at step {}", thousands(step)),
-                        format!("{command} (copied to the clipboard)"),
-                        cx,
-                    );
-                }
-                Err(e) => this.report("Could not attach gdb", e, cx),
-            },
-        );
-    }
 
-    /// Asks the engine for a shell in the guest at the playhead.
-    pub(super) fn open_shell(&mut self, cx: &mut Context<Self>) {
-        let Some(session) = &self.session else {
+        // Runs the engine cannot bring back say so instead of opening a
+        // pane that would only print an error.
+        if let Some(reason) = replay_unavailable(&session.run.origin, replay) {
+            self.notify_user(
+                NoticeTone::Info,
+                format!("{} needs a run recorded here", replay.doing()),
+                reason,
+                cx,
+            );
             return;
-        };
+        }
         let (run, step) = (session.run.path.clone(), self.step);
-        self.with_engine(
-            cx,
-            move |engine| engine.shell(&run, step),
-            move |this, result, cx| {
-                if let Err(e) = result {
-                    this.report("Could not open a shell", e, cx);
-                }
-            },
-        );
+
+        // The shell starts in the process the playhead's event is from,
+        // with its root, working directory and environment; the engine
+        // takes the job's once that process has exited.
+        let t = &session.run.timeline;
+        let pid = t
+            .event_index_at(step)
+            .and_then(|i| t.event(i))
+            .map(|e| e.pid);
+        let (kind, pid, command) = match replay {
+            Replay::Shell => (
+                PaneKind::Shell,
+                pid,
+                self.engine.shell_command(&run, step, pid),
+            ),
+            Replay::Gdb => (PaneKind::Gdb, None, self.engine.gdb_command(&run, step)),
+        };
+        self.count_engine_action(cx);
+        self.open_terminal(kind, step, pid, command, window, cx);
     }
 
-    /// Asks the engine to export the run to a single file.
+    /// Asks where to save the run as a replayable .rwd file, then has the
+    /// engine write it there. Runs that are not a run directory on this
+    /// machine say what can be done with them instead.
     pub(super) fn export(&mut self, cx: &mut Context<Self>) {
         let Some(session) = &self.session else {
             return;
         };
+        let refusal = match &session.run.origin {
+            Origin::Local => None,
+            Origin::Example => Some((
+                "The example cannot be exported".to_string(),
+                "Export writes a run with everything another machine needs to replay it: its keyframes, memory pages, inputs and kernel. The example ships as its trace only. Record a run of your own with rewind nix, then export it.".to_string(),
+            )),
+            Origin::Export(file) => Some((
+                "This run already is a .rwd file".to_string(),
+                format!(
+                    "It was opened from {}; share that file. Export writes a replayable .rwd from a run directory on this machine.",
+                    file.display()
+                ),
+            )),
+            Origin::TraceFile => Some((
+                "A bare trace cannot be exported".to_string(),
+                "Export needs the run's directory, with its manifest, keyframes and inputs. Open the run directory, then export it.".to_string(),
+            )),
+        };
+        if let Some((title, body)) = refusal {
+            self.notify_user(NoticeTone::Info, title, body, cx);
+            return;
+        }
+        if let Some(job) = &self.exporting {
+            let body = format!(
+                "The export to {} is still being written.",
+                job.out.display()
+            );
+            self.notify_user(NoticeTone::Info, "An export is running", body, cx);
+            return;
+        }
+
+        let name = session
+            .run
+            .manifest
+            .id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .unwrap_or(EXPORT_FALLBACK_NAME);
+        let suggested = format!("{name}.{EXPORT_EXTENSION}");
+        let directory = export_directory();
+        let fallback = directory.join(&suggested);
+        let answer = cx.prompt_for_new_path(&directory, Some(&suggested));
+        cx.spawn(async move |this, cx| {
+            let answer = answer.await;
+            let _ = this.update(cx, |this, cx| match answer {
+                Ok(Ok(Some(path))) => this.start_export(path, cx),
+                Ok(Ok(None)) | Err(_) => {}
+                Ok(Err(e)) => {
+                    this.offer(
+                        NoticeTone::Info,
+                        "No file chooser",
+                        format!(
+                            "{e:#}. Rewind can write the export to {} instead.",
+                            fallback.display()
+                        ),
+                        vec![NoticeAction::ExportTo(fallback), NoticeAction::Dismiss],
+                        cx,
+                    );
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Has the engine write the run on screen to `out`, with a notice that
+    /// counts what is written until it is done.
+    pub(super) fn start_export(&mut self, out: PathBuf, cx: &mut Context<Self>) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        if self.exporting.is_some() {
+            return;
+        }
         let run = session.run.path.clone();
+        let existed = out.exists();
+        let notice = self.offer(
+            NoticeTone::Info,
+            "Exporting the run",
+            format!("Writing {}\u{2026}", out.display()),
+            Vec::new(),
+            cx,
+        );
+        self.exporting = Some(ExportJob {
+            out: out.clone(),
+            notice,
+            started: Instant::now(),
+        });
+        self.watch_export(cx);
+
+        let target = out.clone();
         self.with_engine(
             cx,
-            move |engine| engine.export(&run),
-            move |this, result, cx| match result {
-                Ok(path) => {
-                    this.notify_user(NoticeTone::Info, "Exported", path.display().to_string(), cx)
+            move |engine| engine.export(&run, &target),
+            move |this, result, cx| {
+                let Some(job) = this.exporting.take() else {
+                    return;
+                };
+                this.dismiss(job.notice, cx);
+                match result {
+                    Ok(()) => {
+                        let written = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
+                        this.offer(
+                            NoticeTone::Info,
+                            "Exported the run",
+                            format!(
+                                "{} ({:.1} MB). Another machine with a compatible CPU can open and replay it.",
+                                out.display(),
+                                written as f64 / MEGABYTE
+                            ),
+                            vec![
+                                NoticeAction::Reveal(out.clone()),
+                                NoticeAction::CopyText(out.display().to_string()),
+                                NoticeAction::Dismiss,
+                            ],
+                            cx,
+                        );
+                    }
+                    Err(e) => {
+                        // A file the export started is half written.
+                        if !existed {
+                            let _ = std::fs::remove_file(&out);
+                        }
+                        this.report("Could not export the run", e, cx);
+                    }
                 }
-                Err(e) => this.report("Could not export", e, cx),
             },
         );
+    }
+
+    /// Updates the export's notice with the size written so far, until
+    /// the export is done.
+    fn watch_export(&mut self, cx: &mut Context<Self>) {
+        let timer = cx.background_executor().timer(EXPORT_PROGRESS_EVERY);
+        cx.spawn(async move |this, cx| {
+            timer.await;
+            let _ = this.update(cx, |this, cx| {
+                let Some(job) = &this.exporting else {
+                    return;
+                };
+                let written = std::fs::metadata(&job.out).map(|m| m.len()).unwrap_or(0);
+                let body = format!(
+                    "Writing {} \u{b7} {:.1} MB so far \u{b7} {} s",
+                    job.out.display(),
+                    written as f64 / MEGABYTE,
+                    job.started.elapsed().as_secs()
+                );
+                let notice = job.notice;
+                this.update_notice(notice, body, cx);
+                this.watch_export(cx);
+            });
+        })
+        .detach();
     }
 
     /// Compares with the other run: jumps to where the two first differ
@@ -570,4 +825,14 @@ impl Scrubber {
         })
         .detach();
     }
+}
+
+/// Where the save dialog for an export starts: the home directory, or the
+/// working directory without one.
+fn export_directory() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|home| home.is_dir())
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| Path::new("/").to_path_buf())
 }
