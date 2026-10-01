@@ -278,26 +278,32 @@ impl Family {
             }
         }
 
-        // The oldest fork of each trace under each root is the original.
-        let mut originals: HashMap<(usize, &str), &RunEntry> = HashMap::new();
-        for (run, _, root, _) in &order {
-            let (Some(_), Some(hash)) = (&run.parent, &run.trace_hash) else {
+        // Under each root, the original of a trace is the root when the
+        // root has it, as rewind prune keeps the run it is given, and the
+        // oldest fork with it otherwise.
+        let mut originals: HashMap<(usize, &str), (&RunEntry, bool)> = HashMap::new();
+        for (run, depth, root, _) in &order {
+            let Some(hash) = &run.trace_hash else {
                 continue;
             };
-            let original = originals.entry((*root, hash.as_str())).or_insert(run);
-            if (run.created, &run.id) < (original.created, &original.id) {
-                *original = run;
+            let is_root = *depth == 0;
+            let original = originals
+                .entry((*root, hash.as_str()))
+                .or_insert((run, is_root));
+            let older = (run.created, &run.id) < (original.0.created, &original.0.id);
+            if is_root || (!original.1 && older) {
+                *original = (run, is_root);
             }
         }
 
         order
             .into_iter()
             .map(|(run, depth, root, graph)| {
-                let identical_to = match (&run.parent, &run.trace_hash) {
-                    (Some(_), Some(hash)) => originals
+                let identical_to = match (depth > 0, &run.trace_hash) {
+                    (true, Some(hash)) => originals
                         .get(&(root, hash.as_str()))
-                        .filter(|original| original.id != run.id)
-                        .map(|original| original.id.clone()),
+                        .filter(|(original, _)| original.id != run.id)
+                        .map(|(original, _)| original.id.clone()),
                     _ => None,
                 };
                 Row {
@@ -500,6 +506,27 @@ mod tests {
             differs.detail(),
             "at 50 \u{b7} schedule 1 \u{b7} differs at 1,204"
         );
+    }
+
+    #[test]
+    fn a_fork_that_repeats_its_root_is_the_same_as_the_root() {
+        // As rewind prune keeps the run it is given: a fork with the
+        // base's trace is a copy of the base, even made before other forks.
+        let mut copy = run("copy", Some(("base", 10)), 5, "exited:2");
+        copy.trace_hash = Some("hash-base".to_string());
+        let mut f = family();
+        f.runs.push(copy);
+        let rows = f.rows();
+        let copy_row = rows.iter().find(|r| r.run.id == "copy").unwrap();
+        assert_eq!(copy_row.identical_to.as_deref(), Some("base"));
+        assert!(
+            rows.iter()
+                .find(|r| r.run.id == "base")
+                .unwrap()
+                .identical_to
+                .is_none()
+        );
+        assert_eq!(f.identical(), 2);
     }
 
     #[test]
