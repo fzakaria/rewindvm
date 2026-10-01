@@ -132,12 +132,15 @@ impl Running {
             .collect())
     }
 
-    /// The mapped files gdb has no copy of: not sent, and not on this
-    /// machine at a store path.
+    /// The programs and libraries gdb has no copy of: store paths that
+    /// were not sent and are not on this machine. A file outside the store
+    /// that the VM did not send is not a program, such as a database
+    /// mapped into memory, so it is not missed.
     pub fn missing(&self, dir: &Path) -> Vec<&str> {
         self.bases()
             .into_iter()
             .map(|(path, _)| path)
+            .filter(|path| path.contains(NIX_STORE))
             .filter(|path| self.local(path, dir).is_none_or(|p| !p.exists()))
             .collect()
     }
@@ -293,6 +296,21 @@ mod tests {
         }));
         assert!(!running.missing(&dir).contains(&"/build/source/test-helper"));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn only_store_files_this_machine_lacks_are_missed() {
+        // The map's store files are made up, so this machine lacks them;
+        // the unsent file outside the store is data, not a program.
+        let running = Running::parse(&answer(&[])).unwrap();
+        let dir = std::env::temp_dir();
+        assert_eq!(
+            running.missing(&dir),
+            vec![
+                "/nix/store/aaa-bash-5.3/bin/bash",
+                "/nix/store/bbb-glibc-2.44/lib/libc.so.6"
+            ]
+        );
     }
 
     #[test]
