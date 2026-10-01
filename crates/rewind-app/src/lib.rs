@@ -10,6 +10,7 @@ pub mod archive;
 pub mod describe;
 pub mod engine;
 pub mod examples;
+pub mod family;
 pub mod license;
 pub mod model;
 pub mod run;

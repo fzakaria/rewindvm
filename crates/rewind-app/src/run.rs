@@ -41,6 +41,16 @@ pub struct Manifest {
     /// The run this one was forked from, and the step it was forked at.
     pub parent: Option<Parent>,
     pub outcome: Option<Outcome>,
+    /// The BLAKE3 hash of the run's input image, which with the command
+    /// names a build that is not a derivation.
+    pub image_hash: Option<String>,
+    /// The BLAKE3 hash of the run's trace: runs with equal hashes did the
+    /// same thing.
+    pub trace_hash: Option<String>,
+    /// For a fork, the step where it first differs from its parent.
+    pub first_difference: Option<u64>,
+    /// When the run was made, in seconds since the epoch.
+    pub created: Option<u64>,
 }
 
 /// Where a forked run branched off.
@@ -85,6 +95,10 @@ impl Manifest {
             seed: seed(json.get("seed")).or_else(|| seed(spec.and_then(|s| s.get("seed")))),
             schedule: spec.and_then(|s| s.get("schedule")).and_then(Value::as_u64),
             parent: parent(json.get("parent")),
+            image_hash: text(spec.and_then(|s| s.get("image_hash"))),
+            trace_hash: text(json.get("trace_hash")),
+            first_difference: json.get("first_difference").and_then(Value::as_u64),
+            created: json.get("created").and_then(Value::as_u64),
             outcome: json
                 .get("outcome")
                 .filter(|o| o.is_object())
@@ -394,79 +408,12 @@ fn run_dir_of(path: &Path) -> Option<PathBuf> {
     dir.join(MANIFEST_FILE).is_file().then(|| dir.to_path_buf())
 }
 
-/// A run on disk as the list of recent runs shows it, from its manifest
-/// alone.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RecentRun {
-    pub dir: PathBuf,
-    pub id: String,
-    /// What it built or ran: the manifest's name, else its derivation or
-    /// command.
-    pub title: String,
-    /// How it ended: exited:2, killed:SIGSEGV, or unknown.
-    pub ending: String,
-    pub failed: bool,
-    /// When the run's directory last changed.
-    pub modified: std::time::SystemTime,
-}
-
-/// What a run without a recorded exit status is listed as.
-const UNKNOWN_ENDING: &str = "unknown";
-
-/// The `limit` runs under `runs` whose directories changed last, newest
-/// first. Directories without a readable manifest are left out.
-pub fn recent_runs(runs: &Path, limit: usize) -> Vec<RecentRun> {
-    let Ok(entries) = std::fs::read_dir(runs) else {
-        return Vec::new();
-    };
-    let mut dirs: Vec<(std::time::SystemTime, PathBuf)> = entries
-        .filter_map(|e| {
-            let e = e.ok()?;
-            let modified = e.metadata().ok()?.modified().ok()?;
-            Some((modified, e.path()))
-        })
-        .collect();
-    dirs.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
-
-    dirs.into_iter()
-        .filter_map(|(modified, dir)| {
-            let manifest = read_manifest(&dir.join(MANIFEST_FILE)).ok()?;
-            let id = manifest.id.clone().unwrap_or_default();
-            let title = [manifest.name.clone(), manifest.drv.clone()]
-                .into_iter()
-                .flatten()
-                .chain(manifest.command.as_ref().map(|c| c.join(" ")))
-                .find(|t| !t.is_empty())
-                .unwrap_or_else(|| dir.display().to_string());
-            let status = manifest
-                .outcome
-                .as_ref()
-                .and_then(|o| o.status)
-                .and_then(|s| u32::try_from(s).ok());
-            let ending = match status.map(ExitStatus::from_raw) {
-                Some(ExitStatus::Code(code)) => format!("exited:{code}"),
-                Some(ExitStatus::Signal { signo, .. }) => format!("killed:{}", signal_name(signo)),
-                None => UNKNOWN_ENDING.to_string(),
-            };
-            Some(RecentRun {
-                dir,
-                id,
-                title,
-                ending,
-                failed: status.is_some_and(|s| s != 0),
-                modified,
-            })
-        })
-        .take(limit)
-        .collect()
-}
-
 pub fn short_id(id: &str) -> String {
     const ID_SHOWN: usize = 8;
     id.chars().take(ID_SHOWN).collect()
 }
 
-fn read_manifest(path: &Path) -> Result<Manifest> {
+pub(crate) fn read_manifest(path: &Path) -> Result<Manifest> {
     let text =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let json: Value =
@@ -609,45 +556,6 @@ mod tests {
         assert_eq!(run_dir_of(&dir.join(TRACE_FILE)), None);
         assert_eq!(run_dir_of(&run.join("other.json")), None);
         std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn recent_runs_come_newest_first_with_their_endings() {
-        // Three runs written a moment apart and one directory with no
-        // manifest; the list skips that one, keeps the newest two, and
-        // reads each ending from the wait status.
-        let runs = std::env::temp_dir().join(format!("rewind-app-recent-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&runs);
-        let write = |id: &str, manifest: &str| {
-            std::fs::create_dir_all(runs.join(id)).unwrap();
-            std::fs::write(runs.join(id).join(MANIFEST_FILE), manifest).unwrap();
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        };
-        write("old", r#"{"id": "old", "name": "first"}"#);
-        write(
-            "pass",
-            r#"{"id": "pass", "name": "hello", "outcome": {"status": 0}}"#,
-        );
-        std::fs::create_dir_all(runs.join("empty")).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        write(
-            "fail",
-            r#"{"id": "fail", "drv": "/nix/store/x-mylib.drv", "outcome": {"status": 512}}"#,
-        );
-
-        let recent = recent_runs(&runs, 2);
-        let summary: Vec<_> = recent
-            .iter()
-            .map(|r| (r.id.as_str(), r.title.as_str(), r.ending.as_str(), r.failed))
-            .collect();
-        assert_eq!(
-            summary,
-            vec![
-                ("fail", "/nix/store/x-mylib.drv", "exited:2", true),
-                ("pass", "hello", "exited:0", false),
-            ]
-        );
-        std::fs::remove_dir_all(&runs).unwrap();
     }
 
     // Opening runs from a temporary directory: each test writes a trace and

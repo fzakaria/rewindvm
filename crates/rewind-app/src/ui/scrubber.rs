@@ -14,8 +14,9 @@ use gpui::{
 
 use crate::describe::thousands;
 use crate::engine::{Engine, EngineError, EngineResult, Forked};
+use crate::family::{Family, RunEntry, families, family_of, scan};
 use crate::model::{LogFilter, Motion};
-use crate::run::{Agreement, Origin, RecentRun, Session, recent_runs, short_id};
+use crate::run::{Agreement, Origin, Session, short_id};
 use crate::selection::Surface;
 use crate::tour::Tour;
 use crate::ui::Launch;
@@ -120,7 +121,7 @@ pub struct Notice {
     pub actions: Vec<NoticeAction>,
 }
 
-/// How many recent runs the empty state lists.
+/// How many families of runs the empty state lists.
 const RECENT_SHOWN: usize = 8;
 
 /// An export the engine is writing.
@@ -202,8 +203,17 @@ pub struct Scrubber {
     pub(super) loading: Option<PathBuf>,
     /// A replayable export being imported into the engine's runs.
     pub(super) importing: Option<PathBuf>,
-    /// The engine's runs that changed last, for the empty state.
-    pub(super) recent: Vec<RecentRun>,
+    /// The families of the engine's runs that changed last, for the empty
+    /// state.
+    pub(super) recent: Vec<Family>,
+    /// The family of the run on screen: every run of its build, its forks
+    /// among them.
+    pub(super) family: Option<Family>,
+    /// Whether the Runs panel, the family as a tree, is open.
+    pub(super) runs_open: bool,
+    pub(super) runs_scroll: UniformListScrollHandle,
+    /// Whether identical forks are being removed.
+    pub(super) pruning: bool,
     /// The Open link dialog, when it is open.
     pub(super) link_dialog: Option<LinkDialog>,
     pub(super) step: u64,
@@ -252,9 +262,11 @@ impl Scrubber {
             loading: None,
             importing: None,
             link_dialog: None,
-            recent: crate::engine::runs_dir()
-                .map(|runs| recent_runs(&runs, RECENT_SHOWN))
-                .unwrap_or_default(),
+            recent: Vec::new(),
+            family: None,
+            runs_open: false,
+            runs_scroll: UniformListScrollHandle::new(),
+            pruning: false,
             step: 0,
             log_filter: LogFilter::Output,
             log_scroll: UniformListScrollHandle::new(),
@@ -277,6 +289,8 @@ impl Scrubber {
         };
         if let Some(session) = launch.session {
             this.show(session, launch.step, cx);
+        } else {
+            this.reload_runs(cx);
         }
         this.start_licensing(cx);
         this
@@ -311,7 +325,97 @@ impl Scrubber {
         if let Some(file) = replayable {
             self.bring_in(file, cx);
         }
+        self.reload_runs(cx);
         cx.notify();
+    }
+
+    /// Reads the engine's runs in the background, for the families the
+    /// empty state lists and the family of the run on screen.
+    pub(super) fn reload_runs(&mut self, cx: &mut Context<Self>) {
+        let read = cx.background_executor().spawn(async move {
+            crate::engine::runs_dir()
+                .map(|dir| scan(&dir))
+                .unwrap_or_default()
+        });
+        cx.spawn(async move |this, cx| {
+            let runs = read.await;
+            let _ = this.update(cx, |this, cx| {
+                let shown = this
+                    .session
+                    .as_ref()
+                    .filter(|s| s.run.origin == Origin::Local)
+                    .and_then(|s| s.run.manifest.id.clone());
+                this.family = shown.and_then(|id| family_of(runs.clone(), &id));
+                this.recent = families(runs).into_iter().take(RECENT_SHOWN).collect();
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Opens or closes the Runs panel.
+    pub(super) fn toggle_runs(&mut self, cx: &mut Context<Self>) {
+        self.runs_open = !self.runs_open;
+        cx.notify();
+    }
+
+    /// Opens a run of the family; the run it was forked from, when there
+    /// is one, is what it is compared with.
+    pub(super) fn open_family_run(&mut self, run: RunEntry, cx: &mut Context<Self>) {
+        self.open(run.dir, None, cx);
+    }
+
+    /// Opens a family from the empty state: its base run, with the Runs
+    /// panel open when the family has more than that one.
+    pub(super) fn open_family(&mut self, family: &Family, cx: &mut Context<Self>) {
+        self.runs_open = family.runs.len() > 1;
+        self.open(family.base().dir.clone(), None, cx);
+    }
+
+    /// Has the engine remove the forks that repeat an older fork's trace,
+    /// under each run of the family that has some, then reads the runs
+    /// again.
+    pub(super) fn prune_identical(&mut self, cx: &mut Context<Self>) {
+        let Some(family) = &self.family else {
+            return;
+        };
+        let roots: Vec<PathBuf> = family
+            .roots_with_identical()
+            .into_iter()
+            .map(|r| r.dir)
+            .collect();
+        if roots.is_empty() {
+            return;
+        }
+        self.pruning = true;
+        cx.notify();
+        self.with_engine(
+            cx,
+            move |engine| {
+                let mut removed = Vec::new();
+                for root in &roots {
+                    removed.extend(engine.prune_identical(root)?);
+                }
+                Ok(removed)
+            },
+            |this, result, cx| {
+                this.pruning = false;
+                match result {
+                    Ok(removed) => this.notify_user(
+                        NoticeTone::Info,
+                        format!(
+                            "Removed {} identical fork{}",
+                            removed.len(),
+                            if removed.len() == 1 { "" } else { "s" }
+                        ),
+                        "Each repeated the trace of an older fork, which is kept.",
+                        cx,
+                    ),
+                    Err(e) => this.report("Could not remove identical forks", e, cx),
+                }
+                this.reload_runs(cx);
+            },
+        );
     }
 
     /// Imports the export `file` into the engine's runs in the background,
@@ -604,6 +708,7 @@ impl Scrubber {
                 match result {
                     Ok(forked) => {
                         mark.state = ForkState::Created(forked.clone());
+                        this.reload_runs(cx);
                         this.offer(
                             NoticeTone::Info,
                             format!(

@@ -125,6 +125,10 @@ pub trait Engine: Send + Sync {
     /// forked, and returns the run.
     fn import(&self, file: &Path) -> EngineResult<Imported>;
 
+    /// Removes the forks under `run` whose trace repeats an older fork's,
+    /// and returns the ids of the runs removed.
+    fn prune_identical(&self, run: &Path) -> EngineResult<Vec<String>>;
+
     /// The command that opens an interactive shell inside a fork of `run`
     /// at `step`, in process `pid`'s root and working directory, or the
     /// job's when no process is given.
@@ -280,6 +284,37 @@ impl Engine for CliEngine {
             .find_map(|line| serde_json::from_str::<Imported>(line).ok());
         match imported {
             Some(imported) if output.status.success() => Ok(imported),
+            _ => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let message = last_line(&stderr)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| output.status.to_string());
+                Err(EngineError::Failed { command, message })
+            }
+        }
+    }
+
+    fn prune_identical(&self, run: &Path) -> EngineResult<Vec<String>> {
+        // rewind prune <run> --identical --json
+        let args: [OsString; 4] = [
+            "prune".into(),
+            run.into(),
+            "--identical".into(),
+            "--json".into(),
+        ];
+        let command = self.command_line(&args);
+        let output = Command::new(&self.program)
+            .args(&args)
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|e| self.spawn_error(e, &command))?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let removed = stdout
+            .lines()
+            .rev()
+            .find_map(|line| serde_json::from_str::<Vec<String>>(line).ok());
+        match removed {
+            Some(removed) if output.status.success() => Ok(removed),
             _ => {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 let message = last_line(&stderr)
@@ -575,6 +610,23 @@ mod tests {
             panic!("{err:?}");
         };
         assert_eq!(message, "rewind: run.rwd: not a zstd stream");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn pruning_returns_the_runs_the_engine_removed() {
+        // The stand-in prints the removed ids as `rewind prune --json`
+        // does; the arguments name the run and ask for identical forks.
+        let dir = temp_dir("prune");
+        let run = dir.join("base");
+        let engine = fake_engine(&dir, r#"["dup1","dup2"]\n"#, "", 0);
+        let removed = retrying(|| engine.prune_identical(&run)).unwrap();
+        assert_eq!(removed, vec!["dup1".to_string(), "dup2".to_string()]);
+        let args = std::fs::read_to_string(dir.join("args")).unwrap();
+        assert_eq!(
+            args.trim(),
+            format!("prune {} --identical --json", run.display())
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

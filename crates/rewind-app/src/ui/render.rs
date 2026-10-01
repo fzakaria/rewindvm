@@ -11,6 +11,7 @@ use gpui::{
 };
 
 use crate::describe::{self, EventTone, short_store_paths, thousands};
+use crate::family::{Family, RunEntry};
 use crate::model::{FileOp, FileTone, LogFilter, Motion, RowKind, Tone, ticks};
 use crate::run::{Agreement, Session, Verdict, short_id};
 use crate::selection::{Mapped, Surface, part_of_line};
@@ -153,6 +154,11 @@ impl Scrubber {
         let log_column = log.flex_grow(layout::LOG_FLEX);
         let middle_column = middle.flex_grow(layout::SIDE_FLEX);
         let at_step_column = at_step.flex_grow(right_flex);
+        let runs_column = self
+            .family
+            .as_ref()
+            .filter(|_| self.runs_open)
+            .map(|family| self.render_runs(family, cx));
         let panels = div()
             .flex()
             .flex_grow(layout::FILL)
@@ -161,7 +167,8 @@ impl Scrubber {
             .bg(rgb(theme::LINE))
             .child(log_column)
             .child(middle_column)
-            .child(at_step_column);
+            .child(at_step_column)
+            .children(runs_column);
 
         // The terminal pane, while a shell or gdb runs, under the panels.
         let terminal = self.render_terminal(window, cx);
@@ -253,6 +260,28 @@ impl Scrubber {
                         short_id(&parent.id),
                         thousands(parent.step)
                     )),
+            );
+        }
+
+        // The Runs panel's toggle, with how many runs the build has.
+        if let Some(family) = &self.family {
+            let open = self.runs_open;
+            left = left.child(
+                div()
+                    .id("runs-toggle")
+                    .flex_none()
+                    .cursor_pointer()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(pill(
+                        format!("runs \u{b7} {}", family.runs.len()),
+                        if open {
+                            PillTone::Compared
+                        } else {
+                            PillTone::Quiet
+                        },
+                        fonts,
+                    ))
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_runs(cx))),
             );
         }
 
@@ -422,6 +451,27 @@ impl Scrubber {
                 marker(parent.step, size::FORK_MARK_WIDTH, theme::AMBER_PALE)
                     .bg(rgba(0))
                     .border_l_2()
+                    .border_dashed()
+                    .border_color(rgb(theme::AMBER_PALE)),
+            );
+        }
+        // Forks of this run on disk, from this session or before it.
+        let shown_id = session.run.manifest.id.clone().unwrap_or_default();
+        let disk_forks = self
+            .family
+            .iter()
+            .flat_map(|f| f.runs.iter())
+            .filter_map(|r| {
+                r.parent
+                    .as_ref()
+                    .filter(|p| p.id == shown_id)
+                    .map(|p| p.step)
+            });
+        for step in disk_forks {
+            track = track.child(
+                marker(step, size::FORK_MARK_WIDTH, theme::AMBER_PALE)
+                    .bg(rgba(0))
+                    .border_l_1()
                     .border_dashed()
                     .border_color(rgb(theme::AMBER_PALE)),
             );
@@ -1349,26 +1399,23 @@ impl Scrubber {
 }
 
 impl Scrubber {
-    /// The recent runs, newest first, each a row that opens it: how it
-    /// ended, its id, what it built or ran, and when it last changed.
+    /// The families of runs that changed last, newest first, one row
+    /// each however many forks they hold: the base run's ending, id and
+    /// title, how many runs and how they ended, and when one last changed.
+    /// A row opens the base run.
     fn render_recent(&self, cx: &mut Context<Self>) -> Div {
         let now = std::time::SystemTime::now();
         let mut list = card(theme::PANEL, theme::LINE)
             .w(px(size::RECENT_WIDTH))
             .child(card_title(theme::MUTED).child("Recent runs"));
-        for (i, run) in self.recent.iter().enumerate() {
-            let tone = if run.failed {
-                PillTone::Failed
-            } else if run.ending == "exited:0" {
-                PillTone::Passed
-            } else {
-                PillTone::Quiet
-            };
+        for (i, family) in self.recent.iter().enumerate() {
+            let base = family.base();
             let when = now
-                .duration_since(run.modified)
+                .duration_since(family.modified())
                 .map(crate::describe::ago)
                 .unwrap_or_default();
-            let dir = run.dir.clone();
+            let summary = (family.runs.len() > 1).then(|| family.summary());
+            let family = family.clone();
             list = list.child(
                 div()
                     .id(SharedString::from(format!("recent-{i}")))
@@ -1384,7 +1431,7 @@ impl Scrubber {
                         div()
                             .flex_none()
                             .w(px(size::RECENT_ENDING_WIDTH))
-                            .child(pill(run.ending.clone(), tone, &self.fonts)),
+                            .child(pill(base.ending.clone(), ending_tone(base), &self.fonts)),
                     )
                     .child(
                         div()
@@ -1392,17 +1439,33 @@ impl Scrubber {
                             .font_family(self.fonts.mono.clone())
                             .text_size(px(size::TEXT_SMALL))
                             .text_color(rgb(theme::MUTED))
-                            .child(short_id(&run.id)),
+                            .child(short_id(&base.id)),
                     )
                     .child(
                         div()
+                            .flex()
+                            .flex_col()
                             .flex_grow(layout::FILL)
                             .min_w_0()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .whitespace_nowrap()
-                            .text_color(rgb(theme::SOFT))
-                            .child(run.title.clone()),
+                            .child(
+                                div()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .whitespace_nowrap()
+                                    .text_color(rgb(theme::SOFT))
+                                    .child(base.title.clone()),
+                            )
+                            .when_some(summary, |d, summary| {
+                                d.child(
+                                    div()
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .whitespace_nowrap()
+                                        .text_size(px(size::TEXT_SMALL))
+                                        .text_color(rgb(theme::MUTED))
+                                        .child(summary),
+                                )
+                            }),
                     )
                     .child(
                         div()
@@ -1411,10 +1474,110 @@ impl Scrubber {
                             .text_color(rgb(theme::MUTED))
                             .child(when),
                     )
-                    .on_click(cx.listener(move |this, _, _, cx| this.open(dir.clone(), None, cx))),
+                    .on_click(cx.listener(move |this, _, _, cx| this.open_family(&family, cx))),
             );
         }
         list
+    }
+
+    /// The Runs panel: the family of the run on screen as a tree, the run
+    /// on screen marked. A row opens its run, compared with the run it
+    /// was forked from. The title offers to remove forks that repeat an
+    /// older fork's trace.
+    fn render_runs(&self, family: &Family, cx: &mut Context<Self>) -> Div {
+        let rows = family.rows();
+        let count = rows.len();
+        let shown_id = self.session().run.manifest.id.clone().unwrap_or_default();
+        let identical = family.identical();
+        let prune = (identical > 0).then(|| {
+            let label = if self.pruning {
+                "removing\u{2026}".to_string()
+            } else {
+                format!("remove {identical} identical")
+            };
+            div()
+                .id("prune-identical")
+                .cursor_pointer()
+                .text_color(rgb(theme::AMBER))
+                .hover(|s| s.text_color(rgb(theme::TEXT)))
+                .child(label)
+                .on_click(cx.listener(|this, _, _, cx| this.prune_identical(cx)))
+                .into_any_element()
+        });
+
+        let fonts = self.fonts.clone();
+        let list = uniform_list(
+            "runs",
+            count,
+            cx.processor(move |_this, range: std::ops::Range<usize>, _window, cx| {
+                range
+                    .map(|i| {
+                        let row = &rows[i];
+                        let shown = row.run.id == shown_id;
+                        let run = row.run.clone();
+                        div()
+                            .id(i)
+                            .w_full()
+                            .h(px(size::RUNS_ROW_HEIGHT))
+                            .flex()
+                            .items_center()
+                            .gap(px(size::CONTROL_GAP))
+                            .pl(px(size::PANEL_PAD_X + size::RUNS_INDENT * row.depth as f32))
+                            .pr(px(size::PANEL_PAD_X))
+                            .cursor_pointer()
+                            .when(shown, |d| d.bg(rgb(theme::ROW_NOW)))
+                            .hover(|s| s.bg(rgb(theme::RAISED_HOVER)))
+                            .child(pill(row.run.ending.clone(), ending_tone(&row.run), &fonts))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .font_family(fonts.mono.clone())
+                                    .text_color(rgb(if shown { theme::AMBER } else { theme::SOFT }))
+                                    .child(short_id(&row.run.id)),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(px(size::TEXT_SMALL))
+                                    .text_color(rgb(theme::MUTED))
+                                    .child(row.detail()),
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.open_family_run(run.clone(), cx)
+                            }))
+                    })
+                    .collect::<Vec<_>>()
+            }),
+        )
+        .track_scroll(&self.runs_scroll)
+        .flex_grow(layout::FILL)
+        .min_h_0()
+        .py(px(size::LIST_PAD_Y));
+
+        div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .w(px(size::RUNS_PANEL_WIDTH))
+            .min_h_0()
+            .bg(rgb(theme::PANEL))
+            .child(panel_title(
+                &format!("Runs of this build \u{b7} {count}"),
+                prune,
+            ))
+            .child(list)
+    }
+}
+
+/// The pill tone for how a run ended.
+fn ending_tone(run: &RunEntry) -> PillTone {
+    if run.failed {
+        PillTone::Failed
+    } else if run.ending == "exited:0" {
+        PillTone::Passed
+    } else {
+        PillTone::Quiet
     }
 }
 

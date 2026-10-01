@@ -197,6 +197,12 @@ pub mod size {
     /// after it line up.
     pub const RECENT_ENDING_WIDTH: f32 = 128.0;
 
+    // The Runs panel.
+    pub const RUNS_PANEL_WIDTH: f32 = 440.0;
+    pub const RUNS_ROW_HEIGHT: f32 = 30.0;
+    /// How far each level of forks is indented.
+    pub const RUNS_INDENT: f32 = 16.0;
+
     // Text.
     pub const TEXT_UI: f32 = 14.0;
     pub const TEXT_SMALL: f32 = 12.0;
