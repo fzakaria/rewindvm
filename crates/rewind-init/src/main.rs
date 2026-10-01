@@ -56,10 +56,21 @@ const INSPECT_CHUNK: usize = 64 * 1024;
 /// The device a shell inspection's terminal is relayed through.
 const CONSOLE_DEVICE: &str = "/dev/rewind-console";
 
-/// The shell when the job's environment names none, and the terminal type
-/// the shell is told it has.
-const FALLBACK_SHELL: &str = "/bin/sh";
+/// A static busybox and a directory of its applets, in the initramfs, for
+/// shells: its ash has line editing, history and completion, and its
+/// applets stand in for tools a job's PATH lacks. Inside an image job's
+/// root, which cannot see the initramfs, they are bind-mounted at
+/// TOOLS_IN_IMAGE for the fork.
+const TOOLS_DIR: &str = "/rewind/tools";
+const TOOLS_IN_IMAGE: &str = "/.rewind-tools";
+
+/// The terminal type a shell is told it has, and its prompt when the
+/// environment sets none.
 const SHELL_TERM: &str = "xterm-256color";
+const SHELL_PROMPT: &str = "[rewind] \\w \\$ ";
+
+/// How far up the process tree to look for a live environment.
+const MAX_ANCESTORS: usize = 64;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -391,7 +402,7 @@ fn shell(pid: i32, (cols, rows): (u16, u16)) -> Result<()> {
     use std::os::fd::AsRawFd;
 
     // Everything that lives outside the job's root is opened first: the
-    // console, the pty and the job's description.
+    // console, the pty and the environment.
     let console = OpenOptions::new()
         .read(true)
         .write(true)
@@ -402,31 +413,40 @@ fn shell(pid: i32, (cols, rows): (u16, u16)) -> Result<()> {
     )
     .map_err(|e| format!("parsing {JOB_PATH}: {e}"))?;
     let (master, slave) = open_pty(cols, rows)?;
-    let env = live_environment(pid).unwrap_or_else(|| job.env.clone());
+    let source = nearest_live(pid);
+    let mut env = source
+        .and_then(live_environment)
+        .unwrap_or_else(|| job.env.clone());
 
-    enter_view_of(pid)?;
+    // The tools, where the shell will see them once inside the view.
+    let (root, cwd) = view_of(source.unwrap_or(0))?;
+    let tools = if fs::canonicalize(&root).is_ok_and(|r| r == Path::new("/")) {
+        TOOLS_DIR.to_string()
+    } else {
+        let target = format!("{root}{TOOLS_IN_IMAGE}");
+        mkdir(&target)?;
+        mount(TOOLS_DIR, &target, "", libc::MS_BIND, "")?;
+        TOOLS_IN_IMAGE.to_string()
+    };
+    enter(&root, &cwd)?;
 
-    // The shell the environment names if it exists here, else the job's
-    // program when that is a shell, else /bin/sh.
-    let exists = |s: &String| Path::new(s).exists();
-    let named = env
+    // The environment's PATH first, so the job's own tools win, then the
+    // applets; and a prompt when the environment has none.
+    let path = env
         .iter()
-        .find(|(k, _)| k == "SHELL")
-        .map(|(_, v)| v.clone())
-        .filter(exists);
-    let program = job
-        .argv
-        .first()
-        .filter(|p| p.ends_with("sh") && p.contains('/'))
-        .cloned()
-        .filter(exists);
-    let shell = named
-        .or(program)
-        .unwrap_or_else(|| FALLBACK_SHELL.to_string());
+        .find(|(k, _)| k == "PATH")
+        .map(|(_, v)| format!("{v}:{tools}/bin"))
+        .unwrap_or_else(|| format!("{tools}/bin"));
+    env.retain(|(k, _)| k != "PATH");
+    env.push(("PATH".to_string(), path));
+    if !env.iter().any(|(k, _)| k == "PS1") {
+        env.push(("PS1".to_string(), SHELL_PROMPT.to_string()));
+    }
+    let shell = format!("{tools}/busybox");
 
     let slave_fd = slave.as_raw_fd();
     let mut cmd = Command::new(&shell);
-    cmd.arg("-i")
+    cmd.args(["ash", "-i"])
         .env_clear()
         .envs(env.iter().map(|(k, v)| (k, v)))
         .env("TERM", SHELL_TERM)
@@ -452,12 +472,55 @@ fn shell(pid: i32, (cols, rows): (u16, u16)) -> Result<()> {
     Ok(())
 }
 
-/// Process `pid`'s environment as it is now, when the process is alive.
+/// The process a look inside should take its view from: `pid` while it is
+/// alive, else its nearest live ancestor, so a process that has just
+/// crashed gives the view of the program that ran it. With no pid, or no
+/// live ancestor short of init, the job's main process. None when there
+/// is none of those either.
+fn nearest_live(pid: i32) -> Option<i32> {
+    let alive = |p: i32| fs::read_link(format!("/proc/{p}/cwd")).is_ok();
+    let mut p = pid;
+    for _ in 0..MAX_ANCESTORS {
+        if p <= 1 {
+            break;
+        }
+        if alive(p) {
+            return Some(p);
+        }
+        p = parent_of(p)?;
+    }
+    main_process().filter(|p| alive(*p))
+}
+
+/// A process's parent, from /proc/<pid>/status.
+fn parent_of(pid: i32) -> Option<i32> {
+    let status = fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    status
+        .lines()
+        .find_map(|l| l.strip_prefix("PPid:"))
+        .and_then(|v| v.trim().parse().ok())
+}
+
+/// The job's main process: init's child with the lowest pid. An
+/// inspection's own process is a child of kthreadd, not of init.
+fn main_process() -> Option<i32> {
+    fs::read_dir("/proc")
+        .ok()?
+        .filter_map(|e| e.ok()?.file_name().to_str()?.parse::<i32>().ok())
+        .filter(|p| *p > 1 && parent_of(*p) == Some(1))
+        .min()
+}
+
+/// Process `pid`'s environment as it is now, when the process is alive
+/// and has one.
 fn live_environment(pid: i32) -> Option<Vec<(String, String)>> {
     if pid <= 0 {
         return None;
     }
     let raw = fs::read(format!("/proc/{pid}/environ")).ok()?;
+    if raw.is_empty() {
+        return None;
+    }
     Some(
         raw.split(|b| *b == 0)
             .filter_map(|entry| {
@@ -604,31 +667,39 @@ fn take_typed(pending: &mut Vec<u8>, mut resize: impl FnMut(u16, u16)) -> Vec<u8
 }
 
 /// Moves this process into the root and working directory of `pid`, or of
-/// the job when `pid` is 0 or has exited.
+/// its nearest live ancestor, or of the job.
 fn enter_view_of(pid: i32) -> Result<()> {
-    let live = pid > 0 && Path::new(&format!("/proc/{pid}/cwd")).exists();
-    let (root, cwd) = if live {
-        (format!("/proc/{pid}/root"), format!("/proc/{pid}/cwd"))
-    } else {
-        let root = if Path::new(IMAGE_ROOT).exists() {
-            IMAGE_ROOT
-        } else {
-            "/"
-        };
-        let job: Job = serde_json::from_slice(
-            &fs::read(JOB_PATH).map_err(|e| format!("reading {JOB_PATH}: {e}"))?,
-        )
-        .map_err(|e| format!("parsing {JOB_PATH}: {e}"))?;
-        (
-            root.to_string(),
-            within(root, &job.cwd).display().to_string(),
-        )
-    };
+    let (root, cwd) = view_of(nearest_live(pid).unwrap_or(0))?;
+    enter(&root, &cwd)
+}
 
+/// The root and working directory of process `pid`, or of the job when
+/// `pid` is 0.
+fn view_of(pid: i32) -> Result<(String, String)> {
+    if pid > 0 {
+        return Ok((format!("/proc/{pid}/root"), format!("/proc/{pid}/cwd")));
+    }
+    let root = if Path::new(IMAGE_ROOT).exists() {
+        IMAGE_ROOT
+    } else {
+        "/"
+    };
+    let job: Job = serde_json::from_slice(
+        &fs::read(JOB_PATH).map_err(|e| format!("reading {JOB_PATH}: {e}"))?,
+    )
+    .map_err(|e| format!("parsing {JOB_PATH}: {e}"))?;
+    Ok((
+        root.to_string(),
+        within(root, &job.cwd).display().to_string(),
+    ))
+}
+
+/// Chroots into `root` and enters `cwd`.
+fn enter(root: &str, cwd: &str) -> Result<()> {
     // The working directory is opened before the chroot, which would hide
     // it, and entered after.
     let dir = File::open(&cwd).map_err(|e| format!("opening {cwd}: {e}"))?;
-    let root_c = CString::new(root.as_str()).unwrap();
+    let root_c = CString::new(root).unwrap();
     // SAFETY: a valid path and a valid descriptor.
     unsafe {
         if libc::chroot(root_c.as_ptr()) != 0 {

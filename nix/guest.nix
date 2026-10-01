@@ -36,6 +36,11 @@ let
   # derivation's own inputs, and a rewind installed without Nix works.
   sandboxShell = pkgs.busybox-sandbox-shell;
 
+  # For `rewind shell`: a static busybox whose ash has line editing,
+  # history and completion, and its applets, which stand in for tools a
+  # job's PATH lacks. rewind-init's TOOLS_DIR.
+  tools = pkgs.pkgsStatic.busybox;
+
   passwd = pkgs.writeText "passwd" ''
     root:x:0:0:Nix build user:/build:/noshell
     nixbld:x:1000:100:Nix build user:/build:/noshell
@@ -59,6 +64,11 @@ let
       ''
         mkdir -p root/{dev,proc,sys,tmp,build,etc,bin,nix,rewind}
         cp ${init}/bin/rewind-init root/init
+        mkdir -p root/rewind/tools/bin
+        cp ${tools}/bin/busybox root/rewind/tools/busybox
+        for applet in $(${tools}/bin/busybox --list); do
+          ln -s ../busybox root/rewind/tools/bin/$applet
+        done
         cp ${sandboxShell}/bin/busybox root/bin/sh
         cp ${passwd} root/etc/passwd
         cp ${group} root/etc/group
