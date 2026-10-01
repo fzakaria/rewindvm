@@ -43,48 +43,48 @@ indentation and text around the block. The app keeps the block in
 
 ## Keys
 
-The public key in the repository is a DEVELOPMENT key. Its signing half
-was generated outside the repository and signs test licenses only.
-
-Before the first release, generate the production pair on a machine you
-trust:
+The signing key lives in 1Password, never in this repository or on disk.
+To make a new pair (only before the first sale, or after a leak):
 
 ```
-cargo run --features issuer --bin rewind-license -- keygen --out <offline dir>
+nix run .#license -- keygen
 ```
 
-This writes `signing.key` (the 32 byte seed in hex, mode 0600; it refuses
-to overwrite an existing key) and prints the public key as a Rust array.
-Paste the array over `PUBLIC_KEY` in `src/license.rs`, then:
+prints the signing key once on standard error, as 64 hex digits, and the
+public key on standard output as a Rust array. Put the 64 digits in a
+1Password item's password field, clear the terminal, and paste the array
+over `PUBLIC_KEY` in `src/license.rs`. `keygen --out <dir>` writes the key to
+`<dir>/signing.key` instead (mode 0600, never overwriting one).
 
-- Keep `signing.key` offline: a password manager entry, or an encrypted
-  volume. It never goes into this repository, a CI secret store you do not
-  control, or a laptop backup in the clear.
-- Anyone with `signing.key` can issue licenses. If it leaks, generate a new
+- Anyone with the signing key can issue licenses. If it leaks, make a new
   pair, ship a release with the new public key, and reissue licenses to
   existing customers.
 - Changing the public key invalidates every license issued with the old
   one, so rotate only when you must.
 
-`rewind-license` is built only with `--features issuer`, so it never ships
-in the app's package.
+`rewind-license` is built only with the `issuer` feature, as its own
+package (`nix/license.nix`), so it never ships in the app's package.
 
 ## Issuing
 
 ```
-rewind-license issue --key signing.key \
+nix run .#license -- issue --key - \
   --name "Ada Lovelace" --email ada@example.com \
   --edition commercial --seats 3
 ```
 
-prints the block. `--issued YYYY-MM-DD` backdates it; without it the
-issue date is today (UTC). The id is 16 random hex digits; record it with
-the order so the license can be revoked on a refund.
+asks for the signing key without echoing it (paste it from 1Password) and
+prints the block. With the 1Password CLI, pipe it instead:
+`op read "op://<vault>/<item>/password" | nix run .#license -- issue --key - ...`.
+`--key <file>` reads a `signing.key`. `--issued YYYY-MM-DD` backdates the
+license; without it the issue date is today (UTC). The id is 16 random hex
+digits; record it with the order so the license can be revoked on a
+refund.
 
 ## Selling with Stripe
 
-A small server holds `signing.key` and turns paid checkouts into
-licenses:
+A small server holds the signing key, as a secret it reads at start, and
+turns paid checkouts into licenses:
 
 1. The site's Buy button creates a Stripe Checkout session with the
    edition and seat count as the price and quantity.
@@ -92,9 +92,9 @@ licenses:
    The server checks the webhook signature with the endpoint's signing
    secret, reads the customer's name and email and the line items, and
    ignores events it has already handled (Stripe retries).
-3. The server runs `rewind-license issue --key signing.key --name ...
---email ... --edition ... --seats ...` and stores the id with the
-   Stripe session id.
+3. The server runs `rewind-license issue --key - --name ... --email ...
+--edition ... --seats ...` with the key on standard input, and stores
+   the id with the Stripe session id.
 4. It emails the block to the customer and answers the webhook with 200.
 5. On `charge.refunded`, it looks up the id and adds it to a revocation
    list that goes into `REVOKED` in the next release.

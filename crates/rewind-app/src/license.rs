@@ -500,10 +500,17 @@ mod tests {
     }
 
     #[test]
-    fn a_license_from_the_development_key_verifies_against_the_compiled_in_key() {
-        // A block issued by `rewind-license issue` with the development
-        // signing key, checked against PUBLIC_KEY.
-        let license = verify(DEV_ISSUED).unwrap();
+    fn the_compiled_in_key_is_a_valid_public_key() {
+        // PUBLIC_KEY is a point on the curve, so a pasted key with a typo
+        // fails here rather than rejecting every license.
+        assert!(VerifyingKey::from_bytes(&PUBLIC_KEY).is_ok());
+    }
+
+    #[test]
+    fn a_block_from_rewind_license_verifies() {
+        // A block in exactly the format `rewind-license issue` prints,
+        // signed with the test key, checked the way the app checks.
+        let license = verify_with(TEST_ISSUED, &public(), &[]).unwrap();
         assert_eq!(license.name, "Rewind Developer");
         assert_eq!(license.edition, Edition::Personal);
     }
@@ -608,19 +615,18 @@ mod tests {
         assert!(!r.tick(minute * 47));
     }
 
-    /// Issued with the development key by
-    /// `rewind-license issue --key <dev signing.key> --name "Rewind Developer"
-    /// --email dev@rewindvm.dev --edition personal --issued 2026-09-30`.
-    const DEV_ISSUED: &str = "\
+    /// The block `rewind-license issue` prints for this license, signed
+    /// with the test key.
+    const TEST_ISSUED: &str = "\
 ----- BEGIN REWIND VM LICENSE -----
 Name: Rewind Developer
 Email: dev@rewindvm.dev
 Edition: Personal
 Seats: 1
-Id: 7fc2cfb27b9475ee
+Id: aeceda4e86dbf3b3
 Issued: 2026-09-30
 Updates-Until: 2029-09-30
-Signature: v95FH3O2PJHkdnm1CpNJUGkw00pVuybUekTsHaC3RPsdJvmZcBXLUlMz0FHXGiW2umpYxlBywhmCEOJx5GUDDA==
+Signature: dZ5wrWQHhkzg1yZ+/tn+d4/TchtDagIAZ0RFz0MBs+OVuv+/rZZTYKBo6bQ93dmEluHRCKn6b3apL4KwxzzPBw==
 ----- END REWIND VM LICENSE -----
 ";
 }

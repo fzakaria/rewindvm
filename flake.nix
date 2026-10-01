@@ -33,15 +33,21 @@
           pkgs = nixpkgs.legacyPackages.${system};
           kernel = import ./nix/kernel.nix { inherit pkgs; };
           guest = import ./nix/guest.nix { inherit pkgs; };
+          app = import ./nix/app.nix { inherit pkgs; };
         in
         {
-          inherit pkgs kernel guest;
+          inherit
+            pkgs
+            kernel
+            guest
+            app
+            ;
           rewind = import ./nix/rewind.nix { inherit pkgs kernel guest; };
           release = import ./nix/release.nix { inherit pkgs kernel guest; };
           appRelease = import ./nix/app-release.nix { inherit pkgs; };
           site = import ./nix/site.nix { inherit pkgs; };
           examples = import ./nix/examples.nix { inherit pkgs; };
-          app = import ./nix/app.nix { inherit pkgs; };
+          license = import ./nix/license.nix { inherit pkgs app; };
         };
     in
     {
@@ -90,6 +96,13 @@
           default = {
             type = "app";
             program = "${p.rewind}/bin/rewind";
+          };
+
+          # `nix run .#license -- keygen | issue ...`: the license issuer
+          # (nix/license.nix, crates/rewind-app/LICENSING.md)
+          license = {
+            type = "app";
+            program = "${p.license}/bin/rewind-license";
           };
 
           # `nix run .#app -- <run>`: the desktop app
