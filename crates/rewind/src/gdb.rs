@@ -204,7 +204,7 @@ struct KernelSymbols {
     file: Option<PathBuf>,
     scripts: Option<PathBuf>,
     sources: Option<PathBuf>,
-    /// Whether `file` has the DWARF, not only the symbol table.
+    /// Whether `file` has the DWARF as well as the symbol table.
     dwarf: bool,
 }
 

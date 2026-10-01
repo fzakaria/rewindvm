@@ -83,7 +83,7 @@
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> nix profile install github:fzakaria/rewindvm</span>
 <span class="cmd"><span class="prompt">$</span> ls -l /dev/kvm</span>
-crw-rw-rw- 1 root kvm 10, 232 Oct  1 06:29 /dev/kvm</code></pre>
+crw-rw-rw- 1 root kvm 10, 232 Oct  1 10:40 /dev/kvm</code></pre>
         <p>
           The build comes from <code>rewindvm.cachix.org</code>, so nothing compiles on your
           machine. Nix asks once whether to trust that cache; say yes, or pass
@@ -94,7 +94,8 @@ crw-rw-rw- 1 root kvm 10, 232 Oct  1 06:29 /dev/kvm</code></pre>
         </p>
         <pre class="console"><code>inputs.rewind.url = "github:fzakaria/rewindvm";
 
-# in your configuration, with inputs.rewind.nixosModules.default imported
+# in your configuration, with inputs.rewind.nixosModules.default imported;
+# it also adds rewindvm.cachix.org to Nix's substituters
 programs.rewind.enable = true;
 programs.rewind.app.enable = true;
 # AMD only: make the branch counter exact at every boot
@@ -122,9 +123,9 @@ programs.rewind.amdBranchCounterWorkaround = true;</code></pre>
 ...
 mylib&gt; running tests/test_pool_shutdown
 ...
-mylib&gt; job 15 done: 42559
-mylib&gt; worker picked job 17
 mylib&gt; job 16 done: 5986
+mylib&gt; worker picked job 18
+mylib&gt; job 17 done: 43360
 mylib&gt; /nix/store/...-bash-5.3p15/bin/bash: line 1:   133 Segmentation fault         (core dumped) ./$t
 mylib&gt; make: *** [Makefile:18: check] Error 1
 error: Cannot build '/nix/store/hvp2d0h9l97d19d3xp5k3vf6xwhg4axr-mylib-0.3.0.drv'.</code></pre>
@@ -145,7 +146,7 @@ error: Cannot build '/nix/store/hvp2d0h9l97d19d3xp5k3vf6xwhg4axr-mylib-0.3.0.drv
         ><code><span class="cmd"><span class="prompt">$</span> rewind nix github:fzakaria/rewindvm#mylib</span>
 rewind: packing 62 store paths for mylib-0.3.0
 ...
-rewind: run 2085adea85fc0f1e exited:0 after 6188 steps, 0.216s virtual, 1.244s wall (poweroff)
+rewind: run 3a778ee7db102410 exited:0 after 6188 steps, 0.216s virtual, 1.744s wall (poweroff)
 /nix/store/f6a9gy362szw6nxx3ikrklr8glr6rdln-mylib-0.3.0 aa30ea54dc47c30f (same as the host's build)</code></pre>
         <p>
           The run used counter time: the VM's clock follows the work done inside it. On AMD, until
@@ -179,29 +180,29 @@ rewind: run 2085adea85fc0f1e exited:0 after 6188 steps, 0.216s virtual, 1.244s w
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind check github:fzakaria/rewindvm#mylib</span>
-schedule   0: exited:0             6188 steps  aa30ea54dc47  run 2085adea85fc0f1e
-schedule   1: exited:2             5766 steps    run b0e9743e983f513e
-schedule   2: exited:0             7372 steps  aa30ea54dc47  run 02e6337029437d6a
-schedule   3: exited:2             5598 steps    run 33f01fdb2994ad19
-schedule   4: exited:0             7531 steps  aa30ea54dc47  run d5709ffb8201f5af
-schedule   5: exited:2             5516 steps    run a84465fa4963ab82
-schedule   6: exited:0             7333 steps  aa30ea54dc47  run b31321cd76ac526e
-schedule   7: exited:0             7281 steps  aa30ea54dc47  run b5b5a1ff4250dffa
-schedule   8: exited:2             5683 steps    run 22dedc7fa7a3cf92
-schedule   9: exited:0             7250 steps  aa30ea54dc47  run e3cfe79a5a9317ce
-schedule  10: exited:0             7324 steps  aa30ea54dc47  run e3ae6a871d83d690
-schedule  11: exited:0             7437 steps  aa30ea54dc47  run 7e6cf91613cd2bb6
-schedule  12: exited:0             7452 steps  aa30ea54dc47  run 0d1445124317d2de
-schedule  13: exited:0             7276 steps  aa30ea54dc47  run 2a59e327039cda87
-schedule  14: exited:0             7274 steps  aa30ea54dc47  run a6e551527fb191c4
-schedule  15: exited:0             7332 steps  aa30ea54dc47  run 052961f7932bce8a
-schedule  16: exited:0             7086 steps  aa30ea54dc47  run d4695c25b79fc9cd
+schedule   0: exited:0             6188 steps  aa30ea54dc47  run 3a778ee7db102410
+schedule   1: exited:2             5766 steps    run 1032f84316112e2c
+schedule   2: exited:0             7372 steps  aa30ea54dc47  run 6dfb41abadbda893
+schedule   3: exited:2             5598 steps    run 461d8de86dd263ae
+schedule   4: exited:0             7531 steps  aa30ea54dc47  run 085d957b59990d29
+schedule   5: exited:2             5516 steps    run 0b271fc1e4a8ba67
+schedule   6: exited:0             7333 steps  aa30ea54dc47  run 09a7b9afabfb0012
+schedule   7: exited:0             7281 steps  aa30ea54dc47  run 01a9108b65354a7b
+schedule   8: exited:2             5683 steps    run cac5e5d024da8388
+schedule   9: exited:0             7250 steps  aa30ea54dc47  run 4e3ac278247554de
+schedule  10: exited:0             7324 steps  aa30ea54dc47  run d9e1461484bd9cb0
+schedule  11: exited:0             7437 steps  aa30ea54dc47  run e68cfb50da87d593
+schedule  12: exited:0             7452 steps  aa30ea54dc47  run 11e39819314e6864
+schedule  13: exited:0             7276 steps  aa30ea54dc47  run 90b95079f652d088
+schedule  14: exited:0             7274 steps  aa30ea54dc47  run 23aca16ef1737d64
+schedule  15: exited:0             7332 steps  aa30ea54dc47  run 21e6597c1c24da8c
+schedule  16: exited:0             7086 steps  aa30ea54dc47  run d0b79a76e797e730
 
 schedule 1 ends differently; narrowing the steps it perturbs
 perturbing only steps 2198..4570 still ends differently
 
-passing: run 2085adea85fc0f1e
-failing: run 9a96fab59759f2a5
+passing: run 3a778ee7db102410
+failing: run 54cb69d5ef30137f
 
 where ./tests/test_pool_shutdown first behaves differently:
   both        4159   166/167   write(1, "worker picked job 2\n")
@@ -227,7 +228,7 @@ where ./tests/test_pool_shutdown first behaves differently:
           until shutdown lands between a worker's check of the pool and its count of the job.
         </p>
         <p>
-          The whole search took 12 seconds. <code>rewind check --all</code> tries every schedule and
+          The whole search took 15 seconds. <code>rewind check --all</code> tries every schedule and
           says how many failed, which measures how flaky a build is:
         </p>
         <pre
@@ -244,7 +245,7 @@ where ./tests/test_pool_shutdown first behaves differently:
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind log 9a96fab5 --steps | tail -4</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind log 54cb69d5 --steps | tail -4</span>
       4569   166  job 16 done: 5986
       4573   166  job 17 done: 43360
       4590   162  /nix/store/...-bash-5.3p15/bin/bash: line 1:   166 Segmentation fault         ./$t
@@ -254,10 +255,10 @@ where ./tests/test_pool_shutdown first behaves differently:
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind events 9a96fab5 --from 4570 --to 4581</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind events 54cb69d5 --from 4570 --to 4581</span>
       4573   166/168   write(1, "job 17 done: 43360\n")
       4574     0/0     console "[    0.198653] test_pool_shutd[168]: segfault at 108 ip 000055a854bdd437 sp 00007f53a1b30e10 error 6 in test_pool_shutdown[1437,55a854bdd000+1000] likely on CPU 0 (core 0, socket 0)"
-      4575     0/0     console "[    0.198659] Code: fa 48 8d 35 2a 0c 00 00 bf 02 00 00 00 b8 00 00 00 00 e8 ac fc ff ff 48 8b 05 b5 2b 00 00 48 8b 38 e8 8d fc ff ff 49 8b 46 58 &lt;83&gt; 80 08 01 00 00 01 ..."
+      4575     0/0     console "[    0.198658] Code: fa 48 8d 35 2a 0c 00 00 bf 02 00 00 00 b8 00 00 00 00 e8 ac fc ff ff 48 8b 05 b5 2b 00 00 48 8b 38 e8 8d fc ff ff 49 8b 46 58 &lt;83&gt; 80 08 01 00 00 01 ..."
       4576   166/168   SIGSEGV code=1 addr=0x108
       4578   166/166   SIGSEGV code=0 addr=0x0
       4581   166/168   thread exit(test_pool_shutd) killed:SIGSEGV</code></pre>
@@ -269,7 +270,7 @@ where ./tests/test_pool_shutdown first behaves differently:
         <p>The processes alive at the crash:</p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind ps 9a96fab5 --at 4576</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind ps 54cb69d5 --at 4576</span>
      1 /init
     34   /nix/store/...-bash-5.3p15/bin/bash -e /nix/store/...-source-stdenv.sh /nix/store/...-default-builder.sh
    161     make SHELL=/nix/store/...-bash-5.3p15/bin/bash PREFIX=$(out) VERBOSE=y check
@@ -289,7 +290,7 @@ where ./tests/test_pool_shutdown first behaves differently:
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind cat 9a96fab5 4576 src/pool.c --pid 166 | sed -n '/^void pool_shutdown/,/^}/p'</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind cat 54cb69d5 4576 src/pool.c --pid 166 | sed -n '/^void pool_shutdown/,/^}/p'</span>
 void pool_shutdown(struct pool *p)
 {
 	pthread_mutex_lock(&amp;p-&gt;lock);
@@ -308,37 +309,61 @@ void pool_shutdown(struct pool *p)
 	free(p);
 }
 
-<span class="cmd"><span class="prompt">$</span> printf 'pwd; ls; exit\n' | rewind shell 9a96fab5 4576 --pid 166</span>
-rewind: a shell at step 4576 of 9a96fab59759f2a5; exit it to leave
+<span class="cmd"><span class="prompt">$</span> printf 'pwd; ls; exit\n' | rewind shell 54cb69d5 4576 --pid 166</span>
+rewind: a shell at step 4576 of 54cb69d5ef30137f; exit it to leave
 [rewind] /build/mylib # pwd; ls; exit
 /build/mylib
 Containerfile  Makefile  libmylib.a  src  tests</code></pre>
         <p>
           <code>--pid 166</code> resolves the path, and starts the shell, in the test program's root
-          and working directory. gdb sees the VM's CPU and its memory as the running process maps
-          it:
+          and working directory.
+        </p>
+        <p>
+          <code>rewind gdb</code> attaches gdb to a fork at a step, with symbols for the VM's kernel
+          and for the process that was running there: its program and libraries, loaded where the
+          process had them. The test program exists only inside the VM, so Rewind copies it out,
+          with the source files it was built from. Arguments after <code>--</code> go to gdb. Step
+          4573 is thread 168 printing <code>job 17 done</code>, three lines before the line that
+          faulted. Continuing the fork to that line, once the queue is gone, shows the crash in the
+          test's own code:
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind gdb 9a96fab5 4576 --listen 127.0.0.1:1234 &amp;</span>
-rewind: gdb at step 4576 of 9a96fab59759f2a5; connect with: gdb -q /nix/store/...-rewind-guest-kernel-...-symbols/vmlinux -ex 'source /nix/store/...-rewind-guest-kernel-...-symbols/vmlinux-gdb.py' -ex 'target remote 127.0.0.1:1234'
-<span class="cmd"><span class="prompt">$</span> gdb -q -batch /nix/store/...-rewind-guest-kernel-...-symbols/vmlinux -ex 'source /nix/store/...-rewind-guest-kernel-...-symbols/vmlinux-gdb.py' -ex 'target remote 127.0.0.1:1234' -ex 'bt 6' -ex 'x/i 0x55a854bdd437'</span>
-0xffffffff8128642c in __outl (value=&lt;optimized out&gt;, port=1504) at ./arch/x86/include/asm/shared/io.h:24
-warning: 24	./arch/x86/include/asm/shared/io.h: No such file or directory
-#0  0xffffffff8128642c in __outl (value=&lt;optimized out&gt;, port=1504) at ./arch/x86/include/asm/shared/io.h:24
-#1  rewind_emit (kind=6, flags=0, pid=&lt;optimized out&gt;, tid=&lt;optimized out&gt;, aux=11, a=0xffffc900001ebe1c, alen=12, b=0x0, blen=0) at arch/x86/kernel/cpu/rewind.c:192
-#2  rewind_probe_signal (data=&lt;optimized out&gt;, sig=11, info=&lt;optimized out&gt;, ka=&lt;optimized out&gt;) at arch/x86/kernel/cpu/rewind.c:727
-#3  0xffffffff812c46db in __do_trace_signal_deliver (sig=11, info=&lt;optimized out&gt;, ka=&lt;optimized out&gt;) at ./include/trace/events/signal.h:96
-#4  trace_signal_deliver (sig=11, info=&lt;optimized out&gt;, ka=&lt;optimized out&gt;) at ./include/trace/events/signal.h:96
-#5  get_signal (ksig=ksig@entry=0xffffc900001ebea0) at kernel/signal.c:3018
-   0x55a854bdd437:	addl   $0x1,0x108(%rax)
+        ><code><span class="cmd"><span class="prompt">$</span> rewind gdb 54cb69d5 4573 -- -batch -ex 'break src/pool.c:77 if p-&gt;queue == 0' -ex continue -ex 'bt 3' -ex 'p p-&gt;queue' -ex list</span>
+rewind: step 4573 ran in process 166; loading symbols for 4 of its files
+rewind: fetched 3 source files from the VM
+rewind: gdb at step 4573 of 54cb69d5ef30137f
+Downloading 740.00 B source file /build/linux-7.2.8/./arch/x86/include/asm/shared/io.h...
+0xffffffff81285085 in __outl (value=&lt;optimized out&gt;, port=1504) at ./arch/x86/include/asm/shared/io.h:24
+24	BUILDIO(l,  , u32)
+Breakpoint 1 at 0x55a854bdd433: file src/pool.c, line 77.
+
+Breakpoint 1, worker (arg=0x55a86cad9010) at src/pool.c:77
+77				p-&gt;queue-&gt;completed++;
+#0  worker (arg=0x55a86cad9010) at src/pool.c:77
+#1  0x00007f53a23d57d1 in start_thread (arg=&lt;optimized out&gt;) at pthread_create.c:454
+#2  0x00007f53a2461b1c in __GI___clone3 () at ../sysdeps/unix/sysv/linux/x86_64/clone3.S:78
+$1 = (struct queue *) 0x0
+72			 * the bug. */
+73			long result = run_job(job);
+74			if (!p-&gt;stopping) {
+75				printf("job %d done: %ld\n", job, result &amp; 0xffff);
+76				fflush(stdout);
+77				p-&gt;queue-&gt;completed++;
+78			}
+79		}
+80	}
+81
 [Inferior 1 (process 1) detached]</code></pre>
         <p>
-          The VM is stopped in the kernel, delivering the SIGSEGV to the test at the point where
-          Rewind reports it, and at the address from the kernel's segfault report is the instruction
-          that faulted. The kernel's symbols come from its package's <code>symbols</code> output,
-          which <code>rewind gdb</code> fetches from the binary cache the first time. Without
-          <code>--listen</code>, <code>rewind gdb</code> starts gdb itself.
+          gdb starts where the step left the VM: in the kernel, reporting the thread's write to
+          Rewind. The breakpoint is one of the CPU's debug registers, so the fork runs on unchanged
+          until thread 168 reaches line 77 with <code>p-&gt;queue</code> null, the access the kernel
+          reported at 0x108. glibc's symbols and sources, and the kernel's, come from a debuginfod
+          server <code>rewind gdb</code> starts for the session. The kernel's DWARF is in its
+          package's <code>debug</code> output, which <code>rewind gdb</code> fetches from
+          <code>rewindvm.cachix.org</code> the first time; that needs the cache in Nix's settings,
+          which the NixOS module adds. Without <code>--</code>, gdb stays open for you to type into.
         </p>
       </section>
 
@@ -347,11 +372,11 @@ warning: 24	./arch/x86/include/asm/shared/io.h: No such file or directory
         <p>A failing run fails the same way every time it runs:</p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind replay 9a96fab5</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind replay 54cb69d5</span>
 identical: 1596 events over 4613 steps
 
-<span class="cmd"><span class="prompt">$</span> rewind replay 9a96fab5 --from 3400</span>
-identical from the keyframe at step 1699 to the end (0.42s)</code></pre>
+<span class="cmd"><span class="prompt">$</span> rewind replay 54cb69d5 --from 3400</span>
+identical from the keyframe at step 1548 to the end (0.47s)</code></pre>
         <p>
           <code>rewind</code> keeps keyframes while a run executes: snapshots of the machine, with
           memory stored once per distinct page. <code>--from</code> restores the keyframe at or
@@ -368,20 +393,20 @@ identical from the keyframe at step 1699 to the end (0.42s)</code></pre>
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind fork 2085adea 2198 --schedule 1 --quiet</span>
-rewind: run 33ebf4cb07d2a7e7 exited:2 after 4617 steps, 0.199s virtual, 1.011s wall (poweroff)
+        ><code><span class="cmd"><span class="prompt">$</span> rewind fork 3a778ee7 2198 --schedule 1 --quiet</span>
+rewind: run 9c52529ff3a0ff53 exited:2 after 4617 steps, 0.199s virtual, 1.061s wall (poweroff)
 rewind: the fork first differs from its parent at step 2218
 
-<span class="cmd"><span class="prompt">$</span> rewind fork 2085adea 2198 --schedule 2 --quiet</span>
-rewind: run a617e0bbda7a89de exited:0 after 6943 steps, 0.225s virtual, 1.046s wall (poweroff)
+<span class="cmd"><span class="prompt">$</span> rewind fork 3a778ee7 2198 --schedule 2 --quiet</span>
+rewind: run b585a260055e82fb exited:0 after 6943 steps, 0.225s virtual, 1.106s wall (poweroff)
 rewind: the fork first differs from its parent at step 2205
 
-<span class="cmd"><span class="prompt">$</span> rewind fork 2085adea 2198 --schedule 3 --quiet</span>
-rewind: run 9599dc1fd2091996 exited:0 after 7020 steps, 0.228s virtual, 1.076s wall (poweroff)
+<span class="cmd"><span class="prompt">$</span> rewind fork 3a778ee7 2198 --schedule 3 --quiet</span>
+rewind: run f14d886167548aa6 exited:0 after 7020 steps, 0.228s virtual, 1.184s wall (poweroff)
 rewind: the fork first differs from its parent at step 2220
 
-<span class="cmd"><span class="prompt">$</span> rewind fork 2085adea 2198 --schedule 4 --quiet</span>
-rewind: run bbfb4816078d0655 exited:2 after 4828 steps, 0.204s virtual, 1.019s wall (poweroff)
+<span class="cmd"><span class="prompt">$</span> rewind fork 3a778ee7 2198 --schedule 4 --quiet</span>
+rewind: run 8fc689ab2585d455 exited:2 after 4828 steps, 0.204s virtual, 1.056s wall (poweroff)
 rewind: the fork first differs from its parent at step 2205</code></pre>
         <p>
           Forked from the passing build at step 2198, where <code>check</code>'s window starts,
