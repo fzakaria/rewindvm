@@ -374,14 +374,19 @@ fn run(cli: Cli) -> Result<ExitCode> {
 
             // The unperturbed run, and the step its job started on:
             // everything before that is boot, and perturbing it would only
-            // make every run differ from the first kernel thread on.
+            // make every run differ from the first kernel thread on. The
+            // window the user gave narrows that further.
+            let (user_from, user_until) = (machine.schedule_from, machine.schedule_until);
             machine.schedule = 0;
             machine.schedule_from = 0;
             let base = execute(&home, &guest, &prepared, &machine, Announce::No)?;
             println!("schedule   0: {}", show::outcome_line(&base)?);
             let base_trace = base.trace()?;
-            let start = show::start_step(&base_trace);
+            let start = show::start_step(&base_trace).max(user_from);
             let base_key = show::outcome_key(&base)?;
+            // When the unperturbed run is the one that fails, the schedules
+            // that end differently are the ones that pass.
+            let base_failed = base_key.0 != Some(0);
             let differs = |run: &Run| -> Result<bool> { Ok(show::outcome_key(run)? != base_key) };
 
             // Perturbed schedules, a machine per job at a time, in order.
@@ -395,6 +400,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     .map(|&seed| MachineArgs {
                         schedule: seed,
                         schedule_from: start,
+                        schedule_until: user_until,
                         ..machine.clone()
                     })
                     .collect();
@@ -416,7 +422,11 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     break;
                 }
             }
-            if all {
+            if all && base_failed {
+                println!(
+                    "schedule 0 failed; {differing} of {tried} perturbed schedules ended differently"
+                );
+            } else if all {
                 println!("{differing} of {tried} perturbed schedules ended differently");
             }
             let Some(mut worst) = failing else {
@@ -424,20 +434,34 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 return Ok(ExitCode::SUCCESS);
             };
 
-            // Narrow it to a window of steps: first the earliest end that
-            // still changes the outcome, then the latest start. Each step's
+            // Narrow it to a window of steps: first the latest start that
+            // still changes the outcome, then the earliest end. Each step's
             // perturbation depends only on the seed and the step, so a
             // smaller window perturbs a subset of the same steps. The two
             // runs are identical up to the window, so where they part is
-            // inside it, next to the interleaving that matters. Each round
-            // tries a point per job, so a round divides the range by
-            // jobs + 1.
+            // inside it, next to the interleaving that matters. The start
+            // comes first because in a long run a perturbation anywhere
+            // early changes everything after it; the latest start keeps the
+            // window near the end that differs. Each round tries a point per
+            // job, so a round divides the range by jobs + 1.
             machine.schedule = worst.manifest.spec.schedule;
-            let end = worst.manifest.outcome.as_ref().map_or(start, |o| o.step);
-            println!(
-                "\nschedule {} ends differently; narrowing the steps it perturbs",
-                machine.schedule
-            );
+            let end = worst
+                .manifest
+                .outcome
+                .as_ref()
+                .map_or(start, |o| o.step)
+                .min(user_until);
+            if base_failed {
+                println!(
+                    "\nschedule {} passes where schedule 0 fails; narrowing the steps it perturbs",
+                    machine.schedule
+                );
+            } else {
+                println!(
+                    "\nschedule {} ends differently; narrowing the steps it perturbs",
+                    machine.schedule
+                );
+            }
             let probe_all = |windows: Vec<(u64, u64)>| -> Result<Vec<Run>> {
                 let machines = windows
                     .into_iter()
@@ -454,36 +478,11 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 (1..=n).map(|i| lo + (hi - lo) * i / (n + 1)).collect()
             };
 
-            // The earliest end: `hi` fails, `lo` (an empty window) passes.
+            // The latest start: `lo` differs, `hi` (an empty window) does not.
             let (mut lo, mut hi) = (start, end);
             while hi - lo > 1 {
-                let ends = points(lo, hi);
-                let runs = probe_all(ends.iter().map(|&e| (start, e)).collect())?;
-                let mut next_lo = *ends.last().unwrap();
-                let mut found = None;
-                for (e, run) in ends.iter().zip(runs) {
-                    if differs(&run)? {
-                        found = Some((*e, run));
-                        break;
-                    }
-                    next_lo = *e;
-                }
-                match found {
-                    Some((e, run)) => {
-                        hi = e;
-                        lo = ends.iter().copied().filter(|x| *x < e).max().unwrap_or(lo);
-                        worst = run;
-                    }
-                    None => lo = next_lo,
-                }
-            }
-            let until = hi;
-
-            // The latest start: `lo` fails, `hi` (an empty window) passes.
-            let (mut lo, mut hi) = (start, until);
-            while hi - lo > 1 {
                 let starts = points(lo, hi);
-                let runs = probe_all(starts.iter().map(|&f| (f, until)).collect())?;
+                let runs = probe_all(starts.iter().map(|&f| (f, end)).collect())?;
                 let mut found = None;
                 for (f, run) in starts.iter().zip(runs).rev() {
                     if differs(&run)? {
@@ -505,18 +504,49 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     None => hi = starts[0],
                 }
             }
+            let from = lo;
+
+            // The earliest end: `hi` differs, `lo` (an empty window) does not.
+            let (mut lo, mut hi) = (from, end);
+            while hi - lo > 1 {
+                let ends = points(lo, hi);
+                let runs = probe_all(ends.iter().map(|&e| (from, e)).collect())?;
+                let mut next_lo = *ends.last().unwrap();
+                let mut found = None;
+                for (e, run) in ends.iter().zip(runs) {
+                    if differs(&run)? {
+                        found = Some((*e, run));
+                        break;
+                    }
+                    next_lo = *e;
+                }
+                match found {
+                    Some((e, run)) => {
+                        hi = e;
+                        lo = ends.iter().copied().filter(|x| *x < e).max().unwrap_or(lo);
+                        worst = run;
+                    }
+                    None => lo = next_lo,
+                }
+            }
+            let (lo, until) = (from, hi);
             println!("perturbing only steps {lo}..{until} still ends differently\n");
             let base = base.add_keyframes(&home)?;
             let worst = worst.add_keyframes(&home)?;
-            println!("passing: run {}", base.manifest.id);
-            println!("failing: run {}", worst.manifest.id);
-            let (bt, wt) = (base.trace()?, worst.trace()?);
-            match show::culprit(&wt) {
+            let (passing, failing) = if base_failed {
+                (worst, base)
+            } else {
+                (base, worst)
+            };
+            println!("passing: run {}", passing.manifest.id);
+            println!("failing: run {}", failing.manifest.id);
+            let (pt, ft) = (passing.trace()?, failing.trace()?);
+            match ft.culprit_against(&pt) {
                 Some(argv) => {
                     println!("\nwhere {} first behaves differently:", argv.join(" "));
-                    print!("{}", show::divergence_in(&bt, &wt, &argv));
+                    print!("{}", show::divergence_in(&pt, &ft, &argv));
                 }
-                None => print!("{}", show::divergence(&bt, &wt)),
+                None => print!("{}", show::divergence(&pt, &ft)),
             }
             Ok(ExitCode::FAILURE)
         }
@@ -713,11 +743,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             };
             export::export(&home, &run, contents, &out)?;
             let size = std::fs::metadata(&out)?.len();
-            eprintln!(
-                "rewind: wrote {} ({:.1} MB)",
-                out.display(),
-                size as f64 / 1e6
-            );
+            eprintln!("rewind: wrote {} ({})", out.display(), show::size(size));
             Ok(ExitCode::SUCCESS)
         }
         Command::Import { file } => {

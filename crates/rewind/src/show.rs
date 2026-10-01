@@ -58,10 +58,16 @@ pub fn start_step(trace: &Trace) -> u64 {
         .map_or(0, |e| e.step)
 }
 
-/// The command line of the process a failed run's failure came from: the
-/// first to receive a fatal signal, else the first to exit non-zero.
-pub fn culprit(trace: &Trace) -> Option<Vec<String>> {
-    trace.culprit()
+/// A file size the way people read one: bytes, KB or MB, in decimal
+/// units.
+pub fn size(bytes: u64) -> String {
+    const KB: f64 = 1e3;
+    const MB: f64 = 1e6;
+    match bytes as f64 {
+        b if b >= MB => format!("{:.1} MB", b / MB),
+        b if b >= KB => format!("{:.1} KB", b / KB),
+        _ => format!("{bytes} bytes"),
+    }
 }
 
 /// Where one program's own events first differ between two runs (see
@@ -195,10 +201,13 @@ fn tree(alive: &[&rewind_trace::Process], pid: u32, depth: usize, step: u64, out
     let Some(p) = alive.iter().find(|p| p.pid == pid) else {
         return;
     };
+    // A child that forked and never exec'd runs its parent's program.
     let name = if p.argv.is_empty() {
         "[kernel thread]".to_string()
-    } else {
+    } else if p.execd {
         p.argv.join(" ")
+    } else {
+        format!("{} (fork)", p.argv.join(" "))
     };
     let _ = writeln!(out, "{:>6} {}{}", p.pid, "  ".repeat(depth), name);
     for (tid, start, end) in &p.threads {

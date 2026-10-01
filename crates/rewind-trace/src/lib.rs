@@ -30,9 +30,12 @@ pub struct Process {
     pub pid: u32,
     /// The process that forked it; 0 for the first process.
     pub parent: u32,
-    /// The command line of its most recent exec, or empty if it never
-    /// exec'd.
+    /// The command line of its most recent exec, or, if it never exec'd,
+    /// its parent's: a forked child runs its parent's program. Empty for
+    /// processes nothing exec'd before them, such as kernel threads.
     pub argv: Vec<String>,
+    /// Whether `argv` is from its own exec rather than its parent's.
+    pub execd: bool,
     /// The steps it was forked and exited on; `end` is None while it runs.
     pub start: u64,
     pub end: Option<u64>,
@@ -156,6 +159,7 @@ impl Trace {
                         pid,
                         parent,
                         argv: Vec::new(),
+                        execd: false,
                         start: step,
                         end: None,
                         status: None,
@@ -189,11 +193,22 @@ impl Trace {
                             }
                         }
                         entry(&mut procs, &mut order, *child, e.pid, e.step);
+
+                        // A forked child runs its parent's program until it
+                        // execs, and Linux shows it under that command line.
+                        let parent_argv = procs.get(&e.pid).map(|p| p.argv.clone());
+                        if let (Some(argv), Some(c)) = (parent_argv, procs.get_mut(child)) {
+                            if c.argv.is_empty() {
+                                c.argv = argv;
+                            }
+                        }
                     }
                 }
                 EventKind::Exec { argv, .. } => {
                     entry(&mut procs, &mut order, e.pid, 0, 0);
-                    procs.get_mut(&e.pid).unwrap().argv = argv.clone();
+                    let p = procs.get_mut(&e.pid).unwrap();
+                    p.argv = argv.clone();
+                    p.execd = true;
                 }
                 EventKind::Exit { status, thread, .. } => {
                     if let Some(p) = procs.get_mut(&e.pid) {
@@ -289,6 +304,26 @@ impl Trace {
     /// the first to receive a fatal signal, else the first to exit
     /// non-zero.
     pub fn culprit(&self) -> Option<Vec<String>> {
+        self.failures().into_iter().next().map(|(argv, _)| argv)
+    }
+
+    /// The culprit of this run's failure, given `other`, a run of the same
+    /// inputs that ended differently: the first program here to end badly
+    /// that did not end the same way in `other`. A configure probe that
+    /// exits non-zero in every build is skipped. Falls back to
+    /// [`Trace::culprit`] when every failure here also happened there.
+    pub fn culprit_against(&self, other: &Trace) -> Option<Vec<String>> {
+        let theirs = other.failures();
+        self.failures()
+            .into_iter()
+            .find(|failure| !theirs.contains(failure))
+            .map(|(argv, _)| argv)
+            .or_else(|| self.culprit())
+    }
+
+    /// Every program that ended badly, with how: those killed by a fatal
+    /// signal first, then those that exited non-zero, each in order.
+    fn failures(&self) -> Vec<(Vec<String>, Ending)> {
         let procs = self.processes();
         let argv_of = |pid: u32| {
             procs
@@ -297,20 +332,21 @@ impl Trace {
                 .find(|p| p.pid == pid && !p.argv.is_empty())
                 .map(|p| p.argv.clone())
         };
-        let signalled = self.events.iter().find_map(|e| match &e.kind {
-            EventKind::Signal { signo, .. } if FATAL_SIGNALS.contains(signo) => argv_of(e.pid),
+        let signalled = self.events.iter().filter_map(|e| match &e.kind {
+            EventKind::Signal { signo, .. } if FATAL_SIGNALS.contains(signo) => {
+                Some((argv_of(e.pid)?, Ending::Signal(*signo)))
+            }
             _ => None,
         });
-        signalled.or_else(|| {
-            self.events.iter().find_map(|e| match &e.kind {
-                EventKind::Exit {
-                    status,
-                    thread: false,
-                    ..
-                } if *status != 0 => argv_of(e.pid),
-                _ => None,
-            })
-        })
+        let exited = self.events.iter().filter_map(|e| match &e.kind {
+            EventKind::Exit {
+                status,
+                thread: false,
+                ..
+            } if *status != 0 => Some((argv_of(e.pid)?, Ending::Exit(*status))),
+            _ => None,
+        });
+        signalled.chain(exited).collect()
     }
 
     /// The events of the processes running `argv`, each with its thread
@@ -362,6 +398,13 @@ impl Trace {
 /// Signals that end a process unless it handles them: SIGILL, SIGABRT,
 /// SIGBUS, SIGFPE and SIGSEGV.
 pub const FATAL_SIGNALS: [u32; 5] = [4, 6, 7, 8, 11];
+
+/// How a program ended badly, for comparing failures between runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ending {
+    Signal(u32),
+    Exit(u32),
+}
 
 /// One program's events in a trace.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -734,5 +777,89 @@ mod tests {
 
         let swapped = pool([1, 2, 3, 4, 5, 6], (9, "a\n"), (8, "b\n"), None);
         assert_eq!(a.divergence_in(&swapped, &argv), None);
+    }
+
+    /// A process that execs `argv` as `pid`, forked from `parent`, and
+    /// ends at `end` with `ending`.
+    fn program(
+        step: u64,
+        parent: u32,
+        pid: u32,
+        argv: &[&str],
+        ending: Option<EventKind>,
+    ) -> Vec<Event> {
+        let mut events = vec![
+            ev(
+                step,
+                parent,
+                parent,
+                EventKind::Fork {
+                    child: pid,
+                    thread: false,
+                },
+            ),
+            ev(
+                step + 1,
+                pid,
+                pid,
+                EventKind::Exec {
+                    filename: argv[0].into(),
+                    argv: argv.iter().map(|a| a.to_string()).collect(),
+                    old_pid: pid,
+                },
+            ),
+        ];
+        if let Some(kind) = ending {
+            events.push(ev(step + 2, pid, pid, kind));
+        }
+        events
+    }
+
+    fn exit(status: u32) -> Option<EventKind> {
+        Some(EventKind::Exit {
+            status,
+            comm: String::new(),
+            thread: false,
+        })
+    }
+
+    #[test]
+    fn the_culprit_skips_a_failure_both_runs_share() {
+        // A configure probe exits 1 in both runs; only the failing run's
+        // test exits 2, so the test is the culprit.
+        let probe = || program(10, 1, 5, &["cc", "-E", "probe.c"], exit(1));
+        let mut failing = probe();
+        failing.extend(program(20, 1, 6, &["./test"], exit(2)));
+        let mut passing = probe();
+        passing.extend(program(20, 1, 6, &["./test"], exit(0)));
+        let (failing, passing) = (Trace { events: failing }, Trace { events: passing });
+
+        assert_eq!(
+            failing.culprit(),
+            Some(vec!["cc".into(), "-E".into(), "probe.c".into()])
+        );
+        assert_eq!(
+            failing.culprit_against(&passing),
+            Some(vec!["./test".into()])
+        );
+    }
+
+    #[test]
+    fn a_forked_child_shows_its_parents_command_until_it_execs() {
+        // A shell forks a subshell that never execs: it is the shell, not
+        // a kernel thread.
+        let mut events = program(1, 1, 2, &["bash", "test.sh"], None);
+        events.push(ev(
+            5,
+            2,
+            2,
+            EventKind::Fork {
+                child: 3,
+                thread: false,
+            },
+        ));
+        let trace = Trace { events };
+        let sub = trace.processes().into_iter().find(|p| p.pid == 3).unwrap();
+        assert_eq!(sub.argv, vec!["bash".to_string(), "test.sh".to_string()]);
     }
 }

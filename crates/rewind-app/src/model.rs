@@ -519,7 +519,7 @@ impl Comparison {
         let (a, b) = (&this.trace, &other.trace);
 
         // The culprit's own events first.
-        let program = a.culprit().or_else(|| b.culprit());
+        let program = a.culprit_against(b).or_else(|| b.culprit_against(a));
         if let Some(argv) = &program
             && let Some(d) = a.divergence_in(b, argv)
         {
@@ -940,7 +940,7 @@ fn process_rows(trace: &Trace) -> Vec<ProcRow> {
     while let Some((i, depth, parent_command)) = stack.pop() {
         let p = &procs[i];
         let comm = p.end.and_then(|end| comms.get(&(p.pid, end)));
-        let label = if !p.argv.is_empty() {
+        let label = if p.execd && !p.argv.is_empty() {
             program_label(&p.argv)
         } else if let Some(comm) = comm {
             comm.clone()
