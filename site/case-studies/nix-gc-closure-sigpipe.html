@@ -64,7 +64,7 @@
       </nav>
 
       <section class="step">
-        <h2 id="the-software">The software</h2>
+        <h2 id="the-software"><a class="anchor" href="#the-software">The software</a></h2>
         <p>
           The test came in with
           <a href="https://github.com/NixOS/nix/pull/15727">NixOS/nix#15727</a>, merged on
@@ -88,7 +88,9 @@
       </section>
 
       <section class="step">
-        <h2 id="how-rewind-found-it">How Rewind found it</h2>
+        <h2 id="how-rewind-found-it">
+          <a class="anchor" href="#how-rewind-found-it">How Rewind found it</a>
+        </h2>
         <p>
           The derivation is nixpkgs'
           <code>nixVersions.nixComponents_git.nix-functional-tests</code> (Nix master at 203f85b2,
@@ -187,7 +189,7 @@ rewind: /proc/536/io: no such file at this step</code></pre>
       </section>
 
       <section class="step">
-        <h2 id="root-cause">Root cause</h2>
+        <h2 id="root-cause"><a class="anchor" href="#root-cause">Root cause</a></h2>
         <p>
           <code>printf "%s" "$input2"</code> writes its output in two <code>write</code> calls, one
           per line. On the host, with the same bash 5.3.15 and the two store paths from the run:
@@ -224,7 +226,9 @@ rewind: /proc/536/io: no such file at this step</code></pre>
       </section>
 
       <section class="step">
-        <h2 id="how-often-it-fails">How often it fails</h2>
+        <h2 id="how-often-it-fails">
+          <a class="anchor" href="#how-often-it-fails">How often it fails</a>
+        </h2>
         <p>Under Rewind, on the build of Nix master:</p>
         <pre
           class="console"
@@ -325,7 +329,7 @@ schedule  80: exited:1            37256 steps    run 3edd52984245022c
       </section>
 
       <section class="step">
-        <h2 id="the-fix">The fix</h2>
+        <h2 id="the-fix"><a class="anchor" href="#the-fix">The fix</a></h2>
         <p>Give <code>head</code> its input without a pipe, so there is no writer to kill:</p>
         <pre
           class="console diff"
@@ -357,7 +361,7 @@ same result under all 65 schedules</code></pre>
       </section>
 
       <section class="step">
-        <h2 id="the-recording">The recording</h2>
+        <h2 id="the-recording"><a class="anchor" href="#the-recording">The recording</a></h2>
         <p>
           Both files are in the
           <a href="https://github.com/fzakaria/rewindvm/releases/tag/case-studies"
@@ -403,7 +407,7 @@ identical from the keyframe at step 63162 to the end (1.17s)</code></pre>
       </section>
 
       <section class="step">
-        <h2 id="reproducing-it">Reproducing it</h2>
+        <h2 id="reproducing-it"><a class="anchor" href="#reproducing-it">Reproducing it</a></h2>
         <p>
           The derivation is nixpkgs' functional test package with the check phase narrowed to one
           test. With <code>pkgs</code> from nixpkgs b4fd65b1, the attribute

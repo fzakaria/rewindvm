@@ -77,7 +77,7 @@
       </nav>
 
       <section class="step">
-        <h2 id="install">Install</h2>
+        <h2 id="install"><a class="anchor" href="#install">Install</a></h2>
         <p>You need x86_64 Linux with KVM and Nix with flakes enabled.</p>
         <pre
           class="console"
@@ -112,7 +112,7 @@ programs.rewind.amdBranchCounterWorkaround = true;</code></pre>
       </section>
 
       <section class="step">
-        <h2 id="the-flaky-build">The flaky build</h2>
+        <h2 id="the-flaky-build"><a class="anchor" href="#the-flaky-build">The flaky build</a></h2>
         <p>
           On the host, <code>nix build github:fzakaria/rewindvm#mylib</code> usually succeeds.
           Rebuilt 45 times on the laptop, it failed twice, each time in <code>checkPhase</code>:
@@ -136,7 +136,9 @@ error: Cannot build '/nix/store/hvp2d0h9l97d19d3xp5k3vf6xwhg4axr-mylib-0.3.0.drv
       </section>
 
       <section class="step">
-        <h2 id="build-it-in-rewind-vm">Build it in Rewind VM</h2>
+        <h2 id="build-it-in-rewind-vm">
+          <a class="anchor" href="#build-it-in-rewind-vm">Build it in Rewind VM</a>
+        </h2>
         <p>
           <code>rewind nix</code> builds a derivation the way the Nix sandbox would, inside a
           deterministic virtual machine:
@@ -169,7 +171,9 @@ rewind: run 3a778ee7db102410 exited:0 after 6188 steps, 0.216s virtual, 1.744s w
       </section>
 
       <section class="step">
-        <h2 id="find-a-failing-interleaving">Find a failing interleaving</h2>
+        <h2 id="find-a-failing-interleaving">
+          <a class="anchor" href="#find-a-failing-interleaving">Find a failing interleaving</a>
+        </h2>
         <p>
           Determinism means the unperturbed build will never show the bug.
           <code>rewind check</code> builds the derivation again under perturbed schedules. Each
@@ -238,7 +242,9 @@ where ./tests/test_pool_shutdown first behaves differently:
       </section>
 
       <section class="step">
-        <h2 id="look-at-the-failure">Look at the failure</h2>
+        <h2 id="look-at-the-failure">
+          <a class="anchor" href="#look-at-the-failure">Look at the failure</a>
+        </h2>
         <p>
           A failing run is kept like any other. It is a directory holding its inputs and every event
           with its step.
@@ -281,7 +287,9 @@ where ./tests/test_pool_shutdown first behaves differently:
       </section>
 
       <section class="step">
-        <h2 id="look-inside-the-vm">Look inside the VM</h2>
+        <h2 id="look-inside-the-vm">
+          <a class="anchor" href="#look-inside-the-vm">Look inside the VM</a>
+        </h2>
         <p>
           <code>rewind cat</code>, <code>rewind shell</code> and <code>rewind gdb</code> each work
           on a throwaway fork of the run at a step, so nothing they do changes the run. At the
@@ -368,7 +376,7 @@ $1 = (struct queue *) 0x0
       </section>
 
       <section class="step">
-        <h2 id="replay-it">Replay it</h2>
+        <h2 id="replay-it"><a class="anchor" href="#replay-it">Replay it</a></h2>
         <p>A failing run fails the same way every time it runs:</p>
         <pre
           class="console"
@@ -386,7 +394,7 @@ identical from the keyframe at step 1548 to the end (0.47s)</code></pre>
       </section>
 
       <section class="step">
-        <h2 id="fork-it">Fork it</h2>
+        <h2 id="fork-it"><a class="anchor" href="#fork-it">Fork it</a></h2>
         <p>
           A fork is a run that is its parent up to a step, then explores another schedule from
           there:
@@ -416,7 +424,9 @@ rewind: the fork first differs from its parent at step 2205</code></pre>
       </section>
 
       <section class="step">
-        <h2 id="scrub-it-in-the-app">Scrub it in the app</h2>
+        <h2 id="scrub-it-in-the-app">
+          <a class="anchor" href="#scrub-it-in-the-app">Scrub it in the app</a>
+        </h2>
         <p>
           The desktop app, <code>github:fzakaria/rewindvm#app</code>, shows the same run on a
           timeline. Drag the playhead to any step to see the build log up to that step, the
@@ -444,7 +454,9 @@ rewind: the fork first differs from its parent at step 2205</code></pre>
       </section>
 
       <section class="step">
-        <h2 id="fix-it-and-check-the-fix">Fix it and check the fix</h2>
+        <h2 id="fix-it-and-check-the-fix">
+          <a class="anchor" href="#fix-it-and-check-the-fix">Fix it and check the fix</a>
+        </h2>
         <p>
           Clone the repository, so <code>rewind</code> can check your edit of the flake's
           <code>mylib</code>:
@@ -486,7 +498,9 @@ same result under all 65 schedules</code></pre>
       </section>
 
       <section class="step">
-        <h2 id="what-to-read-next">What to read next</h2>
+        <h2 id="what-to-read-next">
+          <a class="anchor" href="#what-to-read-next">What to read next</a>
+        </h2>
         <ul>
           <li>
             <a href="container.html">The container tutorial</a> does the same with a Docker image

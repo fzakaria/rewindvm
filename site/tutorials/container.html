@@ -76,7 +76,7 @@
       </nav>
 
       <section class="step">
-        <h2 id="install">Install</h2>
+        <h2 id="install"><a class="anchor" href="#install">Install</a></h2>
         <p>You need x86_64 Linux with KVM, and Docker or Podman.</p>
         <pre
           class="console"
@@ -106,7 +106,9 @@ crw-rw-rw- 1 root kvm 10, 232 Oct  1 10:44 /dev/kvm
 
       <section class="step">
         <h2 id="build-the-image-and-export-its-filesystem">
-          Build the image and export its filesystem
+          <a class="anchor" href="#build-the-image-and-export-its-filesystem"
+            >Build the image and export its filesystem</a
+          >
         </h2>
         <p>
           Next to mylib's source is a Containerfile that installs a compiler on Debian, copies the
@@ -127,7 +129,7 @@ crw-rw-rw- 1 root kvm 10, 232 Oct  1 10:44 /dev/kvm
       </section>
 
       <section class="step">
-        <h2 id="run-the-tests">Run the tests</h2>
+        <h2 id="run-the-tests"><a class="anchor" href="#run-the-tests">Run the tests</a></h2>
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind run --root mylib.tar --cwd /src -- make check</span>
@@ -153,7 +155,9 @@ rewind: run ddfd379b211e7343 exited:0 after 1317 steps, 0.019s virtual, 1.617s w
       </section>
 
       <section class="step">
-        <h2 id="find-a-failing-interleaving">Find a failing interleaving</h2>
+        <h2 id="find-a-failing-interleaving">
+          <a class="anchor" href="#find-a-failing-interleaving">Find a failing interleaving</a>
+        </h2>
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind check --root mylib.tar --cwd /src -- make check</span>
@@ -213,7 +217,9 @@ where ./tests/test_pool_shutdown first behaves differently:
       </section>
 
       <section class="step">
-        <h2 id="look-at-it-and-keep-it">Look at it, and keep it</h2>
+        <h2 id="look-at-it-and-keep-it">
+          <a class="anchor" href="#look-at-it-and-keep-it">Look at it, and keep it</a>
+        </h2>
         <p>
           The failing run's last output, the processes alive at its SIGSEGV (step 1232, which
           <code>rewind events 44cbffcc</code> shows), and a replay:
@@ -279,7 +285,7 @@ Containerfile  Makefile  libmylib.a  src  tests</code></pre>
       </section>
 
       <section class="step">
-        <h2 id="check-the-fix">Check the fix</h2>
+        <h2 id="check-the-fix"><a class="anchor" href="#check-the-fix">Check the fix</a></h2>
         <p>
           Fix <code>pool_shutdown</code> in <code>src/pool.c</code> as
           <a href="nix.html#fix-it-and-check-the-fix">the Nix tutorial</a> does, rebuild the image,
@@ -294,7 +300,9 @@ same result under all 65 schedules</code></pre>
       </section>
 
       <section class="step">
-        <h2 id="limits-worth-knowing-here">Limits worth knowing here</h2>
+        <h2 id="limits-worth-knowing-here">
+          <a class="anchor" href="#limits-worth-knowing-here">Limits worth knowing here</a>
+        </h2>
         <ul>
           <li>
             The VM has one vCPU. Threads interleave, but never run at the same instant, so a data

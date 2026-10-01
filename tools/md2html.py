@@ -499,8 +499,10 @@ def convert(cfg):
                 out.append("</section>\n")
             in_section = slug(payload)
             paragraphs = 0
+
+            # The heading links to itself, so a reader can copy the section's URL.
             out.append(
-                f'\n<section class="step">\n<h2 id="{in_section}">{inline(payload, source, page)}</h2>\n'
+                f'\n<section class="step">\n<h2 id="{in_section}"><a class="anchor" href="#{in_section}">{inline(payload, source, page)}</a></h2>\n'
             )
             continue
         if kind == "p":

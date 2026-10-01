@@ -63,7 +63,7 @@
       </nav>
 
       <section class="step">
-        <h2 id="the-software">The software</h2>
+        <h2 id="the-software"><a class="anchor" href="#the-software">The software</a></h2>
         <p>
           devenv builds developer environments with Nix and runs tasks in them: commands with
           dependencies between them, such as a database migration before a test suite. The
@@ -116,7 +116,7 @@
       </section>
 
       <section class="step">
-        <h2 id="the-test">The test</h2>
+        <h2 id="the-test"><a class="anchor" href="#the-test">The test</a></h2>
         <p>
           The derivation builds <code>devenv-tasks</code>' unit tests at cecb0452, in release mode
           with debug info, and adds one test to them:
@@ -157,7 +157,9 @@
       </section>
 
       <section class="step">
-        <h2 id="how-rewind-found-it">How Rewind found it</h2>
+        <h2 id="how-rewind-found-it">
+          <a class="anchor" href="#how-rewind-found-it">How Rewind found it</a>
+        </h2>
         <p>The first run in the VM failed:</p>
         <pre
           class="console"
@@ -211,7 +213,9 @@ where /bin/sh /build/script4dnMbS.sh first behaves differently:
       </section>
 
       <section class="step">
-        <h2 id="where-the-third-line-went">Where the third line went</h2>
+        <h2 id="where-the-third-line-went">
+          <a class="anchor" href="#where-the-third-line-went">Where the third line went</a>
+        </h2>
         <p>The events of the failing run around the task:</p>
         <pre
           class="console"
@@ -347,7 +351,7 @@ Breakpoint 2.1, devenv_tasks::task_state::{impl#1}::run::{async_fn#0}::{async_bl
       </section>
 
       <section class="step">
-        <h2 id="root-cause">Root cause</h2>
+        <h2 id="root-cause"><a class="anchor" href="#root-cause">Root cause</a></h2>
         <p>
           <code>tokio::select!</code> polls its branches in a random order each time it is
           evaluated, unless it is told <code>biased;</code>; tokio does that so a loop with one
@@ -369,7 +373,7 @@ Breakpoint 2.1, devenv_tasks::task_state::{impl#1}::run::{async_fn#0}::{async_bl
       </section>
 
       <section class="step">
-        <h2 id="the-fix-checked">The fix, checked</h2>
+        <h2 id="the-fix-checked"><a class="anchor" href="#the-fix-checked">The fix, checked</a></h2>
         <p>
           <a href="https://github.com/cachix/devenv/commit/ef7fb6972ac033b7aa191345b93f77251ffadfb2"
             >ef7fb697</a
@@ -415,7 +419,7 @@ same result under all 257 schedules</code></pre>
       </section>
 
       <section class="step">
-        <h2 id="on-the-host">On the host</h2>
+        <h2 id="on-the-host"><a class="anchor" href="#on-the-host">On the host</a></h2>
         <p>The same test binary on the host:</p>
         <div class="table">
           <table>
@@ -441,7 +445,7 @@ same result under all 257 schedules</code></pre>
       </section>
 
       <section class="step">
-        <h2 id="the-recording">The recording</h2>
+        <h2 id="the-recording"><a class="anchor" href="#the-recording">The recording</a></h2>
         <p>
           Both files are in the
           <a href="https://github.com/fzakaria/rewindvm/releases/tag/case-studies"

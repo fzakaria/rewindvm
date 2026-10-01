@@ -1257,6 +1257,29 @@ a.card:hover {
   margin-top: 1.9em;
   scroll-margin-top: 20px;
 }
+/* A section heading is a link to itself. It keeps the heading's colour, and
+   a "#" shows in the margin while the pointer or focus is on it. */
+.anchor {
+  position: relative;
+  color: inherit;
+  text-decoration: none;
+}
+.anchor:hover {
+  color: inherit;
+}
+.anchor::before {
+  content: "#";
+  position: absolute;
+  right: 100%;
+  padding-right: 0.3em;
+  color: var(--amber);
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.anchor:hover::before,
+.anchor:focus-visible::before {
+  opacity: 1;
+}
 /* A small comparison table in an article, such as the two clocks. */
 .article table.times {
   border-collapse: collapse;

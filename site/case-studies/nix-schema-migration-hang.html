@@ -65,7 +65,7 @@
       </nav>
 
       <section class="step">
-        <h2 id="the-software">The software</h2>
+        <h2 id="the-software"><a class="anchor" href="#the-software">The software</a></h2>
         <p>
           <code>LocalStore::LocalStore</code> opens the store's SQLite database (in WAL mode) and
           runs schema migrations. Since Nix 2.26 a migration is a named SQL script recorded in a
@@ -122,7 +122,7 @@
       </section>
 
       <section class="step">
-        <h2 id="reproducing-it">Reproducing it</h2>
+        <h2 id="reproducing-it"><a class="anchor" href="#reproducing-it">Reproducing it</a></h2>
         <p>
           The derivation is Nix's own <code>nix-functional-tests</code> from its flake at a94dee99e,
           which cache.nixos.org has, with the check phase cut down to
@@ -190,7 +190,9 @@ where nix build --no-link --file ./racy.nix first behaves differently:
       </section>
 
       <section class="step">
-        <h2 id="where-the-hung-process-is">Where the hung process is</h2>
+        <h2 id="where-the-hung-process-is">
+          <a class="anchor" href="#where-the-hung-process-is">Where the hung process is</a>
+        </h2>
         <p>At step 200000, in the middle of the hang, only 223 is left:</p>
         <pre
           class="console"
@@ -270,7 +272,7 @@ autocommit 0
       </section>
 
       <section class="step">
-        <h2 id="root-cause">Root cause</h2>
+        <h2 id="root-cause"><a class="anchor" href="#root-cause">Root cause</a></h2>
         <p>
           <a href="https://www.sqlite.org/rescode.html#busy_snapshot"
             >SQLite's result code documentation</a
@@ -297,7 +299,9 @@ autocommit 0
       </section>
 
       <section class="step">
-        <h2 id="the-two-fixes-checked">The two fixes, checked</h2>
+        <h2 id="the-two-fixes-checked">
+          <a class="anchor" href="#the-two-fixes-checked">The two fixes, checked</a>
+        </h2>
         <p>
           <a href="https://github.com/NixOS/nix/pull/15694">NixOS/nix#15694</a>, merged on
           2026-04-16, changed the insert to <code>insert or ignore</code>. That removes the UNIQUE
@@ -343,7 +347,9 @@ same result under all 257 schedules</code></pre>
       </section>
 
       <section class="step">
-        <h2 id="making-it-fail-more-often">Making it fail more often</h2>
+        <h2 id="making-it-fail-more-often">
+          <a class="anchor" href="#making-it-fail-more-often">Making it fail more often</a>
+        </h2>
         <p>
           Rewind's schedules now include stalls: at one exit in 128 the running task sleeps for 10
           µs to 1.28 ms when it next returns to user space. The rates above were measured with them.
@@ -390,7 +396,7 @@ same result under all 257 schedules</code></pre>
       </section>
 
       <section class="step">
-        <h2 id="the-recording">The recording</h2>
+        <h2 id="the-recording"><a class="anchor" href="#the-recording">The recording</a></h2>
         <p>
           Both files are in the
           <a href="https://github.com/fzakaria/rewindvm/releases/tag/case-studies"

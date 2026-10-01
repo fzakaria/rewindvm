@@ -47,7 +47,9 @@
       </p>
 
       <section class="step">
-        <h2 id="the-short-version">The short version</h2>
+        <h2 id="the-short-version">
+          <a class="anchor" href="#the-short-version">The short version</a>
+        </h2>
         <ul>
           <li><strong>Intel:</strong> nothing to do. Rewind uses counter time.</li>
           <li>
@@ -64,7 +66,9 @@
       </section>
 
       <section class="step">
-        <h2 id="what-the-two-clocks-do">What the two clocks do</h2>
+        <h2 id="what-the-two-clocks-do">
+          <a class="anchor" href="#what-the-two-clocks-do">What the two clocks do</a>
+        </h2>
         <p>
           Rewind sees the VM only at the points where the VM stops and hands control to Rewind: a
           system call that reports a file or a process, a read of the clock, going idle. Each of
@@ -118,7 +122,9 @@
       </section>
 
       <section class="step">
-        <h2 id="why-amd-needs-a-setting">Why AMD needs a setting</h2>
+        <h2 id="why-amd-needs-a-setting">
+          <a class="anchor" href="#why-amd-needs-a-setting">Why AMD needs a setting</a>
+        </h2>
         <p>
           Counter time needs the branch count to be the same on every run. On AMD Zen CPUs it is
           not, out of the box: a speculation feature around locked instructions makes the counter
@@ -143,7 +149,7 @@ set the branch counter workaround on 16 CPUs, until reboot</code></pre>
       </section>
 
       <section class="step">
-        <h2 id="checking">Checking</h2>
+        <h2 id="checking"><a class="anchor" href="#checking">Checking</a></h2>
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind pmu status</span>
@@ -163,7 +169,9 @@ runs will use counter time</code></pre>
       </section>
 
       <section class="step">
-        <h2 id="every-boot-on-nixos">Every boot on NixOS</h2>
+        <h2 id="every-boot-on-nixos">
+          <a class="anchor" href="#every-boot-on-nixos">Every boot on NixOS</a>
+        </h2>
         <p>Use the flake's <code>programs.rewind</code> module:</p>
         <pre class="console"><code>inputs.rewind.url = "github:fzakaria/rewindvm";
 
@@ -177,7 +185,9 @@ programs.rewind.amdBranchCounterWorkaround = true;</code></pre>
       </section>
 
       <section class="step">
-        <h2 id="choosing-yourself">Choosing yourself</h2>
+        <h2 id="choosing-yourself">
+          <a class="anchor" href="#choosing-yourself">Choosing yourself</a>
+        </h2>
         <p>
           <code>--clock exits</code> or <code>--clock branches</code> on <code>rewind run</code>,
           <code>nix</code> or <code>check</code> overrides Rewind's choice. A run remembers its
