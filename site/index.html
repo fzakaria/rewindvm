@@ -486,7 +486,8 @@
         <p>On NixOS, add the flake as an input and turn on its module:</p>
         <pre class="term"><code>inputs.rewind.url = "github:fzakaria/rewindvm";
 
-# in your configuration, with inputs.rewind.nixosModules.default imported
+# in your configuration, with inputs.rewind.nixosModules.default imported;
+# it also adds rewindvm.cachix.org to Nix's substituters
 programs.rewind.enable = true;
 programs.rewind.app.enable = true;
 # AMD only: make the branch counter exact at every boot

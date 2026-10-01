@@ -80,7 +80,8 @@ On NixOS, add the flake as an input and turn on its module:
 ```nix
 inputs.rewind.url = "github:fzakaria/rewindvm";
 
-# in your configuration, with inputs.rewind.nixosModules.default imported
+# in your configuration, with inputs.rewind.nixosModules.default imported;
+# it also adds rewindvm.cachix.org to Nix's substituters
 programs.rewind.enable = true;
 programs.rewind.app.enable = true;
 # AMD only: make the branch counter exact at every boot
@@ -120,11 +121,15 @@ $ rewind log <run> --steps
 $ rewind ps <run> --at <step>
 $ rewind cat <run> <step> /build/env-vars
 
-# a shell inside the VM at a step, or gdb on it, in a throwaway fork;
-# --with brings more Nix packages into the shell, such as gdb for user space
+# a shell inside the VM at a step, in a throwaway fork; --with brings more
+# Nix packages into it
 $ rewind shell <run> <step> --pid <pid>
-$ rewind shell <run> <step> --pid <pid> --with nixpkgs#gdb --with nixpkgs#strace
+$ rewind shell <run> <step> --pid <pid> --with nixpkgs#strace
+
+# gdb on a fork at a step, with the symbols and sources of the kernel and of
+# the process running there; arguments after -- go to gdb
 $ rewind gdb <run> <step>
+$ rewind gdb <run> <step> -- -batch -ex 'break pool.c:77' -ex continue -ex bt
 
 # branch a run at a step under another schedule, or replay it exactly
 $ rewind fork <run> <step> --schedule 2

@@ -121,14 +121,39 @@ VM goes idle, Rewind waits for typing until the next timer is due, and jumps to
 the timer only if none came. `sleep 2` takes two seconds, and an idle shell
 costs no CPU.
 
-`rewind gdb` needs no help from the kernel. It serves the GDB remote protocol
-for a forked machine with the `gdbstub` crate: registers through KVM, and
-memory through KVM's address translation, so gdb reads the kernel and the
-running process's user space as the VM's own page tables map them.
-Breakpoints are the CPU's four debug address registers rather than `int3` in
-memory, and a single step holds interrupts off. A debug trap is a VM exit the
-VM never sees and not a step, so a debugged fork runs exactly as it would
-have.
+`rewind gdb` serves the GDB remote protocol for a forked machine with the
+`gdbstub` crate: registers through KVM, and memory through KVM's address
+translation, so gdb reads the kernel and the running process's user space as
+the VM's own page tables map them. Breakpoints are the CPU's four debug
+address registers rather than `int3` in memory, and a single step holds
+interrupts off. A debug trap is a VM exit the VM never sees and not a step, so
+a debugged fork runs exactly as it would have.
+
+What gdb knows about the code comes from two more inspections, each on a fork
+of its own, before the fork gdb debugs is made. The kernel hands every
+inspection the thread group id of the task that was running when the request
+arrived, in `REWIND_RUNNING`. A `running` inspection answers with that
+process's `/proc/<pid>/maps` and the bytes of every ELF file it had mapped
+that is not in the input image's store, read through
+`/proc/<pid>/map_files`: a store path is in the image unless the overlay's
+writable layer has it, and everything else, such as a test program the build
+compiled, only the VM has. Rewind writes those files to a directory for the
+session and gives gdb every program and library at its load offset, the
+mapping of the file's start less the address its first loadable segment was
+linked at. For the files only the VM had, gdb lists the source files their
+DWARF names, and a `files` inspection reads them in the process's view; the
+list goes in as console input, since a request has room for few arguments.
+
+DWARF and sources for everything in the store come by build ID from
+nixseparatedebuginfod2, which Rewind starts for the session on a socket it
+binds itself and hands over the way systemd's socket activation does. It serves
+the local store's `debug` outputs and cache.nixos.org's, so glibc's DWARF and
+source arrive as gdb asks for them. The kernel's `debug` output is nixpkgs'
+separateDebugInfo layout with an overlay of the files the Rewind patch adds or
+changes. Rewind fetches the output itself the first time, because Cachix keeps
+no index by build ID, opens its vmlinux in gdb, and puts the overlay on gdb's
+source path: nixseparatedebuginfod2 takes an overlay file only in place of one
+the source tarball has, and `rewind.c` is new.
 
 The kernel is uniprocessor (`CONFIG_SMP=n`), so spinlocks compile away and
 nothing in the kernel waits on another CPU. It has no PCI, ACPI or modules.
