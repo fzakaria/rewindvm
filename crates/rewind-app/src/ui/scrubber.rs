@@ -43,8 +43,9 @@ const EXPORT_EXTENSION: &str = "rwd";
 /// Why an example run cannot be forked.
 const EXAMPLE_FORK: &str = "Forking runs the build again from the playhead, which needs the engine and KVM on this machine. The example's inputs, its kernel, initramfs and Nix store paths, belong to the machine that recorded it. Record a run of your own with rewind nix to fork it.";
 
-/// Where "Buy" goes.
-pub const BUY_URL: &str = "https://rewindvm.dev/#buy";
+/// Where "Buy" goes: the site's pricing section, whose buttons open
+/// the Stripe checkouts.
+pub const BUY_URL: &str = "https://rewindvm.dev/#pricing";
 
 /// Where a fork made from the playhead stands.
 #[derive(Clone, Debug, PartialEq, Eq)]
