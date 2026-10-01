@@ -450,16 +450,25 @@ impl Run {
         Ok(runs)
     }
 
-    /// Finds a run by id prefix, name, or path.
+    /// Finds a run by path, name, or id prefix. A run named exactly `what`
+    /// wins over ids that start with it, so a run named `a` is found even
+    /// when another run's id starts with an `a`.
     pub fn find(home: &Home, what: &str) -> Result<Run> {
         let path = Path::new(what);
         if path.join(MANIFEST).exists() {
             return Run::open(path);
         }
-        let matches: Vec<Run> = Run::list(home)?
+        let (named, others): (Vec<Run>, Vec<Run>) = Run::list(home)?
             .into_iter()
-            .filter(|r| r.manifest.id.starts_with(what) || r.manifest.name == what)
-            .collect();
+            .partition(|r| r.manifest.name == what);
+        let matches: Vec<Run> = if named.is_empty() {
+            others
+                .into_iter()
+                .filter(|r| r.manifest.id.starts_with(what))
+                .collect()
+        } else {
+            named
+        };
         match matches.len() {
             0 => bail!("no run matches {what:?}; see `rewind ls`"),
             1 => Ok(matches.into_iter().next().unwrap()),
