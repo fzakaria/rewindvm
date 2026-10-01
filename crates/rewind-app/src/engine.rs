@@ -100,6 +100,17 @@ impl ForkJson {
     }
 }
 
+/// A run the engine imported from an export, as `rewind import --json`
+/// prints it.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
+pub struct Imported {
+    pub id: String,
+    pub dir: PathBuf,
+    /// Whether the run has the keyframes and inputs to be brought back to
+    /// a step.
+    pub replayable: bool,
+}
+
 /// The engine's operations on a recorded run.
 pub trait Engine: Send + Sync {
     /// Forks `run` at `step`: the same inputs with the schedule perturbed
@@ -109,6 +120,10 @@ pub trait Engine: Send + Sync {
     /// Writes `run` to `out` as a single .rwd file another machine can
     /// replay: its trace, keyframes, pages, inputs and kernel.
     fn export(&self, run: &Path, out: &Path) -> EngineResult<()>;
+
+    /// Reads the .rwd file `file` into the engine's runs, where it can be
+    /// forked, and returns the run.
+    fn import(&self, file: &Path) -> EngineResult<Imported>;
 
     /// The command that opens an interactive shell inside a fork of `run`
     /// at `step`, in process `pid`'s root and working directory, or the
@@ -249,6 +264,32 @@ impl Engine for CliEngine {
         })
     }
 
+    fn import(&self, file: &Path) -> EngineResult<Imported> {
+        // rewind import <file> --json
+        let args: [OsString; 3] = ["import".into(), file.into(), "--json".into()];
+        let command = self.command_line(&args);
+        let output = Command::new(&self.program)
+            .args(&args)
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|e| self.spawn_error(e, &command))?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let imported = stdout
+            .lines()
+            .rev()
+            .find_map(|line| serde_json::from_str::<Imported>(line).ok());
+        match imported {
+            Some(imported) if output.status.success() => Ok(imported),
+            _ => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let message = last_line(&stderr)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| output.status.to_string());
+                Err(EngineError::Failed { command, message })
+            }
+        }
+    }
+
     fn export(&self, run: &Path, out: &Path) -> EngineResult<()> {
         // rewind export <run> --replayable -o <out>
         let args: [OsString; 5] = [
@@ -376,15 +417,30 @@ fn locate_run(id: &str, parent: &Path) -> Option<PathBuf> {
     if let Some(home) = std::env::var_os(HOME_ENV) {
         candidates.push(PathBuf::from(home).join(RUNS_DIR).join(id));
     }
-    let data = std::env::var_os(XDG_DATA_ENV)
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(HOME_FALLBACK_DATA)));
-    if let Some(data) = data {
-        candidates.push(data.join(DEFAULT_HOME_DIR).join(RUNS_DIR).join(id));
+    if let Some(data) = default_home() {
+        candidates.push(data.join(RUNS_DIR).join(id));
     }
     candidates
         .into_iter()
         .find(|dir| dir.join(MANIFEST_FILE).is_file())
+}
+
+/// The directory the engine keeps its runs in: under REWIND_HOME when it
+/// is set, else under the default home.
+pub fn runs_dir() -> Option<PathBuf> {
+    let home = std::env::var_os(HOME_ENV)
+        .map(PathBuf::from)
+        .or_else(default_home)?;
+    Some(home.join(RUNS_DIR))
+}
+
+/// The engine's home when REWIND_HOME is not set: rewind under the XDG
+/// data directory.
+fn default_home() -> Option<PathBuf> {
+    let data = std::env::var_os(XDG_DATA_ENV)
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(HOME_FALLBACK_DATA)))?;
+    Some(data.join(DEFAULT_HOME_DIR))
 }
 
 fn last_line(text: &str) -> Option<&str> {
@@ -483,6 +539,42 @@ mod tests {
             panic!("{err:?}");
         };
         assert_eq!(message, "rewind: schedule 0 is the unperturbed run");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_import_returns_the_run_the_engine_names() {
+        // The stand-in prints what `rewind import --json` does; the app
+        // takes the run's directory from it.
+        let dir = temp_dir("import");
+        let file = dir.join("run.rwd");
+        let json =
+            r#"{"id":"e8e7","dir":"/home/me/.local/share/rewind/runs/e8e7","replayable":true}\n"#;
+        let engine = fake_engine(&dir, json, "", 0);
+        let imported = retrying(|| engine.import(&file)).unwrap();
+        assert_eq!(
+            imported,
+            Imported {
+                id: "e8e7".into(),
+                dir: PathBuf::from("/home/me/.local/share/rewind/runs/e8e7"),
+                replayable: true,
+            }
+        );
+        let args = std::fs::read_to_string(dir.join("args")).unwrap();
+        assert_eq!(args.trim(), format!("import {} --json", file.display()));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_refused_import_reports_the_engines_last_words() {
+        // A failed import prints no run, and its reason on standard error.
+        let dir = temp_dir("import-refused");
+        let engine = fake_engine(&dir, "", "rewind: run.rwd: not a zstd stream\n", 1);
+        let err = retrying(|| engine.import(&dir.join("run.rwd"))).unwrap_err();
+        let EngineError::Failed { message, .. } = err else {
+            panic!("{err:?}");
+        };
+        assert_eq!(message, "rewind: run.rwd: not a zstd stream");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

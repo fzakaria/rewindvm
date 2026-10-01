@@ -18,7 +18,7 @@ use crate::theme::{self, layout, size};
 use crate::tour::Anchor;
 use crate::ui::chrome::client_tiling;
 use crate::ui::icons::Icon;
-use crate::ui::scrubber::{ForkState, NoticeAction, NoticeTone, PickKind, Scrubber};
+use crate::ui::scrubber::{ForkState, NoticeAction, NoticeTone, Scrubber};
 use crate::ui::selectable::{PID_CHARS, mapped, process_row, selectable, selects};
 use crate::ui::tour::explore_button;
 use crate::ui::widgets::{
@@ -68,11 +68,7 @@ impl Render for Scrubber {
                 cx.listener(|this, _: &JumpToDivergence, _, cx| this.go(Motion::Divergence, cx)),
             )
             .on_action(cx.listener(|this, _: &ForkHere, _, cx| this.fork_here(cx)))
-            .on_action(
-                cx.listener(|this, _: &OpenRun, _, cx| {
-                    this.prompt_open(PickKind::RunDirectory, cx)
-                }),
-            )
+            .on_action(cx.listener(|this, _: &OpenRun, _, cx| this.prompt_open(cx)))
             .on_action(cx.listener(|this, _: &EnterLicense, window, cx| {
                 this.open_license_dialog(window, cx)
             }))
@@ -1278,20 +1274,20 @@ impl Scrubber {
         row
     }
 
-    /// Before a run is open: the mark, a line of explanation, and buttons
-    /// to pick a run directory or a trace file.
+    /// Before a run is open: the mark, a line of explanation, buttons to
+    /// open a file or a link, and the runs recorded here most recently.
     fn render_empty(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let status = match &self.loading {
             Some(path) => format!("Opening {}\u{2026}", path.display()),
             None => "Open a recorded run to scrub through it, or look around an example first."
                 .to_string(),
         };
-        let open_run = button("open-run", ButtonStyle::Neutral, Availability::Enabled)
-            .child("Open run\u{2026}")
-            .on_click(cx.listener(|this, _, _, cx| this.prompt_open(PickKind::RunDirectory, cx)));
         let open_file = button("open-file", ButtonStyle::Neutral, Availability::Enabled)
-            .child("Open file\u{2026}")
-            .on_click(cx.listener(|this, _, _, cx| this.prompt_open(PickKind::File, cx)));
+            .child("Open\u{2026}")
+            .on_click(cx.listener(|this, _, _, cx| this.prompt_open(cx)));
+        let open_link = button("open-link", ButtonStyle::Neutral, Availability::Enabled)
+            .child("Open link")
+            .on_click(cx.listener(|this, _, _, cx| this.open_link(cx)));
 
         // The header, with only the mark on the left, is still the title
         // bar.
@@ -1328,15 +1324,16 @@ impl Scrubber {
                     .flex()
                     .gap(px(size::CONTROL_GAP))
                     .child(explore_button(cx))
-                    .child(open_run)
-                    .child(open_file),
+                    .child(open_file)
+                    .child(open_link),
             )
+            .when(!self.recent.is_empty(), |d| d.child(self.render_recent(cx)))
             .child(
                 div()
                     .font_family(self.fonts.mono.clone())
                     .text_size(px(size::TEXT_SMALL))
                     .text_color(rgb(theme::MUTED))
-                    .child("rewind-app <run-dir | run.rwd | trace> [--compare <run>]    F1 starts the tour"),
+                    .child("rewind-app <run-dir | run.rwd | URL | trace> [--compare <run>]    F1 starts the tour"),
             );
 
         div()
@@ -1345,6 +1342,76 @@ impl Scrubber {
             .flex_col()
             .child(header)
             .child(middle)
+    }
+}
+
+impl Scrubber {
+    /// The recent runs, newest first, each a row that opens it: how it
+    /// ended, its id, what it built or ran, and when it last changed.
+    fn render_recent(&self, cx: &mut Context<Self>) -> Div {
+        let now = std::time::SystemTime::now();
+        let mut list = card(theme::PANEL, theme::LINE)
+            .w(px(size::RECENT_WIDTH))
+            .child(card_title(theme::MUTED).child("Recent runs"));
+        for (i, run) in self.recent.iter().enumerate() {
+            let tone = if run.failed {
+                PillTone::Failed
+            } else if run.ending == "exited:0" {
+                PillTone::Passed
+            } else {
+                PillTone::Quiet
+            };
+            let when = now
+                .duration_since(run.modified)
+                .map(crate::describe::ago)
+                .unwrap_or_default();
+            let dir = run.dir.clone();
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!("recent-{i}")))
+                    .flex()
+                    .items_center()
+                    .gap(px(size::CONTROL_GAP))
+                    .px(px(size::RECENT_ROW_PAD_X))
+                    .py(px(size::RECENT_ROW_PAD_Y))
+                    .rounded(px(size::RADIUS_CARD))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgb(theme::RAISED_HOVER)))
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(size::RECENT_ENDING_WIDTH))
+                            .child(pill(run.ending.clone(), tone, &self.fonts)),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .font_family(self.fonts.mono.clone())
+                            .text_size(px(size::TEXT_SMALL))
+                            .text_color(rgb(theme::MUTED))
+                            .child(short_id(&run.id)),
+                    )
+                    .child(
+                        div()
+                            .flex_grow(layout::FILL)
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .text_color(rgb(theme::SOFT))
+                            .child(run.title.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(size::TEXT_SMALL))
+                            .text_color(rgb(theme::MUTED))
+                            .child(when),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| this.open(dir.clone(), None, cx))),
+            );
+        }
+        list
     }
 }
 

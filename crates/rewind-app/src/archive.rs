@@ -29,8 +29,29 @@ const HOME_CACHE_DIR: &str = ".cache";
 /// .rwd files.
 const URL_SCHEMES: &[&str] = &["https://", "http://"];
 
+/// Where downloaded exports are kept, next to the unpacked runs, so the
+/// engine can import one without downloading it again.
+const DOWNLOADS_SUBDIR: &str = "rewind/downloads";
+
+/// The directories a replayable export adds: the keyframes, their pages,
+/// and the inputs the run booted.
+const REPLAY_DIRS: &[&str] = &["keyframes", "pages", "inputs"];
+
+/// An export unpacked into the cache.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Unpacked {
+    /// The run's directory, with its manifest and trace.
+    pub dir: PathBuf,
+    /// Whether the export also holds what replay needs, which the engine
+    /// can import.
+    pub replayable: bool,
+}
+
 /// The name used for a run whose manifest has no id.
 const NO_ID: &str = "unnamed";
+
+/// The name a download goes by when its URL ends in no usable file name.
+const DOWNLOAD_NAME: &str = "download.rwd";
 
 /// Whether a file is a `.rwd` export: a zstd stream, whatever its name.
 pub fn is_export(path: &Path) -> bool {
@@ -42,15 +63,24 @@ pub fn is_export(path: &Path) -> bool {
 /// The directory runs are unpacked into: $XDG_CACHE_HOME/rewind/imported,
 /// else ~/.cache/rewind/imported.
 pub fn cache_dir() -> Option<PathBuf> {
-    let cache = std::env::var_os(XDG_CACHE_ENV)
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(HOME_CACHE_DIR)))?;
-    Some(cache.join(CACHE_SUBDIR))
+    Some(cache_root()?.join(CACHE_SUBDIR))
 }
 
-/// Unpacks an export file into the cache and returns the run's directory.
-pub fn import_file(path: &Path) -> Result<PathBuf> {
+/// The directory downloaded exports are kept in.
+pub fn downloads_dir() -> Option<PathBuf> {
+    Some(cache_root()?.join(DOWNLOADS_SUBDIR))
+}
+
+/// $XDG_CACHE_HOME, else ~/.cache.
+fn cache_root() -> Option<PathBuf> {
+    std::env::var_os(XDG_CACHE_ENV)
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(HOME_CACHE_DIR)))
+}
+
+/// Unpacks an export file into the cache.
+pub fn import_file(path: &Path) -> Result<Unpacked> {
     let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let into = cache_dir().context("no HOME to unpack the run into")?;
     import(file, &into).with_context(|| format!("unpacking {}", path.display()))
@@ -62,19 +92,44 @@ pub fn is_url(path: &Path) -> bool {
     URL_SCHEMES.iter().any(|scheme| name.starts_with(scheme))
 }
 
-/// Downloads an export from `url` into the cache, unpacking it as it
-/// arrives, and returns the run's directory.
-pub fn import_url(url: &str) -> Result<PathBuf> {
-    let into = cache_dir().context("no HOME to unpack the run into")?;
+/// Downloads an export from `url` into the downloads directory and
+/// returns the file. A file of the same name and length already there is
+/// taken as that download, so opening a URL twice fetches it once.
+pub fn download(url: &str) -> Result<PathBuf> {
+    let dir = downloads_dir().context("no HOME to download the run into")?;
+    fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let name = download_name(url);
+    let file = dir.join(name);
+
     let response = ureq::get(url)
         .call()
         .with_context(|| format!("downloading {url}"))?;
-    import(response.into_body().into_reader(), &into).with_context(|| format!("unpacking {url}"))
+    let length = response
+        .headers()
+        .get("content-length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok());
+    let have = fs::metadata(&file).ok().map(|m| m.len());
+    if length.is_some() && have == length {
+        return Ok(file);
+    }
+
+    // Written under another name and renamed whole, so a download cut
+    // short never passes for the file.
+    let partial = dir.join(format!(".{name}.{}-{}", std::process::id(), unique()));
+    let written = File::create(&partial)
+        .and_then(|mut out| io::copy(&mut response.into_body().into_reader(), &mut out))
+        .and_then(|_| fs::rename(&partial, &file));
+    if let Err(e) = written {
+        let _ = fs::remove_file(&partial);
+        return Err(e).with_context(|| format!("downloading {url}"));
+    }
+    Ok(file)
 }
 
 /// Unpacks an export held in memory, like the examples compiled into the
 /// app, into the cache.
-pub fn import_bytes(bytes: &[u8]) -> Result<PathBuf> {
+pub fn import_bytes(bytes: &[u8]) -> Result<Unpacked> {
     let into = cache_dir().context("no HOME to unpack the run into")?;
     import(bytes, &into)
 }
@@ -83,7 +138,7 @@ pub fn import_bytes(bytes: &[u8]) -> Result<PathBuf> {
 /// `<into>/<manifest id>/`. A run already unpacked there is reused as it
 /// is: its id is the hash of its inputs, and runs are deterministic, so
 /// the same id means the same run.
-pub fn import(reader: impl Read, into: &Path) -> Result<PathBuf> {
+pub fn import(reader: impl Read, into: &Path) -> Result<Unpacked> {
     fs::create_dir_all(into).with_context(|| format!("creating {}", into.display()))?;
 
     // Unpack into a staging directory first; the run's id is known only
@@ -91,7 +146,10 @@ pub fn import(reader: impl Read, into: &Path) -> Result<PathBuf> {
     let staging = into.join(format!(".staging-{}-{}", std::process::id(), unique()));
     let _ = fs::remove_dir_all(&staging);
     fs::create_dir_all(&staging)?;
-    let result = unpack(reader, &staging).and_then(|()| place(&staging, into));
+    let result = unpack(reader, &staging).and_then(|replayable| {
+        let dir = place(&staging, into)?;
+        Ok(Unpacked { dir, replayable })
+    });
     let _ = fs::remove_dir_all(&staging);
     result
 }
@@ -103,12 +161,13 @@ fn unique() -> u64 {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
-/// Writes the archive's manifest and trace into `staging`. Every other
-/// entry is skipped; a path that is not plain names inside the archive is
-/// refused.
-fn unpack(reader: impl Read, staging: &Path) -> Result<()> {
+/// Writes the archive's manifest and trace into `staging`, and says
+/// whether it holds what replay needs. Every other entry is skipped; a
+/// path that is not plain names inside the archive is refused.
+fn unpack(reader: impl Read, staging: &Path) -> Result<bool> {
     let decoder = zstd::Decoder::new(reader).context("not a zstd stream")?;
     let mut archive = tar::Archive::new(decoder);
+    let mut replayable = false;
     for entry in archive.entries().context("not a tar archive")? {
         let mut entry = entry?;
         let path = entry.path()?.into_owned();
@@ -117,6 +176,9 @@ fn unpack(reader: impl Read, staging: &Path) -> Result<()> {
             .any(|c| !matches!(c, Component::Normal(_)))
         {
             bail!("the archive holds an unsafe path {}", path.display());
+        }
+        if REPLAY_DIRS.iter().any(|d| path.starts_with(d)) {
+            replayable = true;
         }
         let wanted = path == Path::new(MANIFEST_FILE) || path == Path::new(TRACE_FILE);
         if !wanted {
@@ -130,7 +192,7 @@ fn unpack(reader: impl Read, staging: &Path) -> Result<()> {
             bail!("the archive has no {name}");
         }
     }
-    Ok(())
+    Ok(replayable)
 }
 
 /// Moves a staged run to `<into>/<id>`, or keeps the copy already there.
@@ -168,6 +230,22 @@ fn is_complete(dir: &Path) -> bool {
 }
 
 /// A run id that is safe as one path component.
+/// The file name a download of `url` is kept under: the URL's last path
+/// segment, without a query or fragment, when it is a plain file name.
+fn download_name(url: &str) -> &str {
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    let last = path.rsplit('/').next().unwrap_or_default();
+    let plain = !last.starts_with('.')
+        && last
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    if plain && !last.is_empty() {
+        last
+    } else {
+        DOWNLOAD_NAME
+    }
+}
+
 fn is_safe_name(id: &str) -> bool {
     !id.is_empty()
         && id
@@ -192,6 +270,21 @@ pub(crate) fn test_cache() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_download_keeps_the_urls_file_name_when_it_is_plain() {
+        // The last segment names the file, without a query; anything that
+        // could climb out of the downloads directory or hide is replaced.
+        let base = "https://github.com/o/r/releases/download/t";
+        assert_eq!(
+            download_name(&format!("{base}/run-replayable.rwd")),
+            "run-replayable.rwd"
+        );
+        assert_eq!(download_name(&format!("{base}/run.rwd?x=1#y")), "run.rwd");
+        assert_eq!(download_name(&format!("{base}/")), DOWNLOAD_NAME);
+        assert_eq!(download_name(&format!("{base}/..")), DOWNLOAD_NAME);
+        assert_eq!(download_name(&format!("{base}/a%2Fb.rwd")), DOWNLOAD_NAME);
+    }
+
     #[test]
     fn urls_are_told_from_paths() {
         // http and https name a download; anything else is a path, even
@@ -234,7 +327,8 @@ mod tests {
     #[test]
     fn an_export_unpacks_under_its_id_without_the_replay_data() {
         // The manifest comes after the trace, and pages, keyframes and
-        // inputs are left in the archive.
+        // inputs are left in the archive, though their being there marks
+        // the export replayable.
         let dir = temp_dir("unpack");
         let bytes = archive(&[
             ("trace.bin", b"trace"),
@@ -243,7 +337,9 @@ mod tests {
             ("inputs/kernel", b"kernel"),
             ("manifest.json", br#"{"id": "3e7358ddd62c45d3"}"#),
         ]);
-        let run = import(&bytes[..], &dir).unwrap();
+        let unpacked = import(&bytes[..], &dir).unwrap();
+        assert!(unpacked.replayable);
+        let run = unpacked.dir;
         assert_eq!(run, dir.join("3e7358ddd62c45d3"));
         assert_eq!(fs::read(run.join("trace.bin")).unwrap(), b"trace");
         assert!(!run.join("pages").exists() && !run.join("inputs").exists());
@@ -265,8 +361,9 @@ mod tests {
             ("trace.bin", b"two"),
         ]);
         import(&first[..], &dir).unwrap();
-        let run = import(&second[..], &dir).unwrap();
-        assert_eq!(fs::read(run.join("trace.bin")).unwrap(), b"one");
+        let unpacked = import(&second[..], &dir).unwrap();
+        assert!(!unpacked.replayable, "a trace alone is not replayable");
+        assert_eq!(fs::read(unpacked.dir.join("trace.bin")).unwrap(), b"one");
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -290,7 +387,7 @@ mod tests {
                 for _ in 0..RACERS {
                     s.spawn(|| {
                         barrier.wait();
-                        let run = import(&bytes[..], &dir).unwrap();
+                        let run = import(&bytes[..], &dir).unwrap().dir;
                         assert_eq!(fs::read(run.join("trace.bin")).unwrap(), b"trace");
                     });
                 }
@@ -323,7 +420,7 @@ mod tests {
             ("manifest.json", br#"{"id": "../up"}"#),
             ("trace.bin", b"t"),
         ]);
-        assert_eq!(import(&odd_id[..], &dir).unwrap(), dir.join(NO_ID));
+        assert_eq!(import(&odd_id[..], &dir).unwrap().dir, dir.join(NO_ID));
         fs::remove_dir_all(&dir).unwrap();
     }
 

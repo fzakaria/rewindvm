@@ -15,7 +15,7 @@ use gpui::{
 use crate::describe::thousands;
 use crate::engine::{Engine, EngineError, EngineResult, Forked};
 use crate::model::{LogFilter, Motion};
-use crate::run::{Agreement, Origin, Session, short_id};
+use crate::run::{Agreement, Origin, RecentRun, Session, recent_runs, short_id};
 use crate::selection::Surface;
 use crate::tour::Tour;
 use crate::ui::Launch;
@@ -119,13 +119,8 @@ pub struct Notice {
     pub actions: Vec<NoticeAction>,
 }
 
-/// What the "Open" prompt asks for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PickKind {
-    RunDirectory,
-    /// A trace file or a .rwd export.
-    File,
-}
+/// How many recent runs the empty state lists.
+const RECENT_SHOWN: usize = 8;
 
 /// An export the engine is writing.
 pub struct ExportJob {
@@ -141,6 +136,7 @@ pub struct ExportJob {
 pub enum Replay {
     Shell,
     Gdb,
+    Fork,
 }
 
 impl Replay {
@@ -148,6 +144,7 @@ impl Replay {
         match self {
             Replay::Shell => "Opening a shell",
             Replay::Gdb => "Attaching gdb",
+            Replay::Fork => "Forking",
         }
     }
 
@@ -155,13 +152,15 @@ impl Replay {
         match self {
             Replay::Shell => "open a shell",
             Replay::Gdb => "attach gdb",
+            Replay::Fork => "fork it",
         }
     }
 }
 
 /// Why `origin`'s runs cannot be brought back to a step for `replay`, in
-/// words for a notice, or None when they can.
-pub fn replay_unavailable(origin: &Origin, replay: Replay) -> Option<String> {
+/// words for a notice, or None when they can. `importing` says a
+/// replayable export is on its way into the engine's runs.
+pub fn replay_unavailable(origin: &Origin, replay: Replay, importing: bool) -> Option<String> {
     let needs = format!(
         "{} forks the run at the playhead, which needs the run's inputs and Rewind with KVM on this machine.",
         replay.doing()
@@ -172,9 +171,17 @@ pub fn replay_unavailable(origin: &Origin, replay: Replay) -> Option<String> {
             "This example was recorded on another machine and ships as its trace only. Record a run of your own with rewind nix to {} at any step.",
             replay.to_do()
         ),
-        Origin::Export(file) => format!(
-            "This run was opened from {}, and the app unpacks only its trace. Import it with rewind import, then open the imported run.",
-            file.display()
+        Origin::Export(export) if !export.replayable => format!(
+            "{} holds the run's trace only. Open its replayable export, the -replayable.rwd file, to {}.",
+            export.source.display(),
+            replay.to_do()
+        ),
+        Origin::Export(_) if importing => {
+            "The run is being imported into Rewind; try again in a moment.".to_string()
+        }
+        Origin::Export(export) => format!(
+            "Importing the run into Rewind did not work. Run rewind import {}, then open the imported run.",
+            export.file.display()
         ),
         Origin::TraceFile => {
             "This run was opened from a bare trace file. Open its run directory instead."
@@ -192,6 +199,10 @@ pub struct Scrubber {
     pub(super) session: Option<Session>,
     /// A run being read in the background.
     pub(super) loading: Option<PathBuf>,
+    /// A replayable export being imported into the engine's runs.
+    pub(super) importing: Option<PathBuf>,
+    /// The engine's runs that changed last, for the empty state.
+    pub(super) recent: Vec<RecentRun>,
     pub(super) step: u64,
     pub(super) log_filter: LogFilter,
     pub(super) log_scroll: UniformListScrollHandle,
@@ -236,6 +247,10 @@ impl Scrubber {
             engine: launch.engine,
             session: None,
             loading: None,
+            importing: None,
+            recent: crate::engine::runs_dir()
+                .map(|runs| recent_runs(&runs, RECENT_SHOWN))
+                .unwrap_or_default(),
             step: 0,
             log_filter: LogFilter::Output,
             log_scroll: UniformListScrollHandle::new(),
@@ -281,8 +296,70 @@ impl Scrubber {
         self.log_followed = None;
         self.files_followed = None;
         self.selecting.selection = None;
+
+        // A replayable export goes into the engine's runs, where it can
+        // be forked, while it is on screen.
+        let replayable = match &session.run.origin {
+            Origin::Export(export) if export.replayable => Some(export.file.clone()),
+            _ => None,
+        };
         self.session = Some(session);
+        if let Some(file) = replayable {
+            self.bring_in(file, cx);
+        }
         cx.notify();
+    }
+
+    /// Imports the export `file` into the engine's runs in the background,
+    /// then shows the imported run at the same step, so the shell, gdb,
+    /// fork and file buttons work on it. The app already has the file, so
+    /// nothing is downloaded again. A failure leaves the trace on screen.
+    fn bring_in(&mut self, file: PathBuf, cx: &mut Context<Self>) {
+        self.importing = Some(file.clone());
+        let compare = self
+            .session
+            .as_ref()
+            .and_then(|s| s.other.as_ref())
+            .map(|other| other.path.clone());
+        let engine = self.engine.clone();
+        let read = cx.background_executor().spawn({
+            let file = file.clone();
+            async move {
+                let imported = engine.import(&file).map_err(|e| e.to_string())?;
+                Session::open(&imported.dir, compare.as_deref()).map_err(|e| format!("{e:#}"))
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            let result = read.await;
+            let _ = this.update(cx, |this, cx| {
+                this.importing = None;
+
+                // Another run opened meanwhile keeps the screen.
+                let still_shown = matches!(
+                    this.session.as_ref().map(|s| &s.run.origin),
+                    Some(Origin::Export(export)) if export.file == file
+                );
+                if !still_shown {
+                    return;
+                }
+                match result {
+                    Ok(session) => {
+                        let step = this.step;
+                        this.show(session, Some(step), cx);
+                    }
+                    Err(message) => this.notify_user(
+                        NoticeTone::Info,
+                        "Shown from its trace",
+                        format!(
+                            "Importing the run into Rewind did not work, so the shell, gdb and forks are off: {message}"
+                        ),
+                        cx,
+                    ),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Sets the window title to the run's name when it changes.
@@ -490,6 +567,17 @@ impl Scrubber {
             );
             return;
         }
+        if let Some(reason) =
+            replay_unavailable(&session.run.origin, Replay::Fork, self.importing.is_some())
+        {
+            self.notify_user(
+                NoticeTone::Info,
+                "This run cannot be forked yet",
+                reason,
+                cx,
+            );
+            return;
+        }
         let step = self.step;
         let schedule = 1 + session.forks_on_disk as u64 + self.forks.len() as u64;
         let run = session.run.path.clone();
@@ -558,7 +646,9 @@ impl Scrubber {
 
         // Runs the engine cannot bring back say so instead of opening a
         // pane that would only print an error.
-        if let Some(reason) = replay_unavailable(&session.run.origin, replay) {
+        if let Some(reason) =
+            replay_unavailable(&session.run.origin, replay, self.importing.is_some())
+        {
             self.notify_user(
                 NoticeTone::Info,
                 format!("{} needs a run recorded here", replay.doing()),
@@ -584,6 +674,8 @@ impl Scrubber {
                 self.engine.shell_command(&run, step, pid),
             ),
             Replay::Gdb => (PaneKind::Gdb, None, self.engine.gdb_command(&run, step)),
+            // A fork makes a run rather than a pane; fork_here does it.
+            Replay::Fork => return,
         };
         self.count_engine_action(cx);
         self.open_terminal(kind, step, pid, command, window, cx);
@@ -602,11 +694,11 @@ impl Scrubber {
                 "The example cannot be exported".to_string(),
                 "Export writes a run with everything another machine needs to replay it: its keyframes, memory pages, inputs and kernel. The example ships as its trace only. Record a run of your own with rewind nix, then export it.".to_string(),
             )),
-            Origin::Export(file) => Some((
+            Origin::Export(export) => Some((
                 "This run already is a .rwd file".to_string(),
                 format!(
-                    "It was opened from {}; share that file. Export writes a replayable .rwd from a run directory on this machine.",
-                    file.display()
+                    "It was opened from {}; share that. Export writes a replayable .rwd from a run directory on this machine.",
+                    export.source.display()
                 ),
             )),
             Origin::TraceFile => Some((
@@ -767,11 +859,34 @@ impl Scrubber {
         }
     }
 
-    /// Asks for a run to open, and opens it.
-    pub(super) fn prompt_open(&mut self, kind: PickKind, cx: &mut Context<Self>) {
+    /// Opens the run whose link is on the clipboard: an http or https URL
+    /// of a .rwd file, such as a case study's.
+    pub(super) fn open_link(&mut self, cx: &mut Context<Self>) {
+        let text = cx
+            .read_from_clipboard()
+            .and_then(|item| item.text())
+            .map(|t| t.trim().to_string())
+            .unwrap_or_default();
+        if !crate::archive::is_url(Path::new(&text)) {
+            self.notify_user(
+                NoticeTone::Info,
+                "No link on the clipboard",
+                "Copy the link to a .rwd file, such as one on a case study page, then press Open link again.",
+                cx,
+            );
+            return;
+        }
+        self.open(PathBuf::from(text), None, cx);
+    }
+
+    /// Asks for a run to open, and opens it: a .rwd file, a bare trace, or
+    /// the manifest.json in a run's directory, which opens the run. A
+    /// desktop file chooser picks files or directories but not both, so
+    /// one prompt for files reaches every kind.
+    pub(super) fn prompt_open(&mut self, cx: &mut Context<Self>) {
         let options = PathPromptOptions {
-            files: kind == PickKind::File,
-            directories: kind == PickKind::RunDirectory,
+            files: true,
+            directories: false,
             multiple: false,
             prompt: Some(SharedString::from("Open")),
         };

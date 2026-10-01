@@ -5,8 +5,8 @@
 //! A run is a run directory, a .rwd export, an http or https URL of one,
 //! or a bare trace file.
 //!
-//! Without a run, the window opens on an empty state with an "Open run"
-//! button.
+//! Without a run, the window opens on an empty state with buttons to open
+//! a file or a copied link, and the runs recorded here most recently.
 
 use std::path::PathBuf;
 use std::process::ExitCode;

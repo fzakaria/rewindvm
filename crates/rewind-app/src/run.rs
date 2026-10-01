@@ -147,10 +147,24 @@ pub enum Origin {
     Local,
     /// A bare trace file, without the run directory around it.
     TraceFile,
-    /// A `.rwd` export, or a URL of one, unpacked into the cache.
-    Export(PathBuf),
+    /// A `.rwd` export, or a URL of one, with its trace unpacked into the
+    /// cache.
+    Export(Export),
     /// One of the example runs compiled into the app.
     Example,
+}
+
+/// Where an export came from, and what it holds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Export {
+    /// The file or URL the run was opened from.
+    pub source: PathBuf,
+    /// The export on this machine: the file itself, or the download of
+    /// the URL.
+    pub file: PathBuf,
+    /// Whether it holds the keyframes, pages and inputs replay needs, so
+    /// the engine can import it.
+    pub replayable: bool,
 }
 
 pub struct Run {
@@ -166,15 +180,25 @@ pub struct Run {
 
 impl Run {
     /// Opens a run directory, a `.rwd` export, an http or https URL of
-    /// one, or a bare trace file.
+    /// one, or a bare trace file. The manifest or trace inside a run
+    /// directory opens the directory, so one file picker reaches them all.
     pub fn open(path: &Path) -> Result<Run> {
-        if archive::is_url(path) {
-            let dir = archive::import_url(&path.to_string_lossy())?;
-            return Run::open_at(&dir, Origin::Export(path.to_path_buf()));
+        if let Some(dir) = run_dir_of(path) {
+            return Run::open_at(&dir, Origin::Local);
         }
-        if path.is_file() && archive::is_export(path) {
-            let dir = archive::import_file(path)?;
-            return Run::open_at(&dir, Origin::Export(path.to_path_buf()));
+        let file = if archive::is_url(path) {
+            Some(archive::download(&path.to_string_lossy())?)
+        } else {
+            Some(path.to_path_buf()).filter(|p| p.is_file() && archive::is_export(p))
+        };
+        if let Some(file) = file {
+            let unpacked = archive::import_file(&file)?;
+            let export = Export {
+                source: path.to_path_buf(),
+                file,
+                replayable: unpacked.replayable,
+            };
+            return Run::open_at(&unpacked.dir, Origin::Export(export));
         }
         let origin = if path.is_dir() {
             Origin::Local
@@ -186,7 +210,7 @@ impl Run {
 
     /// Opens an example run compiled into the app.
     pub fn open_example(bytes: &[u8]) -> Result<Run> {
-        let dir = archive::import_bytes(bytes)?;
+        let dir = archive::import_bytes(bytes)?.dir;
         Run::open_at(&dir, Origin::Example)
     }
 
@@ -359,6 +383,84 @@ impl Verdict {
 }
 
 /// A run id cut to the length people read and type.
+/// The run directory `path` names when it is the manifest or trace inside
+/// one: a directory with a manifest.
+fn run_dir_of(path: &Path) -> Option<PathBuf> {
+    let name = path.file_name()?;
+    if name != MANIFEST_FILE && name != TRACE_FILE {
+        return None;
+    }
+    let dir = path.parent()?;
+    dir.join(MANIFEST_FILE).is_file().then(|| dir.to_path_buf())
+}
+
+/// A run on disk as the list of recent runs shows it, from its manifest
+/// alone.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecentRun {
+    pub dir: PathBuf,
+    pub id: String,
+    /// What it built or ran: the manifest's name, else its derivation or
+    /// command.
+    pub title: String,
+    /// How it ended: exited:2, killed:SIGSEGV, or unknown.
+    pub ending: String,
+    pub failed: bool,
+    /// When the run's directory last changed.
+    pub modified: std::time::SystemTime,
+}
+
+/// What a run without a recorded exit status is listed as.
+const UNKNOWN_ENDING: &str = "unknown";
+
+/// The `limit` runs under `runs` whose directories changed last, newest
+/// first. Directories without a readable manifest are left out.
+pub fn recent_runs(runs: &Path, limit: usize) -> Vec<RecentRun> {
+    let Ok(entries) = std::fs::read_dir(runs) else {
+        return Vec::new();
+    };
+    let mut dirs: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .filter_map(|e| {
+            let e = e.ok()?;
+            let modified = e.metadata().ok()?.modified().ok()?;
+            Some((modified, e.path()))
+        })
+        .collect();
+    dirs.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+
+    dirs.into_iter()
+        .filter_map(|(modified, dir)| {
+            let manifest = read_manifest(&dir.join(MANIFEST_FILE)).ok()?;
+            let id = manifest.id.clone().unwrap_or_default();
+            let title = [manifest.name.clone(), manifest.drv.clone()]
+                .into_iter()
+                .flatten()
+                .chain(manifest.command.as_ref().map(|c| c.join(" ")))
+                .find(|t| !t.is_empty())
+                .unwrap_or_else(|| dir.display().to_string());
+            let status = manifest
+                .outcome
+                .as_ref()
+                .and_then(|o| o.status)
+                .and_then(|s| u32::try_from(s).ok());
+            let ending = match status.map(ExitStatus::from_raw) {
+                Some(ExitStatus::Code(code)) => format!("exited:{code}"),
+                Some(ExitStatus::Signal { signo, .. }) => format!("killed:{}", signal_name(signo)),
+                None => UNKNOWN_ENDING.to_string(),
+            };
+            Some(RecentRun {
+                dir,
+                id,
+                title,
+                ending,
+                failed: status.is_some_and(|s| s != 0),
+                modified,
+            })
+        })
+        .take(limit)
+        .collect()
+}
+
 pub fn short_id(id: &str) -> String {
     const ID_SHOWN: usize = 8;
     id.chars().take(ID_SHOWN).collect()
@@ -494,6 +596,60 @@ pub enum Agreement {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_runs_manifest_or_trace_opens_its_directory() {
+        // Picking a file inside a run directory reaches the run; a trace
+        // with no manifest beside it stays a bare trace.
+        let dir = std::env::temp_dir().join(format!("rewind-app-rundir-{}", std::process::id()));
+        let run = dir.join("abc");
+        std::fs::create_dir_all(&run).unwrap();
+        std::fs::write(run.join(MANIFEST_FILE), "{}").unwrap();
+        assert_eq!(run_dir_of(&run.join(MANIFEST_FILE)), Some(run.clone()));
+        assert_eq!(run_dir_of(&run.join(TRACE_FILE)), Some(run.clone()));
+        assert_eq!(run_dir_of(&dir.join(TRACE_FILE)), None);
+        assert_eq!(run_dir_of(&run.join("other.json")), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn recent_runs_come_newest_first_with_their_endings() {
+        // Three runs written a moment apart and one directory with no
+        // manifest; the list skips that one, keeps the newest two, and
+        // reads each ending from the wait status.
+        let runs = std::env::temp_dir().join(format!("rewind-app-recent-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&runs);
+        let write = |id: &str, manifest: &str| {
+            std::fs::create_dir_all(runs.join(id)).unwrap();
+            std::fs::write(runs.join(id).join(MANIFEST_FILE), manifest).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        write("old", r#"{"id": "old", "name": "first"}"#);
+        write(
+            "pass",
+            r#"{"id": "pass", "name": "hello", "outcome": {"status": 0}}"#,
+        );
+        std::fs::create_dir_all(runs.join("empty")).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        write(
+            "fail",
+            r#"{"id": "fail", "drv": "/nix/store/x-mylib.drv", "outcome": {"status": 512}}"#,
+        );
+
+        let recent = recent_runs(&runs, 2);
+        let summary: Vec<_> = recent
+            .iter()
+            .map(|r| (r.id.as_str(), r.title.as_str(), r.ending.as_str(), r.failed))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                ("fail", "/nix/store/x-mylib.drv", "exited:2", true),
+                ("pass", "hello", "exited:0", false),
+            ]
+        );
+        std::fs::remove_dir_all(&runs).unwrap();
+    }
+
     // Opening runs from a temporary directory: each test writes a trace and
     // perhaps a manifest, opens the run, and checks what the app shows.
     use super::*;
@@ -645,7 +801,14 @@ mod tests {
         let file = dir.join("mylib-fail.rwd");
         std::fs::write(&file, crate::examples::FAILING).unwrap();
         let run = Run::open(&file).unwrap();
-        assert_eq!(run.origin, Origin::Export(file.clone()));
+        assert_eq!(
+            run.origin,
+            Origin::Export(Export {
+                source: file.clone(),
+                file: file.clone(),
+                replayable: false,
+            })
+        );
         assert!(run.path.join(TRACE_FILE).is_file());
         assert_eq!(run.verdict(), Verdict::Failed);
         std::fs::remove_dir_all(&dir).unwrap();

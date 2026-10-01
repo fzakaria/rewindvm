@@ -165,8 +165,10 @@ both in a terminal pane below the scrubber.
 $ nix run github:fzakaria/rewindvm#app -- ~/.local/share/rewind/runs/<run>
 ```
 
-It opens `.rwd` exports too, from a file or an https URL, and comes with an
-example run and a short tour.
+It opens `.rwd` exports too, from a file or an https URL. A replayable export
+goes into Rewind's runs in the background while it is on screen, so the shell,
+gdb and forks work on it. The start screen lists the runs recorded most
+recently, and the app comes with an example run and a short tour.
 See [pricing](https://rewindvm.dev/#pricing) for licenses.
 
 ## Case studies

@@ -190,6 +190,12 @@ pub mod size {
     pub const EMPTY_MARK_ICON: f32 = 44.0;
     pub const EMPTY_GAP: f32 = 14.0;
     pub const TEXT_EMPTY_TITLE: f32 = 26.0;
+    pub const RECENT_WIDTH: f32 = 640.0;
+    pub const RECENT_ROW_PAD_X: f32 = 12.0;
+    pub const RECENT_ROW_PAD_Y: f32 = 7.0;
+    /// Wide enough for the longest ending, killed:SIGSEGV, so the ids
+    /// after it line up.
+    pub const RECENT_ENDING_WIDTH: f32 = 128.0;
 
     // Text.
     pub const TEXT_UI: f32 = 14.0;
