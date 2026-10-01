@@ -76,32 +76,22 @@ pub struct Spec {
     pub quantum: u64,
     /// Perturbs where timer interrupts, and so preemptions, land; 0 for
     /// none.
-    #[serde(default)]
     pub schedule: u64,
     /// The steps the schedule perturbation applies to, `from..until`.
-    #[serde(default)]
     pub schedule_from: u64,
-    #[serde(default = "forever")]
     pub schedule_until: u64,
     /// For a fork of a fork, the perturbations of the runs it came from,
     /// each over its window and all ending by `schedule_from`, so the fork
-    /// is its parent up to its own step. Left out when empty, so runs and
-    /// first-level forks keep their ids.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// is its parent up to its own step.
     pub inherited_schedules: Vec<ScheduleSegment>,
-    /// The CPU the guest is shown. Runs from before this field showed the
-    /// host's.
-    #[serde(default = "host_cpu")]
+    /// The CPU the guest is shown.
     pub cpu: rewind_vmm::cpu::Model,
     /// What moves virtual time besides exits and idling.
-    #[serde(default)]
     pub clock: rewind_vmm::ClockSource,
     /// Where a computing guest can be interrupted.
-    #[serde(default)]
     pub preemption: rewind_vmm::Preemption,
     /// Whether the machine reserves the extras slot for `rewind shell
-    /// --with`. Runs from before the slot have none.
-    #[serde(default)]
+    /// --with`.
     pub extras: rewind_vmm::Extras,
     pub cmdline: String,
     pub job: Job,
@@ -113,14 +103,6 @@ pub struct ScheduleSegment {
     pub seed: u64,
     pub from: u64,
     pub until: u64,
-}
-
-fn forever() -> u64 {
-    u64::MAX
-}
-
-fn host_cpu() -> rewind_vmm::cpu::Model {
-    rewind_vmm::cpu::Model::Host
 }
 
 /// What kind of workload a run is, for display.
@@ -806,14 +788,11 @@ mod tests {
     }
 
     #[test]
-    fn a_fork_of_an_unperturbed_run_is_the_spec_it_always_was() {
-        // A first-level fork inherits nothing, so its spec, and so its id,
-        // is the one forks had before schedules carried segments.
+    fn a_fork_of_an_unperturbed_run_inherits_nothing() {
+        // A first-level fork has no earlier perturbation to carry, so its
+        // spec is the parent's with only its own schedule and window set.
         let fork = spec().fork(4855, 10);
         assert_eq!(fork, perturbed(10, 4855, u64::MAX));
-        assert_eq!(fork.id(), perturbed(10, 4855, u64::MAX).id());
-        let json = serde_json::to_value(&fork).unwrap();
-        assert!(json.get("inherited_schedules").is_none());
     }
 
     #[test]
@@ -896,8 +875,8 @@ mod tests {
     #[test]
     fn the_app_reads_trace_hash_and_first_difference_by_name() {
         // The fields sit at the top level of manifest.json under exactly
-        // these names, are left out when unknown, and manifests written
-        // before them still parse.
+        // these names, are left out when unknown, and a manifest without
+        // them parses back to the same value.
         let mut m = Manifest {
             version: MANIFEST_VERSION,
             id: "c".into(),

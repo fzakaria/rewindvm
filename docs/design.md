@@ -426,8 +426,7 @@ A fork of a perturbed run, such as a fork of a fork, also keeps the parent's
 perturbations, each cut off at N, in the spec's `inherited_schedules`. Every
 step is then perturbed by the one window that holds it, if any, the same way
 it was in the run it came from. A fork of an unperturbed run inherits
-nothing, and the field is left out of its spec, so its id is what it would
-have been without it.
+nothing.
 
 `rewind check` does the following:
 
