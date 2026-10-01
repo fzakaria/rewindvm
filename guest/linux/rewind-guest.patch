@@ -113,8 +113,8 @@ diff -ruN a/arch/x86/kernel/cpu/Makefile b/arch/x86/kernel/cpu/Makefile
  
 diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 --- a/arch/x86/kernel/cpu/rewind.c	1969-12-31 16:00:00.000000000 -0800
-+++ b/arch/x86/kernel/cpu/rewind.c	2026-09-30 22:25:05.982926990 -0700
-@@ -0,0 +1,977 @@
++++ b/arch/x86/kernel/cpu/rewind.c	2026-09-30 22:53:34.093904791 -0700
+@@ -0,0 +1,988 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Rewind VM guest platform.
@@ -405,9 +405,10 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 + * arguments, which reports through the Rewind devices like any process.
 + * A recording never carries a request, so this changes no recorded run.
 + *
-+ * While an inspection runs, every other user process but init is stopped,
-+ * and power off waits for it to finish, so the job can neither change
-+ * what the inspection reads nor end the machine under it.
++ * While an inspection runs, every other user process is stopped, init
++ * waits at its next system call, and power off waits for the inspection
++ * to finish, so neither the job nor init can change what the inspection
++ * reads, start anything new, or end the machine under it.
 + */
 +#define REWIND_INSPECT_ARGS	8
 +
@@ -415,9 +416,11 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +static DECLARE_WAIT_QUEUE_HEAD(rewind_inspect_done);
 +
 +/*
-+ * Stops every user process except init where it stands. Called from the
-+ * interrupt, so the job stops at the step the monitor asked about rather
-+ * than whenever the worker gets to run.
++ * Stops every user process but init where it stands. Called from the
++ * interrupt, so the machine stops at the step the monitor asked about
++ * rather than whenever the worker gets to run. Linux never stops init with
++ * a signal, so init is held at its next system call instead
++ * (rewind_probe_sys_enter), before it can start the job or anything else.
 + */
 +static void rewind_stop_user_tasks(void)
 +{
@@ -912,6 +915,14 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +
 +static void rewind_probe_sys_enter(void *data, struct pt_regs *regs, long id)
 +{
++	/*
++	 * Init during an inspection: wait here, at a point where it has done
++	 * nothing yet, until the inspection is over. An idle wait, so the
++	 * hung task detector leaves it be.
++	 */
++	if (unlikely(READ_ONCE(rewind_inspecting)) && is_global_init(current))
++		wait_event_idle(rewind_inspect_done, !READ_ONCE(rewind_inspecting));
++
 +	if (in_ia32_syscall())
 +		return;
 +
