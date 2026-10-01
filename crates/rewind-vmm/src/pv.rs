@@ -136,6 +136,21 @@ const PREEMPT_ONE_IN: u64 = 4;
 /// allows on real hardware.
 pub const TIMER_SLACK_NS: u64 = 50_000;
 
+/// Under a schedule seed, one exit in this many stalls the task running
+/// then: it sleeps when it next returns to user space, for between
+/// STALL_MIN_NS and STALL_MIN_NS << (STALL_DOUBLINGS - 1), each doubling
+/// as likely as the next. A busy machine deschedules a process for
+/// stretches like these, and many races need one task held up for a
+/// while rather than switched away from for an instant.
+const STALL_ONE_IN: u64 = 128;
+pub const STALL_MIN_NS: u64 = 10_000;
+pub const STALL_DOUBLINGS: u64 = 8;
+
+/// A stall's length in the shared page, after the console input, with its
+/// interrupt reason.
+pub const PENDING_STALL: u32 = 1 << 4;
+pub const SHARED_STALL_NS: u64 = SHARED_INPUT + INPUT_MAX as u64;
+
 /// A perturbed schedule. At some exits, chosen by the seed, the guest is
 /// asked to reschedule, so another runnable thread may run from there, and
 /// timers armed in the window fire a little late, so sleepers wake in a
@@ -165,6 +180,17 @@ impl Schedule {
         self.seed != 0
             && self.window.contains(&step)
             && mix(mix(self.seed) ^ step).is_multiple_of(PREEMPT_ONE_IN)
+    }
+
+    /// How long to stall the task running after the exit that made
+    /// `step`, if at all.
+    pub fn stall_at(&self, step: u64) -> Option<u64> {
+        if self.seed == 0 || !self.window.contains(&step) {
+            return None;
+        }
+        let h = mix(mix(self.seed ^ 0x57a1) ^ step);
+        h.is_multiple_of(STALL_ONE_IN)
+            .then(|| STALL_MIN_NS << ((h / STALL_ONE_IN) % STALL_DOUBLINGS))
     }
 
     /// Extra delay for a timer armed at `step`.
@@ -225,6 +251,33 @@ mod tests {
         assert_eq!(perturbed.slack_at(50), 0);
         assert!((100..200).all(|s| perturbed.slack_at(s) <= TIMER_SLACK_NS));
         assert!((100..200).any(|s| perturbed.slack_at(s) > 0));
+    }
+
+    #[test]
+    fn stalls_are_rare_bounded_and_off_by_default() {
+        // No stalls without a seed or outside the window; with both, some,
+        // each between the shortest and longest stall.
+        let unperturbed = Schedule {
+            seed: 0,
+            window: 0..u64::MAX,
+        };
+        let perturbed = Schedule {
+            seed: 3,
+            window: 1000..100_000,
+        };
+        assert!((0..10_000).all(|s| unperturbed.stall_at(s).is_none()));
+        assert!((0..1000).all(|s| perturbed.stall_at(s).is_none()));
+        let stalls: Vec<u64> = (1000..100_000)
+            .filter_map(|s| perturbed.stall_at(s))
+            .collect();
+        assert!(stalls.len() > 300 && stalls.len() < 1300);
+        let longest = STALL_MIN_NS << (STALL_DOUBLINGS - 1);
+        assert!(
+            stalls
+                .iter()
+                .all(|ns| (STALL_MIN_NS..=longest).contains(ns))
+        );
+        assert!(stalls.contains(&STALL_MIN_NS) && stalls.contains(&longest));
     }
 
     fn preemptions(seed: u64, window: std::ops::Range<u64>) -> Vec<u64> {

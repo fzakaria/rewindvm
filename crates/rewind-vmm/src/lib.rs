@@ -500,6 +500,14 @@ impl Machine {
         if self.dev.schedule.preempt_at(self.dev.step) {
             reasons |= pv::PENDING_PREEMPT;
         }
+        if let (Some(ns), Some(shared)) =
+            (self.dev.schedule.stall_at(self.dev.step), self.dev.shared)
+        {
+            self.dev
+                .ram
+                .write(shared + pv::SHARED_STALL_NS, &(ns as u32).to_le_bytes())?;
+            reasons |= pv::PENDING_STALL;
+        }
         if self.dev.inspect {
             reasons |= pv::PENDING_INSPECT;
         }

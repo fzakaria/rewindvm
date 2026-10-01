@@ -113,8 +113,8 @@ diff -ruN a/arch/x86/kernel/cpu/Makefile b/arch/x86/kernel/cpu/Makefile
  
 diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 --- a/arch/x86/kernel/cpu/rewind.c	1969-12-31 16:00:00.000000000 -0800
-+++ b/arch/x86/kernel/cpu/rewind.c	2026-09-30 22:53:34.093904791 -0700
-@@ -0,0 +1,988 @@
++++ b/arch/x86/kernel/cpu/rewind.c	2026-10-01 01:13:54.810300098 -0700
+@@ -0,0 +1,1049 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Rewind VM guest platform.
@@ -160,8 +160,10 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +#include <linux/sched/mm.h>
 +#include <linux/sched/signal.h>
 +#include <linux/binfmts.h>
++#include <linux/slab.h>
 +#include <linux/static_call.h>
 +#include <linux/string.h>
++#include <linux/task_work.h>
 +#include <linux/uaccess.h>
 +#include <linux/umh.h>
 +#include <linux/wait.h>
@@ -257,6 +259,7 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +	u8 request[REWIND_REQUEST_MAX];
 +	u32 input_len;
 +	u8 input[REWIND_INPUT_MAX];
++	u32 stall_ns;
 +};
 +
 +/* Reasons for an interrupt, in rewind_shared.pending. */
@@ -264,6 +267,7 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +#define REWIND_PENDING_PREEMPT	BIT(1)	/* reschedule at this point */
 +#define REWIND_PENDING_INSPECT	BIT(2)	/* run the request in rewind_shared */
 +#define REWIND_PENDING_INPUT	BIT(3)	/* input for /dev/rewind-console */
++#define REWIND_PENDING_STALL	BIT(4)	/* stall the running task stall_ns */
 +
 +/*
 + * /dev/rewind-console's input: bytes the monitor sends, in arrival order.
@@ -475,6 +479,43 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +
 +static DECLARE_WORK(rewind_inspect_work, rewind_inspect);
 +
++/*
++ * Stalls: under a schedule seed, the monitor asks for the task running at
++ * a step to sleep for a while when it next returns to user space, as a
++ * busy machine deschedules a process now and then. Many races need one
++ * task held up for a while, which a reschedule alone does not do. The
++ * sleep is on a high resolution timer, so it ends at a deterministic
++ * point of virtual time.
++ */
++struct rewind_stall {
++	struct callback_head work;
++	u32 ns;
++};
++
++static void rewind_stall_now(struct callback_head *head)
++{
++	struct rewind_stall *stall = container_of(head, struct rewind_stall, work);
++	unsigned long us = max(stall->ns / NSEC_PER_USEC, 1U);
++
++	kfree(stall);
++	usleep_range(us, us);
++}
++
++static void rewind_stall_current(void)
++{
++	struct rewind_stall *stall;
++
++	if (!current->mm || (current->flags & PF_KTHREAD))
++		return;
++	stall = kmalloc(sizeof(*stall), GFP_ATOMIC);
++	if (!stall)
++		return;
++	stall->ns = READ_ONCE(rewind_shared.stall_ns);
++	init_task_work(&stall->work, rewind_stall_now);
++	if (task_work_add(current, &stall->work, TWA_RESUME))
++		kfree(stall);
++}
++
 +/* Takes the input the monitor left in the shared page. */
 +static void rewind_take_input(void)
 +{
@@ -512,6 +553,9 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +
 +	if (pending & REWIND_PENDING_INPUT)
 +		rewind_take_input();
++
++	if (pending & REWIND_PENDING_STALL)
++		rewind_stall_current();
 +
 +	if (pending & REWIND_PENDING_INSPECT) {
 +		WRITE_ONCE(rewind_inspecting, true);
@@ -772,6 +816,23 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +		s32 code;
 +		u64 addr;
 +	} __packed detail = {};
++
++	/*
++	 * A SIGKILL the kernel queues itself while a thread group exits is
++	 * not a signal anyone sent. exit_group queues one to every other
++	 * thread, which says nothing, and a fatal signal such as SIGPIPE that
++	 * does not dump core is turned into one for every thread, which hides
++	 * it. Report the signal the group is dying of, once, on its leader.
++	 */
++	if (sig == SIGKILL && (current->signal->flags & SIGNAL_GROUP_EXIT)) {
++		int cause = current->signal->group_exit_code & 0x7f;
++
++		if (!cause || cause == SIGKILL || current->pid != current->tgid)
++			return;
++		rewind_emit(REWIND_EV_SIGNAL, 0, current->tgid, current->pid,
++			    cause, &detail, sizeof(detail), NULL, 0);
++		return;
++	}
 +
 +	if (info) {
 +		detail.code = info->si_code;
