@@ -454,20 +454,20 @@
   // the playhead.
   const INSPECT = {
     gdb: (s, ev) => [
-      "In the app,",
-      `gdb on a fork stopped at step ${fmt(s)}, where pid ${ev.pid} was running.`,
+      "Attach gdb.",
+      `gdb on a fork stopped at step ${fmt(s)}, with the symbols of pid ${ev.pid}, the process running there.`,
     ],
     shell: (s) => [
-      "In the app,",
-      `a shell inside the VM at step ${fmt(s)}, with the build's environment.`,
+      "Open shell.",
+      `A shell inside the VM at step ${fmt(s)}, with the build's environment.`,
     ],
     diff: () => [
-      "In the app,",
-      `run #3 and run #2 are identical up to step ${fmt(DIVERGENCE_STEP)}.`,
+      "Diff.",
+      `Run #3 and run #2 are identical up to step ${fmt(DIVERGENCE_STEP)}.`,
     ],
     export: () => [
-      "In the app,",
-      "run #3 as one .rwd file that replays on another machine.",
+      "Export.",
+      "Run #3 as one .rwd file that replays on another machine.",
     ],
   };
 
@@ -585,6 +585,22 @@
 
   resetNote();
   render();
+
+  // The phone menu closes when one of its links is followed, or on a tap
+  // anywhere else.
+  const menu = document.querySelector(".nav-menu");
+  if (menu) {
+    menu.addEventListener("click", (e) => {
+      if (e.target.closest("a")) {
+        menu.open = false;
+      }
+    });
+    document.addEventListener("click", (e) => {
+      if (menu.open && !menu.contains(e.target)) {
+        menu.open = false;
+      }
+    });
+  }
 
   // The opening sweep: the playhead runs through checkPhase to the failure,
   // once. Skipped for anyone who asked for reduced motion.

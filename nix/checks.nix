@@ -151,7 +151,8 @@ in
     pkgs.writeText "rewind-version" release;
 
   # checks.module: the NixOS module installs both packages, adds Rewind's
-  # binary cache and sets the AMD workaround at boot. Only evaluates, so it needs no KVM.
+  # binary cache and sets the AMD workaround at boot. Only evaluates, so
+  # it needs no KVM.
   module =
     let
       config = moduleSystem.config;

@@ -111,6 +111,7 @@ section {
 
 /* Header */
 .nav {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -152,6 +153,68 @@ section {
 }
 .nav-links a:not(.btn):hover {
   color: var(--text);
+}
+
+/* The phone menu: the header's links behind a button, shown only when
+   they no longer fit beside the brand. */
+.nav-menu {
+  display: none;
+}
+.nav-menu summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border: 1px solid var(--line-2);
+  border-radius: 8px;
+  color: var(--text);
+  font-weight: 600;
+  font-size: 0.95rem;
+  list-style: none;
+  cursor: pointer;
+}
+.nav-menu summary::-webkit-details-marker {
+  display: none;
+}
+.nav-menu summary svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: transform 0.15s ease;
+}
+.nav-menu[open] summary svg {
+  transform: rotate(180deg);
+}
+.nav-menu-links {
+  position: absolute;
+  inset-inline: 16px;
+  top: calc(100% - 8px);
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  padding: 8px;
+  background: var(--panel);
+  border: 1px solid var(--line-2);
+  border-radius: 12px;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
+}
+.nav-menu-links a:not(.btn) {
+  padding: 12px;
+  border-radius: 8px;
+  color: var(--soft);
+  text-decoration: none;
+}
+.nav-menu-links a:not(.btn):hover {
+  background: #1c2026;
+  color: var(--text);
+}
+.nav-menu-links .btn {
+  margin: 8px 4px 4px;
+  text-align: center;
 }
 
 /* Buttons */
@@ -499,7 +562,9 @@ a:focus-visible {
 }
 
 /* Panels: the log across the top, then processes and files beside the
-   step's detail. One pixel gaps over the line color draw the rules. */
+   step's detail. One pixel gaps over the line color draw the rules. The
+   log and processes sit in a wrapper that takes no part in the layout
+   until a phone makes it a row to swipe. */
 .panels {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
@@ -509,6 +574,9 @@ a:focus-visible {
 .panel {
   background: var(--panel-2);
   min-width: 0;
+}
+.panel-swipe {
+  display: contents;
 }
 .panel-log {
   grid-column: 1 / -1;
@@ -1333,8 +1401,11 @@ a.card:hover {
   .hero {
     padding-top: 16px;
   }
-  .nav-links a:not(.btn) {
+  .nav-links {
     display: none;
+  }
+  .nav-menu {
+    display: block;
   }
   .lanes,
   .plans,
@@ -1349,10 +1420,49 @@ a.card:hover {
   }
 }
 
-/* A phone: the scrubber's panels stack, and definitions sit above their text. */
+/* A phone: the scrubber's log and processes become a row to swipe, with
+   the next panel showing at the edge, above the step's detail; cards
+   tighten; definitions sit above their text. */
 @media (max-width: 600px) {
   .panels {
     grid-template-columns: 1fr;
+  }
+  .panel-swipe {
+    display: flex;
+    gap: 1px;
+    overflow-x: auto;
+    scroll-snap-type: x mandatory;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+  }
+  .panel-swipe::-webkit-scrollbar {
+    display: none;
+  }
+  .panel-swipe .panel {
+    flex: 0 0 88%;
+    scroll-snap-align: start;
+  }
+  .procs,
+  .files {
+    min-height: 0;
+  }
+  .steps li {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    column-gap: 14px;
+    padding: 18px;
+  }
+  .steps li::before {
+    grid-row: span 2;
+    margin: 0;
+    font-size: 1.5rem;
+    line-height: 1.1;
+  }
+  .steps h3 {
+    margin-top: 2px;
+  }
+  .card {
+    padding: 18px;
   }
   /* The log scrolls sideways instead of cutting its lines short. */
   .log {
@@ -1388,9 +1498,6 @@ a.card:hover {
 }
 
 @media (max-width: 420px) {
-  .nav .btn.small {
-    display: none;
-  }
   /* Smaller pins on a phone-sized screenshot. */
   .pin {
     width: 20px;

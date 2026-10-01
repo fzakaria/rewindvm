@@ -37,6 +37,23 @@
         <a href="https://github.com/fzakaria/rewindvm">GitHub</a>
         <a class="btn small" href="#download">Download</a>
       </nav>
+      <!-- The same links on a phone, behind a button. demo.js closes the
+           menu when a link in it is followed. -->
+      <details class="nav-menu">
+        <summary>
+          Menu
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>
+        </summary>
+        <nav class="nav-menu-links" aria-label="Sections">
+          <a href="#how">How it works</a>
+          <a href="#workloads">Nix and containers</a>
+          <a href="#tutorials">Tutorials</a>
+          <a href="#case-studies">Case studies</a>
+          <a href="#pricing">Pricing</a>
+          <a href="https://github.com/fzakaria/rewindvm">GitHub</a>
+          <a class="btn" href="#download">Download</a>
+        </nav>
+      </details>
     </header>
 
     <main>
@@ -138,16 +155,20 @@
             </div>
 
             <div class="panels">
-              <div class="panel panel-log" role="group" aria-label="Build log">
-                <h3 class="panel-head">Build log &middot; up to this step</h3>
-                <ol class="rows log" id="log"></ol>
-              </div>
+              <!-- The log and the processes: laid out in the panels' grid,
+                   and on a phone a row to swipe through. -->
+              <div class="panel-swipe">
+                <div class="panel panel-log" role="group" aria-label="Build log">
+                  <h3 class="panel-head">Build log &middot; up to this step</h3>
+                  <ol class="rows log" id="log"></ol>
+                </div>
 
-              <div class="panel panel-procs" role="group" aria-label="Processes and files">
-                <h3 class="panel-head">Process tree &middot; alive</h3>
-                <ul class="rows procs" id="procs"></ul>
-                <h3 class="panel-head">Files &middot; newest first</h3>
-                <ul class="rows files" id="files"></ul>
+                <div class="panel panel-procs" role="group" aria-label="Processes and files">
+                  <h3 class="panel-head">Process tree &middot; alive</h3>
+                  <ul class="rows procs" id="procs"></ul>
+                  <h3 class="panel-head">Files &middot; newest first</h3>
+                  <ul class="rows files" id="files"></ul>
+                </div>
               </div>
 
               <div class="panel panel-step" role="group" aria-label="At this step">
