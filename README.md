@@ -146,6 +146,14 @@ playhead. Fork from here branches the run under a new schedule.
   <img src="docs/img/app-file-viewer.png" alt="The Rewind desktop app with a file open at the playhead: /build/env-vars as of step 4,392, next to the build log and the process tree." />
 </p>
 
+Open shell starts a shell inside the VM at the playhead, in the build's
+directory with its environment, and Attach gdb opens gdb on the same fork,
+both in a terminal pane below the scrubber.
+
+<p align="center">
+  <img src="docs/img/app-shell.png" alt="The Rewind desktop app at the step a test segfaulted, with a terminal pane below the scrubber running a shell inside the VM: ls, type gcc and head work in /build/mylib." />
+</p>
+
 ```console
 $ nix run github:fzakaria/rewindvm#app -- ~/.local/share/rewind/runs/<run>
 ```
@@ -217,11 +225,12 @@ release with both tarballs.
 
 ## License
 
-| Path                 | License                                                                                            |
-| -------------------- | -------------------------------------------------------------------------------------------------- |
-| `crates/rewind-app/` | Proprietary to Lunch Time Surf LLC, source available, see [its LICENSE](crates/rewind-app/LICENSE) |
-| `guest/linux/`       | GPL-2.0-only, as Linux is, see [guest/linux/LICENSE](guest/linux/LICENSE)                          |
-| everything else      | MIT, see [LICENSE](LICENSE)                                                                        |
+| Path                                       | License                                                                                            |
+| ------------------------------------------ | -------------------------------------------------------------------------------------------------- |
+| `crates/rewind-app/`                       | Proprietary to Lunch Time Surf LLC, source available, see [its LICENSE](crates/rewind-app/LICENSE) |
+| `crates/rewind-app/vendor/gpui-pre-linux/` | Apache-2.0, a patched copy of Zed's GPUI, see its LICENSE-APACHE                                   |
+| `guest/linux/`                             | GPL-2.0-only, as Linux is, see [guest/linux/LICENSE](guest/linux/LICENSE)                          |
+| everything else                            | MIT, see [LICENSE](LICENSE)                                                                        |
 
 The engine and the command are open source. The desktop app's source is here
 to read, but copying, modifying or redistributing it needs permission.

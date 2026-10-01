@@ -34,6 +34,12 @@ rewind-trace = { path = "../rewind-trace" }
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 
+# GPUI's X11 backend with one change: the window takes a 32-bit ARGB
+# visual only when a compositing manager runs, so it is not left black on
+# drivers that cannot present into one. See vendor/gpui-pre-linux/README.md.
+[patch.crates-io]
+gpui-pre-linux = { path = "vendor/gpui-pre-linux" }
+
 [profile.release]
 opt-level = 3
 lto = "thin"
