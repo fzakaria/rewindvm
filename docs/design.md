@@ -425,9 +425,3 @@ A license key is a signed text block. The app checks it offline against an
 Ed25519 public key built into it, and nothing is sent anywhere.
 `crates/rewind-app/LICENSING.md` covers the key format, keeping the signing
 key offline, and issuing keys.
-
-Payments go through Stripe. Plain Stripe Checkout leaves sales tax and VAT
-with the seller. Stripe Managed Payments, Stripe's merchant of record product,
-would take them on. A checkout webhook on a small server issues the key and
-emails it. An exe.dev VPS is enough for that server, since it needs no KVM.
-Runs happen on the user's machine.

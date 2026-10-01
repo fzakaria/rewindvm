@@ -80,25 +80,3 @@ prints the block. With the 1Password CLI, pipe it instead:
 license; without it the issue date is today (UTC). The id is 16 random hex
 digits; record it with the order so the license can be revoked on a
 refund.
-
-## Selling with Stripe
-
-A small server holds the signing key, as a secret it reads at start, and
-turns paid checkouts into licenses:
-
-1. The site's Buy button creates a Stripe Checkout session with the
-   edition and seat count as the price and quantity.
-2. Stripe calls the server's webhook with `checkout.session.completed`.
-   The server checks the webhook signature with the endpoint's signing
-   secret, reads the customer's name and email and the line items, and
-   ignores events it has already handled (Stripe retries).
-3. The server runs `rewind-license issue --key - --name ... --email ...
---edition ... --seats ...` with the key on standard input, and stores
-   the id with the Stripe session id.
-4. It emails the block to the customer and answers the webhook with 200.
-5. On `charge.refunded`, it looks up the id and adds it to a revocation
-   list that goes into `REVOKED` in the next release.
-
-The server is the one place the signing key lives online, so it should do
-nothing else, accept only Stripe's webhook, and keep the key readable by
-its own user only.
