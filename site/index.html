@@ -32,6 +32,7 @@
         <a href="#how">How it works</a>
         <a href="#workloads">Nix and containers</a>
         <a href="#tutorials">Tutorials</a>
+        <a href="#case-studies">Case studies</a>
         <a href="#pricing">Pricing</a>
         <a href="https://github.com/fzakaria/rewindvm">GitHub</a>
         <a class="btn small" href="#download">Download</a>
@@ -414,6 +415,34 @@
               schedule and replay the crash exactly.
             </p>
             <span class="card-link">Read the tutorial &rarr;</span>
+          </a>
+        </div>
+      </section>
+
+      <section class="wrap tutorials" id="case-studies">
+        <h2>Case studies</h2>
+        <p class="lede">
+          Rewind VM on Nix's own test suite. Every transcript in them is real output.
+        </p>
+        <div class="grid">
+          <a class="card" href="case-studies/nix-gc-closure-sigpipe.html">
+            <span class="eyebrow">Found by Rewind</span>
+            <h3>A SIGPIPE in Nix's gc-closure test</h3>
+            <p>
+              Rewind's first run of Nix's test suite hit a SIGPIPE flake in
+              <code>gc-closure.sh</code> that Nix's issue tracker has no report of: a pipe into
+              <code>head -n1</code> under <code>pipefail</code>, fixed with a here-string.
+            </p>
+            <span class="card-link">Read the case study &rarr;</span>
+          </a>
+          <a class="card" href="case-studies/nix-schema-migration-hang.html">
+            <span class="eyebrow">Known bug, reproduced</span>
+            <h3>A hang in Nix's store schema migration</h3>
+            <p>
+              A known SQLite schema-migration hang in Nix master, reproduced in Rewind and pinned to
+              <code>SQLITE_BUSY_SNAPSHOT</code> with gdb inside the VM.
+            </p>
+            <span class="card-link">Read the case study &rarr;</span>
           </a>
         </div>
       </section>

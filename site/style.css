@@ -1184,6 +1184,29 @@ a.card:hover {
   --bleed: min(960px, 100vw - 40px);
   margin-inline: calc((var(--bleed) - 100%) / -2);
 }
+/* Tables in articles scroll sideways on a narrow screen rather than squeeze. */
+.article .table {
+  margin-block: 18px;
+  overflow-x: auto;
+}
+.article table {
+  border-collapse: collapse;
+  font-size: 0.95rem;
+}
+.article th,
+.article td {
+  padding: 6px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--line);
+  color: var(--soft);
+}
+.article th {
+  color: var(--text);
+  font-weight: 600;
+}
+.article td:last-child {
+  white-space: nowrap;
+}
 .toc {
   margin-top: 28px;
   padding: 18px 22px;

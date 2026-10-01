@@ -35,10 +35,13 @@ CHECKED_SUFFIXES = {
     ".txt",
 }
 
+# Directories of generated or third-party files: vendored crates are
+# someone else's prose.
 SKIP_DIRS = {
     ".git",
     ".jj",
     "target",
+    "vendor",
     "result",
     "__pycache__",
     ".mypy_cache",
