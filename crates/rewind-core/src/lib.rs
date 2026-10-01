@@ -2,6 +2,7 @@
 //! inputs, executing runs, and finding them again.
 
 pub mod cpio;
+pub mod debug;
 pub mod export;
 pub mod home;
 pub mod image;

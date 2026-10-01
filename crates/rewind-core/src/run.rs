@@ -483,5 +483,6 @@ fn describe(outcome: Outcome) -> String {
         Outcome::Stopped(Stop::Guest(exit)) => format!("{exit:?}").to_lowercase(),
         Outcome::Stopped(Stop::TripleFault) => "triple fault".into(),
         Outcome::Stopped(Stop::Stalled) => "stalled: idle with no timer armed".into(),
+        Outcome::Debug(stop) => format!("stopped by the debugger: {stop:?}"),
     }
 }

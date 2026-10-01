@@ -245,6 +245,17 @@ enum Command {
         #[arg(long)]
         pid: Option<u32>,
     },
+    /// gdb on a fork of a run at a step: one x86-64 CPU, the VM's memory as
+    /// its page tables map it, breakpoints and single steps. Starts the
+    /// host's gdb with the VM kernel's symbols; with --listen, only serves
+    /// the GDB remote protocol for a gdb started some other way.
+    Gdb {
+        run: String,
+        step: u64,
+        /// Serve on this address, such as 127.0.0.1:1234, and start no gdb.
+        #[arg(long)]
+        listen: Option<String>,
+    },
     /// Whether this host's performance counters can drive virtual time.
     Pmu {
         #[command(subcommand)]
@@ -617,6 +628,10 @@ fn run(cli: Cli) -> Result<ExitCode> {
             drop(raw);
             result?;
             Ok(ExitCode::SUCCESS)
+        }
+        Command::Gdb { run, step, listen } => {
+            let run = Run::find(&home, &run)?;
+            gdb(&home, &run, step, listen.as_deref())
         }
         Command::Pmu { action } => {
             let vendor = rewind_core::pmu::Vendor::detect()?;
@@ -1097,6 +1112,63 @@ fn parse_env(pairs: &[String]) -> Result<Vec<(String, String)>> {
         env.push((k.to_string(), v.to_string()));
     }
     Ok(env)
+}
+
+/// The address `rewind gdb` serves on when it starts gdb itself: any free
+/// port on the loopback interface.
+const GDB_LOCAL: &str = "127.0.0.1:0";
+
+/// Serves gdb on a fork of `run` at `step`: on `listen` if given, else on
+/// a free local port with the host's gdb started against it, given the
+/// VM kernel's symbols. Ctrl-C belongs to gdb, which turns it into an
+/// interrupt for the fork, so this process ignores it meanwhile.
+fn gdb(home: &Home, run: &Run, step: u64, listen: Option<&str>) -> Result<ExitCode> {
+    let machine = run.machine_at(home, step, &mut rewind_vmm::Ignore)?;
+    let mut debuggee = rewind_core::debug::Debuggee::new(machine);
+    let listener =
+        std::net::TcpListener::bind(listen.unwrap_or(GDB_LOCAL)).context("listening for gdb")?;
+    let address = listener.local_addr()?;
+    let vmlinux = run.manifest.spec.kernel.with_file_name("vmlinux");
+    let symbols = vmlinux.exists().then(|| vmlinux.display().to_string());
+    let connect = format!("target remote {address}");
+
+    // Only serving: say how to connect, then wait for gdb.
+    if listen.is_some() {
+        eprintln!(
+            "rewind: gdb at step {step} of {}; connect with: gdb -ex '{connect}'{}",
+            run.manifest.id,
+            symbols
+                .as_ref()
+                .map(|s| format!(" {s}"))
+                .unwrap_or_default()
+        );
+        let (conn, _) = listener.accept()?;
+        debuggee.serve(conn)?;
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    // Starting gdb: the fork is served from this thread while gdb owns the
+    // terminal.
+    // SAFETY: ignoring SIGINT has no preconditions; gdb installs its own.
+    unsafe { libc::signal(libc::SIGINT, libc::SIG_IGN) };
+    let mut gdb = std::process::Command::new("gdb");
+    gdb.arg("-q").args(["-ex", &connect]);
+    if let Some(symbols) = &symbols {
+        gdb.arg(symbols);
+    }
+    let mut child = gdb.spawn().context(
+        "starting gdb; is it on PATH? `rewind gdb --listen 127.0.0.1:1234` serves without it",
+    )?;
+    eprintln!("rewind: gdb at step {step} of {}", run.manifest.id);
+    let (conn, _) = listener.accept()?;
+    let served = debuggee.serve(conn);
+    let status = child.wait()?;
+    served?;
+    Ok(if status.success() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
 }
 
 /// The job's wait status as the process exit code, the way a shell reports

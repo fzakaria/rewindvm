@@ -13,6 +13,7 @@
 
 pub mod boot;
 pub mod cpu;
+pub mod debug;
 pub mod layout;
 pub mod memory;
 pub mod pmu;
@@ -174,6 +175,9 @@ pub enum Outcome {
     /// The requested step was reached; the machine can run on from here.
     Paused,
     Stopped(Stop),
+    /// A debugged machine hit a breakpoint or finished a single step
+    /// (debug.rs); it can run on from here.
+    Debug(debug::DebugStop),
 }
 
 /// Receives what the guest reports, with the step it arrived on.
@@ -241,6 +245,8 @@ pub struct Machine {
     pub(crate) work: Option<Work>,
     /// The branch count to resume from, set by a restore.
     pub(crate) work_base: u64,
+    /// The breakpoints, while a debugger is attached (debug.rs).
+    pub(crate) debugging: Option<Vec<u64>>,
 }
 
 impl Machine {
@@ -315,6 +321,7 @@ impl Machine {
             pmu: None,
             work: None,
             work_base: 0,
+            debugging: None,
         })
     }
 
@@ -408,6 +415,10 @@ impl Machine {
                     // A signal to the monitor thread, a counter overflow
                     // among them, or one single step: not the guest's
                     // doing, so not a step of its own.
+                    // A debugger's trap ends the run for the debugger.
+                    VcpuExit::Debug(arch) if self.debugging.is_some() => {
+                        return Ok(Outcome::Debug(self.debug_stop(arch.dr6)));
+                    }
                     VcpuExit::Intr | VcpuExit::Debug(_) => None,
                     VcpuExit::Hlt => bail!("the VM executed HLT; is its kernel built for Rewind?"),
                     other => bail!("unexpected exit at step {}: {other:?}", self.dev.step),

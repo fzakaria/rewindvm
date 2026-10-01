@@ -2,6 +2,7 @@
 {
   pkgs,
   rewind,
+  kernel,
   module,
 }:
 let
@@ -77,6 +78,46 @@ in
         rewind run -q --name b --seed 1 --root ${busyboxRoot} -- sh -c '${workload}'
         rewind diff a b | tee diff
         grep -q 'first difference' diff
+        touch $out
+      '';
+
+  # checks.inspect: looking inside a recorded run at a step. A file read
+  # before and after it is written, a shell that reads it, and gdb stopping
+  # at a breakpoint in the VM's kernel. Boots the VM, so it needs /dev/kvm.
+  inspect =
+    pkgs.runCommand "rewind-inspect"
+      {
+        nativeBuildInputs = [
+          rewind
+          pkgs.gdb
+        ];
+        requiredSystemFeatures = [ "kvm" ];
+      }
+      ''
+        export REWIND_HOME=$TMPDIR/rewind
+        rewind run -q --name w --root ${busyboxRoot} -- \
+          sh -c 'echo first > /notes.txt; sleep 1; echo second >> /notes.txt'
+        start=$(rewind events w | grep 'rewind-start' | head -1 | awk '{print $1}')
+
+        # rewind cat: missing before the job, both lines at the end.
+        status=0
+        rewind cat w "$start" /notes.txt || status=$?
+        test "$status" = 2
+        rewind cat w 999999 /notes.txt | tee cat
+        grep -q second cat
+
+        # rewind shell, typed into from a pipe.
+        printf 'cat /notes.txt; exit\n' | rewind shell w 999999 | tee shell
+        grep -q second shell
+
+        # rewind gdb: a breakpoint where every event is reported.
+        rewind gdb w "$start" --listen 127.0.0.1:12345 &
+        sleep 1
+        gdb -q -batch -ex 'target remote 127.0.0.1:12345' \
+          -ex 'break rewind_emit' -ex continue -ex detach \
+          ${kernel}/vmlinux | tee gdb
+        wait
+        grep -q 'in rewind_emit' gdb
         touch $out
       '';
 

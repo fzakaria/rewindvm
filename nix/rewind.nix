@@ -45,6 +45,8 @@ let
     };
   };
 
+  # gdb comes after the user's own PATH, for `rewind gdb`, so a gdb the
+  # user prefers wins.
   runtimeTools = [
     pkgs.erofs-utils
     pkgs.gnutar
@@ -60,6 +62,7 @@ pkgs.runCommand "rewind"
     mkdir -p $out/bin
     makeWrapper ${unwrapped}/bin/rewind $out/bin/rewind \
       --prefix PATH : ${lib.makeBinPath runtimeTools} \
+      --suffix PATH : ${lib.makeBinPath [ pkgs.gdb ]} \
       --set-default REWIND_KERNEL ${kernel}/bzImage \
       --set-default REWIND_INITRD ${guest.initrd}/initrd
   ''

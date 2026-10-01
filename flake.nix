@@ -129,7 +129,7 @@
           p = per system;
         in
         import ./nix/checks.nix {
-          inherit (p) pkgs rewind;
+          inherit (p) pkgs rewind kernel;
           module = self.nixosModules.default;
         }
       );
