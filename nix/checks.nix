@@ -108,19 +108,21 @@ in
         mv $TMPDIR/away $REWIND_HOME/runs/$fork
 
         # Forks past the end of the run are the run itself: prune removes
-        # them, keeps the run, and keeps a fork another fork came from.
+        # them and keeps the run and the fork that ran differently.
         same1=$(rewind fork a 999999 --schedule 7 --json | id)
         same2=$(rewind fork a 999999 --schedule 8 --json | id)
         ! manifest $same1 | grep -q '"first_difference"'
+        manifest $fork | grep -q '"first_difference"'
         rewind prune a --identical --dry-run --json | tee planned
         grep -q "$same1" planned
         grep -q "$same2" planned
+        ! grep -q "$fork" planned
         test -d $REWIND_HOME/runs/$same1
         rewind prune a --identical
         test ! -e $REWIND_HOME/runs/$same1
         test ! -e $REWIND_HOME/runs/$same2
         test -d $REWIND_HOME/runs/$fork
-        rewind replay $fork2 --from 300 | grep '^identical'
+        rewind replay $fork --from 300 | grep '^identical'
         touch $out
       '';
 
