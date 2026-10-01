@@ -46,10 +46,13 @@ let
     };
   };
 
-  # The kernel's DWARF, named without depending on it: runs record the
-  # path, and `rewind gdb` fetches it from the cache only when someone
-  # debugs, so the package's closure stays without it.
-  symbolsPath = builtins.unsafeDiscardStringContext "${kernel.symbols}";
+  # What only `rewind gdb` needs, named without depending on it, so the
+  # package's closure stays without them: the kernel's DWARF, which runs
+  # record the path of, and nixseparatedebuginfod2, the debuginfod server
+  # that hands gdb DWARF and source files from the store and
+  # cache.nixos.org. `rewind gdb` fetches each the first time it runs.
+  kernelDebug = builtins.unsafeDiscardStringContext "${kernel.debug}";
+  debuginfod = builtins.unsafeDiscardStringContext (lib.getExe pkgs.nixseparatedebuginfod2);
 
   # gdb comes after the user's own PATH, for `rewind gdb`, so a gdb the
   # user prefers wins.
@@ -71,5 +74,6 @@ pkgs.runCommand "rewind"
       --suffix PATH : ${lib.makeBinPath [ pkgs.gdb ]} \
       --set-default REWIND_KERNEL ${kernel}/bzImage \
       --set-default REWIND_INITRD ${guest.initrd}/initrd \
-      --set-default REWIND_KERNEL_SYMBOLS ${symbolsPath}
+      --set-default REWIND_KERNEL_DEBUG ${kernelDebug} \
+      --set-default REWIND_DEBUGINFOD ${debuginfod}
   ''

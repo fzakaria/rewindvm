@@ -8,6 +8,7 @@ pub mod home;
 pub mod image;
 pub mod inspect;
 pub mod keyframes;
+pub mod maps;
 pub mod nix;
 pub mod pmu;
 pub mod run;

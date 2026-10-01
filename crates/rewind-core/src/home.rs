@@ -11,8 +11,9 @@ use anyhow::{Context, Result};
 pub const ENV_KERNEL: &str = "REWIND_KERNEL";
 pub const ENV_INITRD: &str = "REWIND_INITRD";
 
-/// The kernel's DWARF and gdb scripts, for `rewind gdb`; optional.
-pub const ENV_KERNEL_SYMBOLS: &str = "REWIND_KERNEL_SYMBOLS";
+/// The kernel package's `debug` output, its DWARF by build ID, for
+/// `rewind gdb`; optional.
+pub const ENV_KERNEL_DEBUG: &str = "REWIND_KERNEL_DEBUG";
 
 /// Overrides the data directory, which is otherwise under XDG_DATA_HOME.
 pub const ENV_HOME: &str = "REWIND_HOME";
@@ -62,7 +63,7 @@ impl Home {
 pub struct Guest {
     pub kernel: PathBuf,
     pub initrd: PathBuf,
-    pub kernel_symbols: Option<PathBuf>,
+    pub kernel_debug: Option<PathBuf>,
 }
 
 impl Guest {
@@ -75,7 +76,7 @@ impl Guest {
         Ok(Guest {
             kernel: var(ENV_KERNEL)?,
             initrd: var(ENV_INITRD)?,
-            kernel_symbols: std::env::var_os(ENV_KERNEL_SYMBOLS).map(PathBuf::from),
+            kernel_debug: std::env::var_os(ENV_KERNEL_DEBUG).map(PathBuf::from),
         })
     }
 }

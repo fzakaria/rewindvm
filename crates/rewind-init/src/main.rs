@@ -15,9 +15,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use rewind_init::{
-    EXIT_MARK, INSPECT_ARG, INSPECT_BEGIN_MARK, INSPECT_CAT, INSPECT_END_MARK, INSPECT_SHELL,
-    INSPECT_WITH, InspectStatus, JOB_PATH, Job, OUTPUT_MARK, RESIZE_ESCAPE, RESIZE_LEN, RESIZE_TAG,
-    Root, START_MARK, tree_hash,
+    EXIT_MARK, INSPECT_ARG, INSPECT_BEGIN_MARK, INSPECT_CAT, INSPECT_END_MARK, INSPECT_FILES,
+    INSPECT_RUNNING, INSPECT_SHELL, INSPECT_WITH, InspectStatus, JOB_PATH, Job, OUTPUT_MARK,
+    RESIZE_ESCAPE, RESIZE_LEN, RESIZE_TAG, RUNNING_ENV, Root, SECTION_MAPS, SECTION_PID,
+    START_MARK, section_header, tree_hash,
 };
 
 /// The image the monitor maps as persistent memory.
@@ -52,6 +53,18 @@ const IMAGE_ROOT: &str = "/newroot";
 
 /// How much of a file an inspection reads at a time.
 const INSPECT_CHUNK: usize = 64 * 1024;
+
+/// Where the input image's store paths are, as init sees them, and the
+/// overlay's writable layer above them, which holds every store path the
+/// job wrote. A store path not in the writable layer is one the host has.
+const STORE_PREFIX: &str = "/nix/store/";
+const STORE_UPPER: &str = "/nix/.rw-store/upper";
+
+/// The largest mapped file a `running` inspection sends.
+const MAX_SENT_FILE: u64 = 256 * 1024 * 1024;
+
+/// The first bytes of an ELF file.
+const ELF_MAGIC: &[u8; 4] = b"\x7fELF";
 
 /// The device a shell inspection's terminal is relayed through.
 const CONSOLE_DEVICE: &str = "/dev/rewind-console";
@@ -346,6 +359,8 @@ fn inspect(request: &[String]) {
         [op, pid, path] if op == INSPECT_CAT => {
             cat(pid.parse().unwrap_or(0), path, &mut out, &mut err)
         }
+        [op] if op == INSPECT_RUNNING => running(&mut out, &mut err),
+        [op, pid] if op == INSPECT_FILES => files(pid.parse().unwrap_or(0), &mut out, &mut err),
         [op, pid, cols, rows, extras @ ..] if op == INSPECT_SHELL => {
             let size = (cols.parse().unwrap_or(80), rows.parse().unwrap_or(24));
             // `--with <bin dir>...`: the extras slot holds more packages.
@@ -407,6 +422,161 @@ fn cat(pid: i32, path: &str, out: &mut File, err: &mut File) -> InspectStatus {
         }
     }
     InspectStatus::Done
+}
+
+/// The process that was running at the step, which the kernel names in
+/// REWIND_RUNNING, in sections: its pid, its memory map, and the ELF files
+/// it had mapped that the host does not have. The map is read with init's
+/// root, so its paths are whole paths in the VM, a job's root included.
+fn running(out: &mut File, err: &mut File) -> InspectStatus {
+    let pid = std::env::var(RUNNING_ENV)
+        .ok()
+        .and_then(|v| v.parse::<i32>().ok())
+        .unwrap_or(0);
+    if pid <= 0 {
+        let _ = writeln!(err, "no process was running at this step, only the kernel");
+        return InspectStatus::NotFound;
+    }
+
+    let maps = match fs::read_to_string(format!("/proc/{pid}/maps")) {
+        Ok(maps) => maps,
+        Err(e) => {
+            let _ = writeln!(err, "/proc/{pid}/maps: {e}");
+            return InspectStatus::Failed;
+        }
+    };
+    let mut send = |name: &str, bytes: &[u8]| {
+        out.write_all(section_header(name, bytes.len()).as_bytes())
+            .and_then(|()| out.write_all(bytes))
+    };
+    if send(SECTION_PID, pid.to_string().as_bytes()).is_err()
+        || send(SECTION_MAPS, maps.as_bytes()).is_err()
+    {
+        return InspectStatus::Failed;
+    }
+
+    // Each file is read through /proc/<pid>/map_files, which reaches it
+    // even when it has since been deleted or replaced.
+    for (range, path) in files_only_here(&maps) {
+        let Ok(bytes) = read_elf(&format!("/proc/{pid}/map_files/{range}")) else {
+            continue;
+        };
+        if send(&path, &bytes).is_err() {
+            return InspectStatus::Failed;
+        }
+    }
+    InspectStatus::Done
+}
+
+/// The files Rewind lists on the console, in sections, as process `pid`
+/// sees them.
+fn files(pid: i32, out: &mut File, err: &mut File) -> InspectStatus {
+    // The list is read before entering the process's view, which may not
+    // have the console.
+    let list = match read_list() {
+        Ok(list) => list,
+        Err(e) => {
+            let _ = writeln!(err, "{CONSOLE_DEVICE}: {e}");
+            return InspectStatus::Failed;
+        }
+    };
+    if let Err(e) = enter_view_of(pid) {
+        let _ = writeln!(err, "inspect: {e}");
+        return InspectStatus::Failed;
+    }
+
+    for path in list.lines().filter(|l| !l.is_empty()) {
+        let fits = fs::metadata(path).is_ok_and(|m| m.is_file() && m.len() <= MAX_SENT_FILE);
+        if !fits {
+            continue;
+        }
+        let Ok(bytes) = fs::read(path) else {
+            continue;
+        };
+        let header = section_header(path, bytes.len());
+        if out
+            .write_all(header.as_bytes())
+            .and_then(|()| out.write_all(&bytes))
+            .is_err()
+        {
+            return InspectStatus::Failed;
+        }
+    }
+    InspectStatus::Done
+}
+
+/// Lines typed on the console up to an empty one.
+fn read_list() -> std::io::Result<String> {
+    use std::io::Read;
+
+    let mut console = File::open(CONSOLE_DEVICE)?;
+    let mut list = Vec::new();
+    let mut buf = [0u8; 4096];
+    while !list.ends_with(b"\n\n") {
+        let n = console.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        list.extend_from_slice(&buf[..n]);
+    }
+    Ok(String::from_utf8_lossy(&list).into_owned())
+}
+
+/// The files a memory map maps that did not come from the input image's
+/// store, each with the address range of its first mapping, in the order
+/// they first appear.
+fn files_only_here(maps: &str) -> Vec<(String, String)> {
+    let mut files: Vec<(String, String)> = Vec::new();
+    for line in maps.lines() {
+        let mut fields = line.split_whitespace();
+        let Some(range) = fields.next() else {
+            continue;
+        };
+
+        // The path is what follows the fifth field, padded to a column.
+        let Some(path) = line.splitn(6, char::is_whitespace).nth(5) else {
+            continue;
+        };
+        let path = path.trim_start();
+        let path = path.strip_suffix(" (deleted)").unwrap_or(path);
+        if !path.starts_with('/') || files.iter().any(|(_, p)| p == path) {
+            continue;
+        }
+        if let Some(rest) = path.strip_prefix(STORE_PREFIX)
+            && !Path::new(STORE_UPPER).join(rest).exists()
+        {
+            continue;
+        }
+        let Some(range) = map_files_name(range) else {
+            continue;
+        };
+        files.push((range, path.to_string()));
+    }
+    files
+}
+
+/// The name /proc/<pid>/map_files gives a mapping: its address range as
+/// the map shows it, but without the map's zero padding.
+fn map_files_name(range: &str) -> Option<String> {
+    let (start, end) = range.split_once('-')?;
+    let start = u64::from_str_radix(start, 16).ok()?;
+    let end = u64::from_str_radix(end, 16).ok()?;
+    Some(format!("{start:x}-{end:x}"))
+}
+
+/// A file's bytes when it is an ELF file no larger than MAX_SENT_FILE.
+fn read_elf(path: &str) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+
+    let mut file = File::open(path)?;
+    let mut magic = [0u8; ELF_MAGIC.len()];
+    file.read_exact(&mut magic)?;
+    if &magic != ELF_MAGIC || file.metadata()?.len() > MAX_SENT_FILE {
+        return Err(std::io::ErrorKind::InvalidData.into());
+    }
+    let mut bytes = magic.to_vec();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 /// An interactive shell for Rewind, on a pty relayed through the console
@@ -974,6 +1144,18 @@ mod tests {
     // are taken out and applied, and a message split across reads waits
     // for the rest.
     use super::*;
+
+    #[test]
+    fn a_map_range_is_named_without_padding_in_map_files() {
+        assert_eq!(
+            map_files_name("00400000-00401000").as_deref(),
+            Some("400000-401000")
+        );
+        assert_eq!(
+            map_files_name("7f0000000000-7f0000028000").as_deref(),
+            Some("7f0000000000-7f0000028000")
+        );
+    }
 
     #[test]
     fn resize_messages_are_taken_out_of_typed_input() {

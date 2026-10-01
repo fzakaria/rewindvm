@@ -17,8 +17,8 @@ use std::time::Duration;
 
 use anyhow::{Result, bail};
 use rewind_init::{
-    CONSOLE_FD, EXIT_MARK, INSPECT_BEGIN_MARK, INSPECT_CAT, INSPECT_END_MARK, INSPECT_SHELL,
-    INSPECT_WITH, InspectStatus,
+    CONSOLE_FD, EXIT_MARK, INSPECT_BEGIN_MARK, INSPECT_CAT, INSPECT_END_MARK, INSPECT_FILES,
+    INSPECT_RUNNING, INSPECT_SHELL, INSPECT_WITH, InspectStatus,
 };
 use rewind_trace::{Event, EventKind};
 use rewind_vmm::pv::GuestExit;
@@ -112,6 +112,56 @@ pub fn cat(home: &Home, run: &Run, step: u64, pid: Option<u32>, path: &str) -> R
     let mut answer = Answer::default();
     let status = finish(&mut machine, step, &mut answer, "the file could be read")?;
     Ok(answer.into_inspection(status))
+}
+
+/// The process that was running at `step` and its memory map: its pid on
+/// a line, then its /proc/<pid>/maps as the VM's root sees it (see
+/// [`crate::maps`]). Not found when the kernel was running.
+pub fn running(home: &Home, run: &Run, step: u64) -> Result<Inspection> {
+    let (mut machine, step) = fork_at(home, run, step)?;
+    machine.request_inspection(&[INSPECT_RUNNING])?;
+
+    let mut answer = Answer::default();
+    let status = finish(
+        &mut machine,
+        step,
+        &mut answer,
+        "the memory map could be read",
+    )?;
+    Ok(answer.into_inspection(status))
+}
+
+/// Several files' contents at `step`, as process `pid` would have opened
+/// them, in sections named by their paths (see
+/// [`rewind_init::sections`]). Files that are not there are left out.
+pub fn files(
+    home: &Home,
+    run: &Run,
+    step: u64,
+    pid: Option<u32>,
+    paths: &[String],
+) -> Result<Inspection> {
+    let (mut machine, step) = fork_at(home, run, step)?;
+    let pid = pid.unwrap_or(0).to_string();
+    machine.request_inspection(&[INSPECT_FILES, &pid])?;
+
+    // The list goes in as typing: one path a line, then an empty line.
+    let mut list = paths.join("\n");
+    list.push_str("\n\n");
+    machine.set_input(Box::new(Typed(Some(list.into_bytes()))));
+
+    let mut answer = Answer::default();
+    let status = finish(&mut machine, step, &mut answer, "the files could be read")?;
+    Ok(answer.into_inspection(status))
+}
+
+/// Input typed all at once.
+struct Typed(Option<Vec<u8>>);
+
+impl Input for Typed {
+    fn wait(&mut self, _timeout: Option<Duration>) -> Vec<u8> {
+        self.0.take().unwrap_or_default()
+    }
 }
 
 /// An interactive shell inside a fork of `run` at `step`, as `session`

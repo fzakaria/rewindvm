@@ -1,5 +1,6 @@
 //! The `rewind` command.
 
+mod gdb;
 mod show;
 mod terminal;
 
@@ -703,7 +704,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
         }
         Command::Gdb { run, step, listen } => {
             let run = Run::find(&home, &run)?;
-            gdb(&home, &run, step, listen.as_deref())
+            gdb::gdb(&home, &run, step, listen.as_deref())
         }
         Command::Pmu { action } => {
             let vendor = rewind_core::pmu::Vendor::detect()?;
@@ -1030,7 +1031,7 @@ fn execute(
     let spec = Spec {
         kernel: guest.kernel.clone(),
         initrd: guest.initrd.clone(),
-        kernel_symbols: guest.kernel_symbols.clone(),
+        kernel_debug: guest.kernel_debug.clone(),
         image: prepared.image.clone(),
         image_hash: prepared.image_hash.clone(),
         mem_mib: machine.mem,
@@ -1183,122 +1184,6 @@ fn parse_env(pairs: &[String]) -> Result<Vec<(String, String)>> {
     }
     Ok(env)
 }
-
-/// The address `rewind gdb` serves on when it starts gdb itself: any free
-/// port on the loopback interface.
-const GDB_LOCAL: &str = "127.0.0.1:0";
-
-/// Serves gdb on a fork of `run` at `step`: on `listen` if given, else on
-/// a free local port with the host's gdb started against it, given the
-/// VM kernel's symbols. Ctrl-C belongs to gdb, which turns it into an
-/// interrupt for the fork, so this process ignores it meanwhile.
-fn gdb(home: &Home, run: &Run, step: u64, listen: Option<&str>) -> Result<ExitCode> {
-    let machine = run.machine_at(home, step, &mut rewind_vmm::Ignore)?;
-    let mut debuggee = rewind_core::debug::Debuggee::new(machine);
-    let listener =
-        std::net::TcpListener::bind(listen.unwrap_or(GDB_LOCAL)).context("listening for gdb")?;
-    let address = listener.local_addr()?;
-
-    // gdb's arguments: the kernel's symbols, its helper scripts when there
-    // are DWARF symbols, then the connection.
-    let mut args: Vec<String> = vec!["-q".into()];
-    match kernel_symbols(run) {
-        KernelSymbols::Dwarf(dir) => {
-            args.push(dir.join(VMLINUX).display().to_string());
-            args.push("-ex".into());
-            args.push(format!("source {}", dir.join(GDB_SCRIPTS).display()));
-        }
-        KernelSymbols::Table(vmlinux) => args.push(vmlinux.display().to_string()),
-        KernelSymbols::None => {}
-    }
-    args.push("-ex".into());
-    args.push(format!("target remote {address}"));
-
-    // Only serving: say how to connect, then wait for gdb.
-    if listen.is_some() {
-        let shown: Vec<String> = args
-            .iter()
-            .map(|a| {
-                if a.contains(' ') {
-                    format!("'{a}'")
-                } else {
-                    a.clone()
-                }
-            })
-            .collect();
-        eprintln!(
-            "rewind: gdb at step {step} of {}; connect with: gdb {}",
-            run.manifest.id,
-            shown.join(" ")
-        );
-        let (conn, _) = listener.accept()?;
-        debuggee.serve(conn)?;
-        return Ok(ExitCode::SUCCESS);
-    }
-
-    // Starting gdb: the fork is served from this thread while gdb owns the
-    // terminal.
-    // SAFETY: ignoring SIGINT has no preconditions; gdb installs its own.
-    unsafe { libc::signal(libc::SIGINT, libc::SIG_IGN) };
-    let mut child = std::process::Command::new("gdb")
-        .args(&args)
-        .spawn()
-        .context(
-            "starting gdb; is it on PATH? `rewind gdb --listen 127.0.0.1:1234` serves without it",
-        )?;
-    eprintln!("rewind: gdb at step {step} of {}", run.manifest.id);
-    let (conn, _) = listener.accept()?;
-    let served = debuggee.serve(conn);
-    let status = child.wait()?;
-    served?;
-    Ok(if status.success() {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
-    })
-}
-
-/// The files in a kernel's `symbols` output.
-const VMLINUX: &str = "vmlinux";
-const GDB_SCRIPTS: &str = "vmlinux-gdb.py";
-
-/// What gdb can know about a run's kernel.
-enum KernelSymbols {
-    /// The kernel's DWARF and gdb scripts, in this directory.
-    Dwarf(PathBuf),
-    /// Only the symbol table: the vmlinux next to the bzImage.
-    Table(PathBuf),
-    None,
-}
-
-/// The best symbols for the kernel `run` booted: its DWARF, fetched from a
-/// binary cache when it is not on this machine, else its symbol table.
-fn kernel_symbols(run: &Run) -> KernelSymbols {
-    if let Some(dir) = &run.manifest.spec.kernel_symbols {
-        if !dir.exists() && dir.starts_with(NIX_STORE) {
-            eprintln!(
-                "rewind: fetching the kernel's debug symbols, {}",
-                dir.display()
-            );
-            let _ = std::process::Command::new("nix-store")
-                .arg("--realise")
-                .arg(dir)
-                .stdout(std::process::Stdio::null())
-                .status();
-        }
-        if dir.join(VMLINUX).exists() {
-            return KernelSymbols::Dwarf(dir.clone());
-        }
-    }
-    let vmlinux = run.manifest.spec.kernel.with_file_name(VMLINUX);
-    if vmlinux.exists() {
-        return KernelSymbols::Table(vmlinux);
-    }
-    KernelSymbols::None
-}
-
-/// Where Nix keeps store paths, which `nix-store --realise` can fetch.
-const NIX_STORE: &str = "/nix/store";
 
 /// The job's wait status as the process exit code, the way a shell reports
 /// a child.

@@ -24,7 +24,7 @@ pub const OUTPUT_MARK: &str = "rewind-output ";
 
 /// The argument the kernel starts this binary with when Rewind asks what a
 /// forked run looks like inside at some step, followed by the request.
-/// Today the one request is `cat <pid> <path>`: the file's bytes on
+/// The first request is `cat <pid> <path>`: the file's bytes on
 /// standard output, with the path resolved in the root and working
 /// directory of process `pid`, or the job's when `pid` is 0 or gone.
 pub const INSPECT_ARG: &str = "--inspect";
@@ -41,6 +41,30 @@ pub const INSPECT_SHELL: &str = "shell";
 /// store paths the shell sees, and the bin directories that follow go
 /// first on its PATH (`rewind shell --with`).
 pub const INSPECT_WITH: &str = "--with";
+
+/// The third request: `running`, the process that was running at the
+/// step, which the kernel names in [`RUNNING_ENV`]. The answer is in
+/// [sections](section_header): the pid as [`SECTION_PID`], its
+/// /proc/<pid>/maps as [`SECTION_MAPS`], and then each ELF file it had
+/// mapped that did not come from the input image's store, named by its
+/// path as init sees it. Those are the files only the VM has, such as a
+/// program the job compiled. Not found when the kernel or the idle task
+/// was running.
+pub const INSPECT_RUNNING: &str = "running";
+pub const SECTION_PID: &str = "pid";
+pub const SECTION_MAPS: &str = "maps";
+
+/// The fourth request: `files <pid>`, files' bytes in sections named by
+/// their paths, resolved as process `pid` sees them (the job's view when
+/// 0 or gone). A request has room for few arguments, so the paths come as
+/// input on the console instead, one per line, ending with an empty line.
+/// Files that are missing, are not regular files or are too large are
+/// left out.
+pub const INSPECT_FILES: &str = "files";
+
+/// The variable the kernel starts every inspection with: the thread group
+/// id of the process that was running at the step, or 0.
+pub const RUNNING_ENV: &str = "REWIND_RUNNING";
 
 /// The output stream /dev/rewind-console's writes are reported on.
 pub const CONSOLE_FD: u32 = 3;
@@ -150,6 +174,29 @@ pub fn tree_hash(path: &std::path::Path) -> std::io::Result<blake3::Hash> {
     Ok(h.finalize())
 }
 
+/// The header of one section of an answer that carries several things:
+/// the length in decimal, a space and the name, on a line, then that many
+/// bytes. The length comes first so a name may hold any character but a
+/// newline.
+pub fn section_header(name: &str, len: usize) -> String {
+    format!("{len} {name}\n")
+}
+
+/// The sections of an answer, in order, or None when it is cut short.
+pub fn sections(mut answer: &[u8]) -> Option<Vec<(String, &[u8])>> {
+    let mut found = Vec::new();
+    while !answer.is_empty() {
+        let line_end = answer.iter().position(|b| *b == b'\n')?;
+        let header = std::str::from_utf8(&answer[..line_end]).ok()?;
+        let (len, name) = header.split_once(' ')?;
+        let len: usize = len.parse().ok()?;
+        let body = answer.get(line_end + 1..line_end + 1 + len)?;
+        found.push((name.to_string(), body));
+        answer = &answer[line_end + 1 + len..];
+    }
+    Some(found)
+}
+
 /// How the input image becomes the job's filesystem.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -163,4 +210,34 @@ pub enum Root {
     Image,
     /// There is no image; the job runs in the initramfs.
     Initramfs,
+}
+
+#[cfg(test)]
+mod tests {
+    // Sections written one after another and read back, and an answer cut
+    // short in the middle of one.
+    use super::*;
+
+    #[test]
+    fn sections_come_back_in_order_with_any_bytes() {
+        let mut answer = Vec::new();
+        for (name, body) in [("pid", &b"42"[..]), ("/build/a b", b"\n\x7fELF\n")] {
+            answer.extend(section_header(name, body.len()).into_bytes());
+            answer.extend(body);
+        }
+        assert_eq!(
+            sections(&answer).unwrap(),
+            vec![
+                ("pid".to_string(), &b"42"[..]),
+                ("/build/a b".to_string(), &b"\n\x7fELF\n"[..])
+            ]
+        );
+    }
+
+    #[test]
+    fn an_answer_cut_short_has_no_sections() {
+        let mut answer = section_header("maps", 10).into_bytes();
+        answer.extend(b"short");
+        assert_eq!(sections(&answer), None);
+    }
 }

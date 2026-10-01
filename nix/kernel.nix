@@ -6,12 +6,15 @@
 # shaped around distribution configs with thousands of modules, and this
 # kernel has no modules at all.
 #
-# Two outputs of one build, so they describe the same code: `out` is what
-# runs need, the bzImage the monitor boots, vmlinux with its symbol table
-# but no DWARF, System.map and the final .config; `symbols` is what
-# `rewind gdb` needs, vmlinux with compressed DWARF and the kernel's gdb
-# scripts (lx-ps, lx-dmesg and the rest). Runs depend on `out` only, so
-# the DWARF is fetched only by someone who debugs.
+# Two outputs of one build, so they describe the same code. `out` is what
+# runs and `rewind gdb` start from: the bzImage the VM boots, vmlinux with
+# its symbol table but no DWARF, System.map, the final .config and the
+# kernel's gdb scripts (lx-ps, lx-dmesg and the rest). `debug` is
+# nixpkgs' separateDebugInfo output: vmlinux's DWARF under
+# lib/debug/.build-id, which gdb and debuginfod servers such as
+# nixseparatedebuginfod2 find by build ID, with links to the source and
+# the files the Rewind patch changes. Runs depend on `out` only, so the
+# DWARF is fetched only by someone who debugs.
 { pkgs }:
 let
   inherit (pkgs) lib;
@@ -21,10 +24,7 @@ let
 in
 pkgs.stdenv.mkDerivation {
   pname = "rewind-guest-kernel";
-  outputs = [
-    "out"
-    "symbols"
-  ];
+  separateDebugInfo = true;
   inherit (upstream) version src;
 
   patches = [ ../guest/linux/rewind-guest.patch ];
@@ -84,17 +84,33 @@ pkgs.stdenv.mkDerivation {
     runHook postBuild
   '';
 
+  # vmlinux goes in whole: the separateDebugInfo hook moves its DWARF to
+  # `debug` in the fixup phase, and the strip after it, told about
+  # vmlinux here, leaves the symbol table.
   installPhase = ''
     runHook preInstall
-    mkdir -p $out $symbols/scripts
-    cp arch/x86/boot/bzImage .config System.map $out/
-    objcopy --strip-debug vmlinux $out/vmlinux
-
-    # Compressed debug sections: gdb reads them, at a fraction of the size.
-    objcopy --compress-debug-sections=zlib vmlinux $symbols/vmlinux
-    cp -rL scripts/gdb $symbols/scripts/gdb
-    cp -L vmlinux-gdb.py $symbols/vmlinux-gdb.py
+    mkdir -p $out
+    cp arch/x86/boot/bzImage .config System.map vmlinux $out/
+    # The gdb scripts are the Python files in scripts/gdb, some of them
+    # generated, next to the build's own files there.
+    (cd scripts/gdb && find . -name '*.py' -exec install -D -m 444 {} $out/scripts/gdb/{} \;)
+    cp -L vmlinux-gdb.py $out/vmlinux-gdb.py
     runHook postInstall
+  '';
+  stripDebugList = [ "vmlinux" ];
+
+  # The hook's source overlay holds the files that differ from the
+  # tarball, for gdb to show as built. It finds them by checksum, so it
+  # misses the files the patch adds, rewind.c among them, and takes in the
+  # scripts patchShebangs changed, which would make `debug` depend on perl
+  # and python. The overlay is made the patch's files instead.
+  postFixup = ''
+    overlay=$debug/src/overlay/$sourceRoot
+    rm -rf "$overlay"
+    sed -n 's|^+++ b/||p' ${../guest/linux/rewind-guest.patch} | cut -f1 |
+      while read -r file; do
+        install -D -m 444 "$file" "$overlay/$file"
+      done
   '';
 
   meta = {

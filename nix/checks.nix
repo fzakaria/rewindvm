@@ -118,6 +118,19 @@ in
           ${kernel}/vmlinux | tee gdb
         wait
         grep -q 'in rewind_emit' gdb
+
+        # rewind gdb at a step inside the job: it names the process that
+        # was running and loads its program, which in an image job comes
+        # from the VM.
+        write=$(rewind events w | grep 'notes.txt' | head -1)
+        step=$(echo "$write" | awk '{print $1}')
+        pid=$(echo "$write" | awk '{print $2}' | cut -d/ -f1)
+        rewind gdb w "$step" --listen 127.0.0.1:12346 2> serve &
+        while ! grep -q 'connect with' serve; do sleep 0.1; done
+        gdb -q -batch -ex 'target remote 127.0.0.1:12346' -ex detach
+        wait
+        cat serve
+        grep -q "ran in process $pid; loading symbols for 1 of its files" serve
         touch $out
       '';
 

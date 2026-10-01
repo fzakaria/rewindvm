@@ -114,7 +114,7 @@ diff -ruN a/arch/x86/kernel/cpu/Makefile b/arch/x86/kernel/cpu/Makefile
 diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 --- a/arch/x86/kernel/cpu/rewind.c	1969-12-31 16:00:00.000000000 -0800
 +++ b/arch/x86/kernel/cpu/rewind.c	2026-10-01 01:13:54.810300098 -0700
-@@ -0,0 +1,1049 @@
+@@ -0,0 +1,1063 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Rewind VM guest platform.
@@ -420,6 +420,14 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +static DECLARE_WAIT_QUEUE_HEAD(rewind_inspect_done);
 +
 +/*
++ * The process that was running at the step the inspection asks about, by
++ * its thread group id, or 0 when the kernel or the idle task was. The
++ * inspection's process gets it as REWIND_RUNNING, so Rewind can tell gdb
++ * whose program and libraries were mapped at that step.
++ */
++static pid_t rewind_inspect_running;
++
++/*
 + * Stops every user process but init where it stands. Called from the
 + * interrupt, so the machine stops at the step the monitor asked about
 + * rather than whenever the worker gets to run. Linux never stops init with
@@ -443,7 +451,8 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +{
 +	static char request[REWIND_REQUEST_MAX + 1];
 +	static char *argv[REWIND_INSPECT_ARGS + 3];
-+	static char *envp[] = { "PATH=/bin", NULL };
++	static char running[sizeof("REWIND_RUNNING=-2147483648")];
++	static char *envp[] = { "PATH=/bin", running, NULL };
 +	u32 len = min_t(u32, READ_ONCE(rewind_shared.request_len),
 +			REWIND_REQUEST_MAX);
 +	int argc = 0;
@@ -458,6 +467,8 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +	     arg += strlen(arg) + 1)
 +		argv[argc++] = arg;
 +	argv[argc] = NULL;
++	snprintf(running, sizeof(running), "REWIND_RUNNING=%d",
++		 READ_ONCE(rewind_inspect_running));
 +
 +	call_usermodehelper(argv[0], argv, envp, UMH_WAIT_PROC);
 +
@@ -559,6 +570,9 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +
 +	if (pending & REWIND_PENDING_INSPECT) {
 +		WRITE_ONCE(rewind_inspecting, true);
++		WRITE_ONCE(rewind_inspect_running,
++			   (current->flags & PF_KTHREAD) || !current->mm ?
++			   0 : task_tgid_nr(current));
 +		rewind_stop_user_tasks();
 +		/*
 +		 * An inspection can be a shell that runs for as long as
