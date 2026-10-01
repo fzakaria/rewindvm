@@ -714,6 +714,10 @@ a:focus-visible {
 .inspect .ctl {
   justify-content: center;
 }
+/* An odd button out takes the whole row, as Export run does in the app. */
+.inspect .ctl:last-child:nth-child(odd) {
+  grid-column: 1 / -1;
+}
 
 /* How it works */
 .steps {

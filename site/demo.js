@@ -461,10 +461,6 @@
       "Open shell.",
       `A shell inside the VM at step ${fmt(s)}, with the build's environment.`,
     ],
-    diff: () => [
-      "Diff.",
-      `Run #3 and run #2 are identical up to step ${fmt(DIVERGENCE_STEP)}.`,
-    ],
     export: () => [
       "Export.",
       "Run #3 as one .rwd file that replays on another machine.",
