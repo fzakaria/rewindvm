@@ -19,17 +19,12 @@ use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 pub const BEGIN: &str = "----- BEGIN REWIND VM LICENSE -----";
 pub const END: &str = "----- END REWIND VM LICENSE -----";
 
-/// The key licenses are checked against.
-///
-/// This is the DEVELOPMENT key. Its signing half lives only in a scratch
-/// directory on the machine the app was developed on, so licenses signed
-/// with it are for testing. Before release, generate the production pair
-/// with `rewind-license keygen --out <offline dir>`, keep signing.key
-/// offline (a password manager, never this repository), and paste the
-/// public key it prints here.
+/// The key licenses are checked against. Its signing half is kept in
+/// 1Password and never touches this repository or a disk; LICENSING.md
+/// says how licenses are issued with it and how to replace the pair.
 pub const PUBLIC_KEY: [u8; 32] = [
-    0xdb, 0xae, 0xcf, 0xdc, 0x67, 0xbc, 0x0e, 0x5a, 0x98, 0xd9, 0x00, 0x63, 0x74, 0x17, 0x7f, 0x6b,
-    0x8e, 0x11, 0x4a, 0xe3, 0x2f, 0x8b, 0x3c, 0x9e, 0x1d, 0xa6, 0xb1, 0x6b, 0x9f, 0xb8, 0x36, 0x10,
+    0x38, 0x14, 0x5a, 0x44, 0x46, 0x40, 0x0d, 0x25, 0x18, 0x32, 0x50, 0x28, 0x7b, 0xe7, 0x8e, 0x70,
+    0x93, 0x66, 0x54, 0x46, 0x06, 0x3c, 0xe1, 0xf6, 0x53, 0x92, 0xb2, 0x23, 0xe6, 0x12, 0x14, 0x33,
 ];
 
 /// License ids the app refuses: refunded or leaked keys.
@@ -466,8 +461,9 @@ pub fn random_bytes<const N: usize>() -> std::io::Result<[u8; N]> {
 #[cfg(test)]
 mod tests {
     // License blocks end to end: licenses are signed with a key derived
-    // from a fixed seed (or, for the compiled-in key, taken from a block
-    // issued with the development key), then parsed and checked.
+    // from a fixed seed, then parsed and checked. The compiled-in key's
+    // signing half is not available here, so it is only checked to be a
+    // valid public key.
     use super::*;
 
     const TEST_SEED: [u8; 32] = [7; 32];
