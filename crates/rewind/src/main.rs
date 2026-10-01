@@ -634,6 +634,24 @@ fn run(cli: Cli) -> Result<ExitCode> {
             use std::os::fd::AsRawFd;
 
             let run = Run::find(&home, &run)?;
+
+            // A pid is checked against the run: one it never had is a
+            // mistake, and one gone by the step falls back to its parent.
+            if let Some(pid) = pid {
+                let procs = run.trace()?.processes();
+                let Some(p) = procs.iter().rev().find(|p| p.pid == pid) else {
+                    bail!(
+                        "run {} has no process {pid}; see `rewind ps`",
+                        run.manifest.id
+                    );
+                };
+                if !p.alive_at(step) {
+                    eprintln!(
+                        "rewind: pid {pid} is not running at step {step}; the shell takes \
+                         the view of its nearest running ancestor"
+                    );
+                }
+            }
             let size =
                 terminal::size(std::io::stdout().as_raw_fd()).unwrap_or(terminal::DEFAULT_SIZE);
             eprintln!(
@@ -649,10 +667,19 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 pid,
                 size,
                 Box::new(terminal::Keyboard::new(size)),
-                Box::new(|bytes: &[u8]| {
-                    let mut out = std::io::stdout().lock();
-                    let _ = out.write_all(bytes);
-                    let _ = out.flush();
+                Box::new({
+                    // SAFETY: isatty only inspects the descriptor.
+                    let tty = unsafe { libc::isatty(std::io::stdout().as_raw_fd()) } == 1;
+                    let mut plain = terminal::Unterminal::default();
+                    move |bytes: &[u8]| {
+                        let mut out = std::io::stdout().lock();
+                        let _ = if tty {
+                            out.write_all(bytes)
+                        } else {
+                            out.write_all(&plain.convert(bytes))
+                        };
+                        let _ = out.flush();
+                    }
                 }),
             );
             drop(raw);

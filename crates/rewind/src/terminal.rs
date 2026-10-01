@@ -18,6 +18,10 @@ pub const DEFAULT_SIZE: (u16, u16) = (1000, 24);
 /// How many bytes one read takes from standard input.
 const READ_CHUNK: usize = 4096;
 
+/// Ctrl-D: what a terminal sends at the end of input. A shell at an empty
+/// prompt exits on it.
+const END_OF_INPUT: u8 = 0x04;
+
 /// The window size of the terminal on `fd`, as (columns, rows).
 pub fn size(fd: RawFd) -> Option<(u16, u16)> {
     let mut size: libc::winsize = unsafe { std::mem::zeroed() };
@@ -135,14 +139,53 @@ impl Input for Keyboard {
                 return Vec::new();
             }
 
+            // At the end of piped input, type Ctrl-D once, as a terminal
+            // would, so the shell exits rather than wait for more.
             let mut buf = [0u8; READ_CHUNK];
             return match std::io::stdin().lock().read(&mut buf) {
                 Ok(0) | Err(_) => {
                     self.closed = true;
-                    Vec::new()
+                    vec![END_OF_INPUT]
                 }
                 Ok(n) => buf[..n].to_vec(),
             };
         }
+    }
+}
+
+/// Output for a destination that is not a terminal: the shell runs on a
+/// terminal inside the VM, which ends lines with CRLF, so a CR before a LF
+/// is dropped. A CR at the end of one chunk waits for the next.
+#[derive(Default)]
+pub struct Unterminal {
+    held_cr: bool,
+}
+
+impl Unterminal {
+    pub fn convert(&mut self, bytes: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(bytes.len() + 1);
+        for &b in bytes {
+            if self.held_cr && b != b'\n' {
+                out.push(b'\r');
+            }
+            self.held_cr = b == b'\r';
+            if !self.held_cr {
+                out.push(b);
+            }
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Terminal line ends turned back into plain ones, across chunks.
+    use super::*;
+
+    #[test]
+    fn crlf_becomes_lf_even_split_across_chunks() {
+        let mut u = Unterminal::default();
+        assert_eq!(u.convert(b"a\r\nb\r"), b"a\nb");
+        assert_eq!(u.convert(b"\nc\rd"), b"\nc\rd");
     }
 }
