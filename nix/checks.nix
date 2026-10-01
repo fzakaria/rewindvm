@@ -134,6 +134,17 @@ in
         touch $out
       '';
 
+  # checks.pmu-boot: `rewind pmu enable` as the NixOS module's boot service
+  # runs it, with no HOME or anything else in its environment. Whether the
+  # workaround can be set depends on the machine, so this only checks that
+  # the command gets as far as trying.
+  pmu-boot = pkgs.runCommand "rewind-pmu-boot" { nativeBuildInputs = [ rewind ]; } ''
+    env -i ${pkgs.lib.getExe rewind} pmu enable > out 2>&1 || true
+    cat out
+    ! grep -q 'HOME' out
+    touch $out
+  '';
+
   # checks.version: VERSION is the release's version, and Cargo cannot read
   # it, so the two Cargo.toml files that name it must agree with it;
   # tools/set-version changes all three.

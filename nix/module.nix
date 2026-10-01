@@ -7,6 +7,7 @@
 {
   config,
   lib,
+  pkgs,
   ...
 }:
 let
@@ -74,12 +75,16 @@ in
       environment.systemPackages = [ cfg.app.package ];
     })
 
-    # A oneshot at boot, since the MSR bit resets with the CPU.
+    # A oneshot at boot, since the MSR bit resets with the CPU. It runs once
+    # the msr module is loaded, and has modprobe for a switch that has not
+    # loaded it yet.
     (lib.mkIf (cfg.enable && cfg.amdBranchCounterWorkaround) {
       boot.kernelModules = [ "msr" ];
       systemd.services.rewind-pmu = {
         description = "Make the AMD branch counter exact for Rewind VM";
         wantedBy = [ "multi-user.target" ];
+        after = [ "systemd-modules-load.service" ];
+        path = [ pkgs.kmod ];
         serviceConfig = {
           Type = "oneshot";
           RemainAfterExit = true;

@@ -345,6 +345,15 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Result<ExitCode> {
+    // Setting the AMD workaround needs no runs, and the NixOS module's boot
+    // service runs it with no HOME to find them under.
+    if let Command::Pmu {
+        action: PmuAction::Enable,
+    } = cli.command
+    {
+        return pmu_enable();
+    }
+
     let home = Home::open()?;
     match cli.command {
         Command::Run { image, machine } => {
@@ -720,15 +729,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Pmu { action } => {
             let vendor = rewind_core::pmu::Vendor::detect()?;
             match action {
-                PmuAction::Enable => {
-                    if !vendor.needs_workaround() {
-                        println!("{vendor}: no workaround needed");
-                        return Ok(ExitCode::SUCCESS);
-                    }
-                    let n = rewind_core::pmu::enable_workaround()?;
-                    println!("set the branch counter workaround on {n} CPUs, until reboot");
-                    Ok(ExitCode::SUCCESS)
-                }
+                PmuAction::Enable => pmu_enable(),
                 PmuAction::Status => {
                     println!("cpu: {vendor}");
                     let needs = vendor.needs_workaround();
@@ -1194,6 +1195,19 @@ fn parse_env(pairs: &[String]) -> Result<Vec<(String, String)>> {
         env.push((k.to_string(), v.to_string()));
     }
     Ok(env)
+}
+
+/// `rewind pmu enable`: sets the AMD branch counter workaround on every
+/// CPU, until reboot, where the CPU needs it.
+fn pmu_enable() -> Result<ExitCode> {
+    let vendor = rewind_core::pmu::Vendor::detect()?;
+    if !vendor.needs_workaround() {
+        println!("{vendor}: no workaround needed");
+        return Ok(ExitCode::SUCCESS);
+    }
+    let n = rewind_core::pmu::enable_workaround()?;
+    println!("set the branch counter workaround on {n} CPUs, until reboot");
+    Ok(ExitCode::SUCCESS)
 }
 
 /// The job's wait status as the process exit code, the way a shell reports
