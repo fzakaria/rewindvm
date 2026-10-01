@@ -10,8 +10,10 @@ use std::time::Duration;
 use rewind_init::resize_message;
 use rewind_vmm::Input;
 
-/// The size a terminal is taken to be when it cannot be asked.
-pub const DEFAULT_SIZE: (u16, u16) = (80, 24);
+/// The size a terminal is taken to be when there is none to ask, as when
+/// a script pipes commands in: wide, so the shell's line editor does not
+/// wrap long commands it echoes back.
+pub const DEFAULT_SIZE: (u16, u16) = (1000, 24);
 
 /// How many bytes one read takes from standard input.
 const READ_CHUNK: usize = 4096;
