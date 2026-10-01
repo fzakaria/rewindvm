@@ -1,0 +1,76 @@
+#!/bin/sh
+# Installs Rewind VM from the latest GitHub release:
+#
+#   curl -fsSL https://rewindvm.dev/install | sh
+#
+# The command and the desktop app are unpacked under ~/.local/share/rewind
+# and linked into ~/.local/bin. Running it again replaces both with the
+# latest release. Settings, all optional:
+#
+#   REWIND_INSTALL_DIR  where the tarballs are unpacked (~/.local/share/rewind)
+#   REWIND_BIN_DIR      where rewind and rewind-app are linked (~/.local/bin)
+#   REWIND_NO_APP=1     install only the command
+#   REWIND_RELEASE_URL  where the release assets are, for testing a build
+set -eu
+
+RELEASE_URL=${REWIND_RELEASE_URL:-https://github.com/fzakaria/rewindvm/releases/latest/download}
+INSTALL_DIR=${REWIND_INSTALL_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/rewind}
+BIN_DIR=${REWIND_BIN_DIR:-$HOME/.local/bin}
+CLI=rewind-x86_64-linux
+APP=rewind-app-x86_64-linux
+
+say() {
+  printf 'rewind install: %s\n' "$*" >&2
+}
+
+fail() {
+  say "$*"
+  exit 1
+}
+
+# Rewind runs Linux in KVM on x86_64 hosts only.
+[ "$(uname -s)" = Linux ] || fail "Rewind VM needs Linux; this is $(uname -s)"
+[ "$(uname -m)" = x86_64 ] || fail "Rewind VM needs x86_64; this is $(uname -m)"
+
+if command -v curl >/dev/null 2>&1; then
+  fetch() { curl -fsSL "$1"; }
+elif command -v wget >/dev/null 2>&1; then
+  fetch() { wget -qO- "$1"; }
+else
+  fail "needs curl or wget"
+fi
+
+# Each tarball unpacks to a directory of its own name, so a new release
+# replaces the old one whole.
+install_tarball() {
+  name=$1
+  say "downloading $name"
+  staging=$(mktemp -d "$INSTALL_DIR/.install.XXXXXX")
+  fetch "$RELEASE_URL/$name.tar.gz" | tar -xz -C "$staging"
+  rm -rf "${INSTALL_DIR:?}/$name"
+  mv "$staging/$name" "$INSTALL_DIR/$name"
+  rmdir "$staging"
+}
+
+mkdir -p "$INSTALL_DIR" "$BIN_DIR"
+install_tarball "$CLI"
+ln -sf "$INSTALL_DIR/$CLI/bin/rewind" "$BIN_DIR/rewind"
+if [ "${REWIND_NO_APP:-}" != 1 ]; then
+  install_tarball "$APP"
+  ln -sf "$INSTALL_DIR/$APP/bin/rewind-app" "$BIN_DIR/rewind-app"
+fi
+
+say "installed into $INSTALL_DIR, linked from $BIN_DIR"
+
+# What is left for the user to do, if anything.
+case ":$PATH:" in
+  *":$BIN_DIR:"*) ;;
+  *) say "add $BIN_DIR to your PATH" ;;
+esac
+if [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
+  say "/dev/kvm is not readable and writable by you; add yourself to the kvm group"
+fi
+if grep -q AuthenticAMD /proc/cpuinfo 2>/dev/null; then
+  say "on AMD, run 'sudo rewind pmu enable' after each boot: https://rewindvm.dev/counter-time.html"
+fi
+say "try: rewind pmu status"

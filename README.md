@@ -62,10 +62,13 @@ identical: 1591 events over 4470 steps
 
 ## Install
 
-On x86_64 Linux with KVM. With Nix, run it straight from the flake; the builds
-come from [rewindvm.cachix.org](https://rewindvm.cachix.org), so nothing
-compiles on your machine. Nix asks once whether to trust that cache; say yes,
-or pass `--accept-flake-config`.
+On x86_64 Linux with KVM:
+
+```console
+$ curl -fsSL https://rewindvm.dev/install | sh
+```
+
+With Nix, run it straight from the flake, or install it into your profile:
 
 ```console
 $ nix run github:fzakaria/rewindvm -- pmu status
@@ -85,16 +88,15 @@ programs.rewind.app.enable = true;
 programs.rewind.amdBranchCounterWorkaround = true;
 ```
 
-Without Nix, take the tarballs from the
-[latest release](https://github.com/fzakaria/rewindvm/releases/latest). The
-command's holds everything it needs, the VM's kernel included; the app's runs
-with your own graphics drivers.
+Or take the tarballs from the
+[latest release](https://github.com/fzakaria/rewindvm/releases/latest)
+yourself:
 
 ```console
+# the rewind command, with the VM's kernel
 $ curl -L https://github.com/fzakaria/rewindvm/releases/latest/download/rewind-x86_64-linux.tar.gz | tar xz
+# the desktop app
 $ curl -L https://github.com/fzakaria/rewindvm/releases/latest/download/rewind-app-x86_64-linux.tar.gz | tar xz
-$ ./rewind-x86_64-linux/bin/rewind pmu status
-$ ./rewind-app-x86_64-linux/bin/rewind-app
 ```
 
 `/dev/kvm` must be readable and writable by you. On AMD Ryzen and EPYC, run
@@ -145,8 +147,7 @@ $ nix run github:fzakaria/rewindvm#app -- ~/.local/share/rewind/runs/<run>
 ```
 
 It opens `.rwd` exports too, and comes with an example run and a short tour.
-The app is free to download and use while you evaluate it, and sold the way
-Sublime Text is; see [pricing](https://rewindvm.dev/#pricing).
+See [pricing](https://rewindvm.dev/#pricing) for licenses.
 
 ## How it works
 

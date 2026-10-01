@@ -767,6 +767,9 @@ a:focus-visible {
   color: var(--muted);
   user-select: none;
 }
+.term .comment {
+  color: var(--muted);
+}
 .rows-def {
   margin: 22px 0 0;
 }

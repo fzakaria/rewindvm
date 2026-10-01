@@ -296,9 +296,6 @@
             </li>
           </ol>
         </div>
-        <p class="tour-planned">
-          <span class="tag">Planned</span> gdb at a step and a shell at a step.
-        </p>
       </section>
 
       <section class="wrap workloads" id="workloads">
@@ -435,11 +432,6 @@
         ><code><span class="prompt">$</span> nix run github:fzakaria/rewindvm -- pmu status
 <span class="prompt">$</span> nix run github:fzakaria/rewindvm#app
 <span class="prompt">$</span> nix profile install github:fzakaria/rewindvm github:fzakaria/rewindvm#app</code></pre>
-        <p>
-          The builds come from <code>rewindvm.cachix.org</code>, so nothing compiles on your
-          machine. Nix asks once whether to trust that cache; say yes, or pass
-          <code>--accept-flake-config</code>.
-        </p>
         <p>On NixOS, add the flake as an input and turn on its module:</p>
         <pre class="term"><code>inputs.rewind.url = "github:fzakaria/rewindvm";
 
@@ -450,33 +442,27 @@ programs.rewind.app.enable = true;
 programs.rewind.amdBranchCounterWorkaround = true;</code></pre>
 
         <h3>Without Nix</h3>
-        <p>
-          Two tarballs from the latest
-          <a href="https://github.com/fzakaria/rewindvm/releases">release</a>. The CLI's holds the
-          <code>rewind</code> command, the VM's kernel and everything it needs to build input
-          images, so the host needs nothing else. The app is built against glibc 2.31, runs with
-          your own graphics drivers and has been tried on Ubuntu 24.04 and Fedora 41. Unpacked side
-          by side, the app uses that <code>rewind</code> for forks and for reading files at a step.
-        </p>
         <pre
           class="term"
-        ><code><span class="prompt">$</span> curl -L https://github.com/fzakaria/rewindvm/releases/latest/download/rewind-x86_64-linux.tar.gz | tar xz
-<span class="prompt">$</span> curl -L https://github.com/fzakaria/rewindvm/releases/latest/download/rewind-app-x86_64-linux.tar.gz | tar xz
-<span class="prompt">$</span> ./rewind-x86_64-linux/bin/rewind pmu status
-<span class="prompt">$</span> ./rewind-app-x86_64-linux/bin/rewind-app</code></pre>
+        ><code><span class="prompt">$</span> curl -fsSL https://rewindvm.dev/install | sh</code></pre>
+        <p>Or take the tarballs from the latest release yourself:</p>
+        <pre
+          class="term"
+        ><code><span class="comment"># the rewind command, with the VM's kernel</span>
+<span class="prompt">$</span> curl -L https://github.com/fzakaria/rewindvm/releases/latest/download/rewind-x86_64-linux.tar.gz | tar xz
+<span class="comment"># the desktop app</span>
+<span class="prompt">$</span> curl -L https://github.com/fzakaria/rewindvm/releases/latest/download/rewind-app-x86_64-linux.tar.gz | tar xz</code></pre>
         <p class="note">
           If <code>/dev/kvm</code> is not readable and writable by you, add yourself to the
-          <code>kvm</code> group. The app download is the whole app, with nothing locked. Until you
-          enter a license key it says it is unregistered and reminds you now and then; see
-          <a href="#pricing">pricing</a>.
+          <code>kvm</code> group.
         </p>
       </section>
 
       <section class="wrap pricing" id="pricing">
         <h2>Pricing</h2>
         <p class="lede">
-          Sold the way Sublime Text is. Evaluate the app free for as long as you like, with an
-          occasional reminder. Buy a license when it earns its keep.
+          Evaluate the app free for as long as you like, with an occasional reminder. Buy a license
+          when it earns its keep.
         </p>
         <div class="plans">
           <div class="plan">
@@ -523,12 +509,6 @@ programs.rewind.amdBranchCounterWorkaround = true;</code></pre>
         <p class="note refund">
           Every license comes with a full refund within 30 days, for any reason. See the
           <a href="refunds.html">refund policy</a>.
-        </p>
-        <p class="note" id="buy">
-          Checkout for licenses is not open yet. The engine, the CLI and the desktop app are all
-          free to <a href="#download">download</a> now, and the app works fully while unregistered.
-          To hear when checkout opens, write to
-          <a href="mailto:tacos@lunchtimesurf.com">tacos@lunchtimesurf.com</a>.
         </p>
       </section>
 
