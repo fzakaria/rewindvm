@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Rewind
+Comment=Scrub, compare and fork recorded runs of Rewind VM
+Exec=rewind-app %u
+Icon=surf.lunchtime.Rewind
+StartupWMClass=surf.lunchtime.Rewind
+Terminal=false
+Categories=Development;Debugger;

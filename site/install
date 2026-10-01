@@ -58,6 +58,16 @@ ln -sf "$INSTALL_DIR/$CLI/bin/rewind" "$BIN_DIR/rewind"
 if [ "${REWIND_NO_APP:-}" != 1 ]; then
   install_tarball "$APP"
   ln -sf "$INSTALL_DIR/$APP/bin/rewind-app" "$BIN_DIR/rewind-app"
+
+  # The desktop entry and icon, so the app is in the desktop's launcher.
+  # The entry names the app by its path: a desktop session's PATH often
+  # lacks BIN_DIR.
+  share=${XDG_DATA_HOME:-$HOME/.local/share}
+  entry=surf.lunchtime.Rewind.desktop
+  mkdir -p "$share/applications" "$share/icons/hicolor"
+  sed "s|^Exec=rewind-app|Exec=$INSTALL_DIR/$APP/bin/rewind-app|" \
+    "$INSTALL_DIR/$APP/share/applications/$entry" >"$share/applications/$entry"
+  cp -R "$INSTALL_DIR/$APP/share/icons/hicolor/." "$share/icons/hicolor/"
 fi
 
 say "installed into $INSTALL_DIR, linked from $BIN_DIR"

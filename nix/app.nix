@@ -12,7 +12,8 @@
 # build, as nixpkgs does for zed-editor. The wrapper adds the app's two
 # fonts, IBM Plex Sans and JetBrains Mono, to the fonts fontconfig already
 # finds; without them the app falls back to whatever sans-serif and
-# monospace the system has.
+# monospace the system has. The desktop entry and icon come from
+# nix/app-desktop.nix, so the app shows in launchers with its icon.
 { pkgs }:
 let
   inherit (pkgs) lib;
@@ -26,6 +27,8 @@ let
       pkgs.jetbrains-mono
     ];
   };
+
+  desktop = import ./app-desktop.nix { inherit pkgs; };
 
   # Libraries wgpu and the Wayland client open at run time.
   runtimeLibraries = [
@@ -66,6 +69,10 @@ pkgs.rustPlatform.buildRustPackage {
     pkgs.libxcb
     pkgs.wayland
   ];
+
+  postInstall = ''
+    cp -r ${desktop}/share $out/
+  '';
 
   postFixup = ''
     patchelf $out/bin/rewind-app --add-rpath ${lib.makeLibraryPath runtimeLibraries}

@@ -5,7 +5,8 @@
 #   bin/rewind-app            the launcher
 #   libexec/rewind-app        the app, built for glibc 2.31 (nix/app-portable.nix)
 #   share/rewind-app/fonts/   IBM Plex Sans and JetBrains Mono, with their licenses
-#   share/applications/       a desktop entry to copy into ~/.local/share
+#   share/applications/       the desktop entry and icon, which the install
+#   share/icons/              script copies into ~/.local/share (nix/app-desktop.nix)
 #   LICENSE                   the app's license
 #
 # The launcher runs the app against the system's libraries and graphics
@@ -36,18 +37,10 @@ let
 
   launcher = ./app-launcher.sh;
 
-  desktopEntry = pkgs.writeText "rewind-app.desktop" ''
-    [Desktop Entry]
-    Type=Application
-    Name=Rewind
-    Comment=Scrub, compare and fork recorded runs of Rewind VM
-    Exec=rewind-app %f
-    Terminal=false
-    Categories=Development;Debugger;
-  '';
+  desktop = import ./app-desktop.nix { inherit pkgs; };
 in
 pkgs.runCommand "rewind-app-release" { } ''
-  mkdir -p ${dir}/bin ${dir}/libexec ${dir}/share/rewind-app/fonts ${dir}/share/applications
+  mkdir -p ${dir}/bin ${dir}/libexec ${dir}/share/rewind-app/fonts
   install -m 755 ${launcher} ${dir}/bin/rewind-app
   install -m 755 ${portable}/libexec/rewind-app ${dir}/libexec/rewind-app
 
@@ -58,7 +51,7 @@ pkgs.runCommand "rewind-app-release" { } ''
   install -m 644 ${ofl} ${dir}/share/rewind-app/fonts/OFL-JetBrainsMono.txt
   { echo '${plexCopyright}'; tail -n +2 ${ofl}; } > ${dir}/share/rewind-app/fonts/OFL-IBMPlex.txt
 
-  install -m 644 ${desktopEntry} ${dir}/share/applications/rewind-app.desktop
+  cp -r ${desktop}/share/applications ${desktop}/share/icons ${dir}/share/
   install -m 644 ${../crates/rewind-app/LICENSE} ${dir}/LICENSE
 
   mkdir -p $out
