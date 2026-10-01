@@ -20,6 +20,7 @@ use crate::selection::Surface;
 use crate::tour::Tour;
 use crate::ui::Launch;
 use crate::ui::licensing::Licensing;
+use crate::ui::link::LinkDialog;
 use crate::ui::selectable::SelectionState;
 use crate::ui::terminal::{PaneKind, TerminalPane};
 use crate::ui::viewer::FileViewer;
@@ -203,6 +204,8 @@ pub struct Scrubber {
     pub(super) importing: Option<PathBuf>,
     /// The engine's runs that changed last, for the empty state.
     pub(super) recent: Vec<RecentRun>,
+    /// The Open link dialog, when it is open.
+    pub(super) link_dialog: Option<LinkDialog>,
     pub(super) step: u64,
     pub(super) log_filter: LogFilter,
     pub(super) log_scroll: UniformListScrollHandle,
@@ -248,6 +251,7 @@ impl Scrubber {
             session: None,
             loading: None,
             importing: None,
+            link_dialog: None,
             recent: crate::engine::runs_dir()
                 .map(|runs| recent_runs(&runs, RECENT_SHOWN))
                 .unwrap_or_default(),
@@ -857,26 +861,6 @@ impl Scrubber {
                 self.notify_user(NoticeTone::Info, title, lines.join("\n"), cx);
             }
         }
-    }
-
-    /// Opens the run whose link is on the clipboard: an http or https URL
-    /// of a .rwd file, such as a case study's.
-    pub(super) fn open_link(&mut self, cx: &mut Context<Self>) {
-        let text = cx
-            .read_from_clipboard()
-            .and_then(|item| item.text())
-            .map(|t| t.trim().to_string())
-            .unwrap_or_default();
-        if !crate::archive::is_url(Path::new(&text)) {
-            self.notify_user(
-                NoticeTone::Info,
-                "No link on the clipboard",
-                "Copy the link to a .rwd file, such as one on a case study page, then press Open link again.",
-                cx,
-            );
-            return;
-        }
-        self.open(PathBuf::from(text), None, cx);
     }
 
     /// Asks for a run to open, and opens it: a .rwd file, a bare trace, or

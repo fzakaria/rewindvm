@@ -5,6 +5,7 @@
 mod chrome;
 mod icons;
 mod licensing;
+mod link;
 mod render;
 mod scrubber;
 mod selectable;
@@ -42,6 +43,8 @@ actions!(
         OpenRun,
         EnterLicense,
         PasteLicense,
+        PasteLink,
+        ConfirmLink,
         CloseDialog,
         StartTour,
         TourNext,
@@ -70,6 +73,9 @@ const APP_KEYS: &str = "!Terminal";
 
 /// The key context of the license dialog's paste field.
 const LICENSE_CONTEXT: &str = "LicenseDialog";
+
+/// The key context of the Open link dialog's field.
+const LINK_CONTEXT: &str = "LinkDialog";
 
 /// The key context of the tour's callout.
 const TOUR_CONTEXT: &str = "Tour";
@@ -195,6 +201,9 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-shift-v", TerminalPaste, Some(TERMINAL_CONTEXT)),
         KeyBinding::new("ctrl-v", PasteLicense, Some(LICENSE_CONTEXT)),
         KeyBinding::new("escape", CloseDialog, Some(LICENSE_CONTEXT)),
+        KeyBinding::new("ctrl-v", PasteLink, Some(LINK_CONTEXT)),
+        KeyBinding::new("enter", ConfirmLink, Some(LINK_CONTEXT)),
+        KeyBinding::new("escape", CloseDialog, Some(LINK_CONTEXT)),
         KeyBinding::new("enter", TourNext, Some(TOUR_CONTEXT)),
         KeyBinding::new("right", TourNext, Some(TOUR_CONTEXT)),
         KeyBinding::new("left", TourBack, Some(TOUR_CONTEXT)),

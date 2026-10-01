@@ -107,6 +107,9 @@ impl Render for Scrubber {
         if let Some(dialog) = self.render_license_dialog(cx) {
             window_root = window_root.child(dialog);
         }
+        if let Some(dialog) = self.render_link_dialog(cx) {
+            window_root = window_root.child(dialog);
+        }
         if let Some(menu) = self.render_context_menu(cx) {
             window_root = window_root.child(menu);
         }
@@ -1287,7 +1290,7 @@ impl Scrubber {
             .on_click(cx.listener(|this, _, _, cx| this.prompt_open(cx)));
         let open_link = button("open-link", ButtonStyle::Neutral, Availability::Enabled)
             .child("Open link")
-            .on_click(cx.listener(|this, _, _, cx| this.open_link(cx)));
+            .on_click(cx.listener(|this, _, window, cx| this.open_link_dialog(window, cx)));
 
         // The header, with only the mark on the left, is still the title
         // bar.
