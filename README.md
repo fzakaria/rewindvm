@@ -135,6 +135,10 @@ $ rewind gdb <run> <step> -- -batch -ex 'break pool.c:77' -ex continue -ex bt
 $ rewind fork <run> <step> --schedule 2
 $ rewind replay <run>
 
+# remove a run's forks that ran exactly as an older one did
+$ rewind prune <run> --identical --dry-run
+$ rewind prune <run> --identical
+
 # share a run as one file
 $ rewind export <run> --replayable
 $ rewind import <file>.rwd

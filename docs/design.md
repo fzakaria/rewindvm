@@ -14,16 +14,16 @@ Linux 7.1.
 
 ## At a glance
 
-| Piece              | Where                            | What it does                                                                                       |
-| ------------------ | -------------------------------- | -------------------------------------------------------------------------------------------------- |
-| Guest kernel patch | `guest/linux/rewind-guest.patch` | A "Rewind" x86 hypervisor platform in Linux 7.2: virtual clock and timer, idle as an exit, events  |
-| Guest init         | `crates/rewind-init`             | PID 1: mounts the input image, runs the job, reports its exit status and output hashes             |
-| Monitor            | `crates/rewind-vmm`              | One vCPU on KVM: boots the kernel, handles exits, owns time and interrupts, takes keyframes        |
-| Trace              | `crates/rewind-trace`            | Decodes guest records into events and answers questions about a run at a step                      |
-| Page store         | `crates/rewind-store`            | Content-addressed, compressed 4 KiB pages shared by every keyframe                                 |
-| Engine             | `crates/rewind-core`             | Input images, Nix derivations as jobs, runs on disk, keyframes, seeking                            |
-| Command            | `crates/rewind`                  | `rewind run`, `nix`, `check`, `fork`, `replay`, `cat`, `shell`, `gdb`, `export`, `import` and more |
-| App                | `crates/rewind-app`              | The GPUI scrubber (proprietary; see Product)                                                       |
+| Piece              | Where                            | What it does                                                                                      |
+| ------------------ | -------------------------------- | ------------------------------------------------------------------------------------------------- |
+| Guest kernel patch | `guest/linux/rewind-guest.patch` | A "Rewind" x86 hypervisor platform in Linux 7.2: virtual clock and timer, idle as an exit, events |
+| Guest init         | `crates/rewind-init`             | PID 1: mounts the input image, runs the job, reports its exit status and output hashes            |
+| Monitor            | `crates/rewind-vmm`              | One vCPU on KVM: boots the kernel, handles exits, owns time and interrupts, takes keyframes       |
+| Trace              | `crates/rewind-trace`            | Decodes guest records into events and answers questions about a run at a step                     |
+| Page store         | `crates/rewind-store`            | Content-addressed, compressed 4 KiB pages shared by every keyframe                                |
+| Engine             | `crates/rewind-core`             | Input images, Nix derivations as jobs, runs on disk, keyframes, seeking                           |
+| Command            | `crates/rewind`                  | `rewind run`, `nix`, `check`, `fork`, `prune`, `replay`, `cat`, `shell`, `gdb`, `export` and more |
+| App                | `crates/rewind-app`              | The GPUI scrubber (proprietary; see Product)                                                      |
 
 ## Determinism
 
@@ -266,6 +266,13 @@ it again.
   store/                      the page store
 ```
 
+Besides the inputs, a manifest records `trace_hash`, the BLAKE3 hash of
+`trace.bin` once the run has finished, so runs that did the same thing are
+found without reading their traces. A fork records `parent`, the run and step
+it was forked from, `first_difference`, the step where its trace first differs
+from its parent's (absent when the two are identical), and `shared_keyframes`,
+described under [Forks](#forks).
+
 `trace.bin` is a sequence of events. Each is its step as eight little-endian
 bytes, followed by the record exactly as the guest wrote it. `rewind-trace`
 reads it and answers the scrubber's questions: which processes were alive at a
@@ -298,6 +305,11 @@ at most about one interval. `rewind replay --from` restores a keyframe, runs
 to the end and compares the rest of the trace with the original. Every
 keyframe checked this way reproduces the rest of its run exactly.
 
+A delta lists the pages KVM's dirty log names, less the ones whose contents
+are what they were at the parent keyframe, often zero. About one entry in ten
+of the shared keyframe a fork takes (see [Forks](#forks)) is a page written
+back to the same bytes.
+
 | Workload                      | Steps | Wall time | With keyframes | Keyframes | New pages stored |
 | ----------------------------- | ----- | --------- | -------------- | --------- | ---------------- |
 | GNU hello, full nixpkgs build | 86693 | 11.7 s    | 15.8 s         | 58        | 165 MB           |
@@ -323,6 +335,60 @@ the pages a guest dirties between two keyframes are scattered 4 KiB pages, so
 dedup at that granularity would be poor. It was also pre-release when this
 was written. It is the likely choice for moving runs and images between
 machines later.
+
+### Forks
+
+A fork is the same run as its parent up to the step before its fork step, so
+it shares the parent's keyframes for those steps instead of taking copies. It
+restores the parent's latest keyframe at or before that step, copies the
+parent's trace up to the keyframe, and runs on from there. Its manifest's
+`shared_keyframes` names the parent and the last shared step. Seeking in the
+fork reads the parent's keyframes at or before that step and its own after,
+and the parent may share some of its own the same way, back to a run that
+shares none. Runs that share keyframes sit side by side in one runs
+directory.
+
+Rewind takes one keyframe at the last shared step and puts it in the
+directory of the earliest run that has that step in common with the fork,
+where every later fork at the same step finds it and restores from it. A
+fork's own keyframes then hold only what it wrote after its step. How far two
+runs agree comes from their schedules: a seed's choice at a step depends on
+the seed and the step alone, so two runs part at the first step only one of
+them perturbs, or that both perturb with different seeds.
+
+A fork of a fork has one perturbation window, starting at its own step, so
+before that step it runs unperturbed where its parent did not. Forked after
+its parent's fork step, it parts from its parent at that earlier step, and
+shares keyframes only up to there.
+
+For the mylib run in the tutorial (6164 steps, keyframes at 256, 512, 1200 and
+5934), forks of the passing run measured as follows.
+
+| Fork                                  | Before  | After  |
+| ------------------------------------- | ------- | ------ |
+| At step 4855, the first at that step  | 862 KB  | 102 KB |
+| At step 4855, another schedule        | 1454 KB | 155 KB |
+| At step 3000, the first at that step  | 883 KB  | 320 KB |
+| Shared keyframe at step 4854 (parent) |         | 524 KB |
+| Shared keyframe at step 2999 (parent) |         | 504 KB |
+
+The shared keyframe is a delta from the parent's keyframe at step 1200, and
+this build writes most of its memory between the two, so the first fork at a
+step costs a little less than it did before. Each further fork at that step costs only
+its trace and what it wrote after.
+
+A finished run's keyframes are never replaced, since other runs may read them;
+running the same inputs again leaves them as they are. A replayable export
+copies every keyframe a run reads into the archive as the run's own and drops
+`shared_keyframes`, so it imports and replays where the parent is not. A fork
+whose parent is gone cannot reach its shared keyframes, and seeking in it
+fails with the id of the run it needs; `rewind replay` from boot still works.
+
+`rewind prune <run> --identical` removes forks in a run's family, its forks
+and their forks, whose `trace_hash` equals an older member's. The run itself
+always stays, and so does any run another run here names as its parent or
+reads keyframes from. Pages the removed keyframes named stay in the page
+store.
 
 ## Exploring interleavings
 
