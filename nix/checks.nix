@@ -90,9 +90,20 @@ in
         rewind replay $fork | grep '^identical'
         rewind replay $fork --from 300 | grep '^identical'
         rewind replay $fork --from 999999 | grep '^identical'
-        fork2=$(rewind fork $fork 600 --schedule 5 --json | id)
+
+        # A fork of the fork, halfway between the fork's step and its end,
+        # is the fork exit for exit until its own step: it first differs
+        # there or later, and restores from the keyframe the two share just
+        # before it.
+        last=$(rewind events $fork | tail -1 | awk '{print $1}')
+        step=$(( (400 + last) / 2 ))
+        fork2=$(rewind fork $fork $step --schedule 5 --json | id)
+        differs=$(manifest $fork2 | sed -n 's/.*"first_difference": *\([0-9]*\).*/\1/p')
+        echo "fork of a fork at $step first differs at ''${differs:-no step}"
+        test -z "$differs" || test "$differs" -ge "$step"
         rewind replay $fork2 | grep '^identical'
         rewind replay $fork2 --from 300 | grep '^identical'
+        rewind replay $fork2 --from $((step - 1)) | grep "^identical from the keyframe at step $((step - 1)) "
         rewind replay $fork2 --from 999999 | grep '^identical'
 
         # A replayable export of the fork of a fork carries every keyframe

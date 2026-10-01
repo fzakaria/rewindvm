@@ -356,10 +356,13 @@ runs agree comes from their schedules: a seed's choice at a step depends on
 the seed and the step alone, so two runs part at the first step only one of
 them perturbs, or that both perturb with different seeds.
 
-A fork of a fork has one perturbation window, starting at its own step, so
-before that step it runs unperturbed where its parent did not. Forked after
-its parent's fork step, it parts from its parent at that earlier step, and
-shares keyframes only up to there.
+A fork of a fork carries its parent's perturbations up to its own step (see
+[Exploring interleavings](#exploring-interleavings)), so it shares its
+parent's keyframes through the step before its own, like any fork. A fork of
+the mylib fork made at step 3000, forked again at step 4000 with schedule 3,
+first differs from its parent at step 4020. Before forks carried their
+parents' perturbations it ran unperturbed from step 3000 and differed at
+step 3018.
 
 For the mylib run in the tutorial (6164 steps, keyframes at 256, 512, 1200 and
 5934), forks of the passing run measured as follows.
@@ -409,6 +412,13 @@ A perturbation applies only inside a window of steps. Before the window, a
 perturbed run is the unperturbed one, exit for exit. `rewind fork` builds on
 this. A fork of a run at step N with schedule K is the run's inputs with the
 perturbation starting at N, so it is its parent up to N by construction.
+
+A fork of a perturbed run, such as a fork of a fork, also keeps the parent's
+perturbations, each cut off at N, in the spec's `inherited_schedules`. Every
+step is then perturbed by the one window that holds it, if any, the same way
+it was in the run it came from. A fork of an unperturbed run inherits
+nothing, and the field is left out of its spec, so its id is what it would
+have been without it.
 
 `rewind check` does the following:
 

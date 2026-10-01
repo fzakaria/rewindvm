@@ -610,10 +610,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             if schedule == 0 {
                 bail!("schedule 0 is the unperturbed run; a fork needs another seed");
             }
-            let mut spec = m.spec.clone();
-            spec.schedule = schedule;
-            spec.schedule_from = step;
-            spec.schedule_until = u64::MAX;
+            let spec = m.spec.fork(step, schedule);
             let name = format!(
                 "{} (fork of {} at {step}, schedule {schedule})",
                 m.name, m.id
@@ -1122,6 +1119,7 @@ fn execute(
         schedule: machine.schedule,
         schedule_from: machine.schedule_from,
         schedule_until: machine.schedule_until,
+        inherited_schedules: Vec::new(),
         cpu: machine.cpu.into(),
         clock: machine.resolved_clock.unwrap_or_default(),
         preemption: if machine.experimental_preempt {

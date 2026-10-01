@@ -293,6 +293,7 @@ pub fn selftest(guest: &Guest) -> Result<SelfTest> {
         schedule: 0,
         schedule_from: 0,
         schedule_until: u64::MAX,
+        inherited_schedules: Vec::new(),
         cpu: rewind_vmm::cpu::Model::default(),
         clock: rewind_vmm::ClockSource::Exits,
         preemption: rewind_vmm::Preemption::AtExits,

@@ -83,6 +83,12 @@ pub struct Spec {
     pub schedule_from: u64,
     #[serde(default = "forever")]
     pub schedule_until: u64,
+    /// For a fork of a fork, the perturbations of the runs it came from,
+    /// each over its window and all ending by `schedule_from`, so the fork
+    /// is its parent up to its own step. Left out when empty, so runs and
+    /// first-level forks keep their ids.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inherited_schedules: Vec<ScheduleSegment>,
     /// The CPU the guest is shown. Runs from before this field showed the
     /// host's.
     #[serde(default = "host_cpu")]
@@ -99,6 +105,14 @@ pub struct Spec {
     pub extras: rewind_vmm::Extras,
     pub cmdline: String,
     pub job: Job,
+}
+
+/// One schedule seed over the steps `from..until`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScheduleSegment {
+    pub seed: u64,
+    pub from: u64,
+    pub until: u64,
 }
 
 fn forever() -> u64 {
@@ -172,6 +186,52 @@ impl Spec {
         hash[..16].to_string()
     }
 
+    /// The spec of a fork of this run at `step` under schedule `seed`:
+    /// this run's perturbations up to the step, the new one from it.
+    pub fn fork(&self, step: u64, seed: u64) -> Spec {
+        let own = ScheduleSegment {
+            seed: self.schedule,
+            from: self.schedule_from,
+            until: self.schedule_until,
+        };
+
+        // Each earlier perturbation is cut off at the fork step, and one
+        // that perturbs nothing before it is dropped.
+        let inherited = self
+            .inherited_schedules
+            .iter()
+            .chain(std::iter::once(&own))
+            .map(|s| ScheduleSegment {
+                until: s.until.min(step),
+                ..s.clone()
+            })
+            .filter(|s| s.seed != 0 && s.from < s.until)
+            .collect();
+        Spec {
+            schedule: seed,
+            schedule_from: step,
+            schedule_until: u64::MAX,
+            inherited_schedules: inherited,
+            ..self.clone()
+        }
+    }
+
+    /// The perturbations the machine applies.
+    fn schedule(&self) -> rewind_vmm::pv::Schedule {
+        rewind_vmm::pv::Schedule {
+            seed: self.schedule,
+            window: self.schedule_from..self.schedule_until,
+            earlier: self
+                .inherited_schedules
+                .iter()
+                .map(|s| rewind_vmm::pv::Segment {
+                    seed: s.seed,
+                    window: s.from..s.until,
+                })
+                .collect(),
+        }
+    }
+
     /// The last step through which a run of this spec and a run of
     /// `other` are the same run: they differ only in their schedules, and
     /// the schedules perturb the same steps the same way up to it. None
@@ -184,6 +244,7 @@ impl Spec {
             schedule: 0,
             schedule_from: 0,
             schedule_until: u64::MAX,
+            inherited_schedules: Vec::new(),
             image: None,
             kernel_debug: None,
             ..s.clone()
@@ -191,27 +252,7 @@ impl Spec {
         if unscheduled(self) != unscheduled(other) {
             return None;
         }
-
-        // A seed's choice at a step depends on the seed and the step alone,
-        // so two schedules part at the first step only one of them
-        // perturbs, or that both perturb with different seeds.
-        let (a, b) = (self.perturbation(), other.perturbation());
-        let parts_at = match (a, b) {
-            _ if a == b => return Some(u64::MAX),
-            (Some((sa, fa, ua)), Some((sb, fb, ub))) if sa == sb && fa == fb => ua.min(ub),
-            (Some((_, fa, _)), Some((_, fb, _))) => fa.min(fb),
-            (Some((_, from, _)), None) | (None, Some((_, from, _))) => from,
-            (None, None) => unreachable!("two unperturbed schedules are equal"),
-        };
-        Some(parts_at.saturating_sub(1))
-    }
-
-    /// The schedule's seed and window, or None when it perturbs no step.
-    fn perturbation(&self) -> Option<(u64, u64, u64)> {
-        if self.schedule == 0 || self.schedule_from >= self.schedule_until {
-            return None;
-        }
-        Some((self.schedule, self.schedule_from, self.schedule_until))
+        Some(self.schedule().same_through(&other.schedule()))
     }
 
     /// The 32 bytes the guest kernel seeds its RNG with.
@@ -235,10 +276,7 @@ impl Spec {
             seed: self.rng_seed(),
             epoch: self.epoch,
             quantum: self.quantum,
-            schedule: rewind_vmm::pv::Schedule {
-                seed: self.schedule,
-                window: self.schedule_from..self.schedule_until,
-            },
+            schedule: self.schedule(),
             cpu: self.cpu,
             clock: self.clock,
             preemption: self.preemption,
@@ -727,6 +765,7 @@ mod tests {
             schedule: 0,
             schedule_from: 0,
             schedule_until: u64::MAX,
+            inherited_schedules: Vec::new(),
             cpu: rewind_vmm::cpu::Model::V3,
             clock: rewind_vmm::ClockSource::Exits,
             preemption: rewind_vmm::Preemption::AtExits,
@@ -764,6 +803,59 @@ mod tests {
         let fork = perturbed(3, 4855, u64::MAX);
         assert_eq!(parent.same_through(&fork), Some(4854));
         assert_eq!(fork.same_through(&parent), Some(4854));
+    }
+
+    #[test]
+    fn a_fork_of_an_unperturbed_run_is_the_spec_it_always_was() {
+        // A first-level fork inherits nothing, so its spec, and so its id,
+        // is the one forks had before schedules carried segments.
+        let fork = spec().fork(4855, 10);
+        assert_eq!(fork, perturbed(10, 4855, u64::MAX));
+        assert_eq!(fork.id(), perturbed(10, 4855, u64::MAX).id());
+        let json = serde_json::to_value(&fork).unwrap();
+        assert!(json.get("inherited_schedules").is_none());
+    }
+
+    #[test]
+    fn a_fork_of_a_fork_keeps_its_parents_perturbation_until_its_step() {
+        // The parent was forked at 2000 with seed 3; its fork at 4000 with
+        // seed 5 carries seed 3 over 2000..4000, so the two are the same
+        // run through 3999.
+        let parent = spec().fork(2000, 3);
+        let child = parent.fork(4000, 5);
+        assert_eq!(
+            child.inherited_schedules,
+            vec![ScheduleSegment {
+                seed: 3,
+                from: 2000,
+                until: 4000
+            }]
+        );
+        assert_eq!(parent.same_through(&child), Some(3999));
+        let grandchild = child.fork(6000, 9);
+        assert_eq!(grandchild.inherited_schedules.len(), 2);
+        assert_eq!(child.same_through(&grandchild), Some(5999));
+        assert_eq!(parent.same_through(&grandchild), Some(3999));
+    }
+
+    #[test]
+    fn a_fork_before_its_parents_window_inherits_nothing() {
+        // Forked at 1000, before the parent's perturbation starts at 2000,
+        // the child has no part of it; a parent's narrowed window that ended
+        // before the fork step is carried whole.
+        let parent = spec().fork(2000, 3);
+        let early = parent.fork(1000, 5);
+        assert!(early.inherited_schedules.is_empty());
+        assert_eq!(parent.same_through(&early), Some(999));
+        let narrowed = perturbed(10, 4855, 4918).fork(5000, 2);
+        assert_eq!(
+            narrowed.inherited_schedules,
+            vec![ScheduleSegment {
+                seed: 10,
+                from: 4855,
+                until: 4918
+            }]
+        );
     }
 
     #[test]
