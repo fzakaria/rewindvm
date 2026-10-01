@@ -24,6 +24,11 @@ const DIALOG_WIDTH: f32 = 600.0;
 /// The width of the field's caret.
 const CARET_WIDTH: f32 = 1.5;
 
+/// How many characters of the link the field shows: as many as fit its
+/// width in the monospace font. A longer link shows its end, where the
+/// file name and the caret are.
+const SHOWN_CHARS: usize = 68;
+
 /// The dialog's words.
 const DIALOG_TITLE: &str = "Open link";
 const DIALOG_HELP: &str = "The link to a .rwd file, such as one on a case study page. A replayable export can be shelled into, debugged and forked once it is in.";
@@ -61,6 +66,17 @@ pub struct LinkDialog {
     pub focus: FocusHandle,
     pub input: LineInput,
     pub error: Option<&'static str>,
+}
+
+/// The end of `text` that fits in `max` characters, behind an ellipsis
+/// when the start is cut.
+fn tail(text: &str, max: usize) -> String {
+    let count = text.chars().count();
+    if count <= max {
+        return text.to_string();
+    }
+    let kept: String = text.chars().skip(count - (max - 1)).collect();
+    format!("\u{2026}{kept}")
 }
 
 impl Scrubber {
@@ -149,7 +165,7 @@ impl Scrubber {
         let (shown, color): (SharedString, u32) = if typed.is_empty() {
             (PLACEHOLDER.into(), theme::MUTED)
         } else {
-            (typed.clone().into(), theme::TEXT)
+            (tail(typed, SHOWN_CHARS).into(), theme::TEXT)
         };
         let focused_border = rgba(theme::FOCUS_RING_A);
         let field = div()
@@ -165,8 +181,9 @@ impl Scrubber {
                 cx.listener(|this, _: &CloseDialog, window, cx| this.close_link_dialog(window, cx)),
             )
             .flex()
-            .flex_wrap()
             .items_center()
+            .whitespace_nowrap()
+            .overflow_hidden()
             .cursor(CursorStyle::IBeam)
             .p(px(size::NOTICE_PAD))
             .rounded(px(size::RADIUS_BUTTON))
@@ -273,6 +290,13 @@ mod tests {
         input.backspace();
         input.type_str("/x");
         assert_eq!(input.text, "https://x");
+    }
+
+    #[test]
+    fn a_long_link_shows_its_end() {
+        assert_eq!(tail("short", 10), "short");
+        assert_eq!(tail("abcdefghij", 10), "abcdefghij");
+        assert_eq!(tail("abcdefghijk", 10), "\u{2026}cdefghijk");
     }
 
     #[test]
