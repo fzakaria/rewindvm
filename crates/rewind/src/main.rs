@@ -67,6 +67,13 @@ struct MachineArgs {
     /// The VM's memory in MiB.
     #[arg(long, default_value_t = 1024)]
     mem: u64,
+    /// For a Nix build, the NIX_BUILD_CORES it sees, which stdenv passes
+    /// to make, ninja and test runners as their job count. The VM still
+    /// has one vCPU: the jobs interleave on it, so schedules can reorder
+    /// them.
+    #[arg(long, default_value_t = nix::DEFAULT_BUILD_CORES,
+          value_parser = clap::value_parser!(u32).range(1..))]
+    cores: u32,
     /// The VM's wall clock at boot, in seconds since the Unix epoch.
     /// Defaults to the start of today, UTC.
     #[arg(long)]
@@ -1040,7 +1047,10 @@ fn prepare(
         machine.resolved_clock = Some(resolve_clock(home, guest, machine.clock)?);
     }
     let (name, source, image, job) = match workload {
-        Workload::Nix(installable) => prepare_nix(home, installable)?,
+        Workload::Nix(installable) => prepare_nix(home, installable, machine.cores)?,
+        Workload::Image(_) if machine.cores != nix::DEFAULT_BUILD_CORES => {
+            bail!("--cores sets NIX_BUILD_CORES, so it applies only to Nix builds")
+        }
         Workload::Image(args) => prepare_image(home, args)?,
     };
     let image_hash = match &image {
@@ -1084,7 +1094,11 @@ fn prepare_image(home: &Home, args: &ImageArgs) -> Result<(String, Source, Optio
 }
 
 /// A derivation's builder, with its input closure as the image.
-fn prepare_nix(home: &Home, installable: &str) -> Result<(String, Source, Option<PathBuf>, Job)> {
+fn prepare_nix(
+    home: &Home,
+    installable: &str,
+    cores: u32,
+) -> Result<(String, Source, Option<PathBuf>, Job)> {
     let drv_path = nix::resolve(installable)?;
     let drv = nix::show(&drv_path)?;
     let closure = nix::input_closure(&drv)?;
@@ -1112,7 +1126,7 @@ fn prepare_nix(home: &Home, installable: &str) -> Result<(String, Source, Option
         std::fs::rename(&tmp, &image)?;
     }
 
-    let job = nix::job(&drv)?;
+    let job = nix::job(&drv, cores)?;
     let source = Source::Nix {
         drv: drv_path.display().to_string(),
         outputs: drv

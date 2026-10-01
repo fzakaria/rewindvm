@@ -448,6 +448,15 @@ once, which crowds the threads together and makes the race easier to hit. The
 first failure has come within the first two batches of 16 schedules, and the
 whole search takes under 20 seconds on 16 cores.
 
+A Nix build sees `NIX_BUILD_CORES=1` by default, the VM's one vCPU, so
+stdenv runs make, ninja and test runners one job at a time, and a race
+between two jobs never happens. `--cores N` sets it to N. The jobs then
+interleave on the one vCPU, and the schedules reorder them. A Makefile
+whose `main.o` includes a generated `gen.h` without naming it as a
+prerequisite builds under all 65 schedules with `--cores 1`. With
+`--cores 4` the unperturbed run builds, and 58 of 64 perturbed schedules
+compile `main.c` before `gen.h` exists.
+
 Two earlier designs did not work, and why is worth keeping.
 
 - **Jittering every exit's time.** This found failures, but a single shift

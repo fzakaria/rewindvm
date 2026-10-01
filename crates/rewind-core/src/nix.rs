@@ -24,8 +24,9 @@ pub const HOMELESS: &str = "/homeless-shelter";
 pub const BUILDER_UID: u32 = 1000;
 pub const BUILDER_GID: u32 = 100;
 
-/// One vCPU, so one core.
-pub const BUILD_CORES: &str = "1";
+/// The NIX_BUILD_CORES a build sees unless asked otherwise: the VM's one
+/// vCPU.
+pub const DEFAULT_BUILD_CORES: u32 = 1;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Derivation {
@@ -170,8 +171,11 @@ pub fn input_closure(drv: &Derivation) -> Result<Vec<PathBuf>> {
 
 /// The builder as a job, with the environment the Nix sandbox gives it.
 /// The order of operations follows nix-daemon's initEnv, so a derivation
-/// that overrides one of these sees its own value.
-pub fn job(drv: &Derivation) -> Result<Job> {
+/// that overrides one of these sees its own value. `cores` is the
+/// NIX_BUILD_CORES the build sees, which can exceed the VM's one vCPU: the
+/// jobs it starts then interleave on that vCPU instead of running in
+/// parallel.
+pub fn job(drv: &Derivation, cores: u32) -> Result<Job> {
     if drv.env.contains_key("__json") {
         bail!(
             "{} uses structured attributes, which are not supported yet",
@@ -183,7 +187,7 @@ pub fn job(drv: &Derivation) -> Result<Job> {
     env.insert("PATH".into(), "/path-not-set".into());
     env.insert("HOME".into(), HOMELESS.into());
     env.insert("NIX_STORE".into(), STORE.into());
-    env.insert("NIX_BUILD_CORES".into(), BUILD_CORES.into());
+    env.insert("NIX_BUILD_CORES".into(), cores.to_string());
 
     // passAsFile: each named attribute is written to a file in the build
     // directory and replaced by a variable holding the file's path.
@@ -321,8 +325,17 @@ mod tests {
     }
 
     #[test]
+    fn job_env_gives_the_build_the_cores_asked_for() {
+        // A build asked to use 4 cores sees NIX_BUILD_CORES=4, which stdenv
+        // passes to make, ninja and the test runners as their job count.
+        let job = job(&sample(), 4).unwrap();
+        let env: BTreeMap<_, _> = job.env.iter().cloned().collect();
+        assert_eq!(env["NIX_BUILD_CORES"], "4");
+    }
+
+    #[test]
     fn job_env_follows_the_sandbox() {
-        let job = job(&sample()).unwrap();
+        let job = job(&sample(), 1).unwrap();
         let env: BTreeMap<_, _> = job.env.iter().cloned().collect();
         assert_eq!(env["PATH"], "/path-not-set");
         assert_eq!(env["HOME"], "/overridden");
