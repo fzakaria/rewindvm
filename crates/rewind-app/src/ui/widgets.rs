@@ -2,12 +2,43 @@
 //! panel titles and icons, styled after the design.
 
 use gpui::{
-    AnyElement, Div, ElementId, FontWeight, Role, SharedString, Stateful, Svg, div, prelude::*, px,
-    rgb, svg,
+    AnyElement, AnyView, App, Div, ElementId, FontWeight, Role, SharedString, Stateful, Svg,
+    Window, div, prelude::*, px, rgb, svg,
 };
 
 use crate::theme::{self, layout, size};
 use crate::ui::icons::Icon;
+
+/// A hover note: a sentence or two on what a control does, in a small
+/// raised box by the pointer.
+pub struct Tooltip {
+    text: SharedString,
+}
+
+impl Render for Tooltip {
+    fn render(&mut self, _window: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        div()
+            .max_w(px(size::TOOLTIP_WIDTH))
+            .px(px(size::TOOLTIP_PAD_X))
+            .py(px(size::TOOLTIP_PAD_Y))
+            .rounded(px(size::RADIUS_BUTTON))
+            .bg(rgb(theme::RAISED))
+            .border_1()
+            .border_color(rgb(theme::LINE_2))
+            .shadow_lg()
+            .text_size(px(size::TEXT_SMALL))
+            .text_color(rgb(theme::SOFT))
+            .child(self.text.clone())
+    }
+}
+
+/// What an element's `.tooltip()` takes to show `text` on hover.
+pub fn tooltip(
+    text: impl Into<SharedString>,
+) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+    let text = text.into();
+    move |_, cx| cx.new(|_| Tooltip { text: text.clone() }).into()
+}
 
 /// The fonts the app found on this machine.
 #[derive(Clone, Debug)]

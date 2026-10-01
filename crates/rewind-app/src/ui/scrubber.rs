@@ -14,9 +14,9 @@ use gpui::{
 
 use crate::describe::thousands;
 use crate::engine::{Engine, EngineError, EngineResult, Forked};
-use crate::family::{Family, RunEntry, families, family_of, scan};
+use crate::family::{Family, Row, RunEntry, families, family_of, scan};
 use crate::model::{LogFilter, Motion};
-use crate::run::{Agreement, Origin, Session, short_id};
+use crate::run::{Origin, Session, short_id};
 use crate::selection::Surface;
 use crate::tour::Tour;
 use crate::ui::Launch;
@@ -92,6 +92,8 @@ pub enum NoticeAction {
     Reveal(PathBuf),
     /// Put text on the clipboard.
     CopyText(String),
+    /// Remove a run and its forks from the engine's runs.
+    RemoveRun(PathBuf),
     /// Close the notice.
     Dismiss,
 }
@@ -105,6 +107,7 @@ impl NoticeAction {
             NoticeAction::ExportTo(_) => "Export there",
             NoticeAction::Reveal(_) => "Show in folder",
             NoticeAction::CopyText(_) => "Copy path",
+            NoticeAction::RemoveRun(_) => "Remove",
             NoticeAction::Dismiss => "Not now",
         }
     }
@@ -321,6 +324,16 @@ impl Scrubber {
             Origin::Export(export) if export.replayable => Some(export.file.clone()),
             _ => None,
         };
+        // The example's two runs are its family, for the tour; they are
+        // not among the engine's runs.
+        if session.run.origin == Origin::Example {
+            let now = std::time::SystemTime::now();
+            let runs = std::iter::once(&session.run)
+                .chain(session.other.as_ref())
+                .map(|run| RunEntry::from_manifest(&run.path, &run.manifest, now))
+                .collect();
+            self.family = Some(Family { runs });
+        }
         self.session = Some(session);
         if let Some(file) = replayable {
             self.bring_in(file, cx);
@@ -340,12 +353,15 @@ impl Scrubber {
         cx.spawn(async move |this, cx| {
             let runs = read.await;
             let _ = this.update(cx, |this, cx| {
-                let shown = this
-                    .session
-                    .as_ref()
-                    .filter(|s| s.run.origin == Origin::Local)
-                    .and_then(|s| s.run.manifest.id.clone());
-                this.family = shown.and_then(|id| family_of(runs.clone(), &id));
+                let origin = this.session.as_ref().map(|s| &s.run.origin);
+                if origin != Some(&Origin::Example) {
+                    let shown = this
+                        .session
+                        .as_ref()
+                        .filter(|s| s.run.origin == Origin::Local)
+                        .and_then(|s| s.run.manifest.id.clone());
+                    this.family = shown.and_then(|id| family_of(runs.clone(), &id));
+                }
                 this.recent = families(runs).into_iter().take(RECENT_SHOWN).collect();
                 cx.notify();
             });
@@ -362,7 +378,119 @@ impl Scrubber {
     /// Opens a run of the family; the run it was forked from, when there
     /// is one, is what it is compared with.
     pub(super) fn open_family_run(&mut self, run: RunEntry, cx: &mut Context<Self>) {
+        if self
+            .session
+            .as_ref()
+            .is_some_and(|s| s.run.origin == Origin::Example)
+        {
+            self.notify_user(
+                NoticeTone::Info,
+                "The example's runs are on screen already",
+                "This is the failing run, compared with the passing one. Record runs of your own to browse and fork them here.",
+                cx,
+            );
+            return;
+        }
         self.open(run.dir, None, cx);
+    }
+
+    /// The Runs panel's row `index`, as the panel draws it.
+    pub(super) fn runs_row(&self, index: usize) -> Option<Row> {
+        self.family.as_ref()?.rows().into_iter().nth(index)
+    }
+
+    /// Opens `run` compared with the run on screen.
+    pub(super) fn compare_with_shown(&mut self, run: RunEntry, cx: &mut Context<Self>) {
+        let shown = self.session.as_ref().map(|s| s.run.path.clone());
+        self.open(run.dir, shown, cx);
+    }
+
+    /// Removes the run on Runs panel row `index` and its forks. A fork
+    /// with no forks of its own goes at once: the same step and seed make
+    /// it again. Anything more is asked about first.
+    pub(super) fn ask_remove_run(&mut self, index: usize, cx: &mut Context<Self>) {
+        let (Some(row), Some(family)) = (self.runs_row(index), &self.family) else {
+            return;
+        };
+        let forks = family.descendants(&row.run.id).len();
+        if row.run.parent.is_some() && forks == 0 {
+            self.remove_run(row.run.dir, cx);
+            return;
+        }
+        let id = short_id(&row.run.id);
+        let title = match forks {
+            0 => format!("Remove run {id}?"),
+            1 => format!("Remove run {id} and its fork?"),
+            n => format!("Remove run {id} and its {n} forks?"),
+        };
+        self.offer(
+            NoticeTone::Info,
+            title,
+            "Their traces and keyframes are deleted from Rewind's runs. Pages other runs share stay.",
+            vec![NoticeAction::RemoveRun(row.run.dir), NoticeAction::Dismiss],
+            cx,
+        );
+    }
+
+    /// Has the engine remove the run in `dir` and its forks. When the run
+    /// on screen was one of them, its parent takes its place, or the empty
+    /// state when it had none here.
+    fn remove_run(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
+        let call_dir = dir.clone();
+        self.with_engine(
+            cx,
+            move |engine| engine.remove(&call_dir),
+            move |this, result, cx| {
+                let removed = match result {
+                    Ok(removed) => removed,
+                    Err(e) => {
+                        this.report("Could not remove the run", e, cx);
+                        return;
+                    }
+                };
+                let shown = this
+                    .session
+                    .as_ref()
+                    .and_then(|s| s.run.manifest.id.clone());
+                let lost = shown.is_some_and(|id| removed.contains(&id));
+                let parent = this
+                    .family
+                    .as_ref()
+                    .and_then(|f| f.runs.iter().find(|r| r.dir == dir))
+                    .and_then(|r| r.parent.clone())
+                    .and_then(|p| {
+                        this.family
+                            .as_ref()?
+                            .runs
+                            .iter()
+                            .find(|r| r.id == p.id)
+                            .map(|r| r.dir.clone())
+                    });
+                this.notify_user(
+                    NoticeTone::Info,
+                    match removed.len() {
+                        1 => "Removed 1 run".to_string(),
+                        n => format!("Removed {n} runs"),
+                    },
+                    removed
+                        .iter()
+                        .map(|id| short_id(id))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    cx,
+                );
+                if lost {
+                    match parent {
+                        Some(parent) => this.open(parent, None, cx),
+                        None => {
+                            this.session = None;
+                            this.family = None;
+                        }
+                    }
+                }
+                this.reload_runs(cx);
+            },
+        );
     }
 
     /// Opens a family from the empty state: its base run, with the Runs
@@ -623,6 +751,7 @@ impl Scrubber {
             NoticeAction::CopyText(text) => {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(text))
             }
+            NoticeAction::RemoveRun(dir) => self.remove_run(dir, cx),
             NoticeAction::Dismiss => {}
         }
     }
@@ -949,23 +1078,6 @@ impl Scrubber {
             });
         })
         .detach();
-    }
-
-    /// Compares with the other run: jumps to where the two first differ
-    /// and says what each run did there.
-    pub(super) fn diff_runs(&mut self, cx: &mut Context<Self>) {
-        let Some(agreement) = self.session.as_ref().and_then(Session::agreement) else {
-            return;
-        };
-        match agreement {
-            Agreement::Same { title, lines } => {
-                self.notify_user(NoticeTone::Info, title, lines.join("\n"), cx);
-            }
-            Agreement::Parted { step, title, lines } => {
-                self.go_to(step, cx);
-                self.notify_user(NoticeTone::Info, title, lines.join("\n"), cx);
-            }
-        }
     }
 
     /// Asks for a run to open, and opens it: a .rwd file, a bare trace, or

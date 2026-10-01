@@ -164,6 +164,29 @@ impl Row {
     }
 }
 
+impl Row {
+    /// The row's run in a sentence, for its hover note: what a fork or a
+    /// schedule is, in this run's numbers.
+    pub fn explanation(&self) -> String {
+        let run = &self.run;
+        let Some(parent) = &run.parent else {
+            return match run.schedule {
+                0 => "The run as it was first recorded, under the unperturbed thread schedule."
+                    .to_string(),
+                n => format!(
+                    "The same inputs from boot, with the thread schedule perturbed by seed {n}, as rewind check tries them."
+                ),
+            };
+        };
+        format!(
+            "A fork of {}: the same run up to step {}, then the thread schedule perturbed from there by seed {}, so the threads interleave another way. The same step and seed always make the same fork. Right-click for more.",
+            short_id(&parent.id),
+            thousands(parent.step),
+            run.schedule
+        )
+    }
+}
+
 impl Family {
     /// The run the family is known by: the first recorded one, with no
     /// parent and the unperturbed schedule, else the oldest run without a
@@ -333,6 +356,22 @@ impl Family {
             }
         }
         roots
+    }
+
+    /// Every run descended from the run `id` through its forks, nearest
+    /// first: what removing it removes along with it.
+    pub fn descendants(&self, id: &str) -> Vec<&RunEntry> {
+        let mut found: Vec<&RunEntry> = Vec::new();
+        let mut frontier = vec![id.to_string()];
+        while let Some(parent) = frontier.pop() {
+            for run in &self.runs {
+                if run.parent.as_ref().is_some_and(|p| p.id == parent) {
+                    found.push(run);
+                    frontier.push(run.id.clone());
+                }
+            }
+        }
+        found
     }
 
     /// How many forks repeat the trace of a run listed before them, and
@@ -527,6 +566,19 @@ mod tests {
                 .is_none()
         );
         assert_eq!(f.identical(), 2);
+    }
+
+    #[test]
+    fn a_run_s_descendants_are_its_forks_and_theirs() {
+        let f = family();
+        let ids = |id: &str| {
+            let mut ids: Vec<&str> = f.descendants(id).iter().map(|r| r.id.as_str()).collect();
+            ids.sort();
+            ids
+        };
+        assert_eq!(ids("f1"), vec!["f1a"]);
+        assert_eq!(ids("f1a"), Vec::<&str>::new());
+        assert_eq!(ids("base"), vec!["dup", "f1", "f1a", "f2"]);
     }
 
     #[test]

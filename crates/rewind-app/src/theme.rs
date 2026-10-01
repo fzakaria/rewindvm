@@ -199,6 +199,11 @@ pub mod size {
     /// after it line up.
     pub const RECENT_ENDING_WIDTH: f32 = 128.0;
 
+    // Hover notes.
+    pub const TOOLTIP_WIDTH: f32 = 320.0;
+    pub const TOOLTIP_PAD_X: f32 = 10.0;
+    pub const TOOLTIP_PAD_Y: f32 = 7.0;
+
     // The Runs panel.
     pub const RUNS_PANEL_WIDTH: f32 = 440.0;
     pub const RUNS_ROW_HEIGHT: f32 = 30.0;

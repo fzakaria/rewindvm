@@ -24,7 +24,7 @@ use crate::ui::scrubber::{ForkState, NoticeAction, NoticeTone, Scrubber};
 use crate::ui::selectable::{PID_CHARS, mapped, process_row, selectable, selects};
 use crate::ui::tour::explore_button;
 use crate::ui::widgets::{
-    Availability, ButtonStyle, PillTone, button, icon, panel_title, pill, readout,
+    Availability, ButtonStyle, PillTone, button, icon, panel_title, pill, readout, tooltip,
 };
 use crate::ui::{
     CopySelection, EnterLicense, ForkHere, GoToEnd, GoToStart, JumpToDivergence, JumpToFailure,
@@ -267,8 +267,7 @@ impl Scrubber {
         // The Runs panel's toggle, with how many runs the build has.
         if let Some(family) = &self.family {
             let open = self.runs_open;
-            left = left.child(
-                div()
+            let toggle = div()
                     .id("runs-toggle")
                     .flex_none()
                     .cursor_pointer()
@@ -282,8 +281,11 @@ impl Scrubber {
                         },
                         fonts,
                     ))
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_runs(cx))),
-            );
+                    .tooltip(tooltip(
+                        "Show or hide the Runs panel: every run of this build, the run first recorded, the schedules rewind check tried and every fork, drawn as a tree.",
+                    ))
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_runs(cx)));
+            left = left.child(self.with_callout(toggle, Anchor::RunsPill, cx));
         }
 
         let timeline = &run.timeline;
@@ -1143,19 +1145,7 @@ impl Scrubber {
             column = column.child(selects(fork, Surface::ForkCard, cx));
         }
 
-        // Inspect: engine actions at the playhead, two by two.
-        let diff_label = match &session.other {
-            Some(other) => format!(
-                "Diff vs {}",
-                describe::clip(&other.label(), MAX_NAME_CHARS / 2)
-            ),
-            None => "Diff vs other run".to_string(),
-        };
-        let can_diff = if session.other.is_some() {
-            Availability::Enabled
-        } else {
-            Availability::Disabled
-        };
+        // Inspect: engine actions at the playhead.
         let inspect = |id: &'static str, label: String, availability: Availability| {
             button(id, ButtonStyle::Neutral, availability)
                 .flex_1()
@@ -1172,28 +1162,24 @@ impl Scrubber {
                     .flex()
                     .gap(px(size::CARD_GAP))
                     .child(
-                        inspect("gdb", "Attach gdb".into(), Availability::Enabled).on_click(
-                            cx.listener(|this, _, window, cx| this.attach_gdb(window, cx)),
-                        ),
+                        inspect("gdb", "Attach gdb".into(), Availability::Enabled)
+                            .tooltip(tooltip(GDB_NOTE))
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.attach_gdb(window, cx)),
+                            ),
                     )
                     .child(
-                        inspect("shell", "Open shell".into(), Availability::Enabled).on_click(
-                            cx.listener(|this, _, window, cx| this.open_shell(window, cx)),
-                        ),
+                        inspect("shell", "Open shell".into(), Availability::Enabled)
+                            .tooltip(tooltip(SHELL_NOTE))
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.open_shell(window, cx)),
+                            ),
                     ),
             )
             .child(
-                div()
-                    .flex()
-                    .gap(px(size::CARD_GAP))
-                    .child(
-                        inspect("diff", diff_label, can_diff)
-                            .on_click(cx.listener(|this, _, _, cx| this.diff_runs(cx))),
-                    )
-                    .child(
-                        inspect("export", "Export run".into(), Availability::Enabled)
-                            .on_click(cx.listener(|this, _, _, cx| this.export(cx))),
-                    ),
+                inspect("export", "Export run".into(), Availability::Enabled)
+                    .tooltip(tooltip(EXPORT_NOTE))
+                    .on_click(cx.listener(|this, _, _, cx| this.export(cx))),
             );
         column = column.child(
             div()
@@ -1510,15 +1496,34 @@ impl Scrubber {
         // and the text after them line up.
         let columns = rows.iter().map(|r| r.depth + 1).max().unwrap_or(1);
         let fonts = self.fonts.clone();
+        let selected = self.selected_range(Surface::Runs);
         let list = uniform_list(
             "runs",
             count,
-            cx.processor(move |_this, range: std::ops::Range<usize>, _window, cx| {
+            cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
+                let registry = this.selecting.registry.clone();
                 range
                     .map(|i| {
                         let row = &rows[i];
                         let shown = row.run.id == shown_id;
                         let run = row.run.clone();
+
+                        // The id and how the run came to be, one line of
+                        // text to select and copy, the id in its color.
+                        let line = runs_line(row);
+                        let id_len = short_id(&row.run.id).len();
+                        let id_color = if shown { theme::AMBER } else { theme::SOFT };
+                        let part = selected
+                            .as_ref()
+                            .and_then(|r| part_of_line(r, i, line.len()));
+                        let text = selectable(Surface::Runs, i, line, part, &registry)
+                            .with_highlights([(
+                                0..id_len,
+                                HighlightStyle {
+                                    color: Some(rgb(id_color).into()),
+                                    ..Default::default()
+                                },
+                            )]);
                         div()
                             .id(i)
                             .w_full()
@@ -1535,20 +1540,25 @@ impl Scrubber {
                             .child(pill(row.run.ending.clone(), ending_tone(&row.run), &fonts))
                             .child(
                                 div()
-                                    .flex_none()
-                                    .font_family(fonts.mono.clone())
-                                    .text_color(rgb(if shown { theme::AMBER } else { theme::SOFT }))
-                                    .child(short_id(&row.run.id)),
-                            )
-                            .child(
-                                div()
                                     .min_w_0()
                                     .truncate()
+                                    .font_family(fonts.mono.clone())
                                     .text_size(px(size::TEXT_SMALL))
                                     .text_color(rgb(theme::MUTED))
-                                    .child(row.detail()),
+                                    .child(text),
                             )
+                            .tooltip(tooltip(row.explanation()))
+                            // A click opens the run; a drag selects text
+                            // in the row instead.
                             .on_click(cx.listener(move |this, _, _, cx| {
+                                if this.selected_text().is_some_and(|t| !t.is_empty())
+                                    && this
+                                        .selecting
+                                        .selection
+                                        .is_some_and(|s| s.surface == Surface::Runs)
+                                {
+                                    return;
+                                }
                                 this.open_family_run(run.clone(), cx)
                             }))
                     })
@@ -1571,8 +1581,40 @@ impl Scrubber {
                 &format!("Runs of this build \u{b7} {count}"),
                 prune,
             ))
-            .child(list)
+            .child(selects(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_grow(layout::FILL)
+                    .min_h_0()
+                    .child(list),
+                Surface::Runs,
+                cx,
+            ))
     }
+
+    /// The Runs panel's lines as the selection sees them.
+    pub(super) fn runs_lines(&self) -> Vec<Mapped> {
+        self.family
+            .as_ref()
+            .map(|f| {
+                f.rows()
+                    .iter()
+                    .map(|r| Mapped::plain(runs_line(r)))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+/// What the inspect buttons do, for their hover notes.
+const GDB_NOTE: &str = "gdb on a throwaway copy of the VM at this step: its one CPU, stopped in the kernel and the process running there, with their symbols and sources. Breakpoints, step and continue run the copy forward; the recording does not change.";
+const SHELL_NOTE: &str = "A shell inside a throwaway copy of the VM at this step, in the process's directory with its environment, while everything else in the VM stays where it was. Nothing done in it changes the recording.";
+const EXPORT_NOTE: &str = "Writes this run to one .rwd file, with its keyframes and inputs, that another machine can open, replay and fork.";
+
+/// A Runs panel row's text: the run's id and how it came to be.
+fn runs_line(row: &Row) -> String {
+    format!("{}  {}", short_id(&row.run.id), row.detail())
 }
 
 /// One row of the family graph, drawn as ISL and Jujutsu draw a history:

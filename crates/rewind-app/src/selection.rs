@@ -34,6 +34,8 @@ pub enum Surface {
     Notice(u64),
     LicenseDialog,
     Terminal,
+    /// The Runs panel's rows.
+    Runs,
 }
 
 /// A place in a surface's text: a line and a byte offset into it, always

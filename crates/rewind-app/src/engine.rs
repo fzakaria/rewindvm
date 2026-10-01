@@ -111,6 +111,12 @@ pub struct Imported {
     pub replayable: bool,
 }
 
+/// What `rewind remove --json` prints on standard output.
+#[derive(serde::Deserialize)]
+struct RemoveJson {
+    removed: Vec<String>,
+}
+
 /// The engine's operations on a recorded run.
 pub trait Engine: Send + Sync {
     /// Forks `run` at `step`: the same inputs with the schedule perturbed
@@ -128,6 +134,10 @@ pub trait Engine: Send + Sync {
     /// Removes the forks under `run` whose trace repeats an older fork's,
     /// and returns the ids of the runs removed.
     fn prune_identical(&self, run: &Path) -> EngineResult<Vec<String>>;
+
+    /// Removes `run` and every fork descended from it, and returns the
+    /// ids of the runs removed, `run` first.
+    fn remove(&self, run: &Path) -> EngineResult<Vec<String>>;
 
     /// The command that opens an interactive shell inside a fork of `run`
     /// at `step`, in process `pid`'s root and working directory, or the
@@ -315,6 +325,32 @@ impl Engine for CliEngine {
             .find_map(|line| serde_json::from_str::<Vec<String>>(line).ok());
         match removed {
             Some(removed) if output.status.success() => Ok(removed),
+            _ => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let message = last_line(&stderr)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| output.status.to_string());
+                Err(EngineError::Failed { command, message })
+            }
+        }
+    }
+
+    fn remove(&self, run: &Path) -> EngineResult<Vec<String>> {
+        // rewind remove <run> --json
+        let args: [OsString; 3] = ["remove".into(), run.into(), "--json".into()];
+        let command = self.command_line(&args);
+        let output = Command::new(&self.program)
+            .args(&args)
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|e| self.spawn_error(e, &command))?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let removed = stdout
+            .lines()
+            .rev()
+            .find_map(|line| serde_json::from_str::<RemoveJson>(line).ok());
+        match removed {
+            Some(removed) if output.status.success() => Ok(removed.removed),
             _ => {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 let message = last_line(&stderr)
@@ -627,6 +663,24 @@ mod tests {
             args.trim(),
             format!("prune {} --identical --json", run.display())
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn removing_returns_the_run_and_its_forks() {
+        // The stand-in prints what `rewind remove --json` does; a refusal
+        // reports the engine's reason.
+        let dir = temp_dir("remove");
+        let run = dir.join("fork");
+        let engine = fake_engine(&dir, r#"{"removed":["fork","grandfork"]}\n"#, "", 0);
+        let removed = retrying(|| engine.remove(&run)).unwrap();
+        assert_eq!(removed, vec!["fork".to_string(), "grandfork".to_string()]);
+        let args = std::fs::read_to_string(dir.join("args")).unwrap();
+        assert_eq!(args.trim(), format!("remove {} --json", run.display()));
+
+        let refusing = fake_engine(&dir, "", "rewind: run y reads its keyframes from fork\n", 1);
+        let err = retrying(|| refusing.remove(&run)).unwrap_err();
+        assert!(err.to_string().contains("reads its keyframes"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

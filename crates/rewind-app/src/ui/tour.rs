@@ -80,6 +80,7 @@ impl Scrubber {
         let stops = tour::stops_for(
             session.run.timeline.failure.is_some(),
             session.divergence_step().is_some(),
+            self.family.as_ref().is_some_and(|f| f.runs.len() > 1),
         );
         self.tour = Some(Tour::new(stops));
         self.show_tour_stop(cx);
@@ -99,6 +100,10 @@ impl Scrubber {
             &session.run.timeline,
             session.divergence_step(),
         );
+        // The stop about the Runs panel opens it.
+        if stop.anchor == tour::Anchor::RunsPill {
+            self.runs_open = true;
+        }
         self.go_to(step, cx);
         cx.notify();
     }

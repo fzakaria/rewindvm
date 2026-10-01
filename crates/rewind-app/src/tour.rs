@@ -1,4 +1,4 @@
-//! The guided tour: five short stops that each point at one part of the
+//! The guided tour: six short stops that each point at one part of the
 //! window and move the playhead to what they talk about.
 //!
 //! This module holds the stops, moving between them, and remembering that
@@ -16,6 +16,7 @@ pub enum Anchor {
     EventCard,
     DivergenceButton,
     ForkButton,
+    RunsPill,
 }
 
 /// Where a stop puts the playhead.
@@ -44,12 +45,14 @@ pub enum Needs {
     Nothing,
     Failure,
     Divergence,
+    /// Other runs of the same build, for the Runs panel.
+    Family,
 }
 
 /// The phase the first stop starts the playhead at.
 const CHECK_PHASE: &str = "check";
 
-pub const STOPS: [Stop; 5] = [
+pub const STOPS: [Stop; 6] = [
     Stop {
         anchor: Anchor::Timeline,
         title: "The whole run",
@@ -81,15 +84,22 @@ pub const STOPS: [Stop; 5] = [
     Stop {
         anchor: Anchor::ForkButton,
         title: "Branch from any step",
-        body: "Fork from here runs the same inputs again from the playhead under another thread schedule, to see whether the failure depends on it. Forking needs the engine and KVM on your machine, and your own runs; the example can only be scrubbed.",
+        body: "Fork from here runs the same inputs again from the playhead under another thread schedule, to see whether the failure depends on it. Shell and gdb work on a throwaway copy of the VM at the playhead. Forking needs the engine and KVM on your machine, and your own runs; the example can only be scrubbed.",
         playhead: Playhead::Divergence,
         needs: Needs::Nothing,
+    },
+    Stop {
+        anchor: Anchor::RunsPill,
+        title: "Every run of this build",
+        body: "The runs pill shows and hides the Runs panel: the run as first recorded, the schedules rewind check tried and every fork, drawn as a tree. A fork's schedule is the seed that perturbs the threads from its fork step on. Click a run to open it beside the one it forked from; right-click it to compare, copy or remove it.",
+        playhead: Playhead::Divergence,
+        needs: Needs::Family,
     },
 ];
 
 /// The stops that make sense for a run: without a failure or a compared
 /// run, the stops about them are left out.
-pub fn stops_for(has_failure: bool, has_divergence: bool) -> Vec<Stop> {
+pub fn stops_for(has_failure: bool, has_divergence: bool, has_family: bool) -> Vec<Stop> {
     STOPS
         .iter()
         .copied()
@@ -97,6 +107,7 @@ pub fn stops_for(has_failure: bool, has_divergence: bool) -> Vec<Stop> {
             Needs::Nothing => true,
             Needs::Failure => has_failure,
             Needs::Divergence => has_divergence,
+            Needs::Family => has_family,
         })
         .collect()
 }
@@ -227,14 +238,19 @@ mod tests {
 
     #[test]
     fn stops_that_do_not_apply_are_left_out() {
-        // Without a failure or a comparison only the timeline and fork
-        // stops remain; with both, all five.
+        // Without a failure, a comparison or other runs only the timeline
+        // and fork stops remain; with all three, all six; with only other
+        // runs, the Runs stop joins the two.
         let anchors = |stops: Vec<Stop>| stops.iter().map(|s| s.anchor).collect::<Vec<_>>();
         assert_eq!(
-            anchors(stops_for(false, false)),
+            anchors(stops_for(false, false, false)),
             vec![Anchor::Timeline, Anchor::ForkButton]
         );
-        assert_eq!(stops_for(true, true).len(), STOPS.len());
+        assert_eq!(stops_for(true, true, true).len(), STOPS.len());
+        assert_eq!(
+            anchors(stops_for(false, false, true)),
+            vec![Anchor::Timeline, Anchor::ForkButton, Anchor::RunsPill]
+        );
     }
 
     #[test]
@@ -251,7 +267,7 @@ mod tests {
     #[test]
     fn next_and_back_stay_inside_the_tour() {
         // Back on the first stop stays; next on the last stop finishes.
-        let mut tour = Tour::new(stops_for(true, true));
+        let mut tour = Tour::new(stops_for(true, true, true));
         tour.back();
         assert!(tour.is_first());
         for _ in 1..STOPS.len() {
@@ -259,6 +275,6 @@ mod tests {
         }
         assert!(tour.is_last());
         assert_eq!(tour.advance(), Advance::Finished);
-        assert_eq!(tour.current().unwrap().anchor, Anchor::ForkButton);
+        assert_eq!(tour.current().unwrap().anchor, Anchor::RunsPill);
     }
 }

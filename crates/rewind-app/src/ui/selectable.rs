@@ -454,6 +454,7 @@ impl Scrubber {
                 })
                 .unwrap_or_default(),
             Surface::LicenseDialog => self.license_dialog_lines(),
+            Surface::Runs => self.runs_lines(),
             Surface::Log | Surface::Viewer | Surface::Terminal => Vec::new(),
         }
     }
@@ -683,7 +684,7 @@ impl Scrubber {
             .is_some_and(|s| s.surface == menu.surface)
             && self.selected_text().is_some();
 
-        let item = |id: &'static str, label: &'static str| {
+        let item = |id: &'static str, label: SharedString| {
             div()
                 .id(id)
                 .px(px(size::MENU_ITEM_PAD_X))
@@ -709,8 +710,78 @@ impl Scrubber {
             .text_size(px(size::TEXT_UI))
             .text_color(rgb(theme::TEXT))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+        // On a run in the Runs panel, what can be done with that run,
+        // above the text actions.
+        if menu.surface == Surface::Runs
+            && let Some(row) = menu.line.and_then(|i| self.runs_row(i))
+        {
+            let index = menu.line.unwrap_or_default();
+            let shown = self
+                .session
+                .as_ref()
+                .and_then(|s| s.run.manifest.id.clone())
+                .is_some_and(|id| id == row.run.id);
+            let run = row.run.clone();
+            items = items.child(
+                item("menu-run-open", "Open run".into()).on_click(cx.listener(
+                    move |this, _, _, cx| {
+                        this.close_context_menu(cx);
+                        this.open_family_run(run.clone(), cx);
+                    },
+                )),
+            );
+            if !shown {
+                let run = row.run.clone();
+                items = items.child(
+                    item("menu-run-compare", "Compare with the run on screen".into()).on_click(
+                        cx.listener(move |this, _, _, cx| {
+                            this.close_context_menu(cx);
+                            this.compare_with_shown(run.clone(), cx);
+                        }),
+                    ),
+                );
+            }
+            let id = row.run.id.clone();
+            items = items.child(
+                item("menu-run-id", "Copy run id".into()).on_click(cx.listener(
+                    move |this, _, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(id.clone()));
+                        this.close_context_menu(cx);
+                    },
+                )),
+            );
+            let dir = row.run.dir.display().to_string();
+            items = items.child(item("menu-run-dir", "Copy run directory".into()).on_click(
+                cx.listener(move |this, _, _, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(dir.clone()));
+                    this.close_context_menu(cx);
+                }),
+            ));
+            let remove = match self
+                .family
+                .as_ref()
+                .map(|f| f.descendants(&row.run.id).len())
+            {
+                Some(0) | None => "Remove run".to_string(),
+                Some(1) => "Remove run and its fork".to_string(),
+                Some(n) => format!("Remove run and its {n} forks"),
+            };
+            items = items
+                .child(item("menu-run-remove", remove.into()).on_click(cx.listener(
+                    move |this, _, _, cx| {
+                        this.close_context_menu(cx);
+                        this.ask_remove_run(index, cx);
+                    },
+                )))
+                .child(
+                    div()
+                        .my(px(size::MENU_PAD))
+                        .h(px(1.0))
+                        .bg(rgb(theme::LINE_2)),
+                );
+        }
         if has_selection {
-            items = items.child(item("menu-copy", "Copy").on_click(cx.listener(
+            items = items.child(item("menu-copy", "Copy".into()).on_click(cx.listener(
                 |this, _, _, cx| {
                     this.copy_selection(cx);
                     this.close_context_menu(cx);
@@ -718,19 +789,21 @@ impl Scrubber {
             )));
         } else if let Some(line) = menu.line {
             let surface = menu.surface;
-            items = items.child(item("menu-copy-line", "Copy line").on_click(cx.listener(
-                move |this, _, _, cx| {
-                    this.copy_line(surface, line, cx);
-                    this.close_context_menu(cx);
-                },
-            )));
+            items = items.child(
+                item("menu-copy-line", "Copy line".into()).on_click(cx.listener(
+                    move |this, _, _, cx| {
+                        this.copy_line(surface, line, cx);
+                        this.close_context_menu(cx);
+                    },
+                )),
+            );
         }
-        items = items.child(item("menu-select-all", "Select all").on_click(cx.listener(
-            |this, _, _, cx| {
+        items = items.child(
+            item("menu-select-all", "Select all".into()).on_click(cx.listener(|this, _, _, cx| {
                 this.select_all(cx);
                 this.close_context_menu(cx);
-            },
-        )));
+            })),
+        );
 
         Some(
             div()
