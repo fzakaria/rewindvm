@@ -45,6 +45,13 @@ pub const RAM_MAX: u64 = 0xc000_0000;
 /// The input image, mapped as legacy persistent memory at 4 GiB.
 pub const PMEM_START: u64 = 0x1_0000_0000;
 
+/// The extras slot: persistent memory a run reserves at boot, empty, which
+/// `rewind shell --with` fills in a fork with an image of more Nix
+/// packages. Far above any input image, and inside the 39 physical address
+/// bits the CPU model shows.
+pub const EXTRAS_START: u64 = 0x40_0000_0000;
+pub const EXTRAS_LEN: u64 = 64 << 30;
+
 /// The local APIC's architectural base, and the vector the monitor's
 /// interrupt arrives on (Linux's HYPERVISOR_CALLBACK_VECTOR).
 pub const APIC_BASE: u64 = 0xfee0_0000;

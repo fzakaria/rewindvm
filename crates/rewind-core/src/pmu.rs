@@ -296,6 +296,7 @@ pub fn selftest(guest: &Guest) -> Result<SelfTest> {
         cpu: rewind_vmm::cpu::Model::default(),
         clock: rewind_vmm::ClockSource::Exits,
         preemption: rewind_vmm::Preemption::AtExits,
+        extras: rewind_vmm::Extras::Absent,
         cmdline: BASE_CMDLINE.to_string(),
         job: Job {
             argv: vec!["/init".into(), "--selftest".into()],

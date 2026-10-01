@@ -69,6 +69,8 @@ pub struct BootSpec<'a> {
     pub cmdline: &'a str,
     pub seed: [u8; 32],
     pub pmem_len: u64,
+    /// The extras slot's length, or 0 for a machine without one.
+    pub extras_len: u64,
 }
 
 /// Loads the kernel and its inputs into RAM and returns the entry point.
@@ -151,6 +153,9 @@ pub fn load(ram: &mut Mapping, spec: &BootSpec) -> Result<u64> {
     ];
     if spec.pmem_len > 0 {
         e820.push((PMEM_START, spec.pmem_len, E820::Pram));
+    }
+    if spec.extras_len > 0 {
+        e820.push((EXTRAS_START, spec.extras_len, E820::Pram));
     }
     for (i, (addr, size, kind)) in e820.iter().enumerate() {
         let at = bp::E820_TABLE + i * 20;

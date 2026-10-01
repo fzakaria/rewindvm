@@ -16,8 +16,8 @@ use std::process::{Command, Stdio};
 
 use rewind_init::{
     EXIT_MARK, INSPECT_ARG, INSPECT_BEGIN_MARK, INSPECT_CAT, INSPECT_END_MARK, INSPECT_SHELL,
-    InspectStatus, JOB_PATH, Job, OUTPUT_MARK, RESIZE_ESCAPE, RESIZE_LEN, RESIZE_TAG, Root,
-    START_MARK, tree_hash,
+    INSPECT_WITH, InspectStatus, JOB_PATH, Job, OUTPUT_MARK, RESIZE_ESCAPE, RESIZE_LEN, RESIZE_TAG,
+    Root, START_MARK, tree_hash,
 };
 
 /// The image the monitor maps as persistent memory.
@@ -67,6 +67,17 @@ const TOOLS_IN_IMAGE: &str = "/.rewind-tools";
 /// The terminal type a shell is told it has, and its prompt when the
 /// environment sets none.
 const SHELL_TERM: &str = "xterm-256color";
+
+/// The extras slot's device, filled by Rewind for `rewind shell --with`:
+/// the second persistent memory device when the job has an input image,
+/// the first when it has none. Mounted here, then each store path in it is
+/// bind-mounted into the view's /nix/store.
+const EXTRAS_DEVICE_AFTER_IMAGE: &str = "/dev/pmem1";
+const EXTRAS_DEVICE_ALONE: &str = "/dev/pmem0";
+const EXTRAS_MOUNT: &str = "/rewind/extras";
+
+/// BLKFLSBUF, _IO(0x12, 97): drop a block device's cached contents.
+const BLKFLSBUF: u64 = 0x1261;
 const SHELL_PROMPT: &str = "[rewind] \\w \\$ ";
 
 /// How far up the process tree to look for a live environment.
@@ -335,9 +346,15 @@ fn inspect(request: &[String]) {
         [op, pid, path] if op == INSPECT_CAT => {
             cat(pid.parse().unwrap_or(0), path, &mut out, &mut err)
         }
-        [op, pid, cols, rows] if op == INSPECT_SHELL => {
+        [op, pid, cols, rows, extras @ ..] if op == INSPECT_SHELL => {
             let size = (cols.parse().unwrap_or(80), rows.parse().unwrap_or(24));
-            match shell(pid.parse().unwrap_or(0), size) {
+            // `--with <bin dir>...`: the extras slot holds more packages.
+            let with = match extras {
+                [] => None,
+                [flag, bins @ ..] if flag == INSPECT_WITH => Some(bins.to_vec()),
+                _ => None,
+            };
+            match shell(pid.parse().unwrap_or(0), size, with) {
                 Ok(()) => InspectStatus::Done,
                 Err(e) => {
                     let _ = writeln!(err, "inspect: {e}");
@@ -398,7 +415,7 @@ fn cat(pid: i32, path: &str, out: &mut File, err: &mut File) -> InspectStatus {
 /// process is gone), and the shell that environment names. For a Nix build
 /// that is the builder's bash with stdenv's PATH. Returns when the shell
 /// exits.
-fn shell(pid: i32, (cols, rows): (u16, u16)) -> Result<()> {
+fn shell(pid: i32, (cols, rows): (u16, u16), with: Option<Vec<String>>) -> Result<()> {
     use std::os::fd::AsRawFd;
 
     // Everything that lives outside the job's root is opened first: the
@@ -428,15 +445,23 @@ fn shell(pid: i32, (cols, rows): (u16, u16)) -> Result<()> {
         mount(TOOLS_DIR, &target, "", libc::MS_BIND, "")?;
         TOOLS_IN_IMAGE.to_string()
     };
+    if with.is_some() {
+        mount_extras(&root, &job)?;
+    }
     enter(&root, &cwd)?;
 
-    // The environment's PATH first, so the job's own tools win, then the
-    // applets; and a prompt when the environment has none.
+    // The packages asked for with --with first, then the environment's
+    // PATH, so the job's own tools win over the applets that come last;
+    // and a prompt when the environment has none.
     let path = env
         .iter()
         .find(|(k, _)| k == "PATH")
         .map(|(_, v)| format!("{v}:{tools}/bin"))
         .unwrap_or_else(|| format!("{tools}/bin"));
+    let path = match &with {
+        Some(bins) if !bins.is_empty() => format!("{}:{path}", bins.join(":")),
+        _ => path,
+    };
     env.retain(|(k, _)| k != "PATH");
     env.push(("PATH".to_string(), path));
     if !env.iter().any(|(k, _)| k == "PS1") {
@@ -509,6 +534,48 @@ fn main_process() -> Option<i32> {
         .filter_map(|e| e.ok()?.file_name().to_str()?.parse::<i32>().ok())
         .filter(|p| *p > 1 && parent_of(*p) == Some(1))
         .min()
+}
+
+/// Mounts the extras slot's image, filled by Rewind for `--with`, and makes
+/// each store path in it appear in the store of the view at `root`. The
+/// slot is the second persistent memory device when the job has an input
+/// image, the first otherwise. The boot's partition scan read the empty
+/// slot through the block device's cache, so that cache is dropped first.
+fn mount_extras(root: &str, job: &Job) -> Result<()> {
+    use std::os::fd::AsRawFd;
+
+    let device = if job.root == Root::Initramfs {
+        EXTRAS_DEVICE_ALONE
+    } else {
+        EXTRAS_DEVICE_AFTER_IMAGE
+    };
+    let dev = File::open(device).map_err(|e| format!("opening {device}: {e}"))?;
+    // SAFETY: an ioctl without arguments on an open block device.
+    unsafe { libc::ioctl(dev.as_raw_fd(), BLKFLSBUF as libc::Ioctl, 0) };
+    drop(dev);
+
+    mkdir(EXTRAS_MOUNT)?;
+    mount(device, EXTRAS_MOUNT, "erofs", libc::MS_RDONLY, "")?;
+    let store = within(root, "/nix/store");
+    for entry in fs::read_dir(EXTRAS_MOUNT).map_err(|e| format!("reading {EXTRAS_MOUNT}: {e}"))? {
+        let name = entry.map_err(|e| e.to_string())?.file_name();
+        let target = store.join(&name);
+        // A path already in the view's store is the same path.
+        if target.exists() {
+            continue;
+        }
+        let source = Path::new(EXTRAS_MOUNT).join(&name);
+        let (source, target) = (source.display().to_string(), target.display().to_string());
+        // A store path can be a single file; a bind mount needs a file to
+        // cover it then.
+        if Path::new(&source).is_dir() {
+            mkdir(&target)?;
+        } else {
+            fs::write(&target, b"").map_err(|e| format!("creating {target}: {e}"))?;
+        }
+        mount(&source, &target, "", libc::MS_BIND, "")?;
+    }
+    Ok(())
 }
 
 /// Process `pid`'s environment as it is now, when the process is alive
@@ -698,7 +765,7 @@ fn view_of(pid: i32) -> Result<(String, String)> {
 fn enter(root: &str, cwd: &str) -> Result<()> {
     // The working directory is opened before the chroot, which would hide
     // it, and entered after.
-    let dir = File::open(&cwd).map_err(|e| format!("opening {cwd}: {e}"))?;
+    let dir = File::open(cwd).map_err(|e| format!("opening {cwd}: {e}"))?;
     let root_c = CString::new(root).unwrap();
     // SAFETY: a valid path and a valid descriptor.
     unsafe {

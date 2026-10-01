@@ -105,6 +105,17 @@ this changes a recorded run. Init chroots only the job's process into an image
 root, never itself: Linux starts init sharing its filesystem root with the
 kernel's threads, and a chroot there would hide `/init` from the helper.
 
+`rewind shell --with <installable>` brings more Nix packages into the shell.
+Every run reserves a second persistent memory region at boot, 64 GiB at
+256 GiB physical, backed by empty anonymous memory, so a recording only ever
+sees zeros there. In a fork, Rewind builds or fetches the packages on the
+host, packs their closure into an erofs image like an input image, and maps
+it over the region's host memory; KVM follows host mappings, so the slot
+itself does not change. The shell's helper drops the block device's cache,
+which the boot's partition scan filled with zeros, mounts the image, and
+bind-mounts each store path in it into the view's `/nix/store`, with the
+packages' bin directories first on PATH.
+
 While a person is typed into a shell, idle time passes in real time: when the
 VM goes idle, Rewind waits for typing until the next timer is due, and jumps to
 the timer only if none came. `sleep 2` takes two seconds, and an idle shell

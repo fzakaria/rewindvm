@@ -18,7 +18,7 @@ use std::time::Duration;
 use anyhow::{Result, bail};
 use rewind_init::{
     CONSOLE_FD, EXIT_MARK, INSPECT_BEGIN_MARK, INSPECT_CAT, INSPECT_END_MARK, INSPECT_SHELL,
-    InspectStatus,
+    INSPECT_WITH, InspectStatus,
 };
 use rewind_trace::{Event, EventKind};
 use rewind_vmm::pv::GuestExit;
@@ -41,6 +41,54 @@ const STDERR_FD: u32 = 2;
 
 /// Where a shell's output goes as it arrives: the person's terminal.
 pub type Console = Box<dyn FnMut(&[u8])>;
+
+/// What a shell starts with: the process whose view it takes (the job's
+/// when None), its terminal's size as (columns, rows), and any extra
+/// packages.
+pub struct Session {
+    pub pid: Option<u32>,
+    pub size: (u16, u16),
+    pub extras: Option<Extras>,
+}
+
+/// More Nix packages for a shell: an image of their closure, mapped into the
+/// fork's extras slot, and the bin directories to put first on its PATH.
+pub struct Extras {
+    pub image: std::path::PathBuf,
+    pub bins: Vec<String>,
+}
+
+impl Extras {
+    /// The extras for `installables`: built or substituted, their closure
+    /// packed into an erofs image kept in the home, named by the closure
+    /// so a second shell with the same packages reuses it.
+    pub fn build(home: &Home, installables: &[String]) -> Result<Extras> {
+        let (outputs, closure) = crate::nix::packages(installables)?;
+        let key = blake3::hash(
+            closure
+                .iter()
+                .map(|p| p.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("\n")
+                .as_bytes(),
+        )
+        .to_hex();
+        let image = home.images().join(format!("extras-{}.erofs", &key[..32]));
+        if !image.exists() {
+            eprintln!("rewind: packing {} store paths for --with", closure.len());
+            let tmp = image.with_extension("building");
+            crate::image::from_store_paths(&closure, &tmp)?;
+            std::fs::rename(&tmp, &image)?;
+        }
+        let bins = outputs
+            .iter()
+            .map(|o| o.join("bin"))
+            .filter(|b| b.is_dir())
+            .map(|b| b.display().to_string())
+            .collect();
+        Ok(Extras { image, bins })
+    }
+}
 
 /// What an inspection found.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -66,24 +114,35 @@ pub fn cat(home: &Home, run: &Run, step: u64, pid: Option<u32>, path: &str) -> R
     Ok(answer.into_inspection(status))
 }
 
-/// An interactive shell inside a fork of `run` at `step`: the job's shell
-/// with the job's environment, in process `pid`'s root and working
-/// directory, on a terminal of `size` (columns, rows). What the person
-/// types comes from `input`, and what the shell prints goes to `console`.
-/// The rest of the VM is stopped where it was. Returns when the shell
-/// exits.
+/// An interactive shell inside a fork of `run` at `step`, as `session`
+/// describes: in a process's root and working directory, with its
+/// environment, on a terminal of the session's size, with any extra
+/// packages mounted. What the person types comes from `input`, and what
+/// the shell prints goes to `console`. The rest of the VM is stopped where
+/// it was. Returns when the shell exits.
 pub fn shell(
     home: &Home,
     run: &Run,
     step: u64,
-    pid: Option<u32>,
-    (cols, rows): (u16, u16),
+    session: Session,
     input: Box<dyn Input>,
     console: Console,
 ) -> Result<()> {
+    let Session {
+        pid,
+        size: (cols, rows),
+        extras,
+    } = session;
     let (mut machine, step) = fork_at(home, run, step)?;
     let pid = pid.unwrap_or(0).to_string();
-    machine.request_inspection(&[INSPECT_SHELL, &pid, &cols.to_string(), &rows.to_string()])?;
+    let (cols, rows) = (cols.to_string(), rows.to_string());
+    let mut request = vec![INSPECT_SHELL, &pid, &cols, &rows];
+    if let Some(extras) = &extras {
+        machine.attach_extras(&extras.image)?;
+        request.push(INSPECT_WITH);
+        request.extend(extras.bins.iter().map(String::as_str));
+    }
+    machine.request_inspection(&request)?;
 
     let mut answer = Answer {
         console: Some(console),

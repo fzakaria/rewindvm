@@ -121,8 +121,10 @@ $ rewind log <run> --steps
 $ rewind ps <run> --at <step>
 $ rewind cat <run> <step> /build/env-vars
 
-# a shell inside the VM at a step, or gdb on it, in a throwaway fork
+# a shell inside the VM at a step, or gdb on it, in a throwaway fork;
+# --with brings more Nix packages into the shell, such as gdb for user space
 $ rewind shell <run> <step> --pid <pid>
+$ rewind shell <run> <step> --pid <pid> --with nixpkgs#gdb --with nixpkgs#strace
 $ rewind gdb <run> <step>
 
 # branch a run at a step under another schedule, or replay it exactly

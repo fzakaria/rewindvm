@@ -35,6 +35,7 @@ use pv::{Clock, GuestExit, Schedule};
 /// The memory slot of guest RAM, and of the input image.
 pub(crate) const SLOT_RAM: u32 = 0;
 const SLOT_PMEM: u32 = 1;
+const SLOT_EXTRAS: u32 = 2;
 
 /// Where KVM places the TSS the vCPU needs for real-mode emulation. Any
 /// three pages the guest never uses; this is the address other monitors use.
@@ -66,6 +67,19 @@ pub struct Config {
     pub clock: ClockSource,
     /// Where a guest that computes without exits can be interrupted.
     pub preemption: Preemption,
+    /// Whether the machine reserves the extras slot (layout::EXTRAS_START).
+    pub extras: Extras,
+}
+
+/// Whether a machine reserves the extras slot, empty persistent memory a
+/// fork can fill with more Nix packages (`rewind shell --with`). Runs
+/// recorded before the slot existed have none, and replay without it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Extras {
+    #[default]
+    Absent,
+    Reserved,
 }
 
 /// Where the monitor may interrupt the guest.
@@ -234,6 +248,8 @@ pub struct Machine {
     pub(crate) vcpu: VcpuFd,
     pub(crate) dev: Devices,
     pub(crate) pmem: Option<Mapping>,
+    /// The extras slot's memory, when the machine reserves one.
+    pub(crate) extras: Option<Mapping>,
     pub(crate) config: Config,
     /// Exits counted by port and guest instruction pointer, when profiling.
     pub profile: Option<std::collections::HashMap<(u16, u64), u64>>,
@@ -295,6 +311,26 @@ impl Machine {
             None => None,
         };
 
+        // The extras slot, empty: anonymous memory reads as zeros and costs
+        // nothing until a fork maps an image over it.
+        let extras = match config.extras {
+            Extras::Absent => None,
+            Extras::Reserved => {
+                let slot = Mapping::anonymous(layout::EXTRAS_LEN as usize)?;
+                // SAFETY: the mapping outlives the VM; the slot is read-only.
+                unsafe {
+                    vm.set_user_memory_region(kvm_userspace_memory_region {
+                        slot: SLOT_EXTRAS,
+                        flags: KVM_MEM_READONLY,
+                        guest_phys_addr: layout::EXTRAS_START,
+                        memory_size: slot.len() as u64,
+                        userspace_addr: slot.host_addr(),
+                    })?;
+                }
+                Some(slot)
+            }
+        };
+
         let vcpu = vm.create_vcpu(0).context("creating the vCPU")?;
         vcpu.set_cpuid2(&cpu::cpuid(&kvm, config.cpu)?)?;
 
@@ -316,6 +352,7 @@ impl Machine {
                 input_sent: false,
             },
             pmem,
+            extras,
             config: config.clone(),
             profile: None,
             pmu: None,
@@ -336,6 +373,7 @@ impl Machine {
             cmdline: &config.cmdline,
             seed: config.seed,
             pmem_len: m.pmem.as_ref().map_or(0, |p| p.len() as u64),
+            extras_len: m.extras.as_ref().map_or(0, |e| e.len() as u64),
         };
         let entry = boot::load(&mut m.dev.ram, &spec)?;
         boot::write_tables(&mut m.dev.ram)?;
@@ -523,6 +561,46 @@ impl Machine {
             }
             self.dev.inspect = false;
             self.dev.input_sent = false;
+        }
+        Ok(())
+    }
+
+    /// Maps `image` into the extras slot, for a fork: the VM sees it as the
+    /// slot's persistent memory from the next access on. The host mapping
+    /// is replaced in place, and KVM follows host mappings, so the slot
+    /// itself does not change.
+    pub fn attach_extras(&mut self, image: &std::path::Path) -> Result<()> {
+        let slot = self.extras.as_ref().context(
+            "this run was recorded without the extras slot; record it again to use --with",
+        )?;
+        let file =
+            std::fs::File::open(image).with_context(|| format!("opening {}", image.display()))?;
+        let len = file.metadata()?.len() as usize;
+        if len == 0 || len > slot.len() {
+            bail!(
+                "{} is {len} bytes; the extras slot holds 1 to {} bytes",
+                image.display(),
+                slot.len()
+            );
+        }
+        // SAFETY: the target range lies inside the slot's own mapping, which
+        // this machine owns; MAP_FIXED replaces those pages with the file's.
+        let mapped = unsafe {
+            libc::mmap(
+                slot.host_addr() as *mut libc::c_void,
+                len,
+                libc::PROT_READ,
+                libc::MAP_PRIVATE | libc::MAP_FIXED,
+                std::os::fd::AsRawFd::as_raw_fd(&file),
+                0,
+            )
+        };
+        if mapped == libc::MAP_FAILED {
+            bail!(
+                "mapping {}: {}",
+                image.display(),
+                std::io::Error::last_os_error()
+            );
         }
         Ok(())
     }

@@ -93,6 +93,10 @@ pub struct Spec {
     /// Where a computing guest can be interrupted.
     #[serde(default)]
     pub preemption: rewind_vmm::Preemption,
+    /// Whether the machine reserves the extras slot for `rewind shell
+    /// --with`. Runs from before the slot have none.
+    #[serde(default)]
+    pub extras: rewind_vmm::Extras,
     pub cmdline: String,
     pub job: Job,
 }
@@ -184,6 +188,7 @@ impl Spec {
             cpu: self.cpu,
             clock: self.clock,
             preemption: self.preemption,
+            extras: self.extras,
         })
     }
 }

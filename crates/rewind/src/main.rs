@@ -244,6 +244,12 @@ enum Command {
         /// in. By default, and once it has exited, the job's.
         #[arg(long)]
         pid: Option<u32>,
+        /// More packages in the shell, from Nix: an installable such as
+        /// nixpkgs#strace, built or fetched here, its closure visible in
+        /// the VM's /nix/store and its bin directory first on PATH. Repeat
+        /// for several.
+        #[arg(long = "with", value_name = "INSTALLABLE")]
+        with: Vec<String>,
     },
     /// gdb on a fork of a run at a step: one x86-64 CPU, the VM's memory as
     /// its page tables map it, breakpoints and single steps. Starts the
@@ -629,7 +635,12 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 Inspection::Failed(message) => bail!("reading {path} at step {step}: {message}"),
             }
         }
-        Command::Shell { run, step, pid } => {
+        Command::Shell {
+            run,
+            step,
+            pid,
+            with,
+        } => {
             use std::io::Write;
             use std::os::fd::AsRawFd;
 
@@ -660,12 +671,16 @@ fn run(cli: Cli) -> Result<ExitCode> {
             );
             terminal::wake_on_resize();
             let raw = terminal::RawMode::enter();
+            let extras = if with.is_empty() {
+                None
+            } else {
+                Some(rewind_core::inspect::Extras::build(&home, &with)?)
+            };
             let result = rewind_core::inspect::shell(
                 &home,
                 &run,
                 step,
-                pid,
-                size,
+                rewind_core::inspect::Session { pid, size, extras },
                 Box::new(terminal::Keyboard::new(size)),
                 Box::new({
                     // SAFETY: isatty only inspects the descriptor.
@@ -1032,6 +1047,7 @@ fn execute(
         } else {
             rewind_vmm::Preemption::AtExits
         },
+        extras: rewind_vmm::Extras::Reserved,
         cmdline: format!("{BASE_CMDLINE} {}", machine.kernel_args)
             .trim()
             .to_string(),

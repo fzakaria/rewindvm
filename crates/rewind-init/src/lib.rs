@@ -37,6 +37,11 @@ pub const INSPECT_CAT: &str = "cat";
 /// [`CONSOLE_FD`], and what Rewind sends is typed into it.
 pub const INSPECT_SHELL: &str = "shell";
 
+/// After the shell's size: the extras slot holds more Nix packages, whose
+/// store paths the shell sees, and the bin directories that follow go
+/// first on its PATH (`rewind shell --with`).
+pub const INSPECT_WITH: &str = "--with";
+
 /// The output stream /dev/rewind-console's writes are reported on.
 pub const CONSOLE_FD: u32 = 3;
 

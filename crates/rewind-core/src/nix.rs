@@ -247,6 +247,28 @@ pub fn nix32(bytes: &[u8]) -> String {
 }
 
 /// Runs a nix command and returns its standard output.
+/// Builds or substitutes `installables` and returns their outputs and the
+/// closure of those outputs, sorted.
+pub fn packages(installables: &[String]) -> Result<(Vec<PathBuf>, Vec<PathBuf>)> {
+    let mut args = vec!["build", "--no-link", "--print-out-paths"];
+    args.extend(installables.iter().map(String::as_str));
+    let outputs: Vec<PathBuf> = nix(&args)?
+        .lines()
+        .map(|l| PathBuf::from(l.trim()))
+        .collect();
+
+    let mut args = vec!["path-info", "--recursive"];
+    let names: Vec<String> = outputs.iter().map(|p| p.display().to_string()).collect();
+    args.extend(names.iter().map(String::as_str));
+    let mut closure: Vec<PathBuf> = nix(&args)?
+        .lines()
+        .map(|l| PathBuf::from(l.trim()))
+        .collect();
+    closure.sort();
+    closure.dedup();
+    Ok((outputs, closure))
+}
+
 fn nix(args: &[&str]) -> Result<String> {
     let out = Command::new("nix")
         .args(["--extra-experimental-features", "nix-command flakes"])
