@@ -291,6 +291,11 @@ enum Command {
         /// A .rwd file, or an http or https URL of one, which is unpacked
         /// as it downloads.
         file: String,
+        /// Print the run as one JSON object on standard output, for
+        /// programs such as the desktop app: its id, its directory, and
+        /// whether it has the keyframes and inputs to replay.
+        #[arg(long)]
+        json: bool,
     },
     /// List runs, newest first.
     Ls,
@@ -805,13 +810,25 @@ fn run(cli: Cli) -> Result<ExitCode> {
             eprintln!("rewind: wrote {} ({})", out.display(), show::size(size));
             Ok(ExitCode::SUCCESS)
         }
-        Command::Import { file } => {
+        Command::Import { file, json } => {
             let run = if export::is_url(&file) {
                 eprintln!("rewind: downloading {file}");
                 export::import_url(&home, &file)?
             } else {
                 export::import(&home, std::path::Path::new(&file))?
             };
+            if json {
+                let replayable = !rewind_core::keyframes::steps(&run.dir).is_empty();
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "id": run.manifest.id,
+                        "dir": run.dir,
+                        "replayable": replayable,
+                    })
+                );
+                return Ok(ExitCode::SUCCESS);
+            }
             println!("{}", show::summary(&run));
             Ok(ExitCode::SUCCESS)
         }
