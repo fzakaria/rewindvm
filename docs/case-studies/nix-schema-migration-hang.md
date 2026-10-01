@@ -300,6 +300,22 @@ which is where this race lives; Rewind's land on any exit.
 
 ## The recording
 
+Both files are in the
+[case-studies release](https://github.com/fzakaria/rewindvm/releases/tag/case-studies):
+[nix-schema-migration-hang-replayable.rwd](https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-schema-migration-hang-replayable.rwd), with
+everything needed to replay the failure on another AMD machine from Zen 2 on,
+and [nix-schema-migration-hang.rwd](https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-schema-migration-hang.rwd), the trace alone, which the
+desktop app opens.
+
+```console
+$ curl -LO https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-schema-migration-hang-replayable.rwd
+$ rewind import nix-schema-migration-hang-replayable.rwd
+$ rewind replay 6b438713
+$ rewind shell 6b438713 <step>
+```
+
+How they were made:
+
 ```console
 $ rewind replay 6b438713
 identical: 3131 events over 401598 steps

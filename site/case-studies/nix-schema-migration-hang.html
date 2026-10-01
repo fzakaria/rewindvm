@@ -402,6 +402,27 @@ same result under all 257 schedules</code></pre>
 
       <section class="step">
         <h2 id="the-recording">The recording</h2>
+        <p>
+          Both files are in the
+          <a href="https://github.com/fzakaria/rewindvm/releases/tag/case-studies"
+            >case-studies release</a
+          >:
+          <a
+            href="https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-schema-migration-hang-replayable.rwd"
+            >nix-schema-migration-hang-replayable.rwd</a
+          >, with everything needed to replay the failure on another AMD machine from Zen 2 on, and
+          <a
+            href="https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-schema-migration-hang.rwd"
+            >nix-schema-migration-hang.rwd</a
+          >, the trace alone, which the desktop app opens.
+        </p>
+        <pre
+          class="console"
+        ><code><span class="cmd"><span class="prompt">$</span> curl -LO https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-schema-migration-hang-replayable.rwd</span>
+<span class="cmd"><span class="prompt">$</span> rewind import nix-schema-migration-hang-replayable.rwd</span>
+<span class="cmd"><span class="prompt">$</span> rewind replay 6b438713</span>
+<span class="cmd"><span class="prompt">$</span> rewind shell 6b438713 &lt;step&gt;</span></code></pre>
+        <p>How they were made:</p>
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind replay 6b438713</span>

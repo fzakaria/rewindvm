@@ -369,6 +369,27 @@ same result under all 65 schedules</code></pre>
 
       <section class="step">
         <h2 id="the-recording">The recording</h2>
+        <p>
+          Both files are in the
+          <a href="https://github.com/fzakaria/rewindvm/releases/tag/case-studies"
+            >case-studies release</a
+          >:
+          <a
+            href="https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-gc-closure-sigpipe-replayable.rwd"
+            >nix-gc-closure-sigpipe-replayable.rwd</a
+          >, with everything needed to replay the failure on another AMD machine from Zen 2 on, and
+          <a
+            href="https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-gc-closure-sigpipe.rwd"
+            >nix-gc-closure-sigpipe.rwd</a
+          >, the trace alone, which the desktop app opens.
+        </p>
+        <pre
+          class="console"
+        ><code><span class="cmd"><span class="prompt">$</span> curl -LO https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-gc-closure-sigpipe-replayable.rwd</span>
+<span class="cmd"><span class="prompt">$</span> rewind import nix-gc-closure-sigpipe-replayable.rwd</span>
+<span class="cmd"><span class="prompt">$</span> rewind replay c799a9cf</span>
+<span class="cmd"><span class="prompt">$</span> rewind shell c799a9cf &lt;step&gt;</span></code></pre>
+        <p>How they were made:</p>
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind export c799a9cf --replayable -o nix-gc-closure-sigpipe-replayable.rwd</span>
