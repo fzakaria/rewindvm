@@ -1,85 +1,183 @@
-# Rewind VM
+<p align="center">
+  <img src="site/img/mark.svg" width="64" height="64" alt="" />
+</p>
 
-Deterministic Linux virtual machines you can scrub, rewind and fork.
+<h1 align="center">Rewind VM</h1>
+
+<p align="center">
+  <b>Deterministic Linux VMs you can scrub, rewind and fork.</b><br />
+  Catch a flaky build or test once, then replay it exactly, step through it, and branch it.
+</p>
+
+<p align="center">
+  <a href="https://rewindvm.dev">Website</a> ·
+  <a href="docs/tutorial-nix.md">Nix tutorial</a> ·
+  <a href="docs/tutorial-container.md">Container tutorial</a> ·
+  <a href="docs/design.md">Design</a> ·
+  <a href="https://github.com/fzakaria/rewindvm/releases">Releases</a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/fzakaria/rewindvm/actions/workflows/ci.yml"><img src="https://github.com/fzakaria/rewindvm/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+</p>
+
+<p align="center">
+  <img src="site/img/app-failure.png" alt="The Rewind desktop app on a failing Nix build: the timeline of build phases, the build log up to the playhead, the processes alive at that step, the SIGSEGV that ended the test, and a card saying where this run parted from a passing run of the same build." />
+</p>
+
+Rewind VM runs a Nix build, a test suite or any Linux command inside a KVM
+virtual machine whose every run is a function of its inputs. The same inputs
+give the same run, at the same steps, every time. A failure you saw once is a
+failure you keep: replay it, scrub through it step by step, read any file as it
+was at any step, and fork it with a different thread interleaving from any
+point.
 
 ```console
-$ rewind check github:fzakaria/rewind#mylib
-schedule   0: exited:0             5115 steps  aa30ea54dc47  run efd74e9a5a5098f5
-schedule   1: exited:2             4013 steps    run 2ae737e23ef6e78c
+$ rewind check github:fzakaria/rewindvm#mylib
+schedule   0: exited:0             6173 steps  aa30ea54dc47  run 1c9df920ccb1e3f3
+schedule   1: exited:0             6652 steps  aa30ea54dc47  run a3529e91ea9b4da2
+schedule   2: exited:0             6681 steps  aa30ea54dc47  run aabf85180a60b1a9
+schedule   3: exited:2             5098 steps    run 90dc4491b5162f37
+...
 
-schedule 1 ends differently; narrowing the steps it perturbs
-perturbing only steps 3779..3980 still ends differently
+schedule 3 ends differently; narrowing the steps it perturbs
+perturbing only steps 3095..5045 still ends differently
 
-passing: run efd74e9a5a5098f5
-failing: run 27586aa31b6292bf
+passing: run 1c9df920ccb1e3f3
+failing: run b626a706bc163995
 
 where ./tests/test_pool_shutdown first behaves differently:
   ...
-  right       3811   174/175   write(1, "job 17 done: 43360\n")
-  right       3812   174/176   write(1, "job 16 done: 5986\n")
-  right       3815   174/176   SIGSEGV code=1 addr=0x108
+  left        4136   165/166   write(1, "job 0 done: 12727\n")
+  left        4137   165/166   write(1, "worker picked job 2\n")
+  right       4222   165/167   write(1, "job 1 done: 35269\n")
+  right       4223   165/167   write(1, "worker picked job 2\n")
 
-$ rewind replay 27586aa3
-identical: 1608 events over 3848 steps
+$ rewind events b626a706 | grep SIGSEGV
+      4431   165/166   SIGSEGV code=1 addr=0x108
+
+$ rewind replay b626a706
+identical: 1591 events over 4470 steps
 ```
 
-Rewind VM runs a Nix build, or any command in a root filesystem such as a
-Docker export, inside a KVM virtual machine whose every run is a function of
-its inputs. The same inputs give the same run, at the same steps, every time.
-A failure you found once is a failure you have, to replay, scrub through step
-by step, and fork with a different thread interleaving from any point.
+## Install
 
-The guest kernel carries a small hypervisor platform: time is virtual and
-moves only when the guest exits to the monitor, and interrupts arrive only at
-those exits. A GNU hello build from nixpkgs runs at native speed, and its
-output is bit for bit the one Nix builds on the host.
-
-**Documentation:** [Nix tutorial](./docs/tutorial-nix.md) ·
-[Container tutorial](./docs/tutorial-container.md) ·
-[Design](./docs/design.md)
-
-## Status
-
-Early, and working: runs, Nix builds, containers, schedule search, forks,
-replay, keyframes and the desktop app all work on an x86_64 Linux laptop with
-KVM. Not yet published: no release, and the flake is not on GitHub yet.
-[Design](./docs/design.md#limits) lists what the approach cannot do, and
-[the roadmap](./docs/design.md#roadmap) what comes next.
-
-## Quickstart
+On x86_64 Linux with KVM. With Nix, run it straight from the flake; the builds
+come from [rewindvm.cachix.org](https://rewindvm.cachix.org), so nothing
+compiles on your machine. Nix asks once whether to trust that cache; say yes,
+or pass `--accept-flake-config`.
 
 ```console
-# build a derivation in the deterministic VM
-$ nix run . -- nix nixpkgs#hello
-
-# find a failing interleaving of the example's tests
-$ nix run . -- check .#mylib
-
-# a command in a Docker export
-$ nix run . -- run --root mylib.tar --cwd /src -- make check
-
-# list runs, and look inside one
-$ nix run . -- ls
-$ nix run . -- log <run> --steps
-$ nix run . -- ps <run> --at <step>
-
-# the desktop app, the landing page, the tarball for people without Nix
-$ nix run .#app -- ~/.local/share/rewind/runs/<run>
-$ nix run .#serve
-$ nix build .#release
-
-# work on it
-$ nix develop
-$ cargo test --workspace
+$ nix run github:fzakaria/rewindvm -- pmu status
+$ nix run github:fzakaria/rewindvm#app
+$ nix profile install github:fzakaria/rewindvm github:fzakaria/rewindvm#app
 ```
 
-`/dev/kvm` must be readable and writable by you.
+On NixOS, add the flake as an input and turn on its module:
 
-## Layout
+```nix
+inputs.rewind.url = "github:fzakaria/rewindvm";
 
-- `guest/linux/`: the kernel patch and config fragment for the guest.
-- `crates/rewind-vmm/`: the monitor: KVM, boot, exits, time, keyframes.
-- `crates/rewind-init/`: the guest's PID 1, a workspace of its own.
+# in your configuration, with inputs.rewind.nixosModules.default imported
+programs.rewind.enable = true;
+programs.rewind.app.enable = true;
+# AMD only: make the branch counter exact at every boot
+programs.rewind.amdBranchCounterWorkaround = true;
+```
+
+Without Nix, take the tarballs from the
+[latest release](https://github.com/fzakaria/rewindvm/releases/latest). The
+command's holds everything it needs, the VM's kernel included; the app's runs
+with your own graphics drivers.
+
+```console
+$ curl -L https://github.com/fzakaria/rewindvm/releases/latest/download/rewind-x86_64-linux.tar.gz | tar xz
+$ curl -L https://github.com/fzakaria/rewindvm/releases/latest/download/rewind-app-x86_64-linux.tar.gz | tar xz
+$ ./rewind-x86_64-linux/bin/rewind pmu status
+$ ./rewind-app-x86_64-linux/bin/rewind-app
+```
+
+`/dev/kvm` must be readable and writable by you. On AMD Ryzen and EPYC, run
+`sudo rewind pmu enable` once after each boot so the VM's clock can follow the
+work done inside it; [Time inside the VM](docs/pmu.md) explains why.
+
+## Use it
+
+```console
+# build a derivation in the VM; the output is checked against the host's
+$ rewind nix nixpkgs#hello
+
+# run the derivation under many thread schedules and show where a failure parts ways
+$ rewind check github:fzakaria/rewindvm#mylib
+
+# any command in a root filesystem: a directory, an erofs image, or a docker export
+$ rewind run --root mylib.tar --cwd /src -- make check
+
+# list runs and look inside one
+$ rewind ls
+$ rewind log <run> --steps
+$ rewind ps <run> --at <step>
+$ rewind cat <run> <step> /build/env-vars
+
+# branch a run at a step under another schedule, or replay it exactly
+$ rewind fork <run> <step> --schedule 2
+$ rewind replay <run>
+
+# share a run as one file
+$ rewind export <run> --replayable
+$ rewind import <file>.rwd
+```
+
+## The desktop app
+
+The app scrubs a recorded run: drag the playhead over the timeline of phases,
+and the build log, the process tree and the files follow it. It jumps to the
+failure, or to the first point where the run parts from a passing one and says
+in words what each did next. Click a file to read it as it was at the
+playhead. Fork from here branches the run under a new schedule.
+
+<p align="center">
+  <img src="docs/img/app-file-viewer.png" alt="The Rewind desktop app with a file open at the playhead: /build/env-vars as of step 4,392, next to the build log and the process tree." />
+</p>
+
+```console
+$ nix run github:fzakaria/rewindvm#app -- ~/.local/share/rewind/runs/<run>
+```
+
+It opens `.rwd` exports too, and comes with an example run and a short tour.
+The app is free to download and use while you evaluate it, and sold the way
+Sublime Text is; see [pricing](https://rewindvm.dev/#pricing).
+
+## How it works
+
+The VM has one vCPU on stock KVM, so code in it runs on the real CPU. Its
+Linux kernel carries a small Rewind platform: interrupts arrive only when the
+VM hands control to Rewind, the clock moves only then, and the timestamp
+counter and hardware RNG are hidden. Each of those handoffs is a step, and the
+sequence of steps is the same on every run. Inputs, a Nix closure or a root
+filesystem, become a read-only erofs image mapped into the VM's memory.
+Keyframes of the VM's memory go into a content-addressed page store, so seeking
+to any step restores the nearest keyframe and runs forward.
+
+A GNU hello build from nixpkgs runs at close to native speed in the VM, and its
+output is bit for bit the one Nix builds on the host.
+[Design](docs/design.md) has the details, the limits, and what comes next.
+
+## Develop
+
+```console
+$ nix develop                  # the toolchain, with REWIND_KERNEL and REWIND_INITRD set
+$ cargo test --workspace
+$ cargo run --release -p rewind -- nix nixpkgs#hello
+$ nix flake check              # prose, the NixOS module, and a determinism check that needs /dev/kvm
+$ nix fmt                      # Nix, Rust, Python, HTML and Markdown
+$ nix run .#serve              # the website on a local port
+```
+
+- `guest/linux/`: the kernel patch and config fragment for the VM.
+- `crates/rewind-vmm/`: the virtual machine monitor: KVM, boot, steps, time,
+  keyframes.
+- `crates/rewind-init/`: PID 1 inside the VM, a workspace of its own.
 - `crates/rewind-trace/`: reading and querying run traces.
 - `crates/rewind-store/`: the content-addressed page store.
 - `crates/rewind-core/`: input images, Nix derivations, runs, seeking.
@@ -88,11 +186,19 @@ $ cargo test --workspace
 - `examples/mylib/`: the flaky thread pool the tutorials use.
 - `nix/`: one file per derivation; `flake.nix` only wires them together.
 - `site/`: rewindvm.dev.
-- `docs/`: tutorials and design.
+- `docs/`: tutorials, the time reference and the design.
 - `tools/`: the prose check and the local site server.
+
+Pushing a `v*` tag that matches the version in `Cargo.toml` publishes a
+release with both tarballs.
 
 ## License
 
-The engine is MIT, please see [LICENSE](LICENSE). The guest kernel patch is
-GPL-2.0, as Linux is. The desktop app under `crates/rewind-app` is
-proprietary to Lunch Time Surf LLC; see its own LICENSE.
+| Path                 | License                                                                                            |
+| -------------------- | -------------------------------------------------------------------------------------------------- |
+| `crates/rewind-app/` | Proprietary to Lunch Time Surf LLC, source available, see [its LICENSE](crates/rewind-app/LICENSE) |
+| `guest/linux/`       | GPL-2.0-only, as Linux is, see [guest/linux/LICENSE](guest/linux/LICENSE)                          |
+| everything else      | MIT, see [LICENSE](LICENSE)                                                                        |
+
+The engine and the command are open source. The desktop app's source is here
+to read, but copying, modifying or redistributing it needs permission.

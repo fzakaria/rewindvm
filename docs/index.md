@@ -5,6 +5,8 @@
    fork it, and check the fix.
 2. [Tutorial: a flaky test in a container](tutorial-container.md): the same
    with a Docker image and no Nix.
-3. [Design](design.md): how the machine is made deterministic, what a run is
+3. [Time inside the VM](pmu.md): exit time and counter time, and the one
+   setting AMD machines need.
+4. [Design](design.md): how the machine is made deterministic, what a run is
    on disk, keyframes and the page store, exploring interleavings, limits,
    and the product.
