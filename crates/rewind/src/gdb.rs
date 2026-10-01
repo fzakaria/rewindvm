@@ -5,8 +5,10 @@
 //! table next to the bzImage, and its DWARF in the package's `debug`
 //! output, fetched the first time someone debugs. The process that was
 //! running at the step is found by an inspection on a second fork, and
-//! each program and library it had mapped from the store is loaded at the
-//! address it was loaded at in the VM.
+//! each program and library it had mapped is loaded at the address it was
+//! loaded at in the VM: from this machine's store, or, for files only the
+//! VM has, from copies the inspection sends, with the source files a third
+//! fork reads for them.
 //!
 //! DWARF and source files for all of them come from a debuginfod server
 //! started for the session, nixseparatedebuginfod2, which serves the
