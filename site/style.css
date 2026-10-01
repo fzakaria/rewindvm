@@ -1045,6 +1045,9 @@ a:focus-visible {
    1440x900 image and are percentages of it, so they hold at any size. */
 .pin {
   position: absolute;
+  padding: 0;
+  border: 0;
+  cursor: pointer;
   width: 26px;
   height: 26px;
   margin: -13px 0 0 -13px;
@@ -1146,20 +1149,6 @@ a:focus-visible {
   margin: 0 6px 0 0;
 }
 
-/* A card and its pin light up together: hover or focus either one, or
-   arrive at the card from its pin's link. */
-.tour:has(#tour-1:is(:hover, :focus-visible)) .pin-1,
-.tour:has(#tour-2:is(:hover, :focus-visible)) .pin-2,
-.tour:has(#tour-3:is(:hover, :focus-visible)) .pin-3,
-.tour:has(#tour-4:is(:hover, :focus-visible)) .pin-4,
-.tour:has(#tour-5:is(:hover, :focus-visible)) .pin-5,
-.pin:hover,
-.pin:focus-visible {
-  transform: scale(1.25);
-  box-shadow:
-    0 0 0 6px rgba(242, 165, 65, 0.45),
-    0 0 24px 6px rgba(242, 165, 65, 0.5);
-}
 /* The tour in an article: the screenshot as wide as the article's code
    blocks, and the cards in two columns under it. */
 .tour-article {
@@ -1171,14 +1160,29 @@ a:focus-visible {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   margin-top: 18px;
 }
-.tour:has(.pin-1:is(:hover, :focus-visible)) #tour-1,
-.tour:has(.pin-2:is(:hover, :focus-visible)) #tour-2,
-.tour:has(.pin-3:is(:hover, :focus-visible)) #tour-3,
-.tour:has(.pin-4:is(:hover, :focus-visible)) #tour-4,
-.tour:has(.pin-5:is(:hover, :focus-visible)) #tour-5,
+
+/* A card and its pin light up together: hover or focus either one. A pin
+   is a button, so clicking it focuses it and lights its card without
+   scrolling the page away from the screenshot. */
+.tour:has(#tour-1:is(:hover, :focus-visible)) .pin-1,
+.tour:has(#tour-2:is(:hover, :focus-visible)) .pin-2,
+.tour:has(#tour-3:is(:hover, :focus-visible)) .pin-3,
+.tour:has(#tour-4:is(:hover, :focus-visible)) .pin-4,
+.tour:has(#tour-5:is(:hover, :focus-visible)) .pin-5,
+.pin:hover,
+.pin:focus {
+  transform: scale(1.25);
+  box-shadow:
+    0 0 0 6px rgba(242, 165, 65, 0.45),
+    0 0 24px 6px rgba(242, 165, 65, 0.5);
+}
+.tour:has(.pin-1:is(:hover, :focus)) #tour-1,
+.tour:has(.pin-2:is(:hover, :focus)) #tour-2,
+.tour:has(.pin-3:is(:hover, :focus)) #tour-3,
+.tour:has(.pin-4:is(:hover, :focus)) #tour-4,
+.tour:has(.pin-5:is(:hover, :focus)) #tour-5,
 .tour-card:hover,
-.tour-card:focus-visible,
-.tour-card:target {
+.tour-card:focus-visible {
   border-color: var(--amber);
 }
 

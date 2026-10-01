@@ -72,10 +72,10 @@ DEVENV_FIGURE = """<div class="tour tour-article">
           />
         </picture>
       </a>
-      <a class="pin pin-1" href="#tour-1" style="left: 90.3%; top: 16.7%" aria-label="1: the timeline">1</a>
-      <a class="pin pin-2" href="#tour-2" style="left: 20.8%; top: 52.2%" aria-label="2: the build log">2</a>
-      <a class="pin pin-3" href="#tour-3" style="left: 96.9%; top: 57%" aria-label="3: the step's event, SIGCHLD">3</a>
-      <a class="pin pin-4" href="#tour-4" style="left: 97.2%; top: 80%" aria-label="4: where the run diverged">4</a>
+      <button type="button" class="pin pin-1" style="left: 90.3%; top: 16.7%" aria-label="1: the timeline">1</button>
+      <button type="button" class="pin pin-2" style="left: 20.8%; top: 52.2%" aria-label="2: the build log">2</button>
+      <button type="button" class="pin pin-3" style="left: 96.9%; top: 57%" aria-label="3: the step's event, SIGCHLD">3</button>
+      <button type="button" class="pin pin-4" style="left: 97.2%; top: 80%" aria-label="4: where the run diverged">4</button>
     </div>
     <figcaption>
       The app on the failing run e8e78754 at step 1,167, compared with the passing run 15ef00bf.
