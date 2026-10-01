@@ -35,8 +35,8 @@ pub const REVOKED: &[&str] = &[];
 /// versions it covers.
 pub const RELEASE_DATE: Date = Date {
     year: 2026,
-    month: 9,
-    day: 30,
+    month: 10,
+    day: 1,
 };
 
 /// The file a license is kept in, under the user's config directory.

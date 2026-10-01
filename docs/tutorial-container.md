@@ -12,7 +12,7 @@ shutdown race: `pool_shutdown` frees the job queue before joining the
 workers, and a worker that has finished a job counts it through the queue
 without holding the lock. Most runs of its shutdown test pass.
 
-Every transcript below is real output from `rewind` 0.1.0 on a 16 core AMD
+Every transcript below is real output from `rewind` on a 16 core AMD
 laptop, with `sudo rewind pmu enable` run since boot.
 
 ## Install

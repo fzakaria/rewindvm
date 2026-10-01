@@ -12,7 +12,8 @@ let
 
   unwrapped = pkgs.rustPlatform.buildRustPackage {
     pname = "rewind";
-    version = "0.1.0";
+    # VERSION, the one place a release's version is written.
+    version = lib.fileContents ../VERSION;
     # The engine's workspace without the desktop app, which is a workspace
     # of its own, and without build directories.
     src = lib.fileset.toSource {

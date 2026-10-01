@@ -8,4 +8,8 @@
 pkgs.runCommand "rewind-site" { } ''
   mkdir -p $out
   cp -r ${../site}/. $out/
+
+  # The release the front page names, from VERSION.
+  chmod u+w $out/index.html
+  substituteInPlace $out/index.html --replace-fail @VERSION@ ${pkgs.lib.fileContents ../VERSION}
 ''

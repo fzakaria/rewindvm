@@ -12,7 +12,7 @@ that has finished a job checks whether the pool is stopping without holding
 the lock, then counts the job through the queue. When shutdown runs between
 that check and the count, the worker writes through a freed, nulled pointer.
 
-Every transcript below is real output from `rewind` 0.1.0 on a 16 core AMD
+Every transcript below is real output from `rewind` on a 16 core AMD
 laptop, with `sudo rewind pmu enable` run since boot.
 
 ## Install

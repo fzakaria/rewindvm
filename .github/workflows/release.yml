@@ -4,7 +4,7 @@
 #   rewind-x86_64-linux.tar.gz      the command, for people without Nix
 #   rewind-app-x86_64-linux.tar.gz  the desktop app, for any distribution
 #
-# The tag must match the workspace version in Cargo.toml. Nix users need
+# The tag must match VERSION. Nix users need
 # none of this: `nix run github:fzakaria/rewindvm/v0.1.0` builds the same
 # tag, from rewindvm.cachix.org when CI has built it.
 name: release
@@ -41,11 +41,11 @@ jobs:
           name: rewindvm
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
-      - name: Check the tag against Cargo.toml
+      - name: Check the tag against VERSION
         run: |
-          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          version=$(cat VERSION)
           if [ "${GITHUB_REF_NAME#v}" != "$version" ]; then
-            echo "tag $GITHUB_REF_NAME does not match Cargo.toml's version $version" >&2
+            echo "tag $GITHUB_REF_NAME does not match VERSION, $version" >&2
             exit 1
           fi
 

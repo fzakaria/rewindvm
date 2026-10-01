@@ -26,7 +26,7 @@ let
 in
 pkgs.stdenv.mkDerivation {
   pname = "rewind-app-portable";
-  version = "0.1.0";
+  version = lib.fileContents ../VERSION;
 
   src = fs.toSource {
     root = ../.;

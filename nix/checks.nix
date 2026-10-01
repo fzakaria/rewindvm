@@ -121,6 +121,22 @@ in
         touch $out
       '';
 
+  # checks.version: VERSION is the release's version, and Cargo cannot read
+  # it, so the two Cargo.toml files that name it must agree with it;
+  # tools/set-version changes all three.
+  version =
+    let
+      inherit (pkgs) lib;
+      release = lib.fileContents ../VERSION;
+      engine = (lib.importTOML ../Cargo.toml).workspace.package.version;
+      app = (lib.importTOML ../crates/rewind-app/Cargo.toml).package.version;
+    in
+    assert lib.assertMsg (engine == release) "Cargo.toml says ${engine}, VERSION says ${release}";
+    assert lib.assertMsg (
+      app == release
+    ) "crates/rewind-app/Cargo.toml says ${app}, VERSION says ${release}";
+    pkgs.writeText "rewind-version" release;
+
   # checks.module: the NixOS module installs both packages and sets the
   # AMD workaround at boot. Only evaluates, so it needs no KVM.
   module =
@@ -129,7 +145,7 @@ in
       installed = map (p: p.name) config.environment.systemPackages;
     in
     assert builtins.elem rewind.name installed;
-    assert builtins.elem "rewind-app-0.1.0" installed;
+    assert builtins.any (name: pkgs.lib.hasPrefix "rewind-app-" name) installed;
     assert builtins.elem "msr" config.boot.kernelModules;
     pkgs.writeText "rewind-module" config.systemd.services.rewind-pmu.serviceConfig.ExecStart;
 }

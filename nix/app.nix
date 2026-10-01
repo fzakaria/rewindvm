@@ -36,7 +36,8 @@ let
 in
 pkgs.rustPlatform.buildRustPackage {
   pname = "rewind-app";
-  version = "0.1.0";
+  # VERSION, the one place a release's version is written.
+  version = lib.fileContents ../VERSION;
 
   src = fs.toSource {
     root = ../.;

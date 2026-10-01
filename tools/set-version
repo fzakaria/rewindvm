@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Sets the release version everywhere it is written: VERSION, which the
+# Nix packages, the site and the release workflow read, and the two
+# Cargo.toml files Cargo needs it in, with their lockfiles. Also sets the
+# app's RELEASE_DATE, which licenses' update periods are measured
+# against, to today (UTC).
+# checks.version fails when they disagree.
+#
+#   tools/set-version 0.3.0
+#
+# Run from the repository root, inside `nix develop`.
+set -euo pipefail
+
+version=${1:?usage: tools/set-version <version>}
+
+printf '%s\n' "$version" > VERSION
+sed -i "0,/^version = \".*\"/s//version = \"$version\"/" Cargo.toml crates/rewind-app/Cargo.toml
+cargo update --workspace --quiet
+
+year=$(date -u +%Y)
+month=$((10#$(date -u +%m)))
+day=$((10#$(date -u +%d)))
+perl -0pi -e "s/(RELEASE_DATE: Date = Date \\{\\s*year: )\\d+(,\\s*month: )\\d+(,\\s*day: )\\d+/\${1}$year\${2}$month\${3}$day/" \
+  crates/rewind-app/src/license.rs
+(cd crates/rewind-app && cargo update --package rewind-app --quiet)
+echo "VERSION, Cargo.toml and crates/rewind-app/Cargo.toml say $version; RELEASE_DATE is $year-$month-$day"

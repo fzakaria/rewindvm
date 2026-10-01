@@ -16,7 +16,7 @@ let
 
   static = pkgs.pkgsStatic.rustPlatform.buildRustPackage {
     pname = "rewind-static";
-    version = "0.1.0";
+    version = lib.fileContents ../VERSION;
     src = lib.fileset.toSource {
       root = ../.;
       fileset = lib.fileset.unions [
