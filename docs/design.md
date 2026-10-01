@@ -387,6 +387,15 @@ copies every keyframe a run reads into the archive as the run's own and drops
 whose parent is gone cannot reach its shared keyframes, and seeking in it
 fails with the id of the run it needs; `rewind replay` from boot still works.
 
+`rewind remove <run>` removes the run and every run that descends from it
+through `parent`, with any inputs an import placed for them, the deepest
+first, so a removal cut short never leaves a fork whose parent is gone. It
+removes nothing while one of those runs has not finished, or while a run
+outside them reads keyframes from one of them, and names that run. Such a
+reader is rare, since a run reads keyframes only from its parent, but
+running a fork's inputs again as a plain run makes one: the run keeps the
+fork's keyframes and loses its parent.
+
 `rewind prune <run> --identical` removes forks in a run's family, its forks
 and their forks, whose `trace_hash` equals an older member's. The run itself
 always stays, and so does any run another run here names as its parent or

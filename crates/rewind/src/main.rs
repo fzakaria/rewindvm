@@ -237,6 +237,20 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Remove a run and every run forked from it, from those, and so on,
+    /// with their imported inputs. Refused, removing nothing, while one of
+    /// them has not finished or a run that stays reads keyframes from one
+    /// of them. Pages in the page store stay.
+    Remove {
+        run: String,
+        /// Show what would be removed and remove nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Print {"removed": [ids]} on standard output, the run first, for
+        /// programs such as the desktop app.
+        #[arg(long)]
+        json: bool,
+    },
     /// Print a file as it was at a step of a run. Rewind forks the run at
     /// the step and reads the file inside the VM, so this takes about as
     /// long as seeking there. Exits 2 when the file did not exist then.
@@ -677,6 +691,24 @@ fn run(cli: Cli) -> Result<ExitCode> {
             }
             if removals.is_empty() {
                 eprintln!("rewind: no fork of {} needs pruning", root.manifest.id);
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Remove { run, dry_run, json } => {
+            let run = Run::find(&home, &run)?;
+            let act = if dry_run {
+                rewind_core::prune::Act::DryRun
+            } else {
+                rewind_core::prune::Act::Remove
+            };
+            let removed = rewind_core::prune::remove_with_forks(&home, &run, act)?;
+            if json {
+                println!("{}", serde_json::json!({ "removed": removed }));
+                return Ok(ExitCode::SUCCESS);
+            }
+            let verb = if dry_run { "would remove" } else { "removed" };
+            for id in &removed {
+                println!("{verb} {id}");
             }
             Ok(ExitCode::SUCCESS)
         }

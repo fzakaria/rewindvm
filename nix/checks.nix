@@ -134,6 +134,30 @@ in
         test ! -e $REWIND_HOME/runs/$same2
         test -d $REWIND_HOME/runs/$fork
         rewind replay $fork --from 300 | grep '^identical'
+
+        # Removing a fork takes its forks too, and a leaf goes alone.
+        leaf=$(rewind fork $fork2 $((step + 20)) --schedule 9 --json | id)
+        rewind remove $leaf --json | tee removed
+        grep -q "{\"removed\":\[\"$leaf\"\]}" removed
+        test ! -e $REWIND_HOME/runs/$leaf
+
+        # Running the fork's inputs again as a plain run leaves the fork
+        # with no parent, still reading a's keyframes, so a stays.
+        rewind run -q --schedule 3 --schedule-from 400 --root ${busyboxRoot} -- sh -c '${workload}'
+        ! manifest $fork | grep -q '"parent": \['
+        ! rewind remove a 2> refused
+        cat refused
+        grep -q "run $fork reads its keyframes up to step 399 from " refused
+        rewind replay a --from 300 | grep '^identical'
+
+        rewind remove $fork2 --dry-run | tee planned
+        grep -q "would remove $fork2" planned
+        test -d $REWIND_HOME/runs/$fork2
+        rewind remove $fork --json | tee removed
+        grep -q "{\"removed\":\[\"$fork\",\"$fork2\"\]}" removed
+        test ! -e $REWIND_HOME/runs/$fork
+        test ! -e $REWIND_HOME/runs/$fork2
+        rewind replay a --from 300 | grep '^identical'
         touch $out
       '';
 

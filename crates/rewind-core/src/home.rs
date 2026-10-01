@@ -36,6 +36,11 @@ impl Home {
                 data.join("rewind")
             }
         };
+        Home::at(root)
+    }
+
+    /// The home in `root`, made if it is not there yet.
+    pub fn at(root: PathBuf) -> Result<Home> {
         std::fs::create_dir_all(root.join("runs"))?;
         std::fs::create_dir_all(root.join("images"))?;
         Ok(Home { root })
@@ -51,6 +56,12 @@ impl Home {
 
     pub fn images(&self) -> PathBuf {
         self.root.join("images")
+    }
+
+    /// The kernel, initramfs and image of each imported replayable run,
+    /// by run id.
+    pub fn inputs(&self) -> PathBuf {
+        self.root.join("inputs")
     }
 
     /// The page store every run's keyframes share.

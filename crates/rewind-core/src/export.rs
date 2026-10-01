@@ -202,7 +202,7 @@ fn unpack_and_place(home: &Home, reader: impl Read, source: &str, staging: &Path
 
     // Inputs move into the home, where replays will look for them.
     if staging.join(INPUTS_DIR).exists() {
-        let inputs = home.root().join("inputs").join(&manifest.id);
+        let inputs = home.inputs().join(&manifest.id);
         fs::create_dir_all(&inputs)?;
         let place = |name: &str| -> Result<Option<PathBuf>> {
             let from = staging.join(name);

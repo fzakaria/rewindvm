@@ -1,13 +1,16 @@
-//! Removing forks that add nothing: ones that ran exactly as an older run
-//! in the same family did.
+//! Removing runs: one at a time, or the forks that add nothing because
+//! they ran exactly as an older run in the same family did.
+//!
+//! A run another run on this machine names as its parent, or reads
+//! keyframes from, is never removed while that run stays. Removing a run
+//! deletes its directory and its imported inputs; pages its keyframes
+//! named stay in the page store.
 //!
 //! A family is a run and every run forked from it, from those, and so on.
 //! Two runs with the same trace hash did the same thing, so of each such
 //! group in a family only the oldest is worth keeping; the run the family
-//! is named by is always kept. A run another run on this machine names as
-//! its parent, or reads keyframes from, stays whatever its trace, unless
-//! every such run is being removed too. Pages the removed runs' keyframes
-//! named stay in the page store.
+//! is named by is always kept. A run that others need stays whatever its
+//! trace, unless every run that needs it is being removed too.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -15,6 +18,7 @@ use std::fs;
 use anyhow::{Context, Result};
 
 use crate::home::Home;
+use crate::keyframes::Shared;
 use crate::run::{Run, TRACE};
 
 /// What pruning needs to know about one run.
@@ -23,8 +27,8 @@ pub struct Member {
     pub id: String,
     /// The run it was forked from.
     pub parent: Option<String>,
-    /// The run it reads keyframes from.
-    pub shares: Option<String>,
+    /// The run it reads keyframes from, and up to which step.
+    pub shares: Option<Shared>,
     pub created: u64,
     pub trace_hash: Option<String>,
     /// Whether it ran to the end; a run still going may yet differ.
@@ -52,7 +56,7 @@ impl Member {
         Member {
             id: m.id.clone(),
             parent: m.parent.as_ref().map(|(id, _)| id.clone()),
-            shares: m.shared_keyframes.as_ref().map(|s| s.run.clone()),
+            shares: m.shared_keyframes.clone(),
             created: m.created,
             trace_hash,
             finished,
@@ -61,7 +65,7 @@ impl Member {
 
     /// The runs this one cannot do without.
     fn needs(&self) -> impl Iterator<Item = &String> {
-        self.parent.iter().chain(self.shares.iter())
+        self.parent.iter().chain(self.shares.iter().map(|s| &s.run))
     }
 }
 
@@ -70,17 +74,7 @@ impl Member {
 /// run on the machine. In order of age.
 pub fn identical(root: &str, runs: &[Member]) -> Vec<Removal> {
     // The family: the root and everything forked from it, transitively.
-    let mut family: BTreeSet<&str> = BTreeSet::from([root]);
-    let mut grew = true;
-    while grew {
-        grew = false;
-        for r in runs {
-            let forked_from_family = r.parent.as_deref().is_some_and(|p| family.contains(p));
-            if forked_from_family && family.insert(&r.id) {
-                grew = true;
-            }
-        }
-    }
+    let family: BTreeSet<&str> = descendants(root, runs).into_iter().collect();
 
     // The member each trace keeps: the root if it has that trace, else
     // the oldest, ties broken by id so the choice is stable.
@@ -140,11 +134,136 @@ pub fn plan_identical(home: &Home, root: &Run) -> Result<Vec<Removal>> {
     Ok(identical(&root.manifest.id, &members))
 }
 
-/// Deletes the runs' directories.
+/// Deletes the runs `identical` chose.
 pub fn remove(home: &Home, removals: &[Removal]) -> Result<()> {
     for r in removals {
-        let dir = home.runs().join(&r.id);
-        fs::remove_dir_all(&dir).with_context(|| format!("removing {}", dir.display()))?;
+        delete(home, &r.id)?;
+    }
+    Ok(())
+}
+
+/// Whether `remove_tree` deletes anything.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Act {
+    /// Only say what would go.
+    DryRun,
+    Remove,
+}
+
+/// Why a run and its descendants cannot be removed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    /// These runs among them have not finished, and may be executing now.
+    Unfinished(Vec<String>),
+    /// Runs that stay read keyframes from runs that would go: the reader,
+    /// the run it reads from, and the last step it reads.
+    Needed { readers: Vec<(String, String, u64)> },
+}
+
+impl Refusal {
+    /// What to tell the person who asked for the removal.
+    pub fn message(&self) -> String {
+        match self {
+            Refusal::Unfinished(runs) => runs
+                .iter()
+                .map(|id| format!("run {id} has not finished; remove it once it has"))
+                .collect::<Vec<_>>()
+                .join("; "),
+            Refusal::Needed { readers } => readers
+                .iter()
+                .map(|(reader, from, through)| {
+                    format!(
+                        "run {reader} reads its keyframes up to step {through} from {from}; \
+                         remove it first"
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; "),
+        }
+    }
+}
+
+/// `root` and every run forked from it, from those, and so on, nearest
+/// first, and in order of age among runs at the same depth. Each run comes
+/// after the run it was forked from.
+fn descendants<'a>(root: &'a str, runs: &'a [Member]) -> Vec<&'a str> {
+    let mut by_age: Vec<&Member> = runs.iter().collect();
+    by_age.sort_by_key(|r| (r.created, r.id.clone()));
+    let mut tree = vec![root];
+    let mut next = 0;
+    while next < tree.len() {
+        let parent = tree[next];
+        next += 1;
+        for r in &by_age {
+            let forked_here = r.parent.as_deref() == Some(parent);
+            if forked_here && !tree.contains(&r.id.as_str()) {
+                tree.push(&r.id);
+            }
+        }
+    }
+    tree
+}
+
+/// The runs removing `id` takes: `id` first, then every run that descends
+/// from it, nearest first. Refused when one of them has not finished, or
+/// when a run outside the set reads keyframes from one inside it. A run
+/// that reads keyframes through a chain reads them from the first run in
+/// it, which then reads from the next, so the direct readers are the ones
+/// that matter.
+pub fn removal_set(id: &str, runs: &[Member]) -> std::result::Result<Vec<String>, Refusal> {
+    let set = descendants(id, runs);
+    let unfinished: Vec<String> = runs
+        .iter()
+        .filter(|r| set.contains(&r.id.as_str()) && !r.finished)
+        .map(|r| r.id.clone())
+        .collect();
+    if !unfinished.is_empty() {
+        return Err(Refusal::Unfinished(unfinished));
+    }
+
+    // Every run outside the set that names one inside it as its parent is
+    // in the set by construction, so only keyframe readers remain.
+    let readers: Vec<(String, String, u64)> = runs
+        .iter()
+        .filter(|r| !set.contains(&r.id.as_str()))
+        .filter_map(|r| {
+            let shared = r.shares.as_ref()?;
+            set.contains(&shared.run.as_str())
+                .then(|| (r.id.clone(), shared.run.clone(), shared.through))
+        })
+        .collect();
+    if !readers.is_empty() {
+        return Err(Refusal::Needed { readers });
+    }
+    Ok(set.into_iter().map(String::from).collect())
+}
+
+/// Removes `id` and its descendants among `runs`, the deepest first, so a
+/// removal cut short never leaves a fork whose parent is gone. Returns the
+/// ids in the order `removal_set` gives them.
+pub fn remove_tree(home: &Home, id: &str, runs: &[Member], act: Act) -> Result<Vec<String>> {
+    let set = removal_set(id, runs).map_err(|refusal| anyhow::anyhow!(refusal.message()))?;
+    if act == Act::Remove {
+        for run in set.iter().rev() {
+            delete(home, run)?;
+        }
+    }
+    Ok(set)
+}
+
+/// `remove_tree` over the runs in the home.
+pub fn remove_with_forks(home: &Home, run: &Run, act: Act) -> Result<Vec<String>> {
+    let members: Vec<Member> = Run::list(home)?.iter().map(Member::of).collect();
+    remove_tree(home, &run.manifest.id, &members, act)
+}
+
+/// Deletes a run's directory and its imported inputs.
+fn delete(home: &Home, id: &str) -> Result<()> {
+    let dir = home.runs().join(id);
+    fs::remove_dir_all(&dir).with_context(|| format!("removing {}", dir.display()))?;
+    let inputs = home.inputs().join(id);
+    if inputs.exists() {
+        fs::remove_dir_all(&inputs).with_context(|| format!("removing {}", inputs.display()))?;
     }
     Ok(())
 }
@@ -161,10 +280,17 @@ mod tests {
         Member {
             id: id.into(),
             parent: parent.map(Into::into),
-            shares: parent.map(Into::into),
+            shares: parent.map(|p| share(p, 99)),
             created,
             trace_hash: Some(hash.into()),
             finished: true,
+        }
+    }
+
+    fn share(run: &str, through: u64) -> Shared {
+        Shared {
+            run: run.into(),
+            through,
         }
     }
 
@@ -241,7 +367,7 @@ mod tests {
     fn keyframes_shared_from_outside_the_family_keep_a_run() {
         // k is no fork of b, but reads b's keyframes, so b stays.
         let mut k = run("k", None, 4, "hk");
-        k.shares = Some("b".into());
+        k.shares = Some(share("b", 99));
         let runs = [
             run("r", None, 0, "h0"),
             run("a", Some("r"), 1, "h1"),
@@ -265,5 +391,103 @@ mod tests {
             u,
         ];
         assert_eq!(identical("r", &runs), vec![]);
+    }
+
+    #[test]
+    fn a_leaf_fork_is_removed_alone() {
+        // Nothing descends from a, so the set is a alone.
+        let runs = [run("r", None, 0, "h0"), run("a", Some("r"), 1, "h1")];
+        assert_eq!(removal_set("a", &runs), Ok(vec!["a".to_string()]));
+    }
+
+    #[test]
+    fn a_fork_goes_with_its_forks_and_theirs() {
+        // a has a fork b, b has a fork c, and a has a second fork d made
+        // later: the set is a, then its descendants nearest first; r and
+        // the unrelated x stay.
+        let runs = [
+            run("r", None, 0, "h0"),
+            run("a", Some("r"), 1, "h1"),
+            run("c", Some("b"), 3, "h3"),
+            run("b", Some("a"), 2, "h2"),
+            run("d", Some("a"), 4, "h4"),
+            run("x", None, 0, "hx"),
+        ];
+        assert_eq!(
+            removal_set("a", &runs),
+            Ok(vec!["a".into(), "b".into(), "d".into(), "c".into()])
+        );
+    }
+
+    #[test]
+    fn a_run_outside_the_set_that_reads_its_keyframes_refuses() {
+        // k is no descendant of b but reads b's keyframes up to step 400,
+        // so neither b nor its fork goes.
+        let mut k = run("k", None, 4, "hk");
+        k.shares = Some(share("b", 400));
+        let runs = [run("b", None, 0, "h1"), run("f", Some("b"), 1, "h2"), k];
+        let refusal = removal_set("b", &runs).unwrap_err();
+        assert_eq!(
+            refusal,
+            Refusal::Needed {
+                readers: vec![("k".into(), "b".into(), 400)]
+            }
+        );
+        assert_eq!(
+            refusal.message(),
+            "run k reads its keyframes up to step 400 from b; remove it first"
+        );
+    }
+
+    #[test]
+    fn an_unfinished_run_in_the_set_refuses() {
+        // A run still executing may be one another process is writing, so
+        // removing its parent waits for it too.
+        let mut u = run("u", Some("a"), 3, "h1");
+        u.finished = false;
+        let runs = [run("r", None, 0, "h0"), run("a", Some("r"), 1, "h2"), u];
+        let refusal = removal_set("a", &runs).unwrap_err();
+        assert_eq!(refusal, Refusal::Unfinished(vec!["u".into()]));
+        assert_eq!(
+            refusal.message(),
+            "run u has not finished; remove it once it has"
+        );
+    }
+
+    #[test]
+    fn removing_takes_the_runs_and_their_inputs_and_a_dry_run_nothing() {
+        // A home with r, its fork a and a's fork b, each with imported
+        // inputs. A dry run of removing a names a and b and deletes
+        // nothing; the removal then deletes both runs and their inputs and
+        // leaves r.
+        let root = std::env::temp_dir().join(format!("rewind-remove-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let home = Home::at(root.clone()).unwrap();
+        for id in ["r", "a", "b"] {
+            fs::create_dir_all(home.runs().join(id)).unwrap();
+            fs::create_dir_all(home.inputs().join(id)).unwrap();
+        }
+        let runs = [
+            run("r", None, 0, "h0"),
+            run("a", Some("r"), 1, "h1"),
+            run("b", Some("a"), 2, "h2"),
+        ];
+        let removed = remove_tree(&home, "a", &runs, Act::DryRun).unwrap();
+        assert_eq!(removed, vec!["a".to_string(), "b".to_string()]);
+        assert!(
+            ["r", "a", "b"]
+                .iter()
+                .all(|id| home.runs().join(id).exists())
+        );
+
+        let removed = remove_tree(&home, "a", &runs, Act::Remove).unwrap();
+        assert_eq!(removed, vec!["a".to_string(), "b".to_string()]);
+        for id in ["a", "b"] {
+            assert!(!home.runs().join(id).exists());
+            assert!(!home.inputs().join(id).exists());
+        }
+        assert!(home.runs().join("r").exists());
+        assert!(home.inputs().join("r").exists());
+        fs::remove_dir_all(&root).unwrap();
     }
 }

@@ -139,6 +139,10 @@ $ rewind replay <run>
 $ rewind prune <run> --identical --dry-run
 $ rewind prune <run> --identical
 
+# remove a run and every fork of it, and forks of those
+$ rewind remove <run> --dry-run
+$ rewind remove <run>
+
 # share a run as one file
 $ rewind export <run> --replayable
 $ rewind import <file>.rwd
