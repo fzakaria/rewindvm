@@ -450,21 +450,24 @@
     );
   }
 
-  // gdb, the shell and export are on the roadmap; the diff is the app's
-  // comparison with the run this one came from.
+  // What each inspect button does in the app, said for the step under
+  // the playhead.
   const INSPECT = {
     gdb: (s, ev) => [
-      "Planned:",
-      `gdb attached to pid ${ev.pid} as it was at step ${fmt(s)}.`,
+      "In the app,",
+      `gdb on a fork stopped at step ${fmt(s)}, where pid ${ev.pid} was running.`,
     ],
-    shell: (s) => ["Planned:", `a shell inside the VM at step ${fmt(s)}.`],
+    shell: (s) => [
+      "In the app,",
+      `a shell inside the VM at step ${fmt(s)}, with the build's environment.`,
+    ],
     diff: () => [
       "In the app,",
       `run #3 and run #2 are identical up to step ${fmt(DIVERGENCE_STEP)}.`,
     ],
     export: () => [
-      "Planned:",
-      "run #3 as a single file to attach to an issue.",
+      "In the app,",
+      "run #3 as one .rwd file that replays on another machine.",
     ],
   };
 

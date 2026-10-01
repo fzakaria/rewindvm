@@ -14,16 +14,16 @@ Linux 7.1.
 
 ## At a glance
 
-| Piece              | Where                            | What it does                                                                                      |
-| ------------------ | -------------------------------- | ------------------------------------------------------------------------------------------------- |
-| Guest kernel patch | `guest/linux/rewind-guest.patch` | A "Rewind" x86 hypervisor platform in Linux 7.2: virtual clock and timer, idle as an exit, events |
-| Guest init         | `crates/rewind-init`             | PID 1: mounts the input image, runs the job, reports its exit status and output hashes            |
-| Monitor            | `crates/rewind-vmm`              | One vCPU on KVM: boots the kernel, handles exits, owns time and interrupts, takes keyframes       |
-| Trace              | `crates/rewind-trace`            | Decodes guest records into events and answers questions about a run at a step                     |
-| Page store         | `crates/rewind-store`            | Content-addressed, compressed 4 KiB pages shared by every keyframe                                |
-| Engine             | `crates/rewind-core`             | Input images, Nix derivations as jobs, runs on disk, keyframes, seeking                           |
-| Command            | `crates/rewind`                  | `rewind run`, `nix`, `check`, `fork`, `replay`, `log`, `ps`, `events`, `diff`, `ls`               |
-| App                | `crates/rewind-app`              | The GPUI scrubber (proprietary; see Product)                                                      |
+| Piece              | Where                            | What it does                                                                                       |
+| ------------------ | -------------------------------- | -------------------------------------------------------------------------------------------------- |
+| Guest kernel patch | `guest/linux/rewind-guest.patch` | A "Rewind" x86 hypervisor platform in Linux 7.2: virtual clock and timer, idle as an exit, events  |
+| Guest init         | `crates/rewind-init`             | PID 1: mounts the input image, runs the job, reports its exit status and output hashes             |
+| Monitor            | `crates/rewind-vmm`              | One vCPU on KVM: boots the kernel, handles exits, owns time and interrupts, takes keyframes        |
+| Trace              | `crates/rewind-trace`            | Decodes guest records into events and answers questions about a run at a step                      |
+| Page store         | `crates/rewind-store`            | Content-addressed, compressed 4 KiB pages shared by every keyframe                                 |
+| Engine             | `crates/rewind-core`             | Input images, Nix derivations as jobs, runs on disk, keyframes, seeking                            |
+| Command            | `crates/rewind`                  | `rewind run`, `nix`, `check`, `fork`, `replay`, `cat`, `shell`, `gdb`, `export`, `import` and more |
+| App                | `crates/rewind-app`              | The GPUI scrubber (proprietary; see Product)                                                       |
 
 ## Determinism
 
@@ -87,17 +87,37 @@ platforms. The platform is detected by the CPUID signature `RewindRewind`.
   A reason word in the shared page says whether the timer is due, a
   reschedule is requested, or an inspection is.
 
-An inspection is how `rewind cat` reads a file as it was at a step. Rewind
-forks the run at the step and writes a request, a list of arguments, into the
-shared page. The kernel stops every user process except init right in the
-interrupt, then starts `/init --inspect` with the request as a usermode
-helper, and makes power off wait until the helper exits. The helper enters the
-root and working directory of the process named in the request and writes the
-file through `/dev/rewind-stdout` between two marks. A recording never carries
-a request, so none of this changes a recorded run. Init chroots only the job's
-process into an image root, never itself: Linux starts init sharing its
-filesystem root with the kernel's threads, and a chroot there would hide
-`/init` from the helper.
+An inspection is how `rewind cat` and `rewind shell` look inside a run at a
+step. Rewind forks the run at the step and writes a request, a list of
+arguments, into the shared page. In the interrupt, the kernel stops every user
+process with SIGSTOP. Linux never stops the global init with a signal, so init
+is instead held at its next system call, before it can start or write
+anything. The kernel then starts `/init --inspect` with the request as a
+usermode helper, and power off waits until the helper exits. The helper enters
+the root and working directory of the process named in the request. For `cat`
+it writes the file through `/dev/rewind-stdout` between two marks. For `shell`
+it opens a pty, starts the shell that process's environment names (for a Nix
+build, the builder's bash with stdenv's PATH) with that environment, and
+relays the pty to `/dev/rewind-console`. Reads of that device return input
+Rewind places in the shared page with an interrupt of its own, and window
+size changes arrive in band. A recording never carries a request, so none of
+this changes a recorded run. Init chroots only the job's process into an image
+root, never itself: Linux starts init sharing its filesystem root with the
+kernel's threads, and a chroot there would hide `/init` from the helper.
+
+While a person is typed into a shell, idle time passes in real time: when the
+VM goes idle, Rewind waits for typing until the next timer is due, and jumps to
+the timer only if none came. `sleep 2` takes two seconds, and an idle shell
+costs no CPU.
+
+`rewind gdb` needs no help from the kernel. It serves the GDB remote protocol
+for a forked machine with the `gdbstub` crate: registers through KVM, and
+memory through KVM's address translation, so gdb reads the kernel and the
+running process's user space as the VM's own page tables map them.
+Breakpoints are the CPU's four debug address registers rather than `int3` in
+memory, and a single step holds interrupts off. A debug trap is a VM exit the
+VM never sees and not a step, so a debugged fork runs exactly as it would
+have.
 
 The kernel is uniprocessor (`CONFIG_SMP=n`), so spinlocks compile away and
 nothing in the kernel waits on another CPU. It has no PCI, ACPI or modules.
@@ -300,9 +320,13 @@ perturbation starting at N, so it is its parent up to N by construction.
 4. Shows where the failing program's own events first differ between the two
    runs. It compares threads by the order they appear, not by their ids.
 
-For mylib, whose shutdown test fails about one run in nine on the host, about
-half of the perturbed schedules fail. The first failure comes on the first or
-second schedule, and the whole search takes under a minute.
+For mylib, whose shutdown test fails in about one host build in eight, 9 of 64
+perturbed schedules fail with counter time and 34 of 64 with exit time.
+Counter time's rate is close to the host's because computation takes time
+there, as on real hardware; with exit time all of a burst of work lands at
+once, which crowds the threads together and makes the race easier to hit. The
+first failure has come within the first two batches of 16 schedules, and the
+whole search takes under 20 seconds on 16 cores.
 
 Two earlier designs did not work, and why is worth keeping.
 
@@ -316,14 +340,15 @@ Two earlier designs did not work, and why is worth keeping.
 
 ## Limits
 
-- **Computation is free, and CPU-bound threads are not preempted.** A thread
-  that computes without system calls runs until it makes one. A thread
-  spinning on a flag without yielding stalls the guest; futex-based waits are
-  fine. Races that need preemption in the middle of pure computation are out
-  of reach.
+- **CPU-bound threads are not preempted.** A thread gives up the CPU only at
+  a step, so one that computes without system calls runs until it makes one.
+  A thread spinning on a flag without yielding stalls the VM; futex-based
+  waits are fine. Races that need preemption in the middle of pure
+  computation are out of reach. With exit time computation also takes no
+  time; counter time ([pmu.md](pmu.md)) fixes that, not the preemption.
 - **One vCPU.** Threads interleave but never run at the same instant.
-  Throughput comes from running many machines at once, one per core, which
-  `check` could do in parallel and does not yet.
+  Throughput comes from running many machines at once: `check` runs one per
+  core.
 - **The CPU vendor is part of the input.** The fixed CPU model keeps the
   host's vendor, since Intel and AMD differ in ways CPUID cannot hide, so a
   run made on AMD replays on any AMD host from Zen 2 on but not on Intel,
@@ -334,20 +359,19 @@ Two earlier designs did not work, and why is worth keeping.
 - **No network**, other than loopback.
 - **x86_64 Linux hosts with KVM only.**
 
-### Work-proportional time: measured, not shipped
+### Counter time
 
-The fix for free computation is to let virtual time follow the guest's work,
-as Antithesis does with instruction counts. `crates/rewind-vmm/src/pmu.rs`
-reads a guest-mode hardware counter of retired conditional branches at every
-exit. That is the counter rr uses, and it is readable only at exits, which
-are fixed points in the guest's instruction stream.
-
-On this Zen 4 laptop, short runs give identical counts, and retired
-instructions drift. Over a full hello build, three runs differ by up to 26
-branches out of 9.5 billion. That is the overcount rr documents on AMD, which
-it works around by setting a model-specific register bit that needs root.
-Reading the counter at every exit also doubled the wall time. So the counter
-stays an experiment until it is exact on the hardware people have.
+With exit time, computation between exits takes no virtual time. Counter time
+adds the guest's work: a guest-mode hardware counter of retired conditional
+branches, the counter rr uses, read at every exit and worth a nanosecond a
+branch. The count is read only at exits, which are fixed points in the
+guest's instruction stream, so it is the same on every run when the counter is
+exact. It is on Intel. On AMD Zen it overcounts around locked instructions
+unless the workaround rr documents is set, a bit in a model-specific register
+that needs root; `rewind pmu enable` sets it and leaves a note in /run for
+runs as the user. A self-test that provokes the overcount can pass by chance
+without the workaround, so on AMD counter time also needs the workaround to be
+known to be set. [pmu.md](pmu.md) is the user's side of this.
 
 ## Why not QEMU, and why not bhyve
 
@@ -370,20 +394,6 @@ hypervisor. The guest kernel cooperates, so interrupts only ever arrive at
 exits the guest made, and stock KVM does the rest. The same idea underlies
 the cooperative deterministic hypervisor described at
 [redvice.org](https://redvice.org/2026/deterministic-hypervisor/).
-
-## Roadmap
-
-- **gdb at a step.** A gdb stub on the restored machine, positioned in the
-  address space of a chosen process, with the job's binaries available for
-  symbols.
-- **A shell at a step.** A fork whose guest gets an interactive shell next to
-  the paused job, with its input recorded so the fork still replays.
-- **Exporting runs.** A single file holding the manifest, trace, keyframes
-  and the pages they reference, to attach to an issue.
-- **Parallel `check`**, one machine per core.
-- **Work-proportional time** once a counter is exact, or with rr's AMD
-  workaround where the user can apply it.
-- **More than one vCPU**, serialized, as the Red Vice design does.
 
 ## Product
 

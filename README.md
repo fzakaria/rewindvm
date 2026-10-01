@@ -121,6 +121,10 @@ $ rewind log <run> --steps
 $ rewind ps <run> --at <step>
 $ rewind cat <run> <step> /build/env-vars
 
+# a shell inside the VM at a step, or gdb on it, in a throwaway fork
+$ rewind shell <run> <step> --pid <pid>
+$ rewind gdb <run> <step>
+
 # branch a run at a step under another schedule, or replay it exactly
 $ rewind fork <run> <step> --schedule 2
 $ rewind replay <run>
