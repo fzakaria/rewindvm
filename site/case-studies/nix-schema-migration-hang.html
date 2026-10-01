@@ -414,14 +414,15 @@ same result under all 257 schedules</code></pre>
           <a
             href="https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-schema-migration-hang.rwd"
             >nix-schema-migration-hang.rwd</a
-          >, the trace alone, which the desktop app opens.
+          >, the trace alone, which the desktop app opens. <code>rewind import</code> and the app
+          both take the URL, and unpack the file as it downloads:
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> curl -LO https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-schema-migration-hang-replayable.rwd</span>
-<span class="cmd"><span class="prompt">$</span> rewind import nix-schema-migration-hang-replayable.rwd</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind import https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-schema-migration-hang-replayable.rwd</span>
 <span class="cmd"><span class="prompt">$</span> rewind replay 6b438713</span>
-<span class="cmd"><span class="prompt">$</span> rewind shell 6b438713 &lt;step&gt;</span></code></pre>
+<span class="cmd"><span class="prompt">$</span> rewind shell 6b438713 &lt;step&gt;</span>
+<span class="cmd"><span class="prompt">$</span> rewind-app https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-schema-migration-hang.rwd</span></code></pre>
         <p>How they were made:</p>
         <pre
           class="console"

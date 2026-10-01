@@ -267,13 +267,14 @@ Both files are in the
 [nix-gc-closure-sigpipe-replayable.rwd](https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-gc-closure-sigpipe-replayable.rwd), with
 everything needed to replay the failure on another AMD machine from Zen 2 on,
 and [nix-gc-closure-sigpipe.rwd](https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-gc-closure-sigpipe.rwd), the trace alone, which the
-desktop app opens.
+desktop app opens. `rewind import` and the app both take the URL, and
+unpack the file as it downloads:
 
 ```console
-$ curl -LO https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-gc-closure-sigpipe-replayable.rwd
-$ rewind import nix-gc-closure-sigpipe-replayable.rwd
+$ rewind import https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-gc-closure-sigpipe-replayable.rwd
 $ rewind replay c799a9cf
 $ rewind shell c799a9cf <step>
+$ rewind-app https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-gc-closure-sigpipe.rwd
 ```
 
 How they were made:

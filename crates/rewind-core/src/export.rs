@@ -102,24 +102,52 @@ pub fn export(home: &Home, run: &Run, contents: Contents, out: &Path) -> Result<
     Ok(())
 }
 
+/// What `rewind import` and the app take a URL by: http and https.
+const URL_SCHEMES: &[&str] = &["https://", "http://"];
+
+/// Whether `source` names a URL to download rather than a file.
+pub fn is_url(source: &str) -> bool {
+    URL_SCHEMES.iter().any(|scheme| source.starts_with(scheme))
+}
+
 /// Reads a `.rwd` file into the home and returns the run. A replayable
 /// export's inputs land in the home too, and its manifest is rewritten to
 /// point at them.
 pub fn import(home: &Home, file: &Path) -> Result<Run> {
+    let reader = File::open(file).with_context(|| format!("opening {}", file.display()))?;
+    import_from(home, reader, &file.display().to_string())
+}
+
+/// Downloads a `.rwd` file from `url` into the home, unpacking it as it
+/// arrives, and returns the run.
+pub fn import_url(home: &Home, url: &str) -> Result<Run> {
+    let response = ureq::get(url)
+        .call()
+        .with_context(|| format!("downloading {url}"))?;
+    let reader = response.into_body().into_reader();
+    import_from(home, reader, url)
+}
+
+/// Reads an export from `reader` into the home; `source` names it in
+/// errors.
+fn import_from(home: &Home, reader: impl Read, source: &str) -> Result<Run> {
     let staging = home
         .root()
         .join(format!("importing-{}", std::process::id()));
     let _ = fs::remove_dir_all(&staging);
     fs::create_dir_all(&staging)?;
-    let result = unpack_and_place(home, file, &staging);
+    let result = unpack_and_place(home, reader, source, &staging);
     let _ = fs::remove_dir_all(&staging);
     result
 }
 
-fn unpack_and_place(home: &Home, file: &Path, staging: &Path) -> Result<Run> {
-    let decoder = zstd::Decoder::new(
-        File::open(file).with_context(|| format!("opening {}", file.display()))?,
-    )?;
+fn unpack_and_place(
+    home: &Home,
+    reader: impl Read,
+    source: &str,
+    staging: &Path,
+) -> Result<Run> {
+    let decoder = zstd::Decoder::new(reader)?;
     let mut tar = tar::Archive::new(decoder);
     let mut store: Option<Store> = None;
     for entry in tar.entries()? {
@@ -129,7 +157,7 @@ fn unpack_and_place(home: &Home, file: &Path, staging: &Path) -> Result<Run> {
             .components()
             .any(|c| !matches!(c, std::path::Component::Normal(_)))
         {
-            bail!("{} holds an unsafe path {}", file.display(), path.display());
+            bail!("{source} holds an unsafe path {}", path.display());
         }
         // Pages go straight into the store; everything else is staged.
         if path.starts_with(PAGES_DIR) {
@@ -146,8 +174,7 @@ fn unpack_and_place(home: &Home, file: &Path, staging: &Path) -> Result<Run> {
                 .unwrap_or_default();
             if hex(&hash) != named {
                 bail!(
-                    "page {named} in {} does not match its contents",
-                    file.display()
+                    "page {named} in {source} does not match its contents"
                 );
             }
             continue;

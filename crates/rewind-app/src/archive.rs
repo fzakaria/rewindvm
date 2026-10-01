@@ -25,6 +25,10 @@ const CACHE_SUBDIR: &str = "rewind/imported";
 const XDG_CACHE_ENV: &str = "XDG_CACHE_HOME";
 const HOME_CACHE_DIR: &str = ".cache";
 
+/// What a run can be named by instead of a path: http and https URLs of
+/// .rwd files.
+const URL_SCHEMES: &[&str] = &["https://", "http://"];
+
 /// The name used for a run whose manifest has no id.
 const NO_ID: &str = "unnamed";
 
@@ -50,6 +54,23 @@ pub fn import_file(path: &Path) -> Result<PathBuf> {
     let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let into = cache_dir().context("no HOME to unpack the run into")?;
     import(file, &into).with_context(|| format!("unpacking {}", path.display()))
+}
+
+/// Whether `path` is a URL of an export rather than a path on disk.
+pub fn is_url(path: &Path) -> bool {
+    let name = path.to_string_lossy();
+    URL_SCHEMES.iter().any(|scheme| name.starts_with(scheme))
+}
+
+/// Downloads an export from `url` into the cache, unpacking it as it
+/// arrives, and returns the run's directory.
+pub fn import_url(url: &str) -> Result<PathBuf> {
+    let into = cache_dir().context("no HOME to unpack the run into")?;
+    let response = ureq::get(url)
+        .call()
+        .with_context(|| format!("downloading {url}"))?;
+    import(response.into_body().into_reader(), &into)
+        .with_context(|| format!("unpacking {url}"))
 }
 
 /// Unpacks an export held in memory, like the examples compiled into the
@@ -172,6 +193,16 @@ pub(crate) fn test_cache() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn urls_are_told_from_paths() {
+        // http and https name a download; anything else is a path, even
+        // one that looks like a host name.
+        assert!(is_url(Path::new("https://example.com/run.rwd")));
+        assert!(is_url(Path::new("http://example.com/run.rwd")));
+        assert!(!is_url(Path::new("runs/https/run.rwd")));
+        assert!(!is_url(Path::new("example.com/run.rwd")));
+    }
+
     // Archives built in the test the way the engine builds them: a tar of
     // named entries compressed with zstd, unpacked into a temporary
     // directory.

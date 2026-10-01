@@ -2,7 +2,8 @@
 //!
 //!     rewind-app [<run>] [--compare <run>] [--step <n>]
 //!
-//! A run is a run directory, a .rwd export or a bare trace file.
+//! A run is a run directory, a .rwd export, an http or https URL of one,
+//! or a bare trace file.
 //!
 //! Without a run, the window opens on an empty state with an "Open run"
 //! button.
@@ -15,7 +16,7 @@ use rewind_app::engine::CliEngine;
 use rewind_app::run::Session;
 use rewind_app::ui::{self, Launch};
 
-const USAGE: &str = "usage: rewind-app [<run>] [--compare <run>] [--step <n>]\n\na run is a run directory, a .rwd export, or a bare trace file";
+const USAGE: &str = "usage: rewind-app [<run>] [--compare <run>] [--step <n>]\n\na run is a run directory, a .rwd export, an https URL of one, or a bare trace file";
 
 /// The command line, parsed.
 struct Args {
@@ -127,6 +128,13 @@ fn main() -> ExitCode {
 
     // Runs named on the command line are read before the window opens, so
     // a bad path fails here with a message rather than in an empty window.
+    for url in [&args.run, &args.compare]
+        .into_iter()
+        .flatten()
+        .filter(|p| rewind_app::archive::is_url(p))
+    {
+        eprintln!("rewind-app: downloading {}", url.display());
+    }
     let session = match &args.run {
         None => None,
         Some(run) => match Session::open(run, args.compare.as_deref()) {

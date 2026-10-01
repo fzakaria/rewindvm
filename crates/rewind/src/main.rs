@@ -287,7 +287,11 @@ enum Command {
         replayable: bool,
     },
     /// Read a .rwd file into the local runs.
-    Import { file: PathBuf },
+    Import {
+        /// A .rwd file, or an http or https URL of one, which is unpacked
+        /// as it downloads.
+        file: String,
+    },
     /// List runs, newest first.
     Ls,
     /// Print a run's output, up to a step.
@@ -802,7 +806,12 @@ fn run(cli: Cli) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Command::Import { file } => {
-            let run = export::import(&home, &file)?;
+            let run = if export::is_url(&file) {
+                eprintln!("rewind: downloading {file}");
+                export::import_url(&home, &file)?
+            } else {
+                export::import(&home, std::path::Path::new(&file))?
+            };
             println!("{}", show::summary(&run));
             Ok(ExitCode::SUCCESS)
         }

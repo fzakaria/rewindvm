@@ -138,6 +138,7 @@ $ rewind replay <run>
 # share a run as one file
 $ rewind export <run> --replayable
 $ rewind import <file>.rwd
+$ rewind import https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-gc-closure-sigpipe-replayable.rwd
 ```
 
 ## The desktop app
@@ -164,7 +165,8 @@ both in a terminal pane below the scrubber.
 $ nix run github:fzakaria/rewindvm#app -- ~/.local/share/rewind/runs/<run>
 ```
 
-It opens `.rwd` exports too, and comes with an example run and a short tour.
+It opens `.rwd` exports too, from a file or an https URL, and comes with an
+example run and a short tour.
 See [pricing](https://rewindvm.dev/#pricing) for licenses.
 
 ## Case studies

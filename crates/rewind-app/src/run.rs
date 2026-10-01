@@ -147,7 +147,7 @@ pub enum Origin {
     Local,
     /// A bare trace file, without the run directory around it.
     TraceFile,
-    /// A `.rwd` export, unpacked into the cache.
+    /// A `.rwd` export, or a URL of one, unpacked into the cache.
     Export(PathBuf),
     /// One of the example runs compiled into the app.
     Example,
@@ -165,9 +165,13 @@ pub struct Run {
 }
 
 impl Run {
-    /// Opens a run directory or a bare trace file.
-    /// Opens a run directory, a `.rwd` export, or a bare trace file.
+    /// Opens a run directory, a `.rwd` export, an http or https URL of
+    /// one, or a bare trace file.
     pub fn open(path: &Path) -> Result<Run> {
+        if archive::is_url(path) {
+            let dir = archive::import_url(&path.to_string_lossy())?;
+            return Run::open_at(&dir, Origin::Export(path.to_path_buf()));
+        }
         if path.is_file() && archive::is_export(path) {
             let dir = archive::import_file(path)?;
             return Run::open_at(&dir, Origin::Export(path.to_path_buf()));

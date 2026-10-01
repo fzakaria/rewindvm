@@ -15,6 +15,9 @@ bincode = "1"
 # .rwd exports: a zstd-compressed tar.
 tar = "0.4"
 zstd = "0.13"
+# .rwd exports from https URLs. rustls with compiled-in root certificates,
+# so the static release binary needs nothing from the host.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 anyhow = "1"
 # Content hashes of images and run inputs.
 blake3 = { version = "1", features = ["mmap"] }

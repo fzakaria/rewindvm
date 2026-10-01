@@ -305,13 +305,14 @@ Both files are in the
 [nix-schema-migration-hang-replayable.rwd](https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-schema-migration-hang-replayable.rwd), with
 everything needed to replay the failure on another AMD machine from Zen 2 on,
 and [nix-schema-migration-hang.rwd](https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-schema-migration-hang.rwd), the trace alone, which the
-desktop app opens.
+desktop app opens. `rewind import` and the app both take the URL, and
+unpack the file as it downloads:
 
 ```console
-$ curl -LO https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-schema-migration-hang-replayable.rwd
-$ rewind import nix-schema-migration-hang-replayable.rwd
+$ rewind import https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-schema-migration-hang-replayable.rwd
 $ rewind replay 6b438713
 $ rewind shell 6b438713 <step>
+$ rewind-app https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-schema-migration-hang.rwd
 ```
 
 How they were made:
