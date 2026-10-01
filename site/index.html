@@ -257,7 +257,7 @@
                     width="1440"
                     height="900"
                     loading="lazy"
-                    alt="The Rewind desktop app on a failing mylib run: the timeline with the playhead in the check phase, the build log, the process tree, files written, and the SIGSEGV at 0x108 above where the run parted from a passing run of the same build. Opens the full-size image."
+                    alt="The Rewind desktop app on a failing mylib run: the timeline with the playhead in the check phase, the build log, the process tree, files written, the SIGSEGV at 0x108 above where the run parted from a passing run of the same build, and the Runs panel with the build's eight runs drawn as a tree of forks, red for failed and green for passed. Opens the full-size image."
                   />
                 </picture>
               </a>
@@ -287,6 +287,13 @@
               </button>
               <button type="button" class="pin pin-5" aria-label="5: the Fork from here button">
                 5
+              </button>
+              <button
+                type="button"
+                class="pin pin-6"
+                aria-label="6: the Runs panel, every run of the build as a tree of forks"
+              >
+                6
               </button>
             </div>
             <figcaption>The real app, on a real failing run.</figcaption>
@@ -321,6 +328,15 @@
               <p>
                 Branch at the playhead under a new schedule, reschedule requests plus up to 50
                 &micro;s of timer slack, so the threads interleave differently from there on.
+              </p>
+            </li>
+            <li class="tour-card" id="tour-6" tabindex="0">
+              <h3>Every run of this build</h3>
+              <p>
+                The run as recorded, the schedules <code>rewind check</code> tried and every fork,
+                drawn as a tree: each fork branches off the run it came from, red for failed and
+                green for passed. Click one to open it beside its parent; right-click to compare,
+                copy or remove it with its forks.
               </p>
             </li>
           </ol>

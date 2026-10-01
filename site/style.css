@@ -1078,23 +1078,28 @@ a:focus-visible {
 }
 /* The build log, in the space right of the log lines. */
 .pin-2 {
-  left: 29.9%;
+  left: 25.4%;
   top: 55.6%;
 }
 /* On the line between the process tree and the files; the card covers both. */
 .pin-3 {
-  left: 64.6%;
-  top: 61.3%;
+  left: 45.5%;
+  top: 61.4%;
 }
 /* The "At this step" panel, between the SIGSEGV and the divergence card. */
 .pin-4 {
-  left: 95.5%;
-  top: 42%;
+  left: 67.2%;
+  top: 46.7%;
 }
 /* The "Fork from here" button, just under it so the label stays readable. */
 .pin-5 {
   left: 93.3%;
   top: 23%;
+}
+/* The Runs panel, in the space under the tree of runs. */
+.pin-6 {
+  left: 84%;
+  top: 62%;
 }
 
 .tour-cards {
@@ -1173,6 +1178,7 @@ a:focus-visible {
 .tour:has(#tour-3:is(:hover, :focus-visible)) .pin-3,
 .tour:has(#tour-4:is(:hover, :focus-visible)) .pin-4,
 .tour:has(#tour-5:is(:hover, :focus-visible)) .pin-5,
+.tour:has(#tour-6:is(:hover, :focus-visible)) .pin-6,
 .pin:hover,
 .pin:focus {
   transform: scale(1.25);
@@ -1185,6 +1191,7 @@ a:focus-visible {
 .tour:has(.pin-3:is(:hover, :focus)) #tour-3,
 .tour:has(.pin-4:is(:hover, :focus)) #tour-4,
 .tour:has(.pin-5:is(:hover, :focus)) #tour-5,
+.tour:has(.pin-6:is(:hover, :focus)) #tour-6,
 .tour-card:hover,
 .tour-card:focus-visible {
   border-color: var(--amber);

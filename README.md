@@ -22,7 +22,7 @@
 </p>
 
 <p align="center">
-  <img src="site/img/app-failure.png" alt="The Rewind desktop app on a failing Nix build: the timeline of build phases, the build log up to the playhead, the processes alive at that step, the SIGSEGV that ended the test, and a card saying where this run parted from a passing run of the same build." />
+  <img src="site/img/app-failure.png" alt="The Rewind desktop app on a failing Nix build: the timeline of build phases, the build log up to the playhead, the processes alive at that step, the SIGSEGV that ended the test, a card saying where this run parted from a passing run of the same build, and the Runs panel with the build's runs drawn as a tree of forks." />
 </p>
 
 Rewind VM runs a Nix build, a test suite or any Linux command inside a KVM
@@ -164,6 +164,19 @@ playhead. Fork from here branches the run under a new schedule.
 Open shell starts a shell inside the VM at the playhead, in the build's
 directory with its environment, and Attach gdb opens gdb on the same fork,
 both in a terminal pane below the scrubber.
+
+Every run of a build is one family: the run as recorded, the schedules
+`rewind check` tried, and every fork. The start screen lists one line per
+family however many forks it has, and the runs pill in the header opens the
+Runs panel, which draws the family as a tree the way ISL and Jujutsu draw a
+history: each fork branches off the run it came from, red for failed and green
+for passed, with the step it forked at, its schedule and where it first
+differs. Click a run to open it beside its parent; right-click it to compare it
+with the run on screen, copy its id, or remove it with its forks.
+
+<p align="center">
+  <img src="docs/img/app-runs.png" alt="The Runs panel: eight runs of the mylib build as a tree, the passing run and two forks of it at step 2,198, the failing run with forks at steps 4,400 and 4,520 and a fork of a fork at 4,500, each with its exit status, schedule and where it first differs." />
+</p>
 
 <p align="center">
   <img src="docs/img/app-shell.png" alt="The Rewind desktop app at the step a test segfaulted, with a terminal pane below the scrubber running a shell inside the VM: ls, type gcc and head work in /build/mylib." />
