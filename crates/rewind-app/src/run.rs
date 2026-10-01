@@ -489,22 +489,24 @@ impl Session {
             program.as_deref(),
             &name_here,
         );
+        // Each line says which run and which step it means.
+        let step = thousands(point.step);
         let before = match &program {
             Some(p) => {
-                format!("Up to here {p} did the same things in the same order in both runs.")
+                format!("{p} did the same things in the same order in both runs until step {step}.")
             }
-            None => "Up to here both runs did the same things in the same order.".to_string(),
+            None => format!("Both runs did the same things in the same order until step {step}."),
         };
         let other_run =
             if other.verdict() == Verdict::Passed && self.run.verdict() == Verdict::Failed {
-                "The passing run".to_string()
+                "the passing run".to_string()
             } else {
-                format!("Run {other_label}")
+                format!("run {other_label}")
             };
         let mut lines = vec![
             before,
-            format!("Next, this run: {}.", difference.here),
-            format!("{other_run}: {}.", difference.there),
+            format!("Then in this run, {}.", difference.here),
+            format!("In {other_run}, {}.", difference.there),
         ];
         lines.extend(difference.detail);
         Some(Agreement::Parted {
