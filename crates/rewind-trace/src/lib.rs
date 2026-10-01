@@ -197,10 +197,10 @@ impl Trace {
                         // A forked child runs its parent's program until it
                         // execs, and Linux shows it under that command line.
                         let parent_argv = procs.get(&e.pid).map(|p| p.argv.clone());
-                        if let (Some(argv), Some(c)) = (parent_argv, procs.get_mut(child)) {
-                            if c.argv.is_empty() {
-                                c.argv = argv;
-                            }
+                        if let (Some(argv), Some(c)) = (parent_argv, procs.get_mut(child))
+                            && c.argv.is_empty()
+                        {
+                            c.argv = argv;
                         }
                     }
                 }
