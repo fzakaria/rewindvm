@@ -227,6 +227,77 @@ where /bin/sh /build/script4dnMbS.sh first behaves differently:
           done reaches thread 41 at step 1167. Everything the loop will see is there before it reads
           anything.
         </p>
+        <div class="tour tour-article">
+          <figure class="tour-shot">
+            <div class="tour-frame">
+              <a class="tour-link" href="../img/devenv-sigchld.png">
+                <picture>
+                  <source srcset="../img/devenv-sigchld.webp" type="image/webp" />
+                  <img
+                    src="../img/devenv-sigchld.png"
+                    width="1440"
+                    height="600"
+                    loading="lazy"
+                    alt="The Rewind desktop app on the failing devenv run at step 1,167, compared with the passing run 15ef00bf: the build log stops at running 1 test, SIGCHLD has reached thread 41, and the run diverged at step 1,163. Opens the full-size image."
+                  />
+                </picture>
+              </a>
+              <a
+                class="pin pin-1"
+                href="#tour-1"
+                style="left: 90.3%; top: 16.7%"
+                aria-label="1: the timeline"
+                >1</a
+              >
+              <a
+                class="pin pin-2"
+                href="#tour-2"
+                style="left: 20.8%; top: 52.2%"
+                aria-label="2: the build log"
+                >2</a
+              >
+              <a
+                class="pin pin-3"
+                href="#tour-3"
+                style="left: 96.9%; top: 57%"
+                aria-label="3: the step's event, SIGCHLD"
+                >3</a
+              >
+              <a
+                class="pin pin-4"
+                href="#tour-4"
+                style="left: 97.2%; top: 80%"
+                aria-label="4: where the run diverged"
+                >4</a
+              >
+            </div>
+            <figcaption>
+              The app on the failing run e8e78754 at step 1,167, compared with the passing run
+              15ef00bf.
+            </figcaption>
+          </figure>
+          <ol class="tour-cards">
+            <li class="tour-card" id="tour-1" tabindex="0">
+              <h3>The timeline</h3>
+              <p>Step 1,167 of 1,236, four steps after the run left the passing one.</p>
+            </li>
+            <li class="tour-card" id="tour-2" tabindex="0">
+              <h3>Build log</h3>
+              <p>
+                The test has started and nothing from the task is in the log. Its three lines are in
+                the pipe, unread.
+              </p>
+            </li>
+            <li class="tour-card" id="tour-3" tabindex="0">
+              <h3>At this step</h3>
+              <p>SIGCHLD reaches thread 41 of the test process: the task's shell has exited.</p>
+            </li>
+            <li class="tour-card" id="tour-4" tabindex="0">
+              <h3>Divergence</h3>
+              <p>The run left 15ef00bf at step 1,163, where the shell starts the task's script.</p>
+            </li>
+          </ol>
+        </div>
         <p>
           <code>rewind gdb</code> opens gdb on a fork of the run at a step, with the symbols of the
           process running there, loaded from the VM. A breakpoint on <code>read</code> for the

@@ -1160,6 +1160,17 @@ a:focus-visible {
     0 0 0 6px rgba(242, 165, 65, 0.45),
     0 0 24px 6px rgba(242, 165, 65, 0.5);
 }
+/* The tour in an article: the screenshot as wide as the article's code
+   blocks, and the cards in two columns under it. */
+.tour-article {
+  --bleed: min(960px, 100vw - 40px);
+  display: block;
+  margin: 28px calc((var(--bleed) - 100%) / -2);
+}
+.tour-article .tour-cards {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-top: 18px;
+}
 .tour:has(.pin-1:is(:hover, :focus-visible)) #tour-1,
 .tour:has(.pin-2:is(:hover, :focus-visible)) #tour-2,
 .tour:has(.pin-3:is(:hover, :focus-visible)) #tour-3,
@@ -1470,6 +1481,9 @@ a.card:hover {
 @media (max-width: 600px) {
   .panels {
     grid-template-columns: 1fr;
+  }
+  .tour-article .tour-cards {
+    grid-template-columns: minmax(0, 1fr);
   }
   .panel-swipe {
     display: flex;

@@ -35,7 +35,7 @@ LINK_MAP = {
 
 # The app's screenshot, shown in the Nix tutorial after the first paragraph
 # of the section that introduces the app.
-FIGURE = """<figure class="shot">
+NIX_FIGURE = """<figure class="shot">
   <picture>
     <source srcset="../img/app-failure.webp" type="image/webp" />
     <img
@@ -52,16 +52,67 @@ FIGURE = """<figure class="shot">
 </figure>
 """
 
+# The app on the failing devenv run at the step where SIGCHLD reaches the
+# test process, shown after the paragraph that walks through those events.
+# Numbered pins sit over the screenshot with a card for each below it, as
+# on the front page; the pins' positions are percentages of the 1440x600
+# image.
+DEVENV_FIGURE = """<div class="tour tour-article">
+  <figure class="tour-shot">
+    <div class="tour-frame">
+      <a class="tour-link" href="../img/devenv-sigchld.png">
+        <picture>
+          <source srcset="../img/devenv-sigchld.webp" type="image/webp" />
+          <img
+            src="../img/devenv-sigchld.png"
+            width="1440"
+            height="600"
+            loading="lazy"
+            alt="The Rewind desktop app on the failing devenv run at step 1,167, compared with the passing run 15ef00bf: the build log stops at running 1 test, SIGCHLD has reached thread 41, and the run diverged at step 1,163. Opens the full-size image."
+          />
+        </picture>
+      </a>
+      <a class="pin pin-1" href="#tour-1" style="left: 90.3%; top: 16.7%" aria-label="1: the timeline">1</a>
+      <a class="pin pin-2" href="#tour-2" style="left: 20.8%; top: 52.2%" aria-label="2: the build log">2</a>
+      <a class="pin pin-3" href="#tour-3" style="left: 96.9%; top: 57%" aria-label="3: the step's event, SIGCHLD">3</a>
+      <a class="pin pin-4" href="#tour-4" style="left: 97.2%; top: 80%" aria-label="4: where the run diverged">4</a>
+    </div>
+    <figcaption>
+      The app on the failing run e8e78754 at step 1,167, compared with the passing run 15ef00bf.
+    </figcaption>
+  </figure>
+  <ol class="tour-cards">
+    <li class="tour-card" id="tour-1" tabindex="0">
+      <h3>The timeline</h3>
+      <p>Step 1,167 of 1,236, four steps after the run left the passing one.</p>
+    </li>
+    <li class="tour-card" id="tour-2" tabindex="0">
+      <h3>Build log</h3>
+      <p>The test has started and nothing from the task is in the log. Its three lines are in the pipe, unread.</p>
+    </li>
+    <li class="tour-card" id="tour-3" tabindex="0">
+      <h3>At this step</h3>
+      <p>SIGCHLD reaches thread 41 of the test process: the task's shell has exited.</p>
+    </li>
+    <li class="tour-card" id="tour-4" tabindex="0">
+      <h3>Divergence</h3>
+      <p>The run left 15ef00bf at step 1,163, where the shell starts the task's script.</p>
+    </li>
+  </ol>
+</div>
+"""
+
 # Each page: its source, where it goes, the line above its title, its meta
 # description, what its table of contents is called, an optional figure
-# section, and the card that closes it.
+# with the section and the paragraph of that section it follows, and the
+# card that closes it.
 PAGES = [
     dict(
         source="docs/tutorial-nix.md",
         eyebrow="Tutorial &middot; Nix",
         description="Install Rewind VM, find the thread interleaving that breaks a Nix derivation's tests, look at the crash step by step, fork it, and check the fix.",
         toc="Steps",
-        figure_after="scrub-it-in-the-app",
+        figure=("scrub-it-in-the-app", 1, NIX_FIGURE),
         next=(
             "tutorials/container.html",
             "Tutorial &middot; Container",
@@ -74,7 +125,7 @@ PAGES = [
         eyebrow="Tutorial &middot; Container",
         description="Run a test suite from a Docker image in Rewind VM, find the thread interleaving that breaks it, and replay the failure exactly. No Nix needed.",
         toc="Steps",
-        figure_after=None,
+        figure=None,
         next=(
             "tutorials/nix.html",
             "Tutorial &middot; Nix",
@@ -87,7 +138,7 @@ PAGES = [
         eyebrow="Case study",
         description="Rewind VM's first run of Nix's functional tests hit a SIGPIPE in gc-closure.sh that no one had reported: a pipe into head -n1 under pipefail, and bash writing a two-line printf in two writes.",
         toc="Sections",
-        figure_after=None,
+        figure=None,
         next=(
             "case-studies/nix-schema-migration-hang.html",
             "Case study",
@@ -100,7 +151,7 @@ PAGES = [
         eyebrow="Case study",
         description="A known hang in Nix's store schema migration, reproduced in Rewind VM and pinned to SQLITE_BUSY_SNAPSHOT with gdb inside the VM, with both upstream fixes checked.",
         toc="Sections",
-        figure_after=None,
+        figure=None,
         next=(
             "case-studies/devenv-task-output-race.html",
             "Case study",
@@ -113,7 +164,7 @@ PAGES = [
         eyebrow="Case study",
         description="A known devenv bug that dropped a task's last lines of output, reproduced in Rewind VM, traced with gdb to tokio::select! taking the child's exit before a buffered line, and the fix checked under every schedule.",
         toc="Sections",
-        figure_after=None,
+        figure=("where-the-third-line-went", 2, DEVENV_FIGURE),
         next=(
             "case-studies/nix-gc-closure-sigpipe.html",
             "Case study",
@@ -433,6 +484,7 @@ def convert(cfg):
     # The table of contents goes before the first section.
     headings = [b[1] for b in blocks if b[0] == "h2"]
     in_section = None
+    paragraphs = 0
     for kind, payload in blocks:
         if kind == "h2":
             if in_section is None:
@@ -446,18 +498,18 @@ def convert(cfg):
             else:
                 out.append("</section>\n")
             in_section = slug(payload)
+            paragraphs = 0
             out.append(
                 f'\n<section class="step">\n<h2 id="{in_section}">{inline(payload, source, page)}</h2>\n'
             )
             continue
         if kind == "p":
             out.append(f"<p>{inline(payload, source, page)}</p>\n")
-            if (
-                cfg["figure_after"]
-                and cfg["figure_after"] == in_section
-                and FIGURE not in out
-            ):
-                out.append(FIGURE)
+            paragraphs += 1
+
+            # The page's figure follows the paragraph its config names.
+            if cfg["figure"] and cfg["figure"][:2] == (in_section, paragraphs):
+                out.append(cfg["figure"][2])
             continue
         if kind == "ul":
             out.append(
