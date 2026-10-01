@@ -41,27 +41,11 @@
       <p class="eyebrow">Case study</p>
       <h1>Case study: lost task output in devenv</h1>
       <p>
-        In November 2025 devenv could drop the last lines a task printed: a task with
-        <code>showOutput = true</code> showed its output two lines short. This is a known bug,
-        reported by <a href="https://github.com/tebriel">@tebriel</a> as
-        <a href="https://github.com/cachix/devenv/issues/2281">cachix/devenv#2281</a> and fixed by
-        <a href="https://github.com/domenkozar">@domenkozar</a> in
-        <a href="https://github.com/cachix/devenv/pull/2296">cachix/devenv#2296</a>. The pull
-        request added no test, so this case study adds one: a task that prints three lines and
-        fails. On the host it passed 2000 runs out of 2000. In Rewind VM it failed under 216 of 257
-        schedules on the version before the fix, and gdb inside the VM shows the third line sitting
-        in the reader's buffer when the task was reported finished. On the fix it passed all 257.
-      </p>
-      <p>
-        The derivations are in
-        <a href="https://github.com/fzakaria/rewindvm/blob/main/examples/case-studies/flake.nix"
-          >examples/case-studies/flake.nix</a
-        >, and the commands below run from the root of a clone of this repository.
-      </p>
-      <p>
-        Every transcript below is real output from <code>rewind</code> 0.2.0 on a 16 thread AMD Zen
-        4 laptop running NixOS, built from commit 7408b62, with counter time on, trimmed where it
-        says so.
+        In November 2025 <a href="https://devenv.sh/">devenv</a> could drop the last lines a task
+        printed: a task with <code>showOutput = true</code> showed its output two lines short (<a
+          href="https://github.com/cachix/devenv/issues/2281"
+          >cachix/devenv#2281</a
+        >).
       </p>
 
       <nav class="toc" aria-label="Sections">
@@ -75,54 +59,52 @@
           <li><a href="#the-fix-checked">The fix, checked</a></li>
           <li><a href="#on-the-host">On the host</a></li>
           <li><a href="#the-recording">The recording</a></li>
-          <li><a href="#reproducing-it">Reproducing it</a></li>
         </ol>
       </nav>
 
       <section class="step">
         <h2 id="the-software">The software</h2>
         <p>
-          <a href="https://devenv.sh">devenv</a> builds developer environments with Nix and runs
-          tasks in them: commands with dependencies between them, such as a database migration
-          before a test suite. The <code>devenv-tasks</code> crate runs each task's command as a
-          child process on tokio and collects what it prints. At
+          devenv builds developer environments with Nix and runs tasks in them: commands with
+          dependencies between them, such as a database migration before a test suite. The
+          <code>devenv-tasks</code> crate runs each task's command as a child process on tokio and
+          collects what it prints. At
           <a
             href="https://github.com/cachix/devenv/blob/cecb0452cacd9c524ccfc973d5caffff834cbf02/devenv-tasks/src/task_state.rs#L365-L431"
             >cecb0452</a
-          >, the main branch just before the fix, <code>TaskState</code> reads the child's standard
-          output and standard error a line at a time and waits for it to exit, all in one
-          <code>tokio::select!</code> loop:
+          >, <code>TaskState</code> reads the child's standard output and standard error a line at a
+          time and waits for it to exit, all in one <code>tokio::select!</code> loop:
         </p>
-        <pre class="console"><code>        loop {
-            tokio::select! {
-                result = stdout_reader.next_line(), if !stdout_closed =&gt; {
-                    match result {
-                        Ok(Some(line)) =&gt; {
-                            ...
-                            stdout_lines.push((std::time::Instant::now(), line));
+        <pre class="console rust"><code>        <span class="keyword">loop</span> {
+            tokio::<span class="macro">select!</span> {
+                result = stdout_reader.next_line(), <span class="keyword">if</span> !stdout_closed =&gt; {
+                    <span class="keyword">match</span> result {
+                        <span class="type">Ok</span>(<span class="type">Some</span>(line)) =&gt; {
+                            <span class="elide">...</span>
+                            stdout_lines.push((std::time::<span class="type">Instant</span>::now(), line));
                         },
-                        Ok(None) =&gt; {
-                            stdout_closed = true;
+                        <span class="type">Ok</span>(<span class="type">None</span>) =&gt; {
+                            stdout_closed = <span class="keyword">true</span>;
                         },
-                        ...
+                        <span class="elide">...</span>
                     }
                 }
-                result = stderr_reader.next_line(), if !stderr_closed =&gt; {
-                    ...
+                result = stderr_reader.next_line(), <span class="keyword">if</span> !stderr_closed =&gt; {
+                    <span class="elide">...</span>
                 }
-                result = child.wait() =&gt; {
-                    match result {
-                        Ok(status) =&gt; {
-                            ...
-                            if status.success() {
-                                return Ok(TaskCompleted::Success(now.elapsed(), Self::get_outputs(&amp;outputs_file).await));
-                            } else {
-                                return Ok(TaskCompleted::Failed(
+<span class="mark">                result = child.wait() =&gt; {</span>
+                    <span class="keyword">match</span> result {
+                        <span class="type">Ok</span>(status) =&gt; {
+                            <span class="elide">...</span>
+                            <span class="keyword">if</span> status.success() {
+                                <span class="keyword">return</span> <span class="type">Ok</span>(<span class="type">TaskCompleted</span>::<span class="type">Success</span>(now.elapsed(), <span class="keyword">Self</span>::get_outputs(&amp;outputs_file).<span class="keyword">await</span>));
+                            } <span class="keyword">else</span> {
+                                <span class="keyword">return</span> <span class="type">Ok</span>(<span class="type">TaskCompleted</span>::<span class="type">Failed</span>(
                                     now.elapsed(),
-                                    TaskFailure {
+                                    <span class="type">TaskFailure</span> {
                                         stdout: stdout_lines,
                                         stderr: stderr_lines,
-                                        error: format!("Task exited with status: {status}"),
+                                        error: <span class="macro">format!</span>(<span class="string">"Task exited with status: {status}"</span>),
                                     },
                                 ));
                             }
@@ -139,33 +121,33 @@
           The derivation builds <code>devenv-tasks</code>' unit tests at cecb0452, in release mode
           with debug info, and adds one test to them:
         </p>
-        <pre class="console"><code>#[tokio::test]
-async fn test_failed_task_keeps_last_lines() -&gt; Result&lt;(), Error&gt; {
-    let temp_dir = TempDir::new().unwrap();
-    let db_path = temp_dir.path().join("tasks.db");
-    let script = create_script("#!/bin/sh\necho line1\necho line2\necho line3\nexit 1\n")?;
-    let tasks = Tasks::builder(
-        Config::try_from(json!({
-            "roots": ["myapp:task_1"],
-            "run_mode": "all",
-            "tasks": [{ "name": "myapp:task_1", "command": script.to_str().unwrap() }]
+        <pre class="console rust"><code><span class="attr">#[tokio::test]</span>
+<span class="keyword">async</span> <span class="keyword">fn</span> test_failed_task_keeps_last_lines() -&gt; <span class="type">Result</span>&lt;(), <span class="type">Error</span>&gt; {
+    <span class="keyword">let</span> temp_dir = <span class="type">TempDir</span>::new().unwrap();
+    <span class="keyword">let</span> db_path = temp_dir.path().join(<span class="string">"tasks.db"</span>);
+    <span class="keyword">let</span> script = create_script(<span class="string">"#!/bin/sh\necho line1\necho line2\necho line3\nexit 1\n"</span>)?;
+    <span class="keyword">let</span> tasks = <span class="type">Tasks</span>::builder(
+        <span class="type">Config</span>::try_from(<span class="macro">json!</span>({
+            <span class="string">"roots"</span>: [<span class="string">"myapp:task_1"</span>],
+            <span class="string">"run_mode"</span>: <span class="string">"all"</span>,
+            <span class="string">"tasks"</span>: [{ <span class="string">"name"</span>: <span class="string">"myapp:task_1"</span>, <span class="string">"command"</span>: script.to_str().unwrap() }]
         }))
         .unwrap(),
-        VerbosityLevel::Verbose,
-        Shutdown::new(),
+        <span class="type">VerbosityLevel</span>::<span class="type">Verbose</span>,
+        <span class="type">Shutdown</span>::new(),
     )
     .with_db_path(db_path)
     .build()
-    .await?;
-    tasks.run().await;
-    match inspect_tasks(&amp;tasks).await.as_slice() {
-        [(_, TaskStatus::Completed(TaskCompleted::Failed(_, failure)))] =&gt; {
-            let lines: Vec&lt;&amp;str&gt; = failure.stdout.iter().map(|(_, l)| l.as_str()).collect();
-            assert_eq!(lines, vec!["line1", "line2", "line3"]);
+    .<span class="keyword">await</span>?;
+    tasks.run().<span class="keyword">await</span>;
+    <span class="keyword">match</span> inspect_tasks(&amp;tasks).<span class="keyword">await</span>.as_slice() {
+        [(_, <span class="type">TaskStatus</span>::<span class="type">Completed</span>(<span class="type">TaskCompleted</span>::<span class="type">Failed</span>(_, failure)))] =&gt; {
+            <span class="keyword">let</span> lines: <span class="type">Vec</span>&lt;&amp;str&gt; = failure.stdout.iter().map(|(_, l)| l.as_str()).collect();
+            <span class="macro">assert_eq!</span>(lines, <span class="macro">vec!</span>[<span class="string">"line1"</span>, <span class="string">"line2"</span>, <span class="string">"line3"</span>]);
         }
-        other =&gt; panic!("unexpected task statuses: {other:?}"),
+        other =&gt; <span class="macro">panic!</span>(<span class="string">"unexpected task statuses: {other:?}"</span>),
     }
-    Ok(())
+    <span class="type">Ok</span>(())
 }</code></pre>
         <p>
           <code>create_script</code>, <code>inspect_tasks</code> and the builder are the test
@@ -179,7 +161,7 @@ async fn test_failed_task_keeps_last_lines() -&gt; Result&lt;(), Error&gt; {
         <p>The first run in the VM failed:</p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind nix ./examples/case-studies#devenv-last-lines-before-2296</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind nix 'github:fzakaria/rewindvm?dir=examples/case-studies#devenv-last-lines-before-2296'</span>
 iteration 1
 
 running 1 test
@@ -201,13 +183,13 @@ rewind: run e8e787546e53d706 exited:101 after 1236 steps, 0.034s virtual, 4.262s
 <span class="cmd"><span class="prompt">$</span> rewind replay e8e78754</span>
 identical: 769 events over 1236 steps</code></pre>
         <p>
-          The task printed three lines and devenv reported two: the bug from the issue, which was
-          reported on devenv 1.10.0; cecb0452 is 1.10.1. Under 256 perturbed schedules most runs
-          lose the line:
+          The task printed three lines and devenv reported two, as in the issue. The issue was filed
+          against devenv 1.10.0, and cecb0452 is 1.10.1. Most of 256 perturbed schedules lose the
+          line as well:
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind check --all --schedules 256 ./examples/case-studies#devenv-last-lines-before-2296</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind check --all --schedules 256 'github:fzakaria/rewindvm?dir=examples/case-studies#devenv-last-lines-before-2296'</span>
 schedule   0: exited:101           1236 steps    run e8e787546e53d706
 schedule   1: exited:101           1304 steps    run 30e7aab93387ff1e
 schedule   2: exited:101           1329 steps    run 26f93146d1c600de
@@ -343,7 +325,7 @@ Breakpoint 2.1, devenv_tasks::task_state::{impl#1}::run::{async_fn#0}::{async_bl
         <p>The same test at the merge commit passes every schedule:</p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind check --all --schedules 256 ./examples/case-studies#devenv-last-lines-2296</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind check --all --schedules 256 'github:fzakaria/rewindvm?dir=examples/case-studies#devenv-last-lines-2296'</span>
 schedule   0: exited:0             1262 steps  9ab388bedc43  run 9ff400c5f5f23381
 schedule   1: exited:0             1323 steps  9ab388bedc43  run 07915157f8e6e409
 schedule   2: exited:0             1379 steps  9ab388bedc43  run 1ae585ef451a98ca
@@ -352,7 +334,8 @@ schedule   2: exited:0             1379 steps  9ab388bedc43  run 1ae585ef451a98c
 same result under all 257 schedules</code></pre>
         <p>
           All 44 of <code>devenv-tasks</code>' tests at the merge commit, the added one included,
-          also passed under 65 schedules (<code>./examples/case-studies#devenv-tasks-2296</code>).
+          also passed under 65 schedules
+          (<code>github:fzakaria/rewindvm?dir=examples/case-studies#devenv-tasks-2296</code>).
         </p>
       </section>
 
@@ -392,12 +375,11 @@ same result under all 257 schedules</code></pre>
           <a
             href="https://github.com/fzakaria/rewindvm/releases/download/case-studies/devenv-task-output-race-replayable.rwd"
             >devenv-task-output-race-replayable.rwd</a
-          >, with everything needed to replay the failure on another AMD machine from Zen 2 on, and
+          >, with everything needed to replay the failure, and
           <a
             href="https://github.com/fzakaria/rewindvm/releases/download/case-studies/devenv-task-output-race.rwd"
             >devenv-task-output-race.rwd</a
-          >, the trace alone, which the desktop app opens. <code>rewind import</code> and the app
-          both take the URL, and unpack the file as it downloads:
+          >, the trace alone, which the desktop app opens:
         </p>
         <pre
           class="console"
@@ -414,37 +396,6 @@ identical from the keyframe at step 512 to the end (3.25s)
 rewind: wrote devenv-task-output-race-replayable.rwd (185.0 MB)
 <span class="cmd"><span class="prompt">$</span> rewind export e8e78754 -o devenv-task-output-race.rwd</span>
 rewind: wrote devenv-task-output-race.rwd (9.8 KB)</code></pre>
-        <p>
-          Imported into an empty <code>REWIND_HOME</code>, the replayable export replays
-          identically:
-        </p>
-        <pre
-          class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind import devenv-task-output-race-replayable.rwd</span>
-e8e787546e53d706  exited:101         1236 steps  devenv-tasks-test-last-lines-before-2296
-<span class="cmd"><span class="prompt">$</span> rewind replay e8e78754</span>
-identical: 769 events over 1236 steps</code></pre>
-      </section>
-
-      <section class="step">
-        <h2 id="reproducing-it">Reproducing it</h2>
-        <p>
-          The derivation builds the test binary from devenv's source with
-          <code>rustPlatform.buildRustPackage</code>, appends the test above to
-          <code>devenv-tasks/src/tests/mod.rs</code>, and runs
-          <code>cargo test -p devenv-tasks --lib --release --no-run</code> with debug info and
-          symbols kept. A second derivation runs the binary with the test's name as its filter. Both
-          commits are inputs of the example flake, <code>devenv-before-2296</code> and
-          <code>devenv-2296</code>.
-        </p>
-        <p>
-          What the VM does before the test is part of its inputs. An earlier version of the
-          derivation that copied the crate's sources into <code>/build</code> before running the
-          test passed under all 257 schedules on the unfixed version: the copy changed when the
-          shell and the test process got the CPU, and with it whether the shell finished before the
-          loop started reading. Any change to the derivation is a different set of runs, and
-          <code>rewind check --all --schedules 256</code> is the way to find the failing ones.
-        </p>
       </section>
 
       <a class="card next" href="nix-gc-closure-sigpipe.html">

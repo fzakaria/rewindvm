@@ -8,14 +8,6 @@ detail of bash: it line-buffers its own standard output, so a two-line
 `printf` is two `write` calls. As of 2026-10-01 nothing about this is reported
 in the [Nix issue tracker](https://github.com/NixOS/nix/issues).
 
-The derivations are in
-[examples/case-studies/flake.nix](../../examples/case-studies/flake.nix), and
-the commands below run from the root of a clone of this repository.
-
-Every transcript below is real output from `rewind` 0.1.0 on a 16 thread AMD
-Zen 4 laptop running NixOS, built from commit 970be86, with counter time on,
-trimmed where it says so.
-
 ## The software
 
 The test came in with
@@ -44,7 +36,7 @@ down to the tests named. The first run of the whole suite in the VM failed in
 skipped building a plugin and a test program they need.) On its own:
 
 ```console
-$ rewind nix ./examples/case-studies#nix-git-gc-closure
+$ rewind nix 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-git-gc-closure'
 rewind: packing 217 store paths for nix-functional-gc-closure-2.36pre20260912_203f85b2
 ...
 +(gc-closure.sh:47) nix_gc_closure false --also-referrers
@@ -167,7 +159,7 @@ is free to run the woken reader first, and in this run the VM's scheduler did.
 Under Rewind, on the build of Nix master:
 
 ```console
-$ rewind check --all --schedules 256 ./examples/case-studies#nix-git-gc-closure
+$ rewind check --all --schedules 256 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-git-gc-closure'
 schedule   0: exited:1            70567 steps    run c799a9cfa98feda6
 schedule   1: exited:0            89014 steps  d5ede538f628  run 45a28f82dd829f3d
 ...
@@ -205,7 +197,7 @@ The same test from nixpkgs' Nix 2.35.2, which has the same line, failed in 1
 of 257 schedules (schedule 80), also with SIGPIPE at line 15:
 
 ```console
-$ rewind check --all --schedules 256 ./examples/case-studies#nix-gc-closure
+$ rewind check --all --schedules 256 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-gc-closure'
 ...
 schedule  80: exited:1            37256 steps    run 3edd52984245022c
 ...
@@ -246,7 +238,7 @@ With the change applied in the derivation's `postPatch`, all 65 schedules
 pass, including schedule 0:
 
 ```console
-$ rewind check --all ./examples/case-studies#nix-git-gc-closure-fixed
+$ rewind check --all 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-git-gc-closure-fixed'
 schedule   0: exited:0            79402 steps  d5ede538f628  run 0ed02b26ca34684f
 schedule   1: exited:0            88959 steps  d5ede538f628  run 5148a33cbc5b532b
 ...

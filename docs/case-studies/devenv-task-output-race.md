@@ -1,37 +1,20 @@
 # Case study: lost task output in devenv
 
-In November 2025 devenv could drop the last lines a task printed: a task
-with `showOutput = true` showed its output two lines short. This is a known
-bug, reported by [@tebriel](https://github.com/tebriel) as
-[cachix/devenv#2281](https://github.com/cachix/devenv/issues/2281) and fixed
-by [@domenkozar](https://github.com/domenkozar) in
-[cachix/devenv#2296](https://github.com/cachix/devenv/pull/2296). The pull
-request added no test, so this case study adds one: a task that prints three
-lines and fails. On the host it passed 2000 runs out of 2000. In Rewind VM it
-failed under 216 of 257 schedules on the version before the fix, and gdb
-inside the VM shows the third line sitting in the reader's buffer when the
-task was reported finished. On the fix it passed all 257.
-
-The derivations are in
-[examples/case-studies/flake.nix](../../examples/case-studies/flake.nix), and
-the commands below run from the root of a clone of this repository.
-
-Every transcript below is real output from `rewind` 0.2.0 on a 16 thread AMD
-Zen 4 laptop running NixOS, built from commit 7408b62, with counter time on,
-trimmed where it says so.
+In November 2025 [devenv](https://devenv.sh/) could drop the last lines a
+task printed: a task with `showOutput = true` showed its output two lines
+short ([cachix/devenv#2281](https://github.com/cachix/devenv/issues/2281)).
 
 ## The software
 
-[devenv](https://devenv.sh) builds developer environments with Nix and runs
+devenv builds developer environments with Nix and runs
 tasks in them: commands with dependencies between them, such as a database
 migration before a test suite. The `devenv-tasks` crate runs each task's
 command as a child process on tokio and collects what it prints. At
 [cecb0452](https://github.com/cachix/devenv/blob/cecb0452cacd9c524ccfc973d5caffff834cbf02/devenv-tasks/src/task_state.rs#L365-L431),
-the main branch just before the fix, `TaskState` reads the child's standard
-output and standard error a line at a time and waits for it to exit, all in
-one `tokio::select!` loop:
+`TaskState` reads the child's standard output and standard error a line at a
+time and waits for it to exit, all in one `tokio::select!` loop:
 
-```rust
+```rust {18}
         loop {
             tokio::select! {
                 result = stdout_reader.next_line(), if !stdout_closed => {
@@ -116,7 +99,7 @@ test binary with this one test selected.
 The first run in the VM failed:
 
 ```console
-$ rewind nix ./examples/case-studies#devenv-last-lines-before-2296
+$ rewind nix 'github:fzakaria/rewindvm?dir=examples/case-studies#devenv-last-lines-before-2296'
 iteration 1
 
 running 1 test
@@ -139,12 +122,12 @@ $ rewind replay e8e78754
 identical: 769 events over 1236 steps
 ```
 
-The task printed three lines and devenv reported two: the bug from the issue,
-which was reported on devenv 1.10.0; cecb0452 is 1.10.1. Under 256 perturbed schedules
-most runs lose the line:
+The task printed three lines and devenv reported two, as in the issue. The
+issue was filed against devenv 1.10.0, and cecb0452 is 1.10.1. Most of 256
+perturbed schedules lose the line as well:
 
 ```console
-$ rewind check --all --schedules 256 ./examples/case-studies#devenv-last-lines-before-2296
+$ rewind check --all --schedules 256 'github:fzakaria/rewindvm?dir=examples/case-studies#devenv-last-lines-before-2296'
 schedule   0: exited:101           1236 steps    run e8e787546e53d706
 schedule   1: exited:101           1304 steps    run 30e7aab93387ff1e
 schedule   2: exited:101           1329 steps    run 26f93146d1c600de
@@ -276,7 +259,7 @@ turns that branch off, and keeps reading until both pipes are closed:
 The same test at the merge commit passes every schedule:
 
 ```console
-$ rewind check --all --schedules 256 ./examples/case-studies#devenv-last-lines-2296
+$ rewind check --all --schedules 256 'github:fzakaria/rewindvm?dir=examples/case-studies#devenv-last-lines-2296'
 schedule   0: exited:0             1262 steps  9ab388bedc43  run 9ff400c5f5f23381
 schedule   1: exited:0             1323 steps  9ab388bedc43  run 07915157f8e6e409
 schedule   2: exited:0             1379 steps  9ab388bedc43  run 1ae585ef451a98ca
@@ -287,7 +270,7 @@ same result under all 257 schedules
 
 All 44 of `devenv-tasks`' tests at the merge commit, the added one included,
 also passed under 65 schedules
-(`./examples/case-studies#devenv-tasks-2296`).
+(`github:fzakaria/rewindvm?dir=examples/case-studies#devenv-tasks-2296`).
 
 ## On the host
 
@@ -304,11 +287,10 @@ The issue's reporter saw it in real use, on an aarch64 Linux machine.
 
 Both files are in the
 [case-studies release](https://github.com/fzakaria/rewindvm/releases/tag/case-studies):
-[devenv-task-output-race-replayable.rwd](https://github.com/fzakaria/rewindvm/releases/download/case-studies/devenv-task-output-race-replayable.rwd), with
-everything needed to replay the failure on another AMD machine from Zen 2 on,
-and [devenv-task-output-race.rwd](https://github.com/fzakaria/rewindvm/releases/download/case-studies/devenv-task-output-race.rwd), the trace alone, which the
-desktop app opens. `rewind import` and the app both take the URL, and
-unpack the file as it downloads:
+[devenv-task-output-race-replayable.rwd](https://github.com/fzakaria/rewindvm/releases/download/case-studies/devenv-task-output-race-replayable.rwd),
+with everything needed to replay the failure, and
+[devenv-task-output-race.rwd](https://github.com/fzakaria/rewindvm/releases/download/case-studies/devenv-task-output-race.rwd),
+the trace alone, which the desktop app opens:
 
 ```console
 $ rewind import https://github.com/fzakaria/rewindvm/releases/download/case-studies/devenv-task-output-race-replayable.rwd
@@ -327,30 +309,3 @@ rewind: wrote devenv-task-output-race-replayable.rwd (185.0 MB)
 $ rewind export e8e78754 -o devenv-task-output-race.rwd
 rewind: wrote devenv-task-output-race.rwd (9.8 KB)
 ```
-
-Imported into an empty `REWIND_HOME`, the replayable export replays
-identically:
-
-```console
-$ rewind import devenv-task-output-race-replayable.rwd
-e8e787546e53d706  exited:101         1236 steps  devenv-tasks-test-last-lines-before-2296
-$ rewind replay e8e78754
-identical: 769 events over 1236 steps
-```
-
-## Reproducing it
-
-The derivation builds the test binary from devenv's source with
-`rustPlatform.buildRustPackage`, appends the test above to
-`devenv-tasks/src/tests/mod.rs`, and runs `cargo test -p devenv-tasks --lib
---release --no-run` with debug info and symbols kept. A second derivation
-runs the binary with the test's name as its filter. Both commits are inputs
-of the example flake, `devenv-before-2296` and `devenv-2296`.
-
-What the VM does before the test is part of its inputs. An earlier version of
-the derivation that copied the crate's sources into `/build` before running
-the test passed under all 257 schedules on the unfixed version: the copy
-changed when the shell and the test process got the CPU, and with it whether
-the shell finished before the loop started reading. Any change to the
-derivation is a different set of runs, and `rewind check --all --schedules
-256` is the way to find the failing ones.

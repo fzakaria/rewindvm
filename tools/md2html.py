@@ -277,6 +277,52 @@ def diff(lines):
     return '<pre class="console diff"><code>' + "\n".join(body) + "</code></pre>\n"
 
 
+# Rust tokens, in the order they are tried: a comment or string swallows
+# anything that looks like another token inside it.
+RUST_KEYWORDS = (
+    "as async await break const continue crate else enum false fn for if impl in "
+    "let loop match mod move mut pub ref return self Self static struct trait true "
+    "type unsafe use where while"
+).split()
+RUST_TOKEN = re.compile(
+    r"(?P<comment>//.*)"
+    r'|(?P<string>"(?:\\.|[^"\\])*")'
+    r"|(?P<attr>#\[[^\]]*\])"
+    r"|(?P<elide>\.\.\.)"
+    r"|(?P<macro>\b[a-z_][a-z0-9_]*!)"
+    r"|(?P<keyword>\b(?:" + "|".join(RUST_KEYWORDS) + r")\b)"
+    r"|(?P<type>\b[A-Z][A-Za-z0-9_]*\b)"
+    r"|(?P<number>\b\d[\d_]*\b)"
+)
+
+
+def rust_line(line):
+    """One line of Rust as HTML, each token in a span named for its kind."""
+    out = []
+    pos = 0
+    for m in RUST_TOKEN.finditer(line):
+        out.append(html.escape(line[pos : m.start()], quote=False))
+        out.append(
+            f'<span class="{m.lastgroup}">'
+            + html.escape(m.group(), quote=False)
+            + "</span>"
+        )
+        pos = m.end()
+    out.append(html.escape(line[pos:], quote=False))
+    return "".join(out)
+
+
+def rust(lines, marked):
+    """A Rust block, highlighted; the 1-based lines in MARKED get a band."""
+    body = []
+    for n, line in enumerate(lines, start=1):
+        text = rust_line(line)
+        if n in marked:
+            text = f'<span class="mark">{text}</span>'
+        body.append(text)
+    return '<pre class="console rust"><code>' + "\n".join(body) + "</code></pre>\n"
+
+
 def plain(lines):
     return (
         '<pre\n  class="console"\n><code>'
@@ -312,13 +358,14 @@ def parse(lines):
             i += 1
             continue
 
-        # Fenced code.
+        # Fenced code. After the language, "{3,7}" marks lines of the block.
         if line.startswith("```"):
-            lang = line[3:].strip()
+            lang, _, marks = line[3:].strip().partition(" ")
+            marked = {int(n) for n in re.findall(r"\d+", marks)}
             j = i + 1
             while not lines[j].startswith("```"):
                 j += 1
-            blocks.append(("code", (lang, lines[i + 1 : j])))
+            blocks.append(("code", (lang, marked, lines[i + 1 : j])))
             i = j + 1
             continue
 
@@ -422,11 +469,13 @@ def convert(cfg):
         if kind == "table":
             out.append(table(payload, source, page))
             continue
-        lang, code = payload
+        lang, marked, code = payload
         if lang == "console":
             out.append(console(code))
         elif lang == "diff":
             out.append(diff(code))
+        elif lang == "rust":
+            out.append(rust(code, marked))
         else:
             out.append(plain(code))
     if in_section:

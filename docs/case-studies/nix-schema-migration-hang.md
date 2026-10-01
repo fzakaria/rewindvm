@@ -10,14 +10,6 @@ fix did not stop the hang while the second did. None of the bug is a
 discovery; the diagnosis of the hang is more specific than the one in the
 issue.
 
-The derivations are in
-[examples/case-studies/flake.nix](../../examples/case-studies/flake.nix), and
-the commands below run from the root of a clone of this repository.
-
-Every transcript below is real output from `rewind` 0.1.0 on a 16 thread AMD
-Zen 4 laptop running NixOS, built from commit 970be86, with counter time on,
-trimmed where it says so.
-
 ## The software
 
 `LocalStore::LocalStore` opens the store's SQLite database (in WAL mode) and
@@ -75,7 +67,7 @@ a94dee99e, which cache.nixos.org has, with the check phase cut down to
 `rewind shell` can use it later. Under 256 perturbed schedules:
 
 ```console
-$ rewind check --all --schedules 256 ./examples/case-studies#nix-concurrent-builds-15693-gdb
+$ rewind check --all --schedules 256 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-concurrent-builds-15693-gdb'
 schedule   0: exited:0            34756 steps  d5ede538f628  run b433abc89a0741ac
 schedule   1: exited:0            44309 steps  d5ede538f628  run 0e27bb994c0259b5
 ...
@@ -239,7 +231,7 @@ fixed, we are still observing this issue." The same check at the merge commit
 c390460cd:
 
 ```console
-$ rewind check --all --schedules 256 ./examples/case-studies#nix-concurrent-builds-15694
+$ rewind check --all --schedules 256 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-concurrent-builds-15694'
 schedule   0: exited:0            33442 steps  d5ede538f628  run 052043a42332fb5d
 ...
 schedule  48: exited:1           536927 steps    run 7fc75d67433a9fb5
@@ -264,7 +256,7 @@ snapshot cannot go stale. Nix 2.35.2 has both fixes, and the same test from
 nixpkgs' build of it passed every schedule:
 
 ```console
-$ rewind check --all --schedules 256 ./examples/case-studies#nix-concurrent-builds
+$ rewind check --all --schedules 256 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-concurrent-builds'
 schedule   0: exited:0            34552 steps  d5ede538f628  run 41af41b0dc0da884
 ...
 0 of 256 perturbed schedules ended differently

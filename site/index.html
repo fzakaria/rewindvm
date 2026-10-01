@@ -329,7 +329,7 @@
             <h3>A root filesystem and a command</h3>
             <pre
               class="term"
-            ><code><span class="prompt">$</span> rewind run --root mylib.tar --cwd /src -- make check</code></pre>
+            ><code><span class="prompt">$</span> <span class="cmd">rewind</span> run <span class="opt">--root</span> mylib.tar <span class="opt">--cwd</span> /src <span class="opt">--</span> make check</code></pre>
             <p class="lane-lede">
               The root is a directory, an erofs image, or a tarball such as
               <code>docker export</code> writes. The VM mounts it under a writable overlay, and
@@ -370,8 +370,10 @@
           <div class="lane nix">
             <p class="eyebrow">For Nix users</p>
             <h3>Nix builds are already almost a closed world</h3>
-            <pre class="term"><code><span class="prompt">$</span> rewind nix .#mylib
-<span class="prompt">$</span> rewind check .#mylib</code></pre>
+            <pre
+              class="term"
+            ><code><span class="prompt">$</span> <span class="cmd">rewind</span> nix .#mylib
+<span class="prompt">$</span> <span class="cmd">rewind</span> check .#mylib</code></pre>
             <p class="lane-lede">
               Pinned inputs, no network, fixed paths. Point Rewind at a flake attribute and most of
               the work of making the build deterministic is already done.
@@ -396,15 +398,16 @@
               <div>
                 <dt>the output</dt>
                 <dd>
-                  GNU hello built in the VM runs at native speed and is bit for bit the host's
-                  build. <code>rewind nix</code> compares output hashes with the host's copy.
+                  <code>rewind nix</code> hashes each output the VM builds and says whether it
+                  matches the copy already in your store, so you can see the VM built what
+                  <code>nix build</code> does.
                 </dd>
               </div>
               <div>
                 <dt>the clock</dt>
                 <dd>
-                  The VM's wall clock starts at midnight UTC of the day the run was made, and a
-                  replay uses it again.
+                  Builds see today's date: the VM's clock starts at midnight UTC on the day of the
+                  run. The date is saved with the run, so a replay a year later sees the same one.
                 </dd>
               </div>
             </dl>
@@ -490,30 +493,32 @@
         <p>Run either straight from the flake, or install both into your profile:</p>
         <pre
           class="term"
-        ><code><span class="prompt">$</span> nix run github:fzakaria/rewindvm -- pmu status
-<span class="prompt">$</span> nix run github:fzakaria/rewindvm#app
-<span class="prompt">$</span> nix profile install github:fzakaria/rewindvm github:fzakaria/rewindvm#app</code></pre>
+        ><code><span class="prompt">$</span> <span class="cmd">nix</span> run github:fzakaria/rewindvm <span class="opt">--</span> pmu status
+<span class="prompt">$</span> <span class="cmd">nix</span> run github:fzakaria/rewindvm#app
+<span class="prompt">$</span> <span class="cmd">nix</span> profile install github:fzakaria/rewindvm github:fzakaria/rewindvm#app</code></pre>
         <p>On NixOS, add the flake as an input and turn on its module:</p>
-        <pre class="term"><code>inputs.rewind.url = "github:fzakaria/rewindvm";
+        <pre
+          class="term nix"
+        ><code>inputs.rewind.url = <span class="str">"github:fzakaria/rewindvm"</span>;
 
-# in your configuration, with inputs.rewind.nixosModules.default imported;
-# it also adds rewindvm.cachix.org to Nix's substituters
-programs.rewind.enable = true;
-programs.rewind.app.enable = true;
-# AMD only: make the branch counter exact at every boot
-programs.rewind.amdBranchCounterWorkaround = true;</code></pre>
+<span class="comment"># in your configuration, with inputs.rewind.nixosModules.default imported;</span>
+<span class="comment"># it also adds rewindvm.cachix.org to Nix's substituters</span>
+programs.rewind.enable = <span class="kw">true</span>;
+programs.rewind.app.enable = <span class="kw">true</span>;
+<span class="comment"># AMD only: make the branch counter exact at every boot</span>
+programs.rewind.amdBranchCounterWorkaround = <span class="kw">true</span>;</code></pre>
 
         <h3>Without Nix</h3>
         <pre
           class="term"
-        ><code><span class="prompt">$</span> curl -fsSL https://rewindvm.dev/install | sh</code></pre>
+        ><code><span class="prompt">$</span> <span class="cmd">curl</span> <span class="opt">-fsSL</span> https://rewindvm.dev/install <span class="op">|</span> <span class="cmd">sh</span></code></pre>
         <p>Or take the tarballs from the latest release yourself:</p>
         <pre
           class="term"
         ><code><span class="comment"># the rewind command, with the VM's kernel</span>
-<span class="prompt">$</span> curl -L https://github.com/fzakaria/rewindvm/releases/latest/download/rewind-x86_64-linux.tar.gz | tar xz
+<span class="prompt">$</span> <span class="cmd">curl</span> <span class="opt">-L</span> https://github.com/fzakaria/rewindvm/releases/latest/download/rewind-x86_64-linux.tar.gz <span class="op">|</span> <span class="cmd">tar</span> xz
 <span class="comment"># the desktop app</span>
-<span class="prompt">$</span> curl -L https://github.com/fzakaria/rewindvm/releases/latest/download/rewind-app-x86_64-linux.tar.gz | tar xz</code></pre>
+<span class="prompt">$</span> <span class="cmd">curl</span> <span class="opt">-L</span> https://github.com/fzakaria/rewindvm/releases/latest/download/rewind-app-x86_64-linux.tar.gz <span class="op">|</span> <span class="cmd">tar</span> xz</code></pre>
         <p class="note">
           If <code>/dev/kvm</code> is not readable and writable by you, add yourself to the
           <code>kvm</code> group.

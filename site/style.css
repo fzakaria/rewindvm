@@ -838,6 +838,20 @@ a:focus-visible {
 .term .comment {
   color: var(--muted);
 }
+/* Shell and Nix tokens in the front page's code. */
+.term .cmd,
+.term .kw {
+  color: var(--amber);
+}
+.term .opt {
+  color: var(--blue-soft);
+}
+.term .str {
+  color: #9be3a6;
+}
+.term .op {
+  color: var(--muted);
+}
 .rows-def {
   margin: 22px 0 0;
 }
@@ -1368,6 +1382,36 @@ a.card:hover {
 }
 .diff .hunk {
   color: var(--blue);
+}
+/* Rust source: tokens from tools/md2html.py, and a band on a marked line. */
+.rust {
+  color: var(--soft);
+}
+.rust .keyword {
+  color: var(--amber);
+}
+.rust .type {
+  color: var(--blue-soft);
+}
+.rust .macro {
+  color: #c9a6ff;
+}
+.rust .string {
+  color: #9be3a6;
+}
+.rust .number {
+  color: var(--amber-hi);
+}
+.rust .comment,
+.rust .attr,
+.rust .elide {
+  color: var(--faint);
+}
+.rust .mark {
+  display: inline-block;
+  min-width: 100%;
+  background: rgba(242, 165, 65, 0.14);
+  box-shadow: inset 3px 0 0 var(--amber);
 }
 
 @media (max-width: 1080px) {

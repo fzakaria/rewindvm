@@ -49,17 +49,6 @@
         <code>write</code> calls. As of 2026-10-01 nothing about this is reported in the
         <a href="https://github.com/NixOS/nix/issues">Nix issue tracker</a>.
       </p>
-      <p>
-        The derivations are in
-        <a href="https://github.com/fzakaria/rewindvm/blob/main/examples/case-studies/flake.nix"
-          >examples/case-studies/flake.nix</a
-        >, and the commands below run from the root of a clone of this repository.
-      </p>
-      <p>
-        Every transcript below is real output from <code>rewind</code> 0.1.0 on a 16 thread AMD Zen
-        4 laptop running NixOS, built from commit 970be86, with counter time on, trimmed where it
-        says so.
-      </p>
 
       <nav class="toc" aria-label="Sections">
         <p class="toc-head">Sections</p>
@@ -110,7 +99,7 @@
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind nix ./examples/case-studies#nix-git-gc-closure</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind nix 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-git-gc-closure'</span>
 rewind: packing 217 store paths for nix-functional-gc-closure-2.36pre20260912_203f85b2
 ...
 +(gc-closure.sh:47) nix_gc_closure false --also-referrers
@@ -239,7 +228,7 @@ rewind: /proc/536/io: no such file at this step</code></pre>
         <p>Under Rewind, on the build of Nix master:</p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind check --all --schedules 256 ./examples/case-studies#nix-git-gc-closure</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind check --all --schedules 256 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-git-gc-closure'</span>
 schedule   0: exited:1            70567 steps    run c799a9cfa98feda6
 schedule   1: exited:0            89014 steps  d5ede538f628  run 45a28f82dd829f3d
 ...
@@ -278,7 +267,7 @@ where /nix/store/10dxp0qxqxxsyiljrh2kp0xqhz6arhcx-bash-5.3p15/bin/bash -x -e -u 
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind check --all --schedules 256 ./examples/case-studies#nix-gc-closure</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind check --all --schedules 256 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-gc-closure'</span>
 ...
 schedule  80: exited:1            37256 steps    run 3edd52984245022c
 ...
@@ -352,7 +341,7 @@ schedule  80: exited:1            37256 steps    run 3edd52984245022c
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind check --all ./examples/case-studies#nix-git-gc-closure-fixed</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind check --all 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-git-gc-closure-fixed'</span>
 schedule   0: exited:0            79402 steps  d5ede538f628  run 0ed02b26ca34684f
 schedule   1: exited:0            88959 steps  d5ede538f628  run 5148a33cbc5b532b
 ...

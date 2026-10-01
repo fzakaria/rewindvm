@@ -50,17 +50,6 @@
         while the second did. None of the bug is a discovery; the diagnosis of the hang is more
         specific than the one in the issue.
       </p>
-      <p>
-        The derivations are in
-        <a href="https://github.com/fzakaria/rewindvm/blob/main/examples/case-studies/flake.nix"
-          >examples/case-studies/flake.nix</a
-        >, and the commands below run from the root of a clone of this repository.
-      </p>
-      <p>
-        Every transcript below is real output from <code>rewind</code> 0.1.0 on a 16 thread AMD Zen
-        4 laptop running NixOS, built from commit 970be86, with counter time on, trimmed where it
-        says so.
-      </p>
 
       <nav class="toc" aria-label="Sections">
         <p class="toc-head">Sections</p>
@@ -142,7 +131,7 @@
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind check --all --schedules 256 ./examples/case-studies#nix-concurrent-builds-15693-gdb</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind check --all --schedules 256 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-concurrent-builds-15693-gdb'</span>
 schedule   0: exited:0            34756 steps  d5ede538f628  run b433abc89a0741ac
 schedule   1: exited:0            44309 steps  d5ede538f628  run 0e27bb994c0259b5
 ...
@@ -317,7 +306,7 @@ autocommit 0
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind check --all --schedules 256 ./examples/case-studies#nix-concurrent-builds-15694</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind check --all --schedules 256 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-concurrent-builds-15694'</span>
 schedule   0: exited:0            33442 steps  d5ede538f628  run 052043a42332fb5d
 ...
 schedule  48: exited:1           536927 steps    run 7fc75d67433a9fb5
@@ -341,7 +330,7 @@ schedule 121: exited:1           404507 steps    run d42894d1702c4d91
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind check --all --schedules 256 ./examples/case-studies#nix-concurrent-builds</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind check --all --schedules 256 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-concurrent-builds'</span>
 schedule   0: exited:0            34552 steps  d5ede538f628  run 41af41b0dc0da884
 ...
 0 of 256 perturbed schedules ended differently
