@@ -153,6 +153,24 @@ $ nix run github:fzakaria/rewindvm#app -- ~/.local/share/rewind/runs/<run>
 It opens `.rwd` exports too, and comes with an example run and a short tour.
 See [pricing](https://rewindvm.dev/#pricing) for licenses.
 
+## Case studies
+
+- [A SIGPIPE in Nix's gc-closure test](docs/case-studies/nix-gc-closure-sigpipe.md):
+  Rewind's first run of Nix's functional tests failed in `gc-closure.sh`, a
+  flake nobody had reported. A two-line `printf` piped into `head -n1` under
+  `pipefail` is two writes, and when `head` exits between them the writer
+  dies of SIGPIPE. Rewind narrows the failure to the two steps between those
+  writes; on the host the test never failed in 200 runs.
+- [A hang in Nix's store schema migration](docs/case-studies/nix-schema-migration-hang.md):
+  a known, fixed bug, [NixOS/nix#15693](https://github.com/NixOS/nix/issues/15693),
+  reproduced on the version it was reported against. `rewind shell` and gdb
+  inside the VM pin it to `SQLITE_BUSY_SNAPSHOT` retried inside an open
+  transaction, which explains why the first fix did not stop it and the
+  second did.
+
+The derivations both run are in
+[examples/case-studies/flake.nix](examples/case-studies/flake.nix).
+
 ## How it works
 
 The VM has one vCPU on stock KVM, so code in it runs on the real CPU. Its
