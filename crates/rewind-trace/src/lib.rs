@@ -96,25 +96,9 @@ impl Trace {
     /// Reads a trace file: each event is its step as eight little-endian
     /// bytes followed by the record exactly as the guest wrote it.
     pub fn read(path: &Path) -> io::Result<Trace> {
-        let mut r = BufReader::new(std::fs::File::open(path)?);
         let mut events = Vec::new();
-        loop {
-            let mut step = [0u8; 8];
-            match r.read_exact(&mut step) {
-                Ok(()) => {}
-                Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
-                Err(e) => return Err(e),
-            }
-            let mut len = [0u8; 4];
-            r.read_exact(&mut len)?;
-            let len = u32::from_le_bytes(len) as usize;
-            if len < HEADER_LEN {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "short record"));
-            }
-            let mut record = vec![0u8; len];
-            record[..4].copy_from_slice(&(len as u32).to_le_bytes());
-            r.read_exact(&mut record[4..])?;
-            let event = Event::decode(u64::from_le_bytes(step), &record)
+        for (step, record) in records(path)? {
+            let event = Event::decode(step, &record)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
             events.push(event);
         }
@@ -444,6 +428,35 @@ impl ProgramDivergence {
             *events.threads.get(position)?,
         ))
     }
+}
+
+/// A trace file's records as the guest wrote them, each with its step,
+/// undecoded: what a fork copies from its parent's trace for the steps the
+/// two runs share.
+pub fn records(path: &Path) -> io::Result<Vec<(u64, Vec<u8>)>> {
+    let mut r = BufReader::new(std::fs::File::open(path)?);
+    let mut records = Vec::new();
+    loop {
+        let mut step = [0u8; 8];
+        match r.read_exact(&mut step) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(e),
+        }
+
+        // Each record starts with its own length.
+        let mut len = [0u8; 4];
+        r.read_exact(&mut len)?;
+        let len = u32::from_le_bytes(len) as usize;
+        if len < HEADER_LEN {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "short record"));
+        }
+        let mut record = vec![0u8; len];
+        record[..4].copy_from_slice(&(len as u32).to_le_bytes());
+        r.read_exact(&mut record[4..])?;
+        records.push((u64::from_le_bytes(step), record));
+    }
+    Ok(records)
 }
 
 /// Appends events to a trace file as the guest emits them.
@@ -861,5 +874,27 @@ mod tests {
         let trace = Trace { events };
         let sub = trace.processes().into_iter().find(|p| p.pid == 3).unwrap();
         assert_eq!(sub.argv, vec!["bash".to_string(), "test.sh".to_string()]);
+    }
+
+    #[test]
+    fn records_come_back_exactly_as_written() {
+        // Writes two raw records with a TraceWriter and reads them back
+        // with records(), which a fork uses to copy its parent's trace up
+        // to the step it starts from.
+        let raw = |len: usize, fill: u8| {
+            let mut r = vec![fill; len];
+            r[..4].copy_from_slice(&(len as u32).to_le_bytes());
+            r
+        };
+        let written = vec![(7, raw(HEADER_LEN, 1)), (9, raw(HEADER_LEN + 5, 2))];
+        let path = std::env::temp_dir().join(format!("rewind-records-{}", std::process::id()));
+        let mut w = TraceWriter::new(std::fs::File::create(&path).unwrap());
+        for (step, record) in &written {
+            w.record(*step, record).unwrap();
+        }
+        w.finish().unwrap();
+        let read = records(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(read, written);
     }
 }

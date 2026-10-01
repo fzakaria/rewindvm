@@ -140,7 +140,19 @@ pub struct Manifest {
     pub spec: Spec,
     /// The run this one was forked from, and the step it was forked at.
     pub parent: Option<(String, u64)>,
+    /// Where the keyframes this run did not take itself are: another run's,
+    /// up to the last step the two runs share.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_keyframes: Option<crate::keyframes::Shared>,
     pub outcome: Option<RunOutcome>,
+    /// The BLAKE3 hash of trace.bin in hex, once the run has finished. Runs
+    /// with equal hashes did the same thing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_hash: Option<String>,
+    /// For a fork, the step where its trace first differs from its
+    /// parent's; absent when the two are identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_difference: Option<u64>,
 }
 
 impl Spec {
@@ -158,6 +170,48 @@ impl Spec {
         let bytes = serde_json::to_vec(&inputs).expect("a spec always serializes");
         let hash = blake3::hash(&bytes).to_hex();
         hash[..16].to_string()
+    }
+
+    /// The last step through which a run of this spec and a run of
+    /// `other` are the same run: they differ only in their schedules, and
+    /// the schedules perturb the same steps the same way up to it. None
+    /// when anything else differs, u64::MAX when nothing does. A keyframe
+    /// of one run at or before this step is a keyframe of the other.
+    pub fn same_through(&self, other: &Spec) -> Option<u64> {
+        // Everything but the schedule must match, compared the way the id
+        // compares it.
+        let unscheduled = |s: &Spec| Spec {
+            schedule: 0,
+            schedule_from: 0,
+            schedule_until: u64::MAX,
+            image: None,
+            kernel_debug: None,
+            ..s.clone()
+        };
+        if unscheduled(self) != unscheduled(other) {
+            return None;
+        }
+
+        // A seed's choice at a step depends on the seed and the step alone,
+        // so two schedules part at the first step only one of them
+        // perturbs, or that both perturb with different seeds.
+        let (a, b) = (self.perturbation(), other.perturbation());
+        let parts_at = match (a, b) {
+            _ if a == b => return Some(u64::MAX),
+            (Some((sa, fa, ua)), Some((sb, fb, ub))) if sa == sb && fa == fb => ua.min(ub),
+            (Some((_, fa, _)), Some((_, fb, _))) => fa.min(fb),
+            (Some((_, from, _)), None) | (None, Some((_, from, _))) => from,
+            (None, None) => unreachable!("two unperturbed schedules are equal"),
+        };
+        Some(parts_at.saturating_sub(1))
+    }
+
+    /// The schedule's seed and window, or None when it perturbs no step.
+    fn perturbation(&self) -> Option<(u64, u64, u64)> {
+        if self.schedule == 0 || self.schedule_from >= self.schedule_until {
+            return None;
+        }
+        Some((self.schedule, self.schedule_from, self.schedule_until))
     }
 
     /// The 32 bytes the guest kernel seeds its RNG with.
@@ -283,7 +337,10 @@ impl Run {
         Trace::read(&path).with_context(|| format!("reading {}", path.display()))
     }
 
-    /// Executes a spec, writing the run into the home's runs directory.
+    /// Executes a spec, writing the run into the home's runs directory. A
+    /// run with a parent on this machine starts from the parent's latest
+    /// keyframe in the steps the two share, and reads the parent's
+    /// keyframes for those steps instead of taking its own.
     pub fn execute(
         home: &Home,
         name: String,
@@ -293,27 +350,60 @@ impl Run {
         echo: Echo,
         keyframes: Keyframes,
     ) -> Result<Run> {
-        let id = spec.id();
-        let dir = home.runs().join(&id);
-        fs::create_dir_all(&dir)?;
-
-        let created = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or(Duration::ZERO)
-            .as_secs();
-        let mut manifest = Manifest {
+        let manifest = Manifest {
             version: MANIFEST_VERSION,
-            id,
+            id: spec.id(),
             name,
-            created,
+            created: now(),
             source,
             spec,
             parent,
+            shared_keyframes: None,
             outcome: None,
+            trace_hash: None,
+            first_difference: None,
         };
+        Run::execute_manifest(home, manifest, echo, keyframes)
+    }
+
+    /// Executes the run `manifest` describes, filling in how it ended.
+    fn execute_manifest(
+        home: &Home,
+        mut manifest: Manifest,
+        echo: Echo,
+        keyframes: Keyframes,
+    ) -> Result<Run> {
+        let dir = home.runs().join(&manifest.id);
+        fs::create_dir_all(&dir)?;
         let write_manifest = |m: &Manifest| -> Result<()> {
             crate::image::write_atomic(&dir.join(MANIFEST), &serde_json::to_vec_pretty(m)?)
         };
+
+        // Keyframes from a finished earlier execution of the same run stay,
+        // since other runs may read them, and this execution takes none.
+        // Unreadable ones, from an older format, are replaced. Ones left by
+        // an execution that never finished are as good as new ones, which
+        // land beside them.
+        let previous = Run::open(&dir).ok();
+        let own = crate::keyframes::own_state(&dir);
+        let keep = keyframes == Keyframes::Take
+            && own == crate::keyframes::Own::Readable
+            && previous
+                .as_ref()
+                .is_some_and(|p| p.manifest.outcome.is_some());
+        if own == crate::keyframes::Own::Unreadable {
+            fs::remove_dir_all(dir.join(crate::keyframes::DIR))?;
+        }
+        let shortcut = Shortcut::find(home, &manifest);
+        let keyframes = if keep {
+            manifest.shared_keyframes = previous.and_then(|p| p.manifest.shared_keyframes);
+            Keyframes::Skip
+        } else {
+            manifest.shared_keyframes = shortcut.as_ref().map(|s| s.shared.clone());
+            keyframes
+        };
+        manifest.outcome = None;
+        manifest.trace_hash = None;
         write_manifest(&manifest)?;
 
         let mut recorder = Recorder {
@@ -323,18 +413,57 @@ impl Run {
             error: None,
         };
         let start = Instant::now();
-        let mut machine = Machine::boot(&manifest.spec.config()?)?;
+        let config = manifest.spec.config()?;
+        let store = || rewind_store::Store::open(&home.store());
+
+        // A run that shares its start with its parent replays the parent's
+        // events up to the parent's keyframe and goes on from there.
+        let (mut machine, mut store, last_keyframe) = match &shortcut {
+            Some(s) => {
+                for (step, record) in &s.prefix {
+                    recorder.record(*step, record);
+                }
+                let store = store()?;
+                let machine =
+                    Machine::restore(&config, &s.chain, &crate::keyframes::ReadPages(&store))?;
+                (machine, Some(store), Some(s.base))
+            }
+            None => (Machine::boot(&config)?, None, None),
+        };
+
         let outcome = match keyframes {
             Keyframes::Take => {
-                // Keyframes left from an earlier execution of this spec are
-                // replaced with this one's.
-                let _ = fs::remove_dir_all(dir.join(crate::keyframes::DIR));
-                let mut store = rewind_store::Store::open(&home.store())?;
+                let store = match &mut store {
+                    Some(s) => s,
+                    None => store.insert(rewind_store::Store::open(&home.store())?),
+                };
+                let mut parent = last_keyframe;
+                let mut memory = shortcut
+                    .as_ref()
+                    .map(|s| crate::keyframes::Memory::of(&s.chain))
+                    .unwrap_or_default();
+
+                // A keyframe at the last shared step goes to the run that
+                // owns it, where every fork made at this step finds it, and
+                // this run's own keyframes hold only what it wrote after.
+                if let Some(s) = shortcut.as_ref().filter(|s| s.base < s.shared.through)
+                    && let Outcome::Paused = machine.run(Some(s.shared.through), &mut recorder)?
+                {
+                    let mut kf =
+                        machine.keyframe(&mut crate::keyframes::StorePages(store), parent)?;
+                    memory.trim(kf.parent, &mut kf.pages);
+                    if crate::keyframes::save(&s.owner, &kf).is_err() {
+                        crate::keyframes::save(&dir, &kf)?;
+                    }
+                    parent = Some(kf.step);
+                }
                 let outcome = crate::keyframes::run_with_keyframes(
                     &mut machine,
                     &mut recorder,
                     &dir,
-                    &mut store,
+                    store,
+                    parent,
+                    &mut memory,
                 )?;
                 store.sync()?;
                 outcome
@@ -355,6 +484,18 @@ impl Run {
             status: recorder.status,
             wall_ms: wall.as_millis() as u64,
         });
+        manifest.trace_hash = Some(crate::image::hash_file(&dir.join(TRACE))?);
+
+        // Where a fork parts from its parent, while the parent is here to
+        // compare with; otherwise what an earlier execution found stays.
+        if let Some(parent) = manifest
+            .parent
+            .as_ref()
+            .and_then(|(id, _)| Run::open(&home.runs().join(id)).ok())
+        {
+            let ours = Trace::read(&dir.join(TRACE))?;
+            manifest.first_difference = parent.trace()?.divergence(&ours).map(|d| d.right_step);
+        }
         write_manifest(&manifest)?;
         Ok(Run { dir, manifest })
     }
@@ -378,24 +519,24 @@ impl Run {
         Ok(original.divergence(&again))
     }
 
+    /// Where the run's keyframes are, its own and the ones it shares.
+    pub fn keyframes(&self) -> Result<crate::keyframes::Layers> {
+        crate::keyframes::Layers::open(&self.dir, self.manifest.shared_keyframes.as_ref())
+    }
+
     /// Whether the run has keyframes to seek from.
     pub fn has_keyframes(&self) -> bool {
-        !crate::keyframes::steps(&self.dir).is_empty()
+        self.keyframes().is_ok_and(|k| !k.steps().is_empty())
     }
 
     /// Executes this run's spec again, taking keyframes. The run is the
     /// same, so its trace and manifest come out as they were.
     pub fn add_keyframes(&self, home: &Home) -> Result<Run> {
-        let m = &self.manifest;
-        Run::execute(
-            home,
-            m.name.clone(),
-            m.source.clone(),
-            m.spec.clone(),
-            m.parent.clone(),
-            Echo::Quiet,
-            Keyframes::Take,
-        )
+        let manifest = Manifest {
+            created: now(),
+            ..self.manifest.clone()
+        };
+        Run::execute_manifest(home, manifest, Echo::Quiet, Keyframes::Take)
     }
 
     /// A machine at `step` of this run: the latest keyframe at or before
@@ -403,13 +544,12 @@ impl Run {
     /// `obs`.
     pub fn machine_at(&self, home: &Home, step: u64, obs: &mut dyn Observer) -> Result<Machine> {
         let config = self.manifest.spec.config()?;
-        let from = crate::keyframes::steps(&self.dir)
-            .into_iter()
-            .rfind(|s| *s <= step);
+        let keyframes = self.keyframes()?;
+        let from = keyframes.steps().into_iter().rfind(|s| *s <= step);
         let mut machine = match from {
             Some(kf) => {
                 let store = rewind_store::Store::open(&home.store())?;
-                let chain = crate::keyframes::chain(&self.dir, kf)?;
+                let chain = keyframes.chain(kf)?;
                 Machine::restore(&config, &chain, &crate::keyframes::ReadPages(&store))?
             }
             None => Machine::boot(&config)?,
@@ -423,7 +563,9 @@ impl Run {
     /// new one, which should be the same: the claim every keyframe makes.
     pub fn replay_from(&self, home: &Home, step: u64) -> Result<(u64, Trace, Trace)> {
         let original = self.trace()?;
-        let kf = crate::keyframes::steps(&self.dir)
+        let kf = self
+            .keyframes()?
+            .steps()
             .into_iter()
             .rfind(|s| *s <= step)
             .context("the run has no keyframe at or before that step")?;
@@ -488,6 +630,71 @@ impl Run {
     }
 }
 
+/// Seconds since the Unix epoch.
+fn now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_secs()
+}
+
+/// How a run with a parent on this machine starts at the parent's
+/// keyframe rather than at boot.
+struct Shortcut {
+    /// The parent's keyframes this run reads: up to the last step the two
+    /// runs share.
+    shared: crate::keyframes::Shared,
+    /// The parent's latest keyframe at or before that step, and the chain
+    /// that restores it.
+    base: u64,
+    chain: Vec<rewind_vmm::snapshot::Keyframe>,
+    /// The parent's trace up to the keyframe, record by record.
+    prefix: Vec<(u64, Vec<u8>)>,
+    /// The directory a keyframe at the last shared step belongs in.
+    owner: PathBuf,
+}
+
+impl Shortcut {
+    /// The shortcut for the run `manifest` describes, when its parent is
+    /// here, shares steps with it, and has a keyframe among them. Anything
+    /// missing or unreadable means starting from boot, which is never
+    /// wrong.
+    fn find(home: &Home, manifest: &Manifest) -> Option<Shortcut> {
+        let (parent_id, _) = manifest.parent.as_ref()?;
+        if *parent_id == manifest.id {
+            return None;
+        }
+        let parent = Run::open(&home.runs().join(parent_id)).ok()?;
+
+        // A parent still running has a trace that may lag its keyframes.
+        parent.manifest.outcome.as_ref()?;
+        let through = parent.manifest.spec.same_through(&manifest.spec)?;
+
+        // The same spec is the same run, whose keyframes are its own.
+        if through == u64::MAX {
+            return None;
+        }
+        let layers = parent.keyframes().ok()?;
+        let base = layers.steps().into_iter().rfind(|s| *s <= through)?;
+        let chain = layers.chain(base).ok()?;
+        let prefix = rewind_trace::records(&parent.dir.join(TRACE))
+            .ok()?
+            .into_iter()
+            .take_while(|(step, _)| *step <= base)
+            .collect();
+        Some(Shortcut {
+            shared: crate::keyframes::Shared {
+                run: parent.manifest.id.clone(),
+                through,
+            },
+            base,
+            chain,
+            prefix,
+            owner: layers.owner(through).to_path_buf(),
+        })
+    }
+}
+
 fn describe(outcome: Outcome) -> String {
     match outcome {
         Outcome::Paused => "paused".into(),
@@ -495,5 +702,134 @@ fn describe(outcome: Outcome) -> String {
         Outcome::Stopped(Stop::TripleFault) => "triple fault".into(),
         Outcome::Stopped(Stop::Stalled) => "stalled: idle with no timer armed".into(),
         Outcome::Debug(stop) => format!("stopped by the debugger: {stop:?}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Specs and manifests without running anything: how far two schedules
+    // agree, which decides what a fork may share with its parent, and the
+    // manifest fields the desktop app reads by name.
+    use super::*;
+
+    /// An unperturbed spec; tests change the schedule fields.
+    fn spec() -> Spec {
+        Spec {
+            kernel: "/k".into(),
+            initrd: "/i".into(),
+            kernel_debug: None,
+            image: None,
+            image_hash: None,
+            mem_mib: 1024,
+            seed: 0,
+            epoch: 0,
+            quantum: DEFAULT_QUANTUM,
+            schedule: 0,
+            schedule_from: 0,
+            schedule_until: u64::MAX,
+            cpu: rewind_vmm::cpu::Model::V3,
+            clock: rewind_vmm::ClockSource::Exits,
+            preemption: rewind_vmm::Preemption::AtExits,
+            extras: rewind_vmm::Extras::Reserved,
+            cmdline: BASE_CMDLINE.into(),
+            job: Job {
+                argv: vec!["true".into()],
+                env: Vec::new(),
+                cwd: "/".into(),
+                uid: 0,
+                gid: 0,
+                hostname: "localhost".into(),
+                root: rewind_init::Root::Initramfs,
+                files: Vec::new(),
+                outputs: Vec::new(),
+            },
+        }
+    }
+
+    /// `spec()` perturbed by `seed` over `from..until`.
+    fn perturbed(seed: u64, from: u64, until: u64) -> Spec {
+        Spec {
+            schedule: seed,
+            schedule_from: from,
+            schedule_until: until,
+            ..spec()
+        }
+    }
+
+    #[test]
+    fn a_fork_agrees_with_an_unperturbed_parent_until_its_step() {
+        // The perturbation can act at the fork step itself, so the last
+        // shared step is the one before.
+        let parent = spec();
+        let fork = perturbed(3, 4855, u64::MAX);
+        assert_eq!(parent.same_through(&fork), Some(4854));
+        assert_eq!(fork.same_through(&parent), Some(4854));
+    }
+
+    #[test]
+    fn a_fork_of_a_fork_agrees_only_until_either_is_perturbed() {
+        // A fork of a fork at a later step runs unperturbed until its own
+        // step, so it parts from its parent where the parent's
+        // perturbation started.
+        let parent = perturbed(3, 2000, u64::MAX);
+        let later = perturbed(5, 4000, u64::MAX);
+        assert_eq!(parent.same_through(&later), Some(1999));
+        let earlier = perturbed(5, 1000, u64::MAX);
+        assert_eq!(parent.same_through(&earlier), Some(999));
+    }
+
+    #[test]
+    fn one_seed_over_windows_with_one_start_agrees_until_one_ends() {
+        // A seed's choices are a function of the step, so two windows that
+        // start together agree until the shorter one ends.
+        let narrow = perturbed(3, 2000, 2500);
+        let wide = perturbed(3, 2000, u64::MAX);
+        assert_eq!(narrow.same_through(&wide), Some(2499));
+    }
+
+    #[test]
+    fn schedules_that_perturb_nothing_agree_everywhere() {
+        // Seed 0 and an empty window are both the unperturbed run.
+        assert_eq!(spec().same_through(&spec()), Some(u64::MAX));
+        assert_eq!(spec().same_through(&perturbed(3, 10, 10)), Some(u64::MAX));
+    }
+
+    #[test]
+    fn other_inputs_never_agree() {
+        // A different RNG seed is a different run from boot.
+        let other = Spec { seed: 1, ..spec() };
+        assert_eq!(spec().same_through(&other), None);
+    }
+
+    #[test]
+    fn the_app_reads_trace_hash_and_first_difference_by_name() {
+        // The fields sit at the top level of manifest.json under exactly
+        // these names, are left out when unknown, and manifests written
+        // before them still parse.
+        let mut m = Manifest {
+            version: MANIFEST_VERSION,
+            id: "c".into(),
+            name: "fork".into(),
+            created: 0,
+            source: Source::Image { root: "/".into() },
+            spec: spec(),
+            parent: Some(("p".into(), 4855)),
+            shared_keyframes: None,
+            outcome: None,
+            trace_hash: None,
+            first_difference: None,
+        };
+        let json = serde_json::to_value(&m).unwrap();
+        assert!(json.get("trace_hash").is_none());
+        assert!(json.get("first_difference").is_none());
+        assert!(json.get("shared_keyframes").is_none());
+        let old: Manifest = serde_json::from_value(json).unwrap();
+        assert_eq!(old, m);
+
+        m.trace_hash = Some("ab".into());
+        m.first_difference = Some(4872);
+        let json = serde_json::to_value(&m).unwrap();
+        assert_eq!(json["trace_hash"], "ab");
+        assert_eq!(json["first_difference"], 4872);
     }
 }

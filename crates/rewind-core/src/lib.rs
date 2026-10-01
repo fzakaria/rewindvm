@@ -11,6 +11,7 @@ pub mod keyframes;
 pub mod maps;
 pub mod nix;
 pub mod pmu;
+pub mod prune;
 pub mod run;
 
 pub use home::{Guest, Home};

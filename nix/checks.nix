@@ -78,6 +78,49 @@ in
         rewind run -q --name b --seed 1 --root ${busyboxRoot} -- sh -c '${workload}'
         rewind diff a b | tee diff
         grep -q 'first difference' diff
+
+        # A fork reads its parent's keyframes up to its step and replays
+        # like any run, from boot and from a keyframe on either side of the
+        # step. So does a fork of that fork.
+        id() { sed -n 's/.*"id":"\([0-9a-f]*\)".*/\1/p'; }
+        manifest() { cat $REWIND_HOME/runs/$1/manifest.json; }
+        fork=$(rewind fork a 400 --schedule 3 --json | id)
+        manifest $fork | grep -q '"shared_keyframes"'
+        manifest $fork | grep -q '"trace_hash"'
+        rewind replay $fork | grep '^identical'
+        rewind replay $fork --from 300 | grep '^identical'
+        rewind replay $fork --from 999999 | grep '^identical'
+        fork2=$(rewind fork $fork 600 --schedule 5 --json | id)
+        rewind replay $fork2 | grep '^identical'
+        rewind replay $fork2 --from 300 | grep '^identical'
+        rewind replay $fork2 --from 999999 | grep '^identical'
+
+        # A replayable export of the fork of a fork carries every keyframe
+        # it reads, and replays where neither parent is.
+        rewind export --replayable -o fork2.rwd $fork2
+        REWIND_HOME=$TMPDIR/elsewhere rewind import fork2.rwd
+        REWIND_HOME=$TMPDIR/elsewhere rewind replay $fork2 --from 300 | grep '^identical'
+
+        # Without its parent, a fork says which run it needs.
+        mv $REWIND_HOME/runs/$fork $TMPDIR/away
+        ! rewind replay $fork2 --from 300 2> missing
+        grep "$fork" missing
+        mv $TMPDIR/away $REWIND_HOME/runs/$fork
+
+        # Forks past the end of the run are the run itself: prune removes
+        # them, keeps the run, and keeps a fork another fork came from.
+        same1=$(rewind fork a 999999 --schedule 7 --json | id)
+        same2=$(rewind fork a 999999 --schedule 8 --json | id)
+        ! manifest $same1 | grep -q '"first_difference"'
+        rewind prune a --identical --dry-run --json | tee planned
+        grep -q "$same1" planned
+        grep -q "$same2" planned
+        test -d $REWIND_HOME/runs/$same1
+        rewind prune a --identical
+        test ! -e $REWIND_HOME/runs/$same1
+        test ! -e $REWIND_HOME/runs/$same2
+        test -d $REWIND_HOME/runs/$fork
+        rewind replay $fork2 --from 300 | grep '^identical'
         touch $out
       '';
 

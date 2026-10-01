@@ -10,6 +10,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result, bail};
 
@@ -115,9 +116,13 @@ pub fn hash_file(path: &Path) -> Result<String> {
 }
 
 /// Writes `bytes` to `path` atomically, so a crash never leaves a half
-/// written image where a whole one is expected.
+/// written image where a whole one is expected. Writers of the same path in
+/// other processes or threads each get their own temporary file, and the
+/// last rename wins.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    let tmp = path.with_extension("tmp");
+    static WRITES: AtomicU64 = AtomicU64::new(0);
+    let n = WRITES.fetch_add(1, Ordering::Relaxed);
+    let tmp = path.with_extension(format!("tmp-{}-{n}", std::process::id()));
     let mut f = fs::File::create(&tmp)?;
     f.write_all(bytes)?;
     f.sync_all()?;

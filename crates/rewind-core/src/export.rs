@@ -56,7 +56,11 @@ pub fn export(home: &Home, run: &Run, contents: Contents, out: &Path) -> Result<
     let mut tar = tar::Builder::new(encoder);
     tar.mode(tar::HeaderMode::Deterministic);
 
-    tar.append_path_with_name(run.dir.join(MANIFEST), MANIFEST)?;
+    // Keyframes a run shares with another travel in a replayable export as
+    // its own, so the manifest names no other run's.
+    let mut manifest = run.manifest.clone();
+    manifest.shared_keyframes = None;
+    append_bytes(&mut tar, MANIFEST, &serde_json::to_vec_pretty(&manifest)?)?;
     tar.append_path_with_name(run.dir.join(TRACE), TRACE)?;
 
     if contents == Contents::Replayable {
@@ -70,13 +74,18 @@ pub fn export(home: &Home, run: &Run, contents: Contents, out: &Path) -> Result<
                 .with_context(|| format!("adding the image {}", image.display()))?;
         }
 
-        // Every page any keyframe names, once.
+        // Every keyframe the run can seek from, wherever it is kept, and
+        // every page any of them names, once.
         let store = Store::open(&home.store())?;
+        let layers = run.keyframes()?;
         let mut hashes: BTreeSet<Hash> = BTreeSet::new();
-        for step in keyframes::steps(&run.dir) {
+        for step in layers.steps() {
             let name = format!("{}/{step:016}.kf", keyframes::DIR);
-            tar.append_path_with_name(run.dir.join(&name), &name)?;
-            for (_, hash) in keyframes::load(&run.dir, step)?.pages {
+            let from = layers
+                .path(step)
+                .with_context(|| format!("keyframe {step} of run {}", run.manifest.id))?;
+            tar.append_path_with_name(&from, &name)?;
+            for (_, hash) in layers.load(step)?.pages {
                 if hash != ZERO_PAGE {
                     hashes.insert(hash);
                 }
@@ -85,20 +94,23 @@ pub fn export(home: &Home, run: &Run, contents: Contents, out: &Path) -> Result<
         let mut page = vec![0u8; PAGE_SIZE];
         for hash in hashes {
             store.get(&hash, &mut page)?;
-            let mut header = tar::Header::new_gnu();
-            header.set_size(PAGE_SIZE as u64);
-            header.set_mode(0o644);
-            header.set_mtime(0);
-            header.set_cksum();
-            tar.append_data(
-                &mut header,
-                format!("{PAGES_DIR}/{}", hex(&hash)),
-                &page[..],
-            )?;
+            append_bytes(&mut tar, &format!("{PAGES_DIR}/{}", hex(&hash)), &page)?;
         }
     }
 
     tar.into_inner()?.finish()?.sync_all()?;
+    Ok(())
+}
+
+/// Adds a file with these contents, its metadata fixed so the same run
+/// exports to the same bytes.
+fn append_bytes<W: Write>(tar: &mut tar::Builder<W>, name: &str, bytes: &[u8]) -> Result<()> {
+    let mut header = tar::Header::new_gnu();
+    header.set_size(bytes.len() as u64);
+    header.set_mode(0o644);
+    header.set_mtime(0);
+    header.set_cksum();
+    tar.append_data(&mut header, name, bytes)?;
     Ok(())
 }
 
@@ -212,13 +224,28 @@ fn unpack_and_place(home: &Home, reader: impl Read, source: &str, staging: &Path
         }
     }
 
+    // A finished copy of the run already here keeps its keyframes, which
+    // other runs here may read; the export's would only be the same states
+    // again.
+    let local = Run::open(&dir).ok().filter(|r| {
+        r.manifest.outcome.is_some() && keyframes::own_state(&dir) == keyframes::Own::Readable
+    });
     fs::create_dir_all(&dir)?;
     fs::rename(staging.join(TRACE), dir.join(TRACE)).context("the export has no trace.bin")?;
     let kf_from = staging.join(keyframes::DIR);
-    if kf_from.exists() {
-        let kf_to = dir.join(keyframes::DIR);
-        let _ = fs::remove_dir_all(&kf_to);
-        fs::rename(kf_from, kf_to)?;
+    match &local {
+        Some(local) => manifest.shared_keyframes = local.manifest.shared_keyframes.clone(),
+        None if kf_from.exists() => {
+            let kf_to = dir.join(keyframes::DIR);
+            let _ = fs::remove_dir_all(&kf_to);
+            fs::rename(kf_from, kf_to)?;
+        }
+        None => {}
+    }
+
+    // Exports from before trace hashes were kept get one here.
+    if manifest.trace_hash.is_none() {
+        manifest.trace_hash = Some(crate::image::hash_file(&dir.join(TRACE))?);
     }
     let mut f = File::create(dir.join(MANIFEST))?;
     f.write_all(&serde_json::to_vec_pretty(&manifest)?)?;

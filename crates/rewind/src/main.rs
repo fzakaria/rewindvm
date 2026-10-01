@@ -220,6 +220,23 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Remove forks of a run, and forks of those, that ran exactly as an
+    /// older one did. The run itself stays, and so does any run another
+    /// run here was forked from or reads keyframes from.
+    Prune {
+        run: String,
+        /// Remove forks whose trace is the same as an older fork's in the
+        /// family, or the run's own.
+        #[arg(long)]
+        identical: bool,
+        /// Show what would be removed and remove nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Print the ids removed as one JSON array on standard output, for
+        /// programs such as the desktop app.
+        #[arg(long)]
+        json: bool,
+    },
     /// Print a file as it was at a step of a run. Rewind forks the run at
     /// the step and reads the file inside the VM, so this takes about as
     /// long as seeking there. Exits 2 when the file did not exist then.
@@ -615,8 +632,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 echo,
                 Keyframes::Take,
             )?;
-            let (pt, ct) = (parent.trace()?, child.trace()?);
-            let first_difference = pt.divergence(&ct).map(|d| d.right_step);
+            let first_difference = child.manifest.first_difference;
             if json {
                 let status = child.manifest.outcome.as_ref().and_then(|o| o.status);
                 println!(
@@ -631,14 +647,41 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 return Ok(exit_status(&child));
             }
             eprintln!("{}", show::finished(&child));
-            match pt.divergence(&ct) {
+            match first_difference {
                 None => eprintln!("rewind: the fork ran the same as its parent"),
-                Some(d) => eprintln!(
-                    "rewind: the fork first differs from its parent at step {}",
-                    d.right_step
-                ),
+                Some(step) => {
+                    eprintln!("rewind: the fork first differs from its parent at step {step}")
+                }
             }
             Ok(exit_status(&child))
+        }
+        Command::Prune {
+            run,
+            identical,
+            dry_run,
+            json,
+        } => {
+            if !identical {
+                bail!("say what to prune: --identical removes forks that ran the same");
+            }
+            let root = Run::find(&home, &run)?;
+            let removals = rewind_core::prune::plan_identical(&home, &root)?;
+            if !dry_run {
+                rewind_core::prune::remove(&home, &removals)?;
+            }
+            if json {
+                let ids: Vec<&str> = removals.iter().map(|r| r.id.as_str()).collect();
+                println!("{}", serde_json::json!(ids));
+                return Ok(ExitCode::SUCCESS);
+            }
+            let verb = if dry_run { "would remove" } else { "removed" };
+            for r in &removals {
+                println!("{verb} {}: the same trace as {}", r.id, r.same_as);
+            }
+            if removals.is_empty() {
+                eprintln!("rewind: no fork of {} needs pruning", root.manifest.id);
+            }
+            Ok(ExitCode::SUCCESS)
         }
         Command::Cat {
             run,
@@ -818,7 +861,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 export::import(&home, std::path::Path::new(&file))?
             };
             if json {
-                let replayable = !rewind_core::keyframes::steps(&run.dir).is_empty();
+                let replayable = run.has_keyframes();
                 println!(
                     "{}",
                     serde_json::json!({
