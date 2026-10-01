@@ -1,5 +1,39 @@
 {
   "nodes": {
+    "devenv-2296": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1763604782,
+        "narHash": "sha256-sILPaT6a0D8dc/2PMr5Ge+Dm4DMwv6/ARcUOWquarX0=",
+        "owner": "cachix",
+        "repo": "devenv",
+        "rev": "de0dc6a85ae88eb8194c2f7e053f3e933b77c2ac",
+        "type": "github"
+      },
+      "original": {
+        "owner": "cachix",
+        "repo": "devenv",
+        "rev": "de0dc6a85ae88eb8194c2f7e053f3e933b77c2ac",
+        "type": "github"
+      }
+    },
+    "devenv-before-2296": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1763568647,
+        "narHash": "sha256-cglff1KfFuPB6u03JCWCUiqXd6aky7js1UdpR4dr5Rg=",
+        "owner": "cachix",
+        "repo": "devenv",
+        "rev": "cecb0452cacd9c524ccfc973d5caffff834cbf02",
+        "type": "github"
+      },
+      "original": {
+        "owner": "cachix",
+        "repo": "devenv",
+        "rev": "cecb0452cacd9c524ccfc973d5caffff834cbf02",
+        "type": "github"
+      }
+    },
     "flake-compat": {
       "flake": false,
       "locked": {
@@ -558,6 +592,8 @@
     },
     "root": {
       "inputs": {
+        "devenv-2296": "devenv-2296",
+        "devenv-before-2296": "devenv-before-2296",
         "nix-15693": "nix-15693",
         "nix-15694": "nix-15694",
         "nix-after-16088": "nix-after-16088",

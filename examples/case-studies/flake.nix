@@ -15,6 +15,16 @@
   # ("insert or ignore" into SchemaMigrations).
   inputs.nix-15694.url = "github:NixOS/nix/c390460cdf7ee8b3208d982e09f91555f980759e";
   inputs.nix-after-16088.url = "github:NixOS/nix/fc7ac777d7afe93422032e2c9499c0612abb7354";
+  # devenv main just before and at the merge of cachix/devenv#2296, which
+  # fixed cachix/devenv#2281: a task's last lines of output going missing.
+  inputs.devenv-before-2296 = {
+    url = "github:cachix/devenv/cecb0452cacd9c524ccfc973d5caffff834cbf02";
+    flake = false;
+  };
+  inputs.devenv-2296 = {
+    url = "github:cachix/devenv/de0dc6a85ae88eb8194c2f7e053f3e933b77c2ac";
+    flake = false;
+  };
 
   outputs =
     {
@@ -23,6 +33,8 @@
       nix-after-16088,
       nix-15693,
       nix-15694,
+      devenv-before-2296,
+      devenv-2296,
       ...
     }:
     let
@@ -268,6 +280,97 @@
             touch $out
           '';
 
+      # A test for cachix/devenv#2281, added to devenv-tasks' tests: a task
+      # that prints three lines and fails must report all three.
+      devenvLastLinesTest = pkgs.writeText "devenv-last-lines-test.rs" ''
+
+        #[tokio::test]
+        async fn test_failed_task_keeps_last_lines() -> Result<(), Error> {
+            let temp_dir = TempDir::new().unwrap();
+            let db_path = temp_dir.path().join("tasks.db");
+            let script = create_script("#!/bin/sh\necho line1\necho line2\necho line3\nexit 1\n")?;
+            let tasks = Tasks::builder(
+                Config::try_from(json!({
+                    "roots": ["myapp:task_1"],
+                    "run_mode": "all",
+                    "tasks": [{ "name": "myapp:task_1", "command": script.to_str().unwrap() }]
+                }))
+                .unwrap(),
+                VerbosityLevel::Verbose,
+                Shutdown::new(),
+            )
+            .with_db_path(db_path)
+            .build()
+            .await?;
+            tasks.run().await;
+            match inspect_tasks(&tasks).await.as_slice() {
+                [(_, TaskStatus::Completed(TaskCompleted::Failed(_, failure)))] => {
+                    let lines: Vec<&str> = failure.stdout.iter().map(|(_, l)| l.as_str()).collect();
+                    assert_eq!(lines, vec!["line1", "line2", "line3"]);
+                }
+                other => panic!("unexpected task statuses: {other:?}"),
+            }
+            Ok(())
+        }
+      '';
+
+      # devenv-tasks' unit tests from a devenv commit, with
+      # devenvLastLinesTest added, built on the host and installed as
+      # $out/bin/devenv-tasks-tests. A release build as `cargo test --release`
+      # makes it, with debug info, unstripped, and the crate's sources in
+      # $out/src for gdb.
+      devenvTasksTests =
+        src:
+        pkgs.rustPlatform.buildRustPackage {
+          pname = "devenv-tasks-tests";
+          version = "1.10.1";
+          inherit src;
+          cargoHash = "sha256-G8jhMHZW/zrYLNOXXIXkYFCVBlTLjW6pYJYmPE1qGGQ=";
+          nativeBuildInputs = [ pkgs.jq ];
+          postPatch = ''
+            cat ${devenvLastLinesTest} >> devenv-tasks/src/tests/mod.rs
+          '';
+          buildPhase = ''
+            runHook preBuild
+            cargo test -p devenv-tasks --lib --release --no-run --message-format=json > cargo-test.json
+            runHook postBuild
+          '';
+          installPhase = ''
+            runHook preInstall
+            install -Dm755 "$(jq -r 'select(.reason == "compiler-artifact" and .executable != null and .profile.test) | .executable' cargo-test.json)" \
+              $out/bin/devenv-tasks-tests
+            mkdir -p $out/src
+            cp -r devenv-tasks $out/src/
+            runHook postInstall
+          '';
+          doCheck = false;
+          # devenv's release profile strips symbols; keep them and add DWARF.
+          env.CARGO_PROFILE_RELEASE_DEBUG = "full";
+          env.CARGO_PROFILE_RELEASE_STRIP = "none";
+          dontStrip = true;
+        };
+
+      # Run devenv-tasks' tests matching `filter`, `iterations` times,
+      # stopping at the first failure.
+      devenvTasksTest =
+        {
+          name,
+          src,
+          filter ? "",
+          iterations ? 1,
+        }:
+        let
+          tests = devenvTasksTests src;
+        in
+        pkgs.runCommand "devenv-tasks-test-${name}" { } ''
+          export HOME=$(mktemp -d)
+          for i in $(seq 1 ${toString iterations}); do
+            echo "iteration $i"
+            ${tests}/bin/devenv-tasks-tests ${filter}
+          done
+          touch $out
+        '';
+
       # The whole functional suite of Nix master as nixpkgs packages it, under
       # the chaos shim with each of these seeds.
       chaosSeeds = lib.range 1 16;
@@ -290,6 +393,21 @@
           sphinxSrc
           curlTestTree
           ;
+        devenv-last-lines-before-2296 = devenvTasksTest {
+          name = "last-lines-before-2296";
+          src = devenv-before-2296;
+          filter = "test_failed_task_keeps_last_lines";
+        };
+        devenv-last-lines-2296 = devenvTasksTest {
+          name = "last-lines-2296";
+          src = devenv-2296;
+          filter = "test_failed_task_keeps_last_lines";
+        };
+        # All of devenv-tasks' tests at the fix.
+        devenv-tasks-2296 = devenvTasksTest {
+          name = "all-2296";
+          src = devenv-2296;
+        };
         curl-flaky = curlTest {
           name = "flaky";
           tests = "776 1510 587 573 1113 1162 1163 1631 1632";
