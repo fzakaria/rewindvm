@@ -4767,12 +4767,21 @@ dependencies = [
  "gpui-pre",
  "gpui-pre-platform",
  "log",
+ "rewind-text-input",
  "rewind-trace",
  "serde",
  "serde_json",
  "tar",
  "ureq",
  "zstd",
+]
+
+[[package]]
+name = "rewind-text-input"
+version = "0.1.0"
+dependencies = [
+ "gpui-pre",
+ "unicode-segmentation",
 ]
 
 [[package]]

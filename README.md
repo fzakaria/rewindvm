@@ -245,6 +245,7 @@ release with both tarballs.
 | ------------------------------------------ | -------------------------------------------------------------------------------------------------- |
 | `crates/rewind-app/`                       | Proprietary to Lunch Time Surf LLC, source available, see [its LICENSE](crates/rewind-app/LICENSE) |
 | `crates/rewind-app/vendor/gpui-pre-linux/` | Apache-2.0, a patched copy of Zed's GPUI, see its LICENSE-APACHE                                   |
+| `crates/rewind-app/vendor/text-input/`     | Apache-2.0, a text field adapted from GPUI's input example, see its LICENSE-APACHE                 |
 | `guest/linux/`                             | GPL-2.0-only, as Linux is, see [guest/linux/LICENSE](guest/linux/LICENSE)                          |
 | everything else                            | MIT, see [LICENSE](LICENSE)                                                                        |
 

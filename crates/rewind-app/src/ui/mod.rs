@@ -43,7 +43,6 @@ actions!(
         OpenRun,
         EnterLicense,
         PasteLicense,
-        PasteLink,
         ConfirmLink,
         CloseDialog,
         StartTour,
@@ -181,6 +180,8 @@ fn load_bundled_fonts(cx: &App) {
 /// terminal pane, where Ctrl+C belongs to the command, Ctrl+Shift+C and
 /// Ctrl+Shift+V copy and paste.
 fn bind_keys(cx: &mut App) {
+    // The Open link dialog's text field edits with its own keys.
+    cx.bind_keys(rewind_text_input::bindings());
     let context = Some(SCRUBBER_KEYS);
     cx.bind_keys([
         KeyBinding::new("left", PreviousEvent, context),
@@ -201,7 +202,6 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-shift-v", TerminalPaste, Some(TERMINAL_CONTEXT)),
         KeyBinding::new("ctrl-v", PasteLicense, Some(LICENSE_CONTEXT)),
         KeyBinding::new("escape", CloseDialog, Some(LICENSE_CONTEXT)),
-        KeyBinding::new("ctrl-v", PasteLink, Some(LINK_CONTEXT)),
         KeyBinding::new("enter", ConfirmLink, Some(LINK_CONTEXT)),
         KeyBinding::new("escape", CloseDialog, Some(LINK_CONTEXT)),
         KeyBinding::new("enter", TourNext, Some(TOUR_CONTEXT)),

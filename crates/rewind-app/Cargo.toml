@@ -34,6 +34,9 @@ gpui = { package = "gpui-pre", version = "=0.3.7" }
 log = "0.4"
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.7", features = ["wayland", "x11"] }
 rewind-trace = { path = "../rewind-trace" }
+# The Open link dialog's text field, adapted from GPUI's example
+# (Apache-2.0); see vendor/text-input/README.md.
+rewind-text-input = { path = "vendor/text-input" }
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 

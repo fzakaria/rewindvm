@@ -1,0 +1,12 @@
+# A one-line text field for GPUI, adapted from GPUI's examples/input.rs.
+# Apache-2.0, as GPUI is; see README.md and LICENSE-APACHE.
+[package]
+name = "rewind-text-input"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+gpui = { package = "gpui-pre", version = "=0.3.7" }
+unicode-segmentation = "1"
