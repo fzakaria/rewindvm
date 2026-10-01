@@ -528,11 +528,11 @@ impl Machine {
     /// last ones, checking for new typing every so often while the VM is
     /// busy. True when there is input whose interrupt is still to send.
     fn deliver_input(&mut self) -> Result<bool> {
-        if self.dev.step % INPUT_POLL_STEPS == 0 {
-            if let Some(input) = &mut self.dev.input {
-                let bytes = input.wait(Some(std::time::Duration::ZERO));
-                self.dev.typed.extend(bytes);
-            }
+        if self.dev.step.is_multiple_of(INPUT_POLL_STEPS)
+            && let Some(input) = &mut self.dev.input
+        {
+            let bytes = input.wait(Some(std::time::Duration::ZERO));
+            self.dev.typed.extend(bytes);
         }
         if self.dev.input_sent {
             return Ok(true);

@@ -84,7 +84,7 @@ impl Store {
         }
         let whole = bytes.len() / INDEX_ENTRY * INDEX_ENTRY;
         let mut index = HashMap::with_capacity(whole / INDEX_ENTRY);
-        for entry in bytes[..whole].chunks_exact(INDEX_ENTRY) {
+        for entry in bytes[..whole].as_chunks::<INDEX_ENTRY>().0 {
             let hash: Hash = entry[..32].try_into().unwrap();
             let pack = u32::from_le_bytes(entry[32..36].try_into().unwrap());
             let offset = u64::from_le_bytes(entry[36..44].try_into().unwrap());
