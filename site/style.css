@@ -792,6 +792,9 @@ a:focus-visible {
 .download .term {
   max-width: 100%;
 }
+.download h3 {
+  margin-top: 36px;
+}
 .download > p {
   color: var(--soft);
   max-width: 46em;
@@ -986,15 +989,15 @@ a:focus-visible {
   left: 29.9%;
   top: 55.6%;
 }
-/* The process tree, right of the kernel threads. */
+/* On the line between the process tree and the files; the card covers both. */
 .pin-3 {
   left: 64.6%;
-  top: 51.1%;
+  top: 61.3%;
 }
-/* The "At this step" card, at the end of the SIGSEGV line. */
+/* The "At this step" panel, between the SIGSEGV and the divergence card. */
 .pin-4 {
   left: 95.5%;
-  top: 38%;
+  top: 42%;
 }
 /* The "Fork from here" button, just under it so the label stays readable. */
 .pin-5 {

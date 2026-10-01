@@ -1,8 +1,9 @@
-# Publishes the marketing site and the release tarball it serves under
-# download/. The deployed tree is exactly `nix build .#site`, the same one
+# Publishes the marketing site and the tarballs it serves under download/.
+# The deployed tree is exactly `nix build .#site`, the same one
 # `nix run .#serve` previews, so what gets tested locally is what ships.
-# The tarball holds the engine and the guest, so a change to either
-# redeploys, and a cold run builds the guest kernel.
+# The CLI's tarball holds the engine and the VM's kernel, and the desktop
+# app's tarball is built from crates/rewind-app and crates/rewind-trace, so
+# a change to any of them redeploys, and a cold run builds the kernel.
 name: pages
 
 on:

@@ -235,7 +235,7 @@
                     width="1440"
                     height="900"
                     loading="lazy"
-                    alt="The Rewind desktop app on a failing mylib run: the timeline with the playhead in the check phase, the build log, the process tree, files written, and the SIGSEGV at 0x108 next to where the run diverged from its parent. Opens the full-size image."
+                    alt="The Rewind desktop app on a failing mylib run: the timeline with the playhead in the check phase, the build log, the process tree, files written, and the SIGSEGV at 0x108 above where the run parted from a passing run of the same build. Opens the full-size image."
                   />
                 </picture>
               </a>
@@ -282,8 +282,8 @@
             <li class="tour-card" id="tour-4" tabindex="0">
               <h3>At this step</h3>
               <p>
-                The event at the step, here a SIGSEGV at 0x108, and the step where this run diverged
-                from the run it was forked from.
+                The event at the step, here a SIGSEGV at 0x108, and where this run parted from a
+                passing run of the same build.
               </p>
             </li>
             <li class="tour-card" id="tour-5" tabindex="0">
@@ -296,8 +296,7 @@
           </ol>
         </div>
         <p class="tour-planned">
-          <span class="tag">Planned</span> gdb at a step, a shell at a step, and sharing a run as
-          one file.
+          <span class="tag">Planned</span> gdb at a step and a shell at a step.
         </p>
       </section>
 
@@ -423,8 +422,13 @@
       <section class="wrap download" id="download">
         <h2>Download</h2>
         <p class="lede">
-          One tarball for x86_64 Linux with KVM. It holds the <code>rewind</code> command, the VM's
-          kernel and everything it needs to build input images, so the host needs nothing else.
+          Two tarballs for x86_64 Linux: the engine and CLI, which need KVM, and the desktop app,
+          which needs a desktop. Both are free to download.
+        </p>
+        <h3>Engine and CLI</h3>
+        <p>
+          The <code>rewind</code> command, the VM's kernel and everything it needs to build input
+          images, so the host needs nothing else.
         </p>
         <pre
           class="term"
@@ -451,6 +455,35 @@ programs.rewind.amdBranchCounterWorkaround = true;</code></pre>
         <p class="note">
           If <code>/dev/kvm</code> is not readable and writable by you, add yourself to the
           <code>kvm</code> group.
+        </p>
+
+        <h3>Desktop app</h3>
+        <p>
+          The scrubber, built against glibc 2.31 and run with your own graphics drivers. It has been
+          tried on Ubuntu 24.04 and Fedora 41. It needs the X keyboard libraries every desktop has,
+          and brings its own fonts. Unpack it next to the CLI's tarball and it uses that
+          <code>rewind</code> for forks and for reading files at a step.
+        </p>
+        <pre
+          class="term"
+        ><code><span class="prompt">$</span> curl -LO https://rewindvm.dev/download/rewind-app-0.1.0-x86_64-linux.tar.gz
+<span class="prompt">$</span> tar xzf rewind-app-0.1.0-x86_64-linux.tar.gz
+<span class="prompt">$</span> ./rewind-app-0.1.0-x86_64-linux/bin/rewind-app</code></pre>
+        <p>With Nix, the same URL is a flake here too:</p>
+        <pre
+          class="term"
+        ><code><span class="prompt">$</span> nix run https://rewindvm.dev/download/rewind-app-0.1.0-x86_64-linux.tar.gz
+<span class="prompt">$</span> nix profile install https://rewindvm.dev/download/rewind-app-0.1.0-x86_64-linux.tar.gz</code></pre>
+        <p>On NixOS, add it as a second input and turn on the app:</p>
+        <pre
+          class="term"
+        ><code>inputs.rewind-app.url = "https://rewindvm.dev/download/rewind-app-0.1.0-x86_64-linux.tar.gz";
+
+# in your configuration, with inputs.rewind-app.nixosModules.default imported
+programs.rewind.app.enable = true;</code></pre>
+        <p class="note">
+          The download is the whole app, with nothing locked. Until you enter a license key it says
+          it is unregistered and reminds you now and then; see <a href="#pricing">pricing</a>.
         </p>
       </section>
 
@@ -505,8 +538,9 @@ programs.rewind.amdBranchCounterWorkaround = true;</code></pre>
           <a href="refunds.html">refund policy</a>.
         </p>
         <p class="note" id="buy">
-          Checkout for the desktop app is not open yet. The engine and CLI are free to
-          <a href="#download">download</a> now. To hear when the app ships, write to
+          Checkout for licenses is not open yet. The engine, the CLI and the desktop app are all
+          free to <a href="#download">download</a> now, and the app works fully while unregistered.
+          To hear when checkout opens, write to
           <a href="mailto:tacos@lunchtimesurf.com">tacos@lunchtimesurf.com</a>.
         </p>
       </section>
