@@ -5,13 +5,14 @@
 //! here walks the trace.
 
 use gpui::{
-    AnyElement, ClickEvent, Context, CursorStyle, DispatchPhase, Div, FontWeight, HighlightStyle,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Role, ScrollStrategy,
-    SharedString, Window, canvas, div, prelude::*, px, relative, rgb, rgba, uniform_list,
+    AnyElement, Bounds, ClickEvent, Context, CursorStyle, DispatchPhase, Div, FontWeight,
+    HighlightStyle, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels,
+    Point, Role, ScrollStrategy, SharedString, Window, canvas, div, fill, point, prelude::*, px,
+    relative, rgb, rgba, uniform_list,
 };
 
 use crate::describe::{self, EventTone, short_store_paths, thousands};
-use crate::family::{Family, RunEntry};
+use crate::family::{Family, Row, RunEntry};
 use crate::model::{FileOp, FileTone, LogFilter, Motion, RowKind, Tone, ticks};
 use crate::run::{Agreement, Session, Verdict, short_id};
 use crate::selection::{Mapped, Surface, part_of_line};
@@ -1505,6 +1506,9 @@ impl Scrubber {
                 .into_any_element()
         });
 
+        // Every row's graph is as wide as the deepest row's, so the dots
+        // and the text after them line up.
+        let columns = rows.iter().map(|r| r.depth + 1).max().unwrap_or(1);
         let fonts = self.fonts.clone();
         let list = uniform_list(
             "runs",
@@ -1522,11 +1526,12 @@ impl Scrubber {
                             .flex()
                             .items_center()
                             .gap(px(size::CONTROL_GAP))
-                            .pl(px(size::PANEL_PAD_X + size::RUNS_INDENT * row.depth as f32))
+                            .pl(px(size::PANEL_PAD_X))
                             .pr(px(size::PANEL_PAD_X))
                             .cursor_pointer()
                             .when(shown, |d| d.bg(rgb(theme::ROW_NOW)))
                             .hover(|s| s.bg(rgb(theme::RAISED_HOVER)))
+                            .child(graph_cell(row, columns, shown))
                             .child(pill(row.run.ending.clone(), ending_tone(&row.run), &fonts))
                             .child(
                                 div()
@@ -1568,6 +1573,94 @@ impl Scrubber {
             ))
             .child(list)
     }
+}
+
+/// One row of the family graph, drawn as ISL and Jujutsu draw a history:
+/// the lines passing through, the parent's line with a curve off it to
+/// this run's dot, this run's own line down to its forks, and the dot,
+/// colored by how the run ended and ringed when it is the run on screen.
+fn graph_cell(row: &Row, columns: usize, shown: bool) -> impl IntoElement {
+    let graph = row.graph.clone();
+    let depth = row.depth;
+    let dot_color = if row.run.failed {
+        theme::RED
+    } else if row.run.ending == "exited:0" {
+        theme::GREEN_SOFT
+    } else {
+        theme::MUTED
+    };
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            let lane = px(size::GRAPH_LANE);
+            let x = |column: usize| bounds.left() + lane * column as f32 + lane / 2.0;
+            let (top, bottom) = (bounds.top(), bounds.bottom());
+            let mid = top + (bottom - top) / 2.0;
+            let curve = px(size::GRAPH_CURVE);
+            let dot = px(size::GRAPH_DOT);
+            let line_color = rgb(theme::GRAPH_LINE);
+            let mut stroke =
+                |points: &[Point<Pixels>], bend: Option<(Point<Pixels>, Point<Pixels>)>| {
+                    let mut path = PathBuilder::stroke(px(size::GRAPH_STROKE));
+                    path.move_to(points[0]);
+                    if let Some((to, ctrl)) = bend {
+                        path.curve_to(to, ctrl);
+                    }
+                    for p in &points[1..] {
+                        path.line_to(*p);
+                    }
+                    if let Ok(path) = path.build() {
+                        window.paint_path(path, line_color);
+                    }
+                };
+
+            // Lines of ancestors with forks still to come pass through.
+            for (column, through) in graph.through.iter().enumerate() {
+                if *through {
+                    stroke(&[point(x(column), top), point(x(column), bottom)], None);
+                }
+            }
+
+            // The parent's line comes down and curves off to this dot, and
+            // goes on unless this is its last fork.
+            if depth > 0 {
+                let parent = x(depth - 1);
+                let end = if graph.last { mid - curve } else { bottom };
+                stroke(&[point(parent, top), point(parent, end)], None);
+                stroke(
+                    &[point(parent, mid - curve), point(x(depth) - dot, mid)],
+                    Some((point(parent + curve, mid), point(parent, mid))),
+                );
+            }
+
+            // This run's line, down to its forks.
+            if graph.has_forks {
+                stroke(&[point(x(depth), mid), point(x(depth), bottom)], None);
+            }
+
+            // The dot, and a ring around the run on screen.
+            let center = point(x(depth), mid);
+            let circle = |radius: Pixels| {
+                Bounds::new(
+                    point(center.x - radius, center.y - radius),
+                    gpui::size(radius * 2.0, radius * 2.0),
+                )
+            };
+            window.paint_quad(fill(circle(dot), rgb(dot_color)).corner_radii(dot));
+            if shown {
+                let ring = px(size::GRAPH_RING);
+                window.paint_quad(
+                    fill(circle(ring), gpui::transparent_black())
+                        .corner_radii(ring)
+                        .border_widths(px(size::GRAPH_STROKE))
+                        .border_color(rgb(theme::AMBER)),
+                );
+            }
+        },
+    )
+    .flex_none()
+    .w(px(size::GRAPH_LANE * columns as f32))
+    .h_full()
 }
 
 /// The pill tone for how a run ended.

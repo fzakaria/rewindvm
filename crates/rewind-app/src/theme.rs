@@ -25,6 +25,8 @@ pub const SOFT: u32 = 0xc9c5bd;
 pub const MUTED: u32 = 0xa19d95;
 /// Step numbers in the log and file lists.
 pub const FAINT: u32 = 0x5f6571;
+/// The lines of the family graph in the Runs panel.
+pub const GRAPH_LINE: u32 = 0x4d5463;
 /// Timeline tick marks.
 pub const TICK: u32 = 0x5b6170;
 
@@ -200,8 +202,14 @@ pub mod size {
     // The Runs panel.
     pub const RUNS_PANEL_WIDTH: f32 = 440.0;
     pub const RUNS_ROW_HEIGHT: f32 = 30.0;
-    /// How far each level of forks is indented.
-    pub const RUNS_INDENT: f32 = 16.0;
+    /// The family graph: the width of a lane, the radius of a run's dot,
+    /// the ring around the run on screen, the radius of the curve off a
+    /// parent's line, and how thick the lines are.
+    pub const GRAPH_LANE: f32 = 16.0;
+    pub const GRAPH_DOT: f32 = 4.0;
+    pub const GRAPH_RING: f32 = 7.0;
+    pub const GRAPH_CURVE: f32 = 6.0;
+    pub const GRAPH_STROKE: f32 = 1.5;
 
     // Text.
     pub const TEXT_UI: f32 = 14.0;

@@ -110,12 +110,31 @@ pub struct Family {
 }
 
 /// One line of a family's tree: a run, how deep it sits, and the run
-/// with the same trace that came before it, if any.
+/// with the same trace that came before it, if any, with what the graph
+/// beside it draws.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Row {
     pub run: RunEntry,
     pub depth: usize,
     pub identical_to: Option<String>,
+    pub graph: Graph,
+}
+
+/// The lanes of the family graph on one row, as ISL and Jujutsu draw a
+/// history: each run is a dot in the column of its depth, and its line
+/// runs down that column past its forks, each of which curves off it to
+/// its own dot one column to the right.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Graph {
+    /// For each column left of the parent's, whether a line passes
+    /// straight through the row: an ancestor there has forks still to
+    /// come below.
+    pub through: Vec<bool>,
+    /// Whether the run is the last fork of its parent, where the parent's
+    /// line ends.
+    pub last: bool,
+    /// Whether the run has forks below it, so its line goes on down.
+    pub has_forks: bool,
 }
 
 impl Row {
@@ -230,21 +249,38 @@ impl Family {
             });
         }
 
-        // Depth first, each row tagged with the root it is under.
-        let mut order: Vec<(&RunEntry, usize, usize)> = Vec::with_capacity(self.runs.len());
+        // Depth first, each row tagged with the root it is under and its
+        // place in the graph. A fork's columns left of its parent's are
+        // its parent's, plus the parent's own column, which goes on down
+        // while the parent has later siblings.
+        let mut order: Vec<(&RunEntry, usize, usize, Graph)> = Vec::with_capacity(self.runs.len());
         for (root_index, root) in roots.into_iter().enumerate() {
-            let mut stack = vec![(root, 0)];
-            while let Some((run, depth)) = stack.pop() {
-                order.push((run, depth, root_index));
-                if let Some(list) = children.get(run.id.as_str()) {
-                    stack.extend(list.iter().rev().map(|c| (*c, depth + 1)));
+            let mut stack = vec![(root, 0, Graph::default())];
+            while let Some((run, depth, mut graph)) = stack.pop() {
+                let forks = children.get(run.id.as_str());
+                graph.has_forks = forks.is_some_and(|f| !f.is_empty());
+                if let Some(list) = forks {
+                    let mut through = graph.through.clone();
+                    if depth > 0 {
+                        through.push(!graph.last);
+                    }
+                    let last = list.len() - 1;
+                    stack.extend(list.iter().enumerate().rev().map(|(i, c)| {
+                        let fork_graph = Graph {
+                            through: through.clone(),
+                            last: i == last,
+                            has_forks: false,
+                        };
+                        (*c, depth + 1, fork_graph)
+                    }));
                 }
+                order.push((run, depth, root_index, graph));
             }
         }
 
         // The oldest fork of each trace under each root is the original.
         let mut originals: HashMap<(usize, &str), &RunEntry> = HashMap::new();
-        for (run, _, root) in &order {
+        for (run, _, root, _) in &order {
             let (Some(_), Some(hash)) = (&run.parent, &run.trace_hash) else {
                 continue;
             };
@@ -256,7 +292,7 @@ impl Family {
 
         order
             .into_iter()
-            .map(|(run, depth, root)| {
+            .map(|(run, depth, root, graph)| {
                 let identical_to = match (&run.parent, &run.trace_hash) {
                     (Some(_), Some(hash)) => originals
                         .get(&(root, hash.as_str()))
@@ -268,6 +304,7 @@ impl Family {
                     run: run.clone(),
                     depth,
                     identical_to,
+                    graph,
                 }
             })
             .collect()
@@ -385,6 +422,37 @@ mod tests {
                 ("dup".to_string(), 1, Some("f1".to_string())),
                 ("f2".to_string(), 1, None),
                 ("check3".to_string(), 0, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_graph_carries_each_line_down_to_its_last_fork() {
+        // base
+        // ├─ f1
+        // │  ╰─ f1a      base's line passes f1a; f1's ends there
+        // ├─ dup
+        // ╰─ f2          base's line ends here
+        // check3
+        let graphs: Vec<(String, Graph)> = family()
+            .rows()
+            .into_iter()
+            .map(|r| (r.run.id, r.graph))
+            .collect();
+        let graph = |through: &[bool], last: bool, has_forks: bool| Graph {
+            through: through.to_vec(),
+            last,
+            has_forks,
+        };
+        assert_eq!(
+            graphs,
+            vec![
+                ("base".to_string(), graph(&[], false, true)),
+                ("f1".to_string(), graph(&[], false, true)),
+                ("f1a".to_string(), graph(&[true], true, false)),
+                ("dup".to_string(), graph(&[], false, false)),
+                ("f2".to_string(), graph(&[], true, false)),
+                ("check3".to_string(), graph(&[], false, false)),
             ]
         );
     }
