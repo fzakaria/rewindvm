@@ -67,10 +67,16 @@ const ENV_DEBUGINFOD_URLS: &str = "DEBUGINFOD_URLS";
 const LISTEN_FD: i32 = 3;
 
 /// Serves gdb on a fork of `run` at `step`: on `listen` if given, else on
-/// a free local port with the host's gdb started against it. Ctrl-C
-/// belongs to gdb, which turns it into an interrupt for the fork, so this
-/// process ignores it meanwhile.
-pub fn gdb(home: &Home, run: &Run, step: u64, listen: Option<&str>) -> Result<ExitCode> {
+/// a free local port with the host's gdb started against it, with `extra`
+/// after the arguments this makes. Ctrl-C belongs to gdb, which turns it
+/// into an interrupt for the fork, so this process ignores it meanwhile.
+pub fn gdb(
+    home: &Home,
+    run: &Run,
+    step: u64,
+    listen: Option<&str>,
+    extra: &[String],
+) -> Result<ExitCode> {
     // What gdb is told before the fork it debugs is made: the inspection
     // that finds the running process needs a fork of its own.
     let kernel = KernelSymbols::find(run);
@@ -82,7 +88,8 @@ pub fn gdb(home: &Home, run: &Run, step: u64, listen: Option<&str>) -> Result<Ex
     let mut debuggee = rewind_core::debug::Debuggee::new(machine);
     let listener = TcpListener::bind(listen.unwrap_or(GDB_LOCAL)).context("listening for gdb")?;
     let address = listener.local_addr()?;
-    let args = arguments(&kernel, &process, debuginfod.as_ref(), address);
+    let mut args = arguments(&kernel, &process, debuginfod.as_ref(), address);
+    args.extend(extra.iter().cloned());
 
     // Only serving: say how to connect, then wait for gdb. The debuginfod
     // server runs for as long as this does.
@@ -168,13 +175,19 @@ fn arguments(
             format!("set substitute-path {} {}", from.display(), to.display()),
         );
     }
+    // Each is loaded through gdb's Python, which keeps add-symbol-file's
+    // line about the file and its offset to itself.
     for file in &process.files {
+        let command = format!(
+            "with confirm off -- add-symbol-file {} -o {:#x}",
+            file.path.display(),
+            file.offset
+        );
         ex(
             "-ex",
             format!(
-                "with confirm off -- add-symbol-file {} -o {:#x}",
-                file.path.display(),
-                file.offset
+                "python gdb.execute({}, to_string=True)",
+                python_string(&command)
             ),
         );
     }
@@ -330,10 +343,14 @@ fn fetch_sources(
     let mut fetched = 0;
     for (path, bytes) in sections {
         let to = dir.join(path.trim_start_matches('/'));
+        // Dated at the epoch, older than the programs written before them,
+        // or gdb warns that each source is newer than its program.
         let written = to
             .parent()
             .map_or(Ok(()), std::fs::create_dir_all)
-            .and_then(|()| std::fs::write(&to, bytes));
+            .and_then(|()| std::fs::write(&to, bytes))
+            .and_then(|()| std::fs::File::options().write(true).open(&to))
+            .and_then(|f| f.set_modified(std::time::UNIX_EPOCH));
         if written.is_err() {
             continue;
         }
@@ -441,6 +458,11 @@ fn store_root(path: &Path) -> Option<PathBuf> {
     Some(Path::new(NIX_STORE).join(first))
 }
 
+/// A Python string literal holding `text`.
+fn python_string(text: &str) -> String {
+    format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
 /// An argument as a shell would need it typed.
 fn quote(arg: &str) -> String {
     if arg.contains([' ', '\'', '"', '$', '\\']) {
@@ -545,6 +567,11 @@ mod tests {
             PathBuf::from("/build/mylib")
         );
         assert_eq!(source_tree(Path::new("/src/main.c")), PathBuf::from("/src"));
+    }
+
+    #[test]
+    fn a_python_string_escapes_quotes_and_backslashes() {
+        assert_eq!(python_string(r#"a "b" \c"#), r#""a \"b\" \\c""#);
     }
 
     #[test]

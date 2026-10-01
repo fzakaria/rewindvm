@@ -254,14 +254,20 @@ enum Command {
     },
     /// gdb on a fork of a run at a step: one x86-64 CPU, the VM's memory as
     /// its page tables map it, breakpoints and single steps. Starts the
-    /// host's gdb with the VM kernel's symbols; with --listen, only serves
-    /// the GDB remote protocol for a gdb started some other way.
+    /// host's gdb with the symbols of the VM's kernel and of the process
+    /// running at the step, and a debuginfod server for their DWARF and
+    /// sources; with --listen, only serves the GDB remote protocol for a
+    /// gdb started some other way.
     Gdb {
         run: String,
         step: u64,
         /// Serve on this address, such as 127.0.0.1:1234, and start no gdb.
         #[arg(long)]
         listen: Option<String>,
+        /// More arguments for gdb, after `--`, such as -batch -ex bt. They
+        /// come after the ones that load the symbols and connect.
+        #[arg(last = true)]
+        gdb_args: Vec<String>,
     },
     /// Whether this host's performance counters can drive virtual time.
     Pmu {
@@ -702,9 +708,14 @@ fn run(cli: Cli) -> Result<ExitCode> {
             result?;
             Ok(ExitCode::SUCCESS)
         }
-        Command::Gdb { run, step, listen } => {
+        Command::Gdb {
+            run,
+            step,
+            listen,
+            gdb_args,
+        } => {
             let run = Run::find(&home, &run)?;
-            gdb::gdb(&home, &run, step, listen.as_deref())
+            gdb::gdb(&home, &run, step, listen.as_deref(), &gdb_args)
         }
         Command::Pmu { action } => {
             let vendor = rewind_core::pmu::Vendor::detect()?;
