@@ -141,12 +141,7 @@ fn import_from(home: &Home, reader: impl Read, source: &str) -> Result<Run> {
     result
 }
 
-fn unpack_and_place(
-    home: &Home,
-    reader: impl Read,
-    source: &str,
-    staging: &Path,
-) -> Result<Run> {
+fn unpack_and_place(home: &Home, reader: impl Read, source: &str, staging: &Path) -> Result<Run> {
     let decoder = zstd::Decoder::new(reader)?;
     let mut tar = tar::Archive::new(decoder);
     let mut store: Option<Store> = None;
@@ -173,9 +168,7 @@ fn unpack_and_place(
                 .and_then(|n| n.to_str())
                 .unwrap_or_default();
             if hex(&hash) != named {
-                bail!(
-                    "page {named} in {source} does not match its contents"
-                );
+                bail!("page {named} in {source} does not match its contents");
             }
             continue;
         }

@@ -69,8 +69,7 @@ pub fn import_url(url: &str) -> Result<PathBuf> {
     let response = ureq::get(url)
         .call()
         .with_context(|| format!("downloading {url}"))?;
-    import(response.into_body().into_reader(), &into)
-        .with_context(|| format!("unpacking {url}"))
+    import(response.into_body().into_reader(), &into).with_context(|| format!("unpacking {url}"))
 }
 
 /// Unpacks an export held in memory, like the examples compiled into the
