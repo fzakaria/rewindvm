@@ -813,10 +813,7 @@ mod tests {
     fn the_kernel_is_told_the_cpu_count() {
         // The guest kernel reads how many CPUs to report to user space
         // from rewind.cpus= on its command line, after the spec's own.
-        let spec = Spec {
-            cores: 4,
-            ..spec()
-        };
+        let spec = Spec { cores: 4, ..spec() };
         assert_eq!(spec.boot_cmdline(), format!("{BASE_CMDLINE} rewind.cpus=4"));
     }
 

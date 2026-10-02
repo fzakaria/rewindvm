@@ -1051,7 +1051,8 @@ fn report_cpus() -> Result<()> {
     }
 
     // CPU 0's block of /proc/cpuinfo, read before anything covers it.
-    let one = fs::read_to_string(CPUINFO_FILE).map_err(|e| format!("reading {CPUINFO_FILE}: {e}"))?;
+    let one =
+        fs::read_to_string(CPUINFO_FILE).map_err(|e| format!("reading {CPUINFO_FILE}: {e}"))?;
 
     // Each file's replacement, written beside the others and bound over it.
     mkdir(REPORTED_CPUS_DIR)?;
