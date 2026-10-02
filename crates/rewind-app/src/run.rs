@@ -53,6 +53,12 @@ pub struct Manifest {
     pub created: Option<u64>,
     /// The vCPUs the VM had.
     pub cores: Option<u64>,
+    /// The steps a perturbed schedule was confined to, when it was: the
+    /// first and the last.
+    pub window: Option<(u64, u64)>,
+    /// Whether the run came from an export: `rewind import` keeps an
+    /// imported run's kernel among its inputs, under the run's id.
+    pub imported: bool,
     /// A key for the run's inputs less its schedule: runs with equal keys
     /// are the same build on the same machine, perturbed or not.
     pub inputs: Option<String>,
@@ -105,6 +111,8 @@ impl Manifest {
             first_difference: json.get("first_difference").and_then(Value::as_u64),
             created: json.get("created").and_then(Value::as_u64),
             cores: spec.and_then(|s| s.get("cores")).and_then(Value::as_u64),
+            imported: imported(text(json.get("id")).as_deref(), spec),
+            window: window(spec),
             inputs: spec.and_then(inputs_key),
             outcome: json
                 .get("outcome")
@@ -131,6 +139,33 @@ const NOT_INPUTS: [&str; 7] = [
     "initrd",
     "image",
 ];
+
+/// Where `rewind import` puts an imported run's kernel, initrd and image:
+/// a directory named for the run in the home's inputs.
+const IMPORTED_INPUTS_DIR: &str = "inputs";
+
+/// The steps the spec confines its schedule to, when it has an end: the
+/// engine writes the largest u64 for a schedule that runs to the end.
+fn window(spec: Option<&Value>) -> Option<(u64, u64)> {
+    let field = |name| spec?.get(name)?.as_u64();
+    let until = field("schedule_until").filter(|u| *u != u64::MAX)?;
+    Some((field("schedule_from").unwrap_or(0), until))
+}
+
+/// Whether the spec's kernel is in the imported inputs of run `id`.
+fn imported(id: Option<&str>, spec: Option<&Value>) -> bool {
+    let (Some(id), Some(kernel)) = (id, spec.and_then(|s| text(s.get("kernel")))) else {
+        return false;
+    };
+    let Some(dir) = Path::new(&kernel).parent() else {
+        return false;
+    };
+    let named = |p: Option<&Path>, name: &str| {
+        p.and_then(Path::file_name)
+            .is_some_and(|n| n.to_string_lossy() == name)
+    };
+    named(Some(dir), id) && named(dir.parent(), IMPORTED_INPUTS_DIR)
+}
 
 /// A hash of a manifest's spec without the fields in `NOT_INPUTS`.
 fn inputs_key(spec: &Value) -> Option<String> {

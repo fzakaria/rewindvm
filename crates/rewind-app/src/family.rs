@@ -6,7 +6,7 @@
 //! The engine's runs are read from their manifests alone, without their
 //! traces, so a whole home of runs is quick to list.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -39,6 +39,11 @@ pub struct RunEntry {
     pub trace_hash: Option<String>,
     /// The vCPUs the VM had.
     pub cores: u64,
+    /// The steps its schedule was confined to, for the runs rewind check
+    /// makes as it narrows a schedule down.
+    pub window: Option<(u64, u64)>,
+    /// Whether it came from an export made on another machine.
+    pub imported: bool,
     /// Its inputs less its schedule, which tie a run from boot under a
     /// perturbed schedule to the run recorded without one.
     pub inputs: Option<String>,
@@ -93,6 +98,8 @@ impl RunEntry {
             first_difference: manifest.first_difference,
             trace_hash: manifest.trace_hash.clone(),
             cores: manifest.cores.unwrap_or(DEFAULT_CORES),
+            window: manifest.window,
+            imported: manifest.imported,
             inputs: manifest.inputs.clone(),
             created: manifest.created.unwrap_or(0),
             modified,
@@ -125,14 +132,44 @@ pub struct Family {
 /// beside it draws.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Row {
+    /// The row's run, or for a row that folds runs, the schedule 0 run
+    /// they are under.
     pub run: RunEntry,
     pub depth: usize,
     pub identical_to: Option<String>,
-    /// For a recorded run in a family with several, the words that tell
-    /// it from the others: its cores and how long ago it was made.
+    /// For a schedule 0 run in a family with several, the words that tell
+    /// it from the others: its cores, and whether it was imported or how
+    /// long ago it was made.
     pub apart: Option<String>,
     pub graph: Graph,
+    pub kind: RowKind,
 }
+
+/// What a Runs panel row is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowKind {
+    /// A run.
+    Run,
+    /// Stands for `count` runs from boot under the row's run that ended
+    /// the way it did; a click shows them.
+    Folded { count: usize },
+    /// Comes after those runs once shown; a click folds them again.
+    Unfolded { count: usize },
+}
+
+/// The fewest runs from boot a row folds: one run is shown as itself.
+const MIN_FOLD: usize = 2;
+
+/// What `Family::rows_folded` folds: the schedule 0 runs whose runs from
+/// boot are shown, and the runs that stay in view whatever their ending.
+struct Fold<'a> {
+    unfolded: &'a HashSet<String>,
+    keep: &'a [&'a str],
+}
+
+/// What makes a placeholder's id, which stands in the tree for a row that
+/// folds runs, from the id of the run they are under. No run id has it.
+const FOLD_ID_SUFFIX: &str = "/fold";
 
 /// The lanes of the family graph on one row, as ISL and Jujutsu draw a
 /// history: each run is a dot in the column of its depth, and its line
@@ -157,15 +194,24 @@ impl Row {
     /// step it forked at, its schedule, and where it first differs from
     /// its parent or which older fork it repeats.
     pub fn detail(&self) -> String {
+        match self.kind {
+            RowKind::Run => {}
+            RowKind::Folded { count } => {
+                return format!("{count} more at boot ended the same \u{b7} show");
+            }
+            RowKind::Unfolded { count } => {
+                return format!("hide the {count} at boot that ended the same");
+            }
+        }
         let run = &self.run;
         let Some(parent) = &run.parent else {
             return match (run.schedule, self.depth) {
                 (0, _) => match &self.apart {
-                    Some(apart) => format!("recorded \u{b7} {apart}"),
-                    None => "recorded".to_string(),
+                    Some(apart) => format!("schedule 0 \u{b7} {apart}"),
+                    None => "schedule 0".to_string(),
                 },
-                (n, 0) => format!("schedule {n}"),
-                (n, _) => format!("at boot \u{b7} schedule {n}"),
+                (n, 0) => format!("schedule {n}{}", window_words(run)),
+                (n, _) => format!("at boot \u{b7} schedule {n}{}", window_words(run)),
             };
         };
         let mut words = format!(
@@ -180,6 +226,18 @@ impl Row {
         }
         words
     }
+}
+
+/// The steps a run's schedule was confined to, as words to append, or
+/// nothing for a schedule that ran to the end.
+fn window_words(run: &RunEntry) -> String {
+    run.window.map_or(String::new(), |(from, until)| {
+        format!(
+            " \u{b7} steps {}\u{2013}{}",
+            thousands(from),
+            thousands(until)
+        )
+    })
 }
 
 impl Family {
@@ -248,12 +306,71 @@ impl Family {
         self.rows_at(SystemTime::now())
     }
 
+    /// The rows as the Runs panel draws them: under each schedule 0 run
+    /// whose id is not in `unfolded`, its runs from boot that ended as it
+    /// did, have no forks and are not in `keep` are one row.
+    pub fn rows_folded(&self, unfolded: &HashSet<String>, keep: &[&str]) -> Vec<Row> {
+        self.rows_with(SystemTime::now(), Some(Fold { unfolded, keep }))
+    }
+
     /// The rows as `rows` gives them, with how long ago each recorded run
     /// was made counted back from `now`.
     pub fn rows_at(&self, now: SystemTime) -> Vec<Row> {
+        self.rows_with(now, None)
+    }
+
+    fn rows_with(&self, now: SystemTime, fold: Option<Fold>) -> Vec<Row> {
+        let recorded = self.recorded_by_inputs();
+
+        // The runs each folding row stands for, and a placeholder for the
+        // row to take a run's place in the tree.
+        let parents: HashSet<&str> = self
+            .runs
+            .iter()
+            .filter_map(|r| Some(r.parent.as_ref()?.id.as_str()))
+            .collect();
+        let mut folded: HashSet<&str> = HashSet::new();
+        let mut placeholders: Vec<(RunEntry, RowKind)> = Vec::new();
+        let mut same: HashMap<&str, Vec<&str>> = HashMap::new();
+        if let Some(fold) = &fold {
+            for run in &self.runs {
+                let Some(under) = Self::from_boot_under(run, &recorded) else {
+                    continue;
+                };
+                if run.ending != under.ending
+                    || parents.contains(run.id.as_str())
+                    || fold.keep.contains(&run.id.as_str())
+                {
+                    continue;
+                }
+                same.entry(under.id.as_str()).or_default().push(&run.id);
+            }
+        }
+        for (under, runs) in same {
+            if runs.len() < MIN_FOLD {
+                continue;
+            }
+            let count = runs.len();
+            let kind = if fold.as_ref().is_some_and(|f| f.unfolded.contains(under)) {
+                RowKind::Unfolded { count }
+            } else {
+                folded.extend(runs);
+                RowKind::Folded { count }
+            };
+            let Some(under) = self.runs.iter().find(|r| r.id == under) else {
+                continue;
+            };
+            let placeholder = RunEntry {
+                id: format!("{}{FOLD_ID_SUFFIX}", under.id),
+                trace_hash: None,
+                ..under.clone()
+            };
+            placeholders.push((placeholder, kind));
+        }
+
         let mut children: HashMap<&str, Vec<&RunEntry>> = HashMap::new();
         let mut roots: Vec<&RunEntry> = Vec::new();
-        for run in &self.runs {
+        for run in self.runs.iter().filter(|r| !folded.contains(r.id.as_str())) {
             match &run.parent {
                 Some(p) if self.has_parent_here(run) => {
                     children.entry(p.id.as_str()).or_default().push(run)
@@ -264,7 +381,6 @@ impl Family {
         // The runs from boot under other schedules, as rewind check makes
         // them, hang off the schedule 0 run of their inputs like forks at
         // step 0, after its real forks.
-        let recorded = self.recorded_by_inputs();
         let (from_boot, rest): (Vec<&RunEntry>, Vec<&RunEntry>) = roots
             .into_iter()
             .partition(|r| Self::from_boot_under(r, &recorded).is_some());
@@ -286,6 +402,23 @@ impl Family {
                     r.created,
                 )
             });
+        }
+
+        // Each folding row comes last under the run its runs are under.
+        let mut stands_for: HashMap<&str, (&RunEntry, RowKind)> = HashMap::new();
+        for (placeholder, kind) in &placeholders {
+            let Some(under) = self
+                .runs
+                .iter()
+                .find(|r| placeholder.id.strip_suffix(FOLD_ID_SUFFIX) == Some(r.id.as_str()))
+            else {
+                continue;
+            };
+            children
+                .entry(under.id.as_str())
+                .or_default()
+                .push(placeholder);
+            stands_for.insert(placeholder.id.as_str(), (under, *kind));
         }
 
         // Depth first, each row tagged with the root it is under and its
@@ -346,9 +479,12 @@ impl Family {
                 return None;
             }
             let cores = match r.cores {
-                1 => "1 core".to_string(),
-                n => format!("{n} cores"),
+                1 => "1 vCPU".to_string(),
+                n => format!("{n} vCPUs"),
             };
+            if r.imported {
+                return Some(format!("{cores} \u{b7} imported"));
+            }
             let made = SystemTime::UNIX_EPOCH + Duration::from_secs(r.created);
             let elapsed = now.duration_since(made).unwrap_or_default();
             Some(format!("{cores} \u{b7} {}", ago(elapsed)))
@@ -357,6 +493,16 @@ impl Family {
         order
             .into_iter()
             .map(|(run, depth, _, graph)| {
+                if let Some((under, kind)) = stands_for.get(run.id.as_str()) {
+                    return Row {
+                        run: (*under).clone(),
+                        depth,
+                        identical_to: None,
+                        apart: None,
+                        graph,
+                        kind: *kind,
+                    };
+                }
                 let top = self.chain_root(run).id.as_str();
                 let identical_to = match (run.parent.is_some(), &run.trace_hash) {
                     (true, Some(hash)) => originals
@@ -371,6 +517,7 @@ impl Family {
                     identical_to,
                     apart: apart(run),
                     graph,
+                    kind: RowKind::Run,
                 }
             })
             .collect()
@@ -510,6 +657,8 @@ mod tests {
             first_difference: None,
             trace_hash: Some(format!("hash-{id}")),
             cores: DEFAULT_CORES,
+            window: None,
+            imported: false,
             inputs: Some(INPUTS.to_string()),
             created: 0,
             modified: SystemTime::UNIX_EPOCH,
@@ -620,7 +769,7 @@ mod tests {
                 .map(Row::detail)
                 .unwrap()
         };
-        assert_eq!(detail("base"), "recorded");
+        assert_eq!(detail("base"), "schedule 0");
         assert_eq!(detail("check3"), "at boot \u{b7} schedule 3");
         assert_eq!(detail("dup"), "at 50 \u{b7} schedule 2 \u{b7} same as f1");
         let mut differs = rows[1].clone();
@@ -727,9 +876,10 @@ mod tests {
 
     #[test]
     fn several_recorded_runs_say_what_tells_them_apart() {
-        // Two runs recorded on one core a day apart and one on four: each
-        // says its cores and when it was made. A family with one recorded
-        // run says only "recorded".
+        // A run imported from another machine and two recorded here, on
+        // one core and on four: each says its cores, and where it came
+        // from or when it was made. A family with one schedule 0 run says
+        // only that.
         const DAY: u64 = 86_400;
         let made = |mut r: RunEntry, cores: u64, created: u64| {
             r.cores = cores;
@@ -738,7 +888,10 @@ mod tests {
         };
         let f = Family {
             runs: vec![
-                made(run("old", None, 0, "exited:101"), 1, 0),
+                RunEntry {
+                    imported: true,
+                    ..made(run("old", None, 0, "exited:101"), 1, 0)
+                },
                 made(run("one", None, 0, "exited:101"), 1, DAY),
                 made(run("four", None, 0, "exited:0"), 4, DAY),
             ],
@@ -746,10 +899,89 @@ mod tests {
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(3 * DAY);
         let rows = f.rows_at(now);
         let detail = |id: &str| rows.iter().find(|r| r.run.id == id).unwrap().detail();
-        assert_eq!(detail("old"), "recorded \u{b7} 1 core \u{b7} 3d ago");
-        assert_eq!(detail("one"), "recorded \u{b7} 1 core \u{b7} 2d ago");
-        assert_eq!(detail("four"), "recorded \u{b7} 4 cores \u{b7} 2d ago");
-        assert_eq!(family().rows_at(now)[0].detail(), "recorded");
+        assert_eq!(detail("old"), "schedule 0 \u{b7} 1 vCPU \u{b7} imported");
+        assert_eq!(detail("one"), "schedule 0 \u{b7} 1 vCPU \u{b7} 2d ago");
+        assert_eq!(detail("four"), "schedule 0 \u{b7} 4 vCPUs \u{b7} 2d ago");
+        assert_eq!(family().rows_at(now)[0].detail(), "schedule 0");
+    }
+
+    /// A schedule 0 run that failed with a fork, and rewind check's runs
+    /// of it: three that failed the same way, one of them with a fork,
+    /// and one that passed.
+    fn swept() -> Family {
+        Family {
+            runs: vec![
+                run("r", None, 0, "exited:101"),
+                run("f", Some(("r", 40)), 1, "exited:101"),
+                run("s1", None, 1, "exited:101"),
+                run("s2", None, 2, "exited:101"),
+                run("s2a", Some(("s2", 30)), 1, "exited:101"),
+                run("s3", None, 3, "exited:101"),
+                run("s4", None, 4, "exited:0"),
+            ],
+        }
+    }
+
+    fn shown(rows: &[Row]) -> Vec<(String, usize, RowKind)> {
+        rows.iter()
+            .map(|r| (r.run.id.clone(), r.depth, r.kind))
+            .collect()
+    }
+
+    #[test]
+    fn a_run_perturbed_in_a_window_says_its_steps() {
+        // rewind check narrows a schedule to the steps it perturbs: the
+        // runs it makes share a seed and differ in their window.
+        let mut narrowed = swept();
+        narrowed.runs[2].window = Some((501, 1_432));
+        let rows = narrowed.rows();
+        let row = rows.iter().find(|r| r.run.id == "s1").unwrap();
+        assert_eq!(
+            row.detail(),
+            "at boot \u{b7} schedule 1 \u{b7} steps 501\u{2013}1,432"
+        );
+    }
+
+    #[test]
+    fn runs_from_boot_that_end_like_their_run_fold_into_one_row() {
+        // Folded, s1 and s3 become one row after the runs that stay: the
+        // fork, s2 with its fork, and s4, which ended differently. The
+        // folded row stands for r, whose runs it holds.
+        let rows = swept().rows_folded(&HashSet::new(), &[]);
+        let row = |id: &str, depth| (id.to_string(), depth, RowKind::Run);
+        assert_eq!(
+            shown(&rows),
+            vec![
+                row("r", 0),
+                row("f", 1),
+                row("s2", 1),
+                row("s2a", 2),
+                row("s4", 1),
+                ("r".to_string(), 1, RowKind::Folded { count: 2 }),
+            ]
+        );
+        assert_eq!(
+            rows[5].detail(),
+            "2 more at boot ended the same \u{b7} show"
+        );
+        assert!(rows[5].graph.last);
+        assert!(!rows[4].graph.last);
+
+        // Unfolded, every run is there, and a last row folds them again.
+        let open = HashSet::from(["r".to_string()]);
+        let rows = swept().rows_folded(&open, &[]);
+        assert_eq!(rows.len(), 8);
+        assert_eq!(rows[7].kind, RowKind::Unfolded { count: 2 });
+        assert_eq!(rows[7].detail(), "hide the 2 at boot that ended the same");
+    }
+
+    #[test]
+    fn a_run_on_screen_stays_and_one_run_is_not_folded() {
+        // With s3 on screen only s1 would fold, and one run is shown as
+        // itself rather than behind a row of its own.
+        let rows = swept().rows_folded(&HashSet::new(), &["s3"]);
+        assert_eq!(rows.len(), 7);
+        assert!(rows.iter().all(|r| r.kind == RowKind::Run));
     }
 
     #[test]

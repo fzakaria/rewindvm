@@ -3,6 +3,7 @@
 //! Drawing lives in `render`.
 
 use std::cell::Cell;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -14,7 +15,7 @@ use gpui::{
 
 use crate::describe::thousands;
 use crate::engine::{Engine, EngineError, EngineResult, Forked};
-use crate::family::{Family, Row, RunEntry, families, family_of, scan};
+use crate::family::{Family, Row, RowKind, RunEntry, families, family_of, scan};
 use crate::model::{LogFilter, Motion};
 use crate::run::{Origin, Session, short_id};
 use crate::selection::Surface;
@@ -236,6 +237,9 @@ pub struct Scrubber {
     pub(super) runs_scroll: UniformListScrollHandle,
     /// Whether identical forks are being removed.
     pub(super) pruning: bool,
+    /// The schedule 0 runs whose runs from boot that ended the same way
+    /// the Runs panel shows one by one instead of folded into one row.
+    pub(super) runs_unfolded: HashSet<String>,
     /// The Open link dialog, when it is open.
     pub(super) link_dialog: Option<LinkDialog>,
     pub(super) step: u64,
@@ -296,6 +300,7 @@ impl Scrubber {
             pinned_compare: None,
             runs_scroll: UniformListScrollHandle::new(),
             pruning: false,
+            runs_unfolded: HashSet::new(),
             step: 0,
             log_filter: LogFilter::Output,
             log_scroll: UniformListScrollHandle::new(),
@@ -433,9 +438,31 @@ impl Scrubber {
         self.open(run.dir, compare, cx);
     }
 
+    /// The Runs panel's rows as it draws them, folded as the user left
+    /// them. The runs on screen and compared always have rows of their own.
+    pub(super) fn runs_rows(&self) -> Vec<Row> {
+        let Some(family) = &self.family else {
+            return Vec::new();
+        };
+        let ids = |run: Option<&crate::run::Run>| {
+            run.and_then(|r| r.manifest.id.clone()).unwrap_or_default()
+        };
+        let shown = ids(self.session.as_ref().map(|s| &s.run));
+        let compared = ids(self.session.as_ref().and_then(|s| s.other.as_ref()));
+        family.rows_folded(&self.runs_unfolded, &[&shown, &compared])
+    }
+
     /// The Runs panel's row `index`, as the panel draws it.
     pub(super) fn runs_row(&self, index: usize) -> Option<Row> {
-        self.family.as_ref()?.rows().into_iter().nth(index)
+        self.runs_rows().into_iter().nth(index)
+    }
+
+    /// Shows the runs a folding row stands for, or folds them again.
+    pub(super) fn toggle_fold(&mut self, under: &str, cx: &mut Context<Self>) {
+        if !self.runs_unfolded.remove(under) {
+            self.runs_unfolded.insert(under.to_string());
+        }
+        cx.notify();
     }
 
     /// Opens `run` compared with the run on screen.
@@ -472,16 +499,20 @@ impl Scrubber {
         modifiers: gpui::Modifiers,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(rows) = self.family.as_ref().map(Family::rows) else {
-            return false;
-        };
+        let rows = self.runs_rows();
         let Some(row) = rows.get(index) else {
             return false;
         };
+        if row.kind != RowKind::Run {
+            return false;
+        }
         if modifiers.shift {
             let from = self.runs_anchor.unwrap_or(index);
             let (lo, hi) = (from.min(index), from.max(index));
-            for r in &rows[lo..=hi] {
+            for r in rows[lo..=hi.min(rows.len() - 1)]
+                .iter()
+                .filter(|r| r.kind == RowKind::Run)
+            {
                 if !self.runs_picked.contains(&r.run.id) {
                     self.runs_picked.push(r.run.id.clone());
                 }
@@ -518,6 +549,9 @@ impl Scrubber {
         let Some(row) = self.runs_row(index) else {
             return;
         };
+        if row.kind != RowKind::Run {
+            return;
+        }
         if !self.runs_picked.contains(&row.run.id) {
             self.runs_picked = vec![row.run.id];
             self.runs_anchor = Some(index);

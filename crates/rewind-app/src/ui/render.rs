@@ -12,7 +12,7 @@ use gpui::{
 };
 
 use crate::describe::{self, EventTone, short_store_paths, thousands};
-use crate::family::{Family, Row, RunEntry};
+use crate::family::{Family, Row, RowKind as RunsRowKind, RunEntry};
 use crate::model::{FileOp, FileTone, LogFilter, Motion, RowKind, Tone, ticks};
 use crate::run::{Agreement, Session, Verdict, short_id};
 use crate::selection::{Mapped, Surface, part_of_line};
@@ -1501,10 +1501,11 @@ impl Scrubber {
 
     /// The Runs panel: the family of the run on screen as a tree, the run
     /// on screen marked. A row opens its run, compared with the run it
-    /// was forked from. The title offers to remove forks that repeat an
+    /// was forked from, and a folding row shows or hides the runs from
+    /// boot it stands for. The title offers to remove forks that repeat an
     /// older fork's trace.
     fn render_runs(&self, family: &Family, cx: &mut Context<Self>) -> Div {
-        let rows = family.rows();
+        let rows = self.runs_rows();
         let count = rows.len();
         let shown_id = self.session().run.manifest.id.clone().unwrap_or_default();
         let compared_id = self
@@ -1567,15 +1568,20 @@ impl Scrubber {
                 range
                     .map(|i| {
                         let row = &rows[i];
-                        let shown = row.run.id == shown_id;
-                        let compared = row.run.id == compared_id;
-                        let is_picked = picked.contains(&row.run.id);
+                        let is_run = row.kind == RunsRowKind::Run;
+                        let shown = is_run && row.run.id == shown_id;
+                        let compared = is_run && row.run.id == compared_id;
+                        let is_picked = is_run && picked.contains(&row.run.id);
                         let run = row.run.clone();
 
                         // The id and how the run came to be, one line of
                         // text to select and copy, the id in its color.
                         let line = runs_line(row);
-                        let id_len = short_id(&row.run.id).len();
+                        let id_len = if is_run {
+                            short_id(&row.run.id).len()
+                        } else {
+                            0
+                        };
                         let id_color = if shown { theme::AMBER } else { theme::SOFT };
                         let part = selected
                             .as_ref()
@@ -1637,6 +1643,10 @@ impl Scrubber {
                                 {
                                     return;
                                 }
+                                if !is_run {
+                                    this.toggle_fold(&run.id, cx);
+                                    return;
+                                }
                                 this.open_family_run(run.clone(), cx)
                             }))
                     })
@@ -1658,7 +1668,7 @@ impl Scrubber {
             .bg(rgb(theme::PANEL))
             .child(grip(Edge::Runs, cx))
             .child(panel_title(
-                &format!("Runs of this build \u{b7} {count}"),
+                &format!("Runs of this build \u{b7} {}", family.runs.len()),
                 Some(
                     div()
                         .flex()
@@ -1683,15 +1693,10 @@ impl Scrubber {
 
     /// The Runs panel's lines as the selection sees them.
     pub(super) fn runs_lines(&self) -> Vec<Mapped> {
-        self.family
-            .as_ref()
-            .map(|f| {
-                f.rows()
-                    .iter()
-                    .map(|r| Mapped::plain(runs_line(r)))
-                    .collect()
-            })
-            .unwrap_or_default()
+        self.runs_rows()
+            .iter()
+            .map(|r| Mapped::plain(runs_line(r)))
+            .collect()
     }
 }
 
@@ -1705,9 +1710,13 @@ const GDB_NOTE: &str = "gdb on a throwaway copy of the VM at this step: its one 
 const SHELL_NOTE: &str = "A shell inside a throwaway copy of the VM at this step, in the process's directory with its environment, while everything else in the VM stays where it was. Nothing done in it changes the recording.";
 const EXPORT_NOTE: &str = "Writes this run to one .rwd file, with its keyframes and inputs, that another machine can open, replay and fork.";
 
-/// A Runs panel row's text: the run's id and how it came to be.
+/// A Runs panel row's text: the run's id and how it came to be, or what
+/// a folding row stands for.
 fn runs_line(row: &Row) -> String {
-    format!("{}  {}", short_id(&row.run.id), row.detail())
+    match row.kind {
+        RunsRowKind::Run => format!("{}  {}", short_id(&row.run.id), row.detail()),
+        RunsRowKind::Folded { .. } | RunsRowKind::Unfolded { .. } => row.detail(),
+    }
 }
 
 /// One row of the family graph, drawn as ISL and Jujutsu draw a history:
@@ -1717,6 +1726,7 @@ fn runs_line(row: &Row) -> String {
 fn graph_cell(row: &Row, columns: usize, shown: bool, compared: bool) -> impl IntoElement {
     let graph = row.graph.clone();
     let depth = row.depth;
+    let folding = row.kind != RunsRowKind::Run;
     let dot_color = if row.run.failed {
         theme::RED
     } else if row.run.ending == "exited:0" {
@@ -1781,7 +1791,18 @@ fn graph_cell(row: &Row, columns: usize, shown: bool, compared: bool) -> impl In
                     gpui::size(radius * 2.0, radius * 2.0),
                 )
             };
-            window.paint_quad(fill(circle(dot), rgb(dot_color)).corner_radii(dot));
+            // A folding row's dot is a hollow ring in the color of the
+            // ending its runs share.
+            if folding {
+                window.paint_quad(
+                    fill(circle(dot), gpui::transparent_black())
+                        .corner_radii(dot)
+                        .border_widths(px(size::GRAPH_STROKE))
+                        .border_color(rgb(dot_color)),
+                );
+            } else {
+                window.paint_quad(fill(circle(dot), rgb(dot_color)).corner_radii(dot));
+            }
             // The run on screen is ringed in amber, the run it is compared
             // with in blue, as their pills in the header are colored.
             let ring_color = match (shown, compared) {

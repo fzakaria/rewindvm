@@ -91,7 +91,7 @@ pub const STOPS: [Stop; 6] = [
     Stop {
         anchor: Anchor::RunsPill,
         title: "Every run of this build",
-        body: "The runs pill shows and hides the Runs panel: the run as first recorded, the schedules rewind check tried and every fork, drawn as a tree. A fork's schedule is the seed that perturbs the threads from its fork step on. Click a run to open it beside the one it forked from; right-click it to compare, copy or remove it.",
+        body: "The runs pill shows and hides the Runs panel: every run of this build, drawn as a tree. Schedule 0 is the run with its threads left alone. Under it hang its forks, each from the step it forked at, and the schedules rewind check ran from boot; those that ended the way it did fold into one row. A schedule is the seed that perturbs the threads. Click a run to open it beside the run it hangs under; right-click it to compare, copy or remove it.",
         playhead: Playhead::Divergence,
         needs: Needs::Family,
     },

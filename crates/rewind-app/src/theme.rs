@@ -207,7 +207,7 @@ pub mod size {
     pub const TOOLTIP_PAD_Y: f32 = 7.0;
 
     // The Runs panel.
-    pub const RUNS_PANEL_WIDTH: f32 = 500.0;
+    pub const RUNS_PANEL_WIDTH: f32 = 530.0;
     /// The Runs panel's width can be dragged between these.
     pub const RUNS_PANEL_MIN: f32 = 320.0;
     pub const RUNS_PANEL_MAX: f32 = 900.0;
