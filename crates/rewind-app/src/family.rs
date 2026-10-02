@@ -145,9 +145,10 @@ impl Row {
     pub fn detail(&self) -> String {
         let run = &self.run;
         let Some(parent) = &run.parent else {
-            return match run.schedule {
-                0 => "recorded".to_string(),
-                n => format!("schedule {n}"),
+            return match (run.schedule, self.depth) {
+                (0, _) => "recorded".to_string(),
+                (n, 0) => format!("schedule {n}"),
+                (n, _) => format!("at boot \u{b7} schedule {n}"),
             };
         };
         let mut words = format!(
@@ -237,11 +238,27 @@ impl Family {
                 _ => roots.push(run),
             }
         }
-        let base_id = self.base().id.clone();
+        // The recorded run, under the unperturbed schedule, is where every
+        // run of the build starts: the runs rewind check made from boot
+        // under other schedules hang off it like forks at step 0, after
+        // its real forks.
+        let base = self.base();
+        let base_id = base.id.clone();
+        if base.parent.is_none() && base.schedule == 0 {
+            let (from_boot, rest): (Vec<&RunEntry>, Vec<&RunEntry>) = roots
+                .into_iter()
+                .partition(|r| r.id != base_id && r.parent.is_none());
+            roots = rest;
+            children
+                .entry(base.id.as_str())
+                .or_default()
+                .extend(from_boot);
+        }
         roots.sort_by_key(|r| (r.id != base_id, r.schedule, r.created));
         for list in children.values_mut() {
             list.sort_by_key(|r| {
                 (
+                    r.parent.is_none(),
                     r.parent.as_ref().map_or(0, |p| p.step),
                     r.schedule,
                     r.created,
@@ -278,30 +295,34 @@ impl Family {
             }
         }
 
-        // Under each root, the original of a trace is the root when the
-        // root has it, as rewind prune keeps the run it is given, and the
-        // oldest fork with it otherwise.
-        let mut originals: HashMap<(usize, &str), (&RunEntry, bool)> = HashMap::new();
-        for (run, depth, root, _) in &order {
+        // Forks repeat a trace within what rewind prune takes in: a run
+        // without a parent here and every fork below it through parents,
+        // which leaves out the runs from boot drawn under the recorded run.
+        // There the original of a trace is that run when it has the trace,
+        // as prune keeps the run it is given, and the oldest fork otherwise.
+        let mut originals: HashMap<(&str, &str), (&RunEntry, bool)> = HashMap::new();
+        for (run, _, _, _) in &order {
             let Some(hash) = &run.trace_hash else {
                 continue;
             };
-            let is_root = *depth == 0;
+            let top = self.chain_root(run);
+            let is_top = top.id == run.id;
             let original = originals
-                .entry((*root, hash.as_str()))
-                .or_insert((run, is_root));
+                .entry((top.id.as_str(), hash.as_str()))
+                .or_insert((run, is_top));
             let older = (run.created, &run.id) < (original.0.created, &original.0.id);
-            if is_root || (!original.1 && older) {
-                *original = (run, is_root);
+            if is_top || (!original.1 && older) {
+                *original = (run, is_top);
             }
         }
 
         order
             .into_iter()
-            .map(|(run, depth, root, graph)| {
-                let identical_to = match (depth > 0, &run.trace_hash) {
+            .map(|(run, depth, _, graph)| {
+                let top = self.chain_root(run).id.as_str();
+                let identical_to = match (run.parent.is_some(), &run.trace_hash) {
                     (true, Some(hash)) => originals
-                        .get(&(root, hash.as_str()))
+                        .get(&(top, hash.as_str()))
                         .filter(|(original, _)| original.id != run.id)
                         .map(|(original, _)| original.id.clone()),
                     _ => None,
@@ -320,19 +341,30 @@ impl Family {
     /// them, for `rewind prune --identical`.
     pub fn roots_with_identical(&self) -> Vec<RunEntry> {
         let mut roots: Vec<RunEntry> = Vec::new();
-        let mut current: Option<&RunEntry> = None;
-        let rows = self.rows();
-        for row in &rows {
-            if row.depth == 0 {
-                current = Some(&row.run);
+        for row in self.rows() {
+            if row.identical_to.is_none() {
+                continue;
             }
-            if let (Some(_), Some(root)) = (&row.identical_to, current)
-                && !roots.iter().any(|r| r.id == root.id)
-            {
-                roots.push(root.clone());
+            let top = self.chain_root(&row.run);
+            if !roots.iter().any(|r| r.id == top.id) {
+                roots.push(top.clone());
             }
         }
         roots
+    }
+
+    /// The run `run` descends from through parents here, with no parent
+    /// here itself: what rewind prune is given to reach `run`.
+    fn chain_root<'a>(&'a self, run: &'a RunEntry) -> &'a RunEntry {
+        let mut at = run;
+        while let Some(parent) = at
+            .parent
+            .as_ref()
+            .and_then(|p| self.runs.iter().find(|r| r.id == p.id))
+        {
+            at = parent;
+        }
+        at
     }
 
     /// Every run descended from the run `id` through its forks, nearest
@@ -443,7 +475,7 @@ mod tests {
                 ("f1a".to_string(), 2, None),
                 ("dup".to_string(), 1, Some("f1".to_string())),
                 ("f2".to_string(), 1, None),
-                ("check3".to_string(), 0, None),
+                ("check3".to_string(), 1, None),
             ]
         );
     }
@@ -454,8 +486,8 @@ mod tests {
         // ├─ f1
         // │  ╰─ f1a      base's line passes f1a; f1's ends there
         // ├─ dup
-        // ╰─ f2          base's line ends here
-        // check3
+        // ├─ f2
+        // ╰─ check3      from boot, after the forks; base's line ends here
         let graphs: Vec<(String, Graph)> = family()
             .rows()
             .into_iter()
@@ -473,8 +505,8 @@ mod tests {
                 ("f1".to_string(), graph(&[], false, true)),
                 ("f1a".to_string(), graph(&[true], true, false)),
                 ("dup".to_string(), graph(&[], false, false)),
-                ("f2".to_string(), graph(&[], true, false)),
-                ("check3".to_string(), graph(&[], false, false)),
+                ("f2".to_string(), graph(&[], false, false)),
+                ("check3".to_string(), graph(&[], true, false)),
             ]
         );
     }
@@ -514,7 +546,7 @@ mod tests {
                 .unwrap()
         };
         assert_eq!(detail("base"), "recorded");
-        assert_eq!(detail("check3"), "schedule 3");
+        assert_eq!(detail("check3"), "at boot \u{b7} schedule 3");
         assert_eq!(detail("dup"), "at 50 \u{b7} schedule 2 \u{b7} same as f1");
         let mut differs = rows[1].clone();
         differs.run.first_difference = Some(1_204);
@@ -556,6 +588,20 @@ mod tests {
         assert_eq!(ids("f1"), vec!["f1a"]);
         assert_eq!(ids("f1a"), Vec::<&str>::new());
         assert_eq!(ids("base"), vec!["dup", "f1", "f1a", "f2"]);
+    }
+
+    #[test]
+    fn forks_under_a_run_from_boot_are_compared_among_themselves() {
+        // A fork of check3 with f1's trace is not the same as f1: pruning
+        // base does not reach it, and pruning check3 keeps it.
+        let mut cousin = run("cousin", Some(("check3", 40)), 1, "exited:2");
+        cousin.trace_hash = Some("hash-f1".to_string());
+        let mut f = family();
+        f.runs.push(cousin);
+        let rows = f.rows();
+        let row = rows.iter().find(|r| r.run.id == "cousin").unwrap();
+        assert_eq!(row.identical_to, None);
+        assert_eq!(row.depth, 2);
     }
 
     #[test]
