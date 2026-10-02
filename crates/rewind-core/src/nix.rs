@@ -12,8 +12,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
+use nix_derivation::store_path::hash_placeholder;
+use nix_derivation::{StorePath, StructuredAttrsFiles, nixbase32};
 use rewind_init::{Job, JobFile, Root};
-use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 pub const STORE: &str = "/nix/store";
@@ -26,14 +27,10 @@ pub const BUILDER_GID: u32 = 100;
 
 /// The files a structured-attributes build reads its attributes from, in
 /// the build directory, and the variables that name them.
-const ATTRS_SH: &str = ".attrs.sh";
-const ATTRS_JSON: &str = ".attrs.json";
+const ATTRS_SH: &str = StructuredAttrsFiles::SHELL_FILE_NAME;
+const ATTRS_JSON: &str = StructuredAttrsFiles::JSON_FILE_NAME;
 const ATTRS_SH_VAR: &str = "NIX_ATTRS_SH_FILE";
 const ATTRS_JSON_VAR: &str = "NIX_ATTRS_JSON_FILE";
-
-/// The env entry older formats of `nix derivation show` carry structured
-/// attributes in, as JSON text.
-const LEGACY_ATTRS_KEY: &str = "__json";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Derivation {
@@ -48,20 +45,17 @@ pub struct Derivation {
     pub input_srcs: Vec<PathBuf>,
     /// Input derivations and the outputs of each this one uses.
     pub input_drvs: Vec<(PathBuf, Vec<String>)>,
-    /// The attributes of a derivation with `__structuredAttrs = true`.
-    /// The build sees these as files, and none of `env`.
-    pub structured_attrs: Option<Map<String, Value>>,
+    /// The .attrs.json and .attrs.sh a derivation with
+    /// `__structuredAttrs = true` gives its build in place of `env`.
+    pub structured_attrs: Option<StructuredAttrsFiles>,
+    /// Whether the output is fixed by a hash given up front, as a
+    /// fetcher's is.
+    pub fixed_output: bool,
 }
 
-/// A store path from either a full path or, as `nix derivation show`
-/// prints them since format version 4, a base name.
-fn store_path(s: &str) -> PathBuf {
-    if s.starts_with('/') {
-        PathBuf::from(s)
-    } else {
-        Path::new(STORE).join(s)
-    }
-}
+/// The prefix of a builder nix-daemon runs itself, such as
+/// builtin:fetchurl, rather than executing.
+const BUILTIN_BUILDER_PREFIX: &str = "builtin:";
 
 /// The derivation an installable names: a .drv path, or anything
 /// `nix path-info --derivation` accepts, such as `nixpkgs#hello`.
@@ -77,95 +71,80 @@ pub fn resolve(installable: &str) -> Result<PathBuf> {
     Ok(PathBuf::from(drv.trim()))
 }
 
+/// The derivation in a .drv file, read as Nix wrote it.
 pub fn show(drv: &Path) -> Result<Derivation> {
-    let text = nix(&["derivation", "show", &drv.to_string_lossy()])?;
-    let json: Value = serde_json::from_str(&text).context("parsing nix derivation show")?;
-    parse(drv, &json)
+    let aterm = std::fs::read(drv).with_context(|| format!("reading {}", drv.display()))?;
+    parse(drv, &aterm)
 }
 
-/// The derivation in the output of `nix derivation show`.
-fn parse(drv: &Path, json: &Value) -> Result<Derivation> {
-    // Format 4 wraps the derivations in an object with a version; older
-    // formats are the map of derivations itself.
-    let drvs = json.get("derivations").unwrap_or(json);
-    let (_, d) = drvs
-        .as_object()
-        .and_then(|m| m.iter().next())
-        .context("nix derivation show printed no derivation")?;
+/// The derivation `aterm`, the contents of the .drv file `drv`.
+fn parse(drv: &Path, aterm: &[u8]) -> Result<Derivation> {
+    // Nix keeps a derivation's name out of its ATerm, in its file name.
+    let file_name = drv
+        .file_name()
+        .with_context(|| format!("{} names no file", drv.display()))?;
+    let store_path = StorePath::from_basename(file_name.as_encoded_bytes())
+        .with_context(|| format!("{} is not a store path", drv.display()))?;
+    let name = store_path
+        .name()
+        .strip_suffix(".drv")
+        .with_context(|| format!("{} is not a .drv file", drv.display()))?;
+    let parsed = nix_derivation::Derivation::from_aterm_bytes(aterm, name)
+        .with_context(|| format!("parsing {}", drv.display()))?;
 
-    let strings = |v: &Value| -> Vec<String> {
-        v.as_array()
-            .map(|a| {
-                a.iter()
-                    .filter_map(|s| s.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-    let env: BTreeMap<String, String> = d["env"]
-        .as_object()
-        .context("derivation has no env")?
-        .iter()
-        .map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string()))
-        .collect();
-
+    // Each output's path. A content-addressed output has one only once it
+    // is built.
     let mut outputs = Vec::new();
-    for (name, o) in d["outputs"]
-        .as_object()
-        .context("derivation has no outputs")?
-    {
-        let path = o["path"].as_str().with_context(|| {
-            format!("output {name} has no fixed path; content-addressed derivations are not supported yet")
-        })?;
-        outputs.push((name.clone(), store_path(path)));
-    }
-
-    // Inputs moved under "inputs" in format 4.
-    let (srcs, drvs_in) = match d.get("inputs") {
-        Some(inputs) => (&inputs["srcs"], &inputs["drvs"]),
-        None => (&d["inputSrcs"], &d["inputDrvs"]),
-    };
-    let input_srcs = strings(srcs).iter().map(|s| store_path(s)).collect();
-    let mut input_drvs = Vec::new();
-    for (path, spec) in drvs_in.as_object().into_iter().flatten() {
-        // Older formats list the outputs directly, newer ones under
-        // "outputs".
-        let outs = match spec.get("outputs") {
-            Some(o) => strings(o),
-            None => strings(spec),
+    for (out, output) in parsed.outputs() {
+        let Some(path) = output.path(name, out)? else {
+            bail!(
+                "output {out} of {name} has no fixed path; content-addressed derivations are not supported yet"
+            );
         };
-        input_drvs.push((store_path(path), outs));
+        outputs.push((out.clone(), PathBuf::from(path.to_absolute_path())));
     }
 
-    // Structured attributes moved out of env.__json into their own
-    // "structuredAttrs" object in format 4.
-    let structured_attrs = match (d.get("structuredAttrs"), env.get(LEGACY_ATTRS_KEY)) {
-        (Some(attrs), _) => Some(
-            attrs
-                .as_object()
-                .context("structuredAttrs is not an object")?
-                .clone(),
-        ),
-        (None, Some(text)) => Some(
-            serde_json::from_str(text).context("parsing the derivation's structured attributes")?,
-        ),
-        (None, None) => None,
-    };
+    // The environment as text, which is all a job's environment can hold.
+    let mut env = BTreeMap::new();
+    for (k, v) in parsed.environment() {
+        let v = String::from_utf8(v.clone())
+            .with_context(|| format!("{k} in {name}'s environment is not UTF-8"))?;
+        env.insert(k.clone(), v);
+    }
+
+    let input_srcs = parsed
+        .input_sources()
+        .iter()
+        .map(|p| PathBuf::from(p.to_absolute_path()))
+        .collect();
+    let mut input_drvs = Vec::new();
+    for (path, input) in parsed.input_derivations() {
+        if input.is_dynamic() {
+            bail!("{name} uses outputs of dynamic derivations, which are not supported yet");
+        }
+        input_drvs.push((
+            PathBuf::from(path.to_absolute_path()),
+            input.outputs().iter().cloned().collect(),
+        ));
+    }
+
+    let structured_attrs = parsed
+        .structured_attrs_files()
+        .with_context(|| format!("writing {name}'s structured attributes"))?;
+    let fixed_output = parsed.is_fixed_output()?;
 
     Ok(Derivation {
         path: drv.to_path_buf(),
-        name: d["name"].as_str().unwrap_or_default().to_string(),
-        system: d["system"].as_str().unwrap_or_default().to_string(),
-        builder: d["builder"]
-            .as_str()
-            .context("derivation has no builder")?
-            .to_string(),
-        args: strings(&d["args"]),
+        name: name.to_string(),
+        system: parsed.system().to_string(),
+        builder: parsed.builder().to_string(),
+        args: parsed.arguments().to_vec(),
         env,
         outputs,
         input_srcs,
         input_drvs,
         structured_attrs,
+        fixed_output,
     })
 }
 
@@ -205,6 +184,14 @@ pub fn input_closure(drv: &Derivation) -> Result<Vec<PathBuf>> {
 /// that overrides one of these sees its own value. `cores` is the
 /// NIX_BUILD_CORES the build sees, the run's CPU count.
 pub fn job(drv: &Derivation, cores: u32) -> Result<Job> {
+    if drv.builder.starts_with(BUILTIN_BUILDER_PREFIX) {
+        bail!(
+            "{} is built by {}, which runs inside nix-daemon and has no program for a run to execute",
+            drv.name,
+            drv.builder
+        );
+    }
+
     let mut env: BTreeMap<String, String> = BTreeMap::new();
     env.insert("PATH".into(), "/path-not-set".into());
     env.insert("HOME".into(), HOMELESS.into());
@@ -214,13 +201,20 @@ pub fn job(drv: &Derivation, cores: u32) -> Result<Job> {
     // The derivation's own attributes: as environment variables, or as
     // files when the derivation uses structured attributes.
     let files = match &drv.structured_attrs {
-        Some(attrs) => structured_files(drv, attrs, &mut env)?,
+        Some(attrs) => structured_files(attrs, &mut env)?,
         None => env_files(drv, &mut env),
     };
 
     for var in ["NIX_BUILD_TOP", "TMPDIR", "TEMPDIR", "TMP", "TEMP", "PWD"] {
         env.insert(var.into(), BUILD_DIR.into());
     }
+
+    // A fixed-output build is told its output's hash will be checked, so a
+    // fetcher can skip checking it itself.
+    if drv.fixed_output {
+        env.insert("NIX_OUTPUT_CHECKED".into(), "1".into());
+    }
+
     env.insert("NIX_LOG_FD".into(), "2".into());
     env.insert("TERM".into(), "xterm-256color".into());
 
@@ -229,7 +223,7 @@ pub fn job(drv: &Derivation, cores: u32) -> Result<Job> {
     let rewrites: Vec<(String, String)> = drv
         .outputs
         .iter()
-        .map(|(name, path)| (placeholder(name), path.to_string_lossy().into_owned()))
+        .map(|(name, path)| (hash_placeholder(name), path.to_string_lossy().into_owned()))
         .collect();
     let mut argv = vec![drv.builder.clone()];
     argv.extend(drv.args.iter().map(|a| rewrite(a, &rewrites)));
@@ -277,7 +271,10 @@ fn env_files(drv: &Derivation, env: &mut BTreeMap<String, String>) -> Vec<JobFil
             env.insert(k.clone(), v.clone());
             continue;
         }
-        let path = format!("{BUILD_DIR}/.attr-{}", nix32(&Sha256::digest(k.as_bytes())));
+        let path = format!(
+            "{BUILD_DIR}/.attr-{}",
+            nixbase32::encode(&Sha256::digest(k.as_bytes()))
+        );
         env.insert(format!("{k}Path"), path.clone());
         files.push(JobFile {
             path,
@@ -292,18 +289,9 @@ fn env_files(drv: &Derivation, env: &mut BTreeMap<String, String>) -> Vec<JobFil
 /// replaced by each output's path. The env is not set at all; stdenv
 /// exports the attributes it needs from .attrs.sh.
 fn structured_files(
-    drv: &Derivation,
-    attrs: &Map<String, Value>,
+    attrs: &StructuredAttrsFiles,
     env: &mut BTreeMap<String, String>,
 ) -> Result<Vec<JobFile>> {
-    let mut attrs = attrs.clone();
-    let outputs: Map<String, Value> = drv
-        .outputs
-        .iter()
-        .map(|(name, path)| (name.clone(), Value::from(path.to_string_lossy())))
-        .collect();
-    attrs.insert("outputs".into(), Value::Object(outputs));
-
     let sh = format!("{BUILD_DIR}/{ATTRS_SH}");
     let json = format!("{BUILD_DIR}/{ATTRS_JSON}");
     env.insert(ATTRS_SH_VAR.into(), sh.clone());
@@ -311,106 +299,13 @@ fn structured_files(
     Ok(vec![
         JobFile {
             path: sh,
-            contents: attrs_sh(&attrs),
+            contents: String::from_utf8(attrs.shell.clone()).context(".attrs.sh is not UTF-8")?,
         },
         JobFile {
             path: json,
-            contents: serde_json::to_string(&attrs)?,
+            contents: String::from_utf8(attrs.json.clone()).context(".attrs.json is not UTF-8")?,
         },
     ])
-}
-
-/// Structured attributes as bash declarations, following Nix's
-/// StructuredAttrs::writeShell: strings, whole numbers, booleans and null
-/// as scalars, arrays and objects of those as indexed and associative
-/// arrays, and anything else, or any name that is not a shell variable's,
-/// left out.
-fn attrs_sh(attrs: &Map<String, Value>) -> String {
-    let mut out = String::new();
-    for (key, value) in attrs {
-        if !is_shell_name(key) {
-            continue;
-        }
-
-        // A scalar is declared as it is.
-        if let Some(s) = shell_scalar(value) {
-            out += &format!("declare {key}={s}\n");
-            continue;
-        }
-
-        // An array or object is declared only if every element is a
-        // scalar. Nix leaves a trailing space after the last element.
-        match value {
-            Value::Array(items) => {
-                let Some(items) = items.iter().map(shell_scalar).collect::<Option<Vec<_>>>() else {
-                    continue;
-                };
-                let body: String = items.iter().map(|s| format!("{s} ")).collect();
-                out += &format!("declare -a {key}=({body})\n");
-            }
-            Value::Object(entries) => {
-                let Some(body) = entries
-                    .iter()
-                    .map(|(k, v)| shell_scalar(v).map(|s| format!("[{}]={s} ", shell_quote(k))))
-                    .collect::<Option<String>>()
-                else {
-                    continue;
-                };
-                out += &format!("declare -A {key}=({body})\n");
-            }
-            _ => {}
-        }
-    }
-    out
-}
-
-/// A JSON scalar as a bash word, as Nix's writeShell renders one: a
-/// string quoted, a whole number in decimal, true as 1, false and null
-/// as empty. Fractions, arrays and objects have no rendering.
-fn shell_scalar(value: &Value) -> Option<String> {
-    match value {
-        Value::String(s) => Some(shell_quote(s)),
-        Value::Bool(true) => Some("1".into()),
-        Value::Bool(false) => Some("".into()),
-        Value::Null => Some("''".into()),
-        Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                return Some(i.to_string());
-            }
-            let f = n.as_f64()?;
-            if f.fract() != 0.0 {
-                return None;
-            }
-            Some(format!("{f:.0}"))
-        }
-        Value::Array(_) | Value::Object(_) => None,
-    }
-}
-
-/// A string in single quotes, each quote in it closed, escaped and
-/// reopened, as Nix's escapeShellArgAlways quotes it.
-fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
-/// Whether `s` is a shell variable name: an ASCII letter or `_`, then
-/// ASCII letters, digits and `_`.
-fn is_shell_name(s: &str) -> bool {
-    let mut chars = s.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    (first.is_ascii_alphabetic() || first == '_')
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-}
-
-/// The string `builtins.placeholder` returns for an output, which an
-/// input-addressed derivation keeps in place of the output's path.
-pub fn placeholder(output: &str) -> String {
-    format!(
-        "/{}",
-        nix32(&Sha256::digest(format!("nix-output:{output}")))
-    )
 }
 
 /// Replaces each output's placeholder in `s` with the output's path.
@@ -418,21 +313,6 @@ fn rewrite(s: &str, rewrites: &[(String, String)]) -> String {
     rewrites
         .iter()
         .fold(s.to_string(), |s, (from, to)| s.replace(from, to))
-}
-
-/// Nix's base-32, as it names .attr files and store paths.
-pub fn nix32(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 32] = b"0123456789abcdfghijklmnpqrsvwxyz";
-    let len = (bytes.len() * 8 - 1) / 5 + 1;
-    let mut out = String::with_capacity(len);
-    for n in (0..len).rev() {
-        let bit = n * 5;
-        let (i, j) = (bit / 8, bit % 8);
-        let lo = (bytes[i] as u16) >> j;
-        let hi = bytes.get(i + 1).map_or(0, |b| (*b as u16) << (8 - j));
-        out.push(ALPHABET[((lo | hi) & 0x1f) as usize] as char);
-    }
-    out
 }
 
 /// Runs a nix command and returns its standard output.
@@ -485,7 +365,7 @@ mod tests {
         // `nix hash convert --to nix32 sha256:$(printf abc | sha256sum)`
         let digest = Sha256::digest(b"abc");
         assert_eq!(
-            nix32(&digest),
+            nixbase32::encode(&digest),
             "1b8m03r63zqhnjf7l5wnldhh7c134ap5vpj0850ymkq1iyzicy5s"
         );
     }
@@ -507,6 +387,7 @@ mod tests {
             input_srcs: vec![],
             input_drvs: vec![],
             structured_attrs: None,
+            fixed_output: false,
         }
     }
 
@@ -543,9 +424,119 @@ mod tests {
     fn placeholder_matches_nix() {
         // `nix eval --raw --expr 'builtins.placeholder "out"'`
         assert_eq!(
-            placeholder("out"),
+            hash_placeholder("out"),
             "/1rz4g4znpzjwh1xymhjpm42vipw92pr73vdgl6xs1hycac8kf2n9"
         );
+    }
+
+    // Store paths for the .drv fixtures. The parser checks their form, so
+    // these are real-looking paths rather than /nix/store/aaa-x.
+    const FIXTURE_DRV: &str = "/nix/store/0000000000000000000000000000000a-x.drv";
+    const FIXTURE_OUT: &str = "/nix/store/0000000000000000000000000000000b-x";
+    const FIXTURE_DEP: &str = "/nix/store/0000000000000000000000000000000c-dep.drv";
+    const FIXTURE_SRC: &str = "/nix/store/0000000000000000000000000000000d-src";
+
+    /// A string as Nix writes one in a .drv file.
+    fn aterm_string(s: &str) -> String {
+        let escaped = s
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r")
+            .replace('\t', "\\t");
+        format!("\"{escaped}\"")
+    }
+
+    /// A .drv file's contents for a derivation named x with one
+    /// input-addressed output, one input derivation, one input source and
+    /// the environment `env`.
+    fn fixture(env: &[(&str, &str)]) -> Vec<u8> {
+        let output = format!("(\"out\",\"{FIXTURE_OUT}\",\"\",\"\")");
+        fixture_with(&output, "/bin/sh", env)
+    }
+
+    /// A .drv file's contents for a derivation named x with the output
+    /// `output`, in ATerm syntax, the builder `builder` and the
+    /// environment `env`.
+    fn fixture_with(output: &str, builder: &str, env: &[(&str, &str)]) -> Vec<u8> {
+        let mut env: BTreeMap<&str, &str> = env.iter().copied().collect();
+        env.insert("out", FIXTURE_OUT);
+        let env: Vec<String> = env
+            .iter()
+            .map(|(k, v)| format!("({},{})", aterm_string(k), aterm_string(v)))
+            .collect();
+        format!(
+            "Derive([{output}],[(\"{FIXTURE_DEP}\",[\"out\"])],[\"{FIXTURE_SRC}\"],\"x86_64-linux\",{},[\"-e\",\"builder.sh\"],[{}])",
+            aterm_string(builder),
+            env.join(",")
+        )
+        .into_bytes()
+    }
+
+    /// The output of a fixed-output derivation, in ATerm syntax.
+    fn fixed_output() -> String {
+        let hash = "0".repeat(64);
+        format!("(\"out\",\"{FIXTURE_OUT}\",\"sha256\",\"{hash}\")")
+    }
+
+    #[test]
+    fn fixed_output_builds_are_told_the_output_is_checked() {
+        // nix-daemon sets NIX_OUTPUT_CHECKED=1 for a fixed-output
+        // derivation, and only for one, so fetchers can skip checking the
+        // hash themselves. A fixed-output fixture's job has it; an
+        // input-addressed one's does not.
+        let fixed = parse(
+            Path::new(FIXTURE_DRV),
+            &fixture_with(&fixed_output(), "/bin/sh", &[]),
+        )
+        .unwrap();
+        let env: BTreeMap<_, _> = job(&fixed, 1).unwrap().env.into_iter().collect();
+        assert_eq!(env["NIX_OUTPUT_CHECKED"], "1");
+
+        let plain = parse(Path::new(FIXTURE_DRV), &fixture(&[])).unwrap();
+        let env: BTreeMap<_, _> = job(&plain, 1).unwrap().env.into_iter().collect();
+        assert!(!env.contains_key("NIX_OUTPUT_CHECKED"));
+    }
+
+    #[test]
+    fn builtin_builders_are_refused() {
+        // A builder such as builtin:fetchurl runs inside nix-daemon, not as
+        // a program, so a run has nothing to execute. Rewind says so.
+        let drv = parse(
+            Path::new(FIXTURE_DRV),
+            &fixture_with(&fixed_output(), "builtin:fetchurl", &[]),
+        )
+        .unwrap();
+        let err = job(&drv, 1).unwrap_err().to_string();
+        assert!(err.contains("builtin:fetchurl"), "{err}");
+    }
+
+    fn sample_structured(attrs: serde_json::Value) -> Derivation {
+        let json = attrs.to_string();
+        parse(Path::new(FIXTURE_DRV), &fixture(&[("__json", &json)])).unwrap()
+    }
+
+    #[test]
+    fn show_reads_the_drv_file() {
+        // A .drv file parses to its name, builder, args, env, outputs and
+        // inputs.
+        let drv = parse(Path::new(FIXTURE_DRV), &fixture(&[("pname", "x")])).unwrap();
+        assert_eq!(drv.name, "x");
+        assert_eq!(drv.system, "x86_64-linux");
+        assert_eq!(drv.builder, "/bin/sh");
+        assert_eq!(drv.args, vec!["-e", "builder.sh"]);
+        assert_eq!(drv.env["pname"], "x");
+        assert_eq!(drv.env["out"], FIXTURE_OUT);
+        assert_eq!(
+            drv.outputs,
+            vec![("out".to_string(), PathBuf::from(FIXTURE_OUT))]
+        );
+        assert_eq!(drv.input_srcs, vec![PathBuf::from(FIXTURE_SRC)]);
+        assert_eq!(
+            drv.input_drvs,
+            vec![(PathBuf::from(FIXTURE_DEP), vec!["out".to_string()])]
+        );
+        assert_eq!(drv.structured_attrs, None);
     }
 
     #[test]
@@ -555,7 +546,7 @@ mod tests {
         // starts, in the env, the args and the files it writes. A job built
         // from a derivation using the placeholder in each of those places
         // sees the output path in each.
-        let out = placeholder("out");
+        let out = hash_placeholder("out");
         let mut drv = sample();
         drv.args.push(format!("--prefix={out}"));
         drv.env.insert("flags".into(), format!("-DLIB={out}/lib"));
@@ -566,22 +557,23 @@ mod tests {
         assert_eq!(plain.argv.last().unwrap(), "--prefix=/nix/store/aaa-x");
         assert_eq!(plain.files[0].contents, "/nix/store/aaa-x/share");
 
-        let mut drv = sample_structured();
-        let attrs = drv.structured_attrs.as_mut().unwrap();
-        attrs.insert("prefix".into(), Value::from(out));
+        let drv = sample_structured(serde_json::json!({"outputs": ["out"], "prefix": out}));
         let structured = job(&drv, 1).unwrap();
         for file in &structured.files {
             assert!(!file.contents.contains("1rz4g4zn"), "{}", file.contents);
         }
-        assert!(
-            structured.files[0]
-                .contents
-                .contains("declare prefix='/nix/store/aaa-x'")
-        );
+        let prefix = format!("declare prefix='{FIXTURE_OUT}'");
+        assert!(structured.files[0].contents.contains(&prefix));
     }
 
-    fn sample_structured() -> Derivation {
-        let attrs = serde_json::json!({
+    #[test]
+    fn structured_attrs_reach_the_build_as_files() {
+        // A derivation with structured attributes gets its attributes as
+        // .attrs.sh and .attrs.json in the build directory, named by
+        // NIX_ATTRS_SH_FILE and NIX_ATTRS_JSON_FILE, and none of its env.
+        // .attrs.sh is held to the bytes Nix's StructuredAttrs::writeShell
+        // writes for the same attributes.
+        let drv = sample_structured(serde_json::json!({
             "bad-name": "skipped",
             "doCheck": true,
             "env": {"FOO": "bar"},
@@ -590,25 +582,14 @@ mod tests {
             "nested": {"a": ["x"]},
             "outputs": ["out"],
             "stdenv": "/nix/store/ddd-stdenv",
-        });
-        Derivation {
-            structured_attrs: attrs.as_object().cloned(),
-            ..sample()
-        }
-    }
-
-    #[test]
-    fn structured_attrs_reach_the_build_as_files() {
-        // A derivation with structured attributes gets its attributes as
-        // .attrs.sh and .attrs.json in the build directory, named by
-        // NIX_ATTRS_SH_FILE and NIX_ATTRS_JSON_FILE, and none of its env.
-        let job = job(&sample_structured(), 1).unwrap();
+        }));
+        let job = job(&drv, 1).unwrap();
         let env: BTreeMap<_, _> = job.env.iter().cloned().collect();
         assert_eq!(env["NIX_ATTRS_SH_FILE"], "/build/.attrs.sh");
         assert_eq!(env["NIX_ATTRS_JSON_FILE"], "/build/.attrs.json");
         assert_eq!(env["HOME"], HOMELESS);
         assert!(!env.contains_key("out"));
-        assert!(!env.contains_key("textPath"));
+        assert!(!env.contains_key("__json"));
         assert!(!env.contains_key("FOO"));
 
         let files: BTreeMap<_, _> = job
@@ -618,47 +599,17 @@ mod tests {
             .collect();
         assert_eq!(
             files["/build/.attrs.sh"],
-            "declare doCheck=1\n\
-             declare -A env=(['FOO']='bar' )\n\
-             declare -a list=('a' 'b'\\''c' )\n\
-             declare n=3\n\
-             declare -A outputs=(['out']='/nix/store/aaa-x' )\n\
-             declare stdenv='/nix/store/ddd-stdenv'\n"
+            format!(
+                "declare doCheck=1\n\
+                 declare -A env=(['FOO']='bar' )\n\
+                 declare -a list=('a' 'b'\\''c' )\n\
+                 declare n=3\n\
+                 declare -A outputs=(['out']='{FIXTURE_OUT}' )\n\
+                 declare stdenv='/nix/store/ddd-stdenv'\n"
+            )
         );
-        let json: Value = serde_json::from_str(files["/build/.attrs.json"]).unwrap();
-        assert_eq!(
-            json["outputs"],
-            serde_json::json!({"out": "/nix/store/aaa-x"})
-        );
+        let json: serde_json::Value = serde_json::from_str(files["/build/.attrs.json"]).unwrap();
+        assert_eq!(json["outputs"], serde_json::json!({"out": FIXTURE_OUT}));
         assert_eq!(json["stdenv"], "/nix/store/ddd-stdenv");
-    }
-
-    #[test]
-    fn structured_attrs_parse_from_every_format() {
-        // Format 4 of `nix derivation show` carries structured attributes
-        // under "structuredAttrs"; older formats carry them as JSON text in
-        // env.__json. Both parse to the same attributes.
-        let v4 = serde_json::json!({
-            "version": 4,
-            "derivations": {"bbb-x.drv": {
-                "name": "x", "system": "x86_64-linux", "builder": "/bin/sh",
-                "args": [], "env": {"out": "/nix/store/aaa-x"},
-                "outputs": {"out": {"path": "aaa-x"}},
-                "inputs": {"srcs": [], "drvs": {}},
-                "structuredAttrs": {"stdenv": "/nix/store/ddd-stdenv"},
-            }},
-        });
-        let v3 = serde_json::json!({"/nix/store/bbb-x.drv": {
-            "name": "x", "system": "x86_64-linux", "builder": "/bin/sh",
-            "args": [],
-            "env": {"out": "/nix/store/aaa-x", "__json": "{\"stdenv\":\"/nix/store/ddd-stdenv\"}"},
-            "outputs": {"out": {"path": "/nix/store/aaa-x"}},
-            "inputSrcs": [], "inputDrvs": {},
-        }});
-        let want = serde_json::json!({"stdenv": "/nix/store/ddd-stdenv"});
-        for json in [v4, v3] {
-            let drv = parse(Path::new("/nix/store/bbb-x.drv"), &json).unwrap();
-            assert_eq!(drv.structured_attrs.as_ref(), want.as_object());
-        }
     }
 }
