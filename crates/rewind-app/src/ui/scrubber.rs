@@ -457,6 +457,21 @@ impl Scrubber {
         self.runs_rows().into_iter().nth(index)
     }
 
+    /// The folding row that Runs panel row `index` goes with, as the id
+    /// of the schedule 0 run it is under and whether it is folded: the
+    /// row itself, or for a run the row of its schedule 0 run.
+    pub(super) fn fold_for_row(&self, index: usize) -> Option<(String, RowKind)> {
+        let family = self.family.as_ref()?;
+        let rows = self.runs_rows();
+        let row = rows.get(index)?;
+        if row.kind != RowKind::Run {
+            return Some((row.run.id.clone(), row.kind));
+        }
+        let under = family.fold_under(&row.run)?;
+        let fold = Family::fold_row(&rows, under)?;
+        Some((fold.run.id.clone(), fold.kind))
+    }
+
     /// Shows the runs a folding row stands for, or folds them again.
     pub(super) fn toggle_fold(&mut self, under: &str, cx: &mut Context<Self>) {
         if !self.runs_unfolded.remove(under) {
@@ -549,7 +564,11 @@ impl Scrubber {
         let Some(row) = self.runs_row(index) else {
             return;
         };
+
+        // A folding row is no run: the menu on it acts on no picked run,
+        // so none from an earlier click is deleted by mistake.
         if row.kind != RowKind::Run {
+            self.runs_picked.clear();
             return;
         }
         if !self.runs_picked.contains(&row.run.id) {

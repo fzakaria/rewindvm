@@ -176,6 +176,8 @@ pub mod size {
     /// The sliver a selection shows past a line's end for the line break.
     pub const SELECTION_LINE_END: f32 = 4.0;
     pub const MENU_WIDTH: f32 = 160.0;
+    /// The least room between the menu and a window edge.
+    pub const MENU_EDGE_MARGIN: f32 = 8.0;
     pub const MENU_PAD: f32 = 4.0;
     pub const MENU_ITEM_PAD_X: f32 = 10.0;
     pub const MENU_ITEM_PAD_Y: f32 = 6.0;

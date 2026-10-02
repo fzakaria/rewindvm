@@ -404,7 +404,9 @@ impl Family {
             });
         }
 
-        // Each folding row comes last under the run its runs are under.
+        // Each folding row comes first among the runs from boot under the
+        // run its runs are under, after the real forks, so it stays where
+        // it is as it opens and closes.
         let mut stands_for: HashMap<&str, (&RunEntry, RowKind)> = HashMap::new();
         for (placeholder, kind) in &placeholders {
             let Some(under) = self
@@ -414,10 +416,12 @@ impl Family {
             else {
                 continue;
             };
-            children
-                .entry(under.id.as_str())
-                .or_default()
-                .push(placeholder);
+            let list = children.entry(under.id.as_str()).or_default();
+            let at = list
+                .iter()
+                .position(|r| r.parent.is_none())
+                .unwrap_or(list.len());
+            list.insert(at, placeholder);
             stands_for.insert(placeholder.id.as_str(), (under, *kind));
         }
 
@@ -531,6 +535,22 @@ impl Family {
             return self.runs.iter().find(|r| r.id == parent.id);
         }
         Self::from_boot_under(run, &self.recorded_by_inputs())
+    }
+
+    /// The schedule 0 run whose folding row `run` goes with: the run itself
+    /// when it is one, or the one a run from boot hangs under.
+    pub fn fold_under<'a>(&'a self, run: &'a RunEntry) -> Option<&'a RunEntry> {
+        if run.parent.is_none() && run.schedule == 0 {
+            return Some(run);
+        }
+        Self::from_boot_under(run, &self.recorded_by_inputs())
+    }
+
+    /// The folding row among `rows` for the runs under `under`, if it has
+    /// one.
+    pub fn fold_row<'a>(rows: &'a [Row], under: &RunEntry) -> Option<&'a Row> {
+        rows.iter()
+            .find(|r| r.kind != RowKind::Run && r.run.id == under.id)
     }
 
     /// The runs from boot under schedule 0 by their inputs. A family can
@@ -944,9 +964,9 @@ mod tests {
 
     #[test]
     fn runs_from_boot_that_end_like_their_run_fold_into_one_row() {
-        // Folded, s1 and s3 become one row after the runs that stay: the
-        // fork, s2 with its fork, and s4, which ended differently. The
-        // folded row stands for r, whose runs it holds.
+        // Folded, s1 and s3 become one row after r's fork and before the
+        // runs from boot that stay: s2 with its fork, and s4, which ended
+        // differently. The folded row stands for r, whose runs it holds.
         let rows = swept().rows_folded(&HashSet::new(), &[]);
         let row = |id: &str, depth| (id.to_string(), depth, RowKind::Run);
         assert_eq!(
@@ -954,25 +974,42 @@ mod tests {
             vec![
                 row("r", 0),
                 row("f", 1),
+                ("r".to_string(), 1, RowKind::Folded { count: 2 }),
                 row("s2", 1),
                 row("s2a", 2),
                 row("s4", 1),
-                ("r".to_string(), 1, RowKind::Folded { count: 2 }),
             ]
         );
         assert_eq!(
-            rows[5].detail(),
+            rows[2].detail(),
             "2 more at boot ended the same \u{b7} show"
         );
         assert!(rows[5].graph.last);
-        assert!(!rows[4].graph.last);
 
-        // Unfolded, every run is there, and a last row folds them again.
+        // Unfolded, the row stays where it was, to fold them again, and
+        // every run follows it.
         let open = HashSet::from(["r".to_string()]);
         let rows = swept().rows_folded(&open, &[]);
         assert_eq!(rows.len(), 8);
-        assert_eq!(rows[7].kind, RowKind::Unfolded { count: 2 });
-        assert_eq!(rows[7].detail(), "hide the 2 at boot that ended the same");
+        assert_eq!(rows[2].kind, RowKind::Unfolded { count: 2 });
+        assert_eq!(rows[2].detail(), "hide the 2 at boot that ended the same");
+        assert_eq!(rows[3].run.id, "s1");
+    }
+
+    #[test]
+    fn a_run_knows_the_folding_row_it_belongs_with() {
+        // The schedule 0 run and its runs from boot answer with r's row;
+        // a fork answers with nothing.
+        let f = swept();
+        let rows = f.rows_folded(&HashSet::new(), &[]);
+        let fold = |id: &str| {
+            let run = f.runs.iter().find(|r| r.id == id).unwrap();
+            Family::fold_row(&rows, f.fold_under(run)?).map(|row| row.kind)
+        };
+        let folded = Some(RowKind::Folded { count: 2 });
+        assert_eq!(fold("r"), folded);
+        assert_eq!(fold("s4"), folded);
+        assert_eq!(fold("f"), None);
     }
 
     #[test]

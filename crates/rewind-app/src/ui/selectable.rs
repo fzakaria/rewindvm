@@ -15,10 +15,11 @@ use gpui::{
     App, Bounds, ClipboardItem, Context, DispatchPhase, Element, ElementId, GlobalElementId,
     HighlightStyle, InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollStrategy, SharedString, StyledText,
-    TextLayout, Window, canvas, div, fill, point, prelude::*, px, rgb, rgba,
+    TextLayout, Window, anchored, canvas, div, fill, point, prelude::*, px, rgb, rgba,
 };
 
 use crate::describe::short_store_paths_mapped;
+use crate::family::RowKind;
 use crate::selection::{DrawnText, Lines, Mapped, Pos, Selection, Surface, Unit, nearest_line};
 use crate::theme::{self, size};
 use crate::ui::scrubber::Scrubber;
@@ -712,9 +713,6 @@ impl Scrubber {
                 .child(label)
         };
         let mut items = div()
-            .absolute()
-            .left(menu.position.x)
-            .top(menu.position.y)
             .min_w(px(size::MENU_WIDTH))
             .flex()
             .flex_col()
@@ -794,6 +792,22 @@ impl Scrubber {
                     },
                 )));
             }
+            // On a schedule 0 run, its folding row or a run from boot under
+            // it, the runs that ended the same way show or fold from here
+            // as well as from their row.
+            if let Some((under, kind)) = menu.line.and_then(|i| self.fold_for_row(i)) {
+                let label = match kind {
+                    RowKind::Folded { count } => format!("Show {count} more at boot"),
+                    RowKind::Unfolded { count } => format!("Fold {count} at boot"),
+                    RowKind::Run => String::new(),
+                };
+                items = items.child(item("menu-run-fold", label.into()).on_click(cx.listener(
+                    move |this, _, _, cx| {
+                        this.close_context_menu(cx);
+                        this.toggle_fold(&under, cx);
+                    },
+                )));
+            }
             items = items.child(
                 item("menu-run-all", "Select all".into()).on_click(cx.listener(
                     |this, _, _, cx| {
@@ -802,7 +816,7 @@ impl Scrubber {
                     },
                 )),
             );
-            return Some(menu_frame(items, cx));
+            return Some(menu_frame(items, menu.position, cx));
         }
         if has_selection {
             items = items.child(item("menu-copy", "Copy".into()).on_click(cx.listener(
@@ -829,13 +843,14 @@ impl Scrubber {
             })),
         );
 
-        Some(menu_frame(items, cx))
+        Some(menu_frame(items, menu.position, cx))
     }
 }
 
-/// The right-click menu's `items` over a backdrop that closes the menu
-/// on any press outside it.
-fn menu_frame(items: gpui::Div, cx: &mut Context<Scrubber>) -> gpui::Div {
+/// The right-click menu's `items` at `position` over a backdrop that
+/// closes the menu on any press outside it. Near a window edge the menu
+/// moves in to stay whole.
+fn menu_frame(items: gpui::Div, position: Point<Pixels>, cx: &mut Context<Scrubber>) -> gpui::Div {
     div()
         .absolute()
         .top_0()
@@ -857,7 +872,12 @@ fn menu_frame(items: gpui::Div, cx: &mut Context<Scrubber>) -> gpui::Div {
                     cx.listener(|this, _, _, cx| this.close_context_menu(cx)),
                 ),
         )
-        .child(items)
+        .child(
+            anchored()
+                .position(position)
+                .snap_to_window_with_margin(px(size::MENU_EDGE_MARGIN))
+                .child(items),
+        )
 }
 
 /// Mouse handlers that make a container select text in `surface`: a
