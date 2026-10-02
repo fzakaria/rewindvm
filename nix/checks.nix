@@ -257,8 +257,8 @@ in
   # not at boot. Every one of them still replays from boot to the same
   # trace, and none reads the unperturbed run's keyframes afterwards, so
   # removing that run leaves them whole. Four background jobs race to
-  # write a file first; some schedules change which one wins. Boots the
-  # VM, so it needs /dev/kvm.
+  # write a file first; on some CPUs, some schedules change which one wins.
+  # Boots the VM, so it needs /dev/kvm.
   search =
     pkgs.runCommand "rewind-search"
       {
@@ -276,10 +276,17 @@ in
           wait
           test "$(head -1 /run/race/o)" = 1
         '
-        # check exits 1 when a schedule ends differently, as here.
-        ! rewind check -j 4 --root ${busyboxRoot} -- sh -c "$race" > found
-        cat found
-        grep -q 'still ends differently' found
+        # check exits 1 when a schedule ends differently and 0 when none
+        # does. Which depends on the CPU vendor, since runs differ between
+        # them: on AMD a schedule changes which job wins, and on Intel none
+        # of the 64 has. Either way, every run check made must replay.
+        if rewind check -j 4 --root ${busyboxRoot} -- sh -c "$race" > found; then
+          cat found
+          grep -q 'same result under all' found
+        else
+          cat found
+          grep -q 'still ends differently' found
+        fi
         for dir in $REWIND_HOME/runs/*; do
           id=$(basename $dir)
           jq -e '.shared_keyframes == null' $dir/manifest.json > /dev/null
