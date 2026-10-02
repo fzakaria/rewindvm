@@ -176,13 +176,15 @@ way ISL and Jujutsu draw a history. Each fork branches off the run it came
 from, red for failed and green for passed, with the step it forked at, its
 schedule and where it first differs. The schedules `rewind check` ran from
 boot hang off the schedule 0 run, and those that ended the way it did fold into
-one row that opens on a click. A family recorded on two machines, or with
-different `--cores`, has a schedule 0 run for each. Click a run to open it
+one row that opens on a click. The runs `check` makes narrowing a schedule to a
+window of steps hang off that schedule and fold the same way, but for the
+narrowest window that still ends as it did. A family recorded on two machines,
+or with different `--cores`, has a schedule 0 run for each. Click a run to open it
 beside the run it hangs under; right-click it to compare it with the run on
 screen, copy its id, or remove it with its forks.
 
 <p align="center">
-  <img src="docs/img/app-runs.png" alt="The Runs panel: the mylib build's 170 runs as a tree under the passing schedule 0 run, with twelve forks of it at step 2,713, one crashed fork with forks of its own at steps 4,400 and 4,520 and a fork of a fork at 4,500, one row folding the 104 schedules from boot that passed like the schedule 0 run, then the failing ones rewind check ran from boot, each with its exit status, schedule and the steps it perturbed." />
+  <img src="docs/img/app-runs.png" alt="The Runs panel: the mylib build's 170 runs as a tree under the passing schedule 0 run, with twelve forks of it at step 2,713, one crashed fork with forks of its own at steps 4,400 and 4,520 and a fork of a fork at 4,500, one row folding the 53 schedules from boot that passed like the schedule 0 run, then schedule 4, which failed, with a row folding the 88 windows rewind check narrowed it to and the narrowest window that still fails." />
 </p>
 
 <p align="center">
