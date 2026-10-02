@@ -23,3 +23,9 @@ repository = "https://github.com/fzakaria/rewindvm"
 opt-level = 3
 lto = "thin"
 debug = "line-tables-only"
+
+# exportReferencesGraph needs nix-derivation's
+# structured_attrs_files_with_reference_graphs, which is not released yet:
+# https://github.com/cachix/nix-derivation/pull/6
+[patch.crates-io]
+nix-derivation = { git = "https://github.com/fzakaria/nix-derivation", rev = "8cafa2692ea6d51711fe5fbb0145006d49dc8058" }

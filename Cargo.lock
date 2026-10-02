@@ -439,8 +439,7 @@ dependencies = [
 [[package]]
 name = "nix-derivation"
 version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c24bef42be77590fa747d2b751790ebb9ad9200f89721285a052edfc447de09"
+source = "git+https://github.com/fzakaria/nix-derivation?rev=8cafa2692ea6d51711fe5fbb0145006d49dc8058#8cafa2692ea6d51711fe5fbb0145006d49dc8058"
 dependencies = [
  "base64 0.22.1",
  "blake3",
