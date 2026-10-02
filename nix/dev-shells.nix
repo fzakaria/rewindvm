@@ -7,10 +7,8 @@
   pkgs,
   kernel,
   guest,
+  app,
 }:
-let
-  app = import ./app.nix { inherit pkgs; };
-in
 {
   default = pkgs.mkShell {
     packages = [

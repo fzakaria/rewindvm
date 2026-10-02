@@ -4,47 +4,40 @@
 # settings.
 {
   pkgs,
+  rust,
   kernel,
   guest,
 }:
 let
   inherit (pkgs) lib;
 
-  unwrapped = pkgs.rustPlatform.buildRustPackage {
-    pname = "rewind";
-    # VERSION, the one place a release's version is written.
-    version = lib.fileContents ../VERSION;
-    # The engine's workspace without the desktop app, which is a workspace
-    # of its own, and without build directories.
-    src = lib.fileset.toSource {
-      root = ../.;
-      fileset = lib.fileset.unions [
-        ../Cargo.toml
-        ../Cargo.lock
-        (lib.fileset.difference ../crates (
-          lib.fileset.unions [
-            ../crates/rewind-app
-            (lib.fileset.maybeMissing ../crates/rewind-init/target)
-          ]
-        ))
-      ];
-    };
-    cargoLock.lockFile = ../Cargo.lock;
-    cargoBuildFlags = [
-      "-p"
-      "rewind"
-    ];
-    # The workspace's unit tests; the ones that need /dev/kvm run as flake
-    # checks instead, where the sandbox can be given it.
-    cargoTestFlags = [ "--workspace" ];
-    nativeCheckInputs = [ pkgs.cpio ];
-    meta = {
-      description = "Run Linux workloads in a deterministic VM, then scrub, rewind and fork them";
-      mainProgram = "rewind";
-      license = lib.licenses.mit;
-      platforms = [ "x86_64-linux" ];
-    };
-  };
+  # The workspace's dependencies, compiled once per Cargo.lock and set of
+  # manifests (nix/crane.nix). The tests' dev-dependencies are among them.
+  cargoArtifacts = rust.craneLib.buildDepsOnly (
+    rust.engine
+    // {
+      pname = "rewind";
+      cargoTestExtraArgs = "--no-run --workspace";
+    }
+  );
+
+  unwrapped = rust.craneLib.buildPackage (
+    rust.engine
+    // {
+      pname = "rewind";
+      inherit cargoArtifacts;
+      # The workspace's unit tests; the ones that need /dev/kvm run as flake
+      # checks instead, where the sandbox can be given it.
+      cargoTestExtraArgs = "--workspace";
+      nativeCheckInputs = [ pkgs.cpio ];
+      meta = {
+        description = "Run Linux workloads in a deterministic VM, then scrub, rewind and fork them";
+        mainProgram = "rewind";
+        license = lib.licenses.mit;
+        platforms = [ "x86_64-linux" ];
+      };
+    }
+  );
 
   # What only `rewind gdb` needs, named without depending on it, so the
   # package's closure stays without them: the kernel's DWARF, which runs

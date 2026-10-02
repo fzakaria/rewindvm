@@ -52,7 +52,9 @@ jobs:
 
       # Pulls what earlier runs built and pushes what this one builds, so
       # the guest kernel and the app compile once per change, and users of
-      # the flake download them (flake.nix's nixConfig).
+      # the flake download them (flake.nix's nixConfig). The Rust
+      # dependencies are derivations of their own (nix/crane.nix), so they
+      # compile once per Cargo.lock and come from here otherwise.
       - uses: cachix/cachix-action@v16
         with:
           name: rewindvm

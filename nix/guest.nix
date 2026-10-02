@@ -22,6 +22,11 @@ let
     ];
   };
 
+  # nixpkgs' buildRustPackage rather than crane, which the other Rust
+  # packages use (nix/crane.nix): crane's build embeds other paths for the
+  # dependencies' sources, so the binary, and with it the initramfs whose
+  # hash is part of every run's id, would change. The init has four
+  # dependencies and is rebuilt only when the init itself changes.
   init = pkgs.pkgsStatic.rustPlatform.buildRustPackage {
     pname = "rewind-init";
     version = "0.1.0";

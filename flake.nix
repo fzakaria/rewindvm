@@ -3,6 +3,10 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    # Rust builds whose dependencies are a derivation of their own
+    # (nix/crane.nix). It takes nixpkgs from its caller, so it has no
+    # nixpkgs input to follow.
+    crane.url = "github:ipetkov/crane";
   };
 
   # CI pushes every build to this cache, so `nix run github:fzakaria/rewindvm`
@@ -19,7 +23,11 @@
   # under nix/, so a flake output here is one line and its definition is one
   # file over there.
   outputs =
-    { self, nixpkgs }:
+    {
+      self,
+      nixpkgs,
+      crane,
+    }:
     let
       # x86_64-linux only: the engine is a KVM virtual machine monitor, and
       # the guest kernel's hypervisor platform is x86 code.
@@ -31,9 +39,10 @@
         system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
+          rust = import ./nix/crane.nix { inherit pkgs crane; };
           kernel = import ./nix/kernel.nix { inherit pkgs; };
           guest = import ./nix/guest.nix { inherit pkgs; };
-          app = import ./nix/app.nix { inherit pkgs; };
+          app = import ./nix/app.nix { inherit pkgs rust; };
         in
         {
           inherit
@@ -42,12 +51,26 @@
             guest
             app
             ;
-          rewind = import ./nix/rewind.nix { inherit pkgs kernel guest; };
-          release = import ./nix/release.nix { inherit pkgs kernel guest; };
-          appRelease = import ./nix/app-release.nix { inherit pkgs; };
+          rewind = import ./nix/rewind.nix {
+            inherit
+              pkgs
+              rust
+              kernel
+              guest
+              ;
+          };
+          release = import ./nix/release.nix {
+            inherit
+              pkgs
+              rust
+              kernel
+              guest
+              ;
+          };
+          appRelease = import ./nix/app-release.nix { inherit pkgs rust; };
           site = import ./nix/site.nix { inherit pkgs; };
           examples = import ./nix/examples.nix { inherit pkgs; };
-          license = import ./nix/license.nix { inherit pkgs app; };
+          license = import ./nix/license.nix { inherit pkgs rust app; };
         };
     in
     {
@@ -142,7 +165,14 @@
         let
           p = per system;
         in
-        import ./nix/dev-shells.nix { inherit (p) pkgs kernel guest; }
+        import ./nix/dev-shells.nix {
+          inherit (p)
+            pkgs
+            kernel
+            guest
+            app
+            ;
+        }
       );
 
       # `programs.rewind` and `programs.rewind.app` for NixOS (nix/module.nix)

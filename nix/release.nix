@@ -9,36 +9,30 @@
 # release workflow's assets have the same URL under releases/latest.
 {
   pkgs,
+  rust,
   kernel,
   guest,
 }:
 let
   inherit (pkgs) lib;
 
-  static = pkgs.pkgsStatic.rustPlatform.buildRustPackage {
-    pname = "rewind-static";
-    version = lib.fileContents ../VERSION;
-    src = lib.fileset.toSource {
-      root = ../.;
-      fileset = lib.fileset.unions [
-        ../Cargo.toml
-        ../Cargo.lock
-        (lib.fileset.difference ../crates (
-          lib.fileset.unions [
-            ../crates/rewind-app
-            (lib.fileset.maybeMissing ../crates/rewind-init/target)
-          ]
-        ))
-      ];
-    };
-    cargoLock.lockFile = ../Cargo.lock;
-    cargoBuildFlags = [
-      "-p"
-      "rewind"
-    ];
-    # The unit tests run in the dynamically linked package.
-    doCheck = false;
-  };
+  # The engine built against musl, with dependencies of its own: the
+  # dynamically linked package's are for another target.
+  static = rust.craneLibStatic.buildPackage (
+    rust.engine
+    // {
+      pname = "rewind-static";
+      cargoArtifacts = rust.craneLibStatic.buildDepsOnly (
+        rust.engine
+        // {
+          pname = "rewind-static";
+          doCheck = false;
+        }
+      );
+      # The unit tests run in the dynamically linked package.
+      doCheck = false;
+    }
+  );
 
   # Static GNU tar fails to link against static libacl, which defines the
   # same xattr helpers; images are built from the store, which has no ACLs.
