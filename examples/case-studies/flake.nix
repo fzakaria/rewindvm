@@ -41,13 +41,6 @@
       pkgs = nixpkgs.legacyPackages.x86_64-linux;
       lib = pkgs.lib;
 
-      # LD_PRELOAD shim: the VM has one CPU, so programs that size thread
-      # pools by CPU count would otherwise run single-threaded there.
-      fakeNprocs = pkgs.runCommandCC "fake-nprocs" { } ''
-        mkdir -p $out/lib
-        $CC -shared -fPIC -O2 -o $out/lib/libfakenprocs.so ${./fake-nprocs.c} -ldl
-      '';
-
       # LD_PRELOAD shim that stalls threads at random file, lock and socket
       # calls; see chaos-delay.c.
       chaosDelay = pkgs.runCommandCC "chaos-delay" { } ''
@@ -56,13 +49,13 @@
       '';
 
       # Nix's functional test suite, configured but not built, running only
-      # the named tests, each `iterations` times in a row.
+      # the named tests, each `iterations` times in a row. To have the tests
+      # see 4 CPUs, run them with `rewind check --cores 4`.
       nixFunctionalTest =
         {
           components ? pkgs.nixVersions.nixComponents_2_35,
           tests,
           iterations ? 1,
-          nprocs ? null,
           chaos ? false,
           chaosSeed ? 0,
           name ? builtins.concatStringsSep "-" tests,
@@ -70,16 +63,10 @@
           extraInputs ? [ ],
         }:
         components.nix-functional-tests.overrideAttrs (old: {
-          pname = "nix-functional-${name}${
-            lib.optionalString (nprocs != null) "-nprocs${toString nprocs}"
-          }${lib.optionalString chaos "-chaos${toString chaosSeed}"}";
-          preCheck =
-            lib.optionalString (nprocs != null) ''
-              export LD_PRELOAD=${fakeNprocs}/lib/libfakenprocs.so FAKE_NPROCS=${toString nprocs}
-            ''
-            + lib.optionalString chaos ''
-              export LD_PRELOAD="''${LD_PRELOAD:+$LD_PRELOAD }${chaosDelay}/lib/libchaosdelay.so" CHAOS_SEED=${toString chaosSeed}
-            '';
+          pname = "nix-functional-${name}${lib.optionalString chaos "-chaos${toString chaosSeed}"}";
+          preCheck = lib.optionalString chaos ''
+            export LD_PRELOAD="''${LD_PRELOAD:+$LD_PRELOAD }${chaosDelay}/lib/libchaosdelay.so" CHAOS_SEED=${toString chaosSeed}
+          '';
           postPatch = (old.postPatch or "") + postPatch;
           # Tools to have in the VM's closure for `rewind shell`, unused by the build.
           nativeBuildInputs = old.nativeBuildInputs ++ extraInputs;
@@ -97,22 +84,19 @@
         });
 
       # One of Nix's unit test binaries, run as nixpkgs runs it, optionally
-      # with the CPU count faked and a gtest filter.
+      # with a gtest filter. To size its thread pools for 4 CPUs, run it with
+      # `rewind check --cores 4`.
       nixUnitTest =
         {
           components ? pkgs.nixVersions.nixComponents_2_35,
           suite,
-          nprocs ? null,
           filter ? null,
           repeat ? 1,
         }:
         components.${suite}.tests.run.overrideAttrs (old: {
-          name = "${suite}-run${lib.optionalString (nprocs != null) "-nprocs${toString nprocs}"}";
+          name = "${suite}-run";
           buildCommand =
-            lib.optionalString (nprocs != null) ''
-              export LD_PRELOAD=${fakeNprocs}/lib/libfakenprocs.so FAKE_NPROCS=${toString nprocs}
-            ''
-            + lib.optionalString (filter != null) ''
+            lib.optionalString (filter != null) ''
               export GTEST_FILTER='${filter}'
             ''
             + ''
@@ -123,21 +107,19 @@
 
       # The sink tests from Nix master, around the fix for NixOS/nix#16088.
       sinkTest =
-        nixFlake: nprocs:
+        nixFlake:
         nixUnitTest {
           components = nixFlake.packages.x86_64-linux;
           suite = "nix-fetchers-tests";
-          inherit nprocs;
           filter = "GitUtilsTest.sink*";
         };
 
       # Only the test that NixOS/nix#16088 deflaked, many times in one run.
       sinkNoParentDir =
-        nixFlake: nprocs:
+        nixFlake:
         nixUnitTest {
           components = nixFlake.packages.x86_64-linux;
           suite = "nix-fetchers-tests";
-          inherit nprocs;
           filter = "GitUtilsTest.sink_no_parent_dir";
           repeat = 100;
         };
@@ -387,7 +369,6 @@
       packages.x86_64-linux = {
         inherit
           chaosDelay
-          fakeNprocs
           gitTestTree
           sphinxTestPython
           sphinxSrc
@@ -416,12 +397,10 @@
           name = "t7900-strategy";
           scripts = [ "./t7900-maintenance.sh -v -x --run='maintenance.strategy is respected'" ];
         };
-        sink-before-16088 = sinkTest nix-before-16088 null;
-        sink-before-16088-nprocs4 = sinkTest nix-before-16088 4;
-        sink-after-16088-nprocs4 = sinkTest nix-after-16088 4;
-        sink-no-parent-dir-before-16088 = sinkNoParentDir nix-before-16088 null;
-        sink-no-parent-dir-before-16088-nprocs4 = sinkNoParentDir nix-before-16088 4;
-        sink-no-parent-dir-after-16088-nprocs4 = sinkNoParentDir nix-after-16088 4;
+        sink-before-16088 = sinkTest nix-before-16088;
+        sink-after-16088 = sinkTest nix-after-16088;
+        sink-no-parent-dir-before-16088 = sinkNoParentDir nix-before-16088;
+        sink-no-parent-dir-after-16088 = sinkNoParentDir nix-after-16088;
         nix-gc-non-blocking = nixFunctionalTest { tests = [ "gc-non-blocking" ]; };
         nix-concurrent-builds-15693 = nixFunctionalTest {
           components = nix-15693.packages.x86_64-linux;
@@ -518,11 +497,6 @@
           name = "all";
           tests = [ ];
         };
-        nix-concurrency-nprocs4 = nixFunctionalTest {
-          name = "concurrency";
-          tests = concurrencyTests;
-          nprocs = 4;
-        };
         nix-gc-non-blocking-x5 = nixFunctionalTest {
           tests = [ "gc-non-blocking" ];
           iterations = 5;
@@ -545,15 +519,6 @@
           suite:
           lib.nameValuePair suite (nixUnitTest {
             inherit suite;
-          })
-        ) unitSuites
-      )
-      // lib.listToAttrs (
-        map (
-          suite:
-          lib.nameValuePair "${suite}-nprocs4" (nixUnitTest {
-            inherit suite;
-            nprocs = 4;
           })
         ) unitSuites
       );
