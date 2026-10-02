@@ -261,30 +261,19 @@ impl Family {
                 _ => roots.push(run),
             }
         }
-        // A run recorded under the unperturbed schedule is where the runs
-        // of the same inputs start: those from boot under other schedules,
-        // as rewind check makes them, hang off it like forks at step 0,
-        // after its real forks. A family can hold several, one for each
-        // machine or build of the inputs.
-        let recorded: HashMap<&str, &str> = roots
-            .iter()
-            .filter(|r| r.parent.is_none() && r.schedule == 0)
-            .filter_map(|r| Some((r.inputs.as_deref()?, r.id.as_str())))
-            .collect();
-        let (from_boot, rest): (Vec<&RunEntry>, Vec<&RunEntry>) =
-            roots.into_iter().partition(|r| {
-                r.parent.is_none()
-                    && r.schedule != 0
-                    && r.inputs
-                        .as_deref()
-                        .is_some_and(|i| recorded.contains_key(i))
-            });
+        // The runs from boot under other schedules, as rewind check makes
+        // them, hang off the schedule 0 run of their inputs like forks at
+        // step 0, after its real forks.
+        let recorded = self.recorded_by_inputs();
+        let (from_boot, rest): (Vec<&RunEntry>, Vec<&RunEntry>) = roots
+            .into_iter()
+            .partition(|r| Self::from_boot_under(r, &recorded).is_some());
         roots = rest;
         for run in from_boot {
-            let Some(under) = run.inputs.as_deref().and_then(|i| recorded.get(i)) else {
+            let Some(under) = Self::from_boot_under(run, &recorded) else {
                 continue;
             };
-            children.entry(under).or_default().push(run);
+            children.entry(under.id.as_str()).or_default().push(run);
         }
         let base_id = self.base().id.clone();
         roots.sort_by_key(|r| (r.id != base_id, r.schedule, r.created));
@@ -385,6 +374,39 @@ impl Family {
                 }
             })
             .collect()
+    }
+
+    /// The run `run` hangs under in the tree, which opening it compares it
+    /// with: a fork's parent, or for a run from boot under another
+    /// schedule the schedule 0 run of its inputs.
+    pub fn tree_parent(&self, run: &RunEntry) -> Option<&RunEntry> {
+        if let Some(parent) = &run.parent {
+            return self.runs.iter().find(|r| r.id == parent.id);
+        }
+        Self::from_boot_under(run, &self.recorded_by_inputs())
+    }
+
+    /// The runs from boot under schedule 0 by their inputs. A family can
+    /// hold several, one for each machine or build of the inputs, and
+    /// each is where the runs of its inputs under other schedules start.
+    fn recorded_by_inputs(&self) -> HashMap<&str, &RunEntry> {
+        self.runs
+            .iter()
+            .filter(|r| r.parent.is_none() && r.schedule == 0)
+            .filter_map(|r| Some((r.inputs.as_deref()?, r)))
+            .collect()
+    }
+
+    /// For a run from boot under another schedule, the schedule 0 run of
+    /// its inputs in `recorded`.
+    fn from_boot_under<'a>(
+        run: &RunEntry,
+        recorded: &HashMap<&str, &'a RunEntry>,
+    ) -> Option<&'a RunEntry> {
+        if run.parent.is_some() || run.schedule == 0 {
+            return None;
+        }
+        recorded.get(run.inputs.as_deref()?).copied()
     }
 
     /// The runs without a parent here that have identical forks under
@@ -687,6 +709,20 @@ mod tests {
                 ("lone-s1".to_string(), 0),
             ]
         );
+    }
+
+    #[test]
+    fn each_run_is_compared_with_the_run_it_hangs_under() {
+        // A fork with its parent, a run from boot with the schedule 0
+        // run of its inputs, and a schedule 0 run with nothing.
+        let f = family();
+        let above = |id: &str| {
+            let run = f.runs.iter().find(|r| r.id == id).unwrap();
+            f.tree_parent(run).map(|r| r.id.clone())
+        };
+        assert_eq!(above("f1a"), Some("f1".to_string()));
+        assert_eq!(above("check3"), Some("base".to_string()));
+        assert_eq!(above("base"), None);
     }
 
     #[test]

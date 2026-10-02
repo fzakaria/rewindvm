@@ -418,10 +418,18 @@ impl Scrubber {
             return;
         }
         // The chosen comparison holds, except against the run itself.
+        // Without one, the run is compared with the run it hangs under in
+        // the panel, which for a run from boot is not in its manifest.
+        let above = self
+            .family
+            .as_ref()
+            .and_then(|f| f.tree_parent(&run))
+            .map(|r| r.dir.clone());
         let compare = self
             .pinned_compare
             .clone()
-            .filter(|pinned| *pinned != run.dir);
+            .filter(|pinned| *pinned != run.dir)
+            .or(above);
         self.open(run.dir, compare, cx);
     }
 
@@ -445,9 +453,14 @@ impl Scrubber {
     /// opened after, is compared with its parent again.
     pub(super) fn compare_with_parents(&mut self, cx: &mut Context<Self>) {
         self.pinned_compare = None;
-        if let Some(shown) = self.session.as_ref().map(|s| s.run.path.clone()) {
-            self.open(shown, None, cx);
-        }
+        let Some(shown) = self.session.as_ref().map(|s| s.run.path.clone()) else {
+            return;
+        };
+        let above = self.family.as_ref().and_then(|f| {
+            let run = f.runs.iter().find(|r| r.dir == shown)?;
+            f.tree_parent(run).map(|r| r.dir.clone())
+        });
+        self.open(shown, above, cx);
     }
 
     /// A press on Runs panel row `index` with a modifier: Ctrl picks or
