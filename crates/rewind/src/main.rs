@@ -6,6 +6,7 @@ mod terminal;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -13,7 +14,7 @@ use rewind_core::inspect::Inspection;
 use rewind_core::run::{
     BASE_CMDLINE, DEFAULT_CORES, DEFAULT_QUANTUM, MAX_CORES, Start, default_epoch,
 };
-use rewind_core::{Echo, Guest, Home, Keyframes, Run, Source, Spec};
+use rewind_core::{Echo, Execution, Guest, Home, Keyframes, Run, Source, Spec, TimeLimit};
 use rewind_core::{export, image, nix};
 use rewind_init::{Job, Root};
 
@@ -90,6 +91,12 @@ struct MachineArgs {
     /// Skip keyframes: faster, but seeking into the run starts from boot.
     #[arg(long)]
     no_keyframes: bool,
+    /// Stop the run after this many seconds on this machine, however far it
+    /// got. It then ends as timed-out, which depends on how fast this
+    /// machine is. Unless this is set, rewind check gives each perturbed
+    /// schedule ten times as long as schedule 0 took, and at least a minute.
+    #[arg(long, value_name = "SECONDS")]
+    timeout: Option<u64>,
     /// Extra kernel command line arguments; `loglevel=7` shows the kernel's
     /// messages in the trace.
     #[arg(long, default_value = "")]
@@ -229,6 +236,10 @@ enum Command {
         /// programs such as the desktop app.
         #[arg(long)]
         json: bool,
+        /// Stop the fork after this many seconds on this machine, however
+        /// far it got, as `--timeout` does for a run.
+        #[arg(long, value_name = "SECONDS")]
+        timeout: Option<u64>,
     },
     /// Remove forks of a run, and forks of those, that ran exactly as an
     /// older one did. The run itself stays, and so does any run another
@@ -474,6 +485,17 @@ fn run(cli: Cli) -> Result<ExitCode> {
             // long build runs only from near the window.
             let from_base = Start::After(base.manifest.id.clone());
             println!("schedule   0: {}", show::outcome_line(&base)?);
+
+            // A schedule can make a program loop forever where schedule 0
+            // did not, so unless told otherwise each other run gets a
+            // generous multiple of schedule 0's time and then ends as
+            // timed-out, instead of holding up the whole search.
+            if machine.timeout.is_none() {
+                let base_wall = base.manifest.outcome.as_ref().map_or(0, |o| o.wall_ms);
+                let limit =
+                    Duration::from_millis(base_wall * CHECK_TIMEOUT_FACTOR).max(CHECK_TIMEOUT_MIN);
+                machine.timeout = Some(limit.as_secs());
+            }
             let base_trace = base.trace()?;
             let start = show::start_step(&base_trace).max(user_from);
             let base_key = show::outcome_key(&base)?;
@@ -651,6 +673,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             schedule,
             quiet,
             json,
+            timeout,
         } => {
             let parent = Run::find(&home, &run)?;
             let m = &parent.manifest;
@@ -667,6 +690,11 @@ fn run(cli: Cli) -> Result<ExitCode> {
             } else {
                 Echo::Output
             };
+            let how = Execution {
+                echo,
+                keyframes: Keyframes::Take,
+                limit: time_limit(timeout),
+            };
             let child = Run::execute(
                 &home,
                 name,
@@ -676,8 +704,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     parent: m.id.clone(),
                     step,
                 },
-                echo,
-                Keyframes::Take,
+                how,
             )?;
             let first_difference = child.manifest.first_difference;
             if json {
@@ -1218,14 +1245,18 @@ fn execute(
     } else {
         Keyframes::Take
     };
+    let how = Execution {
+        echo,
+        keyframes,
+        limit: time_limit(machine.timeout),
+    };
     let run = Run::execute(
         home,
         prepared.name.clone(),
         prepared.source.clone(),
         spec,
         start,
-        echo,
-        keyframes,
+        how,
     )?;
     if announce == Announce::Yes {
         eprintln!("{}", show::finished(&run));
@@ -1256,6 +1287,21 @@ fn execute_all(
             .collect()
     })
 }
+
+/// The time limit `--timeout` sets, in seconds, if given.
+fn time_limit(timeout: Option<u64>) -> TimeLimit {
+    match timeout {
+        Some(secs) => TimeLimit::Wall(Duration::from_secs(secs)),
+        None => TimeLimit::None,
+    }
+}
+
+/// How many times schedule 0's wall-clock time `rewind check` gives each
+/// other schedule, unless `--timeout` says otherwise.
+const CHECK_TIMEOUT_FACTOR: u64 = 10;
+
+/// The least time `rewind check` gives each schedule after schedule 0.
+const CHECK_TIMEOUT_MIN: Duration = Duration::from_secs(60);
 
 /// Prints each output's hash from the guest, and whether it matches the
 /// copy of that output the host already has, if it has one. A job that

@@ -315,6 +315,28 @@ pub enum Start {
     After(String),
 }
 
+/// How long a run may take on the host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TimeLimit {
+    /// As long as it takes.
+    None,
+    /// Stop it after this much wall-clock time, however far it got. It
+    /// then ends as [`TIMED_OUT`], which is the host's doing: the same run
+    /// may finish on a faster host.
+    Wall(std::time::Duration),
+}
+
+/// How to execute a run, none of which changes what the run is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Execution {
+    pub echo: Echo,
+    pub keyframes: Keyframes,
+    pub limit: TimeLimit,
+}
+
+/// How a run that reached its [`TimeLimit`] stopped, in its outcome.
+pub const TIMED_OUT: &str = "timed out";
+
 /// Whether a run takes keyframes as it executes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Keyframes {
@@ -486,8 +508,7 @@ impl Run {
         source: Source,
         spec: Spec,
         start: Start,
-        echo: Echo,
-        keyframes: Keyframes,
+        how: Execution,
     ) -> Result<Run> {
         let (parent, start_from) = match start {
             Start::Boot => (None, None),
@@ -507,7 +528,7 @@ impl Run {
             trace_hash: None,
             first_difference: None,
         };
-        Run::execute_manifest(home, manifest, start_from.as_deref(), echo, keyframes)
+        Run::execute_manifest(home, manifest, start_from.as_deref(), how)
     }
 
     /// Executes the run `manifest` describes, filling in how it ended,
@@ -516,9 +537,13 @@ impl Run {
         home: &Home,
         mut manifest: Manifest,
         start_from: Option<&str>,
-        echo: Echo,
-        keyframes: Keyframes,
+        how: Execution,
     ) -> Result<Run> {
+        let Execution {
+            echo,
+            keyframes,
+            limit,
+        } = how;
         let dir = home.runs().join(&manifest.id);
         fs::create_dir_all(&dir)?;
         let _executing = lock_executing(&dir)?;
@@ -589,6 +614,9 @@ impl Run {
             }
             None => (Machine::boot(&config)?, None, None),
         };
+        if let TimeLimit::Wall(limit) = limit {
+            machine.set_deadline(Some(start + limit));
+        }
 
         let outcome = match keyframes {
             Keyframes::Take => {
@@ -689,13 +717,25 @@ impl Run {
     }
 
     /// Executes this run's spec again, taking keyframes. The run is the
-    /// same, so its trace and manifest come out as they were.
+    /// same, so its trace and manifest come out as they were. A run that
+    /// timed out gets as long as it had, and may stop at another step.
     pub fn add_keyframes(&self, home: &Home) -> Result<Run> {
+        let limit = match &self.manifest.outcome {
+            Some(o) if o.stop == TIMED_OUT => {
+                TimeLimit::Wall(std::time::Duration::from_millis(o.wall_ms))
+            }
+            _ => TimeLimit::None,
+        };
         let manifest = Manifest {
             created: now(),
             ..self.manifest.clone()
         };
-        Run::execute_manifest(home, manifest, None, Echo::Quiet, Keyframes::Take)
+        let how = Execution {
+            echo: Echo::Quiet,
+            keyframes: Keyframes::Take,
+            limit,
+        };
+        Run::execute_manifest(home, manifest, None, how)
     }
 
     /// A machine at `step` of this run: the latest keyframe at or before
@@ -894,6 +934,7 @@ fn describe(outcome: Outcome) -> String {
         Outcome::Stopped(Stop::Guest(exit)) => format!("{exit:?}").to_lowercase(),
         Outcome::Stopped(Stop::TripleFault) => "triple fault".into(),
         Outcome::Stopped(Stop::Stalled) => "stalled: idle with no timer armed".into(),
+        Outcome::Stopped(Stop::TimedOut) => TIMED_OUT.into(),
         Outcome::Debug(stop) => format!("stopped by the debugger: {stop:?}"),
     }
 }

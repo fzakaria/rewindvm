@@ -440,7 +440,10 @@ nothing.
 1. Runs the unperturbed schedule.
 2. Runs perturbed schedules, starting the window at the step the job
    started, until one ends differently. It compares exit statuses and output
-   hashes.
+   hashes. A schedule can make a program loop forever, so each run gets ten
+   times as long as schedule 0 took, and at least a minute, unless
+   `--timeout` says otherwise. A run still going then is stopped, and ends
+   as timed-out. Whether a run times out depends on how fast the host is.
 3. Narrows the window, first its end and then its start, to the smallest
    window that still makes that schedule end differently. A smaller window
    perturbs a subset of the same steps, so the search is well defined.

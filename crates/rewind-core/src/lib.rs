@@ -15,4 +15,4 @@ pub mod prune;
 pub mod run;
 
 pub use home::{Guest, Home};
-pub use run::{Echo, Keyframes, Manifest, Run, RunOutcome, Source, Spec};
+pub use run::{Echo, Execution, Keyframes, Manifest, Run, RunOutcome, Source, Spec, TimeLimit};

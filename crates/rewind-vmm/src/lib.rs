@@ -19,6 +19,7 @@ pub mod memory;
 pub mod pmu;
 pub mod pv;
 pub mod snapshot;
+mod watchdog;
 
 use std::path::PathBuf;
 
@@ -182,6 +183,9 @@ pub enum Stop {
     TripleFault,
     /// The guest went idle with no timer armed: nothing will ever wake it.
     Stalled,
+    /// The wall-clock deadline passed first. Unlike the others this
+    /// depends on the host, not the guest: a faster one may have finished.
+    TimedOut,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -263,6 +267,8 @@ pub struct Machine {
     pub(crate) work_base: u64,
     /// The breakpoints, while a debugger is attached (debug.rs).
     pub(crate) debugging: Option<Vec<u64>>,
+    /// When to stop the machine, however far it has got.
+    pub(crate) deadline: Option<std::time::Instant>,
 }
 
 impl Machine {
@@ -359,6 +365,7 @@ impl Machine {
             work: None,
             work_base: 0,
             debugging: None,
+            deadline: None,
         })
     }
 
@@ -405,6 +412,13 @@ impl Machine {
         &self.config
     }
 
+    /// Stops the machine at `deadline` with [`Stop::TimedOut`], wherever
+    /// the guest is then, even computing without exits. The thread that
+    /// calls [`Machine::run`] is the one stopped.
+    pub fn set_deadline(&mut self, deadline: Option<std::time::Instant>) {
+        self.deadline = deadline;
+    }
+
     /// Runs until the guest stops, or until step `until` if given.
     pub fn run(&mut self, until: Option<u64>, obs: &mut dyn Observer) -> Result<Outcome> {
         if let Some(stop) = self.dev.stop {
@@ -414,11 +428,23 @@ impl Machine {
             return Ok(Outcome::Paused);
         }
 
+        // A deadline is watched only while this thread is in here, so no
+        // signal reaches it once it has left.
+        let watchdog = self.deadline.map(watchdog::Watchdog::start);
+        let expired = watchdog.as_ref().map(|w| w.expired());
+
         if let (ClockSource::Branches(event), None) = (self.config.clock, &self.work) {
             self.work = Some(Work::open(event, self.work_base)?);
         }
 
         loop {
+            if expired
+                .as_ref()
+                .is_some_and(|e| e.load(std::sync::atomic::Ordering::Relaxed))
+            {
+                self.dev.stop = Some(Stop::TimedOut);
+                return Ok(Outcome::Stopped(Stop::TimedOut));
+            }
             if self.work.is_some() && self.config.preemption == Preemption::AtBranchCounts {
                 self.aim_preemption()?;
             }

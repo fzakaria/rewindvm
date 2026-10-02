@@ -72,7 +72,7 @@ const F_SETSIG: i32 = 10;
 
 /// The signal a counter overflow sends the vCPU thread. Any signal pulls
 /// the thread out of KVM_RUN; this one is otherwise unused.
-fn overflow_signal() -> i32 {
+pub(crate) fn overflow_signal() -> i32 {
     libc::SIGRTMIN() + 3
 }
 
@@ -189,7 +189,7 @@ impl Drop for Overflow {
 
 /// A handler that does nothing: the signal's only job is to interrupt
 /// KVM_RUN, which a pending signal with a handler does.
-fn install_signal_handler() {
+pub(crate) fn install_signal_handler() {
     extern "C" fn nothing(_: i32) {}
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {

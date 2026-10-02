@@ -10,7 +10,7 @@ use rewind_trace::{Event, EventKind, Trace, signal_name};
 pub fn summary(run: &Run) -> String {
     let m = &run.manifest;
     let outcome = match &m.outcome {
-        Some(o) => format!("{:<9} {:>12} steps", status(o.status), o.step),
+        Some(o) => format!("{:<9} {:>12} steps", ending(&o.stop, o.status, &[]), o.step),
         None if run.executing() => "running".into(),
         None => "interrupted".into(),
     };
@@ -26,7 +26,7 @@ pub fn finished(run: &Run) -> String {
     format!(
         "rewind: run {} {} after {} steps, {:.3}s virtual, {:.3}s wall ({})",
         m.id,
-        status(o.status),
+        ending(&o.stop, o.status, &[]),
         o.step,
         Duration::from_nanos(o.virtual_ns).as_secs_f64(),
         Duration::from_millis(o.wall_ms).as_secs_f64(),
@@ -116,9 +116,14 @@ pub fn passed(status: Option<i32>, missing: &[String]) -> bool {
     status == Some(0) && missing.is_empty()
 }
 
-/// How a run ended, in words: its wait status, or missing-output for a
-/// job that exited 0 without creating every output.
-pub fn ending(status_: Option<i32>, missing: &[String]) -> String {
+/// How a run ended, in words, from how the machine stopped and the job's
+/// wait status: timed-out for a machine stopped at its time limit,
+/// missing-output for a job that exited 0 without creating every output,
+/// and otherwise the status.
+pub fn ending(stop: &str, status_: Option<i32>, missing: &[String]) -> String {
+    if stop == rewind_core::run::TIMED_OUT {
+        return TIMED_OUT.into();
+    }
     if status_ == Some(0) && !missing.is_empty() {
         return MISSING_OUTPUT.into();
     }
@@ -128,10 +133,18 @@ pub fn ending(status_: Option<i32>, missing: &[String]) -> String {
 /// What [`ending`] calls a job that exited 0 but left an output uncreated.
 const MISSING_OUTPUT: &str = "missing-output";
 
+/// What [`ending`] calls a run stopped at its time limit.
+const TIMED_OUT: &str = "timed-out";
+
 /// One line per run for `rewind check`.
 pub fn outcome_line(run: &Run) -> anyhow::Result<String> {
     let (status_, outputs) = outcome_key(run)?;
     let missing = missing_outputs(&run.manifest.spec.job.outputs, &outputs);
+    let stop = run
+        .manifest
+        .outcome
+        .as_ref()
+        .map_or("", |o| o.stop.as_str());
     let steps = run.manifest.outcome.as_ref().map_or(0, |o| o.step);
     let hashes: Vec<String> = outputs
         .iter()
@@ -139,7 +152,7 @@ pub fn outcome_line(run: &Run) -> anyhow::Result<String> {
         .collect();
     Ok(format!(
         "{:<14} {:>10} steps  {}  run {}",
-        ending(status_, &missing),
+        ending(stop, status_, &missing),
         steps,
         hashes.join(" "),
         run.manifest.id
@@ -302,11 +315,19 @@ mod tests {
         let exited_0 = Some(0);
         let exited_1 = Some(1 << 8);
         let missing = vec![DEV.to_string()];
-        assert_eq!(ending(exited_0, &[]), "exited:0");
-        assert_eq!(ending(exited_0, &missing), "missing-output");
-        assert_eq!(ending(exited_1, &missing), "exited:1");
+        let off = "poweroff";
+        assert_eq!(ending(off, exited_0, &[]), "exited:0");
+        assert_eq!(ending(off, exited_0, &missing), "missing-output");
+        assert_eq!(ending(off, exited_1, &missing), "exited:1");
         assert!(passed(exited_0, &[]));
         assert!(!passed(exited_0, &missing));
         assert!(!passed(exited_1, &[]));
+    }
+
+    #[test]
+    fn a_run_stopped_at_its_time_limit_reads_timed_out() {
+        // The job never reported a status: the machine was stopped first.
+        assert_eq!(ending(rewind_core::run::TIMED_OUT, None, &[]), "timed-out");
+        assert_eq!(ending("poweroff", None, &[]), "no-status");
     }
 }

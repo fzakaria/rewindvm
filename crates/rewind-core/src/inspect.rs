@@ -271,6 +271,7 @@ fn stopped(stop: Stop) -> &'static str {
         Stop::Guest(GuestExit::Halt) => "halted",
         Stop::TripleFault => "crashed",
         Stop::Stalled => "went idle for good",
+        Stop::TimedOut => "timed out",
     }
 }
 
