@@ -571,6 +571,11 @@ impl Scrubber {
             .registry
             .hit(surface, event.position)
             .map(|p| p.line);
+        if surface == Surface::Runs
+            && let Some(index) = line
+        {
+            self.pick_for_menu(index);
+        }
         self.selecting.menu = Some(ContextMenu {
             surface,
             position: event.position,
@@ -651,6 +656,19 @@ impl Scrubber {
                         return;
                     }
                     move_view.update(cx, |this, cx| {
+                        // The Runs panel's edge, while it is dragged: the
+                        // panel widens as the edge moves left.
+                        if let Some((from, width)) = this.runs_resize {
+                            if e.pressed_button != Some(MouseButton::Left) {
+                                this.runs_resize = None;
+                                return;
+                            }
+                            let moved = f32::from(from - e.position.x);
+                            this.runs_width =
+                                (width + moved).clamp(size::RUNS_PANEL_MIN, size::RUNS_PANEL_MAX);
+                            cx.notify();
+                            return;
+                        }
                         if !this.selecting.dragging {
                             return;
                         }
@@ -664,7 +682,10 @@ impl Scrubber {
                 let up_view = view.clone();
                 window.on_mouse_event(move |e: &MouseUpEvent, _, _, cx| {
                     if e.button == MouseButton::Left {
-                        up_view.update(cx, |this, _| this.selection_release());
+                        up_view.update(cx, |this, _| {
+                            this.runs_resize = None;
+                            this.selection_release();
+                        });
                     }
                 });
             },
@@ -710,30 +731,26 @@ impl Scrubber {
             .text_size(px(size::TEXT_UI))
             .text_color(rgb(theme::TEXT))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
-        // On a run in the Runs panel, what can be done with that run,
-        // above the text actions.
-        if menu.surface == Surface::Runs
-            && let Some(row) = menu.line.and_then(|i| self.runs_row(i))
-        {
-            let index = menu.line.unwrap_or_default();
+        // On the Runs panel, what can be done with the runs picked: the
+        // text actions do not apply there.
+        if menu.surface == Surface::Runs {
+            let runs = self.runs_menu_targets();
             let shown = self
                 .session
                 .as_ref()
-                .and_then(|s| s.run.manifest.id.clone())
-                .is_some_and(|id| id == row.run.id);
-            let run = row.run.clone();
-            items = items.child(
-                item("menu-run-open", "Open run".into()).on_click(cx.listener(
-                    move |this, _, _, cx| {
-                        this.close_context_menu(cx);
-                        this.open_family_run(run.clone(), cx);
-                    },
-                )),
-            );
-            if !shown {
-                let run = row.run.clone();
+                .and_then(|s| s.run.manifest.id.clone());
+            let compared = self
+                .session
+                .as_ref()
+                .and_then(|s| s.other.as_ref())
+                .and_then(|o| o.manifest.id.clone());
+            if let [run] = runs.as_slice()
+                && Some(&run.id) != shown.as_ref()
+                && Some(&run.id) != compared.as_ref()
+            {
+                let run = run.clone();
                 items = items.child(
-                    item("menu-run-compare", "Compare with the run on screen".into()).on_click(
+                    item("menu-run-compare", "Compare against this run".into()).on_click(
                         cx.listener(move |this, _, _, cx| {
                             this.close_context_menu(cx);
                             this.compare_with_shown(run.clone(), cx);
@@ -741,44 +758,43 @@ impl Scrubber {
                     ),
                 );
             }
-            let id = row.run.id.clone();
-            items = items.child(
-                item("menu-run-id", "Copy run id".into()).on_click(cx.listener(
+            if !runs.is_empty() {
+                let ids = runs
+                    .iter()
+                    .map(|r| r.id.clone())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let copy = match runs.len() {
+                    1 => "Copy run id".to_string(),
+                    n => format!("Copy {n} run ids"),
+                };
+                items = items.child(item("menu-run-id", copy.into()).on_click(cx.listener(
                     move |this, _, _, cx| {
-                        cx.write_to_clipboard(ClipboardItem::new_string(id.clone()));
+                        cx.write_to_clipboard(ClipboardItem::new_string(ids.clone()));
                         this.close_context_menu(cx);
+                    },
+                )));
+                let delete = match runs.len() {
+                    1 => "Delete".to_string(),
+                    n => format!("Delete {n} runs"),
+                };
+                let targets = runs.clone();
+                items = items.child(item("menu-run-delete", delete.into()).on_click(cx.listener(
+                    move |this, _, _, cx| {
+                        this.close_context_menu(cx);
+                        this.ask_delete_runs(targets.clone(), cx);
+                    },
+                )));
+            }
+            items = items.child(
+                item("menu-run-all", "Select all".into()).on_click(cx.listener(
+                    |this, _, _, cx| {
+                        this.close_context_menu(cx);
+                        this.pick_all_runs(cx);
                     },
                 )),
             );
-            let dir = row.run.dir.display().to_string();
-            items = items.child(item("menu-run-dir", "Copy run directory".into()).on_click(
-                cx.listener(move |this, _, _, cx| {
-                    cx.write_to_clipboard(ClipboardItem::new_string(dir.clone()));
-                    this.close_context_menu(cx);
-                }),
-            ));
-            let remove = match self
-                .family
-                .as_ref()
-                .map(|f| f.descendants(&row.run.id).len())
-            {
-                Some(0) | None => "Remove run".to_string(),
-                Some(1) => "Remove run and its fork".to_string(),
-                Some(n) => format!("Remove run and its {n} forks"),
-            };
-            items = items
-                .child(item("menu-run-remove", remove.into()).on_click(cx.listener(
-                    move |this, _, _, cx| {
-                        this.close_context_menu(cx);
-                        this.ask_remove_run(index, cx);
-                    },
-                )))
-                .child(
-                    div()
-                        .my(px(size::MENU_PAD))
-                        .h(px(1.0))
-                        .bg(rgb(theme::LINE_2)),
-                );
+            return Some(menu_frame(items, cx));
         }
         if has_selection {
             items = items.child(item("menu-copy", "Copy".into()).on_click(cx.listener(
@@ -805,31 +821,35 @@ impl Scrubber {
             })),
         );
 
-        Some(
+        Some(menu_frame(items, cx))
+    }
+}
+
+/// The right-click menu's `items` over a backdrop that closes the menu
+/// on any press outside it.
+fn menu_frame(items: gpui::Div, cx: &mut Context<Scrubber>) -> gpui::Div {
+    div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .child(
             div()
+                .id("menu-backdrop")
                 .absolute()
                 .top_0()
                 .left_0()
                 .size_full()
-                .child(
-                    div()
-                        .id("menu-backdrop")
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .size_full()
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _, _, cx| this.close_context_menu(cx)),
-                        )
-                        .on_mouse_down(
-                            MouseButton::Right,
-                            cx.listener(|this, _, _, cx| this.close_context_menu(cx)),
-                        ),
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| this.close_context_menu(cx)),
                 )
-                .child(items),
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(|this, _, _, cx| this.close_context_menu(cx)),
+                ),
         )
-    }
+        .child(items)
 }
 
 /// Mouse handlers that make a container select text in `surface`: a

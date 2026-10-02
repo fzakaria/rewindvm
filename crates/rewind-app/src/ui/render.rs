@@ -229,18 +229,30 @@ impl Scrubber {
             .gap(px(size::HEADER_GAP))
             .child(brand)
             .child(subject)
-            .child(pill(
-                format!("{name} \u{b7} {}", run.verdict_label()),
-                tone,
-                fonts,
-            ));
+            .child(
+                div()
+                    .id("shown-pill")
+                    .flex_none()
+                    .child(pill(
+                        format!("{name} \u{b7} {}", run.verdict_label()),
+                        tone,
+                        fonts,
+                    ))
+                    .tooltip(tooltip(SHOWN_NOTE)),
+            );
         if let Some(other) = &session.other {
             let other_name = describe::clip(&other.label(), MAX_NAME_CHARS);
-            left = left.child(pill(
-                format!("{other_name} \u{b7} {}", other.verdict_label()),
-                PillTone::Compared,
-                fonts,
-            ));
+            left = left.child(
+                div()
+                    .id("compared-pill")
+                    .flex_none()
+                    .child(pill(
+                        format!("{other_name} \u{b7} {}", other.verdict_label()),
+                        PillTone::Compared,
+                        fonts,
+                    ))
+                    .tooltip(tooltip(COMPARED_NOTE)),
+            );
         }
 
         // Where a forked run branched off its parent.
@@ -1475,7 +1487,37 @@ impl Scrubber {
         let rows = family.rows();
         let count = rows.len();
         let shown_id = self.session().run.manifest.id.clone().unwrap_or_default();
+        let compared_id = self
+            .session()
+            .other
+            .as_ref()
+            .and_then(|o| o.manifest.id.clone())
+            .unwrap_or_default();
+        let picked = self.runs_picked.clone();
         let identical = family.identical();
+
+        // What the rings in the graph mean, as the header's pills.
+        let legend_dot = |color: u32, label: &'static str| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(size::LEGEND_GAP))
+                .child(
+                    div()
+                        .size(px(size::GRAPH_RING))
+                        .rounded_full()
+                        .border_1()
+                        .border_color(rgb(color)),
+                )
+                .child(label)
+        };
+        let legend = div()
+            .flex()
+            .gap(px(size::CONTROL_GAP))
+            .child(legend_dot(theme::AMBER, "on screen"))
+            .when(self.session().other.is_some(), |d| {
+                d.child(legend_dot(theme::BLUE, "compared"))
+            });
         let prune = (identical > 0).then(|| {
             let label = if self.pruning {
                 "removing\u{2026}".to_string()
@@ -1506,6 +1548,8 @@ impl Scrubber {
                     .map(|i| {
                         let row = &rows[i];
                         let shown = row.run.id == shown_id;
+                        let compared = row.run.id == compared_id;
+                        let is_picked = picked.contains(&row.run.id);
                         let run = row.run.clone();
 
                         // The id and how the run came to be, one line of
@@ -1535,8 +1579,9 @@ impl Scrubber {
                             .pr(px(size::PANEL_PAD_X))
                             .cursor_pointer()
                             .when(shown, |d| d.bg(rgb(theme::ROW_NOW)))
+                            .when(is_picked, |d| d.bg(rgb(theme::ROW_PICKED)))
                             .hover(|s| s.bg(rgb(theme::RAISED_HOVER)))
-                            .child(graph_cell(row, columns, shown))
+                            .child(graph_cell(row, columns, shown, compared))
                             .child(pill(row.run.ending.clone(), ending_tone(&row.run), &fonts))
                             .child(
                                 div()
@@ -1547,10 +1592,23 @@ impl Scrubber {
                                     .text_color(rgb(theme::MUTED))
                                     .child(text),
                             )
-                            .tooltip(tooltip(row.explanation()))
-                            // A click opens the run; a drag selects text
-                            // in the row instead.
-                            .on_click(cx.listener(move |this, _, _, cx| {
+                            // Ctrl and Shift pick runs; a plain press goes on
+                            // to start a text selection.
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                                    if this.pick_run(i, e.modifiers, cx) {
+                                        cx.stop_propagation();
+                                    }
+                                }),
+                            )
+                            // A click opens the run; a pick or a drag that
+                            // selected text does not.
+                            .on_click(cx.listener(move |this, e: &ClickEvent, _, cx| {
+                                let m = e.modifiers();
+                                if m.shift || m.control || m.platform {
+                                    return;
+                                }
                                 if this.selected_text().is_some_and(|t| !t.is_empty())
                                     && this
                                         .selecting
@@ -1570,16 +1628,42 @@ impl Scrubber {
         .min_h_0()
         .py(px(size::LIST_PAD_Y));
 
+        // The panel's left edge drags its width.
+        let grip = div()
+            .id("runs-grip")
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .left(px(-size::RUNS_GRIP / 2.0))
+            .w(px(size::RUNS_GRIP))
+            .cursor(CursorStyle::ResizeLeftRight)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, e: &MouseDownEvent, _, cx| {
+                    this.runs_resize = Some((e.position.x, this.runs_width));
+                    cx.stop_propagation();
+                }),
+            );
         div()
+            .relative()
             .flex()
             .flex_col()
             .flex_none()
-            .w(px(size::RUNS_PANEL_WIDTH))
+            .w(px(self.runs_width))
             .min_h_0()
             .bg(rgb(theme::PANEL))
+            .child(grip)
             .child(panel_title(
                 &format!("Runs of this build \u{b7} {count}"),
-                prune,
+                Some(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(size::CONTROL_GAP))
+                        .child(legend)
+                        .children(prune)
+                        .into_any_element(),
+                ),
             ))
             .child(selects(
                 div()
@@ -1607,6 +1691,10 @@ impl Scrubber {
     }
 }
 
+/// What the header's two run pills are, for their hover notes.
+const SHOWN_NOTE: &str = "The run on screen. Clicking a run in the Runs panel puts it here, compared with the run it was forked from.";
+const COMPARED_NOTE: &str = "The run it is compared with: the blue mark and the divergence card are where the two first differ. Right-click a run in the Runs panel to compare against it instead.";
+
 /// What the inspect buttons do, for their hover notes.
 const GDB_NOTE: &str = "gdb on a throwaway copy of the VM at this step: its one CPU, stopped in the kernel and the process running there, with their symbols and sources. Breakpoints, step and continue run the copy forward; the recording does not change.";
 const SHELL_NOTE: &str = "A shell inside a throwaway copy of the VM at this step, in the process's directory with its environment, while everything else in the VM stays where it was. Nothing done in it changes the recording.";
@@ -1621,7 +1709,7 @@ fn runs_line(row: &Row) -> String {
 /// the lines passing through, the parent's line with a curve off it to
 /// this run's dot, this run's own line down to its forks, and the dot,
 /// colored by how the run ended and ringed when it is the run on screen.
-fn graph_cell(row: &Row, columns: usize, shown: bool) -> impl IntoElement {
+fn graph_cell(row: &Row, columns: usize, shown: bool, compared: bool) -> impl IntoElement {
     let graph = row.graph.clone();
     let depth = row.depth;
     let dot_color = if row.run.failed {
@@ -1689,13 +1777,20 @@ fn graph_cell(row: &Row, columns: usize, shown: bool) -> impl IntoElement {
                 )
             };
             window.paint_quad(fill(circle(dot), rgb(dot_color)).corner_radii(dot));
-            if shown {
+            // The run on screen is ringed in amber, the run it is compared
+            // with in blue, as their pills in the header are colored.
+            let ring_color = match (shown, compared) {
+                (true, _) => Some(theme::AMBER),
+                (false, true) => Some(theme::BLUE),
+                _ => None,
+            };
+            if let Some(color) = ring_color {
                 let ring = px(size::GRAPH_RING);
                 window.paint_quad(
                     fill(circle(ring), gpui::transparent_black())
                         .corner_radii(ring)
                         .border_widths(px(size::GRAPH_STROKE))
-                        .border_color(rgb(theme::AMBER)),
+                        .border_color(rgb(color)),
                 );
             }
         },

@@ -25,6 +25,8 @@ pub const SOFT: u32 = 0xc9c5bd;
 pub const MUTED: u32 = 0xa19d95;
 /// Step numbers in the log and file lists.
 pub const FAINT: u32 = 0x5f6571;
+/// A run picked in the Runs panel, for copying or deleting.
+pub const ROW_PICKED: u32 = 0x1b2633;
 /// The lines of the family graph in the Runs panel.
 pub const GRAPH_LINE: u32 = 0x4d5463;
 /// Timeline tick marks.
@@ -206,6 +208,11 @@ pub mod size {
 
     // The Runs panel.
     pub const RUNS_PANEL_WIDTH: f32 = 440.0;
+    /// The Runs panel's width can be dragged between these.
+    pub const RUNS_PANEL_MIN: f32 = 320.0;
+    pub const RUNS_PANEL_MAX: f32 = 900.0;
+    /// The grip on the panel's left edge.
+    pub const RUNS_GRIP: f32 = 6.0;
     pub const RUNS_ROW_HEIGHT: f32 = 30.0;
     /// The family graph: the width of a lane, the radius of a run's dot,
     /// the ring around the run on screen, the radius of the curve off a
@@ -215,6 +222,7 @@ pub mod size {
     pub const GRAPH_RING: f32 = 7.0;
     pub const GRAPH_CURVE: f32 = 6.0;
     pub const GRAPH_STROKE: f32 = 1.5;
+    pub const LEGEND_GAP: f32 = 4.0;
 
     // Text.
     pub const TEXT_UI: f32 = 14.0;

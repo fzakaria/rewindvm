@@ -164,29 +164,6 @@ impl Row {
     }
 }
 
-impl Row {
-    /// The row's run in a sentence, for its hover note: what a fork or a
-    /// schedule is, in this run's numbers.
-    pub fn explanation(&self) -> String {
-        let run = &self.run;
-        let Some(parent) = &run.parent else {
-            return match run.schedule {
-                0 => "The run as it was first recorded, under the unperturbed thread schedule."
-                    .to_string(),
-                n => format!(
-                    "The same inputs from boot, with the thread schedule perturbed by seed {n}, as rewind check tries them."
-                ),
-            };
-        };
-        format!(
-            "A fork of {}: the same run up to step {}, then the thread schedule perturbed from there by seed {}, so the threads interleave another way. The same step and seed always make the same fork. Right-click for more.",
-            short_id(&parent.id),
-            thousands(parent.step),
-            run.schedule
-        )
-    }
-}
-
 impl Family {
     /// The run the family is known by: the first recorded one, with no
     /// parent and the unperturbed schedule, else the oldest run without a

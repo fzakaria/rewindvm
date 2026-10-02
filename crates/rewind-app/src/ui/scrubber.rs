@@ -18,6 +18,7 @@ use crate::family::{Family, Row, RunEntry, families, family_of, scan};
 use crate::model::{LogFilter, Motion};
 use crate::run::{Origin, Session, short_id};
 use crate::selection::Surface;
+use crate::theme::size;
 use crate::tour::Tour;
 use crate::ui::Launch;
 use crate::ui::licensing::Licensing;
@@ -92,8 +93,8 @@ pub enum NoticeAction {
     Reveal(PathBuf),
     /// Put text on the clipboard.
     CopyText(String),
-    /// Remove a run and its forks from the engine's runs.
-    RemoveRun(PathBuf),
+    /// Remove runs and their forks from the engine's runs.
+    RemoveRuns(Vec<PathBuf>),
     /// Close the notice.
     Dismiss,
 }
@@ -107,7 +108,7 @@ impl NoticeAction {
             NoticeAction::ExportTo(_) => "Export there",
             NoticeAction::Reveal(_) => "Show in folder",
             NoticeAction::CopyText(_) => "Copy path",
-            NoticeAction::RemoveRun(_) => "Remove",
+            NoticeAction::RemoveRuns(_) => "Delete",
             NoticeAction::Dismiss => "Not now",
         }
     }
@@ -214,6 +215,16 @@ pub struct Scrubber {
     pub(super) family: Option<Family>,
     /// Whether the Runs panel, the family as a tree, is open.
     pub(super) runs_open: bool,
+    /// The Runs panel's width, which its left edge drags.
+    pub(super) runs_width: f32,
+    /// While the edge is dragged: where the drag started and the width
+    /// then.
+    pub(super) runs_resize: Option<(gpui::Pixels, f32)>,
+    /// Runs picked with Ctrl and Shift clicks, by id, for copying their
+    /// ids or deleting them together.
+    pub(super) runs_picked: Vec<String>,
+    /// The row a Shift click picks from.
+    pub(super) runs_anchor: Option<usize>,
     pub(super) runs_scroll: UniformListScrollHandle,
     /// Whether identical forks are being removed.
     pub(super) pruning: bool,
@@ -268,6 +279,10 @@ impl Scrubber {
             recent: Vec::new(),
             family: None,
             runs_open: false,
+            runs_width: size::RUNS_PANEL_WIDTH,
+            runs_resize: None,
+            runs_picked: Vec::new(),
+            runs_anchor: None,
             runs_scroll: UniformListScrollHandle::new(),
             pruning: false,
             step: 0,
@@ -405,72 +420,185 @@ impl Scrubber {
         self.open(run.dir, shown, cx);
     }
 
-    /// Removes the run on Runs panel row `index` and its forks. A fork
-    /// with no forks of its own goes at once: the same step and seed make
-    /// it again. Anything more is asked about first.
-    pub(super) fn ask_remove_run(&mut self, index: usize, cx: &mut Context<Self>) {
-        let (Some(row), Some(family)) = (self.runs_row(index), &self.family) else {
+    /// A press on Runs panel row `index` with a modifier: Ctrl picks or
+    /// unpicks the run, Shift picks every run from the last one picked.
+    /// Returns whether the press was a pick, which a click then ignores.
+    pub(super) fn pick_run(
+        &mut self,
+        index: usize,
+        modifiers: gpui::Modifiers,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(rows) = self.family.as_ref().map(Family::rows) else {
+            return false;
+        };
+        let Some(row) = rows.get(index) else {
+            return false;
+        };
+        if modifiers.shift {
+            let from = self.runs_anchor.unwrap_or(index);
+            let (lo, hi) = (from.min(index), from.max(index));
+            for r in &rows[lo..=hi] {
+                if !self.runs_picked.contains(&r.run.id) {
+                    self.runs_picked.push(r.run.id.clone());
+                }
+            }
+        } else if modifiers.control || modifiers.platform {
+            let id = &row.run.id;
+            match self.runs_picked.iter().position(|p| p == id) {
+                Some(at) => {
+                    self.runs_picked.remove(at);
+                }
+                None => self.runs_picked.push(id.clone()),
+            }
+            self.runs_anchor = Some(index);
+        } else {
+            self.runs_picked.clear();
+            self.runs_anchor = Some(index);
+            return false;
+        }
+        cx.notify();
+        true
+    }
+
+    /// Picks every run in the Runs panel.
+    pub(super) fn pick_all_runs(&mut self, cx: &mut Context<Self>) {
+        if let Some(family) = &self.family {
+            self.runs_picked = family.rows().into_iter().map(|r| r.run.id).collect();
+            cx.notify();
+        }
+    }
+
+    /// A right click on row `index`: the row joins the pick unless it is
+    /// in it already, when the click acts on every picked run.
+    pub(super) fn pick_for_menu(&mut self, index: usize) {
+        let Some(row) = self.runs_row(index) else {
             return;
         };
-        let forks = family.descendants(&row.run.id).len();
-        if row.run.parent.is_some() && forks == 0 {
-            self.remove_run(row.run.dir, cx);
+        if !self.runs_picked.contains(&row.run.id) {
+            self.runs_picked = vec![row.run.id];
+            self.runs_anchor = Some(index);
+        }
+    }
+
+    /// The runs the Runs panel's menu acts on: the picked ones, in the
+    /// panel's order.
+    pub(super) fn runs_menu_targets(&self) -> Vec<RunEntry> {
+        let Some(family) = &self.family else {
+            return Vec::new();
+        };
+        family
+            .rows()
+            .into_iter()
+            .filter(|r| self.runs_picked.contains(&r.run.id))
+            .map(|r| r.run)
+            .collect()
+    }
+
+    /// Deletes `runs` and their forks. A single fork with no forks of its
+    /// own goes at once: the same step and seed make it again. Anything
+    /// more is asked about first, with how many runs go in all.
+    pub(super) fn ask_delete_runs(&mut self, runs: Vec<RunEntry>, cx: &mut Context<Self>) {
+        let Some(family) = &self.family else {
+            return;
+        };
+        let picked: Vec<&str> = runs.iter().map(|r| r.id.as_str()).collect();
+
+        // Runs under another picked run go with it.
+        let tops: Vec<&RunEntry> = runs
+            .iter()
+            .filter(|r| {
+                !picked
+                    .iter()
+                    .any(|p| family.descendants(p).iter().any(|d| d.id == r.id))
+            })
+            .collect();
+        let mut gone: Vec<&str> = Vec::new();
+        for top in &tops {
+            for id in std::iter::once(top.id.as_str())
+                .chain(family.descendants(&top.id).iter().map(|d| d.id.as_str()))
+            {
+                if !gone.contains(&id) {
+                    gone.push(id);
+                }
+            }
+        }
+        let dirs: Vec<PathBuf> = tops.iter().map(|r| r.dir.clone()).collect();
+        if tops.len() == 1 && tops[0].parent.is_some() && gone.len() == 1 {
+            self.remove_runs(dirs, cx);
             return;
         }
-        let id = short_id(&row.run.id);
-        let title = match forks {
-            0 => format!("Remove run {id}?"),
-            1 => format!("Remove run {id} and its fork?"),
-            n => format!("Remove run {id} and its {n} forks?"),
+        let title = match (tops.len(), gone.len() - tops.len()) {
+            (1, 0) => format!("Delete run {}?", short_id(&tops[0].id)),
+            (1, 1) => format!("Delete run {} and its fork?", short_id(&tops[0].id)),
+            (1, n) => format!("Delete run {} and its {n} forks?", short_id(&tops[0].id)),
+            (k, 0) => format!("Delete {k} runs?"),
+            (k, n) => format!("Delete {k} runs and their {n} forks?"),
         };
         self.offer(
             NoticeTone::Info,
             title,
             "Their traces and keyframes are deleted from Rewind's runs. Pages other runs share stay.",
-            vec![NoticeAction::RemoveRun(row.run.dir), NoticeAction::Dismiss],
+            vec![NoticeAction::RemoveRuns(dirs), NoticeAction::Dismiss],
             cx,
         );
     }
 
-    /// Has the engine remove the run in `dir` and its forks. When the run
-    /// on screen was one of them, its parent takes its place, or the empty
-    /// state when it had none here.
-    fn remove_run(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
-        let call_dir = dir.clone();
+    /// Has the engine delete the runs in `dirs` and their forks. When the
+    /// run on screen was one of them, the nearest run left above it takes
+    /// its place, or the empty state when none is.
+    fn remove_runs(&mut self, dirs: Vec<PathBuf>, cx: &mut Context<Self>) {
+        let call_dirs = dirs.clone();
         self.with_engine(
             cx,
-            move |engine| engine.remove(&call_dir),
+            move |engine| {
+                let mut removed = Vec::new();
+                for dir in &call_dirs {
+                    removed.extend(engine.remove(dir)?);
+                }
+                Ok(removed)
+            },
             move |this, result, cx| {
                 let removed = match result {
                     Ok(removed) => removed,
                     Err(e) => {
-                        this.report("Could not remove the run", e, cx);
+                        this.report("Could not delete", e, cx);
+                        this.reload_runs(cx);
                         return;
                     }
                 };
+                this.runs_picked.retain(|id| !removed.contains(id));
                 let shown = this
                     .session
                     .as_ref()
                     .and_then(|s| s.run.manifest.id.clone());
-                let lost = shown.is_some_and(|id| removed.contains(&id));
-                let parent = this
-                    .family
-                    .as_ref()
-                    .and_then(|f| f.runs.iter().find(|r| r.dir == dir))
-                    .and_then(|r| r.parent.clone())
-                    .and_then(|p| {
-                        this.family
-                            .as_ref()?
-                            .runs
-                            .iter()
-                            .find(|r| r.id == p.id)
-                            .map(|r| r.dir.clone())
-                    });
+
+                // The nearest ancestor of the run on screen that is left.
+                let mut replacement = None;
+                if let (Some(shown), Some(family)) = (&shown, &this.family)
+                    && removed.contains(shown)
+                {
+                    let mut at = family.runs.iter().find(|r| &r.id == shown);
+                    while let Some(run) = at {
+                        if !removed.contains(&run.id) {
+                            replacement = Some(run.dir.clone());
+                            break;
+                        }
+                        at = run
+                            .parent
+                            .as_ref()
+                            .and_then(|p| family.runs.iter().find(|r| r.id == p.id));
+                    }
+                    if replacement.is_none() {
+                        this.session = None;
+                        this.family = None;
+                    }
+                }
                 this.notify_user(
                     NoticeTone::Info,
                     match removed.len() {
-                        1 => "Removed 1 run".to_string(),
-                        n => format!("Removed {n} runs"),
+                        1 => "Deleted 1 run".to_string(),
+                        n => format!("Deleted {n} runs"),
                     },
                     removed
                         .iter()
@@ -479,14 +607,8 @@ impl Scrubber {
                         .join(", "),
                     cx,
                 );
-                if lost {
-                    match parent {
-                        Some(parent) => this.open(parent, None, cx),
-                        None => {
-                            this.session = None;
-                            this.family = None;
-                        }
-                    }
+                if let Some(dir) = replacement {
+                    this.open(dir, None, cx);
                 }
                 this.reload_runs(cx);
             },
@@ -751,7 +873,7 @@ impl Scrubber {
             NoticeAction::CopyText(text) => {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(text))
             }
-            NoticeAction::RemoveRun(dir) => self.remove_run(dir, cx),
+            NoticeAction::RemoveRuns(dirs) => self.remove_runs(dirs, cx),
             NoticeAction::Dismiss => {}
         }
     }
