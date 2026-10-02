@@ -753,9 +753,21 @@ impl Scrubber {
                     item("menu-run-compare", "Compare against this run".into()).on_click(
                         cx.listener(move |this, _, _, cx| {
                             this.close_context_menu(cx);
-                            this.compare_with_shown(run.clone(), cx);
+                            this.compare_against(run.clone(), cx);
                         }),
                     ),
+                );
+            }
+            if self.pinned_compare.is_some() {
+                items = items.child(
+                    item(
+                        "menu-run-parents",
+                        "Compare each run with its parent".into(),
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.close_context_menu(cx);
+                        this.compare_with_parents(cx);
+                    })),
                 );
             }
             if !runs.is_empty() {

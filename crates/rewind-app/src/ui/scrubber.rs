@@ -225,6 +225,10 @@ pub struct Scrubber {
     pub(super) runs_picked: Vec<String>,
     /// The row a Shift click picks from.
     pub(super) runs_anchor: Option<usize>,
+    /// The run chosen with Compare against this run, which every run
+    /// opened from the Runs panel is compared with until the choice is
+    /// dropped. Without one, a run is compared with its parent.
+    pub(super) pinned_compare: Option<PathBuf>,
     pub(super) runs_scroll: UniformListScrollHandle,
     /// Whether identical forks are being removed.
     pub(super) pruning: bool,
@@ -283,6 +287,7 @@ impl Scrubber {
             runs_resize: None,
             runs_picked: Vec::new(),
             runs_anchor: None,
+            pinned_compare: None,
             runs_scroll: UniformListScrollHandle::new(),
             pruning: false,
             step: 0,
@@ -406,7 +411,12 @@ impl Scrubber {
             );
             return;
         }
-        self.open(run.dir, None, cx);
+        // The chosen comparison holds, except against the run itself.
+        let compare = self
+            .pinned_compare
+            .clone()
+            .filter(|pinned| *pinned != run.dir);
+        self.open(run.dir, compare, cx);
     }
 
     /// The Runs panel's row `index`, as the panel draws it.
@@ -415,9 +425,23 @@ impl Scrubber {
     }
 
     /// Opens `run` compared with the run on screen.
-    pub(super) fn compare_with_shown(&mut self, run: RunEntry, cx: &mut Context<Self>) {
-        let shown = self.session.as_ref().map(|s| s.run.path.clone());
-        self.open(run.dir, shown, cx);
+    /// Compares the run on screen with `run`, and keeps comparing with it
+    /// as other runs are opened from the Runs panel.
+    pub(super) fn compare_against(&mut self, run: RunEntry, cx: &mut Context<Self>) {
+        let Some(shown) = self.session.as_ref().map(|s| s.run.path.clone()) else {
+            return;
+        };
+        self.pinned_compare = Some(run.dir.clone());
+        self.open(shown, Some(run.dir), cx);
+    }
+
+    /// Drops the chosen comparison: the run on screen, and every run
+    /// opened after, is compared with its parent again.
+    pub(super) fn compare_with_parents(&mut self, cx: &mut Context<Self>) {
+        self.pinned_compare = None;
+        if let Some(shown) = self.session.as_ref().map(|s| s.run.path.clone()) {
+            self.open(shown, None, cx);
+        }
     }
 
     /// A press on Runs panel row `index` with a modifier: Ctrl picks or
@@ -619,6 +643,7 @@ impl Scrubber {
     /// panel open when the family has more than that one.
     pub(super) fn open_family(&mut self, family: &Family, cx: &mut Context<Self>) {
         self.runs_open = family.runs.len() > 1;
+        self.pinned_compare = None;
         self.open(family.base().dir.clone(), None, cx);
     }
 

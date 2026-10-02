@@ -251,7 +251,11 @@ impl Scrubber {
                         PillTone::Compared,
                         fonts,
                     ))
-                    .tooltip(tooltip(COMPARED_NOTE)),
+                    .tooltip(tooltip(if self.pinned_compare.is_some() {
+                        COMPARED_PINNED_NOTE
+                    } else {
+                        COMPARED_NOTE
+                    })),
             );
         }
 
@@ -1692,8 +1696,9 @@ impl Scrubber {
 }
 
 /// What the header's two run pills are, for their hover notes.
-const SHOWN_NOTE: &str = "The run on screen. Clicking a run in the Runs panel puts it here, compared with the run it was forked from.";
-const COMPARED_NOTE: &str = "The run it is compared with: the blue mark and the divergence card are where the two first differ. Right-click a run in the Runs panel to compare against it instead.";
+const SHOWN_NOTE: &str = "The run on screen. Clicking a run in the Runs panel puts it here.";
+const COMPARED_NOTE: &str = "The run it is compared with, here the run it was forked from: the blue mark and the divergence card are where the two first differ. Right-click a run in the Runs panel to compare against it instead; it stays the comparison as you open other runs.";
+const COMPARED_PINNED_NOTE: &str = "The run you chose to compare against, which stays the comparison as you open other runs. Right-click in the Runs panel and choose Compare each run with its parent to go back.";
 
 /// What the inspect buttons do, for their hover notes.
 const GDB_NOTE: &str = "gdb on a throwaway copy of the VM at this step: its one CPU, stopped in the kernel and the process running there, with their symbols and sources. Breakpoints, step and continue run the copy forward; the recording does not change.";
