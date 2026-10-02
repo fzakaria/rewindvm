@@ -24,6 +24,7 @@ use crate::ui::Launch;
 use crate::ui::licensing::Licensing;
 use crate::ui::link::LinkDialog;
 use crate::ui::selectable::SelectionState;
+use crate::ui::splits::{Drag, Measured, Splits};
 use crate::ui::terminal::{PaneKind, TerminalPane};
 use crate::ui::viewer::FileViewer;
 use crate::ui::widgets::Fonts;
@@ -217,9 +218,12 @@ pub struct Scrubber {
     pub(super) runs_open: bool,
     /// The Runs panel's width, which its left edge drags.
     pub(super) runs_width: f32,
-    /// While the edge is dragged: where the drag started and the width
-    /// then.
-    pub(super) runs_resize: Option<(gpui::Pixels, f32)>,
+    /// How the panels share the window, which their edges drag.
+    pub(super) splits: Splits,
+    /// The edge being dragged, if one is.
+    pub(super) split_drag: Option<Drag>,
+    /// Where the areas the edges divide were last painted.
+    pub(super) measured: Rc<Measured>,
     /// Runs picked with Ctrl and Shift clicks, by id, for copying their
     /// ids or deleting them together.
     pub(super) runs_picked: Vec<String>,
@@ -284,7 +288,9 @@ impl Scrubber {
             family: None,
             runs_open: false,
             runs_width: size::RUNS_PANEL_WIDTH,
-            runs_resize: None,
+            splits: Splits::default(),
+            split_drag: None,
+            measured: Rc::new(Measured::default()),
             runs_picked: Vec::new(),
             runs_anchor: None,
             pinned_compare: None,

@@ -656,17 +656,13 @@ impl Scrubber {
                         return;
                     }
                     move_view.update(cx, |this, cx| {
-                        // The Runs panel's edge, while it is dragged: the
-                        // panel widens as the edge moves left.
-                        if let Some((from, width)) = this.runs_resize {
+                        // An edge between panels, while it is dragged.
+                        if this.split_drag.is_some() {
                             if e.pressed_button != Some(MouseButton::Left) {
-                                this.runs_resize = None;
+                                this.split_drag = None;
                                 return;
                             }
-                            let moved = f32::from(from - e.position.x);
-                            this.runs_width =
-                                (width + moved).clamp(size::RUNS_PANEL_MIN, size::RUNS_PANEL_MAX);
-                            cx.notify();
+                            this.drag_edge(e.position, cx);
                             return;
                         }
                         if !this.selecting.dragging {
@@ -683,7 +679,7 @@ impl Scrubber {
                 window.on_mouse_event(move |e: &MouseUpEvent, _, _, cx| {
                     if e.button == MouseButton::Left {
                         up_view.update(cx, |this, _| {
-                            this.runs_resize = None;
+                            this.split_drag = None;
                             this.selection_release();
                         });
                     }

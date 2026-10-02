@@ -22,6 +22,7 @@ use crate::ui::chrome::client_tiling;
 use crate::ui::icons::Icon;
 use crate::ui::scrubber::{ForkState, NoticeAction, NoticeTone, Scrubber};
 use crate::ui::selectable::{PID_CHARS, mapped, process_row, selectable, selects};
+use crate::ui::splits::{Edge, grip, measure};
 use crate::ui::tour::explore_button;
 use crate::ui::widgets::{
     Availability, ButtonStyle, PillTone, button, icon, panel_title, pill, readout, tooltip,
@@ -145,22 +146,32 @@ impl Scrubber {
         let middle = self.render_middle(cx);
         // The right column: the file viewer when a file is open, which
         // takes the log's share of the width, else "At this step".
+        let splits = self.splits;
         let (at_step, right_flex) = match self.render_viewer(cx) {
-            Some(viewer) => (viewer, layout::LOG_FLEX),
-            None => (self.render_at_step(cx), layout::SIDE_FLEX),
+            Some(viewer) => (viewer, splits.right * layout::LOG_FLEX / layout::SIDE_FLEX),
+            None => (self.render_at_step(cx), splits.right),
         };
 
         // The panel row: three columns with one pixel rules between them,
-        // drawn by the row's background showing through the gaps.
-        let log_column = log.flex_grow(layout::LOG_FLEX);
-        let middle_column = middle.flex_grow(layout::SIDE_FLEX);
-        let at_step_column = at_step.flex_grow(right_flex);
+        // drawn by the row's background showing through the gaps. Each
+        // column after the first has a grip on its left edge that drags it.
+        let log_column = log.flex_grow(splits.log);
+        let middle_column = middle
+            .relative()
+            .flex_grow(splits.middle)
+            .child(measure(|m| &m.middle, &self.measured))
+            .child(grip(Edge::LogMiddle, cx));
+        let at_step_column = at_step
+            .relative()
+            .flex_grow(right_flex)
+            .child(grip(Edge::MiddleRight, cx));
         let runs_column = self
             .family
             .as_ref()
             .filter(|_| self.runs_open)
             .map(|family| self.render_runs(family, cx));
         let panels = div()
+            .relative()
             .flex()
             .flex_grow(layout::FILL)
             .min_h_0()
@@ -169,11 +180,13 @@ impl Scrubber {
             .child(log_column)
             .child(middle_column)
             .child(at_step_column)
-            .children(runs_column);
+            .children(runs_column)
+            .child(measure(|m| &m.panels, &self.measured));
 
         // The terminal pane, while a shell or gdb runs, under the panels.
         let terminal = self.render_terminal(window, cx);
         div()
+            .relative()
             .flex()
             .flex_col()
             .size_full()
@@ -181,6 +194,7 @@ impl Scrubber {
             .child(timeline)
             .child(panels)
             .children(terminal)
+            .child(measure(|m| &m.session, &self.measured))
     }
 
     /// The header: the mark, the run and what it built, verdict pills, and
@@ -859,7 +873,7 @@ impl Scrubber {
             .id("procs")
             .flex()
             .flex_col()
-            .flex_grow(layout::FILL)
+            .flex_grow(self.splits.procs)
             .flex_basis(relative(0.0))
             .min_h_0()
             .overflow_y_scroll()
@@ -986,7 +1000,7 @@ impl Scrubber {
             }),
         )
         .track_scroll(&self.files_scroll)
-        .flex_grow(layout::FILL)
+        .flex_grow(self.splits.files)
         .flex_basis(relative(0.0))
         .min_h_0()
         .py(px(size::LIST_PAD_Y))
@@ -1009,12 +1023,14 @@ impl Scrubber {
             .child(procs)
             .child(
                 div()
+                    .relative()
                     .border_t_1()
                     .border_color(rgb(theme::LINE_SOFT))
                     .child(panel_title(
                         "Files \u{b7} newest first",
                         Some(count(files).into_any_element()),
-                    )),
+                    ))
+                    .child(grip(Edge::ProcsFiles, cx)),
             )
             .when(files == 0, |d| {
                 d.child(placeholder("No files written up to this step."))
@@ -1632,22 +1648,6 @@ impl Scrubber {
         .min_h_0()
         .py(px(size::LIST_PAD_Y));
 
-        // The panel's left edge drags its width.
-        let grip = div()
-            .id("runs-grip")
-            .absolute()
-            .top_0()
-            .bottom_0()
-            .left(px(-size::RUNS_GRIP / 2.0))
-            .w(px(size::RUNS_GRIP))
-            .cursor(CursorStyle::ResizeLeftRight)
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, e: &MouseDownEvent, _, cx| {
-                    this.runs_resize = Some((e.position.x, this.runs_width));
-                    cx.stop_propagation();
-                }),
-            );
         div()
             .relative()
             .flex()
@@ -1656,7 +1656,7 @@ impl Scrubber {
             .w(px(self.runs_width))
             .min_h_0()
             .bg(rgb(theme::PANEL))
-            .child(grip)
+            .child(grip(Edge::Runs, cx))
             .child(panel_title(
                 &format!("Runs of this build \u{b7} {count}"),
                 Some(

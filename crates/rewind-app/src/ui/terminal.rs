@@ -549,8 +549,9 @@ impl Scrubber {
                 .on_action(cx.listener(|this, _: &TerminalPaste, _, cx| this.terminal_paste(cx)))
                 .flex()
                 .flex_col()
+                .relative()
                 .flex_none()
-                .h(relative(layout::TERMINAL_SHARE))
+                .h(relative(self.splits.terminal))
                 .min_h_0()
                 .bg(rgb(theme::PANEL))
                 .border_t_1()
@@ -560,7 +561,11 @@ impl Scrubber {
                     theme::LINE
                 }))
                 .child(bar)
-                .child(grid),
+                .child(grid)
+                .child(crate::ui::splits::grip(
+                    crate::ui::splits::Edge::Terminal,
+                    cx,
+                )),
         )
     }
 }

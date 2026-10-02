@@ -9,6 +9,7 @@ mod link;
 mod render;
 mod scrubber;
 mod selectable;
+mod splits;
 mod terminal;
 mod tour;
 mod viewer;
