@@ -24,7 +24,7 @@ $ mkdir -p ~/.local/opt ~/.local/bin
 $ curl -L https://github.com/fzakaria/rewindvm/releases/latest/download/rewind-x86_64-linux.tar.gz | tar -xz -C ~/.local/opt
 $ ln -s ~/.local/opt/rewind-x86_64-linux/bin/rewind ~/.local/bin/rewind
 $ ls -l /dev/kvm
-crw-rw-rw- 1 root kvm 10, 232 Oct  1 10:44 /dev/kvm
+crw-rw-rw- 1 root kvm 10, 232 Oct  1 17:24 /dev/kvm
 $ sudo usermod -aG kvm $USER          # if /dev/kvm is not yours to use; log in again after
 ```
 
@@ -68,7 +68,7 @@ $ rewind run --root mylib.tar --cwd /src -- make check
 ...
 round 3: ok
 test_pool_shutdown: ok
-rewind: run ddfd379b211e7343 exited:0 after 1317 steps, 0.019s virtual, 1.617s wall (poweroff)
+rewind: run c971836506aa532b exited:0 after 1317 steps, 0.019s virtual, 0.857s wall (poweroff)
 ```
 
 On AMD, until `sudo rewind pmu enable` has been run since boot, `rewind` first
@@ -85,29 +85,29 @@ inputs. Your image, and so your run ids, will differ from these.
 
 ```console
 $ rewind check --root mylib.tar --cwd /src -- make check
-schedule   0: exited:0             1317 steps    run ddfd379b211e7343
-schedule   1: exited:0             1524 steps    run d8d1e6a5490c3ae6
-schedule   2: exited:0             1587 steps    run 45931e26f3075e54
-schedule   3: exited:0             1473 steps    run 6082d794b2a4d1b9
-schedule   4: exited:0             1617 steps    run e7df004e46e9c23d
-schedule   5: exited:2             1018 steps    run 037fd4b7e6dd1997
-schedule   6: exited:0             1563 steps    run 3543af096ed5f719
-schedule   7: exited:0             1453 steps    run cd880a24e507c598
-schedule   8: exited:0             1528 steps    run c300723a1c419324
-schedule   9: exited:0             1521 steps    run fb5bddf7914a74f1
-schedule  10: exited:0             1686 steps    run a82b92c436ebbf58
-schedule  11: exited:0             1586 steps    run 5419f8b009a9aca9
-schedule  12: exited:0             1631 steps    run 5f18b54051e031ae
-schedule  13: exited:0             1522 steps    run 4010625af811f5c9
-schedule  14: exited:0             1602 steps    run eccf48b0fbed4d7a
-schedule  15: exited:0             1543 steps    run a3c092c0a5acbd08
-schedule  16: exited:0             1516 steps    run c024f0a4ed3dcc30
+schedule   0: exited:0             1317 steps    run c971836506aa532b
+schedule   1: exited:0             1524 steps    run c344d69bdfcfa414
+schedule   2: exited:0             1587 steps    run 86d685335be7bc94
+schedule   3: exited:0             1473 steps    run 6117ff0cdf7de924
+schedule   4: exited:0             1617 steps    run 08be693b0a6508f6
+schedule   5: exited:2             1018 steps    run 2de1c10dea6d83de
+schedule   6: exited:0             1563 steps    run 785ac392de407d3f
+schedule   7: exited:0             1453 steps    run 95bf2b0689bb65e0
+schedule   8: exited:0             1528 steps    run 949a5afc5d04396d
+schedule   9: exited:0             1521 steps    run 0fe55942d288bdab
+schedule  10: exited:0             1686 steps    run cba37907d8b43eee
+schedule  11: exited:0             1586 steps    run 43987786f1b47615
+schedule  12: exited:0             1631 steps    run 8d28447a52e25c8a
+schedule  13: exited:0             1522 steps    run de4b776bfd97598f
+schedule  14: exited:0             1602 steps    run 2628aa8bc49c3ff4
+schedule  15: exited:0             1543 steps    run 6c86e367b87ab882
+schedule  16: exited:0             1516 steps    run 23229acbe2b1c421
 
 schedule 5 ends differently; narrowing the steps it perturbs
 perturbing only steps 586..690 still ends differently
 
-passing: run ddfd379b211e7343
-failing: run 589339f23d54ee71
+passing: run c971836506aa532b
+failing: run d26a287627836186
 
 where ./tests/test_pool_shutdown first behaves differently:
   both         659    39/41    write(1, "job 14 done: 39906\n")
@@ -132,7 +132,7 @@ where the test's own events first differ: up to job 15 both runs agree; then
 in the passing run the workers finish and exit, while in the failing run a
 worker is still finishing job 16 when shutdown runs, and crashes right after.
 
-This took 6 seconds. `--all` tries every schedule and reports a failure rate:
+This took 5 seconds. `--all` tries every schedule and reports a failure rate:
 
 ```console
 $ rewind check --all --schedules 32 --root mylib.tar --cwd /src -- make check | grep 'ended differently'
@@ -141,16 +141,16 @@ $ rewind check --all --schedules 32 --root mylib.tar --cwd /src -- make check | 
 
 ## Look at it, and keep it
 
-The failing run's last output, the processes alive at its SIGSEGV (step 1232,
-which `rewind events 44cbffcc` shows), and a replay:
+The failing run's last output, the processes alive at its SIGSEGV (step 696,
+which `rewind events d26a2876` shows), and a replay:
 
 ```console
-$ rewind log 589339f2 --steps | tail -3
+$ rewind log d26a2876 --steps | tail -3
        685    39  worker picked job 17
        714    35  Segmentation fault
        720    34  make: *** [Makefile:18: check] Error 1
 
-$ rewind ps 589339f2 --at 696
+$ rewind ps d26a2876 --at 696
      1 /init
     34   make check
     35     /bin/sh -c for t in tests/test_pool_basic tests/test_pool_shutdown; do echo "running $t"; ./$t || exit 1; done
@@ -158,7 +158,7 @@ $ rewind ps 589339f2 --at 696
     40         (thread)
     41         (thread)
 
-$ rewind replay 589339f2
+$ rewind replay d26a2876
 identical: 280 events over 730 steps
 ```
 
@@ -173,7 +173,7 @@ fork of the run, so nothing they do changes it. At the SIGSEGV, the source the
 test was built from, and a shell in the test program's working directory:
 
 ```console
-$ rewind cat 589339f2 696 src/pool.c --pid 39 | sed -n '/^void pool_shutdown/,/^}/p'
+$ rewind cat d26a2876 696 src/pool.c --pid 39 | sed -n '/^void pool_shutdown/,/^}/p'
 void pool_shutdown(struct pool *p)
 {
 	pthread_mutex_lock(&p->lock);
@@ -192,8 +192,8 @@ void pool_shutdown(struct pool *p)
 	free(p);
 }
 
-$ printf 'pwd; ls; exit\n' | rewind shell 589339f2 696 --pid 39
-rewind: a shell at step 696 of 589339f23d54ee71; exit it to leave
+$ printf 'pwd; ls; exit\n' | rewind shell d26a2876 696 --pid 39
+rewind: a shell at step 696 of d26a287627836186; exit it to leave
 [rewind] /src # pwd; ls; exit
 /src
 Containerfile  Makefile  libmylib.a  src  tests
@@ -202,7 +202,7 @@ Containerfile  Makefile  libmylib.a  src  tests
 To scrub it in the desktop app:
 
 ```console
-$ rewind-app ~/.local/share/rewind/runs/44cbffccfb599fe3 --compare ~/.local/share/rewind/runs/62efc0dd26d542af
+$ rewind-app ~/.local/share/rewind/runs/d26a287627836186 --compare ~/.local/share/rewind/runs/c971836506aa532b
 ```
 
 ## Check the fix

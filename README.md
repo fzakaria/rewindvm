@@ -34,29 +34,32 @@ point.
 
 ```console
 $ rewind check github:fzakaria/rewindvm#mylib
-schedule   0: exited:0             6188 steps  aa30ea54dc47  run 2085adea85fc0f1e
-schedule   1: exited:2             5766 steps    run b0e9743e983f513e
-schedule   2: exited:0             7372 steps  aa30ea54dc47  run 02e6337029437d6a
+schedule   0: exited:0             6162 steps  aa30ea54dc47  run eb160fbb7899f5f6
+schedule   1: exited:0             7115 steps  aa30ea54dc47  run 0cd62de6117dab15
+schedule   2: exited:0             7339 steps  aa30ea54dc47  run 71648c271e2de469
+schedule   3: exited:0             7277 steps  aa30ea54dc47  run d70f86efb6477307
+schedule   4: exited:2             5436 steps    run 730c06d084ff5b48
 ...
 
-schedule 1 ends differently; narrowing the steps it perturbs
-perturbing only steps 2198..4570 still ends differently
+schedule 4 ends differently; narrowing the steps it perturbs
+perturbing only steps 2713..4571 still ends differently
 
-passing: run 2085adea85fc0f1e
-failing: run 9a96fab59759f2a5
+passing: run eb160fbb7899f5f6
+failing: run 5833da2c43c402bf
 
 where ./tests/test_pool_shutdown first behaves differently:
   ...
-  left        4179   166/168   write(1, "job 3 done: 58758\n")
-  left        4188   166/167   write(1, "job 2 done: 30213\n")
-  right       4401   166/167   write(1, "job 2 done: 30213\n")
-  right       4405   166/168   write(1, "job 3 done: 58758\n")
+  left        4151   166/167   write(1, "worker picked job 2\n")
+  left        4162   166/168   write(1, "worker picked job 3\n")
+  right       4398   166/168   write(1, "worker picked job 2\n")
+  right       4422   166/167   write(1, "worker picked job 3\n")
 
-$ rewind events 9a96fab5 | grep SIGSEGV
-      4576   166/168   SIGSEGV code=1 addr=0x108
+$ rewind events 5833da2c | grep SIGSEGV
+      4583   166/167   SIGSEGV code=1 addr=0x108
+...
 
-$ rewind replay 9a96fab5
-identical: 1596 events over 4613 steps
+$ rewind replay 5833da2c
+identical: 1595 events over 4623 steps
 ```
 
 ## Install
