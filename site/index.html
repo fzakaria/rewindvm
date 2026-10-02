@@ -17,6 +17,9 @@
       rel="stylesheet"
     />
     <link rel="stylesheet" href="style.css" />
+    <!-- Google Analytics, with consent defaults set before gtag.js runs. -->
+    <script src="analytics.js"></script>
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-L0515BFLG0"></script>
     <script src="demo.js" defer></script>
   </head>
   <body>
@@ -515,12 +518,14 @@
         <h3>With Nix</h3>
         <p>Run either straight from the flake, or install both into your profile:</p>
         <pre
+          data-install="nix"
           class="term"
         ><code><span class="prompt">$</span> <span class="cmd">nix</span> run github:fzakaria/rewindvm <span class="opt">--</span> pmu status
 <span class="prompt">$</span> <span class="cmd">nix</span> run github:fzakaria/rewindvm#app
 <span class="prompt">$</span> <span class="cmd">nix</span> profile install github:fzakaria/rewindvm github:fzakaria/rewindvm#app</code></pre>
         <p>On NixOS, add the flake as an input and turn on its module:</p>
         <pre
+          data-install="nixos"
           class="term nix"
         ><code>inputs.rewind.url = <span class="str">"github:fzakaria/rewindvm"</span>;
 
@@ -533,10 +538,12 @@ programs.rewind.amdBranchCounterWorkaround = <span class="kw">true</span>;</code
 
         <h3>Without Nix</h3>
         <pre
+          data-install="script"
           class="term"
         ><code><span class="prompt">$</span> <span class="cmd">curl</span> <span class="opt">-fsSL</span> https://rewindvm.dev/install <span class="op">|</span> <span class="cmd">sh</span></code></pre>
         <p>Or take the tarballs from the latest release yourself:</p>
         <pre
+          data-install="tarball"
           class="term"
         ><code><span class="comment"># the rewind command, with the VM's kernel</span>
 <span class="prompt">$</span> <span class="cmd">curl</span> <span class="opt">-L</span> https://github.com/fzakaria/rewindvm/releases/latest/download/rewind-x86_64-linux.tar.gz <span class="op">|</span> <span class="cmd">tar</span> xz
@@ -581,7 +588,12 @@ programs.rewind.amdBranchCounterWorkaround = <span class="kw">true</span>;</code
               <li>3 years of updates</li>
               <li>Offline license key by email</li>
             </ul>
-            <a class="btn" href="https://buy.stripe.com/8x29AU8ztes49xEbDQ3Je00">Buy personal</a>
+            <a
+              class="btn"
+              data-edition="personal"
+              href="https://buy.stripe.com/8x29AU8ztes49xEbDQ3Je00"
+              >Buy personal</a
+            >
           </div>
           <div class="plan">
             <h3>Commercial</h3>
@@ -591,7 +603,10 @@ programs.rewind.amdBranchCounterWorkaround = <span class="kw">true</span>;</code
               <li>One seat per person using the app</li>
               <li>Offline license key by email</li>
             </ul>
-            <a class="btn ghost" href="https://buy.stripe.com/aFa4gA1716ZCcJQ8rE3Je01"
+            <a
+              class="btn ghost"
+              data-edition="commercial"
+              href="https://buy.stripe.com/aFa4gA1716ZCcJQ8rE3Je01"
               >Buy commercial</a
             >
           </div>

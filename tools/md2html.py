@@ -195,6 +195,9 @@ HEAD = """<!doctype html>
       rel="stylesheet"
     />
     <link rel="stylesheet" href="{up}style.css" />
+    <!-- Google Analytics, with consent defaults set before gtag.js runs. -->
+    <script src="{up}analytics.js"></script>
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-L0515BFLG0"></script>
   </head>
   <body>
     <header class="wrap nav">
