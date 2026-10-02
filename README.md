@@ -182,7 +182,7 @@ beside the run it hangs under; right-click it to compare it with the run on
 screen, copy its id, or remove it with its forks.
 
 <p align="center">
-  <img src="docs/img/app-runs.png" alt="The Runs panel: the mylib build's 170 runs as a tree under the passing schedule 0 run, with twelve forks of it at step 2,713, one crashed fork with forks of its own at steps 4,400 and 4,520 and a fork of a fork at 4,500, then the failing schedules rewind check ran from boot, each with its exit status, schedule and the steps it perturbed." />
+  <img src="docs/img/app-runs.png" alt="The Runs panel: the mylib build's 170 runs as a tree under the passing schedule 0 run, with twelve forks of it at step 2,713, one crashed fork with forks of its own at steps 4,400 and 4,520 and a fork of a fork at 4,500, one row folding the 104 schedules from boot that passed like the schedule 0 run, then the failing ones rewind check ran from boot, each with its exit status, schedule and the steps it perturbed." />
 </p>
 
 <p align="center">
