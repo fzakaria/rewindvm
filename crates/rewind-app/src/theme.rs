@@ -224,6 +224,8 @@ pub mod size {
     pub const GRAPH_RING: f32 = 7.0;
     pub const GRAPH_CURVE: f32 = 6.0;
     pub const GRAPH_STROKE: f32 = 1.5;
+    /// Half the height of a folding row's chevron.
+    pub const GRAPH_CHEVRON: f32 = 5.0;
     pub const LEGEND_GAP: f32 = 4.0;
 
     // Text.

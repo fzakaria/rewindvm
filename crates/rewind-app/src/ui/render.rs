@@ -1726,7 +1726,11 @@ fn runs_line(row: &Row) -> String {
 fn graph_cell(row: &Row, columns: usize, shown: bool, compared: bool) -> impl IntoElement {
     let graph = row.graph.clone();
     let depth = row.depth;
-    let folding = row.kind != RunsRowKind::Run;
+    let chevron = match row.kind {
+        RunsRowKind::Run => None,
+        RunsRowKind::Folded { .. } => Some(Chevron::Closed),
+        RunsRowKind::Unfolded { .. } => Some(Chevron::Open),
+    };
     let dot_color = if row.run.failed {
         theme::RED
     } else if row.run.ending == "exited:0" {
@@ -1791,17 +1795,37 @@ fn graph_cell(row: &Row, columns: usize, shown: bool, compared: bool) -> impl In
                     gpui::size(radius * 2.0, radius * 2.0),
                 )
             };
-            // A folding row's dot is a hollow ring in the color of the
-            // ending its runs share.
-            if folding {
-                window.paint_quad(
-                    fill(circle(dot), gpui::transparent_black())
-                        .corner_radii(dot)
-                        .border_widths(px(size::GRAPH_STROKE))
-                        .border_color(rgb(dot_color)),
-                );
-            } else {
-                window.paint_quad(fill(circle(dot), rgb(dot_color)).corner_radii(dot));
+            // A folding row has a chevron in place of a dot, as a file tree
+            // draws a folder: pointing right while its runs are hidden and
+            // down while they show, in the color of how its run ended.
+            match chevron {
+                None => {
+                    window.paint_quad(fill(circle(dot), rgb(dot_color)).corner_radii(dot));
+                }
+                Some(chevron) => {
+                    let h = px(size::GRAPH_CHEVRON);
+                    let (c, a, b) = (center, h * 0.6, h * 0.8);
+                    let corners = match chevron {
+                        Chevron::Closed => [
+                            point(c.x - a, c.y - h),
+                            point(c.x - a, c.y + h),
+                            point(c.x + b, c.y),
+                        ],
+                        Chevron::Open => [
+                            point(c.x - h, c.y - a),
+                            point(c.x + h, c.y - a),
+                            point(c.x, c.y + b),
+                        ],
+                    };
+                    let mut path = PathBuilder::fill();
+                    path.move_to(corners[0]);
+                    path.line_to(corners[1]);
+                    path.line_to(corners[2]);
+                    path.close();
+                    if let Ok(path) = path.build() {
+                        window.paint_path(path, rgb(dot_color));
+                    }
+                }
             }
             // The run on screen is ringed in amber, the run it is compared
             // with in blue, as their pills in the header are colored.
@@ -1824,6 +1848,15 @@ fn graph_cell(row: &Row, columns: usize, shown: bool, compared: bool) -> impl In
     .flex_none()
     .w(px(size::GRAPH_LANE * columns as f32))
     .h_full()
+}
+
+/// Which way a folding row's chevron points.
+#[derive(Clone, Copy)]
+enum Chevron {
+    /// Right: the runs are hidden.
+    Closed,
+    /// Down: the runs show below.
+    Open,
 }
 
 /// The pill tone for how a run ended.

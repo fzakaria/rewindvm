@@ -150,11 +150,20 @@ pub struct Row {
 pub enum RowKind {
     /// A run.
     Run,
-    /// Stands for `count` runs from boot under the row's run that ended
-    /// the way it did; a click shows them.
-    Folded { count: usize },
-    /// Comes after those runs once shown; a click folds them again.
-    Unfolded { count: usize },
+    /// Stands for `count` runs under the row's run; a click shows them.
+    Folded { count: usize, folds: Folds },
+    /// Comes before those runs once shown; a click folds them again.
+    Unfolded { count: usize, folds: Folds },
+}
+
+/// Which runs a folding row stands for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Folds {
+    /// Runs from boot under a schedule 0 run that ended the way it did.
+    EndedLike,
+    /// Runs under a schedule that perturb it only in a window of steps,
+    /// as rewind check makes them narrowing the schedule down.
+    Windows,
 }
 
 /// The fewest runs from boot a row folds: one run is shown as itself.
@@ -194,20 +203,25 @@ impl Row {
     /// step it forked at, its schedule, and where it first differs from
     /// its parent or which older fork it repeats.
     pub fn detail(&self) -> String {
+        let (id, schedule) = (short_id(&self.run.id), self.run.schedule);
         match self.kind {
             RowKind::Run => {}
-            RowKind::Folded { count } => {
-                return format!(
-                    "{count} more at boot ended like {} \u{b7} show",
-                    short_id(&self.run.id)
-                );
-            }
-            RowKind::Unfolded { count } => {
-                return format!(
-                    "hide the {count} at boot that ended like {}",
-                    short_id(&self.run.id)
-                );
-            }
+            RowKind::Folded {
+                count,
+                folds: Folds::EndedLike,
+            } => return format!("{count} more at boot ended like {id} \u{b7} show"),
+            RowKind::Unfolded {
+                count,
+                folds: Folds::EndedLike,
+            } => return format!("hide the {count} at boot that ended like {id}"),
+            RowKind::Folded {
+                count,
+                folds: Folds::Windows,
+            } => return format!("{count} more windows of schedule {schedule} \u{b7} show"),
+            RowKind::Unfolded {
+                count,
+                folds: Folds::Windows,
+            } => return format!("hide the {count} windows of schedule {schedule}"),
         }
         let run = &self.run;
         let Some(parent) = &run.parent else {
@@ -328,40 +342,87 @@ impl Family {
     fn rows_with(&self, now: SystemTime, fold: Option<Fold>) -> Vec<Row> {
         let recorded = self.recorded_by_inputs();
 
+        let hangs = self.boot_hangs(&recorded);
+
         // The runs each folding row stands for, and a placeholder for the
-        // row to take a run's place in the tree.
+        // row to take a run's place in the tree. Under a schedule 0 run,
+        // the runs from boot that ended as it did fold; under a schedule
+        // with windows, the windows fold but for the narrowest that still
+        // ends as the schedule did, the one rewind check reports. Runs
+        // with forks, or with windows under them, and runs to keep in view
+        // stay.
         let parents: HashSet<&str> = self
             .runs
             .iter()
             .filter_map(|r| Some(r.parent.as_ref()?.id.as_str()))
+            .chain(
+                hangs
+                    .values()
+                    .filter(|u| u.schedule != 0)
+                    .map(|u| u.id.as_str()),
+            )
             .collect();
-        let mut folded: HashSet<&str> = HashSet::new();
-        let mut placeholders: Vec<(RunEntry, RowKind)> = Vec::new();
-        let mut same: HashMap<&str, Vec<&str>> = HashMap::new();
-        if let Some(fold) = &fold {
+        let narrowest: HashMap<&str, &str> = {
+            let mut best: HashMap<&str, &RunEntry> = HashMap::new();
             for run in &self.runs {
-                let Some(under) = Self::from_boot_under(run, &recorded) else {
+                let Some(under) = hangs.get(run.id.as_str()) else {
                     continue;
                 };
-                if run.ending != under.ending
-                    || parents.contains(run.id.as_str())
-                    || fold.keep.contains(&run.id.as_str())
-                {
+                let Some((from, until)) = run.window else {
+                    continue;
+                };
+                if under.schedule == 0 || run.ending != under.ending {
                     continue;
                 }
-                same.entry(under.id.as_str()).or_default().push(&run.id);
+                let width = until.saturating_sub(from);
+                let slot = best.entry(under.id.as_str()).or_insert(run);
+                let held = slot.window.map_or(u64::MAX, |(f, u)| u.saturating_sub(f));
+                if (width, std::cmp::Reverse(run.created)) < (held, std::cmp::Reverse(slot.created))
+                {
+                    *slot = run;
+                }
+            }
+            best.into_iter().map(|(u, r)| (u, r.id.as_str())).collect()
+        };
+        let mut groups: HashMap<&str, (Folds, Vec<&str>)> = HashMap::new();
+        if let Some(fold) = &fold {
+            for run in &self.runs {
+                let Some(under) = hangs.get(run.id.as_str()) else {
+                    continue;
+                };
+                if parents.contains(run.id.as_str()) || fold.keep.contains(&run.id.as_str()) {
+                    continue;
+                }
+                let folds = if under.schedule == 0 {
+                    if run.ending != under.ending {
+                        continue;
+                    }
+                    Folds::EndedLike
+                } else {
+                    if narrowest.get(under.id.as_str()) == Some(&run.id.as_str()) {
+                        continue;
+                    }
+                    Folds::Windows
+                };
+                groups
+                    .entry(under.id.as_str())
+                    .or_insert((folds, Vec::new()))
+                    .1
+                    .push(&run.id);
             }
         }
-        for (under, runs) in same {
+        let mut folded: HashSet<&str> = HashSet::new();
+        let mut placeholders: Vec<(RunEntry, RowKind)> = Vec::new();
+        for (under, (folds, runs)) in groups {
             if runs.len() < MIN_FOLD {
                 continue;
             }
             let count = runs.len();
             let kind = if fold.as_ref().is_some_and(|f| f.unfolded.contains(under)) {
-                RowKind::Unfolded { count }
+                RowKind::Unfolded { count, folds }
             } else {
                 folded.extend(runs);
-                RowKind::Folded { count }
+                RowKind::Folded { count, folds }
             };
             let Some(under) = self.runs.iter().find(|r| r.id == under) else {
                 continue;
@@ -386,13 +447,14 @@ impl Family {
         }
         // The runs from boot under other schedules, as rewind check makes
         // them, hang off the schedule 0 run of their inputs like forks at
-        // step 0, after its real forks.
+        // step 0, after its real forks, and the windows of a schedule hang
+        // off that schedule's run.
         let (from_boot, rest): (Vec<&RunEntry>, Vec<&RunEntry>) = roots
             .into_iter()
-            .partition(|r| Self::from_boot_under(r, &recorded).is_some());
+            .partition(|r| hangs.contains_key(r.id.as_str()));
         roots = rest;
         for run in from_boot {
-            let Some(under) = Self::from_boot_under(run, &recorded) else {
+            let Some(under) = hangs.get(run.id.as_str()) else {
                 continue;
             };
             children.entry(under.id.as_str()).or_default().push(run);
@@ -543,13 +605,42 @@ impl Family {
         Self::from_boot_under(run, &self.recorded_by_inputs())
     }
 
-    /// The schedule 0 run whose folding row `run` goes with: the run itself
-    /// when it is one, or the one a run from boot hangs under.
+    /// The run whose folding row `run` goes with: the run itself when it
+    /// is a schedule 0 run, or the run a run from boot hangs under.
     pub fn fold_under<'a>(&'a self, run: &'a RunEntry) -> Option<&'a RunEntry> {
         if run.parent.is_none() && run.schedule == 0 {
             return Some(run);
         }
-        Self::from_boot_under(run, &self.recorded_by_inputs())
+        self.boot_hangs(&self.recorded_by_inputs())
+            .get(run.id.as_str())
+            .copied()
+    }
+
+    /// For each run from boot under another schedule, the run it hangs
+    /// under in the tree: for one perturbed only in a window, the run of
+    /// its schedule without one when that is here, else the schedule 0
+    /// run of its inputs.
+    fn boot_hangs<'a>(
+        &'a self,
+        recorded: &HashMap<&str, &'a RunEntry>,
+    ) -> HashMap<&'a str, &'a RunEntry> {
+        let whole: HashMap<(&str, u64), &RunEntry> = self
+            .runs
+            .iter()
+            .filter(|r| r.window.is_none() && Self::from_boot_under(r, recorded).is_some())
+            .filter_map(|r| Some(((r.inputs.as_deref()?, r.schedule), r)))
+            .collect();
+        self.runs
+            .iter()
+            .filter_map(|run| {
+                let base = Self::from_boot_under(run, recorded)?;
+                let schedule = run
+                    .window
+                    .and(run.inputs.as_deref())
+                    .and_then(|i| whole.get(&(i, run.schedule)).copied());
+                Some((run.id.as_str(), schedule.unwrap_or(base)))
+            })
+            .collect()
     }
 
     /// The folding row among `rows` for the runs under `under`, if it has
@@ -980,7 +1071,14 @@ mod tests {
             vec![
                 row("r", 0),
                 row("f", 1),
-                ("r".to_string(), 1, RowKind::Folded { count: 2 }),
+                (
+                    "r".to_string(),
+                    1,
+                    RowKind::Folded {
+                        count: 2,
+                        folds: Folds::EndedLike
+                    }
+                ),
                 row("s2", 1),
                 row("s2a", 2),
                 row("s4", 1),
@@ -994,7 +1092,13 @@ mod tests {
         let open = HashSet::from(["r".to_string()]);
         let rows = swept().rows_folded(&open, &[]);
         assert_eq!(rows.len(), 8);
-        assert_eq!(rows[2].kind, RowKind::Unfolded { count: 2 });
+        assert_eq!(
+            rows[2].kind,
+            RowKind::Unfolded {
+                count: 2,
+                folds: Folds::EndedLike
+            }
+        );
         assert_eq!(rows[2].detail(), "hide the 2 at boot that ended like r");
         assert_eq!(rows[3].run.id, "s1");
     }
@@ -1009,10 +1113,73 @@ mod tests {
             let run = f.runs.iter().find(|r| r.id == id).unwrap();
             Family::fold_row(&rows, f.fold_under(run)?).map(|row| row.kind)
         };
-        let folded = Some(RowKind::Folded { count: 2 });
+        let folded = Some(RowKind::Folded {
+            count: 2,
+            folds: Folds::EndedLike,
+        });
         assert_eq!(fold("r"), folded);
         assert_eq!(fold("s4"), folded);
         assert_eq!(fold("f"), None);
+    }
+
+    /// A passing schedule 0 run, two runs from boot that passed like it,
+    /// schedule 5 that failed, and four runs rewind check made narrowing
+    /// schedule 5 to a window: w4 is the narrowest that still fails.
+    fn narrowed() -> Family {
+        let within = |id: &str, ending: &str, from: u64, until: u64, created: u64| RunEntry {
+            window: Some((from, until)),
+            created,
+            ..run(id, None, 5, ending)
+        };
+        Family {
+            runs: vec![
+                run("r", None, 0, "exited:0"),
+                run("s5", None, 5, "exited:1"),
+                run("s6", None, 6, "exited:0"),
+                run("s7", None, 7, "exited:0"),
+                within("w1", "exited:1", 10, 100, 1),
+                within("w2", "exited:0", 50, 100, 2),
+                within("w3", "exited:1", 40, 100, 3),
+                within("w4", "exited:1", 40, 60, 4),
+            ],
+        }
+    }
+
+    #[test]
+    fn a_schedules_windows_hang_under_it_and_fold() {
+        // The windows go under s5, the schedule they narrow, and fold but
+        // for w4, the narrowest that still ends like s5. Opening a window
+        // still compares it with r, where its schedule is perturbed from.
+        let f = narrowed();
+        let rows = f.rows_folded(&HashSet::new(), &[]);
+        let ended_like = |count| RowKind::Folded {
+            count,
+            folds: Folds::EndedLike,
+        };
+        let windows = |count| RowKind::Folded {
+            count,
+            folds: Folds::Windows,
+        };
+        let row = |id: &str, depth| (id.to_string(), depth, RowKind::Run);
+        assert_eq!(
+            shown(&rows),
+            vec![
+                row("r", 0),
+                ("r".to_string(), 1, ended_like(2)),
+                row("s5", 1),
+                ("s5".to_string(), 2, windows(3)),
+                row("w4", 2),
+            ]
+        );
+        assert_eq!(rows[3].detail(), "3 more windows of schedule 5 \u{b7} show");
+        let w1 = f.runs.iter().find(|r| r.id == "w1").unwrap();
+        assert_eq!(f.tree_parent(w1).map(|r| r.id.as_str()), Some("r"));
+
+        // Unfolded, every window is there after the row that folds them.
+        let open = HashSet::from(["s5".to_string()]);
+        let rows = f.rows_folded(&open, &[]);
+        assert_eq!(rows.len(), 8);
+        assert_eq!(rows[3].detail(), "hide the 3 windows of schedule 5");
     }
 
     #[test]

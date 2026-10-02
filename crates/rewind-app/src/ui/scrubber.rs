@@ -467,8 +467,11 @@ impl Scrubber {
         if row.kind != RowKind::Run {
             return Some((row.run.id.clone(), row.kind));
         }
-        let under = family.fold_under(&row.run)?;
-        let fold = Family::fold_row(&rows, under)?;
+        // A run with windows folded under it answers for those first.
+        let fold = Family::fold_row(&rows, &row.run).or_else(|| {
+            let under = family.fold_under(&row.run)?;
+            Family::fold_row(&rows, under)
+        })?;
         Some((fold.run.id.clone(), fold.kind))
     }
 

@@ -19,7 +19,7 @@ use gpui::{
 };
 
 use crate::describe::short_store_paths_mapped;
-use crate::family::RowKind;
+use crate::family::{Folds, RowKind};
 use crate::selection::{DrawnText, Lines, Mapped, Pos, Selection, Surface, Unit, nearest_line};
 use crate::theme::{self, size};
 use crate::ui::scrubber::Scrubber;
@@ -797,8 +797,22 @@ impl Scrubber {
             // as well as from their row.
             if let Some((under, kind)) = menu.line.and_then(|i| self.fold_for_row(i)) {
                 let label = match kind {
-                    RowKind::Folded { count } => format!("Show {count} more at boot"),
-                    RowKind::Unfolded { count } => format!("Fold {count} at boot"),
+                    RowKind::Folded {
+                        count,
+                        folds: Folds::EndedLike,
+                    } => format!("Show {count} more at boot"),
+                    RowKind::Unfolded {
+                        count,
+                        folds: Folds::EndedLike,
+                    } => format!("Fold {count} at boot"),
+                    RowKind::Folded {
+                        count,
+                        folds: Folds::Windows,
+                    } => format!("Show {count} more windows"),
+                    RowKind::Unfolded {
+                        count,
+                        folds: Folds::Windows,
+                    } => format!("Fold {count} windows"),
                     RowKind::Run => String::new(),
                 };
                 items = items.child(item("menu-run-fold", label.into()).on_click(cx.listener(
