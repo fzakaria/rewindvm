@@ -10,4 +10,3 @@ anyhow = "1"
 blake3 = "1"
 # Per-page compression; guest pages are mostly sparse.
 zstd = "0.13"
-libc = "0.2"

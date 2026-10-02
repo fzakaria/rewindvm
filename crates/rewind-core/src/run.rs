@@ -597,10 +597,9 @@ impl Run {
         let store = || rewind_store::Store::open(&home.store());
 
         // A run that shares its start with its parent replays the parent's
-        // events up to the parent's keyframe and goes on from there. The
-        // store is locked while it is open, so a run that takes no
-        // keyframes closes it once restored, and runs executing side by
-        // side, as rewind check's do, are not held up behind one another.
+        // events up to the parent's keyframe and goes on from there. A run
+        // that takes no keyframes needs the store only to restore, so it
+        // closes it then.
         let (mut machine, mut store, last_keyframe) = match &shortcut {
             Some(s) => {
                 for (step, record) in &s.prefix {

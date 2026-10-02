@@ -11,10 +11,16 @@
 //! pages appended one after another, and an index that names every page's
 //! pack, offset and length. Both only ever grow, so a crash can at worst
 //! leave a partial last entry, which [`Store::open`] drops.
+//!
+//! Any number of processes can have a store open at once. Each one that
+//! writes appends to a pack no other is writing, which it holds a lock on,
+//! and appends each index entry in a single write, so entries from
+//! different writers never interleave. A store that misses a page rereads
+//! the index for entries others added since.
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -42,15 +48,31 @@ struct Location {
     len: u32,
 }
 
+/// The index as far as this store has read it.
+struct Index {
+    pages: HashMap<Hash, Location>,
+    /// How many bytes of the index file `pages` holds, a whole number of
+    /// entries.
+    read: u64,
+}
+
+/// The pack this store appends to, locked against other writers while the
+/// file is open.
+struct Pack {
+    file: File,
+    id: u32,
+    len: u64,
+}
+
 pub struct Store {
     dir: PathBuf,
-    index: HashMap<Hash, Location>,
+    index: Mutex<Index>,
     index_log: File,
-    pack: File,
-    pack_id: u32,
-    pack_len: u64,
+    /// Claimed on the first page put, so a store only read takes none.
+    pack: Option<Pack>,
     readers: Mutex<HashMap<u32, File>>,
-    /// Holds the store's lock for as long as the store is open.
+    /// Held shared for as long as the store is open, so an opener that
+    /// gets it exclusively knows no one else has the store open.
     _lock: File,
 }
 
@@ -64,79 +86,107 @@ pub struct Stats {
 impl Store {
     pub fn open(dir: &Path) -> Result<Store> {
         fs::create_dir_all(dir.join("packs"))?;
-
-        // One writer at a time: two processes appending to the same pack
-        // would interleave their pages.
-        let lock = File::create(dir.join("lock"))?;
-        // SAFETY: flock on a file we own.
-        if unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&lock), libc::LOCK_EX) } != 0 {
-            bail!(
-                "locking {}: {}",
-                dir.display(),
-                std::io::Error::last_os_error()
-            );
-        }
-
         let index_path = dir.join("index");
-        let mut bytes = Vec::new();
-        if let Ok(mut f) = File::open(&index_path) {
-            f.read_to_end(&mut bytes)?;
+        let index_log = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .read(true)
+            .open(&index_path)?;
+
+        // A partial last index entry can only be a crash's, and only an
+        // opener with the store to itself may cut it off: with others open
+        // it could be an entry still being written.
+        let lock = File::create(dir.join("lock"))?;
+        if lock.try_lock().is_ok() {
+            let len = index_log.metadata()?.len();
+            let whole = len / INDEX_ENTRY as u64 * INDEX_ENTRY as u64;
+            if whole != len {
+                index_log.set_len(whole)?;
+            }
         }
-        let whole = bytes.len() / INDEX_ENTRY * INDEX_ENTRY;
-        let mut index = HashMap::with_capacity(whole / INDEX_ENTRY);
-        for entry in bytes[..whole].as_chunks::<INDEX_ENTRY>().0 {
+        lock.lock_shared()
+            .with_context(|| format!("locking {}", dir.display()))?;
+
+        let store = Store {
+            dir: dir.to_path_buf(),
+            index: Mutex::new(Index {
+                pages: HashMap::new(),
+                read: 0,
+            }),
+            index_log,
+            pack: None,
+            readers: Mutex::new(HashMap::new()),
+            _lock: lock,
+        };
+        store.refresh()?;
+        Ok(store)
+    }
+
+    /// Reads the index entries written since this store last looked,
+    /// by it or by any other.
+    fn refresh(&self) -> Result<()> {
+        let mut index = self.index.lock().unwrap();
+        let mut file = File::open(self.dir.join("index"))?;
+        file.seek(SeekFrom::Start(index.read))?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        let (entries, _) = bytes.as_chunks::<INDEX_ENTRY>();
+        for entry in entries {
             let hash: Hash = entry[..32].try_into().unwrap();
             let pack = u32::from_le_bytes(entry[32..36].try_into().unwrap());
             let offset = u64::from_le_bytes(entry[36..44].try_into().unwrap());
             let len = u32::from_le_bytes(entry[44..48].try_into().unwrap());
-            index.insert(hash, Location { pack, offset, len });
+            index.pages.insert(hash, Location { pack, offset, len });
         }
-        let index_log = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&index_path)?;
-        if whole != bytes.len() {
-            // A partial entry from an interrupted write.
-            index_log.set_len(whole as u64)?;
-        }
-
-        let pack_id = index.values().map(|l| l.pack).max().unwrap_or(0);
-        let (pack, pack_len) = Self::open_pack(dir, pack_id)?;
-        let mut store = Store {
-            dir: dir.to_path_buf(),
-            index,
-            index_log,
-            pack,
-            pack_id,
-            pack_len,
-            readers: Mutex::new(HashMap::new()),
-            _lock: lock,
-        };
-        if store.pack_len >= PACK_MAX {
-            store.roll()?;
-        }
-        Ok(store)
+        index.read += (entries.len() * INDEX_ENTRY) as u64;
+        Ok(())
     }
 
     fn pack_path(dir: &Path, id: u32) -> PathBuf {
         dir.join("packs").join(format!("{id:08}.pack"))
     }
 
-    fn open_pack(dir: &Path, id: u32) -> Result<(File, u64)> {
-        let f = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(Self::pack_path(dir, id))?;
-        let len = f.metadata()?.len();
-        Ok((f, len))
-    }
+    /// A pack to append to that no other writer holds: an existing one with
+    /// room, or else a new one.
+    fn claim_pack(&self) -> Result<Pack> {
+        let mut ids: Vec<u32> = fs::read_dir(self.dir.join("packs"))?
+            .filter_map(|e| {
+                e.ok()?
+                    .file_name()
+                    .to_str()?
+                    .strip_suffix(".pack")?
+                    .parse()
+                    .ok()
+            })
+            .collect();
+        ids.sort_unstable();
+        for &id in ids.iter().rev() {
+            let file = OpenOptions::new()
+                .append(true)
+                .open(Self::pack_path(&self.dir, id))?;
+            let len = file.metadata()?.len();
+            if len < PACK_MAX && file.try_lock().is_ok() {
+                return Ok(Pack { file, id, len });
+            }
+        }
 
-    fn roll(&mut self) -> Result<()> {
-        self.pack_id += 1;
-        let (pack, len) = Self::open_pack(&self.dir, self.pack_id)?;
-        self.pack = pack;
-        self.pack_len = len;
-        Ok(())
+        // Another writer may create the same new pack first, so each tries
+        // the next number until one is its own.
+        let mut id = ids.last().map_or(0, |last| last + 1);
+        loop {
+            match OpenOptions::new()
+                .append(true)
+                .create_new(true)
+                .open(Self::pack_path(&self.dir, id))
+            {
+                Ok(file) => {
+                    file.lock()?;
+                    return Ok(Pack { file, id, len: 0 });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => id += 1,
+                Err(e) => return Err(e.into()),
+            }
+        }
     }
 
     pub fn hash(data: &[u8]) -> Hash {
@@ -147,34 +197,58 @@ impl Store {
     }
 
     pub fn contains(&self, hash: &Hash) -> bool {
-        *hash == ZERO_PAGE || self.index.contains_key(hash)
+        *hash == ZERO_PAGE || self.location(hash).is_some()
     }
 
-    /// Stores a page if it is new, and returns its hash either way.
+    /// Where a page is, rereading the index once if this store has not
+    /// seen it yet.
+    fn location(&self, hash: &Hash) -> Option<Location> {
+        let known = self.index.lock().unwrap().pages.get(hash).copied();
+        if known.is_some() {
+            return known;
+        }
+        self.refresh().ok()?;
+        self.index.lock().unwrap().pages.get(hash).copied()
+    }
+
+    /// Stores a page if it is new, and returns its hash either way. New
+    /// means new to this store: it does not reread the index for every
+    /// page, so two stores may both write a page another wrote meanwhile,
+    /// and either copy serves.
     pub fn put(&mut self, data: &[u8]) -> Result<Hash> {
         let hash = Self::hash(data);
-        if self.contains(&hash) {
+        if hash == ZERO_PAGE || self.index.lock().unwrap().pages.contains_key(&hash) {
             return Ok(hash);
         }
         let compressed = zstd::bulk::compress(data, COMPRESSION_LEVEL)?;
-        if self.pack_len + compressed.len() as u64 > PACK_MAX {
-            self.roll()?;
+        let full = self
+            .pack
+            .as_ref()
+            .is_none_or(|p| p.len + compressed.len() as u64 > PACK_MAX);
+        if full {
+            self.pack = Some(self.claim_pack()?);
         }
+        let pack = self.pack.as_mut().expect("claimed above");
         let loc = Location {
-            pack: self.pack_id,
-            offset: self.pack_len,
+            pack: pack.id,
+            offset: pack.len,
             len: compressed.len() as u32,
         };
-        self.pack.write_all(&compressed)?;
-        self.pack_len += compressed.len() as u64;
+        pack.file.write_all(&compressed)?;
+        pack.len += compressed.len() as u64;
 
+        // The page is in its pack before the entry naming it is written,
+        // and the entry goes in one write, whole, after everyone else's.
         let mut entry = Vec::with_capacity(INDEX_ENTRY);
         entry.extend_from_slice(&hash);
         entry.extend_from_slice(&loc.pack.to_le_bytes());
         entry.extend_from_slice(&loc.offset.to_le_bytes());
         entry.extend_from_slice(&loc.len.to_le_bytes());
-        self.index_log.write_all(&entry)?;
-        self.index.insert(hash, loc);
+        let written = (&self.index_log).write(&entry)?;
+        if written != INDEX_ENTRY {
+            bail!("wrote {written} of an index entry's {INDEX_ENTRY} bytes");
+        }
+        self.index.lock().unwrap().pages.insert(hash, loc);
         Ok(hash)
     }
 
@@ -184,9 +258,8 @@ impl Store {
             out.fill(0);
             return Ok(());
         }
-        let loc = *self
-            .index
-            .get(hash)
+        let loc = self
+            .location(hash)
             .with_context(|| format!("page {} is not in the store", hex(hash)))?;
         let mut compressed = vec![0u8; loc.len as usize];
         {
@@ -208,15 +281,19 @@ impl Store {
 
     /// Makes everything written so far durable.
     pub fn sync(&self) -> Result<()> {
-        self.pack.sync_data()?;
+        if let Some(pack) = &self.pack {
+            pack.file.sync_data()?;
+        }
         self.index_log.sync_data()?;
         Ok(())
     }
 
+    /// How much the store holds, as far as this store has read the index.
     pub fn stats(&self) -> Stats {
+        let index = self.index.lock().unwrap();
         Stats {
-            pages: self.index.len(),
-            stored_bytes: self.index.values().map(|l| l.len as u64).sum(),
+            pages: index.pages.len(),
+            stored_bytes: index.pages.values().map(|l| l.len as u64).sum(),
         }
     }
 }
@@ -289,6 +366,54 @@ mod tests {
             fs::metadata(dir.join("index")).unwrap().len(),
             INDEX_ENTRY as u64
         );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn stores_open_side_by_side_share_pages() {
+        // Two stores open on one directory at once, as two rewind
+        // processes would have them: opening the second does not wait for
+        // the first to close, each writes to a pack of its own, and a page
+        // one puts is there for the other to read, and for any store
+        // opened later.
+        let dir = tmp("side-by-side");
+        let mut first = Store::open(&dir).unwrap();
+        let opened = {
+            let dir = dir.clone();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || tx.send(Store::open(&dir).unwrap()).unwrap());
+            rx.recv_timeout(std::time::Duration::from_secs(5))
+        };
+        let mut second = opened.expect("the second store waited for the first to close");
+
+        let a = first.put(&page(1)).unwrap();
+        let b = second.put(&page(2)).unwrap();
+        let c = first.put(&page(3)).unwrap();
+        let mut out = vec![0u8; PAGE];
+        second.get(&a, &mut out).unwrap();
+        assert_eq!(out, page(1));
+        first.get(&b, &mut out).unwrap();
+        assert_eq!(out, page(2));
+
+        let packs = fs::read_dir(dir.join("packs")).unwrap().count();
+        assert_eq!(packs, 2);
+        drop((first, second));
+
+        let later = Store::open(&dir).unwrap();
+        for (hash, fill) in [(a, 1), (b, 2), (c, 3)] {
+            later.get(&hash, &mut out).unwrap();
+            assert_eq!(out, page(fill));
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_store_only_read_writes_nothing() {
+        // Opening a store to read pages creates no pack.
+        let dir = tmp("read-only");
+        let store = Store::open(&dir).unwrap();
+        assert_eq!(store.stats().pages, 0);
+        assert_eq!(fs::read_dir(dir.join("packs")).unwrap().count(), 0);
         fs::remove_dir_all(&dir).unwrap();
     }
 }
