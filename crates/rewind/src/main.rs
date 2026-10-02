@@ -1174,7 +1174,7 @@ fn prepare_nix(
             closure.len(),
             drv.name
         );
-        let tmp = image.with_extension("building");
+        let tmp = image::temp_beside(&image);
         image::from_store_paths(&closure, &tmp)?;
         std::fs::rename(&tmp, &image)?;
     }
@@ -1361,9 +1361,7 @@ fn root_image(home: &Home, root: &std::path::Path) -> Result<PathBuf> {
         None
     };
 
-    let tmp = home
-        .images()
-        .join(format!("building-{}.erofs", std::process::id()));
+    let tmp = image::temp_beside(&home.images().join("root.erofs"));
     if root.is_dir() {
         image::from_dir(root, &tmp)?;
     } else if root.is_file() {

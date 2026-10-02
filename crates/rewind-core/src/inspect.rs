@@ -76,7 +76,7 @@ impl Extras {
         let image = home.images().join(format!("extras-{}.erofs", &key[..32]));
         if !image.exists() {
             eprintln!("rewind: packing {} store paths for --with", closure.len());
-            let tmp = image.with_extension("building");
+            let tmp = crate::image::temp_beside(&image);
             crate::image::from_store_paths(&closure, &tmp)?;
             std::fs::rename(&tmp, &image)?;
         }

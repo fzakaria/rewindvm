@@ -115,17 +115,44 @@ pub fn hash_file(path: &Path) -> Result<String> {
     Ok(hasher.finalize().to_hex().to_string())
 }
 
+/// A name beside `path` to write it under before renaming it into place,
+/// unique to this process and call. Two writers of the same file, such as
+/// two runs packing the same image, each get their own, and the last
+/// rename wins.
+pub fn temp_beside(path: &Path) -> PathBuf {
+    static WRITES: AtomicU64 = AtomicU64::new(0);
+    let n = WRITES.fetch_add(1, Ordering::Relaxed);
+    path.with_extension(format!("tmp-{}-{n}", std::process::id()))
+}
+
 /// Writes `bytes` to `path` atomically, so a crash never leaves a half
 /// written image where a whole one is expected. Writers of the same path in
 /// other processes or threads each get their own temporary file, and the
 /// last rename wins.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    static WRITES: AtomicU64 = AtomicU64::new(0);
-    let n = WRITES.fetch_add(1, Ordering::Relaxed);
-    let tmp = path.with_extension(format!("tmp-{}-{n}", std::process::id()));
+    let tmp = temp_beside(path);
     let mut f = fs::File::create(&tmp)?;
     f.write_all(bytes)?;
     f.sync_all()?;
     fs::rename(&tmp, path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    // Temporary names beside a file: two writers of the same file, in one
+    // process or two, never share one.
+    use super::*;
+
+    #[test]
+    fn each_temporary_name_is_its_own() {
+        let image = Path::new("/home/images/store-abc.erofs");
+        let first = temp_beside(image);
+        let second = temp_beside(image);
+        assert_ne!(first, second);
+        assert_ne!(first, image);
+        assert_eq!(first.parent(), image.parent());
+        let name = first.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.contains(&std::process::id().to_string()), "{name}");
+    }
 }
