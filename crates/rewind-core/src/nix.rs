@@ -224,11 +224,30 @@ pub fn job(drv: &Derivation, cores: u32) -> Result<Job> {
     env.insert("NIX_LOG_FD".into(), "2".into());
     env.insert("TERM".into(), "xterm-256color".into());
 
+    // Output placeholders become the outputs' paths everywhere the build
+    // can see them: the args, the environment and the files.
+    let rewrites: Vec<(String, String)> = drv
+        .outputs
+        .iter()
+        .map(|(name, path)| (placeholder(name), path.to_string_lossy().into_owned()))
+        .collect();
     let mut argv = vec![drv.builder.clone()];
-    argv.extend(drv.args.iter().cloned());
+    argv.extend(drv.args.iter().map(|a| rewrite(a, &rewrites)));
+    let env = env
+        .into_iter()
+        .map(|(k, v)| (k, rewrite(&v, &rewrites)))
+        .collect();
+    let files = files
+        .into_iter()
+        .map(|f| JobFile {
+            contents: rewrite(&f.contents, &rewrites),
+            ..f
+        })
+        .collect();
+
     Ok(Job {
         argv,
-        env: env.into_iter().collect(),
+        env,
         cwd: BUILD_DIR.into(),
         uid: BUILDER_UID,
         gid: BUILDER_GID,
@@ -385,6 +404,22 @@ fn is_shell_name(s: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// The string `builtins.placeholder` returns for an output, which an
+/// input-addressed derivation keeps in place of the output's path.
+pub fn placeholder(output: &str) -> String {
+    format!(
+        "/{}",
+        nix32(&Sha256::digest(format!("nix-output:{output}")))
+    )
+}
+
+/// Replaces each output's placeholder in `s` with the output's path.
+fn rewrite(s: &str, rewrites: &[(String, String)]) -> String {
+    rewrites
+        .iter()
+        .fold(s.to_string(), |s, (from, to)| s.replace(from, to))
+}
+
 /// Nix's base-32, as it names .attr files and store paths.
 pub fn nix32(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 32] = b"0123456789abcdfghijklmnpqrsvwxyz";
@@ -502,6 +537,47 @@ mod tests {
             vec!["/nix/store/ccc-bash/bin/bash", "-e", "builder.sh"]
         );
         assert_eq!(job.outputs, vec!["/nix/store/aaa-x".to_string()]);
+    }
+
+    #[test]
+    fn placeholder_matches_nix() {
+        // `nix eval --raw --expr 'builtins.placeholder "out"'`
+        assert_eq!(
+            placeholder("out"),
+            "/1rz4g4znpzjwh1xymhjpm42vipw92pr73vdgl6xs1hycac8kf2n9"
+        );
+    }
+
+    #[test]
+    fn placeholders_become_output_paths() {
+        // An input-addressed derivation keeps `placeholder "out"` in its
+        // env and args; nix-daemon swaps in the output path when the build
+        // starts, in the env, the args and the files it writes. A job built
+        // from a derivation using the placeholder in each of those places
+        // sees the output path in each.
+        let out = placeholder("out");
+        let mut drv = sample();
+        drv.args.push(format!("--prefix={out}"));
+        drv.env.insert("flags".into(), format!("-DLIB={out}/lib"));
+        drv.env.insert("text".into(), format!("{out}/share"));
+        let plain = job(&drv, 1).unwrap();
+        let env: BTreeMap<_, _> = plain.env.iter().cloned().collect();
+        assert_eq!(env["flags"], "-DLIB=/nix/store/aaa-x/lib");
+        assert_eq!(plain.argv.last().unwrap(), "--prefix=/nix/store/aaa-x");
+        assert_eq!(plain.files[0].contents, "/nix/store/aaa-x/share");
+
+        let mut drv = sample_structured();
+        let attrs = drv.structured_attrs.as_mut().unwrap();
+        attrs.insert("prefix".into(), Value::from(out));
+        let structured = job(&drv, 1).unwrap();
+        for file in &structured.files {
+            assert!(!file.contents.contains("1rz4g4zn"), "{}", file.contents);
+        }
+        assert!(
+            structured.files[0]
+                .contents
+                .contains("declare prefix='/nix/store/aaa-x'")
+        );
     }
 
     fn sample_structured() -> Derivation {
