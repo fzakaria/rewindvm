@@ -432,28 +432,38 @@ impl ProgramDivergence {
 
 /// A trace file's records as the guest wrote them, each with its step,
 /// undecoded: what a fork copies from its parent's trace for the steps the
-/// two runs share.
+/// two runs share. A trace cut off mid-record, as one is when the process
+/// writing it is killed, ends at its last whole record.
 pub fn records(path: &Path) -> io::Result<Vec<(u64, Vec<u8>)>> {
     let mut r = BufReader::new(std::fs::File::open(path)?);
     let mut records = Vec::new();
+    let cut_off = |e: &io::Error| e.kind() == io::ErrorKind::UnexpectedEof;
     loop {
         let mut step = [0u8; 8];
         match r.read_exact(&mut step) {
             Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
+            Err(e) if cut_off(&e) => break,
             Err(e) => return Err(e),
         }
 
         // Each record starts with its own length.
         let mut len = [0u8; 4];
-        r.read_exact(&mut len)?;
+        match r.read_exact(&mut len) {
+            Ok(()) => {}
+            Err(e) if cut_off(&e) => break,
+            Err(e) => return Err(e),
+        }
         let len = u32::from_le_bytes(len) as usize;
         if len < HEADER_LEN {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "short record"));
         }
         let mut record = vec![0u8; len];
         record[..4].copy_from_slice(&(len as u32).to_le_bytes());
-        r.read_exact(&mut record[4..])?;
+        match r.read_exact(&mut record[4..]) {
+            Ok(()) => {}
+            Err(e) if cut_off(&e) => break,
+            Err(e) => return Err(e),
+        }
         records.push((u64::from_le_bytes(step), record));
     }
     Ok(records)
@@ -479,6 +489,40 @@ impl<W: Write> TraceWriter<W> {
     pub fn finish(mut self) -> io::Result<W> {
         self.out.flush()?;
         self.out.into_inner().map_err(|e| e.into_error())
+    }
+}
+
+#[cfg(test)]
+mod partial_tests {
+    // A trace cut off mid-record, as one is when the process writing it is
+    // killed, reads up to its last whole record.
+    use super::*;
+
+    #[test]
+    fn a_trace_cut_off_mid_record_reads_its_whole_records() {
+        let path = std::env::temp_dir().join(format!("rewind-partial-{}.bin", std::process::id()));
+        let record = |len: u32| {
+            let mut r = len.to_le_bytes().to_vec();
+            r.resize(len as usize, 0);
+            r
+        };
+        let mut writer = TraceWriter::new(std::fs::File::create(&path).unwrap());
+        writer.record(3, &record(HEADER_LEN as u32)).unwrap();
+        writer.record(5, &record(HEADER_LEN as u32 + 4)).unwrap();
+        writer.finish().unwrap();
+        let whole = std::fs::read(&path).unwrap();
+
+        for cut in [
+            whole.len() - 1,
+            whole.len() - 6,
+            whole.len() - (HEADER_LEN + 4 + 8) + 3,
+        ] {
+            std::fs::write(&path, &whole[..cut]).unwrap();
+            let got = records(&path).unwrap();
+            assert_eq!(got.len(), 1, "cut at {cut}");
+            assert_eq!(got[0].0, 3);
+        }
+        std::fs::remove_file(&path).unwrap();
     }
 }
 

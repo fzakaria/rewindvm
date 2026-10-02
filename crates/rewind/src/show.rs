@@ -11,7 +11,8 @@ pub fn summary(run: &Run) -> String {
     let m = &run.manifest;
     let outcome = match &m.outcome {
         Some(o) => format!("{:<9} {:>12} steps", status(o.status), o.step),
-        None => "running or interrupted".into(),
+        None if run.executing() => "running".into(),
+        None => "interrupted".into(),
     };
     format!("{}  {outcome}  {}", m.id, m.name)
 }

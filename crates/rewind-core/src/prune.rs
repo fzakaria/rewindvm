@@ -33,6 +33,9 @@ pub struct Member {
     pub trace_hash: Option<String>,
     /// Whether it ran to the end; a run still going may yet differ.
     pub finished: bool,
+    /// Whether a process is executing it now. An unfinished run that is
+    /// not executing was interrupted.
+    pub executing: bool,
 }
 
 /// A run to remove, and the run with the same trace that stays.
@@ -60,6 +63,7 @@ impl Member {
             created: m.created,
             trace_hash,
             finished,
+            executing: !finished && run.executing(),
         }
     }
 
@@ -153,8 +157,8 @@ pub enum Act {
 /// Why a run and its descendants cannot be removed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Refusal {
-    /// These runs among them have not finished, and may be executing now.
-    Unfinished(Vec<String>),
+    /// Another process is executing these runs among them now.
+    Executing(Vec<String>),
     /// Runs that stay read keyframes from runs that would go: the reader,
     /// the run it reads from, and the last step it reads.
     Needed { readers: Vec<(String, String, u64)> },
@@ -164,9 +168,9 @@ impl Refusal {
     /// What to tell the person who asked for the removal.
     pub fn message(&self) -> String {
         match self {
-            Refusal::Unfinished(runs) => runs
+            Refusal::Executing(runs) => runs
                 .iter()
-                .map(|id| format!("run {id} has not finished; remove it once it has"))
+                .map(|id| format!("run {id} is executing; remove it once it has finished"))
                 .collect::<Vec<_>>()
                 .join("; "),
             Refusal::Needed { readers } => readers
@@ -205,20 +209,20 @@ fn descendants<'a>(root: &'a str, runs: &'a [Member]) -> Vec<&'a str> {
 }
 
 /// The runs removing `id` takes: `id` first, then every run that descends
-/// from it, nearest first. Refused when one of them has not finished, or
+/// from it, nearest first. Refused when one of them is executing, or
 /// when a run outside the set reads keyframes from one inside it. A run
 /// that reads keyframes through a chain reads them from the first run in
 /// it, which then reads from the next, so the direct readers are the ones
 /// that matter.
 pub fn removal_set(id: &str, runs: &[Member]) -> std::result::Result<Vec<String>, Refusal> {
     let set = descendants(id, runs);
-    let unfinished: Vec<String> = runs
+    let executing: Vec<String> = runs
         .iter()
-        .filter(|r| set.contains(&r.id.as_str()) && !r.finished)
+        .filter(|r| set.contains(&r.id.as_str()) && r.executing)
         .map(|r| r.id.clone())
         .collect();
-    if !unfinished.is_empty() {
-        return Err(Refusal::Unfinished(unfinished));
+    if !executing.is_empty() {
+        return Err(Refusal::Executing(executing));
     }
 
     // Every run outside the set that names one inside it as its parent is
@@ -284,6 +288,7 @@ mod tests {
             created,
             trace_hash: Some(hash.into()),
             finished: true,
+            executing: false,
         }
     }
 
@@ -440,17 +445,32 @@ mod tests {
     }
 
     #[test]
-    fn an_unfinished_run_in_the_set_refuses() {
-        // A run still executing may be one another process is writing, so
+    fn an_executing_run_in_the_set_refuses() {
+        // A run another process is executing is still being written, so
         // removing its parent waits for it too.
         let mut u = run("u", Some("a"), 3, "h1");
         u.finished = false;
+        u.executing = true;
         let runs = [run("r", None, 0, "h0"), run("a", Some("r"), 1, "h2"), u];
         let refusal = removal_set("a", &runs).unwrap_err();
-        assert_eq!(refusal, Refusal::Unfinished(vec!["u".into()]));
+        assert_eq!(refusal, Refusal::Executing(vec!["u".into()]));
         assert_eq!(
             refusal.message(),
-            "run u has not finished; remove it once it has"
+            "run u is executing; remove it once it has finished"
+        );
+    }
+
+    #[test]
+    fn an_interrupted_run_is_removed() {
+        // A run whose execution was killed never finishes and nothing is
+        // writing it, so it goes like any other.
+        let mut u = run("u", Some("a"), 3, "h1");
+        u.finished = false;
+        u.trace_hash = None;
+        let runs = [run("r", None, 0, "h0"), run("a", Some("r"), 1, "h2"), u];
+        assert_eq!(
+            removal_set("a", &runs).unwrap(),
+            vec!["a".to_string(), "u".to_string()]
         );
     }
 

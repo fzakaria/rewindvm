@@ -407,6 +407,35 @@ impl Observer for Recorder {
     }
 }
 
+/// The file in a run's directory that the process executing the run holds
+/// a lock on. The kernel drops the lock when that process dies, however it
+/// dies, so a run with no outcome and no lock held was interrupted.
+const EXECUTING_LOCK: &str = "executing.lock";
+
+/// Takes `dir`'s executing lock, held until the file is dropped. Refused
+/// while another execution of the same run holds it.
+fn lock_executing(dir: &Path) -> Result<fs::File> {
+    let path = dir.join(EXECUTING_LOCK);
+    let file = fs::File::create(&path).with_context(|| format!("creating {}", path.display()))?;
+    if file.try_lock().is_err() {
+        bail!(
+            "run {} is executing in another process",
+            dir.file_name().unwrap_or_default().to_string_lossy()
+        );
+    }
+    Ok(file)
+}
+
+/// Whether a process is executing the run in `dir` now.
+fn executing(dir: &Path) -> bool {
+    let Ok(file) = fs::File::open(dir.join(EXECUTING_LOCK)) else {
+        return false;
+    };
+    // A shared lock is refused only while an execution holds its own, and
+    // goes when the file is dropped.
+    file.try_lock_shared().is_err()
+}
+
 /// A run on disk.
 pub struct Run {
     pub dir: PathBuf,
@@ -433,6 +462,12 @@ impl Run {
             dir: dir.to_path_buf(),
             manifest,
         })
+    }
+
+    /// Whether a process is executing this run now. A run with no outcome
+    /// that is not executing was interrupted.
+    pub fn executing(&self) -> bool {
+        executing(&self.dir)
     }
 
     pub fn trace(&self) -> Result<Trace> {
@@ -486,6 +521,7 @@ impl Run {
     ) -> Result<Run> {
         let dir = home.runs().join(&manifest.id);
         fs::create_dir_all(&dir)?;
+        let _executing = lock_executing(&dir)?;
         let write_manifest = |m: &Manifest| -> Result<()> {
             crate::image::write_atomic(&dir.join(MANIFEST), &serde_json::to_vec_pretty(m)?)
         };
@@ -891,6 +927,25 @@ mod tests {
             feed(&[(3, vec![1]), (5, vec![2]), (9, vec![3]), (11, vec![4])]),
             Some(11)
         );
+    }
+
+    #[test]
+    fn a_run_is_executing_while_its_lock_is_held() {
+        // The lock an execution takes marks the run as executing until it
+        // is dropped, as it is when the process dies; a second execution
+        // of the same run meanwhile is refused. A run dir without the lock
+        // file was never executed by this build, and is not executing.
+        let dir = std::env::temp_dir().join(format!("rewind-executing-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        assert!(!executing(&dir));
+
+        let held = lock_executing(&dir).unwrap();
+        assert!(executing(&dir));
+        assert!(lock_executing(&dir).is_err());
+        drop(held);
+        assert!(!executing(&dir));
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     /// An unperturbed spec; tests change the schedule fields.
