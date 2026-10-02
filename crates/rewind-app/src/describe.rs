@@ -181,7 +181,7 @@ pub fn quote(text: &str) -> String {
 }
 
 /// How long ago something happened, in the largest whole unit: "just
-/// now", "5 minutes ago", "3 days ago".
+/// now", "5m ago", "3d ago".
 pub fn ago(elapsed: std::time::Duration) -> String {
     const MINUTE: u64 = 60;
     const HOUR: u64 = 60 * MINUTE;
@@ -189,12 +189,11 @@ pub fn ago(elapsed: std::time::Duration) -> String {
     let secs = elapsed.as_secs();
     let (n, unit) = match secs {
         s if s < MINUTE => return "just now".to_string(),
-        s if s < HOUR => (s / MINUTE, "minute"),
-        s if s < DAY => (s / HOUR, "hour"),
-        s => (s / DAY, "day"),
+        s if s < HOUR => (s / MINUTE, "m"),
+        s if s < DAY => (s / HOUR, "h"),
+        s => (s / DAY, "d"),
     };
-    let plural = if n == 1 { "" } else { "s" };
-    format!("{n} {unit}{plural} ago")
+    format!("{n}{unit} ago")
 }
 
 /// A count with thousands separators: 11760 as "11,760".
@@ -428,13 +427,13 @@ fn detail(here: Party, there: Party) -> Option<String> {
 mod tests {
     #[test]
     fn ago_says_the_largest_whole_unit() {
-        // Seconds read as now; then minutes, hours and days, singular
-        // for one.
+        // Seconds read as now; then minutes, hours and days, each by its
+        // letter so the words fit beside a run in the Runs panel.
         use std::time::Duration;
         assert_eq!(ago(Duration::from_secs(30)), "just now");
-        assert_eq!(ago(Duration::from_secs(60)), "1 minute ago");
-        assert_eq!(ago(Duration::from_secs(5 * 3600 + 59)), "5 hours ago");
-        assert_eq!(ago(Duration::from_secs(3 * 86_400)), "3 days ago");
+        assert_eq!(ago(Duration::from_secs(60)), "1m ago");
+        assert_eq!(ago(Duration::from_secs(5 * 3600 + 59)), "5h ago");
+        assert_eq!(ago(Duration::from_secs(3 * 86_400)), "3d ago");
     }
 
     // Event descriptions and number formatting: each test describes one

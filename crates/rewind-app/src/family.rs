@@ -8,11 +8,11 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use rewind_trace::signal_name;
 
-use crate::describe::thousands;
+use crate::describe::{ago, thousands};
 use crate::model::ExitStatus;
 use crate::run::{MANIFEST_FILE, Manifest, Parent, read_manifest, short_id};
 
@@ -37,6 +37,11 @@ pub struct RunEntry {
     pub failed: bool,
     pub first_difference: Option<u64>,
     pub trace_hash: Option<String>,
+    /// The vCPUs the VM had.
+    pub cores: u64,
+    /// Its inputs less its schedule, which tie a run from boot under a
+    /// perturbed schedule to the run recorded without one.
+    pub inputs: Option<String>,
     /// When the run was made, for ordering runs made in the same second
     /// apart from when their directories last changed.
     pub created: u64,
@@ -87,11 +92,17 @@ impl RunEntry {
             failed: status.is_some_and(|s| s != 0),
             first_difference: manifest.first_difference,
             trace_hash: manifest.trace_hash.clone(),
+            cores: manifest.cores.unwrap_or(DEFAULT_CORES),
+            inputs: manifest.inputs.clone(),
             created: manifest.created.unwrap_or(0),
             modified,
         }
     }
 }
+
+/// The vCPUs of a run whose manifest does not say, as the engine's
+/// default.
+const DEFAULT_CORES: u64 = 1;
 
 /// Every run under `runs` with a readable manifest.
 pub fn scan(runs: &Path) -> Vec<RunEntry> {
@@ -117,6 +128,9 @@ pub struct Row {
     pub run: RunEntry,
     pub depth: usize,
     pub identical_to: Option<String>,
+    /// For a recorded run in a family with several, the words that tell
+    /// it from the others: its cores and how long ago it was made.
+    pub apart: Option<String>,
     pub graph: Graph,
 }
 
@@ -146,7 +160,10 @@ impl Row {
         let run = &self.run;
         let Some(parent) = &run.parent else {
             return match (run.schedule, self.depth) {
-                (0, _) => "recorded".to_string(),
+                (0, _) => match &self.apart {
+                    Some(apart) => format!("recorded \u{b7} {apart}"),
+                    None => "recorded".to_string(),
+                },
                 (n, 0) => format!("schedule {n}"),
                 (n, _) => format!("at boot \u{b7} schedule {n}"),
             };
@@ -228,6 +245,12 @@ impl Family {
     /// name the oldest of them, which is the one `rewind prune
     /// --identical` keeps.
     pub fn rows(&self) -> Vec<Row> {
+        self.rows_at(SystemTime::now())
+    }
+
+    /// The rows as `rows` gives them, with how long ago each recorded run
+    /// was made counted back from `now`.
+    pub fn rows_at(&self, now: SystemTime) -> Vec<Row> {
         let mut children: HashMap<&str, Vec<&RunEntry>> = HashMap::new();
         let mut roots: Vec<&RunEntry> = Vec::new();
         for run in &self.runs {
@@ -238,22 +261,32 @@ impl Family {
                 _ => roots.push(run),
             }
         }
-        // The recorded run, under the unperturbed schedule, is where every
-        // run of the build starts: the runs rewind check made from boot
-        // under other schedules hang off it like forks at step 0, after
-        // its real forks.
-        let base = self.base();
-        let base_id = base.id.clone();
-        if base.parent.is_none() && base.schedule == 0 {
-            let (from_boot, rest): (Vec<&RunEntry>, Vec<&RunEntry>) = roots
-                .into_iter()
-                .partition(|r| r.id != base_id && r.parent.is_none());
-            roots = rest;
-            children
-                .entry(base.id.as_str())
-                .or_default()
-                .extend(from_boot);
+        // A run recorded under the unperturbed schedule is where the runs
+        // of the same inputs start: those from boot under other schedules,
+        // as rewind check makes them, hang off it like forks at step 0,
+        // after its real forks. A family can hold several, one for each
+        // machine or build of the inputs.
+        let recorded: HashMap<&str, &str> = roots
+            .iter()
+            .filter(|r| r.parent.is_none() && r.schedule == 0)
+            .filter_map(|r| Some((r.inputs.as_deref()?, r.id.as_str())))
+            .collect();
+        let (from_boot, rest): (Vec<&RunEntry>, Vec<&RunEntry>) =
+            roots.into_iter().partition(|r| {
+                r.parent.is_none()
+                    && r.schedule != 0
+                    && r.inputs
+                        .as_deref()
+                        .is_some_and(|i| recorded.contains_key(i))
+            });
+        roots = rest;
+        for run in from_boot {
+            let Some(under) = run.inputs.as_deref().and_then(|i| recorded.get(i)) else {
+                continue;
+            };
+            children.entry(under).or_default().push(run);
         }
+        let base_id = self.base().id.clone();
         roots.sort_by_key(|r| (r.id != base_id, r.schedule, r.created));
         for list in children.values_mut() {
             list.sort_by_key(|r| {
@@ -316,6 +349,22 @@ impl Family {
             }
         }
 
+        // With more than one recorded run, each says what tells it apart.
+        let is_recorded = |r: &RunEntry| r.parent.is_none() && r.schedule == 0;
+        let several_recorded = self.runs.iter().filter(|r| is_recorded(r)).count() > 1;
+        let apart = |r: &RunEntry| {
+            if !several_recorded || !is_recorded(r) {
+                return None;
+            }
+            let cores = match r.cores {
+                1 => "1 core".to_string(),
+                n => format!("{n} cores"),
+            };
+            let made = SystemTime::UNIX_EPOCH + Duration::from_secs(r.created);
+            let elapsed = now.duration_since(made).unwrap_or_default();
+            Some(format!("{cores} \u{b7} {}", ago(elapsed)))
+        };
+
         order
             .into_iter()
             .map(|(run, depth, _, graph)| {
@@ -331,6 +380,7 @@ impl Family {
                     run: run.clone(),
                     depth,
                     identical_to,
+                    apart: apart(run),
                     graph,
                 }
             })
@@ -420,6 +470,7 @@ mod tests {
     use std::time::Duration;
 
     const DRV: &str = "/nix/store/x-mylib.drv";
+    const INPUTS: &str = "one core";
 
     fn run(id: &str, parent: Option<(&str, u64)>, schedule: u64, ending: &str) -> RunEntry {
         RunEntry {
@@ -436,6 +487,8 @@ mod tests {
             failed: ending != "exited:0",
             first_difference: None,
             trace_hash: Some(format!("hash-{id}")),
+            cores: DEFAULT_CORES,
+            inputs: Some(INPUTS.to_string()),
             created: 0,
             modified: SystemTime::UNIX_EPOCH,
         }
@@ -602,6 +655,65 @@ mod tests {
         let row = rows.iter().find(|r| r.run.id == "cousin").unwrap();
         assert_eq!(row.identical_to, None);
         assert_eq!(row.depth, 2);
+    }
+
+    #[test]
+    fn runs_from_boot_hang_off_the_recorded_run_of_their_inputs() {
+        // The build recorded on one core and on four, with rewind check
+        // run on each: every schedule goes under the recorded run it
+        // perturbs, and a schedule whose recorded run is gone stays a root.
+        let on = |mut r: RunEntry, inputs: &str| {
+            r.inputs = Some(inputs.to_string());
+            r
+        };
+        let f = Family {
+            runs: vec![
+                run("one", None, 0, "exited:101"),
+                on(run("four", None, 0, "exited:0"), "four cores"),
+                run("one-s1", None, 1, "exited:101"),
+                on(run("four-s1", None, 1, "exited:0"), "four cores"),
+                on(run("lone-s1", None, 1, "exited:0"), "two cores"),
+            ],
+        };
+        let rows: Vec<(String, usize)> =
+            f.rows().into_iter().map(|r| (r.run.id, r.depth)).collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("one".to_string(), 0),
+                ("one-s1".to_string(), 1),
+                ("four".to_string(), 0),
+                ("four-s1".to_string(), 1),
+                ("lone-s1".to_string(), 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn several_recorded_runs_say_what_tells_them_apart() {
+        // Two runs recorded on one core a day apart and one on four: each
+        // says its cores and when it was made. A family with one recorded
+        // run says only "recorded".
+        const DAY: u64 = 86_400;
+        let made = |mut r: RunEntry, cores: u64, created: u64| {
+            r.cores = cores;
+            r.created = created;
+            r
+        };
+        let f = Family {
+            runs: vec![
+                made(run("old", None, 0, "exited:101"), 1, 0),
+                made(run("one", None, 0, "exited:101"), 1, DAY),
+                made(run("four", None, 0, "exited:0"), 4, DAY),
+            ],
+        };
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(3 * DAY);
+        let rows = f.rows_at(now);
+        let detail = |id: &str| rows.iter().find(|r| r.run.id == id).unwrap().detail();
+        assert_eq!(detail("old"), "recorded \u{b7} 1 core \u{b7} 3d ago");
+        assert_eq!(detail("one"), "recorded \u{b7} 1 core \u{b7} 2d ago");
+        assert_eq!(detail("four"), "recorded \u{b7} 4 cores \u{b7} 2d ago");
+        assert_eq!(family().rows_at(now)[0].detail(), "recorded");
     }
 
     #[test]

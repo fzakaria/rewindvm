@@ -51,6 +51,11 @@ pub struct Manifest {
     pub first_difference: Option<u64>,
     /// When the run was made, in seconds since the epoch.
     pub created: Option<u64>,
+    /// The vCPUs the VM had.
+    pub cores: Option<u64>,
+    /// A key for the run's inputs less its schedule: runs with equal keys
+    /// are the same build on the same machine, perturbed or not.
+    pub inputs: Option<String>,
 }
 
 /// Where a forked run branched off.
@@ -99,6 +104,8 @@ impl Manifest {
             trace_hash: text(json.get("trace_hash")),
             first_difference: json.get("first_difference").and_then(Value::as_u64),
             created: json.get("created").and_then(Value::as_u64),
+            cores: spec.and_then(|s| s.get("cores")).and_then(Value::as_u64),
+            inputs: spec.and_then(inputs_key),
             outcome: json
                 .get("outcome")
                 .filter(|o| o.is_object())
@@ -112,6 +119,32 @@ impl Manifest {
 }
 
 /// A JSON string, if the value is one and is not empty.
+/// The spec's fields that say how the schedule is perturbed, and the
+/// paths on this machine of inputs the spec also names by content or the
+/// run id counts by content.
+const NOT_INPUTS: [&str; 7] = [
+    "schedule",
+    "schedule_from",
+    "schedule_until",
+    "inherited_schedules",
+    "kernel",
+    "initrd",
+    "image",
+];
+
+/// A hash of a manifest's spec without the fields in `NOT_INPUTS`.
+fn inputs_key(spec: &Value) -> Option<String> {
+    use std::hash::{Hash, Hasher};
+
+    let mut spec = spec.as_object()?.clone();
+    for field in NOT_INPUTS {
+        spec.remove(field);
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    Value::Object(spec).to_string().hash(&mut hasher);
+    Some(format!("{:016x}", hasher.finish()))
+}
+
 fn text(value: Option<&Value>) -> Option<String> {
     value
         .and_then(Value::as_str)
