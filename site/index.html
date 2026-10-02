@@ -548,7 +548,9 @@ programs.rewind.amdBranchCounterWorkaround = <span class="kw">true</span>;</code
         ><code><span class="comment"># the rewind command, with the VM's kernel</span>
 <span class="prompt">$</span> <span class="cmd">curl</span> <span class="opt">-L</span> https://github.com/fzakaria/rewindvm/releases/latest/download/rewind-x86_64-linux.tar.gz <span class="op">|</span> <span class="cmd">tar</span> xz
 <span class="comment"># the desktop app</span>
-<span class="prompt">$</span> <span class="cmd">curl</span> <span class="opt">-L</span> https://github.com/fzakaria/rewindvm/releases/latest/download/rewind-app-x86_64-linux.tar.gz <span class="op">|</span> <span class="cmd">tar</span> xz</code></pre>
+<span class="prompt">$</span> <span class="cmd">curl</span> <span class="opt">-L</span> https://github.com/fzakaria/rewindvm/releases/latest/download/rewind-app-x86_64-linux.tar.gz <span class="op">|</span> <span class="cmd">tar</span> xz
+<span class="comment"># the kernel's debug symbols for rewind gdb, next to the command (150 MB)</span>
+<span class="prompt">$</span> <span class="cmd">curl</span> <span class="opt">-L</span> https://github.com/fzakaria/rewindvm/releases/latest/download/rewind-debug-x86_64-linux.tar.gz <span class="op">|</span> <span class="cmd">tar</span> xz</code></pre>
         <p class="note">
           If <code>/dev/kvm</code> is not readable and writable by you, add yourself to the
           <code>kvm</code> group.

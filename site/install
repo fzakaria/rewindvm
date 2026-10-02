@@ -10,6 +10,8 @@
 #   REWIND_INSTALL_DIR  where the tarballs are unpacked (~/.local/share/rewind)
 #   REWIND_BIN_DIR      where rewind and rewind-app are linked (~/.local/bin)
 #   REWIND_NO_APP=1     install only the command
+#   REWIND_WITH_DEBUG=1 also install the VM kernel's DWARF and source files
+#                       for `rewind gdb`, 150 MB
 #   REWIND_RELEASE_URL  where the release assets are, for testing a build
 set -eu
 
@@ -18,6 +20,7 @@ INSTALL_DIR=${REWIND_INSTALL_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/rewind}
 BIN_DIR=${REWIND_BIN_DIR:-$HOME/.local/bin}
 CLI=rewind-x86_64-linux
 APP=rewind-app-x86_64-linux
+DEBUG=rewind-debug-x86_64-linux
 
 say() {
   printf 'rewind install: %s\n' "$*" >&2
@@ -55,6 +58,12 @@ install_tarball() {
 mkdir -p "$INSTALL_DIR" "$BIN_DIR"
 install_tarball "$CLI"
 ln -sf "$INSTALL_DIR/$CLI/bin/rewind" "$BIN_DIR/rewind"
+
+# The kernel's debug symbols go next to the command, where its launcher
+# looks for them.
+if [ "${REWIND_WITH_DEBUG:-}" = 1 ]; then
+  install_tarball "$DEBUG"
+fi
 if [ "${REWIND_NO_APP:-}" != 1 ]; then
   install_tarball "$APP"
   ln -sf "$INSTALL_DIR/$APP/bin/rewind-app" "$BIN_DIR/rewind-app"

@@ -100,6 +100,8 @@ yourself:
 $ curl -L https://github.com/fzakaria/rewindvm/releases/latest/download/rewind-x86_64-linux.tar.gz | tar xz
 # the desktop app
 $ curl -L https://github.com/fzakaria/rewindvm/releases/latest/download/rewind-app-x86_64-linux.tar.gz | tar xz
+# the kernel's debug symbols for rewind gdb, next to the command (150 MB)
+$ curl -L https://github.com/fzakaria/rewindvm/releases/latest/download/rewind-debug-x86_64-linux.tar.gz | tar xz
 ```
 
 `/dev/kvm` must be readable and writable by you. On AMD Ryzen and EPYC, run
