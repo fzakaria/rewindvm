@@ -76,6 +76,10 @@
   const SESSION_PARAM = "session_id";
   const EDITION_PARAM = "edition";
 
+  // Stripe's prefix for a checkout session made in test mode. A test
+  // payment is not a sale, so the thank-you page reports nothing for it.
+  const TEST_SESSION_PREFIX = "cs_test_";
+
   // The Buy links carry the visitor's GA client id to Stripe in this
   // parameter, so a sale can later be tied to the visit that made it.
   // Stripe takes letters, digits, dashes and underscores only, and GA's
@@ -176,14 +180,16 @@
     });
   });
 
-  // The sale, on the thank-you page. The checkout session id is the
-  // transaction id, so GA4 counts a reload of the page only once.
+  // The sale, on the thank-you page, unless it was a test checkout. The
+  // checkout session id is the transaction id, so GA4 counts a reload of
+  // the page only once.
   const query = new URLSearchParams(window.location.search);
   const session = query.get(SESSION_PARAM);
   const bought = query.get(EDITION_PARAM);
   if (
     THANKS_PATH.test(window.location.pathname) &&
     session &&
+    !session.startsWith(TEST_SESSION_PREFIX) &&
     Object.hasOwn(PRICES, bought)
   ) {
     gtag("event", EVENT_PURCHASE, {
