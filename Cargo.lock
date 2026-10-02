@@ -485,7 +485,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rewind"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -500,7 +500,7 @@ dependencies = [
 
 [[package]]
 name = "rewind-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "bincode",
@@ -531,7 +531,7 @@ dependencies = [
 
 [[package]]
 name = "rewind-store"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -541,7 +541,7 @@ dependencies = [
 
 [[package]]
 name = "rewind-trace"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "thiserror",
@@ -549,7 +549,7 @@ dependencies = [
 
 [[package]]
 name = "rewind-vmm"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "kvm-bindings",
