@@ -30,8 +30,9 @@ use rewind_core::{Home, Run};
 /// port on the loopback interface.
 const GDB_LOCAL: &str = "127.0.0.1:0";
 
-/// Where Nix keeps store paths, which `nix-store --realise` can fetch.
+/// Where Nix keeps store paths, and the program that fetches them.
 const NIX_STORE: &str = "/nix/store";
+const NIX_STORE_PROGRAM: &str = "nix-store";
 
 /// The kernel package's files: vmlinux with its symbol table and the
 /// kernel's gdb scripts, next to the bzImage; in the `debug` output,
@@ -39,6 +40,11 @@ const NIX_STORE: &str = "/nix/store";
 const VMLINUX: &str = "vmlinux";
 const GDB_SCRIPTS: &str = "vmlinux-gdb.py";
 const DEBUG_VMLINUX: &str = "lib/debug/vmlinux";
+
+/// gdb's switch for the Python scripts it loads from next to a symbol
+/// file, such as vmlinux-gdb.py next to vmlinux.
+const AUTO_LOAD_OFF: &str = "set auto-load python-scripts off";
+const AUTO_LOAD_ON: &str = "set auto-load python-scripts on";
 
 /// In the `debug` output, the files the Rewind patch adds or changes, in
 /// a directory named for the source tree. nixseparatedebuginfod2 serves
@@ -90,7 +96,15 @@ pub fn gdb(
     let mut debuggee = rewind_core::debug::Debuggee::new(machine);
     let listener = TcpListener::bind(listen.unwrap_or(GDB_LOCAL)).context("listening for gdb")?;
     let address = listener.local_addr()?;
-    let mut args = arguments(&kernel, &process, debuginfod.as_ref(), address);
+    // The session's server first, then any the person already uses.
+    let others = std::env::var(ENV_DEBUGINFOD_URLS).unwrap_or_default();
+    let urls: Vec<&str> = debuginfod
+        .as_ref()
+        .map(|d| d.url.as_str())
+        .into_iter()
+        .chain(others.split_whitespace())
+        .collect();
+    let mut args = arguments(&kernel, &process, &urls, address);
     args.extend(extra.iter().cloned());
 
     // Only serving: say how to connect, then wait for gdb. The debuginfod
@@ -126,14 +140,14 @@ pub fn gdb(
     })
 }
 
-/// gdb's arguments: the servers to ask for DWARF, the kernel's symbols
+/// gdb's arguments: the debuginfod servers to ask for DWARF, the kernel's symbols
 /// and scripts, the running process's files, then the connection. Each is
 /// its own -ex, so one gdb cannot run, such as a debuginfod setting in a
 /// gdb built without debuginfod, does not stop the rest.
 fn arguments(
     kernel: &KernelSymbols,
     process: &Process,
-    debuginfod: Option<&Debuginfod>,
+    urls: &[&str],
     address: std::net::SocketAddr,
 ) -> Vec<String> {
     let mut args: Vec<String> = vec!["-q".into()];
@@ -142,27 +156,30 @@ fn arguments(
         args.push(command);
     };
 
-    // The session's server first, then any the person already uses.
-    let others = std::env::var(ENV_DEBUGINFOD_URLS).unwrap_or_default();
-    let urls: Vec<&str> = debuginfod
-        .map(|d| d.url.as_str())
-        .into_iter()
-        .chain(others.split_whitespace())
-        .collect();
     if !urls.is_empty() {
         ex("-iex", "set debuginfod enabled on".into());
         ex("-iex", format!("set debuginfod urls {}", urls.join(" ")));
     }
 
-    // The kernel: its DWARF when it is here, else its symbol table, whose
-    // DWARF a debuginfod server may have. The scripts need the DWARF.
+    // The kernel: its DWARF when it is here, else its symbol table. The
+    // scripts need the DWARF, which no debuginfod server has: the session's
+    // serves only what is in the store, and the kernel's is not until
+    // `realise` fetches it. gdb would also auto-load the scripts from next
+    // to a vmlinux with only its symbol table, so auto-loading is off while
+    // that one loads, and on again for the process's libraries.
     if let Some(file) = &kernel.file {
+        if !kernel.dwarf {
+            ex("-ex", AUTO_LOAD_OFF.into());
+        }
         ex("-ex", format!("file {}", file.display()));
+        if !kernel.dwarf {
+            ex("-ex", AUTO_LOAD_ON.into());
+        }
         if let Some(sources) = &kernel.sources {
             ex("-ex", format!("directory {}", sources.display()));
         }
         if let Some(scripts) = &kernel.scripts
-            && (kernel.dwarf || !urls.is_empty())
+            && kernel.dwarf
         {
             ex("-ex", format!("source {}", scripts.display()));
         }
@@ -432,6 +449,8 @@ impl Drop for Session {
 /// on this machine, from the substituters in Nix's own settings. The
 /// kernel's debug output is only in Rewind's binary cache, which the
 /// NixOS module adds to them. Whether the path is here now.
+/// On a host without Nix there is nothing to fetch with, and nothing to
+/// say about it.
 fn realise(path: &Path, what: &str) -> bool {
     if path.exists() {
         return true;
@@ -439,8 +458,11 @@ fn realise(path: &Path, what: &str) -> bool {
     let Some(root) = store_root(path) else {
         return false;
     };
+    let Some(nix_store) = on_path(NIX_STORE_PROGRAM, std::env::var_os("PATH").as_deref()) else {
+        return false;
+    };
     eprintln!("rewind: fetching {what}, {}", root.display());
-    let _ = Command::new("nix-store")
+    let _ = Command::new(nix_store)
         .arg("--realise")
         .arg(&root)
         .stdout(Stdio::null())
@@ -541,9 +563,13 @@ fn debuginfod_program() -> Option<PathBuf> {
     {
         return Some(named);
     }
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|dir| dir.join(DEBUGINFOD_PROGRAM))
+    on_path(DEBUGINFOD_PROGRAM, std::env::var_os("PATH").as_deref())
+}
+
+/// Where `program` is in `path`, a list of directories like PATH's.
+fn on_path(program: &str, path: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    std::env::split_paths(path?)
+        .map(|dir| dir.join(program))
         .find(|p| p.exists())
 }
 
@@ -581,5 +607,56 @@ mod tests {
         assert_eq!(quote("-q"), "-q");
         assert_eq!(quote("target remote x"), "'target remote x'");
         assert_eq!(quote("it's"), r"'it'\''s'");
+    }
+
+    /// The kernel's gdb scripts need its DWARF. Builds gdb's arguments for
+    /// a kernel with only its symbol table while a debuginfod server is
+    /// named, as on a host without Nix with DEBUGINFOD_URLS set, and checks
+    /// the scripts are neither sourced nor auto-loaded with vmlinux, and
+    /// the server is still named.
+    #[test]
+    fn the_kernel_s_scripts_are_loaded_only_with_its_dwarf() {
+        let kernel = |dwarf| KernelSymbols {
+            file: Some(PathBuf::from("/opt/rewind/vmlinux")),
+            scripts: Some(PathBuf::from("/opt/rewind/vmlinux-gdb.py")),
+            sources: None,
+            dwarf,
+        };
+        let urls = ["https://debuginfod.debian.net"];
+        let address = "127.0.0.1:1234".parse().unwrap();
+        let sourced = |args: &[String]| args.iter().any(|a| a.starts_with("source "));
+
+        let without = arguments(&kernel(false), &Process::default(), &urls, address);
+        assert!(!sourced(&without));
+        let at = |command: &str| without.iter().position(|a| a == command);
+        let off = at("set auto-load python-scripts off").expect("auto-load is turned off");
+        let file = at("file /opt/rewind/vmlinux").expect("the kernel is loaded");
+        let on = at("set auto-load python-scripts on").expect("auto-load is turned back on");
+        assert!(off < file && file < on);
+        assert!(without.contains(&"set debuginfod urls https://debuginfod.debian.net".to_string()));
+
+        let with = arguments(&kernel(true), &Process::default(), &urls, address);
+        assert!(sourced(&with));
+    }
+
+    /// Looks for a program in a PATH-like list of directories: a temporary
+    /// directory holding a file of that name, then a list without it.
+    #[test]
+    fn a_program_is_found_on_the_path_it_is_on() {
+        let dir = std::env::temp_dir().join(format!("rewind-on-path-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("nix-store"), "").unwrap();
+        let path = std::env::join_paths([Path::new("/nonexistent"), &dir]).unwrap();
+
+        assert_eq!(
+            on_path("nix-store", Some(&path)),
+            Some(dir.join("nix-store"))
+        );
+        assert_eq!(
+            on_path("nix-store", Some(std::ffi::OsStr::new("/nonexistent"))),
+            None
+        );
+        assert_eq!(on_path("nix-store", None), None);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
