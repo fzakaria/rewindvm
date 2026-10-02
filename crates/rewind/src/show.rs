@@ -93,9 +93,44 @@ pub fn divergence_in(left: &Trace, right: &Trace, argv: &[String]) -> String {
     out
 }
 
+/// The outputs the job was to create that init never hashed, from the
+/// `path hash` lines of [`outcome_key`]. Init hashes outputs only after
+/// the job exits 0, so for such a job these are the outputs it did not
+/// create.
+pub fn missing_outputs(expected: &[String], hashed: &[String]) -> Vec<String> {
+    expected
+        .iter()
+        .filter(|path| {
+            !hashed
+                .iter()
+                .any(|h| h.split_once(' ').is_some_and(|(p, _)| p == *path))
+        })
+        .cloned()
+        .collect()
+}
+
+/// Whether a run succeeded as nix-daemon judges a build: the job exited 0
+/// and created every output.
+pub fn passed(status: Option<i32>, missing: &[String]) -> bool {
+    status == Some(0) && missing.is_empty()
+}
+
+/// How a run ended, in words: its wait status, or missing-output for a
+/// job that exited 0 without creating every output.
+pub fn ending(status_: Option<i32>, missing: &[String]) -> String {
+    if status_ == Some(0) && !missing.is_empty() {
+        return MISSING_OUTPUT.into();
+    }
+    status(status_)
+}
+
+/// What [`ending`] calls a job that exited 0 but left an output uncreated.
+const MISSING_OUTPUT: &str = "missing-output";
+
 /// One line per run for `rewind check`.
 pub fn outcome_line(run: &Run) -> anyhow::Result<String> {
     let (status_, outputs) = outcome_key(run)?;
+    let missing = missing_outputs(&run.manifest.spec.job.outputs, &outputs);
     let steps = run.manifest.outcome.as_ref().map_or(0, |o| o.step);
     let hashes: Vec<String> = outputs
         .iter()
@@ -103,7 +138,7 @@ pub fn outcome_line(run: &Run) -> anyhow::Result<String> {
         .collect();
     Ok(format!(
         "{:<14} {:>10} steps  {}  run {}",
-        status(status_),
+        ending(status_, &missing),
         steps,
         hashes.join(" "),
         run.manifest.id
@@ -241,4 +276,36 @@ pub fn divergence(left: &Trace, right: &Trace) -> String {
         let _ = writeln!(out, "  right {}", event(e));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    // How a run that exited 0 reads when its job left an output uncreated:
+    // nix-daemon fails such a build, so Rewind calls it missing-output
+    // rather than exited:0.
+    use super::*;
+
+    const OUT: &str = "/nix/store/0000000000000000000000000000000b-x";
+    const DEV: &str = "/nix/store/0000000000000000000000000000000c-x-dev";
+
+    #[test]
+    fn an_output_init_never_hashed_is_missing() {
+        let expected = vec![OUT.to_string(), DEV.to_string()];
+        let hashed = vec![format!("{OUT} 0123abcd")];
+        assert_eq!(missing_outputs(&expected, &hashed), vec![DEV.to_string()]);
+        assert!(missing_outputs(&expected[..1], &hashed).is_empty());
+    }
+
+    #[test]
+    fn exiting_0_without_every_output_is_a_failure() {
+        let exited_0 = Some(0);
+        let exited_1 = Some(1 << 8);
+        let missing = vec![DEV.to_string()];
+        assert_eq!(ending(exited_0, &[]), "exited:0");
+        assert_eq!(ending(exited_0, &missing), "missing-output");
+        assert_eq!(ending(exited_1, &missing), "exited:1");
+        assert!(passed(exited_0, &[]));
+        assert!(!passed(exited_0, &missing));
+        assert!(!passed(exited_1, &[]));
+    }
 }

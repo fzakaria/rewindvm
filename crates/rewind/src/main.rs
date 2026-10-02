@@ -417,7 +417,10 @@ fn run(cli: Cli) -> Result<ExitCode> {
         } => {
             let guest = Guest::from_env()?;
             let run = run_workload(&home, &guest, &Workload::Nix(installable), &machine)?;
-            report_outputs(&run)?;
+            let missing = report_outputs(&run)?;
+            if !missing.is_empty() {
+                return Ok(ExitCode::FAILURE);
+            }
             Ok(exit_status(&run))
         }
         Command::Check {
@@ -475,8 +478,10 @@ fn run(cli: Cli) -> Result<ExitCode> {
             let start = show::start_step(&base_trace).max(user_from);
             let base_key = show::outcome_key(&base)?;
             // When the unperturbed run is the one that fails, the schedules
-            // that end differently are the ones that pass.
-            let base_failed = base_key.0 != Some(0);
+            // that end differently are the ones that pass. A job that exits
+            // 0 without creating every output fails, as under nix-daemon.
+            let base_missing = show::missing_outputs(&base.manifest.spec.job.outputs, &base_key.1);
+            let base_failed = !show::passed(base_key.0, &base_missing);
             let differs = |run: &Run| -> Result<bool> { Ok(show::outcome_key(run)? != base_key) };
 
             // Perturbed schedules, a machine per job at a time, in order.
@@ -1253,8 +1258,11 @@ fn execute_all(
 }
 
 /// Prints each output's hash from the guest, and whether it matches the
-/// copy of that output the host already has, if it has one.
-fn report_outputs(run: &Run) -> Result<()> {
+/// copy of that output the host already has, if it has one. A job that
+/// exited 0 without creating an output failed, as nix-daemon judges it:
+/// those outputs are printed as missing and returned.
+fn report_outputs(run: &Run) -> Result<Vec<String>> {
+    let (status, hashed) = show::outcome_key(run)?;
     for e in run.trace()?.events {
         let rewind_trace::EventKind::Mark { text } = e.kind else {
             continue;
@@ -1277,7 +1285,15 @@ fn report_outputs(run: &Run) -> Result<()> {
         };
         println!("{path} {} ({verdict})", &hash[..16]);
     }
-    Ok(())
+
+    if status != Some(0) {
+        return Ok(Vec::new());
+    }
+    let missing = show::missing_outputs(&run.manifest.spec.job.outputs, &hashed);
+    for path in &missing {
+        println!("{path} missing: the builder exited 0 without creating it");
+    }
+    Ok(missing)
 }
 
 /// Builds or reuses the erofs image for a root filesystem argument.
