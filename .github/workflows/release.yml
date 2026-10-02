@@ -54,6 +54,19 @@ jobs:
           nix build -L .#release -o cli
           nix build -L .#app-release -o app
 
+      # Cachix evicts the paths used least when the cache is full, and
+      # never a pinned one. A release's packages are what its `nix run` and
+      # its runs' `rewind gdb` fetch, the kernel's debug output among them,
+      # which nothing depends on, so it needs a pin of its own; they are
+      # kept for good. The Rust dependency builds are not pinned: evicted,
+      # they compile again once.
+      - name: Pin the release in the cache
+        run: |
+          for attr in rewind app kernel kernel-debug; do
+            cachix pin rewindvm "$attr-$GITHUB_REF_NAME" \
+              "$(nix build --no-link --print-out-paths ".#$attr")" --keep-forever
+          done
+
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}

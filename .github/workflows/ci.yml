@@ -68,3 +68,15 @@ jobs:
 
       - name: Packages
         run: nix build -L .#rewind .#app .#release .#app-release .#site
+
+      # The latest builds of main, pinned so they stay when the cache fills
+      # and the dependency builds go: the last five of each, the kernel's
+      # debug output among them, for `rewind gdb` on runs made with them.
+      # Releases pin theirs for good (release.yml).
+      - name: Pin main's packages
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          for attr in rewind app kernel kernel-debug; do
+            cachix pin rewindvm "main-$attr" \
+              "$(nix build --no-link --print-out-paths ".#$attr")" --keep-revisions 5
+          done
