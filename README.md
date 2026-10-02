@@ -168,17 +168,21 @@ Open shell starts a shell inside the VM at the playhead, in the build's
 directory with its environment, and Attach gdb opens gdb on the same fork,
 both in a terminal pane below the scrubber.
 
-Every run of a build is one family: the run as recorded, the schedules
-`rewind check` tried, and every fork. The start screen lists one line per
-family however many forks it has, and the runs pill in the header opens the
-Runs panel, which draws the family as a tree the way ISL and Jujutsu draw a
-history: each fork branches off the run it came from, red for failed and green
-for passed, with the step it forked at, its schedule and where it first
-differs. Click a run to open it beside its parent; right-click it to compare it
-with the run on screen, copy its id, or remove it with its forks.
+Every run of a build is one family: the run under schedule 0, with its
+threads left alone, the schedules `rewind check` tried, and every fork. The
+start screen lists one line per family however many runs it has, and the runs
+pill in the header opens the Runs panel, which draws the family as a tree the
+way ISL and Jujutsu draw a history. Each fork branches off the run it came
+from, red for failed and green for passed, with the step it forked at, its
+schedule and where it first differs. The schedules `rewind check` ran from
+boot hang off the schedule 0 run, and those that ended the way it did fold into
+one row that opens on a click. A family recorded on two machines, or with
+different `--cores`, has a schedule 0 run for each. Click a run to open it
+beside the run it hangs under; right-click it to compare it with the run on
+screen, copy its id, or remove it with its forks.
 
 <p align="center">
-  <img src="docs/img/app-runs.png" alt="The Runs panel: the mylib build's runs as a tree under the passing recorded run, with twelve forks of it at step 2,713, one crashed fork with forks of its own at steps 4,400 and 4,520 and a fork of a fork at 4,500, then the schedules rewind check ran from boot, each with its exit status and schedule." />
+  <img src="docs/img/app-runs.png" alt="The Runs panel: the mylib build's 170 runs as a tree under the passing schedule 0 run, with twelve forks of it at step 2,713, one crashed fork with forks of its own at steps 4,400 and 4,520 and a fork of a fork at 4,500, then the failing schedules rewind check ran from boot, each with its exit status, schedule and the steps it perturbed." />
 </p>
 
 <p align="center">
