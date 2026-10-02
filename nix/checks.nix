@@ -295,6 +295,65 @@ in
         touch $out
       '';
 
+  # checks.yield: a thread that calls sched_yield until another thread sets
+  # a flag finishes under every schedule. A yield makes an exit, so virtual
+  # time moves and the other thread gets to run; before, a perturbed
+  # schedule that switched to the yielding thread first ran forever. The
+  # timeout turns that hang into a failure. Boots the VM, so it needs
+  # /dev/kvm.
+  yield =
+    let
+      source = pkgs.writeText "yieldspin.c" ''
+        #include <pthread.h>
+        #include <sched.h>
+        #include <stdatomic.h>
+        #include <stdio.h>
+        #include <unistd.h>
+
+        static atomic_int flag;
+
+        /* Each write is an exit, where a perturbed schedule may switch to
+           the yielding thread before the flag is set. */
+        static void *setter(void *arg) {
+            (void)arg;
+            for (int i = 0; i < 20; i++) {
+                write(2, ".", 1);
+            }
+            atomic_store(&flag, 1);
+            return NULL;
+        }
+
+        int main(void) {
+            pthread_t t;
+            pthread_create(&t, NULL, setter, NULL);
+            while (!atomic_load(&flag)) {
+                sched_yield();
+            }
+            pthread_join(t, NULL);
+            puts("done");
+            return 0;
+        }
+      '';
+      root = pkgs.pkgsStatic.runCommandCC "rewind-yield-root" { } ''
+        mkdir -p $out/bin
+        $CC -static -O2 -pthread -o $out/bin/yieldspin ${source}
+      '';
+    in
+    pkgs.runCommand "rewind-yield"
+      {
+        nativeBuildInputs = [
+          rewind
+          pkgs.coreutils
+        ];
+        requiredSystemFeatures = [ "kvm" ];
+      }
+      ''
+        export REWIND_HOME=$TMPDIR/rewind
+        timeout 600 rewind check -j 4 --cores 2 --schedules 16 --root ${root} -- /bin/yieldspin | tee found
+        grep -q 'same result under all 17 schedules' found
+        touch $out
+      '';
+
   # checks.pmu-boot: `rewind pmu enable` as the NixOS module's boot service
   # runs it, with no HOME or anything else in its environment. Whether the
   # workaround can be set depends on the machine, so this only checks that

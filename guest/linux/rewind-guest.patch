@@ -1,6 +1,6 @@
 diff -ruN a/arch/x86/include/asm/hypervisor.h b/arch/x86/include/asm/hypervisor.h
---- a/arch/x86/include/asm/hypervisor.h	2026-09-30 15:14:16.655903918 -0700
-+++ b/arch/x86/include/asm/hypervisor.h	2026-09-30 15:14:54.734543364 -0700
+--- a/arch/x86/include/asm/hypervisor.h	2026-09-25 07:37:14.000000000 -0700
++++ b/arch/x86/include/asm/hypervisor.h	2026-10-02 15:54:32.286093513 -0700
 @@ -31,6 +31,7 @@
  	X86_HYPER_JAILHOUSE,
  	X86_HYPER_ACRN,
@@ -9,7 +9,7 @@ diff -ruN a/arch/x86/include/asm/hypervisor.h b/arch/x86/include/asm/hypervisor.
  };
  
  #ifdef CONFIG_HYPERVISOR_GUEST
-@@ -66,9 +67,20 @@
+@@ -66,9 +67,21 @@
  extern const struct hypervisor_x86 x86_hyper_jailhouse;
  extern const struct hypervisor_x86 x86_hyper_acrn;
  extern const struct hypervisor_x86 x86_hyper_bhyve;
@@ -26,6 +26,7 @@ diff -ruN a/arch/x86/include/asm/hypervisor.h b/arch/x86/include/asm/hypervisor.
 +struct cpumask;
 +void rewind_report_cpus(struct cpumask *mask);
 +const struct cpumask *rewind_fold_cpus(const struct cpumask *mask);
++void rewind_yield(void);
 +#endif
  extern enum x86_hypervisor_type x86_hyper_type;
  extern void init_hypervisor_platform(void);
@@ -116,8 +117,8 @@ diff -ruN a/arch/x86/kernel/cpu/Makefile b/arch/x86/kernel/cpu/Makefile
  
 diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 --- a/arch/x86/kernel/cpu/rewind.c	1969-12-31 16:00:00.000000000 -0800
-+++ b/arch/x86/kernel/cpu/rewind.c	2026-10-01 01:13:54.810300098 -0700
-@@ -0,0 +1,1114 @@
++++ b/arch/x86/kernel/cpu/rewind.c	1969-12-31 16:00:00.000000000 -0800
+@@ -0,0 +1,1127 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Rewind VM guest platform.
@@ -356,6 +357,19 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +noinstr u64 rewind_sched_clock(void)
 +{
 +	return READ_ONCE(rewind_shared.now);
++}
++
++/*
++ * A yield costs one exit, as a system call and a context switch cost time
++ * on real hardware. Without one, a thread that yields in a loop until
++ * another thread acts makes no exit at all: the scheduler's clock stands
++ * still, so the loop uses up none of its slice, and no timer or interrupt
++ * comes due for the thread it waits on. The loop then runs forever.
++ */
++void rewind_yield(void)
++{
++	if (rewind_running)
++		inl(REWIND_PORT_CLOCK);
 +}
 +
 +static u32 __init rewind_detect(void)
@@ -1276,7 +1290,7 @@ diff -ruN a/arch/x86/kernel/tsc.c b/arch/x86/kernel/tsc.c
  	 * ( But note that we still use it if the TSC is marked
 diff -ruN a/kernel/sched/syscalls.c b/kernel/sched/syscalls.c
 --- a/kernel/sched/syscalls.c	2026-09-25 07:37:14.000000000 -0700
-+++ b/kernel/sched/syscalls.c	2026-10-01 16:58:22.594128403 -0700
++++ b/kernel/sched/syscalls.c	2026-10-02 15:54:32.286596879 -0700
 @@ -12,6 +12,9 @@
  #include <linux/sched/debug.h>
  
@@ -1310,3 +1324,15 @@ diff -ruN a/kernel/sched/syscalls.c b/kernel/sched/syscalls.c
  
  	return 0;
  }
+@@ -1337,6 +1349,11 @@
+ 	struct rq_flags rf;
+ 	struct rq *rq;
+ 
++#ifdef CONFIG_REWIND_GUEST
++	/* Virtual time moves only at exits; a yield makes one. */
++	rewind_yield();
++#endif
++
+ 	rq = this_rq_lock_irq(&rf);
+ 
+ 	schedstat_inc(rq->yld_count);

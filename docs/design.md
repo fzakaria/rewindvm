@@ -88,9 +88,11 @@ platforms. The platform is detected by the CPUID signature `RewindRewind`.
   reschedule is requested, or an inspection is.
 - `sched_getaffinity` reports the CPU count given as `rewind.cpus=` on the
   command line, and `sched_setaffinity` takes any of those CPUs to mean the
-  one there is. These two hooks in `kernel/sched/syscalls.c` are the
-  patch's only changes outside `arch/x86` (see
-  [Exploring interleavings](#exploring-interleavings)).
+  one there is (see [Exploring interleavings](#exploring-interleavings)).
+- `sched_yield` makes an exit, so a thread that yields in a loop moves
+  virtual time (see [Limits](#limits)). These three hooks in
+  `kernel/sched/syscalls.c` are the patch's only changes outside
+  `arch/x86`.
 
 An inspection is how `rewind cat` and `rewind shell` look inside a run at a
 step. Rewind forks the run at the step and writes a request, a list of
@@ -500,9 +502,10 @@ Two earlier designs did not work, and why is worth keeping.
 - **CPU-bound threads are not preempted.** A thread gives up the CPU only at
   a step, so one that computes without system calls runs until it makes one.
   A thread spinning on a flag without yielding stalls the VM; futex-based
-  waits are fine. Races that need preemption in the middle of pure
-  computation are out of reach. With exit time computation also takes no
-  time; counter time ([pmu.md](pmu.md)) fixes that, not the preemption.
+  waits are fine, and so is a loop of `sched_yield`, since each yield is an
+  exit. Races that need preemption in the middle of pure computation are
+  out of reach. With exit time computation also takes no time; counter
+  time ([pmu.md](pmu.md)) fixes that, not the preemption.
 - **One vCPU.** Threads interleave but never run at the same instant, even
   with `--cores` reporting more CPUs. Throughput comes from running many
   machines at once: `check` runs one per core.
