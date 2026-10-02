@@ -10,7 +10,7 @@ use std::process::ExitCode;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use rewind_core::inspect::Inspection;
-use rewind_core::run::{BASE_CMDLINE, DEFAULT_QUANTUM, default_epoch};
+use rewind_core::run::{BASE_CMDLINE, DEFAULT_CORES, DEFAULT_QUANTUM, MAX_CORES, default_epoch};
 use rewind_core::{Echo, Guest, Home, Keyframes, Run, Source, Spec};
 use rewind_core::{export, image, nix};
 use rewind_init::{Job, Root};
@@ -67,12 +67,13 @@ struct MachineArgs {
     /// The VM's memory in MiB.
     #[arg(long, default_value_t = 1024)]
     mem: u64,
-    /// For a Nix build, the NIX_BUILD_CORES it sees, which stdenv passes
-    /// to make, ninja and test runners as their job count. The VM still
-    /// has one vCPU: the jobs interleave on it, so schedules can reorder
-    /// them.
-    #[arg(long, default_value_t = nix::DEFAULT_BUILD_CORES,
-          value_parser = clap::value_parser!(u32).range(1..))]
+    /// The CPUs programs in the VM are told it has, and for a Nix build
+    /// its NIX_BUILD_CORES, which stdenv passes to make, ninja and test
+    /// runners as their job count. The VM still has one vCPU: the threads
+    /// and jobs sized by the count interleave on it, so schedules can
+    /// reorder them.
+    #[arg(long, default_value_t = DEFAULT_CORES,
+          value_parser = clap::value_parser!(u32).range(1..=i64::from(MAX_CORES)))]
     cores: u32,
     /// The VM's wall clock at boot, in seconds since the Unix epoch.
     /// Defaults to the start of today, UTC.
@@ -1048,9 +1049,6 @@ fn prepare(
     }
     let (name, source, image, job) = match workload {
         Workload::Nix(installable) => prepare_nix(home, installable, machine.cores)?,
-        Workload::Image(_) if machine.cores != nix::DEFAULT_BUILD_CORES => {
-            bail!("--cores sets NIX_BUILD_CORES, so it applies only to Nix builds")
-        }
         Workload::Image(args) => prepare_image(home, args)?,
     };
     let image_hash = match &image {
@@ -1159,6 +1157,7 @@ fn execute(
         image: prepared.image.clone(),
         image_hash: prepared.image_hash.clone(),
         mem_mib: machine.mem,
+        cores: machine.cores,
         seed: machine.seed,
         epoch: machine.epoch.unwrap_or_else(default_epoch),
         quantum: DEFAULT_QUANTUM,

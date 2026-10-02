@@ -86,6 +86,11 @@ platforms. The platform is detected by the CPUID signature `RewindRewind`.
 - The monitor's interrupt arrives as an MSI on `HYPERVISOR_CALLBACK_VECTOR`.
   A reason word in the shared page says whether the timer is due, a
   reschedule is requested, or an inspection is.
+- `sched_getaffinity` reports the CPU count given as `rewind.cpus=` on the
+  command line, and `sched_setaffinity` takes any of those CPUs to mean the
+  one there is. These two hooks in `kernel/sched/syscalls.c` are the
+  patch's only changes outside `arch/x86` (see
+  [Exploring interleavings](#exploring-interleavings)).
 
 An inspection is how `rewind cat` and `rewind shell` look inside a run at a
 step. Rewind forks the run at the step and writes a request, a list of
@@ -448,14 +453,37 @@ once, which crowds the threads together and makes the race easier to hit. The
 first failure has come within the first two batches of 16 schedules, and the
 whole search takes under 20 seconds on 16 cores.
 
-A Nix build sees `NIX_BUILD_CORES=1` by default, the VM's one vCPU, so
-stdenv runs make, ninja and test runners one job at a time, and a race
-between two jobs never happens. `--cores N` sets it to N. The jobs then
-interleave on the one vCPU, and the schedules reorder them. A Makefile
-whose `main.o` includes a generated `gen.h` without naming it as a
-prerequisite builds under all 65 schedules with `--cores 1`. With
-`--cores 4` the unperturbed run builds, and 58 of 64 perturbed schedules
-compile `main.c` before `gen.h` exists.
+A program that sizes its threads by the CPU count sees one CPU by default,
+so it starts one worker, and a race between its workers never happens. The
+same goes for a Nix build: `NIX_BUILD_CORES=1` makes stdenv run make, ninja
+and test runners one job at a time. `--cores N` tells the guest's programs
+there are N CPUs and sets `NIX_BUILD_CORES` to N. The VM still has one vCPU,
+so the extra workers and jobs interleave on it, and the schedules reorder
+them. Programs count CPUs in two ways, and both answer N:
+
+- **The affinity system calls.** coreutils' `nproc`, Go's runtime, Rust's
+  `available_parallelism` and musl's `sysconf` count the bits
+  `sched_getaffinity` returns. The kernel patch reads N from `rewind.cpus=`
+  and reports CPUs 0 to N-1. `sched_setaffinity` to any of them runs the
+  task on CPU 0, and to none of them fails with `EINVAL`, as on a machine
+  with N CPUs.
+- **Files.** glibc's `sysconf`, and so Python's `os.cpu_count` and C++'s
+  `hardware_concurrency`, read `/sys/devices/system/cpu/online`, and older
+  build scripts count the blocks in `/proc/cpuinfo`. Init writes versions
+  of `online`, `possible`, `present` and `cpuinfo` for N CPUs and
+  bind-mounts them over the real ones before it makes the job's root, so
+  a Nix build and an image root both see them. Doing this in init rather
+  than the kernel keeps the patch out of sysfs and procfs.
+
+Two examples, each under 64 schedules:
+
+| Workload                                                         | `--cores 1`       | `--cores 4`                 |
+| ---------------------------------------------------------------- | ----------------- | --------------------------- |
+| A Makefile whose `main.o` includes a generated `gen.h` unlisted  | 0 end differently | unperturbed builds, 58 fail |
+| A pthread pool sized by `sysconf`, with an unlocked shared total | 0 end differently | unperturbed passes, 64 fail |
+
+A job that mounts its own `/proc` or sysfs sees the kernel's files again,
+which say one CPU, while the affinity calls still say N.
 
 Two earlier designs did not work, and why is worth keeping.
 
@@ -475,9 +503,9 @@ Two earlier designs did not work, and why is worth keeping.
   waits are fine. Races that need preemption in the middle of pure
   computation are out of reach. With exit time computation also takes no
   time; counter time ([pmu.md](pmu.md)) fixes that, not the preemption.
-- **One vCPU.** Threads interleave but never run at the same instant.
-  Throughput comes from running many machines at once: `check` runs one per
-  core.
+- **One vCPU.** Threads interleave but never run at the same instant, even
+  with `--cores` reporting more CPUs. Throughput comes from running many
+  machines at once: `check` runs one per core.
 - **The CPU vendor is part of the input.** The fixed CPU model keeps the
   host's vendor, since Intel and AMD differ in ways CPUID cannot hide, so a
   run made on AMD replays on any AMD host from Zen 2 on but not on Intel,

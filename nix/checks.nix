@@ -30,7 +30,7 @@ let
   busyboxRoot = pkgs.runCommand "rewind-busybox-root" { } ''
     mkdir -p $out/bin
     cp ${pkgs.pkgsStatic.busybox}/bin/busybox $out/bin/
-    for tool in sh echo cat head od sleep seq; do
+    for tool in sh echo cat head od sleep seq nproc grep taskset; do
       ln -s busybox $out/bin/$tool
     done
   '';
@@ -158,6 +158,44 @@ in
         test ! -e $REWIND_HOME/runs/$fork
         test ! -e $REWIND_HOME/runs/$fork2
         rewind replay a --from 300 | grep '^identical'
+        touch $out
+      '';
+
+  # checks.cores: with --cores 4, the affinity system call busybox's nproc
+  # reads, the sysfs list glibc reads and /proc/cpuinfo all say 4. Pinning to one of the four succeeds and to
+  # a fifth fails, as on a machine with four. With the default, all say 1.
+  # Boots the VM, so it needs /dev/kvm.
+  cores =
+    pkgs.runCommand "rewind-cores"
+      {
+        nativeBuildInputs = [ rewind ];
+        requiredSystemFeatures = [ "kvm" ];
+      }
+      ''
+        export REWIND_HOME=$TMPDIR/rewind
+        probe='
+          echo "nproc $(nproc)"
+          echo "online $(cat /sys/devices/system/cpu/online)"
+          echo "cpuinfo $(grep -c ^processor /proc/cpuinfo)"
+          taskset -c 3 echo "pinned 3" || echo "refused 3"
+          taskset -c 4 echo "pinned 4" || echo "refused 4"
+        '
+        rewind run -q --name four --cores 4 --root ${busyboxRoot} -- sh -c "$probe"
+        rewind log four | tee four
+        grep -qx 'nproc 4' four
+        grep -qx 'online 0-3' four
+        grep -qx 'cpuinfo 4' four
+        grep -qx 'pinned 3' four
+        grep -qx 'refused 4' four
+
+        rewind run -q --name one --root ${busyboxRoot} -- sh -c "$probe"
+        rewind log one | tee one
+        grep -qx 'nproc 1' one
+        grep -qx 'online 0' one
+        grep -qx 'cpuinfo 1' one
+        grep -qx 'refused 3' one
+
+        rewind replay four | grep '^identical'
         touch $out
       '';
 

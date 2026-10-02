@@ -23,7 +23,7 @@ use rewind_vmm::pmu::{Counter, Event, Modes};
 use rewind_vmm::{Ignore, Machine};
 
 use crate::home::Guest;
-use crate::run::{BASE_CMDLINE, DEFAULT_QUANTUM, Spec};
+use crate::run::{BASE_CMDLINE, DEFAULT_CORES, DEFAULT_QUANTUM, Spec};
 
 /// Where to read about all this.
 pub const DOCS_URL: &str = "https://rewindvm.dev/counter-time.html";
@@ -287,6 +287,7 @@ pub fn selftest(guest: &Guest) -> Result<SelfTest> {
         image: None,
         image_hash: None,
         mem_mib: 256,
+        cores: DEFAULT_CORES,
         seed: 0,
         epoch: 1,
         quantum: DEFAULT_QUANTUM,

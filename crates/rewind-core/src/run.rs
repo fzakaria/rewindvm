@@ -37,6 +37,17 @@ const MANIFEST_VERSION: u32 = 1;
 pub const BASE_CMDLINE: &str =
     "nolapic_timer lpj=1000000 panic=-1 rdinit=/init loglevel=7 mitigations=off";
 
+/// The CPUs the guest tells user space it has unless asked otherwise: the
+/// VM's one vCPU.
+pub const DEFAULT_CORES: u32 = 1;
+
+/// The most CPUs the guest can tell user space of: its kernel's affinity
+/// mask is one 64-bit word.
+pub const MAX_CORES: u32 = 64;
+
+/// The guest kernel's command line parameter for the CPU count.
+const CORES_PARAM: &str = "rewind.cpus";
+
 /// Nanoseconds of virtual time per exit: about what a system call and a
 /// context switch cost on current hardware, which is what an exit stands
 /// for.
@@ -71,6 +82,11 @@ pub struct Spec {
     pub image: Option<PathBuf>,
     pub image_hash: Option<String>,
     pub mem_mib: u64,
+    /// The CPUs the guest tells user space it has, through the affinity
+    /// system calls, sysfs and /proc/cpuinfo, and a Nix build's
+    /// NIX_BUILD_CORES. The VM has one vCPU whatever this is: threads
+    /// sized by the count interleave on it.
+    pub cores: u32,
     pub seed: u64,
     pub epoch: u64,
     pub quantum: u64,
@@ -244,6 +260,11 @@ impl Spec {
         *hasher.finalize().as_bytes()
     }
 
+    /// The kernel's command line: the spec's, then the CPU count.
+    pub fn boot_cmdline(&self) -> String {
+        format!("{} {CORES_PARAM}={}", self.cmdline, self.cores)
+    }
+
     /// The machine config: the base initramfs with the job appended.
     pub fn config(&self) -> Result<Config> {
         let mut initrd =
@@ -254,7 +275,7 @@ impl Spec {
             initrd,
             image: self.image.clone(),
             mem_bytes: self.mem_mib << 20,
-            cmdline: self.cmdline.clone(),
+            cmdline: self.boot_cmdline(),
             seed: self.rng_seed(),
             epoch: self.epoch,
             quantum: self.quantum,
@@ -741,6 +762,7 @@ mod tests {
             image: None,
             image_hash: None,
             mem_mib: 1024,
+            cores: DEFAULT_CORES,
             seed: 0,
             epoch: 0,
             quantum: DEFAULT_QUANTUM,
@@ -785,6 +807,17 @@ mod tests {
         let fork = perturbed(3, 4855, u64::MAX);
         assert_eq!(parent.same_through(&fork), Some(4854));
         assert_eq!(fork.same_through(&parent), Some(4854));
+    }
+
+    #[test]
+    fn the_kernel_is_told_the_cpu_count() {
+        // The guest kernel reads how many CPUs to report to user space
+        // from rewind.cpus= on its command line, after the spec's own.
+        let spec = Spec {
+            cores: 4,
+            ..spec()
+        };
+        assert_eq!(spec.boot_cmdline(), format!("{BASE_CMDLINE} rewind.cpus=4"));
     }
 
     #[test]

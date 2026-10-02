@@ -24,10 +24,6 @@ pub const HOMELESS: &str = "/homeless-shelter";
 pub const BUILDER_UID: u32 = 1000;
 pub const BUILDER_GID: u32 = 100;
 
-/// The NIX_BUILD_CORES a build sees unless asked otherwise: the VM's one
-/// vCPU.
-pub const DEFAULT_BUILD_CORES: u32 = 1;
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Derivation {
     pub path: PathBuf,
@@ -172,9 +168,7 @@ pub fn input_closure(drv: &Derivation) -> Result<Vec<PathBuf>> {
 /// The builder as a job, with the environment the Nix sandbox gives it.
 /// The order of operations follows nix-daemon's initEnv, so a derivation
 /// that overrides one of these sees its own value. `cores` is the
-/// NIX_BUILD_CORES the build sees, which can exceed the VM's one vCPU: the
-/// jobs it starts then interleave on that vCPU instead of running in
-/// parallel.
+/// NIX_BUILD_CORES the build sees, the run's CPU count.
 pub fn job(drv: &Derivation, cores: u32) -> Result<Job> {
     if drv.env.contains_key("__json") {
         bail!(

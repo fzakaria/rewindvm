@@ -96,6 +96,19 @@ const SHELL_PROMPT: &str = "[rewind] \\w \\$ ";
 /// How far up the process tree to look for a live environment.
 const MAX_ANCESTORS: usize = 64;
 
+/// The files besides the affinity system calls that say how many CPUs
+/// there are, and the directory init writes its own versions of them to.
+const CPU_LIST_FILES: [&str; 3] = [
+    "/sys/devices/system/cpu/online",
+    "/sys/devices/system/cpu/possible",
+    "/sys/devices/system/cpu/present",
+];
+const CPUINFO_FILE: &str = "/proc/cpuinfo";
+const REPORTED_CPUS_DIR: &str = "/rewind/cpus";
+
+/// The line that opens CPU 0's block in /proc/cpuinfo.
+const CPUINFO_FIRST: &str = "processor\t: 0";
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some(SELFTEST_ARG) {
@@ -121,6 +134,7 @@ fn run() -> Result<()> {
 
     mount("proc", "/proc", "proc", 0, "")?;
     mount("sysfs", "/sys", "sysfs", 0, "")?;
+    report_cpus()?;
     mkdir("/dev/pts")?;
     mount("devpts", "/dev/pts", "devpts", 0, "ptmxmode=0666,mode=0620")?;
     mkdir("/dev/shm")?;
@@ -1026,6 +1040,69 @@ fn dev_links() -> Result<()> {
     Ok(())
 }
 
+/// Makes sysfs and /proc/cpuinfo report as many CPUs as the kernel's
+/// affinity system calls do (rewind.cpus=), by bind-mounting files init
+/// writes over them. Runs before the job's root is made, so an image root's
+/// recursive binds of /proc and /sys carry these mounts along.
+fn report_cpus() -> Result<()> {
+    let cpus = reported_cpus()?;
+    if cpus == 1 {
+        return Ok(());
+    }
+
+    // CPU 0's block of /proc/cpuinfo, read before anything covers it.
+    let one = fs::read_to_string(CPUINFO_FILE).map_err(|e| format!("reading {CPUINFO_FILE}: {e}"))?;
+
+    // Each file's replacement, written beside the others and bound over it.
+    mkdir(REPORTED_CPUS_DIR)?;
+    let files = CPU_LIST_FILES
+        .iter()
+        .map(|target| (*target, cpu_list(cpus)))
+        .chain(std::iter::once((CPUINFO_FILE, cpuinfo(&one, cpus))));
+    for (target, contents) in files {
+        let name = Path::new(target)
+            .file_name()
+            .expect("every reported file has a name")
+            .to_string_lossy();
+        let source = format!("{REPORTED_CPUS_DIR}/{name}");
+        fs::write(&source, contents).map_err(|e| format!("writing {source}: {e}"))?;
+        mount(&source, target, "", libc::MS_BIND, "")?;
+    }
+    Ok(())
+}
+
+/// How many CPUs the kernel's sched_getaffinity reports.
+fn reported_cpus() -> Result<usize> {
+    // SAFETY: an all-zero cpu_set_t is a valid empty set.
+    let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+    // SAFETY: the kernel writes at most the size it is given into `set`.
+    let rc = unsafe { libc::sched_getaffinity(0, std::mem::size_of_val(&set), &mut set) };
+    if rc != 0 {
+        return Err(format!(
+            "sched_getaffinity: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: `set` is a cpu_set_t the kernel filled.
+    Ok(unsafe { libc::CPU_COUNT(&set) } as usize)
+}
+
+/// A sysfs CPU list naming CPUs 0 to `cpus` - 1.
+fn cpu_list(cpus: usize) -> String {
+    if cpus == 1 {
+        return "0\n".into();
+    }
+    format!("0-{}\n", cpus - 1)
+}
+
+/// /proc/cpuinfo for `cpus` CPUs: CPU 0's block once per CPU, each with
+/// its own processor number.
+fn cpuinfo(one: &str, cpus: usize) -> String {
+    (0..cpus)
+        .map(|cpu| one.replacen(CPUINFO_FIRST, &format!("processor\t: {cpu}"), 1))
+        .collect()
+}
+
 /// Points init's own output at the Rewind devices, so its errors reach the
 /// trace. Best effort: nowhere else to report a failure here.
 fn redirect_own_output() {
@@ -1144,6 +1221,26 @@ mod tests {
     // are taken out and applied, and a message split across reads waits
     // for the rest.
     use super::*;
+
+    #[test]
+    fn a_cpu_list_names_every_cpu_reported() {
+        // sysfs's online, possible and present files: a range from CPU 0.
+        assert_eq!(cpu_list(1), "0\n");
+        assert_eq!(cpu_list(4), "0-3\n");
+    }
+
+    #[test]
+    fn cpuinfo_repeats_the_one_cpu_for_each_cpu_reported() {
+        // Each copy of CPU 0's block carries its own processor number, so
+        // `grep -c ^processor /proc/cpuinfo` counts the CPUs reported.
+        let one = "processor\t: 0\nvendor_id\t: AuthenticAMD\n\n";
+        assert_eq!(
+            cpuinfo(one, 3),
+            "processor\t: 0\nvendor_id\t: AuthenticAMD\n\n\
+             processor\t: 1\nvendor_id\t: AuthenticAMD\n\n\
+             processor\t: 2\nvendor_id\t: AuthenticAMD\n\n"
+        );
+    }
 
     #[test]
     fn a_map_range_is_named_without_padding_in_map_files() {
