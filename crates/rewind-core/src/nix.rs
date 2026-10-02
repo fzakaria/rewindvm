@@ -393,8 +393,8 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-/// Whether `s` is a shell variable name: a letter or underscore, then
-/// letters, digits and underscores.
+/// Whether `s` is a shell variable name: an ASCII letter or `_`, then
+/// ASCII letters, digits and `_`.
 fn is_shell_name(s: &str) -> bool {
     let mut chars = s.chars();
     let Some(first) = chars.next() else {
