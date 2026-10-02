@@ -30,7 +30,7 @@ let
   busyboxRoot = pkgs.runCommand "rewind-busybox-root" { } ''
     mkdir -p $out/bin
     cp ${pkgs.pkgsStatic.busybox}/bin/busybox $out/bin/
-    for tool in sh echo cat head od sleep seq nproc grep taskset; do
+    for tool in sh echo cat head od sleep seq nproc grep taskset mkdir; do
       ln -s busybox $out/bin/$tool
     done
   '';
@@ -249,6 +249,42 @@ in
         wait
         cat serve
         grep -q "ran in process $pid; loading symbols for 1 of its files" serve
+        touch $out
+      '';
+
+  # checks.search: `rewind check` starts each run it tries at the
+  # unperturbed run's latest keyframe before the run's schedule starts,
+  # not at boot. Every one of them still replays from boot to the same
+  # trace, and none reads the unperturbed run's keyframes afterwards, so
+  # removing that run leaves them whole. Four background jobs race to
+  # write a file first; some schedules change which one wins. Boots the
+  # VM, so it needs /dev/kvm.
+  search =
+    pkgs.runCommand "rewind-search"
+      {
+        nativeBuildInputs = [
+          rewind
+          pkgs.jq
+        ];
+        requiredSystemFeatures = [ "kvm" ];
+      }
+      ''
+        export REWIND_HOME=$TMPDIR/rewind
+        race='
+          mkdir -p /run/race
+          for i in 1 2 3 4; do (echo $i >> /run/race/o) & done
+          wait
+          test "$(head -1 /run/race/o)" = 1
+        '
+        # check exits 1 when a schedule ends differently, as here.
+        ! rewind check -j 4 --root ${busyboxRoot} -- sh -c "$race" > found
+        cat found
+        grep -q 'still ends differently' found
+        for dir in $REWIND_HOME/runs/*; do
+          id=$(basename $dir)
+          jq -e '.shared_keyframes == null' $dir/manifest.json > /dev/null
+          rewind replay $id | grep '^identical'
+        done
         touch $out
       '';
 

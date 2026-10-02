@@ -10,7 +10,9 @@ use std::process::ExitCode;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use rewind_core::inspect::Inspection;
-use rewind_core::run::{BASE_CMDLINE, DEFAULT_CORES, DEFAULT_QUANTUM, MAX_CORES, default_epoch};
+use rewind_core::run::{
+    BASE_CMDLINE, DEFAULT_CORES, DEFAULT_QUANTUM, MAX_CORES, Start, default_epoch,
+};
 use rewind_core::{Echo, Guest, Home, Keyframes, Run, Source, Spec};
 use rewind_core::{export, image, nix};
 use rewind_init::{Job, Root};
@@ -430,7 +432,8 @@ fn run(cli: Cli) -> Result<ExitCode> {
             let jobs = jobs
                 .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
                 .max(1);
-            // Exploring compares runs; only the two reported get keyframes.
+            // Exploring compares runs; only the unperturbed run, which every
+            // other run starts from, and the two reported get keyframes.
             machine.no_keyframes = true;
             machine.quiet = true;
             // Every run in a search boots with the same wall clock, even one
@@ -449,7 +452,24 @@ fn run(cli: Cli) -> Result<ExitCode> {
             let (user_from, user_until) = (machine.schedule_from, machine.schedule_until);
             machine.schedule = 0;
             machine.schedule_from = 0;
-            let base = execute(&home, &guest, &prepared, &machine, Announce::No)?;
+            let with_keyframes = MachineArgs {
+                no_keyframes: false,
+                ..machine.clone()
+            };
+            let base = execute(
+                &home,
+                &guest,
+                &prepared,
+                &with_keyframes,
+                Start::Boot,
+                Announce::No,
+            )?;
+
+            // Every other run is the unperturbed run until its schedule
+            // starts, so it starts at the unperturbed run's latest keyframe
+            // before then instead of at boot: a narrowed window late in a
+            // long build runs only from near the window.
+            let from_base = Start::After(base.manifest.id.clone());
             println!("schedule   0: {}", show::outcome_line(&base)?);
             let base_trace = base.trace()?;
             let start = show::start_step(&base_trace).max(user_from);
@@ -474,7 +494,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                         ..machine.clone()
                     })
                     .collect();
-                for run in execute_all(&home, &guest, &prepared, machines)? {
+                for run in execute_all(&home, &guest, &prepared, machines, from_base.clone())? {
                     println!(
                         "schedule {:>3}: {}",
                         run.manifest.spec.schedule,
@@ -541,7 +561,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                         ..machine.clone()
                     })
                     .collect();
-                execute_all(&home, &guest, &prepared, machines)
+                execute_all(&home, &guest, &prepared, machines, from_base.clone())
             };
             let points = |lo: u64, hi: u64| -> Vec<u64> {
                 let n = (jobs as u64).min(hi - lo - 1).max(1);
@@ -647,7 +667,10 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 name,
                 m.source.clone(),
                 spec,
-                Some((m.id.clone(), step)),
+                Start::Fork {
+                    parent: m.id.clone(),
+                    step,
+                },
                 echo,
                 Keyframes::Take,
             )?;
@@ -1035,7 +1058,7 @@ fn run_workload(
 ) -> Result<Run> {
     let mut machine = machine.clone();
     let prepared = prepare(home, guest, workload, &mut machine)?;
-    execute(home, guest, &prepared, &machine, Announce::Yes)
+    execute(home, guest, &prepared, &machine, Start::Boot, Announce::Yes)
 }
 
 fn prepare(
@@ -1148,6 +1171,7 @@ fn execute(
     guest: &Guest,
     prepared: &Prepared,
     machine: &MachineArgs,
+    start: Start,
     announce: Announce,
 ) -> Result<Run> {
     let spec = Spec {
@@ -1193,7 +1217,7 @@ fn execute(
         prepared.name.clone(),
         prepared.source.clone(),
         spec,
-        None,
+        start,
         echo,
         keyframes,
     )?;
@@ -1210,11 +1234,15 @@ fn execute_all(
     guest: &Guest,
     prepared: &Prepared,
     machines: Vec<MachineArgs>,
+    start: Start,
 ) -> Result<Vec<Run>> {
     std::thread::scope(|scope| {
         let handles: Vec<_> = machines
             .into_iter()
-            .map(|m| scope.spawn(move || execute(home, guest, prepared, &m, Announce::No)))
+            .map(|m| {
+                let start = start.clone();
+                scope.spawn(move || execute(home, guest, prepared, &m, start, Announce::No))
+            })
             .collect();
         handles
             .into_iter()

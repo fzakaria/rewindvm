@@ -301,6 +301,20 @@ fn job_archive(job: &Job) -> Result<Vec<u8>> {
     Ok(a.finish())
 }
 
+/// Where a run starts executing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Start {
+    /// At boot.
+    Boot,
+    /// As a fork of `parent` at `step`: the parent's run up to the step,
+    /// from the parent's latest keyframe among the steps the two share.
+    Fork { parent: String, step: u64 },
+    /// At the latest keyframe of this run, by id, among the steps the two
+    /// share, without being its fork: the runs `rewind check` makes match
+    /// its unperturbed run up to where their schedules start.
+    After(String),
+}
+
 /// Whether a run takes keyframes as it executes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Keyframes {
@@ -427,18 +441,24 @@ impl Run {
     }
 
     /// Executes a spec, writing the run into the home's runs directory. A
-    /// run with a parent on this machine starts from the parent's latest
+    /// fork of a run on this machine starts from the parent's latest
     /// keyframe in the steps the two share, and reads the parent's
-    /// keyframes for those steps instead of taking its own.
+    /// keyframes for those steps instead of taking its own. A run started
+    /// after another starts the same way without being its fork.
     pub fn execute(
         home: &Home,
         name: String,
         source: Source,
         spec: Spec,
-        parent: Option<(String, u64)>,
+        start: Start,
         echo: Echo,
         keyframes: Keyframes,
     ) -> Result<Run> {
+        let (parent, start_from) = match start {
+            Start::Boot => (None, None),
+            Start::Fork { parent, step } => (Some((parent, step)), None),
+            Start::After(run) => (None, Some(run)),
+        };
         let manifest = Manifest {
             version: MANIFEST_VERSION,
             id: spec.id(),
@@ -452,13 +472,15 @@ impl Run {
             trace_hash: None,
             first_difference: None,
         };
-        Run::execute_manifest(home, manifest, echo, keyframes)
+        Run::execute_manifest(home, manifest, start_from.as_deref(), echo, keyframes)
     }
 
-    /// Executes the run `manifest` describes, filling in how it ended.
+    /// Executes the run `manifest` describes, filling in how it ended,
+    /// starting from `start_from`'s keyframes or else its parent's.
     fn execute_manifest(
         home: &Home,
         mut manifest: Manifest,
+        start_from: Option<&str>,
         echo: Echo,
         keyframes: Keyframes,
     ) -> Result<Run> {
@@ -483,12 +505,20 @@ impl Run {
         if own == crate::keyframes::Own::Unreadable {
             fs::remove_dir_all(dir.join(crate::keyframes::DIR))?;
         }
-        let shortcut = Shortcut::find(home, &manifest);
+        let shortcut = Shortcut::find(home, &manifest, start_from);
+
+        // A run that takes no keyframes of its own replays from boot, so it
+        // reads none of another run's either: starting from them only made
+        // this execution shorter, and removing that run takes nothing from
+        // this one.
         let keyframes = if keep {
             manifest.shared_keyframes = previous.and_then(|p| p.manifest.shared_keyframes);
             Keyframes::Skip
         } else {
-            manifest.shared_keyframes = shortcut.as_ref().map(|s| s.shared.clone());
+            manifest.shared_keyframes = shortcut
+                .as_ref()
+                .filter(|_| keyframes == Keyframes::Take)
+                .map(|s| s.shared.clone());
             keyframes
         };
         manifest.outcome = None;
@@ -506,7 +536,10 @@ impl Run {
         let store = || rewind_store::Store::open(&home.store());
 
         // A run that shares its start with its parent replays the parent's
-        // events up to the parent's keyframe and goes on from there.
+        // events up to the parent's keyframe and goes on from there. The
+        // store is locked while it is open, so a run that takes no
+        // keyframes closes it once restored, and runs executing side by
+        // side, as rewind check's do, are not held up behind one another.
         let (mut machine, mut store, last_keyframe) = match &shortcut {
             Some(s) => {
                 for (step, record) in &s.prefix {
@@ -515,7 +548,8 @@ impl Run {
                 let store = store()?;
                 let machine =
                     Machine::restore(&config, &s.chain, &crate::keyframes::ReadPages(&store))?;
-                (machine, Some(store), Some(s.base))
+                let store = (keyframes == Keyframes::Take).then_some(store);
+                (machine, store, Some(s.base))
             }
             None => (Machine::boot(&config)?, None, None),
         };
@@ -625,7 +659,7 @@ impl Run {
             created: now(),
             ..self.manifest.clone()
         };
-        Run::execute_manifest(home, manifest, Echo::Quiet, Keyframes::Take)
+        Run::execute_manifest(home, manifest, None, Echo::Quiet, Keyframes::Take)
     }
 
     /// A machine at `step` of this run: the latest keyframe at or before
@@ -761,8 +795,8 @@ fn now() -> u64 {
         .as_secs()
 }
 
-/// How a run with a parent on this machine starts at the parent's
-/// keyframe rather than at boot.
+/// How a run starts at the keyframe of a run it shares its start with, its
+/// parent or one it was told to start from, rather than at boot.
 struct Shortcut {
     /// The parent's keyframes this run reads: up to the last step the two
     /// runs share.
@@ -778,12 +812,12 @@ struct Shortcut {
 }
 
 impl Shortcut {
-    /// The shortcut for the run `manifest` describes, when its parent is
-    /// here, shares steps with it, and has a keyframe among them. Anything
-    /// missing or unreadable means starting from boot, which is never
-    /// wrong.
-    fn find(home: &Home, manifest: &Manifest) -> Option<Shortcut> {
-        let (parent_id, _) = manifest.parent.as_ref()?;
+    /// The shortcut for the run `manifest` describes, when `start_from`,
+    /// or else its parent, is here, shares steps with it, and has a
+    /// keyframe among them. Anything missing or unreadable means starting
+    /// from boot, which is never wrong.
+    fn find(home: &Home, manifest: &Manifest, start_from: Option<&str>) -> Option<Shortcut> {
+        let parent_id = start_from.or(manifest.parent.as_ref().map(|(id, _)| id.as_str()))?;
         if *parent_id == manifest.id {
             return None;
         }
