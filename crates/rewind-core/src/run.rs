@@ -320,6 +320,45 @@ pub enum Echo {
     Quiet,
 }
 
+/// Passes a replay's records on to `inner` and compares each with the
+/// next record the run made, keeping the step of the first that differs:
+/// a record with other bytes, at another step, or that the run never made.
+/// A replay that went another way reaches its step in a different machine.
+struct Checked<'a> {
+    inner: &'a mut dyn Observer,
+    made: std::vec::IntoIter<(u64, Vec<u8>)>,
+    differs_at: Option<u64>,
+}
+
+impl<'a> Checked<'a> {
+    /// Checks against `made`, the run's records from where the replay
+    /// starts.
+    fn new(inner: &'a mut dyn Observer, made: Vec<(u64, Vec<u8>)>) -> Checked<'a> {
+        Checked {
+            inner,
+            made: made.into_iter(),
+            differs_at: None,
+        }
+    }
+}
+
+impl Observer for Checked<'_> {
+    fn record(&mut self, step: u64, record: &[u8]) {
+        self.inner.record(step, record);
+        if self.differs_at.is_some() {
+            return;
+        }
+        match self.made.next() {
+            Some((made_step, made)) if made_step == step && made == record => {}
+            _ => self.differs_at = Some(step),
+        }
+    }
+
+    fn serial(&mut self, step: u64, byte: u8) {
+        self.inner.serial(step, byte);
+    }
+}
+
 /// Collects the trace as it arrives and echoes output if asked.
 struct Recorder {
     trace: TraceWriter<fs::File>,
@@ -363,10 +402,19 @@ pub struct Run {
 impl Run {
     pub fn open(dir: &Path) -> Result<Run> {
         let path = dir.join(MANIFEST);
+
+        // A manifest that does not parse is, most often, one another build
+        // of rewind wrote with other fields.
         let manifest = serde_json::from_slice(
             &fs::read(&path).with_context(|| format!("reading {}", path.display()))?,
         )
-        .with_context(|| format!("parsing {}", path.display()))?;
+        .with_context(|| {
+            format!(
+                "run {} was recorded by another build of rewind, and this one cannot read \
+                 its manifest; record it again with this build to replay it",
+                dir.display()
+            )
+        })?;
         Ok(Run {
             dir: dir.to_path_buf(),
             manifest,
@@ -595,7 +643,27 @@ impl Run {
             }
             None => Machine::boot(&config)?,
         };
-        machine.run(Some(step), obs)?;
+
+        // On the way to the step, the replay must make the records the run
+        // made after where it starts. One that differs means this build of
+        // rewind runs the inputs another way than the build that recorded
+        // them, and the machine at the step is not the run's.
+        let path = self.dir.join(TRACE);
+        let made: Vec<(u64, Vec<u8>)> = rewind_trace::records(&path)
+            .with_context(|| format!("reading {}", path.display()))?
+            .into_iter()
+            .filter(|(s, _)| from.is_none_or(|kf| *s > kf))
+            .collect();
+        let mut checked = Checked::new(obs, made);
+        machine.run(Some(step), &mut checked)?;
+        if let Some(differs) = checked.differs_at {
+            bail!(
+                "replaying run {} went another way at step {differs} than when it was \
+                 recorded, so this build of rewind runs its inputs differently from the \
+                 build that recorded it; use that build, or record the run again with this one",
+                self.manifest.id
+            );
+        }
         Ok(machine)
     }
 
@@ -664,10 +732,24 @@ impl Run {
             named
         };
         match matches.len() {
-            0 => bail!("no run matches {what:?}; see `rewind ls`"),
+            0 => Err(Run::unreadable(home, what)
+                .unwrap_or_else(|| anyhow::anyhow!("no run matches {what:?}; see `rewind ls`"))),
             1 => Ok(matches.into_iter().next().unwrap()),
             n => bail!("{n} runs match {what:?}; give more of the id"),
         }
+    }
+
+    /// Why a run whose id starts with `what` could not be opened, when one
+    /// is there that `Run::list` left out.
+    fn unreadable(home: &Home, what: &str) -> Option<anyhow::Error> {
+        let dir = fs::read_dir(home.runs())
+            .ok()?
+            .filter_map(|e| Some(e.ok()?.path()))
+            .find(|d| {
+                d.file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with(what))
+            })?;
+        Run::open(&dir).err()
     }
 }
 
@@ -752,6 +834,30 @@ mod tests {
     // agree, which decides what a fork may share with its parent, and the
     // manifest fields the desktop app reads by name.
     use super::*;
+
+    #[test]
+    fn a_replay_that_goes_another_way_is_caught() {
+        // Records fed to the check as a replay would make them: the same
+        // ones pass, and the first that differs in bytes or step, or that
+        // the run never made, is where the replay went another way.
+        let made = vec![(3, vec![1u8]), (5, vec![2]), (9, vec![3])];
+        let feed = |replayed: &[(u64, Vec<u8>)]| {
+            let mut ignore = rewind_vmm::Ignore;
+            let mut check = Checked::new(&mut ignore, made.clone());
+            for (step, record) in replayed {
+                check.record(*step, record);
+            }
+            check.differs_at
+        };
+        assert_eq!(feed(&made), None);
+        assert_eq!(feed(&made[..2]), None);
+        assert_eq!(feed(&[(3, vec![1]), (5, vec![7])]), Some(5));
+        assert_eq!(feed(&[(3, vec![1]), (4, vec![2])]), Some(4));
+        assert_eq!(
+            feed(&[(3, vec![1]), (5, vec![2]), (9, vec![3]), (11, vec![4])]),
+            Some(11)
+        );
+    }
 
     /// An unperturbed spec; tests change the schedule fields.
     fn spec() -> Spec {
