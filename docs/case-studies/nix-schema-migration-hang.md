@@ -68,20 +68,20 @@ a94dee99e, which cache.nixos.org has, with the check phase cut down to
 
 ```console
 $ rewind check --all --schedules 256 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-concurrent-builds-15693-gdb'
-schedule   0: exited:0            33058 steps  d5ede538f628  run 1f3294d1cefa74d2
-schedule   1: exited:0            41906 steps  d5ede538f628  run 2ca20d402deac28d
+schedule   0: exited:0            33058 steps  d5ede538f628  run 461078397cb7e6e6
+schedule   1: exited:0            41906 steps  d5ede538f628  run 32f8784e9830d50c
 ...
-schedule 173: exited:1           400101 steps    run 6921fa19c24513c2
+schedule 173: exited:1           400101 steps    run 9eefad4f01caae9f
 ...
-schedule 195: exited:1           546770 steps    run 425599d5bd3eff21
+schedule 195: exited:1           546770 steps    run f4b33ffa97765908
 ...
 2 of 256 perturbed schedules ended differently
 
 schedule 173 ends differently; narrowing the steps it perturbs
 perturbing only steps 5032..23472 still ends differently
 
-passing: run 1f3294d1cefa74d2
-failing: run e2bf9ff720735a80
+passing: run 461078397cb7e6e6
+failing: run 0b79ab20a9ce2688
 
 where nix build --no-link --file ./racy.nix first behaves differently:
   left       18023   220/220   execve("/nix/store/...-nix-2.35.0pre20260414_a94dee9/bin/nix", ["nix", "build", "--no-link", "--file", "./racy.nix"])
@@ -99,12 +99,12 @@ The failing run ends with meson's 300 second timeout, which the VM reaches in
 seconds of wall time since a sleeping machine skips ahead to its next timer:
 
 ```console
-$ rewind log 6921fa19 | grep -E 'UNIQUE|is busy|TIMEOUT' | sort | uniq -c
+$ rewind log 9eefad4f | grep -E 'UNIQUE|is busy|TIMEOUT' | sort | uniq -c
       2 1/1 nix-functional-tests:ca / concurrent-builds TIMEOUT        300.02s   killed by signal 15 SIGTERM
       3        insert into SchemaMigrations values('20251017-ca-derivations')': constraint failed, UNIQUE constraint failed: SchemaMigrations.migration (in '/build/nix-test/ca/concurrent-builds/var/nix/db/db.sqlite')
      28 warning: SQLite database '/build/nix-test/ca/concurrent-builds/var/nix/db/db.sqlite' is busy
 
-$ rewind events 6921fa19 | grep -E 'exit_group\(nix\)'
+$ rewind events 9eefad4f | grep -E 'exit_group\(nix\)'
      25933   222/222   exit_group(nix) exited:1
      26209   224/224   exit_group(nix) exited:1
      26525   225/225   exit_group(nix) exited:1
@@ -127,7 +127,7 @@ so each of them took the new store branch of the constructor.
 At step 200000, in the middle of the hang, only 220 is left:
 
 ```console
-$ rewind ps 6921fa19 --at 200000
+$ rewind ps 9eefad4f --at 200000
      1 /init
     34   /nix/store/...-bash-5.3p3/bin/bash -e /nix/store/...-source-stdenv.sh /nix/store/...-default-builder.sh
    187     /nix/store/...-python3-3.13.11/bin/python3.13 /nix/store/...-meson-1.9.1/bin/meson test --no-rebuild --print-errorlogs concurrent-builds
@@ -135,7 +135,7 @@ $ rewind ps 6921fa19 --at 200000
    220         nix build --no-link --file ./racy.nix
    230           (thread)
 
-$ rewind cat 6921fa19 200000 /proc/locks
+$ rewind cat 9eefad4f 200000 /proc/locks
 1: POSIX  ADVISORY  READ 220 00:03:1812 124 124
 2: POSIX  ADVISORY  READ 220 00:03:1812 128 128
 3: POSIX  ADVISORY  READ 220 00:03:1809 1073741826 1073742335
@@ -153,8 +153,8 @@ and let it run until the next retry. The inspection leaves a SIGSTOP pending
 on every process, which gdb has to be told to swallow:
 
 ```console
-$ rewind shell 6921fa19 200000 --pid 220
-rewind: a shell at step 200000 of 6921fa19c24513c2; exit it to leave
+$ rewind shell 9eefad4f 200000 --pid 220
+rewind: a shell at step 200000 of 9eefad4f01caae9f; exit it to leave
 [rewind] /build/source/tests/functional/ca # cat /tmp/g.cmd
 set pagination off
 handle SIGSTOP nostop noprint nopass
@@ -231,15 +231,15 @@ c390460cd:
 
 ```console
 $ rewind check --all --schedules 256 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-concurrent-builds-15694'
-schedule   0: exited:0            34454 steps  d5ede538f628  run 2b4ba428c261fdee
+schedule   0: exited:0            34454 steps  d5ede538f628  run 903808a7e9b1e965
 ...
-schedule  22: exited:1           403388 steps    run 1b2bb898da558719
+schedule  22: exited:1           403388 steps    run 78846dd1444c9c6c
 ...
-schedule  64: exited:1           404978 steps    run 1fa948d203fc4431
+schedule  64: exited:1           404978 steps    run 78bdfbd0e62108a2
 ...
 8 of 256 perturbed schedules ended differently
 
-$ rewind log 1fa948d2 | grep -E 'UNIQUE|is busy|TIMEOUT' | sort | uniq -c
+$ rewind log 78bdfbd0 | grep -E 'UNIQUE|is busy|TIMEOUT' | sort | uniq -c
       2 1/1 nix-functional-tests:ca / concurrent-builds TIMEOUT        300.03s   killed by signal 15 SIGTERM
      28 warning: SQLite database '/build/nix-test/ca/concurrent-builds/var/nix/db/db.sqlite' is busy
 ```
@@ -256,7 +256,7 @@ nixpkgs' build of it passed every schedule:
 
 ```console
 $ rewind check --all --schedules 256 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-concurrent-builds'
-schedule   0: exited:0            34510 steps  d5ede538f628  run 29d7fba8cdf6e017
+schedule   0: exited:0            34510 steps  d5ede538f628  run f0239da1e666e621
 ...
 0 of 256 perturbed schedules ended differently
 same result under all 257 schedules
@@ -272,7 +272,9 @@ Rewind's schedules now include stalls: at one exit in 128 the running task
 sleeps for 10 µs to 1.28 ms when it next returns to user space. The rates
 above were measured with them. With the previous version of Rewind, which only
 reordered, the same derivation at a94dee99e failed under 3 of 256 schedules
-and the first fix under 2 of 256, so stalls change the rates little here.
+and the first fix under 2 of 256. With stalls they fail under 2 and 8 of 256:
+about the same for the reported bug, and four times as often for the first
+fix.
 
 Earlier, to get more failing runs to study, an `LD_PRELOAD` library that
 sleeps up to 5 ms at one call in 16 to `fcntl`, `flock`, `rename`, `unlink`,
@@ -301,18 +303,18 @@ unpack the file as it downloads:
 
 ```console
 $ rewind import https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-schema-migration-hang-replayable.rwd
-$ rewind replay 6921fa19
-$ rewind shell 6921fa19 <step>
+$ rewind replay 9eefad4f
+$ rewind shell 9eefad4f <step>
 $ rewind-app https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-schema-migration-hang.rwd
 ```
 
 How they were made:
 
 ```console
-$ rewind replay 6921fa19
+$ rewind replay 9eefad4f
 identical: 3119 events over 400101 steps
-$ rewind export 6921fa19 --replayable -o nix-schema-migration-hang-replayable.rwd
+$ rewind export 9eefad4f --replayable -o nix-schema-migration-hang-replayable.rwd
 rewind: wrote nix-schema-migration-hang-replayable.rwd (433.5 MB)
-$ rewind export 6921fa19 -o nix-schema-migration-hang.rwd
-rewind: wrote nix-schema-migration-hang.rwd (39.6 KB)
+$ rewind export 9eefad4f -o nix-schema-migration-hang.rwd
+rewind: wrote nix-schema-migration-hang.rwd (39.5 KB)
 ```

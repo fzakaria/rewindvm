@@ -34,18 +34,18 @@ point.
 
 ```console
 $ rewind check github:fzakaria/rewindvm#mylib
-schedule   0: exited:0             6162 steps  aa30ea54dc47  run eb160fbb7899f5f6
-schedule   1: exited:0             7115 steps  aa30ea54dc47  run 0cd62de6117dab15
-schedule   2: exited:0             7339 steps  aa30ea54dc47  run 71648c271e2de469
-schedule   3: exited:0             7277 steps  aa30ea54dc47  run d70f86efb6477307
-schedule   4: exited:2             5436 steps    run 730c06d084ff5b48
+schedule   0: exited:0             6162 steps  aa30ea54dc47  run 3a7a903ba51d85aa
+schedule   1: exited:0             7115 steps  aa30ea54dc47  run deaf00808dc50162
+schedule   2: exited:0             7339 steps  aa30ea54dc47  run 0a7c28a6d574df14
+schedule   3: exited:0             7277 steps  aa30ea54dc47  run bbc132f6e733e2c1
+schedule   4: exited:2             5436 steps    run d2d679b756ff023c
 ...
 
 schedule 4 ends differently; narrowing the steps it perturbs
 perturbing only steps 2713..4571 still ends differently
 
-passing: run eb160fbb7899f5f6
-failing: run 5833da2c43c402bf
+passing: run 3a7a903ba51d85aa
+failing: run a0f799f19c9f85ed
 
 where ./tests/test_pool_shutdown first behaves differently:
   ...
@@ -54,11 +54,11 @@ where ./tests/test_pool_shutdown first behaves differently:
   right       4398   166/168   write(1, "worker picked job 2\n")
   right       4422   166/167   write(1, "worker picked job 3\n")
 
-$ rewind events 5833da2c | grep SIGSEGV
+$ rewind events a0f799f1 | grep SIGSEGV
       4583   166/167   SIGSEGV code=1 addr=0x108
 ...
 
-$ rewind replay 5833da2c
+$ rewind replay a0f799f1
 identical: 1595 events over 4623 steps
 ```
 
@@ -161,7 +161,7 @@ in words what each did next. Click a file to read it as it was at the
 playhead. Fork from here branches the run under a new schedule.
 
 <p align="center">
-  <img src="docs/img/app-file-viewer.png" alt="The Rewind desktop app with a file open at the playhead: /build/env-vars as of step 4,392, next to the build log and the process tree." />
+  <img src="docs/img/app-file-viewer.png" alt="The Rewind desktop app with a file open at the playhead: /build/env-vars as of step 4,583, next to the build log and the process tree." />
 </p>
 
 Open shell starts a shell inside the VM at the playhead, in the build's
@@ -178,7 +178,7 @@ differs. Click a run to open it beside its parent; right-click it to compare it
 with the run on screen, copy its id, or remove it with its forks.
 
 <p align="center">
-  <img src="docs/img/app-runs.png" alt="The Runs panel: eight runs of the mylib build as a tree, the passing run and two forks of it at step 2,198, the failing run with forks at steps 4,400 and 4,520 and a fork of a fork at 4,500, each with its exit status, schedule and where it first differs." />
+  <img src="docs/img/app-runs.png" alt="The Runs panel: the mylib build's runs as a tree under the passing recorded run, with twelve forks of it at step 2,713, one crashed fork with forks of its own at steps 4,400 and 4,520 and a fork of a fork at 4,500, then the schedules rewind check ran from boot, each with its exit status and schedule." />
 </p>
 
 <p align="center">
