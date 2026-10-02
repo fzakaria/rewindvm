@@ -301,6 +301,10 @@ memory stored once per distinct page. `--from` restores the keyframe at or
 before a step and runs from there. A keyframe that did not reproduce the rest
 of the run exactly would make that command say so.
 
+The VM sees a fixed x86-64-v3 CPU model, so a run replays on other machines
+with the same CPU vendor: one recorded on AMD replays on AMD from Zen 2 on,
+and not on Intel.
+
 ## Fork it
 
 A fork is a run that is its parent up to a step, then explores another
@@ -384,6 +388,17 @@ same result under all 65 schedules
 
 Before the fix, 11 of the same 64 schedules crashed.
 
+## Limits worth knowing here
+
+- The VM has one vCPU. Threads interleave, but never run at the same
+  instant, so a data race between two plain loads and stores with no system
+  call between them is out of reach. Races across a system call, a lock or a
+  sleep, like this one, are in reach.
+- With exit time, a thread that computes for a long time without a system
+  call is not preempted, and a thread spinning on a flag without yielding
+  stalls the VM. [Counter time](pmu.md) explains why.
+- The build runs with no network, as in the Nix sandbox.
+
 ## What to read next
 
 - [The container tutorial](tutorial-container.md) does the same with a
@@ -391,4 +406,4 @@ Before the fix, 11 of the same 64 schedules crashed.
 - [Counter time](pmu.md) explains how the VM's clock follows its work, and
   the exit time warning on AMD.
 - [Design](design.md) explains how the machine is made deterministic, and
-  where that stops.
+  where that stops; [its list of limits](design.md#limits) is the full one.

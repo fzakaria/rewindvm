@@ -52,6 +52,25 @@ NIX_FIGURE = """<figure class="shot">
 </figure>
 """
 
+# The app on a failing fork of the container run, at its SIGSEGV, shown in
+# the container tutorial where the Nix tutorial shows its own.
+CONTAINER_FIGURE = """<figure class="shot">
+  <picture>
+    <source srcset="../img/app-container.webp" type="image/webp" />
+    <img
+      src="../img/app-container.png"
+      width="1440"
+      height="900"
+      loading="lazy"
+      alt="The Rewind desktop app on a failing fork of the mylib container run: the timeline with the playhead at step 696, the test's output, the process tree, and the SIGSEGV at 0x108 next to where the run diverged from its parent at step 684"
+    />
+  </picture>
+  <figcaption>
+    The app on a failing mylib fork, compared with the passing run it was forked from.
+  </figcaption>
+</figure>
+"""
+
 # The app on the failing devenv run at the step where SIGCHLD reaches the
 # test process, shown after the paragraph that walks through those events.
 # Numbered pins sit over the screenshot with a card for each below it, as
@@ -123,14 +142,14 @@ PAGES = [
     dict(
         source="docs/tutorial-container.md",
         eyebrow="Tutorial &middot; Container",
-        description="Run a test suite from a Docker image in Rewind VM, find the thread interleaving that breaks it, and replay the failure exactly. No Nix needed.",
+        description="Install Rewind VM, find the thread interleaving that breaks a container image's tests, look at the crash step by step, fork it, and check the fix. No Nix needed.",
         toc="Steps",
-        figure=None,
+        figure=("scrub-it-in-the-app", 1, CONTAINER_FIGURE),
         next=(
             "tutorials/nix.html",
             "Tutorial &middot; Nix",
             "A flaky Nix build",
-            "The same bug as a Nix derivation, with more on inspecting the failure, forking it and fixing it.",
+            "The same bug as a Nix derivation, built the way the Nix sandbox would.",
         ),
     ),
     dict(

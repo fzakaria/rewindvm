@@ -75,6 +75,7 @@
           <li><a href="#fork-it">Fork it</a></li>
           <li><a href="#scrub-it-in-the-app">Scrub it in the app</a></li>
           <li><a href="#fix-it-and-check-the-fix">Fix it and check the fix</a></li>
+          <li><a href="#limits-worth-knowing-here">Limits worth knowing here</a></li>
           <li><a href="#what-to-read-next">What to read next</a></li>
         </ol>
       </nav>
@@ -392,6 +393,10 @@ identical from the keyframe at step 1692 to the end (0.42s)</code></pre>
           before a step and runs from there. A keyframe that did not reproduce the rest of the run
           exactly would make that command say so.
         </p>
+        <p>
+          The VM sees a fixed x86-64-v3 CPU model, so a run replays on other machines with the same
+          CPU vendor: one recorded on AMD replays on AMD from Zen 2 on, and not on Intel.
+        </p>
       </section>
 
       <section class="step">
@@ -499,6 +504,25 @@ same result under all 65 schedules</code></pre>
       </section>
 
       <section class="step">
+        <h2 id="limits-worth-knowing-here">
+          <a class="anchor" href="#limits-worth-knowing-here">Limits worth knowing here</a>
+        </h2>
+        <ul>
+          <li>
+            The VM has one vCPU. Threads interleave, but never run at the same instant, so a data
+            race between two plain loads and stores with no system call between them is out of
+            reach. Races across a system call, a lock or a sleep, like this one, are in reach.
+          </li>
+          <li>
+            With exit time, a thread that computes for a long time without a system call is not
+            preempted, and a thread spinning on a flag without yielding stalls the VM.
+            <a href="../counter-time.html">Counter time</a> explains why.
+          </li>
+          <li>The build runs with no network, as in the Nix sandbox.</li>
+        </ul>
+      </section>
+
+      <section class="step">
         <h2 id="what-to-read-next">
           <a class="anchor" href="#what-to-read-next">What to read next</a>
         </h2>
@@ -513,7 +537,11 @@ same result under all 65 schedules</code></pre>
           </li>
           <li>
             <a href="https://github.com/fzakaria/rewindvm/blob/main/docs/design.md">Design</a>
-            explains how the machine is made deterministic, and where that stops.
+            explains how the machine is made deterministic, and where that stops;
+            <a href="https://github.com/fzakaria/rewindvm/blob/main/docs/design.md#limits"
+              >its list of limits</a
+            >
+            is the full one.
           </li>
         </ul>
       </section>

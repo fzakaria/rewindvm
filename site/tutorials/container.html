@@ -4,7 +4,7 @@
     <title>Tutorial: a flaky test in a container: Rewind VM</title>
     <meta
       name="description"
-      content="Run a test suite from a Docker image in Rewind VM, find the thread interleaving that breaks it, and replay the failure exactly. No Nix needed."
+      content="Install Rewind VM, find the thread interleaving that breaks a container image's tests, look at the crash step by step, fork it, and check the fix. No Nix needed."
     />
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -44,17 +44,18 @@
       <p class="eyebrow">Tutorial &middot; Container</p>
       <h1>Tutorial: a flaky test in a container</h1>
       <p>
-        This tutorial runs a test suite from a Docker image in Rewind VM, finds the thread
-        interleaving that breaks it, and replays the failure exactly. It needs no Nix.
-        <a href="nix.html">The Nix tutorial</a> covers the same bug as a Nix derivation, and goes
-        further into inspecting the failure.
+        This tutorial takes a container image whose test suite fails now and then, makes Rewind VM
+        find a failing run in under a minute, looks at the failure step by step, and checks the fix
+        across 64 thread interleavings. It needs no Nix.
       </p>
       <p>
-        The example is <code>mylib</code>, a small C thread pool in
-        <a href="https://github.com/fzakaria/rewindvm/tree/main/examples/mylib">examples/mylib</a>.
-        It has a shutdown race: <code>pool_shutdown</code> frees the job queue before joining the
-        workers, and a worker that has finished a job counts it through the queue without holding
-        the lock. Most runs of its shutdown test pass.
+        The image is built from <code>mylib</code>, a small C thread pool in
+        <a href="https://github.com/fzakaria/rewindvm/tree/main/examples/mylib">examples/mylib</a>,
+        with the Containerfile next to its source. Its <code>pool_shutdown</code> frees the job
+        queue before joining the workers, and a worker that has finished a job checks whether the
+        pool is stopping without holding the lock, then counts the job through the queue. When
+        shutdown runs between that check and the count, the worker writes through a freed, nulled
+        pointer.
       </p>
       <p>
         Every transcript below is real output from <code>rewind</code> on a 16 core AMD laptop, with
@@ -65,95 +66,124 @@
         <p class="toc-head">Steps</p>
         <ol>
           <li><a href="#install">Install</a></li>
-          <li>
-            <a href="#build-the-image-and-export-its-filesystem"
-              >Build the image and export its filesystem</a
-            >
-          </li>
-          <li><a href="#run-the-tests">Run the tests</a></li>
+          <li><a href="#the-flaky-test">The flaky test</a></li>
+          <li><a href="#run-it-in-rewind-vm">Run it in Rewind VM</a></li>
           <li><a href="#find-a-failing-interleaving">Find a failing interleaving</a></li>
-          <li><a href="#look-at-it-and-keep-it">Look at it, and keep it</a></li>
-          <li><a href="#check-the-fix">Check the fix</a></li>
+          <li><a href="#look-at-the-failure">Look at the failure</a></li>
+          <li><a href="#look-inside-the-vm">Look inside the VM</a></li>
+          <li><a href="#replay-it">Replay it</a></li>
+          <li><a href="#fork-it">Fork it</a></li>
+          <li><a href="#scrub-it-in-the-app">Scrub it in the app</a></li>
+          <li><a href="#fix-it-and-check-the-fix">Fix it and check the fix</a></li>
           <li><a href="#limits-worth-knowing-here">Limits worth knowing here</a></li>
+          <li><a href="#what-to-read-next">What to read next</a></li>
         </ol>
       </nav>
 
       <section class="step">
         <h2 id="install"><a class="anchor" href="#install">Install</a></h2>
-        <p>You need x86_64 Linux with KVM, and Docker or Podman.</p>
+        <p>You need x86_64 Linux with KVM, Docker or Podman, and gdb for the step that uses it.</p>
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> mkdir -p ~/.local/opt ~/.local/bin</span>
 <span class="cmd"><span class="prompt">$</span> curl -L https://github.com/fzakaria/rewindvm/releases/latest/download/rewind-x86_64-linux.tar.gz | tar -xz -C ~/.local/opt</span>
 <span class="cmd"><span class="prompt">$</span> ln -s ~/.local/opt/rewind-x86_64-linux/bin/rewind ~/.local/bin/rewind</span>
 <span class="cmd"><span class="prompt">$</span> ls -l /dev/kvm</span>
-crw-rw-rw- 1 root kvm 10, 232 Oct  1 20:17 /dev/kvm
-<span class="cmd"><span class="prompt">$</span> sudo usermod -aG kvm $USER          # if /dev/kvm is not yours to use; log in again after</span></code></pre>
+crw-rw-rw- 1 root kvm 10, 232 Oct  1 20:17 /dev/kvm</code></pre>
         <p>
           The tarball, from the latest
           <a href="https://github.com/fzakaria/rewindvm/releases">release</a>, holds a static
           <code>rewind</code>, the VM's kernel and initramfs, and static <code>mkfs.erofs</code> and
-          GNU tar for turning root filesystems into images, so the host needs nothing else. Runs are
-          kept under <code>~/.local/share/rewind</code>; set <code>REWIND_HOME</code> to keep them
-          elsewhere.
-        </p>
-        <p>
-          The desktop app is a second tarball from the same release. Unpacked next to the first, it
-          uses that <code>rewind</code>:
+          GNU tar for turning root filesystems into images, so the host needs nothing else. Two more
+          tarballs from the same release unpack next to it: the kernel's debug symbols and source
+          files, for <code>rewind gdb</code>, and the desktop app, which uses the
+          <code>rewind</code> next to it:
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> curl -L https://github.com/fzakaria/rewindvm/releases/latest/download/rewind-app-x86_64-linux.tar.gz | tar -xz -C ~/.local/opt</span>
+        ><code><span class="cmd"><span class="prompt">$</span> curl -L https://github.com/fzakaria/rewindvm/releases/latest/download/rewind-debug-x86_64-linux.tar.gz | tar -xz -C ~/.local/opt</span>
+<span class="cmd"><span class="prompt">$</span> curl -L https://github.com/fzakaria/rewindvm/releases/latest/download/rewind-app-x86_64-linux.tar.gz | tar -xz -C ~/.local/opt</span>
 <span class="cmd"><span class="prompt">$</span> ln -s ~/.local/opt/rewind-app-x86_64-linux/bin/rewind-app ~/.local/bin/rewind-app</span></code></pre>
+        <p>
+          If <code>/dev/kvm</code> is not readable and writable by you, add yourself to the
+          <code>kvm</code> group with <code>sudo usermod -aG kvm $USER</code> and log in again.
+        </p>
+        <p>
+          Runs are kept under <code>~/.local/share/rewind</code>. Set <code>REWIND_HOME</code> to
+          keep them somewhere else.
+        </p>
       </section>
 
       <section class="step">
-        <h2 id="build-the-image-and-export-its-filesystem">
-          <a class="anchor" href="#build-the-image-and-export-its-filesystem"
-            >Build the image and export its filesystem</a
-          >
-        </h2>
+        <h2 id="the-flaky-test"><a class="anchor" href="#the-flaky-test">The flaky test</a></h2>
         <p>
-          Next to mylib's source is a Containerfile that installs a compiler on Debian, copies the
-          source to <code>/src</code> and builds it:
+          Clone the repository and build the image. The Containerfile installs a compiler on Debian,
+          copies mylib's source to <code>/src</code> and builds it:
         </p>
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> git clone https://github.com/fzakaria/rewindvm</span>
 <span class="cmd"><span class="prompt">$</span> cd rewindvm/examples/mylib</span>
-<span class="cmd"><span class="prompt">$</span> docker build -t mylib -f Containerfile .</span>
-<span class="cmd"><span class="prompt">$</span> docker export $(docker create mylib) -o mylib.tar</span></code></pre>
+<span class="cmd"><span class="prompt">$</span> docker build -t mylib -f Containerfile .</span></code></pre>
         <p>
-          <code>rewind</code> runs a command in any root filesystem: a directory, or a tarball like
-          the one <code>docker export</code> writes. It converts the tarball once into a read-only
-          erofs image and caches it by the tarball's hash. The VM mounts it under a writable
-          overlay, so the command can write anywhere, and nothing it writes reaches your disk.
+          The image's command is <code>make check</code>. On the host,
+          <code>docker run --rm mylib</code> usually passes. Run 60 times on the laptop, it failed 3
+          times, each time in the shutdown test:
+        </p>
+        <pre
+          class="console"
+        ><code><span class="cmd"><span class="prompt">$</span> docker run --rm mylib</span>
+running tests/test_pool_basic
+...
+running tests/test_pool_shutdown
+...
+worker picked job 17
+job 16 done: 5986
+Segmentation fault (core dumped)
+make: *** [Makefile:18: check] Error 1</code></pre>
+        <p>
+          The container is gone when it exits. Running it again usually passes, so there is nothing
+          left to look at.
         </p>
       </section>
 
       <section class="step">
-        <h2 id="run-the-tests"><a class="anchor" href="#run-the-tests">Run the tests</a></h2>
+        <h2 id="run-it-in-rewind-vm">
+          <a class="anchor" href="#run-it-in-rewind-vm">Run it in Rewind VM</a>
+        </h2>
+        <p>
+          <code>rewind</code> runs a command in any root filesystem: a directory, or a tarball like
+          the one <code>docker export</code> writes:
+        </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind run --root mylib.tar --cwd /src -- make check</span>
+        ><code><span class="cmd"><span class="prompt">$</span> docker export $(docker create mylib) -o mylib.tar</span>
+<span class="cmd"><span class="prompt">$</span> rewind run --root mylib.tar --cwd /src -- make check</span>
 ...
 round 3: ok
 test_pool_shutdown: ok
-rewind: run d00e369998976986 exited:0 after 1317 steps, 0.019s virtual, 0.676s wall (poweroff)</code></pre>
+rewind: run a90bb947758190d9 exited:0 after 1317 steps, 0.019s virtual, 0.554s wall (poweroff)</code></pre>
         <p>
-          On AMD, until <code>sudo rewind pmu enable</code> has been run since boot,
-          <code>rewind</code> first prints a warning that begins
+          <code>rewind</code> converts the tarball once into a read-only erofs image and caches it
+          by the tarball's hash. The VM mounts it under a writable overlay, so the command can write
+          anywhere, and nothing it writes reaches your disk.
+        </p>
+        <p>
+          The run used counter time: the VM's clock follows the work done inside it. On AMD, until
+          <code>sudo rewind pmu enable</code> has been run since boot, <code>rewind</code> instead
+          prints a warning that begins
           <code
             >rewind: recording with exit time: this AMD CPU's branch counter is not exact until rr's
             workaround is set.</code
           >
-          and records with exit time, where the VM's clock does not follow the work done inside it.
-          <a href="../counter-time.html">Counter time</a> explains the difference.
+          and records with exit time. <a href="../counter-time.html">Counter time</a> explains the
+          difference.
         </p>
         <p>
-          The tests pass, and they pass every time with this root and this command: runs in Rewind
-          VM are deterministic, and the run's id is the hash of its inputs. Your image, and so your
-          run ids, will differ from these.
+          The tests pass, and they pass every time: the same inputs make the same run, down to the
+          same 1317 steps. A step is one exit from the VM to Rewind, and the step count is the run's
+          clock. The run's id is the hash of its inputs, so your image, and so your run ids, will
+          differ from these.
         </p>
       </section>
 
@@ -161,32 +191,39 @@ rewind: run d00e369998976986 exited:0 after 1317 steps, 0.019s virtual, 0.676s w
         <h2 id="find-a-failing-interleaving">
           <a class="anchor" href="#find-a-failing-interleaving">Find a failing interleaving</a>
         </h2>
+        <p>
+          Determinism means the unperturbed run will never show the bug.
+          <code>rewind check</code> runs the command again under perturbed schedules. Each schedule
+          asks the VM's kernel to reschedule at different points and lets timers fire a little late,
+          as timer slack does on real hardware. It runs one machine per CPU at a time and stops
+          after the first batch in which a run ends differently:
+        </p>
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind check --root mylib.tar --cwd /src -- make check</span>
-schedule   0: exited:0             1317 steps    run d00e369998976986
-schedule   1: exited:0             1524 steps    run 12300937c6130857
-schedule   2: exited:0             1587 steps    run 533c74ef11858204
-schedule   3: exited:0             1473 steps    run 26f4d1bd5a69d9b7
-schedule   4: exited:0             1617 steps    run b78e2920e7455352
-schedule   5: exited:2             1018 steps    run 939d3cf94b1f7a12
-schedule   6: exited:0             1563 steps    run 72354cfb2c37f531
-schedule   7: exited:0             1453 steps    run a84f038d8174f31d
-schedule   8: exited:0             1528 steps    run 1da554257a5a384a
-schedule   9: exited:0             1521 steps    run 4dfcedc55bd552a8
-schedule  10: exited:0             1686 steps    run e14f4aeb18346cdd
-schedule  11: exited:0             1586 steps    run 94f1f2adea406cd9
-schedule  12: exited:0             1631 steps    run 88b99f1ffbf33d97
-schedule  13: exited:0             1522 steps    run 5ceff7ba2f191458
-schedule  14: exited:0             1602 steps    run d224aa8e86d53764
-schedule  15: exited:0             1543 steps    run 45bd80dec65a6725
-schedule  16: exited:0             1516 steps    run 5a80b9a1be1c01d5
+schedule   0: exited:0             1317 steps    run a90bb947758190d9
+schedule   1: exited:0             1524 steps    run 31ce61139a1f78fb
+schedule   2: exited:0             1587 steps    run c37c5d2c467a362e
+schedule   3: exited:0             1473 steps    run 3b47ad4fefde760a
+schedule   4: exited:0             1617 steps    run e96c2974eaa258f9
+schedule   5: exited:2             1018 steps    run 575d788493e0f64e
+schedule   6: exited:0             1563 steps    run 5f619cf236985958
+schedule   7: exited:0             1453 steps    run b63698cfaeaff76e
+schedule   8: exited:0             1528 steps    run 59fb9dc2eea19b6a
+schedule   9: exited:0             1521 steps    run 8a4e83bcd3fad142
+schedule  10: exited:0             1686 steps    run 58b08ddfebab7961
+schedule  11: exited:0             1586 steps    run b5005c3049b352e2
+schedule  12: exited:0             1631 steps    run b95bf7b786cc7af5
+schedule  13: exited:0             1522 steps    run 06d6db68b426af2f
+schedule  14: exited:0             1602 steps    run 374353673db62f59
+schedule  15: exited:0             1543 steps    run 2dd2991c0c946d0e
+schedule  16: exited:0             1516 steps    run f9cd2e9f420d4e89
 
 schedule 5 ends differently; narrowing the steps it perturbs
 perturbing only steps 586..690 still ends differently
 
-passing: run d00e369998976986
-failing: run 6c1d2710b2516089
+passing: run a90bb947758190d9
+failing: run eb9e5c661312d075
 
 where ./tests/test_pool_shutdown first behaves differently:
   both         659    39/41    write(1, "job 14 done: 39906\n")
@@ -201,63 +238,84 @@ where ./tests/test_pool_shutdown first behaves differently:
   right        696    39/40    SIGSEGV code=1 addr=0x108
   right        698    39/39    SIGSEGV code=0 addr=0x0</code></pre>
         <p>
-          <code>check</code> runs the command again under perturbed schedules, one machine per CPU
-          at a time: at some points the VM's kernel is asked to reschedule, and timers fire a little
-          late, as timer slack does on real hardware, and now and then a task is stalled for a
-          moment. Schedule 5 makes the test crash. <code>check</code> narrows its perturbation to
-          steps 586 to 690 and keeps that run. The last block shows where the test's own events
-          first differ: up to job 15 both runs agree; then in the passing run the workers finish and
-          exit, while in the failing run a worker is still finishing job 16 when shutdown runs, and
-          crashes right after.
+          Schedule 5 fails. <code>check</code> then narrows its perturbation to the smallest window
+          that still changes the outcome, here steps 586 to 690. It keeps two runs: the unperturbed
+          one and the failing one with the narrowed window. The two are identical up to step 586.
         </p>
         <p>
-          This took 5 seconds. <code>--all</code> tries every schedule and reports a failure rate:
+          The last block compares only the failing program's own events. Up to job 15 both runs
+          agree. Then in the passing run the workers finish and exit, while in the failing run a
+          worker is still finishing job 16 when shutdown runs, and the other worker crashes right
+          after.
+        </p>
+        <p>
+          <code>rewind check --all</code> tries every schedule and says how many failed, which
+          measures how flaky a test is:
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind check --all --schedules 32 --root mylib.tar --cwd /src -- make check | grep 'ended differently'</span>
-3 of 32 perturbed schedules ended differently</code></pre>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind check --all --root mylib.tar --cwd /src -- make check | grep 'ended differently'</span>
+11 of 64 perturbed schedules ended differently</code></pre>
       </section>
 
       <section class="step">
-        <h2 id="look-at-it-and-keep-it">
-          <a class="anchor" href="#look-at-it-and-keep-it">Look at it, and keep it</a>
+        <h2 id="look-at-the-failure">
+          <a class="anchor" href="#look-at-the-failure">Look at the failure</a>
         </h2>
         <p>
-          The failing run's last output, the processes alive at its SIGSEGV (step 696, which
-          <code>rewind events 6c1d2710</code> shows), and a replay:
+          A failing run is kept like any other. It is a directory holding its inputs and every event
+          with its step.
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind log 6c1d2710 --steps | tail -3</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind log eb9e5c66 --steps | tail -4</span>
+       684    39  job 16 done: 5986
        685    39  worker picked job 17
        714    35  Segmentation fault
-       720    34  make: *** [Makefile:18: check] Error 1
-
-<span class="cmd"><span class="prompt">$</span> rewind ps 6c1d2710 --at 696</span>
+       720    34  make: *** [Makefile:18: check] Error 1</code></pre>
+        <p>
+          The events around the crash show the kernel's own report, with the faulting instruction:
+        </p>
+        <pre
+          class="console"
+        ><code><span class="cmd"><span class="prompt">$</span> rewind events eb9e5c66 --from 680 --to 698</span>
+       681    39/40    write(1, "job 15 done: 42559\n")
+       684    39/41    write(1, "job 16 done: 5986\n")
+       685    39/41    write(1, "worker picked job 17\n")
+       694     0/0     console "[    0.013444] test_pool_shutd[40]: segfault at 108 ip 000055b38aab7412 sp 00007f0ec92d1ea0 error 6 in test_pool_shutdown[1412,55b38aab7000+1000] likely on CPU 0 (core 0, socket 0)"
+       695     0/0     console "[    0.013449] Code: 5f c3 0f b7 d3 44 89 f6 48 8d 3d 48 0c 00 00 b8 00 00 00 00 e8 6f fc ff ff 48 8b 3d 90 2c 00 00 e8 c3 fc ff ff 49 8b 44 24 58 &lt;83&gt; 80 08 01 00 00 01 e9 c6 fe ff ff 55 53 48 83 ec 08 be 78 00 00"
+       696    39/40    SIGSEGV code=1 addr=0x108
+       698    39/39    SIGSEGV code=0 addr=0x0</code></pre>
+        <p>
+          The instruction marked <code>&lt;83&gt; 80 08 01 00 00 01</code> is
+          <code>addl $1, 0x108(%rax)</code>: <code>p-&gt;queue-&gt;completed++</code> with
+          <code>p-&gt;queue</code> null, 0x108 bytes into the queue.
+        </p>
+        <p>The processes alive at the crash:</p>
+        <pre
+          class="console"
+        ><code><span class="cmd"><span class="prompt">$</span> rewind ps eb9e5c66 --at 696</span>
      1 /init
     34   make check
     35     /bin/sh -c for t in tests/test_pool_basic tests/test_pool_shutdown; do echo "running $t"; ./$t || exit 1; done
     39       ./tests/test_pool_shutdown
     40         (thread)
-    41         (thread)
+    41         (thread)</code></pre>
+      </section>
 
-<span class="cmd"><span class="prompt">$</span> rewind replay 6c1d2710</span>
-identical: 280 events over 730 steps</code></pre>
+      <section class="step">
+        <h2 id="look-inside-the-vm">
+          <a class="anchor" href="#look-inside-the-vm">Look inside the VM</a>
+        </h2>
         <p>
-          <code>replay</code> runs the failing run's inputs again and checks every event comes out
-          the same, at the same step. The failure is now a directory you can keep and bring back
-          exactly. The VM sees a fixed x86-64-v3 CPU model, so a run replays on other machines with
-          the same CPU vendor: one recorded on AMD replays on AMD from Zen 2 on, and not on Intel.
-        </p>
-        <p>
-          <code>rewind cat</code> and <code>rewind shell</code> look inside the VM at a step, in a
-          throwaway fork of the run, so nothing they do changes it. At the SIGSEGV, the source the
-          test was built from, and a shell in the test program's working directory:
+          <code>rewind cat</code>, <code>rewind shell</code> and <code>rewind gdb</code> each work
+          on a throwaway fork of the run at a step, so nothing they do changes the run. At the
+          SIGSEGV, step 696, here are the source the test was built from and a shell in the test
+          program's working directory:
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind cat 6c1d2710 696 src/pool.c --pid 39 | sed -n '/^void pool_shutdown/,/^}/p'</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind cat eb9e5c66 696 src/pool.c --pid 39 | sed -n '/^void pool_shutdown/,/^}/p'</span>
 void pool_shutdown(struct pool *p)
 {
 	pthread_mutex_lock(&amp;p-&gt;lock);
@@ -276,30 +334,183 @@ void pool_shutdown(struct pool *p)
 	free(p);
 }
 
-<span class="cmd"><span class="prompt">$</span> printf 'pwd; ls; exit\n' | rewind shell 6c1d2710 696 --pid 39</span>
-rewind: a shell at step 696 of 6c1d2710b2516089; exit it to leave
+<span class="cmd"><span class="prompt">$</span> printf 'pwd; ls; exit\n' | rewind shell eb9e5c66 696 --pid 39</span>
+rewind: a shell at step 696 of eb9e5c661312d075; exit it to leave
 [rewind] /src # pwd; ls; exit
 /src
 Containerfile  Makefile  libmylib.a  src  tests</code></pre>
-        <p>To scrub it in the desktop app:</p>
+        <p>
+          <code>--pid 39</code> resolves the path, and starts the shell, in the test program's root
+          and working directory.
+        </p>
+        <p>
+          <code>rewind gdb</code> attaches gdb to a fork at a step, with symbols for the VM's kernel
+          and for the process that was running there: its program and libraries, loaded where the
+          process had them. The test program and Debian's libc exist only inside the VM, so Rewind
+          copies them out, with the source files the program was built from. Arguments after
+          <code>--</code> go to gdb. Step 681 is thread 40 printing <code>job 15 done</code>, the
+          last thing it does before the line that faulted. Continuing the fork to that line, once
+          the queue is gone, shows the crash in the test's own code:
+        </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind-app ~/.local/share/rewind/runs/6c1d2710b2516089 --compare ~/.local/share/rewind/runs/d00e369998976986</span></code></pre>
+        ><code><span class="cmd"><span class="prompt">$</span> DEBUGINFOD_URLS=https://debuginfod.debian.net rewind gdb eb9e5c66 681 -- -batch -ex 'break src/pool.c:77 if p-&gt;queue == 0' -ex continue -ex 'bt 3' -ex 'p p-&gt;queue' -ex list</span>
+rewind: step 681 ran in process 39; loading symbols for 3 of its files
+rewind: fetched 12 source files from the VM
+rewind: gdb at step 681 of eb9e5c661312d075
+0xffffffff81285085 in __outl (value=&lt;optimized out&gt;, port=1504) at ./arch/x86/include/asm/shared/io.h:24
+24	BUILDIO(l,  , u32)
+Breakpoint 1 at 0x55b38aab740d: file src/pool.c, line 77.
+
+Breakpoint 1, worker (arg=0x55b38f77c2a0) at src/pool.c:77
+77				p-&gt;queue-&gt;completed++;
+#0  worker (arg=0x55b38f77c2a0) at src/pool.c:77
+#1  0x00007f0ec935f1f5 in start_thread (arg=&lt;optimized out&gt;) at ./nptl/pthread_create.c:442
+#2  0x00007f0ec93df8ec in clone3 () at ../sysdeps/unix/sysv/linux/x86_64/clone3.S:81
+$1 = (struct queue *) 0x0
+72			 * the bug. */
+73			long result = run_job(job);
+74			if (!p-&gt;stopping) {
+75				printf("job %d done: %ld\n", job, result &amp; 0xffff);
+76				fflush(stdout);
+77				p-&gt;queue-&gt;completed++;
+78			}
+79		}
+80	}
+81
+[Inferior 1 (process 1) detached]</code></pre>
+        <p>
+          gdb starts where the step left the VM: in the kernel, reporting the thread's write to
+          Rewind. The breakpoint is one of the CPU's debug registers, so the fork runs on unchanged
+          until thread 40 reaches line 77 with <code>p-&gt;queue</code> null, the access the kernel
+          reported at 0x108. The kernel's symbols and source files come from the debug tarball
+          unpacked next to <code>rewind</code>. Debian strips its libc, and Debian runs a public
+          debuginfod server with the debug symbols of every package it ships;
+          <code>DEBUGINFOD_URLS</code> names it, and gdb fetches libc's by build ID. That is where
+          <code>start_thread</code> and its source line come from. Images built on Fedora, Ubuntu or
+          Arch have servers of their own, listed by
+          <a href="https://sourceware.org/elfutils/Debuginfod.html">elfutils</a>. Without
+          <code>--</code>, gdb stays open for you to type into.
+        </p>
       </section>
 
       <section class="step">
-        <h2 id="check-the-fix"><a class="anchor" href="#check-the-fix">Check the fix</a></h2>
+        <h2 id="replay-it"><a class="anchor" href="#replay-it">Replay it</a></h2>
+        <p>A failing run fails the same way every time it runs:</p>
+        <pre
+          class="console"
+        ><code><span class="cmd"><span class="prompt">$</span> rewind replay eb9e5c66</span>
+identical: 280 events over 730 steps
+
+<span class="cmd"><span class="prompt">$</span> rewind replay eb9e5c66 --from 600</span>
+identical from the keyframe at step 512 to the end (0.27s)</code></pre>
         <p>
-          Fix <code>pool_shutdown</code> in <code>src/pool.c</code> as
-          <a href="nix.html#fix-it-and-check-the-fix">the Nix tutorial</a> does, rebuild the image,
-          export it, and check again:
+          <code>rewind</code> keeps keyframes while a run executes: snapshots of the machine, with
+          memory stored once per distinct page. <code>--from</code> restores the keyframe at or
+          before a step and runs from there. A keyframe that did not reproduce the rest of the run
+          exactly would make that command say so.
         </p>
+        <p>
+          The VM sees a fixed x86-64-v3 CPU model, so a run replays on other machines with the same
+          CPU vendor: one recorded on AMD replays on AMD from Zen 2 on, and not on Intel.
+        </p>
+      </section>
+
+      <section class="step">
+        <h2 id="fork-it"><a class="anchor" href="#fork-it">Fork it</a></h2>
+        <p>
+          A fork is a run that is its parent up to a step, then explores another schedule from
+          there:
+        </p>
+        <pre
+          class="console"
+        ><code><span class="cmd"><span class="prompt">$</span> rewind fork a90bb947 586 --schedule 5 --quiet</span>
+rewind: run de4c9d4a2c6ea2bf exited:2 after 737 steps, 0.014s virtual, 0.304s wall (poweroff)
+rewind: the fork first differs from its parent at step 598
+
+<span class="cmd"><span class="prompt">$</span> rewind fork a90bb947 586 --schedule 6 --quiet</span>
+rewind: run 5f1f16bdabd39c5f exited:0 after 1520 steps, 0.022s virtual, 0.266s wall (poweroff)
+rewind: the fork first differs from its parent at step 598
+
+<span class="cmd"><span class="prompt">$</span> rewind fork a90bb947 586 --schedule 7 --quiet</span>
+rewind: run d318f75da5efa75d exited:0 after 1480 steps, 0.021s virtual, 0.262s wall (poweroff)
+rewind: the fork first differs from its parent at step 598
+
+<span class="cmd"><span class="prompt">$</span> rewind fork a90bb947 586 --schedule 8 --quiet</span>
+rewind: run f767eb53f74b0184 exited:2 after 1518 steps, 0.021s virtual, 0.267s wall (poweroff)
+rewind: the fork first differs from its parent at step 598</code></pre>
+        <p>
+          Forked from the passing run at step 586, where <code>check</code>'s window starts,
+          schedules 5 and 8 crash and schedules 6 and 7 pass. So the bug can be reached from that
+          step by more than the one interleaving <code>check</code> found.
+        </p>
+      </section>
+
+      <section class="step">
+        <h2 id="scrub-it-in-the-app">
+          <a class="anchor" href="#scrub-it-in-the-app">Scrub it in the app</a>
+        </h2>
+        <p>
+          The desktop app shows the same run on a timeline. Drag the playhead to any step to see the
+          test's output up to that step, the processes alive, the files written, and the event at
+          the step. Jump to the failure, jump to where the failing run left the passing one, and
+          fork from the playhead.
+        </p>
+        <figure class="shot">
+          <picture>
+            <source srcset="../img/app-container.webp" type="image/webp" />
+            <img
+              src="../img/app-container.png"
+              width="1440"
+              height="900"
+              loading="lazy"
+              alt="The Rewind desktop app on a failing fork of the mylib container run: the timeline with the playhead at step 696, the test's output, the process tree, and the SIGSEGV at 0x108 next to where the run diverged from its parent at step 684"
+            />
+          </picture>
+          <figcaption>
+            The app on a failing mylib fork, compared with the passing run it was forked from.
+          </figcaption>
+        </figure>
+        <pre
+          class="console"
+        ><code><span class="cmd"><span class="prompt">$</span> rewind-app ~/.local/share/rewind/runs/eb9e5c661312d075 --compare ~/.local/share/rewind/runs/a90bb947758190d9</span></code></pre>
+      </section>
+
+      <section class="step">
+        <h2 id="fix-it-and-check-the-fix">
+          <a class="anchor" href="#fix-it-and-check-the-fix">Fix it and check the fix</a>
+        </h2>
+        <p>
+          In <code>src/pool.c</code>, count the finished job under the lock, and free the queue only
+          after the workers are joined:
+        </p>
+        <pre class="console diff"><code><span class="ctx"> 		long result = run_job(job);</span>
+<span class="add">+		pthread_mutex_lock(&amp;p-&gt;lock);</span>
+<span class="ctx"> 		if (!p-&gt;stopping) {</span>
+<span class="ctx"> 			printf("job %d done: %ld\n", job, result &amp; 0xffff);</span>
+<span class="ctx"> 			fflush(stdout);</span>
+<span class="ctx"> 			p-&gt;queue-&gt;completed++;</span>
+<span class="ctx"> 		}</span>
+<span class="add">+		pthread_mutex_unlock(&amp;p-&gt;lock);</span>
+<span class="ctx"> 	}</span>
+<span class="ctx"> }</span>
+<span class="hunk">@@</span>
+<span class="del">-	/* The bug: the queue goes before the workers are joined. */</span>
+<span class="del">-	free(p-&gt;queue);</span>
+<span class="del">-	p-&gt;queue = NULL;</span>
+<span class="del">-</span>
+<span class="ctx"> 	for (int i = 0; i &lt; POOL_WORKERS; i++)</span>
+<span class="ctx"> 		pthread_join(p-&gt;workers[i], NULL);</span>
+<span class="add">+	free(p-&gt;queue);</span>
+<span class="add">+	p-&gt;queue = NULL;</span></code></pre>
+        <p>Rebuild the image, export it, and check again:</p>
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> docker build -t mylib -f Containerfile . &amp;&amp; docker export $(docker create mylib) -o mylib.tar</span>
 <span class="cmd"><span class="prompt">$</span> rewind check --all --root mylib.tar --cwd /src -- make check | tail -2</span>
 0 of 64 perturbed schedules ended differently
 same result under all 65 schedules</code></pre>
+        <p>Before the fix, 11 of the same 64 schedules crashed.</p>
       </section>
 
       <section class="step">
@@ -319,18 +530,37 @@ same result under all 65 schedules</code></pre>
           </li>
           <li>The container runs with no network.</li>
         </ul>
-        <p>
-          <a href="https://github.com/fzakaria/rewindvm/blob/main/docs/design.md#limits">Design</a>
-          has the full list of limits, and how the machine is made deterministic.
-        </p>
+      </section>
+
+      <section class="step">
+        <h2 id="what-to-read-next">
+          <a class="anchor" href="#what-to-read-next">What to read next</a>
+        </h2>
+        <ul>
+          <li>
+            <a href="nix.html">The Nix tutorial</a> does the same with a Nix derivation instead of
+            an image.
+          </li>
+          <li>
+            <a href="../counter-time.html">Counter time</a> explains how the VM's clock follows its
+            work, and the exit time warning on AMD.
+          </li>
+          <li>
+            <a href="https://github.com/fzakaria/rewindvm/blob/main/docs/design.md">Design</a>
+            explains how the machine is made deterministic, and where that stops;
+            <a href="https://github.com/fzakaria/rewindvm/blob/main/docs/design.md#limits"
+              >its list of limits</a
+            >
+            is the full one.
+          </li>
+        </ul>
       </section>
 
       <a class="card next" href="nix.html">
         <span class="eyebrow">Tutorial &middot; Nix</span>
         <span class="next-title">A flaky Nix build</span>
         <span class="next-text"
-          >The same bug as a Nix derivation, with more on inspecting the failure, forking it and
-          fixing it.</span
+          >The same bug as a Nix derivation, built the way the Nix sandbox would.</span
         >
       </a>
     </main>
