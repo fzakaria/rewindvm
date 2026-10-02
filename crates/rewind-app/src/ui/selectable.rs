@@ -793,7 +793,7 @@ impl Scrubber {
                 )));
             }
             // On a schedule 0 run, its folding row or a run from boot under
-            // it, the runs that ended the same way show or fold from here
+            // it, the runs that ended as it did show or fold from here
             // as well as from their row.
             if let Some((under, kind)) = menu.line.and_then(|i| self.fold_for_row(i)) {
                 let label = match kind {

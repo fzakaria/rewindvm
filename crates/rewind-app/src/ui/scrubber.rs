@@ -237,7 +237,7 @@ pub struct Scrubber {
     pub(super) runs_scroll: UniformListScrollHandle,
     /// Whether identical forks are being removed.
     pub(super) pruning: bool,
-    /// The schedule 0 runs whose runs from boot that ended the same way
+    /// The schedule 0 runs whose runs from boot that ended as they did
     /// the Runs panel shows one by one instead of folded into one row.
     pub(super) runs_unfolded: HashSet<String>,
     /// The Open link dialog, when it is open.

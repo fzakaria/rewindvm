@@ -197,10 +197,16 @@ impl Row {
         match self.kind {
             RowKind::Run => {}
             RowKind::Folded { count } => {
-                return format!("{count} more at boot ended the same \u{b7} show");
+                return format!(
+                    "{count} more at boot ended like {} \u{b7} show",
+                    short_id(&self.run.id)
+                );
             }
             RowKind::Unfolded { count } => {
-                return format!("hide the {count} at boot that ended the same");
+                return format!(
+                    "hide the {count} at boot that ended like {}",
+                    short_id(&self.run.id)
+                );
             }
         }
         let run = &self.run;
@@ -980,10 +986,7 @@ mod tests {
                 row("s4", 1),
             ]
         );
-        assert_eq!(
-            rows[2].detail(),
-            "2 more at boot ended the same \u{b7} show"
-        );
+        assert_eq!(rows[2].detail(), "2 more at boot ended like r \u{b7} show");
         assert!(rows[5].graph.last);
 
         // Unfolded, the row stays where it was, to fold them again, and
@@ -992,7 +995,7 @@ mod tests {
         let rows = swept().rows_folded(&open, &[]);
         assert_eq!(rows.len(), 8);
         assert_eq!(rows[2].kind, RowKind::Unfolded { count: 2 });
-        assert_eq!(rows[2].detail(), "hide the 2 at boot that ended the same");
+        assert_eq!(rows[2].detail(), "hide the 2 at boot that ended like r");
         assert_eq!(rows[3].run.id, "s1");
     }
 
