@@ -45,11 +45,12 @@
       <p>
         The website uses Google Analytics to count visits and see what people use: which pages they
         read, where they came from, whether they reach the pricing and download sections, which Buy
-        button they press and which install command they copy. Google Analytics sets cookies to tell
-        one visit from the next. In the European Economic Area, the United Kingdom and Switzerland
-        it sets no cookies and sends Google only a cookieless notice of each page view. Google's
-        advertising features are turned off, so none of this is used for ads. Google processes the
-        data under
+        button they press, which install command they copy and whether a visit ends in a purchase.
+        To tie a purchase to its visit, the Buy buttons pass Stripe the random visitor id Google
+        Analytics uses, and nothing else about you. Google Analytics sets cookies to tell one visit
+        from the next. In the European Economic Area, the United Kingdom and Switzerland it sets no
+        cookies and sends Google only a cookieless notice of each page view. Google's advertising
+        features are turned off, so none of this is used for ads. Google processes the data under
         <a href="https://policies.google.com/privacy">Google's privacy policy</a>. A content blocker
         that blocks Google Analytics leaves the site working as before.
       </p>

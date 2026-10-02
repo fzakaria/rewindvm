@@ -1,6 +1,7 @@
 // Google Analytics 4 for rewindvm.dev, and the site's own events: which
 // header links people follow, how far down the home page they get, which
-// Buy button they press and which install command they copy. Every page
+// Buy button they press, which install command they copy, and the sale
+// itself when Stripe sends the buyer back to the thank-you page. Every page
 // loads gtag.js from Google next to this file. The desktop app and the
 // engine send nothing anywhere; this is the website only.
 (() => {
@@ -57,6 +58,7 @@
   const EVENT_SECTION = "view_section";
   const EVENT_CHECKOUT = "begin_checkout";
   const EVENT_COPY_INSTALL = "copy_install";
+  const EVENT_PURCHASE = "purchase";
 
   // The license prices, in dollars, by data-edition on the Buy buttons.
   const CURRENCY = "USD";
@@ -67,6 +69,44 @@
 
   // How much of a section must be on screen to count as seen.
   const SEEN_SHARE = 0.25;
+
+  // Stripe's Payment Links send the buyer to the thank-you page with the
+  // checkout session's id and the edition bought in the query string.
+  const THANKS_PATH = /\/thanks(\.html)?$/;
+  const SESSION_PARAM = "session_id";
+  const EDITION_PARAM = "edition";
+
+  // The Buy links carry the visitor's GA client id to Stripe in this
+  // parameter, so a sale can later be tied to the visit that made it.
+  // Stripe takes letters, digits, dashes and underscores only, and GA's
+  // client id has a dot, so anything else becomes a dash.
+  const REFERENCE_PARAM = "client_reference_id";
+  const NOT_REFERENCE_CHARS = /[^A-Za-z0-9_-]/g;
+  const REFERENCE_SEPARATOR = "-";
+
+  // Runs RUN once the page's elements exist; this file loads in <head>.
+  function whenReady(run) {
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", run);
+      return;
+    }
+    run();
+  }
+
+  // GA4's ecommerce fields for one license of EDITION.
+  function license(edition) {
+    return {
+      currency: CURRENCY,
+      value: PRICES[edition],
+      items: [
+        {
+          item_id: edition,
+          item_name: `Rewind VM ${edition}`,
+          price: PRICES[edition],
+        },
+      ],
+    };
+  }
 
   // gtag.js reads its commands from this queue.
   window.dataLayer = window.dataLayer || [];
@@ -113,19 +153,44 @@
       return;
     }
 
-    const edition = button.dataset.edition;
-    gtag("event", EVENT_CHECKOUT, {
-      currency: CURRENCY,
-      value: PRICES[edition],
-      items: [
-        {
-          item_id: edition,
-          item_name: `Rewind VM ${edition}`,
-          price: PRICES[edition],
-        },
-      ],
+    gtag("event", EVENT_CHECKOUT, license(button.dataset.edition));
+  });
+
+  // The Buy links, once gtag.js knows the visitor's client id: pass it to
+  // Stripe as the checkout's client reference.
+  gtag("get", MEASUREMENT_ID, "client_id", (clientId) => {
+    if (!clientId) {
+      return;
+    }
+
+    const reference = String(clientId).replace(
+      NOT_REFERENCE_CHARS,
+      REFERENCE_SEPARATOR,
+    );
+    whenReady(() => {
+      for (const link of document.querySelectorAll("a[data-edition]")) {
+        const url = new URL(link.href);
+        url.searchParams.set(REFERENCE_PARAM, reference);
+        link.href = url.toString();
+      }
     });
   });
+
+  // The sale, on the thank-you page. The checkout session id is the
+  // transaction id, so GA4 counts a reload of the page only once.
+  const query = new URLSearchParams(window.location.search);
+  const session = query.get(SESSION_PARAM);
+  const bought = query.get(EDITION_PARAM);
+  if (
+    THANKS_PATH.test(window.location.pathname) &&
+    session &&
+    Object.hasOwn(PRICES, bought)
+  ) {
+    gtag("event", EVENT_PURCHASE, {
+      transaction_id: session,
+      ...license(bought),
+    });
+  }
 
   // Install commands: a copy from any block marked data-install counts,
   // whether by keyboard, menu or a selection.
@@ -164,7 +229,7 @@
     },
     { threshold: SEEN_SHARE },
   );
-  document.addEventListener("DOMContentLoaded", () => {
+  whenReady(() => {
     for (const id of WATCHED_SECTIONS) {
       const section = document.getElementById(id);
       if (!section) {
