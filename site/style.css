@@ -987,6 +987,16 @@ a:focus-visible {
   margin-top: 1.6em;
   font-size: 1.35rem;
 }
+/* The promise readers come to the privacy page for, set apart in the
+   accent like the pricing page's highlighted plan. */
+.prose .promise {
+  border-left: 3px solid var(--amber);
+  border-radius: 0 10px 10px 0;
+  background: linear-gradient(90deg, rgba(242, 165, 65, 0.1), transparent);
+  padding: 12px 18px;
+  color: var(--text);
+  font-weight: 500;
+}
 
 /* A screenshot of the real app: a framed image with its caption below. */
 /* Only the top margin: the features band centres its children, and the
