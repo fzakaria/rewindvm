@@ -7,14 +7,15 @@
 //! and the environment is set up the way the Nix sandbox sets it up, so
 //! the builder cannot tell the difference.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use nix_derivation::store_path::hash_placeholder;
-use nix_derivation::{StorePath, StructuredAttrsFiles, nixbase32};
+use nix_derivation::{NixHash, StorePath, StructuredAttrsFiles, nixbase32};
 use rewind_init::{Job, JobFile, Root};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 pub const STORE: &str = "/nix/store";
@@ -45,13 +46,37 @@ pub struct Derivation {
     pub input_srcs: Vec<PathBuf>,
     /// Input derivations and the outputs of each this one uses.
     pub input_drvs: Vec<(PathBuf, Vec<String>)>,
-    /// The .attrs.json and .attrs.sh a derivation with
-    /// `__structuredAttrs = true` gives its build in place of `env`.
-    pub structured_attrs: Option<StructuredAttrsFiles>,
     /// Whether the output is fixed by a hash given up front, as a
     /// fetcher's is.
     pub fixed_output: bool,
+    /// The store paths whose closures exportReferencesGraph asks for, by
+    /// the name the build reads each closure under.
+    pub reference_graphs: BTreeMap<String, BTreeSet<PathBuf>>,
+    /// The derivation as Nix wrote it, which the .attrs.json and .attrs.sh
+    /// of `__structuredAttrs = true` are written from.
+    parsed: nix_derivation::Derivation,
 }
+
+/// What a store holds about one path of a reference graph's closure, as
+/// nix-daemon hands it to the build.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PathInfo {
+    pub path: PathBuf,
+    /// The hash of the path's NAR serialisation, as `sha256:<nix32>`.
+    pub nar_hash: String,
+    pub nar_size: u64,
+    pub references: BTreeSet<PathBuf>,
+    /// The path's content address, for a content-addressed path.
+    pub ca: Option<String>,
+    /// The NAR size of the path's whole closure.
+    pub closure_size: u64,
+}
+
+/// Each closure exportReferencesGraph asks for, by name, in path order.
+pub type ReferenceGraphs = BTreeMap<String, Vec<PathInfo>>;
+
+/// The attribute naming the closures a derivation wants described.
+const EXPORT_REFERENCES_GRAPH: &str = "exportReferencesGraph";
 
 /// The prefix of a builder nix-daemon runs itself, such as
 /// builtin:fetchurl, rather than executing.
@@ -128,10 +153,9 @@ fn parse(drv: &Path, aterm: &[u8]) -> Result<Derivation> {
         ));
     }
 
-    let structured_attrs = parsed
-        .structured_attrs_files()
-        .with_context(|| format!("writing {name}'s structured attributes"))?;
     let fixed_output = parsed.is_fixed_output()?;
+    let reference_graphs = requested_graphs(&parsed, &env)
+        .with_context(|| format!("reading {name}'s {EXPORT_REFERENCES_GRAPH}"))?;
 
     Ok(Derivation {
         path: drv.to_path_buf(),
@@ -143,9 +167,83 @@ fn parse(drv: &Path, aterm: &[u8]) -> Result<Derivation> {
         outputs,
         input_srcs,
         input_drvs,
-        structured_attrs,
         fixed_output,
+        reference_graphs,
+        parsed,
     })
+}
+
+/// The closures exportReferencesGraph asks for: with structured
+/// attributes, an object from each name to store paths, in lists nested
+/// any depth; otherwise, pairs of a file name and a store path in the
+/// environment. nix-daemon ignores the attribute when the object is not
+/// one.
+fn requested_graphs(
+    parsed: &nix_derivation::Derivation,
+    env: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, BTreeSet<PathBuf>>> {
+    let mut graphs = BTreeMap::new();
+
+    if let Some(attrs) = parsed.structured_attrs() {
+        let Some(Value::Object(requested)) = attrs.get(EXPORT_REFERENCES_GRAPH) else {
+            return Ok(graphs);
+        };
+        for (name, value) in requested {
+            let mut roots = BTreeSet::new();
+            flatten_store_paths(value, &mut roots).with_context(|| format!("graph {name}"))?;
+            graphs.insert(name.clone(), roots);
+        }
+        return Ok(graphs);
+    }
+
+    let Some(value) = env.get(EXPORT_REFERENCES_GRAPH) else {
+        return Ok(graphs);
+    };
+    let tokens: Vec<&str> = value.split_whitespace().collect();
+    let (pairs, odd) = tokens.as_chunks::<2>();
+    if !odd.is_empty() {
+        bail!("odd number of tokens in {value:?}");
+    }
+    for [name, root] in pairs {
+        if !is_graph_file_name(name) {
+            bail!("invalid file name {name}");
+        }
+        graphs.insert(name.to_string(), BTreeSet::from([store_path(root)?]));
+    }
+    Ok(graphs)
+}
+
+/// Collects the store paths in `value`, a store path or lists of them.
+fn flatten_store_paths(value: &Value, out: &mut BTreeSet<PathBuf>) -> Result<()> {
+    match value {
+        Value::String(s) => {
+            out.insert(store_path(s)?);
+        }
+        Value::Array(values) => {
+            for v in values {
+                flatten_store_paths(v, out)?;
+            }
+        }
+        _ => bail!("{value} is not a store path"),
+    }
+    Ok(())
+}
+
+/// `s` as a store path, refusing anything else, a path inside one
+/// included.
+fn store_path(s: &str) -> Result<PathBuf> {
+    StorePath::from_absolute_path(s.as_bytes())
+        .with_context(|| format!("{s} is not a store path"))?;
+    Ok(PathBuf::from(s))
+}
+
+/// Whether `name` may name a reference graph's file, as nix-daemon checks
+/// it: an ASCII letter or `_`, then ASCII letters, digits, `_`, `.` and
+/// `-`.
+fn is_graph_file_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    matches!(bytes.next(), Some(b) if b.is_ascii_alphabetic() || b == b'_')
+        && bytes.all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
 }
 
 /// Builds or substitutes every input and returns the closure the build may
@@ -179,11 +277,157 @@ pub fn input_closure(drv: &Derivation) -> Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
+/// The closures the derivation's exportReferencesGraph asks for, from the
+/// host's store. Each root must be in `input_closure`, as nix-daemon
+/// requires.
+pub fn reference_graphs(drv: &Derivation, input_closure: &[PathBuf]) -> Result<ReferenceGraphs> {
+    if drv.reference_graphs.is_empty() {
+        return Ok(ReferenceGraphs::new());
+    }
+
+    // What the store holds about every root's closure.
+    let roots: BTreeSet<&PathBuf> = drv.reference_graphs.values().flatten().collect();
+    let mut infos = query_path_infos(roots.iter().copied())?;
+
+    // nix-daemon adds the closure of the outputs of each derivation in a
+    // graph, so a graph of build inputs also describes what they build.
+    let mut drv_outputs = BTreeMap::new();
+    for path in infos
+        .keys()
+        .filter(|p| p.extension().is_some_and(|e| e == "drv"))
+    {
+        let outputs: Vec<PathBuf> = show(path)?.outputs.into_iter().map(|(_, p)| p).collect();
+        drv_outputs.insert(path.clone(), outputs);
+    }
+    let outputs: BTreeSet<&PathBuf> = drv_outputs.values().flatten().collect();
+    if !outputs.is_empty() {
+        infos.extend(query_path_infos(outputs.into_iter())?);
+    }
+
+    closures(drv, input_closure, &infos, &drv_outputs)
+}
+
+/// Each requested graph's closure, given what the store holds about every
+/// path in them and the outputs of each derivation among them, as
+/// nix-daemon's exportReferences computes it.
+fn closures(
+    drv: &Derivation,
+    input_closure: &[PathBuf],
+    infos: &BTreeMap<PathBuf, PathInfo>,
+    drv_outputs: &BTreeMap<PathBuf, Vec<PathBuf>>,
+) -> Result<ReferenceGraphs> {
+    let inputs: BTreeSet<&PathBuf> = input_closure.iter().collect();
+    let mut graphs = ReferenceGraphs::new();
+    for (name, roots) in &drv.reference_graphs {
+        if let Some(root) = roots.iter().find(|r| !inputs.contains(r)) {
+            bail!(
+                "cannot export references of {} because it is not in the input closure of {}",
+                root.display(),
+                drv.name
+            );
+        }
+
+        let mut closure = closure_of(roots.iter().cloned(), infos)?;
+        let outputs: Vec<PathBuf> = closure
+            .iter()
+            .filter_map(|p| drv_outputs.get(p))
+            .flatten()
+            .cloned()
+            .collect();
+        closure.extend(closure_of(outputs.into_iter(), infos)?);
+        graphs.insert(
+            name.clone(),
+            closure.iter().map(|p| infos[p].clone()).collect(),
+        );
+    }
+    Ok(graphs)
+}
+
+/// The paths `roots` refer to, directly or not, and the roots themselves.
+fn closure_of(
+    roots: impl Iterator<Item = PathBuf>,
+    infos: &BTreeMap<PathBuf, PathInfo>,
+) -> Result<BTreeSet<PathBuf>> {
+    let mut closure = BTreeSet::new();
+    let mut todo: Vec<PathBuf> = roots.collect();
+    while let Some(path) = todo.pop() {
+        if !closure.insert(path.clone()) {
+            continue;
+        }
+        let info = infos
+            .get(&path)
+            .with_context(|| format!("the store has nothing on {}", path.display()))?;
+        todo.extend(info.references.iter().cloned());
+    }
+    Ok(closure)
+}
+
+/// What the store holds about `paths` and everything they refer to.
+fn query_path_infos<'a>(
+    paths: impl Iterator<Item = &'a PathBuf>,
+) -> Result<BTreeMap<PathBuf, PathInfo>> {
+    let paths: Vec<String> = paths.map(|p| p.to_string_lossy().into_owned()).collect();
+    let mut args = vec!["path-info", "--json", "--closure-size", "--recursive"];
+    args.extend(paths.iter().map(String::as_str));
+    let json: Value = serde_json::from_str(&nix(&args)?).context("parsing nix path-info --json")?;
+    path_infos(&json)
+}
+
+/// The paths in the output of `nix path-info --json --closure-size`: an
+/// object keyed by path since Nix 2.19, a list of objects with a "path"
+/// before it. Hashes come in SRI form or as `sha256:<nix32>`.
+fn path_infos(json: &Value) -> Result<BTreeMap<PathBuf, PathInfo>> {
+    let entries: Vec<(&str, &Value)> = match json {
+        Value::Object(map) => map.iter().map(|(k, v)| (k.as_str(), v)).collect(),
+        Value::Array(list) => list
+            .iter()
+            .map(|v| Ok((v["path"].as_str().context("a path has no \"path\"")?, v)))
+            .collect::<Result<_>>()?,
+        _ => bail!("nix path-info printed neither an object nor a list"),
+    };
+
+    let mut infos = BTreeMap::new();
+    for (path, v) in entries {
+        let field = |key: &str| v.get(key).with_context(|| format!("{path} has no {key}"));
+        let nar_hash = field("narHash")?
+            .as_str()
+            .context("narHash is not a string")?;
+        let nar_hash = NixHash::parse(nar_hash)
+            .with_context(|| format!("{path} has narHash {nar_hash}"))?
+            .to_nix_nixbase32_string();
+        let references = field("references")?
+            .as_array()
+            .context("references is not a list")?
+            .iter()
+            .map(|r| {
+                r.as_str()
+                    .map(PathBuf::from)
+                    .context("a reference is not a string")
+            })
+            .collect::<Result<_>>()?;
+        let info = PathInfo {
+            path: PathBuf::from(path),
+            nar_hash,
+            nar_size: field("narSize")?
+                .as_u64()
+                .context("narSize is not a number")?,
+            references,
+            ca: v.get("ca").and_then(Value::as_str).map(String::from),
+            closure_size: field("closureSize")?
+                .as_u64()
+                .context("closureSize is not a number")?,
+        };
+        infos.insert(info.path.clone(), info);
+    }
+    Ok(infos)
+}
+
 /// The builder as a job, with the environment the Nix sandbox gives it.
 /// The order of operations follows nix-daemon's initEnv, so a derivation
 /// that overrides one of these sees its own value. `cores` is the
-/// NIX_BUILD_CORES the build sees, the run's CPU count.
-pub fn job(drv: &Derivation, cores: u32) -> Result<Job> {
+/// NIX_BUILD_CORES the build sees, the run's CPU count. `graphs` are the
+/// closures exportReferencesGraph asks for, from [`reference_graphs`].
+pub fn job(drv: &Derivation, graphs: &ReferenceGraphs, cores: u32) -> Result<Job> {
     if drv.builder.starts_with(BUILTIN_BUILDER_PREFIX) {
         bail!(
             "{} is built by {}, which runs inside nix-daemon and has no program for a run to execute",
@@ -200,9 +444,9 @@ pub fn job(drv: &Derivation, cores: u32) -> Result<Job> {
 
     // The derivation's own attributes: as environment variables, or as
     // files when the derivation uses structured attributes.
-    let files = match &drv.structured_attrs {
-        Some(attrs) => structured_files(attrs, &mut env)?,
-        None => env_files(drv, &mut env),
+    let files = match drv.parsed.structured_attrs() {
+        Some(_) => structured_files(drv, graphs, &mut env)?,
+        None => env_files(drv, graphs, &mut env),
     };
 
     for var in ["NIX_BUILD_TOP", "TMPDIR", "TEMPDIR", "TMP", "TEMP", "PWD"] {
@@ -258,8 +502,14 @@ pub fn job(drv: &Derivation, cores: u32) -> Result<Job> {
 
 /// The derivation's env, set directly in the build's environment or, for
 /// the attributes passAsFile names, written to a file in the build
-/// directory and replaced by a variable holding the file's path.
-fn env_files(drv: &Derivation, env: &mut BTreeMap<String, String>) -> Vec<JobFile> {
+/// directory and replaced by a variable holding the file's path. Each
+/// reference graph is a file of its own name, in the form
+/// `nix-store --register-validity` reads.
+fn env_files(
+    drv: &Derivation,
+    graphs: &ReferenceGraphs,
+    env: &mut BTreeMap<String, String>,
+) -> Vec<JobFile> {
     let pass_as_file: Vec<&str> = drv
         .env
         .get("passAsFile")
@@ -281,7 +531,51 @@ fn env_files(drv: &Derivation, env: &mut BTreeMap<String, String>) -> Vec<JobFil
             contents: v.clone(),
         });
     }
+
+    for (name, closure) in graphs {
+        files.push(JobFile {
+            path: format!("{BUILD_DIR}/{name}"),
+            contents: validity_registration(closure),
+        });
+    }
     files
+}
+
+/// `closure` as Nix's makeValidityRegistration writes it without hashes or
+/// derivers: each path, an empty deriver line, the number of references,
+/// then the references.
+fn validity_registration(closure: &[PathInfo]) -> String {
+    let mut out = String::new();
+    for info in closure {
+        out += &format!("{}\n\n{}\n", info.path.display(), info.references.len());
+        for r in &info.references {
+            out += &format!("{}\n", r.display());
+        }
+    }
+    out
+}
+
+/// `closure` as nix-daemon's pathInfoToJSON writes it into .attrs.json,
+/// a format Nix keeps fixed for builds' sake.
+fn graph_json(closure: &[PathInfo]) -> Value {
+    let paths = closure
+        .iter()
+        .map(|info| {
+            let mut entry = json!({
+                "closureSize": info.closure_size,
+                "narHash": info.nar_hash,
+                "narSize": info.nar_size,
+                "path": info.path,
+                "references": info.references,
+                "valid": true,
+            });
+            if let Some(ca) = &info.ca {
+                entry["ca"] = json!(ca);
+            }
+            entry
+        })
+        .collect();
+    Value::Array(paths)
 }
 
 /// Structured attributes as nix-daemon hands them to the build: written
@@ -289,9 +583,20 @@ fn env_files(drv: &Derivation, env: &mut BTreeMap<String, String>) -> Vec<JobFil
 /// replaced by each output's path. The env is not set at all; stdenv
 /// exports the attributes it needs from .attrs.sh.
 fn structured_files(
-    attrs: &StructuredAttrsFiles,
+    drv: &Derivation,
+    graphs: &ReferenceGraphs,
     env: &mut BTreeMap<String, String>,
 ) -> Result<Vec<JobFile>> {
+    let graphs: BTreeMap<String, Value> = graphs
+        .iter()
+        .map(|(name, closure)| (name.clone(), graph_json(closure)))
+        .collect();
+    let attrs: StructuredAttrsFiles = drv
+        .parsed
+        .structured_attrs_files_with_reference_graphs(&graphs)
+        .with_context(|| format!("writing {}'s structured attributes", drv.name))?
+        .context("structured attributes went missing")?;
+
     let sh = format!("{BUILD_DIR}/{ATTRS_SH}");
     let json = format!("{BUILD_DIR}/{ATTRS_JSON}");
     env.insert(ATTRS_SH_VAR.into(), sh.clone());
@@ -315,7 +620,6 @@ fn rewrite(s: &str, rewrites: &[(String, String)]) -> String {
         .fold(s.to_string(), |s, (from, to)| s.replace(from, to))
 }
 
-/// Runs a nix command and returns its standard output.
 /// Builds or substitutes `installables` and returns their outputs and the
 /// closure of those outputs, sorted.
 pub fn packages(installables: &[String]) -> Result<(Vec<PathBuf>, Vec<PathBuf>)> {
@@ -338,6 +642,7 @@ pub fn packages(installables: &[String]) -> Result<(Vec<PathBuf>, Vec<PathBuf>)>
     Ok((outputs, closure))
 }
 
+/// Runs a nix command and returns its standard output.
 fn nix(args: &[&str]) -> Result<String> {
     let out = Command::new("nix")
         .args(["--extra-experimental-features", "nix-command flakes"])
@@ -370,39 +675,33 @@ mod tests {
         );
     }
 
+    /// A derivation passing `text` as a file and overriding HOME.
     fn sample() -> Derivation {
-        let mut env = BTreeMap::new();
-        env.insert("out".into(), "/nix/store/aaa-x".into());
-        env.insert("text".into(), "hello".into());
-        env.insert("passAsFile".into(), "text".into());
-        env.insert("HOME".into(), "/overridden".into());
-        Derivation {
-            path: "/nix/store/bbb-x.drv".into(),
-            name: "x".into(),
-            system: "x86_64-linux".into(),
-            builder: "/nix/store/ccc-bash/bin/bash".into(),
-            args: vec!["-e".into(), "builder.sh".into()],
-            env,
-            outputs: vec![("out".into(), "/nix/store/aaa-x".into())],
-            input_srcs: vec![],
-            input_drvs: vec![],
-            structured_attrs: None,
-            fixed_output: false,
-        }
+        let env = [
+            ("text", "hello"),
+            ("passAsFile", "text"),
+            ("HOME", "/overridden"),
+        ];
+        parse(Path::new(FIXTURE_DRV), &fixture(&env)).unwrap()
+    }
+
+    /// No reference graphs, for a derivation that asks for none.
+    fn no_graphs() -> ReferenceGraphs {
+        ReferenceGraphs::new()
     }
 
     #[test]
     fn job_env_gives_the_build_the_cores_asked_for() {
         // A build asked to use 4 cores sees NIX_BUILD_CORES=4, which stdenv
         // passes to make, ninja and the test runners as their job count.
-        let job = job(&sample(), 4).unwrap();
+        let job = job(&sample(), &no_graphs(), 4).unwrap();
         let env: BTreeMap<_, _> = job.env.iter().cloned().collect();
         assert_eq!(env["NIX_BUILD_CORES"], "4");
     }
 
     #[test]
     fn job_env_follows_the_sandbox() {
-        let job = job(&sample(), 1).unwrap();
+        let job = job(&sample(), &no_graphs(), 1).unwrap();
         let env: BTreeMap<_, _> = job.env.iter().cloned().collect();
         assert_eq!(env["PATH"], "/path-not-set");
         assert_eq!(env["HOME"], "/overridden");
@@ -413,11 +712,8 @@ mod tests {
         assert_eq!(env["textPath"], file.path);
         assert_eq!(file.contents, "hello");
         assert!(file.path.starts_with("/build/.attr-"));
-        assert_eq!(
-            job.argv,
-            vec!["/nix/store/ccc-bash/bin/bash", "-e", "builder.sh"]
-        );
-        assert_eq!(job.outputs, vec!["/nix/store/aaa-x".to_string()]);
+        assert_eq!(job.argv, vec!["/bin/sh", "-e", "builder.sh"]);
+        assert_eq!(job.outputs, vec![FIXTURE_OUT.to_string()]);
     }
 
     #[test]
@@ -430,7 +726,7 @@ mod tests {
     }
 
     // Store paths for the .drv fixtures. The parser checks their form, so
-    // these are real-looking paths rather than /nix/store/aaa-x.
+    // these are real-looking paths.
     const FIXTURE_DRV: &str = "/nix/store/0000000000000000000000000000000a-x.drv";
     const FIXTURE_OUT: &str = "/nix/store/0000000000000000000000000000000b-x";
     const FIXTURE_DEP: &str = "/nix/store/0000000000000000000000000000000c-dep.drv";
@@ -490,11 +786,19 @@ mod tests {
             &fixture_with(&fixed_output(), "/bin/sh", &[]),
         )
         .unwrap();
-        let env: BTreeMap<_, _> = job(&fixed, 1).unwrap().env.into_iter().collect();
+        let env: BTreeMap<_, _> = job(&fixed, &no_graphs(), 1)
+            .unwrap()
+            .env
+            .into_iter()
+            .collect();
         assert_eq!(env["NIX_OUTPUT_CHECKED"], "1");
 
         let plain = parse(Path::new(FIXTURE_DRV), &fixture(&[])).unwrap();
-        let env: BTreeMap<_, _> = job(&plain, 1).unwrap().env.into_iter().collect();
+        let env: BTreeMap<_, _> = job(&plain, &no_graphs(), 1)
+            .unwrap()
+            .env
+            .into_iter()
+            .collect();
         assert!(!env.contains_key("NIX_OUTPUT_CHECKED"));
     }
 
@@ -507,11 +811,11 @@ mod tests {
             &fixture_with(&fixed_output(), "builtin:fetchurl", &[]),
         )
         .unwrap();
-        let err = job(&drv, 1).unwrap_err().to_string();
+        let err = job(&drv, &no_graphs(), 1).unwrap_err().to_string();
         assert!(err.contains("builtin:fetchurl"), "{err}");
     }
 
-    fn sample_structured(attrs: serde_json::Value) -> Derivation {
+    fn sample_structured(attrs: Value) -> Derivation {
         let json = attrs.to_string();
         parse(Path::new(FIXTURE_DRV), &fixture(&[("__json", &json)])).unwrap()
     }
@@ -536,7 +840,8 @@ mod tests {
             drv.input_drvs,
             vec![(PathBuf::from(FIXTURE_DEP), vec!["out".to_string()])]
         );
-        assert_eq!(drv.structured_attrs, None);
+        assert!(drv.parsed.structured_attrs().is_none());
+        assert!(drv.reference_graphs.is_empty());
     }
 
     #[test]
@@ -551,14 +856,17 @@ mod tests {
         drv.args.push(format!("--prefix={out}"));
         drv.env.insert("flags".into(), format!("-DLIB={out}/lib"));
         drv.env.insert("text".into(), format!("{out}/share"));
-        let plain = job(&drv, 1).unwrap();
+        let plain = job(&drv, &no_graphs(), 1).unwrap();
         let env: BTreeMap<_, _> = plain.env.iter().cloned().collect();
-        assert_eq!(env["flags"], "-DLIB=/nix/store/aaa-x/lib");
-        assert_eq!(plain.argv.last().unwrap(), "--prefix=/nix/store/aaa-x");
-        assert_eq!(plain.files[0].contents, "/nix/store/aaa-x/share");
+        assert_eq!(env["flags"], format!("-DLIB={FIXTURE_OUT}/lib"));
+        assert_eq!(
+            *plain.argv.last().unwrap(),
+            format!("--prefix={FIXTURE_OUT}")
+        );
+        assert_eq!(plain.files[0].contents, format!("{FIXTURE_OUT}/share"));
 
         let drv = sample_structured(serde_json::json!({"outputs": ["out"], "prefix": out}));
-        let structured = job(&drv, 1).unwrap();
+        let structured = job(&drv, &no_graphs(), 1).unwrap();
         for file in &structured.files {
             assert!(!file.contents.contains("1rz4g4zn"), "{}", file.contents);
         }
@@ -583,7 +891,7 @@ mod tests {
             "outputs": ["out"],
             "stdenv": "/nix/store/ddd-stdenv",
         }));
-        let job = job(&drv, 1).unwrap();
+        let job = job(&drv, &no_graphs(), 1).unwrap();
         let env: BTreeMap<_, _> = job.env.iter().cloned().collect();
         assert_eq!(env["NIX_ATTRS_SH_FILE"], "/build/.attrs.sh");
         assert_eq!(env["NIX_ATTRS_JSON_FILE"], "/build/.attrs.json");
@@ -611,5 +919,181 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(files["/build/.attrs.json"]).unwrap();
         assert_eq!(json["outputs"], serde_json::json!({"out": FIXTURE_OUT}));
         assert_eq!(json["stdenv"], "/nix/store/ddd-stdenv");
+    }
+
+    // More store paths for the reference graph tests: a root, what it
+    // refers to, a derivation in its closure and that derivation's output.
+    const GRAPH_ROOT: &str = "/nix/store/0000000000000000000000000000000f-root";
+    const GRAPH_LIB: &str = "/nix/store/0000000000000000000000000000000g-lib";
+    const GRAPH_DRV: &str = "/nix/store/0000000000000000000000000000000h-tool.drv";
+    const GRAPH_TOOL: &str = "/nix/store/0000000000000000000000000000000i-tool";
+    const NAR_HASH: &str = "sha256:1b8m03r63zqhnjf7l5wnldhh7c134ap5vpj0850ymkq1iyzicy5s";
+
+    fn info(path: &str, references: &[&str]) -> PathInfo {
+        PathInfo {
+            path: PathBuf::from(path),
+            nar_hash: NAR_HASH.into(),
+            nar_size: 8,
+            references: references.iter().map(PathBuf::from).collect(),
+            ca: None,
+            closure_size: 8 * (references.len() as u64 + 1),
+        }
+    }
+
+    #[test]
+    fn reference_graphs_are_read_from_either_form() {
+        // Without structured attributes the graphs are pairs of a file name
+        // and a store path; with them, an object of store paths in lists
+        // nested any depth. A name nix-daemon would refuse, a path inside a
+        // store path and an odd pair are errors.
+        let plain = parse(
+            Path::new(FIXTURE_DRV),
+            &fixture(&[(
+                "exportReferencesGraph",
+                &format!("closure {GRAPH_ROOT}\n deps {GRAPH_LIB}"),
+            )]),
+        )
+        .unwrap();
+        assert_eq!(
+            plain.reference_graphs,
+            BTreeMap::from([
+                (
+                    "closure".to_string(),
+                    BTreeSet::from([PathBuf::from(GRAPH_ROOT)])
+                ),
+                (
+                    "deps".to_string(),
+                    BTreeSet::from([PathBuf::from(GRAPH_LIB)])
+                ),
+            ])
+        );
+
+        let structured = sample_structured(json!({
+            "exportReferencesGraph": {"closure": [GRAPH_ROOT, [[GRAPH_LIB]]]},
+        }));
+        assert_eq!(
+            structured.reference_graphs,
+            BTreeMap::from([(
+                "closure".to_string(),
+                BTreeSet::from([PathBuf::from(GRAPH_ROOT), PathBuf::from(GRAPH_LIB)])
+            )])
+        );
+
+        for bad in [
+            format!(".hidden {GRAPH_ROOT}"),
+            format!("closure {GRAPH_ROOT}/bin"),
+            format!("closure {GRAPH_ROOT} deps"),
+        ] {
+            let result = parse(
+                Path::new(FIXTURE_DRV),
+                &fixture(&[("exportReferencesGraph", &bad)]),
+            );
+            assert!(result.is_err(), "accepted {bad:?}");
+        }
+    }
+
+    #[test]
+    fn path_infos_read_every_path_info_format() {
+        // nix path-info --json prints an object keyed by path with SRI
+        // hashes since Nix 2.19, and a list with "path" in each entry
+        // before. Both read to the same paths, with the hash as
+        // sha256:<nix32>.
+        let sri = "sha256-ungWv48Bz+pBQUDeXa4iI7ADYaOWF3qctBD/YfIAFa0=";
+        let entry = json!({
+            "narHash": sri, "narSize": 8, "references": [GRAPH_LIB],
+            "ca": null, "closureSize": 16,
+        });
+        let object = json!({GRAPH_ROOT: entry});
+        let mut listed = entry.clone();
+        listed["path"] = json!(GRAPH_ROOT);
+        listed["narHash"] = json!(NAR_HASH);
+        for json in [object, Value::Array(vec![listed])] {
+            let infos = path_infos(&json).unwrap();
+            assert_eq!(
+                infos[&PathBuf::from(GRAPH_ROOT)],
+                info(GRAPH_ROOT, &[GRAPH_LIB])
+            );
+        }
+    }
+
+    #[test]
+    fn closures_follow_references_and_derivation_outputs() {
+        // A graph holds its root's closure, plus the closure of the outputs
+        // of any derivation in it, as nix-daemon's exportReferences does.
+        // A root outside the input closure is refused.
+        let mut drv = sample();
+        drv.reference_graphs = BTreeMap::from([(
+            "closure".to_string(),
+            BTreeSet::from([PathBuf::from(GRAPH_ROOT)]),
+        )]);
+        let infos: BTreeMap<PathBuf, PathInfo> = [
+            info(GRAPH_ROOT, &[GRAPH_LIB, GRAPH_DRV]),
+            info(GRAPH_LIB, &[]),
+            info(GRAPH_DRV, &[]),
+            info(GRAPH_TOOL, &[GRAPH_LIB]),
+        ]
+        .into_iter()
+        .map(|i| (i.path.clone(), i))
+        .collect();
+        let drv_outputs =
+            BTreeMap::from([(PathBuf::from(GRAPH_DRV), vec![PathBuf::from(GRAPH_TOOL)])]);
+        let input_closure = vec![PathBuf::from(GRAPH_ROOT), PathBuf::from(GRAPH_LIB)];
+
+        let graphs = closures(&drv, &input_closure, &infos, &drv_outputs).unwrap();
+        let paths: Vec<&Path> = graphs["closure"].iter().map(|i| i.path.as_path()).collect();
+        let want: Vec<&Path> = [GRAPH_ROOT, GRAPH_LIB, GRAPH_DRV, GRAPH_TOOL]
+            .map(Path::new)
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        assert_eq!(paths, want);
+
+        let err = closures(&drv, &[], &infos, &drv_outputs)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not in the input closure"), "{err}");
+    }
+
+    #[test]
+    fn reference_graphs_reach_the_build_as_nix_writes_them() {
+        // Without structured attributes a graph is a file in the build
+        // directory, in the form nix-store --register-validity reads; with
+        // them, a list under the graph's name in .attrs.json, in the shape
+        // nix-daemon's pathInfoToJSON writes.
+        let closure = vec![info(GRAPH_LIB, &[]), info(GRAPH_ROOT, &[GRAPH_LIB])];
+        let graphs = ReferenceGraphs::from([("closure".to_string(), closure)]);
+
+        let plain = parse(
+            Path::new(FIXTURE_DRV),
+            &fixture(&[("exportReferencesGraph", &format!("closure {GRAPH_ROOT}"))]),
+        )
+        .unwrap();
+        let job_files = job(&plain, &graphs, 1).unwrap().files;
+        let file = job_files
+            .iter()
+            .find(|f| f.path == "/build/closure")
+            .unwrap();
+        assert_eq!(
+            file.contents,
+            format!("{GRAPH_LIB}\n\n0\n{GRAPH_ROOT}\n\n1\n{GRAPH_LIB}\n")
+        );
+
+        let structured = sample_structured(json!({
+            "exportReferencesGraph": {"closure": [GRAPH_ROOT]},
+            "outputs": ["out"],
+        }));
+        let job_files = job(&structured, &graphs, 1).unwrap().files;
+        let attrs = job_files
+            .iter()
+            .find(|f| f.path == "/build/.attrs.json")
+            .unwrap();
+        assert!(
+            attrs.contents.starts_with(&format!(
+                r#"{{"closure":[{{"closureSize":8,"narHash":"{NAR_HASH}","narSize":8,"path":"{GRAPH_LIB}","references":[],"valid":true}},{{"closureSize":16,"narHash":"{NAR_HASH}","narSize":8,"path":"{GRAPH_ROOT}","references":["{GRAPH_LIB}"],"valid":true}}],"exportReferencesGraph""#
+            )),
+            "{}",
+            attrs.contents
+        );
     }
 }

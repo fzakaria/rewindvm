@@ -1147,7 +1147,8 @@ fn prepare_nix(
         std::fs::rename(&tmp, &image)?;
     }
 
-    let job = nix::job(&drv, cores)?;
+    let graphs = nix::reference_graphs(&drv, &closure)?;
+    let job = nix::job(&drv, &graphs, cores)?;
     let source = Source::Nix {
         drv: drv_path.display().to_string(),
         outputs: drv
