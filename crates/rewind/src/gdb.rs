@@ -40,6 +40,10 @@ const NIX_STORE_PROGRAM: &str = "nix-store";
 const VMLINUX: &str = "vmlinux";
 const GDB_SCRIPTS: &str = "vmlinux-gdb.py";
 const DEBUG_VMLINUX: &str = "lib/debug/vmlinux";
+const DEBUG_BUILD_IDS: &str = "lib/debug/.build-id";
+
+/// The release asset with the kernel's DWARF, for hosts without Nix.
+const DEBUG_RELEASE: &str = "rewind-debug-x86_64-linux.tar.gz";
 
 /// gdb's switch for the Python scripts it loads from next to a symbol
 /// file, such as vmlinux-gdb.py next to vmlinux.
@@ -226,16 +230,26 @@ struct KernelSymbols {
 }
 
 impl KernelSymbols {
-    /// The best symbols for the kernel `run` booted: its DWARF, fetched
-    /// from a binary cache when it is not on this machine, else its symbol
-    /// table.
+    /// The best symbols for the kernel `run` booted: its DWARF, else its
+    /// symbol table. The DWARF is looked for where the run was recorded
+    /// with it, then where this rewind would record it, which on a host
+    /// without Nix is the debug release unpacked after the run was made.
     fn find(run: &Run) -> KernelSymbols {
         let dir = run.manifest.spec.kernel.parent().unwrap_or(Path::new("/"));
         let scripts = Some(dir.join(GDB_SCRIPTS)).filter(|p| p.exists());
+        let build_id = std::fs::File::open(dir.join(VMLINUX))
+            .ok()
+            .and_then(|mut f| rewind_core::maps::build_id(&mut f));
+        let candidates: Vec<PathBuf> = run
+            .manifest
+            .spec
+            .kernel_debug
+            .clone()
+            .into_iter()
+            .chain(std::env::var_os(rewind_core::home::ENV_KERNEL_DEBUG).map(PathBuf::from))
+            .collect();
 
-        if let Some(debug) = &run.manifest.spec.kernel_debug
-            && realise(&debug.join(DEBUG_VMLINUX), "the kernel's debug symbols")
-        {
+        if let Some(debug) = debug_dir(&candidates, build_id.as_deref()) {
             // The one directory in the overlay, named like the source tree.
             let sources = std::fs::read_dir(debug.join(DEBUG_SOURCES))
                 .ok()
@@ -248,6 +262,15 @@ impl KernelSymbols {
                 dwarf: true,
             };
         }
+
+        // Without Nix there is no binary cache to fetch the DWARF from, so
+        // say where it is.
+        if on_path(NIX_STORE_PROGRAM, std::env::var_os("PATH").as_deref()).is_none() {
+            eprintln!(
+                "rewind: the kernel has its symbol table only; unpack {DEBUG_RELEASE} \
+                 next to rewind-x86_64-linux for its DWARF and source files"
+            );
+        }
         KernelSymbols {
             file: Some(dir.join(VMLINUX)).filter(|p| p.exists()),
             scripts,
@@ -255,6 +278,30 @@ impl KernelSymbols {
             dwarf: false,
         }
     }
+}
+
+/// The first of `candidates` with the kernel's DWARF: for `build_id` when
+/// it is known, so a debug directory updated in place for a newer kernel
+/// is passed over. A candidate in the store is fetched when it is not
+/// here.
+fn debug_dir(candidates: &[PathBuf], build_id: Option<&str>) -> Option<PathBuf> {
+    candidates
+        .iter()
+        .find(|debug| {
+            if !realise(&debug.join(DEBUG_VMLINUX), "the kernel's debug symbols") {
+                return false;
+            }
+            let Some(id) = build_id.filter(|id| id.len() > 2) else {
+                return true;
+            };
+            let (dir, rest) = id.split_at(2);
+            debug
+                .join(DEBUG_BUILD_IDS)
+                .join(dir)
+                .join(format!("{rest}.debug"))
+                .exists()
+        })
+        .cloned()
 }
 
 /// What gdb is told about the process running at a step.
@@ -637,6 +684,44 @@ mod tests {
 
         let with = arguments(&kernel(true), &Process::default(), &urls, address);
         assert!(sourced(&with));
+    }
+
+    /// The kernel's DWARF comes from the first candidate directory that
+    /// holds it for the run's build ID. Makes two debug directories in a
+    /// temporary directory, one for another kernel and one for this, and
+    /// checks the matching one is chosen whatever the order, that none is
+    /// when neither matches, and that the first with any DWARF is when the
+    /// build ID is not known.
+    #[test]
+    fn the_kernel_s_dwarf_comes_from_a_directory_with_its_build_id() {
+        let root = std::env::temp_dir().join(format!("rewind-debug-dir-{}", std::process::id()));
+        let debug = |name: &str, id: &str| {
+            let dir = root.join(name);
+            let file = dir
+                .join(DEBUG_BUILD_IDS)
+                .join(&id[..2])
+                .join(format!("{}.debug", &id[2..]));
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, "").unwrap();
+            std::os::unix::fs::symlink(&file, dir.join(DEBUG_VMLINUX)).unwrap();
+            dir
+        };
+        let old = debug("old", "aa0001");
+        let new = debug("new", "bb0002");
+
+        let both = [old.clone(), new.clone()];
+        assert_eq!(debug_dir(&both, Some("bb0002")), Some(new.clone()));
+        assert_eq!(
+            debug_dir(&[new.clone(), old.clone()], Some("aa0001")),
+            Some(old.clone())
+        );
+        assert_eq!(debug_dir(&both, Some("cc0003")), None);
+        assert_eq!(debug_dir(&both, None), Some(old.clone()));
+        assert_eq!(
+            debug_dir(&[root.join("missing"), new.clone()], None),
+            Some(new)
+        );
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     /// Looks for a program in a PATH-like list of directories: a temporary

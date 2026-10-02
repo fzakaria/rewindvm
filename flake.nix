@@ -68,6 +68,7 @@
               guest
               ;
           };
+          releaseDebug = import ./nix/release-debug.nix { inherit pkgs kernel; };
           appRelease = import ./nix/app-release.nix { inherit pkgs rust; };
           site = import ./nix/site.nix { inherit pkgs; };
           examples = import ./nix/examples.nix { inherit pkgs; };
@@ -88,6 +89,10 @@
           # the command's release asset, for people without Nix
           # (nix/release.nix)
           release = p.release;
+
+          # the kernel's debug symbols and sources for `rewind gdb`, a
+          # release asset next to the command's (nix/release-debug.nix)
+          release-debug = p.releaseDebug;
 
           # the guest kernel with the Rewind platform (nix/kernel.nix)
           kernel = p.kernel;

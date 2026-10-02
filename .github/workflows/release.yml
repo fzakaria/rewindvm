@@ -1,8 +1,10 @@
 # Publishes a GitHub release for a version tag such as v0.1.0, with the
 # assets the site and the tutorials link under releases/latest/download:
 #
-#   rewind-x86_64-linux.tar.gz      the command, for people without Nix
-#   rewind-app-x86_64-linux.tar.gz  the desktop app, for any distribution
+#   rewind-x86_64-linux.tar.gz        the command, for people without Nix
+#   rewind-debug-x86_64-linux.tar.gz  the kernel's DWARF and sources, for
+#                                     the command's `rewind gdb`
+#   rewind-app-x86_64-linux.tar.gz    the desktop app, for any distribution
 #
 # The tag must match VERSION. Nix users need
 # none of this: `nix run github:fzakaria/rewindvm/v0.1.0` builds the same
@@ -52,6 +54,7 @@ jobs:
       - name: Build the assets
         run: |
           nix build -L .#release -o cli
+          nix build -L .#release-debug -o debug
           nix build -L .#app-release -o app
 
       # Cachix evicts the paths used least when the cache is full, and
@@ -72,4 +75,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes \
-            cli/rewind-x86_64-linux.tar.gz app/rewind-app-x86_64-linux.tar.gz
+            cli/rewind-x86_64-linux.tar.gz debug/rewind-debug-x86_64-linux.tar.gz \
+            app/rewind-app-x86_64-linux.tar.gz

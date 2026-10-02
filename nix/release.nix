@@ -42,19 +42,27 @@ let
 
   # Named for `rewind gdb` without being shipped: on a host with Nix, the
   # kernel's DWARF and the debuginfod server are fetched from the binary
-  # caches the first time someone debugs.
+  # caches the first time someone debugs. Without Nix, the kernel's DWARF
+  # and sources are a release asset of their own (nix/release-debug.nix),
+  # which the launcher names when it is unpacked next to this one.
   kernelDebug = builtins.unsafeDiscardStringContext "${kernel.debug}";
   debuginfod = builtins.unsafeDiscardStringContext (lib.getExe pkgs.nixseparatedebuginfod2);
 
   launcher = pkgs.writeText "rewind" ''
     #!/bin/sh
     # Points rewind at the guest shipped next to it, unless the environment
-    # already names one, and puts the shipped tools first on PATH.
+    # already names one, and puts the shipped tools first on PATH. The
+    # kernel's DWARF is the debug release unpacked next to this one when
+    # it is there, else the kernel's debug output in the store.
     here=$(dirname "$(readlink -f "$0")")
     PATH="$here/../libexec/rewind-tools:$PATH"
     export PATH
     : "''${REWIND_KERNEL:=$here/../share/rewind/bzImage}"
     : "''${REWIND_INITRD:=$here/../share/rewind/initrd}"
+    debug=$(readlink -f "$here/../../rewind-debug-x86_64-linux")
+    if [ -z "''${REWIND_KERNEL_DEBUG:-}" ] && [ -e "$debug/lib/debug/vmlinux" ]; then
+      REWIND_KERNEL_DEBUG=$debug
+    fi
     : "''${REWIND_KERNEL_DEBUG:=${kernelDebug}}"
     : "''${REWIND_DEBUGINFOD:=${debuginfod}}"
     export REWIND_KERNEL REWIND_INITRD REWIND_KERNEL_DEBUG REWIND_DEBUGINFOD

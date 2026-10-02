@@ -172,11 +172,19 @@ fn parse_line(line: &str) -> Option<Mapping> {
     })
 }
 
-/// ELF's magic, the class byte for 64 bits, and the program header type
-/// of a loadable segment.
+/// ELF's magic, the class byte for 64 bits, and the program header types
+/// of a loadable segment and a note segment.
 const ELF_MAGIC: &[u8; 4] = b"\x7fELF";
 const ELF_CLASS_64: u8 = 2;
 const PT_LOAD: u32 = 1;
+const PT_NOTE: u32 = 4;
+
+/// A note's owner and type when it is a build ID, and the alignment of
+/// its name and description.
+const NOTE_GNU: &[u8] = b"GNU\0";
+const NT_GNU_BUILD_ID: u32 = 3;
+const NOTE_ALIGN: usize = 4;
+const NOTE_HEADER_LEN: usize = 12;
 
 /// Offsets into a 64-bit ELF header and program header.
 const E_PHOFF: usize = 32;
@@ -185,6 +193,7 @@ const E_PHNUM: usize = 56;
 const ELF_HEADER_LEN: usize = 64;
 const P_OFFSET: usize = 8;
 const P_VADDR: usize = 16;
+const P_FILESZ: usize = 32;
 const PHDR_LEN: usize = 56;
 
 /// How far an ELF file's addresses moved when it was loaded with its
@@ -216,6 +225,58 @@ pub fn load_offset(file: &mut (impl Read + Seek), base: u64) -> Option<u64> {
         .find(|p| u32::from_le_bytes(p[..4].try_into().unwrap()) == PT_LOAD)?;
     let linked = (u64_at(first, P_VADDR) - u64_at(first, P_OFFSET)) & PAGE_MASK;
     Some(base.wrapping_sub(linked))
+}
+
+/// An ELF file's GNU build ID, in hex, from its note segments: the name
+/// gdb and debuginfod find its separate DWARF by. None when the file is
+/// not a 64-bit ELF file or has no build ID.
+pub fn build_id(file: &mut (impl Read + Seek)) -> Option<String> {
+    let mut header = [0u8; ELF_HEADER_LEN];
+    file.read_exact(&mut header).ok()?;
+    if &header[..4] != ELF_MAGIC || header[4] != ELF_CLASS_64 {
+        return None;
+    }
+    let u16_at = |b: &[u8], at: usize| u16::from_le_bytes([b[at], b[at + 1]]) as usize;
+    let u32_at = |b: &[u8], at: usize| u32::from_le_bytes(b[at..at + 4].try_into().unwrap());
+    let u64_at = |b: &[u8], at: usize| u64::from_le_bytes(b[at..at + 8].try_into().unwrap());
+    let phentsize = u16_at(&header, E_PHENTSIZE);
+    let phnum = u16_at(&header, E_PHNUM);
+    if phentsize < PHDR_LEN {
+        return None;
+    }
+    let mut phdrs = vec![0u8; phentsize * phnum];
+    file.seek(SeekFrom::Start(u64_at(&header, E_PHOFF))).ok()?;
+    file.read_exact(&mut phdrs).ok()?;
+
+    // Each note segment holds notes one after another: sizes and a type,
+    // then the name and description, each padded to four bytes.
+    let align = |n: usize| n.div_ceil(NOTE_ALIGN) * NOTE_ALIGN;
+    for phdr in phdrs.chunks_exact(phentsize) {
+        if u32_at(phdr, 0) != PT_NOTE {
+            continue;
+        }
+        let mut notes = vec![0u8; usize::try_from(u64_at(phdr, P_FILESZ)).ok()?];
+        file.seek(SeekFrom::Start(u64_at(phdr, P_OFFSET))).ok()?;
+        file.read_exact(&mut notes).ok()?;
+
+        let mut at = 0;
+        while at + NOTE_HEADER_LEN <= notes.len() {
+            let namesz = u32_at(&notes, at) as usize;
+            let descsz = u32_at(&notes, at + 4) as usize;
+            let kind = u32_at(&notes, at + 8);
+            let name = at + NOTE_HEADER_LEN;
+            let desc = name + align(namesz);
+            if desc + descsz > notes.len() {
+                break;
+            }
+            if kind == NT_GNU_BUILD_ID && &notes[name..name + namesz] == NOTE_GNU {
+                let id = &notes[desc..desc + descsz];
+                return Some(id.iter().map(|b| format!("{b:02x}")).collect());
+            }
+            at = desc + align(descsz);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -329,6 +390,35 @@ mod tests {
     fn a_file_that_is_not_elf_has_no_offset() {
         let mut file = Cursor::new(b"#!/bin/sh\necho hello\n".repeat(8));
         assert_eq!(load_offset(&mut file, 0x400000), None);
+    }
+
+    /// A 64-bit ELF file whose one program header is a note segment
+    /// holding a GNU build ID note for `id`, as vmlinux has, read back as
+    /// hex; and a file whose note is of another kind, which has none.
+    #[test]
+    fn a_build_id_is_read_from_the_note_segment() {
+        let elf_with_note = |note_type: u32| {
+            let mut b = elf(0);
+            let p = ELF_HEADER_LEN;
+            let note = ELF_HEADER_LEN + PHDR_LEN;
+            b[p..p + 4].copy_from_slice(&PT_NOTE.to_le_bytes());
+            b[p + P_OFFSET..p + P_OFFSET + 8].copy_from_slice(&(note as u64).to_le_bytes());
+            let mut body = Vec::new();
+            body.extend(4u32.to_le_bytes());
+            body.extend(3u32.to_le_bytes());
+            body.extend(note_type.to_le_bytes());
+            body.extend(b"GNU\0");
+            body.extend([0x15, 0xf1, 0x13]);
+            body.push(0);
+            b[p + P_FILESZ..p + P_FILESZ + 8].copy_from_slice(&(body.len() as u64).to_le_bytes());
+            b.extend(body);
+            b
+        };
+
+        let mut file = Cursor::new(elf_with_note(NT_GNU_BUILD_ID));
+        assert_eq!(build_id(&mut file).as_deref(), Some("15f113"));
+        let mut other = Cursor::new(elf_with_note(NT_GNU_BUILD_ID + 1));
+        assert_eq!(build_id(&mut other), None);
     }
 
     #[test]

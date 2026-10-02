@@ -8,7 +8,7 @@
 #     makes another run. It boots the guest, so it needs /dev/kvm, which
 #     GitHub's Linux runners have but do not open to the build user.
 #
-# Then the packages build: the command, the desktop app, both release
+# Then the packages build: the command, the desktop app, the three release
 # assets and the site. Everything built is pushed to rewindvm.cachix.org.
 name: ci
 
@@ -67,7 +67,7 @@ jobs:
         run: nix flake check -L
 
       - name: Packages
-        run: nix build -L .#rewind .#app .#release .#app-release .#site
+        run: nix build -L .#rewind .#app .#release .#release-debug .#app-release .#site
 
       # The latest builds of main, pinned so they stay when the cache fills
       # and the dependency builds go: the last five of each, the kernel's
