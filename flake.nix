@@ -42,15 +42,6 @@
           rust = import ./nix/crane.nix { inherit pkgs crane; };
           kernel = import ./nix/kernel.nix { inherit pkgs; };
           guest = import ./nix/guest.nix { inherit pkgs; };
-          app = import ./nix/app.nix { inherit pkgs rust; };
-        in
-        {
-          inherit
-            pkgs
-            kernel
-            guest
-            app
-            ;
           rewind = import ./nix/rewind.nix {
             inherit
               pkgs
@@ -59,6 +50,16 @@
               guest
               ;
           };
+          app = import ./nix/app.nix { inherit pkgs rust rewind; };
+        in
+        {
+          inherit
+            pkgs
+            kernel
+            guest
+            rewind
+            app
+            ;
           release = import ./nix/release.nix {
             inherit
               pkgs
