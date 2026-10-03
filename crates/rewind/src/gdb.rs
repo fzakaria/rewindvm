@@ -98,7 +98,7 @@ pub fn gdb(
 
     let machine = run.machine_at(home, step, &mut rewind_vmm::Ignore)?;
     let made = run.records_after(step)?;
-    let mut debuggee = rewind_core::debug::Debuggee::new(machine, made);
+    let mut debuggee = rewind_core::debug::Debuggee::new(machine, made, process.scope)?;
     let listener = TcpListener::bind(listen.unwrap_or(GDB_LOCAL)).context("listening for gdb")?;
     let address = listener.local_addr()?;
     // The session's server first, then any the person already uses.
@@ -308,6 +308,9 @@ fn debug_dir(candidates: &[PathBuf], build_id: Option<&str>) -> Option<PathBuf> 
 /// What gdb is told about the process running at a step.
 #[derive(Default)]
 struct Process {
+    /// Whose breakpoints and watchpoints gdb sees: this process's, when
+    /// one was running.
+    scope: rewind_core::debug::Scope,
     /// Its programs and libraries, with their load offsets.
     files: Vec<SymbolFile>,
     /// Directories of source files only the VM had, as the VM names them,
@@ -364,7 +367,11 @@ fn running_process(home: &Home, run: &Run, step: u64, dir: &Path) -> Process {
         .filter(|p| p.starts_with(dir))
         .collect();
     let source_dirs = fetch_sources(home, run, step, running.pid, &sent, dir);
-    Process { files, source_dirs }
+    Process {
+        scope: rewind_core::debug::Scope::Process,
+        files,
+        source_dirs,
+    }
 }
 
 /// Fetches from a fork the source files that `programs`, which only the

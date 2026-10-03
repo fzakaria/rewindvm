@@ -2,7 +2,10 @@
 //! GDB remote protocol. gdb sees one x86-64 CPU with the VM's memory as the
 //! VM's page tables map it: the kernel, which the VM kernel's vmlinux has
 //! the symbols for, and the user space of whichever process was running.
-//! Continuing and stepping run the fork, never the recording. The fork's
+//! Breakpoints and watchpoints at user addresses stop the fork only in the
+//! process gdb is debugging; other processes map the same addresses to
+//! memory of their own. Continuing and stepping run the fork, never the
+//! recording. The fork's
 //! records are compared with the run's as it goes, and gdb's user is told
 //! the step where the two first differ: from there on the fork is not the
 //! run, whether gdb changed its memory or the debugging itself moved it.
@@ -39,6 +42,28 @@ const GPR_COUNT: usize = 16;
 
 /// The most bytes one debug register watches.
 const MAX_PIECE: u64 = 8;
+
+/// CR3's page table base, bits 12 to 51, which names an address space;
+/// the bits below are the PCID, which changes as the kernel switches. The
+/// guest boots with mitigations off, so a process has one page table, not
+/// a user and a kernel one.
+const CR3_PAGE_TABLE: u64 = 0x000f_ffff_ffff_f000;
+
+/// Where x86-64's lower half, user space, ends.
+const USER_END: u64 = 0x0000_8000_0000_0000;
+
+/// RFLAGS' resume flag: the next instruction runs without its breakpoint
+/// trapping, and the CPU clears it once that instruction has.
+const RFLAGS_RF: u64 = 1 << 16;
+
+/// Whose traps gdb sees: the process running at the fork's step, which
+/// `rewind gdb` loads the symbols of, or any, when no process was.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Scope {
+    Process,
+    #[default]
+    Any,
+}
 
 /// What gdb asked the fork to do next.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -160,11 +185,27 @@ fn pieces(address: u64, len: u64) -> Vec<(u64, u64)> {
     out
 }
 
+/// The page table base of a CR3 value.
+fn page_table(cr3: u64) -> u64 {
+    cr3 & CR3_PAGE_TABLE
+}
+
+/// Whether a trap at `address`, taken with `cr3`, is in the address space
+/// gdb debugs: a kernel address always is, being every process's.
+fn in_scope(address: u64, space: Option<u64>, cr3: u64) -> bool {
+    match space {
+        Some(space) if address < USER_END => page_table(cr3) == space,
+        _ => true,
+    }
+}
+
 /// A forked machine under gdb.
 pub struct Debuggee {
     machine: Machine,
     traps: Traps,
     mode: Mode,
+    /// The page table of the process gdb debugs, if one was running.
+    space: Option<u64>,
     follow: Follow,
     /// Whether gdb's user has been told the fork left the recording.
     told: bool,
@@ -172,15 +213,35 @@ pub struct Debuggee {
 
 impl Debuggee {
     /// A debuggee for `machine`, a fork of a run at a step, with `made`,
-    /// the records the run made after that step.
-    pub fn new(machine: Machine, made: Vec<(u64, Vec<u8>)>) -> Debuggee {
-        Debuggee {
+    /// the records the run made after that step. With [`Scope::Process`],
+    /// the address space the machine is in now is the one gdb debugs.
+    pub fn new(machine: Machine, made: Vec<(u64, Vec<u8>)>, scope: Scope) -> Result<Debuggee> {
+        let space = match scope {
+            Scope::Process => Some(page_table(machine.special_registers()?.cr3)),
+            Scope::Any => None,
+        };
+        Ok(Debuggee {
             machine,
             traps: Traps::default(),
             mode: Mode::Continue,
+            space,
             follow: Follow::new(made),
             told: false,
-        }
+        })
+    }
+
+    /// Whether a trap at `address`, just taken, is the debugged process's.
+    fn in_scope(&self, address: u64) -> Result<bool> {
+        let cr3 = self.machine.special_registers()?.cr3;
+        Ok(in_scope(address, self.space, cr3))
+    }
+
+    /// Lets the instruction at a breakpoint another process reached run
+    /// without trapping again.
+    fn pass_breakpoint(&mut self) -> Result<()> {
+        let mut regs = self.machine.registers()?;
+        regs.rflags |= RFLAGS_RF;
+        self.machine.set_registers(&regs)
     }
 
     /// Serves gdb on `conn` until it detaches or the connection closes.
@@ -407,6 +468,25 @@ impl BlockingEventLoop for EventLoop {
                 Outcome::Debug(DebugStop::Step) => {
                     return Ok(Event::TargetStopped(SingleThreadStopReason::DoneStep));
                 }
+                // A trap in another process's address space is passed:
+                // the fork runs on, or a step is done.
+                Outcome::Debug(DebugStop::Breakpoint(address))
+                    if !target.in_scope(address).map_err(target_error)? =>
+                {
+                    if target.mode == Mode::Step {
+                        return Ok(Event::TargetStopped(SingleThreadStopReason::DoneStep));
+                    }
+                    target.pass_breakpoint().map_err(target_error)?;
+                    continue;
+                }
+                Outcome::Debug(DebugStop::Watchpoint(address))
+                    if !target.in_scope(address).map_err(target_error)? =>
+                {
+                    if target.mode == Mode::Step {
+                        return Ok(Event::TargetStopped(SingleThreadStopReason::DoneStep));
+                    }
+                    continue;
+                }
                 Outcome::Debug(DebugStop::Breakpoint(_)) => {
                     return Ok(Event::TargetStopped(SingleThreadStopReason::SwBreak(())));
                 }
@@ -449,6 +529,23 @@ mod tests {
     // A fork's records compared with the run's, as gdb runs it: the step
     // of the first that differs is kept, and only that one.
     use super::*;
+
+    /// Address spaces are told apart by CR3's page table base alone: the
+    /// PCID in its low bits changes as the kernel switches. User addresses
+    /// are filtered by them, kernel addresses never, and with no process
+    /// to debug nothing is.
+    #[test]
+    fn user_traps_count_in_the_debugged_address_space_only() {
+        let space = Some(page_table(0x0000_0001_2345_6000));
+        assert!(in_scope(0x55b3_8f77_c320, space, 0x0000_0001_2345_6003));
+        assert!(!in_scope(0x55b3_8f77_c320, space, 0x0000_0001_2345_7000));
+        assert!(in_scope(
+            0xffff_ffff_8128_5085,
+            space,
+            0x0000_0001_2345_7000
+        ));
+        assert!(in_scope(0x55b3_8f77_c320, None, 0x0000_0001_2345_7000));
+    }
 
     /// Splits watched ranges as the CPU needs them: the largest aligned
     /// piece of up to 8 bytes at each address, so an aligned pointer is one

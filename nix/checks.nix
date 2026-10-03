@@ -36,7 +36,8 @@ let
   '';
 
   # A root of two static programs for gdb, built with their symbols: one
-  # prints, forks, and waits for its child; one writes a global twice.
+  # prints, forks, and waits for its child; one forks a child that prints
+  # and writes a global, then writes the same global twice itself.
   gdbRoot =
     pkgs.runCommand "rewind-gdb-root"
       {
@@ -64,6 +65,7 @@ let
         $CC -static -O1 -g -o $out/bin/fork fork.c
 
         cat > watch.c <<'EOF'
+        #include <sys/wait.h>
         #include <unistd.h>
 
         volatile int counter;
@@ -71,8 +73,14 @@ let
         int main(void)
         {
           write(1, "start\n", 6);
-          counter = 1;
+          if (fork() == 0) {
+            write(1, "child\n", 6);
+            counter = 1;
+            _exit(0);
+          }
+          wait(0);
           counter = 2;
+          counter = 3;
           write(1, "done\n", 5);
           return 0;
         }
@@ -349,10 +357,12 @@ in
       '';
 
   # checks.gdb-watch: `watch` in `rewind gdb` is a debug register: gdb
-  # stops just after each write to a program's global, with its old and
-  # new values, and the fork runs on to the end on the recording. x86 has
-  # no trap on reads alone, so `rwatch` is refused. Boots the VM, so it
-  # needs /dev/kvm.
+  # stops just after each write the debugged process makes to its global,
+  # with the old and new values, and the fork runs on to the end on the
+  # recording. Its child writes the global at the same address in its own
+  # address space first, and calls write first, which must stop gdb at
+  # neither a watchpoint nor a breakpoint. x86 has no trap on reads alone,
+  # so `rwatch` is refused. Boots the VM, so it needs /dev/kvm.
   gdb-watch =
     pkgs.runCommand "rewind-gdb-watch"
       {
@@ -375,10 +385,19 @@ in
           -ex 'watch counter' -ex continue -ex continue -ex continue > gdb 2>&1 || true
         cat gdb
         grep -q 'Old value = 0' gdb
-        grep -q 'New value = 1' gdb
         grep -q 'New value = 2' gdb
+        grep -q 'New value = 3' gdb
+        ! grep -q 'New value = 1' gdb
         grep -q 'exited normally' gdb
         ! grep -q 'left the recording\|SIGTRAP' gdb
+
+        # The child's write is passed, the parent's last one stops gdb.
+        rewind gdb watch "$start" -- -batch \
+          -ex 'break write' -ex continue -ex 'print counter' -ex delete -ex continue > break 2>&1 || true
+        cat break
+        grep -q '^\$1 = 3' break
+        grep -q 'exited normally' break
+        ! grep -q 'left the recording\|SIGTRAP' break
 
         rewind gdb watch "$start" -- -batch -ex 'rwatch counter' -ex continue > read 2>&1 || true
         cat read
