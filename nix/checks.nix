@@ -35,6 +35,35 @@ let
     done
   '';
 
+  # A root holding one static program that prints, forks, and waits for
+  # its child, built with its symbols for gdb.
+  forkRoot =
+    pkgs.runCommand "rewind-fork-root"
+      {
+        nativeBuildInputs = [ pkgs.pkgsStatic.stdenv.cc ];
+        dontStrip = true;
+      }
+      ''
+        mkdir -p $out/bin
+        cat > fork.c <<'EOF'
+        #include <sys/wait.h>
+        #include <unistd.h>
+
+        int main(void)
+        {
+          write(1, "start\n", 6);
+          if (fork() == 0) {
+            write(1, "child\n", 6);
+            _exit(0);
+          }
+          wait(0);
+          write(1, "parent\n", 7);
+          return 0;
+        }
+        EOF
+        $CC -static -O1 -g -o $out/bin/fork fork.c
+      '';
+
   # Background jobs racing through a pipe, the kernel's RNG, and a sleep:
   # everything that would differ between two runs of an ordinary VM.
   workload = ''
@@ -249,6 +278,57 @@ in
         wait
         cat serve
         grep -q "ran in process $pid; loading symbols for 1 of its files" serve
+        touch $out
+      '';
+
+  # checks.gdb-step: single-stepping in `rewind gdb` keeps the fork on the
+  # recording, and gdb is stopped only where it asked. Two shells compute
+  # side by side under a perturbed schedule, whose reschedules are
+  # interrupts sent at exits; from every fourth step of the job, gdb steps
+  # across some of them and continues to the end. Then gdb steps a program
+  # past its fork system call and continues: the child starts with the
+  # trap flag the step left in the flags it copied, which must not stop
+  # gdb. Exit time and the schedule are chosen here so the check means the
+  # same on any machine. Boots the VM, so it needs /dev/kvm.
+  gdb-step =
+    pkgs.runCommand "rewind-gdb-step"
+      {
+        nativeBuildInputs = [
+          rewind
+          pkgs.gdb
+        ];
+        requiredSystemFeatures = [ "kvm" ];
+      }
+      ''
+        export REWIND_HOME=$TMPDIR/rewind
+        # No debuginfod server: without a network, each of gdb's questions
+        # to it waits out a timeout.
+        export REWIND_DEBUGINFOD=/nonexistent
+
+        # A fork's records, and stops only where gdb asked.
+        follows() {
+          if ! grep -q 'exited normally' gdb || grep -q 'left the recording\|SIGTRAP' gdb; then
+            echo "$1:"
+            cat gdb
+            exit 1
+          fi
+        }
+
+        rewind run -q --clock exits --schedule 5 --name busy --root ${busyboxRoot} -- \
+          sh -c 'for i in 1 2; do (n=0; while [ $n -lt 3000 ]; do n=$((n+1)); done; echo $i) & done; wait'
+        start=$(rewind events busy | grep 'rewind-start' | head -1 | awk '{print $1}')
+        end=$(rewind events busy | grep 'rewind-exit' | head -1 | awk '{print $1}')
+
+        for step in $(seq "$start" 4 "$end"); do
+          rewind gdb busy "$step" -- -batch -ex 'stepi 3000' -ex continue > gdb 2>&1 || true
+          follows "stepping from step $step"
+        done
+
+        rewind run -q --clock exits --name fork --root ${forkRoot} -- /bin/fork
+        start=$(rewind events fork | grep 'write(1, "start' | awk '{print $1}')
+        rewind gdb fork "$start" -- -batch \
+          -ex 'break _Fork' -ex continue -ex 'stepi 300' -ex continue > gdb 2>&1 || true
+        follows "stepping past fork"
         touch $out
       '';
 

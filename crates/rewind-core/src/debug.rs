@@ -2,7 +2,10 @@
 //! GDB remote protocol. gdb sees one x86-64 CPU with the VM's memory as the
 //! VM's page tables map it: the kernel, which the VM kernel's vmlinux has
 //! the symbols for, and the user space of whichever process was running.
-//! Continuing and stepping run the fork, never the recording.
+//! Continuing and stepping run the fork, never the recording. The fork's
+//! records are compared with the run's as it goes, and gdb's user is told
+//! the step where the two first differ: from there on the fork is not the
+//! run, whether gdb changed its memory or the debugging itself moved it.
 
 use std::net::TcpStream;
 
@@ -22,8 +25,8 @@ use gdbstub::target::ext::breakpoints::{
 use gdbstub::target::{Target, TargetError, TargetResult};
 use gdbstub_arch::x86::X86_64_SSE;
 use gdbstub_arch::x86::reg::X86_64CoreRegs;
-use rewind_vmm::debug::{DebugStop, MAX_BREAKPOINTS};
-use rewind_vmm::{Ignore, Machine, Outcome};
+use rewind_vmm::debug::{DebugStop, MAX_BREAKPOINTS, Stepping};
+use rewind_vmm::{Machine, Observer, Outcome};
 
 /// How far the fork runs between looks at the connection, in steps, so a
 /// Ctrl-C in gdb stops a VM that is running free.
@@ -40,19 +43,35 @@ enum Mode {
     Step,
 }
 
+impl Mode {
+    fn stepping(self) -> Stepping {
+        match self {
+            Mode::Continue => Stepping::No,
+            Mode::Step => Stepping::Yes,
+        }
+    }
+}
+
 /// A forked machine under gdb.
 pub struct Debuggee {
     machine: Machine,
     breakpoints: Vec<u64>,
     mode: Mode,
+    follow: Follow,
+    /// Whether gdb's user has been told the fork left the recording.
+    told: bool,
 }
 
 impl Debuggee {
-    pub fn new(machine: Machine) -> Debuggee {
+    /// A debuggee for `machine`, a fork of a run at a step, with `made`,
+    /// the records the run made after that step.
+    pub fn new(machine: Machine, made: Vec<(u64, Vec<u8>)>) -> Debuggee {
         Debuggee {
             machine,
             breakpoints: Vec::new(),
             mode: Mode::Continue,
+            follow: Follow::new(made),
+            told: false,
         }
     }
 
@@ -91,6 +110,35 @@ impl Target for Debuggee {
 
     fn support_breakpoints(&mut self) -> Option<BreakpointsOps<'_, Self>> {
         Some(self)
+    }
+}
+
+/// The run's records after the fork's step, compared one by one with the
+/// fork's as it makes them, keeping the step of the first that differs: a
+/// record with other bytes, at another step, or one the run never made.
+struct Follow {
+    made: std::vec::IntoIter<(u64, Vec<u8>)>,
+    left_at: Option<u64>,
+}
+
+impl Follow {
+    fn new(made: Vec<(u64, Vec<u8>)>) -> Follow {
+        Follow {
+            made: made.into_iter(),
+            left_at: None,
+        }
+    }
+}
+
+impl Observer for Follow {
+    fn record(&mut self, step: u64, record: &[u8]) {
+        if self.left_at.is_some() {
+            return;
+        }
+        match self.made.next() {
+            Some((made_step, made)) if made_step == step && made == record => {}
+            _ => self.left_at = Some(step),
+        }
     }
 }
 
@@ -220,15 +268,25 @@ impl BlockingEventLoop for EventLoop {
         let breakpoints = target.breakpoints.clone();
         target
             .machine
-            .set_debug(target.mode == Mode::Step, &breakpoints)
+            .set_debug(target.mode.stepping(), &breakpoints)
             .map_err(target_error)?;
 
         loop {
             let until = target.machine.step() + CHUNK_STEPS;
             let outcome = target
                 .machine
-                .run(Some(until), &mut Ignore)
+                .run(Some(until), &mut target.follow)
                 .map_err(target_error)?;
+
+            // Said once, when it happens, so gdb's user knows what follows
+            // is not what the run did.
+            if let (Some(step), false) = (target.follow.left_at, target.told) {
+                target.told = true;
+                eprintln!(
+                    "rewind: the fork left the recording at step {step}; \
+                     from there on it is not the run"
+                );
+            }
             match outcome {
                 Outcome::Debug(DebugStop::Step) => {
                     return Ok(Event::TargetStopped(SingleThreadStopReason::DoneStep));
@@ -256,5 +314,45 @@ impl BlockingEventLoop for EventLoop {
 
     fn on_interrupt(_target: &mut Debuggee) -> Result<Option<Self::StopReason>, String> {
         Ok(Some(SingleThreadStopReason::Signal(Signal::SIGINT)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // A fork's records compared with the run's, as gdb runs it: the step
+    // of the first that differs is kept, and only that one.
+    use super::*;
+
+    /// Feeds a follower the run's own records, then records that differ
+    /// in bytes and in step, and checks it keeps the first difference.
+    #[test]
+    fn a_fork_leaves_the_recording_at_its_first_different_record() {
+        let made = vec![
+            (10, b"a".to_vec()),
+            (12, b"b".to_vec()),
+            (15, b"c".to_vec()),
+        ];
+
+        let mut same = Follow::new(made.clone());
+        same.record(10, b"a");
+        same.record(12, b"b");
+        same.record(15, b"c");
+        assert_eq!(same.left_at, None);
+
+        let mut other_bytes = Follow::new(made.clone());
+        other_bytes.record(10, b"a");
+        other_bytes.record(12, b"x");
+        other_bytes.record(15, b"c");
+        assert_eq!(other_bytes.left_at, Some(12));
+
+        let mut other_step = Follow::new(made.clone());
+        other_step.record(11, b"a");
+        assert_eq!(other_step.left_at, Some(11));
+
+        let mut past_the_end = Follow::new(made);
+        for (step, record) in [(10, b"a"), (12, b"b"), (15, b"c"), (20, b"d")] {
+            past_the_end.record(step, record);
+        }
+        assert_eq!(past_the_end.left_at, Some(20));
     }
 }

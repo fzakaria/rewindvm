@@ -9,8 +9,8 @@
 
 use anyhow::{Context, Result, bail};
 use kvm_bindings::{
-    KVM_GUESTDBG_BLOCKIRQ, KVM_GUESTDBG_ENABLE, KVM_GUESTDBG_SINGLESTEP, KVM_GUESTDBG_USE_HW_BP,
-    kvm_guest_debug, kvm_regs, kvm_sregs,
+    KVM_GUESTDBG_ENABLE, KVM_GUESTDBG_SINGLESTEP, KVM_GUESTDBG_USE_HW_BP, kvm_guest_debug,
+    kvm_regs, kvm_sregs,
 };
 
 use crate::Machine;
@@ -29,7 +29,23 @@ const DR7_INDEX: usize = 7;
 const DR6_HIT_MASK: u64 = 0xf;
 const DR6_SINGLE_STEP: u64 = 1 << 14;
 
+/// RFLAGS' trap flag, which KVM sets to single-step the vCPU.
+const RFLAGS_TF: u64 = 1 << 8;
+
 const PAGE_SIZE: u64 = 4096;
+
+/// Whether a debugger runs the machine one instruction at a time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stepping {
+    No,
+    Yes,
+}
+
+/// What a debugger has asked of the machine.
+pub(crate) struct Debugging {
+    stepping: Stepping,
+    breakpoints: Vec<u64>,
+}
 
 /// Why a debugged machine stopped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,10 +58,14 @@ pub enum DebugStop {
 
 impl Machine {
     /// Turns debugging on with these breakpoint addresses, stepping one
-    /// instruction at a time when `single_step`. Interrupts are held off
-    /// while stepping, so a step stays in the code being stepped. With
-    /// debugging on, `run` returns [`crate::Outcome::Debug`] at every trap.
-    pub fn set_debug(&mut self, single_step: bool, breakpoints: &[u64]) -> Result<()> {
+    /// instruction at a time when asked. With debugging on, `run` returns
+    /// [`crate::Outcome::Debug`] at every trap that is the debugger's.
+    ///
+    /// Interrupts are not held off while stepping, though a step then
+    /// lands in an interrupt handler now and then: one held off is taken
+    /// later than when the run was recorded, and the machine goes another
+    /// way from there.
+    pub fn set_debug(&mut self, stepping: Stepping, breakpoints: &[u64]) -> Result<()> {
         if breakpoints.len() > MAX_BREAKPOINTS {
             bail!(
                 "at most {MAX_BREAKPOINTS} breakpoints, the CPU's debug registers; got {}",
@@ -56,8 +76,8 @@ impl Machine {
             control: KVM_GUESTDBG_ENABLE | KVM_GUESTDBG_USE_HW_BP,
             ..Default::default()
         };
-        if single_step {
-            debug.control |= KVM_GUESTDBG_SINGLESTEP | KVM_GUESTDBG_BLOCKIRQ;
+        if stepping == Stepping::Yes {
+            debug.control |= KVM_GUESTDBG_SINGLESTEP;
         }
         for (i, address) in breakpoints.iter().enumerate() {
             debug.arch.debugreg[i] = *address;
@@ -65,7 +85,10 @@ impl Machine {
                 DR7_LOCAL_ENABLE << (DR7_BITS_PER_BREAKPOINT * i as u32);
         }
         self.vcpu.set_guest_debug(&debug)?;
-        self.debugging = Some(breakpoints.to_vec());
+        self.debugging = Some(Debugging {
+            stepping,
+            breakpoints: breakpoints.to_vec(),
+        });
         Ok(())
     }
 
@@ -78,7 +101,10 @@ impl Machine {
 
     /// What a debug trap with this DR6 means, given the breakpoints set.
     pub(crate) fn debug_stop(&self, dr6: u64) -> DebugStop {
-        let breakpoints = self.debugging.as_deref().unwrap_or_default();
+        let breakpoints = self
+            .debugging
+            .as_ref()
+            .map_or(&[][..], |d| &d.breakpoints[..]);
         if dr6 & DR6_SINGLE_STEP == 0 {
             let hit = (dr6 & DR6_HIT_MASK).trailing_zeros() as usize;
             if let Some(address) = breakpoints.get(hit) {
@@ -86,6 +112,24 @@ impl Machine {
             }
         }
         DebugStop::Step
+    }
+
+    /// Whether a debug trap is stray, and if so clears the TF behind it, so
+    /// the guest runs on as it did when the run was recorded. KVM steps
+    /// the vCPU by setting TF, and an instruction that saves RFLAGS while
+    /// it is set, `syscall` into R11, `pushf`, or an interrupt's frame,
+    /// keeps a copy that sets TF again when the guest restores it, after
+    /// the debugger has stopped stepping. The trap comes after the
+    /// instruction has run, and KVM keeps it from the guest.
+    pub(crate) fn clear_stray_trap(&mut self, dr6: u64) -> Result<bool> {
+        let stepping = self.debugging.as_ref().map_or(Stepping::No, |d| d.stepping);
+        if !stray_trap(dr6, stepping) {
+            return Ok(false);
+        }
+        let mut regs = self.vcpu.get_regs()?;
+        regs.rflags &= !RFLAGS_TF;
+        self.vcpu.set_regs(&regs)?;
+        Ok(true)
     }
 
     /// The general purpose registers, the instruction pointer and flags.
@@ -147,6 +191,12 @@ impl Machine {
     }
 }
 
+/// Whether a debug trap with this DR6 is a single step the debugger did
+/// not ask for.
+fn stray_trap(dr6: u64, stepping: Stepping) -> bool {
+    dr6 & DR6_SINGLE_STEP != 0 && dr6 & DR6_HIT_MASK == 0 && stepping == Stepping::No
+}
+
 /// How many bytes from `address` to the end of its page.
 fn page_remainder(address: u64) -> usize {
     (PAGE_SIZE - address % PAGE_SIZE) as usize
@@ -157,6 +207,17 @@ mod tests {
     // Reads and writes split at page boundaries, where the next page may
     // map somewhere else entirely.
     use super::*;
+
+    /// A single-step trap is the debugger's only when it asked to step;
+    /// otherwise it is TF that one of its steps left in a saved copy of
+    /// RFLAGS. A breakpoint's trap is always the debugger's.
+    #[test]
+    fn a_single_step_trap_the_debugger_did_not_ask_for_is_stray() {
+        assert!(stray_trap(DR6_SINGLE_STEP, Stepping::No));
+        assert!(!stray_trap(DR6_SINGLE_STEP, Stepping::Yes));
+        assert!(!stray_trap(1, Stepping::No));
+        assert!(!stray_trap(DR6_SINGLE_STEP | 1, Stepping::No));
+    }
 
     #[test]
     fn a_page_remainder_runs_to_the_next_boundary() {

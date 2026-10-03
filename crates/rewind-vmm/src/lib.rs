@@ -265,8 +265,8 @@ pub struct Machine {
     pub(crate) work: Option<Work>,
     /// The branch count to resume from, set by a restore.
     pub(crate) work_base: u64,
-    /// The breakpoints, while a debugger is attached (debug.rs).
-    pub(crate) debugging: Option<Vec<u64>>,
+    /// What a debugger has asked for, while one is attached (debug.rs).
+    pub(crate) debugging: Option<debug::Debugging>,
     /// When to stop the machine, however far it has got.
     pub(crate) deadline: Option<std::time::Instant>,
 }
@@ -479,9 +479,13 @@ impl Machine {
                     // A signal to the monitor thread, a counter overflow
                     // among them, or one single step: not the guest's
                     // doing, so not a step of its own.
-                    // A debugger's trap ends the run for the debugger.
+                    // A debugger's trap ends the run for the debugger; a
+                    // stray one is cleared and is not a step.
                     VcpuExit::Debug(arch) if self.debugging.is_some() => {
-                        return Ok(Outcome::Debug(self.debug_stop(arch.dr6)));
+                        if !self.clear_stray_trap(arch.dr6)? {
+                            return Ok(Outcome::Debug(self.debug_stop(arch.dr6)));
+                        }
+                        None
                     }
                     VcpuExit::Intr | VcpuExit::Debug(_) => None,
                     VcpuExit::Hlt => bail!("the VM executed HLT; is its kernel built for Rewind?"),

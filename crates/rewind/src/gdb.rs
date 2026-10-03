@@ -97,7 +97,8 @@ pub fn gdb(
     let debuginfod = Debuginfod::start();
 
     let machine = run.machine_at(home, step, &mut rewind_vmm::Ignore)?;
-    let mut debuggee = rewind_core::debug::Debuggee::new(machine);
+    let made = run.records_after(step)?;
+    let mut debuggee = rewind_core::debug::Debuggee::new(machine, made);
     let listener = TcpListener::bind(listen.unwrap_or(GDB_LOCAL)).context("listening for gdb")?;
     let address = listener.local_addr()?;
     // The session's server first, then any the person already uses.

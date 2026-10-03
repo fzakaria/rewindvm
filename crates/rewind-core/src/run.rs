@@ -776,6 +776,17 @@ impl Run {
         Ok(machine)
     }
 
+    /// The records the run made after `step`, with their steps: what a
+    /// fork at `step` should make again.
+    pub fn records_after(&self, step: u64) -> Result<Vec<(u64, Vec<u8>)>> {
+        let path = self.dir.join(TRACE);
+        Ok(rewind_trace::records(&path)
+            .with_context(|| format!("reading {}", path.display()))?
+            .into_iter()
+            .filter(|(s, _)| *s > step)
+            .collect())
+    }
+
     /// Restores the keyframe at or before `step` and runs to the end.
     /// Returns the keyframe's step, the original trace after it, and the
     /// new one, which should be the same: the claim every keyframe makes.
