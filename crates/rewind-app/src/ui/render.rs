@@ -1706,7 +1706,7 @@ const COMPARED_NOTE: &str = "The run it is compared with, here the run it was fo
 const COMPARED_PINNED_NOTE: &str = "The run you chose to compare against, which stays the comparison as you open other runs. Right-click in the Runs panel and choose Compare each run with its parent to go back.";
 
 /// What the inspect buttons do, for their hover notes.
-const GDB_NOTE: &str = "gdb on a throwaway copy of the VM at this step: its one CPU, stopped in the kernel and the process running there, with their symbols and sources. Breakpoints, step and continue run the copy forward; the recording does not change.";
+const GDB_NOTE: &str = "gdb on a throwaway copy of the VM at this step: its one CPU, stopped in the kernel and the process running there, with their symbols and sources. Breakpoints and watchpoints in user space stop only in that process. Breakpoints, step and continue run the copy forward; the recording does not change.";
 const SHELL_NOTE: &str = "A shell inside a throwaway copy of the VM at this step, in the process's directory with its environment, while everything else in the VM stays where it was. Nothing done in it changes the recording.";
 const EXPORT_NOTE: &str = "Writes this run to one .rwd file, with its keyframes and inputs, that another machine can open, replay and fork.";
 
