@@ -136,7 +136,7 @@ pub struct Job {
     #[serde(default)]
     pub files: Vec<JobFile>,
     /// Paths the job produces. After it succeeds, init hashes each with
-    /// [`tree_hash`] and reports the hash as a mark, so two runs can be
+    /// [`nar_hash`] and reports the hash as a mark, so two runs can be
     /// compared by what they built.
     #[serde(default)]
     pub outputs: Vec<String>,
@@ -148,36 +148,20 @@ pub struct JobFile {
     pub contents: String,
 }
 
-/// A hash of a file tree: file contents, the executable bit, symlink
-/// targets and names, and nothing else, so it is equal wherever and
-/// whenever the same tree was built. Directory entries are taken in byte
-/// order of their names.
-pub fn tree_hash(path: &std::path::Path) -> std::io::Result<blake3::Hash> {
-    use std::os::unix::fs::PermissionsExt;
-
-    let meta = std::fs::symlink_metadata(path)?;
-    let mut h = blake3::Hasher::new();
-    if meta.file_type().is_symlink() {
-        h.update(b"l");
-        h.update(std::fs::read_link(path)?.as_os_str().as_encoded_bytes());
-    } else if meta.is_dir() {
-        h.update(b"d");
-        let mut names: Vec<_> = std::fs::read_dir(path)?
-            .map(|e| e.map(|e| e.file_name()))
-            .collect::<Result<_, _>>()?;
-        names.sort();
-        for name in names {
-            h.update(name.as_encoded_bytes());
-            h.update(&[0]);
-            h.update(tree_hash(&path.join(&name))?.as_bytes());
-        }
-    } else {
-        let exec = meta.permissions().mode() & 0o111 != 0;
-        h.update(if exec { b"x" } else { b"f" });
-        h.update_reader(std::fs::File::open(path)?)?;
-    }
-    Ok(h.finalize())
+/// The hash of a file tree serialized as a NAR, `sha256:` and the digest
+/// in hex: the hash Nix records as a store path's narHash and binary caches
+/// publish as NarHash. It covers names, file contents, the executable bit
+/// and symlink targets, and nothing else, so it is equal wherever and
+/// whenever the same tree was built.
+pub fn nar_hash(path: &std::path::Path) -> std::io::Result<String> {
+    let hash = nix_archive::nar::hash_path(path, nix_archive::nar::CaseHack::native())
+        .map_err(std::io::Error::other)?;
+    let hex: String = hash.sha256.iter().map(|b| format!("{b:02x}")).collect();
+    Ok(format!("{NAR_HASH_PREFIX}{hex}"))
 }
+
+/// How [`nar_hash`] names its algorithm, as Nix writes a base-16 hash.
+pub const NAR_HASH_PREFIX: &str = "sha256:";
 
 /// The header of one section of an answer that carries several things:
 /// the length in decimal, a space and the name, on a line, then that many
@@ -222,6 +206,31 @@ mod tests {
     // Sections written one after another and read back, and an answer cut
     // short in the middle of one.
     use super::*;
+
+    #[test]
+    fn an_output_is_hashed_as_nix_hashes_a_store_path() {
+        // A tree with a file, an executable and a symlink, and a file on its
+        // own, hash to what `nix hash path --algo sha256 --base16` printed
+        // for the same tree, the hash Nix records as a path's narHash.
+        let dir = std::env::temp_dir().join(format!("rewind-nar-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        std::fs::write(dir.join("a"), "hello\n").unwrap();
+        std::fs::write(dir.join("bin/run"), "#!/bin/sh\necho hi\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.join("bin/run"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::os::unix::fs::symlink("a", dir.join("l")).unwrap();
+
+        assert_eq!(
+            nar_hash(&dir).unwrap(),
+            "sha256:3396a269de6b6355be0bcaef381dfaddf85eb8237aeff4d930f72816a67080fb"
+        );
+        assert_eq!(
+            nar_hash(&dir.join("a")).unwrap(),
+            "sha256:1c37d01af40be2e80691de3cc3df44377a699afbb17c68f080964b2fd071fc13"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn sections_come_back_in_order_with_any_bytes() {

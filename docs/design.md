@@ -253,9 +253,16 @@ working directory, user, and how the image becomes the root.
   shell into an image. The guest mounts it at `/nix/store` under a writable
   overlay. The builder runs with the environment nix-daemon's `initEnv` would
   give it, `passAsFile` files included, as uid 1000 in `/build`. After a
-  successful build, init hashes each output tree and reports the hash.
-  `rewind nix` compares it with the host's copy of the output when there is
-  one. GNU hello built in the guest is identical to the host's build.
+  successful build, init reports each output's NAR hash, the hash Nix
+  records as a store path's narHash. `rewind nix` compares it with the
+  host's copy of the output, if the host has one, and with the build each
+  HTTP binary cache Nix substitutes from publishes. It fetches only a
+  cache's `.narinfo` for the path, never the NAR, logs in with the netrc
+  file Nix is configured with, and skips substituters that are not HTTP
+  caches. A store path names a build's inputs, not its contents, so a build
+  that differs mostly says the package is not bit-reproducible; one that
+  matches says the VM built the same bytes. GNU hello and pkgconf built in
+  the guest match cache.nixos.org's builds.
 
 The guest's wall clock starts at midnight UTC of the day the run was made.
 Configure scripts compare the clock with the timestamps in source tarballs, so

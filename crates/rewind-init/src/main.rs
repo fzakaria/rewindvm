@@ -18,7 +18,7 @@ use rewind_init::{
     EXIT_MARK, INSPECT_ARG, INSPECT_BEGIN_MARK, INSPECT_CAT, INSPECT_END_MARK, INSPECT_FILES,
     INSPECT_RUNNING, INSPECT_SHELL, INSPECT_WITH, InspectStatus, JOB_PATH, Job, OUTPUT_MARK,
     RESIZE_ESCAPE, RESIZE_LEN, RESIZE_TAG, RUNNING_ENV, Root, SECTION_MAPS, SECTION_PID,
-    START_MARK, section_header, tree_hash,
+    START_MARK, nar_hash, section_header,
 };
 
 /// The image the monitor maps as persistent memory.
@@ -177,7 +177,7 @@ fn run() -> Result<()> {
     let status = spawn_and_reap(&job, root)?;
     if status == 0 {
         for output in &job.outputs {
-            match tree_hash(&within(root, output)) {
+            match nar_hash(&within(root, output)) {
                 Ok(hash) => mark(&format!("{OUTPUT_MARK}{output} {hash}")),
                 Err(e) => eprintln!("rewind-init: hashing {output}: {e}"),
             }

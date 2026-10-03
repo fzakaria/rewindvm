@@ -15,7 +15,7 @@ use rewind_core::run::{
     BASE_CMDLINE, DEFAULT_CORES, DEFAULT_QUANTUM, MAX_CORES, Start, default_epoch,
 };
 use rewind_core::{Echo, Execution, Guest, Home, Keyframes, Run, Source, Spec, TimeLimit};
-use rewind_core::{export, image, nix};
+use rewind_core::{compare, export, image, nix};
 use rewind_init::{Job, Root};
 
 /// `rewind cat`'s exit status when the file did not exist at the step.
@@ -197,6 +197,14 @@ enum Command {
     Nix {
         /// A .drv path or an installable such as `nixpkgs#hello`.
         installable: String,
+        /// Also compare the outputs with this binary cache's builds of them,
+        /// besides the substituters Nix is configured with. Repeatable.
+        #[arg(long = "compare-with", value_name = "URL")]
+        compare_with: Vec<String>,
+        /// Compare the outputs with this machine's store only, asking no
+        /// binary cache.
+        #[arg(long)]
+        no_compare: bool,
         #[command(flatten)]
         machine: MachineArgs,
     },
@@ -424,11 +432,20 @@ fn run(cli: Cli) -> Result<ExitCode> {
         }
         Command::Nix {
             installable,
+            compare_with,
+            no_compare,
             machine,
         } => {
             let guest = Guest::from_env()?;
             let run = run_workload(&home, &guest, &Workload::Nix(installable), &machine)?;
-            let missing = report_outputs(&run)?;
+            let lookup = if no_compare {
+                compare::Lookup::Off
+            } else {
+                compare::Lookup::Configured {
+                    extra: compare_with,
+                }
+            };
+            let missing = report_outputs(&run, &lookup)?;
             if !missing.is_empty() {
                 return Ok(ExitCode::FAILURE);
             }
@@ -1305,33 +1322,47 @@ const CHECK_TIMEOUT_FACTOR: u64 = 10;
 /// The least time `rewind check` gives each schedule after schedule 0.
 const CHECK_TIMEOUT_MIN: Duration = Duration::from_secs(60);
 
-/// Prints each output's hash from the guest, and whether it matches the
-/// copy of that output the host already has, if it has one. A job that
-/// exited 0 without creating an output failed, as nix-daemon judges it:
-/// those outputs are printed as missing and returned.
-fn report_outputs(run: &Run) -> Result<Vec<String>> {
+/// Prints each output's hash from the guest, and what this machine's store
+/// and the binary caches `lookup` names say about their builds of it. A
+/// job that exited 0 without creating an output failed, as nix-daemon
+/// judges it: those outputs are printed as missing and returned.
+fn report_outputs(run: &Run, lookup: &compare::Lookup) -> Result<Vec<String>> {
     let (status, hashed) = show::outcome_key(run)?;
-    for e in run.trace()?.events {
-        let rewind_trace::EventKind::Mark { text } = e.kind else {
-            continue;
-        };
-        let Some(rest) = text.strip_prefix(rewind_init::OUTPUT_MARK) else {
-            continue;
-        };
-        let Some((path, hash)) = rest.split_once(' ') else {
-            continue;
-        };
-        let host = std::path::Path::new(path);
-        let verdict = if host.exists() {
-            match rewind_init::tree_hash(host) {
-                Ok(h) if h.to_hex().as_str() == hash => "same as the host's build",
-                Ok(_) => "DIFFERENT from the host's build",
-                Err(_) => "host copy unreadable",
-            }
-        } else {
-            "not built on the host"
-        };
-        println!("{path} {} ({verdict})", &hash[..16]);
+    let outputs: Vec<(String, String)> = hashed
+        .iter()
+        .filter_map(|h| h.split_once(' '))
+        .map(|(path, hash)| (path.to_string(), hash.to_string()))
+        .collect();
+
+    // The caches to ask; without Nix's configuration, only the store.
+    let caches = match compare::caches(lookup) {
+        Ok(caches) => caches,
+        Err(e) => {
+            eprintln!("rewind: comparing with your store only: {e:#}");
+            compare::Caches::default()
+        }
+    };
+    let netrc = if caches.http.is_empty() {
+        compare::Netrc::default()
+    } else {
+        compare::Netrc::load()
+    };
+    let results = compare::compare(&outputs, &caches, &netrc);
+    for ((path, hash), result) in outputs.iter().zip(&results) {
+        println!("{}", show::verdict_line(path, hash, &result.comparisons));
+    }
+    let differs = results
+        .iter()
+        .flat_map(|r| &r.comparisons)
+        .any(|c| c.verdict == compare::Verdict::Differs);
+    if differs {
+        println!("{}", show::DIFFERS_NOTE);
+    }
+    if !outputs.is_empty() && !caches.skipped.is_empty() {
+        println!(
+            "rewind: did not ask {}, which are not HTTP binary caches",
+            caches.skipped.join(", ")
+        );
     }
 
     if status != Some(0) {

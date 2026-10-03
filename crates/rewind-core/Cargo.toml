@@ -28,5 +28,10 @@ sha2 = "0.10"
 # .drv files as Nix writes them, and the .attrs.json and .attrs.sh a build
 # with structured attributes reads.
 nix-derivation = "0.6"
+# Binary caches' .narinfo files, whose NarHash a run's outputs are compared
+# with.
+nix-narinfo = "0.4"
+# Basic authentication for caches with a netrc login.
+base64 = "0.22"
 gdbstub = "0.7"
 gdbstub_arch = "0.3"

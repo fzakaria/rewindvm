@@ -1,6 +1,7 @@
 //! The engine behind the `rewind` command and the desktop app: building
 //! inputs, executing runs, and finding them again.
 
+pub mod compare;
 pub mod cpio;
 pub mod debug;
 pub mod export;

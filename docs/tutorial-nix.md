@@ -80,7 +80,7 @@ $ rewind nix github:fzakaria/rewindvm#mylib
 rewind: packing 62 store paths for mylib-0.3.0
 ...
 rewind: run 3a7a903ba51d85aa exited:0 after 6162 steps, 0.216s virtual, 1.162s wall (poweroff)
-/nix/store/f6a9gy362szw6nxx3ikrklr8glr6rdln-mylib-0.3.0 aa30ea54dc47c30f (same as the host's build)
+/nix/store/f6a9gy362szw6nxx3ikrklr8glr6rdln-mylib-0.3.0 aa30ea54dc47c30f  matches your store
 ```
 
 The run used counter time: the VM's clock follows the work done inside it. On
@@ -91,9 +91,11 @@ with exit time. [Counter time](pmu.md) explains the difference.
 
 This build passes, and it passes every time: the same inputs make the same
 run, down to the same 6162 steps. A step is one exit from the VM to Rewind,
-and the step count is the run's clock. The last line is the hash of the output
-tree. The host built the same derivation above, so `rewind nix` compares the
-two outputs, and they are the same.
+and the step count is the run's clock. The last line is the output's NAR
+hash, the hash Nix records for a store path, and the other builds of it that
+have the same contents. The host built the same derivation above, so your
+store has a copy, and it matches. `rewind nix` also asks the binary caches Nix
+is configured with, which have no build of mylib.
 
 ## Find a failing interleaving
 

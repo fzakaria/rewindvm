@@ -4,6 +4,7 @@ use std::fmt::Write;
 use std::time::Duration;
 
 use rewind_core::Run;
+use rewind_core::compare::{Comparison, Source, Verdict};
 use rewind_trace::{Event, EventKind, Trace, signal_name};
 
 /// A one-line summary for `rewind ls`.
@@ -136,6 +137,80 @@ const MISSING_OUTPUT: &str = "missing-output";
 /// What [`ending`] calls a run stopped at its time limit.
 const TIMED_OUT: &str = "timed-out";
 
+/// One line for an output of a Nix run: its path, the start of its NAR
+/// hash, and what this machine's store and the caches said about it.
+pub fn verdict_line(path: &str, hash: &str, comparisons: &[Comparison]) -> String {
+    let named = |verdict: &dyn Fn(&Verdict) -> bool| -> Vec<String> {
+        comparisons
+            .iter()
+            .filter(|c| verdict(&c.verdict))
+            .map(|c| source_name(&c.source))
+            .collect()
+    };
+    let matches = named(&|v| *v == Verdict::Matches);
+    let differs = named(&|v| *v == Verdict::Differs);
+    let absent = named(&|v| *v == Verdict::Absent).len();
+
+    // What had the path, or else how many places did not.
+    let mut parts = Vec::new();
+    if !matches.is_empty() {
+        parts.push(format!("matches {}", matches.join(", ")));
+    }
+    if !differs.is_empty() {
+        parts.push(format!("differs from {}", differs.join(", ")));
+    }
+    if parts.is_empty() {
+        parts.push(match absent {
+            0 => "not in your store".to_string(),
+            1 => "not in your store or 1 cache".to_string(),
+            n => format!("not in your store or {n} caches"),
+        });
+    }
+
+    // Caches that could not say either way.
+    for c in comparisons {
+        match &c.verdict {
+            Verdict::NeedsCredentials => {
+                parts.push(format!("{} needs credentials", source_name(&c.source)))
+            }
+            Verdict::Unreachable(why) => {
+                parts.push(format!("{} unreachable ({why})", source_name(&c.source)))
+            }
+            _ => {}
+        }
+    }
+
+    let digest = hash
+        .strip_prefix(rewind_init::NAR_HASH_PREFIX)
+        .unwrap_or(hash);
+    let short = digest.get(..HASH_SHOWN).unwrap_or(digest);
+    format!("{path} {short}  {}", parts.join("; "))
+}
+
+/// How many characters of each output's hash a `rewind check` line shows.
+const CHECK_HASH_SHOWN: usize = 12;
+
+/// How many characters of an output's hash a verdict line shows.
+const HASH_SHOWN: usize = 16;
+
+/// A source as a reader knows it: "your store", or a cache's URL without
+/// its scheme.
+fn source_name(source: &Source) -> String {
+    match source {
+        Source::Store => "your store".to_string(),
+        Source::Cache(url) => url
+            .split_once("://")
+            .map_or(url.as_str(), |(_, rest)| rest)
+            .to_string(),
+    }
+}
+
+/// Printed once under the verdict lines when some build of an output
+/// differs from the run's.
+pub const DIFFERS_NOTE: &str = "rewind: a store path names a build's inputs, not its contents, so \
+     another build of it can differ in bytes: the package may not be bit-reproducible, or the \
+     VM's CPU model, kernel or --cores reached its output";
+
 /// One line per run for `rewind check`.
 pub fn outcome_line(run: &Run) -> anyhow::Result<String> {
     let (status_, outputs) = outcome_key(run)?;
@@ -148,7 +223,11 @@ pub fn outcome_line(run: &Run) -> anyhow::Result<String> {
     let steps = run.manifest.outcome.as_ref().map_or(0, |o| o.step);
     let hashes: Vec<String> = outputs
         .iter()
-        .filter_map(|o| o.split_once(' ').map(|(_, h)| h[..12].to_string()))
+        .filter_map(|o| o.split_once(' '))
+        .map(|(_, h)| {
+            let digest = h.strip_prefix(rewind_init::NAR_HASH_PREFIX).unwrap_or(h);
+            digest.get(..CHECK_HASH_SHOWN).unwrap_or(digest).to_string()
+        })
         .collect();
     Ok(format!(
         "{:<14} {:>10} steps  {}  run {}",
@@ -322,6 +401,65 @@ mod tests {
         assert!(passed(exited_0, &[]));
         assert!(!passed(exited_0, &missing));
         assert!(!passed(exited_1, &[]));
+    }
+
+    #[test]
+    fn an_output_line_names_who_matches_and_who_differs() {
+        // Sources are named the way a reader knows them, the store as
+        // "your store" and a cache by its URL without the scheme. Caches
+        // without the path are only counted, and only when no source had
+        // it; ones that could not answer say so, with the reason.
+        use rewind_core::compare::{Comparison, Source, Verdict};
+        let path = "/nix/store/0rk0cxq5669yg1bwzwk3s6nkhk9fqk6w-pkgconf-2.4.3";
+        let hash = "sha256:dfd7aed38b3557dcbca63b4a1a7572f4af98c98e7649549a6d53cbfbcee928f4";
+        let cache = |url: &str, verdict| Comparison {
+            source: Source::Cache(url.into()),
+            verdict,
+        };
+        let store = |verdict| Comparison {
+            source: Source::Store,
+            verdict,
+        };
+        let prefix = format!("{path} dfd7aed38b3557dc  ");
+
+        let line = verdict_line(
+            path,
+            hash,
+            &[
+                store(Verdict::Matches),
+                cache("https://cache.nixos.org", Verdict::Matches),
+                cache("http://leviathan:5000", Verdict::Differs),
+                cache("https://other.cachix.org", Verdict::Absent),
+            ],
+        );
+        assert_eq!(
+            line,
+            format!("{prefix}matches your store, cache.nixos.org; differs from leviathan:5000")
+        );
+
+        let line = verdict_line(
+            path,
+            hash,
+            &[
+                cache("https://cache.nixos.org", Verdict::Absent),
+                cache("https://private.cachix.org", Verdict::NeedsCredentials),
+                cache(
+                    "http://leviathan:5000",
+                    Verdict::Unreachable("timeout".into()),
+                ),
+            ],
+        );
+        assert_eq!(
+            line,
+            format!(
+                "{prefix}not in your store or 1 cache; \
+                 private.cachix.org needs credentials; leviathan:5000 unreachable (timeout)"
+            )
+        );
+        assert_eq!(
+            verdict_line(path, hash, &[]),
+            format!("{prefix}not in your store")
+        );
     }
 
     #[test]
