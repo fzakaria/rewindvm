@@ -4757,7 +4757,7 @@ dependencies = [
 
 [[package]]
 name = "rewind-app"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -4786,7 +4786,7 @@ dependencies = [
 
 [[package]]
 name = "rewind-trace"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "serde",
  "thiserror 2.0.21",
