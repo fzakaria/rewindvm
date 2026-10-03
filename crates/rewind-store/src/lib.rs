@@ -382,7 +382,9 @@ mod tests {
             let dir = dir.clone();
             let (tx, rx) = std::sync::mpsc::channel();
             std::thread::spawn(move || tx.send(Store::open(&dir).unwrap()).unwrap());
-            rx.recv_timeout(std::time::Duration::from_secs(5))
+            // Generous, so a loaded build machine does not fail it; a store
+            // that waited for the first to close would wait forever.
+            rx.recv_timeout(std::time::Duration::from_secs(60))
         };
         let mut second = opened.expect("the second store waited for the first to close");
 
