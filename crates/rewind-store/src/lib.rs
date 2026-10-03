@@ -20,6 +20,7 @@
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
+use std::hash::{BuildHasherDefault, Hasher};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
@@ -48,9 +49,34 @@ struct Location {
     len: u32,
 }
 
+/// Hashes a page's key for the index's map by taking its first eight
+/// bytes. The keys are BLAKE3 output, already uniform, and a store holds
+/// millions of them: hashing each again with the standard hasher made
+/// opening a large store take seconds.
+#[derive(Default)]
+struct PageHasher(u64);
+
+impl Hasher for PageHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        let mut first = [0u8; 8];
+        let n = bytes.len().min(first.len());
+        first[..n].copy_from_slice(&bytes[..n]);
+        self.0 = u64::from_le_bytes(first);
+    }
+
+    // The length an array writes before its bytes says nothing.
+    fn write_usize(&mut self, _: usize) {}
+
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+type PageHashes = BuildHasherDefault<PageHasher>;
+
 /// The index as far as this store has read it.
 struct Index {
-    pages: HashMap<Hash, Location>,
+    pages: HashMap<Hash, Location, PageHashes>,
     /// How many bytes of the index file `pages` holds, a whole number of
     /// entries.
     read: u64,
@@ -110,7 +136,7 @@ impl Store {
         let store = Store {
             dir: dir.to_path_buf(),
             index: Mutex::new(Index {
-                pages: HashMap::new(),
+                pages: HashMap::default(),
                 read: 0,
             }),
             index_log,
@@ -131,6 +157,7 @@ impl Store {
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
         let (entries, _) = bytes.as_chunks::<INDEX_ENTRY>();
+        index.pages.reserve(entries.len());
         for entry in entries {
             let hash: Hash = entry[..32].try_into().unwrap();
             let pack = u32::from_le_bytes(entry[32..36].try_into().unwrap());
@@ -310,6 +337,19 @@ mod tests {
     use super::*;
 
     const PAGE: usize = 4096;
+
+    /// The index's map hashes a page's key to the key's first eight bytes,
+    /// which BLAKE3 already makes uniform, rather than hashing 32 bytes
+    /// again; two keys that differ there land apart.
+    #[test]
+    fn a_page_key_hashes_to_its_first_eight_bytes() {
+        use std::hash::BuildHasher;
+        let build = PageHashes::default();
+        let key = Store::hash(b"some page");
+        let first = u64::from_le_bytes(key[..8].try_into().unwrap());
+        assert_eq!(build.hash_one(key), first);
+        assert_ne!(build.hash_one(Store::hash(b"another page")), first);
+    }
 
     fn tmp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("rewind-store-{name}-{}", std::process::id()));
