@@ -1012,6 +1012,8 @@ mod tests {
             cmdline: BASE_CMDLINE.into(),
             job: Job {
                 argv: vec!["true".into()],
+                program: None,
+
                 env: Vec::new(),
                 cwd: "/".into(),
                 uid: 0,

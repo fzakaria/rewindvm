@@ -277,6 +277,28 @@ pub fn input_closure(drv: &Derivation) -> Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
+/// Refuses, before anything is built, a derivation a run cannot build as
+/// nix-daemon would: one whose builder nix-daemon runs itself, and a
+/// fixed-output one, which nix-daemon gives the network a run lacks.
+pub fn runnable(drv: &Derivation) -> Result<()> {
+    if drv.builder.starts_with(BUILTIN_BUILDER_PREFIX) {
+        bail!(
+            "{} is built by {}, which runs inside nix-daemon and has no program for a run to execute",
+            drv.name,
+            drv.builder
+        );
+    }
+    if drv.fixed_output {
+        bail!(
+            "{} is a fixed-output derivation, such as a fetcher, which Nix builds with the \
+             network, and a run has none; build it with nix build, and derivations that use \
+             it run here with its output as an input",
+            drv.name
+        );
+    }
+    Ok(())
+}
+
 /// The closures the derivation's exportReferencesGraph asks for, from the
 /// host's store. Each root must be in `input_closure`, as nix-daemon
 /// requires.
@@ -428,14 +450,6 @@ fn path_infos(json: &Value) -> Result<BTreeMap<PathBuf, PathInfo>> {
 /// NIX_BUILD_CORES the build sees, the run's CPU count. `graphs` are the
 /// closures exportReferencesGraph asks for, from [`reference_graphs`].
 pub fn job(drv: &Derivation, graphs: &ReferenceGraphs, cores: u32) -> Result<Job> {
-    if drv.builder.starts_with(BUILTIN_BUILDER_PREFIX) {
-        bail!(
-            "{} is built by {}, which runs inside nix-daemon and has no program for a run to execute",
-            drv.name,
-            drv.builder
-        );
-    }
-
     let mut env: BTreeMap<String, String> = BTreeMap::new();
     env.insert("PATH".into(), "/path-not-set".into());
     env.insert("HOME".into(), HOMELESS.into());
@@ -453,12 +467,6 @@ pub fn job(drv: &Derivation, graphs: &ReferenceGraphs, cores: u32) -> Result<Job
         env.insert(var.into(), BUILD_DIR.into());
     }
 
-    // A fixed-output build is told its output's hash will be checked, so a
-    // fetcher can skip checking it itself.
-    if drv.fixed_output {
-        env.insert("NIX_OUTPUT_CHECKED".into(), "1".into());
-    }
-
     env.insert("NIX_LOG_FD".into(), "2".into());
     env.insert("TERM".into(), "xterm-256color".into());
 
@@ -469,7 +477,12 @@ pub fn job(drv: &Derivation, graphs: &ReferenceGraphs, cores: u32) -> Result<Job
         .iter()
         .map(|(name, path)| (hash_placeholder(name), path.to_string_lossy().into_owned()))
         .collect();
-    let mut argv = vec![drv.builder.clone()];
+    // nix-daemon executes the builder by its path and passes only the file
+    // name as argv[0].
+    let name = Path::new(&drv.builder)
+        .file_name()
+        .map_or(drv.builder.clone(), |n| n.to_string_lossy().into_owned());
+    let mut argv = vec![name];
     argv.extend(drv.args.iter().map(|a| rewrite(a, &rewrites)));
     let env = env
         .into_iter()
@@ -484,6 +497,7 @@ pub fn job(drv: &Derivation, graphs: &ReferenceGraphs, cores: u32) -> Result<Job
         .collect();
 
     Ok(Job {
+        program: Some(drv.builder.clone()),
         argv,
         env,
         cwd: BUILD_DIR.into(),
@@ -712,7 +726,10 @@ mod tests {
         assert_eq!(env["textPath"], file.path);
         assert_eq!(file.contents, "hello");
         assert!(file.path.starts_with("/build/.attr-"));
-        assert_eq!(job.argv, vec!["/bin/sh", "-e", "builder.sh"]);
+        // nix-daemon executes the builder by its path and passes only the
+        // file name as argv[0].
+        assert_eq!(job.program.as_deref(), Some("/bin/sh"));
+        assert_eq!(job.argv, vec!["sh", "-e", "builder.sh"]);
         assert_eq!(job.outputs, vec![FIXTURE_OUT.to_string()]);
     }
 
@@ -776,30 +793,21 @@ mod tests {
     }
 
     #[test]
-    fn fixed_output_builds_are_told_the_output_is_checked() {
-        // nix-daemon sets NIX_OUTPUT_CHECKED=1 for a fixed-output
-        // derivation, and only for one, so fetchers can skip checking the
-        // hash themselves. A fixed-output fixture's job has it; an
-        // input-addressed one's does not.
+    fn fixed_output_derivations_are_refused_up_front() {
+        // A fixed-output derivation, such as a fetcher, gets the network
+        // under nix-daemon, and a run has none, so Rewind refuses it before
+        // building anything and says why. An input-addressed one passes.
         let fixed = parse(
             Path::new(FIXTURE_DRV),
             &fixture_with(&fixed_output(), "/bin/sh", &[]),
         )
         .unwrap();
-        let env: BTreeMap<_, _> = job(&fixed, &no_graphs(), 1)
-            .unwrap()
-            .env
-            .into_iter()
-            .collect();
-        assert_eq!(env["NIX_OUTPUT_CHECKED"], "1");
+        let err = runnable(&fixed).unwrap_err().to_string();
+        assert!(err.contains("fixed-output"), "{err}");
+        assert!(err.contains("network"), "{err}");
 
         let plain = parse(Path::new(FIXTURE_DRV), &fixture(&[])).unwrap();
-        let env: BTreeMap<_, _> = job(&plain, &no_graphs(), 1)
-            .unwrap()
-            .env
-            .into_iter()
-            .collect();
-        assert!(!env.contains_key("NIX_OUTPUT_CHECKED"));
+        runnable(&plain).unwrap();
     }
 
     #[test]
@@ -811,7 +819,7 @@ mod tests {
             &fixture_with(&fixed_output(), "builtin:fetchurl", &[]),
         )
         .unwrap();
-        let err = job(&drv, &no_graphs(), 1).unwrap_err().to_string();
+        let err = runnable(&drv).unwrap_err().to_string();
         assert!(err.contains("builtin:fetchurl"), "{err}");
     }
 

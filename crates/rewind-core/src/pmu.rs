@@ -301,6 +301,7 @@ pub fn selftest(guest: &Guest) -> Result<SelfTest> {
         extras: rewind_vmm::Extras::Absent,
         cmdline: BASE_CMDLINE.to_string(),
         job: Job {
+            program: None,
             argv: vec!["/init".into(), "--selftest".into()],
             env: Vec::new(),
             cwd: "/".into(),

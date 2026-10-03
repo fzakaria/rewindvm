@@ -969,9 +969,13 @@ fn enter(root: &str, cwd: &str) -> Result<()> {
     Ok(())
 }
 
-/// The program to exec, as a path inside the job's root: as given if it
-/// contains a slash, else the first match on the job's PATH.
+/// The program to exec, as a path inside the job's root: the job's program
+/// if it names one, else argv[0], as given if it contains a slash, else
+/// the first match on the job's PATH.
 fn resolve(job: &Job, root: &str) -> Result<PathBuf> {
+    if let Some(program) = &job.program {
+        return Ok(PathBuf::from(program));
+    }
     let name = job.argv.first().ok_or("the job has no program")?;
     if name.contains('/') {
         return Ok(PathBuf::from(name));
@@ -1222,6 +1226,32 @@ mod tests {
     // are taken out and applied, and a message split across reads waits
     // for the rest.
     use super::*;
+
+    #[test]
+    fn a_job_runs_its_program_whatever_argv0_says() {
+        // A Nix builder is executed by its path with only its file name as
+        // argv[0]; a job without a program runs argv[0], as given when it
+        // has a slash.
+        let mut job = Job {
+            program: Some("/nix/store/aaa-bash/bin/bash".into()),
+            argv: vec!["bash".into(), "-e".into()],
+            env: vec![],
+            cwd: "/build".into(),
+            uid: 1000,
+            gid: 100,
+            hostname: "localhost".into(),
+            root: Root::Store,
+            files: vec![],
+            outputs: vec![],
+        };
+        assert_eq!(
+            resolve(&job, "/").unwrap(),
+            PathBuf::from("/nix/store/aaa-bash/bin/bash")
+        );
+        job.program = None;
+        job.argv[0] = "/bin/sh".into();
+        assert_eq!(resolve(&job, "/").unwrap(), PathBuf::from("/bin/sh"));
+    }
 
     #[test]
     fn a_cpu_list_names_every_cpu_reported() {

@@ -1130,6 +1130,7 @@ fn prepare_image(home: &Home, args: &ImageArgs) -> Result<(String, Source, Optio
     }
     let image = root_image(home, root)?;
     let job = Job {
+        program: None,
         argv: args.argv.clone(),
         env: parse_env(&args.env)?,
         cwd: args.cwd.clone(),
@@ -1154,6 +1155,7 @@ fn prepare_nix(
 ) -> Result<(String, Source, Option<PathBuf>, Job)> {
     let drv_path = nix::resolve(installable)?;
     let drv = nix::show(&drv_path)?;
+    nix::runnable(&drv)?;
     let closure = nix::input_closure(&drv)?;
 
     // Images of store paths are named by the paths, which already name

@@ -117,8 +117,13 @@ impl InspectStatus {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Job {
-    /// The program and its arguments. A program without a slash is looked
-    /// up on the PATH in `env`.
+    /// The program to execute, when it is not `argv[0]`: nix-daemon
+    /// executes a builder by its path and passes only its file name as
+    /// `argv[0]`.
+    pub program: Option<String>,
+    /// The program and its arguments, or with `program` set, its name and
+    /// its arguments. A program without a slash is looked up on the PATH in
+    /// `env`.
     pub argv: Vec<String>,
     /// The environment, in order.
     pub env: Vec<(String, String)>,
