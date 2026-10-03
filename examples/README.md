@@ -20,3 +20,16 @@ $ docker build -t mylib -f mylib/Containerfile mylib   # as a container
 The tutorials find the failing interleaving with `rewind check`, look at it
 step by step, and check the fix:
 [Nix](../docs/tutorial-nix.md) · [container](../docs/tutorial-container.md).
+
+## philosophers
+
+The dining philosophers. Five threads share five mutexes in a ring, and each
+locks the one on its left, then the one on its right. When every thread holds
+its left mutex at once, each waits for its neighbor forever. `make check`
+gives dinner ten seconds and fails with timeout's status 124 when it
+deadlocks. Locking the lower numbered fork first fixes it.
+
+```console
+$ make -C philosophers check                       # plain, on the host
+$ nix build github:fzakaria/rewindvm#philosophers  # as a derivation
+```

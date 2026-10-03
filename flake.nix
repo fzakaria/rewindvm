@@ -120,6 +120,9 @@
 
           # the tutorials' flaky thread pool (nix/examples.nix)
           mylib = p.examples.mylib;
+
+          # the dining philosophers, a deadlock (nix/examples.nix)
+          philosophers = p.examples.philosophers;
         }
       );
 
