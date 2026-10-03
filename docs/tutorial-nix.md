@@ -403,6 +403,9 @@ Before the fix, 11 of the same 64 schedules crashed.
 
 - [The container tutorial](tutorial-container.md) does the same with a
   Docker image instead of a derivation.
+- [The advanced tutorial](tutorial-advanced.md) has short recipes for the
+  rest: watchpoints, the kernel's side of the crash, tools inside the VM,
+  more CPUs, and sharing a failing run.
 - [Counter time](pmu.md) explains how the VM's clock follows its work, and
   the exit time warning on AMD.
 - [Design](design.md) explains how the machine is made deterministic, and

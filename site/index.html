@@ -444,8 +444,9 @@
       <section class="wrap tutorials" id="tutorials">
         <h2>Tutorials</h2>
         <p class="lede">
-          Both follow one real bug, a shutdown race in a small C thread pool, from install to fix.
-          Every transcript in them is real output.
+          The first two follow one real bug, a shutdown race in a small C thread pool, from install
+          to fix; the third is the rest of the tools on the same bug. Every transcript in them is
+          real output.
         </p>
         <div class="grid">
           <a class="card" href="tutorials/nix.html">
@@ -463,6 +464,15 @@
             <p>
               The same bug from a Docker image with no Nix: export the filesystem, find the failing
               schedule and replay the crash exactly.
+            </p>
+            <span class="card-link">Read the tutorial &rarr;</span>
+          </a>
+          <a class="card" href="tutorials/advanced.html">
+            <span class="eyebrow">Advanced</span>
+            <h3>Advanced features</h3>
+            <p>
+              Short recipes: watchpoints, the kernel's side of a crash, tools inside the VM, more
+              CPUs, steering the perturbation, and sharing a failing run.
             </p>
             <span class="card-link">Read the tutorial &rarr;</span>
           </a>
