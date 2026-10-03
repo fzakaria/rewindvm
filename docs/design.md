@@ -397,8 +397,9 @@ fails with the id of the run it needs; `rewind replay` from boot still works.
 `rewind remove <run>` removes the run and every run that descends from it
 through `parent`, with any inputs an import placed for them, the deepest
 first, so a removal cut short never leaves a fork whose parent is gone. It
-removes nothing while one of those runs has not finished, or while a run
-outside them reads keyframes from one of them, and names that run. Such a
+removes nothing while a process is executing one of those runs, or while a
+run outside them reads keyframes from one of them, and names that run. A
+run whose execution was killed is interrupted, and goes like any other. Such a
 reader is rare, since a run reads keyframes only from its parent, but
 running a fork's inputs again as a plain run makes one: the run keeps the
 fork's keyframes and loses its parent.
