@@ -439,7 +439,7 @@ dependencies = [
 [[package]]
 name = "nix-derivation"
 version = "0.6.1"
-source = "git+https://github.com/fzakaria/nix-derivation?rev=8cafa2692ea6d51711fe5fbb0145006d49dc8058#8cafa2692ea6d51711fe5fbb0145006d49dc8058"
+source = "git+https://github.com/cachix/nix-derivation?rev=e02e776cce1dc1e6d432b8cb3460026e7c76def4#e02e776cce1dc1e6d432b8cb3460026e7c76def4"
 dependencies = [
  "base64 0.22.1",
  "blake3",

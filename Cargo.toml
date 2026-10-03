@@ -25,7 +25,7 @@ lto = "thin"
 debug = "line-tables-only"
 
 # exportReferencesGraph needs nix-derivation's
-# structured_attrs_files_with_reference_graphs, which is not released yet:
-# https://github.com/cachix/nix-derivation/pull/6
+# structured_attrs_files_with_reference_graphs, merged in
+# https://github.com/cachix/nix-derivation/pull/6 but not released yet.
 [patch.crates-io]
-nix-derivation = { git = "https://github.com/fzakaria/nix-derivation", rev = "8cafa2692ea6d51711fe5fbb0145006d49dc8058" }
+nix-derivation = { git = "https://github.com/cachix/nix-derivation", rev = "e02e776cce1dc1e6d432b8cb3460026e7c76def4" }
