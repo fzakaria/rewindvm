@@ -122,7 +122,7 @@ pub fn passed(status: Option<i32>, missing: &[String]) -> bool {
 /// missing-output for a job that exited 0 without creating every output,
 /// and otherwise the status.
 pub fn ending(stop: &str, status_: Option<i32>, missing: &[String]) -> String {
-    if stop == rewind_core::run::TIMED_OUT {
+    if stop.starts_with(rewind_core::run::TIMED_OUT) {
         return TIMED_OUT.into();
     }
     if status_ == Some(0) && !missing.is_empty() {

@@ -183,10 +183,33 @@ pub enum Stop {
     TripleFault,
     /// The guest went idle with no timer armed: nothing will ever wake it.
     Stalled,
-    /// The wall-clock deadline passed first. Unlike the others this
-    /// depends on the host, not the guest: a faster one may have finished.
-    TimedOut,
+    /// The wall-clock deadline passed first, and where the guest was then.
+    /// Unlike the others this depends on the host, not the guest: a faster
+    /// one may have finished.
+    TimedOut(Stall),
 }
+
+/// Where a guest was when its run reached its time limit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Stall {
+    /// The instruction the vCPU was at.
+    pub rip: u64,
+    /// Whether that was user code or the kernel's.
+    pub mode: CpuMode,
+    /// How long the guest had gone without an exit: long for a guest
+    /// computing without system calls, short for one still making them.
+    pub since_exit: std::time::Duration,
+}
+
+/// The privilege the vCPU was running at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CpuMode {
+    User,
+    Kernel,
+}
+
+/// The privilege level of user code, in the code segment's DPL.
+const USER_DPL: u8 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
@@ -269,6 +292,9 @@ pub struct Machine {
     pub(crate) debugging: Option<debug::Debugging>,
     /// When to stop the machine, however far it has got.
     pub(crate) deadline: Option<std::time::Instant>,
+    /// When the guest last exited, while a deadline is watched: how long it
+    /// has gone without one says whether it is stuck computing.
+    pub(crate) last_exit: std::time::Instant,
 }
 
 impl Machine {
@@ -366,6 +392,7 @@ impl Machine {
             work_base: 0,
             debugging: None,
             deadline: None,
+            last_exit: std::time::Instant::now(),
         })
     }
 
@@ -419,6 +446,21 @@ impl Machine {
         self.deadline = deadline;
     }
 
+    /// Where the vCPU is now, and how long since the guest last exited.
+    fn stall(&self) -> Result<Stall> {
+        let rip = self.vcpu.get_regs()?.rip;
+        let mode = if self.vcpu.get_sregs()?.cs.dpl == USER_DPL {
+            CpuMode::User
+        } else {
+            CpuMode::Kernel
+        };
+        Ok(Stall {
+            rip,
+            mode,
+            since_exit: self.last_exit.elapsed(),
+        })
+    }
+
     /// Runs until the guest stops, or until step `until` if given.
     pub fn run(&mut self, until: Option<u64>, obs: &mut dyn Observer) -> Result<Outcome> {
         if let Some(stop) = self.dev.stop {
@@ -432,6 +474,7 @@ impl Machine {
         // signal reaches it once it has left.
         let watchdog = self.deadline.map(watchdog::Watchdog::start);
         let expired = watchdog.as_ref().map(|w| w.expired());
+        self.last_exit = std::time::Instant::now();
 
         if let (ClockSource::Branches(event), None) = (self.config.clock, &self.work) {
             self.work = Some(Work::open(event, self.work_base)?);
@@ -442,8 +485,9 @@ impl Machine {
                 .as_ref()
                 .is_some_and(|e| e.load(std::sync::atomic::Ordering::Relaxed))
             {
-                self.dev.stop = Some(Stop::TimedOut);
-                return Ok(Outcome::Stopped(Stop::TimedOut));
+                let stop = Stop::TimedOut(self.stall()?);
+                self.dev.stop = Some(stop);
+                return Ok(Outcome::Stopped(stop));
             }
             if self.work.is_some() && self.config.preemption == Preemption::AtBranchCounts {
                 self.aim_preemption()?;
@@ -497,6 +541,9 @@ impl Machine {
 
             if let Some(stop) = self.dev.stop {
                 return Ok(Outcome::Stopped(stop));
+            }
+            if counted.is_some() && self.deadline.is_some() {
+                self.last_exit = std::time::Instant::now();
             }
             let Some(port) = counted else {
                 // Close in on the timer's branch count; reaching it is a

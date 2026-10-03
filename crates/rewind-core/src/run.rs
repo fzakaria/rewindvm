@@ -664,7 +664,7 @@ impl Run {
         recorder.trace.finish()?;
 
         manifest.outcome = Some(RunOutcome {
-            stop: describe(outcome),
+            stop: describe(outcome, &manifest.spec.kernel),
             step: machine.step(),
             virtual_ns: machine.now(),
             status: recorder.status,
@@ -720,7 +720,7 @@ impl Run {
     /// timed out gets as long as it had, and may stop at another step.
     pub fn add_keyframes(&self, home: &Home) -> Result<Run> {
         let limit = match &self.manifest.outcome {
-            Some(o) if o.stop == TIMED_OUT => {
+            Some(o) if o.stop.starts_with(TIMED_OUT) => {
                 TimeLimit::Wall(std::time::Duration::from_millis(o.wall_ms))
             }
             _ => TimeLimit::None,
@@ -938,13 +938,63 @@ impl Shortcut {
     }
 }
 
-fn describe(outcome: Outcome) -> String {
+/// A guest that went this long without an exit before its time limit was
+/// computing, not making system calls, and where it was is worth saying.
+const COMPUTING_AFTER: Duration = Duration::from_secs(1);
+
+/// A timeout in words: still making exits, or computing without them for
+/// how long and at which instruction, named by its kernel symbol if it was
+/// in the kernel.
+fn describe_timeout(stall: &rewind_vmm::Stall, kernel: &Path) -> String {
+    if stall.since_exit < COMPUTING_AFTER {
+        return format!("{TIMED_OUT} while still making exits");
+    }
+    let place = match stall.mode {
+        rewind_vmm::CpuMode::User => format!("in user space at {:#x}", stall.rip),
+        rewind_vmm::CpuMode::Kernel => {
+            let map = kernel.with_file_name(SYSTEM_MAP);
+            let symbol = fs::read_to_string(map)
+                .ok()
+                .and_then(|text| kernel_symbol(&text, stall.rip));
+            format!(
+                "in the kernel at {}",
+                symbol.unwrap_or_else(|| format!("{:#x}", stall.rip))
+            )
+        }
+    };
+    format!(
+        "{TIMED_OUT} computing without exits for {:.1}s, {place}",
+        stall.since_exit.as_secs_f64()
+    )
+}
+
+/// The kernel's symbol table, beside its bzImage.
+const SYSTEM_MAP: &str = "System.map";
+
+/// `addr` as `symbol+0xoffset`, from the System.map text `map`: the symbol
+/// at the highest address not above it.
+fn kernel_symbol(map: &str, addr: u64) -> Option<String> {
+    map.lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let start = u64::from_str_radix(fields.next()?, 16).ok()?;
+            let name = fields.nth(1)?;
+            Some((start, name))
+        })
+        .filter(|(start, _)| *start <= addr)
+        .max_by_key(|(start, _)| *start)
+        .map(|(start, name)| format!("{name}+{:#x}", addr - start))
+}
+
+/// How a run stopped, in words. `kernel` is the guest kernel the run
+/// booted, whose System.map names a kernel address a timeout stopped at.
+fn describe(outcome: Outcome, kernel: &Path) -> String {
     match outcome {
         Outcome::Paused => "paused".into(),
         Outcome::Stopped(Stop::Guest(exit)) => format!("{exit:?}").to_lowercase(),
         Outcome::Stopped(Stop::TripleFault) => "triple fault".into(),
         Outcome::Stopped(Stop::Stalled) => "stalled: idle with no timer armed".into(),
-        Outcome::Stopped(Stop::TimedOut) => TIMED_OUT.into(),
+        Outcome::Stopped(Stop::TimedOut(stall)) => describe_timeout(&stall, kernel),
         Outcome::Debug(stop) => format!("stopped by the debugger: {stop:?}"),
     }
 }
@@ -978,6 +1028,49 @@ mod tests {
             feed(&[(3, vec![1]), (5, vec![2]), (9, vec![3]), (11, vec![4])]),
             Some(11)
         );
+    }
+
+    #[test]
+    fn a_timeout_says_where_the_guest_was() {
+        // A run stopped while it was still making exits says only that. One
+        // stopped after a long stretch without exits says for how long and
+        // where the vCPU was: a user-space address as it is, a kernel one
+        // by its symbol in the System.map beside the kernel.
+        use rewind_vmm::{CpuMode, Stall};
+        let dir = std::env::temp_dir().join(format!("rewind-timeout-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("System.map"),
+            "ffffffff81000000 T _text\nffffffff81285080 t rewind_clock_read\nffffffff812850c0 T rewind_yield\n",
+        )
+        .unwrap();
+        let kernel = dir.join("bzImage");
+        let timed_out = |rip, mode, since_exit_ms| {
+            describe(
+                Outcome::Stopped(Stop::TimedOut(Stall {
+                    rip,
+                    mode,
+                    since_exit: std::time::Duration::from_millis(since_exit_ms),
+                })),
+                &kernel,
+            )
+        };
+
+        assert_eq!(
+            timed_out(0x55ce_d9ab_18a7, CpuMode::User, 12_300),
+            "timed out computing without exits for 12.3s, in user space at 0x55ced9ab18a7"
+        );
+        assert_eq!(
+            timed_out(0xffff_ffff_8128_5085, CpuMode::Kernel, 2_000),
+            "timed out computing without exits for 2.0s, in the kernel at rewind_clock_read+0x5"
+        );
+        assert_eq!(
+            timed_out(0xffff_ffff_8128_5085, CpuMode::Kernel, 3),
+            "timed out while still making exits"
+        );
+        assert!(timed_out(0x1000, CpuMode::User, 3).starts_with(TIMED_OUT));
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

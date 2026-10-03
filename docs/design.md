@@ -452,6 +452,10 @@ nothing.
    times as long as schedule 0 took, and at least a minute, unless
    `--timeout` says otherwise. A run still going then is stopped, and ends
    as timed-out. Whether a run times out depends on how fast the host is.
+   A run that timed out says whether the guest was still making exits,
+   which is a slow run, or had gone a second or more without one, which is
+   a guest stuck computing; then it says for how long and at which
+   instruction, in user space or at a kernel symbol.
 3. Narrows the window, first its end and then its start, to the smallest
    window that still makes that schedule end differently. A smaller window
    perturbs a subset of the same steps, so the search is well defined.

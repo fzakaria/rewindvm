@@ -502,6 +502,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             // long build runs only from near the window.
             let from_base = Start::After(base.manifest.id.clone());
             println!("schedule   0: {}", show::outcome_line(&base)?);
+            print_timeout(0, &base);
 
             // A schedule can make a program loop forever where schedule 0
             // did not, so unless told otherwise each other run gets a
@@ -596,6 +597,8 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     machine.schedule
                 );
             }
+
+            print_timeout(machine.schedule, &worst);
             let probe_all = |windows: Vec<(u64, u64)>| -> Result<Vec<Run>> {
                 let machines = windows
                     .into_iter()
@@ -1305,6 +1308,17 @@ fn execute_all(
             .map(|h| h.join().expect("a run's thread panicked"))
             .collect()
     })
+}
+
+/// For a schedule of `rewind check` that hit its time limit, how and where:
+/// a guest stuck computing without exits is often what the search found.
+fn print_timeout(schedule: u64, run: &Run) {
+    let Some(o) = run.manifest.outcome.as_ref() else {
+        return;
+    };
+    if o.stop.starts_with(rewind_core::run::TIMED_OUT) {
+        println!("schedule {schedule}: {}", o.stop);
+    }
 }
 
 /// The time limit `--timeout` sets, in seconds, if given.
