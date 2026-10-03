@@ -1,0 +1,31 @@
+--- a/examples/mylib/src/pool.c
++++ b/examples/mylib/src/pool.c
+@@ -71,11 +71,13 @@
+ 		 * stopping. The check and the count are not under the lock:
+ 		 * the bug. */
+ 		long result = run_job(job);
++		pthread_mutex_lock(&p->lock);
+ 		if (!p->stopping) {
+ 			printf("job %d done: %ld\n", job, result & 0xffff);
+ 			fflush(stdout);
+ 			p->queue->completed++;
+ 		}
++		pthread_mutex_unlock(&p->lock);
+ 	}
+ }
+ 
+@@ -120,12 +122,10 @@
+ 	pthread_cond_broadcast(&p->ready);
+ 	pthread_mutex_unlock(&p->lock);
+ 
+-	/* The bug: the queue goes before the workers are joined. */
+-	free(p->queue);
+-	p->queue = NULL;
+-
+ 	for (int i = 0; i < POOL_WORKERS; i++)
+ 		pthread_join(p->workers[i], NULL);
++	free(p->queue);
++	p->queue = NULL;
+ 	pthread_cond_destroy(&p->ready);
+ 	pthread_mutex_destroy(&p->lock);
+ 	free(p);
