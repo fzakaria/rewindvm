@@ -407,11 +407,11 @@ Cloning into 'rewindvm'...
 <span class="add">+		pthread_mutex_unlock(&amp;p-&gt;lock);</span>
 <span class="ctx"> 	}</span>
 <span class="ctx"> }</span>
-<span class="ctx"> </span>
+<span class="ctx"></span>
 <span class="hunk">@@ -120,12 +122,10 @@</span>
 <span class="ctx"> 	pthread_cond_broadcast(&amp;p-&gt;ready);</span>
 <span class="ctx"> 	pthread_mutex_unlock(&amp;p-&gt;lock);</span>
-<span class="ctx"> </span>
+<span class="ctx"></span>
 <span class="del">-	/* The bug: the queue goes before the workers are joined. */</span>
 <span class="del">-	free(p-&gt;queue);</span>
 <span class="del">-	p-&gt;queue = NULL;</span>

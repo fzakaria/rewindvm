@@ -313,11 +313,11 @@ queue after the workers are joined:
 +		pthread_mutex_unlock(&p->lock);
  	}
  }
- 
+
 @@ -120,12 +122,10 @@
  	pthread_cond_broadcast(&p->ready);
  	pthread_mutex_unlock(&p->lock);
- 
+
 -	/* The bug: the queue goes before the workers are joined. */
 -	free(p->queue);
 -	p->queue = NULL;

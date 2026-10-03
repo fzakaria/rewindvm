@@ -71,6 +71,7 @@ deterministic virtual machine:
 ```console run name=build show=:1,-2:
 $ rewind nix --epoch {{epoch}} {{flake}}
 ```
+
 <!-- capture built_steps: exited:0 after (\d+) steps -->
 <!-- assert: grep -q 'matches your store' {{out:build}} -->
 
@@ -87,6 +88,7 @@ build ends differently:
 ```console run name=check time=check_seconds
 $ rewind check --epoch {{epoch}} {{flake}}
 ```
+
 <!-- capture passing: passing: run (\w+) -->
 <!-- capture failing: failing: run (\w+) -->
 <!-- capture narrowed: schedule (\d+) ends differently -->
@@ -107,6 +109,7 @@ took {{check_seconds}} seconds.
 ```console run
 $ rewind check --all --epoch {{epoch}} {{flake}} | grep 'ended differently'
 ```
+
 <!-- capture flaky: (\d+) of 64 perturbed schedules ended differently -->
 
 ## Look at the failure
@@ -123,6 +126,7 @@ The failing run keeps every event with its step:
 $ rewind log {{failing|short}} --steps | tail -4
 $ rewind events {{failing|short}} --from {{last_write}} --to {{events_to}}
 ```
+
 <!-- assert: rewind events {{failing}} --from {{last_write}} --to {{events_to}} | grep -q '<83> 80 08 01 00 00 01' -->
 
 The kernel's report marks the faulting instruction, `<83> 80 08 01 00 00 01`:
@@ -150,6 +154,7 @@ continue to the line that faulted:
 ```console run name=gdb
 $ rewind gdb {{failing|short}} {{last_write}} -- -batch -ex 'break src/pool.c:77 if p->queue == 0' -ex continue -ex 'bt 3' -ex 'p p->queue' -ex list
 ```
+
 <!-- assert: grep -q 'Breakpoint 1, worker' {{out:gdb}} && grep -q '(struct queue \*) 0x0' {{out:gdb}} -->
 
 The breakpoint is one of the CPU's debug registers, so the fork runs unchanged
@@ -162,6 +167,7 @@ type into.
 $ rewind replay {{failing|short}}
 $ rewind replay {{failing|short}} --from {{window_from}}
 ```
+
 <!-- assert: rewind replay {{failing}} | grep -q '^identical' -->
 
 `--from` starts at the nearest keyframe before the step. A run replays on any
@@ -182,6 +188,7 @@ $ rewind fork {{passing|short}} {{window_from}} --schedule {{f2}} --quiet
 $ rewind fork {{passing|short}} {{window_from}} --schedule {{f3}} --quiet
 $ rewind fork {{passing|short}} {{window_from}} --schedule {{f4}} --quiet
 ```
+
 <!-- set fork_failed: grep -o 'exited:[0-9]*' {{out:forks}} | paste - <(printf '%s\n' {{fork_first}} {{f2}} {{f3}} {{f4}}) | awk '$1 != "exited:0" {print $2}' | tr '\n' ' ' -->
 <!-- set fork_passed: grep -o 'exited:[0-9]*' {{out:forks}} | paste - <(printf '%s\n' {{fork_first}} {{f2}} {{f3}} {{f4}}) | awk '$1 == "exited:0" {print $2}' | tr '\n' ' ' -->
 <!-- set fork_run: grep -m1 -o 'run [0-9a-f]* exited:[1-9]' {{out:forks}} | awk '{print $2}' -->
@@ -220,6 +227,7 @@ queue after the workers are joined:
 ```console run name=fixed show=-2:
 $ rewind check --all --epoch {{epoch}} .#mylib
 ```
+
 <!-- assert: grep -q '^0 of 64 perturbed schedules ended differently' {{out:fixed}} -->
 
 Before the fix, {{flaky}} of the same 64 schedules crashed.

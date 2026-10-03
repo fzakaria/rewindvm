@@ -71,6 +71,7 @@ export` writes, inside a deterministic virtual machine:
 $ docker export $(docker create mylib) -o mylib.tar
 $ rewind run --root mylib.tar --cwd /src -- make check
 ```
+
 <!-- capture built_steps: exited:0 after (\d+) steps -->
 
 It passes, in the same {{built_steps}} steps every time. Nothing the command
@@ -86,6 +87,7 @@ ends differently:
 ```console run name=check time=check_seconds
 $ rewind check --root mylib.tar --cwd /src -- make check
 ```
+
 <!-- capture passing: passing: run (\w+) -->
 <!-- capture failing: failing: run (\w+) -->
 <!-- capture narrowed: schedule (\d+) ends differently -->
@@ -101,6 +103,7 @@ shows where the test's own output first differs. The search took
 ```console run
 $ rewind check --all --root mylib.tar --cwd /src -- make check | grep 'ended differently'
 ```
+
 <!-- capture flaky: (\d+) of 64 perturbed schedules ended differently -->
 
 ## Look at the failure
@@ -115,6 +118,7 @@ $ rewind check --all --root mylib.tar --cwd /src -- make check | grep 'ended dif
 $ rewind log {{failing|short}} --steps | tail -4
 $ rewind events {{failing|short}} --from {{last_write}} --to {{events_to}}
 ```
+
 <!-- assert: rewind events {{failing}} --from {{last_write}} --to {{events_to}} | grep -q '<83> 80 08 01 00 00 01' -->
 
 The kernel's report marks the faulting instruction, `<83> 80 08 01 00 00 01`:
@@ -143,6 +147,7 @@ debuginfod server, which has its symbols. From step {{last_write}}, thread
 ```console run name=gdb
 $ DEBUGINFOD_URLS=https://debuginfod.debian.net rewind gdb {{failing|short}} {{last_write}} -- -batch -ex 'break src/pool.c:77 if p->queue == 0' -ex continue -ex 'bt 3' -ex 'p p->queue' -ex list
 ```
+
 <!-- assert: grep -q 'Breakpoint 1, worker' {{out:gdb}} && grep -q 'in start_thread' {{out:gdb}} -->
 
 Images built on Fedora, Ubuntu or Arch have debuginfod servers of their own,
@@ -154,6 +159,7 @@ listed by [elfutils](https://sourceware.org/elfutils/Debuginfod.html).
 $ rewind replay {{failing|short}}
 $ rewind replay {{failing|short}} --from {{window_from}}
 ```
+
 <!-- assert: rewind replay {{failing}} | grep -q '^identical' -->
 
 `--from` starts at the nearest keyframe before the step. A run replays on any
@@ -172,6 +178,7 @@ $ rewind fork {{passing|short}} {{window_from}} --schedule {{f2}} --quiet
 $ rewind fork {{passing|short}} {{window_from}} --schedule {{f3}} --quiet
 $ rewind fork {{passing|short}} {{window_from}} --schedule {{f4}} --quiet
 ```
+
 <!-- set fork_run: grep -m1 -o 'run [0-9a-f]* exited:[1-9]' {{out:forks}} | awk '{print $2}' -->
 <!-- set fork_crash: rewind events {{fork_run}} | grep -m1 SIGSEGV | awk '{print $1}' -->
 
@@ -204,6 +211,7 @@ Rebuild the image, export it, and check again:
 $ docker build -q -t mylib -f Containerfile . && docker export $(docker create mylib) -o mylib.tar
 $ rewind check --all --root mylib.tar --cwd /src -- make check
 ```
+
 <!-- assert: grep -q '^0 of 64 perturbed schedules ended differently' {{out:fixed}} -->
 
 Before the fix, {{flaky}} of the same 64 schedules crashed.

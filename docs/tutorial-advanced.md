@@ -106,7 +106,7 @@ prints the command line that loads the same symbols:
 $ rewind gdb 08fd8925 5060 --listen 127.0.0.1:1234
 rewind: step 5060 ran in process 166; loading symbols for 4 of its files
 rewind: fetched 3 source files from the VM
-rewind: gdb at step 5060 of 08fd8925dde8e545; connect with: gdb -q -iex 'set debuginfod enabled on' -iex 'set debuginfod urls http://127.0.0.1:33993' -ex 'file /nix/store/vjncslv1ind0ani0jv2cy33icbw04ipd-rewind-guest-kernel-7.2.8- ...
+rewind: gdb at step 5060 of 08fd8925dde8e545; connect with: gdb -q -iex 'set debuginfod enabled on' -iex 'set debuginfod urls http://127.0.0.1:45209' -ex 'file /nix/store/vjncslv1ind0ani0jv2cy33icbw04ipd-rewind-guest-kernel-7.2.8- ...
 ```
 
 ## Bring tools into the VM
@@ -134,7 +134,7 @@ interleave on the one vCPU:
 ```console
 $ rewind nix --cores 4 --epoch 1790985600 github:fzakaria/rewindvm#mylib
 ...
-rewind: run 53c77c1127fd76fa exited:0 after 6160 steps, 0.216s virtual, 1.222s wall (poweroff)
+rewind: run 53c77c1127fd76fa exited:0 after 6160 steps, 0.216s virtual, 1.005s wall (poweroff)
 /nix/store/f6a9gy362szw6nxx3ikrklr8glr6rdln-mylib-0.3.0 a9d703ba89774f3d  matches your store, rewindvm.cachix.org
 ```
 
@@ -156,19 +156,19 @@ spins waiting for a thread that never runs.
 
 ```console
 $ rewind fork 08fd8925 4960 --schedule 1 --quiet
-rewind: run 9462e0eb011632c2 exited:2 after 5105 steps, 0.203s virtual, 1.733s wall (poweroff)
+rewind: run 9462e0eb011632c2 exited:2 after 5105 steps, 0.203s virtual, 0.433s wall (poweroff)
 rewind: the fork first differs from its parent at step 5070
 
 $ rewind fork 08fd8925 4960 --schedule 2 --quiet
-rewind: run 2b73307df58afbe4 exited:0 after 6586 steps, 0.221s virtual, 1.202s wall (poweroff)
+rewind: run 2b73307df58afbe4 exited:0 after 6586 steps, 0.221s virtual, 0.469s wall (poweroff)
 rewind: the fork first differs from its parent at step 4966
 
 $ rewind fork 08fd8925 4960 --schedule 3 --quiet
-rewind: run 38fd5aa840e88802 exited:0 after 6639 steps, 0.225s virtual, 0.830s wall (poweroff)
+rewind: run 38fd5aa840e88802 exited:0 after 6639 steps, 0.225s virtual, 0.311s wall (poweroff)
 rewind: the fork first differs from its parent at step 4966
 
 $ rewind fork 08fd8925 4960 --schedule 4 --quiet
-rewind: run f984623895715415 exited:0 after 6604 steps, 0.224s virtual, 0.644s wall (poweroff)
+rewind: run f984623895715415 exited:0 after 6604 steps, 0.224s virtual, 0.296s wall (poweroff)
 rewind: the fork first differs from its parent at step 4966
 ```
 
@@ -184,7 +184,7 @@ same flags make the same run:
 
 ```console
 $ rewind nix --quiet --epoch 1790985600 --schedule 1 --schedule-from 4396 --schedule-until 5048 github:fzakaria/rewindvm#mylib
-rewind: run 08fd8925dde8e545 exited:2 after 5102 steps, 0.203s virtual, 1.304s wall (poweroff)
+rewind: run 08fd8925dde8e545 exited:2 after 5102 steps, 0.203s virtual, 0.591s wall (poweroff)
 ```
 
 ## Compare any two runs

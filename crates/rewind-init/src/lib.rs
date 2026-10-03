@@ -218,7 +218,8 @@ mod tests {
         std::fs::write(dir.join("a"), "hello\n").unwrap();
         std::fs::write(dir.join("bin/run"), "#!/bin/sh\necho hi\n").unwrap();
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(dir.join("bin/run"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(dir.join("bin/run"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
         std::os::unix::fs::symlink("a", dir.join("l")).unwrap();
 
         assert_eq!(

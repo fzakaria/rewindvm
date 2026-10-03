@@ -102,7 +102,10 @@ def build(rev):
     """The store paths of OUTPUTS at `rev`, from the repository as git has
     it, so neither uncommitted files nor build products go into the store."""
     commit = subprocess.run(
-        ["git", "-C", str(REPO), "rev-parse", rev], capture_output=True, text=True, check=True
+        ["git", "-C", str(REPO), "rev-parse", rev],
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout.strip()
     refs = [f"git+file://{REPO}?rev={commit}#{o}" for o in OUTPUTS]
     paths = subprocess.run(
@@ -130,7 +133,9 @@ class Recording:
             "release_debug": paths["release-debug"],
         }
         self.env = dict(os.environ)
-        self.env["PATH"] = f"{paths['rewind']}/bin:{paths['app']}/bin:{self.env['PATH']}"
+        self.env["PATH"] = (
+            f"{paths['rewind']}/bin:{paths['app']}/bin:{self.env['PATH']}"
+        )
         # A fresh debuginfod cache, so gdb downloads what a reader's does.
         self.env["DEBUGINFOD_CACHE_PATH"] = str(work / "debuginfod")
         self.env["TERM"] = "dumb"
@@ -156,7 +161,11 @@ class Recording:
                 return value[:8]
             if how == "and":
                 words = value.split()
-                return words[0] if len(words) == 1 else ", ".join(words[:-1]) + " and " + words[-1]
+                return (
+                    words[0]
+                    if len(words) == 1
+                    else ", ".join(words[:-1]) + " and " + words[-1]
+                )
             if how:
                 raise Failed(f"no filter {how}")
             return value
@@ -230,7 +239,9 @@ class Recording:
                 lines = slices(lines, opts["show"])
             if "cut" in opts:
                 n = int(opts["cut"])
-                lines = [line if len(line) <= n else line[:n] + " ..." for line in lines]
+                lines = [
+                    line if len(line) <= n else line[:n] + " ..." for line in lines
+                ]
             if shown and shown[-1] != "" and not shown[-1].startswith("$ "):
                 shown.append("")
             shown.append(f"$ {command}")
@@ -261,18 +272,28 @@ class Recording:
             name, pattern = (s.strip() for s in rest.split(":", 1))
             m = re.search(self.fill(pattern), self.last)
             if not m:
-                raise Failed(f"{pattern!r} is not in the last block's output:\n{self.last}")
+                raise Failed(
+                    f"{pattern!r} is not in the last block's output:\n{self.last}"
+                )
             self.values[name] = m.group(1)
         elif kind == "assert":
             command = self.fill(rest.split(":", 1)[1].strip())
             done = subprocess.run(
-                ["bash", "-c", command], cwd=self.cwd, env=self.env, capture_output=True, text=True
+                ["bash", "-c", command],
+                cwd=self.cwd,
+                env=self.env,
+                capture_output=True,
+                text=True,
             )
             if done.returncode != 0:
-                raise Failed(f"the page's story does not hold: {command}\n{done.stdout}{done.stderr}")
+                raise Failed(
+                    f"the page's story does not hold: {command}\n{done.stdout}{done.stderr}"
+                )
         elif kind == "diff":
             patch = (TEMPLATES / rest.split(":", 1)[1].strip()).read_text().splitlines()
-            body = [line for line in patch if not line.startswith(("--- ", "+++ ", "diff "))]
+            body = [
+                line for line in patch if not line.startswith(("--- ", "+++ ", "diff "))
+            ]
             return ["```diff", *body, "```"]
         elif kind == "screenshot":
             path, rest = (s.strip() for s in rest.split(":", 1))
@@ -294,7 +315,9 @@ class Recording:
                     f"xdotool mousemove {x} {y} click 1; sleep 1; xdotool mousemove {PARKED}"
                 )
             elif verb == "type":
-                actions.append(f"xdotool type --delay 20 {shlex.quote(arg)}; xdotool key Return")
+                actions.append(
+                    f"xdotool type --delay 20 {shlex.quote(arg)}; xdotool key Return"
+                )
             elif verb == "key":
                 actions.append(f"xdotool key {shlex.quote(arg)}; sleep 1")
             elif verb == "wait":
@@ -315,7 +338,15 @@ class Recording:
             cwebp -quiet -q {WEBP_QUALITY} {png} -o {path.with_suffix('.webp')}
         """
         tools = ["xorg.xvfb", "imagemagick", "xdotool", "oxipng", "libwebp"]
-        nix = ["nix", "shell", *[f"nixpkgs#{t}" for t in tools], "-c", "bash", "-c", script]
+        nix = [
+            "nix",
+            "shell",
+            *[f"nixpkgs#{t}" for t in tools],
+            "-c",
+            "bash",
+            "-c",
+            script,
+        ]
         done = subprocess.run(nix, env=self.env, capture_output=True, text=True)
         if done.returncode != 0 or not png.exists():
             raise Failed(f"screenshot {path} failed:\n{done.stderr}")
@@ -374,13 +405,17 @@ def record(name, work, home, paths):
                 continue
             if line.startswith("```console run"):
                 end = lines.index("```", i + 1)
+                # The `after` directive for a bg block is the next line that is
+                # not blank, which the formatter puts after the fence.
                 after = None
-                nxt = lines[end + 1] if end + 1 < len(lines) else ""
-                if m := DIRECTIVE.match(nxt):
+                nxt = end + 1
+                while nxt < len(lines) and not lines[nxt].strip():
+                    nxt += 1
+                if nxt < len(lines) and (m := DIRECTIVE.match(lines[nxt])):
                     if m.group(1) == "after":
                         after = m.group(2).split(":", 1)[1].strip()
                 page.extend(rec.block(line, lines[i + 1 : end], after))
-                i = end + 1 + (after is not None)
+                i = nxt + 1 if after is not None else end + 1
                 continue
             page.append(rec.fill(line))
             i += 1
@@ -388,19 +423,29 @@ def record(name, work, home, paths):
             sys.exit(f"{where}: {e}")
     out = REPO / "docs" / f"tutorial-{name}.md"
     out.write_text("\n".join(collapse(page)) + "\n")
+
+    # Formatted as CI checks it, so a recording commits as it is.
+    subprocess.run(
+        ["nix", "fmt", "--", str(out)], cwd=REPO, check=True, capture_output=True
+    )
     print(f"wrote {out.relative_to(REPO)}")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Record the tutorials.")
-    parser.add_argument("--rev", default="HEAD", help="the commit whose build to record with")
+    parser.add_argument(
+        "--rev", default="HEAD", help="the commit whose build to record with"
+    )
     parser.add_argument(
         "--work",
         type=Path,
-        default=Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "rewind-record",
+        default=Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
+        / "rewind-record",
         help="where each tutorial's commands run",
     )
-    parser.add_argument("tutorials", nargs="*", help="names, such as nix; all by default")
+    parser.add_argument(
+        "tutorials", nargs="*", help="names, such as nix; all by default"
+    )
     args = parser.parse_args()
 
     names = args.tutorials or sorted(

@@ -12,6 +12,7 @@ and in the desktop app. They use the Nix tutorial's runs and install.
 ```console run name=check
 $ rewind check --epoch {{epoch}} {{flake}} | grep -E 'ends differently|perturbing only|passing:|failing:'
 ```
+
 <!-- capture passing: passing: run (\w+) -->
 <!-- capture failing: failing: run (\w+) -->
 <!-- set crash_step: rewind events {{failing}} | grep -m1 SIGSEGV | awk '{print $1}' -->
@@ -30,6 +31,7 @@ A watchpoint finds who freed the queue the crash reads. Break in a worker so
 ```console run name=watch
 $ rewind gdb {{failing|short}} {{watch_from}} -- -batch -ex 'break src/pool.c:74' -ex continue -ex 'watch -l p->queue' -ex 'delete 1' -ex continue -ex 'bt 2' -ex 'break src/pool.c:77 if p->queue == 0' -ex continue -ex 'bt 1'
 ```
+
 <!-- assert: grep -q 'New value = (struct queue \*) 0x0' {{out:watch}} && grep -q 'in main ()' {{out:watch}} && grep -q 'Breakpoint 3, worker' {{out:watch}} -->
 
 The first stop is `main` nulling the queue in `pool_shutdown`, the second the
@@ -51,6 +53,7 @@ SIGSEGV, and use its own gdb scripts:
 ```console run name=kernel
 $ rewind gdb {{failing|short}} {{last_write}} -- -batch -ex 'break force_sig_fault' -ex continue -ex 'bt 4' -ex 'pipe lx-ps | tail -4' -ex 'pipe lx-dmesg | tail -2'
 ```
+
 <!-- assert: grep -q 'force_sig_fault (sig=11, code=1, addr=0x108)' {{out:kernel}} -->
 
 The kernel's DWARF comes from `rewindvm.cachix.org` with Nix, and from the
@@ -69,6 +72,7 @@ prints the command line that loads the same symbols:
 ```console run bg=connect cut=230
 $ rewind gdb {{failing|short}} {{crash_step}} --listen 127.0.0.1:1234
 ```
+
 <!-- after: gdb -q -batch -ex 'target remote 127.0.0.1:1234' -ex detach -->
 
 ## Bring tools into the VM
@@ -79,6 +83,7 @@ run. Here binutils disassembles the faulting instruction:
 ```console run name=objdump
 $ printf 'objdump -d --no-show-raw-insn --start-address=0x142c --stop-address=0x143e tests/test_pool_shutdown | tail -4; exit\n' | rewind shell {{failing|short}} {{crash_step}} --pid {{pid}} --with nixpkgs#binutils
 ```
+
 <!-- assert: grep -q 'addl   $0x1,0x108(%rax)' {{out:objdump}} -->
 
 ## Give programs more CPUs
@@ -90,6 +95,7 @@ interleave on the one vCPU:
 ```console run name=cores show=-2:
 $ rewind nix --cores 4 --epoch {{epoch}} {{flake}}
 ```
+
 <!-- capture cores_run: run (\w+) exited -->
 <!-- set make_step: rewind events {{cores_run}} | grep -m1 'execve.*"make"' | awk '{print $1}' -->
 <!-- set make_pid: rewind events {{cores_run}} | grep -m1 'execve.*"make"' | awk '{print $2}' | cut -d/ -f1 -->
@@ -97,6 +103,7 @@ $ rewind nix --cores 4 --epoch {{epoch}} {{flake}}
 ```console run name=nproc
 $ printf 'nproc; echo $NIX_BUILD_CORES; exit\n' | rewind shell {{cores_run|short}} {{make_step}} --pid {{make_pid}}
 ```
+
 <!-- assert: test "$(tail -2 {{out:nproc}} | tr '\n' ' ')" = '4 4 ' -->
 
 Run Go programs with `GOMAXPROCS=1` above one core: Go's garbage collector
@@ -115,6 +122,7 @@ $ rewind fork {{failing|short}} {{fork_from}} --schedule 2 --quiet
 $ rewind fork {{failing|short}} {{fork_from}} --schedule 3 --quiet
 $ rewind fork {{failing|short}} {{fork_from}} --schedule 4 --quiet
 ```
+
 <!-- assert: grep -q 'exited:0' {{out:forks}} && grep -q 'exited:[1-9]' {{out:forks}} -->
 
 The app's Runs panel shows every run of the build, with forks under the run
@@ -138,6 +146,7 @@ same flags make the same run:
 ```console run name=rebuild
 $ rewind nix --quiet --epoch {{s_epoch}} --schedule {{s_schedule}} --schedule-from {{s_from}} --schedule-until {{s_until}} {{flake}}
 ```
+
 <!-- assert: grep -q 'run {{failing}} ' {{out:rebuild}} -->
 
 ## Compare any two runs
@@ -163,6 +172,7 @@ $ rewind export {{failing|short}} --replayable -o crash.rwd
 $ REWIND_HOME=elsewhere rewind import crash.rwd
 $ REWIND_HOME=elsewhere rewind replay {{failing|short}}
 ```
+
 <!-- set small: rewind export {{failing}} -o small.rwd 2>&1 | grep -o '([^)]*)' | tr -d '()' -->
 
 A replayable export carries the keyframes, the image and the VM's kernel, and
