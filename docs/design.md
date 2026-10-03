@@ -510,6 +510,11 @@ Two earlier designs did not work, and why is worth keeping.
   exit. Races that need preemption in the middle of pure computation are
   out of reach. With exit time computation also takes no time; counter
   time ([pmu.md](pmu.md)) fixes that, not the preemption.
+- **Go programs at `--cores` above 1 can hang.** During garbage collection
+  Go's runtime waits for a goroutine on another thread by spinning in user
+  space, without system calls, and with spare CPUs reported it does not
+  yield. That thread never gets the one vCPU, so the run makes no more
+  steps. Set `GOMAXPROCS=1` for Go programs, or use `--cores 1`.
 - **One vCPU.** Threads interleave but never run at the same instant, even
   with `--cores` reporting more CPUs. Throughput comes from running many
   machines at once: `check` runs one per core.
