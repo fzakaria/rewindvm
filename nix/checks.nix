@@ -35,10 +35,10 @@ let
     done
   '';
 
-  # A root holding one static program that prints, forks, and waits for
-  # its child, built with its symbols for gdb.
-  forkRoot =
-    pkgs.runCommand "rewind-fork-root"
+  # A root of two static programs for gdb, built with their symbols: one
+  # prints, forks, and waits for its child; one writes a global twice.
+  gdbRoot =
+    pkgs.runCommand "rewind-gdb-root"
       {
         nativeBuildInputs = [ pkgs.pkgsStatic.stdenv.cc ];
         dontStrip = true;
@@ -62,6 +62,22 @@ let
         }
         EOF
         $CC -static -O1 -g -o $out/bin/fork fork.c
+
+        cat > watch.c <<'EOF'
+        #include <unistd.h>
+
+        volatile int counter;
+
+        int main(void)
+        {
+          write(1, "start\n", 6);
+          counter = 1;
+          counter = 2;
+          write(1, "done\n", 5);
+          return 0;
+        }
+        EOF
+        $CC -static -O1 -g -o $out/bin/watch watch.c
       '';
 
   # Background jobs racing through a pipe, the kernel's RNG, and a sleep:
@@ -324,11 +340,49 @@ in
           follows "stepping from step $step"
         done
 
-        rewind run -q --clock exits --name fork --root ${forkRoot} -- /bin/fork
+        rewind run -q --clock exits --name fork --root ${gdbRoot} -- /bin/fork
         start=$(rewind events fork | grep 'write(1, "start' | awk '{print $1}')
         rewind gdb fork "$start" -- -batch \
           -ex 'break _Fork' -ex continue -ex 'stepi 300' -ex continue > gdb 2>&1 || true
         follows "stepping past fork"
+        touch $out
+      '';
+
+  # checks.gdb-watch: `watch` in `rewind gdb` is a debug register: gdb
+  # stops just after each write to a program's global, with its old and
+  # new values, and the fork runs on to the end on the recording. x86 has
+  # no trap on reads alone, so `rwatch` is refused. Boots the VM, so it
+  # needs /dev/kvm.
+  gdb-watch =
+    pkgs.runCommand "rewind-gdb-watch"
+      {
+        nativeBuildInputs = [
+          rewind
+          pkgs.gdb
+        ];
+        requiredSystemFeatures = [ "kvm" ];
+      }
+      ''
+        export REWIND_HOME=$TMPDIR/rewind
+        # No debuginfod server: without a network, each of gdb's questions
+        # to it waits out a timeout.
+        export REWIND_DEBUGINFOD=/nonexistent
+
+        rewind run -q --clock exits --name watch --root ${gdbRoot} -- /bin/watch
+        start=$(rewind events watch | grep 'write(1, "start' | awk '{print $1}')
+
+        rewind gdb watch "$start" -- -batch \
+          -ex 'watch counter' -ex continue -ex continue -ex continue > gdb 2>&1 || true
+        cat gdb
+        grep -q 'Old value = 0' gdb
+        grep -q 'New value = 1' gdb
+        grep -q 'New value = 2' gdb
+        grep -q 'exited normally' gdb
+        ! grep -q 'left the recording\|SIGTRAP' gdb
+
+        rewind gdb watch "$start" -- -batch -ex 'rwatch counter' -ex continue > read 2>&1 || true
+        cat read
+        grep -q 'Could not insert' read
         touch $out
       '';
 

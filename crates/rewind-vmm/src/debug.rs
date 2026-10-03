@@ -1,11 +1,12 @@
 //! Debugging a forked machine: its registers, its memory as the VM's own
-//! page tables map it, breakpoints and single steps. `rewind gdb` serves
-//! these over the GDB remote protocol.
+//! page tables map it, breakpoints, watchpoints and single steps. `rewind
+//! gdb` serves these over the GDB remote protocol.
 //!
-//! Breakpoints are the CPU's four debug address registers rather than int3
-//! written into memory, so nothing in the VM changes. A debug trap is a
-//! VM exit the VM never sees, and it is not a step: a machine runs the
-//! same whether or not it is being debugged.
+//! Breakpoints and watchpoints are the CPU's four debug address registers
+//! rather than int3 written into memory or a value compared after every
+//! step, so nothing in the VM changes and it runs at full speed. A debug
+//! trap is a VM exit the VM never sees, and it is not a step: a machine
+//! runs the same whether or not it is being debugged.
 
 use anyhow::{Context, Result, bail};
 use kvm_bindings::{
@@ -15,14 +16,25 @@ use kvm_bindings::{
 
 use crate::Machine;
 
-/// The CPU has four breakpoint address registers, DR0 to DR3.
-pub const MAX_BREAKPOINTS: usize = 4;
+/// The CPU has four debug address registers, DR0 to DR3, shared by
+/// breakpoints and watchpoints.
+pub const MAX_TRAPS: usize = 4;
 
-/// DR7: the local enable bit of breakpoint i is bit 2i; its condition and
-/// length bits, all zero, mean "break on executing this address".
+/// DR7: the local enable bit of register i is bit 2i. Its condition and
+/// length are four bits from bit 16 + 4i: two for the condition, then two
+/// for how many bytes it watches.
 const DR7_LOCAL_ENABLE: u64 = 1;
-const DR7_BITS_PER_BREAKPOINT: u32 = 2;
+const DR7_BITS_PER_ENABLE: u32 = 2;
+const DR7_CONDITIONS: u32 = 16;
+const DR7_BITS_PER_CONDITION: u32 = 4;
+const DR7_LEN_SHIFT: u32 = 2;
 const DR7_INDEX: usize = 7;
+
+/// DR7's condition bits: executing the address, writing it, or reading or
+/// writing it. x86 cannot trap on reads alone.
+const DR7_EXECUTE: u64 = 0b00;
+const DR7_WRITE: u64 = 0b01;
+const DR7_READ_WRITE: u64 = 0b11;
 
 /// DR6 on a debug trap: which breakpoint matched (bits 0 to 3), or BS
 /// (bit 14) for a single step.
@@ -41,10 +53,31 @@ pub enum Stepping {
     Yes,
 }
 
+/// Which accesses a watchpoint traps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Access {
+    Write,
+    ReadWrite,
+}
+
+/// What one debug address register traps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Trap {
+    /// Executing the instruction at this address.
+    Execute(u64),
+    /// An access to `len` bytes at `address`: 1, 2, 4 or 8 of them,
+    /// aligned to that many. The trap comes after the access.
+    Watch {
+        address: u64,
+        len: u64,
+        access: Access,
+    },
+}
+
 /// What a debugger has asked of the machine.
 pub(crate) struct Debugging {
     stepping: Stepping,
-    breakpoints: Vec<u64>,
+    traps: Vec<Trap>,
 }
 
 /// Why a debugged machine stopped.
@@ -54,24 +87,22 @@ pub enum DebugStop {
     Step,
     /// Execution reached the breakpoint at this address.
     Breakpoint(u64),
+    /// An instruction accessed the watched bytes at this address, and has
+    /// run.
+    Watchpoint(u64),
 }
 
 impl Machine {
-    /// Turns debugging on with these breakpoint addresses, stepping one
-    /// instruction at a time when asked. With debugging on, `run` returns
-    /// [`crate::Outcome::Debug`] at every trap that is the debugger's.
+    /// Turns debugging on with these traps, one per debug address register,
+    /// stepping one instruction at a time when asked. With debugging on,
+    /// `run` returns [`crate::Outcome::Debug`] at every trap that is the
+    /// debugger's.
     ///
     /// Interrupts are not held off while stepping, though a step then
     /// lands in an interrupt handler now and then: one held off is taken
     /// later than when the run was recorded, and the machine goes another
     /// way from there.
-    pub fn set_debug(&mut self, stepping: Stepping, breakpoints: &[u64]) -> Result<()> {
-        if breakpoints.len() > MAX_BREAKPOINTS {
-            bail!(
-                "at most {MAX_BREAKPOINTS} breakpoints, the CPU's debug registers; got {}",
-                breakpoints.len()
-            );
-        }
+    pub fn set_debug(&mut self, stepping: Stepping, traps: &[Trap]) -> Result<()> {
         let mut debug = kvm_guest_debug {
             control: KVM_GUESTDBG_ENABLE | KVM_GUESTDBG_USE_HW_BP,
             ..Default::default()
@@ -79,15 +110,16 @@ impl Machine {
         if stepping == Stepping::Yes {
             debug.control |= KVM_GUESTDBG_SINGLESTEP;
         }
-        for (i, address) in breakpoints.iter().enumerate() {
-            debug.arch.debugreg[i] = *address;
-            debug.arch.debugreg[DR7_INDEX] |=
-                DR7_LOCAL_ENABLE << (DR7_BITS_PER_BREAKPOINT * i as u32);
+        debug.arch.debugreg[DR7_INDEX] = dr7(traps)?;
+        for (i, trap) in traps.iter().enumerate() {
+            debug.arch.debugreg[i] = match trap {
+                Trap::Execute(address) | Trap::Watch { address, .. } => *address,
+            };
         }
         self.vcpu.set_guest_debug(&debug)?;
         self.debugging = Some(Debugging {
             stepping,
-            breakpoints: breakpoints.to_vec(),
+            traps: traps.to_vec(),
         });
         Ok(())
     }
@@ -99,19 +131,10 @@ impl Machine {
         Ok(())
     }
 
-    /// What a debug trap with this DR6 means, given the breakpoints set.
+    /// What a debug trap with this DR6 means, given the traps set.
     pub(crate) fn debug_stop(&self, dr6: u64) -> DebugStop {
-        let breakpoints = self
-            .debugging
-            .as_ref()
-            .map_or(&[][..], |d| &d.breakpoints[..]);
-        if dr6 & DR6_SINGLE_STEP == 0 {
-            let hit = (dr6 & DR6_HIT_MASK).trailing_zeros() as usize;
-            if let Some(address) = breakpoints.get(hit) {
-                return DebugStop::Breakpoint(*address);
-            }
-        }
-        DebugStop::Step
+        let traps = self.debugging.as_ref().map_or(&[][..], |d| &d.traps[..]);
+        stop_for(dr6, traps)
     }
 
     /// Whether a debug trap is stray, and if so clears the TF behind it, so
@@ -191,6 +214,68 @@ impl Machine {
     }
 }
 
+/// DR7 for these traps, in registers 0 on. Refuses more traps than there
+/// are registers, and a watch the CPU cannot make.
+fn dr7(traps: &[Trap]) -> Result<u64> {
+    if traps.len() > MAX_TRAPS {
+        bail!(
+            "at most {MAX_TRAPS} breakpoints and watchpoints, the CPU's debug registers; got {}",
+            traps.len()
+        );
+    }
+    let mut dr7 = 0;
+    for (i, trap) in traps.iter().enumerate() {
+        let condition = match *trap {
+            Trap::Execute(_) => DR7_EXECUTE,
+            Trap::Watch {
+                address,
+                len,
+                access,
+            } => {
+                // DR7's length encoding: 1, 2, 8 and 4 bytes, in that order.
+                let len_bits = match len {
+                    1 => 0b00,
+                    2 => 0b01,
+                    8 => 0b10,
+                    4 => 0b11,
+                    _ => bail!("a watchpoint covers 1, 2, 4 or 8 bytes, not {len}"),
+                };
+                if !address.is_multiple_of(len) {
+                    bail!("a watchpoint of {len} bytes must be aligned to {len}: {address:#x}");
+                }
+                let access_bits = match access {
+                    Access::Write => DR7_WRITE,
+                    Access::ReadWrite => DR7_READ_WRITE,
+                };
+                access_bits | len_bits << DR7_LEN_SHIFT
+            }
+        };
+        dr7 |= DR7_LOCAL_ENABLE << (DR7_BITS_PER_ENABLE * i as u32);
+        dr7 |= condition << (DR7_CONDITIONS + DR7_BITS_PER_CONDITION * i as u32);
+    }
+    Ok(dr7)
+}
+
+/// What a debug trap with this DR6 means. A watched access is reported
+/// even when a step trapped with it, since the step's instruction made
+/// it; a breakpoint only when no step did.
+fn stop_for(dr6: u64, traps: &[Trap]) -> DebugStop {
+    let hits = (0..MAX_TRAPS)
+        .filter(|i| dr6 & DR6_HIT_MASK & (1 << i) != 0)
+        .filter_map(|i| traps.get(i));
+    let mut breakpoint = None;
+    for trap in hits {
+        match *trap {
+            Trap::Watch { address, .. } => return DebugStop::Watchpoint(address),
+            Trap::Execute(address) => breakpoint = breakpoint.or(Some(address)),
+        }
+    }
+    match breakpoint {
+        Some(address) if dr6 & DR6_SINGLE_STEP == 0 => DebugStop::Breakpoint(address),
+        _ => DebugStop::Step,
+    }
+}
+
 /// Whether a debug trap with this DR6 is a single step the debugger did
 /// not ask for.
 fn stray_trap(dr6: u64, stepping: Stepping) -> bool {
@@ -207,6 +292,69 @@ mod tests {
     // Reads and writes split at page boundaries, where the next page may
     // map somewhere else entirely.
     use super::*;
+
+    /// DR7 for a breakpoint and two watchpoints, encoded by hand from the
+    /// Intel SDM's layout: each register's enable bit, then its condition
+    /// and length in the upper half.
+    #[test]
+    fn dr7_enables_each_register_with_its_condition_and_length() {
+        let traps = [
+            Trap::Execute(0x1000),
+            Trap::Watch {
+                address: 0x2000,
+                len: 8,
+                access: Access::Write,
+            },
+            Trap::Watch {
+                address: 0x3002,
+                len: 2,
+                access: Access::ReadWrite,
+            },
+        ];
+        let enable = 0b01 | 0b01 << 2 | 0b01 << 4;
+        // Register 0 executes, all zeros; 1 watches writes of 8 bytes; 2
+        // watches reads and writes of 2.
+        let conditions = 0b1001 << 20 | 0b0111 << 24;
+        assert_eq!(dr7(&traps).unwrap(), enable | conditions);
+    }
+
+    /// The CPU watches a power of two up to 8 bytes, aligned to itself,
+    /// and has four registers; anything else is refused.
+    #[test]
+    fn a_watch_the_cpu_cannot_make_is_refused() {
+        let watch = |address, len| Trap::Watch {
+            address,
+            len,
+            access: Access::Write,
+        };
+        assert!(dr7(&[watch(0x2000, 3)]).is_err());
+        assert!(dr7(&[watch(0x2004, 8)]).is_err());
+        assert!(dr7(&[watch(0x2000, 16)]).is_err());
+        assert!(dr7(&[watch(0x2000, 1); 5]).is_err());
+        assert!(dr7(&[watch(0x2001, 1), watch(0x2004, 4)]).is_ok());
+    }
+
+    /// A trap names the register that matched in DR6: a watched address
+    /// stops as a watchpoint even when a step trapped with it, an executed
+    /// one as a breakpoint, and a step alone as a step.
+    #[test]
+    fn a_trap_stops_for_the_register_that_matched() {
+        let traps = [
+            Trap::Execute(0x1000),
+            Trap::Watch {
+                address: 0x2000,
+                len: 8,
+                access: Access::Write,
+            },
+        ];
+        assert_eq!(stop_for(0b10, &traps), DebugStop::Watchpoint(0x2000));
+        assert_eq!(
+            stop_for(0b10 | DR6_SINGLE_STEP, &traps),
+            DebugStop::Watchpoint(0x2000)
+        );
+        assert_eq!(stop_for(0b01, &traps), DebugStop::Breakpoint(0x1000));
+        assert_eq!(stop_for(DR6_SINGLE_STEP, &traps), DebugStop::Step);
+    }
 
     /// A single-step trap is the debugger's only when it asked to step;
     /// otherwise it is TF that one of its steps left in a saved copy of

@@ -20,12 +20,13 @@ use gdbstub::target::ext::base::singlethread::{
     SingleThreadSingleStepOps,
 };
 use gdbstub::target::ext::breakpoints::{
-    Breakpoints, BreakpointsOps, HwBreakpoint, HwBreakpointOps, SwBreakpoint, SwBreakpointOps,
+    Breakpoints, BreakpointsOps, HwBreakpoint, HwBreakpointOps, HwWatchpoint, HwWatchpointOps,
+    SwBreakpoint, SwBreakpointOps, WatchKind,
 };
 use gdbstub::target::{Target, TargetError, TargetResult};
 use gdbstub_arch::x86::X86_64_SSE;
 use gdbstub_arch::x86::reg::X86_64CoreRegs;
-use rewind_vmm::debug::{DebugStop, MAX_BREAKPOINTS, Stepping};
+use rewind_vmm::debug::{Access, DebugStop, MAX_TRAPS, Stepping, Trap};
 use rewind_vmm::{Machine, Observer, Outcome};
 
 /// How far the fork runs between looks at the connection, in steps, so a
@@ -35,6 +36,9 @@ const CHUNK_STEPS: u64 = 10_000;
 /// The order gdb's x86-64 description lists the general purpose
 /// registers in.
 const GPR_COUNT: usize = 16;
+
+/// The most bytes one debug register watches.
+const MAX_PIECE: u64 = 8;
 
 /// What gdb asked the fork to do next.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -52,10 +56,114 @@ impl Mode {
     }
 }
 
+/// A range gdb watches, as it asked for it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Watch {
+    address: u64,
+    len: u64,
+    kind: WatchKind,
+}
+
+/// gdb's breakpoints and watchpoints, which share the CPU's four debug
+/// address registers. A watched range takes one register for each aligned
+/// piece of it the CPU can watch.
+#[derive(Default)]
+struct Traps {
+    breakpoints: Vec<u64>,
+    watches: Vec<Watch>,
+}
+
+impl Traps {
+    fn add_breakpoint(&mut self, address: u64) -> bool {
+        if self.breakpoints.contains(&address) {
+            return true;
+        }
+        if self.registers().len() == MAX_TRAPS {
+            return false;
+        }
+        self.breakpoints.push(address);
+        true
+    }
+
+    fn remove_breakpoint(&mut self, address: u64) -> bool {
+        let before = self.breakpoints.len();
+        self.breakpoints.retain(|b| *b != address);
+        self.breakpoints.len() != before
+    }
+
+    /// Adds a watch if all its pieces fit in the registers left. x86 has
+    /// no trap on reads alone, so a read watch is refused, and gdb says so.
+    fn add_watch(&mut self, address: u64, len: u64, kind: WatchKind) -> bool {
+        let watch = Watch { address, len, kind };
+        if kind == WatchKind::Read {
+            return false;
+        }
+        if self.watches.contains(&watch) {
+            return true;
+        }
+        if self.registers().len() + pieces(address, len).len() > MAX_TRAPS {
+            return false;
+        }
+        self.watches.push(watch);
+        true
+    }
+
+    fn remove_watch(&mut self, address: u64, len: u64, kind: WatchKind) -> bool {
+        let before = self.watches.len();
+        self.watches.retain(|w| *w != Watch { address, len, kind });
+        self.watches.len() != before
+    }
+
+    /// One trap per register: the breakpoints, then each watch's pieces.
+    fn registers(&self) -> Vec<Trap> {
+        let breakpoints = self.breakpoints.iter().map(|a| Trap::Execute(*a));
+        let watches = self.watches.iter().flat_map(|w| {
+            let access = match w.kind {
+                WatchKind::Write => Access::Write,
+                WatchKind::Read | WatchKind::ReadWrite => Access::ReadWrite,
+            };
+            pieces(w.address, w.len)
+                .into_iter()
+                .map(move |(address, len)| Trap::Watch {
+                    address,
+                    len,
+                    access,
+                })
+        });
+        breakpoints.chain(watches).collect()
+    }
+
+    /// The watch, as gdb set it, that the piece at `address` belongs to.
+    fn watch_at(&self, address: u64) -> Option<(u64, WatchKind)> {
+        self.watches
+            .iter()
+            .find(|w| (w.address..w.address + w.len).contains(&address))
+            .map(|w| (w.address, w.kind))
+    }
+}
+
+/// `len` bytes at `address` as the pieces a debug register can watch: at
+/// each address, the largest power of two up to 8 that it is aligned to
+/// and that does not run past the end.
+fn pieces(address: u64, len: u64) -> Vec<(u64, u64)> {
+    let end = address + len;
+    let mut at = address;
+    let mut out = Vec::new();
+    while at < end {
+        let mut size = MAX_PIECE;
+        while !at.is_multiple_of(size) || at + size > end {
+            size /= 2;
+        }
+        out.push((at, size));
+        at += size;
+    }
+    out
+}
+
 /// A forked machine under gdb.
 pub struct Debuggee {
     machine: Machine,
-    breakpoints: Vec<u64>,
+    traps: Traps,
     mode: Mode,
     follow: Follow,
     /// Whether gdb's user has been told the fork left the recording.
@@ -68,7 +176,7 @@ impl Debuggee {
     pub fn new(machine: Machine, made: Vec<(u64, Vec<u8>)>) -> Debuggee {
         Debuggee {
             machine,
-            breakpoints: Vec::new(),
+            traps: Traps::default(),
             mode: Mode::Continue,
             follow: Follow::new(made),
             told: false,
@@ -80,23 +188,6 @@ impl Debuggee {
         let stub = GdbStub::new(conn);
         stub.run_blocking::<EventLoop>(self)
             .map_err(|e| anyhow::anyhow!("gdb session: {e}"))
-    }
-
-    fn add_breakpoint(&mut self, address: u64) -> bool {
-        if self.breakpoints.contains(&address) {
-            return true;
-        }
-        if self.breakpoints.len() == MAX_BREAKPOINTS {
-            return false;
-        }
-        self.breakpoints.push(address);
-        true
-    }
-
-    fn remove_breakpoint(&mut self, address: u64) -> bool {
-        let before = self.breakpoints.len();
-        self.breakpoints.retain(|b| *b != address);
-        self.breakpoints.len() != before
     }
 }
 
@@ -220,7 +311,8 @@ impl SingleThreadSingleStep for Debuggee {
 }
 
 // gdb's `break` and `hbreak` both become debug register breakpoints, so
-// nothing is written into the VM's memory; there are four of them.
+// nothing is written into the VM's memory, and `watch` and `awatch` become
+// debug register watchpoints; there are four registers between them.
 impl Breakpoints for Debuggee {
     fn support_sw_breakpoint(&mut self) -> Option<SwBreakpointOps<'_, Self>> {
         Some(self)
@@ -229,25 +321,49 @@ impl Breakpoints for Debuggee {
     fn support_hw_breakpoint(&mut self) -> Option<HwBreakpointOps<'_, Self>> {
         Some(self)
     }
+
+    fn support_hw_watchpoint(&mut self) -> Option<HwWatchpointOps<'_, Self>> {
+        Some(self)
+    }
 }
 
 impl SwBreakpoint for Debuggee {
     fn add_sw_breakpoint(&mut self, address: u64, _kind: usize) -> TargetResult<bool, Self> {
-        Ok(self.add_breakpoint(address))
+        Ok(self.traps.add_breakpoint(address))
     }
 
     fn remove_sw_breakpoint(&mut self, address: u64, _kind: usize) -> TargetResult<bool, Self> {
-        Ok(self.remove_breakpoint(address))
+        Ok(self.traps.remove_breakpoint(address))
     }
 }
 
 impl HwBreakpoint for Debuggee {
     fn add_hw_breakpoint(&mut self, address: u64, _kind: usize) -> TargetResult<bool, Self> {
-        Ok(self.add_breakpoint(address))
+        Ok(self.traps.add_breakpoint(address))
     }
 
     fn remove_hw_breakpoint(&mut self, address: u64, _kind: usize) -> TargetResult<bool, Self> {
-        Ok(self.remove_breakpoint(address))
+        Ok(self.traps.remove_breakpoint(address))
+    }
+}
+
+impl HwWatchpoint for Debuggee {
+    fn add_hw_watchpoint(
+        &mut self,
+        address: u64,
+        len: u64,
+        kind: WatchKind,
+    ) -> TargetResult<bool, Self> {
+        Ok(self.traps.add_watch(address, len, kind))
+    }
+
+    fn remove_hw_watchpoint(
+        &mut self,
+        address: u64,
+        len: u64,
+        kind: WatchKind,
+    ) -> TargetResult<bool, Self> {
+        Ok(self.traps.remove_watch(address, len, kind))
     }
 }
 
@@ -265,10 +381,10 @@ impl BlockingEventLoop for EventLoop {
         conn: &mut TcpStream,
     ) -> Result<Event<Self::StopReason>, WaitForStopReasonError<String, std::io::Error>> {
         let target_error = |e: anyhow::Error| WaitForStopReasonError::Target(e.to_string());
-        let breakpoints = target.breakpoints.clone();
+        let traps = target.traps.registers();
         target
             .machine
-            .set_debug(target.mode.stepping(), &breakpoints)
+            .set_debug(target.mode.stepping(), &traps)
             .map_err(target_error)?;
 
         loop {
@@ -293,6 +409,17 @@ impl BlockingEventLoop for EventLoop {
                 }
                 Outcome::Debug(DebugStop::Breakpoint(_)) => {
                     return Ok(Event::TargetStopped(SingleThreadStopReason::SwBreak(())));
+                }
+                Outcome::Debug(DebugStop::Watchpoint(piece)) => {
+                    let stop = match target.traps.watch_at(piece) {
+                        Some((addr, kind)) => SingleThreadStopReason::Watch {
+                            tid: (),
+                            kind,
+                            addr,
+                        },
+                        None => SingleThreadStopReason::Signal(Signal::SIGTRAP),
+                    };
+                    return Ok(Event::TargetStopped(stop));
                 }
                 Outcome::Stopped(_) => {
                     return Ok(Event::TargetStopped(SingleThreadStopReason::Exited(0)));
@@ -322,6 +449,61 @@ mod tests {
     // A fork's records compared with the run's, as gdb runs it: the step
     // of the first that differs is kept, and only that one.
     use super::*;
+
+    /// Splits watched ranges as the CPU needs them: the largest aligned
+    /// piece of up to 8 bytes at each address, so an aligned pointer is one
+    /// piece and an odd range is several.
+    #[test]
+    fn a_watched_range_splits_into_aligned_pieces() {
+        assert_eq!(pieces(0x1000, 8), vec![(0x1000, 8)]);
+        assert_eq!(pieces(0x1004, 4), vec![(0x1004, 4)]);
+        assert_eq!(
+            pieces(0x1001, 7),
+            vec![(0x1001, 1), (0x1002, 2), (0x1004, 4)]
+        );
+        assert_eq!(pieces(0x1000, 16), vec![(0x1000, 8), (0x1008, 8)]);
+        assert_eq!(pieces(0x1000, 0), vec![]);
+    }
+
+    /// Breakpoints and watch pieces share the four registers: a watch that
+    /// does not fit is refused whole, a read-only watch is refused since
+    /// x86 has none, and a hit on any piece names the watch gdb set.
+    #[test]
+    fn breakpoints_and_watches_share_the_four_registers() {
+        let mut traps = Traps::default();
+        assert!(traps.add_breakpoint(0x400000));
+        assert!(traps.add_watch(0x1000, 8, WatchKind::Write));
+        assert!(!traps.add_watch(0x2001, 7, WatchKind::Write));
+        assert!(!traps.add_watch(0x3000, 4, WatchKind::Read));
+        assert!(traps.add_watch(0x2002, 6, WatchKind::ReadWrite));
+        assert_eq!(
+            traps.registers(),
+            vec![
+                Trap::Execute(0x400000),
+                Trap::Watch {
+                    address: 0x1000,
+                    len: 8,
+                    access: Access::Write
+                },
+                Trap::Watch {
+                    address: 0x2002,
+                    len: 2,
+                    access: Access::ReadWrite
+                },
+                Trap::Watch {
+                    address: 0x2004,
+                    len: 4,
+                    access: Access::ReadWrite
+                },
+            ]
+        );
+        assert_eq!(traps.watch_at(0x2004), Some((0x2002, WatchKind::ReadWrite)));
+        assert_eq!(traps.watch_at(0x5000), None);
+
+        assert!(traps.remove_watch(0x2002, 6, WatchKind::ReadWrite));
+        assert!(!traps.remove_watch(0x2002, 6, WatchKind::ReadWrite));
+        assert_eq!(traps.registers().len(), 2);
+    }
 
     /// Feeds a follower the run's own records, then records that differ
     /// in bytes and in step, and checks it keeps the first difference.
