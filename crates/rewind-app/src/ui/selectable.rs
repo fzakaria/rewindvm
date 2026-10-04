@@ -456,6 +456,7 @@ impl Scrubber {
                 .unwrap_or_default(),
             Surface::LicenseDialog => self.license_dialog_lines(),
             Surface::Runs => self.runs_lines(),
+            Surface::Source => self.source_lines(),
             Surface::Log | Surface::Viewer | Surface::Terminal => Vec::new(),
         }
     }

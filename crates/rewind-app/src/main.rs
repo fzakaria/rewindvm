@@ -1,9 +1,9 @@
 //! `rewind-app`: the desktop scrubber.
 //!
-//!     rewind-app [<run>] [--compare <run>] [--step <n>]
+//!     rewind-app [<run>] [--compare <run>] [--step <n>] [--source]
 //!
 //! A run is a run directory, a .rwd export, an http or https URL of one,
-//! or a bare trace file.
+//! or a bare trace file. --source opens the source panel at the step.
 //!
 //! Without a run, the window opens on an empty state with buttons to open
 //! a file or a copied link, and the runs recorded here most recently.
@@ -14,15 +14,16 @@ use std::sync::Arc;
 
 use rewind_app::engine::CliEngine;
 use rewind_app::run::Session;
-use rewind_app::ui::{self, Launch};
+use rewind_app::ui::{self, Launch, RightColumn};
 
-const USAGE: &str = "usage: rewind-app [<run>] [--compare <run>] [--step <n>]\n\na run is a run directory, a .rwd export, an https URL of one, or a bare trace file";
+const USAGE: &str = "usage: rewind-app [<run>] [--compare <run>] [--step <n>] [--source]\n\na run is a run directory, a .rwd export, an https URL of one, or a bare trace file;\n--source opens the source panel at the step";
 
 /// The command line, parsed.
 struct Args {
     run: Option<PathBuf>,
     compare: Option<PathBuf>,
     step: Option<u64>,
+    right: RightColumn,
 }
 
 /// What the command line asked for.
@@ -76,6 +77,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Parsed, String> {
         run: None,
         compare: None,
         step: None,
+        right: RightColumn::AtStep,
     };
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -93,6 +95,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Parsed, String> {
                     .map_err(|_| format!("--step: not a step number: {value}"))?;
                 parsed.step = Some(step);
             }
+            "--source" => parsed.right = RightColumn::Source,
             flag if flag.starts_with("--") => return Err(format!("unknown option {flag}")),
             path => {
                 if parsed.run.is_some() {
@@ -104,6 +107,9 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Parsed, String> {
     }
     if parsed.compare.is_some() && parsed.run.is_none() {
         return Err("--compare needs a run to compare with".into());
+    }
+    if parsed.right == RightColumn::Source && parsed.run.is_none() {
+        return Err("--source needs a run".into());
     }
     Ok(Parsed::Run(parsed))
 }
@@ -149,6 +155,7 @@ fn main() -> ExitCode {
     ui::run(Launch {
         session,
         step: args.step,
+        right: args.right,
         engine: Arc::new(CliEngine::from_env()),
     });
     ExitCode::SUCCESS
@@ -175,6 +182,21 @@ mod tests {
         assert_eq!(args.run, Some(PathBuf::from("runs/fail")));
         assert_eq!(args.compare, Some(PathBuf::from("runs/pass")));
         assert_eq!(args.step, Some(1_204));
+    }
+
+    /// --source opens the source panel with the run, and is refused
+    /// without one.
+    #[test]
+    fn the_source_panel_opens_with_a_run() {
+        let Ok(Parsed::Run(args)) = parse_list(&["runs/fail", "--step", "5060", "--source"]) else {
+            panic!("refused");
+        };
+        assert_eq!(args.right, RightColumn::Source);
+        let Ok(Parsed::Run(args)) = parse_list(&["runs/fail"]) else {
+            panic!("refused");
+        };
+        assert_eq!(args.right, RightColumn::AtStep);
+        assert!(parse_list(&["--source"]).is_err());
     }
 
     #[test]

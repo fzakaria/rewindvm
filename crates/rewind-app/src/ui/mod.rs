@@ -9,6 +9,7 @@ mod link;
 mod render;
 mod scrubber;
 mod selectable;
+mod source;
 mod splits;
 mod terminal;
 mod tour;
@@ -41,6 +42,7 @@ actions!(
         JumpToFailure,
         JumpToDivergence,
         ForkHere,
+        ToggleSource,
         OpenRun,
         EnterLicense,
         PasteLicense,
@@ -97,7 +99,16 @@ pub struct Launch {
     pub session: Option<Session>,
     /// Where to put the playhead first; None picks the failure, or the end.
     pub step: Option<u64>,
+    /// What the right column shows first.
+    pub right: RightColumn,
     pub engine: Arc<dyn Engine>,
+}
+
+/// What the right column shows: "At this step", or the source panel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RightColumn {
+    AtStep,
+    Source,
 }
 
 /// Runs the app until its window closes.
@@ -176,7 +187,8 @@ fn load_bundled_fonts(cx: &App) {
 
 /// The keyboard map. Arrows move between events, Shift+arrows by one
 /// step, Page Up and Page Down between phases, Home and End to the ends,
-/// f to the failure and d to the divergence. Ctrl+C copies the selected
+/// f to the failure and d to the divergence; s opens or closes the source
+/// panel. Ctrl+C copies the selected
 /// text and Ctrl+A selects all of the panel last clicked in; in the
 /// terminal pane, where Ctrl+C belongs to the command, Ctrl+Shift+C and
 /// Ctrl+Shift+V copy and paste.
@@ -195,6 +207,7 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("pagedown", NextPhase, context),
         KeyBinding::new("f", JumpToFailure, context),
         KeyBinding::new("d", JumpToDivergence, context),
+        KeyBinding::new("s", ToggleSource, context),
         KeyBinding::new("ctrl-c", CopySelection, context),
         KeyBinding::new("ctrl-a", SelectAll, context),
         KeyBinding::new("ctrl-c", CopySelection, Some(LICENSE_CONTEXT)),

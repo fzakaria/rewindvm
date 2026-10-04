@@ -1,6 +1,7 @@
 //! What the app asks of the engine: forking a run at a step, reading a
-//! file at a step, exporting a run, and the command lines for a shell and
-//! for gdb at a step.
+//! file at a step, finding the line of the program's own code a thread
+//! was on at a step, exporting a run, and the command lines for a shell
+//! and for gdb at a step.
 //!
 //! The app talks to the engine through the `Engine` trait, and `CliEngine`
 //! implements the trait by running the `rewind` command. Every call
@@ -15,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::run::MANIFEST_FILE;
+use crate::source::Located;
 use crate::viewer::{self, FetchedAll};
 
 /// The engine's command, looked up on PATH.
@@ -152,6 +154,12 @@ pub trait Engine: Send + Sync {
     /// `pid` saw it when one is given. The engine brings the run back to
     /// the step to read it, which takes seconds.
     fn cat(&self, run: &Path, step: u64, pid: Option<u32>, path: &str) -> EngineResult<FileAtStep>;
+
+    /// Where in the program's own code thread `tid` of process `pid` was
+    /// at `step` of `run`: the thread's frames, the innermost of them in
+    /// the program's own code, and its source. The engine forks the run at
+    /// the step and walks the thread's stack in gdb, which takes seconds.
+    fn locate(&self, run: &Path, step: u64, pid: u32, tid: u32) -> EngineResult<Located>;
 }
 
 /// A program and its arguments, for the terminal pane to run.
@@ -476,6 +484,48 @@ impl Engine for CliEngine {
             )),
         }
     }
+
+    fn locate(&self, run: &Path, step: u64, pid: u32, tid: u32) -> EngineResult<Located> {
+        self.where_json(run, step, pid, tid)
+    }
+}
+
+impl CliEngine {
+    /// `rewind where`, as Engine::locate describes it.
+    fn where_json(&self, run: &Path, step: u64, pid: u32, tid: u32) -> EngineResult<Located> {
+        // rewind where <run> <step> --pid P --tid T --json
+        let args: [OsString; 8] = [
+            "where".into(),
+            run.into(),
+            step.to_string().into(),
+            "--pid".into(),
+            pid.to_string().into(),
+            "--tid".into(),
+            tid.to_string().into(),
+            "--json".into(),
+        ];
+        let command = self.command_line(&args);
+        let output = Command::new(&self.program)
+            .args(&args)
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|e| self.spawn_error(e, &command))?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let located = stdout
+            .lines()
+            .rev()
+            .find_map(|line| serde_json::from_str::<Located>(line).ok());
+        match located {
+            Some(located) if output.status.success() => Ok(located),
+            _ => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let message = last_line(&stderr)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| output.status.to_string());
+                Err(EngineError::Failed { command, message })
+            }
+        }
+    }
 }
 
 /// Where the run with `id` is: next to its parent, else in the Rewind home
@@ -725,6 +775,35 @@ mod tests {
             engine.gdb_command(run, 4_392).display(),
             "rewind gdb /runs/abc 4392"
         );
+    }
+
+    /// The stand-in prints what `rewind where --json` does; the app reads
+    /// the chosen frame from it, and the arguments name the step, the
+    /// process and the thread. A refusal reports the engine's reason.
+    #[test]
+    fn locate_returns_the_chosen_frame_or_the_engines_reason() {
+        let dir = temp_dir("where");
+        let run = dir.join("run");
+        let json = r#"{"run":"r","step":5060,"pid":166,"tid":174,"process":"test_pool_shutdown","frames":[{"level":0,"function":"worker","file":"src/pool.c","fullname":null,"line":77,"pc":"0x55bfaf437437","object":"/build/mylib/tests/test_pool_shutdown"}],"chosen":0,"source":null}\n"#;
+        let engine = fake_engine(&dir, json, "rewind: walking the stack in gdb\n", 0);
+        let located = retrying(|| engine.locate(&run, 5_060, 166, 174)).unwrap();
+        assert_eq!(
+            located.chosen_frame().unwrap().place_label(),
+            "src/pool.c:77"
+        );
+        let args = std::fs::read_to_string(dir.join("args")).unwrap();
+        assert_eq!(
+            args.trim(),
+            format!("where {} 5060 --pid 166 --tid 174 --json", run.display())
+        );
+
+        let refusing = fake_engine(&dir, "", "rewind: no process 166 at this step\n", 1);
+        let err = retrying(|| refusing.locate(&run, 10, 166, 166)).unwrap_err();
+        let EngineError::Failed { message, .. } = err else {
+            panic!("{err:?}");
+        };
+        assert_eq!(message, "rewind: no process 166 at this step");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

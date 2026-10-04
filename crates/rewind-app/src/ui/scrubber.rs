@@ -21,14 +21,15 @@ use crate::run::{Origin, Session, short_id};
 use crate::selection::Surface;
 use crate::theme::size;
 use crate::tour::Tour;
-use crate::ui::Launch;
 use crate::ui::licensing::Licensing;
 use crate::ui::link::LinkDialog;
 use crate::ui::selectable::SelectionState;
+use crate::ui::source::SourcePanel;
 use crate::ui::splits::{Drag, Measured, Splits};
 use crate::ui::terminal::{PaneKind, TerminalPane};
 use crate::ui::viewer::FileViewer;
 use crate::ui::widgets::Fonts;
+use crate::ui::{Launch, RightColumn};
 
 /// How long a notice stays up.
 const NOTICE_DURATION: Duration = Duration::from_secs(8);
@@ -145,6 +146,7 @@ pub enum Replay {
     Shell,
     Gdb,
     Fork,
+    Where,
 }
 
 impl Replay {
@@ -153,6 +155,7 @@ impl Replay {
             Replay::Shell => "Opening a shell",
             Replay::Gdb => "Attaching gdb",
             Replay::Fork => "Forking",
+            Replay::Where => "Showing the source",
         }
     }
 
@@ -161,6 +164,7 @@ impl Replay {
             Replay::Shell => "open a shell",
             Replay::Gdb => "attach gdb",
             Replay::Fork => "fork it",
+            Replay::Where => "see its source",
         }
     }
 }
@@ -262,6 +266,9 @@ pub struct Scrubber {
     pub(super) tour_focus: FocusHandle,
     /// The file viewer, while a file is open in it.
     pub(super) viewer: Option<FileViewer>,
+    /// The source panel, while it is open; it shares the file viewer's
+    /// place.
+    pub(super) source: Option<SourcePanel>,
     /// A press on the title bar that the next motion turns into a window
     /// move.
     pub(super) titlebar_armed: bool,
@@ -318,11 +325,15 @@ impl Scrubber {
             terminal: None,
             exporting: None,
             viewer: None,
+            source: None,
             next_notice: 0,
             title: None,
         };
         if let Some(session) = launch.session {
             this.show(session, launch.step, cx);
+            if launch.right == RightColumn::Source {
+                this.open_source(cx);
+            }
         } else {
             this.reload_runs(cx);
         }
@@ -345,6 +356,7 @@ impl Scrubber {
         self.forks.clear();
         self.tour = None;
         self.viewer = None;
+        self.source = None;
         self.log_followed = None;
         self.files_followed = None;
         self.selecting.selection = None;
@@ -853,6 +865,7 @@ impl Scrubber {
             Surface::Divergence,
         ]);
         self.playhead_moved(cx);
+        self.source_playhead_moved(cx);
         cx.notify();
     }
 
@@ -1134,8 +1147,9 @@ impl Scrubber {
                 self.engine.shell_command(&run, step, pid),
             ),
             Replay::Gdb => (PaneKind::Gdb, None, self.engine.gdb_command(&run, step)),
-            // A fork makes a run rather than a pane; fork_here does it.
-            Replay::Fork => return,
+            // A fork makes a run and the source fills a panel rather than
+            // a pane; fork_here and open_source do them.
+            Replay::Fork | Replay::Where => return,
         };
         self.count_engine_action(cx);
         self.open_terminal(kind, step, pid, command, window, cx);

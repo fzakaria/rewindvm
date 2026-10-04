@@ -114,6 +114,7 @@ impl Scrubber {
             return;
         };
         let unavailable = unavailable(session);
+        self.source = None;
         self.viewer = Some(FileViewer {
             path,
             pid,
@@ -125,7 +126,7 @@ impl Scrubber {
             generation: 0,
             scroll: UniformListScrollHandle::new(),
         });
-        self.clear_selection_in(&[Surface::Viewer]);
+        self.clear_selection_in(&[Surface::Viewer, Surface::Source]);
         if unavailable.is_none() {
             self.count_engine_action(cx);
             self.fetch_file(cx);

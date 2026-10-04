@@ -24,6 +24,8 @@ pub enum Surface {
     Processes,
     Files,
     Viewer,
+    /// The source panel's lines.
+    Source,
     /// The last event at the playhead.
     EventCard,
     /// Where the run parts from the one it is compared with.

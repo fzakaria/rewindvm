@@ -30,7 +30,7 @@ use crate::ui::widgets::{
 use crate::ui::{
     CopySelection, EnterLicense, ForkHere, GoToEnd, GoToStart, JumpToDivergence, JumpToFailure,
     KEY_CONTEXT, NextEvent, NextPhase, OpenRun, PreviousEvent, PreviousPhase, SelectAll, StartTour,
-    StepBack, StepForward,
+    StepBack, StepForward, ToggleSource,
 };
 
 /// Header labels are cut to this many characters.
@@ -71,6 +71,7 @@ impl Render for Scrubber {
                 cx.listener(|this, _: &JumpToDivergence, _, cx| this.go(Motion::Divergence, cx)),
             )
             .on_action(cx.listener(|this, _: &ForkHere, _, cx| this.fork_here(cx)))
+            .on_action(cx.listener(|this, _: &ToggleSource, _, cx| this.toggle_source(cx)))
             .on_action(cx.listener(|this, _: &OpenRun, _, cx| this.prompt_open(cx)))
             .on_action(cx.listener(|this, _: &EnterLicense, window, cx| {
                 this.open_license_dialog(window, cx)
@@ -144,11 +145,14 @@ impl Scrubber {
         let timeline = self.render_timeline(window, cx);
         let log = self.render_log(cx);
         let middle = self.render_middle(cx);
-        // The right column: the file viewer when a file is open, which
-        // takes the log's share of the width, else "At this step".
+        // The right column: the file viewer when a file is open, or the
+        // source panel when it is, either taking the log's share of the
+        // width, else "At this step".
         let splits = self.splits;
-        let (at_step, right_flex) = match self.render_viewer(cx) {
-            Some(viewer) => (viewer, splits.right * layout::LOG_FLEX / layout::SIDE_FLEX),
+        let wide = splits.right * layout::LOG_FLEX / layout::SIDE_FLEX;
+        let (at_step, right_flex) = match self.render_viewer(cx).or_else(|| self.render_source(cx))
+        {
+            Some(panel) => (panel, wide),
             None => (self.render_at_step(cx), splits.right),
         };
 
@@ -1209,9 +1213,19 @@ impl Scrubber {
                     ),
             )
             .child(
-                inspect("export", "Export run".into(), Availability::Enabled)
-                    .tooltip(tooltip(EXPORT_NOTE))
-                    .on_click(cx.listener(|this, _, _, cx| this.export(cx))),
+                div()
+                    .flex()
+                    .gap(px(size::CARD_GAP))
+                    .child(
+                        inspect("source", "Show source".into(), Availability::Enabled)
+                            .tooltip(tooltip(SOURCE_NOTE))
+                            .on_click(cx.listener(|this, _, _, cx| this.open_source(cx))),
+                    )
+                    .child(
+                        inspect("export", "Export run".into(), Availability::Enabled)
+                            .tooltip(tooltip(EXPORT_NOTE))
+                            .on_click(cx.listener(|this, _, _, cx| this.export(cx))),
+                    ),
             );
         column = column.child(
             div()
@@ -1706,6 +1720,7 @@ const COMPARED_NOTE: &str = "The run it is compared with, here the run it was fo
 const COMPARED_PINNED_NOTE: &str = "The run you chose to compare against, which stays the comparison as you open other runs. Right-click in the Runs panel and choose Compare each run with its parent to go back.";
 
 /// What the inspect buttons do, for their hover notes.
+const SOURCE_NOTE: &str = "The line of the program's own code the thread at the playhead was on, past the C library and other libraries, with the frames that called it. Rewind finds it in gdb on a throwaway copy of the VM at this step, and again when the playhead rests elsewhere. Key: s.";
 const GDB_NOTE: &str = "gdb on a throwaway copy of the VM at this step: its one CPU, stopped in the kernel and the process running there, with their symbols and sources. Breakpoints and watchpoints in user space stop only in that process. Breakpoints, step and continue run the copy forward; the recording does not change.";
 const SHELL_NOTE: &str = "A shell inside a throwaway copy of the VM at this step, in the process's directory with its environment, while everything else in the VM stays where it was. Nothing done in it changes the recording.";
 const EXPORT_NOTE: &str = "Writes this run to one .rwd file, with its keyframes and inputs, that another machine can open, replay and fork.";

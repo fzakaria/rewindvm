@@ -285,6 +285,11 @@ the run left the passing one, and fork from the playhead.
 $ rewind-app ~/.local/share/rewind/runs/8fd5378ddf70075e --compare ~/.local/share/rewind/runs/af648d629627479e
 ```
 
+Press f to jump to the failure at step 5,060, then s to open the source
+panel. After a few seconds it shows `worker` at `src/pool.c:77`, with
+`p->queue->completed++;` marked: the line that read the queue after
+`pool_shutdown` had set it to NULL.
+
 ## Fix it and check the fix
 
 Clone the repository to edit the flake's `mylib`:

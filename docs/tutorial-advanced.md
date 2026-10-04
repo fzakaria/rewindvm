@@ -79,6 +79,18 @@ Thread 1 (Thread 1.4194305 (the CPU, in test_pool_shutd 174)):
 Both read each thread's registers from the VM kernel's task list, so they
 work on runs recorded with a guest that lists its tasks, as these were.
 
+In the app, Show source under Inspect, or the s key, opens the source panel
+in place of At this step. It names the line `rewind where` would for the
+thread of the playhead's event, marks it in the source around it, and lists
+the thread's frames below with the chosen one marked. When the playhead rests
+on another step the panel asks again, dimming the last answer meanwhile; each
+answer forks the run, so it takes a few seconds. Runs the app cannot fork
+say so instead: the bundled example and an export that holds only the trace.
+So does a run recorded before the guest listed its tasks, which has to be
+recorded again.
+
+![The app's source panel at step 5,060 of the failing run: worker at src/pool.c:77 with p->queue->completed++ marked, and the frames worker, start_thread and clone3 below](img/app-source.png)
+
 ## Watch both sides of the race
 
 A watchpoint finds who freed the queue the crash reads. Break in a worker so

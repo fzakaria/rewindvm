@@ -279,6 +279,11 @@ the run left the passing one, and fork from the playhead.
 $ rewind-app ~/.local/share/rewind/runs/1f4dbc7f616b856f --compare ~/.local/share/rewind/runs/d3191482bbc8c650
 ```
 
+Press f to jump to the failure at step 696, then s to open the source panel.
+After a few seconds it shows `worker` at `src/pool.c:77`, with
+`p->queue->completed++;` marked: the line that read the queue after
+`pool_shutdown` had set it to NULL.
+
 ## Fix it and check the fix
 
 In `src/pool.c`, count the job under the lock, and free the queue after the
