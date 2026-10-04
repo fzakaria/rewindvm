@@ -31,7 +31,7 @@ use rewind_core::{Home, Run};
 
 /// The address `rewind gdb` serves on when it starts gdb itself: any free
 /// port on the loopback interface.
-const GDB_LOCAL: &str = "127.0.0.1:0";
+pub const GDB_LOCAL: &str = "127.0.0.1:0";
 
 /// Where Nix keeps store paths, and the program that fetches them.
 const NIX_STORE: &str = "/nix/store";
@@ -97,35 +97,17 @@ pub fn gdb(
 ) -> Result<ExitCode> {
     // What gdb is told before the fork it debugs is made: the inspection
     // that finds the process needs a fork of its own.
-    let kernel = KernelSymbols::find(run);
-    let session = Session::new(home)?;
-    let process = debugged_process(home, run, step, pid, &session.dir);
-    let debuginfod = Debuginfod::start();
+    let symbols = Symbols::load(home, run, step, pid, Kernel::Load)?;
 
-    let machine = run.machine_at(home, step, &mut rewind_vmm::Ignore)?;
     // Finding a process that is not on the CPU takes the kernel's task
     // list, which kernels before it do not publish.
-    if pid.is_some() && machine.task_layout()?.is_none() {
-        bail!(
-            "run {}'s kernel does not say where its tasks are, so --pid cannot find \
-             process {}; record the run again",
-            run.manifest.id,
-            pid.unwrap_or_default()
-        );
-    }
-    let made = run.records_after(step)?;
-    let mut debuggee = rewind_core::debug::Debuggee::new(machine, made, process.scope)?;
+    let needs = match pid {
+        Some(pid) => Needs::Tasks(format!("--pid cannot find process {pid}")),
+        None => Needs::Nothing,
+    };
+    let mut debuggee = fork(home, run, step, symbols.process.scope, needs)?;
     let listener = TcpListener::bind(listen.unwrap_or(GDB_LOCAL)).context("listening for gdb")?;
-    let address = listener.local_addr()?;
-    // The session's server first, then any the person already uses.
-    let others = std::env::var(ENV_DEBUGINFOD_URLS).unwrap_or_default();
-    let urls: Vec<&str> = debuginfod
-        .as_ref()
-        .map(|d| d.url.as_str())
-        .into_iter()
-        .chain(others.split_whitespace())
-        .collect();
-    let mut args = arguments(&kernel, &process, &urls, address);
+    let mut args = symbols.arguments(Some(listener.local_addr()?));
     args.extend(extra.iter().cloned());
 
     // Only serving: say how to connect, then wait for gdb. The debuginfod
@@ -146,14 +128,8 @@ pub fn gdb(
     // terminal.
     // SAFETY: ignoring SIGINT has no preconditions; gdb installs its own.
     unsafe { libc::signal(libc::SIGINT, libc::SIG_IGN) };
-    let mut child = Command::new("gdb").args(&args).spawn().context(
-        "starting gdb; is it on PATH? `rewind gdb --listen 127.0.0.1:1234` serves without it",
-    )?;
     eprintln!("rewind: gdb at step {step} of {}", run.manifest.id);
-    let (conn, _) = listener.accept()?;
-    let served = debuggee.serve(conn);
-    let status = child.wait()?;
-    served?;
+    let (status, _) = run_gdb(&args, Some((&mut debuggee, &listener)), Output::Terminal)?;
     Ok(if status.success() {
         ExitCode::SUCCESS
     } else {
@@ -161,15 +137,197 @@ pub fn gdb(
     })
 }
 
+/// Whether a session loads the VM kernel's symbols: gdb on a fork does,
+/// while a question about a process's own code needs only the process's,
+/// and the kernel's DWARF is slow to load and may need fetching first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kernel {
+    Load,
+    Skip,
+}
+
+/// What a fork for gdb needs of the run's kernel.
+pub enum Needs {
+    /// Nothing more than any kernel gives.
+    Nothing,
+    /// Its task list, without which the thing named cannot be done:
+    /// kernels before the task layout was published do not give it.
+    Tasks(String),
+}
+
+/// A fork of `run` at `step` for gdb, seeing `scope`'s threads, refused
+/// when the run's kernel lacks what `needs` names.
+pub fn fork(
+    home: &Home,
+    run: &Run,
+    step: u64,
+    scope: rewind_core::debug::Scope,
+    needs: Needs,
+) -> Result<rewind_core::debug::Debuggee> {
+    let machine = run.machine_at(home, step, &mut rewind_vmm::Ignore)?;
+    if let Needs::Tasks(what) = needs
+        && machine.task_layout()?.is_none()
+    {
+        bail!(
+            "run {}'s kernel does not say where its tasks are, so {what}; record the run again",
+            run.manifest.id
+        );
+    }
+    let made = run.records_after(step)?;
+    rewind_core::debug::Debuggee::new(machine, made, scope)
+}
+
+/// Where gdb's output goes: to the terminal, or back to the caller.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Output {
+    Terminal,
+    Captured,
+}
+
+/// What gdb printed when its output was captured.
+#[derive(Default)]
+pub struct Printed {
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// Runs the host's gdb with `args` and waits for it, serving `fork` to it
+/// from this thread when given, on the listener its arguments connect to.
+/// Returns how gdb exited and, when captured, what it printed.
+pub fn run_gdb(
+    args: &[String],
+    fork: Option<(&mut rewind_core::debug::Debuggee, &TcpListener)>,
+    output: Output,
+) -> Result<(std::process::ExitStatus, Printed)> {
+    let mut command = Command::new(GDB_PROGRAM);
+    command.args(args);
+    if output == Output::Captured {
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    }
+    let mut child = command.spawn().context(
+        "starting gdb; is it on PATH? `rewind gdb --listen 127.0.0.1:1234` serves without it",
+    )?;
+
+    // gdb's output is read beside the serving, so a full pipe cannot stop
+    // gdb while the fork waits for it.
+    let read = |pipe: Option<Box<dyn std::io::Read + Send>>| {
+        pipe.map(|mut pipe| {
+            std::thread::spawn(move || {
+                let mut text = String::new();
+                let _ = pipe.read_to_string(&mut text);
+                text
+            })
+        })
+    };
+    let stdout = read(child.stdout.take().map(|p| Box::new(p) as _));
+    let stderr = read(child.stderr.take().map(|p| Box::new(p) as _));
+    let served = match fork {
+        Some((debuggee, listener)) => {
+            let (conn, _) = listener.accept()?;
+            debuggee.serve(conn).map(|_| ())
+        }
+        None => Ok(()),
+    };
+    let status = child.wait()?;
+    let text = |reader: Option<std::thread::JoinHandle<String>>| {
+        reader
+            .map(|r| r.join().unwrap_or_default())
+            .unwrap_or_default()
+    };
+    let printed = Printed {
+        stdout: text(stdout),
+        stderr: text(stderr),
+    };
+    served?;
+    Ok((status, printed))
+}
+
+/// The host's gdb.
+const GDB_PROGRAM: &str = "gdb";
+
+/// Fails, saying so, when the host's gdb cannot run Python, which loading
+/// the process's symbols and `rewind where`'s script need.
+pub fn require_python() -> Result<()> {
+    let ran = Command::new(GDB_PROGRAM)
+        .args(["-nx", "-batch", "-ex", "python import gdb"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("starting gdb; is it on PATH?")?;
+    if !ran.success() {
+        bail!("the gdb on PATH cannot run Python scripts; use a gdb built with Python");
+    }
+    Ok(())
+}
+
+/// What gdb is told about a run at a step: the kernel's symbols, the
+/// process's programs and libraries with their sources, and a debuginfod
+/// server for their DWARF, with the session directory the files only the
+/// VM had are written to.
+pub struct Symbols {
+    session: Session,
+    kernel: KernelSymbols,
+    process: Process,
+    debuginfod: Option<Debuginfod>,
+}
+
+impl Symbols {
+    /// The symbols for process `pid` at `step` of `run`, or when None the
+    /// process running there, with the kernel's when `kernel` says so.
+    pub fn load(
+        home: &Home,
+        run: &Run,
+        step: u64,
+        pid: Option<u32>,
+        kernel: Kernel,
+    ) -> Result<Symbols> {
+        let kernel = match kernel {
+            Kernel::Load => KernelSymbols::find(run),
+            Kernel::Skip => KernelSymbols::none(),
+        };
+        let session = Session::new(home)?;
+        let process = debugged_process(home, run, step, pid, &session.dir);
+        let debuginfod = Debuginfod::start();
+        Ok(Symbols {
+            session,
+            kernel,
+            process,
+            debuginfod,
+        })
+    }
+
+    /// The directory the session's files are written to, which goes when
+    /// the symbols do.
+    pub fn dir(&self) -> &Path {
+        &self.session.dir
+    }
+
+    /// gdb's arguments for these symbols, connecting to `target` when
+    /// given. The session's debuginfod server is asked first, then any the
+    /// person already uses.
+    pub fn arguments(&self, target: Option<std::net::SocketAddr>) -> Vec<String> {
+        let others = std::env::var(ENV_DEBUGINFOD_URLS).unwrap_or_default();
+        let urls: Vec<&str> = self
+            .debuginfod
+            .as_ref()
+            .map(|d| d.url.as_str())
+            .into_iter()
+            .chain(others.split_whitespace())
+            .collect();
+        arguments(&self.kernel, &self.process, &urls, target)
+    }
+}
+
 /// gdb's arguments: the debuginfod servers to ask for DWARF, the kernel's symbols
-/// and scripts, the running process's files, then the connection. Each is
-/// its own -ex, so one gdb cannot run, such as a debuginfod setting in a
-/// gdb built without debuginfod, does not stop the rest.
+/// and scripts, the running process's files, then the connection when
+/// there is one. Each is its own -ex, so one gdb cannot run, such as a
+/// debuginfod setting in a gdb built without debuginfod, does not stop the
+/// rest.
 fn arguments(
     kernel: &KernelSymbols,
     process: &Process,
     urls: &[&str],
-    address: std::net::SocketAddr,
+    target: Option<std::net::SocketAddr>,
 ) -> Vec<String> {
     let mut args: Vec<String> = vec!["-q".into()];
     let mut ex = |when: &str, command: String| {
@@ -232,7 +390,9 @@ fn arguments(
         );
     }
 
-    ex("-ex", format!("target remote {address}"));
+    if let Some(address) = target {
+        ex("-ex", format!("target remote {address}"));
+    }
     args
 }
 
@@ -247,6 +407,16 @@ struct KernelSymbols {
 }
 
 impl KernelSymbols {
+    /// No symbols for the kernel.
+    fn none() -> KernelSymbols {
+        KernelSymbols {
+            file: None,
+            scripts: None,
+            sources: None,
+            dwarf: false,
+        }
+    }
+
     /// The best symbols for the kernel `run` booted: its DWARF, else its
     /// symbol table. The DWARF is looked for where the run was recorded
     /// with it, then where this rewind would record it, which on a host
@@ -552,7 +722,7 @@ fn sources_outside_store(files: &[SymbolFile]) -> Vec<Vec<String>> {
 
 /// The path a symbol file had in the VM: its path under `dir` when it was
 /// written there, else its own path.
-fn path_in_vm(file: &Path, dir: &Path) -> PathBuf {
+pub fn path_in_vm(file: &Path, dir: &Path) -> PathBuf {
     match file.strip_prefix(dir) {
         Ok(inside) => Path::new("/").join(inside),
         Err(_) => file.to_path_buf(),
@@ -691,7 +861,7 @@ fn source_trees_in(src: &Path, sources: &[String]) -> Vec<PathBuf> {
 /// lists them: `info sources` prints the program's name and a colon, then
 /// the files, separated by commas.
 fn source_files(program: &Path) -> Vec<String> {
-    let Ok(output) = Command::new("gdb")
+    let Ok(output) = Command::new(GDB_PROGRAM)
         .args(["-batch", "-nx", "-ex", "info sources"])
         .arg(program)
         .stderr(Stdio::null())
@@ -971,7 +1141,7 @@ mod tests {
         let address = "127.0.0.1:1234".parse().unwrap();
         let sourced = |args: &[String]| args.iter().any(|a| a.starts_with("source "));
 
-        let without = arguments(&kernel(false), &Process::default(), &urls, address);
+        let without = arguments(&kernel(false), &Process::default(), &urls, Some(address));
         assert!(!sourced(&without));
         let at = |command: &str| without.iter().position(|a| a == command);
         let off = at("set auto-load python-scripts off").expect("auto-load is turned off");
@@ -980,7 +1150,7 @@ mod tests {
         assert!(off < file && file < on);
         assert!(without.contains(&"set debuginfod urls https://debuginfod.debian.net".to_string()));
 
-        let with = arguments(&kernel(true), &Process::default(), &urls, address);
+        let with = arguments(&kernel(true), &Process::default(), &urls, Some(address));
         assert!(sourced(&with));
     }
 

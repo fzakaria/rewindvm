@@ -17,6 +17,68 @@ failing: run 8fd5378ddf70075e
 
 The failing run crashes at step 5060.
 
+## Find the line a thread was on
+
+`rewind where` names the line of the program's own code a thread was on at a
+step, past the C library and, in Rust, the standard library and
+dependencies. By default it looks at the thread of the step's own event, the
+pid/tid pair `rewind events` prints; at 5060 that is the worker that
+segfaulted:
+
+```console
+$ rewind where 8fd5378d 5060
+rewind: process 166 at step 5060; loading symbols for 4 of its files
+rewind: fetched 3 source files from the VM
+rewind: walking thread 174's stack in gdb
+process 166 (test_pool_shutdown), thread 174, at step 5060
+#0 worker (src/pool.c:77)
+      75  			printf("job %d done: %ld\n", job, result & 0xffff);
+      76  			fflush(stdout);
+>     77  			p->queue->completed++;
+      78  		}
+      79  	}
+called from #1 start_thread (pthread_create.c:454)
+called from #2 __GI___clone3 (../sysdeps/unix/sysv/linux/x86_64/clone3.S:78)
+```
+
+`--tid` picks another thread, on the CPU or not. A few steps earlier the
+main thread is waiting to join the workers:
+
+```console
+$ rewind where 8fd5378d 5057 --tid 166
+rewind: process 166 at step 5057; loading symbols for 4 of its files
+rewind: fetched 3 source files from the VM
+rewind: walking thread 166's stack in gdb
+process 166 (test_pool_shutdown), thread 166, at step 5057
+#7 pool_shutdown (src/pool.c:128)
+     126
+     127  	for (int i = 0; i < POOL_WORKERS; i++)
+>    128  		pthread_join(p->workers[i], NULL);
+     129  	pthread_cond_destroy(&p->ready);
+     130  	pthread_mutex_destroy(&p->lock);
+called from #8 main (tests/test_pool_shutdown.c:24)
+called from #9 __libc_start_call_main (../sysdeps/nptl/libc_start_call_main.h:59)
+```
+
+`--json` prints every frame and which one was chosen. For every frame of
+every thread, ask gdb for all the stacks of the process:
+
+```console
+$ rewind gdb 8fd5378d 5057 --pid 166 -- -batch -ex 'thread apply all bt' 2>/dev/null | grep -E '^Thread|src/|tests/'
+Thread 4 (Thread 1.174 (test_pool_shutd, on the CPU)):
+#9  0x000055bfaf437433 in worker (arg=0x55bfe41ff010) at src/pool.c:76
+Thread 3 (Thread 1.173 (test_pool_shutd)):
+#5  0x000055bfaf4373a9 in run_job (job=18) at src/pool.c:45
+#6  worker (arg=0x55bfe41ff010) at src/pool.c:73
+Thread 2 (Thread 1.166 (test_pool_shutd)):
+#7  0x000055bfaf4375b3 in pool_shutdown (p=p@entry=0x55bfe41ff010) at src/pool.c:128
+#8  0x000055bfaf437272 in main () at tests/test_pool_shutdown.c:24
+Thread 1 (Thread 1.4194305 (the CPU, in test_pool_shutd 174)):
+```
+
+Both read each thread's registers from the VM kernel's task list, so they
+work on runs recorded with a guest that lists its tasks, as these were.
+
 ## Watch both sides of the race
 
 A watchpoint finds who freed the queue the crash reads. Break in a worker so

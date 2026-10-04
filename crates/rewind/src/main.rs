@@ -1,6 +1,7 @@
 //! The `rewind` command.
 
 mod gdb;
+mod locate;
 mod show;
 mod terminal;
 
@@ -20,6 +21,9 @@ use rewind_init::{Job, Root};
 
 /// `rewind cat`'s exit status when the file did not exist at the step.
 const CAT_NOT_FOUND: u8 = 2;
+
+/// How many callers of the chosen frame `rewind where` shows.
+const DEFAULT_CALLERS: usize = 2;
 
 #[derive(Parser)]
 #[command(
@@ -356,6 +360,30 @@ enum Command {
         /// come after the ones that load the symbols and connect.
         #[arg(last = true)]
         gdb_args: Vec<String>,
+    },
+    /// Where in the program's own code a thread was at a step: its
+    /// innermost frame outside the kernel, the C library, Rust's standard
+    /// library and dependencies, with its source, and the frames that
+    /// called it. By default the thread of the step's own event, the pid
+    /// and tid `rewind events` prints. Takes gdb with Python on PATH, and
+    /// a run recorded with a kernel that lists its tasks.
+    Where {
+        run: String,
+        step: u64,
+        /// Look at this process; by default the step's event's.
+        #[arg(long)]
+        pid: Option<u32>,
+        /// Look at this thread; by default the step's event's, or the
+        /// main thread of --pid.
+        #[arg(long)]
+        tid: Option<u32>,
+        /// How many frames that called the chosen one to show.
+        #[arg(long, default_value_t = DEFAULT_CALLERS)]
+        frames: usize,
+        /// Print every frame and the chosen one's index as one JSON object
+        /// on standard output, for programs such as the desktop app.
+        #[arg(long)]
+        json: bool,
     },
     /// Whether this host's performance counters can drive virtual time.
     Pmu {
@@ -989,6 +1017,22 @@ fn run(cli: Cli) -> Result<ExitCode> {
         } => {
             let run = Run::find(&home, &run)?;
             gdb::gdb(&home, &run, step, pid, listen.as_deref(), &gdb_args)
+        }
+        Command::Where {
+            run,
+            step,
+            pid,
+            tid,
+            frames,
+            json,
+        } => {
+            let run = Run::find(&home, &run)?;
+            let format = if json {
+                locate::Format::Json
+            } else {
+                locate::Format::Text
+            };
+            locate::locate(&home, &run, step, (pid, tid), frames, format)
         }
         Command::Pmu { action } => {
             let vendor = rewind_core::pmu::Vendor::detect()?;

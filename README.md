@@ -139,6 +139,11 @@ $ rewind gdb <run> <step> -- -batch -ex 'break pool.c:77' -ex continue -ex bt
 # every thread of a process, even with the CPU idle, as at a deadlock
 $ rewind gdb <run> <step> --pid <pid> -- -batch -ex 'thread apply all bt'
 
+# the line of the program's own code a thread was on, with its callers: by
+# default the thread of the step's event; --json for programs
+$ rewind where <run> <step>
+$ rewind where <run> <step> --tid <tid> --json
+
 # branch a run at a step under another schedule, or replay it exactly
 $ rewind fork <run> <step> --schedule 2
 $ rewind replay <run>

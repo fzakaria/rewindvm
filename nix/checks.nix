@@ -162,6 +162,65 @@ let
         $CC -static -O1 -g -pthread -o $out/bin/threads threads.c
       '';
 
+  # A root with a static program in two files, like mylib: main hands a
+  # job to a pool whose worker thread prints it. The sources are in the
+  # root under /src, the directory their DWARF names, so the VM has them.
+  whereRoot =
+    pkgs.runCommand "rewind-where-root"
+      {
+        nativeBuildInputs = [ pkgs.pkgsStatic.stdenv.cc ];
+        dontStrip = true;
+      }
+      ''
+        mkdir -p $out/bin $out/src
+        cd $out/src
+        cat > pool.h <<'EOF'
+        struct pool {
+          int job;
+        };
+
+        void pool_run(struct pool *p);
+        EOF
+
+        cat > pool.c <<'EOF'
+        #include <pthread.h>
+        #include <stdio.h>
+
+        #include "pool.h"
+
+        static void *worker(void *arg)
+        {
+          struct pool *p = arg;
+
+          printf("worker picked job %d\n", p->job); /* the write */
+          fflush(stdout);
+          return 0;
+        }
+
+        void pool_run(struct pool *p)
+        {
+          pthread_t t;
+
+          pthread_create(&t, 0, worker, p);
+          pthread_join(t, 0); /* the wait */
+        }
+        EOF
+
+        cat > main.c <<'EOF'
+        #include "pool.h"
+
+        int main(void)
+        {
+          struct pool p = { .job = 1 };
+
+          pool_run(&p);
+          return 0;
+        }
+        EOF
+        $CC -static -O1 -g -pthread -fdebug-prefix-map=$out/src=/src \
+          -o $out/bin/pool main.c pool.c
+      '';
+
   # Background jobs racing through a pipe, the kernel's RNG, and a sleep:
   # everything that would differ between two runs of an ordinary VM.
   workload = ''
@@ -588,6 +647,52 @@ in
         test -n "$idle"
 
         threads_at 5 "$idle" --pid "$pid"
+        touch $out
+      '';
+
+  # checks.where: `rewind where` names the program's own line at a step.
+  # At the worker's write, the innermost frames are musl's printf
+  # machinery, which has no line table; the answer is the worker's printf
+  # in pool.c, with its source from the VM and the line marked, and two
+  # frames that called it. --json lists the same frame as the chosen one.
+  # The main thread, off the CPU then, waits in pool_run's join, called
+  # from main. Boots the VM, so it needs /dev/kvm.
+  where =
+    pkgs.runCommand "rewind-where"
+      {
+        nativeBuildInputs = [
+          rewind
+          pkgs.gdb
+          pkgs.jq
+        ];
+        requiredSystemFeatures = [ "kvm" ];
+      }
+      ''
+        export REWIND_HOME=$TMPDIR/rewind
+        # No debuginfod server: without a network, each of gdb's questions
+        # to it waits out a timeout.
+        export REWIND_DEBUGINFOD=/nonexistent
+
+        rewind run -q --clock exits --name pool --root ${whereRoot} -- /bin/pool
+        write=$(rewind events pool | grep 'write(1, "worker')
+        step=$(echo "$write" | awk '{print $1}')
+        pid=$(echo "$write" | awk '{print $2}' | cut -d/ -f1)
+        line() { grep -n "$1" ${whereRoot}/src/pool.c | cut -d: -f1; }
+
+        rewind where pool "$step" > where
+        cat where
+        grep -q "^#[1-9][0-9]* worker (pool.c:$(line 'the write'))$" where
+        grep -q "^> *$(line 'the write')  .*printf(" where
+        test "$(grep -c '^called from ' where)" = 2
+
+        rewind where pool "$step" --json > where.json
+        jq -e --argjson line "$(line 'the write')" \
+          '.frames[.chosen] | .function == "worker" and .line == $line' where.json
+
+        rewind where pool "$step" --tid "$pid" > main
+        cat main
+        grep -q "^#[1-9][0-9]* pool_run (pool.c:$(line 'the wait'))$" main
+        grep -q '^called from #[0-9]* main (main.c:' main
         touch $out
       '';
 
