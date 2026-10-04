@@ -633,17 +633,34 @@ fn derivation_sources(store_path: &Path, sources: &[String]) -> Vec<(PathBuf, Pa
     trees.into_iter().map(|tree| (tree, src.clone())).collect()
 }
 
+/// Where a derivation's attributes are in `nix derivation show`: its
+/// environment, and for a derivation with `__structuredAttrs = true`
+/// either an object of their own, in Nix, or the environment's JSON
+/// string, in Lix and older versions of Nix.
+const DERIVATION_ENV: &str = "env";
+const STRUCTURED_ATTRS: &str = "structuredAttrs";
+const STRUCTURED_ATTRS_JSON: &str = "__json";
+const SRC: &str = "src";
+
 /// The `src` of the derivation `nix derivation show` printed as `show`:
 /// under `derivations` by name in recent versions of Nix, by path at the
-/// top in older ones.
+/// top in older ones, and in its environment or, with structured
+/// attributes, among those.
 fn derivation_src(show: &[u8]) -> Option<PathBuf> {
     let json: serde_json::Value = serde_json::from_slice(show).ok()?;
     let derivations = json.get(DERIVATIONS).unwrap_or(&json);
     let derivation = derivations.as_object()?.values().next()?;
-    derivation
-        .get("env")?
-        .get("src")?
-        .as_str()
+    let env = derivation.get(DERIVATION_ENV);
+
+    // The attributes as an object, then as a JSON string, then plain.
+    let encoded: Option<serde_json::Value> = env
+        .and_then(|e| e.get(STRUCTURED_ATTRS_JSON)?.as_str())
+        .and_then(|text| serde_json::from_str(text).ok());
+    let attributes = [derivation.get(STRUCTURED_ATTRS), encoded.as_ref(), env];
+    attributes
+        .into_iter()
+        .flatten()
+        .find_map(|a| a.get(SRC)?.as_str())
         .map(PathBuf::from)
 }
 
@@ -902,6 +919,26 @@ mod tests {
         assert_eq!(derivation_src(older), src);
         let none = br#"{"/nix/store/h9v-run.drv":{"env":{"buildCommand":"true"}}}"#;
         assert_eq!(derivation_src(none), None);
+    }
+
+    /// A derivation with `__structuredAttrs = true` keeps src among its
+    /// structured attributes, not in env. Reads src from `nix derivation
+    /// show` of one such derivation as three versions print it, cut to a
+    /// few attributes: Nix 2.35, under `derivations` with a
+    /// `structuredAttrs` object; Nix 2.31, by path with the same object;
+    /// and Lix 2.95, by path with the attributes as a JSON string in
+    /// env's `__json`.
+    #[test]
+    fn a_structured_derivation_s_src_is_read_from_its_attributes() {
+        let src = Some(PathBuf::from(
+            "/nix/store/cwjyzq3122bisr9wdff7a683axzp7m84-src",
+        ));
+        let nix_2_35 = br#"{"derivations":{"813zvgg0x0ax42v6dm2jf19p9k8kx5lv-structured-0.1.drv":{"env":{"out":"/nix/store/i5sh3ajs0cb1mhxzvs8pg8sz92nzjpc6-structured-0.1"},"name":"structured-0.1","structuredAttrs":{"__structuredAttrs":true,"pname":"structured","src":"/nix/store/cwjyzq3122bisr9wdff7a683axzp7m84-src","version":"0.1"}}},"version":4}"#;
+        assert_eq!(derivation_src(nix_2_35), src);
+        let nix_2_31 = br#"{"/nix/store/813zvgg0x0ax42v6dm2jf19p9k8kx5lv-structured-0.1.drv":{"env":{"out":"/nix/store/i5sh3ajs0cb1mhxzvs8pg8sz92nzjpc6-structured-0.1"},"name":"structured-0.1","structuredAttrs":{"pname":"structured","src":"/nix/store/cwjyzq3122bisr9wdff7a683axzp7m84-src","version":"0.1"}}}"#;
+        assert_eq!(derivation_src(nix_2_31), src);
+        let lix_2_95 = br#"{"/nix/store/813zvgg0x0ax42v6dm2jf19p9k8kx5lv-structured-0.1.drv":{"env":{"__json":"{\"pname\":\"structured\",\"src\":\"/nix/store/cwjyzq3122bisr9wdff7a683axzp7m84-src\",\"version\":\"0.1\"}","out":"/nix/store/i5sh3ajs0cb1mhxzvs8pg8sz92nzjpc6-structured-0.1"},"name":"structured-0.1"}}"#;
+        assert_eq!(derivation_src(lix_2_95), src);
     }
 
     #[test]
