@@ -481,15 +481,18 @@ fn run(cli: Cli) -> Result<ExitCode> {
 
     let home = Home::open()?;
 
-    // Commands that pack images, execute runs or mount extras hold the home
-    // in use until they exit, so `rewind gc` never removes an image between
-    // its packing and the manifest of the run that boots it.
+    // Commands that pack images, execute runs, mount extras or fork a run to
+    // look inside it hold the home in use until they exit, so `rewind gc`
+    // never removes an image between its packing and the manifest of the run
+    // that boots it, nor collects pages under a fork that reads them.
     let _in_use = match &cli.command {
         Command::Run { .. }
         | Command::Nix { .. }
         | Command::Check { .. }
         | Command::Fork { .. }
         | Command::Shell { .. }
+        | Command::Gdb { .. }
+        | Command::Where { .. }
         | Command::Import { .. } => Some(home.in_use()?),
         _ => None,
     };
