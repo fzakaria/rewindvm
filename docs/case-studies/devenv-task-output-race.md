@@ -284,11 +284,16 @@ The issue's reporter saw it in real use, on an aarch64 Linux machine.
 ## The recording
 
 Both files are in the
-[case-studies release](https://github.com/fzakaria/rewindvm/releases/tag/case-studies):
-[devenv-task-output-race-replayable.rwd](https://github.com/fzakaria/rewindvm/releases/download/case-studies/devenv-task-output-race-replayable.rwd),
-with everything needed to replay the failure, and
-[devenv-task-output-race.rwd](https://github.com/fzakaria/rewindvm/releases/download/case-studies/devenv-task-output-race.rwd),
-the trace alone, which the desktop app opens:
+[case-studies release](https://github.com/fzakaria/rewindvm/releases/tag/case-studies). `rewind import` and the
+desktop app (`rewind-app`) take either one, by path or URL, and unpack it as
+it downloads:
+
+- [devenv-task-output-race.rwd](https://github.com/fzakaria/rewindvm/releases/download/case-studies/devenv-task-output-race.rwd)
+  (10.0 KB) is the trace alone, enough for `rewind events`, `rewind log` and
+  the app.
+- [devenv-task-output-race-replayable.rwd](https://github.com/fzakaria/rewindvm/releases/download/case-studies/devenv-task-output-race-replayable.rwd)
+  (185.3 MB) adds the kernel, the input image and the keyframes, so
+  `rewind replay`, `rewind gdb` and `rewind shell` work on it.
 
 ```console
 $ rewind import https://github.com/fzakaria/rewindvm/releases/download/case-studies/devenv-task-output-race-replayable.rwd

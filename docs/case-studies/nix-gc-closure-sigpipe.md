@@ -258,12 +258,16 @@ the same way.
 ## The recording
 
 Both files are in the
-[case-studies release](https://github.com/fzakaria/rewindvm/releases/tag/case-studies):
-[nix-gc-closure-sigpipe-replayable.rwd](https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-gc-closure-sigpipe-replayable.rwd), with
-everything needed to replay the failure on another AMD machine from Zen 2 on,
-and [nix-gc-closure-sigpipe.rwd](https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-gc-closure-sigpipe.rwd), the trace alone, which the
-desktop app opens. `rewind import` and the app both take the URL, and
-unpack the file as it downloads:
+[case-studies release](https://github.com/fzakaria/rewindvm/releases/tag/case-studies). `rewind import` and the
+desktop app (`rewind-app`) take either one, by path or URL, and unpack it as
+it downloads:
+
+- [nix-gc-closure-sigpipe.rwd](https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-gc-closure-sigpipe.rwd)
+  (70.9 KB) is the trace alone, enough for `rewind events`, `rewind log` and
+  the app.
+- [nix-gc-closure-sigpipe-replayable.rwd](https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-gc-closure-sigpipe-replayable.rwd)
+  (535.3 MB) adds the kernel, the input image and the keyframes, so
+  another AMD machine from Zen 2 on can `rewind replay` and `rewind shell` it.
 
 ```console
 $ rewind import https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-gc-closure-sigpipe-replayable.rwd
@@ -281,11 +285,8 @@ $ rewind export 1e084c79 -o nix-gc-closure-sigpipe.rwd
 rewind: wrote nix-gc-closure-sigpipe.rwd (70.9 KB)
 ```
 
-The replayable file holds the input image, the kernel and the keyframes, so
-another AMD machine from Zen 2 on can import it and replay the failure; the
-view-only file holds the trace and opens in the app. Imported into an empty
-`REWIND_HOME`, the replayable export replays identically from boot and from a
-keyframe:
+Imported into an empty `REWIND_HOME`, the replayable export replays
+identically from boot and from a keyframe:
 
 ```console
 $ rewind import nix-gc-closure-sigpipe-replayable.rwd

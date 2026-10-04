@@ -294,12 +294,16 @@ which is where this race lives; Rewind's land on any exit.
 ## The recording
 
 Both files are in the
-[case-studies release](https://github.com/fzakaria/rewindvm/releases/tag/case-studies):
-[nix-schema-migration-hang-replayable.rwd](https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-schema-migration-hang-replayable.rwd), with
-everything needed to replay the failure on another AMD machine from Zen 2 on,
-and [nix-schema-migration-hang.rwd](https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-schema-migration-hang.rwd), the trace alone, which the
-desktop app opens. `rewind import` and the app both take the URL, and
-unpack the file as it downloads:
+[case-studies release](https://github.com/fzakaria/rewindvm/releases/tag/case-studies). `rewind import` and the
+desktop app (`rewind-app`) take either one, by path or URL, and unpack it as
+it downloads:
+
+- [nix-schema-migration-hang.rwd](https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-schema-migration-hang.rwd)
+  (39.5 KB) is the trace alone, enough for `rewind events`, `rewind log` and
+  the app.
+- [nix-schema-migration-hang-replayable.rwd](https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-schema-migration-hang-replayable.rwd)
+  (433.5 MB) adds the kernel, the input image and the keyframes, so
+  another AMD machine from Zen 2 on can `rewind replay` and `rewind shell` it.
 
 ```console
 $ rewind import https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-schema-migration-hang-replayable.rwd
