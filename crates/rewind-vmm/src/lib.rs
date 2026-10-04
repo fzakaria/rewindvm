@@ -725,8 +725,12 @@ impl Machine {
 
     /// Asks the VM to start an inspection: `/init --inspect` with `args`,
     /// whose answer arrives as records like any process's output. The
-    /// request goes out with the next step's interrupt. Only for machines
-    /// forked from a run, since the request is not part of any recording.
+    /// interrupt goes out now, so the VM takes it on resuming from this
+    /// step, in the task that made this step's exit: the kernel names that
+    /// task as the one running, where the next exit may be another task's
+    /// or the idle task's. An interrupt the APIC does not accept goes again
+    /// at the next exit. Only for machines forked from a run, since the
+    /// request is not part of any recording.
     pub fn request_inspection(&mut self, args: &[&str]) -> Result<()> {
         let shared = self
             .dev
@@ -752,7 +756,7 @@ impl Machine {
             &(request.len() as u32).to_le_bytes(),
         )?;
         self.dev.ram.write(shared + pv::SHARED_REQUEST, &request)?;
-        self.dev.inspect = true;
+        self.dev.inspect = !self.inject(pv::PENDING_INSPECT)?;
         Ok(())
     }
 

@@ -35,9 +35,11 @@ let
     done
   '';
 
-  # A root of two static programs for gdb, built with their symbols: one
+  # A root of three static programs for gdb, built with their symbols: one
   # prints, forks, and waits for its child; one forks a child that prints
-  # and writes a global, then writes the same global twice itself.
+  # and writes a global, then writes the same global twice itself; one
+  # forks a child that sleeps before writing to a pipe, prints, and blocks
+  # reading the pipe.
   gdbRoot =
     pkgs.runCommand "rewind-gdb-root"
       {
@@ -86,6 +88,29 @@ let
         }
         EOF
         $CC -static -O1 -g -o $out/bin/watch watch.c
+
+        cat > block.c <<'EOF'
+        #include <sys/wait.h>
+        #include <unistd.h>
+
+        int main(void)
+        {
+          int p[2];
+          char c;
+
+          pipe(p);
+          if (fork() == 0) {
+            sleep(1);
+            write(p[1], "x", 1);
+            _exit(0);
+          }
+          write(1, "wait\n", 5);
+          read(p[0], &c, 1);
+          wait(0);
+          return 0;
+        }
+        EOF
+        $CC -static -O1 -g -o $out/bin/block block.c
       '';
 
   # Background jobs racing through a pipe, the kernel's RNG, and a sleep:
@@ -302,6 +327,21 @@ in
         wait
         cat serve
         grep -q "ran in process $pid; loading symbols for 1 of its files" serve
+
+        # rewind gdb at a write the process blocks right after: the next
+        # exit is the idle task's, and the process named is still the
+        # writer.
+        rewind run -q --name block --root ${gdbRoot} -- /bin/block
+        write=$(rewind events block | grep 'write(1, "wait' | head -1)
+        step=$(echo "$write" | awk '{print $1}')
+        pid=$(echo "$write" | awk '{print $2}' | cut -d/ -f1)
+        rewind gdb block "$step" --listen 127.0.0.1:12347 2> serve &
+        while ! grep -q 'connect with' serve; do sleep 0.1; done
+        gdb -q -batch -ex 'target remote 127.0.0.1:12347' -ex detach
+        wait
+        echo "$write"
+        cat serve
+        grep -q "ran in process $pid;" serve
         touch $out
       '';
 
