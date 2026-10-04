@@ -1,9 +1,9 @@
 # `nix build .#release`: the command's release asset, for people without
 # Nix. It holds a static rewind, the guest kernel and initramfs, the
 # kernel's vmlinux and gdb scripts for `rewind gdb`, static mkfs.erofs and
-# GNU tar for building input images, and a launcher that points rewind at
-# all of them. The host needs only /dev/kvm; `rewind nix`
-# also needs nix on PATH.
+# GNU tar for building input images, static dump.erofs for `rewind gdb` to
+# read files out of them, and a launcher that points rewind at all of
+# them. The host needs only /dev/kvm; `rewind nix` also needs nix on PATH.
 #
 # The file and the directory it unpacks to carry no version, so the
 # release workflow's assets have the same URL under releases/latest.
@@ -74,8 +74,8 @@ pkgs.runCommand "rewind-release" { } ''
   mkdir -p $dir/bin $dir/libexec $dir/share/rewind
   cp ${static}/bin/rewind $dir/libexec/rewind
   mkdir -p $dir/libexec/rewind-tools
-  cp ${pkgs.pkgsStatic.erofs-utils}/bin/mkfs.erofs ${staticTar}/bin/tar \
-    $dir/libexec/rewind-tools/
+  cp ${pkgs.pkgsStatic.erofs-utils}/bin/mkfs.erofs ${pkgs.pkgsStatic.erofs-utils}/bin/dump.erofs \
+    ${staticTar}/bin/tar $dir/libexec/rewind-tools/
   install -m 755 ${launcher} $dir/bin/rewind
   cp -r ${kernel}/bzImage ${kernel}/vmlinux ${kernel}/vmlinux-gdb.py ${kernel}/scripts \
     ${guest.initrd}/initrd $dir/share/rewind/

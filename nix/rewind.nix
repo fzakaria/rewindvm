@@ -29,7 +29,11 @@ let
       # The workspace's unit tests; the ones that need /dev/kvm run as flake
       # checks instead, where the sandbox can be given it.
       cargoTestExtraArgs = "--workspace";
-      nativeCheckInputs = [ pkgs.cpio ];
+      # erofs-utils for the test that reads a file out of an image.
+      nativeCheckInputs = [
+        pkgs.cpio
+        pkgs.erofs-utils
+      ];
       meta = {
         description = "Run Linux workloads in a deterministic VM, then scrub, rewind and fork them";
         mainProgram = "rewind";

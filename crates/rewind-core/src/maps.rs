@@ -7,11 +7,15 @@
 //! on this machine too, at the same paths, so gdb reads their symbols here
 //! and fetches their DWARF by build ID. The inspection sends the files
 //! only the VM has, such as a program the build itself compiled, and they
-//! are written to a directory for gdb.
+//! are written to a directory for gdb. A store file this machine lacks,
+//! such as a test program in a run imported from elsewhere, came from the
+//! run's input image, and is read out of that image into the same
+//! directory.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use rewind_init::{SECTION_MAPS, SECTION_PID, sections};
 
@@ -25,6 +29,18 @@ const DELETED: &str = " (deleted)";
 
 /// Pages are 4 KiB; a mapping starts on a page boundary.
 const PAGE_MASK: u64 = !0xfff;
+
+/// erofs-utils' program that reads a file out of an erofs image, and its
+/// flags for the file's path inside the image and for its contents.
+const DUMP_EROFS: &str = "dump.erofs";
+const DUMP_EROFS_PATH: &str = "--path=";
+const DUMP_EROFS_CAT: &str = "--cat";
+
+/// How dump.erofs describes an inode: a line that starts with the file's
+/// size and ends with its type, as in `Size: 3  On-disk size: 3  regular
+/// file`.
+const DUMP_EROFS_SIZE: &str = "Size:";
+const DUMP_EROFS_REGULAR: &str = "regular file";
 
 /// The process that was running and what it had mapped.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -51,6 +67,19 @@ pub struct Mapping {
 pub struct SymbolFile {
     pub path: PathBuf,
     pub offset: u64,
+    pub origin: Origin,
+}
+
+/// Where the copy of a mapped file that gdb reads came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Origin {
+    /// The VM sent the file, which only the VM had.
+    Sent,
+    /// This machine's store has the file at the path the VM had it.
+    Store,
+    /// The file was read out of the run's input image, which the VM's
+    /// store was mounted from.
+    Image,
 }
 
 impl Running {
@@ -99,19 +128,30 @@ impl Running {
 
     /// Where a file the VM mapped at `path` is on this machine: under
     /// `dir` when the VM sent it, else at its store path when this machine
-    /// has that.
-    fn local(&self, path: &str, dir: &Path) -> Option<PathBuf> {
+    /// has that, else under `dir` when it was read out of the run's image.
+    fn local(&self, path: &str, dir: &Path) -> Option<(PathBuf, Origin)> {
+        let copy = dir.join(path.trim_start_matches('/'));
         if self.sent.iter().any(|(p, _)| p == path) {
-            return Some(dir.join(path.trim_start_matches('/')));
+            return Some((copy, Origin::Sent));
         }
         let at = path.find(NIX_STORE)?;
-        Some(PathBuf::from(&path[at..])).filter(|p| p.exists())
+        let here = PathBuf::from(&path[at..]);
+        if here.exists() {
+            return Some((here, Origin::Store));
+        }
+        Some((copy, Origin::Image)).filter(|(p, _)| p.exists())
     }
 
     /// Writes the files the VM sent under `dir`, at their paths in the
     /// VM, and returns every file gdb can read with its load offset: what
-    /// gdb needs to name the process's code.
-    pub fn symbol_files(&self, dir: &Path) -> std::io::Result<Vec<SymbolFile>> {
+    /// gdb needs to name the process's code. A store file that was neither
+    /// sent nor is on this machine is read out of `store_image`, the image
+    /// the VM's store was mounted from, when there is one.
+    pub fn symbol_files(
+        &self,
+        dir: &Path,
+        store_image: Option<&Path>,
+    ) -> std::io::Result<Vec<SymbolFile>> {
         for (path, bytes) in &self.sent {
             let to = dir.join(path.trim_start_matches('/'));
             if let Some(parent) = to.parent() {
@@ -120,30 +160,99 @@ impl Running {
             std::fs::write(&to, bytes)?;
         }
 
+        // The store files gdb would otherwise have no copy of, from the
+        // image. A file the image lacks stays missing.
+        if let Some(image) = store_image {
+            for path in self.missing(dir) {
+                let Some(inside) = path.strip_prefix(NIX_STORE) else {
+                    continue;
+                };
+                let to = dir.join(path.trim_start_matches('/'));
+                if let Some(parent) = to.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                if extract(image, &format!("/{inside}"), &to).is_err() {
+                    let _ = std::fs::remove_file(&to);
+                }
+            }
+        }
+
         Ok(self
             .bases()
             .into_iter()
             .filter_map(|(path, base)| {
-                let path = self.local(path, dir)?;
+                let (path, origin) = self.local(path, dir)?;
                 let mut file = File::open(&path).ok()?;
                 let offset = load_offset(&mut file, base)?;
-                Some(SymbolFile { path, offset })
+                Some(SymbolFile {
+                    path,
+                    offset,
+                    origin,
+                })
             })
             .collect())
     }
 
     /// The programs and libraries gdb has no copy of: store paths that
-    /// were not sent and are not on this machine. A file outside the store
-    /// that the VM did not send is not a program, such as a database
-    /// mapped into memory, so it is not missed.
+    /// were not sent, are not on this machine, and were not read out of
+    /// the run's image. A file outside the store that the VM did not send
+    /// is not a program, such as a database mapped into memory, so it is
+    /// not missed.
     pub fn missing(&self, dir: &Path) -> Vec<&str> {
         self.bases()
             .into_iter()
             .map(|(path, _)| path)
             .filter(|path| path.contains(NIX_STORE))
-            .filter(|path| self.local(path, dir).is_none_or(|p| !p.exists()))
+            .filter(|path| self.local(path, dir).is_none_or(|(p, _)| !p.exists()))
             .collect()
     }
+}
+
+/// Copies the file at `inside`, a path inside the erofs image `image`, to
+/// `to` with dump.erofs. dump.erofs exits successfully when the path is
+/// not in the image, and prints a directory's entries as its contents, so
+/// the inode is looked up first and must be a regular file, and the copy
+/// must be as long as the inode says.
+fn extract(image: &Path, inside: &str, to: &Path) -> std::io::Result<()> {
+    let not_read = || {
+        std::io::Error::other(format!(
+            "{DUMP_EROFS} could not read {inside} from {}",
+            image.display()
+        ))
+    };
+
+    // The inode: a regular file, and its size.
+    let inode = Command::new(DUMP_EROFS)
+        .arg(format!("{DUMP_EROFS_PATH}{inside}"))
+        .arg(image)
+        .stderr(Stdio::null())
+        .output()?;
+    let size = regular_file_size(&String::from_utf8_lossy(&inode.stdout)).ok_or_else(not_read)?;
+
+    // The contents.
+    let status = Command::new(DUMP_EROFS)
+        .arg(format!("{DUMP_EROFS_PATH}{inside}"))
+        .arg(DUMP_EROFS_CAT)
+        .arg(image)
+        .stdout(File::create(to)?)
+        .stderr(Stdio::null())
+        .status()?;
+    if !status.success() || std::fs::metadata(to)?.len() != size {
+        return Err(not_read());
+    }
+    Ok(())
+}
+
+/// The size of the inode dump.erofs describes in `info`, when the inode is
+/// a regular file.
+fn regular_file_size(info: &str) -> Option<u64> {
+    let line = info
+        .lines()
+        .find_map(|l| l.trim().strip_prefix(DUMP_EROFS_SIZE))?;
+    if !line.trim_end().ends_with(DUMP_EROFS_REGULAR) {
+        return None;
+    }
+    line.split_whitespace().next()?.parse().ok()
 }
 
 /// A line of /proc/<pid>/maps: `start-end perms offset dev inode path`,
@@ -349,14 +458,57 @@ mod tests {
     fn sent_files_are_written_where_gdb_finds_them() {
         let dir = std::env::temp_dir().join(format!("rewind-maps-test-{}", std::process::id()));
         let running = Running::parse(&answer(&[("/build/source/test-helper", &elf(0))])).unwrap();
-        let files = running.symbol_files(&dir).unwrap();
+        let files = running.symbol_files(&dir, None).unwrap();
         let helper = dir.join("build/source/test-helper");
         assert!(files.contains(&SymbolFile {
             path: helper.clone(),
-            offset: 0x7f0000300000
+            offset: 0x7f0000300000,
+            origin: Origin::Sent,
         }));
         assert!(!running.missing(&dir).contains(&"/build/source/test-helper"));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A store file the VM did not send and this machine lacks is read out
+    /// of the run's input image. Packs a made-up bash into an erofs image
+    /// the way a run's store image is laid out, by store path name, then
+    /// checks bash is written under the session's directory and loaded at
+    /// its base, while glibc, which the image lacks, is still missed.
+    #[test]
+    fn a_store_file_this_machine_lacks_is_read_from_the_image() {
+        let root = std::env::temp_dir().join(format!("rewind-maps-image-{}", std::process::id()));
+        let tree = root.join("tree");
+        let bash = tree.join("aaa-bash-5.3/bin/bash");
+        std::fs::create_dir_all(bash.parent().unwrap()).unwrap();
+        std::fs::write(&bash, elf(0)).unwrap();
+        let image = root.join("store.erofs");
+        crate::image::from_dir(&tree, &image).unwrap();
+        let dir = root.join("session");
+
+        let running = Running::parse(&answer(&[])).unwrap();
+        let files = running.symbol_files(&dir, Some(&image)).unwrap();
+        assert!(files.contains(&SymbolFile {
+            path: dir.join("nix/store/aaa-bash-5.3/bin/bash"),
+            offset: 0x5578a000,
+            origin: Origin::Image,
+        }));
+        assert_eq!(
+            running.missing(&dir),
+            vec!["/nix/store/bbb-glibc-2.44/lib/libc.so.6"]
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// dump.erofs's description of an inode gives a regular file's size
+    /// and nothing for a directory. Reads both from text as dump.erofs
+    /// prints it.
+    #[test]
+    fn only_a_regular_file_in_the_image_has_a_size() {
+        let file = "Path : /a/f\nSize: 3  On-disk size: 3  regular file\nNID: 44\n";
+        assert_eq!(regular_file_size(file), Some(3));
+        let dir = "Path : /a\nSize: 40  On-disk size: 40  directory\nNID: 40\n";
+        assert_eq!(regular_file_size(dir), None);
+        assert_eq!(regular_file_size(""), None);
     }
 
     #[test]

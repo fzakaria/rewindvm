@@ -8,7 +8,8 @@
 //! each program and library it had mapped is loaded at the address it was
 //! loaded at in the VM: from this machine's store, or, for files only the
 //! VM has, from copies the inspection sends, with the source files a third
-//! fork reads for them.
+//! fork reads for them. A store file this machine lacks is read out of the
+//! run's input image.
 //!
 //! DWARF and source files for all of them come from a debuginfod server
 //! started for the session, nixseparatedebuginfod2, which serves the
@@ -23,8 +24,9 @@ use std::process::{Child, Command, ExitCode, Stdio};
 
 use anyhow::{Context, Result, bail};
 use rewind_core::inspect::Inspection;
-use rewind_core::maps::{Running, SymbolFile};
+use rewind_core::maps::{Origin, Running, SymbolFile};
 use rewind_core::{Home, Run};
+use rewind_init::Root;
 
 /// The address `rewind gdb` serves on when it starts gdb itself: any free
 /// port on the loopback interface.
@@ -333,9 +335,9 @@ struct Process {
 
 /// Process `pid` at `step`, or when None the process running there: its
 /// programs and libraries, from this machine's store or, when only the VM
-/// has them, written under `dir`, with the source files those name. Empty
-/// when the kernel was running, there was no such process, or the map
-/// could not be read.
+/// or the run's image has them, written under `dir`, with the source files
+/// those name. Empty when the kernel was running, there was no such
+/// process, or the map could not be read.
 fn debugged_process(home: &Home, run: &Run, step: u64, pid: Option<u32>, dir: &Path) -> Process {
     let answer = match rewind_core::inspect::running(home, run, step, pid) {
         Ok(Inspection::Contents(bytes)) => bytes,
@@ -360,7 +362,13 @@ fn debugged_process(home: &Home, run: &Run, step: u64, pid: Option<u32>, dir: &P
         eprintln!("rewind: no symbols for the running process: its answer was cut short");
         return Process::default();
     };
-    let files = match running.symbol_files(dir) {
+    // A Nix run's store was mounted from its input image, so a store file
+    // this machine lacks is read from there.
+    let store_image = match run.manifest.spec.job.root {
+        Root::Store => run.manifest.spec.image.as_deref(),
+        Root::Image | Root::Initramfs => None,
+    };
+    let files = match running.symbol_files(dir, store_image) {
         Ok(files) => files,
         Err(e) => {
             eprintln!("rewind: no symbols for the running process: {e}");
@@ -377,6 +385,10 @@ fn debugged_process(home: &Home, run: &Run, step: u64, pid: Option<u32>, dir: &P
         "rewind: {whose}; loading symbols for {} of its files",
         files.len()
     );
+    let from_image = files.iter().filter(|f| f.origin == Origin::Image).count();
+    if from_image > 0 {
+        eprintln!("rewind: read {from_image} of them from the run's image");
+    }
     let missing = running.missing(dir);
     if !missing.is_empty() {
         eprintln!("rewind: no symbols for {}", missing.join(", "));
