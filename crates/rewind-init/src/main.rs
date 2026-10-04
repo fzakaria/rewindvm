@@ -15,10 +15,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use rewind_init::{
-    EXIT_MARK, INSPECT_ARG, INSPECT_BEGIN_MARK, INSPECT_CAT, INSPECT_END_MARK, INSPECT_FILES,
-    INSPECT_RUNNING, INSPECT_SHELL, INSPECT_WITH, InspectStatus, JOB_PATH, Job, OUTPUT_MARK,
-    RESIZE_ESCAPE, RESIZE_LEN, RESIZE_TAG, RUNNING_ENV, Root, SECTION_MAPS, SECTION_PID,
-    START_MARK, nar_hash, section_header,
+    EXIT_MARK, IMAGE_ROOT, INSPECT_ARG, INSPECT_BEGIN_MARK, INSPECT_CAT, INSPECT_END_MARK,
+    INSPECT_FILES, INSPECT_RUNNING, INSPECT_SHELL, INSPECT_WITH, InspectStatus, JOB_PATH, Job,
+    OUTPUT_MARK, RESIZE_ESCAPE, RESIZE_LEN, RESIZE_TAG, RUNNING_ENV, Root, SECTION_MAPS,
+    SECTION_PID, START_MARK, nar_hash, section_header,
 };
 
 /// The image the monitor maps as persistent memory.
@@ -47,10 +47,8 @@ const SELFTEST_ARG: &str = "--selftest";
 const SELFTEST_THREADS: usize = 4;
 const SELFTEST_ADDS: u64 = 5_000_000;
 
-/// Where an image job's root is mounted; init chroots into it, and takes
-/// /dev and /proc along. The image itself is mounted read-only at
-/// IMAGE_LOWER, under the overlay.
-const IMAGE_ROOT: &str = "/newroot";
+/// Where an image job's image is mounted read-only, under the overlay at
+/// IMAGE_ROOT that init chroots the job into, taking /dev and /proc along.
 const IMAGE_LOWER: &str = "/lower";
 
 /// A root's hosts file, and the lines an image root gets when its own is

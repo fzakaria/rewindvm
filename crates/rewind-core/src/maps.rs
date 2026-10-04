@@ -10,18 +10,23 @@
 //! are written to a directory for gdb. A store file this machine lacks,
 //! such as a test program in a run imported from elsewhere, came from the
 //! run's input image, and is read out of that image into the same
-//! directory.
+//! directory. So is a program in a run with a root filesystem that was too
+//! large for the VM to send.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use rewind_init::{SECTION_MAPS, SECTION_PID, sections};
+use rewind_init::{IMAGE_ROOT, Root, SECTION_MAPS, SECTION_PID, sections};
 
 /// Where store paths start in a path as the VM's root sees it. A job runs
 /// in a root of its own, so its files show up under that root's path.
 const NIX_STORE: &str = "/nix/store/";
+
+/// Where a Nix run's input image is mounted in the VM: its top directory
+/// holds the store paths.
+const STORE_MOUNT: &str = "/nix/store";
 
 /// What the kernel appends to the path of a file deleted since it was
 /// mapped.
@@ -41,6 +46,35 @@ const DUMP_EROFS_CAT: &str = "--cat";
 /// file`.
 const DUMP_EROFS_SIZE: &str = "Size:";
 const DUMP_EROFS_REGULAR: &str = "regular file";
+
+/// A run's input image and where the VM mounted it, which says what file
+/// in the image a path in the VM is.
+#[derive(Clone, Copy, Debug)]
+pub struct ImageMount<'a> {
+    pub image: &'a Path,
+    pub at: &'a str,
+}
+
+impl<'a> ImageMount<'a> {
+    /// Where a run with `root` mounted its input image `image`: a Nix
+    /// run's at its store, and a root filesystem's at the job's root. A
+    /// run in the initramfs has no image.
+    pub fn of(image: &'a Path, root: Root) -> Option<ImageMount<'a>> {
+        let at = match root {
+            Root::Store => STORE_MOUNT,
+            Root::Image => IMAGE_ROOT,
+            Root::Initramfs => return None,
+        };
+        Some(ImageMount { image, at })
+    }
+
+    /// The path inside the image of the file the VM had at `path`, when
+    /// the file is under the mount.
+    fn inside(&self, path: &str) -> Option<String> {
+        let rest = Path::new(path).strip_prefix(self.at).ok()?;
+        Some(Path::new("/").join(rest).to_string_lossy().into_owned())
+    }
+}
 
 /// The process that was running and what it had mapped.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -134,23 +168,26 @@ impl Running {
         if self.sent.iter().any(|(p, _)| p == path) {
             return Some((copy, Origin::Sent));
         }
-        let at = path.find(NIX_STORE)?;
-        let here = PathBuf::from(&path[at..]);
-        if here.exists() {
-            return Some((here, Origin::Store));
+        if let Some(at) = path.find(NIX_STORE) {
+            let here = PathBuf::from(&path[at..]);
+            if here.exists() {
+                return Some((here, Origin::Store));
+            }
         }
         Some((copy, Origin::Image)).filter(|(p, _)| p.exists())
     }
 
     /// Writes the files the VM sent under `dir`, at their paths in the
     /// VM, and returns every file gdb can read with its load offset: what
-    /// gdb needs to name the process's code. A store file that was neither
-    /// sent nor is on this machine is read out of `store_image`, the image
-    /// the VM's store was mounted from, when there is one.
+    /// gdb needs to name the process's code. A mapped ELF file that was
+    /// neither sent nor is in this machine's store is read out of the
+    /// run's input image, mounted as `mount` says, when it is there: a
+    /// store file this machine lacks, or in a run with a root filesystem a
+    /// program too large for the VM to send.
     pub fn symbol_files(
         &self,
         dir: &Path,
-        store_image: Option<&Path>,
+        mount: Option<ImageMount>,
     ) -> std::io::Result<Vec<SymbolFile>> {
         for (path, bytes) in &self.sent {
             let to = dir.join(path.trim_start_matches('/'));
@@ -160,18 +197,24 @@ impl Running {
             std::fs::write(&to, bytes)?;
         }
 
-        // The store files gdb would otherwise have no copy of, from the
-        // image. A file the image lacks stays missing.
-        if let Some(image) = store_image {
-            for path in self.missing(dir) {
-                let Some(inside) = path.strip_prefix(NIX_STORE) else {
+        // The files gdb would otherwise have no copy of, from the image.
+        // A file the image lacks, or that is not ELF, stays out.
+        if let Some(mount) = mount {
+            let unread: Vec<&str> = self
+                .bases()
+                .into_iter()
+                .map(|(path, _)| path)
+                .filter(|path| self.local(path, dir).is_none())
+                .collect();
+            for path in unread {
+                let Some(inside) = mount.inside(path) else {
                     continue;
                 };
                 let to = dir.join(path.trim_start_matches('/'));
                 if let Some(parent) = to.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
-                if extract(image, &format!("/{inside}"), &to).is_err() {
+                if extract_elf(mount.image, &inside, &to).is_err() {
                     let _ = std::fs::remove_file(&to);
                 }
             }
@@ -209,11 +252,13 @@ impl Running {
 }
 
 /// Copies the file at `inside`, a path inside the erofs image `image`, to
-/// `to` with dump.erofs. dump.erofs exits successfully when the path is
-/// not in the image, and prints a directory's entries as its contents, so
-/// the inode is looked up first and must be a regular file, and the copy
-/// must be as long as the inode says.
-fn extract(image: &Path, inside: &str, to: &Path) -> std::io::Result<()> {
+/// `to` with dump.erofs, when it is an ELF file. dump.erofs exits
+/// successfully when the path is not in the image, and prints a
+/// directory's entries as its contents, so the inode is looked up first
+/// and must be a regular file, and the copy must be as long as the inode
+/// says. A file that does not start as ELF does, such as a database the
+/// process mapped, is not read past its first bytes.
+fn extract_elf(image: &Path, inside: &str, to: &Path) -> std::io::Result<()> {
     let not_read = || {
         std::io::Error::other(format!(
             "{DUMP_EROFS} could not read {inside} from {}",
@@ -229,14 +274,25 @@ fn extract(image: &Path, inside: &str, to: &Path) -> std::io::Result<()> {
         .output()?;
     let size = regular_file_size(&String::from_utf8_lossy(&inode.stdout)).ok_or_else(not_read)?;
 
-    // The contents.
-    let status = Command::new(DUMP_EROFS)
+    // The contents, once their first bytes say ELF.
+    let mut cat = Command::new(DUMP_EROFS)
         .arg(format!("{DUMP_EROFS_PATH}{inside}"))
         .arg(DUMP_EROFS_CAT)
         .arg(image)
-        .stdout(File::create(to)?)
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .status()?;
+        .spawn()?;
+    let mut contents = cat.stdout.take().ok_or_else(not_read)?;
+    let mut magic = [0u8; ELF_MAGIC.len()];
+    if contents.read_exact(&mut magic).is_err() || &magic != ELF_MAGIC {
+        let _ = cat.kill();
+        let _ = cat.wait();
+        return Err(not_read());
+    }
+    let mut out = File::create(to)?;
+    std::io::Write::write_all(&mut out, &magic)?;
+    std::io::copy(&mut contents, &mut out)?;
+    let status = cat.wait()?;
     if !status.success() || std::fs::metadata(to)?.len() != size {
         return Err(not_read());
     }
@@ -393,6 +449,7 @@ mod tests {
     // Memory maps as the VM reports them, read into store files and load
     // offsets, with the ELF headers made up in memory.
     use super::*;
+    use rewind_init::Root;
     use std::io::Cursor;
 
     const MAPS: &str = "\
@@ -408,8 +465,13 @@ mod tests {
 
     /// An answer with the map above and `sent` files.
     fn answer(sent: &[(&str, &[u8])]) -> Vec<u8> {
+        answer_with(MAPS, sent)
+    }
+
+    /// An answer with the map `maps` and `sent` files.
+    fn answer_with(maps: &str, sent: &[(&str, &[u8])]) -> Vec<u8> {
         let mut answer = Vec::new();
-        let parts = [(SECTION_PID, &b"4242"[..]), (SECTION_MAPS, MAPS.as_bytes())];
+        let parts = [(SECTION_PID, &b"4242"[..]), (SECTION_MAPS, maps.as_bytes())];
         for (name, body) in parts.iter().chain(sent) {
             answer.extend(rewind_init::section_header(name, body.len()).into_bytes());
             answer.extend(*body);
@@ -486,7 +548,8 @@ mod tests {
         let dir = root.join("session");
 
         let running = Running::parse(&answer(&[])).unwrap();
-        let files = running.symbol_files(&dir, Some(&image)).unwrap();
+        let mount = ImageMount::of(&image, Root::Store);
+        let files = running.symbol_files(&dir, mount).unwrap();
         assert!(files.contains(&SymbolFile {
             path: dir.join("nix/store/aaa-bash-5.3/bin/bash"),
             offset: 0x5578a000,
@@ -496,6 +559,44 @@ mod tests {
             running.missing(&dir),
             vec!["/nix/store/bbb-glibc-2.44/lib/libc.so.6"]
         );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// In a run with a root filesystem, the VM sends every program it
+    /// mapped but one too large to send, which is read out of the run's
+    /// image by its path under the job's root. Packs a made-up test
+    /// program and a data file into an image laid out as a root, maps
+    /// both under the job's root, and checks the program is written
+    /// under the session's directory and loaded at its base, while the
+    /// data file, which is not ELF, is left in the image.
+    #[test]
+    fn a_root_file_too_large_to_send_is_read_from_the_image() {
+        let root = std::env::temp_dir().join(format!("rewind-maps-root-{}", std::process::id()));
+        let tree = root.join("tree");
+        std::fs::create_dir_all(tree.join("src")).unwrap();
+        std::fs::write(tree.join("src/big-test"), elf(0)).unwrap();
+        std::fs::write(tree.join("src/data.db"), b"SQLite format 3\0").unwrap();
+        let image = root.join("root.erofs");
+        crate::image::from_dir(&tree, &image).unwrap();
+        let dir = root.join("session");
+
+        let maps = "\
+55a000000000-55a000001000 r--p 00000000 00:1a 5 /newroot/src/big-test
+7f0000400000-7f0000401000 r--p 00000000 00:1a 6 /newroot/src/data.db
+";
+        let running = Running::parse(&answer_with(maps, &[])).unwrap();
+        let files = running
+            .symbol_files(&dir, ImageMount::of(&image, Root::Image))
+            .unwrap();
+        assert_eq!(
+            files,
+            vec![SymbolFile {
+                path: dir.join("newroot/src/big-test"),
+                offset: 0x55a000000000,
+                origin: Origin::Image,
+            }]
+        );
+        assert!(!dir.join("newroot/src/data.db").exists());
         std::fs::remove_dir_all(&root).unwrap();
     }
 

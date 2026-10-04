@@ -10,6 +10,11 @@ use serde::{Deserialize, Serialize};
 /// Where the job file lands in the guest.
 pub const JOB_PATH: &str = "/rewind/job.json";
 
+/// Where a job with a root filesystem has its root, as init sees it: init
+/// chroots the job into it, so the paths init reports for the job's files,
+/// such as those in its memory map, start with it.
+pub const IMAGE_ROOT: &str = "/newroot";
+
 /// The mark init writes to /dev/rewind when the job's main process exits,
 /// followed by its wait status in decimal.
 pub const EXIT_MARK: &str = "rewind-exit ";

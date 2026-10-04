@@ -8,8 +8,8 @@
 //! each program and library it had mapped is loaded at the address it was
 //! loaded at in the VM: from this machine's store, or, for files only the
 //! VM has, from copies the inspection sends, with the source files a third
-//! fork reads for them. A store file this machine lacks is read out of the
-//! run's input image.
+//! fork reads for them. A store file this machine lacks, or a program too
+//! large for the VM to send, is read out of the run's input image.
 //!
 //! DWARF and source files for all of them come from a debuginfod server
 //! started for the session, nixseparatedebuginfod2, which serves the
@@ -26,9 +26,8 @@ use std::process::{Child, Command, ExitCode, Stdio};
 
 use anyhow::{Context, Result, bail};
 use rewind_core::inspect::Inspection;
-use rewind_core::maps::{Origin, Running, SymbolFile};
+use rewind_core::maps::{ImageMount, Origin, Running, SymbolFile};
 use rewind_core::{Home, Run};
-use rewind_init::Root;
 
 /// The address `rewind gdb` serves on when it starts gdb itself: any free
 /// port on the loopback interface.
@@ -365,13 +364,15 @@ fn debugged_process(home: &Home, run: &Run, step: u64, pid: Option<u32>, dir: &P
         eprintln!("rewind: no symbols for the running process: its answer was cut short");
         return Process::default();
     };
-    // A Nix run's store was mounted from its input image, so a store file
-    // this machine lacks is read from there.
-    let store_image = match run.manifest.spec.job.root {
-        Root::Store => run.manifest.spec.image.as_deref(),
-        Root::Image | Root::Initramfs => None,
-    };
-    let files = match running.symbol_files(dir, store_image) {
+    // A Nix run's store, or a run's root filesystem, was mounted from its
+    // input image, so a file this machine lacks is read from there.
+    let mount = run
+        .manifest
+        .spec
+        .image
+        .as_deref()
+        .and_then(|image| ImageMount::of(image, run.manifest.spec.job.root));
+    let files = match running.symbol_files(dir, mount) {
         Ok(files) => files,
         Err(e) => {
             eprintln!("rewind: no symbols for the running process: {e}");
