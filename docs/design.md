@@ -264,7 +264,9 @@ working directory, user, and how the image becomes the root.
 
 - **A root filesystem** (`rewind run --root`): a directory, an erofs image,
   or a tarball such as `docker export` writes. The guest mounts it under a
-  writable tmpfs overlay and chroots into it.
+  writable tmpfs overlay and chroots into it. A root whose `/etc/hosts` is
+  missing or empty, as `docker export` leaves it, gets `localhost` in the
+  overlay, as a Nix build has.
 - **A Nix derivation** (`rewind nix`, the Nix angle). `rewind` realises the
   derivation's inputs on the host and packs the input closure and the sandbox
   shell into an image. The guest mounts it at `/nix/store` under a writable

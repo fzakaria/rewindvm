@@ -48,8 +48,17 @@ const SELFTEST_THREADS: usize = 4;
 const SELFTEST_ADDS: u64 = 5_000_000;
 
 /// Where an image job's root is mounted; init chroots into it, and takes
-/// /dev and /proc along.
+/// /dev and /proc along. The image itself is mounted read-only at
+/// IMAGE_LOWER, under the overlay.
 const IMAGE_ROOT: &str = "/newroot";
+const IMAGE_LOWER: &str = "/lower";
+
+/// A root's hosts file, and the lines an image root gets when its own is
+/// missing or empty, the same the initramfs has for Nix builds. `docker
+/// export` leaves /etc/hosts empty, since Docker bind-mounts its own over
+/// it, and without these lines `localhost` does not resolve.
+const HOSTS_FILE: &str = "etc/hosts";
+const LOCALHOST_HOSTS: &str = "127.0.0.1 localhost\n::1 localhost\n";
 
 /// How much of a file an inspection reads at a time.
 const INSPECT_CHUNK: usize = 64 * 1024;
@@ -226,8 +235,8 @@ fn within(root: &str, path: &str) -> PathBuf {
 /// IMAGE_ROOT, with /dev, /proc and /sys bound into it, for the job to be
 /// chrooted into.
 fn image_root() -> Result<()> {
-    mkdir("/lower")?;
-    mount(IMAGE_DEVICE, "/lower", "erofs", libc::MS_RDONLY, "")?;
+    mkdir(IMAGE_LOWER)?;
+    mount(IMAGE_DEVICE, IMAGE_LOWER, "erofs", libc::MS_RDONLY, "")?;
     mkdir("/rw")?;
     mount("tmpfs", "/rw", "tmpfs", 0, "mode=0755")?;
     mkdir("/rw/upper")?;
@@ -238,8 +247,9 @@ fn image_root() -> Result<()> {
         "/newroot",
         "overlay",
         0,
-        "lowerdir=/lower,upperdir=/rw/upper,workdir=/rw/work",
+        &format!("lowerdir={IMAGE_LOWER},upperdir=/rw/upper,workdir=/rw/work"),
     )?;
+    default_hosts(Path::new(IMAGE_LOWER), Path::new(IMAGE_ROOT))?;
     for dir in ["/dev", "/proc", "/sys"] {
         let target = format!("{IMAGE_ROOT}{dir}");
         mkdir(&target)?;
@@ -251,6 +261,26 @@ fn image_root() -> Result<()> {
         chmod(&dir, 0o1777)?;
     }
     Ok(())
+}
+
+/// Writes LOCALHOST_HOSTS to `root`'s hosts file when `image`, the image
+/// `root` is an overlay of, has none or an empty one. The write lands in
+/// the overlay's writable layer; the image is never changed. A hosts file
+/// that is a symbolic link is the image's choice, and stays.
+fn default_hosts(image: &Path, root: &Path) -> Result<()> {
+    let ours = match fs::symlink_metadata(image.join(HOSTS_FILE)) {
+        Ok(meta) => meta.is_file() && meta.len() == 0,
+        Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+    };
+    if !ours {
+        return Ok(());
+    }
+
+    let hosts = root.join(HOSTS_FILE);
+    if let Some(etc) = hosts.parent() {
+        mkdir(&etc.to_string_lossy())?;
+    }
+    fs::write(&hosts, LOCALHOST_HOSTS).map_err(|e| format!("writing {}: {e}", hosts.display()))
 }
 
 /// Runs the job and reaps every process until its main process exits,
@@ -1257,6 +1287,32 @@ mod tests {
         job.program = None;
         job.argv[0] = "/bin/sh".into();
         assert_eq!(resolve(&job, "/").unwrap(), PathBuf::from("/bin/sh"));
+    }
+
+    /// An image root gets the localhost lines a Nix build's sandbox has
+    /// when its own /etc/hosts is missing or empty, as `docker export`
+    /// leaves it, and keeps one that says anything. Lays out an image and
+    /// the root it is seen through in temporary directories for each case,
+    /// then reads the root's /etc/hosts.
+    #[test]
+    fn an_image_without_hosts_gets_localhost() {
+        let base = std::env::temp_dir().join(format!("rewind-init-hosts-{}", std::process::id()));
+        let case = |name: &str, hosts: Option<&str>| -> Option<String> {
+            let image = base.join(name).join("image");
+            let root = base.join(name).join("root");
+            fs::create_dir_all(image.join("etc")).unwrap();
+            fs::create_dir_all(&root).unwrap();
+            if let Some(hosts) = hosts {
+                fs::write(image.join(HOSTS_FILE), hosts).unwrap();
+            }
+            default_hosts(&image, &root).unwrap();
+            fs::read_to_string(root.join(HOSTS_FILE)).ok()
+        };
+
+        assert_eq!(case("missing", None).as_deref(), Some(LOCALHOST_HOSTS));
+        assert_eq!(case("empty", Some("")).as_deref(), Some(LOCALHOST_HOSTS));
+        assert_eq!(case("own", Some("10.0.0.1 db\n")), None);
+        fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]
