@@ -492,6 +492,19 @@ repeats as exactly as any other.
   microseconds late, which Linux's default timer slack for user tasks allows
   on real hardware. Sleepers wake in a different order.
 
+A schedule changes neither the inputs, nor `--seed`, nor the wall clock at
+boot (`--epoch`). Values a program draws from the kernel's randomness can
+still differ under another schedule, such as the ephemeral port a socket
+binds: the kernel's generator starts from the same seed, but the schedule
+decides which process draws from it first. Address space layout randomization
+draws from the same generator, so a program started after the schedule
+diverges can load at other addresses too. `--seed` moves the layout outright:
+one spinning program loaded at `0x558577205154` with seed 0 and
+`0x558a0708d154` with seed 1, and at the same address under schedules 0 to 7.
+`--kernel-args norandmaps` turns address randomization off, which put it at
+`0x555555555154` under every seed, to tell an interleaving apart from a layout
+change.
+
 A perturbation applies only inside a window of steps. Before the window, a
 perturbed run is the unperturbed one, exit for exit. `rewind fork` builds on
 this. A fork of a run at step N with schedule K is the run's inputs with the

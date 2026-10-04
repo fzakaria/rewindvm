@@ -39,8 +39,13 @@ struct MachineArgs {
     #[arg(long, default_value_t = 0)]
     seed: u64,
     /// Asks the VM to reschedule at steps this seed picks, to explore
-    /// other thread interleavings with everything else, time included,
-    /// unchanged. 0 is the unperturbed schedule.
+    /// other thread interleavings. The inputs, --seed and --epoch stay as
+    /// they are, but values programs draw from the kernel's randomness,
+    /// such as ephemeral port numbers and where programs are loaded, can
+    /// differ: the schedule decides which process draws first.
+    /// `--kernel-args norandmaps` turns address randomization off, to tell
+    /// an interleaving apart from a layout change. 0 is the unperturbed
+    /// schedule.
     #[arg(long, default_value_t = 0)]
     schedule: u64,
     /// The first step a reschedule may be asked at; before it the run is the
@@ -235,7 +240,11 @@ enum Command {
     Fork {
         run: String,
         step: u64,
-        /// The schedule seed for the new branch.
+        /// The schedule seed for the new branch. As with a run's
+        /// --schedule, values programs draw from the kernel's randomness
+        /// after the step, such as load addresses, can differ from the
+        /// parent's; a run recorded with `--kernel-args norandmaps` loads
+        /// programs at fixed addresses.
         #[arg(long, default_value_t = 1)]
         schedule: u64,
         #[arg(long, short)]
