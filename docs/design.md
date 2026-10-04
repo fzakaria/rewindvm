@@ -530,7 +530,11 @@ nothing.
    A run that timed out says whether the guest was still making exits,
    which is a slow run, or had gone a second or more without one, which is
    a guest stuck computing; then it says for how long and at which
-   instruction, in user space or at a kernel symbol.
+   instruction, in user space or at a kernel symbol. A user-space
+   instruction is named with the program's symbols, as `rewind gdb` loads
+   them at the run's last step, by function, offset and source line, with
+   the process the VM's kernel had on the CPU: "in user space in spin+11
+   (spin.c:5), process 38 (spin)". The manifest keeps the bare address.
 3. Narrows the window, first its end and then its start, to the smallest
    window that still makes that schedule end differently. A smaller window
    perturbs a subset of the same steps, so the search is well defined.

@@ -1,4 +1,5 @@
-//! `rewind where`: where in a program's own code a thread was at a step.
+//! `rewind where`: where in a program's own code a thread was at a step,
+//! and where a run that timed out computing in user space had stopped.
 //!
 //! The thread's stack comes from gdb on a fork at the step, set up as
 //! `rewind gdb` sets it up but without the kernel's symbols, which a
@@ -15,7 +16,7 @@ use rewind_core::{Home, Run};
 use rewind_trace::Trace;
 use serde::{Deserialize, Serialize};
 
-use crate::gdb::{self, Kernel, Needs, Output, Symbols};
+use crate::gdb::{self, Kernel, Needs, Output, Say, Symbols};
 
 /// The gdb script, written to the session's directory for gdb to source,
 /// and the start of the line it answers on.
@@ -109,7 +110,7 @@ pub fn walk(home: &Home, run: &Run, step: u64, pid: u32, tid: u32) -> Result<Ans
     let needs = Needs::Tasks(format!("`rewind where` cannot find thread {tid}"));
     let scope = rewind_core::debug::Scope::Process(pid);
     let mut debuggee = gdb::fork(home, run, step, scope, needs)?;
-    let symbols = Symbols::load(home, run, step, Some(pid), Kernel::Skip)?;
+    let symbols = Symbols::load(home, run, step, Some(pid), Kernel::Skip, Say::Aloud)?;
 
     // gdb with the script, against the fork.
     let script = symbols.dir().join(SCRIPT_NAME);
@@ -159,6 +160,123 @@ pub fn walk(home: &Home, run: &Run, step: u64, pid: u32, tid: u32) -> Result<Ans
         chosen,
         source,
     })
+}
+
+/// What the gdb script prints for an address: the function it is in and
+/// how far into it, its source line, and its program.
+#[derive(Debug, Deserialize)]
+struct Place {
+    function: Option<String>,
+    offset: Option<u64>,
+    file: Option<String>,
+    line: Option<u32>,
+    object: Option<String>,
+    error: Option<String>,
+}
+
+/// Where `address` is in the code process `pid` had mapped at `step` of
+/// `run`. gdb reads the symbol files alone, with no fork to connect to.
+fn place(home: &Home, run: &Run, step: u64, pid: u32, address: u64) -> Result<Place> {
+    gdb::require_python()?;
+    let symbols = Symbols::load(home, run, step, Some(pid), Kernel::Skip, Say::Nothing)?;
+    let script = symbols.dir().join(SCRIPT_NAME);
+    std::fs::write(&script, SCRIPT).context("writing the gdb script")?;
+    let mut args = symbols.arguments(None);
+    args.extend([
+        "-batch".to_string(),
+        "-ex".to_string(),
+        format!("set $rewind_address = {address:#x}"),
+        "-x".to_string(),
+        script.display().to_string(),
+    ]);
+    let (_, printed) = gdb::run_gdb(&args, None, Output::Captured)?;
+    let place: Place = script_answer(&printed)?;
+    if let Some(error) = place.error {
+        bail!("gdb could not place {address:#x}: {error}");
+    }
+    Ok(place)
+}
+
+/// How sure a timeout's message is of the process it names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Certainty {
+    /// The VM's kernel had its thread on the CPU when the run stopped.
+    OnTheCpu,
+    /// It made the run's last event; the kernel did not say.
+    LastEvent,
+}
+
+/// How a run that timed out computing in user space stopped, with the
+/// instruction named by its function, offset and source line, and the
+/// process it was in. None when the run did not stop that way or the
+/// instruction has no symbol, and the run's own words stand.
+pub fn describe_stall(home: &Home, run: &Run) -> Option<String> {
+    let stalled = run.stalled.as_ref()?;
+    let trace = run.trace().ok()?;
+
+    // The process: the thread on the CPU, else the last event's.
+    let (pid, name, certainty) = match &stalled.thread {
+        Some(thread) => (thread.pid, thread.name.clone(), Certainty::OnTheCpu),
+        None => {
+            let event = trace.events.iter().rev().find(|e| e.pid != 0)?;
+            let name = process_name(&trace, event.pid);
+            (event.pid, name, Certainty::LastEvent)
+        }
+    };
+
+    // The instruction, with the process's symbols as of the last step:
+    // the address is reached after it, but the map rarely changes then.
+    let place = place(home, run, trace.last_step(), pid, stalled.stall.rip).ok()?;
+    let words = place_words(&place)?;
+    Some(format!(
+        "{}, {}",
+        rewind_core::run::describe_user_stall(&stalled.stall, &words),
+        process_words(pid, &name, certainty)
+    ))
+}
+
+/// Where store paths are, and what ends the hash that starts a store
+/// path's name.
+const NIX_STORE: &str = "/nix/store/";
+const STORE_HASH_END: char = '-';
+
+/// A file's name for a one-line message: the last part of its path, and
+/// for a file that is a store path itself, its name without the hash.
+fn file_name(path: &str) -> &str {
+    if let Some(name) = path.strip_prefix(NIX_STORE).filter(|n| !n.contains('/')) {
+        return name.split_once(STORE_HASH_END).map_or(name, |(_, n)| n);
+    }
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+/// An instruction's place in words: its function and offset, then its
+/// source file's name and line, else its program's file name. None
+/// without a function.
+fn place_words(place: &Place) -> Option<String> {
+    let function = place.function.as_ref()?;
+    let at = match place.offset {
+        Some(offset) if offset > 0 => format!("{function}+{offset}"),
+        _ => function.clone(),
+    };
+    let detail = match (&place.file, place.line, &place.object) {
+        (Some(file), Some(line), _) => Some(format!("{}:{line}", file_name(file))),
+        (_, _, Some(object)) => Some(file_name(object).to_string()),
+        _ => None,
+    };
+    Some(match detail {
+        Some(detail) => format!("in {at} ({detail})"),
+        None => format!("in {at}"),
+    })
+}
+
+/// The process a run stalled in, in words.
+fn process_words(pid: u32, name: &str, certainty: Certainty) -> String {
+    match certainty {
+        Certainty::OnTheCpu => format!("process {pid} ({name})"),
+        Certainty::LastEvent => {
+            format!("probably process {pid} ({name}), which made the run's last event")
+        }
+    }
 }
 
 /// The JSON the gdb script printed on its marked line. Without one, what
@@ -496,6 +614,48 @@ mod tests {
         assert!(thread_at(&trace, 11, None, None).is_err());
         assert!(thread_at(&trace, 12, None, None).is_err());
         assert!(thread_at(&trace, 10, None, Some(999)).is_err());
+    }
+
+    /// A stopped instruction in words: its function and offset, then its
+    /// source file's name and line, else its program's file name; without
+    /// a function, no words. A source file that is a store path loses its
+    /// hash. Places as the gdb script prints them for an address.
+    #[test]
+    fn a_place_names_the_function_and_the_line() {
+        let place = |json: &str| -> Place { serde_json::from_str(json).unwrap() };
+        let spin = place(
+            r#"{"address":"0x558577205154","function":"spin","offset":11,"file":"/nix/store/lm3yyssrgs19ph1hc8fsh6lhq0473x8r-spin.c","fullname":null,"line":5,"object":"/nix/store/aaa-spin-bin/bin/spin"}"#,
+        );
+        assert_eq!(place_words(&spin).as_deref(), Some("in spin+11 (spin.c:5)"));
+        let pool = place(
+            r#"{"address":"0x55bfaf437437","function":"worker","offset":0,"file":"src/pool.c","fullname":null,"line":77,"object":null}"#,
+        );
+        assert_eq!(place_words(&pool).as_deref(), Some("in worker (pool.c:77)"));
+        let stripped = place(
+            r#"{"address":"0x401913","function":"__syscall_cp_c","offset":0,"file":null,"fullname":null,"line":null,"object":"/newroot/src/big"}"#,
+        );
+        assert_eq!(
+            place_words(&stripped).as_deref(),
+            Some("in __syscall_cp_c (big)")
+        );
+        let unknown = place(
+            r#"{"address":"0x1000","function":null,"offset":null,"file":null,"fullname":null,"line":null,"object":null}"#,
+        );
+        assert_eq!(place_words(&unknown), None);
+    }
+
+    /// The process a run stalled in: the one the VM's kernel had on the
+    /// CPU, by its name there, or a guess from the run's last event.
+    #[test]
+    fn the_stalled_process_is_named_or_guessed() {
+        assert_eq!(
+            process_words(38, "spin", Certainty::OnTheCpu),
+            "process 38 (spin)"
+        );
+        assert_eq!(
+            process_words(38, "spin", Certainty::LastEvent),
+            "probably process 38 (spin), which made the run's last event"
+        );
     }
 
     /// Source lines around a line, cut at the start and the end of the

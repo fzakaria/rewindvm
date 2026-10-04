@@ -49,6 +49,17 @@ impl<'a, M: Memory + ?Sized> Tasks<'a, M> {
         self.pointer(self.layout.current_task)
     }
 
+    /// The thread on the CPU, with the id of the process it belongs to.
+    pub fn current_thread(&self) -> Result<(u32, Thread)> {
+        let task = self.current()?;
+        let thread = Thread {
+            tid: self.tid(task)?,
+            task,
+            name: self.name(task)?,
+        };
+        Ok((self.tgid(task)?, thread))
+    }
+
     /// A task's thread id: its pid, which is 0 for the idle task.
     pub fn tid(&self, task: u64) -> Result<u32> {
         self.pid_at(task + self.layout.pid)
@@ -299,6 +310,25 @@ mod tests {
         assert!(threads.iter().all(|t| t.name == "phil"));
         assert_eq!(tasks.current().unwrap(), t41);
         assert_eq!(tasks.tgid(t41).unwrap(), 40);
+    }
+
+    /// The thread on the CPU, with the process it belongs to and its
+    /// name, read from current_task.
+    #[test]
+    fn the_thread_on_the_cpu_names_its_process() {
+        let (fake, [_, t41, _]) = kernel();
+        let tasks = Tasks::new(&fake, layout());
+        assert_eq!(
+            tasks.current_thread().unwrap(),
+            (
+                40,
+                Thread {
+                    tid: 41,
+                    task: t41,
+                    name: "phil".into(),
+                }
+            )
+        );
     }
 
     /// The page table is mm->pgd's physical address; a kernel thread has

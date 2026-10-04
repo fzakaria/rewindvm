@@ -462,6 +462,50 @@ pub(crate) fn executing(dir: &Path) -> bool {
 pub struct Run {
     pub dir: PathBuf,
     pub manifest: Manifest,
+    /// Where the run was when it timed out computing in user space, known
+    /// only to the execution that stopped it: the manifest keeps the
+    /// timeout in words.
+    pub stalled: Option<Stalled>,
+}
+
+/// Where a run that timed out computing in user space was stopped: the
+/// vCPU's instruction, and the thread on the CPU, when the VM's kernel
+/// says where its tasks are.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Stalled {
+    pub stall: rewind_vmm::Stall,
+    pub thread: Option<StalledThread>,
+}
+
+/// The thread a run was computing in when it timed out.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StalledThread {
+    pub pid: u32,
+    pub tid: u32,
+    /// The thread's name, as the kernel keeps it.
+    pub name: String,
+}
+
+/// Where `machine`, stopped with `outcome`, was computing in user space,
+/// when it timed out doing so.
+fn stalled(machine: &Machine, outcome: Outcome) -> Option<Stalled> {
+    let Outcome::Stopped(Stop::TimedOut(stall)) = outcome else {
+        return None;
+    };
+    if stall.mode != rewind_vmm::CpuMode::User || stall.since_exit < COMPUTING_AFTER {
+        return None;
+    }
+    let thread = machine.task_layout().ok().flatten().and_then(|layout| {
+        let (pid, thread) = crate::threads::Tasks::new(machine, layout)
+            .current_thread()
+            .ok()?;
+        Some(StalledThread {
+            pid,
+            tid: thread.tid,
+            name: thread.name,
+        })
+    });
+    Some(Stalled { stall, thread })
 }
 
 impl Run {
@@ -483,6 +527,7 @@ impl Run {
         Ok(Run {
             dir: dir.to_path_buf(),
             manifest,
+            stalled: None,
         })
     }
 
@@ -663,6 +708,9 @@ impl Run {
         }
         recorder.trace.finish()?;
 
+        // Which thread a run computing in user space stopped in, read from
+        // the VM's kernel while the machine is here.
+        let stalled = stalled(&machine, outcome);
         manifest.outcome = Some(RunOutcome {
             stop: describe(outcome, &manifest.spec.kernel),
             step: machine.step(),
@@ -683,7 +731,11 @@ impl Run {
             manifest.first_difference = parent.trace()?.divergence(&ours).map(|d| d.right_step);
         }
         write_manifest(&manifest)?;
-        Ok(Run { dir, manifest })
+        Ok(Run {
+            dir,
+            manifest,
+            stalled,
+        })
     }
 
     /// Runs the same inputs again and compares traces. None when the new
@@ -950,7 +1002,9 @@ fn describe_timeout(stall: &rewind_vmm::Stall, kernel: &Path) -> String {
         return format!("{TIMED_OUT} while still making exits");
     }
     let place = match stall.mode {
-        rewind_vmm::CpuMode::User => format!("in user space at {:#x}", stall.rip),
+        rewind_vmm::CpuMode::User => {
+            return describe_user_stall(stall, &format!("at {:#x}", stall.rip));
+        }
         rewind_vmm::CpuMode::Kernel => {
             let map = kernel.with_file_name(SYSTEM_MAP);
             let symbol = fs::read_to_string(map)
@@ -964,6 +1018,15 @@ fn describe_timeout(stall: &rewind_vmm::Stall, kernel: &Path) -> String {
     };
     format!(
         "{TIMED_OUT} computing without exits for {:.1}s, {place}",
+        stall.since_exit.as_secs_f64()
+    )
+}
+
+/// A timeout computing in user space in words, the instruction named by
+/// `place`: its address, or what the program's symbols say of it.
+pub fn describe_user_stall(stall: &rewind_vmm::Stall, place: &str) -> String {
+    format!(
+        "{TIMED_OUT} computing without exits for {:.1}s, in user space {place}",
         stall.since_exit.as_secs_f64()
     )
 }
@@ -1071,6 +1134,23 @@ mod tests {
         );
         assert!(timed_out(0x1000, CpuMode::User, 3).starts_with(TIMED_OUT));
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A user-space stall in words with its place named some other way,
+    /// as the rewind command names it with the program's symbols: the
+    /// same sentence as with the bare address.
+    #[test]
+    fn a_user_space_stall_takes_any_place() {
+        use rewind_vmm::{CpuMode, Stall};
+        let stall = Stall {
+            rip: 0x5585_7720_5154,
+            mode: CpuMode::User,
+            since_exit: std::time::Duration::from_millis(7_100),
+        };
+        assert_eq!(
+            describe_user_stall(&stall, "in spin+11 (spin.c:5)"),
+            "timed out computing without exits for 7.1s, in user space in spin+11 (spin.c:5)"
+        );
     }
 
     #[test]

@@ -18,8 +18,9 @@ pub fn summary(run: &Run) -> String {
     format!("{}  {outcome}  {}", m.id, m.name)
 }
 
-/// The line printed when a run finishes.
-pub fn finished(run: &Run) -> String {
+/// The line printed when a run finishes, with how it stopped in the
+/// words `stop` gives, else the manifest's.
+pub fn finished(run: &Run, stop: Option<&str>) -> String {
     let m = &run.manifest;
     let Some(o) = &m.outcome else {
         return format!("rewind: run {} did not finish", m.id);
@@ -31,7 +32,7 @@ pub fn finished(run: &Run) -> String {
         o.step,
         Duration::from_nanos(o.virtual_ns).as_secs_f64(),
         Duration::from_millis(o.wall_ms).as_secs_f64(),
-        o.stop,
+        stop.unwrap_or(&o.stop),
     )
 }
 

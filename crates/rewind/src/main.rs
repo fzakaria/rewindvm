@@ -571,7 +571,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             // long build runs only from near the window.
             let from_base = Start::After(base.manifest.id.clone());
             println!("schedule   0: {}", show::outcome_line(&base)?);
-            print_timeout(0, &base);
+            print_timeout(&home, 0, &base);
 
             // A schedule can make a program loop forever where schedule 0
             // did not, so unless told otherwise each other run gets a
@@ -667,7 +667,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 );
             }
 
-            print_timeout(machine.schedule, &worst);
+            print_timeout(&home, machine.schedule, &worst);
             let probe_all = |windows: Vec<(u64, u64)>| -> Result<Vec<Run>> {
                 let machines = windows
                     .into_iter()
@@ -809,7 +809,8 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 );
                 return Ok(exit_status(&child));
             }
-            eprintln!("{}", show::finished(&child));
+            let stop = locate::describe_stall(&home, &child);
+            eprintln!("{}", show::finished(&child, stop.as_deref()));
             match first_difference {
                 None => eprintln!("rewind: the fork ran the same as its parent"),
                 Some(step) => {
@@ -1445,7 +1446,8 @@ fn execute(
         how,
     )?;
     if announce == Announce::Yes {
-        eprintln!("{}", show::finished(&run));
+        let stop = locate::describe_stall(home, &run);
+        eprintln!("{}", show::finished(&run, stop.as_deref()));
     }
     Ok(run)
 }
@@ -1476,13 +1478,16 @@ fn execute_all(
 
 /// For a schedule of `rewind check` that hit its time limit, how and where:
 /// a guest stuck computing without exits is often what the search found.
-fn print_timeout(schedule: u64, run: &Run) {
+/// A user-space address is named by the program's symbols when it can be.
+fn print_timeout(home: &Home, schedule: u64, run: &Run) {
     let Some(o) = run.manifest.outcome.as_ref() else {
         return;
     };
-    if o.stop.starts_with(rewind_core::run::TIMED_OUT) {
-        println!("schedule {schedule}: {}", o.stop);
+    if !o.stop.starts_with(rewind_core::run::TIMED_OUT) {
+        return;
     }
+    let stop = locate::describe_stall(home, run).unwrap_or_else(|| o.stop.clone());
+    println!("schedule {schedule}: {stop}");
 }
 
 /// The time limit `--timeout` sets, in seconds, if given.

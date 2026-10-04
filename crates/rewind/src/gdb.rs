@@ -97,7 +97,7 @@ pub fn gdb(
 ) -> Result<ExitCode> {
     // What gdb is told before the fork it debugs is made: the inspection
     // that finds the process needs a fork of its own.
-    let symbols = Symbols::load(home, run, step, pid, Kernel::Load)?;
+    let symbols = Symbols::load(home, run, step, pid, Kernel::Load, Say::Aloud)?;
 
     // Finding a process that is not on the CPU takes the kernel's task
     // list, which kernels before it do not publish.
@@ -144,6 +144,24 @@ pub fn gdb(
 pub enum Kernel {
     Load,
     Skip,
+}
+
+/// Whether loading symbols says on stderr what it found: for a person
+/// starting gdb, or not, when the symbols only name an address in another
+/// message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Say {
+    Aloud,
+    Nothing,
+}
+
+impl Say {
+    /// Prints `text` on its own line after rewind's prefix, when aloud.
+    fn line(self, text: impl std::fmt::Display) {
+        if self == Say::Aloud {
+            eprintln!("rewind: {text}");
+        }
+    }
 }
 
 /// What a fork for gdb needs of the run's kernel.
@@ -273,20 +291,22 @@ pub struct Symbols {
 
 impl Symbols {
     /// The symbols for process `pid` at `step` of `run`, or when None the
-    /// process running there, with the kernel's when `kernel` says so.
+    /// process running there, with the kernel's when `kernel` says so,
+    /// saying what they are as `say` says.
     pub fn load(
         home: &Home,
         run: &Run,
         step: u64,
         pid: Option<u32>,
         kernel: Kernel,
+        say: Say,
     ) -> Result<Symbols> {
         let kernel = match kernel {
             Kernel::Load => KernelSymbols::find(run),
             Kernel::Skip => KernelSymbols::none(),
         };
         let session = Session::new(home)?;
-        let process = debugged_process(home, run, step, pid, &session.dir);
+        let process = debugged_process(home, run, step, pid, &session.dir, say);
         let debuginfod = Debuginfod::start();
         Ok(Symbols {
             session,
@@ -510,28 +530,39 @@ struct Process {
 /// or the run's image has them, written under `dir`, with the source files
 /// those name. Empty when the kernel was running, there was no such
 /// process, or the map could not be read.
-fn debugged_process(home: &Home, run: &Run, step: u64, pid: Option<u32>, dir: &Path) -> Process {
+fn debugged_process(
+    home: &Home,
+    run: &Run,
+    step: u64,
+    pid: Option<u32>,
+    dir: &Path,
+    say: Say,
+) -> Process {
     let answer = match rewind_core::inspect::running(home, run, step, pid) {
         Ok(Inspection::Contents(bytes)) => bytes,
         Ok(Inspection::NotFound(message)) if pid.is_some() => {
-            eprintln!("rewind: {}", message.trim());
+            say.line(message.trim());
             return Process::default();
         }
         Ok(Inspection::NotFound(_)) => {
-            eprintln!("rewind: step {step} ran in the kernel, in no process");
+            say.line(format_args!("step {step} ran in the kernel, in no process"));
             return Process::default();
         }
         Ok(Inspection::Failed(message)) => {
-            eprintln!("rewind: no symbols for the running process: {message}");
+            say.line(format_args!(
+                "no symbols for the running process: {message}"
+            ));
             return Process::default();
         }
         Err(e) => {
-            eprintln!("rewind: no symbols for the running process: {e:#}");
+            say.line(format_args!("no symbols for the running process: {e:#}"));
             return Process::default();
         }
     };
     let Some(running) = Running::parse(&answer) else {
-        eprintln!("rewind: no symbols for the running process: its answer was cut short");
+        say.line(format_args!(
+            "no symbols for the running process: its answer was cut short"
+        ));
         return Process::default();
     };
     // A Nix run's store, or a run's root filesystem, was mounted from its
@@ -545,7 +576,7 @@ fn debugged_process(home: &Home, run: &Run, step: u64, pid: Option<u32>, dir: &P
     let files = match running.symbol_files(dir, mount) {
         Ok(files) => files,
         Err(e) => {
-            eprintln!("rewind: no symbols for the running process: {e}");
+            say.line(format_args!("no symbols for the running process: {e}"));
             return Process::default();
         }
     };
@@ -555,17 +586,19 @@ fn debugged_process(home: &Home, run: &Run, step: u64, pid: Option<u32>, dir: &P
         Some(_) => format!("process {} at step {step}", running.pid),
         None => format!("step {step} ran in process {}", running.pid),
     };
-    eprintln!(
-        "rewind: {whose}; loading symbols for {} of its files",
+    say.line(format_args!(
+        "{whose}; loading symbols for {} of its files",
         files.len()
-    );
+    ));
     let from_image = files.iter().filter(|f| f.origin == Origin::Image).count();
     if from_image > 0 {
-        eprintln!("rewind: read {from_image} of them from the run's image");
+        say.line(format_args!(
+            "read {from_image} of them from the run's image"
+        ));
     }
     let missing = running.missing(dir);
     if !missing.is_empty() {
-        eprintln!("rewind: no symbols for {}", missing.join(", "));
+        say.line(format_args!("no symbols for {}", missing.join(", ")));
     }
 
     // Source files outside the store, which debuginfod does not serve.
@@ -591,7 +624,7 @@ fn debugged_process(home: &Home, run: &Run, step: u64, pid: Option<u32>, dir: &P
             from_src.push((store_path, sources));
         }
     }
-    let mut source_dirs = fetch_sources(home, run, step, running.pid, from_vm, dir);
+    let mut source_dirs = fetch_sources(home, run, step, running.pid, from_vm, dir, say);
 
     // The trees the VM did not have, from each store program's derivation.
     for (store_path, sources) in &from_src {
@@ -606,7 +639,7 @@ fn debugged_process(home: &Home, run: &Run, step: u64, pid: Option<u32>, dir: &P
         if unmapped.is_empty() {
             continue;
         }
-        source_dirs.extend(derivation_sources(store_path, &unmapped));
+        source_dirs.extend(derivation_sources(store_path, &unmapped, say));
     }
 
     Process {
@@ -626,6 +659,7 @@ fn fetch_sources(
     pid: u32,
     paths: Vec<String>,
     dir: &Path,
+    say: Say,
 ) -> Vec<(PathBuf, PathBuf)> {
     let paths: Vec<String> = paths
         .into_iter()
@@ -639,16 +673,16 @@ fn fetch_sources(
     let answer = match rewind_core::inspect::files(home, run, step, Some(pid), &paths) {
         Ok(Inspection::Contents(bytes)) => bytes,
         Ok(Inspection::NotFound(message) | Inspection::Failed(message)) => {
-            eprintln!("rewind: no source files: {message}");
+            say.line(format_args!("no source files: {message}"));
             return Vec::new();
         }
         Err(e) => {
-            eprintln!("rewind: no source files: {e:#}");
+            say.line(format_args!("no source files: {e:#}"));
             return Vec::new();
         }
     };
     let Some(sections) = rewind_init::sections(&answer) else {
-        eprintln!("rewind: no source files: the answer was cut short");
+        say.line(format_args!("no source files: the answer was cut short"));
         return Vec::new();
     };
 
@@ -674,7 +708,7 @@ fn fetch_sources(
             dirs.push((from, here));
         }
     }
-    eprintln!("rewind: fetched {fetched} source files from the VM");
+    say.line(format_args!("fetched {fetched} source files from the VM"));
     dirs
 }
 
@@ -744,7 +778,7 @@ const DERIVATIONS: &str = "derivations";
 /// /build/source, which held src unpacked. Says on stderr why there are
 /// none when the derivation or its src is not on this machine, or src is
 /// not a directory, such as a tarball.
-fn derivation_sources(store_path: &Path, sources: &[String]) -> Vec<(PathBuf, PathBuf)> {
+fn derivation_sources(store_path: &Path, sources: &[String], say: Say) -> Vec<(PathBuf, PathBuf)> {
     // Without Nix there is no derivation to ask, and nothing to say.
     let Some(root) = store_root(store_path) else {
         return Vec::new();
@@ -753,7 +787,10 @@ fn derivation_sources(store_path: &Path, sources: &[String]) -> Vec<(PathBuf, Pa
         return Vec::new();
     };
     let skip = |why: String| {
-        eprintln!("rewind: no source files for {}: {why}", root.display());
+        say.line(format_args!(
+            "no source files for {}: {why}",
+            root.display()
+        ));
         Vec::new()
     };
 
@@ -796,11 +833,11 @@ fn derivation_sources(store_path: &Path, sources: &[String]) -> Vec<(PathBuf, Pa
     if trees.is_empty() {
         return skip(format!("none of its source files are in {}", src.display()));
     }
-    eprintln!(
-        "rewind: source files for {} from {}",
+    say.line(format_args!(
+        "source files for {} from {}",
         root.display(),
         src.display()
-    );
+    ));
     trees.into_iter().map(|tree| (tree, src.clone())).collect()
 }
 
