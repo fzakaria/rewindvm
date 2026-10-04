@@ -15,6 +15,11 @@ pub const ENV_INITRD: &str = "REWIND_INITRD";
 /// `rewind gdb`; optional.
 pub const ENV_KERNEL_DEBUG: &str = "REWIND_KERNEL_DEBUG";
 
+/// How images are built, for the directory they are cached in: 2 since
+/// image builds ignore SOURCE_DATE_EPOCH, which before then made an image
+/// built in a Nix development shell differ from one built outside.
+const IMAGES: &str = "2";
+
 /// Overrides the data directory, which is otherwise under XDG_DATA_HOME.
 pub const ENV_HOME: &str = "REWIND_HOME";
 
@@ -42,7 +47,7 @@ impl Home {
     /// The home in `root`, made if it is not there yet.
     pub fn at(root: PathBuf) -> Result<Home> {
         std::fs::create_dir_all(root.join("runs"))?;
-        std::fs::create_dir_all(root.join("images"))?;
+        std::fs::create_dir_all(root.join("images").join(IMAGES))?;
         Ok(Home { root })
     }
 
@@ -54,8 +59,12 @@ impl Home {
         self.root.join("runs")
     }
 
+    /// Where images are cached, by what went into them. The directory is
+    /// named for how images are built, IMAGES, so an image an earlier way
+    /// of building made is not taken for one this way makes; the runs that
+    /// booted it still name it where it was.
     pub fn images(&self) -> PathBuf {
-        self.root.join("images")
+        self.root.join("images").join(IMAGES)
     }
 
     /// The kernel, initramfs and image of each imported replayable run,

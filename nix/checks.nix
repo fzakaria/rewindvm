@@ -305,6 +305,29 @@ in
         touch $out
       '';
 
+  # checks.image-env: the image of a root, and so the run, is the same
+  # whether rewind runs in a Nix development shell, which sets
+  # SOURCE_DATE_EPOCH to 1980, or outside one. mkfs.erofs reads the
+  # variable ahead of the timestamp rewind gives it. Boots the VM, so it
+  # needs /dev/kvm.
+  image-env =
+    pkgs.runCommand "rewind-image-env"
+      {
+        nativeBuildInputs = [ rewind ];
+        requiredSystemFeatures = [ "kvm" ];
+      }
+      ''
+        REWIND_HOME=$TMPDIR/shell SOURCE_DATE_EPOCH=315532800 \
+          rewind run -q --root ${busyboxRoot} -- echo hi
+        env -u SOURCE_DATE_EPOCH REWIND_HOME=$TMPDIR/plain \
+          rewind run -q --root ${busyboxRoot} -- echo hi
+        shell=$(REWIND_HOME=$TMPDIR/shell rewind ls | awk '{print $1}')
+        plain=$(REWIND_HOME=$TMPDIR/plain rewind ls | awk '{print $1}')
+        echo "in a shell: $shell, outside one: $plain"
+        test "$shell" = "$plain"
+        touch $out
+      '';
+
   # checks.gdb-step: single-stepping in `rewind gdb` keeps the fork on the
   # recording, and gdb is stopped only where it asked. Two shells compute
   # side by side under a perturbed schedule, whose reschedules are

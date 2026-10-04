@@ -4,7 +4,10 @@
 //! Images are erofs, built by mkfs.erofs with everything that could vary
 //! between two builds of the same files pinned: owners, timestamps, the
 //! filesystem UUID, and the order of entries. The same files therefore
-//! always make the same image, and the image's hash names the input.
+//! always make the same image, and the image's hash names the input. That
+//! includes the environment: mkfs.erofs and tar take SOURCE_DATE_EPOCH
+//! over the timestamp they are given, and a Nix development shell sets it,
+//! so the commands that build images run without it.
 
 use std::fs;
 use std::io::Write;
@@ -17,6 +20,10 @@ use anyhow::{Context, Result, bail};
 /// A fixed UUID, so the superblock does not change between builds.
 const UUID: &str = "00000000-0000-0000-0000-000000000000";
 
+/// The variable mkfs.erofs and tar read a timestamp from ahead of their
+/// flags, which `nix develop` sets to the start of 1980.
+const SOURCE_DATE_EPOCH: &str = "SOURCE_DATE_EPOCH";
+
 /// The timestamp every file in an image carries.
 const MTIME: &str = "1";
 
@@ -25,7 +32,16 @@ fn mkfs_erofs() -> Command {
     let mut cmd = Command::new("mkfs.erofs");
     cmd.args(["--quiet", "--all-root", "--ignore-mtime", "-x-1"])
         .arg(format!("-T{MTIME}"))
-        .arg(format!("-U{UUID}"));
+        .arg(format!("-U{UUID}"))
+        .env_remove(SOURCE_DATE_EPOCH);
+    cmd
+}
+
+/// tar, for packing store paths into an image's input, with nothing from
+/// the environment to change what it writes.
+fn tar_command() -> Command {
+    let mut cmd = Command::new("tar");
+    cmd.env_remove(SOURCE_DATE_EPOCH);
     cmd
 }
 
@@ -79,7 +95,7 @@ pub fn from_store_paths(paths: &[PathBuf], out: &Path) -> Result<()> {
     fs::write(&list, names.join("\n") + "\n")?;
     let tar = out.with_extension("tar");
 
-    let status = Command::new("tar")
+    let status = tar_command()
         .args(["--create", "--file"])
         .arg(&tar)
         .args([
@@ -143,6 +159,21 @@ mod tests {
     // Temporary names beside a file: two writers of the same file, in one
     // process or two, never share one.
     use super::*;
+
+    /// mkfs.erofs and tar read SOURCE_DATE_EPOCH ahead of the timestamps
+    /// they are given, and a Nix development shell sets it, so the
+    /// commands that build images take it out of their environment.
+    /// Checks each command's environment rather than setting the variable
+    /// here, which other tests would see.
+    #[test]
+    fn image_builders_ignore_source_date_epoch() {
+        for cmd in [mkfs_erofs(), tar_command()] {
+            let removed = cmd
+                .get_envs()
+                .any(|(name, value)| name == SOURCE_DATE_EPOCH && value.is_none());
+            assert!(removed, "{:?} keeps SOURCE_DATE_EPOCH", cmd.get_program());
+        }
+    }
 
     #[test]
     fn each_temporary_name_is_its_own() {
