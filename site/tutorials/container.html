@@ -138,7 +138,7 @@ make: *** [Makefile:18: check] Error 1</code></pre>
 ...
 round 3: ok
 test_pool_shutdown: ok
-rewind: run b1d028b3a17eea0f exited:0 after 1317 steps, 0.019s virtual, 0.770s wall (poweroff)</code></pre>
+rewind: run 29fdd213823e4e4f exited:0 after 1317 steps, 0.019s virtual, 0.704s wall (poweroff)</code></pre>
         <p>
           It passes, in the same 1317 steps every time. Nothing the command writes reaches your
           disk. A run's id is the hash of its inputs, so your image makes ids other than these.
@@ -157,29 +157,29 @@ rewind: run b1d028b3a17eea0f exited:0 after 1317 steps, 0.019s virtual, 0.770s w
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind check --root mylib.tar --cwd /src -- make check</span>
-schedule   0: exited:0             1317 steps    run b1d028b3a17eea0f
-schedule   1: exited:0             1524 steps    run b490e222fa3a968e
-schedule   2: exited:0             1587 steps    run b16ce1b73c9988c4
-schedule   3: exited:0             1473 steps    run 7cb80e4824f3e4e0
-schedule   4: exited:0             1617 steps    run e8e60bac2db38126
-schedule   5: exited:2             1018 steps    run 3a56c89de2309fd2
-schedule   6: exited:0             1563 steps    run f0be4bc7b196b600
-schedule   7: exited:0             1453 steps    run c88312835112d286
-schedule   8: exited:0             1528 steps    run bbea0c8b7fac3467
-schedule   9: exited:0             1521 steps    run 60dae325abf9a7ac
-schedule  10: exited:0             1686 steps    run bd34ab3781f5afd9
-schedule  11: exited:0             1586 steps    run 09c863e1d0d1b575
-schedule  12: exited:0             1631 steps    run 1cd07aba27fc3f8d
-schedule  13: exited:0             1522 steps    run 3ebe7c2d351eca24
-schedule  14: exited:0             1602 steps    run 3a8a780d309bfbb0
-schedule  15: exited:0             1543 steps    run 1520f728e6ab5ca4
-schedule  16: exited:0             1516 steps    run f2c317f10636a702
+schedule   0: exited:0             1317 steps    run 29fdd213823e4e4f
+schedule   1: exited:0             1524 steps    run 24c7c078553fd2a7
+schedule   2: exited:0             1587 steps    run 4b2f8d637beaf563
+schedule   3: exited:0             1473 steps    run 16acf7a4765ca352
+schedule   4: exited:0             1617 steps    run b72640b32de92eca
+schedule   5: exited:2             1018 steps    run 708fb3ec55a9b445
+schedule   6: exited:0             1563 steps    run a1a9982d9243c1b1
+schedule   7: exited:0             1453 steps    run 548a06b1163fdb17
+schedule   8: exited:0             1528 steps    run 7cff4a865622e0c7
+schedule   9: exited:0             1521 steps    run 49f9d9d393511921
+schedule  10: exited:0             1686 steps    run 607bbef2aa38e11c
+schedule  11: exited:0             1586 steps    run 75c9471e8a1e9194
+schedule  12: exited:0             1631 steps    run 4341fbd199cbb1f8
+schedule  13: exited:0             1522 steps    run 8e810ad6ffd05d95
+schedule  14: exited:0             1602 steps    run 1bdb4fc2b100f04c
+schedule  15: exited:0             1543 steps    run a27ac290941fae22
+schedule  16: exited:0             1516 steps    run 31ec6b11209519dc
 
 schedule 5 ends differently; narrowing the steps it perturbs
 perturbing only steps 586..690 still ends differently
 
-passing: run b1d028b3a17eea0f
-failing: run 9e525e3242d0a034
+passing: run 29fdd213823e4e4f
+failing: run 2614905ee8f09e0b
 
 where ./tests/test_pool_shutdown first behaves differently:
   both         659    39/41    write(1, "job 14 done: 39906\n")
@@ -196,7 +196,7 @@ where ./tests/test_pool_shutdown first behaves differently:
         <p>
           <code>check</code> narrows schedule 5's perturbation to steps 586 to 690 and keeps the
           passing and failing runs. The last block shows where the test's own output first differs.
-          The search took 36 seconds. <code>--all</code> tries every schedule:
+          The search took 31 seconds. <code>--all</code> tries every schedule:
         </p>
         <pre
           class="console"
@@ -210,17 +210,17 @@ where ./tests/test_pool_shutdown first behaves differently:
         </h2>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind log 9e525e32 --steps | tail -4</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind log 2614905e --steps | tail -4</span>
        684    39  job 16 done: 5986
        685    39  worker picked job 17
        714    35  Segmentation fault
        720    34  make: *** [Makefile:18: check] Error 1
 
-<span class="cmd"><span class="prompt">$</span> rewind events 9e525e32 --from 681 --to 698</span>
+<span class="cmd"><span class="prompt">$</span> rewind events 2614905e --from 681 --to 698</span>
        681    39/40    write(1, "job 15 done: 42559\n")
        684    39/41    write(1, "job 16 done: 5986\n")
        685    39/41    write(1, "worker picked job 17\n")
-       694     0/0     console "[    0.013444] test_pool_shutd[40]: segfault at 108 ip 0000561329832412 sp 00007f25856a7ea0 error 6 in test_pool_shutdown[1412,561329832000+1000] likely on CPU 0 (core 0, socket 0)"
+       694     0/0     console "[    0.013444] test_pool_shutd[40]: segfault at 108 ip 0000562ad6446412 sp 00007fcac0975ea0 error 6 in test_pool_shutdown[1412,562ad6446000+1000] likely on CPU 0 (core 0, socket 0)"
        695     0/0     console "[    0.013449] Code: 5f c3 0f b7 d3 44 89 f6 48 8d 3d 48 0c 00 00 b8 00 00 00 00 e8 6f fc ff ff 48 8b 3d 90 2c 00 00 e8 c3 fc ff ff 49 8b 44 24 58 &lt;83&gt; 80 08 01 00 00 01 e9 c6 fe ff ff 55 53 48 83 ec 08 be 78 00 00"
        696    39/40    SIGSEGV code=1 addr=0x108
        698    39/39    SIGSEGV code=0 addr=0x0</code></pre>
@@ -232,7 +232,7 @@ where ./tests/test_pool_shutdown first behaves differently:
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind ps 9e525e32 --at 696</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind ps 2614905e --at 696</span>
      1 /init
     34   make check
     35     /bin/sh -c for t in tests/test_pool_basic tests/test_pool_shutdown; do echo "running $t"; ./$t || exit 1; done
@@ -251,7 +251,7 @@ where ./tests/test_pool_shutdown first behaves differently:
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind cat 9e525e32 696 src/pool.c --pid 39 | sed -n '/^void pool_shutdown/,/^}/p'</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind cat 2614905e 696 src/pool.c --pid 39 | sed -n '/^void pool_shutdown/,/^}/p'</span>
 void pool_shutdown(struct pool *p)
 {
 	pthread_mutex_lock(&amp;p-&gt;lock);
@@ -270,8 +270,8 @@ void pool_shutdown(struct pool *p)
 	free(p);
 }
 
-<span class="cmd"><span class="prompt">$</span> printf 'pwd; ls; exit\n' | rewind shell 9e525e32 696 --pid 39</span>
-rewind: a shell at step 696 of 9e525e3242d0a034; exit it to leave
+<span class="cmd"><span class="prompt">$</span> printf 'pwd; ls; exit\n' | rewind shell 2614905e 696 --pid 39</span>
+rewind: a shell at step 696 of 2614905ee8f09e0b; exit it to leave
 [rewind] /src # pwd; ls; exit
 /src
 Containerfile  Makefile  libmylib.a  src  tests</code></pre>
@@ -283,19 +283,19 @@ Containerfile  Makefile  libmylib.a  src  tests</code></pre>
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> DEBUGINFOD_URLS=https://debuginfod.debian.net rewind gdb 9e525e32 681 -- -batch -ex 'break src/pool.c:77 if p-&gt;queue == 0' -ex continue -ex 'bt 3' -ex 'p p-&gt;queue' -ex list</span>
+        ><code><span class="cmd"><span class="prompt">$</span> DEBUGINFOD_URLS=https://debuginfod.debian.net rewind gdb 2614905e 681 -- -batch -ex 'break src/pool.c:77 if p-&gt;queue == 0' -ex continue -ex 'bt 3' -ex 'p p-&gt;queue' -ex list</span>
 rewind: step 681 ran in process 39; loading symbols for 3 of its files
 rewind: fetched 12 source files from the VM
-rewind: gdb at step 681 of 9e525e3242d0a034
+rewind: gdb at step 681 of 2614905ee8f09e0b
 0xffffffff81285085 in __outl (value=&lt;optimized out&gt;, port=1504) at ./arch/x86/include/asm/shared/io.h:24
 24	BUILDIO(l,  , u32)
-Breakpoint 1 at 0x56132983240d: file src/pool.c, line 77.
+Breakpoint 1 at 0x562ad644640d: file src/pool.c, line 77.
 
-Breakpoint 1, worker (arg=0x561332a3c2a0) at src/pool.c:77
+Breakpoint 1, worker (arg=0x562b0be702a0) at src/pool.c:77
 77				p-&gt;queue-&gt;completed++;
-#0  worker (arg=0x561332a3c2a0) at src/pool.c:77
-#1  0x00007f25857351f5 in start_thread (arg=&lt;optimized out&gt;) at ./nptl/pthread_create.c:442
-#2  0x00007f25857b58ec in clone3 () at ../sysdeps/unix/sysv/linux/x86_64/clone3.S:81
+#0  worker (arg=0x562b0be702a0) at src/pool.c:77
+#1  0x00007fcac0a031f5 in start_thread (arg=&lt;optimized out&gt;) at ./nptl/pthread_create.c:442
+#2  0x00007fcac0a838ec in clone3 () at ../sysdeps/unix/sysv/linux/x86_64/clone3.S:81
 $1 = (struct queue *) 0x0
 72			 * the bug. */
 73			long result = run_job(job);
@@ -318,10 +318,10 @@ $1 = (struct queue *) 0x0
         <h2 id="replay-it"><a class="anchor" href="#replay-it">Replay it</a></h2>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind replay 9e525e32</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind replay 2614905e</span>
 identical: 280 events over 730 steps
 
-<span class="cmd"><span class="prompt">$</span> rewind replay 9e525e32 --from 586</span>
+<span class="cmd"><span class="prompt">$</span> rewind replay 2614905e --from 586</span>
 identical from the keyframe at step 512 to the end (0.43s)</code></pre>
         <p>
           <code>--from</code> starts at the nearest keyframe before the step. A run replays on any
@@ -333,20 +333,20 @@ identical from the keyframe at step 512 to the end (0.43s)</code></pre>
         <h2 id="fork-it"><a class="anchor" href="#fork-it">Fork it</a></h2>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind fork b1d028b3 586 --schedule 1 --quiet</span>
-rewind: run 101d507de9fa8667 exited:2 after 971 steps, 0.016s virtual, 0.400s wall (poweroff)
+        ><code><span class="cmd"><span class="prompt">$</span> rewind fork 29fdd213 586 --schedule 1 --quiet</span>
+rewind: run e9adb24981358925 exited:2 after 971 steps, 0.016s virtual, 0.407s wall (poweroff)
 rewind: the fork first differs from its parent at step 601
 
-<span class="cmd"><span class="prompt">$</span> rewind fork b1d028b3 586 --schedule 2 --quiet</span>
-rewind: run 582d7734b18e6cb8 exited:0 after 1443 steps, 0.021s virtual, 0.412s wall (poweroff)
+<span class="cmd"><span class="prompt">$</span> rewind fork 29fdd213 586 --schedule 2 --quiet</span>
+rewind: run 06eb84c90c904ed4 exited:0 after 1443 steps, 0.021s virtual, 0.411s wall (poweroff)
 rewind: the fork first differs from its parent at step 598
 
-<span class="cmd"><span class="prompt">$</span> rewind fork b1d028b3 586 --schedule 3 --quiet</span>
-rewind: run fbc24857562e6444 exited:0 after 1626 steps, 0.022s virtual, 0.410s wall (poweroff)
+<span class="cmd"><span class="prompt">$</span> rewind fork 29fdd213 586 --schedule 3 --quiet</span>
+rewind: run 77b157bc0d491965 exited:0 after 1626 steps, 0.022s virtual, 0.417s wall (poweroff)
 rewind: the fork first differs from its parent at step 599
 
-<span class="cmd"><span class="prompt">$</span> rewind fork b1d028b3 586 --schedule 4 --quiet</span>
-rewind: run 5f609d45ee656cb4 exited:0 after 1570 steps, 0.022s virtual, 0.401s wall (poweroff)
+<span class="cmd"><span class="prompt">$</span> rewind fork 29fdd213 586 --schedule 4 --quiet</span>
+rewind: run da0719a766ef0149 exited:0 after 1570 steps, 0.022s virtual, 0.407s wall (poweroff)
 rewind: the fork first differs from its parent at step 600</code></pre>
         <p>From step 586 of the passing run, some schedules crash and some pass.</p>
       </section>
@@ -377,7 +377,7 @@ rewind: the fork first differs from its parent at step 600</code></pre>
         </figure>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind-app ~/.local/share/rewind/runs/9e525e3242d0a034 --compare ~/.local/share/rewind/runs/b1d028b3a17eea0f</span></code></pre>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind-app ~/.local/share/rewind/runs/2614905ee8f09e0b --compare ~/.local/share/rewind/runs/29fdd213823e4e4f</span></code></pre>
       </section>
 
       <section class="step">
@@ -421,7 +421,7 @@ rewind: the fork first differs from its parent at step 600</code></pre>
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> docker build -q -t mylib -f Containerfile . &amp;&amp; docker export $(docker create mylib) -o mylib.tar</span>
-sha256:05a5b30971fb71954b8febd4c826e4b9b01794cb4da1e591c5cfe255e6735b87
+sha256:ec1289ae5711150fd369c64b0de50ec8bd9d7a8a8cada241d51c8fe7dfdfe3e2
 
 <span class="cmd"><span class="prompt">$</span> rewind check --all --root mylib.tar --cwd /src -- make check</span>
 ...
