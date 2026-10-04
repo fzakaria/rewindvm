@@ -65,7 +65,9 @@ pub fn start_step(trace: &Trace) -> u64 {
 pub fn size(bytes: u64) -> String {
     const KB: f64 = 1e3;
     const MB: f64 = 1e6;
+    const GB: f64 = 1e9;
     match bytes as f64 {
+        b if b >= GB => format!("{:.1} GB", b / GB),
         b if b >= MB => format!("{:.1} MB", b / MB),
         b if b >= KB => format!("{:.1} KB", b / KB),
         _ => format!("{bytes} bytes"),

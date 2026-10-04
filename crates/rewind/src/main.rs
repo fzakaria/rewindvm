@@ -269,7 +269,7 @@ enum Command {
     /// Remove a run and every run forked from it, from those, and so on,
     /// with their imported inputs. Refused, removing nothing, while one of
     /// them has not finished or a run that stays reads keyframes from one
-    /// of them. Pages in the page store stay.
+    /// of them. The images and pages they used stay until `rewind gc`.
     Remove {
         run: String,
         /// Show what would be removed and remove nothing.
@@ -277,6 +277,20 @@ enum Command {
         dry_run: bool,
         /// Print {"removed": [ids]} on standard output, the run first, for
         /// programs such as the desktop app.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove the cached images no run names and the pages in the page
+    /// store no keyframe names, which `remove` and `prune` leave behind.
+    /// Refused, removing nothing, while another rewind process is packing
+    /// an image, executing a run, has a shell open or has the page store
+    /// open.
+    Gc {
+        /// Show what would be removed and remove nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Print what was removed as one JSON object on standard output:
+        /// {"images": [{"path", "bytes"}], "pages", "page_bytes", "bytes"}.
         #[arg(long)]
         json: bool,
     },
@@ -429,6 +443,19 @@ fn run(cli: Cli) -> Result<ExitCode> {
     }
 
     let home = Home::open()?;
+
+    // Commands that pack images, execute runs or mount extras hold the home
+    // in use until they exit, so `rewind gc` never removes an image between
+    // its packing and the manifest of the run that boots it.
+    let _in_use = match &cli.command {
+        Command::Run { .. }
+        | Command::Nix { .. }
+        | Command::Check { .. }
+        | Command::Fork { .. }
+        | Command::Shell { .. }
+        | Command::Import { .. } => Some(home.in_use()?),
+        _ => None,
+    };
     match cli.command {
         Command::Run { image, machine } => {
             let guest = Guest::from_env()?;
@@ -779,6 +806,10 @@ fn run(cli: Cli) -> Result<ExitCode> {
             }
             if removals.is_empty() {
                 eprintln!("rewind: no fork of {} needs pruning", root.manifest.id);
+                return Ok(ExitCode::SUCCESS);
+            }
+            if !dry_run {
+                print_gc_hint(&home);
             }
             Ok(ExitCode::SUCCESS)
         }
@@ -798,6 +829,60 @@ fn run(cli: Cli) -> Result<ExitCode> {
             for id in &removed {
                 println!("{verb} {id}");
             }
+            if !dry_run {
+                print_gc_hint(&home);
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Gc { dry_run, json } => {
+            let act = if dry_run {
+                rewind_core::gc::Act::DryRun
+            } else {
+                rewind_core::gc::Act::Remove
+            };
+            let garbage = rewind_core::gc::collect(&home, act)?;
+            if json {
+                let images: Vec<serde_json::Value> = garbage
+                    .images
+                    .iter()
+                    .map(|i| serde_json::json!({ "path": i.path, "bytes": i.bytes }))
+                    .collect();
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "images": images,
+                        "pages": garbage.pages.pages,
+                        "page_bytes": garbage.pages.bytes,
+                        "bytes": garbage.bytes(),
+                    })
+                );
+                return Ok(ExitCode::SUCCESS);
+            }
+            let (verb, freed) = if dry_run {
+                ("would remove", "would free")
+            } else {
+                ("removed", "freed")
+            };
+            for image in &garbage.images {
+                println!(
+                    "{verb} {} ({})",
+                    image.path.display(),
+                    show::size(image.bytes)
+                );
+            }
+            println!(
+                "{verb} {} pages ({})",
+                garbage.pages.pages,
+                show::size(garbage.pages.bytes)
+            );
+            if garbage.unreadable_keyframes > 0 {
+                eprintln!(
+                    "rewind: {} keyframes do not read back, as from another build of rewind; \
+                     the pages only they name were not kept",
+                    garbage.unreadable_keyframes
+                );
+            }
+            println!("{freed} {}", show::size(garbage.bytes()));
             Ok(ExitCode::SUCCESS)
         }
         Command::Cat {
@@ -1095,6 +1180,26 @@ fn run(cli: Cli) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
     }
+}
+
+/// After runs are removed, says how much of the image cache `rewind gc`
+/// would free, which takes reading every manifest. Counting the pages too
+/// would take reading every keyframe and the whole page index, which is
+/// too slow to do after each removal, so the line only mentions them. A
+/// failure to count is not the removal's, and prints nothing.
+fn print_gc_hint(home: &Home) {
+    let Ok(images) = rewind_core::gc::unused_images(home) else {
+        return;
+    };
+    let bytes: u64 = images.iter().map(|i| i.bytes).sum();
+    if bytes == 0 {
+        eprintln!("rewind: `rewind gc` removes the pages no run uses any more");
+        return;
+    }
+    eprintln!(
+        "rewind: images no run uses take {}; `rewind gc` removes them and the pages no run uses",
+        show::size(bytes)
+    );
 }
 
 /// A workload resolved to what a run needs: done once, then run under as

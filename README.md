@@ -151,6 +151,10 @@ $ rewind prune <run> --identical
 $ rewind remove <run> --dry-run
 $ rewind remove <run>
 
+# remove the cached images and stored pages no run uses any more
+$ rewind gc --dry-run
+$ rewind gc
+
 # share a run as one file
 $ rewind export <run> --replayable
 $ rewind import <file>.rwd

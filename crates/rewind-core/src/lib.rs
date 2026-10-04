@@ -5,6 +5,7 @@ pub mod compare;
 pub mod cpio;
 pub mod debug;
 pub mod export;
+pub mod gc;
 pub mod home;
 pub mod image;
 pub mod inspect;

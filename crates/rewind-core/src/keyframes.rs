@@ -25,6 +25,9 @@ const MAX_INTERVAL: u64 = 1 << 20;
 
 pub const DIR: &str = "keyframes";
 
+/// The extension of a keyframe's file, which is named by its step.
+pub const EXTENSION: &str = "kf";
+
 /// The page store as the monitor sees it.
 pub struct StorePages<'a>(pub &'a mut Store);
 
@@ -50,7 +53,7 @@ impl Pages for ReadPages<'_> {
 }
 
 fn path(run_dir: &Path, step: u64) -> PathBuf {
-    run_dir.join(DIR).join(format!("{step:016}.kf"))
+    run_dir.join(DIR).join(format!("{step:016}.{EXTENSION}"))
 }
 
 pub fn save(run_dir: &Path, kf: &Keyframe) -> Result<()> {
@@ -99,7 +102,7 @@ fn own_steps(run_dir: &Path) -> Vec<u64> {
         .filter_map(|e| {
             e.file_name()
                 .to_str()
-                .and_then(|n| n.strip_suffix(".kf"))
+                .and_then(|n| n.strip_suffix(EXTENSION)?.strip_suffix('.'))
                 .and_then(|n| n.parse().ok())
         })
         .collect();

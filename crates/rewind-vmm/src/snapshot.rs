@@ -34,7 +34,9 @@ pub trait Pages {
 /// The hash the all-zero page goes by; see rewind-store.
 pub const ZERO_PAGE: [u8; 32] = [0; 32];
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// A machine at a step. The default is an empty one with no pages, for
+/// tests of what reads only a keyframe's pages.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Keyframe {
     pub step: u64,
     /// The step of the keyframe whose memory this one's pages are written
@@ -47,7 +49,7 @@ pub struct Keyframe {
     pub pages: Vec<(u32, [u8; 32])>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct CpuState {
     regs: Vec<u8>,
     sregs: Vec<u8>,
@@ -60,7 +62,7 @@ struct CpuState {
     mp_state: Vec<u8>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct DeviceState {
     now: u64,
     deadline: Option<u64>,

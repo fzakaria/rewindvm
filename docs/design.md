@@ -293,9 +293,14 @@ it again.
   runs/<id>/manifest.json     inputs, what they describe, parent, outcome
   runs/<id>/trace.bin         every record, each prefixed with its step
   runs/<id>/keyframes/*.kf    keyframes, by step
-  images/*.erofs              input images, by content
+  images/2/*.erofs            input images, by content
   store/                      the page store
+  lock                        held while a process adds images or runs
 ```
+
+Images live in a directory named for how they are built, so an image an
+earlier way of building made is not taken for one this way makes. Runs that
+booted an older image keep naming it where it is, in `images/` itself.
 
 Besides the inputs, a manifest records `trace_hash`, the BLAKE3 hash of
 `trace.bin` once the run has finished, so runs that did the same thing are
@@ -356,7 +361,9 @@ of runs with the same inputs, and a fork and its parent. `rewind-store`
 therefore stores each 4 KiB page once, named by its BLAKE3 hash and compressed
 with zstd at its fastest level. The all-zero page is never stored. Pages go
 into append-only pack files with an append-only index. A crash can leave at
-most a torn last index entry, which is dropped when the store opens.
+most a torn last index entry, which is dropped when the store opens. Pages no
+keyframe names any more stay until `rewind gc` removes them (see [Removing
+runs](#removing-runs)).
 
 [casita](https://casita.rs) was the other candidate. It is a content-addressed
 store from Cachix with BLAKE3 and FastCDC chunking. It fits disk images and
@@ -418,6 +425,8 @@ copies every keyframe a run reads into the archive as the run's own and drops
 whose parent is gone cannot reach its shared keyframes, and seeking in it
 fails with the id of the run it needs; `rewind replay` from boot still works.
 
+### Removing runs
+
 `rewind remove <run>` removes the run and every run that descends from it
 through `parent`, with any inputs an import placed for them, the deepest
 first, so a removal cut short never leaves a fork whose parent is gone. It
@@ -431,8 +440,42 @@ fork's keyframes and loses its parent.
 `rewind prune <run> --identical` removes forks in a run's family, its forks
 and their forks, whose `trace_hash` equals an older member's. The run itself
 always stays, and so does any run another run here names as its parent or
-reads keyframes from. Pages the removed keyframes named stay in the page
-store.
+reads keyframes from.
+
+Neither command removes images or pages, which other runs may share. `rewind
+gc` removes the images in `images/` and its subdirectories that no run's
+manifest names, and the pages that no keyframe in any run's directory names.
+A fork reads keyframes from the directories of the runs it shares them with,
+so counting every directory's keyframes counts every keyframe a run reads.
+`--dry-run` reports the same figures and removes nothing. On a machine with
+7,155 runs it found 23 of 81 images (22.8 GB) and 15 million of 18.6 million
+stored pages (16.5 GB) unused.
+
+`rewind gc` refuses, removing nothing, while another process may be about to
+use something it would remove:
+
+- **A process holds the home in use.** `rewind run`, `nix`, `check`, `fork`,
+  `shell` and `import` hold a shared lock on the home's `lock` file until they
+  exit, and `rewind gc` takes it exclusively. An image is packed before the
+  manifest of the run that boots it is written, so between the two no run
+  names it; the lock covers that window. An extras image for `rewind shell
+  --with` is named by no run at all, and goes like any unused image once no
+  shell holds the home in use; the next shell with the same packages packs it
+  again.
+- **A run is executing**, by the same test `rewind remove` uses, for a
+  process that takes no home lock.
+- **Another process has the page store open**, such as one seeking in a run.
+  Every store holds a shared lock on `store/lock`, and `rewind gc` takes it
+  exclusively, so a store opened while it runs waits for it to finish.
+
+Removing pages rewrites the store. The pages that stay are copied, as stored,
+out of every pack that holds anything else into new packs, and a new index of
+only those pages replaces the old one with a rename. The old packs are deleted
+after the rename. A crash before it leaves the old index naming every page
+where it was, and one after leaves the new index naming every page where it
+is; either way the next `rewind gc` deletes the packs no entry names. The
+copy needs as much free space as the pages that stay in the packs it
+rewrites.
 
 ## Exploring interleavings
 

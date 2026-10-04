@@ -25,11 +25,18 @@
 //! The index only grows, so a sorted copy of its start never goes stale;
 //! an opener that finds many entries past it writes a new one, under
 //! another name first, and renames it over the old.
+//!
+//! Pages no keyframe names any more are removed by a [`Collector`], which
+//! needs the store to itself. It copies the pages that stay out of every
+//! pack that holds anything else into new packs, writes a new index of
+//! only those pages, and then deletes the old packs. Until the new index
+//! is renamed over the old, the old one still names every page where it
+//! was; after, the new one names every page where it is now.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::hash::{BuildHasherDefault, Hasher};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -43,6 +50,22 @@ pub const ZERO_PAGE: Hash = [0; 32];
 
 /// The size of one index entry: hash, pack number, offset, length.
 const INDEX_ENTRY: usize = 32 + 4 + 8 + 4;
+
+/// The index, the directory of packs, and the file every open store holds
+/// a shared lock on.
+const INDEX: &str = "index";
+const PACKS: &str = "packs";
+const LOCK: &str = "lock";
+
+/// A pack's file name after its number.
+const PACK_SUFFIX: &str = ".pack";
+
+/// The name a collector writes a new index under before renaming it over
+/// the old, followed by its process id.
+const COLLECTING: &str = "index.collecting";
+
+/// How much of the index or a pack a collector reads at a time.
+const COLLECT_BUFFER: usize = 1 << 20;
 
 /// The sorted copy of the index's first entries: a header of a magic
 /// value and how many index entries it covers, then those entries, in the
@@ -193,7 +216,7 @@ fn write_sorted(dir: &Path, entries: &[[u8; INDEX_ENTRY]], covers: u64) -> Resul
 /// millions of them: hashing each again with the standard hasher made
 /// opening a large store take seconds.
 #[derive(Default)]
-struct PageHasher(u64);
+pub struct PageHasher(u64);
 
 impl Hasher for PageHasher {
     fn write(&mut self, bytes: &[u8]) {
@@ -211,7 +234,10 @@ impl Hasher for PageHasher {
     }
 }
 
-type PageHashes = BuildHasherDefault<PageHasher>;
+pub type PageHashes = BuildHasherDefault<PageHasher>;
+
+/// A set of pages by hash, such as the ones a collection keeps.
+pub type PageSet = HashSet<Hash, PageHashes>;
 
 /// The index as far as this store has read it: a sorted copy of its first
 /// entries, and the entries after those in memory.
@@ -262,8 +288,8 @@ pub struct Stats {
 
 impl Store {
     pub fn open(dir: &Path) -> Result<Store> {
-        fs::create_dir_all(dir.join("packs"))?;
-        let index_path = dir.join("index");
+        fs::create_dir_all(dir.join(PACKS))?;
+        let index_path = dir.join(INDEX);
         let index_log = OpenOptions::new()
             .create(true)
             .append(true)
@@ -274,7 +300,7 @@ impl Store {
         // opener with the store to itself may cut it off: with others open
         // it could be an entry still being written. The same goes for a
         // sorted copy still being written.
-        let lock = File::create(dir.join("lock"))?;
+        let lock = File::create(dir.join(LOCK))?;
         if lock.try_lock().is_ok() {
             let len = index_log.metadata()?.len();
             let whole = len / INDEX_ENTRY as u64 * INDEX_ENTRY as u64;
@@ -337,7 +363,7 @@ impl Store {
         // The entries after the old copy, as the index file has them.
         let tail = index.read - covered * INDEX_ENTRY as u64;
         let mut bytes = vec![0u8; tail as usize];
-        File::open(self.dir.join("index"))?
+        File::open(self.dir.join(INDEX))?
             .read_exact_at(&mut bytes, covered * INDEX_ENTRY as u64)?;
         entries.extend_from_slice(bytes.as_chunks::<INDEX_ENTRY>().0);
 
@@ -354,7 +380,7 @@ impl Store {
     /// by it or by any other.
     fn refresh(&self) -> Result<()> {
         let mut index = self.index.lock().unwrap();
-        let mut file = File::open(self.dir.join("index"))?;
+        let mut file = File::open(self.dir.join(INDEX))?;
         file.seek(SeekFrom::Start(index.read))?;
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
@@ -369,23 +395,29 @@ impl Store {
     }
 
     fn pack_path(dir: &Path, id: u32) -> PathBuf {
-        dir.join("packs").join(format!("{id:08}.pack"))
+        dir.join(PACKS).join(format!("{id:08}{PACK_SUFFIX}"))
     }
 
-    /// A pack to append to that no other writer holds: an existing one with
-    /// room, or else a new one.
-    fn claim_pack(&self) -> Result<Pack> {
-        let mut ids: Vec<u32> = fs::read_dir(self.dir.join("packs"))?
+    /// The numbers of the packs in `dir`, in order.
+    fn pack_ids(dir: &Path) -> Result<Vec<u32>> {
+        let mut ids: Vec<u32> = fs::read_dir(dir.join(PACKS))?
             .filter_map(|e| {
                 e.ok()?
                     .file_name()
                     .to_str()?
-                    .strip_suffix(".pack")?
+                    .strip_suffix(PACK_SUFFIX)?
                     .parse()
                     .ok()
             })
             .collect();
         ids.sort_unstable();
+        Ok(ids)
+    }
+
+    /// A pack to append to that no other writer holds: an existing one with
+    /// room, or else a new one.
+    fn claim_pack(&self) -> Result<Pack> {
+        let ids = Self::pack_ids(&self.dir)?;
         for &id in ids.iter().rev() {
             let file = OpenOptions::new()
                 .append(true)
@@ -538,6 +570,279 @@ impl Store {
                 .sum::<u64>()
                 + after.iter().map(|l| l.len as u64).sum::<u64>(),
         }
+    }
+}
+
+/// Whether `Collector::collect` changes the store.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Act {
+    /// Only count what would go.
+    DryRun,
+    Remove,
+}
+
+/// What a collection removed, or would.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Collected {
+    /// Index entries dropped: one for each page that is not kept, and one
+    /// for each second copy of a kept page that two writers both stored.
+    pub pages: u64,
+    /// How many bytes smaller the store is on disk afterwards.
+    pub bytes: u64,
+}
+
+/// A pack on disk: its number, its size, and how many of its bytes hold
+/// pages a collection keeps.
+struct PackUse {
+    id: u32,
+    size: u64,
+    kept: u64,
+}
+
+impl PackUse {
+    /// Bytes of the pack that hold no kept page: removed pages, second
+    /// copies, and what a crash left past the last entry.
+    fn dead(&self) -> u64 {
+        self.size.saturating_sub(self.kept)
+    }
+}
+
+/// A store held by one process alone, which may remove pages from it. It
+/// holds the store's lock exclusively, so a store opened meanwhile waits
+/// for it to be dropped.
+pub struct Collector {
+    dir: PathBuf,
+    _lock: File,
+}
+
+impl Collector {
+    /// The store in `dir` to this process alone, or None while another
+    /// store has it open, since that store may be about to read a page or
+    /// name one in a new keyframe.
+    pub fn lock(dir: &Path) -> Result<Option<Collector>> {
+        fs::create_dir_all(dir.join(PACKS))?;
+        let lock = File::create(dir.join(LOCK))?;
+        match lock.try_lock() {
+            Ok(()) => Ok(Some(Collector {
+                dir: dir.to_path_buf(),
+                _lock: lock,
+            })),
+            Err(fs::TryLockError::WouldBlock) => Ok(None),
+            Err(fs::TryLockError::Error(e)) => {
+                Err(e).with_context(|| format!("locking {}", dir.display()))
+            }
+        }
+    }
+
+    /// Removes every page not in `live`, or with `Act::DryRun` counts what
+    /// that would remove. A pack holding only kept pages stays as it is;
+    /// the kept pages of any other pack are copied into new packs, and the
+    /// old pack is deleted once a new index names the copies.
+    pub fn collect(&self, live: &PageSet, act: Act) -> Result<Collected> {
+        let (mut kept, dropped) = self.kept_entries(live)?;
+
+        // Each pack's size and the bytes its kept pages take. A pack with
+        // anything else in it is rewritten; one with no kept page is only
+        // deleted.
+        let mut kept_bytes: HashMap<u32, u64> = HashMap::new();
+        for loc in kept.values() {
+            *kept_bytes.entry(loc.pack).or_default() += u64::from(loc.len);
+        }
+        let mut packs = Vec::new();
+        for id in Store::pack_ids(&self.dir)? {
+            let size = fs::metadata(Store::pack_path(&self.dir, id))?.len();
+            let kept = kept_bytes.get(&id).copied().unwrap_or(0);
+            packs.push(PackUse { id, size, kept });
+        }
+        let rewritten: Vec<&PackUse> = packs.iter().filter(|p| p.dead() > 0).collect();
+        let moves = rewritten.iter().any(|p| p.kept > 0);
+
+        // The index is written again when it loses an entry or a kept page
+        // moves, along with a sorted copy of all of it when it is as long
+        // as an opener would sort.
+        let reindex = dropped > 0 || moves;
+        let index_now = file_len(&self.dir.join(INDEX))? + file_len(&self.dir.join(SORTED))?;
+        let entries_len = (kept.len() * INDEX_ENTRY) as u64;
+        let sorted_len = if kept.len() >= COMPACT_AT {
+            SORTED_HEADER as u64 + entries_len
+        } else {
+            0
+        };
+        let index_after = if reindex {
+            entries_len + sorted_len
+        } else {
+            index_now
+        };
+        let packs_freed: u64 = rewritten.iter().map(|p| p.dead()).sum();
+        let collected = Collected {
+            pages: dropped,
+            bytes: (packs_freed + index_now).saturating_sub(index_after),
+        };
+        if act == Act::DryRun || (rewritten.is_empty() && !reindex) {
+            return Ok(collected);
+        }
+
+        // The kept pages of rewritten packs go into new packs, numbered
+        // after every pack there is.
+        let next = packs.last().map_or(0, |p| p.id + 1);
+        let from: HashSet<u32> = rewritten.iter().map(|p| p.id).collect();
+        self.move_pages(&mut kept, &from, next)?;
+        if reindex {
+            self.write_index(&kept)?;
+        }
+
+        // The new index names none of the old packs' pages.
+        for pack in &rewritten {
+            fs::remove_file(Store::pack_path(&self.dir, pack.id))?;
+        }
+        Ok(collected)
+    }
+
+    /// The first index entry for each page in `live`, and how many other
+    /// entries there are. The index is read a buffer at a time, so a
+    /// collection holds only the kept entries in memory. A partial last
+    /// entry is a crash's, since no one else has the store open.
+    fn kept_entries(&self, live: &PageSet) -> Result<(HashMap<Hash, Location, PageHashes>, u64)> {
+        let mut kept: HashMap<Hash, Location, PageHashes> = HashMap::default();
+        let mut dropped = 0u64;
+        let index = match File::open(self.dir.join(INDEX)) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((kept, dropped)),
+            Err(e) => return Err(e.into()),
+        };
+        let mut reader = BufReader::with_capacity(COLLECT_BUFFER, index);
+        let mut entry = [0u8; INDEX_ENTRY];
+        loop {
+            match reader.read_exact(&mut entry) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(e.into()),
+            }
+            let hash: Hash = entry[..32].try_into().unwrap();
+            if !live.contains(&hash) || kept.contains_key(&hash) {
+                dropped += 1;
+                continue;
+            }
+            kept.insert(hash, Location::of(&entry));
+        }
+        Ok((kept, dropped))
+    }
+
+    /// Copies the kept pages of the packs in `from` into new packs
+    /// numbered from `next`, as they are stored, and points `kept` at the
+    /// copies. Each new pack is synced before the index names it.
+    fn move_pages(
+        &self,
+        kept: &mut HashMap<Hash, Location, PageHashes>,
+        from: &HashSet<u32>,
+        mut next: u32,
+    ) -> Result<()> {
+        let mut moving: Vec<(Hash, Location)> = kept
+            .iter()
+            .filter(|(_, loc)| from.contains(&loc.pack))
+            .map(|(hash, loc)| (*hash, *loc))
+            .collect();
+        moving.sort_unstable_by_key(|(_, loc)| (loc.pack, loc.offset));
+
+        let mut source: Option<(u32, File)> = None;
+        let mut out: Option<Pack> = None;
+        let mut page = Vec::new();
+        for (hash, loc) in moving {
+            // The old pack the page is in.
+            if source.as_ref().is_none_or(|(id, _)| *id != loc.pack) {
+                let file = File::open(Store::pack_path(&self.dir, loc.pack))?;
+                source = Some((loc.pack, file));
+            }
+            let (_, file) = source.as_ref().expect("opened above");
+            page.resize(loc.len as usize, 0);
+            file.read_exact_at(&mut page, loc.offset)?;
+
+            // A new pack when there is none yet or the page would not fit.
+            let full = out
+                .as_ref()
+                .is_none_or(|p| p.len + u64::from(loc.len) > PACK_MAX);
+            if full {
+                if let Some(done) = out.take() {
+                    done.file.sync_all()?;
+                }
+                let file = OpenOptions::new()
+                    .append(true)
+                    .create_new(true)
+                    .open(Store::pack_path(&self.dir, next))?;
+                out = Some(Pack {
+                    file,
+                    id: next,
+                    len: 0,
+                });
+                next += 1;
+            }
+            let pack = out.as_mut().expect("opened above");
+            pack.file.write_all(&page)?;
+            kept.insert(
+                hash,
+                Location {
+                    pack: pack.id,
+                    offset: pack.len,
+                    len: loc.len,
+                },
+            );
+            pack.len += u64::from(loc.len);
+        }
+        if let Some(done) = out {
+            done.file.sync_all()?;
+        }
+        Ok(())
+    }
+
+    /// Replaces the index with one entry for each page in `kept`, sorted,
+    /// and a sorted copy covering all of it when it is as long as an opener
+    /// would sort. The old sorted copy goes first, so that no crash leaves
+    /// it beside an index it does not describe; until the rename the old
+    /// index stands, and after it the new one.
+    fn write_index(&self, kept: &HashMap<Hash, Location, PageHashes>) -> Result<()> {
+        let mut entries: Vec<[u8; INDEX_ENTRY]> = kept
+            .iter()
+            .map(|(hash, loc)| {
+                let mut entry = [0u8; INDEX_ENTRY];
+                entry[..32].copy_from_slice(hash);
+                entry[32..36].copy_from_slice(&loc.pack.to_le_bytes());
+                entry[36..44].copy_from_slice(&loc.offset.to_le_bytes());
+                entry[44..48].copy_from_slice(&loc.len.to_le_bytes());
+                entry
+            })
+            .collect();
+        entries.sort_unstable_by(|a, b| a[..32].cmp(&b[..32]));
+
+        // The new index, whole and synced, under a name of its own.
+        let tmp = self
+            .dir
+            .join(format!("{COLLECTING}.{}", std::process::id()));
+        let mut out = BufWriter::with_capacity(COLLECT_BUFFER, File::create(&tmp)?);
+        for entry in &entries {
+            out.write_all(entry)?;
+        }
+        out.into_inner()?.sync_all()?;
+
+        match fs::remove_file(self.dir.join(SORTED)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        fs::rename(&tmp, self.dir.join(INDEX))?;
+        File::open(&self.dir)?.sync_all()?;
+        if entries.len() < COMPACT_AT {
+            return Ok(());
+        }
+        write_sorted(&self.dir, &entries, entries.len() as u64)
+    }
+}
+
+/// The size of the file at `path`, or 0 when there is none.
+fn file_len(path: &Path) -> Result<u64> {
+    match fs::metadata(path) {
+        Ok(meta) => Ok(meta.len()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(e) => Err(e.into()),
     }
 }
 
@@ -778,6 +1083,143 @@ mod tests {
             assert_eq!(sorted.find(&key).map(|l| l.pack), Some(i));
         }
         assert!(sorted.find(blake3::hash(b"absent").as_bytes()).is_none());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The set of `hashes`, as `Collector::collect` takes the pages to keep.
+    fn live(hashes: &[Hash]) -> PageSet {
+        hashes.iter().copied().collect()
+    }
+
+    /// The bytes of every pack, the index and its sorted copy in `dir`.
+    fn on_disk(dir: &Path) -> u64 {
+        let packs: u64 = fs::read_dir(dir.join("packs"))
+            .unwrap()
+            .map(|e| e.unwrap().metadata().unwrap().len())
+            .sum();
+        let index = fs::metadata(dir.join("index")).map_or(0, |m| m.len());
+        let sorted = fs::metadata(dir.join(SORTED)).map_or(0, |m| m.len());
+        packs + index + sorted
+    }
+
+    #[test]
+    fn collecting_keeps_the_live_pages_and_removes_the_rest() {
+        // Six pages in one pack, two of them live. A dry run counts four
+        // pages and the bytes they and their index entries take, and
+        // changes nothing; collecting then frees exactly that, and a store
+        // opened after reads the two live pages and has no other.
+        let dir = tmp("collect");
+        let hashes = {
+            let mut store = Store::open(&dir).unwrap();
+            put_pages(&mut store, 1, 6)
+        };
+        let keep = live(&[hashes[1], hashes[4]]);
+        let before = on_disk(&dir);
+
+        let collector = Collector::lock(&dir)
+            .unwrap()
+            .expect("no one has the store open");
+        let counted = collector.collect(&keep, Act::DryRun).unwrap();
+        assert_eq!(counted.pages, 4);
+        assert!(counted.bytes > 0);
+        assert_eq!(on_disk(&dir), before);
+
+        let collected = collector.collect(&keep, Act::Remove).unwrap();
+        assert_eq!(collected, counted);
+        assert_eq!(on_disk(&dir), before - collected.bytes);
+        drop(collector);
+
+        let store = Store::open(&dir).unwrap();
+        assert_eq!(store.stats().pages, 2);
+        let mut out = vec![0u8; PAGE];
+        for (i, hash) in hashes.iter().enumerate() {
+            if keep.contains(hash) {
+                store.get(hash, &mut out).unwrap();
+                assert_eq!(out, page(i as u8 + 1));
+            } else {
+                assert!(!store.contains(hash));
+            }
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_collected_store_takes_new_pages() {
+        // After a collection, a writer appends to the store as before, and
+        // the pages it adds and the ones kept all read back.
+        let dir = tmp("collect-then-put");
+        let hashes = {
+            let mut store = Store::open(&dir).unwrap();
+            put_pages(&mut store, 1, 3)
+        };
+        let collector = Collector::lock(&dir).unwrap().unwrap();
+        collector.collect(&live(&hashes[..1]), Act::Remove).unwrap();
+        drop(collector);
+
+        let more = {
+            let mut store = Store::open(&dir).unwrap();
+            put_pages(&mut store, 10, 2)
+        };
+        let store = Store::open(&dir).unwrap();
+        let mut out = vec![0u8; PAGE];
+        for (hash, fill) in [(hashes[0], 1), (more[0], 10), (more[1], 11)] {
+            store.get(&hash, &mut out).unwrap();
+            assert_eq!(out, page(fill));
+        }
+        assert_eq!(store.stats().pages, 3);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_store_whose_pages_all_live_is_left_as_it_is() {
+        // Nothing to remove: no page counted, no byte freed, no file
+        // rewritten.
+        let dir = tmp("collect-nothing");
+        let hashes = {
+            let mut store = Store::open(&dir).unwrap();
+            put_pages(&mut store, 1, 3)
+        };
+        let before = fs::read(dir.join("index")).unwrap();
+        let collector = Collector::lock(&dir).unwrap().unwrap();
+        let collected = collector.collect(&live(&hashes), Act::Remove).unwrap();
+        assert_eq!(collected, Collected::default());
+        assert_eq!(fs::read(dir.join("index")).unwrap(), before);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_pack_no_entry_names_is_removed() {
+        // A pack a crash left behind, which no index entry names, holds
+        // nothing to keep: collecting deletes it and counts its bytes.
+        let dir = tmp("collect-orphan");
+        let hash = {
+            let mut store = Store::open(&dir).unwrap();
+            store.put(&page(1)).unwrap()
+        };
+        let orphan = Store::pack_path(&dir, 7);
+        fs::write(&orphan, [9u8; 100]).unwrap();
+        let collector = Collector::lock(&dir).unwrap().unwrap();
+        let collected = collector.collect(&live(&[hash]), Act::Remove).unwrap();
+        assert_eq!(
+            collected,
+            Collected {
+                pages: 0,
+                bytes: 100
+            }
+        );
+        assert!(!orphan.exists());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_store_open_elsewhere_is_not_collected() {
+        // While any store has the directory open, no collector gets it,
+        // since that store may be about to read or name a page.
+        let dir = tmp("collect-busy");
+        let store = Store::open(&dir).unwrap();
+        assert!(Collector::lock(&dir).unwrap().is_none());
+        drop(store);
+        assert!(Collector::lock(&dir).unwrap().is_some());
         fs::remove_dir_all(&dir).unwrap();
     }
 

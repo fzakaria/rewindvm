@@ -285,6 +285,20 @@ in
         test ! -e $REWIND_HOME/runs/$fork
         test ! -e $REWIND_HOME/runs/$fork2
         rewind replay a --from 300 | grep '^identical'
+
+        # The removed forks' own keyframes named pages no other run's do:
+        # gc removes them, a dry run first removing nothing, and the runs
+        # that stay still replay from their keyframes. A second gc finds
+        # nothing left.
+        rewind gc --dry-run | tee planned
+        grep -q '^would remove [1-9][0-9]* pages' planned
+        rewind gc --dry-run | grep -q '^would remove [1-9][0-9]* pages'
+        rewind gc --json | tee collected
+        grep -q '"pages":[1-9]' collected
+        rewind replay a --from 300 | grep '^identical'
+        rewind replay b --from 300 | grep '^identical'
+        rewind gc --json | tee again
+        grep -q '"pages":0' again
         touch $out
       '';
 

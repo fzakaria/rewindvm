@@ -436,7 +436,7 @@ const EXECUTING_LOCK: &str = "executing.lock";
 
 /// Takes `dir`'s executing lock, held until the file is dropped. Refused
 /// while another execution of the same run holds it.
-fn lock_executing(dir: &Path) -> Result<fs::File> {
+pub(crate) fn lock_executing(dir: &Path) -> Result<fs::File> {
     let path = dir.join(EXECUTING_LOCK);
     let file = fs::File::create(&path).with_context(|| format!("creating {}", path.display()))?;
     if file.try_lock().is_err() {
@@ -449,7 +449,7 @@ fn lock_executing(dir: &Path) -> Result<fs::File> {
 }
 
 /// Whether a process is executing the run in `dir` now.
-fn executing(dir: &Path) -> bool {
+pub(crate) fn executing(dir: &Path) -> bool {
     let Ok(file) = fs::File::open(dir.join(EXECUTING_LOCK)) else {
         return false;
     };
