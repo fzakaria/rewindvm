@@ -14,6 +14,7 @@ pub mod nix;
 pub mod pmu;
 pub mod prune;
 pub mod run;
+pub mod threads;
 
 pub use home::{Guest, Home};
 pub use run::{Echo, Execution, Keyframes, Manifest, Run, RunOutcome, Source, Spec, TimeLimit};

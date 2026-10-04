@@ -312,15 +312,20 @@ enum Command {
         #[arg(long = "with", value_name = "INSTALLABLE")]
         with: Vec<String>,
     },
-    /// gdb on a fork of a run at a step: one x86-64 CPU, the VM's memory as
-    /// its page tables map it, breakpoints and single steps. Starts the
-    /// host's gdb with the symbols of the VM's kernel and of the process
-    /// running at the step, and a debuginfod server for their DWARF and
-    /// sources; with --listen, only serves the GDB remote protocol for a
-    /// gdb started some other way.
+    /// gdb on a fork of a run at a step: one x86-64 CPU and every thread of
+    /// the process debugged, the VM's memory as its page tables map it,
+    /// breakpoints and single steps. Starts the host's gdb with the symbols
+    /// of the VM's kernel and of the process running at the step, or of
+    /// --pid's, and a debuginfod server for their DWARF and sources; with
+    /// --listen, only serves the GDB remote protocol for a gdb started some
+    /// other way.
     Gdb {
         run: String,
         step: u64,
+        /// Debug this process, whether or not it was running at the step:
+        /// its symbols, its breakpoints and every one of its threads.
+        #[arg(long)]
+        pid: Option<u32>,
         /// Serve on this address, such as 127.0.0.1:1234, and start no gdb.
         #[arg(long)]
         listen: Option<String>,
@@ -884,11 +889,12 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Gdb {
             run,
             step,
+            pid,
             listen,
             gdb_args,
         } => {
             let run = Run::find(&home, &run)?;
-            gdb::gdb(&home, &run, step, listen.as_deref(), &gdb_args)
+            gdb::gdb(&home, &run, step, pid, listen.as_deref(), &gdb_args)
         }
         Command::Pmu { action } => {
             let vendor = rewind_core::pmu::Vendor::detect()?;

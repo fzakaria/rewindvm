@@ -21,7 +21,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode, Stdio};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use rewind_core::inspect::Inspection;
 use rewind_core::maps::{Running, SymbolFile};
 use rewind_core::{Home, Run};
@@ -78,25 +78,38 @@ const ENV_DEBUGINFOD_URLS: &str = "DEBUGINFOD_URLS";
 /// way the session's server gets its listening socket.
 const LISTEN_FD: i32 = 3;
 
-/// Serves gdb on a fork of `run` at `step`: on `listen` if given, else on
-/// a free local port with the host's gdb started against it, with `extra`
-/// after the arguments this makes. Ctrl-C belongs to gdb, which turns it
-/// into an interrupt for the fork, so this process ignores it meanwhile.
+/// Serves gdb on a fork of `run` at `step`, debugging process `pid`, or
+/// when None the process running at the step: on `listen` if given, else
+/// on a free local port with the host's gdb started against it, with
+/// `extra` after the arguments this makes. Ctrl-C belongs to gdb, which
+/// turns it into an interrupt for the fork, so this process ignores it
+/// meanwhile.
 pub fn gdb(
     home: &Home,
     run: &Run,
     step: u64,
+    pid: Option<u32>,
     listen: Option<&str>,
     extra: &[String],
 ) -> Result<ExitCode> {
     // What gdb is told before the fork it debugs is made: the inspection
-    // that finds the running process needs a fork of its own.
+    // that finds the process needs a fork of its own.
     let kernel = KernelSymbols::find(run);
     let session = Session::new(home)?;
-    let process = running_process(home, run, step, &session.dir);
+    let process = debugged_process(home, run, step, pid, &session.dir);
     let debuginfod = Debuginfod::start();
 
     let machine = run.machine_at(home, step, &mut rewind_vmm::Ignore)?;
+    // Finding a process that is not on the CPU takes the kernel's task
+    // list, which kernels before it do not publish.
+    if pid.is_some() && machine.task_layout()?.is_none() {
+        bail!(
+            "run {}'s kernel does not say where its tasks are, so --pid cannot find \
+             process {}; record the run again",
+            run.manifest.id,
+            pid.unwrap_or_default()
+        );
+    }
     let made = run.records_after(step)?;
     let mut debuggee = rewind_core::debug::Debuggee::new(machine, made, process.scope)?;
     let listener = TcpListener::bind(listen.unwrap_or(GDB_LOCAL)).context("listening for gdb")?;
@@ -318,13 +331,18 @@ struct Process {
     source_dirs: Vec<(PathBuf, PathBuf)>,
 }
 
-/// The process running at `step`: its programs and libraries, from this
-/// machine's store or, when only the VM has them, written under `dir`,
-/// with the source files those name. Empty when the kernel was running
-/// or the map could not be read.
-fn running_process(home: &Home, run: &Run, step: u64, dir: &Path) -> Process {
-    let answer = match rewind_core::inspect::running(home, run, step) {
+/// Process `pid` at `step`, or when None the process running there: its
+/// programs and libraries, from this machine's store or, when only the VM
+/// has them, written under `dir`, with the source files those name. Empty
+/// when the kernel was running, there was no such process, or the map
+/// could not be read.
+fn debugged_process(home: &Home, run: &Run, step: u64, pid: Option<u32>, dir: &Path) -> Process {
+    let answer = match rewind_core::inspect::running(home, run, step, pid) {
         Ok(Inspection::Contents(bytes)) => bytes,
+        Ok(Inspection::NotFound(message)) if pid.is_some() => {
+            eprintln!("rewind: {}", message.trim());
+            return Process::default();
+        }
         Ok(Inspection::NotFound(_)) => {
             eprintln!("rewind: step {step} ran in the kernel, in no process");
             return Process::default();
@@ -351,9 +369,12 @@ fn running_process(home: &Home, run: &Run, step: u64, dir: &Path) -> Process {
     };
 
     // Say what gdb will know about, and what it cannot.
+    let whose = match pid {
+        Some(_) => format!("process {} at step {step}", running.pid),
+        None => format!("step {step} ran in process {}", running.pid),
+    };
     eprintln!(
-        "rewind: step {step} ran in process {}; loading symbols for {} of its files",
-        running.pid,
+        "rewind: {whose}; loading symbols for {} of its files",
         files.len()
     );
     let missing = running.missing(dir);
@@ -368,7 +389,7 @@ fn running_process(home: &Home, run: &Run, step: u64, dir: &Path) -> Process {
         .collect();
     let source_dirs = fetch_sources(home, run, step, running.pid, &sent, dir);
     Process {
-        scope: rewind_core::debug::Scope::Process,
+        scope: rewind_core::debug::Scope::Process(running.pid),
         files,
         source_dirs,
     }

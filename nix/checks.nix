@@ -35,11 +35,12 @@ let
     done
   '';
 
-  # A root of three static programs for gdb, built with their symbols: one
+  # A root of four static programs for gdb, built with their symbols: one
   # prints, forks, and waits for its child; one forks a child that prints
   # and writes a global, then writes the same global twice itself; one
   # forks a child that sleeps before writing to a pipe, prints, and blocks
-  # reading the pipe.
+  # reading the pipe; one starts three threads that block on a futex until
+  # the main thread, after a sleep, prints and wakes them.
   gdbRoot =
     pkgs.runCommand "rewind-gdb-root"
       {
@@ -111,6 +112,54 @@ let
         }
         EOF
         $CC -static -O1 -g -o $out/bin/block block.c
+
+        cat > threads.c <<'EOF'
+        #include <pthread.h>
+        #include <sys/syscall.h>
+        #include <unistd.h>
+        #include <linux/futex.h>
+
+        #define WORKERS 3
+
+        static int gate;
+
+        /* The futex system call made here rather than in musl, which has
+           no unwind tables, so gdb finds each waiting worker in this file. */
+        static void futex(int op, int val)
+        {
+          register long timeout __asm__("r10") = 0;
+          long ret;
+
+          __asm__ volatile("syscall"
+                           : "=a"(ret)
+                           : "a"(SYS_futex), "D"(&gate), "S"(op), "d"(val), "r"(timeout)
+                           : "rcx", "r11", "memory");
+        }
+
+        static void *worker(void *arg)
+        {
+          while (!__atomic_load_n(&gate, __ATOMIC_ACQUIRE))
+            futex(FUTEX_WAIT, 0);
+          return arg;
+        }
+
+        int main(void)
+        {
+          pthread_t t[WORKERS];
+          int i;
+
+          for (i = 0; i < WORKERS; i++)
+            pthread_create(&t[i], 0, worker, 0);
+          sleep(1);
+          write(1, "open\n", 5);
+          __atomic_store_n(&gate, 1, __ATOMIC_RELEASE);
+          futex(FUTEX_WAKE, WORKERS);
+          for (i = 0; i < WORKERS; i++)
+            pthread_join(t[i], 0);
+          return 0;
+        }
+        EOF
+        $CC -static -O1 -g -pthread -o $out/bin/threads threads.c
       '';
 
   # Background jobs racing through a pipe, the kernel's RNG, and a sleep:
@@ -465,6 +514,66 @@ in
         rewind gdb watch "$start" -- -batch -ex 'rwatch counter' -ex continue > read 2>&1 || true
         cat read
         grep -q 'Could not insert' read
+        touch $out
+      '';
+
+  # checks.gdb-threads: `rewind gdb` shows every thread of the process it
+  # debugs, those off the CPU included. Three workers wait on a futex
+  # while the main thread sleeps, then prints. At that print, gdb lists
+  # the CPU and the four threads, and finds each worker waiting in its own
+  # function, from the registers the kernel saved for it. At a step that
+  # ran in no process, `--pid` names the process, and gdb still finds the
+  # three.
+  # Boots the VM, so it needs /dev/kvm.
+  gdb-threads =
+    pkgs.runCommand "rewind-gdb-threads"
+      {
+        nativeBuildInputs = [
+          rewind
+          pkgs.gdb
+        ];
+        requiredSystemFeatures = [ "kvm" ];
+      }
+      ''
+        export REWIND_HOME=$TMPDIR/rewind
+        # No debuginfod server: without a network, each of gdb's questions
+        # to it waits out a timeout.
+        export REWIND_DEBUGINFOD=/nonexistent
+
+        rewind run -q --clock exits --name threads --root ${gdbRoot} -- /bin/threads
+        write=$(rewind events threads | grep 'write(1, "open')
+        open=$(echo "$write" | awk '{print $1}')
+        pid=$(echo "$write" | awk '{print $2}' | cut -d/ -f1)
+
+        # gdb at a step, given the number of threads it should list: each
+        # worker waiting in its own function.
+        threads_at() {
+          want=$1
+          shift
+          rewind gdb threads "$@" -- -batch -ex 'thread apply all bt 1' > gdb 2>&1 || true
+          cat gdb
+          test "$(grep -c '^Thread ' gdb)" = "$want"
+          test "$(grep -c '^#0 .*worker .*threads\.c' gdb)" = 3
+        }
+        threads_at 5 "$open"
+
+        # The latest step before the print that ran in no process: the
+        # machine idle while every thread waits.
+        idle=
+        for step in $(seq $((open - 1)) -1 $((open - 40))); do
+          rewind gdb threads "$step" --listen 127.0.0.1:12350 2> serve &
+          while ! grep -q 'connect with' serve; do sleep 0.1; done
+          gdb -q -batch -ex 'target remote 127.0.0.1:12350' -ex detach > /dev/null 2>&1
+          wait
+          if grep -q 'in no process' serve; then
+            idle=$step
+            break
+          fi
+        done
+        echo "idle at step ''${idle:-none}"
+        test -n "$idle"
+
+        threads_at 5 "$idle" --pid "$pid"
         touch $out
       '';
 

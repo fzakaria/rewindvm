@@ -45,6 +45,37 @@ const DR6_SINGLE_STEP: u64 = 1 << 14;
 const RFLAGS_TF: u64 = 1 << 8;
 
 const PAGE_SIZE: u64 = 4096;
+const PAGE_SHIFT: u32 = 12;
+
+/// A page table entry: present, a large page (in a page directory or the
+/// table above it), and the physical address it points at, bits 12 to 51.
+const PTE_PRESENT: u64 = 1;
+const PTE_LARGE: u64 = 1 << 7;
+const PTE_ADDRESS: u64 = 0x000f_ffff_ffff_f000;
+
+/// Each level of the walk indexes its table with 9 bits of the address.
+const INDEX_BITS: u32 = 9;
+const INDEX_MASK: u64 = (1 << INDEX_BITS) - 1;
+const PTE_SIZE: u64 = 8;
+
+/// CR4's LA57 bit: five levels of page tables rather than four.
+const CR4_LA57: u64 = 1 << 12;
+
+/// How many levels of page tables translate an address.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Levels {
+    Four,
+    Five,
+}
+
+impl Levels {
+    fn count(self) -> u32 {
+        match self {
+            Levels::Four => 4,
+            Levels::Five => 5,
+        }
+    }
+}
 
 /// Whether a debugger runs the machine one instruction at a time.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -193,6 +224,58 @@ impl Machine {
         Ok(done)
     }
 
+    /// Reads the VM's memory at a virtual address as the page table at
+    /// physical address `page_table` maps it, whichever process is
+    /// running: a process's memory while another runs. Returns how many
+    /// bytes could be read, which stops short at the first unmapped page.
+    pub fn read_virtual_in(&self, page_table: u64, address: u64, buf: &mut [u8]) -> Result<usize> {
+        let levels = if self.vcpu.get_sregs()?.cr4 & CR4_LA57 != 0 {
+            Levels::Five
+        } else {
+            Levels::Four
+        };
+        let read = |physical: u64| {
+            let mut entry = [0u8; PTE_SIZE as usize];
+            self.dev.ram.read(physical, &mut entry).ok()?;
+            Some(u64::from_le_bytes(entry))
+        };
+        let mut done = 0;
+        while done < buf.len() {
+            let at = address + done as u64;
+            let Some(physical) = walk(read, page_table, at, levels) else {
+                break;
+            };
+            let n = page_remainder(at).min(buf.len() - done);
+            if self
+                .dev
+                .ram
+                .read(physical, &mut buf[done..done + n])
+                .is_err()
+            {
+                break;
+            }
+            done += n;
+        }
+        Ok(done)
+    }
+
+    /// What the kernel published about its tasks at setup, or None from a
+    /// kernel that predates it or before setup.
+    pub fn task_layout(&self) -> Result<Option<crate::pv::TaskLayout>> {
+        let Some(shared) = self.dev.shared else {
+            return Ok(None);
+        };
+        let mut fields = [0u64; crate::pv::TASK_LAYOUT_FIELDS];
+        for (i, field) in fields.iter_mut().enumerate() {
+            let mut bytes = [0u8; 8];
+            self.dev
+                .ram
+                .read(shared + crate::pv::SHARED_TASKS + 8 * i as u64, &mut bytes)?;
+            *field = u64::from_le_bytes(bytes);
+        }
+        Ok(crate::pv::TaskLayout::from_fields(fields))
+    }
+
     /// Writes the VM's memory at a virtual address, all or nothing per page.
     pub fn write_virtual(&mut self, address: u64, data: &[u8]) -> Result<()> {
         let mut done = 0;
@@ -283,6 +366,31 @@ fn stray_trap(dr6: u64, stepping: Stepping) -> bool {
 }
 
 /// How many bytes from `address` to the end of its page.
+/// The physical address `address` maps to in the page tables rooted at
+/// `root`, reading each entry with `read`, or None where it is not mapped.
+/// Large pages end the walk early.
+fn walk(read: impl Fn(u64) -> Option<u64>, root: u64, address: u64, levels: Levels) -> Option<u64> {
+    let mut table = root & PTE_ADDRESS;
+    for level in (0..levels.count()).rev() {
+        let shift = PAGE_SHIFT + INDEX_BITS * level;
+        let index = (address >> shift) & INDEX_MASK;
+        let entry = read(table + index * PTE_SIZE)?;
+        if entry & PTE_PRESENT == 0 {
+            return None;
+        }
+
+        // A page: 4 KiB at the last level, or a large one a level or two
+        // above it.
+        let large = matches!(level, 1 | 2) && entry & PTE_LARGE != 0;
+        if level == 0 || large {
+            let size = 1u64 << shift;
+            return Some((entry & PTE_ADDRESS & !(size - 1)) | (address & (size - 1)));
+        }
+        table = entry & PTE_ADDRESS;
+    }
+    None
+}
+
 fn page_remainder(address: u64) -> usize {
     (PAGE_SIZE - address % PAGE_SIZE) as usize
 }
@@ -365,6 +473,84 @@ mod tests {
         assert!(!stray_trap(DR6_SINGLE_STEP, Stepping::Yes));
         assert!(!stray_trap(1, Stepping::No));
         assert!(!stray_trap(DR6_SINGLE_STEP | 1, Stepping::No));
+    }
+
+    /// Page tables as a map from physical address to entry, built one
+    /// entry at a time.
+    #[derive(Default)]
+    struct Tables(std::collections::HashMap<u64, u64>);
+
+    impl Tables {
+        /// Points entry `index` of the table at `table` to `to`, with
+        /// `flags` besides present.
+        fn entry(&mut self, table: u64, index: u64, to: u64, flags: u64) {
+            self.0.insert(table + index * 8, to | flags | PTE_PRESENT);
+        }
+
+        fn read(&self, physical: u64) -> Option<u64> {
+            self.0.get(&physical).copied()
+        }
+    }
+
+    /// The index an address has at a level of the walk, 0 being the page
+    /// table's.
+    fn index(address: u64, level: u32) -> u64 {
+        (address >> (PAGE_SHIFT + INDEX_BITS * level)) & INDEX_MASK
+    }
+
+    /// A 4 KiB page four levels down: the walk follows each table to the
+    /// page and keeps the offset within it. An address whose table has no
+    /// entry for it is not mapped.
+    #[test]
+    fn a_walk_follows_four_levels_to_a_page() {
+        let address = 0x7fff_1234_5678;
+        let mut t = Tables::default();
+        t.entry(0x1000, index(address, 3), 0x2000, 0);
+        t.entry(0x2000, index(address, 2), 0x3000, 0);
+        t.entry(0x3000, index(address, 1), 0x4000, 0);
+        t.entry(0x4000, index(address, 0), 0x9000, 0);
+        let read = |p| t.read(p);
+        assert_eq!(walk(read, 0x1000, address, Levels::Four), Some(0x9678));
+        assert_eq!(walk(read, 0x1000, address + 0x1000, Levels::Four), None);
+    }
+
+    /// A 2 MiB page ends the walk at the page directory, and a 1 GiB one
+    /// at the level above, each keeping the offset within its size. The
+    /// root's low bits, a PCID in CR3, are not part of its address.
+    #[test]
+    fn a_walk_stops_at_a_large_page() {
+        let address = 0x0000_4000_0012_3456;
+        let mut t = Tables::default();
+        t.entry(0x1000, index(address, 3), 0x2000, 0);
+        t.entry(0x2000, index(address, 2), 0x3000, 0);
+        t.entry(0x3000, index(address, 1), 0x4000_0000, PTE_LARGE);
+        let read = |p| t.read(p);
+        assert_eq!(
+            walk(read, 0x1000 | 0x5, address, Levels::Four),
+            Some(0x4012_3456)
+        );
+
+        let mut t = Tables::default();
+        t.entry(0x1000, index(address, 3), 0x2000, 0);
+        t.entry(0x2000, index(address, 2), 0x8000_0000, PTE_LARGE);
+        let read = |p| t.read(p);
+        assert_eq!(walk(read, 0x1000, address, Levels::Four), Some(0x8012_3456));
+    }
+
+    /// With five levels the walk starts one table higher, indexed by the
+    /// address's bits from 48.
+    #[test]
+    fn a_walk_with_five_levels_starts_one_higher() {
+        let address = 0x0001_0000_0000_1234;
+        let mut t = Tables::default();
+        t.entry(0x1000, index(address, 4), 0x2000, 0);
+        t.entry(0x2000, index(address, 3), 0x3000, 0);
+        t.entry(0x3000, index(address, 2), 0x4000, 0);
+        t.entry(0x4000, index(address, 1), 0x5000, 0);
+        t.entry(0x5000, index(address, 0), 0x9000, 0);
+        let read = |p| t.read(p);
+        assert_eq!(walk(read, 0x1000, address, Levels::Five), Some(0x9234));
+        assert_eq!(walk(read, 0x1000, address, Levels::Four), None);
     }
 
     #[test]

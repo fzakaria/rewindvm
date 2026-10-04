@@ -114,12 +114,16 @@ pub fn cat(home: &Home, run: &Run, step: u64, pid: Option<u32>, path: &str) -> R
     Ok(answer.into_inspection(status))
 }
 
-/// The process that was running at `step` and its memory map: its pid on
-/// a line, then its /proc/<pid>/maps as the VM's root sees it (see
-/// [`crate::maps`]). Not found when the kernel was running.
-pub fn running(home: &Home, run: &Run, step: u64) -> Result<Inspection> {
+/// Process `pid` at `step`, or when None the process that was running
+/// there, and its memory map: its pid on a line, then its /proc/<pid>/maps
+/// as the VM's root sees it (see [`crate::maps`]). Not found when the
+/// kernel was running, or when there is no process `pid`.
+pub fn running(home: &Home, run: &Run, step: u64, pid: Option<u32>) -> Result<Inspection> {
     let (mut machine, step) = fork_at(home, run, step)?;
-    machine.request_inspection(&[INSPECT_RUNNING])?;
+    let pid = pid.map(|p| p.to_string());
+    let mut request = vec![INSPECT_RUNNING];
+    request.extend(pid.as_deref());
+    machine.request_inspection(&request)?;
 
     let mut answer = Answer::default();
     let status = finish(

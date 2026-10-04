@@ -136,6 +136,23 @@ address registers rather than `int3` in memory, and a single step holds
 interrupts off. A debug trap is a VM exit the VM never sees and not a step, so
 a debugged fork runs exactly as it would have.
 
+gdb's first thread is the CPU, named for the task on it, with the same id at
+every stop, so a step or a trap always stops the thread gdb ran. Every thread
+of the process gdb debugs, the one running at the step or the one `--pid`
+names, is a thread too, by its own id. At setup the kernel writes into the shared page where its
+tasks are: `init_task`, the variable holding the running task, the direct
+map's base, and the offsets in `task_struct`, `signal_struct` and `mm_struct`
+needed to walk from the list of processes to a process's threads and its page
+table. At each stop Rewind walks that list in the VM's memory. A thread off the
+CPU, or in the kernel on it, saved its user registers in the `struct pt_regs`
+at the top of its kernel stack when it entered the kernel, and gdb gets those
+for it, read-only; one running user space on the CPU has the vCPU's.
+gdb reads its memory through the process's page table, walked in software,
+since the CPU may be in another process or idle. So at a deadlock, with every
+thread asleep and the CPU idle, `thread apply all bt` shows where each one
+waits. The threads move only when the CPU runs them: a step steps the CPU,
+whichever thread is on it.
+
 What gdb knows about the code comes from two more inspections, each on a fork
 of its own, before the fork gdb debugs is made. The kernel hands every
 inspection the thread group id of the task that was running when the request

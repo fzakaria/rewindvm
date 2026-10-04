@@ -2,6 +2,12 @@
 //! GDB remote protocol. gdb sees one x86-64 CPU with the VM's memory as the
 //! VM's page tables map it: the kernel, which the VM kernel's vmlinux has
 //! the symbols for, and the user space of whichever process was running.
+//! The CPU is gdb's first thread, with the same id at every stop and
+//! named for the task on it, so steps and traps always stop the thread gdb
+//! ran. Every thread of the process gdb debugs is a thread too, with its
+//! process's memory and the user registers it saved when it last entered
+//! the kernel, or the vCPU's while it runs in user space, so gdb shows
+//! where each one waits; they move only when the CPU runs them.
 //! Breakpoints and watchpoints at user addresses stop the fork only in the
 //! process gdb is debugging; other processes map the same addresses to
 //! memory of their own. Continuing and stepping run the fork, never the
@@ -12,25 +18,30 @@
 
 use std::net::TcpStream;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use gdbstub::common::Signal;
+use gdbstub::common::Tid;
 use gdbstub::conn::ConnectionExt;
 use gdbstub::stub::run_blocking::{BlockingEventLoop, Event, WaitForStopReasonError};
-use gdbstub::stub::{DisconnectReason, GdbStub, SingleThreadStopReason};
+use gdbstub::stub::{DisconnectReason, GdbStub, MultiThreadStopReason};
 use gdbstub::target::ext::base::BaseOps;
-use gdbstub::target::ext::base::singlethread::{
-    SingleThreadBase, SingleThreadResume, SingleThreadResumeOps, SingleThreadSingleStep,
-    SingleThreadSingleStepOps,
+use gdbstub::target::ext::base::multithread::{
+    MultiThreadBase, MultiThreadResume, MultiThreadResumeOps, MultiThreadSchedulerLocking,
+    MultiThreadSchedulerLockingOps, MultiThreadSingleStep, MultiThreadSingleStepOps,
 };
 use gdbstub::target::ext::breakpoints::{
     Breakpoints, BreakpointsOps, HwBreakpoint, HwBreakpointOps, HwWatchpoint, HwWatchpointOps,
     SwBreakpoint, SwBreakpointOps, WatchKind,
 };
+use gdbstub::target::ext::thread_extra_info::{ThreadExtraInfo, ThreadExtraInfoOps};
 use gdbstub::target::{Target, TargetError, TargetResult};
 use gdbstub_arch::x86::X86_64_SSE;
 use gdbstub_arch::x86::reg::X86_64CoreRegs;
 use rewind_vmm::debug::{Access, DebugStop, MAX_TRAPS, Stepping, Trap};
+use rewind_vmm::pv::{TaskLayout, pt_regs};
 use rewind_vmm::{Machine, Observer, Outcome};
+
+use crate::threads::{Memory, Tasks, Thread};
 
 /// How far the fork runs between looks at the connection, in steps, so a
 /// Ctrl-C in gdb stops a VM that is running free.
@@ -56,13 +67,129 @@ const USER_END: u64 = 0x0000_8000_0000_0000;
 /// trapping, and the CPU clears it once that instruction has.
 const RFLAGS_RF: u64 = 1 << 16;
 
-/// Whose traps gdb sees: the process running at the fork's step, which
-/// `rewind gdb` loads the symbols of, or any, when no process was.
+/// The CPU's thread id for gdb, the same at every stop whichever task is
+/// on it, so a step or a trap always stops the thread gdb ran. One past
+/// PID_MAX_LIMIT, the most pids a 64-bit kernel hands out, so no task has
+/// it.
+const CPU_TID: usize = 4_194_305;
+
+/// RPL bits of a code segment selector: 3 in user space.
+const SELECTOR_RPL: u64 = 0b11;
+const USER_RPL: u64 = 0b11;
+
+/// Whose traps and threads gdb sees: the process with this id, which
+/// `rewind gdb` loads the symbols of, or any, when it debugs no process.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Scope {
-    Process,
+    Process(u32),
     #[default]
     Any,
+}
+
+/// Whether a task is the one on the CPU.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OnCpu {
+    Yes,
+    No,
+}
+
+/// Where gdb gets a thread's registers from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Source {
+    /// The vCPU, whichever task is on it.
+    Cpu,
+    /// A thread of the debugged process, by its task struct's address: the
+    /// vCPU while the thread runs in user space on it, else the user
+    /// registers it saved in its struct pt_regs.
+    Task(u64, OnCpu),
+}
+
+/// A thread as gdb sees it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Seen {
+    tid: Tid,
+    source: Source,
+    name: String,
+}
+
+/// The CPU's thread id as gdb takes it.
+fn cpu_tid() -> Tid {
+    Tid::new(CPU_TID).expect("CPU_TID is not 0")
+}
+
+/// The threads gdb sees: the CPU, named for the task on it, first, then
+/// every thread of the debugged process. Thread ids are never 0; the idle
+/// task's is, and it is no process's.
+fn seen(cpu: Option<&Thread>, process: &[Thread]) -> Vec<Seen> {
+    let name = match cpu {
+        Some(t) if t.tid == 0 => "the CPU, idle".to_string(),
+        Some(t) => format!("the CPU, in {} {}", t.name, t.tid),
+        None => "the CPU".to_string(),
+    };
+    let on_cpu = Seen {
+        tid: cpu_tid(),
+        source: Source::Cpu,
+        name,
+    };
+    let threads = process.iter().filter_map(|t| {
+        let on = match cpu {
+            Some(c) if c.task == t.task => OnCpu::Yes,
+            _ => OnCpu::No,
+        };
+        Some(Seen {
+            tid: Tid::new(t.tid as usize)?,
+            source: Source::Task(t.task, on),
+            name: t.name.clone(),
+        })
+    });
+    std::iter::once(on_cpu).chain(threads).collect()
+}
+
+/// gdb's registers from a struct pt_regs: the user registers a thread
+/// saved, with the data segments user space runs with, which are 0.
+fn saved_registers(words: &[u64; pt_regs::WORDS]) -> X86_64CoreRegs {
+    let segments = gdbstub_arch::x86::reg::X86SegmentRegs {
+        cs: words[pt_regs::CS] as u16 as u32,
+        ss: words[pt_regs::SS] as u16 as u32,
+        ..Default::default()
+    };
+    X86_64CoreRegs {
+        // gdb's order: rax rbx rcx rdx rsi rdi rbp rsp r8 to r15.
+        regs: [
+            words[pt_regs::RAX],
+            words[pt_regs::RBX],
+            words[pt_regs::RCX],
+            words[pt_regs::RDX],
+            words[pt_regs::RSI],
+            words[pt_regs::RDI],
+            words[pt_regs::RBP],
+            words[pt_regs::RSP],
+            words[pt_regs::R8],
+            words[pt_regs::R9],
+            words[pt_regs::R10],
+            words[pt_regs::R11],
+            words[pt_regs::R12],
+            words[pt_regs::R13],
+            words[pt_regs::R14],
+            words[pt_regs::R15],
+        ],
+        rip: words[pt_regs::RIP],
+        eflags: words[pt_regs::RFLAGS] as u32,
+        segments,
+        ..Default::default()
+    }
+}
+
+/// The VM kernel's memory, as the vCPU's page tables map it; the kernel's
+/// half is the same in every process's.
+impl Memory for Machine {
+    fn read(&self, address: u64, buf: &mut [u8]) -> Result<()> {
+        let n = self.read_virtual(address, buf)?;
+        if n < buf.len() {
+            anyhow::bail!("{:#x} is not mapped", address + n as u64);
+        }
+        Ok(())
+    }
 }
 
 /// What gdb asked the fork to do next.
@@ -204,8 +331,14 @@ pub struct Debuggee {
     machine: Machine,
     traps: Traps,
     mode: Mode,
-    /// The page table of the process gdb debugs, if one was running.
+    /// The process gdb debugs, if any.
+    process: Option<u32>,
+    /// The page table of the process gdb debugs, if any.
     space: Option<u64>,
+    /// Where the VM kernel keeps its tasks, when it says.
+    layout: Option<TaskLayout>,
+    /// The threads gdb sees, as of the last stop.
+    threads: Vec<Seen>,
     follow: Follow,
     /// Whether gdb's user has been told the fork left the recording.
     told: bool,
@@ -214,20 +347,89 @@ pub struct Debuggee {
 impl Debuggee {
     /// A debuggee for `machine`, a fork of a run at a step, with `made`,
     /// the records the run made after that step. With [`Scope::Process`],
-    /// the address space the machine is in now is the one gdb debugs.
+    /// that process's address space is the one gdb debugs, found in the
+    /// kernel's tasks, or, from a kernel that publishes no task layout,
+    /// the one the machine is in now.
     pub fn new(machine: Machine, made: Vec<(u64, Vec<u8>)>, scope: Scope) -> Result<Debuggee> {
-        let space = match scope {
-            Scope::Process => Some(page_table(machine.special_registers()?.cr3)),
+        let layout = machine.task_layout()?;
+        let process = match scope {
+            Scope::Process(pid) => Some(pid),
             Scope::Any => None,
         };
-        Ok(Debuggee {
+        let space = match (process, layout) {
+            (Some(pid), Some(layout)) => {
+                let tasks = Tasks::new(&machine, layout);
+                let task = tasks
+                    .process(pid)?
+                    .with_context(|| format!("no process {pid} at this step"))?;
+                tasks.page_table(task)?
+            }
+            (Some(_), None) => Some(page_table(machine.special_registers()?.cr3)),
+            (None, _) => None,
+        };
+        let mut debuggee = Debuggee {
             machine,
             traps: Traps::default(),
             mode: Mode::Continue,
+            process,
             space,
+            layout,
+            threads: Vec::new(),
             follow: Follow::new(made),
             told: false,
-        })
+        };
+        debuggee.refresh_threads();
+        Ok(debuggee)
+    }
+
+    /// Reads the threads gdb sees again, after the machine has run. A task
+    /// list the kernel was changing at the stop leaves the CPU alone.
+    fn refresh_threads(&mut self) {
+        self.threads = match self.read_threads() {
+            Ok(threads) => threads,
+            Err(e) => {
+                eprintln!("rewind: only the CPU's thread at this stop: {e:#}");
+                seen(None, &[])
+            }
+        };
+    }
+
+    fn read_threads(&self) -> Result<Vec<Seen>> {
+        let Some(layout) = self.layout else {
+            return Ok(seen(None, &[]));
+        };
+        let tasks = Tasks::new(&self.machine, layout);
+        let current = tasks.current()?;
+        let cpu = Thread {
+            tid: tasks.tid(current)?,
+            task: current,
+            name: tasks.name(current)?,
+        };
+        let process = match self.process {
+            Some(pid) => match tasks.process(pid)? {
+                Some(task) => tasks.threads(task)?,
+                None => Vec::new(),
+            },
+            None => Vec::new(),
+        };
+        Ok(seen(Some(&cpu), &process))
+    }
+
+    /// Where thread `tid`'s registers come from, if gdb sees it.
+    fn source(&self, tid: Tid) -> Option<Source> {
+        self.threads.iter().find(|t| t.tid == tid).map(|t| t.source)
+    }
+
+    /// Whether the CPU is running user space.
+    fn in_user_space(&self) -> Result<bool> {
+        let cs = self.machine.special_registers()?.cs.selector;
+        Ok(u64::from(cs) & SELECTOR_RPL == USER_RPL)
+    }
+
+    /// Whether the CPU is in the address space gdb debugs.
+    fn on_cpu_space(&self) -> Result<bool> {
+        let cr3 = self.machine.special_registers()?.cr3;
+        Ok(self.space.is_none_or(|space| page_table(cr3) == space))
     }
 
     /// Whether a trap at `address`, just taken, is the debugged process's.
@@ -257,7 +459,7 @@ impl Target for Debuggee {
     type Error = String;
 
     fn base_ops(&mut self) -> BaseOps<'_, Self::Arch, Self::Error> {
-        BaseOps::SingleThread(self)
+        BaseOps::MultiThread(self)
     }
 
     fn support_breakpoints(&mut self) -> Option<BreakpointsOps<'_, Self>> {
@@ -299,8 +501,21 @@ fn fatal<E: std::fmt::Display>(e: E) -> TargetError<String> {
     TargetError::Fatal(e.to_string())
 }
 
-impl SingleThreadBase for Debuggee {
-    fn read_registers(&mut self, regs: &mut X86_64CoreRegs) -> TargetResult<(), Self> {
+impl MultiThreadBase for Debuggee {
+    fn read_registers(&mut self, regs: &mut X86_64CoreRegs, tid: Tid) -> TargetResult<(), Self> {
+        // A thread off the CPU, or in the kernel on it: the user registers
+        // it saved in its pt_regs.
+        if let Some(Source::Task(task, on)) = self.source(tid)
+            && !(on == OnCpu::Yes && self.in_user_space().map_err(fatal)?)
+        {
+            let layout = self.layout.ok_or(TargetError::NonFatal)?;
+            let words = Tasks::new(&self.machine, layout)
+                .user_registers(task)
+                .map_err(fatal)?;
+            *regs = saved_registers(&words);
+            return Ok(());
+        }
+
         let r = self.machine.registers().map_err(fatal)?;
         let s = self.machine.special_registers().map_err(fatal)?;
         // gdb's order: rax rbx rcx rdx rsi rdi rbp rsp r8 to r15.
@@ -320,7 +535,11 @@ impl SingleThreadBase for Debuggee {
         Ok(())
     }
 
-    fn write_registers(&mut self, regs: &X86_64CoreRegs) -> TargetResult<(), Self> {
+    fn write_registers(&mut self, regs: &X86_64CoreRegs, tid: Tid) -> TargetResult<(), Self> {
+        // Only the CPU's registers can be changed.
+        if let Some(Source::Task(..)) = self.source(tid) {
+            return Err(TargetError::NonFatal);
+        }
         let mut r = self.machine.registers().map_err(fatal)?;
         let g = regs.regs;
         (r.rax, r.rbx, r.rcx, r.rdx, r.rsi, r.rdi, r.rbp, r.rsp) =
@@ -332,37 +551,112 @@ impl SingleThreadBase for Debuggee {
         self.machine.set_registers(&r).map_err(fatal)
     }
 
-    fn read_addrs(&mut self, start: u64, data: &mut [u8]) -> TargetResult<usize, Self> {
+    fn read_addrs(&mut self, start: u64, data: &mut [u8], tid: Tid) -> TargetResult<usize, Self> {
+        // A thread of the process sees its process's memory, whichever
+        // process is on the CPU.
+        if let (Some(Source::Task(..)), Some(space)) = (self.source(tid), self.space) {
+            return self
+                .machine
+                .read_virtual_in(space, start, data)
+                .map_err(fatal);
+        }
         self.machine.read_virtual(start, data).map_err(fatal)
     }
 
-    fn write_addrs(&mut self, start: u64, data: &[u8]) -> TargetResult<(), Self> {
+    fn write_addrs(&mut self, start: u64, data: &[u8], tid: Tid) -> TargetResult<(), Self> {
+        // Writes go through the CPU's page tables, so a thread of the
+        // process writes only while its process is on the CPU.
+        if let Some(Source::Task(..)) = self.source(tid)
+            && !self.on_cpu_space().map_err(fatal)?
+        {
+            return Err(TargetError::NonFatal);
+        }
         self.machine
             .write_virtual(start, data)
             .map_err(|_| TargetError::NonFatal)
     }
 
-    fn support_resume(&mut self) -> Option<SingleThreadResumeOps<'_, Self>> {
+    fn list_active_threads(&mut self, thread_is_active: &mut dyn FnMut(Tid)) -> Result<(), String> {
+        for t in &self.threads {
+            thread_is_active(t.tid);
+        }
+        Ok(())
+    }
+
+    fn support_resume(&mut self) -> Option<MultiThreadResumeOps<'_, Self>> {
+        Some(self)
+    }
+
+    fn support_thread_extra_info(&mut self) -> Option<ThreadExtraInfoOps<'_, Self>> {
         Some(self)
     }
 }
 
-impl SingleThreadResume for Debuggee {
-    fn resume(&mut self, signal: Option<Signal>) -> Result<(), Self::Error> {
-        if signal.is_some() {
-            return Err("a signal cannot be delivered to the whole VM".into());
-        }
+impl ThreadExtraInfo for Debuggee {
+    /// The CPU's task, or a thread's name and whether it is on the CPU.
+    fn thread_extra_info(&self, tid: Tid, buf: &mut [u8]) -> Result<usize, String> {
+        let Some(t) = self.threads.iter().find(|t| t.tid == tid) else {
+            return Ok(0);
+        };
+        let info = match t.source {
+            Source::Task(_, OnCpu::Yes) => format!("{}, on the CPU", t.name),
+            Source::Cpu | Source::Task(_, OnCpu::No) => t.name.clone(),
+        };
+        let n = info.len().min(buf.len());
+        buf[..n].copy_from_slice(&info.as_bytes()[..n]);
+        Ok(n)
+    }
+}
+
+// The VM has one CPU, and its scheduler picks the task on it, so gdb's
+// resume actions come down to one: run the CPU, or step it. A step asked
+// of a thread off the CPU steps the CPU, and gdb then stops in whichever
+// thread that was.
+impl MultiThreadResume for Debuggee {
+    fn resume(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn clear_resume_actions(&mut self) -> Result<(), Self::Error> {
         self.mode = Mode::Continue;
         Ok(())
     }
 
-    fn support_single_step(&mut self) -> Option<SingleThreadSingleStepOps<'_, Self>> {
+    fn set_resume_action_continue(
+        &mut self,
+        _tid: Tid,
+        signal: Option<Signal>,
+    ) -> Result<(), Self::Error> {
+        if signal.is_some() {
+            return Err("a signal cannot be delivered to the whole VM".into());
+        }
+        Ok(())
+    }
+
+    fn support_single_step(&mut self) -> Option<MultiThreadSingleStepOps<'_, Self>> {
+        Some(self)
+    }
+
+    fn support_scheduler_locking(&mut self) -> Option<MultiThreadSchedulerLockingOps<'_, Self>> {
         Some(self)
     }
 }
 
-impl SingleThreadSingleStep for Debuggee {
-    fn step(&mut self, signal: Option<Signal>) -> Result<(), Self::Error> {
+// gdb asks to run one thread alone when it steps past a breakpoint. The
+// CPU's thread is the only one that runs anyway: the other threads move
+// only when the guest's scheduler puts them on the CPU.
+impl MultiThreadSchedulerLocking for Debuggee {
+    fn set_resume_action_scheduler_lock(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
+impl MultiThreadSingleStep for Debuggee {
+    fn set_resume_action_step(
+        &mut self,
+        _tid: Tid,
+        signal: Option<Signal>,
+    ) -> Result<(), Self::Error> {
         if signal.is_some() {
             return Err("a signal cannot be delivered to the whole VM".into());
         }
@@ -435,7 +729,7 @@ enum EventLoop {}
 impl BlockingEventLoop for EventLoop {
     type Target = Debuggee;
     type Connection = TcpStream;
-    type StopReason = SingleThreadStopReason<u64>;
+    type StopReason = MultiThreadStopReason<u64>;
 
     fn wait_for_stop_reason(
         target: &mut Debuggee,
@@ -447,6 +741,16 @@ impl BlockingEventLoop for EventLoop {
             .machine
             .set_debug(target.mode.stepping(), &traps)
             .map_err(target_error)?;
+
+        // Each stop reads the threads again, and names the CPU's.
+        let stop = |target: &mut Debuggee, reason: fn(Tid) -> MultiThreadStopReason<u64>| {
+            target.refresh_threads();
+            Ok(Event::TargetStopped(reason(cpu_tid())))
+        };
+        let step_done = |tid| MultiThreadStopReason::SignalWithThread {
+            tid,
+            signal: Signal::SIGTRAP,
+        };
 
         loop {
             let until = target.machine.step() + CHUNK_STEPS;
@@ -465,16 +769,14 @@ impl BlockingEventLoop for EventLoop {
                 );
             }
             match outcome {
-                Outcome::Debug(DebugStop::Step) => {
-                    return Ok(Event::TargetStopped(SingleThreadStopReason::DoneStep));
-                }
+                Outcome::Debug(DebugStop::Step) => return stop(target, step_done),
                 // A trap in another process's address space is passed:
                 // the fork runs on, or a step is done.
                 Outcome::Debug(DebugStop::Breakpoint(address))
                     if !target.in_scope(address).map_err(target_error)? =>
                 {
                     if target.mode == Mode::Step {
-                        return Ok(Event::TargetStopped(SingleThreadStopReason::DoneStep));
+                        return stop(target, step_done);
                     }
                     target.pass_breakpoint().map_err(target_error)?;
                     continue;
@@ -483,26 +785,24 @@ impl BlockingEventLoop for EventLoop {
                     if !target.in_scope(address).map_err(target_error)? =>
                 {
                     if target.mode == Mode::Step {
-                        return Ok(Event::TargetStopped(SingleThreadStopReason::DoneStep));
+                        return stop(target, step_done);
                     }
                     continue;
                 }
                 Outcome::Debug(DebugStop::Breakpoint(_)) => {
-                    return Ok(Event::TargetStopped(SingleThreadStopReason::SwBreak(())));
+                    return stop(target, MultiThreadStopReason::SwBreak);
                 }
                 Outcome::Debug(DebugStop::Watchpoint(piece)) => {
-                    let stop = match target.traps.watch_at(piece) {
-                        Some((addr, kind)) => SingleThreadStopReason::Watch {
-                            tid: (),
-                            kind,
-                            addr,
-                        },
-                        None => SingleThreadStopReason::Signal(Signal::SIGTRAP),
+                    target.refresh_threads();
+                    let tid = cpu_tid();
+                    let reason = match target.traps.watch_at(piece) {
+                        Some((addr, kind)) => MultiThreadStopReason::Watch { tid, kind, addr },
+                        None => step_done(tid),
                     };
-                    return Ok(Event::TargetStopped(stop));
+                    return Ok(Event::TargetStopped(reason));
                 }
                 Outcome::Stopped(_) => {
-                    return Ok(Event::TargetStopped(SingleThreadStopReason::Exited(0)));
+                    return Ok(Event::TargetStopped(MultiThreadStopReason::Exited(0)));
                 }
                 Outcome::Paused => {}
             }
@@ -519,8 +819,12 @@ impl BlockingEventLoop for EventLoop {
         }
     }
 
-    fn on_interrupt(_target: &mut Debuggee) -> Result<Option<Self::StopReason>, String> {
-        Ok(Some(SingleThreadStopReason::Signal(Signal::SIGINT)))
+    fn on_interrupt(target: &mut Debuggee) -> Result<Option<Self::StopReason>, String> {
+        target.refresh_threads();
+        Ok(Some(MultiThreadStopReason::SignalWithThread {
+            tid: cpu_tid(),
+            signal: Signal::SIGINT,
+        }))
     }
 }
 
@@ -545,6 +849,69 @@ mod tests {
             0x0000_0001_2345_7000
         ));
         assert!(in_scope(0x55b3_8f77_c320, None, 0x0000_0001_2345_7000));
+    }
+
+    fn thread(tid: u32, task: u64) -> Thread {
+        Thread {
+            tid,
+            task,
+            name: "phil".into(),
+        }
+    }
+
+    /// The CPU is gdb's first thread, with an id of its own at every stop
+    /// and named for the task on it; every thread of the process follows
+    /// by its own id, the one on the CPU marked so.
+    #[test]
+    fn the_cpu_comes_first_and_every_thread_after() {
+        let process = [thread(40, 0x100), thread(41, 0x200), thread(42, 0x300)];
+        let threads = seen(Some(&thread(41, 0x200)), &process);
+        let got: Vec<(usize, Source)> = threads.iter().map(|t| (t.tid.get(), t.source)).collect();
+        assert_eq!(
+            got,
+            vec![
+                (CPU_TID, Source::Cpu),
+                (40, Source::Task(0x100, OnCpu::No)),
+                (41, Source::Task(0x200, OnCpu::Yes)),
+                (42, Source::Task(0x300, OnCpu::No)),
+            ]
+        );
+        assert_eq!(threads[0].name, "the CPU, in phil 41");
+
+        let idle = Thread {
+            tid: 0,
+            task: 0x900,
+            name: "swapper/0".into(),
+        };
+        let threads = seen(Some(&idle), &process);
+        assert_eq!(threads[0].tid.get(), CPU_TID);
+        assert_eq!(threads[0].name, "the CPU, idle");
+        assert!(
+            threads[1..]
+                .iter()
+                .all(|t| matches!(t.source, Source::Task(_, OnCpu::No)))
+        );
+    }
+
+    /// A saved thread's registers are its pt_regs words in gdb's order,
+    /// with the selectors it saved and data segments of 0.
+    #[test]
+    fn saved_registers_follow_gdbs_order() {
+        let mut words = [0u64; pt_regs::WORDS];
+        for (i, w) in words.iter_mut().enumerate() {
+            *w = 0x1000 + i as u64;
+        }
+        words[pt_regs::CS] = 0x33;
+        words[pt_regs::SS] = 0x2b;
+        let regs = saved_registers(&words);
+        assert_eq!(regs.regs[0], 0x1000 + pt_regs::RAX as u64);
+        assert_eq!(regs.regs[6], 0x1000 + pt_regs::RBP as u64);
+        assert_eq!(regs.regs[7], 0x1000 + pt_regs::RSP as u64);
+        assert_eq!(regs.regs[15], 0x1000 + pt_regs::R15 as u64);
+        assert_eq!(regs.rip, 0x1000 + pt_regs::RIP as u64);
+        assert_eq!(regs.segments.cs, 0x33);
+        assert_eq!(regs.segments.ss, 0x2b);
+        assert_eq!(regs.segments.fs, 0);
     }
 
     /// Splits watched ranges as the CPU needs them: the largest aligned

@@ -42,14 +42,14 @@ pub const INSPECT_SHELL: &str = "shell";
 /// first on its PATH (`rewind shell --with`).
 pub const INSPECT_WITH: &str = "--with";
 
-/// The third request: `running`, the process that was running at the
-/// step, which the kernel names in [`RUNNING_ENV`]. The answer is in
-/// [sections](section_header): the pid as [`SECTION_PID`], its
-/// /proc/<pid>/maps as [`SECTION_MAPS`], and then each ELF file it had
-/// mapped that did not come from the input image's store, named by its
-/// path as init sees it. Those are the files only the VM has, such as a
-/// program the job compiled. Not found when the kernel or the idle task
-/// was running.
+/// The third request: `running [pid]`, the process that was running at
+/// the step, which the kernel names in [`RUNNING_ENV`], or process `pid`
+/// when given. The answer is in [sections](section_header): the pid as
+/// [`SECTION_PID`], its /proc/<pid>/maps as [`SECTION_MAPS`], and then
+/// each ELF file it had mapped that did not come from the input image's
+/// store, named by its path as init sees it. Those are the files only the
+/// VM has, such as a program the job compiled. Not found when the kernel
+/// or the idle task was running, or when there is no process `pid`.
 pub const INSPECT_RUNNING: &str = "running";
 pub const SECTION_PID: &str = "pid";
 pub const SECTION_MAPS: &str = "maps";

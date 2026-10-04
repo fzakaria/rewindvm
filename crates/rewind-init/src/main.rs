@@ -373,7 +373,8 @@ fn inspect(request: &[String]) {
         [op, pid, path] if op == INSPECT_CAT => {
             cat(pid.parse().unwrap_or(0), path, &mut out, &mut err)
         }
-        [op] if op == INSPECT_RUNNING => running(&mut out, &mut err),
+        [op] if op == INSPECT_RUNNING => running(None, &mut out, &mut err),
+        [op, pid] if op == INSPECT_RUNNING => running(pid.parse().ok(), &mut out, &mut err),
         [op, pid] if op == INSPECT_FILES => files(pid.parse().unwrap_or(0), &mut out, &mut err),
         [op, pid, cols, rows, extras @ ..] if op == INSPECT_SHELL => {
             let size = (cols.parse().unwrap_or(80), rows.parse().unwrap_or(24));
@@ -438,14 +439,15 @@ fn cat(pid: i32, path: &str, out: &mut File, err: &mut File) -> InspectStatus {
     InspectStatus::Done
 }
 
-/// The process that was running at the step, which the kernel names in
-/// REWIND_RUNNING, in sections: its pid, its memory map, and the ELF files
-/// it had mapped that the host does not have. The map is read with init's
-/// root, so its paths are whole paths in the VM, a job's root included.
-fn running(out: &mut File, err: &mut File) -> InspectStatus {
-    let pid = std::env::var(RUNNING_ENV)
-        .ok()
-        .and_then(|v| v.parse::<i32>().ok())
+/// Process `pid`, or when None the process that was running at the step,
+/// which the kernel names in REWIND_RUNNING, in sections: its pid, its
+/// memory map, and the ELF files it had mapped that the host does not
+/// have. The map is read with init's root, so its paths are whole paths in
+/// the VM, a job's root included.
+fn running(pid: Option<i32>, out: &mut File, err: &mut File) -> InspectStatus {
+    let asked = pid.is_some();
+    let pid = pid
+        .or_else(|| std::env::var(RUNNING_ENV).ok()?.parse().ok())
         .unwrap_or(0);
     if pid <= 0 {
         let _ = writeln!(err, "no process was running at this step, only the kernel");
@@ -454,6 +456,10 @@ fn running(out: &mut File, err: &mut File) -> InspectStatus {
 
     let maps = match fs::read_to_string(format!("/proc/{pid}/maps")) {
         Ok(maps) => maps,
+        Err(e) if asked && e.kind() == std::io::ErrorKind::NotFound => {
+            let _ = writeln!(err, "no process {pid} at this step");
+            return InspectStatus::NotFound;
+        }
         Err(e) => {
             let _ = writeln!(err, "/proc/{pid}/maps: {e}");
             return InspectStatus::Failed;

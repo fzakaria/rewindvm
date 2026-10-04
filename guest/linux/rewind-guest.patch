@@ -118,7 +118,7 @@ diff -ruN a/arch/x86/kernel/cpu/Makefile b/arch/x86/kernel/cpu/Makefile
 diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 --- a/arch/x86/kernel/cpu/rewind.c	1969-12-31 16:00:00.000000000 -0800
 +++ b/arch/x86/kernel/cpu/rewind.c	1969-12-31 16:00:00.000000000 -0800
-@@ -0,0 +1,1127 @@
+@@ -0,0 +1,1188 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Rewind VM guest platform.
@@ -252,6 +252,39 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +#define REWIND_INPUT_MAX	1024
 +
 +/*
++ * Where `rewind gdb` finds a process's threads, written once at setup:
++ * the head of the task list, where the running task's pointer is, the
++ * direct map's base for turning mm->pgd into a page table address, and
++ * the offsets of the fields read to walk from one task to the next. A
++ * thread that is not on the CPU saved its user registers in the struct
++ * pt_regs at pt_regs bytes into its stack, so gdb can show every thread
++ * of the process it debugs, those off the CPU included.
++ */
++struct rewind_tasks {
++	u64 init_task;
++	u64 current_task;
++	u64 page_offset;
++	u64 tasks;		/* in struct task_struct, as are those to comm */
++	u64 thread_node;
++	u64 signal;
++	u64 pid;
++	u64 tgid;
++	u64 stack;
++	u64 mm;
++	u64 comm;
++	u64 thread_head;	/* in struct signal_struct */
++	u64 pgd;		/* in struct mm_struct */
++	u64 pt_regs;
++};
++
++/*
++ * The monitor reads struct pt_regs as this many u64s, in the order of
++ * ptrace's user_regs_struct: r15 to r12, bp, bx, r11 to r8, ax, cx, dx,
++ * si, di, orig_ax, ip, cs, flags, sp, ss.
++ */
++#define REWIND_PT_REGS_WORDS	21
++
++/*
 + * The page the monitor writes into: the virtual clock on every
 + * REWIND_PORT_CLOCK read, the boot wall clock once at setup, and, before
 + * each interrupt it sends, why it sent it. An inspection request comes
@@ -268,6 +301,7 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +	u32 input_len;
 +	u8 input[REWIND_INPUT_MAX];
 +	u32 stall_ns;
++	struct rewind_tasks tasks;
 +};
 +
 +/* Reasons for an interrupt, in rewind_shared.pending. */
@@ -743,9 +777,36 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +	smp_found_config = 1;
 +}
 +
++/* The task list's layout, for the monitor (struct rewind_tasks). */
++static void __init rewind_publish_tasks(void)
++{
++	struct rewind_tasks *t = &rewind_shared.tasks;
++
++	BUILD_BUG_ON(sizeof(struct pt_regs) != REWIND_PT_REGS_WORDS * sizeof(u64));
++	BUILD_BUG_ON(offsetof(struct pt_regs, ss) !=
++		     (REWIND_PT_REGS_WORDS - 1) * sizeof(u64));
++
++	t->init_task = (u64)&init_task;
++	t->current_task = (u64)per_cpu_ptr(&current_task, 0);
++	t->page_offset = PAGE_OFFSET;
++	t->tasks = offsetof(struct task_struct, tasks);
++	t->thread_node = offsetof(struct task_struct, thread_node);
++	t->signal = offsetof(struct task_struct, signal);
++	t->pid = offsetof(struct task_struct, pid);
++	t->tgid = offsetof(struct task_struct, tgid);
++	t->stack = offsetof(struct task_struct, stack);
++	t->mm = offsetof(struct task_struct, mm);
++	t->comm = offsetof(struct task_struct, comm);
++	t->thread_head = offsetof(struct signal_struct, thread_head);
++	t->pgd = offsetof(struct mm_struct, pgd);
++	t->pt_regs = THREAD_SIZE - TOP_OF_KERNEL_STACK_PADDING -
++		     sizeof(struct pt_regs);
++}
++
 +static void __init rewind_init_platform(void)
 +{
 +	rewind_running = true;
++	rewind_publish_tasks();
 +	outl(__pa_symbol(&rewind_shared), REWIND_PORT_SETUP);
 +
 +	sysvec_install(HYPERVISOR_CALLBACK_VECTOR, sysvec_rewind_callback);

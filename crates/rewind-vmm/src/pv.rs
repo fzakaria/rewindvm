@@ -151,6 +151,96 @@ pub const STALL_DOUBLINGS: u64 = 8;
 pub const PENDING_STALL: u32 = 1 << 4;
 pub const SHARED_STALL_NS: u64 = SHARED_INPUT + INPUT_MAX as u64;
 
+/// The kernel's task layout in the shared page, after the stall's length
+/// and aligned to 8 bytes, as [`TaskLayout`]'s fields in order, each a u64.
+pub const SHARED_TASKS: u64 = (SHARED_STALL_NS + 4).next_multiple_of(8);
+
+/// Where `rewind gdb` finds a process's threads: what the kernel writes
+/// into the shared page at setup. Addresses are kernel virtual ones;
+/// offsets are within the struct each field names. All zero from a kernel
+/// that predates it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TaskLayout {
+    /// init_task, whose `tasks` list holds every process.
+    pub init_task: u64,
+    /// The variable holding the running task's address.
+    pub current_task: u64,
+    /// The direct map's base: mm->pgd less this is the page table's
+    /// physical address.
+    pub page_offset: u64,
+    /// In struct task_struct.
+    pub tasks: u64,
+    pub thread_node: u64,
+    pub signal: u64,
+    pub pid: u64,
+    pub tgid: u64,
+    pub stack: u64,
+    pub mm: u64,
+    pub comm: u64,
+    /// In struct signal_struct: the list of the process's threads, linked
+    /// through each task's `thread_node`.
+    pub thread_head: u64,
+    /// In struct mm_struct.
+    pub pgd: u64,
+    /// From a task's stack to its struct pt_regs.
+    pub pt_regs: u64,
+}
+
+/// How many u64 fields [`TaskLayout`] has.
+pub const TASK_LAYOUT_FIELDS: usize = 14;
+
+impl TaskLayout {
+    /// The layout from its fields in the shared page's order, or None when
+    /// the kernel wrote none.
+    pub fn from_fields(f: [u64; TASK_LAYOUT_FIELDS]) -> Option<TaskLayout> {
+        if f[0] == 0 {
+            return None;
+        }
+        Some(TaskLayout {
+            init_task: f[0],
+            current_task: f[1],
+            page_offset: f[2],
+            tasks: f[3],
+            thread_node: f[4],
+            signal: f[5],
+            pid: f[6],
+            tgid: f[7],
+            stack: f[8],
+            mm: f[9],
+            comm: f[10],
+            thread_head: f[11],
+            pgd: f[12],
+            pt_regs: f[13],
+        })
+    }
+}
+
+/// struct pt_regs as u64s, in the order of ptrace's user_regs_struct, and
+/// where each register is among them.
+pub mod pt_regs {
+    pub const WORDS: usize = 21;
+    pub const R15: usize = 0;
+    pub const R14: usize = 1;
+    pub const R13: usize = 2;
+    pub const R12: usize = 3;
+    pub const RBP: usize = 4;
+    pub const RBX: usize = 5;
+    pub const R11: usize = 6;
+    pub const R10: usize = 7;
+    pub const R9: usize = 8;
+    pub const R8: usize = 9;
+    pub const RAX: usize = 10;
+    pub const RCX: usize = 11;
+    pub const RDX: usize = 12;
+    pub const RSI: usize = 13;
+    pub const RDI: usize = 14;
+    pub const RIP: usize = 16;
+    pub const CS: usize = 17;
+    pub const RFLAGS: usize = 18;
+    pub const RSP: usize = 19;
+    pub const SS: usize = 20;
+}
+
 /// A perturbed schedule. At some exits, chosen by the seed, the guest is
 /// asked to reschedule, so another runnable thread may run from there, and
 /// timers armed in the window fire a little late, so sleepers wake in a
