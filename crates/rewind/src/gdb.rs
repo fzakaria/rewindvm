@@ -14,7 +14,9 @@
 //! DWARF and source files for all of them come from a debuginfod server
 //! started for the session, nixseparatedebuginfod2, which serves the
 //! `debug` outputs in the local store and on cache.nixos.org, with the
-//! source files they were built from.
+//! source files they were built from. A store program that keeps its
+//! DWARF, with no `debug` output, names source files in the build's
+//! directory; those are found in its derivation's src.
 
 use std::net::TcpListener;
 use std::os::fd::AsRawFd;
@@ -328,8 +330,9 @@ struct Process {
     scope: rewind_core::debug::Scope,
     /// Its programs and libraries, with their load offsets.
     files: Vec<SymbolFile>,
-    /// Directories of source files only the VM had, as the VM names them,
-    /// each with where its files were written here.
+    /// Directories of source files as the programs' DWARF names them, each
+    /// with where its files are here: written from the VM, or a
+    /// derivation's src in the store.
     source_dirs: Vec<(PathBuf, PathBuf)>,
 }
 
@@ -394,12 +397,47 @@ fn debugged_process(home: &Home, run: &Run, step: u64, pid: Option<u32>, dir: &P
         eprintln!("rewind: no symbols for {}", missing.join(", "));
     }
 
-    let sent: Vec<&Path> = files
-        .iter()
-        .map(|f| f.path.as_path())
-        .filter(|p| p.starts_with(dir))
-        .collect();
-    let source_dirs = fetch_sources(home, run, step, running.pid, &sent, dir);
+    // Source files outside the store, which debuginfod does not serve.
+    // The VM has them for a program it built: one it sent, or one of the
+    // run's outputs. Any other store program was built elsewhere, and the
+    // VM's /build, if it has one, is another build's, so its source files
+    // are its derivation's src on this machine. The VM's trees go first:
+    // gdb takes the first substitute-path that matches.
+    let outputs = &run.manifest.spec.job.outputs;
+    let mut from_vm: Vec<String> = Vec::new();
+    let mut from_src: Vec<(PathBuf, Vec<String>)> = Vec::new();
+    for (file, sources) in files.iter().zip(sources_outside_store(&files)) {
+        if sources.is_empty() {
+            continue;
+        }
+        let store_path = path_in_vm(&file.path, dir);
+        let built_by_run = store_root(&store_path)
+            .is_some_and(|root| outputs.iter().any(|o| Path::new(o) == root));
+        if file.origin == Origin::Sent || built_by_run {
+            from_vm.extend(sources.iter().cloned());
+        }
+        if file.origin != Origin::Sent {
+            from_src.push((store_path, sources));
+        }
+    }
+    let mut source_dirs = fetch_sources(home, run, step, running.pid, from_vm, dir);
+
+    // The trees the VM did not have, from each store program's derivation.
+    for (store_path, sources) in &from_src {
+        let unmapped: Vec<String> = sources
+            .iter()
+            .filter(|p| {
+                let tree = source_tree(Path::new(p));
+                !source_dirs.iter().any(|(from, _)| *from == tree)
+            })
+            .cloned()
+            .collect();
+        if unmapped.is_empty() {
+            continue;
+        }
+        source_dirs.extend(derivation_sources(store_path, &unmapped));
+    }
+
     Process {
         scope: rewind_core::debug::Scope::Process(running.pid),
         files,
@@ -407,22 +445,19 @@ fn debugged_process(home: &Home, run: &Run, step: u64, pid: Option<u32>, dir: &P
     }
 }
 
-/// Fetches from a fork the source files that `programs`, which only the
-/// VM had, were built from, and writes them under `dir`. Returns the tree
-/// each was in, with where it is here, for gdb's substitute-path. Sources
-/// in the store are left to debuginfod.
+/// Fetches from a fork the source files at `paths`, named by programs the
+/// VM built, and writes them under `dir`. Returns the tree each was in,
+/// with where it is here, for gdb's substitute-path.
 fn fetch_sources(
     home: &Home,
     run: &Run,
     step: u64,
     pid: u32,
-    programs: &[&Path],
+    paths: Vec<String>,
     dir: &Path,
 ) -> Vec<(PathBuf, PathBuf)> {
-    let paths: Vec<String> = programs
-        .iter()
-        .flat_map(|program| source_files(program))
-        .filter(|p| !p.starts_with(NIX_STORE))
+    let paths: Vec<String> = paths
+        .into_iter()
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .collect();
@@ -489,6 +524,149 @@ fn source_tree(file: &Path) -> PathBuf {
         tree.push(part);
     }
     tree
+}
+
+/// For each of `files`, the source files its DWARF names outside the
+/// store. Each file is listed by a gdb of its own, several at once.
+fn sources_outside_store(files: &[SymbolFile]) -> Vec<Vec<String>> {
+    let workers = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let per_worker = files.len().div_ceil(workers).max(1);
+    let outside = |file: &SymbolFile| -> Vec<String> {
+        source_files(&file.path)
+            .into_iter()
+            .filter(|p| !p.starts_with(NIX_STORE))
+            .collect()
+    };
+    std::thread::scope(|scope| {
+        let listings: Vec<_> = files
+            .chunks(per_worker)
+            .map(|chunk| scope.spawn(move || chunk.iter().map(outside).collect::<Vec<_>>()))
+            .collect();
+        listings
+            .into_iter()
+            .flat_map(|l| l.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
+            .collect()
+    })
+}
+
+/// The path a symbol file had in the VM: its path under `dir` when it was
+/// written there, else its own path.
+fn path_in_vm(file: &Path, dir: &Path) -> PathBuf {
+    match file.strip_prefix(dir) {
+        Ok(inside) => Path::new("/").join(inside),
+        Err(_) => file.to_path_buf(),
+    }
+}
+
+/// How Nix answers for a store path it does not know the derivation of.
+const UNKNOWN_DERIVER: &str = "unknown-deriver";
+
+/// The nix command, with the feature `nix derivation show` needs, and the
+/// key recent versions list the derivations it shows under.
+const NIX_PROGRAM: &str = "nix";
+const NIX_COMMAND: &[&str] = &["--extra-experimental-features", "nix-command"];
+const DERIVATIONS: &str = "derivations";
+
+/// The trees `sources` are in, named by the DWARF of `store_path`, each
+/// with the src of the derivation that built it: a program built in
+/// the Nix sandbox names its files under the build's directory, such as
+/// /build/source, which held src unpacked. Says on stderr why there are
+/// none when the derivation or its src is not on this machine, or src is
+/// not a directory, such as a tarball.
+fn derivation_sources(store_path: &Path, sources: &[String]) -> Vec<(PathBuf, PathBuf)> {
+    // Without Nix there is no derivation to ask, and nothing to say.
+    let Some(root) = store_root(store_path) else {
+        return Vec::new();
+    };
+    let Some(nix_store) = on_path(NIX_STORE_PROGRAM, std::env::var_os("PATH").as_deref()) else {
+        return Vec::new();
+    };
+    let skip = |why: String| {
+        eprintln!("rewind: no source files for {}: {why}", root.display());
+        Vec::new()
+    };
+
+    // The derivation, which must be on this machine.
+    let deriver = Command::new(nix_store)
+        .args(["--query", "--deriver"])
+        .arg(&root)
+        .stderr(Stdio::null())
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    if deriver.is_empty() || deriver == UNKNOWN_DERIVER {
+        return skip("this machine does not know its derivation".into());
+    }
+    let drv = PathBuf::from(deriver);
+    if !drv.exists() {
+        return skip(format!(
+            "its derivation {} is not on this machine",
+            drv.display()
+        ));
+    }
+
+    // The derivation's src, which must be a directory here.
+    let show = Command::new(NIX_PROGRAM)
+        .args(NIX_COMMAND)
+        .args(["derivation", "show"])
+        .arg(&drv)
+        .stderr(Stdio::null())
+        .output()
+        .map(|o| o.stdout)
+        .unwrap_or_default();
+    let Some(src) = derivation_src(&show) else {
+        return skip(format!("its derivation {} names no src", drv.display()));
+    };
+    if !src.is_dir() {
+        return skip(format!("its src {} is not a directory here", src.display()));
+    }
+
+    let trees = source_trees_in(&src, sources);
+    if trees.is_empty() {
+        return skip(format!("none of its source files are in {}", src.display()));
+    }
+    eprintln!(
+        "rewind: source files for {} from {}",
+        root.display(),
+        src.display()
+    );
+    trees.into_iter().map(|tree| (tree, src.clone())).collect()
+}
+
+/// The `src` of the derivation `nix derivation show` printed as `show`:
+/// under `derivations` by name in recent versions of Nix, by path at the
+/// top in older ones.
+fn derivation_src(show: &[u8]) -> Option<PathBuf> {
+    let json: serde_json::Value = serde_json::from_slice(show).ok()?;
+    let derivations = json.get(DERIVATIONS).unwrap_or(&json);
+    let derivation = derivations.as_object()?.values().next()?;
+    derivation
+        .get("env")?
+        .get("src")?
+        .as_str()
+        .map(PathBuf::from)
+}
+
+/// The trees `sources` are in whose files are in `src`: a tree is the
+/// directory src was unpacked to when one of its files, by its path
+/// inside the tree, is in src. Files a build generated, under target/ for
+/// one, are not in src, so one file found is enough.
+fn source_trees_in(src: &Path, sources: &[String]) -> Vec<PathBuf> {
+    let mut trees: Vec<PathBuf> = Vec::new();
+    for source in sources {
+        let source = Path::new(source);
+        let tree = source_tree(source);
+        if trees.contains(&tree) {
+            continue;
+        }
+        let Ok(inside) = source.strip_prefix(&tree) else {
+            continue;
+        };
+        if src.join(inside).exists() {
+            trees.push(tree);
+        }
+    }
+    trees
 }
 
 /// The absolute paths of the source files a program's DWARF names, as gdb
@@ -683,6 +861,47 @@ mod tests {
             PathBuf::from("/build/mylib")
         );
         assert_eq!(source_tree(Path::new("/src/main.c")), PathBuf::from("/src"));
+    }
+
+    /// A store program's source tree is the one its derivation's src
+    /// holds. Makes a src directory with one crate's test file, then checks
+    /// that of the trees gdb names, the build's /build/source is found in
+    /// it, and the vendored crates and the Rust library, which src lacks,
+    /// are not.
+    #[test]
+    fn a_source_tree_is_found_in_src_by_its_files() {
+        let src = std::env::temp_dir().join(format!("rewind-src-tree-{}", std::process::id()));
+        let test = src.join("crates/casita/tests/retained_process_pins.rs");
+        std::fs::create_dir_all(test.parent().unwrap()).unwrap();
+        std::fs::write(&test, "").unwrap();
+
+        let sources = [
+            "/build/source/crates/casita/tests/retained_process_pins.rs",
+            "/build/source/target/release/build/casita/out/generated.rs",
+            "/build/cargo-vendor-dir/libc-0.2.177/src/lib.rs",
+            "/rustc/48a229ce/library/std/src/fs.rs",
+        ]
+        .map(String::from);
+        assert_eq!(
+            source_trees_in(&src, &sources),
+            vec![PathBuf::from("/build/source")]
+        );
+        std::fs::remove_dir_all(&src).unwrap();
+    }
+
+    /// A derivation's src, from `nix derivation show` as Nix 2.35 prints
+    /// it, under `derivations` by name, and as older versions print it, by
+    /// path at the top; and none when the derivation has no src.
+    #[test]
+    fn a_derivation_s_src_is_read_from_either_shape() {
+        let src = Some(PathBuf::from("/nix/store/jyz-source"));
+        let newer = br#"{"derivations":{"h9v-casita-tests-0.1.0.drv":{"env":{"src":"/nix/store/jyz-source"}}},"version":4}"#;
+        assert_eq!(derivation_src(newer), src);
+        let older =
+            br#"{"/nix/store/h9v-casita-tests-0.1.0.drv":{"env":{"src":"/nix/store/jyz-source"}}}"#;
+        assert_eq!(derivation_src(older), src);
+        let none = br#"{"/nix/store/h9v-run.drv":{"env":{"buildCommand":"true"}}}"#;
+        assert_eq!(derivation_src(none), None);
     }
 
     #[test]
