@@ -71,9 +71,16 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 TEMPLATES = REPO / "docs" / "templates"
 
-# The flake outputs a recording runs: the command and the app, and the
-# release tarballs the container tutorial installs.
-OUTPUTS = ["rewind", "app", "release", "release-debug"]
+# The flake outputs a recording runs: the command and the app, the
+# release tarballs the container tutorial installs, and the guest every
+# run boots, which RECORDED_WITH names.
+OUTPUTS = ["rewind", "app", "release", "release-debug", "initrd", "kernel"]
+
+# Which guest the tutorials were recorded with. A run's id hashes the
+# guest's initramfs and kernel, so a release whose guest is another makes
+# runs the tutorials do not show; the release workflow refuses one.
+RECORDED_WITH = TEMPLATES / "recorded-with"
+GUEST = ["initrd", "kernel"]
 
 # A store path's hash, to shorten as the tutorials do.
 STORE_HASH = re.compile(r"/nix/store/[0-9a-z]{32}-")
@@ -461,6 +468,14 @@ def main():
         shutil.rmtree(work, ignore_errors=True)
         work.mkdir(parents=True)
         record(name, work, home, paths)
+
+    lines = [
+        "# The guest the tutorials were recorded with, by tools/record-tutorials.py.",
+        "# The release workflow refuses a tag whose guest is another.",
+        *(f"{name} {paths[name]}" for name in GUEST),
+    ]
+    RECORDED_WITH.write_text("\n".join(lines) + "\n")
+    print(f"wrote {RECORDED_WITH.relative_to(REPO)}")
 
 
 if __name__ == "__main__":

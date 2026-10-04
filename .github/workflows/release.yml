@@ -51,6 +51,21 @@ jobs:
             exit 1
           fi
 
+      # The tutorials show run ids, which hash the guest's initramfs and
+      # kernel; a tag whose guest is not the one they were recorded with
+      # would publish pages whose commands make other runs.
+      - name: Check the tutorials were recorded with this guest
+        run: |
+          want=$(grep -v '^#' docs/templates/recorded-with)
+          have=$(printf 'initrd %s\nkernel %s\n' \
+            "$(nix build --no-link --print-out-paths .#initrd)" \
+            "$(nix build --no-link --print-out-paths .#kernel)")
+          if [ "$want" != "$have" ]; then
+            echo "the tutorials were recorded with another guest; run tools/record-tutorials.py" >&2
+            diff <(echo "$want") <(echo "$have") >&2
+            exit 1
+          fi
+
       - name: Build the assets
         run: |
           nix build -L .#release -o cli
