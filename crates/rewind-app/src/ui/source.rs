@@ -28,11 +28,12 @@ use gpui::{
 use crate::answers::PlaceKey;
 use crate::describe::thousands;
 use crate::engine::{Cancel, EngineResult, REPLAYS_ANOTHER_WAY, goes_another_way};
+use crate::model::Timeline;
 use crate::request::Request;
 use crate::run::Replays;
 use crate::selection::{Mapped, Pos, Surface, part_of_line};
 use crate::sideways::{Sideways, line_width, text_column};
-use crate::source::{Frame, Located, Progress, Shown, SourceFile, shown, target};
+use crate::source::{Frame, Located, Progress, Shown, SourceFile, Thread, shown, target};
 use crate::syntax::{Highlighter, Language};
 use crate::theme::{self, layout, size};
 use crate::ui::icons::Icon;
@@ -40,6 +41,16 @@ use crate::ui::scrubber::{Replay, Scrubber, replay_unavailable};
 use crate::ui::selectable::{colored, selectable, selects, viewer_line};
 use crate::ui::sideways::{shifted, sideways_layer};
 use crate::ui::widgets::{icon, panel_title};
+
+/// Whose stack the panel shows at `step`: the thread of the latest event
+/// at or before it, or the one on the CPU when that event is the kernel's
+/// or there is none yet.
+fn thread_at(timeline: &Timeline, step: u64) -> Thread {
+    timeline
+        .event_index_at(step)
+        .and_then(|i| timeline.event(i))
+        .map_or(Thread::OnTheCpu, |e| target(e.pid, e.tid))
+}
 
 /// How long the playhead must rest before the panel asks again.
 const DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(400);
@@ -185,30 +196,16 @@ impl Scrubber {
         panel.request = self.requests.issue();
         let step = panel.step;
 
-        // While the VM boots no thread of the job runs, and the kernel's
-        // own events name none.
+        // While the VM boots no thread of the job runs.
         let timeline = &session.run.timeline;
         let job_start = timeline.job_start.unwrap_or(0);
-        let event = timeline
-            .event_index_at(step)
-            .and_then(|i| timeline.event(i));
-        let thread = event.and_then(|e| target(e.pid, e.tid));
-        let immediate = if step < job_start {
-            Some(Shown::Booting { step, job_start })
-        } else if thread.is_none() {
-            Some(Shown::Kernel { step })
-        } else {
-            None
-        };
-        if let Some(answer) = immediate {
+        if step < job_start {
             panel.loading = false;
-            panel.shown = Some(answer);
+            panel.shown = Some(Shown::Booting { step, job_start });
             cx.notify();
             return;
         }
-        let Some((pid, tid)) = thread else {
-            return;
-        };
+        let thread = thread_at(timeline, step);
         let run = session.run.path.clone();
         if let Some(answer) = self.known_place() {
             self.show_place(step, Ok(answer), cx);
@@ -222,7 +219,7 @@ impl Scrubber {
         panel.loading = true;
         panel.progress = Progress::default();
         let request = panel.request;
-        let key: PlaceKey = (run.clone(), pid, tid, step);
+        let key: PlaceKey = (run.clone(), thread, step);
         let engine = self.engine.clone();
 
         // The engine's lines come through a channel as it says them, and
@@ -231,7 +228,7 @@ impl Scrubber {
         let cancel = Cancel::default();
         panel.in_flight = Some(cancel.clone());
         let task = cx.background_executor().spawn(async move {
-            engine.locate(&run, step, pid, tid, &cancel, &mut |line| {
+            engine.locate(&run, step, thread, &cancel, &mut |line| {
                 let _ = lines.unbounded_send(line.to_string());
             })
         });
@@ -269,20 +266,27 @@ impl Scrubber {
     }
 
     /// The answer kept for the thread of the panel's step, when the engine
-    /// gave one there. None while the VM boots or the kernel runs, which
-    /// the panel says instead.
+    /// gave one there. None while the VM boots, which the panel says
+    /// instead.
     fn known_place(&self) -> Option<Located> {
         let (panel, session) = (self.source.as_ref()?, self.session.as_ref()?);
         let timeline = &session.run.timeline;
         if panel.step < timeline.job_start.unwrap_or(0) {
             return None;
         }
-        let event = timeline
-            .event_index_at(panel.step)
-            .and_then(|i| timeline.event(i))?;
-        let (pid, tid) = target(event.pid, event.tid)?;
-        let key: PlaceKey = (session.run.path.clone(), pid, tid, panel.step);
+        let thread = thread_at(timeline, panel.step);
+        let key: PlaceKey = (session.run.path.clone(), thread, panel.step);
         self.place_answers.get(&key)
+    }
+
+    /// The answer the source panel shows for the playhead's step, when it
+    /// shows one: what gdb starts in, at the frame the panel shows.
+    pub(super) fn place_at_playhead(&self) -> Option<(&Located, Option<usize>)> {
+        let panel = self.source.as_ref()?;
+        if panel.step != self.step || panel.loading {
+            return None;
+        }
+        panel.shown.as_ref()?.located()
     }
 
     /// Shows the engine's answer for the thread at `step`.
@@ -438,7 +442,6 @@ impl Scrubber {
                 "process {} ({}) \u{b7} thread {}",
                 located.pid, located.process, located.tid
             ),
-            (Some(Shown::Kernel { .. }), None) => "the kernel, in no process".to_string(),
             (Some(Shown::Booting { .. }), None) => "the VM is still booting".to_string(),
             (Some(Shown::Unreadable { .. }), None) => "not available for this run".to_string(),
             (Some(Shown::Failed { .. }), None) => "could not walk the stack".to_string(),
@@ -833,13 +836,6 @@ fn source_message(panel: &SourcePanel) -> Option<(String, u32)> {
     }
     Some(match panel.shown.as_ref() {
         Some(Shown::Located { .. }) => return None,
-        Some(Shown::Kernel { step }) => (
-            format!(
-                "At step {} the kernel was running, in no process. Move the playhead to a step of a process to see its source.",
-                thousands(*step)
-            ),
-            theme::SOFT,
-        ),
         Some(Shown::Booting { step, job_start }) => (
             format!(
                 "At step {} the VM is still booting. The job starts at step {}; move the playhead past it to see its source.",

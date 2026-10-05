@@ -17,7 +17,8 @@ use gpui::{
 use crate::answers::{Answers, FileKey, PlaceKey};
 use crate::describe::thousands;
 use crate::engine::{
-    Engine, EngineError, EngineResult, FileAtStep, Forked, REPLAYS_ANOTHER_WAY, goes_another_way,
+    Engine, EngineError, EngineResult, FileAtStep, Forked, GdbAt, REPLAYS_ANOTHER_WAY,
+    goes_another_way,
 };
 use crate::family::{Family, Row, RowKind, RunEntry, families, family_of, scan};
 use crate::history::History;
@@ -1339,7 +1340,17 @@ impl Scrubber {
                 pid,
                 self.engine.shell_command(&run, step, pid),
             ),
-            Replay::Gdb => (PaneKind::Gdb, None, self.engine.gdb_command(&run, step)),
+            // gdb starts in the thread and frame the source panel shows
+            // for this step, when it shows one; else the engine picks the
+            // thread `rewind where` would.
+            Replay::Gdb => {
+                let at = self.place_at_playhead().map(|(located, frame)| GdbAt {
+                    pid: located.pid,
+                    tid: located.tid,
+                    frame: frame.map(|f| located.frames[f].level),
+                });
+                (PaneKind::Gdb, None, self.engine.gdb_command(&run, step, at))
+            }
             // A fork makes a run and the source fills a panel rather than
             // a pane; fork_here and open_source do them.
             Replay::Fork | Replay::Where => return,

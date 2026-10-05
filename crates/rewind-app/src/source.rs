@@ -177,15 +177,25 @@ impl Located {
     }
 }
 
-/// The process and thread whose stack the panel shows at a step: the
-/// thread of the latest event at or before it. None when that event is
-/// the kernel's, in no process.
-pub fn target(pid: u32, tid: u32) -> Option<(u32, u32)> {
+/// Whose stack the panel asks the engine for at a step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Thread {
+    /// The thread of the latest event at or before the step.
+    Of { pid: u32, tid: u32 },
+    /// The thread that was on the CPU, which the engine reads from the
+    /// guest kernel: the latest event is the kernel's own, such as a
+    /// console line printed while a thread of the job ran.
+    OnTheCpu,
+}
+
+/// Whose stack the panel shows at a step whose latest event is `pid`'s
+/// and `tid`'s.
+pub fn target(pid: u32, tid: u32) -> Thread {
     const KERNEL_PID: u32 = 0;
     if pid == KERNEL_PID {
-        return None;
+        return Thread::OnTheCpu;
     }
-    Some((pid, tid))
+    Thread::Of { pid, tid }
 }
 
 /// What the panel shows for one step.
@@ -197,10 +207,6 @@ pub enum Shown {
         step: u64,
         located: Located,
         selected: Option<usize>,
-    },
-    /// The event at the step is the kernel's; there is no thread to show.
-    Kernel {
-        step: u64,
     },
     /// The step is before the job started, while the VM boots.
     Booting {
@@ -224,7 +230,6 @@ impl Shown {
     pub fn step(&self) -> u64 {
         match self {
             Shown::Located { step, .. }
-            | Shown::Kernel { step }
             | Shown::Booting { step, .. }
             | Shown::Unreadable { step, .. }
             | Shown::Failed { step, .. } => *step,
@@ -472,9 +477,12 @@ mod tests {
         let again = shown(5057, Ok(located));
         assert_eq!(again.located().map(|(_, at)| at), Some(Some(0)));
 
-        let mut kernel = Shown::Kernel { step: 10 };
-        assert!(!kernel.select_frame(0));
-        assert_eq!(kernel.located(), None);
+        let mut booting = Shown::Booting {
+            step: 10,
+            job_start: 900,
+        };
+        assert!(!booting.select_frame(0));
+        assert_eq!(booting.located(), None);
     }
 
     /// A frame without source is shown by its address and program, and a
@@ -517,11 +525,12 @@ mod tests {
         assert_eq!(frame.place_label(), "big");
     }
 
-    /// The kernel's own events name no thread to show.
+    /// A process's event names its thread; at the kernel's own events
+    /// the engine looks for the thread on the CPU.
     #[test]
-    fn a_kernel_event_has_no_thread() {
-        assert_eq!(target(0, 0), None);
-        assert_eq!(target(166, 174), Some((166, 174)));
+    fn a_kernel_event_asks_for_the_thread_on_the_cpu() {
+        assert_eq!(target(0, 0), Thread::OnTheCpu);
+        assert_eq!(target(166, 174), Thread::Of { pid: 166, tid: 174 });
     }
 
     /// A run recorded before its kernel listed its tasks says to record

@@ -18,7 +18,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 use crate::run::MANIFEST_FILE;
-use crate::source::Located;
+use crate::source::{Located, Thread};
 use crate::viewer::{self, FetchedAll};
 
 /// The engine's command, looked up on PATH.
@@ -189,6 +189,15 @@ pub struct Imported {
     pub replayable: bool,
 }
 
+/// Where gdb starts: a thread of a process, and a frame of its stack by
+/// the level `rewind where --json` gives it, or its innermost frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GdbAt {
+    pub pid: u32,
+    pub tid: u32,
+    pub frame: Option<u32>,
+}
+
 /// What `rewind remove --json` prints on standard output.
 #[derive(serde::Deserialize)]
 struct RemoveJson {
@@ -223,8 +232,9 @@ pub trait Engine: Send + Sync {
     fn shell_command(&self, run: &Path, step: u64, pid: Option<u32>) -> CommandLine;
 
     /// The command that forks `run` at `step` behind a GDB server and runs
-    /// gdb attached to it.
-    fn gdb_command(&self, run: &Path, step: u64) -> CommandLine;
+    /// gdb attached to it, in the thread and frame `at` names, or where the
+    /// engine picks: the thread `rewind where` would look at.
+    fn gdb_command(&self, run: &Path, step: u64, at: Option<GdbAt>) -> CommandLine;
 
     /// Reads `path` inside the VM as it was at `step` of `run`, as process
     /// `pid` saw it when one is given. The engine brings the run back to
@@ -239,19 +249,18 @@ pub trait Engine: Send + Sync {
         cancel: &Cancel,
     ) -> EngineResult<FileAtStep>;
 
-    /// Where in the program's own code thread `tid` of process `pid` was
-    /// at `step` of `run`: the thread's frames, the innermost of them in
-    /// the program's own code, and its source. The engine forks the run at
-    /// the step and walks the thread's stack in gdb, which takes seconds,
-    /// or a minute the first time gdb downloads a library's debug info;
-    /// `progress` is handed each line the engine says while it works, and
-    /// `cancel` stops it early.
+    /// Where in the program's own code `thread` was at `step` of `run`:
+    /// the thread's frames, the innermost of them in the program's own
+    /// code, and its source. The engine forks the run at the step and
+    /// walks the thread's stack in gdb, which takes seconds, or a minute
+    /// the first time gdb downloads a library's debug info; `progress` is
+    /// handed each line the engine says while it works, and `cancel` stops
+    /// it early.
     fn locate(
         &self,
         run: &Path,
         step: u64,
-        pid: u32,
-        tid: u32,
+        thread: Thread,
         cancel: &Cancel,
         progress: &mut dyn FnMut(&str),
     ) -> EngineResult<Located>;
@@ -502,11 +511,23 @@ impl Engine for CliEngine {
         }
     }
 
-    fn gdb_command(&self, run: &Path, step: u64) -> CommandLine {
-        // rewind gdb <run> <step>
+    fn gdb_command(&self, run: &Path, step: u64, at: Option<GdbAt>) -> CommandLine {
+        // rewind gdb <run> <step> [--pid P --tid T [--frame N]]
+        let mut args: Vec<OsString> = vec!["gdb".into(), run.into(), step.to_string().into()];
+        if let Some(at) = at {
+            args.extend([
+                "--pid".into(),
+                at.pid.to_string().into(),
+                "--tid".into(),
+                at.tid.to_string().into(),
+            ]);
+            if let Some(frame) = at.frame {
+                args.extend(["--frame".into(), frame.to_string().into()]);
+            }
+        }
         CommandLine {
             program: self.program.clone(),
-            args: vec!["gdb".into(), run.into(), step.to_string().into()],
+            args,
         }
     }
 
@@ -606,12 +627,11 @@ impl Engine for CliEngine {
         &self,
         run: &Path,
         step: u64,
-        pid: u32,
-        tid: u32,
+        thread: Thread,
         cancel: &Cancel,
         progress: &mut dyn FnMut(&str),
     ) -> EngineResult<Located> {
-        self.where_json(run, step, pid, tid, cancel, progress)
+        self.where_json(run, step, thread, cancel, progress)
     }
 }
 
@@ -621,22 +641,22 @@ impl CliEngine {
         &self,
         run: &Path,
         step: u64,
-        pid: u32,
-        tid: u32,
+        thread: Thread,
         cancel: &Cancel,
         progress: &mut dyn FnMut(&str),
     ) -> EngineResult<Located> {
-        // rewind where <run> <step> --pid P --tid T --json
-        let args: [OsString; 8] = [
-            "where".into(),
-            run.into(),
-            step.to_string().into(),
-            "--pid".into(),
-            pid.to_string().into(),
-            "--tid".into(),
-            tid.to_string().into(),
-            "--json".into(),
-        ];
+        // rewind where <run> <step> [--pid P --tid T] --json; with no
+        // thread named, the engine takes the one on the CPU.
+        let mut args: Vec<OsString> = vec!["where".into(), run.into(), step.to_string().into()];
+        if let Thread::Of { pid, tid } = thread {
+            args.extend([
+                "--pid".into(),
+                pid.to_string().into(),
+                "--tid".into(),
+                tid.to_string().into(),
+            ]);
+        }
+        args.push("--json".into());
         let command = self.command_line(&args);
 
         // In a process group of its own, with the gdb it starts, which
@@ -1040,8 +1060,17 @@ mod tests {
             "rewind shell /runs/abc 10"
         );
         assert_eq!(
-            engine.gdb_command(run, 4_392).display(),
+            engine.gdb_command(run, 4_392, None).display(),
             "rewind gdb /runs/abc 4392"
+        );
+        let at = GdbAt {
+            pid: 166,
+            tid: 174,
+            frame: Some(3),
+        };
+        assert_eq!(
+            engine.gdb_command(run, 4_392, Some(at)).display(),
+            "rewind gdb /runs/abc 4392 --pid 166 --tid 174 --frame 3"
         );
     }
 
@@ -1054,8 +1083,9 @@ mod tests {
         let run = dir.join("run");
         let json = r#"{"run":"r","step":5060,"pid":166,"tid":174,"process":"test_pool_shutdown","frames":[{"level":0,"function":"worker","file":"src/pool.c","fullname":null,"line":77,"pc":"0x55bfaf437437","object":"/build/mylib/tests/test_pool_shutdown"}],"chosen":0,"files":{}}\n"#;
         let engine = fake_engine(&dir, json, "rewind: walking the stack in gdb\n", 0);
+        let thread = Thread::Of { pid: 166, tid: 174 };
         let located =
-            retrying(|| engine.locate(&run, 5_060, 166, 174, &Cancel::default(), &mut |_| {}))
+            retrying(|| engine.locate(&run, 5_060, thread, &Cancel::default(), &mut |_| {}))
                 .unwrap();
         assert_eq!(
             located.chosen_frame().unwrap().place_label(),
@@ -1067,8 +1097,24 @@ mod tests {
             format!("where {} 5060 --pid 166 --tid 174 --json", run.display())
         );
 
+        // At a step of the kernel's own, the engine picks the thread on
+        // the CPU, so the arguments name none.
+        retrying(|| {
+            engine.locate(
+                &run,
+                5_061,
+                Thread::OnTheCpu,
+                &Cancel::default(),
+                &mut |_| {},
+            )
+        })
+        .unwrap();
+        let args = std::fs::read_to_string(dir.join("args")).unwrap();
+        assert_eq!(args.trim(), format!("where {} 5061 --json", run.display()));
+
         let refusing = fake_engine(&dir, "", "rewind: no process 166 at this step\n", 1);
-        let err = retrying(|| refusing.locate(&run, 10, 166, 166, &Cancel::default(), &mut |_| {}))
+        let thread = Thread::Of { pid: 166, tid: 166 };
+        let err = retrying(|| refusing.locate(&run, 10, thread, &Cancel::default(), &mut |_| {}))
             .unwrap_err();
         let EngineError::Failed { message, .. } = err else {
             panic!("{err:?}");
@@ -1104,7 +1150,8 @@ mod tests {
 
         let said = std::cell::RefCell::new(Vec::new());
         let located = retrying(|| {
-            engine.locate(&run, 1, 2, 2, &Cancel::default(), &mut |line| {
+            let thread = Thread::Of { pid: 2, tid: 2 };
+            engine.locate(&run, 1, thread, &Cancel::default(), &mut |line| {
                 said.borrow_mut().push(line.to_string());
                 std::fs::write(&go, "").unwrap();
             })

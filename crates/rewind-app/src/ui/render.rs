@@ -1807,7 +1807,7 @@ const COMPARED_PINNED_NOTE: &str = "The run you chose to compare against, which 
 
 /// What the inspect buttons do, for their hover notes.
 const SOURCE_NOTE: &str = "The line of the program's own code the thread at the playhead was on, past the C library and other libraries, with the frames that called it. Rewind finds it in gdb on a throwaway copy of the VM at this step, and again when the playhead rests elsewhere. Key: s.";
-const GDB_NOTE: &str = "gdb on a throwaway copy of the VM at this step: its one CPU, stopped in the kernel and the process running there, with their symbols and sources. Breakpoints and watchpoints in user space stop only in that process. Breakpoints, step and continue run the copy forward; the recording does not change.";
+const GDB_NOTE: &str = "gdb on a throwaway copy of the VM at this step, with the symbols and sources of the kernel and the process. It starts in the thread and frame the source panel shows, or else in the thread that ran at this step. Breakpoints and watchpoints in user space stop only in that process. Breakpoints, step and continue run the copy forward; the recording does not change.";
 const SHELL_NOTE: &str = "A shell inside a throwaway copy of the VM at this step, in the process's directory with its environment, while everything else in the VM stays where it was. Nothing done in it changes the recording.";
 const FILE_STEP_NOTE: &str = "The step this file was last written, removed or renamed at. Click to go there; click the path to see the file at the playhead.";
 const PROCESS_ROW_NOTE: &str = "Click to go to the step this process or thread started at.";
