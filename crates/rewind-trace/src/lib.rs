@@ -96,9 +96,14 @@ impl Trace {
     /// Reads a trace file: each event is its step as eight little-endian
     /// bytes followed by the record exactly as the guest wrote it.
     pub fn read(path: &Path) -> io::Result<Trace> {
-        let mut events = Vec::new();
-        for (step, record) in records(path)? {
-            let event = Event::decode(step, &record)
+        Trace::decode(&records(path)?)
+    }
+
+    /// The trace of a file's records, as [`records`] reads them.
+    pub fn decode(records: &[(u64, Vec<u8>)]) -> io::Result<Trace> {
+        let mut events = Vec::with_capacity(records.len());
+        for (step, record) in records {
+            let event = Event::decode(*step, record)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
             events.push(event);
         }

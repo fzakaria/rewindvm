@@ -589,7 +589,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 machine.timeout = Some(limit.as_secs());
             }
             let base_trace = base.trace()?;
-            let start = show::start_step(&base_trace).max(user_from);
+            let start = show::start_step(base_trace).max(user_from);
             let base_key = show::outcome_key(&base)?;
             // When the unperturbed run is the one that fails, the schedules
             // that end differently are the ones that pass. A job that exits
@@ -752,12 +752,12 @@ fn run(cli: Cli) -> Result<ExitCode> {
             println!("passing: run {}", passing.manifest.id);
             println!("failing: run {}", failing.manifest.id);
             let (pt, ft) = (passing.trace()?, failing.trace()?);
-            match ft.culprit_against(&pt) {
+            match ft.culprit_against(pt) {
                 Some(argv) => {
                     println!("\nwhere {} first behaves differently:", argv.join(" "));
-                    print!("{}", show::divergence_in(&pt, &ft, &argv));
+                    print!("{}", show::divergence_in(pt, ft, &argv));
                 }
-                None => print!("{}", show::divergence(&pt, &ft)),
+                None => print!("{}", show::divergence(pt, ft)),
             }
             Ok(ExitCode::FAILURE)
         }
@@ -1168,7 +1168,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             } else {
                 show::KernelThreads::Hide
             };
-            print!("{}", show::process_tree(&trace, at, threads));
+            print!("{}", show::process_tree(trace, at, threads));
             Ok(ExitCode::SUCCESS)
         }
         Command::Events {
@@ -1239,7 +1239,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             let left = Run::find(&home, &left)?;
             let right = Run::find(&home, &right)?;
             let (lt, rt) = (left.trace()?, right.trace()?);
-            print!("{}", show::divergence(&lt, &rt));
+            print!("{}", show::divergence(lt, rt));
             Ok(ExitCode::SUCCESS)
         }
     }

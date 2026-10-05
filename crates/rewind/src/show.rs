@@ -41,8 +41,8 @@ pub fn finished(run: &Run, stop: Option<&str>) -> String {
 pub fn outcome_key(run: &Run) -> anyhow::Result<(Option<i32>, Vec<String>)> {
     let status = run.manifest.outcome.as_ref().and_then(|o| o.status);
     let mut outputs = Vec::new();
-    for e in run.trace()?.events {
-        if let EventKind::Mark { text } = e.kind
+    for e in &run.trace()?.events {
+        if let EventKind::Mark { text } = &e.kind
             && let Some(rest) = text.strip_prefix(rewind_init::OUTPUT_MARK)
         {
             outputs.push(rest.to_string());

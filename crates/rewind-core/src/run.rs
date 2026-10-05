@@ -8,6 +8,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
@@ -484,6 +485,13 @@ pub struct Run {
     /// only to the execution that stopped it: the manifest keeps the
     /// timeout in words.
     pub stalled: Option<Stalled>,
+    /// The trace file's records and the trace decoded from them, read the
+    /// first time either is asked for. A Run is opened on a finished run,
+    /// or made when its execution has finished writing the file, so this
+    /// process never sees the file change; another process executing the
+    /// run meanwhile is seen as of the first read.
+    records: OnceLock<Vec<(u64, Vec<u8>)>>,
+    trace: OnceLock<Trace>,
 }
 
 /// Where a run that timed out computing in user space was stopped: the
@@ -546,6 +554,8 @@ impl Run {
             dir: dir.to_path_buf(),
             manifest,
             stalled: None,
+            records: OnceLock::new(),
+            trace: OnceLock::new(),
         })
     }
 
@@ -555,9 +565,27 @@ impl Run {
         executing(&self.dir)
     }
 
-    pub fn trace(&self) -> Result<Trace> {
+    /// The run's trace, read once.
+    pub fn trace(&self) -> Result<&Trace> {
+        if let Some(trace) = self.trace.get() {
+            return Ok(trace);
+        }
         let path = self.dir.join(TRACE);
-        Trace::read(&path).with_context(|| format!("reading {}", path.display()))
+        let trace = Trace::decode(self.records()?)
+            .with_context(|| format!("reading {}", path.display()))?;
+        Ok(self.trace.get_or_init(|| trace))
+    }
+
+    /// The run's records as the guest wrote them, each with its step,
+    /// read once.
+    pub fn records(&self) -> Result<&[(u64, Vec<u8>)]> {
+        if let Some(records) = self.records.get() {
+            return Ok(records);
+        }
+        let path = self.dir.join(TRACE);
+        let records =
+            rewind_trace::records(&path).with_context(|| format!("reading {}", path.display()))?;
+        Ok(self.records.get_or_init(|| records))
     }
 
     /// Executes a spec, writing the run into the home's runs directory. A
@@ -753,6 +781,8 @@ impl Run {
             dir,
             manifest,
             stalled,
+            records: OnceLock::new(),
+            trace: OnceLock::new(),
         })
     }
 
@@ -842,11 +872,11 @@ impl Run {
         // made after where it starts. One that differs means this build of
         // rewind runs the inputs another way than the build that recorded
         // them, and the machine at the step is not the run's.
-        let path = self.dir.join(TRACE);
-        let made: Vec<(u64, Vec<u8>)> = rewind_trace::records(&path)
-            .with_context(|| format!("reading {}", path.display()))?
-            .into_iter()
+        let made: Vec<(u64, Vec<u8>)> = self
+            .records()?
+            .iter()
             .filter(|(s, _)| from.is_none_or(|kf| *s > kf))
+            .cloned()
             .collect();
         let mut checked = Checked::new(obs, made);
         let outcome = machine.run(Some(step), &mut checked)?;
@@ -918,12 +948,9 @@ impl Run {
     /// The records the run made after `step`, with their steps: what a
     /// fork at `step` should make again.
     pub fn records_after(&self, step: u64) -> Result<Vec<(u64, Vec<u8>)>> {
-        let path = self.dir.join(TRACE);
-        Ok(rewind_trace::records(&path)
-            .with_context(|| format!("reading {}", path.display()))?
-            .into_iter()
-            .filter(|(s, _)| *s > step)
-            .collect())
+        let records = self.records()?;
+        let after = records.partition_point(|(s, _)| *s <= step);
+        Ok(records[after..].to_vec())
     }
 
     /// Restores the keyframe at or before `step` and runs to the end.
@@ -1408,6 +1435,82 @@ mod tests {
         // A different RNG seed is a different run from boot.
         let other = Spec { seed: 1, ..spec() };
         assert_eq!(spec().same_through(&other), None);
+    }
+
+    /// A manifest for run `id` named `name`, made at `created`.
+    fn manifest(id: &str, name: &str, created: u64) -> Manifest {
+        Manifest {
+            version: MANIFEST_VERSION,
+            id: id.into(),
+            name: name.into(),
+            created,
+            source: Source::Image { root: "/".into() },
+            spec: spec(),
+            parent: None,
+            shared_keyframes: None,
+            outcome: None,
+            trace_hash: None,
+            first_difference: None,
+        }
+    }
+
+    /// A run directory under `runs` holding `manifest` and a trace of one
+    /// write of `text` at each of `steps`.
+    fn write_run(runs: &Path, manifest: &Manifest, steps: &[u64], text: &[u8]) -> PathBuf {
+        let dir = runs.join(&manifest.id);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(MANIFEST), serde_json::to_vec(manifest).unwrap()).unwrap();
+        write_trace(&dir, steps, text);
+        dir
+    }
+
+    /// Writes `dir`'s trace: one write of `text` at each of `steps`.
+    fn write_trace(dir: &Path, steps: &[u64], text: &[u8]) {
+        const OUTPUT: u16 = 2;
+        const STDOUT: u32 = 1;
+        let len = (rewind_trace::HEADER_LEN + text.len()) as u32;
+        let mut record = Vec::new();
+        record.extend_from_slice(&len.to_le_bytes());
+        record.extend_from_slice(&OUTPUT.to_le_bytes());
+        record.extend_from_slice(&0u16.to_le_bytes());
+        record.extend_from_slice(&7u32.to_le_bytes());
+        record.extend_from_slice(&7u32.to_le_bytes());
+        record.extend_from_slice(&STDOUT.to_le_bytes());
+        record.extend_from_slice(text);
+        let mut writer = TraceWriter::new(fs::File::create(dir.join(TRACE)).unwrap());
+        for step in steps {
+            writer.record(*step, &record).unwrap();
+        }
+        writer.finish().unwrap();
+    }
+
+    /// A fresh runs directory for one test.
+    fn runs_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("rewind-run-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_run_reads_its_trace_once() {
+        // A run's trace file is read the first time trace(), records() or
+        // records_after() needs it. Writes a trace of three events, reads
+        // it, replaces the file with another, and checks the open Run
+        // still answers from the first while a Run opened anew reads the
+        // second.
+        let runs = runs_dir("trace-once");
+        let dir = write_run(&runs, &manifest("r", "r", 0), &[3, 5, 9], b"a");
+        let run = Run::open(&dir).unwrap();
+        assert_eq!(run.trace().unwrap().events.len(), 3);
+        assert_eq!(run.records_after(4).unwrap().len(), 2);
+
+        write_trace(&dir, &[1], b"b");
+        assert_eq!(run.trace().unwrap().events.len(), 3);
+        assert_eq!(run.records().unwrap().len(), 3);
+        assert_eq!(run.records_after(4).unwrap().len(), 2);
+        assert_eq!(Run::open(&dir).unwrap().trace().unwrap().events.len(), 1);
+        fs::remove_dir_all(&runs).unwrap();
     }
 
     #[test]

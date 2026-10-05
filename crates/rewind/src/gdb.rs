@@ -671,9 +671,7 @@ fn fetch_sources(
     let mut found: Vec<(String, Vec<u8>)> = Vec::new();
     let mut missing: Vec<(String, Version)> = Vec::new();
     for path in paths {
-        let version = trace
-            .as_ref()
-            .map_or(Version::Changing, |t| source_cache::version(t, &path, step));
+        let version = trace.map_or(Version::Changing, |t| source_cache::version(t, &path, step));
         match cache.get(version, &path) {
             Some(Entry::File(bytes)) => found.push((path, bytes)),
             Some(Entry::Absent) => {}

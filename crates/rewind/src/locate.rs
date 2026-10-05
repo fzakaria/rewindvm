@@ -69,8 +69,7 @@ pub fn locate(
     callers: usize,
     format: Format,
 ) -> Result<ExitCode> {
-    let trace = run.trace()?;
-    let (pid, tid) = thread_at(&trace, step, pid, tid)?;
+    let (pid, tid) = thread_at(run.trace()?, step, pid, tid)?;
     let answer = walk(home, run, step, pid, tid)?;
     match format {
         Format::Json => println!("{}", serde_json::to_string(&answer)?),
@@ -153,7 +152,7 @@ pub fn walk(home: &Home, run: &Run, step: u64, pid: u32, tid: u32) -> Result<Ans
         step,
         pid,
         tid,
-        process: process_name(&run.trace()?, pid),
+        process: process_name(run.trace()?, pid),
         frames,
         chosen,
         source,
@@ -216,7 +215,7 @@ pub fn describe_stall(home: &Home, run: &Run) -> Option<String> {
         Some(thread) => (thread.pid, thread.name.clone(), Certainty::OnTheCpu),
         None => {
             let event = trace.events.iter().rev().find(|e| e.pid != 0)?;
-            let name = process_name(&trace, event.pid);
+            let name = process_name(trace, event.pid);
             (event.pid, name, Certainty::LastEvent)
         }
     };
