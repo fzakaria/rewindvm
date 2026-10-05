@@ -23,6 +23,10 @@ use crate::home::Home;
 pub const MANIFEST: &str = "manifest.json";
 pub const TRACE: &str = "trace.bin";
 
+/// The desktop app's bookmarks of a run, kept in the run's directory and
+/// carried in its exports. The engine never reads them.
+pub const BOOKMARKS: &str = "bookmarks.json";
+
 /// The version of the manifest format.
 const MANIFEST_VERSION: u32 = 1;
 

@@ -2,13 +2,15 @@
 //!
 //! A `.rwd` file is a tar archive compressed with zstd. It always holds the
 //! run's `manifest.json` and `trace.bin`, which is everything the scrubber
-//! needs to show the run. A replayable export adds what another machine
+//! needs to show the run, and the desktop app's bookmarks of the run when
+//! it has any. A replayable export adds what another machine
 //! needs to run it again: the keyframes, the pages they use, the input
 //! image, and the guest kernel and initramfs the run booted.
 //!
 //! ```text
 //! manifest.json
 //! trace.bin
+//! bookmarks.json               when the run has bookmarks
 //! keyframes/<step>.kf          replayable only
 //! pages/<hex hash>             replayable only: 4 KiB page contents
 //! inputs/kernel                replayable only
@@ -26,7 +28,7 @@ use rewind_store::{Hash, Store, ZERO_PAGE, hex};
 
 use crate::home::Home;
 use crate::keyframes;
-use crate::run::{MANIFEST, Manifest, Run, TRACE};
+use crate::run::{BOOKMARKS, MANIFEST, Manifest, Run, TRACE};
 
 /// What an export carries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,6 +51,10 @@ const KERNEL: &str = "inputs/kernel";
 const INITRD: &str = "inputs/initrd";
 const IMAGE: &str = "inputs/image.erofs";
 
+/// The most bytes of bookmarks an export may carry: notes a person typed,
+/// far below this, so a larger file is not a run's.
+const MAX_BOOKMARKS: u64 = 1 << 20;
+
 /// Writes `run` to `out` as a `.rwd` file.
 pub fn export(home: &Home, run: &Run, contents: Contents, out: &Path) -> Result<()> {
     let file = File::create(out).with_context(|| format!("creating {}", out.display()))?;
@@ -62,6 +68,18 @@ pub fn export(home: &Home, run: &Run, contents: Contents, out: &Path) -> Result<
     manifest.shared_keyframes = None;
     append_bytes(&mut tar, MANIFEST, &serde_json::to_vec_pretty(&manifest)?)?;
     tar.append_path_with_name(run.dir.join(TRACE), TRACE)?;
+
+    // The app's bookmarks, within the size an import takes.
+    let bookmarks = run.dir.join(BOOKMARKS);
+    if let Ok(meta) = fs::metadata(&bookmarks) {
+        if meta.len() > MAX_BOOKMARKS {
+            bail!(
+                "{} is over {MAX_BOOKMARKS} bytes, more than an import takes",
+                bookmarks.display()
+            );
+        }
+        tar.append_path_with_name(&bookmarks, BOOKMARKS)?;
+    }
 
     if contents == Contents::Replayable {
         let spec = &run.manifest.spec;
@@ -175,6 +193,11 @@ fn unpack_and_place(home: &Home, reader: impl Read, source: &str, staging: &Path
                 "{source} holds {} as a {kind:?}, which no export does",
                 path.display()
             );
+        }
+
+        // Bookmarks are notes, never larger than MAX_BOOKMARKS.
+        if path == Path::new(BOOKMARKS) && entry.header().size()? > MAX_BOOKMARKS {
+            bail!("{source} holds bookmarks over {MAX_BOOKMARKS} bytes");
         }
 
         // Pages go straight into the store; everything else is staged. A
@@ -293,6 +316,13 @@ fn unpack_and_place(home: &Home, reader: impl Read, source: &str, staging: &Path
         None => {}
     }
 
+    // A copy of the run already here keeps its own bookmarks.
+    let staged_bookmarks = staging.join(BOOKMARKS);
+    let local_bookmarks = dir.join(BOOKMARKS);
+    if staged_bookmarks.is_file() && !local_bookmarks.exists() {
+        fs::rename(&staged_bookmarks, &local_bookmarks)?;
+    }
+
     // The manifest goes last, whole or not at all.
     manifest.trace_hash = Some(trace_hash);
     crate::image::write_atomic(&dir.join(MANIFEST), &serde_json::to_vec_pretty(&manifest)?)?;
@@ -305,8 +335,8 @@ mod tests {
     // directory: what an import refuses, and what it keeps of a copy of
     // the run already there. No VM runs.
     use super::*;
-    use crate::run::RunOutcome;
     use crate::run::tests::manifest;
+    use crate::run::{BOOKMARKS, RunOutcome};
 
     /// The id the tests' runs go by.
     const ID: &str = "0123456789abcdef";
@@ -469,6 +499,74 @@ mod tests {
         ]);
         import_bytes(&home, &same).unwrap();
         assert_eq!(fs::read(dir.join(TRACE)).unwrap(), b"local");
+        fs::remove_dir_all(home.root()).unwrap();
+    }
+
+    #[test]
+    fn an_export_carries_the_runs_bookmarks() {
+        // A run with a bookmarks file, exported for viewing and imported
+        // into another home: the file arrives byte for byte. The engine
+        // never reads it, so any bytes do.
+        let from = home("bookmarks-from");
+        let to = home("bookmarks-to");
+        let dir = from.runs().join(ID);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(MANIFEST), finished(ID)).unwrap();
+        fs::write(dir.join(TRACE), b"trace").unwrap();
+        let bookmarks = br#"[{"step":5,"note":"here"}]"#;
+        fs::write(dir.join(BOOKMARKS), bookmarks).unwrap();
+        let out = from.root().join("run.rwd");
+
+        export(&from, &Run::open(&dir).unwrap(), Contents::View, &out).unwrap();
+        let run = import(&to, &out).unwrap();
+        assert_eq!(fs::read(run.dir.join(BOOKMARKS)).unwrap(), bookmarks);
+        fs::remove_dir_all(from.root()).unwrap();
+        fs::remove_dir_all(to.root()).unwrap();
+    }
+
+    #[test]
+    fn an_import_refuses_bookmarks_past_their_limit() {
+        // Bookmarks are a person's notes; a file over MAX_BOOKMARKS bytes
+        // is refused before it is unpacked, and no run is placed.
+        let home = home("bookmarks-limit");
+        let manifest = finished(ID);
+        let huge = vec![b' '; MAX_BOOKMARKS as usize + 1];
+        let bytes = archive(&[
+            Entry::File(MANIFEST, &manifest),
+            Entry::File(TRACE, b"trace"),
+            Entry::File(BOOKMARKS, &huge),
+        ]);
+        assert!(import_bytes(&home, &bytes).is_err());
+        assert_eq!(fs::read_dir(home.runs()).unwrap().count(), 0);
+        fs::remove_dir_all(home.root()).unwrap();
+    }
+
+    #[test]
+    fn an_import_keeps_the_bookmarks_of_a_copy_already_here() {
+        // The run is here with bookmarks of its own: an export of the same
+        // run with other bookmarks imports, and the ones here stay. A copy
+        // here without bookmarks takes the export's.
+        let home = home("bookmarks-local");
+        let dir = home.runs().join(ID);
+        fs::create_dir_all(&dir).unwrap();
+        let mut local = serde_json::from_slice::<Manifest>(&finished(ID)).unwrap();
+        local.trace_hash = Some(blake3_hex(b"trace"));
+        fs::write(dir.join(MANIFEST), serde_json::to_vec(&local).unwrap()).unwrap();
+        fs::write(dir.join(TRACE), b"trace").unwrap();
+        fs::write(dir.join(BOOKMARKS), b"local").unwrap();
+
+        let manifest = finished(ID);
+        let bytes = archive(&[
+            Entry::File(MANIFEST, &manifest),
+            Entry::File(TRACE, b"trace"),
+            Entry::File(BOOKMARKS, b"theirs"),
+        ]);
+        import_bytes(&home, &bytes).unwrap();
+        assert_eq!(fs::read(dir.join(BOOKMARKS)).unwrap(), b"local");
+
+        fs::remove_file(dir.join(BOOKMARKS)).unwrap();
+        import_bytes(&home, &bytes).unwrap();
+        assert_eq!(fs::read(dir.join(BOOKMARKS)).unwrap(), b"theirs");
         fs::remove_dir_all(home.root()).unwrap();
     }
 
