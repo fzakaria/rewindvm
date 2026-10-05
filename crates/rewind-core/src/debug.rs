@@ -524,14 +524,19 @@ fn fatal<E: std::fmt::Display>(e: E) -> TargetError<String> {
 impl MultiThreadBase for Debuggee {
     fn read_registers(&mut self, regs: &mut X86_64CoreRegs, tid: Tid) -> TargetResult<(), Self> {
         // A thread off the CPU, or in the kernel on it: the user registers
-        // it saved in its pt_regs.
+        // it saved in its pt_regs. A thread whose registers do not read,
+        // such as one that exited since the last stop, is an error gdb
+        // reports for that thread; the session goes on.
         if let Some(Source::Task(task, on)) = self.source(tid)
             && !(on == OnCpu::Yes && self.in_user_space().map_err(fatal)?)
         {
             let layout = self.layout.ok_or(TargetError::NonFatal)?;
             let words = Tasks::new(&self.machine, layout)
                 .user_registers(task)
-                .map_err(fatal)?;
+                .map_err(|e| {
+                    eprintln!("rewind: {e:#}");
+                    TargetError::NonFatal
+                })?;
             *regs = saved_registers(&words);
             return Ok(());
         }
@@ -774,18 +779,18 @@ impl BlockingEventLoop for EventLoop {
         // stepped, which gdb expects to stop; a stop in another thread
         // would read to gdb as a signal it never asked for. The process's
         // thread on the CPU shows its user registers while the vCPU runs
-        // the kernel, so its pc moves once the kernel returns to it.
+        // the kernel, so its pc moves once the kernel returns to it. A
+        // stepped thread that has exited cannot stop: the CPU's thread
+        // stops with no signal, which ends gdb's stepping without one.
         let step_done = |target: &mut Debuggee| {
             target.refresh_threads();
-            let tid = target
-                .stepped
-                .filter(|&tid| target.source(tid).is_some())
-                .unwrap_or_else(cpu_tid);
+            let (tid, signal) = match target.stepped {
+                Some(tid) if target.source(tid).is_none() => (cpu_tid(), Signal::SIGZERO),
+                Some(tid) => (tid, Signal::SIGTRAP),
+                None => (cpu_tid(), Signal::SIGTRAP),
+            };
             Ok(Event::TargetStopped(
-                MultiThreadStopReason::SignalWithThread {
-                    tid,
-                    signal: Signal::SIGTRAP,
-                },
+                MultiThreadStopReason::SignalWithThread { tid, signal },
             ))
         };
 

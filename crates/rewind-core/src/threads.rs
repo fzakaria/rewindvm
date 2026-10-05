@@ -122,22 +122,33 @@ impl<'a, M: Memory + ?Sized> Tasks<'a, M> {
         Ok(None)
     }
 
-    /// Every thread of the process `task` belongs to, in the kernel's
-    /// order: the list in its signal_struct, linked through each task's
-    /// `thread_node`.
+    /// Every live thread of the process `task` belongs to, in the
+    /// kernel's order: the list in its signal_struct, linked through each
+    /// task's `thread_node`. A thread that has exited stays on the list for
+    /// a while after the kernel frees its stack, and is left out: it has no
+    /// registers left to show.
     pub fn threads(&self, task: u64) -> Result<Vec<Thread>> {
         let signal = self.pointer(task + self.layout.signal)?;
         let head = signal + self.layout.thread_head;
-        self.entries(head, self.layout.thread_node)?
-            .into_iter()
-            .map(|task| {
-                Ok(Thread {
-                    tid: self.tid(task)?,
-                    task,
-                    name: self.name(task)?,
-                })
-            })
-            .collect()
+        let mut threads = Vec::new();
+        for task in self.entries(head, self.layout.thread_node)? {
+            if self.stack(task)?.is_none() {
+                continue;
+            }
+            threads.push(Thread {
+                tid: self.tid(task)?,
+                task,
+                name: self.name(task)?,
+            });
+        }
+        Ok(threads)
+    }
+
+    /// A task's kernel stack, or None once it has exited and the kernel
+    /// has freed it.
+    fn stack(&self, task: u64) -> Result<Option<u64>> {
+        let stack = self.pointer(task + self.layout.stack)?;
+        Ok((stack != 0).then_some(stack))
     }
 
     /// The physical address of a task's page table, or None for a kernel
@@ -154,7 +165,9 @@ impl<'a, M: Memory + ?Sized> Tasks<'a, M> {
     /// The user registers a task saved when it last entered the kernel, in
     /// struct pt_regs at the top of its stack.
     pub fn user_registers(&self, task: u64) -> Result<[u64; pt_regs::WORDS]> {
-        let stack = self.pointer(task + self.layout.stack)?;
+        let Some(stack) = self.stack(task)? else {
+            bail!("thread {} has exited", self.tid(task)?);
+        };
         let mut bytes = [0u8; pt_regs::WORDS * POINTER_LEN];
         self.mem.read(stack + self.layout.pt_regs, &mut bytes)?;
         let mut words = [0u64; pt_regs::WORDS];
@@ -272,7 +285,12 @@ mod tests {
         fake.put_u64(prev, head);
     }
 
-    /// A task at slot `slot` with these ids, name, signal_struct and mm.
+    /// Where the made-up kernel's task stacks start: each task's is the
+    /// slot this far past its own.
+    const STACKS: u64 = 20 * SLOT;
+
+    /// A task at slot `slot` with these ids, name, signal_struct and mm,
+    /// and a stack of its own.
     fn task(
         fake: &Fake,
         slot: u64,
@@ -288,6 +306,7 @@ mod tests {
         fake.put(task + l.comm, name.as_bytes());
         fake.put_u64(task + l.signal, signal);
         fake.put_u64(task + l.mm, mm);
+        fake.put_u64(task + l.stack, task + STACKS);
         task
     }
 
@@ -407,8 +426,7 @@ mod tests {
     fn user_registers_come_from_the_top_of_the_stack() {
         let (fake, [_, t41, _]) = kernel();
         let l = layout();
-        let stack = BASE + 20 * SLOT;
-        fake.put_u64(t41 + l.stack, stack);
+        let stack = t41 + STACKS;
         for word in 0..pt_regs::WORDS {
             fake.put_u64(stack + l.pt_regs + 8 * word as u64, 100 + word as u64);
         }
@@ -416,6 +434,23 @@ mod tests {
         assert_eq!(regs[pt_regs::R15], 100);
         assert_eq!(regs[pt_regs::RIP], 100 + pt_regs::RIP as u64);
         assert_eq!(regs[pt_regs::SS], 100 + pt_regs::SS as u64);
+    }
+
+    /// A thread that has exited and given its stack back, as the kernel
+    /// does before the thread leaves its process's list, is not listed,
+    /// and asking for its registers is an error naming it rather than a
+    /// read of address 0 plus the pt_regs offset.
+    #[test]
+    fn an_exited_thread_without_a_stack_is_left_out() {
+        let (fake, [t40, t41, t42]) = kernel();
+        let l = layout();
+        fake.put_u64(t42 + l.stack, 0);
+        let tasks = Tasks::new(&fake, l);
+        let ids: Vec<u32> = tasks.threads(t40).unwrap().iter().map(|t| t.tid).collect();
+        assert_eq!(ids, vec![40, 41]);
+        let err = tasks.user_registers(t42).unwrap_err().to_string();
+        assert!(err.contains("42") && err.contains("exited"), "{err}");
+        assert!(tasks.user_registers(t41).is_ok());
     }
 
     /// A list that never comes back to its head is refused, not followed
