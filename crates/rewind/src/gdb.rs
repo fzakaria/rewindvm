@@ -154,7 +154,7 @@ pub fn gdb(
     // Only serving: say how to connect, then wait for gdb. The debuginfod
     // server runs for as long as this does.
     if listen.is_some() {
-        let shown: Vec<String> = args.iter().map(|a| quote(a)).collect();
+        let shown: Vec<String> = args.iter().map(|a| crate::show::quote(a)).collect();
         eprintln!(
             "rewind: gdb at step {step} of {}; connect with: gdb {}",
             run.manifest.id,
@@ -1180,15 +1180,6 @@ fn store_root(path: &Path) -> Option<PathBuf> {
     Some(Path::new(NIX_STORE).join(first))
 }
 
-/// An argument as a shell would need it typed.
-fn quote(arg: &str) -> String {
-    if arg.contains([' ', '\'', '"', '$', '\\']) {
-        format!("'{}'", arg.replace('\'', r"'\''"))
-    } else {
-        arg.to_string()
-    }
-}
-
 /// A debuginfod server for one gdb session, stopped when dropped.
 struct Debuginfod {
     child: Child,
@@ -1446,13 +1437,6 @@ mod tests {
             "pipe with confirm off -- add-symbol-file /nix/store/abc-glibc/lib/libc.so.6 -o 0x7f0000000000 | {DOWNLOADS_ONLY}"
         );
         assert!(args.contains(&expected), "{args:?}");
-    }
-
-    #[test]
-    fn arguments_with_spaces_or_quotes_are_quoted() {
-        assert_eq!(quote("-q"), "-q");
-        assert_eq!(quote("target remote x"), "'target remote x'");
-        assert_eq!(quote("it's"), r"'it'\''s'");
     }
 
     /// The kernel's gdb scripts need its DWARF. Builds gdb's arguments for

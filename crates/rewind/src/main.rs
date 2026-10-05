@@ -5,6 +5,7 @@ mod gdb;
 mod json;
 mod list;
 mod locate;
+mod reproduce;
 mod show;
 mod terminal;
 
@@ -38,6 +39,12 @@ const STEP_LONG_HELP: &str = "A step of the run: how many times the VM had stopp
 /// apart from 1, which any failure exits with, and 2, clap's for a
 /// command line it refused.
 const CAT_NOT_FOUND: u8 = 3;
+
+/// The VM's memory in MiB unless --mem says otherwise.
+const DEFAULT_MEM_MIB: u64 = 1024;
+
+/// The PATH a command in a root filesystem gets unless --env sets one.
+const DEFAULT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 /// How many callers of the chosen frame `rewind where` shows.
 const DEFAULT_CALLERS: usize = 2;
@@ -101,7 +108,7 @@ struct MachineArgs {
     #[arg(long, default_value_t = u64::MAX, hide_default_value = true)]
     schedule_until: u64,
     /// The VM's memory in MiB.
-    #[arg(long, default_value_t = 1024)]
+    #[arg(long, default_value_t = DEFAULT_MEM_MIB)]
     mem: u64,
     /// The CPUs programs in the VM are told it has, and for a Nix build its
     /// NIX_BUILD_CORES, which stdenv passes to make, ninja and test runners
@@ -542,6 +549,22 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// The command that makes a run again, and for a fork its parents'.
+    ///
+    /// A run's id is the hash of its inputs, so the same command on a
+    /// machine with the same CPU vendor and guest makes the same run. The
+    /// commands name the epoch, which by default is the start of the day a
+    /// run is made, so the same command a day later makes another run.
+    Show {
+        #[arg(help = RUN_HELP, long_help = RUN_LONG_HELP)]
+        run: String,
+        /// Print one JSON object on standard output, for programs: the
+        /// run's id, whether this rewind boots the guest the run booted, and
+        /// oldest first each command with the id of the run it makes, as
+        /// arguments after `rewind` and as a line for a shell.
+        #[arg(long)]
+        json: bool,
+    },
     /// Print a run's output, up to a step.
     Log {
         #[arg(help = RUN_HELP, long_help = RUN_LONG_HELP)]
@@ -700,6 +723,7 @@ impl Command {
             | Command::Gc { .. }
             | Command::Pmu { .. }
             | Command::Ls { .. }
+            | Command::Show { .. }
             | Command::Log { .. }
             | Command::Ps { .. }
             | Command::Events { .. }
@@ -1538,6 +1562,83 @@ fn run(cli: Cli) -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
+        Command::Show { run, json } => {
+            let run = Run::find(&home, &run)?;
+
+            // The run and the runs it was forked from, oldest first, as far
+            // back as this home has them.
+            let mut chain = vec![run.manifest.clone()];
+            let mut gone = None;
+            while let Some((parent, _)) = chain.last().and_then(|m| m.parent.clone()) {
+                match Run::find(&home, &parent) {
+                    Ok(p) => chain.push(p.manifest),
+                    Err(_) => {
+                        gone = Some(parent);
+                        break;
+                    }
+                }
+            }
+            chain.reverse();
+            let commands = chain
+                .iter()
+                .map(|m| {
+                    let args = reproduce::command(m).map_err(|unset| {
+                        anyhow::anyhow!(
+                            "no command line makes run {} again: it has {}",
+                            m.id,
+                            unset.0
+                        )
+                    })?;
+                    let line = std::iter::once("rewind".to_string())
+                        .chain(args.iter().map(|a| show::quote(a)))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    Ok((m.id.clone(), args, line))
+                })
+                .collect::<Result<Vec<_>>>()?;
+
+            // The guest is an input too, by its contents.
+            let same_guest = Guest::from_env().ok().map(|guest| {
+                let same = |recorded: &std::path::Path, now: &std::path::Path| {
+                    recorded == now || image::hash_file(recorded).ok() == image::hash_file(now).ok()
+                };
+                let spec = &run.manifest.spec;
+                same(&spec.kernel, &guest.kernel) && same(&spec.initrd, &guest.initrd)
+            });
+
+            if json {
+                let commands: Vec<serde_json::Value> = commands
+                    .iter()
+                    .map(|(id, args, line)| serde_json::json!({ "id": id, "args": args, "line": line }))
+                    .collect();
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "id": run.manifest.id,
+                        "same_guest": same_guest,
+                        "parent_gone": gone,
+                        "commands": commands,
+                    })
+                );
+                return Ok(ExitCode::SUCCESS);
+            }
+            println!("{}", show::summary(&run));
+            if let Some(parent) = gone {
+                eprintln!(
+                    "rewind: run {parent}, which the first of these forks, is not in this home"
+                );
+            }
+            if same_guest == Some(false) {
+                eprintln!(
+                    "rewind: this rewind boots another kernel or initramfs than the run did, so \
+                     these commands make other runs"
+                );
+            }
+            for (id, _, line) in &commands {
+                println!("{line}  # {id}");
+            }
+            Ok(ExitCode::SUCCESS)
+        }
         Command::Log { run, step, steps } => {
             let run = Run::find(&home, &run)?;
             let until = step.map(|s| run.check_step(s)).transpose()?;
@@ -2128,10 +2229,7 @@ fn root_image(home: &Home, root: &std::path::Path) -> Result<PathBuf> {
 }
 
 fn parse_env(pairs: &[String]) -> Result<Vec<(String, String)>> {
-    let mut env = vec![(
-        "PATH".to_string(),
-        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
-    )];
+    let mut env = vec![("PATH".to_string(), DEFAULT_PATH.to_string())];
     for pair in pairs {
         let (k, v) = pair
             .split_once('=')

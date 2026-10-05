@@ -122,6 +122,7 @@ $ rewind run --root mylib.tar --cwd /src -- make check
 
 # list runs and look inside one
 $ rewind ls
+$ rewind show <run>
 $ rewind log <run> --steps
 $ rewind ps <run> <step>
 $ rewind cat <run> <step> /build/env-vars

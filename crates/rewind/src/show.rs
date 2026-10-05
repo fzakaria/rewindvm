@@ -297,6 +297,16 @@ pub fn event(e: &Event) -> String {
     format!("{:>10} {:>5}/{:<5} {what}", e.step, e.pid, e.tid)
 }
 
+/// An argument as a shell would need it typed: as it is when every
+/// character is one no shell treats specially, else in single quotes.
+pub fn quote(arg: &str) -> String {
+    let plain = |c: char| c.is_ascii_alphanumeric() || "_@%+=:,./-".contains(c);
+    if !arg.is_empty() && arg.chars().all(plain) {
+        return arg.to_string();
+    }
+    format!("'{}'", arg.replace('\'', r"'\''"))
+}
+
 /// Whether `rewind ps` lists the kernel's own threads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KernelThreads {
@@ -467,6 +477,21 @@ mod tests {
             verdict_line(path, hash, &[]),
             format!("{prefix}not in your store")
         );
+    }
+
+    #[test]
+    fn an_argument_is_quoted_unless_a_shell_takes_it_as_it_is() {
+        // Plain words, paths and KEY=VALUE pass; spaces, quotes, a
+        // redirection, a comment and the empty argument are quoted, a
+        // quote inside closed and reopened around an escaped one.
+        assert_eq!(quote("-q"), "-q");
+        assert_eq!(quote("CC=gcc"), "CC=gcc");
+        assert_eq!(quote("/nix/store/0a-x-1.0.drv"), "/nix/store/0a-x-1.0.drv");
+        assert_eq!(quote("target remote x"), "'target remote x'");
+        assert_eq!(quote("it's"), r"'it'\''s'");
+        assert_eq!(quote("a>b"), "'a>b'");
+        assert_eq!(quote("nixpkgs#hello"), "'nixpkgs#hello'");
+        assert_eq!(quote(""), "''");
     }
 
     #[test]
