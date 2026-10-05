@@ -10,14 +10,13 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
 use rewind_trace::Trace;
+use rewind_trace::ending::{Ending, ExitStatus};
 use rewind_trace::manifest::{MANIFEST, Manifest, Parent, RunId, Source, TRACE};
 use rewind_trace::stop::Stop;
 
-use rewind_trace::signal_name;
-
 use crate::archive;
 use crate::describe::{self, thousands};
-use crate::model::{Comparison, ExitStatus, Timeline};
+use crate::model::{Comparison, Timeline};
 
 /// Where a run came from.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -164,25 +163,38 @@ impl Run {
         self.manifest.as_ref()?.parent.as_ref()
     }
 
-    /// Whether the run failed. The job's wait status decides when the
-    /// manifest or init's exit mark gives one; otherwise a crash or
-    /// failing exit in the trace, or a machine that stopped any way but
-    /// its guest powering off, such as at its time limit.
+    /// How the run ended, in the engine's words, once the engine has
+    /// recorded its end. A Nix build that exited 0 without creating every
+    /// output ended missing-output, as nix-daemon would fail it.
+    pub fn ending(&self) -> Option<Ending> {
+        let m = self.manifest.as_ref()?;
+        let outcome = m.outcome.as_ref()?;
+        let built = self.timeline.trace.outputs();
+        let missing: Vec<String> = m
+            .spec
+            .job
+            .outputs
+            .iter()
+            .filter(|path| !built.iter().any(|(p, _)| p == *path))
+            .cloned()
+            .collect();
+        Some(Ending::of(&outcome.stop, outcome.status, &missing))
+    }
+
+    /// Whether the run failed: as its ending says, once the engine has
+    /// recorded one. A trace without a manifest goes by init's exit mark,
+    /// else by a crash or failing exit in the trace.
     pub fn verdict(&self) -> Verdict {
-        if let Some(status) = self.status() {
-            return if status == 0 {
-                Verdict::Passed
-            } else {
-                Verdict::Failed
-            };
+        let passed = match (self.ending(), self.timeline.job_exit) {
+            (Some(ending), _) => ending.passed(),
+            (None, Some(exit)) => ExitStatus::from_wait(exit.status).success(),
+            (None, None) => self.timeline.failure.is_none(),
+        };
+        if passed {
+            Verdict::Passed
+        } else {
+            Verdict::Failed
         }
-        if self.timeline.failure.is_some() {
-            return Verdict::Failed;
-        }
-        if self.stop().is_some_and(|stop| !stop.is_clean()) {
-            return Verdict::Failed;
-        }
-        Verdict::Passed
     }
 
     /// How the machine stopped, once the run has finished.
@@ -198,30 +210,14 @@ impl Run {
         (step >= self.timeline.total).then_some(stop)
     }
 
-    /// The job's wait status: the manifest's, else init's exit mark's.
-    pub fn status(&self) -> Option<u32> {
-        let from_manifest = self
-            .manifest
-            .as_ref()
-            .and_then(|m| m.outcome.as_ref()?.status)
-            .and_then(|s| u32::try_from(s).ok());
-        let from_mark = self
-            .timeline
-            .job_exit
-            .and_then(|j| u32::try_from(j.status).ok());
-        from_manifest.or(from_mark)
-    }
-
-    /// How the run ended, in the engine's words when there is a wait
-    /// status (exited:2, killed:SIGSEGV) or it was stopped at its time
-    /// limit (timed-out), else passed or failed.
+    /// How the run ended, in the engine's words (exited:2, killed:SIGSEGV,
+    /// timed-out), else by init's exit mark, else passed or failed.
     pub fn verdict_label(&self) -> String {
-        match self.status().map(ExitStatus::from_raw) {
-            Some(ExitStatus::Code(code)) => format!("exited:{code}"),
-            Some(ExitStatus::Signal { signo, .. }) => format!("killed:{}", signal_name(signo)),
-            None if self.stop().is_some_and(|s| s.timeout().is_some()) => {
-                rewind_trace::stop::TIMED_OUT_ENDING.to_string()
-            }
+        if let Some(ending) = self.ending() {
+            return ending.to_string();
+        }
+        match self.timeline.job_exit {
+            Some(exit) => ExitStatus::from_wait(exit.status).to_string(),
             None => self.verdict().label().to_string(),
         }
     }
@@ -535,11 +531,11 @@ mod tests {
     }
 
     #[test]
-    fn a_run_without_a_wait_status_passes_only_if_it_powered_off() {
+    fn a_run_without_a_wait_status_fails_however_it_stopped() {
         // The passing example's boot, before its job, under manifests with
         // no wait status and each way a machine stops: one stopped at its
-        // time limit fails and says timed-out, as `rewind ls` does; one
-        // whose machine faulted fails; one whose guest powered off passes.
+        // time limit says timed-out, as `rewind ls` does, and the others
+        // no-status. None of them passed: the job never reported its end.
         let dir = temp_dir("stops");
         std::fs::write(dir.join(TRACE), trace_until(PASSING, Until::JobStart)).unwrap();
         let with_stop = |stop: Stop| {
@@ -555,7 +551,9 @@ mod tests {
         assert_eq!(hung.verdict(), Verdict::Failed);
         assert_eq!(hung.verdict_label(), "timed-out");
         assert_eq!(with_stop(Stop::TripleFault).verdict(), Verdict::Failed);
-        assert_eq!(with_stop(Stop::PoweredOff).verdict(), Verdict::Passed);
+        let powered_off = with_stop(Stop::PoweredOff);
+        assert_eq!(powered_off.verdict(), Verdict::Failed);
+        assert_eq!(powered_off.verdict_label(), "no-status");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -602,19 +600,25 @@ mod tests {
     }
 
     #[test]
-    fn a_nonzero_wait_status_fails_a_run_whose_trace_looks_clean() {
-        // The passing example's boot, before its job, under manifests with
-        // two wait statuses.
+    fn a_wait_status_and_the_outputs_built_decide_a_nix_build() {
+        // The passing example, a Nix build, under manifests with two wait
+        // statuses: 0 passes, 1 fails. Its boot alone, which built none of
+        // its outputs, under status 0 fails as nix-daemon would.
         let dir = temp_dir("status");
-        std::fs::write(dir.join(TRACE), trace_until(PASSING, Until::JobStart)).unwrap();
         let with_status = |status: i32| {
             let mut manifest = manifest_of(PASSING);
             manifest.outcome.as_mut().unwrap().status = Some(status);
             write_manifest(&dir, &manifest);
             Run::open(&dir).unwrap()
         };
+        std::fs::write(dir.join(TRACE), trace_of(PASSING)).unwrap();
         assert_eq!(with_status(1 << 8).verdict(), Verdict::Failed);
         assert_eq!(with_status(0).verdict(), Verdict::Passed);
+
+        std::fs::write(dir.join(TRACE), trace_until(PASSING, Until::JobStart)).unwrap();
+        let unbuilt = with_status(0);
+        assert_eq!(unbuilt.verdict(), Verdict::Failed);
+        assert_eq!(unbuilt.verdict_label(), "missing-output");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

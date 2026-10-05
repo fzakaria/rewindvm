@@ -5,14 +5,18 @@ use std::time::Duration;
 
 use rewind_core::Run;
 use rewind_core::compare::{Comparison, Source, Verdict};
-use rewind_trace::stop::Stop;
+use rewind_trace::ending::{Ending, ExitStatus};
 use rewind_trace::{Event, EventKind, Trace, signal_name};
 
 /// A one-line summary for `rewind ls`.
 pub fn summary(run: &Run) -> String {
     let m = &run.manifest;
     let outcome = match &m.outcome {
-        Some(o) => format!("{:<9} {:>12} steps", ending(&o.stop, o.status, &[]), o.step),
+        Some(o) => format!(
+            "{:<9} {:>12} steps",
+            Ending::of(&o.stop, o.status, &[]).to_string(),
+            o.step
+        ),
         None if run.executing() => "running".into(),
         None => "interrupted".into(),
     };
@@ -29,7 +33,7 @@ pub fn finished(run: &Run, stop: Option<&str>) -> String {
     format!(
         "rewind: run {} {} after {} steps, {:.3}s virtual, {:.3}s wall ({})",
         m.id,
-        ending(&o.stop, o.status, &[]),
+        Ending::of(&o.stop, o.status, &[]),
         o.step,
         Duration::from_nanos(o.virtual_ns).as_secs_f64(),
         Duration::from_millis(o.wall_ms).as_secs_f64(),
@@ -108,29 +112,6 @@ pub fn missing_outputs(expected: &[String], hashed: &[(String, String)]) -> Vec<
         .cloned()
         .collect()
 }
-
-/// Whether a run succeeded as nix-daemon judges a build: the job exited 0
-/// and created every output.
-pub fn passed(status: Option<i32>, missing: &[String]) -> bool {
-    status == Some(0) && missing.is_empty()
-}
-
-/// How a run ended, in words, from how the machine stopped and the job's
-/// wait status: timed-out for a machine stopped at its time limit,
-/// missing-output for a job that exited 0 without creating every output,
-/// and otherwise the status.
-pub fn ending(stop: &Stop, status_: Option<i32>, missing: &[String]) -> String {
-    if stop.timeout().is_some() {
-        return rewind_trace::stop::TIMED_OUT_ENDING.into();
-    }
-    if status_ == Some(0) && !missing.is_empty() {
-        return MISSING_OUTPUT.into();
-    }
-    status(status_)
-}
-
-/// What [`ending`] calls a job that exited 0 but left an output uncreated.
-const MISSING_OUTPUT: &str = "missing-output";
 
 /// One line for an output of a Nix run: its path, the start of its NAR
 /// hash, and what this machine's store and the caches said about it.
@@ -214,8 +195,8 @@ pub fn outcome_line(run: &Run) -> anyhow::Result<String> {
     } = outcome_key(run)?;
     let missing = missing_outputs(&run.manifest.spec.job.outputs, &outputs);
     let ended = match &run.manifest.outcome {
-        Some(o) => ending(&o.stop, status_, &missing),
-        None => status(status_),
+        Some(o) => Ending::of(&o.stop, status_, &missing),
+        None => Ending::NoStatus,
     };
     let steps = run.manifest.outcome.as_ref().map_or(0, |o| o.step);
     let hashes: Vec<String> = outputs
@@ -232,27 +213,6 @@ pub fn outcome_line(run: &Run) -> anyhow::Result<String> {
         hashes.join(" "),
         run.manifest.id
     ))
-}
-
-/// A wait status in words.
-pub fn status(status: Option<i32>) -> String {
-    match status {
-        None => "no-status".into(),
-        Some(s) if s & 0x7f != 0 => format!("killed:{}", signal_name((s & 0x7f) as u32)),
-        Some(s) => match (s >> 8) & 0xff {
-            0 => "exited:0".into(),
-            code => format!("exited:{code}"),
-        },
-    }
-}
-
-/// The shell convention for a wait status as an exit code.
-pub fn exit_code(status: i32) -> u8 {
-    if status & 0x7f != 0 {
-        128 + (status & 0x7f) as u8
-    } else {
-        ((status >> 8) & 0xff) as u8
-    }
 }
 
 /// One event, in the syscall-ish notation the scrubber uses.
@@ -279,7 +239,7 @@ pub fn event(e: &Event) -> String {
             thread,
         } => {
             let who = if *thread { "thread exit" } else { "exit_group" };
-            format!("{who}({comm}) {}", status(Some(*s as i32)))
+            format!("{who}({comm}) {}", ExitStatus::from_raw(*s))
         }
         EventKind::Signal { signo, code, addr } => {
             format!("{} code={code} addr={addr:#x}", signal_name(*signo))
@@ -403,20 +363,6 @@ mod tests {
     }
 
     #[test]
-    fn exiting_0_without_every_output_is_a_failure() {
-        let exited_0 = Some(0);
-        let exited_1 = Some(1 << 8);
-        let missing = vec![DEV.to_string()];
-        let off = &Stop::PoweredOff;
-        assert_eq!(ending(off, exited_0, &[]), "exited:0");
-        assert_eq!(ending(off, exited_0, &missing), "missing-output");
-        assert_eq!(ending(off, exited_1, &missing), "exited:1");
-        assert!(passed(exited_0, &[]));
-        assert!(!passed(exited_0, &missing));
-        assert!(!passed(exited_1, &[]));
-    }
-
-    #[test]
     fn an_output_line_names_who_matches_and_who_differs() {
         // Sources are named the way a reader knows them, the store as
         // "your store" and a cache by its URL without the scheme. Caches
@@ -488,16 +434,5 @@ mod tests {
         assert_eq!(quote("a>b"), "'a>b'");
         assert_eq!(quote("nixpkgs#hello"), "'nixpkgs#hello'");
         assert_eq!(quote(""), "''");
-    }
-
-    #[test]
-    fn a_run_stopped_at_its_time_limit_reads_timed_out() {
-        // The job never reported a status: the machine was stopped first.
-        let hung = Stop::TimedOut(rewind_trace::stop::Timeout {
-            since_exit_ms: 0,
-            doing: rewind_trace::stop::Doing::MakingExits,
-        });
-        assert_eq!(ending(&hung, None, &[]), "timed-out");
-        assert_eq!(ending(&Stop::PoweredOff, None, &[]), "no-status");
     }
 }

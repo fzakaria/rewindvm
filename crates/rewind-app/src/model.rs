@@ -85,14 +85,6 @@ const FORK_SUFFIX: &str = "(fork)";
 /// A file written this share of the run ago or less is drawn as fresh.
 pub const RECENT_SHARE: f64 = 0.005;
 
-/// The kernel's exit_code keeps the terminating signal in these bits.
-const EXIT_SIGNAL_MASK: u32 = 0x7f;
-/// The bit of the kernel's exit_code set when a core was dumped.
-const EXIT_CORE_BIT: u32 = 0x80;
-/// The exit status sits in the second byte of the kernel's exit_code.
-const EXIT_STATUS_SHIFT: u32 = 8;
-const EXIT_STATUS_MASK: u32 = 0xff;
-
 /// Where a log line came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stream {
@@ -228,26 +220,6 @@ pub enum FileTone {
     Error,
     /// Something the job built.
     Output,
-}
-
-/// A process's end, decoded from the kernel's exit_code.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ExitStatus {
-    Code(u32),
-    Signal { signo: u32, core: bool },
-}
-
-impl ExitStatus {
-    pub fn from_raw(raw: u32) -> ExitStatus {
-        let signo = raw & EXIT_SIGNAL_MASK;
-        if signo == 0 {
-            return ExitStatus::Code((raw >> EXIT_STATUS_SHIFT) & EXIT_STATUS_MASK);
-        }
-        ExitStatus::Signal {
-            signo,
-            core: raw & EXIT_CORE_BIT != 0,
-        }
-    }
 }
 
 /// Why the app calls a run failed.
@@ -1723,19 +1695,6 @@ mod tests {
         );
         assert_eq!(p.there.map(|s| s.index), Some(13));
         assert_eq!(p.step, 14);
-    }
-
-    #[test]
-    fn exit_status_decodes_codes_and_signals() {
-        // exit(2) and a SIGSEGV with a core dump, as the kernel encodes them.
-        assert_eq!(ExitStatus::from_raw(2 << 8), ExitStatus::Code(2));
-        assert_eq!(
-            ExitStatus::from_raw(0x8b),
-            ExitStatus::Signal {
-                signo: 11,
-                core: true
-            }
-        );
     }
 
     #[test]

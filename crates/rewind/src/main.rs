@@ -963,7 +963,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
             // 0 without creating every output fails, as under nix-daemon.
             let base_missing =
                 show::missing_outputs(&base.manifest.spec.job.outputs, &base_key.outputs);
-            let base_failed = !show::passed(base_key.status, &base_missing);
+            let base_failed = !base.manifest.outcome.as_ref().is_some_and(|o| {
+                rewind_trace::ending::Ending::of(&o.stop, base_key.status, &base_missing).passed()
+            });
             let differs = |run: &Run| -> Result<bool> { Ok(show::outcome_key(run)? != base_key) };
 
             // Perturbed schedules, a machine per job at a time, in order.
@@ -2428,7 +2430,7 @@ fn pmu_enable() -> Result<ExitCode> {
 fn exit_status(run: &Run) -> ExitCode {
     match run.manifest.outcome.as_ref().and_then(|o| o.status) {
         Some(0) => ExitCode::SUCCESS,
-        Some(s) => ExitCode::from(show::exit_code(s)),
+        Some(s) => ExitCode::from(rewind_trace::ending::ExitStatus::from_wait(s).shell_code()),
         None => ExitCode::FAILURE,
     }
 }

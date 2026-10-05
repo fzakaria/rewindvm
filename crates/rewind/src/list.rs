@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::{Context, Result, bail};
 use rewind_core::Run;
 use rewind_core::run::{RunOutcome, Unreadable};
+use rewind_trace::ending::Ending;
 
 /// How a run stands, as `rewind ls --status` picks runs by.
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,9 +37,11 @@ impl Status {
     /// as failed too.
     pub fn of(outcome: Option<&RunOutcome>, executing: Executing) -> Status {
         match (outcome, executing) {
-            (Some(o), _) if o.stop.timeout().is_some() => Status::TimedOut,
-            (Some(o), _) if o.status == Some(0) => Status::Passed,
-            (Some(_), _) => Status::Failed,
+            (Some(o), _) => match Ending::of(&o.stop, o.status, &[]) {
+                Ending::TimedOut => Status::TimedOut,
+                ending if ending.passed() => Status::Passed,
+                _ => Status::Failed,
+            },
             (None, Executing::Yes) => Status::Running,
             (None, Executing::No) => Status::Interrupted,
         }
@@ -173,7 +176,7 @@ pub fn json(entry: &Entry, row: &Row) -> serde_json::Value {
         "parent": m.parent,
         "state": entry.status.word(),
         "status": outcome.and_then(|o| o.status),
-        "ending": outcome.map(|o| crate::show::ending(&o.stop, o.status, &[])),
+        "ending": outcome.map(|o| Ending::of(&o.stop, o.status, &[]).to_string()),
         "steps": outcome.map(|o| o.step),
     })
 }

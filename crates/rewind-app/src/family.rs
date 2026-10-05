@@ -10,15 +10,14 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use rewind_trace::ending::Ending;
 use rewind_trace::manifest::{MANIFEST, Manifest, Source, Spec};
-use rewind_trace::signal_name;
 
 use crate::describe::{ago, thousands};
-use crate::model::ExitStatus;
 use crate::run::{read_manifest, short_id};
 
-/// What a run without a recorded exit status is listed as.
-const UNKNOWN_ENDING: &str = "unknown";
+/// What a run the engine has not recorded the end of is listed as.
+const UNFINISHED_ENDING: &str = "unfinished";
 
 /// The directory of a run's own keyframes, as the engine names it.
 const KEYFRAMES_DIR: &str = "keyframes";
@@ -48,9 +47,14 @@ pub struct RunEntry {
     pub family: String,
     pub parent: Option<Parent>,
     pub schedule: u64,
-    /// How it ended: exited:2, killed:SIGSEGV, or unknown.
+    /// How it ended, as `rewind ls` says it (exited:2, killed:SIGSEGV,
+    /// timed-out), or unfinished.
     pub ending: String,
+    /// Whether it ended any way but its job exiting 0.
     pub failed: bool,
+    /// Whether its job exited 0; an unfinished run neither passed nor
+    /// failed.
+    pub passed: bool,
     pub first_difference: Option<u64>,
     pub trace_hash: Option<String>,
     /// The vCPUs the VM had.
@@ -105,26 +109,13 @@ impl RunEntry {
                 spec.image_hash.as_deref().unwrap_or_default()
             ),
         };
-        let outcome = manifest.outcome.as_ref();
-        let status = outcome
-            .and_then(|o| o.status)
-            .and_then(|s| u32::try_from(s).ok());
-        let stop = outcome.map(|o| &o.stop);
-        let ending = match status.map(ExitStatus::from_raw) {
-            Some(ExitStatus::Code(code)) => format!("exited:{code}"),
-            Some(ExitStatus::Signal { signo, .. }) => format!("killed:{}", signal_name(signo)),
-            None if stop.is_some_and(|s| s.timeout().is_some()) => {
-                rewind_trace::stop::TIMED_OUT_ENDING.to_string()
-            }
-            None => UNKNOWN_ENDING.to_string(),
-        };
-
-        // Failed by a wait status other than 0, or with none by a machine
-        // that stopped any way but its guest powering off.
-        let failed = match status {
-            Some(s) => s != 0,
-            None => stop.is_some_and(|stop| !stop.is_clean()),
-        };
+        // How it ended as `rewind ls` says it, which reads no traces and
+        // so counts no missing outputs.
+        let ended = manifest
+            .outcome
+            .as_ref()
+            .map(|o| Ending::of(&o.stop, o.status, &[]));
+        let ending = ended.map_or_else(|| UNFINISHED_ENDING.to_string(), |e| e.to_string());
         RunEntry {
             dir: dir.to_path_buf(),
             id: manifest.id.to_string(),
@@ -136,7 +127,8 @@ impl RunEntry {
             }),
             schedule: spec.schedule,
             ending,
-            failed,
+            failed: ended.is_some_and(|e| !e.passed()),
+            passed: ended.is_some_and(Ending::passed),
             first_difference: manifest.first_difference,
             trace_hash: manifest.trace_hash.clone(),
             cores: u64::from(spec.cores),
@@ -900,6 +892,7 @@ mod tests {
             schedule,
             ending: ending.to_string(),
             failed: ending != "exited:0",
+            passed: ending == "exited:0",
             first_difference: None,
             trace_hash: Some(format!("hash-{id}")),
             cores: ONE_CORE,
@@ -961,6 +954,7 @@ mod tests {
             if r.id == "base" {
                 r.ending = "exited:0".into();
                 r.failed = false;
+                r.passed = true;
             }
             if r.id == "dup" {
                 r.has_keyframes = true;

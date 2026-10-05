@@ -1975,7 +1975,7 @@ fn graph_cell(row: &Row, columns: usize, shown: bool, compared: bool) -> impl In
     };
     let dot_color = if row.run.failed {
         theme::RED
-    } else if row.run.ending == "exited:0" {
+    } else if row.run.passed {
         theme::GREEN_SOFT
     } else {
         theme::MUTED
@@ -2105,7 +2105,7 @@ enum Chevron {
 fn ending_tone(run: &RunEntry) -> PillTone {
     if run.failed {
         PillTone::Failed
-    } else if run.ending == "exited:0" {
+    } else if run.passed {
         PillTone::Passed
     } else {
         PillTone::Quiet

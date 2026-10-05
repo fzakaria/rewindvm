@@ -4,6 +4,7 @@ use anyhow::Result;
 use rewind_core::Run;
 use rewind_core::compare::{Comparison, Source, Verdict};
 use rewind_trace::Trace;
+use rewind_trace::ending::Ending;
 use serde_json::{Value, json};
 
 use crate::show::{self, KernelThreads};
@@ -28,7 +29,7 @@ pub fn run(run: &Run) -> Result<Value> {
         "dir": run.dir,
         "parent": m.parent,
         "status": status,
-        "ending": outcome.map(|o| show::ending(&o.stop, status, &missing)),
+        "ending": outcome.map(|o| Ending::of(&o.stop, status, &missing).to_string()),
         "steps": outcome.map(|o| o.step),
         "stop": outcome.map(|o| o.stop.to_string()),
         "first_difference": m.first_difference,

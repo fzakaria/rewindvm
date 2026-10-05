@@ -11,6 +11,7 @@
 //! in, and where two runs first went different ways.
 
 pub mod contents;
+pub mod ending;
 mod event;
 pub mod machine;
 pub mod manifest;

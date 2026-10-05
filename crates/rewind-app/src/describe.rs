@@ -7,8 +7,9 @@
 
 use rewind_trace::{Event, EventKind, signal_name};
 
-use crate::model::{ExitStatus, signo};
+use crate::model::signo;
 use crate::selection::{Mapped, Splice};
+use rewind_trace::ending::ExitStatus;
 
 /// Text inside a described event is cut to this many characters.
 const MAX_QUOTED_CHARS: usize = 160;

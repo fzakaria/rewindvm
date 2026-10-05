@@ -167,9 +167,8 @@ struct ForkJson {
 impl ForkJson {
     fn summary(&self) -> String {
         let status = match self.status {
-            None => "no exit status".to_string(),
-            Some(s) if s & 0x7f != 0 => format!("killed by signal {}", s & 0x7f),
-            Some(s) => format!("exited:{}", (s >> 8) & 0xff),
+            None => rewind_trace::ending::Ending::NoStatus.to_string(),
+            Some(s) => rewind_trace::ending::ExitStatus::from_wait(s).to_string(),
         };
         match self.first_difference {
             Some(step) => format!("{status}, first differs from its parent at step {step}"),
