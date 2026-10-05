@@ -6,7 +6,8 @@
 //! the thread's stack in gdb and picks the innermost frame that is the
 //! program's own code, past the C library, Rust's standard library and
 //! dependencies. That takes seconds, so the panel asks only once the
-//! playhead rests.
+//! playhead rests. The answer carries every frame's source, so showing
+//! another frame's needs no new answer.
 
 use serde::Deserialize;
 
@@ -40,9 +41,22 @@ impl Frame {
             _ => String::new(),
         }
     }
+
+    /// What the panel shows in place of the source of a frame without
+    /// any: the frame's address and program, and a line saying so.
+    pub fn without_source(&self) -> Vec<String> {
+        let place = match &self.object {
+            Some(object) => format!("{}  {object}", self.pc),
+            None => self.pc.clone(),
+        };
+        vec![place, NO_SOURCE.to_string()]
+    }
 }
 
-/// Lines of the chosen frame's source file around its line.
+/// What the panel says of a frame the engine found no source for.
+const NO_SOURCE: &str = "no source";
+
+/// Lines of a frame's source file around its line.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct Source {
     /// The number of the first line.
@@ -58,13 +72,15 @@ pub struct Located {
     pub process: String,
     pub frames: Vec<Frame>,
     /// The index in `frames` of the innermost frame in the program's own
-    /// code, when there is one, and its source lines.
+    /// code, when there is one.
     pub chosen: Option<usize>,
-    pub source: Option<Source>,
+    /// Each frame's source lines, in the order of `frames`: None for a
+    /// frame the engine found no source for.
+    pub sources: Vec<Option<Source>>,
 }
 
-/// How many lines either side of the chosen frame's line the panel
-/// shows: the line sits in the middle, with room for the frames below.
+/// How many lines either side of a frame's line the panel shows: the line
+/// sits in the middle, with room for the frames below.
 pub const PANEL_RADIUS: u32 = 8;
 
 impl Located {
@@ -73,11 +89,11 @@ impl Located {
         self.frames.get(self.chosen?)
     }
 
-    /// The chosen frame's source lines within `radius` of its line, and
-    /// the number of the first of them.
-    pub fn source_around(&self, radius: u32) -> Option<(u32, &[String])> {
-        let source = self.source.as_ref()?;
-        let line = self.chosen_frame()?.line?;
+    /// Frame `frame`'s source lines within `radius` of its line, and the
+    /// number of the first of them.
+    pub fn source_around(&self, frame: usize, radius: u32) -> Option<(u32, &[String])> {
+        let source = self.sources.get(frame)?.as_ref()?;
+        let line = self.frames.get(frame)?.line?;
         let first = line.saturating_sub(radius).max(source.first);
         let skip = (first - source.first) as usize;
         let take = (line + radius + 1).saturating_sub(first) as usize;
@@ -101,9 +117,12 @@ pub fn target(pid: u32, tid: u32) -> Option<(u32, u32)> {
 /// What the panel shows for one step.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Shown {
+    /// An answer, with the frame whose source the panel shows: the
+    /// chosen one until another frame is clicked.
     Located {
         step: u64,
         located: Located,
+        selected: Option<usize>,
     },
     /// The event at the step is the kernel's; there is no thread to show.
     Kernel {
@@ -137,6 +156,33 @@ impl Shown {
             | Shown::Failed { step, .. } => *step,
         }
     }
+
+    /// The answer and the frame whose source the panel shows, when it
+    /// shows an answer.
+    pub fn located(&self) -> Option<(&Located, Option<usize>)> {
+        match self {
+            Shown::Located {
+                located, selected, ..
+            } => Some((located, *selected)),
+            _ => None,
+        }
+    }
+
+    /// Shows frame `frame`'s source in place of the frame shown. False,
+    /// changing nothing, when the panel shows no answer with that frame.
+    pub fn select_frame(&mut self, frame: usize) -> bool {
+        let Shown::Located {
+            located, selected, ..
+        } = self
+        else {
+            return false;
+        };
+        if frame >= located.frames.len() {
+            return false;
+        }
+        *selected = Some(frame);
+        true
+    }
 }
 
 /// Why a run's kernel cannot give a thread's stack: it was recorded
@@ -152,7 +198,11 @@ const ENGINE_PREFIX: &str = "rewind: ";
 /// The panel's view of the engine's answer for `step`.
 pub fn shown(step: u64, answer: Result<Located, EngineError>) -> Shown {
     match answer {
-        Ok(located) => Shown::Located { step, located },
+        Ok(located) => Shown::Located {
+            step,
+            selected: located.chosen,
+            located,
+        },
         Err(EngineError::Failed { message, .. }) if message.contains(PREDATES_MARKER) => {
             Shown::Unreadable {
                 step,
@@ -187,38 +237,90 @@ mod tests {
     use super::*;
 
     /// The answer for the Nix tutorial's failing run at the crash, as
-    /// `rewind where 8fd5378d 5060 --json` printed it, with the source
-    /// cut to three lines and glibc's sources, in this machine's
-    /// debuginfod cache, left out.
-    const AT_THE_CRASH: &str = r#"{"run":"8fd5378ddf70075e","step":5060,"pid":166,"tid":174,"process":"test_pool_shutdown","frames":[{"level":0,"function":"worker","file":"src/pool.c","fullname":"/build/mylib/src/pool.c","line":77,"pc":"0x55bfaf437437","object":"/build/mylib/tests/test_pool_shutdown"},{"level":1,"function":"start_thread","file":"pthread_create.c","fullname":null,"line":454,"pc":"0x7f615854d7d1","object":"/nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6"},{"level":2,"function":"__GI___clone3","file":"../sysdeps/unix/sysv/linux/x86_64/clone3.S","fullname":null,"line":78,"pc":"0x7f61585d9b1c","object":"/nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6"}],"chosen":0,"source":{"first":76,"lines":["\t\t\tfflush(stdout);","\t\t\tp->queue->completed++;","\t\t}"]}}"#;
+    /// `rewind where 8fd5378d 5060 --json` printed it, with the first
+    /// frame's source cut to three lines and glibc's sources, in this
+    /// machine's debuginfod cache, left out.
+    const AT_THE_CRASH: &str = r#"{"run":"8fd5378ddf70075e","step":5060,"pid":166,"tid":174,"process":"test_pool_shutdown","frames":[{"level":0,"function":"worker","file":"src/pool.c","fullname":"/build/mylib/src/pool.c","line":77,"pc":"0x55bfaf437437","object":"/build/mylib/tests/test_pool_shutdown"},{"level":1,"function":"start_thread","file":"pthread_create.c","fullname":null,"line":454,"pc":"0x7f615854d7d1","object":"/nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6"},{"level":2,"function":"__GI___clone3","file":"../sysdeps/unix/sysv/linux/x86_64/clone3.S","fullname":null,"line":78,"pc":"0x7f61585d9b1c","object":"/nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6"}],"chosen":0,"sources":[{"first":76,"lines":["\t\t\tfflush(stdout);","\t\t\tp->queue->completed++;","\t\t}"]},null,null]}"#;
 
-    /// The answer reads into the frames, the chosen one and its source;
-    /// fields the panel does not use, such as fullname, are skipped.
+    /// The answer reads into the frames, the chosen one, and each frame's
+    /// source, null where the engine had none; fields the panel does not
+    /// use, such as fullname, are skipped.
     #[test]
-    fn an_answer_reads_into_the_frames_and_the_chosen_source() {
+    fn an_answer_reads_into_the_frames_and_their_sources() {
         let located: Located = serde_json::from_str(AT_THE_CRASH).unwrap();
         assert_eq!((located.pid, located.tid), (166, 174));
         assert_eq!(located.process, "test_pool_shutdown");
         assert_eq!(located.frames.len(), 3);
-        let chosen = located.chosen_frame().unwrap();
+        assert_eq!(located.chosen, Some(0));
+        let chosen = &located.frames[0];
         assert_eq!(chosen.function_label(), "worker");
         assert_eq!(chosen.place_label(), "src/pool.c:77");
-        assert_eq!(located.source.as_ref().unwrap().first, 76);
+        assert_eq!(located.sources.len(), 3);
+        assert_eq!(located.sources[0].as_ref().unwrap().first, 76);
+        assert_eq!(located.sources[1], None);
     }
 
-    /// The panel's lines are the source within a radius of the chosen
-    /// frame's line, cut where the engine's lines end.
+    /// The panel's lines are a frame's source within a radius of its line,
+    /// cut where the engine's lines end; a frame without source has none.
     #[test]
-    fn the_panel_shows_the_lines_around_the_chosen_line() {
+    fn the_panel_shows_the_lines_around_a_frame_s_line() {
         let located: Located = serde_json::from_str(AT_THE_CRASH).unwrap();
-        let (first, lines) = located.source_around(1).unwrap();
+        let (first, lines) = located.source_around(0, 1).unwrap();
         assert_eq!(first, 76);
         assert_eq!(lines.len(), 3);
-        let (first, lines) = located.source_around(0).unwrap();
+        let (first, lines) = located.source_around(0, 0).unwrap();
         assert_eq!((first, lines.len()), (77, 1));
         assert_eq!(lines[0], "\t\t\tp->queue->completed++;");
-        let (first, lines) = located.source_around(PANEL_RADIUS).unwrap();
+        let (first, lines) = located.source_around(0, PANEL_RADIUS).unwrap();
         assert_eq!((first, lines.len()), (76, 3));
+        assert_eq!(located.source_around(1, PANEL_RADIUS), None);
+        assert_eq!(located.source_around(3, PANEL_RADIUS), None);
+    }
+
+    /// A new answer shows its chosen frame. Clicking another frame shows
+    /// that one instead, and a frame the answer does not have, or a click
+    /// while the panel shows no answer, changes nothing.
+    #[test]
+    fn a_clicked_frame_is_shown_until_the_next_answer() {
+        let located: Located = serde_json::from_str(AT_THE_CRASH).unwrap();
+        let mut answer = shown(5060, Ok(located.clone()));
+        assert_eq!(answer.located().map(|(_, at)| at), Some(Some(0)));
+
+        assert!(answer.select_frame(2));
+        let (_, at) = answer.located().unwrap();
+        assert_eq!(at, Some(2));
+        assert!(!answer.select_frame(3));
+        assert_eq!(answer.located().map(|(_, at)| at), Some(Some(2)));
+
+        let again = shown(5057, Ok(located));
+        assert_eq!(again.located().map(|(_, at)| at), Some(Some(0)));
+
+        let mut kernel = Shown::Kernel { step: 10 };
+        assert!(!kernel.select_frame(0));
+        assert_eq!(kernel.located(), None);
+    }
+
+    /// A frame without source is shown by its address and program, and a
+    /// line saying it has no source.
+    #[test]
+    fn a_frame_without_source_says_where_it_is() {
+        let located: Located = serde_json::from_str(AT_THE_CRASH).unwrap();
+        assert_eq!(
+            located.frames[2].without_source(),
+            vec![
+                "0x7f61585d9b1c  /nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6"
+                    .to_string(),
+                "no source".to_string(),
+            ]
+        );
+        let bare = Frame {
+            object: None,
+            ..located.frames[2].clone()
+        };
+        assert_eq!(
+            bare.without_source(),
+            vec!["0x7f61585d9b1c".to_string(), "no source".to_string()]
+        );
     }
 
     /// A frame without a source line is placed by its program's file

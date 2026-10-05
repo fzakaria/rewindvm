@@ -784,7 +784,7 @@ mod tests {
     fn locate_returns_the_chosen_frame_or_the_engines_reason() {
         let dir = temp_dir("where");
         let run = dir.join("run");
-        let json = r#"{"run":"r","step":5060,"pid":166,"tid":174,"process":"test_pool_shutdown","frames":[{"level":0,"function":"worker","file":"src/pool.c","fullname":null,"line":77,"pc":"0x55bfaf437437","object":"/build/mylib/tests/test_pool_shutdown"}],"chosen":0,"source":null}\n"#;
+        let json = r#"{"run":"r","step":5060,"pid":166,"tid":174,"process":"test_pool_shutdown","frames":[{"level":0,"function":"worker","file":"src/pool.c","fullname":null,"line":77,"pc":"0x55bfaf437437","object":"/build/mylib/tests/test_pool_shutdown"}],"chosen":0,"sources":[null]}\n"#;
         let engine = fake_engine(&dir, json, "rewind: walking the stack in gdb\n", 0);
         let located = retrying(|| engine.locate(&run, 5_060, 166, 174)).unwrap();
         assert_eq!(

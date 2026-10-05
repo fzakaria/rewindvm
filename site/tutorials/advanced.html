@@ -151,11 +151,12 @@ Thread 1 (Thread 1.4194305 (the CPU, in test_pool_shutd 174)):</code></pre>
           In the app, Show source under Inspect, or the s key, opens the source panel in place of At
           this step. It names the line <code>rewind where</code> would for the thread of the
           playhead's event, marks it in the source around it, and lists the thread's frames below
-          with the chosen one marked. When the playhead rests on another step the panel asks again,
-          dimming the last answer meanwhile; each answer forks the run, so it takes a few seconds.
-          Runs the app cannot fork say so instead: the bundled example and an export that holds only
-          the trace. So does a run recorded before the guest listed its tasks, which has to be
-          recorded again.
+          with the chosen one marked. Clicking another frame shows its source instead, with its line
+          marked; a frame without source shows its address and program. When the playhead rests on
+          another step the panel asks again, back at the chosen frame, dimming the last answer
+          meanwhile; each answer forks the run, so it takes a few seconds. Runs the app cannot fork
+          say so instead: the bundled example and an export that holds only the trace. So does a run
+          recorded before the guest listed its tasks, which has to be recorded again.
         </p>
         <figure class="shot">
           <picture>

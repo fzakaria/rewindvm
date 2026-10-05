@@ -7,9 +7,12 @@
 //! again only once the playhead rests, and the last answer stays on
 //! screen, dimmed, until the new one arrives. Runs the engine cannot fork
 //! say so instead, as do runs recorded before the guest kernel listed its
-//! tasks.
+//! tasks. Clicking a frame in the list shows that frame's source, from the
+//! same answer, until the next answer shows its chosen frame again.
 
-use gpui::{Context, CursorStyle, Div, MouseButton, Role, div, prelude::*, px, relative, rgb};
+use gpui::{
+    Context, CursorStyle, Div, MouseButton, Role, SharedString, div, prelude::*, px, relative, rgb,
+};
 
 use crate::describe::thousands;
 use crate::selection::{Mapped, Surface, part_of_line};
@@ -26,8 +29,8 @@ const DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(400);
 /// The opacity of the last answer while a new one loads.
 const STALE_OPACITY: f32 = 0.45;
 
-/// What marks the chosen frame in the frame list.
-const CHOSEN_MARKER: &str = "\u{25b8}";
+/// What marks the frame whose source is shown in the frame list.
+const SHOWN_MARKER: &str = "\u{25b8}";
 
 /// The open panel.
 pub struct SourcePanel {
@@ -171,19 +174,40 @@ impl Scrubber {
         .detach();
     }
 
-    /// The answer on screen, when the panel shows one.
-    fn located(&self) -> Option<&Located> {
-        match self.source.as_ref()?.shown.as_ref()? {
-            Shown::Located { located, .. } => Some(located),
-            _ => None,
-        }
+    /// The answer on screen, when the panel shows one, and the frame whose
+    /// source it shows.
+    fn located(&self) -> Option<(&Located, Option<usize>)> {
+        self.source.as_ref()?.shown.as_ref()?.located()
     }
 
-    /// The selectable lines of the panel: the chosen frame's source, or
-    /// the message in its place.
+    /// Shows frame `frame`'s source, when a row of the frame list is
+    /// clicked.
+    fn select_frame(&mut self, frame: usize, cx: &mut Context<Self>) {
+        let Some(shown) = self.source.as_mut().and_then(|p| p.shown.as_mut()) else {
+            return;
+        };
+        if !shown.select_frame(frame) {
+            return;
+        }
+        self.clear_selection_in(&[Surface::Source]);
+        cx.notify();
+    }
+
+    /// The selectable lines of the panel: the shown frame's source, what
+    /// stands in for it when the frame has none, or the message in place
+    /// of an answer.
     pub(super) fn source_lines(&self) -> Vec<Mapped> {
-        if let Some((_, lines)) = self.located().and_then(|l| l.source_around(PANEL_RADIUS)) {
-            return lines.iter().map(|l| viewer_line(l)).collect();
+        if let Some((located, Some(at))) = self.located() {
+            if let Some((_, lines)) = located.source_around(at, PANEL_RADIUS) {
+                return lines.iter().map(|l| viewer_line(l)).collect();
+            }
+            if let Some(frame) = located.frames.get(at) {
+                return frame
+                    .without_source()
+                    .into_iter()
+                    .map(Mapped::plain)
+                    .collect();
+            }
         }
         self.source
             .as_ref()
@@ -212,10 +236,12 @@ impl Scrubber {
             Some(close.into_any_element()),
         );
 
-        // The chosen frame, and whose stack it is.
-        let located = self.located();
-        let chosen = located.and_then(Located::chosen_frame);
-        let headline = match (located, chosen) {
+        // The frame shown, and whose stack it is.
+        let answer = self.located();
+        let located = answer.map(|(located, _)| located);
+        let at = answer.and_then(|(_, at)| at);
+        let frame_shown = located.zip(at).and_then(|(l, at)| l.frames.get(at));
+        let headline = match (located, frame_shown) {
             (Some(_), Some(frame)) => {
                 format!("{}  {}", frame.function_label(), frame.place_label())
             }
@@ -273,16 +299,35 @@ impl Scrubber {
                     .child(status),
             );
 
-        // The body: the chosen frame's source with its line marked, then
-        // the frame list; or a message in their place.
+        // The body: the shown frame's source with its line marked, or its
+        // address and program when it has none, then the frame list; or a
+        // message in their place.
         let registry = self.selecting.registry.clone();
         let selected = self.selected_range(Surface::Source);
         let body = match (located, source_message(panel)) {
             (Some(located), _) => {
                 let mut body = div().flex().flex_col().py(px(size::LIST_PAD_Y));
-                if let (Some((first, lines)), Some(frame)) =
-                    (located.source_around(PANEL_RADIUS), chosen)
-                {
+                let source = at.and_then(|at| located.source_around(at, PANEL_RADIUS));
+                if let (None, Some(frame)) = (source, frame_shown) {
+                    for (i, text) in frame.without_source().into_iter().enumerate() {
+                        let part = selected
+                            .as_ref()
+                            .and_then(|r| part_of_line(r, i, text.len()));
+                        body = body.child(
+                            div()
+                                .w_full()
+                                .h(px(size::LOG_ROW_HEIGHT))
+                                .flex()
+                                .flex_none()
+                                .items_center()
+                                .px(px(size::PANEL_PAD_X))
+                                .whitespace_nowrap()
+                                .text_color(rgb(theme::MUTED))
+                                .child(selectable(Surface::Source, i, text, part, &registry)),
+                        );
+                    }
+                }
+                if let (Some((first, lines)), Some(frame)) = (source, frame_shown) {
                     let last = first as usize + lines.len();
                     let digits = last.to_string().len();
                     for (i, line) in lines.iter().enumerate() {
@@ -331,7 +376,8 @@ impl Scrubber {
                         );
                     }
                 }
-                body.child(self.render_frames(located)).into_any_element()
+                body.child(self.render_frames(located, at, cx))
+                    .into_any_element()
             }
             (None, Some((text, color))) => {
                 let part = selected
@@ -382,17 +428,21 @@ impl Scrubber {
         )
     }
 
-    /// The thread's frames, innermost first, the chosen one marked: its
-    /// level, function and place.
-    fn render_frames(&self, located: &Located) -> Div {
+    /// The thread's frames, innermost first, the one whose source is
+    /// shown marked: each frame's level, function and place. Clicking a
+    /// row shows that frame's source.
+    fn render_frames(&self, located: &Located, at: Option<usize>, cx: &mut Context<Self>) -> Div {
         let row = |i: usize, frame: &Frame| {
-            let chosen = located.chosen == Some(i);
-            let (name_color, place_color) = if chosen {
+            let shown = at == Some(i);
+            let (name_color, place_color) = if shown {
                 (theme::AMBER, theme::AMBER_PALE)
             } else {
                 (theme::SOFT, theme::MUTED)
             };
             div()
+                .id(SharedString::from(format!("source-frame-{i}")))
+                .role(Role::Button)
+                .aria_label(format!("Show the source of frame {}", frame.level))
                 .w_full()
                 .flex()
                 .flex_none()
@@ -401,13 +451,17 @@ impl Scrubber {
                 .h(px(size::LOG_ROW_HEIGHT))
                 .items_center()
                 .whitespace_nowrap()
-                .when(chosen, |r| r.bg(rgb(theme::AMBER_CARD)))
+                .cursor_pointer()
+                .when(shown, |r| r.bg(rgb(theme::AMBER_CARD)))
+                .when(!shown, |r| r.hover(|s| s.bg(rgb(theme::RAISED_HOVER))))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(move |this, _, _, cx| this.select_frame(i, cx)))
                 .child(
                     div()
                         .flex_none()
                         .w(px(size::ICON_CLOSE))
                         .text_color(rgb(theme::AMBER))
-                        .child(if chosen { CHOSEN_MARKER } else { "" }),
+                        .child(if shown { SHOWN_MARKER } else { "" }),
                 )
                 .child(
                     div()

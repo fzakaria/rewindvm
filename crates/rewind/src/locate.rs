@@ -8,6 +8,7 @@
 //! innermost that is the program's own code, not the C library's, Rust's
 //! standard library's or a dependency's, is the answer.
 
+use std::collections::HashMap;
 use std::net::TcpListener;
 use std::process::ExitCode;
 
@@ -24,8 +25,9 @@ const SCRIPT: &str = include_str!("locate.py");
 const SCRIPT_NAME: &str = "where.py";
 const ANSWER_MARKER: &str = "rewind-where: ";
 
-/// The source lines around the chosen frame's line: a few for a person to
-/// read, more for a program, such as the desktop app, to scroll through.
+/// The source lines around a frame's line: a few around the chosen
+/// frame's for a person to read, more around every frame's for a program,
+/// such as the desktop app, to scroll through.
 const TEXT_SOURCE_RADIUS: u32 = 2;
 const JSON_SOURCE_RADIUS: u32 = 40;
 
@@ -45,10 +47,13 @@ pub struct Answer {
     pub tid: u32,
     pub process: String,
     /// The thread's frames, innermost first, and the one in the program's
-    /// own code, with its source lines.
+    /// own code.
     pub frames: Vec<Frame>,
     pub chosen: Option<usize>,
-    pub source: Option<Source>,
+    /// Each frame's source lines around its line, in the order of
+    /// `frames`: null for a frame without a source file and line, or whose
+    /// file was not found.
+    pub sources: Vec<Option<Source>>,
 }
 
 /// What the gdb script prints for a thread.
@@ -80,9 +85,9 @@ pub fn locate(
                 tid,
                 step,
             };
-            let text_source = answer.source.as_ref().and_then(|s| {
-                let line = answer.chosen.and_then(|i| answer.frames[i].line)?;
-                narrowed(s, line, TEXT_SOURCE_RADIUS)
+            let text_source = answer.chosen.and_then(|i| {
+                let source = answer.sources.get(i)?.as_ref()?;
+                narrowed(source, answer.frames[i].line?, TEXT_SOURCE_RADIUS)
             });
             print!(
                 "{}",
@@ -129,13 +134,11 @@ pub fn walk(home: &Home, run: &Run, step: u64, pid: u32, tid: u32) -> Result<Ans
     }
     let mut frames = walked.frames.unwrap_or_default();
 
-    // The chosen frame's source, read while the session's copy is here,
+    // Each frame's source, read while the session's copies are here,
     // then every path as the VM had it.
     let chosen = chosen(&frames);
-    let source = chosen.and_then(|i| {
-        let frame = &frames[i];
-        let text = std::fs::read_to_string(frame.fullname.as_ref()?).ok()?;
-        source_around(&text, frame.line?, JSON_SOURCE_RADIUS)
+    let sources = frame_sources(&frames, JSON_SOURCE_RADIUS, |path| {
+        std::fs::read_to_string(path).ok()
     });
     for frame in &mut frames {
         let in_vm = |path: &String| {
@@ -155,7 +158,7 @@ pub fn walk(home: &Home, run: &Run, step: u64, pid: u32, tid: u32) -> Result<Ans
         process: process_name(run.trace()?, pid),
         frames,
         chosen,
-        source,
+        sources,
     })
 }
 
@@ -427,6 +430,27 @@ pub fn chosen(frames: &[Frame]) -> Option<usize> {
             .iter()
             .position(|f| f.in_user_space() && f.function.is_some())
     })
+}
+
+/// For each of `frames`, the lines within `radius` of its line in its
+/// source file, as `read` gives the file by its path here: None for a
+/// frame without both, or whose file `read` cannot give. Each file is
+/// read once, however many frames are in it.
+fn frame_sources(
+    frames: &[Frame],
+    radius: u32,
+    mut read: impl FnMut(&str) -> Option<String>,
+) -> Vec<Option<Source>> {
+    let mut files: HashMap<&str, Option<String>> = HashMap::new();
+    frames
+        .iter()
+        .map(|frame| {
+            let path = frame.fullname.as_deref()?;
+            let line = frame.line?;
+            let text = files.entry(path).or_insert_with(|| read(path)).as_deref()?;
+            source_around(text, line, radius)
+        })
+        .collect()
 }
 
 /// Lines of a source file around one.
@@ -707,6 +731,44 @@ mod tests {
             })
         );
         assert_eq!(source_around(text, 7, 2), None);
+    }
+
+    /// Every frame with a file and a line gets the lines around its own
+    /// line, two frames in one file each their own, and the file is read
+    /// once. A frame without a line, or whose file cannot be read, gets
+    /// none. Frames as the gdb script lists them, over files held in a
+    /// map.
+    #[test]
+    fn each_frame_with_a_line_gets_its_own_window() {
+        let stack = frames(
+            r#"[
+            {"level":0,"function":"run_job","file":"src/pool.c","fullname":"/s/pool.c","line":2,"pc":"0x1","object":null},
+            {"level":1,"function":"worker","file":"src/pool.c","fullname":"/s/pool.c","line":5,"pc":"0x2","object":null},
+            {"level":2,"function":"start_thread","file":"pthread_create.c","fullname":"/gone.c","line":9,"pc":"0x3","object":null},
+            {"level":3,"function":"__clone3","file":null,"fullname":null,"line":null,"pc":"0x4","object":"/lib/libc.so.6"}
+        ]"#,
+        );
+        let mut reads = 0;
+        let sources = frame_sources(&stack, 1, |path| {
+            reads += 1;
+            (path == "/s/pool.c").then(|| "a\nb\nc\nd\ne\nf\n".to_string())
+        });
+        let lines = |first: u32, lines: &[&str]| {
+            Some(Source {
+                first,
+                lines: lines.iter().map(|l| l.to_string()).collect(),
+            })
+        };
+        assert_eq!(
+            sources,
+            vec![
+                lines(1, &["a", "b", "c"]),
+                lines(4, &["d", "e", "f"]),
+                None,
+                None
+            ]
+        );
+        assert_eq!(reads, 2);
     }
 
     /// The text answer: who and when, the chosen frame by its level with
