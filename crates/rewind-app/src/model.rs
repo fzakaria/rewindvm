@@ -625,7 +625,18 @@ fn step_of(trace: &Trace, index: Option<usize>, total: u64) -> u64 {
 /// Whether a line reads as an error.
 pub fn is_error_text(text: &str) -> bool {
     let lower = text.to_lowercase();
-    ERROR_MARKERS.iter().any(|m| lower.contains(m))
+    ERROR_MARKERS.iter().any(|m| starts_a_word(&lower, m))
+}
+
+/// Whether `marker` is in `text` at the start of a word: not inside one,
+/// as "error" is in a compiler flag such as -Werror or -Wno-error=x.
+fn starts_a_word(text: &str, marker: &str) -> bool {
+    text.match_indices(marker).any(|(at, _)| {
+        text[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !(c.is_alphanumeric() || c == '-' || c == '_'))
+    })
 }
 
 /// A mark someone wrote to /dev/rewind on purpose: not empty, and not one
@@ -1293,6 +1304,22 @@ mod tests {
         assert_eq!(lines[0].text, "[2/2] cc b.c");
         assert_eq!(lines[1].text, "error: bad");
         assert_eq!(lines[1].tone, Tone::Error);
+    }
+
+    #[test]
+    fn an_error_word_marks_a_line_and_a_flag_that_names_one_does_not() {
+        // Error words at the start of a word mark a line as an error,
+        // plural or in capitals; inside a word, as in a compiler flag such
+        // as -Werror, they do not.
+        assert!(is_error_text("pool.c:77: error: bad"));
+        assert!(is_error_text("3 errors generated."));
+        assert!(is_error_text("FAILED: 1 test"));
+        assert!(is_error_text("Segmentation fault (core dumped)"));
+        assert!(!is_error_text(
+            "Compiler for C++ supports arguments -Werror=documentation: NO"
+        ));
+        assert!(!is_error_text("gcc -Wno-error=unused -c a.c"));
+        assert!(!is_error_text("all 12 tests passed"));
     }
 
     #[test]
