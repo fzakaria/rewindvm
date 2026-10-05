@@ -8,13 +8,10 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-/// The file a run's bookmarks are kept in, in its directory, as the engine
-/// names it (`rewind_core::run::BOOKMARKS`).
-pub const BOOKMARKS_FILE: &str = "bookmarks.json";
-
-/// The largest bookmarks file read; the engine refuses a larger one on
-/// import.
-pub const MAX_BYTES: u64 = 1 << 20;
+/// The file a run's bookmarks are kept in, in its directory, and the
+/// largest one read, which the engine refuses on import.
+pub use rewind_trace::export::MAX_BOOKMARKS as MAX_BYTES;
+pub use rewind_trace::manifest::BOOKMARKS as BOOKMARKS_FILE;
 
 /// One marked step.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

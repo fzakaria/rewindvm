@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use rewind_trace::ending::Ending;
-use rewind_trace::manifest::{MANIFEST, Manifest, Source, Spec};
+use rewind_trace::manifest::{KEYFRAMES_DIR, MANIFEST, Manifest, Source, Spec};
 use rewind_trace::prune::{self, Forks, Member, Reads};
 
 use crate::describe::{ago, thousands};
@@ -19,9 +19,6 @@ use crate::run::{read_manifest, short_id};
 
 /// What a run the engine has not recorded the end of is listed as.
 const UNFINISHED_ENDING: &str = "unfinished";
-
-/// The directory of a run's own keyframes, as the engine names it.
-const KEYFRAMES_DIR: &str = "keyframes";
 
 /// The run a row's run was forked from, by id, and the step it was
 /// forked at.

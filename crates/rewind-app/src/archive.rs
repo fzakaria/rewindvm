@@ -17,7 +17,8 @@ use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
 use crate::bookmarks::{BOOKMARKS_FILE, MAX_BYTES as BOOKMARKS_MAX_BYTES};
-use rewind_trace::manifest::{MANIFEST, TRACE};
+use rewind_trace::export;
+use rewind_trace::manifest::{MANIFEST, RunId, TRACE};
 
 /// The first four bytes of every zstd frame.
 const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
@@ -34,10 +35,6 @@ const URL_SCHEMES: &[&str] = &["https://", "http://"];
 /// Where downloaded exports are kept, next to the unpacked runs, so the
 /// engine can import one without downloading it again.
 const DOWNLOADS_SUBDIR: &str = "rewind/downloads";
-
-/// The directories a replayable export adds: the keyframes, their pages,
-/// and the inputs the run booted.
-const REPLAY_DIRS: &[&str] = &["keyframes", "pages", "inputs"];
 
 /// An export unpacked into the cache.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -179,7 +176,7 @@ fn unpack(reader: impl Read, staging: &Path) -> Result<bool> {
         {
             bail!("the archive holds an unsafe path {}", path.display());
         }
-        if REPLAY_DIRS.iter().any(|d| path.starts_with(d)) {
+        if export::REPLAY_DIRS.iter().any(|d| path.starts_with(d)) {
             replayable = true;
         }
         // The run's bookmarks come too, as a regular file no larger than
@@ -209,9 +206,8 @@ fn place(staging: &Path, into: &Path) -> Result<PathBuf> {
     let id = manifest
         .get("id")
         .and_then(Value::as_str)
-        .filter(|id| is_safe_name(id))
-        .unwrap_or(NO_ID)
-        .to_string();
+        .and_then(RunId::parse)
+        .map_or_else(|| NO_ID.to_string(), |id| id.to_string());
     let dir = into.join(&id);
     if is_complete(&dir) {
         return Ok(dir);
@@ -236,7 +232,6 @@ fn is_complete(dir: &Path) -> bool {
     dir.join(MANIFEST).is_file() && dir.join(TRACE).is_file()
 }
 
-/// A run id that is safe as one path component.
 /// The file name a download of `url` is kept under: the URL's last path
 /// segment, without a query or fragment, when it is a plain file name.
 fn download_name(url: &str) -> &str {
@@ -251,13 +246,6 @@ fn download_name(url: &str) -> &str {
     } else {
         DOWNLOAD_NAME
     }
-}
-
-fn is_safe_name(id: &str) -> bool {
-    !id.is_empty()
-        && id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 /// One cache directory for every test in this binary that opens exports,
@@ -308,7 +296,7 @@ mod tests {
     use super::*;
 
     /// zstd's default level, as the engine uses.
-    const LEVEL: i32 = 3;
+    const LEVEL: i32 = rewind_trace::export::COMPRESSION_LEVEL;
 
     fn archive(entries: &[(&str, &[u8])]) -> Vec<u8> {
         let encoder = zstd::Encoder::new(Vec::new(), LEVEL).unwrap();
@@ -362,7 +350,7 @@ mod tests {
         let dir = temp_dir("bookmarks");
         let marks = br#"[{"step": 40, "note": "here"}]"#;
         let bytes = archive(&[
-            ("manifest.json", br#"{"id": "marked"}"#),
+            ("manifest.json", br#"{"id": "000000000000000a"}"#),
             ("trace.bin", b"trace"),
             (crate::bookmarks::BOOKMARKS_FILE, marks),
         ]);
@@ -372,7 +360,7 @@ mod tests {
 
         let huge = vec![b' '; crate::bookmarks::MAX_BYTES as usize + 1];
         let bytes = archive(&[
-            ("manifest.json", br#"{"id": "huge"}"#),
+            ("manifest.json", br#"{"id": "000000000000000b"}"#),
             ("trace.bin", b"trace"),
             (crate::bookmarks::BOOKMARKS_FILE, &huge),
         ]);
@@ -386,11 +374,11 @@ mod tests {
         // A second import of the same id keeps the first copy.
         let dir = temp_dir("reuse");
         let first = archive(&[
-            ("manifest.json", br#"{"id": "abc"}"#),
+            ("manifest.json", br#"{"id": "0000000000000abc"}"#),
             ("trace.bin", b"one"),
         ]);
         let second = archive(&[
-            ("manifest.json", br#"{"id": "abc"}"#),
+            ("manifest.json", br#"{"id": "0000000000000abc"}"#),
             ("trace.bin", b"two"),
         ]);
         import(&first[..], &dir).unwrap();
@@ -410,7 +398,7 @@ mod tests {
         // at the same moment, as two windows opening the same file do;
         // every import returns a complete copy of the run.
         let bytes = archive(&[
-            ("manifest.json", br#"{"id": "same"}"#),
+            ("manifest.json", br#"{"id": "000000000000005a"}"#),
             ("trace.bin", b"trace"),
         ]);
         for round in 0..ROUNDS {
@@ -432,9 +420,9 @@ mod tests {
     #[test]
     fn broken_and_hostile_archives_are_refused() {
         // A missing trace, a path that climbs out, and bytes that are not
-        // zstd at all; an id that is not a plain name is replaced.
+        // zstd at all; an id that is not a run id is replaced.
         let dir = temp_dir("refuse");
-        let no_trace = archive(&[("manifest.json", br#"{"id": "x"}"#)]);
+        let no_trace = archive(&[("manifest.json", br#"{"id": "000000000000000c"}"#)]);
         assert!(import(&no_trace[..], &dir).is_err());
         // tar refuses to write "..", so that name goes into the header raw.
         let climbing = {

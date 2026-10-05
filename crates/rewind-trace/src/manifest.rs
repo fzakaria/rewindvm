@@ -21,6 +21,9 @@ pub const TRACE: &str = "trace.bin";
 /// carried in its exports. The engine never reads them.
 pub const BOOKMARKS: &str = "bookmarks.json";
 
+/// The directory of a run's own keyframes, inside the run's directory.
+pub const KEYFRAMES_DIR: &str = "keyframes";
+
 /// The version of the manifest format.
 pub const MANIFEST_VERSION: u32 = 1;
 

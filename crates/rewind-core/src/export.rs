@@ -29,6 +29,9 @@ use rewind_store::{Hash, Store, ZERO_PAGE, hex};
 use crate::home::Home;
 use crate::keyframes;
 use crate::run::{BOOKMARKS, MANIFEST, Manifest, Run, TRACE};
+use rewind_trace::export::{
+    COMPRESSION_LEVEL, IMAGE, INITRD, INPUTS_DIR, KERNEL, MAX_BOOKMARKS, PAGES_DIR,
+};
 
 /// What an export carries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,19 +44,6 @@ pub enum Contents {
 }
 
 const PAGE_SIZE: usize = 4096;
-
-/// zstd's default level: an export is written once and read rarely.
-const COMPRESSION_LEVEL: i32 = 3;
-
-const PAGES_DIR: &str = "pages";
-const INPUTS_DIR: &str = "inputs";
-const KERNEL: &str = "inputs/kernel";
-const INITRD: &str = "inputs/initrd";
-const IMAGE: &str = "inputs/image.erofs";
-
-/// The most bytes of bookmarks an export may carry: notes a person typed,
-/// far below this, so a larger file is not a run's.
-const MAX_BOOKMARKS: u64 = 1 << 20;
 
 /// Writes `run` to `out` as a `.rwd` file.
 pub fn export(home: &Home, run: &Run, contents: Contents, out: &Path) -> Result<()> {

@@ -23,7 +23,7 @@ pub const TARGET: Duration = Duration::from_millis(250);
 const MIN_INTERVAL: u64 = 256;
 const MAX_INTERVAL: u64 = 1 << 20;
 
-pub const DIR: &str = "keyframes";
+pub use rewind_trace::manifest::KEYFRAMES_DIR as DIR;
 
 /// The extension of a keyframe's file, which is named by its step.
 pub const EXTENSION: &str = "kf";
