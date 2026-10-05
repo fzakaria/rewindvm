@@ -26,6 +26,15 @@ pub const TRACE: &str = "trace.bin";
 /// The version of the manifest format.
 const MANIFEST_VERSION: u32 = 1;
 
+/// How many hex digits of the hash of its inputs a run id keeps.
+const ID_LEN: usize = 16;
+
+/// Whether `id` is one `Spec::id` could give: ID_LEN lowercase hex digits,
+/// and so a name that stays inside the runs directory.
+pub fn is_run_id(id: &str) -> bool {
+    id.len() == ID_LEN && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 /// The kernel command line every guest boots with. The first two keep the
 /// kernel from waiting on hardware time. loglevel=7 sends informational
 /// messages to the console, and so into the trace, the segfault report
@@ -182,7 +191,7 @@ impl Spec {
         inputs.initrd = PathBuf::from(content(&self.initrd));
         let bytes = serde_json::to_vec(&inputs).expect("a spec always serializes");
         let hash = blake3::hash(&bytes).to_hex();
-        hash[..16].to_string()
+        hash[..ID_LEN].to_string()
     }
 
     /// The spec of a fork of this run at `step` under schedule `seed`:
@@ -1323,7 +1332,7 @@ fn describe(outcome: Outcome, kernel: &Path) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     // Specs and manifests without running anything: how far two schedules
     // agree, which decides what a fork may share with its parent, and the
     // manifest fields the desktop app reads by name.
@@ -1487,7 +1496,7 @@ mod tests {
     }
 
     /// An unperturbed spec; tests change the schedule fields.
-    fn spec() -> Spec {
+    pub(crate) fn spec() -> Spec {
         Spec {
             kernel: "/k".into(),
             initrd: "/i".into(),
@@ -1638,7 +1647,7 @@ mod tests {
     }
 
     /// A manifest for run `id` named `name`, made at `created`.
-    fn manifest(id: &str, name: &str, created: u64) -> Manifest {
+    pub(crate) fn manifest(id: &str, name: &str, created: u64) -> Manifest {
         Manifest {
             version: MANIFEST_VERSION,
             id: id.into(),
