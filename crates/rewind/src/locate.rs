@@ -103,8 +103,6 @@ pub fn locate(
 /// Thread `tid`'s frames at `step`, with process `pid`'s symbols, and the
 /// one in the program's own code with its source.
 pub fn walk(home: &Home, run: &Run, step: u64, pid: u32, tid: u32) -> Result<Answer> {
-    gdb::require_python()?;
-
     // The fork, refused first for a run whose kernel lists no tasks, then
     // the symbols, which take inspections on forks of their own.
     let needs = Needs::Tasks(format!("`rewind where` cannot find thread {tid}"));
@@ -177,7 +175,6 @@ struct Place {
 /// Where `address` is in the code process `pid` had mapped at `step` of
 /// `run`. gdb reads the symbol files alone, with no fork to connect to.
 fn place(home: &Home, run: &Run, step: u64, pid: u32, address: u64) -> Result<Place> {
-    gdb::require_python()?;
     let symbols = Symbols::load(home, run, step, Some(pid), Kernel::Skip, Say::Nothing)?;
     let script = symbols.dir().join(SCRIPT_NAME);
     std::fs::write(&script, SCRIPT).context("writing the gdb script")?;
@@ -279,14 +276,22 @@ fn process_words(pid: u32, name: &str, certainty: Certainty) -> String {
     }
 }
 
+/// What a gdb built without Python says when asked to run Python, as
+/// sourcing the script or loading the process's files does.
+const NO_PYTHON: &str = "Python scripting is not supported in this copy of GDB";
+
 /// The JSON the gdb script printed on its marked line. Without one, what
-/// gdb said on its standard error explains why.
+/// gdb said on its standard error explains why: most plainly, that it
+/// cannot run the script at all.
 fn script_answer<T: serde::de::DeserializeOwned>(printed: &gdb::Printed) -> Result<T> {
     let Some(line) = printed
         .stdout
         .lines()
         .find_map(|l| l.strip_prefix(ANSWER_MARKER))
     else {
+        if printed.stderr.contains(NO_PYTHON) {
+            bail!("the gdb on PATH cannot run Python scripts; use a gdb built with Python");
+        }
         bail!("gdb's script gave no answer: {}", printed.stderr.trim());
     };
     serde_json::from_str(line).context("reading the gdb script's answer")
@@ -642,6 +647,31 @@ mod tests {
             r#"{"address":"0x1000","function":null,"offset":null,"file":null,"fullname":null,"line":null,"object":null}"#,
         );
         assert_eq!(place_words(&unknown), None);
+    }
+
+    /// A gdb built without Python cannot run the script, and says so on
+    /// its standard error; the answer names the cause and the fix. Any
+    /// other failure to answer passes gdb's words on.
+    #[test]
+    fn a_gdb_without_python_is_named_as_the_cause() {
+        let printed = |stderr: &str| gdb::Printed {
+            stdout: String::new(),
+            stderr: stderr.into(),
+        };
+        let without = printed(
+            "/tmp/gdb/42/where.py:1: Error in sourced command file:\n\
+             Python scripting is not supported in this copy of GDB.\n",
+        );
+        let err = script_answer::<Place>(&without).unwrap_err().to_string();
+        assert_eq!(
+            err,
+            "the gdb on PATH cannot run Python scripts; use a gdb built with Python"
+        );
+        let other = script_answer::<Place>(&printed("Remote connection closed")).unwrap_err();
+        assert_eq!(
+            other.to_string(),
+            "gdb's script gave no answer: Remote connection closed"
+        );
     }
 
     /// The process a run stalled in: the one the VM's kernel had on the

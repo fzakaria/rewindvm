@@ -270,21 +270,6 @@ pub fn run_gdb(
 /// The host's gdb.
 const GDB_PROGRAM: &str = "gdb";
 
-/// Fails, saying so, when the host's gdb cannot run Python, which loading
-/// the process's symbols and `rewind where`'s script need.
-pub fn require_python() -> Result<()> {
-    let ran = Command::new(GDB_PROGRAM)
-        .args(["-nx", "-batch", "-ex", "python import gdb"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .context("starting gdb; is it on PATH?")?;
-    if !ran.success() {
-        bail!("the gdb on PATH cannot run Python scripts; use a gdb built with Python");
-    }
-    Ok(())
-}
-
 /// What gdb is told about a run at a step: the kernel's symbols, the
 /// process's programs and libraries with their sources, and a debuginfod
 /// server for their DWARF, with the session directory the files only the
@@ -792,27 +777,85 @@ fn source_tree(file: &Path) -> PathBuf {
     tree
 }
 
+/// The start of the line gdb echoes before listing a file's sources,
+/// followed by the file's index.
+const SOURCES_MARKER: &str = "rewind-sources ";
+
+/// The source files `info sources` listed for each of `count` files, in
+/// gdb's `output` with each file's listing after its marker: the paths
+/// after the objfile's name and a colon, separated by commas, without
+/// gdb's notes. A marker for no such file starts nothing.
+fn listed_sources(output: &str, count: usize) -> Vec<Vec<String>> {
+    let mut listed = vec![Vec::new(); count];
+    let mut current: Option<usize> = None;
+    for line in output.lines() {
+        if let Some(index) = line.strip_prefix(SOURCES_MARKER) {
+            current = index.trim().parse().ok().filter(|i| *i < count);
+            continue;
+        }
+        let Some(i) = current else {
+            continue;
+        };
+        let paths = line
+            .split(',')
+            .map(str::trim)
+            .filter(|p| p.starts_with('/') && !p.ends_with(':'))
+            .map(String::from);
+        listed[i].extend(paths);
+    }
+    listed
+}
+
+/// The characters a gdb command that splits its arguments like a shell,
+/// such as `symbol-file`, needs escaped in a path.
+const GDB_SPECIAL: &[char] = &[' ', '\t', '\'', '"', '\\'];
+
+/// `path` as one argument of a gdb command that splits its arguments like
+/// a shell: each special character after a backslash.
+fn gdb_word(path: &Path) -> String {
+    let mut word = String::new();
+    for c in path.display().to_string().chars() {
+        if GDB_SPECIAL.contains(&c) {
+            word.push('\\');
+        }
+        word.push(c);
+    }
+    word
+}
+
 /// For each of `files`, the source files its DWARF names outside the
-/// store. Each file is listed by a gdb of its own, several at once.
+/// store, all listed by one gdb. It loads each file's symbols in turn,
+/// after echoing the file's marker and clearing the last file's, so a
+/// file gdb cannot read lists nothing rather than the files of the one
+/// before it. Every list is empty when gdb cannot start.
 fn sources_outside_store(files: &[SymbolFile]) -> Vec<Vec<String>> {
-    let workers = std::thread::available_parallelism().map_or(1, |n| n.get());
-    let per_worker = files.len().div_ceil(workers).max(1);
-    let outside = |file: &SymbolFile| -> Vec<String> {
-        source_files(&file.path)
-            .into_iter()
-            .filter(|p| !p.starts_with(NIX_STORE))
-            .collect()
+    if files.is_empty() {
+        return Vec::new();
+    }
+    let mut command = Command::new(GDB_PROGRAM);
+    command.args(["-batch", "-nx"]);
+    for (i, file) in files.iter().enumerate() {
+        command
+            .arg("-ex")
+            .arg(format!("echo {SOURCES_MARKER}{i}\\n"));
+        command.args(["-ex", "symbol-file"]);
+        command
+            .arg("-ex")
+            .arg(format!("symbol-file {}", gdb_word(&file.path)));
+        command.args(["-ex", "info sources"]);
+    }
+    let Ok(output) = command.stderr(Stdio::null()).output() else {
+        return vec![Vec::new(); files.len()];
     };
-    std::thread::scope(|scope| {
-        let listings: Vec<_> = files
-            .chunks(per_worker)
-            .map(|chunk| scope.spawn(move || chunk.iter().map(outside).collect::<Vec<_>>()))
-            .collect();
-        listings
-            .into_iter()
-            .flat_map(|l| l.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
-            .collect()
-    })
+    listed_sources(&String::from_utf8_lossy(&output.stdout), files.len())
+        .into_iter()
+        .map(|sources| {
+            sources
+                .into_iter()
+                .filter(|p| !p.starts_with(NIX_STORE))
+                .collect()
+        })
+        .collect()
 }
 
 /// The path a symbol file had in the VM: its path under `dir` when it was
@@ -953,26 +996,6 @@ fn source_trees_in(src: &Path, sources: &[String]) -> Vec<PathBuf> {
         }
     }
     trees
-}
-
-/// The absolute paths of the source files a program's DWARF names, as gdb
-/// lists them: `info sources` prints the program's name and a colon, then
-/// the files, separated by commas.
-fn source_files(program: &Path) -> Vec<String> {
-    let Ok(output) = Command::new(GDB_PROGRAM)
-        .args(["-batch", "-nx", "-ex", "info sources"])
-        .arg(program)
-        .stderr(Stdio::null())
-        .output()
-    else {
-        return Vec::new();
-    };
-    String::from_utf8_lossy(&output.stdout)
-        .split([',', '\n'])
-        .map(str::trim)
-        .filter(|p| p.starts_with('/') && !p.ends_with(':'))
-        .map(str::to_string)
-        .collect()
 }
 
 /// A directory for one gdb session's files, removed when dropped.
@@ -1208,6 +1231,57 @@ mod tests {
         assert_eq!(derivation_src(nix_2_31), src);
         let lix_2_95 = br#"{"/nix/store/813zvgg0x0ax42v6dm2jf19p9k8kx5lv-structured-0.1.drv":{"env":{"__json":"{\"pname\":\"structured\",\"src\":\"/nix/store/cwjyzq3122bisr9wdff7a683axzp7m84-src\",\"version\":\"0.1\"}","out":"/nix/store/i5sh3ajs0cb1mhxzvs8pg8sz92nzjpc6-structured-0.1"},"name":"structured-0.1"}}"#;
         assert_eq!(derivation_src(lix_2_95), src);
+    }
+
+    /// One gdb lists every file's sources, each after a marker it echoes
+    /// before loading the file. Output as gdb 16 prints it for a program,
+    /// a path it cannot open and a library, cut to two source files: each
+    /// file gets the paths after its own marker, the objfile's header and
+    /// gdb's notes left out, and the missing file none, not the files of
+    /// the one before it.
+    #[test]
+    fn one_gdb_lists_each_file_s_sources_after_its_marker() {
+        let output = "rewind-sources 0\n\
+            /tmp/s/prog:\n\
+            (Full debug information has not yet been read for this file.)\n\
+            \n\
+            /build/mylib/src/pool.c, /build/mylib/src/pool.h\n\
+            \n\
+            rewind-sources 1\n\
+            rewind-sources 2\n\
+            /tmp/s/libb.so:\n\
+            (Full debug information has not yet been read for this file.)\n\
+            \n\
+            /build/b/b.c\n";
+        assert_eq!(
+            listed_sources(output, 3),
+            vec![
+                vec![
+                    "/build/mylib/src/pool.c".to_string(),
+                    "/build/mylib/src/pool.h".to_string()
+                ],
+                vec![],
+                vec!["/build/b/b.c".to_string()],
+            ]
+        );
+        assert_eq!(
+            listed_sources("rewind-sources 7\n/x.c\n", 1),
+            vec![Vec::<String>::new()]
+        );
+    }
+
+    /// A path in a gdb command that splits its arguments like a shell:
+    /// spaces, quotes and backslashes are escaped, other characters left.
+    #[test]
+    fn a_path_is_one_gdb_argument() {
+        assert_eq!(
+            gdb_word(Path::new("/nix/store/abc-x/lib.so")),
+            "/nix/store/abc-x/lib.so"
+        );
+        assert_eq!(
+            gdb_word(Path::new(r#"/a b/c'd"e\f"#)),
+            r#"/a\ b/c\'d\"e\\f"#
+        );
     }
 
     #[test]
