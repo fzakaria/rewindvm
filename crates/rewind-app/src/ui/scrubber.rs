@@ -283,6 +283,9 @@ pub struct Scrubber {
     /// What the right column shows: "At this step", the Runs panel, the
     /// file viewer or the source panel.
     pub(super) right_tab: RightTab,
+    /// Whether the Runs panel has a tab, which the runs pill opens and the
+    /// tab's x takes away.
+    pub(super) runs_tab: bool,
     /// How the panels share the window, which their edges drag.
     pub(super) splits: Splits,
     /// The edge being dragged, if one is.
@@ -414,6 +417,7 @@ impl Scrubber {
             recent: Vec::new(),
             family: None,
             right_tab: RightTab::AtStep,
+            runs_tab: false,
             splits: layout_path().map(|p| Splits::load(&p)).unwrap_or_default(),
             split_drag: None,
             measured: Rc::new(Measured::default()),
@@ -618,14 +622,14 @@ impl Scrubber {
         cx.notify();
     }
 
-    /// Shows the Runs panel, or "At this step" again when it shows.
+    /// The runs pill: shows the Runs panel, opening its tab, or closes
+    /// the tab when the panel shows.
     pub(super) fn toggle_runs(&mut self, cx: &mut Context<Self>) {
-        let tab = if self.right_tab == RightTab::Runs {
-            RightTab::AtStep
-        } else {
-            RightTab::Runs
-        };
-        self.select_tab(tab, cx);
+        if self.right_tab == RightTab::Runs {
+            self.close_tab(RightTab::Runs, cx);
+            return;
+        }
+        self.select_tab(RightTab::Runs, cx);
     }
 
     /// Opens a run of the family; the run it was forked from, when there

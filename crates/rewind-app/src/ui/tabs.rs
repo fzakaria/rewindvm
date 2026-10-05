@@ -1,8 +1,9 @@
 //! The tabs over the right column: "At this step", the Runs panel, the
 //! file viewer and the source panel. Each shows in the column's whole
 //! height when chosen, so none takes another's place or squeezes a fourth
-//! column into the window; the file, the source and the runs close back
-//! to "At this step".
+//! column into the window. The file, the source and the runs close back to
+//! "At this step", by their x or Escape, and the runs pill opens the runs
+//! again.
 //!
 //! Only the chosen tab follows the playhead: a file or source tab behind
 //! another asks the engine again once it is chosen, rather than forking
@@ -22,6 +23,9 @@ const MAX_FILE_CHARS: usize = 24;
 /// The tab bar's height.
 const TAB_HEIGHT: f32 = 32.0;
 
+/// The room around a tab's close icon that takes a click.
+const CLOSE_PAD: f32 = 4.0;
+
 /// What the right column shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RightTab {
@@ -35,6 +39,9 @@ impl Scrubber {
     /// Shows `tab`, and brings a file or source tab up to the playhead.
     pub(super) fn select_tab(&mut self, tab: RightTab, cx: &mut Context<Self>) {
         self.right_tab = tab;
+        if tab == RightTab::Runs {
+            self.runs_tab = true;
+        }
         match tab {
             RightTab::File => self.playhead_moved(cx),
             RightTab::Source => self.source_playhead_moved(cx),
@@ -43,13 +50,14 @@ impl Scrubber {
         cx.notify();
     }
 
-    /// Closes `tab`: the file viewer, the source panel or the Runs panel.
-    /// "At this step" stays.
+    /// Closes `tab`: the file viewer, the source panel or the Runs panel,
+    /// which the runs pill opens again. "At this step" stays.
     pub(super) fn close_tab(&mut self, tab: RightTab, cx: &mut Context<Self>) {
         match tab {
             RightTab::File => self.close_viewer(cx),
             RightTab::Source => self.close_source(cx),
             RightTab::Runs => {
+                self.runs_tab = false;
                 if self.right_tab == RightTab::Runs {
                     self.right_tab = RightTab::AtStep;
                 }
@@ -59,11 +67,11 @@ impl Scrubber {
         }
     }
 
-    /// The tabs there are: "At this step" always, the runs with a family,
-    /// and the file and the source while they are open.
+    /// The tabs there are: "At this step" always, and the runs, the file
+    /// and the source while they are open.
     fn tabs(&self) -> Vec<RightTab> {
         let mut tabs = vec![RightTab::AtStep];
-        if self.family.is_some() {
+        if self.runs_tab && self.family.is_some() {
             tabs.push(RightTab::Runs);
         }
         if self.viewer.is_some() {
@@ -132,6 +140,9 @@ impl Scrubber {
                         .id(SharedString::from(format!("tab-close-{name}")))
                         .role(Role::Button)
                         .aria_label("Close")
+                        .p(px(CLOSE_PAD))
+                        .rounded(px(size::RADIUS_MENU_ITEM))
+                        .hover(|s| s.bg(rgb(theme::RAISED_HOVER)))
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
