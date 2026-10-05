@@ -310,12 +310,14 @@ in
         # step. So does a fork of that fork.
         id() { sed -n 's/.*"id":"\([0-9a-f]*\)".*/\1/p'; }
         manifest() { cat $REWIND_HOME/runs/$1/manifest.json; }
+        # The step a run ended at, the run named by its id or its name.
+        end() { rewind ls --json | sed -n "s/.*\"\(id\|name\)\":\"$1\",.*\"steps\":\([0-9]*\).*/\2/p"; }
         fork=$(rewind fork a 400 --schedule 3 --json | id)
         manifest $fork | grep -q '"shared_keyframes"'
         manifest $fork | grep -q '"trace_hash"'
         rewind replay $fork | grep '^identical'
         rewind replay $fork --from 300 | grep '^identical'
-        rewind replay $fork --from 999999 | grep '^identical'
+        rewind replay $fork --from "$(end $fork)" | grep '^identical'
 
         # A fork of the fork, halfway between the fork's step and its end,
         # is the fork exit for exit until its own step: it first differs
@@ -330,7 +332,7 @@ in
         rewind replay $fork2 | grep '^identical'
         rewind replay $fork2 --from 300 | grep '^identical'
         rewind replay $fork2 --from $((step - 1)) | grep "^identical from the keyframe at step $((step - 1)) "
-        rewind replay $fork2 --from 999999 | grep '^identical'
+        rewind replay $fork2 --from "$(end $fork2)" | grep '^identical'
 
         # A replayable export of the fork of a fork carries every keyframe
         # it reads, and replays where neither parent is.
@@ -344,10 +346,13 @@ in
         grep "$fork" missing
         mv $TMPDIR/away $REWIND_HOME/runs/$fork
 
-        # Forks past the end of the run are the run itself: prune removes
-        # them and keeps the run and the fork that ran differently.
-        same1=$(rewind fork a 999999 --schedule 7 --json | id)
-        same2=$(rewind fork a 999999 --schedule 8 --json | id)
+        # A fork past the end of the run is refused. Forks at its end are
+        # the run itself: prune removes them and keeps the run and the fork
+        # that ran differently.
+        ! rewind fork a $(($(end a) + 1)) --schedule 7 2> past
+        grep -q 'past its end' past
+        same1=$(rewind fork a "$(end a)" --schedule 7 --json | id)
+        same2=$(rewind fork a "$(end a)" --schedule 8 --json | id)
         ! manifest $same1 | grep -q '"first_difference"'
         manifest $fork | grep -q '"first_difference"'
         rewind prune a --identical --dry-run --json | tee planned
@@ -475,15 +480,20 @@ in
         rewind events w > events
         start=$(awk '/rewind-start/ { print $1; exit }' events)
 
-        # rewind cat: missing before the job, both lines at the end.
+        end=$(rewind ls --json | sed -n 's/.*"name":"w",.*"steps":\([0-9]*\).*/\1/p')
+
+        # rewind cat: missing before the job, both lines at the end, and a
+        # step past the end refused.
         status=0
         rewind cat w "$start" /notes.txt || status=$?
         test "$status" = 3
-        rewind cat w 999999 /notes.txt | tee cat
+        rewind cat w "$end" /notes.txt | tee cat
         grep -q second cat
+        ! rewind cat w $((end + 1)) /notes.txt 2> past
+        grep -q 'past its end' past
 
         # rewind shell, typed into from a pipe.
-        printf 'cat /notes.txt; exit\n' | rewind shell w 999999 | tee shell
+        printf 'cat /notes.txt; exit\n' | rewind shell w "$end" | tee shell
         grep -q second shell
 
         # rewind gdb: a breakpoint where every event is reported.

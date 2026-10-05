@@ -699,6 +699,28 @@ impl Run {
         })
     }
 
+    /// The run's last step: where the machine stopped, for a finished run,
+    /// else its last event.
+    pub fn last_step(&self) -> Result<u64> {
+        match &self.manifest.outcome {
+            Some(o) => Ok(o.step),
+            None => Ok(self.trace()?.last_step()),
+        }
+    }
+
+    /// `step`, when the run reached it. A step past the end is refused
+    /// rather than taken as the end: a fork there would be the run again.
+    pub fn check_step(&self, step: u64) -> Result<u64> {
+        let last = self.last_step()?;
+        if step > last {
+            bail!(
+                "run {} ends at step {last}, so step {step} is past its end",
+                self.manifest.id
+            );
+        }
+        Ok(step)
+    }
+
     /// Whether a process is executing this run now. A run with no outcome
     /// that is not executing was interrupted.
     pub fn executing(&self) -> bool {
@@ -2132,6 +2154,42 @@ pub(crate) mod tests {
         );
         assert!(Run::find_unreadable(&home, "aaaa").is_none());
         assert!(Run::find_unreadable(&home, "dddd").is_none());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_step_past_the_end_of_a_run_is_refused() {
+        // A finished run ends at its outcome's step, after its last event;
+        // a run that never finished, at its last event. Steps up to the
+        // end are taken, and the one after it refused with both named.
+        let root = runs_dir("past-end");
+        let home = Home::at(root.clone()).unwrap();
+        let mut finished = manifest("aaaa000000000000", "finished", 1);
+        finished.outcome = Some(RunOutcome {
+            stop: rewind_trace::stop::POWERED_OFF.into(),
+            step: 12,
+            virtual_ns: 0,
+            status: Some(0),
+            wall_ms: 0,
+        });
+        let dir = write_run(&home.runs(), &finished, &[3, 5, 9], b"a");
+        let run = Run::open(&dir).unwrap();
+        assert_eq!(run.last_step().unwrap(), 12);
+        assert_eq!(run.check_step(12).unwrap(), 12);
+        assert_eq!(
+            run.check_step(13).unwrap_err().to_string(),
+            "run aaaa000000000000 ends at step 12, so step 13 is past its end"
+        );
+
+        let dir = write_run(
+            &home.runs(),
+            &manifest("bbbb000000000000", "cut", 2),
+            &[3, 5, 9],
+            b"a",
+        );
+        let run = Run::open(&dir).unwrap();
+        assert_eq!(run.last_step().unwrap(), 9);
+        assert!(run.check_step(10).is_err());
         fs::remove_dir_all(&root).unwrap();
     }
 

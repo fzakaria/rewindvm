@@ -529,8 +529,8 @@ enum Command {
     Log {
         #[arg(help = RUN_HELP, long_help = RUN_LONG_HELP)]
         run: String,
-        #[arg(long)]
-        at: Option<u64>,
+        /// The step to print up to; by default the run's end.
+        step: Option<u64>,
         /// Prefix each line with its step and pid.
         #[arg(long, short)]
         steps: bool,
@@ -539,8 +539,8 @@ enum Command {
     Ps {
         #[arg(help = RUN_HELP, long_help = RUN_LONG_HELP)]
         run: String,
-        #[arg(long)]
-        at: Option<u64>,
+        /// The step; by default the run's end.
+        step: Option<u64>,
         /// Show the kernel's own threads too.
         #[arg(long)]
         all: bool,
@@ -549,9 +549,11 @@ enum Command {
     Events {
         #[arg(help = RUN_HELP, long_help = RUN_LONG_HELP)]
         run: String,
-        #[arg(long)]
+        /// The first step whose events to print; by default 0.
+        #[arg(long, value_name = "STEP")]
         from: Option<u64>,
-        #[arg(long)]
+        /// The last step whose events to print; by default the run's end.
+        #[arg(long, value_name = "STEP")]
         to: Option<u64>,
         /// One JSON object per line.
         #[arg(long)]
@@ -562,7 +564,7 @@ enum Command {
         #[arg(help = RUN_HELP, long_help = RUN_LONG_HELP)]
         run: String,
         /// Start from the keyframe at or before this step instead of boot.
-        #[arg(long)]
+        #[arg(long, value_name = "STEP")]
         from: Option<u64>,
     },
     /// Compare two runs and show where they first differ.
@@ -994,6 +996,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             timeout,
         } => {
             let parent = Run::find(&home, &run)?;
+            let step = parent.check_step(step)?;
             let m = &parent.manifest;
             if schedule == 0 {
                 bail!("schedule 0 is the unperturbed run; a fork needs another seed");
@@ -1175,6 +1178,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             pid,
         } => {
             let run = Run::find(&home, &run)?;
+            let step = run.check_step(step)?;
             match rewind_core::inspect::cat(&home, &run, step, pid, &path)? {
                 Inspection::Contents(bytes) => {
                     use std::io::Write;
@@ -1198,6 +1202,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             use std::os::fd::AsRawFd;
 
             let run = Run::find(&home, &run)?;
+            let step = run.check_step(step)?;
 
             // A pid is checked against the run: one it never had is a
             // mistake, and one gone by the step falls back to its parent.
@@ -1264,6 +1269,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             gdb_args,
         } => {
             let run = Run::find(&home, &run)?;
+            let step = run.check_step(step)?;
             let start = gdb::Start { pid, tid, frame };
             gdb::gdb(&home, &run, step, start, listen.as_deref(), &gdb_args)
         }
@@ -1276,6 +1282,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             json,
         } => {
             let run = Run::find(&home, &run)?;
+            let step = run.check_step(step)?;
             let format = if json {
                 locate::Format::Json
             } else {
@@ -1435,10 +1442,11 @@ fn run(cli: Cli) -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        Command::Log { run, at, steps } => {
+        Command::Log { run, step, steps } => {
             let run = Run::find(&home, &run)?;
+            let until = step.map(|s| run.check_step(s)).transpose()?;
             let trace = run.trace()?;
-            for line in trace.lines_until(at.unwrap_or(u64::MAX)) {
+            for line in trace.lines_until(until.unwrap_or(u64::MAX)) {
                 if steps {
                     println!("{:>10} {:>5}  {}", line.step, line.pid, line.text);
                 } else {
@@ -1447,8 +1455,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        Command::Ps { run, at, all } => {
+        Command::Ps { run, step, all } => {
             let run = Run::find(&home, &run)?;
+            let at = step.map(|s| run.check_step(s)).transpose()?;
             let trace = run.trace()?;
             let at = at.unwrap_or(trace.last_step());
             let threads = if all {
@@ -1466,6 +1475,8 @@ fn run(cli: Cli) -> Result<ExitCode> {
             json,
         } => {
             let run = Run::find(&home, &run)?;
+            let from = from.map(|s| run.check_step(s)).transpose()?;
+            let to = to.map(|s| run.check_step(s)).transpose()?;
             let trace = run.trace()?;
             let (from, to) = (from.unwrap_or(0), to.unwrap_or(u64::MAX));
             for e in trace
@@ -1486,6 +1497,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             from: Some(step),
         } => {
             let run = Run::find(&home, &run)?;
+            let step = run.check_step(step)?;
             let started = std::time::Instant::now();
             let (kf, original, again) = run.replay_from(&home, step)?;
             match original.divergence(&again) {
@@ -1966,6 +1978,31 @@ mod tests {
             echo_for(Loudness::Quiet, Progress::Hidden, Terminal::Yes),
             Echo::Quiet
         );
+    }
+
+    #[test]
+    fn a_step_follows_the_run_in_every_command() {
+        // Each command that looks at one step takes it as the argument
+        // after the run, optional where the run's end is a default; the
+        // range of `events` and the start of `replay` stay options.
+        let parses = |line: &str| Cli::try_parse_from(line.split_whitespace()).is_ok();
+        for line in [
+            "rewind fork abc 5",
+            "rewind cat abc 5 /etc/hosts",
+            "rewind shell abc 5",
+            "rewind gdb abc 5",
+            "rewind where abc 5",
+            "rewind log abc 5",
+            "rewind log abc",
+            "rewind ps abc 5",
+            "rewind ps abc",
+            "rewind events abc --from 1 --to 5",
+            "rewind replay abc --from 5",
+        ] {
+            assert!(parses(line), "{line}");
+        }
+        assert!(!parses("rewind ps abc --at 5"));
+        assert!(!parses("rewind log abc --at 5"));
     }
 
     #[test]

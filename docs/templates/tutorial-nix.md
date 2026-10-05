@@ -134,7 +134,7 @@ The kernel's report marks the faulting instruction, `<83> 80 08 01 00 00 01`:
 null. The processes alive at the crash:
 
 ```console run elide
-$ rewind ps {{failing|short}} --at {{crash_step}}
+$ rewind ps {{failing|short}} {{crash_step}}
 ```
 
 ## Look inside the VM

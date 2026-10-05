@@ -75,7 +75,7 @@ $ rewind events 1e084c79 --from 33292 --to 33392
      33374   359/359   SIGCHLD code=1 addr=0x0
      33387   359/359   exit_group(bash) exited:141
 
-$ rewind ps 1e084c79 --at 33330
+$ rewind ps 1e084c79 33330
 ...
    359       /nix/store/10dxp0qxqxxsyiljrh2kp0xqhz6arhcx-bash-5.3p15/bin/bash -x -e -u -o pipefail gc-closure.sh
    416         /nix/store/10dxp0qxqxxsyiljrh2kp0xqhz6arhcx-bash-5.3p15/bin/bash -x -e -u -o pipefail gc-closure.sh (fork)

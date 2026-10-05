@@ -123,7 +123,7 @@ $ rewind run --root mylib.tar --cwd /src -- make check
 # list runs and look inside one
 $ rewind ls
 $ rewind log <run> --steps
-$ rewind ps <run> --at <step>
+$ rewind ps <run> <step>
 $ rewind cat <run> <step> /build/env-vars
 
 # a shell inside the VM at a step, in a throwaway fork; --with brings more

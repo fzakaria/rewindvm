@@ -127,7 +127,7 @@ so each of them took the new store branch of the constructor.
 At step 200000, in the middle of the hang, only 220 is left:
 
 ```console
-$ rewind ps 9eefad4f --at 200000
+$ rewind ps 9eefad4f 200000
      1 /init
     34   /nix/store/...-bash-5.3p3/bin/bash -e /nix/store/...-source-stdenv.sh /nix/store/...-default-builder.sh
    187     /nix/store/...-python3-3.13.11/bin/python3.13 /nix/store/...-meson-1.9.1/bin/meson test --no-rebuild --print-errorlogs concurrent-builds
