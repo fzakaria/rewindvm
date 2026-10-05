@@ -16,6 +16,7 @@
 //! it. Clicking a frame in the list shows that frame's file, from the same
 //! answer, until the next answer shows its chosen frame again.
 
+use std::collections::HashMap;
 use std::ops::Range;
 
 use futures::StreamExt;
@@ -27,10 +28,11 @@ use gpui::{
 use crate::describe::thousands;
 use crate::selection::{Mapped, Pos, Surface, part_of_line};
 use crate::source::{Frame, Located, Progress, Shown, SourceFile, shown, target};
+use crate::syntax::{Highlighter, Language};
 use crate::theme::{self, layout, size};
 use crate::ui::icons::Icon;
 use crate::ui::scrubber::{Replay, Scrubber, replay_unavailable};
-use crate::ui::selectable::{selectable, selects, viewer_line};
+use crate::ui::selectable::{colored, selectable, selects, viewer_line};
 use crate::ui::widgets::{icon, panel_title};
 
 /// How long the playhead must rest before the panel asks again.
@@ -60,6 +62,9 @@ pub struct SourcePanel {
     generation: u64,
     /// The shown file's scroll position.
     scroll: UniformListScrollHandle,
+    /// Each file's colors, as far as they have been drawn, by the path
+    /// the answer keys the file by.
+    highlighters: HashMap<String, Highlighter>,
 }
 
 impl Scrubber {
@@ -81,6 +86,7 @@ impl Scrubber {
             progress: Progress::default(),
             generation: 0,
             scroll: UniformListScrollHandle::new(),
+            highlighters: HashMap::new(),
         });
         self.clear_selection_in(&[Surface::Viewer, Surface::Source]);
         if readable {
@@ -212,6 +218,7 @@ impl Scrubber {
                 }
                 panel.loading = false;
                 panel.shown = Some(shown(step, result));
+                panel.highlighters.clear();
                 this.clear_selection_in(&[Surface::Source]);
                 this.centre_shown_line();
                 cx.notify();
@@ -475,17 +482,32 @@ impl Scrubber {
         uniform_list(
             "source-lines",
             count,
-            cx.processor(move |this, range: Range<usize>, _, _| {
-                let Some((file, _)) = this.shown_file() else {
+            cx.processor(move |this, range: Range<usize>, _, cx| {
+                let registry = this.selecting.registry.clone();
+                let Some(SourcePanel {
+                    shown: Some(shown),
+                    highlighters,
+                    generation,
+                    ..
+                }) = this.source.as_mut()
+                else {
                     return Vec::new();
                 };
-                let registry = this.selecting.registry.clone();
-                range
+                let Some((file, key, highlighter)) = file_and_colors(shown, highlighters) else {
+                    return Vec::new();
+                };
+                let rows = range
                     .filter_map(|row| {
                         let line = file.lines.get(row)?;
                         let marked = Some(row) == marked_row;
                         let number = file.number_of(row);
-                        let text = viewer_line(line).shown;
+                        let mapped = viewer_line(line);
+                        let spans = highlighter.spans(&file.lines, row);
+                        let colors = colored(
+                            &mapped,
+                            spans.iter().map(|s| (s.range.clone(), s.token.color())),
+                        );
+                        let text = mapped.shown;
                         let part = selected
                             .as_ref()
                             .and_then(|r| part_of_line(r, row, text.len()));
@@ -517,17 +539,23 @@ impl Scrubber {
                                         } else {
                                             theme::SOFT
                                         }))
-                                        .child(selectable(
-                                            Surface::Source,
-                                            row,
-                                            text,
-                                            part,
-                                            &registry,
-                                        )),
+                                        .child(
+                                            selectable(Surface::Source, row, text, part, &registry)
+                                                .with_highlights(colors),
+                                        ),
                                 ),
                         )
                     })
-                    .collect::<Vec<_>>()
+                    .collect::<Vec<_>>();
+
+                // Lines too far down to color in this frame, as the line a
+                // long file opens at can be, wait for the rest of the file,
+                // colored on another thread.
+                if let Some(rest) = highlighter.to_finish() {
+                    let key = key.to_string();
+                    finish_colors(rest, file.lines.clone(), key, *generation, cx);
+                }
+                rows
             }),
         )
         .track_scroll(scroll)
@@ -630,6 +658,62 @@ impl Scrubber {
             )
     }
 }
+
+/// Colors the rest of the file the answer keys by `key` with `rest` on a
+/// background thread, and keeps the colors if the panel still shows the
+/// answer to request `generation` when they are done.
+fn finish_colors(
+    rest: Highlighter,
+    lines: Vec<String>,
+    key: String,
+    generation: u64,
+    cx: &mut Context<Scrubber>,
+) {
+    let task = cx
+        .background_executor()
+        .spawn(async move { rest.finish(&lines) });
+    cx.spawn(async move |this, cx| {
+        let finished = task.await;
+        let _ = this.update(cx, |this, cx| {
+            let Some(panel) = &mut this.source else {
+                return;
+            };
+            if panel.generation != generation {
+                return;
+            }
+            panel.highlighters.insert(key, finished);
+            cx.notify();
+        });
+    })
+    .detach();
+}
+
+/// The file `shown` shows, the path the answer keys it by, and its
+/// highlighter, made on first use with the language of the file's name,
+/// as the shown frame's DWARF gives it, and of its first line when the
+/// answer carries it.
+fn file_and_colors<'a>(
+    shown: &'a Shown,
+    highlighters: &'a mut HashMap<String, Highlighter>,
+) -> Option<(&'a SourceFile, &'a str, &'a mut Highlighter)> {
+    let (located, at) = shown.located()?;
+    let at = at?;
+    let frame = located.frames.get(at)?;
+    let key = frame.fullname.as_deref()?;
+    let file = located.files.get(key)?;
+    let highlighter = highlighters.entry(key.to_string()).or_insert_with(|| {
+        let name = frame.file.as_deref().unwrap_or(key);
+        let first_line = match file.first {
+            FIRST_LINE => file.lines.first().map_or("", String::as_str),
+            _ => "",
+        };
+        Highlighter::new(Language::of(name, first_line))
+    });
+    Some((file, key, highlighter))
+}
+
+/// The number of a file's first line.
+const FIRST_LINE: u32 = 1;
 
 /// The message the panel shows in place of an answer, and its color, or
 /// None while it shows one.

@@ -61,7 +61,7 @@ work on runs recorded with a guest that lists its tasks, as these were.
 In the app, Show source under Inspect, or the s key, opens the source panel
 in place of At this step. It names the line `rewind where` would for the
 thread of the playhead's event and shows that line's whole source file,
-scrolled so the line, marked, sits in the middle. The thread's frames are
+syntax colored, scrolled so the line, marked, sits in the middle. The thread's frames are
 listed in a short list pinned below the file, with the chosen one marked.
 Clicking another frame shows its file instead, scrolled to its line and
 marked; a frame without source shows its address and program. A file over a

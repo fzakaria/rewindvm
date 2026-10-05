@@ -19,12 +19,13 @@ use crate::describe::{short_store_paths, thousands};
 use crate::engine::{EngineError, FileAtStep};
 use crate::run::{Origin, Session};
 use crate::selection::{Mapped, Surface, part_of_line};
+use crate::syntax::{Highlighter, Language};
 use crate::theme::{self, layout, size};
 use crate::ui::icons::Icon;
 use crate::ui::scrubber::Scrubber;
-use crate::ui::selectable::{selectable, selects, viewer_line};
+use crate::ui::selectable::{colored, selectable, selects, viewer_line};
 use crate::ui::widgets::{icon, panel_title};
-use crate::viewer::{self, Kind, View};
+use crate::viewer::{self, Kind, View, hex_spans};
 
 /// How long the playhead must rest before a pinned viewer asks again.
 const DEBOUNCE: Duration = Duration::from_millis(400);
@@ -94,6 +95,8 @@ pub struct FileViewer {
     /// Counts requests; an answer to anything but the latest is dropped.
     generation: u64,
     scroll: UniformListScrollHandle,
+    /// The shown text's colors, as far as they have been drawn.
+    highlighter: Highlighter,
 }
 
 /// Why a session's files cannot be read, if they cannot.
@@ -125,6 +128,7 @@ impl Scrubber {
             loading: unavailable.is_none(),
             generation: 0,
             scroll: UniformListScrollHandle::new(),
+            highlighter: Highlighter::new(None),
         });
         self.clear_selection_in(&[Surface::Viewer, Surface::Source]);
         if unavailable.is_none() {
@@ -258,11 +262,15 @@ impl Scrubber {
                 let Some(viewer) = &mut this.viewer else {
                     return;
                 };
+                // Colors start over with the new contents; only text in a
+                // known language has any.
+                viewer.highlighter = Highlighter::new(None);
                 viewer.shown = Some(match result {
-                    Ok(FileAtStep::Exists { bytes, complete }) => Fetched::Contents {
-                        step,
-                        view: View::new(&bytes, complete),
-                    },
+                    Ok(FileAtStep::Exists { bytes, complete }) => {
+                        let view = View::new(&bytes, complete);
+                        viewer.highlighter = Highlighter::new(language_of(&viewer.path, &view));
+                        Fetched::Contents { step, view }
+                    }
                     Ok(FileAtStep::Missing) => Fetched::Missing { step },
                     Err(e) if predates_inspection(&e) => Fetched::Unreadable {
                         step,
@@ -388,14 +396,18 @@ impl Scrubber {
                 uniform_list(
                     "viewer-lines",
                     lines,
-                    cx.processor(move |this, range: std::ops::Range<usize>, _, _| {
-                        let Some(Fetched::Contents { view, .. }) =
-                            this.viewer.as_ref().and_then(|v| v.shown.as_ref())
+                    cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
+                        let registry = this.selecting.registry.clone();
+                        let Some(FileViewer {
+                            shown: Some(Fetched::Contents { view, .. }),
+                            highlighter,
+                            generation,
+                            ..
+                        }) = this.viewer.as_mut()
                         else {
                             return Vec::new();
                         };
-                        let registry = this.selecting.registry.clone();
-                        range
+                        let rows = range
                             .filter_map(|i| {
                                 let line = view.lines.get(i)?;
                                 let number = if numbered {
@@ -403,7 +415,20 @@ impl Scrubber {
                                 } else {
                                     String::new()
                                 };
-                                let text = viewer_line(line).shown;
+
+                                // Text in its language's colors, a hex dump
+                                // in its bytes'.
+                                let mapped = viewer_line(line);
+                                let parts: Vec<(std::ops::Range<usize>, u32)> = match view.kind {
+                                    Kind::Text => highlighter
+                                        .spans(&view.lines, i)
+                                        .iter()
+                                        .map(|s| (s.range.clone(), s.token.color()))
+                                        .collect(),
+                                    Kind::Binary => hex_spans(view.chunk(i)),
+                                };
+                                let colors = colored(&mapped, parts);
+                                let text = mapped.shown;
                                 let part = selected
                                     .as_ref()
                                     .and_then(|r| part_of_line(r, i, text.len()));
@@ -425,12 +450,28 @@ impl Scrubber {
                                                     .child(number),
                                             )
                                         })
-                                        .child(div().text_color(rgb(theme::SOFT)).child(
-                                            selectable(Surface::Viewer, i, text, part, &registry),
-                                        )),
+                                        .child(
+                                            div().text_color(rgb(theme::SOFT)).child(
+                                                selectable(
+                                                    Surface::Viewer,
+                                                    i,
+                                                    text,
+                                                    part,
+                                                    &registry,
+                                                )
+                                                .with_highlights(colors),
+                                            ),
+                                        ),
                                 )
                             })
-                            .collect::<Vec<_>>()
+                            .collect::<Vec<_>>();
+
+                        // Lines too far down to color in this frame wait for
+                        // the rest of the file, colored on another thread.
+                        if let Some(rest) = highlighter.to_finish() {
+                            finish_colors(rest, view.lines.clone(), *generation, cx);
+                        }
+                        rows
                     }),
                 )
                 .track_scroll(&viewer.scroll)
@@ -484,6 +525,43 @@ impl Scrubber {
                     cx,
                 )),
         )
+    }
+}
+
+/// Colors the rest of the viewer's file with `rest` on a background
+/// thread, and shows the colors if the viewer still shows the same
+/// contents, those of request `generation`, when they are done.
+fn finish_colors(
+    rest: Highlighter,
+    lines: Vec<String>,
+    generation: u64,
+    cx: &mut Context<Scrubber>,
+) {
+    let task = cx
+        .background_executor()
+        .spawn(async move { rest.finish(&lines) });
+    cx.spawn(async move |this, cx| {
+        let finished = task.await;
+        let _ = this.update(cx, |this, cx| {
+            let Some(viewer) = &mut this.viewer else {
+                return;
+            };
+            if viewer.generation != generation {
+                return;
+            }
+            viewer.highlighter = finished;
+            cx.notify();
+        });
+    })
+    .detach();
+}
+
+/// The language a file's text is in, by its path and first line; none
+/// for a hex dump.
+fn language_of(path: &str, view: &View) -> Option<Language> {
+    match view.kind {
+        Kind::Text => Language::of(path, view.lines.first().map_or("", String::as_str)),
+        Kind::Binary => None,
     }
 }
 

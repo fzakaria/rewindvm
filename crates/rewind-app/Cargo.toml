@@ -39,6 +39,15 @@ rewind-trace = { path = "../rewind-trace" }
 rewind-text-input = { path = "vendor/text-input" }
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
+# Syntax highlighting in the source panel and the file viewer. Matching
+# runs on fancy-regex, which is Rust, in place of the Oniguruma C library;
+# the grammars come from vendor/syntaxes, compiled by build.rs.
+syntect = { version = "5.3", default-features = false, features = ["parsing", "regex-fancy"] }
+
+# build.rs reads the grammars' YAML and dumps the syntax set it compiles,
+# so the app loads the dump instead of parsing YAML at every start.
+[build-dependencies]
+syntect = { version = "5.3", default-features = false, features = ["yaml-load", "regex-fancy"] }
 
 # GPUI's X11 backend with one change: the window takes a 32-bit ARGB
 # visual only when a compositing manager runs, so it is not left black on

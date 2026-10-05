@@ -80,6 +80,34 @@ pub const RAISED_HOVER: u32 = 0x1d2127;
 /// Selected text's background: the divergence blue at 40 percent.
 pub const SELECTION_A: u32 = 0x4a77b866;
 
+/// Source text by what it is, in the source panel and the file viewer,
+/// from the palette above where it has a color to spare. Text of no kind
+/// keeps its row's color, SOFT or, on a marked line, TEXT.
+pub mod syntax {
+    /// Between FAINT and MUTED: comments recede but stay readable on
+    /// the marked line's AMBER_CARD.
+    pub const COMMENT: u32 = 0x80868f;
+    pub const KEYWORD: u32 = super::BLUE;
+    pub const STRING: u32 = super::GREEN_SOFT;
+    pub const NUMBER: u32 = super::AMBER_PALE;
+    /// Lavender, the one color here the palette has no use for, so types
+    /// stand apart from keywords' blue and strings' green.
+    pub const TYPE: u32 = 0xb69cf0;
+    pub const FUNCTION: u32 = super::TEXT;
+}
+
+/// A hex dump's bytes by what they are, as hexyl colors them, and the
+/// offsets in the gutter's color.
+pub mod bytes {
+    pub const OFFSET: u32 = super::FAINT;
+    pub const NULL: u32 = super::FAINT;
+    pub const PRINTABLE: u32 = super::BLUE_SOFT;
+    pub const WHITESPACE: u32 = super::GREEN_SOFT;
+    pub const CONTROL: u32 = super::STDERR;
+    pub const ALL_ONES: u32 = super::AMBER;
+    pub const NON_ASCII: u32 = super::AMBER_PALE;
+}
+
 /// Phase segments cycle through these greys, darkest first.
 pub const PHASE_GREYS: [u32; 5] = [0x2c323d, 0x323946, 0x39414f, 0x414a5a, 0x4a5466];
 

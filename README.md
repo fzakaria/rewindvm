@@ -175,7 +175,10 @@ The app scrubs a recorded run: drag the playhead over the timeline of phases,
 and the build log, the process tree and the files follow it. It jumps to the
 failure, or to the first point where the run parts from a passing one and says
 in words what each did next. Click a file to read it as it was at the
-playhead. Fork from here branches the run under a new schedule.
+playhead, its syntax colored for C, C++, Rust, Go, Python, shell (Nix's
+env-vars among it), Makefiles, Markdown, Nix, assembly and Dockerfiles, and
+a binary file as a hex dump colored by byte. Fork from here branches the run
+under a new schedule.
 
 <p align="center">
   <img src="docs/img/app-file-viewer.png" alt="The Rewind desktop app with a file open at the playhead: /build/env-vars as of step 4,583, next to the build log and the process tree." />
@@ -186,7 +189,8 @@ directory with its environment, and Attach gdb opens gdb on the same fork,
 both in a terminal pane below the scrubber. Show source, or the s key, opens
 a panel with the whole source file of the program's own code the playhead's
 thread was in, scrolled to the line it was on, and the frames that led there
-in a short list below; clicking a frame shows its file at its line.
+in a short list below; clicking a frame shows its file at its line. The
+file's syntax is colored as in the file viewer.
 
 Every run of a build is one family: the run under schedule 0, with its
 threads left alone, the schedules `rewind check` tried, and every fork. The
@@ -296,6 +300,7 @@ release with both tarballs.
 | `crates/rewind-app/`                       | Proprietary to Lunch Time Surf LLC, source available, see [its LICENSE](crates/rewind-app/LICENSE) |
 | `crates/rewind-app/vendor/gpui-pre-linux/` | Apache-2.0, a patched copy of Zed's GPUI, see its LICENSE-APACHE                                   |
 | `crates/rewind-app/vendor/text-input/`     | Apache-2.0, a text field adapted from GPUI's input example, see its LICENSE-APACHE                 |
+| `crates/rewind-app/vendor/syntaxes/`       | Grammars for syntax highlighting, under MIT, the Unlicense and Sublime HQ's terms, see its README  |
 | `guest/linux/`                             | GPL-2.0-only, as Linux is, see [guest/linux/LICENSE](guest/linux/LICENSE)                          |
 | everything else                            | MIT, see [LICENSE](LICENSE)                                                                        |
 

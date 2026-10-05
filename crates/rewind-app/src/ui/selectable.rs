@@ -351,6 +351,26 @@ pub fn viewer_line(line: &str) -> Mapped {
     expand_tabs(line)
 }
 
+/// Colors for parts of `line`, given by byte ranges of its original text,
+/// as highlights of its shown text.
+pub fn colored(
+    line: &Mapped,
+    parts: impl IntoIterator<Item = (Range<usize>, u32)>,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    parts
+        .into_iter()
+        .map(|(range, color)| {
+            let shown = line.shown_offset(range.start)..line.shown_offset(range.end);
+            let style = HighlightStyle {
+                color: Some(rgb(color).into()),
+                ..HighlightStyle::default()
+            };
+            (shown, style)
+        })
+        .filter(|(range, _)| !range.is_empty())
+        .collect()
+}
+
 /// The text of a process tree row: the id, padded to its column, then
 /// the label.
 pub fn process_row(tid: u32, label: &str) -> Mapped {

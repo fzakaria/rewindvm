@@ -213,6 +213,23 @@ impl Mapped {
             .unwrap_or_default()
     }
 
+    /// The offset into the shown text of `original`, an offset into the
+    /// original text: an offset inside a part shown differently maps to
+    /// where that part's shown text starts.
+    pub fn shown_offset(&self, original: usize) -> usize {
+        let mut delta: isize = 0;
+        for splice in &self.splices {
+            if original <= splice.original.start {
+                break;
+            }
+            if original < splice.original.end {
+                return splice.shown.start;
+            }
+            delta = splice.shown.end as isize - splice.original.end as isize;
+        }
+        (original as isize + delta).clamp(0, self.shown.len() as isize) as usize
+    }
+
     fn to_original(&self, offset: usize, edge: Edge) -> usize {
         let mut delta: isize = 0;
         for splice in &self.splices {
@@ -758,6 +775,31 @@ mod tests {
         assert_eq!(prefixed.copy(0..prefixed.shown.len()), "165   abcdef-x");
         assert_eq!(prefixed.copy(0..3), "165");
         assert_eq!(Mapped::plain("same").copy(1..3), "am");
+    }
+
+    /// Offsets into a line's original text map onto its shown text, for
+    /// coloring parts of it: "a\tb\tc" shown with each tab as four
+    /// spaces moves each offset past a tab by three, and an offset at a
+    /// tab maps to where its spaces start.
+    #[test]
+    fn original_offsets_map_onto_the_shown_text() {
+        let mapped = Mapped::new(
+            "a    b    c".into(),
+            "a\tb\tc".into(),
+            vec![
+                Splice {
+                    shown: 1..5,
+                    original: 1..2,
+                },
+                Splice {
+                    shown: 6..10,
+                    original: 3..4,
+                },
+            ],
+        );
+        let shown: Vec<usize> = (0..=5).map(|o| mapped.shown_offset(o)).collect();
+        assert_eq!(shown, vec![0, 1, 5, 6, 10, 11]);
+        assert_eq!(Mapped::plain("same").shown_offset(2), 2);
     }
 
     #[test]
