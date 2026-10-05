@@ -1006,10 +1006,11 @@ impl Run {
         let outcome = machine.run(Some(step), &mut checked)?;
         if let Some(differs) = checked.differs_at {
             bail!(
-                "replaying run {} went another way at step {differs} than when it was \
-                 recorded, so this build of rewind runs its inputs differently from the \
-                 build that recorded it; use that build, or record the run again with this one",
-                self.manifest.id
+                "replaying run {} {} {differs} than when it was recorded, so this build of \
+                 rewind runs its inputs differently from the build that recorded it; use that \
+                 build, or record the run again with this one",
+                self.manifest.id,
+                rewind_trace::WENT_ANOTHER_WAY
             );
         }
 

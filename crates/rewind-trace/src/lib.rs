@@ -19,6 +19,12 @@ use std::path::Path;
 
 pub use event::{DecodeError, Event, EventKind, HEADER_LEN, signal_name};
 
+/// The words, before the step, that a replay making other records than its
+/// run made is reported with: the engine writes them and the desktop app
+/// recognizes them, as the sign that this build of rewind runs the run's
+/// inputs another way than the build that recorded it.
+pub const WENT_ANOTHER_WAY: &str = "went another way at step";
+
 /// Every event of a run, in step order.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Trace {

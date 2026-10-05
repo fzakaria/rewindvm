@@ -67,6 +67,18 @@ impl std::fmt::Display for EngineError {
 
 impl std::error::Error for EngineError {}
 
+/// What the app says of a run this build of rewind replays another way than
+/// the build that recorded it, in place of files, source, a shell, gdb or
+/// a fork, which all need the run brought to a step.
+pub const REPLAYS_ANOTHER_WAY: &str = "This build of rewind runs this run's inputs differently from the build that recorded it, so it cannot bring the run to a step: files, source, shells, gdb and forks are off for it. Record the run again with this build to look inside it.";
+
+/// Whether the engine refused because replaying the run went another way
+/// than its recording, which a later request for the same run would only
+/// find again.
+pub fn goes_another_way(error: &EngineError) -> bool {
+    matches!(error, EngineError::Failed { message, .. } if message.contains(rewind_trace::WENT_ANOTHER_WAY))
+}
+
 pub type EngineResult<T> = Result<T, EngineError>;
 
 /// A run the engine forked.
@@ -623,6 +635,26 @@ mod tests {
     // written to a temporary directory play `rewind`, and a name that does
     // not exist plays a machine without it.
     use super::*;
+
+    #[test]
+    fn a_replay_that_went_another_way_is_told_apart() {
+        // The engine's refusal for a replay that went another way, in its
+        // words, is recognized; another refusal and a missing engine are
+        // not.
+        let failed = |message: String| EngineError::Failed {
+            command: "rewind cat".into(),
+            message,
+        };
+        let words = format!(
+            "rewind: replaying run 9d540a70 {} 506",
+            rewind_trace::WENT_ANOTHER_WAY
+        );
+        assert!(goes_another_way(&failed(words)));
+        assert!(!goes_another_way(&failed("rewind: no process 7".into())));
+        assert!(!goes_another_way(&EngineError::Missing {
+            program: "rewind".into()
+        }));
+    }
     use std::os::unix::fs::PermissionsExt;
 
     fn temp_dir(name: &str) -> PathBuf {

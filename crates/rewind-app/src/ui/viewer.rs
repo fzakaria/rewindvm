@@ -16,9 +16,9 @@ use gpui::{
 };
 
 use crate::describe::{short_store_paths, thousands};
-use crate::engine::{EngineError, FileAtStep};
+use crate::engine::{EngineError, FileAtStep, REPLAYS_ANOTHER_WAY, goes_another_way};
 use crate::request::Request;
-use crate::run::{Origin, Session};
+use crate::run::{Origin, Replays, Session};
 use crate::selection::{Mapped, Surface, part_of_line};
 use crate::sideways::{Sideways, line_width, text_column};
 use crate::syntax::{Highlighter, Language};
@@ -108,6 +108,9 @@ pub struct FileViewer {
 
 /// Why a session's files cannot be read, if they cannot.
 fn unavailable(session: &Session) -> Option<&'static str> {
+    if session.replays == Replays::AnotherWay {
+        return Some(REPLAYS_ANOTHER_WAY);
+    }
     match session.run.origin {
         Origin::Example => Some(EXAMPLE_REASON),
         Origin::Export(ref export) if export.replayable => Some(EXPORT_IMPORTING_REASON),
@@ -282,6 +285,16 @@ impl Scrubber {
                 let Some(viewer) = &mut this.viewer else {
                     return;
                 };
+                // A run this build replays another way is so at every step,
+                // so the viewer stops asking, and so does everything else
+                // that brings the run to a step.
+                if result.as_ref().is_err_and(goes_another_way) {
+                    viewer.unavailable = Some(REPLAYS_ANOTHER_WAY);
+                    if let Some(session) = &mut this.session {
+                        session.replays = Replays::AnotherWay;
+                    }
+                }
+
                 // Colors start over with the new contents; only text in a
                 // known language has any.
                 viewer.highlighter = Highlighter::new(None);
@@ -295,6 +308,10 @@ impl Scrubber {
                     Err(e) if predates_inspection(&e) => Fetched::Unreadable {
                         step,
                         message: PREDATES_REASON,
+                    },
+                    Err(e) if goes_another_way(&e) => Fetched::Unreadable {
+                        step,
+                        message: REPLAYS_ANOTHER_WAY,
                     },
                     Err(e) => Fetched::Failed {
                         step,

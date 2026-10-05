@@ -496,6 +496,19 @@ pub struct Session {
     /// Why the run asked to be compared with could not be opened, such as
     /// one removed meanwhile, for a notice; the run then opens alone.
     pub unopened_compare: Option<String>,
+    /// Whether this build of rewind brings the run to a step as recorded.
+    pub replays: Replays,
+}
+
+/// Whether this build of rewind brings a run to a step as it was recorded.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Replays {
+    /// As far as any request for the run has found.
+    #[default]
+    AsRecorded,
+    /// A replay went another way than the recording, which every later
+    /// one would too: the run was recorded by another build.
+    AnotherWay,
 }
 
 /// The runs in one directory, as their manifests read at one time.
@@ -533,6 +546,7 @@ impl Session {
             forks_on_disk,
             neighbours,
             unopened_compare: None,
+            replays: Replays::AsRecorded,
         }
     }
 

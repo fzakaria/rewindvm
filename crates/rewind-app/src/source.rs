@@ -318,6 +318,10 @@ pub fn shown(step: u64, answer: Result<Located, EngineError>) -> Shown {
                 message: PREDATES_REASON,
             }
         }
+        Err(e) if crate::engine::goes_another_way(&e) => Shown::Unreadable {
+            step,
+            message: crate::engine::REPLAYS_ANOTHER_WAY,
+        },
         Err(EngineError::Failed { message, .. }) => Shown::Failed {
             step,
             message: format!(
@@ -547,6 +551,20 @@ mod tests {
             panic!("not a failure");
         };
         assert!(message.ends_with(": no process 7"));
+
+        // A replay that went another way than the recording, in the
+        // engine's words for it, is a fact about the run, not a failure.
+        let another_way = format!(
+            "rewind: replaying run 9d540a70 {} 506 than when it was recorded",
+            rewind_trace::WENT_ANOTHER_WAY
+        );
+        assert_eq!(
+            shown(10, Err(failed(&another_way))),
+            Shown::Unreadable {
+                step: 10,
+                message: crate::engine::REPLAYS_ANOTHER_WAY
+            }
+        );
 
         let missing = EngineError::Missing {
             program: "rewind".into(),

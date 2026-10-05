@@ -14,11 +14,13 @@ use gpui::{
 };
 
 use crate::describe::thousands;
-use crate::engine::{Engine, EngineError, EngineResult, Forked};
+use crate::engine::{
+    Engine, EngineError, EngineResult, Forked, REPLAYS_ANOTHER_WAY, goes_another_way,
+};
 use crate::family::{Family, Row, RowKind, RunEntry, families, family_of, scan};
 use crate::model::{LogFilter, Motion};
 use crate::request::{Request, Requests};
-use crate::run::{Origin, Session, short_id};
+use crate::run::{Origin, Replays, Session, short_id};
 use crate::selection::Surface;
 use crate::theme::size;
 use crate::tour::Tour;
@@ -172,10 +174,14 @@ impl Replay {
     }
 }
 
-/// Why `origin`'s runs cannot be brought back to a step for `replay`, in
-/// words for a notice, or None when they can. `importing` says a
-/// replayable export is on its way into the engine's runs.
-pub fn replay_unavailable(origin: &Origin, replay: Replay, importing: bool) -> Option<String> {
+/// Why `session`'s run cannot be brought back to a step for `replay`, in
+/// words for a notice, or None when it can. `importing` says a replayable
+/// export is on its way into the engine's runs.
+pub fn replay_unavailable(session: &Session, replay: Replay, importing: bool) -> Option<String> {
+    if session.replays == Replays::AnotherWay {
+        return Some(REPLAYS_ANOTHER_WAY.to_string());
+    }
+    let origin = &session.run.origin;
     let needs = format!(
         "{} forks the run at the playhead, which needs the run's inputs and Rewind with KVM on this machine.",
         replay.doing()
@@ -1084,9 +1090,7 @@ impl Scrubber {
             );
             return;
         }
-        if let Some(reason) =
-            replay_unavailable(&session.run.origin, Replay::Fork, self.importing.is_some())
-        {
+        if let Some(reason) = replay_unavailable(session, Replay::Fork, self.importing.is_some()) {
             self.notify_user(
                 NoticeTone::Info,
                 "This run cannot be forked yet",
@@ -1143,6 +1147,13 @@ impl Scrubber {
                         if let Some(mark) = mark {
                             mark.state = ForkState::Failed(e.to_string());
                         }
+
+                        // A run this build replays another way cannot be
+                        // brought to a step again, while it is on screen.
+                        let shown = this.session.as_mut().filter(|s| s.run.path == parent);
+                        if let Some(session) = shown.filter(|_| goes_another_way(&e)) {
+                            session.replays = Replays::AnotherWay;
+                        }
                         this.report("Could not fork", e, cx);
                     }
                 }
@@ -1169,9 +1180,7 @@ impl Scrubber {
 
         // Runs the engine cannot bring back say so instead of opening a
         // pane that would only print an error.
-        if let Some(reason) =
-            replay_unavailable(&session.run.origin, replay, self.importing.is_some())
-        {
+        if let Some(reason) = replay_unavailable(session, replay, self.importing.is_some()) {
             self.notify_user(
                 NoticeTone::Info,
                 format!("{} needs a run recorded here", replay.doing()),
@@ -1453,4 +1462,32 @@ fn same_dir(a: &Path, b: &Path) -> bool {
         return true;
     }
     matches!((a.canonicalize(), b.canonicalize()), (Ok(a), Ok(b)) if a == b)
+}
+
+#[cfg(test)]
+mod tests {
+    // What the scrubber decides about a run, with no window.
+    use super::*;
+    use crate::synth::{self, SynthConfig, Variant};
+
+    #[test]
+    fn a_run_replayed_another_way_cannot_be_brought_to_a_step() {
+        // A run in a directory of its own can be forked and looked inside
+        // until an answer finds this build replays it another way; then
+        // every way of bringing it to a step says why not.
+        let dir = std::env::temp_dir().join(format!("rewind-app-replays-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let trace = synth::generate(&SynthConfig::small(Variant::Failing));
+        std::fs::write(dir.join(crate::run::TRACE_FILE), trace).unwrap();
+        let mut session = Session::open(&dir, None).unwrap();
+        assert_eq!(replay_unavailable(&session, Replay::Fork, false), None);
+
+        session.replays = Replays::AnotherWay;
+        for replay in [Replay::Fork, Replay::Shell, Replay::Gdb, Replay::Where] {
+            let why = replay_unavailable(&session, replay, false);
+            assert_eq!(why.as_deref(), Some(REPLAYS_ANOTHER_WAY));
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

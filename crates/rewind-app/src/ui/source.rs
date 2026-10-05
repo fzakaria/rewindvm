@@ -26,7 +26,9 @@ use gpui::{
 };
 
 use crate::describe::thousands;
+use crate::engine::{REPLAYS_ANOTHER_WAY, goes_another_way};
 use crate::request::Request;
+use crate::run::Replays;
 use crate::selection::{Mapped, Pos, Surface, part_of_line};
 use crate::sideways::{Sideways, line_width, text_column};
 use crate::source::{Frame, Located, Progress, Shown, SourceFile, shown, target};
@@ -80,8 +82,7 @@ impl Scrubber {
         let Some(session) = &self.session else {
             return;
         };
-        let unavailable =
-            replay_unavailable(&session.run.origin, Replay::Where, self.importing.is_some());
+        let unavailable = replay_unavailable(session, Replay::Where, self.importing.is_some());
         let readable = unavailable.is_none();
         self.viewer = None;
         self.source = Some(SourcePanel {
@@ -221,6 +222,16 @@ impl Scrubber {
                     return;
                 }
                 panel.loading = false;
+
+                // A run this build replays another way is so at every step,
+                // so the panel stops asking, and so does everything else
+                // that brings the run to a step.
+                if result.as_ref().is_err_and(goes_another_way) {
+                    panel.unavailable = Some(REPLAYS_ANOTHER_WAY.to_string());
+                    if let Some(session) = &mut this.session {
+                        session.replays = Replays::AnotherWay;
+                    }
+                }
                 panel.shown = Some(shown(step, result));
                 panel.highlighters.clear();
                 panel.sideways = Sideways::default();
