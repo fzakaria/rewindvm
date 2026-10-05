@@ -1341,8 +1341,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     );
                 }
             }
-            // The packages first, while Ctrl-C still stops a slow Nix
+            // KVM, then the packages, while Ctrl-C still stops a slow Nix
             // build, then the terminal raw for the shell.
+            rewind_vmm::kvm::open()?;
             let extras = if with.is_empty() {
                 None
             } else {
@@ -1886,6 +1887,9 @@ fn prepare(
     workload: &Workload,
     machine: &mut MachineArgs,
 ) -> Result<Prepared> {
+    // KVM first: packing a Nix closure into an image can take minutes, and
+    // a machine without KVM would only say so after them.
+    rewind_vmm::kvm::open()?;
     if machine.resolved_clock.is_none() {
         machine.resolved_clock = Some(resolve_clock(home, guest, machine.clock)?);
     }

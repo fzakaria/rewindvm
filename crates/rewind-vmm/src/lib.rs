@@ -14,6 +14,7 @@
 pub mod boot;
 pub mod cpu;
 pub mod debug;
+pub mod kvm;
 pub mod layout;
 pub mod memory;
 pub mod pmu;
@@ -311,7 +312,7 @@ impl Machine {
             bail!("VM memory must be between 64 MiB and {} MiB", RAM_MAX >> 20);
         }
 
-        let kvm = Kvm::new().context("opening /dev/kvm")?;
+        let kvm = kvm::open()?;
         let vm = kvm.create_vm().context("creating the VM")?;
         vm.set_tss_address(TSS_ADDRESS)?;
         vm.create_irq_chip()
