@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result, bail};
 use rewind_trace::Trace;
 use rewind_trace::ending::{Ending, ExitStatus};
-use rewind_trace::manifest::{MANIFEST, Manifest, Parent, RunId, Source, TRACE};
+use rewind_trace::manifest::{MANIFEST, Manifest, Parent, RunId, Source, TRACE, executing};
 use rewind_trace::stop::Stop;
 
 use crate::archive;
@@ -101,6 +101,9 @@ impl Run {
             (path.to_path_buf(), None)
         };
         if !trace_path.is_file() {
+            if let Some(why) = Some(path).filter(|p| p.is_dir()).and_then(not_ended) {
+                bail!(why);
+            }
             bail!("no trace at {}", trace_path.display());
         }
 
@@ -256,7 +259,6 @@ impl Verdict {
     }
 }
 
-/// A run id cut to the length people read and type.
 /// The run directory `path` names when it is the manifest or trace inside
 /// one: a directory with a manifest.
 fn run_dir_of(path: &Path) -> Option<PathBuf> {
@@ -268,6 +270,26 @@ fn run_dir_of(path: &Path) -> Option<PathBuf> {
     dir.join(MANIFEST).is_file().then(|| dir.to_path_buf())
 }
 
+/// Why the run in `dir` has no trace, when its manifest says the run has
+/// not ended: the engine is still executing it, as it does a fork until
+/// the fork finishes, or the execution was killed before it wrote one.
+fn not_ended(dir: &Path) -> Option<String> {
+    let manifest = read_manifest(&dir.join(MANIFEST)).ok()?;
+    if manifest.outcome.is_some() {
+        return None;
+    }
+    let id = short_id(manifest.id.as_str());
+    if executing(dir) {
+        return Some(format!(
+            "run {id} is still running; it opens once it has finished"
+        ));
+    }
+    Some(format!(
+        "run {id} was interrupted before it finished, so it has no trace to open"
+    ))
+}
+
+/// A run id cut to the length people read and type.
 pub fn short_id(id: &str) -> String {
     const ID_SHOWN: usize = 8;
     id.chars().take(ID_SHOWN).collect()
@@ -448,6 +470,7 @@ mod tests {
     // perhaps a manifest, opens the run, and checks what the app shows.
     use super::*;
     use crate::examples::{FAILING, PASSING, Until, manifest_of, trace_of, trace_until};
+    use rewind_trace::manifest::EXECUTING_LOCK;
 
     /// A run stopped at its time limit while computing in user space.
     fn hung_in_user_space() -> Stop {
@@ -528,6 +551,35 @@ mod tests {
         assert_eq!(run.name(), TRACE);
         assert_eq!(run.verdict(), Verdict::Failed);
         assert!(Run::open(&dir.join("nope.bin")).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_run_with_no_trace_yet_says_whether_it_is_still_running() {
+        // A fork the engine is still executing has a manifest with no
+        // outcome and no trace until it finishes; one whose execution was
+        // killed stays that way. Opening either says which of the two it
+        // is.
+        let dir = temp_dir("no-trace-yet");
+        let mut manifest = manifest_of(FAILING);
+        manifest.outcome = None;
+        write_manifest(&dir, &manifest);
+        let id = short_id(manifest.id.as_str());
+
+        let lock = std::fs::File::create(dir.join(EXECUTING_LOCK)).unwrap();
+        lock.try_lock().unwrap();
+        let running = format!("{:#}", Run::open(&dir).err().unwrap());
+        assert_eq!(
+            running,
+            format!("run {id} is still running; it opens once it has finished")
+        );
+
+        drop(lock);
+        let interrupted = format!("{:#}", Run::open(&dir).err().unwrap());
+        assert_eq!(
+            interrupted,
+            format!("run {id} was interrupted before it finished, so it has no trace to open")
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

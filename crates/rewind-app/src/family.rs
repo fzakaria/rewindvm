@@ -11,14 +11,36 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use rewind_trace::ending::Ending;
-use rewind_trace::manifest::{KEYFRAMES_DIR, MANIFEST, Manifest, Source, Spec};
+use rewind_trace::manifest::{KEYFRAMES_DIR, MANIFEST, Manifest, Source, Spec, executing};
 use rewind_trace::prune::{self, Forks, Member, Reads};
 
 use crate::describe::{ago, thousands};
 use crate::run::{read_manifest, short_id};
 
-/// What a run the engine has not recorded the end of is listed as.
-const UNFINISHED_ENDING: &str = "unfinished";
+/// What a run the engine has not recorded the end of is listed as, as
+/// `rewind ls` says it: running while a process executes it, interrupted
+/// once none does.
+const RUNNING_ENDING: &str = "running";
+const INTERRUPTED_ENDING: &str = "interrupted";
+
+/// Whether a process is executing a run now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Executing {
+    Yes,
+    No,
+}
+
+/// How far a run has got.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Progress {
+    /// The engine recorded how it ended.
+    Ended,
+    /// A process is executing it now, as the engine does a fork until it
+    /// finishes. It has no trace until then.
+    Running,
+    /// It never finished, and nothing executes it.
+    Interrupted,
+}
 
 /// The run a row's run was forked from, by id, and the step it was
 /// forked at.
@@ -53,17 +75,16 @@ pub struct RunEntry {
     pub parent: Option<Parent>,
     pub schedule: u64,
     /// How it ended, as `rewind ls` says it (exited:2, killed:SIGSEGV,
-    /// timed-out), or unfinished.
+    /// timed-out), or running or interrupted.
     pub ending: String,
     /// Whether it ended any way but its job exiting 0.
     pub failed: bool,
-    /// Whether its job exited 0; an unfinished run neither passed nor
-    /// failed.
+    /// Whether its job exited 0; a run that has not ended neither passed
+    /// nor failed.
     pub passed: bool,
     pub first_difference: Option<u64>,
     pub trace_hash: Option<String>,
-    /// Whether the engine has recorded how it ended.
-    pub finished: bool,
+    pub progress: Progress,
     /// The run it reads keyframes from, and up to which step.
     pub shares: Option<Reads>,
     /// The vCPUs the VM had.
@@ -90,12 +111,24 @@ impl RunEntry {
     pub fn read(dir: &Path) -> Option<RunEntry> {
         let modified = std::fs::metadata(dir).ok()?.modified().ok()?;
         let manifest = read_manifest(&dir.join(MANIFEST)).ok()?;
-        let mut entry = RunEntry::from_manifest(dir, &manifest, modified);
+        let running = if manifest.outcome.is_none() && executing(dir) {
+            Executing::Yes
+        } else {
+            Executing::No
+        };
+        let mut entry = RunEntry::from_manifest(dir, &manifest, modified, running);
         entry.has_keyframes = dir.join(KEYFRAMES_DIR).is_dir();
         Some(entry)
     }
 
-    pub fn from_manifest(dir: &Path, manifest: &Manifest, modified: SystemTime) -> RunEntry {
+    /// The run in `dir` as `manifest` describes it, `executing` saying
+    /// whether a process is executing it now.
+    pub fn from_manifest(
+        dir: &Path,
+        manifest: &Manifest,
+        modified: SystemTime,
+        executing: Executing,
+    ) -> RunEntry {
         let spec = &manifest.spec;
         let command = spec.job.argv.join(" ");
         let drv = match &manifest.source {
@@ -124,7 +157,11 @@ impl RunEntry {
             .outcome
             .as_ref()
             .map(|o| Ending::of(&o.stop, o.status, &[]));
-        let ending = ended.map_or_else(|| UNFINISHED_ENDING.to_string(), |e| e.to_string());
+        let (progress, ending) = match (ended, executing) {
+            (Some(ending), _) => (Progress::Ended, ending.to_string()),
+            (None, Executing::Yes) => (Progress::Running, RUNNING_ENDING.to_string()),
+            (None, Executing::No) => (Progress::Interrupted, INTERRUPTED_ENDING.to_string()),
+        };
         RunEntry {
             dir: dir.to_path_buf(),
             id: manifest.id.to_string(),
@@ -140,7 +177,7 @@ impl RunEntry {
             passed: ended.is_some_and(Ending::passed),
             first_difference: manifest.first_difference,
             trace_hash: manifest.trace_hash.clone(),
-            finished: manifest.outcome.is_some(),
+            progress,
             shares: manifest.shared_keyframes.as_ref().map(|s| Reads {
                 run: s.run.to_string(),
                 through: s.through,
@@ -797,8 +834,8 @@ impl Family {
                 shares: r.shares.clone(),
                 created: r.created,
                 trace_hash: r.trace_hash.clone(),
-                finished: r.finished,
-                executing: false,
+                finished: r.progress == Progress::Ended,
+                executing: r.progress == Progress::Running,
             })
             .collect()
     }
@@ -904,7 +941,7 @@ mod tests {
             passed: ending == "exited:0",
             first_difference: None,
             trace_hash: Some(format!("hash-{id}")),
-            finished: true,
+            progress: Progress::Ended,
             shares: None,
             cores: ONE_CORE,
             window: None,
@@ -1067,10 +1104,36 @@ mod tests {
             since_exit_ms: 0,
             doing: rewind_trace::stop::Doing::MakingExits,
         });
-        let entry =
-            RunEntry::from_manifest(Path::new("/runs/abc"), &manifest, SystemTime::UNIX_EPOCH);
+        let entry = RunEntry::from_manifest(
+            Path::new("/runs/abc"),
+            &manifest,
+            SystemTime::UNIX_EPOCH,
+            Executing::No,
+        );
         assert_eq!(entry.ending, "timed-out");
         assert!(entry.failed);
+    }
+
+    #[test]
+    fn a_run_with_no_outcome_is_running_or_interrupted() {
+        // A manifest with no outcome is a run that has not ended: listed as
+        // running while a process executes it, as a fork does until it
+        // finishes, and as interrupted once nothing does. Neither passed
+        // nor failed.
+        let mut manifest = crate::examples::manifest_of(crate::examples::FAILING);
+        manifest.outcome = None;
+        let dir = Path::new("/runs/abc");
+        let running =
+            RunEntry::from_manifest(dir, &manifest, SystemTime::UNIX_EPOCH, Executing::Yes);
+        assert_eq!(running.progress, Progress::Running);
+        assert_eq!(running.ending, "running");
+        assert!(!running.passed && !running.failed);
+
+        let interrupted =
+            RunEntry::from_manifest(dir, &manifest, SystemTime::UNIX_EPOCH, Executing::No);
+        assert_eq!(interrupted.progress, Progress::Interrupted);
+        assert_eq!(interrupted.ending, "interrupted");
+        assert!(!interrupted.passed && !interrupted.failed);
     }
 
     #[test]

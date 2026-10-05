@@ -14,7 +14,7 @@ use gpui::{
 };
 
 use crate::describe::{self, EventTone, short_store_paths, thousands};
-use crate::family::{Family, Row, RowKind as RunsRowKind, RunEntry};
+use crate::family::{Family, Progress, Row, RowKind as RunsRowKind, RunEntry};
 use crate::model::{FileOp, FileTone, LogFilter, Motion, RowKind, Tone};
 use crate::run::{Agreement, Session, Verdict, short_id};
 use crate::selection::{Mapped, Surface, part_of_line};
@@ -29,7 +29,8 @@ use crate::ui::splits::{Edge, grip, measure};
 use crate::ui::tabs::RightTab;
 use crate::ui::tour::explore_button;
 use crate::ui::widgets::{
-    Availability, ButtonStyle, PillTone, button, icon, panel_title, pill, readout, tooltip,
+    Availability, ButtonStyle, PillTone, button, icon, panel_title, pill, pulsing, readout,
+    spinner, tooltip,
 };
 use crate::ui::{
     AddBookmark, CloseNearest, CopySelection, EnterLicense, ForkHere, GoBack, GoForward, GoToEnd,
@@ -589,17 +590,24 @@ impl Scrubber {
                 },
             ));
         }
-        for fork in &self.forks {
+        for (n, fork) in self.forks.iter().enumerate() {
             let color = match fork.state {
                 ForkState::Failed(_) => theme::MUTED,
                 ForkState::Pending | ForkState::Created(_) => theme::AMBER_PALE,
             };
-            track = track.children(marker(fork.step, size::FORK_MARK_WIDTH, color).map(|m| {
+            let mark = marker(fork.step, size::FORK_MARK_WIDTH, color).map(|m| {
                 m.bg(rgba(0))
                     .border_l_2()
                     .border_dashed()
                     .border_color(rgb(color))
-            }));
+            });
+
+            // A fork the engine is still running pulses.
+            if fork.state != ForkState::Pending {
+                track = track.children(mark);
+                continue;
+            }
+            track = track.children(mark.map(|m| pulsing(("fork-mark", n), m)));
         }
         if let Some(divergence) = session.divergence_step() {
             track = track.children(marker(divergence, size::DIVERGENCE_WIDTH, theme::BLUE));
@@ -837,9 +845,22 @@ impl Scrubber {
             .text_size(px(size::TEXT_READOUT))
             .child(self.render_step_readout(cx))
             .child(readout("phase", phase, theme::TEXT, FontWeight::NORMAL));
+        // While forks made here run, the button's icon turns and its note
+        // says how many; a click still starts another.
+        let forking = self
+            .forks
+            .iter()
+            .filter(|f| f.state == ForkState::Pending)
+            .count();
+        let fork_icon = if forking == 0 {
+            icon(Icon::Fork, size::ICON_FORK, theme::AMBER_INK).into_any_element()
+        } else {
+            spinner("fork-spinner", size::ICON_FORK, theme::AMBER_INK).into_any_element()
+        };
         let fork = button("fork", ButtonStyle::Primary, Availability::Enabled)
-            .child(icon(Icon::Fork, size::ICON_FORK, theme::AMBER_INK))
+            .child(fork_icon)
             .child("Fork from here")
+            .when(forking > 0, |b| b.tooltip(tooltip(forking_note(forking))))
             .on_click(cx.listener(|this, _, _, cx| this.fork_here(cx)));
         let fork = self.with_callout(fork, Anchor::ForkButton, cx);
 
@@ -1851,7 +1872,19 @@ impl Scrubber {
                             .when(is_picked, |d| d.bg(rgb(theme::ROW_PICKED)))
                             .hover(|s| s.bg(rgb(theme::RAISED_HOVER)))
                             .child(graph_cell(row, columns, shown, compared))
-                            .child(pill(row.run.ending.clone(), ending_tone(&row.run), &fonts))
+                            .child({
+                                // A run the engine is executing pulses.
+                                let ending =
+                                    pill(row.run.ending.clone(), ending_tone(&row.run), &fonts);
+                                match row.run.progress {
+                                    Progress::Running => {
+                                        pulsing(("running", i), ending).into_any_element()
+                                    }
+                                    Progress::Ended | Progress::Interrupted => {
+                                        ending.into_any_element()
+                                    }
+                                }
+                            })
                             .child(
                                 div()
                                     .min_w_0()
@@ -1957,6 +1990,18 @@ const BACK_NOTE: &str = "Back to where the playhead was before its last jump: to
 const FORWARD_NOTE: &str =
     "Forward again, after Back. Key: Alt+Right, or the mouse's forward button.";
 const EXPORT_NOTE: &str = "Writes this run to one .rwd file, with its keyframes and inputs, that another machine can open, replay and fork.";
+
+/// The fork button's note while forks made from this window run.
+fn forking_note(forking: usize) -> String {
+    let runs = if forking == 1 {
+        "1 fork made here is running".to_string()
+    } else {
+        format!("{forking} forks made here are running")
+    };
+    format!(
+        "{runs}. A fork takes about as long as the run did, and the Runs panel lists it as running until it finishes. A click forks again with the next schedule."
+    )
+}
 
 /// A Runs panel row's text: the run's id and how it came to be, or what
 /// a folding row stands for.
@@ -2107,9 +2152,11 @@ enum Chevron {
     Open,
 }
 
-/// The pill tone for how a run ended.
+/// The pill tone for how a run ended, or that it is running.
 fn ending_tone(run: &RunEntry) -> PillTone {
-    if run.failed {
+    if run.progress == Progress::Running {
+        PillTone::Running
+    } else if run.failed {
         PillTone::Failed
     } else if run.passed {
         PillTone::Passed

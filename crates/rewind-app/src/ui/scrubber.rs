@@ -23,7 +23,9 @@ use crate::engine::{
     Engine, EngineError, EngineResult, EngineVersion, FileAtStep, Forked, GdbAt, PROGRAM_ENV,
     REPLAYS_ANOTHER_WAY, goes_another_way,
 };
-use crate::family::{Family, Row, RowKind, RunEntry, families, family_of, scan};
+use crate::family::{
+    Executing, Family, Progress, Row, RowKind, RunEntry, families, family_of, scan,
+};
 use crate::history::History;
 use crate::model::{LogFilter, Motion};
 use crate::request::{Request, Requests};
@@ -69,6 +71,12 @@ const EXPORT_EXTENSION: &str = "rwd";
 
 /// Why an example run cannot be forked.
 const EXAMPLE_FORK: &str = "Forking runs the build again from the playhead, which needs the engine and KVM on this machine. The example's inputs, its kernel, initramfs and Nix store paths, belong to the machine that recorded it. Record a run of your own with rewind nix to fork it.";
+
+/// Why a run the engine is still executing does not open.
+const STILL_RUNNING: &str = "Its trace is written when it finishes, which for a fork takes about as long as the run it was forked from did. Its row in the Runs panel changes to how it ended then; click it again.";
+
+/// How often the Runs panel is read again while a run in it is running.
+const RUNNING_POLL: Duration = Duration::from_secs(1);
 
 /// Where "Buy" goes: the site's pricing section, whose buttons open
 /// the Stripe checkouts.
@@ -540,6 +548,7 @@ impl Scrubber {
                         &run.path,
                         run.manifest.as_ref()?,
                         now,
+                        Executing::No,
                     ))
                 })
                 .collect();
@@ -574,6 +583,7 @@ impl Scrubber {
     /// Shows `runs`, the engine's runs: the families the empty state lists
     /// and the family of the run on screen.
     fn apply_runs(&mut self, runs: Vec<RunEntry>, cx: &mut Context<Self>) {
+        let running = runs.iter().any(|r| r.progress == Progress::Running);
         let origin = self.session.as_ref().map(|s| &s.run.origin);
         if origin != Some(&Origin::Example) {
             let shown = self
@@ -586,7 +596,39 @@ impl Scrubber {
                 .set_family(shown.and_then(|id| family_of(runs.clone(), &id)));
         }
         self.recent = families(runs);
+        if running {
+            self.watch_running(cx);
+        }
         cx.notify();
+    }
+
+    /// Reads the engine's runs again every RUNNING_POLL while a fork made
+    /// here or any run the engine executes is running, so the Runs panel
+    /// lists a fork as running once its directory appears, and as how it
+    /// ended once it finishes.
+    pub(super) fn watch_running(&mut self, cx: &mut Context<Self>) {
+        if self.runs.watching {
+            return;
+        }
+        self.runs.watching = true;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(RUNNING_POLL).await;
+                let more = this.update(cx, |this, cx| {
+                    let forking = this.forks.iter().any(|f| f.state == ForkState::Pending);
+                    if !forking && !this.runs.any_running() {
+                        this.runs.watching = false;
+                        return false;
+                    }
+                    this.reload_runs(cx);
+                    true
+                });
+                if !matches!(more, Ok(true)) {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     /// The runs pill: shows the Runs panel, opening its tab, or closes
@@ -602,6 +644,16 @@ impl Scrubber {
     /// Opens a run of the family; the run it was forked from, when there
     /// is one, is what it is compared with.
     pub(super) fn open_family_run(&mut self, run: RunEntry, cx: &mut Context<Self>) {
+        // A run the engine is still executing has no trace to open yet.
+        if run.progress == Progress::Running {
+            self.notify_user(
+                NoticeTone::Info,
+                format!("Run {} is still running", short_id(&run.id)),
+                STILL_RUNNING,
+                cx,
+            );
+            return;
+        }
         if self
             .session
             .as_ref()
@@ -1225,6 +1277,7 @@ impl Scrubber {
             schedule,
             state: ForkState::Pending,
         });
+        self.watch_running(cx);
         cx.notify();
 
         self.with_engine(
@@ -1672,7 +1725,12 @@ mod tests {
                 step: 10,
             }),
             schedule,
-            ..RunEntry::from_manifest(Path::new(id), &manifest, std::time::SystemTime::UNIX_EPOCH)
+            ..RunEntry::from_manifest(
+                Path::new(id),
+                &manifest,
+                std::time::SystemTime::UNIX_EPOCH,
+                Executing::No,
+            )
         };
         let family = Family {
             runs: vec![

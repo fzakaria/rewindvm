@@ -2,11 +2,12 @@
 //! panel titles and icons, styled after the design.
 
 use gpui::{
-    AnyElement, AnyView, App, Div, ElementId, FontWeight, Role, SharedString, Stateful, Svg,
-    Window, div, prelude::*, px, rgb, svg,
+    Animation, AnimationElement, AnimationExt, AnyElement, AnyView, App, Div, ElementId,
+    FontWeight, Role, SharedString, Stateful, Svg, Transformation, Window, div, percentage,
+    prelude::*, pulsating_between, px, rgb, svg,
 };
 
-use crate::theme::{self, layout, size};
+use crate::theme::{self, layout, motion, size};
 use crate::ui::icons::Icon;
 
 /// A hover note: a sentence or two on what a control does, in a small
@@ -161,6 +162,30 @@ pub fn icon(icon: Icon, size_px: f32, color: u32) -> Svg {
         .text_color(rgb(color))
 }
 
+/// An open ring turning round and round while the engine works on
+/// something the user started.
+pub fn spinner(id: impl Into<ElementId>, size_px: f32, color: u32) -> AnimationElement<Svg> {
+    icon(Icon::Spinner, size_px, color).with_animation(
+        id,
+        Animation::new(motion::SPIN).repeat(),
+        |ring, turned| ring.with_transformation(Transformation::rotate(percentage(turned))),
+    )
+}
+
+/// `element` fading out and back while the engine works on what it
+/// stands for.
+pub fn pulsing<E: Styled + IntoElement + 'static>(
+    id: impl Into<ElementId>,
+    element: E,
+) -> AnimationElement<E> {
+    let breathe = pulsating_between(motion::PULSE_MIN_OPACITY, 1.0);
+    element.with_animation(
+        id,
+        Animation::new(motion::PULSE).repeat().with_easing(breathe),
+        |element, opacity| element.opacity(opacity),
+    )
+}
+
 /// How a pill is colored.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PillTone {
@@ -170,6 +195,8 @@ pub enum PillTone {
     Compared,
     /// A label with no verdict, like "Unregistered".
     Quiet,
+    /// A run a process is executing now.
+    Running,
 }
 
 /// A rounded label in the header.
@@ -179,6 +206,7 @@ pub fn pill(text: impl Into<SharedString>, tone: PillTone, fonts: &Fonts) -> Div
         PillTone::Passed => (theme::GREEN_PILL, theme::GREEN_SOFT, theme::GREEN_BORDER),
         PillTone::Compared => (theme::BLUE_PILL, theme::BLUE_SOFT, theme::BLUE_BORDER),
         PillTone::Quiet => (theme::PANEL, theme::MUTED, theme::LINE_2),
+        PillTone::Running => (theme::AMBER_CARD, theme::AMBER, theme::AMBER_DEEP),
     };
     div()
         .flex_none()

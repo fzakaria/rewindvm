@@ -19,6 +19,8 @@ pub enum Icon {
     Back,
     Forward,
     Fork,
+    /// An open ring, turned while the engine works.
+    Spinner,
     Close,
     Minimize,
     Maximize,
@@ -26,7 +28,7 @@ pub enum Icon {
 }
 
 impl Icon {
-    const ALL: [Icon; 11] = [
+    const ALL: [Icon; 12] = [
         Icon::Mark,
         Icon::GoToStart,
         Icon::ChevronLeft,
@@ -34,6 +36,7 @@ impl Icon {
         Icon::Back,
         Icon::Forward,
         Icon::Fork,
+        Icon::Spinner,
         Icon::Close,
         Icon::Minimize,
         Icon::Maximize,
@@ -49,6 +52,7 @@ impl Icon {
             Icon::Back => "icons/back.svg",
             Icon::Forward => "icons/forward.svg",
             Icon::Fork => "icons/fork.svg",
+            Icon::Spinner => "icons/spinner.svg",
             Icon::Close => "icons/close.svg",
             Icon::Minimize => "icons/minimize.svg",
             Icon::Maximize => "icons/maximize.svg",
@@ -72,6 +76,7 @@ impl Icon {
                 "2.2",
                 r#"<circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="8" r="2"/><path d="M6 7v10"/><path d="M18 10c0 4-6 3-12 7"/>"#,
             ),
+            Icon::Spinner => ("2.2", r#"<path d="M21 12a9 9 0 1 1-6.2-8.56"/>"#),
             Icon::Close => ("2", r#"<path d="M6 6l12 12"/><path d="M18 6L6 18"/>"#),
             Icon::Minimize => ("2", r#"<path d="M6 12h12"/>"#),
             Icon::Maximize => ("2", r#"<path d="M6 6h12v12H6z"/>"#),

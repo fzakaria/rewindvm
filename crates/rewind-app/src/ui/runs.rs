@@ -9,7 +9,7 @@ use std::rc::Rc;
 
 use gpui::UniformListScrollHandle;
 
-use crate::family::{Family, Row, RowKind, RunEntry};
+use crate::family::{Family, Progress, Row, RowKind, RunEntry};
 use crate::memo::Memo;
 use crate::run::short_id;
 
@@ -55,6 +55,8 @@ pub struct RunsPanel {
     pub scroll: UniformListScrollHandle,
     /// Whether identical forks are being removed.
     pub pruning: bool,
+    /// Whether the runs are read again every so often, while one runs.
+    pub watching: bool,
     /// The schedule 0 runs whose runs from boot that ended as they did
     /// the Runs panel shows one by one instead of folded into one row.
     unfolded: HashSet<String>,
@@ -84,6 +86,13 @@ impl RunsPanel {
             Some(family) => family.rows_folded(&self.unfolded, &[shown, compared]),
             None => Vec::new(),
         })
+    }
+
+    /// Whether a process is executing any run of the family.
+    pub fn any_running(&self) -> bool {
+        self.family
+            .as_ref()
+            .is_some_and(|f| f.runs.iter().any(|r| r.progress == Progress::Running))
     }
 
     /// How many forks of the family repeat an older fork's trace.
@@ -266,6 +275,7 @@ mod tests {
                 std::path::Path::new("/runs"),
                 &manifest,
                 std::time::SystemTime::UNIX_EPOCH,
+                crate::family::Executing::No,
             )
         }
     }

@@ -40,11 +40,11 @@ pub const AMBER_INK: u32 = 0x1a1206;
 pub const AMBER_HI: u32 = 0xffc978;
 /// The glow around the playhead: amber at 18 percent.
 pub const AMBER_GLOW_A: u32 = 0xf2a5412e;
-/// The phase the playhead is in, and the fork card.
+/// The phase the playhead is in, the fork card, and a running run's pill.
 pub const AMBER_DEEP: u32 = 0x5a4520;
 /// Text on the active phase and the fork card's title.
 pub const AMBER_PALE: u32 = 0xf2d3a0;
-/// The fork card's background.
+/// The fork card's and a running run's pill's background.
 pub const AMBER_CARD: u32 = 0x221a0e;
 /// The focus ring around the timeline.
 pub const FOCUS_RING_A: u32 = 0xf2a54140;
@@ -301,4 +301,16 @@ pub mod layout {
     pub const FRAMES_HEIGHT: f32 = 4.0 * super::size::LOG_ROW_HEIGHT;
     /// A disabled button is drawn at this opacity.
     pub const DISABLED_OPACITY: f32 = 0.4;
+}
+
+/// What moves while the engine works on something the user started.
+pub mod motion {
+    use std::time::Duration;
+
+    /// One turn of a spinner.
+    pub const SPIN: Duration = Duration::from_millis(1000);
+    /// One fade out and back of something that pulses.
+    pub const PULSE: Duration = Duration::from_millis(1600);
+    /// The faintest a pulse goes.
+    pub const PULSE_MIN_OPACITY: f32 = 0.35;
 }
