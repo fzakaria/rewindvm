@@ -23,6 +23,63 @@ pub fn open() -> Result<Session> {
     Ok(Session::new(failing, Some(passing)))
 }
 
+/// The trace inside an example export, for tests that need a real one.
+#[cfg(test)]
+pub fn trace_of(export: &[u8]) -> Vec<u8> {
+    use std::io::Read;
+    const TRACE: &str = "trace.bin";
+    let tar = zstd::decode_all(export).expect("an example is zstd");
+    let mut archive = tar::Archive::new(&tar[..]);
+    for entry in archive.entries().expect("an example is a tar") {
+        let mut entry = entry.expect("an example's entries read");
+        if entry.path().expect("an entry has a path").as_os_str() != TRACE {
+            continue;
+        }
+        let mut trace = Vec::new();
+        entry.read_to_end(&mut trace).expect("the trace reads");
+        return trace;
+    }
+    panic!("an example without {TRACE}");
+}
+
+/// Where [`trace_until`] cuts an example's trace.
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub enum Until {
+    /// Before init starts the job: boot alone, with nothing failing.
+    JobStart,
+    /// Before init reports the job's exit, as a run stopped at its time
+    /// limit leaves it.
+    JobExit,
+}
+
+/// An example's trace, cut off before `until`.
+#[cfg(test)]
+pub fn trace_until(export: &[u8], until: Until) -> Vec<u8> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static CUTS: AtomicUsize = AtomicUsize::new(0);
+
+    // The records are read from a file of this cut's own, since tests run
+    // in parallel.
+    let cut = CUTS.fetch_add(1, Ordering::Relaxed);
+    let whole = std::env::temp_dir().join(format!("rewind-app-cut-{}-{cut}", std::process::id()));
+    std::fs::write(&whole, trace_of(export)).unwrap();
+    let records = rewind_trace::records(&whole).unwrap();
+    std::fs::remove_file(&whole).unwrap();
+
+    let trace = rewind_trace::Trace::decode(&records).unwrap();
+    let end = match until {
+        Until::JobStart => trace.job_start(),
+        Until::JobExit => trace.job_exit().map(|exit| exit.step),
+    }
+    .expect("an example's job starts and exits");
+    let mut out = rewind_trace::TraceWriter::new(Vec::new());
+    for (step, record) in records.iter().filter(|(step, _)| *step < end) {
+        out.record(*step, record).unwrap();
+    }
+    out.finish().unwrap()
+}
+
 #[cfg(test)]
 mod tests {
     // The compiled-in examples, unpacked into a temporary cache directory

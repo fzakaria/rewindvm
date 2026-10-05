@@ -647,7 +647,7 @@ mod tests {
     // Opening runs from a temporary directory: each test writes a trace and
     // perhaps a manifest, opens the run, and checks what the app shows.
     use super::*;
-    use crate::synth::{self, SynthConfig, Variant};
+    use crate::examples::{FAILING, PASSING, Until, trace_of, trace_until};
 
     /// A run stopped at its time limit while computing in user space.
     fn hung_in_user_space() -> Stop {
@@ -667,9 +667,9 @@ mod tests {
         dir
     }
 
+    /// The failing example's trace, which crashes, in `dir`.
     fn small_trace(dir: &Path) {
-        let config = SynthConfig::small(Variant::Failing);
-        std::fs::write(dir.join(TRACE_FILE), synth::generate(&config)).unwrap();
+        std::fs::write(dir.join(TRACE_FILE), trace_of(FAILING)).unwrap();
     }
 
     #[test]
@@ -756,13 +756,12 @@ mod tests {
 
     #[test]
     fn a_run_without_a_wait_status_passes_only_if_it_powered_off() {
-        // The passing synthetic trace under manifests with no wait status
-        // and the ways the engine words a stop: one stopped at its time
-        // limit fails and says timed-out, as `rewind ls` does; one whose
-        // machine faulted fails; one whose guest powered off passes.
+        // The passing example's boot, before its job, under manifests with
+        // no wait status and each way a machine stops: one stopped at its
+        // time limit fails and says timed-out, as `rewind ls` does; one
+        // whose machine faulted fails; one whose guest powered off passes.
         let dir = temp_dir("stops");
-        let config = SynthConfig::small(Variant::Passing);
-        std::fs::write(dir.join(TRACE_FILE), synth::generate(&config)).unwrap();
+        std::fs::write(dir.join(TRACE_FILE), trace_until(PASSING, Until::JobStart)).unwrap();
         let with_stop = |stop: Stop| {
             let manifest = serde_json::json!({ "outcome": { "stop": stop } });
             std::fs::write(dir.join(MANIFEST_FILE), manifest.to_string()).unwrap();
@@ -783,8 +782,7 @@ mod tests {
         // words for it at the step it stopped at and after, and none
         // before; a run that powered off gives none anywhere.
         let dir = temp_dir("hang-words");
-        let config = SynthConfig::small(Variant::Passing);
-        std::fs::write(dir.join(TRACE_FILE), synth::generate(&config)).unwrap();
+        std::fs::write(dir.join(TRACE_FILE), trace_until(PASSING, Until::JobExit)).unwrap();
         let hung = hung_in_user_space();
         let with_stop = |stop: &Stop| {
             let manifest = serde_json::json!({ "outcome": { "stop": stop } });
@@ -818,10 +816,10 @@ mod tests {
 
     #[test]
     fn a_nonzero_wait_status_fails_a_run_whose_trace_looks_clean() {
-        // The passing synthetic trace under manifests with two wait statuses.
+        // The passing example's boot, before its job, under manifests with
+        // two wait statuses.
         let dir = temp_dir("status");
-        let config = SynthConfig::small(Variant::Passing);
-        std::fs::write(dir.join(TRACE_FILE), synth::generate(&config)).unwrap();
+        std::fs::write(dir.join(TRACE_FILE), trace_until(PASSING, Until::JobStart)).unwrap();
         std::fs::write(dir.join(MANIFEST_FILE), r#"{"outcome": {"status": 256}}"#).unwrap();
         assert_eq!(Run::open(&dir).unwrap().verdict(), Verdict::Failed);
         std::fs::write(dir.join(MANIFEST_FILE), r#"{"outcome": {"status": 0}}"#).unwrap();

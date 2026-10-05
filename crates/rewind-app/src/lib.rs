@@ -5,8 +5,8 @@
 //! commands for the actions that need the machine itself, whose answers
 //! `viewer` and `source` lay out, and `syntax` highlights; `terminal` runs
 //! the shell and gdb in a pty; `selection` is the text selection over every
-//! text surface; `synth` writes synthetic runs for development and tests;
-//! `request` numbers background work so a late answer is told apart.
+//! text surface; `request` numbers background work so a late answer is
+//! told apart.
 
 pub mod answers;
 pub mod archive;
@@ -29,7 +29,6 @@ pub mod source;
 pub mod step_entry;
 pub mod stride;
 pub mod syntax;
-pub mod synth;
 pub mod terminal;
 pub mod theme;
 pub mod tour;

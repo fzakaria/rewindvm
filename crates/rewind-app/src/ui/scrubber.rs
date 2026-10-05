@@ -1807,7 +1807,6 @@ mod tests {
         };
         assert_eq!(escape_closes(nothing), None);
     }
-    use crate::synth::{self, SynthConfig, Variant};
 
     #[test]
     fn each_fork_of_a_run_gets_a_schedule_of_its_own() {
@@ -1858,7 +1857,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("rewind-app-replays-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let trace = synth::generate(&SynthConfig::small(Variant::Failing));
+        let trace = crate::examples::trace_of(crate::examples::FAILING);
         std::fs::write(dir.join(crate::run::TRACE_FILE), trace).unwrap();
         let mut session = Session::open(&dir, None).unwrap();
         assert_eq!(replay_unavailable(&session, Replay::Fork, false), None);
