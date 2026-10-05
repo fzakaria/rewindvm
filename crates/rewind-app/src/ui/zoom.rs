@@ -22,6 +22,9 @@ const PAN_PER_NOTCH: f32 = 0.1;
 /// How far above the track the labels sit.
 const LABEL_RISE: f32 = 20.0;
 
+/// Past this share of the track the pointer's label reads leftward.
+const LABEL_FLIP: f32 = 0.75;
+
 impl Scrubber {
     /// The steps the timeline shows: the zoomed window, or the whole run.
     pub(super) fn timeline_view(&self) -> View {
@@ -129,9 +132,10 @@ impl Scrubber {
         let view = self.timeline_view();
         let mut labels = Vec::new();
 
-        // Which steps a zoom shows, while the pointer's label is not where
-        // it would go.
-        if !view.is_whole(t.total) && self.hover.is_none() {
+        // Which steps a zoom shows, while neither the pointer's label nor
+        // the playhead's is where it would go.
+        let playhead_right = self.step > view.hi;
+        if !view.is_whole(t.total) && self.hover.is_none() && !playhead_right {
             labels.push(
                 div()
                     .absolute()
@@ -146,6 +150,23 @@ impl Scrubber {
                     )),
             );
         }
+        // Where the playhead is, at the edge it is past, when the wheel
+        // zoomed in somewhere else; the pointer's label takes its place
+        // while the pointer is over the track.
+        if !view.contains(self.step) && self.hover.is_none() {
+            let label = div()
+                .absolute()
+                .top(px(-LABEL_RISE))
+                .text_color(rgb(theme::AMBER))
+                .whitespace_nowrap();
+            let at = thousands(self.step);
+            labels.push(if self.step < view.lo {
+                label.left_0().child(format!("\u{25c2} playhead at {at}"))
+            } else {
+                label.right_0().child(format!("playhead at {at} \u{25b8}"))
+            });
+        }
+
         let Some(fraction) = self.hover else {
             return labels;
         };
@@ -162,16 +183,23 @@ impl Scrubber {
                 .w(px(1.0))
                 .bg(rgb(theme::MUTED)),
         );
-        labels.push(
-            div()
-                .absolute()
+        // The label reads from the pointer rightward, or near the right
+        // end leftward, so it stays over the track.
+        let label = div()
+            .absolute()
+            .top(px(-LABEL_RISE))
+            .whitespace_nowrap()
+            .text_color(rgb(theme::SOFT))
+            .child(format!("step {}{phase}", thousands(step)));
+        labels.push(if fraction > LABEL_FLIP {
+            label
+                .right(relative(1.0 - fraction))
+                .mr(px(size::SEGMENT_LABEL_PAD))
+        } else {
+            label
                 .left(relative(fraction))
-                .top(px(-LABEL_RISE))
                 .ml(px(size::SEGMENT_LABEL_PAD))
-                .whitespace_nowrap()
-                .text_color(rgb(theme::SOFT))
-                .child(format!("step {}{phase}", thousands(step))),
-        );
+        });
         labels
     }
 }
