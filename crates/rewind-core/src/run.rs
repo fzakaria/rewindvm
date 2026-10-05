@@ -998,21 +998,30 @@ impl Run {
         Ok(runs)
     }
 
-    /// Finds a run by path, name, or id prefix. A run named exactly `what`
-    /// wins over ids that start with it, so a run named `a` is found even
-    /// when another run's id starts with an `a`.
+    /// Finds a run by path, id, name, or id prefix. A path to a run's
+    /// directory, or a run's full id, opens that run without reading any
+    /// other. Otherwise a run named exactly `what` wins over ids that
+    /// start with it, so a run named `a` is found even when another run's
+    /// id starts with an `a`; only names need every manifest read.
     pub fn find(home: &Home, what: &str) -> Result<Run> {
         let path = Path::new(what);
         if path.join(MANIFEST).exists() {
             return Run::open(path);
         }
-        let (named, others): (Vec<Run>, Vec<Run>) = Run::list(home)?
-            .into_iter()
-            .partition(|r| r.manifest.name == what);
+        let dir = home.runs().join(what);
+        let is_id = path.components().count() == 1 && dir.join(MANIFEST).exists();
+        if is_id {
+            return Run::open(&dir);
+        }
+
+        // The runs named `what`, else those whose id starts with it. Only
+        // their manifests are read whole, and ones that do not read are
+        // left out, as `Run::list` leaves them out.
+        let named = Run::named(home, what)?;
         let matches: Vec<Run> = if named.is_empty() {
-            others
-                .into_iter()
-                .filter(|r| r.manifest.id.starts_with(what))
+            Run::dirs_starting(home, what)?
+                .iter()
+                .filter_map(|dir| Run::open(dir).ok())
                 .collect()
         } else {
             named
@@ -1023,6 +1032,46 @@ impl Run {
             1 => Ok(matches.into_iter().next().unwrap()),
             n => bail!("{n} runs match {what:?}; give more of the id"),
         }
+    }
+
+    /// The runs in the home named `name`. Each manifest is read for its
+    /// name alone, and only the ones with this name are opened.
+    fn named(home: &Home, name: &str) -> Result<Vec<Run>> {
+        #[derive(Deserialize)]
+        struct Named {
+            name: String,
+        }
+        let mut runs = Vec::new();
+        for dir in Run::dirs_starting(home, "")? {
+            let Ok(bytes) = fs::read(dir.join(MANIFEST)) else {
+                continue;
+            };
+            let is_named = serde_json::from_slice::<Named>(&bytes).is_ok_and(|n| n.name == name);
+            if !is_named {
+                continue;
+            }
+            if let Ok(run) = Run::open(&dir) {
+                runs.push(run);
+            }
+        }
+        Ok(runs)
+    }
+
+    /// The directories in the home's runs directory whose names start with
+    /// `prefix`, without reading what is in them.
+    fn dirs_starting(home: &Home, prefix: &str) -> Result<Vec<PathBuf>> {
+        let Ok(entries) = fs::read_dir(home.runs()) else {
+            return Ok(Vec::new());
+        };
+        let mut dirs = Vec::new();
+        for entry in entries {
+            let entry = entry?;
+            if !entry.file_name().to_string_lossy().starts_with(prefix) {
+                continue;
+            }
+            dirs.push(entry.path());
+        }
+        Ok(dirs)
     }
 
     /// Why a run whose id starts with `what` could not be opened, when one
@@ -1511,6 +1560,50 @@ mod tests {
         assert_eq!(run.records_after(4).unwrap().len(), 2);
         assert_eq!(Run::open(&dir).unwrap().trace().unwrap().events.len(), 1);
         fs::remove_dir_all(&runs).unwrap();
+    }
+
+    #[test]
+    fn a_run_is_found_by_path_id_prefix_or_name() {
+        // find() over a home of runs: 8fd5 named mylib, 8f00 named 8f,
+        // a1b2 named a, and b000 named with 8fd5's id. A path, a full id or a unique prefix finds
+        // its run; a name finds its run over the ids it starts; a prefix
+        // two ids share, or one nothing has, is an error. A full id finds
+        // its own run even when b000 is named with it.
+        let root = runs_dir("find");
+        let home = Home::at(root.clone()).unwrap();
+        let runs = home.runs();
+        let id = |run: Result<Run>| run.unwrap().manifest.id;
+        write_run(&runs, &manifest("8fd5378ddf70075e", "mylib", 1), &[3], b"a");
+        write_run(&runs, &manifest("8f00aaaaaaaaaaaa", "8f", 2), &[3], b"a");
+        write_run(&runs, &manifest("a1b2c3d4e5f60718", "a", 3), &[3], b"a");
+        write_run(
+            &runs,
+            &manifest("b000000000000000", "8fd5378ddf70075e", 4),
+            &[3],
+            b"a",
+        );
+
+        let dir = runs.join("8fd5378ddf70075e");
+        assert_eq!(
+            id(Run::find(&home, dir.to_str().unwrap())),
+            "8fd5378ddf70075e"
+        );
+        assert_eq!(id(Run::find(&home, "8fd5378ddf70075e")), "8fd5378ddf70075e");
+        assert_eq!(id(Run::find(&home, "8fd5")), "8fd5378ddf70075e");
+        assert_eq!(id(Run::find(&home, "mylib")), "8fd5378ddf70075e");
+        assert_eq!(id(Run::find(&home, "8f")), "8f00aaaaaaaaaaaa");
+        assert_eq!(id(Run::find(&home, "a")), "a1b2c3d4e5f60718");
+        assert_eq!(id(Run::find(&home, "8f0")), "8f00aaaaaaaaaaaa");
+        assert_eq!(
+            Run::find(&home, "c").err().unwrap().to_string(),
+            "no run matches \"c\"; see `rewind ls`"
+        );
+        write_run(&runs, &manifest("8f01bbbbbbbbbbbb", "other", 5), &[3], b"a");
+        assert_eq!(
+            Run::find(&home, "8f0").err().unwrap().to_string(),
+            "2 runs match \"8f0\"; give more of the id"
+        );
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
