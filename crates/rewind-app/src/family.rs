@@ -276,7 +276,8 @@ impl Family {
     /// parent and the unperturbed schedule, else the oldest run without a
     /// parent here, else the oldest run.
     pub fn base(&self) -> &RunEntry {
-        let roots = || self.runs.iter().filter(|r| !self.has_parent_here(r));
+        let by_id = self.by_id();
+        let roots = || self.runs.iter().filter(|r| !Self::has_parent_in(r, &by_id));
         roots()
             .filter(|r| r.schedule == 0)
             .min_by_key(|r| r.created)
@@ -321,10 +322,18 @@ impl Family {
         )
     }
 
-    fn has_parent_here(&self, run: &RunEntry) -> bool {
+    /// The family's runs by id, built once for a pass over every run so
+    /// each lookup in it does not walk the runs again: a family of
+    /// thousands of runs is drawn every frame the Runs panel is open.
+    fn by_id(&self) -> HashMap<&str, &RunEntry> {
+        self.runs.iter().map(|r| (r.id.as_str(), r)).collect()
+    }
+
+    /// Whether `run`'s parent is among the runs `by_id` holds.
+    fn has_parent_in(run: &RunEntry, by_id: &HashMap<&str, &RunEntry>) -> bool {
         run.parent
             .as_ref()
-            .is_some_and(|p| self.runs.iter().any(|r| r.id == p.id))
+            .is_some_and(|p| by_id.contains_key(p.id.as_str()))
     }
 
     /// The family as a tree, one row per run in display order: runs
@@ -351,6 +360,7 @@ impl Family {
     }
 
     fn rows_with(&self, now: SystemTime, fold: Option<Fold>) -> Vec<Row> {
+        let by_id = self.by_id();
         let recorded = self.recorded_by_inputs();
 
         let hangs = self.boot_hangs(&recorded);
@@ -435,7 +445,7 @@ impl Family {
                 folded.extend(runs);
                 RowKind::Folded { count, folds }
             };
-            let Some(under) = self.runs.iter().find(|r| r.id == under) else {
+            let Some(under) = by_id.get(under).copied() else {
                 continue;
             };
             let placeholder = RunEntry {
@@ -450,7 +460,7 @@ impl Family {
         let mut roots: Vec<&RunEntry> = Vec::new();
         for run in self.runs.iter().filter(|r| !folded.contains(r.id.as_str())) {
             match &run.parent {
-                Some(p) if self.has_parent_here(run) => {
+                Some(p) if Self::has_parent_in(run, &by_id) => {
                     children.entry(p.id.as_str()).or_default().push(run)
                 }
                 _ => roots.push(run),
@@ -488,10 +498,10 @@ impl Family {
         // it is as it opens and closes.
         let mut stands_for: HashMap<&str, (&RunEntry, RowKind)> = HashMap::new();
         for (placeholder, kind) in &placeholders {
-            let Some(under) = self
-                .runs
-                .iter()
-                .find(|r| placeholder.id.strip_suffix(FOLD_ID_SUFFIX) == Some(r.id.as_str()))
+            let Some(under) = placeholder
+                .id
+                .strip_suffix(FOLD_ID_SUFFIX)
+                .and_then(|id| by_id.get(id).copied())
             else {
                 continue;
             };
@@ -543,7 +553,7 @@ impl Family {
             let Some(hash) = &run.trace_hash else {
                 continue;
             };
-            let top = self.chain_root(run);
+            let top = Self::chain_root_in(run, &by_id);
             let is_top = top.id == run.id;
             let original = originals
                 .entry((top.id.as_str(), hash.as_str()))
@@ -586,7 +596,7 @@ impl Family {
                         kind: *kind,
                     };
                 }
-                let top = self.chain_root(run).id.as_str();
+                let top = Self::chain_root_in(run, &by_id).id.as_str();
                 let identical_to = match (run.parent.is_some(), &run.trace_hash) {
                     (true, Some(hash)) => originals
                         .get(&(top, hash.as_str()))
@@ -687,12 +697,13 @@ impl Family {
     /// The runs without a parent here that have identical forks under
     /// them, for `rewind prune --identical`.
     pub fn roots_with_identical(&self) -> Vec<RunEntry> {
+        let by_id = self.by_id();
         let mut roots: Vec<RunEntry> = Vec::new();
         for row in self.rows() {
             if row.identical_to.is_none() {
                 continue;
             }
-            let top = self.chain_root(&row.run);
+            let top = Self::chain_root_in(&row.run, &by_id);
             if !roots.iter().any(|r| r.id == top.id) {
                 roots.push(top.clone());
             }
@@ -700,15 +711,12 @@ impl Family {
         roots
     }
 
-    /// The run `run` descends from through parents here, with no parent
-    /// here itself: what rewind prune is given to reach `run`.
-    fn chain_root<'a>(&'a self, run: &'a RunEntry) -> &'a RunEntry {
+    /// The run `run` descends from through parents among the runs `by_id`
+    /// holds, with no parent there itself: what rewind prune is given to
+    /// reach `run`.
+    fn chain_root_in<'a>(run: &'a RunEntry, by_id: &HashMap<&str, &'a RunEntry>) -> &'a RunEntry {
         let mut at = run;
-        while let Some(parent) = at
-            .parent
-            .as_ref()
-            .and_then(|p| self.runs.iter().find(|r| r.id == p.id))
-        {
+        while let Some(parent) = at.parent.as_ref().and_then(|p| by_id.get(p.id.as_str())) {
             at = parent;
         }
         at
