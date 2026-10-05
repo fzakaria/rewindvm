@@ -227,6 +227,12 @@ pub trait Observer {
     fn record(&mut self, _step: u64, _record: &[u8]) {}
     /// One byte written to the early serial console.
     fn serial(&mut self, _step: u64, _byte: u8) {}
+    /// Whether to stop at the step just taken, short of the step the run
+    /// was asked to reach: the observer has seen enough, as a replay that
+    /// went another way has. The machine pauses there and can run on.
+    fn stop(&self) -> bool {
+        false
+    }
 }
 
 /// An observer that ignores everything.
@@ -579,7 +585,7 @@ impl Machine {
             }
             self.after_step(Quantum::Add)?;
 
-            if until.is_some_and(|u| self.dev.step >= u) {
+            if until.is_some_and(|u| self.dev.step >= u) || obs.stop() {
                 return Ok(Outcome::Paused);
             }
         }

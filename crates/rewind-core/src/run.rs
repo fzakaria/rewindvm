@@ -403,6 +403,13 @@ impl Observer for Checked<'_> {
     fn serial(&mut self, step: u64, byte: u8) {
         self.inner.serial(step, byte);
     }
+
+    /// A replay that went another way stops there: what it does after is
+    /// not the run's, and running on to the step asked for would only
+    /// delay saying so.
+    fn stop(&self) -> bool {
+        self.differs_at.is_some() || self.inner.stop()
+    }
 }
 
 /// Collects the trace as it arrives and echoes output if asked.
@@ -1435,7 +1442,8 @@ pub(crate) mod tests {
     fn a_replay_that_goes_another_way_is_caught() {
         // Records fed to the check as a replay would make them: the same
         // ones pass, and the first that differs in bytes or step, or that
-        // the run never made, is where the replay went another way.
+        // the run never made, is where the replay went another way, and
+        // where the check asks the machine to stop.
         let made = vec![(3, vec![1u8]), (5, vec![2]), (9, vec![3])];
         let feed = |replayed: &[(u64, Vec<u8>)]| {
             let mut ignore = rewind_vmm::Ignore;
@@ -1443,6 +1451,7 @@ pub(crate) mod tests {
             for (step, record) in replayed {
                 check.record(*step, record);
             }
+            assert_eq!(check.stop(), check.differs_at.is_some());
             check.differs_at
         };
         assert_eq!(feed(&made), None);
