@@ -1,17 +1,19 @@
-//! The search box: Ctrl+F, or /, opens a field over the panels that finds
+//! The search box: Ctrl+f, or /, opens a field over the panels that finds
 //! text in the build log, the kernel's console, file paths and the other
 //! events, with every match listed by its step.
 //!
-//! Up and Down move through the matches and take the playhead to each;
-//! a click does too. Enter and Escape close the box where the playhead
-//! is, and Back returns to where the search started. `crate::search`
-//! builds the index and runs the queries.
+//! Up and Down move through the matches and take the playhead to each.
+//! A click takes the playhead to a match and closes the box; a file
+//! match opens in the viewer at the playhead instead. Enter and Escape close the box where the
+//! playhead is, and Back returns to where the search started.
+//! `crate::search` builds the index and runs the queries.
 
 use std::rc::Rc;
 
 use gpui::{
     Context, Div, Entity, Focusable, HighlightStyle, ScrollStrategy, SharedString, StyledText,
-    Subscription, UniformListScrollHandle, Window, div, prelude::*, px, rgb, rgba, uniform_list,
+    Subscription, UniformListScrollHandle, Window, div, prelude::*, px, relative, rgb, rgba,
+    uniform_list,
 };
 use rewind_text_input::{TextInput, TextInputStyle};
 
@@ -31,7 +33,7 @@ const MAX_TEXT_CHARS: usize = 160;
 const BOX_WIDTH: f32 = 640.0;
 const ROWS_SHOWN: f32 = 12.0;
 
-/// Where the box sits: under the timeline, at the window's right.
+/// Where the box sits: under the timeline, across the window's middle.
 const BOX_TOP: f32 = size::HEADER_HEIGHT + 132.0;
 
 /// The search box while it is open.
@@ -136,7 +138,8 @@ impl Scrubber {
         cx.notify();
     }
 
-    /// Takes the playhead to match `index` and marks it.
+    /// Takes the playhead to match `index` and marks it, scrolling the
+    /// list to it as Up and Down move through the matches.
     fn select_hit(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(search) = &mut self.search else {
             return;
@@ -149,6 +152,24 @@ impl Scrubber {
         search.scroll.scroll_to_item(index, ScrollStrategy::Center);
         self.go_to(step, cx);
         cx.notify();
+    }
+
+    /// A click on match `index` closes the box: a file opens in the viewer
+    /// as it was at the playhead, since at the step it was last opened for
+    /// writing it is often empty; any other match takes the playhead to
+    /// its step.
+    fn open_hit(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(hit) = self.search.as_ref().and_then(|s| s.hits.hits.get(index)) else {
+            return;
+        };
+        let (step, file) = (hit.step, hit.file.clone());
+        if file.is_none() {
+            self.go_to(step, cx);
+        }
+        self.close_search(window, cx);
+        if let Some((path, pid)) = file {
+            self.open_file(path, pid, cx);
+        }
     }
 
     /// Down or Up: the next or previous match, starting from the playhead
@@ -248,7 +269,9 @@ impl Scrubber {
                                 .cursor_pointer()
                                 .hover(|s| s.bg(rgb(theme::ROW_HOVER)))
                                 .when(selected == Some(i), |d| d.bg(rgb(theme::ROW_NOW)))
-                                .on_click(cx.listener(move |this, _, _, cx| this.select_hit(i, cx)))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.open_hit(i, window, cx)
+                                }))
                                 .child(
                                     div()
                                         .flex_none()
@@ -292,7 +315,8 @@ impl Scrubber {
                 .occlude()
                 .absolute()
                 .top(px(BOX_TOP))
-                .right(px(size::PAGE_PAD_X))
+                .left(relative(0.5))
+                .ml(px(-BOX_WIDTH / 2.0))
                 .w(px(BOX_WIDTH))
                 .flex()
                 .flex_col()

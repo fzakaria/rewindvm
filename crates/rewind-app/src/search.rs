@@ -1,9 +1,11 @@
 //! Searching a run: the build log's lines, kernel console lines among
-//! them, and the events the log does not show, files written, removed and
-//! renamed among them, for text typed into the search box.
+//! them, the events the log does not show, and the paths of the files the
+//! run wrote, for text typed into the search box.
 //!
 //! The index is built once per run, in the background, and each query
 //! scans it: a match is the query anywhere in the text, ignoring case.
+
+use std::collections::HashMap;
 
 use rewind_trace::EventKind;
 
@@ -15,10 +17,10 @@ use crate::model::{LogFilter, Timeline};
 pub enum Found {
     /// A line of the build log, or of the kernel's console.
     Log,
-    /// A file written, removed or renamed.
+    /// A file the run wrote, removed or renamed, by its path, once.
     File,
     /// Any other event: a program run, a process started or ended, a
-    /// signal.
+    /// signal, a file opened, removed or renamed.
     Event,
 }
 
@@ -38,6 +40,9 @@ pub struct Hit {
     pub step: u64,
     pub found: Found,
     pub text: String,
+    /// For a file, its path and the process that last wrote, removed or
+    /// renamed it, for the file viewer.
+    pub file: Option<(String, u32)>,
 }
 
 /// What a query matched: the first matches, up to the limit asked for,
@@ -66,22 +71,32 @@ impl Index {
         let mut entries: Vec<Entry> = timeline
             .lines(LogFilter::WithConsole)
             .iter()
-            .map(|line| entry(line.step, Found::Log, line.text.clone()))
+            .map(|line| entry(line.step, Found::Log, line.text.clone(), None))
             .collect();
         for event in &timeline.trace.events {
-            let found = match &event.kind {
-                // The log holds these already.
-                EventKind::Output { .. } | EventKind::Console { .. } | EventKind::Mark { .. } => {
-                    continue;
-                }
-                EventKind::Open { .. } | EventKind::Unlink { .. } | EventKind::Rename { .. } => {
-                    Found::File
-                }
-                _ => Found::Event,
-            };
-            entries.push(entry(event.step, found, describe::describe(event).text));
+            // The log holds these already.
+            let logged = matches!(
+                event.kind,
+                EventKind::Output { .. } | EventKind::Console { .. } | EventKind::Mark { .. }
+            );
+            if logged {
+                continue;
+            }
+            let text = describe::describe(event).text;
+            entries.push(entry(event.step, Found::Event, text, None));
         }
-        entries.sort_by_key(|e| e.hit.step);
+
+        // Each file the Files panel lists, once, at the step it was last
+        // written, removed or renamed.
+        let mut last: HashMap<&str, (u64, u32)> = HashMap::new();
+        for file in &timeline.files {
+            last.insert(file.path.as_str(), (file.step, file.pid));
+        }
+        for (path, (step, pid)) in last {
+            let file = Some((path.to_string(), pid));
+            entries.push(entry(step, Found::File, path.to_string(), file));
+        }
+        entries.sort_by_key(|e| (e.hit.step, e.hit.found == Found::File));
         Index { entries }
     }
 
@@ -103,10 +118,15 @@ impl Index {
     }
 }
 
-fn entry(step: u64, found: Found, text: String) -> Entry {
+fn entry(step: u64, found: Found, text: String, file: Option<(String, u32)>) -> Entry {
     Entry {
         lower: text.to_lowercase(),
-        hit: Hit { step, found, text },
+        hit: Hit {
+            step,
+            found,
+            text,
+            file,
+        },
     }
 }
 
@@ -165,21 +185,60 @@ mod tests {
 
     #[test]
     fn a_query_finds_log_lines_console_lines_files_and_events() {
-        // "test" is in the failing line, the console's segfault, and the
-        // log file's path; "make" is in the program run. Case is ignored,
-        // and hits come in step order.
+        // "test" is in the failing line, the console's segfault, the log
+        // file's path and the event that opened it; "make" is in the
+        // program run. Case is ignored, and hits come in step order, the
+        // file at the step it was last written.
         let index = Index::build(&timeline());
         let found = index.find("TEST", 10);
         let at: Vec<(u64, Found)> = found.hits.iter().map(|h| (h.step, h.found)).collect();
         assert_eq!(
             at,
-            vec![(20, Found::Log), (25, Found::Log), (30, Found::File)]
+            vec![
+                (20, Found::Log),
+                (25, Found::Log),
+                (30, Found::Event),
+                (30, Found::File),
+            ]
         );
-        assert_eq!(found.total, 3);
+        assert_eq!(found.total, 4);
+        let file = &found.hits[3];
+        assert_eq!(file.text, "/build/test-suite.log");
+        assert_eq!(file.file, Some(("/build/test-suite.log".to_string(), 5)));
+        assert!(found.hits[2].text.starts_with("openat("));
         let make = index.find("make", 10);
         assert_eq!(make.hits.len(), 1);
         assert_eq!(make.hits[0].found, Found::Event);
         assert!(make.hits[0].text.contains("/bin/make"));
+    }
+
+    #[test]
+    fn a_file_written_again_is_one_hit_at_its_last_write() {
+        // A path opened for writing twice is one file, found at the
+        // second write, with the process that made it.
+        let mut t = timeline().trace;
+        t.events.push(Event {
+            step: 40,
+            pid: 9,
+            tid: 9,
+            kind: EventKind::Open {
+                path: "/build/test-suite.log".into(),
+                flags: 0o1101,
+            },
+        });
+        let index = Index::build(&Timeline::new(t, None, None));
+        let found = index.find("suite", 10);
+        let files: Vec<&Hit> = found
+            .hits
+            .iter()
+            .filter(|h| h.found == Found::File)
+            .collect();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].step, 40);
+        assert_eq!(
+            files[0].file,
+            Some(("/build/test-suite.log".to_string(), 9))
+        );
     }
 
     #[test]
@@ -191,7 +250,7 @@ mod tests {
         let found = index.find("test", 2);
         assert_eq!(found.hits.len(), 2);
         assert_eq!(found.hits[1].step, 25);
-        assert_eq!(found.total, 3);
+        assert_eq!(found.total, 4);
         assert_eq!(index.find("   ", 10), Hits::default());
         assert_eq!(index.find("nothing here", 10).total, 0);
     }
