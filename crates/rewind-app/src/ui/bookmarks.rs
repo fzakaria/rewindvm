@@ -1,21 +1,23 @@
-//! Bookmarks on screen: b marks the playhead's step with a note, a card in
-//! "At this step" lists the run's bookmarks and goes to one on a click,
-//! and the timeline marks each one. `crate::bookmarks` keeps them in the
-//! run's directory.
+//! Bookmarks on screen: b marks the playhead's step with a note. The
+//! timeline marks each bookmark, and a mark goes to its step on a click
+//! and shows its note when pointed at; "At this step" shows the note of
+//! the playhead's step; the Bookmarks tab lists them all. `crate::bookmarks`
+//! keeps them in the run's directory.
 
 use std::path::PathBuf;
 
 use gpui::{
-    Context, Div, Entity, Focusable, FontWeight, SharedString, Window, div, prelude::*, px,
-    relative, rgb, rgba,
+    Context, Div, Entity, Focusable, FontWeight, MouseButton, SharedString, Stateful, Window, div,
+    prelude::*, px, relative, rgb, rgba,
 };
 use rewind_text_input::{TextInput, TextInputStyle};
 
-use crate::describe::{clip, thousands};
+use crate::describe::thousands;
 use crate::run::{Origin, Run};
-use crate::theme::{self, size};
+use crate::theme::{self, layout, size};
 use crate::ui::scrubber::{NoticeTone, Scrubber};
-use crate::ui::widgets::{Availability, ButtonStyle, button, tooltip};
+use crate::ui::tabs::RightTab;
+use crate::ui::widgets::{Availability, ButtonStyle, button, panel_title, tooltip};
 use crate::ui::{BOOKMARK_CONTEXT, CloseDialog, SaveBookmark};
 use crate::view::View;
 
@@ -23,8 +25,8 @@ use crate::view::View;
 const BACKDROP_A: u32 = 0x0000_00a0;
 const DIALOG_WIDTH: f32 = 520.0;
 
-/// How many characters of a note the card shows.
-const MAX_NOTE_CHARS: usize = 60;
+/// The width of the Bookmarks tab's step column, in characters.
+const STEP_CHARS: f32 = 9.0;
 
 /// The bookmark marks on the timeline: a small square above the track.
 const MARK_SIZE: f32 = 7.0;
@@ -52,9 +54,14 @@ pub fn bookmarks_dir(run: &Run) -> Option<PathBuf> {
 }
 
 impl Scrubber {
-    /// Opens the note dialog for the playhead's step, with its note when
-    /// it has one, selected so typing replaces it.
+    /// Opens the note dialog for the playhead's step.
     pub(super) fn open_bookmark_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.edit_bookmark_at(self.step, window, cx);
+    }
+
+    /// Opens the note dialog for `step`, with its note when it has one,
+    /// selected so typing replaces it.
+    fn edit_bookmark_at(&mut self, step: u64, window: &mut Window, cx: &mut Context<Self>) {
         if self.session.is_none() {
             return;
         }
@@ -64,7 +71,6 @@ impl Scrubber {
             caret_color: rgb(theme::AMBER).into(),
             selection_color: rgba(theme::FOCUS_RING_A).into(),
         };
-        let step = self.step;
         let existing = self.bookmarks.at(step).map(|b| b.note.clone());
         let input = cx.new(|cx| TextInput::new(style, cx));
         if let Some(note) = &existing {
@@ -104,9 +110,16 @@ impl Scrubber {
         let Some(editor) = &self.bookmark_editor else {
             return;
         };
-        self.bookmarks.remove(editor.step);
+        let step = editor.step;
         self.close_bookmark_editor(window, cx);
+        self.remove_bookmark_at(step, cx);
+    }
+
+    /// Removes the bookmark at `step`.
+    fn remove_bookmark_at(&mut self, step: u64, cx: &mut Context<Self>) {
+        self.bookmarks.remove(step);
         self.keep_bookmarks(cx);
+        cx.notify();
     }
 
     /// Writes the bookmarks to the run's directory, or says why they are
@@ -134,33 +147,116 @@ impl Scrubber {
         }
     }
 
-    /// The card listing the run's bookmarks, each a link to its step, and
-    /// a row to mark the playhead's step.
-    pub(super) fn render_bookmarks_card(&self, cx: &mut Context<Self>) -> Div {
-        let mut card = div().flex().flex_col().gap(px(size::CARD_GAP / 2.0)).child(
-            div()
-                .text_size(px(size::TEXT_SMALL))
-                .text_color(rgb(theme::MUTED))
-                .child(match self.bookmarks.len() {
-                    0 => "BOOKMARKS".to_string(),
-                    n => format!("BOOKMARKS \u{b7} {n}"),
-                }),
-        );
+    /// What "At this step" says of bookmarks: the note of the playhead's
+    /// step when it has one, with a link to edit it, then links to
+    /// bookmark the step and to the Bookmarks tab.
+    pub(super) fn render_bookmark_here(&self, cx: &mut Context<Self>) -> Div {
+        let mut column = div().flex().flex_col().gap(px(size::CARD_GAP));
+        if let Some(mark) = self.bookmarks.at(self.step) {
+            let note = if mark.note.is_empty() {
+                div().text_color(rgb(theme::MUTED)).child("No note.")
+            } else {
+                div().text_color(rgb(theme::SOFT)).child(mark.note.clone())
+            };
+            column = column.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(size::CARD_GAP / 2.0))
+                    .p(px(size::CARD_PAD))
+                    .rounded(px(size::RADIUS_CARD))
+                    .bg(rgb(theme::GREEN_PILL))
+                    .border_1()
+                    .border_color(rgb(theme::GREEN_BORDER))
+                    .child(
+                        div()
+                            .text_size(px(size::TEXT_SMALL))
+                            .text_color(rgb(theme::GREEN_SOFT))
+                            .child(format!("BOOKMARK \u{b7} STEP {}", thousands(mark.step))),
+                    )
+                    .child(note)
+                    .child(link("bookmark-edit", "Edit the note (b)").on_click(
+                        cx.listener(|this, _, window, cx| this.open_bookmark_editor(window, cx)),
+                    )),
+            );
+        }
+
+        let mut links = div().flex().gap(px(size::SECTION_GAP));
+        if self.bookmarks.at(self.step).is_none() {
+            links = links.child(
+                link("bookmark-add", "Bookmark this step (b)")
+                    .tooltip(tooltip(ADD_NOTE))
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.open_bookmark_editor(window, cx)),
+                    ),
+            );
+        }
+        if !self.bookmarks.is_empty() {
+            links = links.child(
+                link(
+                    "bookmark-all",
+                    format!("All bookmarks \u{b7} {}", self.bookmarks.len()),
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.select_tab(RightTab::Bookmarks, cx))),
+            );
+        }
+        column.child(links)
+    }
+
+    /// The Bookmarks tab: every bookmark of the run in step order, each a
+    /// link to its step with its whole note, and links to edit or remove
+    /// it.
+    pub(super) fn render_bookmarks_panel(&self, cx: &mut Context<Self>) -> Div {
+        let mut list = div()
+            .id("bookmarks")
+            .flex()
+            .flex_col()
+            .flex_grow(layout::FILL)
+            .min_h_0()
+            .overflow_y_scroll()
+            .py(px(size::LIST_PAD_Y));
+        if self.bookmarks.is_empty() {
+            list = list.child(
+                div()
+                    .px(px(size::PANEL_PAD_X))
+                    .text_color(rgb(theme::MUTED))
+                    .child("No bookmarks. Press b to bookmark the playhead's step."),
+            );
+        }
         for (i, mark) in self.bookmarks.iter().enumerate() {
             let step = mark.step;
             let here = step == self.step;
             let note = if mark.note.is_empty() {
-                "no note".to_string()
+                div().text_color(rgb(theme::MUTED)).child("No note.")
             } else {
-                clip(&mark.note, MAX_NOTE_CHARS)
+                div().text_color(rgb(theme::SOFT)).child(mark.note.clone())
             };
-            card = card.child(
+            let actions = div()
+                .flex()
+                .gap(px(size::SECTION_GAP))
+                .child(
+                    link(SharedString::from(format!("bookmark-edit-{i}")), "Edit").on_click(
+                        cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.edit_bookmark_at(step, window, cx)
+                        }),
+                    ),
+                )
+                .child(
+                    link(SharedString::from(format!("bookmark-remove-{i}")), "Remove").on_click(
+                        cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.remove_bookmark_at(step, cx)
+                        }),
+                    ),
+                );
+            list = list.child(
                 div()
                     .id(SharedString::from(format!("bookmark-{i}")))
                     .flex()
                     .gap(px(size::LIST_COLUMN_GAP))
-                    .px(px(size::CARD_GAP / 2.0))
-                    .rounded(px(size::RADIUS_MENU_ITEM))
+                    .px(px(size::PANEL_PAD_X))
+                    .py(px(size::CARD_GAP / 2.0))
                     .cursor_pointer()
                     .hover(|s| s.bg(rgb(theme::ROW_HOVER)))
                     .when(here, |d| d.bg(rgb(theme::ROW_NOW)))
@@ -168,55 +264,65 @@ impl Scrubber {
                     .child(
                         div()
                             .flex_none()
+                            .w(px(size::MONO_CHAR_WIDTH * STEP_CHARS))
+                            .flex()
+                            .justify_end()
                             .font_family(self.fonts.mono.clone())
                             .text_color(rgb(if here { theme::AMBER } else { theme::FAINT }))
                             .child(thousands(step)),
                     )
                     .child(
                         div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
                             .min_w_0()
-                            .truncate()
-                            .text_color(rgb(if mark.note.is_empty() {
-                                theme::MUTED
-                            } else {
-                                theme::SOFT
-                            }))
-                            .child(note),
+                            .gap(px(size::CARD_GAP / 2.0))
+                            .child(note)
+                            .child(actions),
                     ),
             );
         }
-        let add = if self.bookmarks.at(self.step).is_some() {
-            "Edit this step's note (b)"
-        } else {
-            "Bookmark this step (b)"
-        };
-        card.child(
-            div()
-                .id("bookmark-add")
-                .px(px(size::CARD_GAP / 2.0))
-                .cursor_pointer()
-                .text_color(rgb(theme::AMBER))
-                .hover(|s| s.text_color(rgb(theme::AMBER_HI)))
-                .tooltip(tooltip(ADD_NOTE))
-                .on_click(cx.listener(|this, _, window, cx| this.open_bookmark_editor(window, cx)))
-                .child(add),
-        )
+        div()
+            .flex()
+            .flex_col()
+            .min_w_0()
+            .min_h_0()
+            .bg(rgb(theme::PANEL))
+            .child(panel_title(
+                &format!("Bookmarks \u{b7} {}", self.bookmarks.len()),
+                None,
+            ))
+            .child(list)
     }
 
-    /// The marks of the bookmarks the track shows, by step.
-    pub(super) fn bookmark_marks(&self, view: View) -> Vec<Div> {
+    /// The marks of the bookmarks the track shows, by step: each goes to
+    /// its step on a click and shows its note when pointed at.
+    pub(super) fn bookmark_marks(&self, view: View, cx: &mut Context<Self>) -> Vec<Stateful<Div>> {
         self.bookmarks
             .iter()
-            .filter(|mark| view.contains(mark.step))
-            .map(|mark| {
+            .enumerate()
+            .filter(|(_, mark)| view.contains(mark.step))
+            .map(|(i, mark)| {
+                let step = mark.step;
+                let note = if mark.note.is_empty() {
+                    format!("Bookmark at step {}", thousands(step))
+                } else {
+                    format!("Bookmark at step {}: {}", thousands(step), mark.note)
+                };
                 div()
+                    .id(SharedString::from(format!("bookmark-mark-{i}")))
                     .absolute()
-                    .left(relative(view.fraction_of(mark.step)))
+                    .left(relative(view.fraction_of(step)))
                     .ml(px(-MARK_SIZE / 2.0))
                     .top(px(-size::MARKER_OVERHANG - MARK_SIZE))
                     .size(px(MARK_SIZE))
                     .rounded(px(1.0))
                     .bg(rgb(theme::GREEN_SOFT))
+                    .cursor_pointer()
+                    .tooltip(tooltip(note))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(move |this, _, _, cx| this.jump_to(step, cx)))
             })
             .collect()
     }
@@ -286,11 +392,6 @@ impl Scrubber {
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(format!("Bookmark at step {}", thousands(editor.step))),
             )
-            .child(
-                div()
-                    .text_color(rgb(theme::SOFT))
-                    .child("Enter saves the note; Escape leaves the bookmarks as they were."),
-            )
             .child(field)
             .child(buttons);
         Some(
@@ -310,4 +411,14 @@ impl Scrubber {
             ),
         )
     }
+}
+
+/// A text link in the accent color.
+fn link(id: impl Into<gpui::ElementId>, text: impl Into<SharedString>) -> Stateful<Div> {
+    div()
+        .id(id)
+        .cursor_pointer()
+        .text_color(rgb(theme::AMBER))
+        .hover(|s| s.text_color(rgb(theme::AMBER_HI)))
+        .child(text.into())
 }

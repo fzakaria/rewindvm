@@ -286,6 +286,8 @@ pub struct Scrubber {
     /// Whether the Runs panel has a tab, which the runs pill opens and the
     /// tab's x takes away.
     pub(super) runs_tab: bool,
+    /// Whether the bookmarks have a tab, which "All bookmarks" opens.
+    pub(super) bookmarks_tab: bool,
     /// How the panels share the window, which their edges drag.
     pub(super) splits: Splits,
     /// The edge being dragged, if one is.
@@ -418,6 +420,7 @@ impl Scrubber {
             family: None,
             right_tab: RightTab::AtStep,
             runs_tab: false,
+            bookmarks_tab: false,
             splits: layout_path().map(|p| Splits::load(&p)).unwrap_or_default(),
             split_drag: None,
             measured: Rc::new(Measured::default()),
@@ -555,7 +558,7 @@ impl Scrubber {
         self.tour = None;
         self.viewer = None;
         self.source = None;
-        if self.right_tab != RightTab::Runs {
+        if !matches!(self.right_tab, RightTab::Runs | RightTab::Bookmarks) {
             self.right_tab = RightTab::AtStep;
         }
         self.log_followed = None;
@@ -1109,7 +1112,7 @@ impl Scrubber {
         match self.right_tab {
             RightTab::File => self.playhead_moved(cx),
             RightTab::Source => self.source_playhead_moved(cx),
-            RightTab::AtStep | RightTab::Runs => {}
+            RightTab::AtStep | RightTab::Runs | RightTab::Bookmarks => {}
         }
         cx.notify();
     }

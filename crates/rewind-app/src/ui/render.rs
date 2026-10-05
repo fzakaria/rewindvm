@@ -197,6 +197,7 @@ impl Scrubber {
             RightTab::File => self.render_viewer(cx),
             RightTab::Source => self.render_source(cx),
             RightTab::Runs => self.family.as_ref().map(|f| self.render_runs(f, cx)),
+            RightTab::Bookmarks => Some(self.render_bookmarks_panel(cx)),
             RightTab::AtStep => None,
         };
         let (panel, right_flex) = match chosen {
@@ -598,7 +599,7 @@ impl Scrubber {
         if let Some(divergence) = session.divergence_step() {
             track = track.children(marker(divergence, size::DIVERGENCE_WIDTH, theme::BLUE));
         }
-        track = track.children(self.bookmark_marks(view));
+        track = track.children(self.bookmark_marks(view, cx));
         if let Some(failure) = t.failure {
             track = track.children(marker(failure.step, size::FAILURE_WIDTH, theme::RED));
         }
@@ -1342,7 +1343,7 @@ impl Scrubber {
         }
 
         // The run's bookmarks.
-        column = column.child(self.render_bookmarks_card(cx));
+        column = column.child(self.render_bookmark_here(cx));
 
         // Inspect: engine actions at the playhead.
         let inspect = |id: &'static str, label: String, availability: Availability| {

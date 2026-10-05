@@ -1,5 +1,5 @@
 //! The tabs over the right column: "At this step", the Runs panel, the
-//! file viewer and the source panel. Each shows in the column's whole
+//! bookmarks, the file viewer and the source panel. Each shows in the column's whole
 //! height when chosen, so none takes another's place or squeezes a fourth
 //! column into the window. The file, the source and the runs close back to
 //! "At this step", by their x or Escape, and the runs pill opens the runs
@@ -31,6 +31,7 @@ const CLOSE_PAD: f32 = 4.0;
 pub enum RightTab {
     AtStep,
     Runs,
+    Bookmarks,
     File,
     Source,
 }
@@ -39,13 +40,15 @@ impl Scrubber {
     /// Shows `tab`, and brings a file or source tab up to the playhead.
     pub(super) fn select_tab(&mut self, tab: RightTab, cx: &mut Context<Self>) {
         self.right_tab = tab;
-        if tab == RightTab::Runs {
-            self.runs_tab = true;
+        match tab {
+            RightTab::Runs => self.runs_tab = true,
+            RightTab::Bookmarks => self.bookmarks_tab = true,
+            _ => {}
         }
         match tab {
             RightTab::File => self.playhead_moved(cx),
             RightTab::Source => self.source_playhead_moved(cx),
-            RightTab::AtStep | RightTab::Runs => {}
+            RightTab::AtStep | RightTab::Runs | RightTab::Bookmarks => {}
         }
         cx.notify();
     }
@@ -63,6 +66,13 @@ impl Scrubber {
                 }
                 cx.notify();
             }
+            RightTab::Bookmarks => {
+                self.bookmarks_tab = false;
+                if self.right_tab == RightTab::Bookmarks {
+                    self.right_tab = RightTab::AtStep;
+                }
+                cx.notify();
+            }
             RightTab::AtStep => {}
         }
     }
@@ -73,6 +83,9 @@ impl Scrubber {
         let mut tabs = vec![RightTab::AtStep];
         if self.runs_tab && self.family.is_some() {
             tabs.push(RightTab::Runs);
+        }
+        if self.bookmarks_tab {
+            tabs.push(RightTab::Bookmarks);
         }
         if self.viewer.is_some() {
             tabs.push(RightTab::File);
@@ -99,6 +112,7 @@ impl Scrubber {
                 format!("File \u{b7} {}", clip(&name, MAX_FILE_CHARS))
             }
             RightTab::Source => "Source".to_string(),
+            RightTab::Bookmarks => format!("Bookmarks \u{b7} {}", self.bookmarks.len()),
         }
     }
 
