@@ -319,7 +319,8 @@ impl Run {
         let trace = Trace::read(&trace_path)
             .with_context(|| format!("reading {}", trace_path.display()))?;
         let total_hint = manifest.outcome.as_ref().and_then(|o| o.step);
-        let timeline = Timeline::new(trace, total_hint);
+        let stop = manifest.outcome.as_ref().and_then(|o| o.stop.as_deref());
+        let timeline = Timeline::new(trace, total_hint, stop);
         Ok(Run {
             path: path.to_path_buf(),
             origin,
@@ -387,6 +388,14 @@ impl Run {
     /// finished.
     pub fn stop(&self) -> Option<&str> {
         self.manifest.outcome.as_ref()?.stop.as_deref()
+    }
+
+    /// The engine's words for how the machine stopped, at the step it
+    /// stopped at, when it stopped any way but its guest powering off,
+    /// such as at its time limit; None at any other step or run.
+    pub fn stopped_at(&self, step: u64) -> Option<&str> {
+        let stop = self.stop().filter(|s| !rewind_trace::stop::clean(s))?;
+        (step >= self.timeline.total).then_some(stop)
     }
 
     /// The job's wait status: the manifest's, else init's exit mark's.
@@ -758,6 +767,29 @@ mod tests {
         assert_eq!(hung.verdict_label(), "timed-out");
         assert_eq!(with_stop("triple fault").verdict(), Verdict::Failed);
         assert_eq!(with_stop("poweroff").verdict(), Verdict::Passed);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_run_stopped_at_its_time_limit_says_so_where_it_stopped() {
+        // A run the engine stopped at its time limit gives the engine's
+        // words for it at the step it stopped at and after, and none
+        // before; a run that powered off gives none anywhere.
+        let dir = temp_dir("hang-words");
+        let config = SynthConfig::small(Variant::Passing);
+        std::fs::write(dir.join(TRACE_FILE), synth::generate(&config)).unwrap();
+        let hung = "timed out while still making exits";
+        let with_stop = |stop: &str| {
+            let manifest = serde_json::json!({ "outcome": { "stop": stop } });
+            std::fs::write(dir.join(MANIFEST_FILE), manifest.to_string()).unwrap();
+            Run::open(&dir).unwrap()
+        };
+
+        let run = with_stop(hung);
+        let end = run.timeline.total;
+        assert_eq!(run.stopped_at(end), Some(hung));
+        assert_eq!(run.stopped_at(end - 1), None);
+        assert_eq!(with_stop("poweroff").stopped_at(end), None);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

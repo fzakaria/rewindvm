@@ -63,7 +63,7 @@ pub const STOPS: [Stop; 6] = [
     Stop {
         anchor: Anchor::FailureButton,
         title: "The failure",
-        body: "The red mark is the failure: the first crash signal, or else the process whose nonzero exit failed the run. Jump to failure, or f, puts the playhead on it.",
+        body: "The red mark is the failure: the first crash signal, or else the process whose nonzero exit failed the run, or where a run that hung was stopped. Jump to failure, or f, puts the playhead on it.",
         playhead: Playhead::Failure,
         needs: Needs::Failure,
     },
@@ -233,7 +233,7 @@ mod tests {
             },
             out(100, "done\n"),
         ];
-        Timeline::new(Trace { events }, None)
+        Timeline::new(Trace { events }, None, None)
     }
 
     #[test]

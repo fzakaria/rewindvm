@@ -1065,10 +1065,28 @@ impl Scrubber {
                 .and_then(|r| part_of_line(r, line, text.len()));
             selectable(Surface::EventCard, line, text, part, &registry)
         };
+        let stopped_here = session.run.stopped_at(step).is_some();
         let event_card = match t
             .event_index_at(step)
             .and_then(|i| t.event(i).map(|e| (i, e)))
         {
+            // Where the machine stopped before the job exited, the
+            // engine's words for how, in place of the last event.
+            _ if stopped_here => card(theme::RAISED, theme::LINE)
+                .child(
+                    div()
+                        .font_family(mono.clone())
+                        .text_size(px(size::TEXT_SMALL))
+                        .text_color(rgb(theme::MUTED))
+                        .child(event_line(0)),
+                )
+                .child(
+                    div()
+                        .font_family(mono.clone())
+                        .text_size(px(size::TEXT_EVENT))
+                        .text_color(rgb(theme::RED))
+                        .child(event_line(1)),
+                ),
             None => card(theme::RAISED, theme::LINE)
                 .child(div().text_color(rgb(theme::MUTED)).child(event_line(0))),
             Some((index, event)) => {
@@ -1969,6 +1987,13 @@ impl Scrubber {
             return Vec::new();
         };
         let t = &session.run.timeline;
+
+        // Where the machine stopped before the job exited, how it stopped.
+        if let Some(stop) = session.run.stopped_at(self.step) {
+            let meta = format!("machine stopped \u{b7} step {}", thousands(t.total));
+            return vec![Mapped::plain(meta), mapped(stop)];
+        }
+
         let Some(event) = t.event_index_at(self.step).and_then(|i| t.event(i)) else {
             return vec![Mapped::plain(NOTHING_YET)];
         };

@@ -1280,7 +1280,7 @@ mod tests {
             "{} events",
             trace.events.len()
         );
-        let t = Timeline::new(trace, None);
+        let t = Timeline::new(trace, None, None);
         let names: Vec<&str> = t.phases.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(
             names,
@@ -1311,7 +1311,7 @@ mod tests {
         };
         assert!(String::from_utf8_lossy(bytes).contains("worker-1: woke first"));
         assert_eq!(d.left_step, d.right_step);
-        let pass = Timeline::new(pass, None);
+        let pass = Timeline::new(pass, None, None);
         assert_eq!(pass.failure, None);
         assert_eq!(pass.phases.last().unwrap().name, "fixup");
     }

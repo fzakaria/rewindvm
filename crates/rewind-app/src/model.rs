@@ -267,6 +267,18 @@ pub enum FailureKind {
     Signal { signo: u32, addr: u64 },
     /// A process exited with a nonzero exit_code.
     Exit { status: u32 },
+    /// The machine stopped before the job exited: at its time limit, or
+    /// by a fault.
+    Stopped,
+}
+
+/// How a run's machine stopped, as far as finding its failure goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stopped {
+    /// Any way but its guest powering off, such as at its time limit.
+    Abnormally,
+    /// By its guest powering off, or not known.
+    Otherwise,
 }
 
 /// The step a run failed on, and how.
@@ -326,8 +338,14 @@ pub struct Timeline {
 impl Timeline {
     /// Indexes a trace. `total_hint` stretches the timeline past the last
     /// event, for a run whose manifest says it went on longer.
-    pub fn new(trace: Trace, total_hint: Option<u64>) -> Timeline {
+    /// The timeline of `trace`, `total_hint` steps long when the run went
+    /// on past its last event, and stopped as the engine's `stop` says.
+    pub fn new(trace: Trace, total_hint: Option<u64>, stop: Option<&str>) -> Timeline {
         let total = trace.last_step().max(total_hint.unwrap_or(0));
+        let stopped = match stop {
+            Some(stop) if !rewind_trace::stop::clean(stop) => Stopped::Abnormally,
+            _ => Stopped::Otherwise,
+        };
         let output_lines = output_lines(&trace);
         let all_lines = merge_by_step(&output_lines, &console_lines(&trace));
         let phases = phase_spans(&trace, &output_lines, total);
@@ -335,7 +353,7 @@ impl Timeline {
         let files = file_events(&trace);
         let job_exit = job_exit(&trace);
         let job_start = job_start(&trace);
-        let failure = find_failure(&trace, job_exit);
+        let failure = find_failure(&trace, job_exit, total, stopped);
 
         // Command names for event descriptions: the latest process per pid
         // wins, which is the right one for any pid that was not reused.
@@ -790,7 +808,12 @@ fn job_exit(trace: &Trace) -> Option<JobExit> {
 /// Otherwise the first crash signal is the failure, and without one, the
 /// start of the chain of nonzero exits that ended the run: from the last
 /// process to exit nonzero, down through the child it exited after.
-fn find_failure(trace: &Trace, job_exit: Option<JobExit>) -> Option<Failure> {
+fn find_failure(
+    trace: &Trace,
+    job_exit: Option<JobExit>,
+    total: u64,
+    stopped: Stopped,
+) -> Option<Failure> {
     if job_exit.is_some_and(|j| j.status == 0) {
         return None;
     }
@@ -822,6 +845,20 @@ fn find_failure(trace: &Trace, job_exit: Option<JobExit>) -> Option<Failure> {
     });
     if signal.is_some() {
         return signal;
+    }
+
+    // A machine that stopped before the job exited failed where it
+    // stopped: the nonzero exits along the way did not end the job. The
+    // failing event is the last one the run made.
+    if stopped == Stopped::Abnormally && job_exit.is_none() {
+        let (index, last) = trace.events.iter().enumerate().next_back()?;
+        return Some(Failure {
+            step: total,
+            pid: last.pid,
+            tid: last.tid,
+            index,
+            kind: FailureKind::Stopped,
+        });
     }
 
     // Processes that exited nonzero; threads are left out, since a
@@ -1155,7 +1192,7 @@ mod tests {
             out(18, 2, 2, "make: *** [check] Error 2\n"),
             exit(19, 2, 2, 2 << 8, "make", false),
         ];
-        Timeline::new(Trace { events }, None)
+        Timeline::new(Trace { events }, None, None)
     }
 
     #[test]
@@ -1189,7 +1226,7 @@ mod tests {
                 },
             ),
         );
-        let t = Timeline::new(Trace { events }, None);
+        let t = Timeline::new(Trace { events }, None, None);
         assert_eq!(t.lines(LogFilter::Output).len(), 4);
         let all = t.lines(LogFilter::WithConsole);
         assert_eq!(all.len(), 5);
@@ -1219,7 +1256,7 @@ mod tests {
         // exit before it does not count.
         let mut events = build().trace.events;
         events.retain(|e| !matches!(e.kind, EventKind::Signal { .. }));
-        let t = Timeline::new(Trace { events }, None);
+        let t = Timeline::new(Trace { events }, None, None);
         let f = t.failure.unwrap();
         assert_eq!((f.step, f.pid), (16, 4));
         assert_eq!(f.kind, FailureKind::Exit { status: 0x8b });
@@ -1277,7 +1314,7 @@ mod tests {
                 "rewind-output /nix/store/jgr1axsv7hwwf37n19ssg0fiyaj3bvk7-mylib-0.3.0 ab12",
             ),
         ];
-        Timeline::new(Trace { events }, None)
+        Timeline::new(Trace { events }, None, None)
     }
 
     #[test]
@@ -1352,13 +1389,42 @@ mod tests {
         events.push(signal(30, 45, 45, signo::SIGSEGV));
         events.push(exit(31, 45, 45, SIGKILL_STATUS, "sleep", false));
         events.sort_by_key(|e| e.step);
-        let t = Timeline::new(Trace { events }, None);
+        let t = Timeline::new(Trace { events }, None, None);
         let f = t.failure.unwrap();
         assert_eq!((f.step, f.pid), (25, 44));
     }
 
     /// The exit_code of a process killed by SIGKILL.
     const SIGKILL_STATUS: u32 = 9;
+
+    /// How the engine words a run it stopped at its time limit.
+    const HUNG: &str = "timed out computing without exits for 2.2s, in user space at 0x41b33e";
+
+    #[test]
+    fn a_run_stopped_before_its_job_exited_fails_where_it_stopped() {
+        // The failing job without its exit mark, as a hang leaves it, and
+        // stopped at step 50: its nonzero exits along the way are not the
+        // failure, the step it was stopped at is. A crash signal before
+        // the hang still wins.
+        let mut events = job(2 << 8).trace.events;
+        events.retain(
+            |e| !matches!(&e.kind, EventKind::Mark { text } if text.starts_with("rewind-exit")),
+        );
+        let hung = Timeline::new(
+            Trace {
+                events: events.clone(),
+            },
+            Some(50),
+            Some(HUNG),
+        );
+        let f = hung.failure.unwrap();
+        assert_eq!((f.step, f.kind), (50, FailureKind::Stopped));
+        assert_eq!(hung.seek(Motion::Failure, 0, None), 50);
+
+        events.push(signal(30, 44, 44, signo::SIGSEGV));
+        let crashed = Timeline::new(Trace { events }, Some(50), Some(HUNG));
+        assert_eq!(crashed.failure.unwrap().step, 30);
+    }
 
     #[test]
     fn processes_are_named_by_the_file_name_of_their_program() {
@@ -1377,7 +1443,7 @@ mod tests {
             exit(3, 2, 2, 0, "true", false),
             signal(4, 1, 1, 17),
         ];
-        let t = Timeline::new(Trace { events }, None);
+        let t = Timeline::new(Trace { events }, None, None);
         assert_eq!(t.failure, None);
     }
 
@@ -1412,7 +1478,7 @@ mod tests {
             exec(2, 1, &["/bin/sh", "/init"]),
             fork(3, 1, 40, false),
         ];
-        let t = Timeline::new(Trace { events }, None);
+        let t = Timeline::new(Trace { events }, None, None);
         let labels: Vec<(u32, &str)> = t.rows.iter().map(|r| (r.pid, r.label.as_str())).collect();
         assert_eq!(
             labels,
@@ -1476,6 +1542,7 @@ mod tests {
                 events: vec![exec(5, 1, &["sh"])],
             },
             Some(50),
+            None,
         );
         assert_eq!(t.total, 50);
         assert_eq!(
@@ -1533,9 +1600,9 @@ mod tests {
         let a = build();
         let mut events = a.trace.events.clone();
         events[6] = out(7, 3, 2, "pool.c:3: warning: other\n");
-        let b = Timeline::new(Trace { events }, None);
+        let b = Timeline::new(Trace { events }, None, None);
         assert_eq!(Comparison::new(&a, &b).step(), Some(7));
-        let same = Timeline::new(a.trace.clone(), None);
+        let same = Timeline::new(a.trace.clone(), None, None);
         assert_eq!(Comparison::new(&a, &same).step(), None);
     }
 
@@ -1551,7 +1618,7 @@ mod tests {
             e.step += 2;
         }
         events[13] = exit(16, 4, 5, 0, "worker-0", true);
-        let b = Timeline::new(Trace { events }, None);
+        let b = Timeline::new(Trace { events }, None, None);
         assert_eq!(a.trace.divergence(&b.trace).unwrap().index, 3);
 
         let c = Comparison::new(&a, &b);
