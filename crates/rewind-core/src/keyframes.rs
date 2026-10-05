@@ -298,15 +298,13 @@ pub const KEEP_AFTER: u64 = 512;
 
 /// Whether a fork at `step` of a run with keyframes at `steps` keeps a
 /// keyframe there: when the nearest keyframe at or before the step, the
-/// one the fork restored, is more than KEEP_AFTER steps back. A run with
-/// no keyframes keeps none: such a run was recorded or imported without
-/// them, an import says whether a run is replayable by whether it has
-/// any, and `Run::add_keyframes` takes a full set only for a run with
-/// none of its own.
+/// one the fork restored, is more than KEEP_AFTER steps back. Without an
+/// earlier keyframe the fork booted, and boot counts as one at step 0, so
+/// a run recorded without keyframes, as most of `rewind check`'s are,
+/// gets a full one where it is first looked inside, and the next look
+/// near there restores it instead of booting.
 pub fn worth_keeping(steps: &[u64], step: u64) -> bool {
-    let Some(nearest) = steps.iter().copied().rfind(|s| *s <= step) else {
-        return false;
-    };
+    let nearest = steps.iter().copied().rfind(|s| *s <= step).unwrap_or(0);
     step - nearest > KEEP_AFTER
 }
 
@@ -458,7 +456,8 @@ mod tests {
         // worth_keeping() over lists of keyframe steps: a step more than
         // KEEP_AFTER past the nearest earlier keyframe is worth one, a
         // step at or nearer to it is not, keyframes after the step do not
-        // count, and a run without keyframes gets none.
+        // count, and without an earlier keyframe boot counts as one at
+        // step 0.
         let steps = [256, 512, 1439];
         assert!(worth_keeping(&steps, 1439 + KEEP_AFTER + 1));
         assert!(worth_keeping(&steps, 5060));
@@ -466,7 +465,9 @@ mod tests {
         assert!(!worth_keeping(&steps, 1439));
         assert!(!worth_keeping(&steps, 600));
         assert!(worth_keeping(&[256, 9000], 256 + KEEP_AFTER + 1));
-        assert!(!worth_keeping(&[], 5060));
+        assert!(worth_keeping(&[], 5060));
+        assert!(worth_keeping(&[9000], 5060));
+        assert!(!worth_keeping(&[], KEEP_AFTER));
     }
 
     #[test]

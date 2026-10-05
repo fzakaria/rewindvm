@@ -367,7 +367,12 @@ at step 5060 replayed 3621 steps from the keyframe at 1439 in 0.28 s on each for
 keeping the keyframe took 0.1 s. The keyframe holds the pages written since
 the one restored and goes where a fork's shared keyframe goes (see
 [Forks](#forks)), written under that run's executing lock with the page store
-open, so `rewind gc` waits. A run recorded without keyframes keeps none.
+open, so `rewind gc` waits. A run recorded without keyframes, as most of the
+runs `rewind check` makes are, counts boot as its keyframe at step 0, so the
+first look inside it more than 512 steps in keeps a full keyframe, every page
+that is not zero. In a run of 5947 steps that rewrites 64 MB of files, the
+first `rewind cat` at step 5000 took 3.6 s instead of 3.0 s, and each later
+one there took 0.5 s instead of 3.0 s.
 
 A delta lists the pages KVM's dirty log names, less the ones whose contents
 are what they were at the parent keyframe, often zero. About one entry in ten

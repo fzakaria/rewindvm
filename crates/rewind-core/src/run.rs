@@ -1007,25 +1007,34 @@ impl Run {
         }
 
         // A keyframe at the step, when asked for, the machine got there,
-        // and the one it started from is far enough back.
+        // and the keyframe it started from, or boot, is far enough back.
         if keep == Keep::Nothing {
             return Ok(machine);
         }
         let reached = matches!(outcome, Outcome::Paused) && machine.step() == step;
-        let Some(mut restored) = restored.filter(|_| reached) else {
+        if !reached || !crate::keyframes::worth_keeping(&steps, step) {
             return Ok(machine);
-        };
-        if crate::keyframes::worth_keeping(&steps, step) {
-            self.keep_keyframe(&mut machine, &mut restored)?;
+        }
+        match restored {
+            Some(mut restored) => {
+                let from = Some((restored.kf, restored.chain.as_slice()));
+                self.keep_keyframe(&mut machine, &mut restored.store, from)?;
+            }
+            None => {
+                let mut store = rewind_store::Store::open(&home.store())?;
+                self.keep_keyframe(&mut machine, &mut store, None)?;
+            }
         }
         Ok(machine)
     }
 
     /// Saves a keyframe of `machine`, at a step of this run it reached
-    /// from the keyframe `restored`, in the directory of the run that owns
-    /// the step, where every fork made there finds it (see
+    /// from the keyframe `from` names, restored by the chain beside it, or
+    /// from boot when `from` is None, in the directory of the run that
+    /// owns the step, where every fork made there finds it (see
     /// [`crate::keyframes::Layers::owner`]). Its pages are the ones
-    /// written since that keyframe.
+    /// written since that keyframe, or from boot every non-zero page, put
+    /// in `store`.
     ///
     /// The owner's executing lock is held meanwhile, so `rewind gc`, which
     /// refuses while a run is executing, does not collect the pages
@@ -1042,7 +1051,12 @@ impl Run {
     /// resolve as before. Only the step a fork near the new keyframe
     /// replays from moves, as it does when an execution keeps the
     /// keyframe at the step where it parts from its parent.
-    fn keep_keyframe(&self, machine: &mut Machine, restored: &mut Restored) -> Result<()> {
+    fn keep_keyframe(
+        &self,
+        machine: &mut Machine,
+        store: &mut rewind_store::Store,
+        from: Option<(u64, &[rewind_vmm::snapshot::Keyframe])>,
+    ) -> Result<()> {
         let step = machine.step();
         let layers = self.keyframes()?;
         let owner = layers.owner(step).to_path_buf();
@@ -1054,10 +1068,12 @@ impl Run {
         }
 
         // The pages first, durably, then the keyframe naming them.
-        let pages = &mut crate::keyframes::StorePages(&mut restored.store);
-        let mut kf = machine.keyframe(pages, Some(restored.kf))?;
-        crate::keyframes::Memory::of(&restored.chain).trim(kf.parent, &mut kf.pages);
-        restored.store.sync()?;
+        let pages = &mut crate::keyframes::StorePages(store);
+        let mut kf = machine.keyframe(pages, from.map(|(step, _)| step))?;
+        if let Some((_, chain)) = from {
+            crate::keyframes::Memory::of(chain).trim(kf.parent, &mut kf.pages);
+        }
+        store.sync()?;
         crate::keyframes::save(&owner, &kf)
             .with_context(|| format!("keeping a keyframe at step {step} in {}", owner.display()))
     }
