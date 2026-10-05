@@ -126,6 +126,7 @@ $ rewind doctor
 # list runs and look inside one
 $ rewind ls
 $ rewind show <run>
+$ rewind open <run> <step> --compare <other run>
 $ rewind log <run> --steps
 $ rewind ps <run> <step>
 $ rewind cat <run> <step> /build/env-vars

@@ -47,6 +47,10 @@ const DEFAULT_MEM_MIB: u64 = 1024;
 /// The PATH a command in a root filesystem gets unless --env sets one.
 const DEFAULT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
+/// The desktop app, looked up on PATH unless REWIND_APP names it.
+const APP_PROGRAM: &str = "rewind-app";
+const APP_ENV: &str = "REWIND_APP";
+
 /// How many callers of the chosen frame `rewind where` shows.
 const DEFAULT_CALLERS: usize = 2;
 
@@ -505,6 +509,21 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Open a run in the desktop app, at a step and beside another run.
+    ///
+    /// Starts rewind-app, from PATH or REWIND_APP, on the run's directory.
+    /// `rewind check` and `rewind fork` print the command that opens what
+    /// they found.
+    Open {
+        #[arg(help = RUN_HELP, long_help = RUN_LONG_HELP)]
+        run: String,
+        /// The step the playhead starts at; by default the app's choice.
+        step: Option<u64>,
+        /// Show this run beside it, lined up with it, as the passing run
+        /// beside a failing one.
+        #[arg(long, value_name = "RUN")]
+        compare: Option<String>,
+    },
     /// Whether this machine can record runs and look inside them.
     ///
     /// Checks KVM, the guest, which clock runs get, gdb and its Python, the
@@ -748,6 +767,7 @@ impl Command {
             | Command::Remove { .. }
             | Command::Gc { .. }
             | Command::Pmu { .. }
+            | Command::Open { .. }
             | Command::Doctor
             | Command::Ls { .. }
             | Command::Show { .. }
@@ -1141,13 +1161,24 @@ fn run(cli: Cli) -> Result<ExitCode> {
             }
             println!("passing: run {}", passing.manifest.id);
             println!("failing: run {}", failing.manifest.id);
-            match culprit {
+
+            // Where they part, in words, and the failing run's step there,
+            // where the app opens it beside the passing one.
+            let parts_at = match &culprit {
                 Some(argv) => {
                     println!("\nwhere {} first behaves differently:", argv.join(" "));
-                    print!("{}", show::divergence_in(pt, ft, &argv));
+                    print!("{}", show::divergence_in(pt, ft, argv));
+                    pt.divergence_in(ft, argv)
+                        .and_then(|d| d.right_event())
+                        .map(|(i, _)| ft.events[i].step)
                 }
-                None => print!("{}", show::divergence(pt, ft)),
-            }
+                None => {
+                    print!("{}", show::divergence(pt, ft));
+                    pt.divergence(ft).map(|d| d.right_step)
+                }
+            };
+            let open = open_line(&failing.manifest.id, parts_at, Some(&passing.manifest.id));
+            println!("\nopen both in the desktop app: {open}");
             Ok(ExitCode::FAILURE)
         }
         Command::Fork {
@@ -1203,6 +1234,8 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     eprintln!("rewind: the fork first differs from its parent at step {step}")
                 }
             }
+            let open = open_line(&child.manifest.id, first_difference, Some(&m.id));
+            eprintln!("rewind: open it beside its parent in the desktop app: {open}");
             Ok(exit_status(&child))
         }
         Command::Prune {
@@ -1827,6 +1860,25 @@ fn run(cli: Cli) -> Result<ExitCode> {
             }
         }
         Command::Generate { what } => generate(what),
+        Command::Open { run, step, compare } => {
+            use std::os::unix::process::CommandExt;
+            let run = Run::find(&home, &run)?;
+            let step = step.map(|s| run.check_step(s)).transpose()?;
+            let compare = compare.map(|c| Run::find(&home, &c)).transpose()?;
+            let program = std::env::var_os(APP_ENV).unwrap_or_else(|| APP_PROGRAM.into());
+            let args = app_args(&run.dir, step, compare.as_ref().map(|c| c.dir.as_path()));
+
+            // exec only returns when the app did not start.
+            let e = std::process::Command::new(&program).args(args).exec();
+            if e.kind() == std::io::ErrorKind::NotFound {
+                bail!(
+                    "the desktop app, {}, is not on PATH; install it from \
+                     https://rewindvm.dev, or set {APP_ENV} to it",
+                    program.to_string_lossy()
+                );
+            }
+            Err(anyhow::Error::new(e).context(format!("starting {}", program.to_string_lossy())))
+        }
         Command::Doctor => {
             println!("rewind {}", rewind_core::VERSION);
             let found = doctor::findings(&home);
@@ -1862,6 +1914,36 @@ fn run(cli: Cli) -> Result<ExitCode> {
             }
         }
     }
+}
+
+/// rewind-app's arguments for a run's directory, the step to start at and
+/// the directory of the run to show beside it.
+fn app_args(
+    dir: &std::path::Path,
+    step: Option<u64>,
+    compare: Option<&std::path::Path>,
+) -> Vec<std::ffi::OsString> {
+    let mut args = vec![dir.as_os_str().to_owned()];
+    if let Some(step) = step {
+        args.extend(["--step".into(), step.to_string().into()]);
+    }
+    if let Some(compare) = compare {
+        args.extend(["--compare".into(), compare.as_os_str().to_owned()]);
+    }
+    args
+}
+
+/// The command that opens `run` in the desktop app at `step`, beside
+/// `compare`, as `rewind check` and `rewind fork` print it.
+fn open_line(run: &str, step: Option<u64>, compare: Option<&str>) -> String {
+    let mut line = format!("rewind open {run}");
+    if let Some(step) = step {
+        line.push_str(&format!(" {step}"));
+    }
+    if let Some(compare) = compare {
+        line.push_str(&format!(" --compare {compare}"));
+    }
+    line
 }
 
 /// `rewind generate`: completions on standard output, or man pages in a
@@ -2386,6 +2468,28 @@ mod tests {
         let mut bash = Vec::new();
         completions(clap_complete::Shell::Bash, &mut bash);
         assert!(String::from_utf8(bash).unwrap().contains("fork"));
+    }
+
+    #[test]
+    fn the_app_is_given_the_run_its_step_and_the_run_beside_it() {
+        // rewind-app takes a run's directory, then --step and --compare
+        // when asked for; a run alone opens alone.
+        let args = |step, compare: Option<&str>| -> Vec<String> {
+            app_args(
+                std::path::Path::new("/runs/a"),
+                step,
+                compare.map(std::path::Path::new),
+            )
+            .into_iter()
+            .map(|a| a.into_string().unwrap())
+            .collect()
+        };
+        assert_eq!(args(None, None), vec!["/runs/a"]);
+        assert_eq!(
+            args(Some(5), Some("/runs/b")),
+            vec!["/runs/a", "--step", "5", "--compare", "/runs/b"]
+        );
+        assert!(Cli::try_parse_from("rewind open abc 5 --compare def".split_whitespace()).is_ok());
     }
 
     #[test]
