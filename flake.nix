@@ -34,6 +34,17 @@
       systems = [ "x86_64-linux" ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f system);
 
+      # The commit the packages are built from, for `rewind --version` and
+      # the manifests of the runs it records: 12 hex digits, marked dirty
+      # for a tree with uncommitted changes, and null outside git.
+      commit =
+        if self ? rev then
+          builtins.substring 0 12 self.rev
+        else if self ? dirtyRev then
+          "${builtins.substring 0 12 self.dirtyRev}-dirty"
+        else
+          null;
+
       # Everything a system's outputs share, built once per system.
       per =
         system:
@@ -48,6 +59,7 @@
               rust
               kernel
               guest
+              commit
               ;
           };
           app = import ./nix/app.nix { inherit pkgs rust rewind; };
@@ -66,6 +78,7 @@
               rust
               kernel
               guest
+              commit
               ;
           };
           releaseDebug = import ./nix/release-debug.nix { inherit pkgs kernel; };

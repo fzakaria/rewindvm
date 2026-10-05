@@ -12,6 +12,7 @@
   rust,
   kernel,
   guest,
+  commit,
 }:
 let
   inherit (pkgs) lib;
@@ -31,6 +32,8 @@ let
       );
       # The unit tests run in the dynamically linked package.
       doCheck = false;
+      # The commit, for `rewind --version`, as in nix/rewind.nix.
+      REWIND_COMMIT = commit;
     }
   );
 

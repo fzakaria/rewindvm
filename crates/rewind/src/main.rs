@@ -51,7 +51,7 @@ const DEFAULT_CALLERS: usize = 2;
 
 #[derive(Parser)]
 #[command(
-    version,
+    version = rewind_core::VERSION,
     about = "Run Linux workloads in a deterministic VM, then scrub, rewind and fork them"
 )]
 struct Cli {
@@ -1617,6 +1617,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     "{}",
                     serde_json::json!({
                         "id": run.manifest.id,
+                        "recorded_by": run.manifest.recorded_by,
                         "same_guest": same_guest,
                         "parent_gone": gone,
                         "commands": commands,
@@ -1625,6 +1626,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 return Ok(ExitCode::SUCCESS);
             }
             println!("{}", show::summary(&run));
+            if let Some(version) = &run.manifest.recorded_by {
+                println!("recorded by rewind {version}");
+            }
             if let Some(parent) = gone {
                 eprintln!(
                     "rewind: run {parent}, which the first of these forks, is not in this home"

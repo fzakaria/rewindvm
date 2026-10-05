@@ -7,6 +7,7 @@
   rust,
   kernel,
   guest,
+  commit,
 }:
 let
   inherit (pkgs) lib;
@@ -29,6 +30,9 @@ let
       # The workspace's unit tests; the ones that need /dev/kvm run as flake
       # checks instead, where the sandbox can be given it.
       cargoTestExtraArgs = "--workspace";
+      # The commit, for `rewind --version`; given to this build alone, so
+      # the dependencies' build does not change with every commit.
+      REWIND_COMMIT = commit;
       # erofs-utils for the test that reads a file out of an image.
       nativeCheckInputs = [
         pkgs.cpio
