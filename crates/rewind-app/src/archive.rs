@@ -17,7 +17,7 @@ use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
 use crate::bookmarks::{BOOKMARKS_FILE, MAX_BYTES as BOOKMARKS_MAX_BYTES};
-use crate::run::{MANIFEST_FILE, TRACE_FILE};
+use rewind_trace::manifest::{MANIFEST, TRACE};
 
 /// The first four bytes of every zstd frame.
 const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
@@ -187,14 +187,14 @@ fn unpack(reader: impl Read, staging: &Path) -> Result<bool> {
         let bookmarks = path == Path::new(BOOKMARKS_FILE)
             && entry.header().entry_type().is_file()
             && entry.size() <= BOOKMARKS_MAX_BYTES;
-        let wanted = path == Path::new(MANIFEST_FILE) || path == Path::new(TRACE_FILE) || bookmarks;
+        let wanted = path == Path::new(MANIFEST) || path == Path::new(TRACE) || bookmarks;
         if !wanted {
             continue;
         }
         let mut out = File::create(staging.join(&path))?;
         io::copy(&mut entry, &mut out)?;
     }
-    for name in [MANIFEST_FILE, TRACE_FILE] {
+    for name in [MANIFEST, TRACE] {
         if !staging.join(name).is_file() {
             bail!("the archive has no {name}");
         }
@@ -204,7 +204,7 @@ fn unpack(reader: impl Read, staging: &Path) -> Result<bool> {
 
 /// Moves a staged run to `<into>/<id>`, or keeps the copy already there.
 fn place(staging: &Path, into: &Path) -> Result<PathBuf> {
-    let manifest: Value = serde_json::from_slice(&fs::read(staging.join(MANIFEST_FILE))?)
+    let manifest: Value = serde_json::from_slice(&fs::read(staging.join(MANIFEST))?)
         .context("the archive's manifest.json is not JSON")?;
     let id = manifest
         .get("id")
@@ -233,7 +233,7 @@ fn place(staging: &Path, into: &Path) -> Result<PathBuf> {
 
 /// Whether `dir` holds an unpacked run: its manifest and its trace.
 fn is_complete(dir: &Path) -> bool {
-    dir.join(MANIFEST_FILE).is_file() && dir.join(TRACE_FILE).is_file()
+    dir.join(MANIFEST).is_file() && dir.join(TRACE).is_file()
 }
 
 /// A run id that is safe as one path component.

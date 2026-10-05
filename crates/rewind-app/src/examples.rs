@@ -23,23 +23,36 @@ pub fn open() -> Result<Session> {
     Ok(Session::new(failing, Some(passing)))
 }
 
-/// The trace inside an example export, for tests that need a real one.
+/// The file `name` inside an example export.
 #[cfg(test)]
-pub fn trace_of(export: &[u8]) -> Vec<u8> {
+fn file_of(export: &[u8], name: &str) -> Vec<u8> {
     use std::io::Read;
-    const TRACE: &str = "trace.bin";
     let tar = zstd::decode_all(export).expect("an example is zstd");
     let mut archive = tar::Archive::new(&tar[..]);
     for entry in archive.entries().expect("an example is a tar") {
         let mut entry = entry.expect("an example's entries read");
-        if entry.path().expect("an entry has a path").as_os_str() != TRACE {
+        if entry.path().expect("an entry has a path").as_os_str() != name {
             continue;
         }
-        let mut trace = Vec::new();
-        entry.read_to_end(&mut trace).expect("the trace reads");
-        return trace;
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes).expect("the file reads");
+        return bytes;
     }
-    panic!("an example without {TRACE}");
+    panic!("an example without {name}");
+}
+
+/// The trace inside an example export, for tests that need a real one.
+#[cfg(test)]
+pub fn trace_of(export: &[u8]) -> Vec<u8> {
+    file_of(export, rewind_trace::manifest::TRACE)
+}
+
+/// The manifest inside an example export, for tests that need a real one
+/// to change.
+#[cfg(test)]
+pub fn manifest_of(export: &[u8]) -> rewind_trace::manifest::Manifest {
+    let bytes = file_of(export, rewind_trace::manifest::MANIFEST);
+    serde_json::from_slice(&bytes).expect("an example's manifest reads")
 }
 
 /// Where [`trace_until`] cuts an example's trace.

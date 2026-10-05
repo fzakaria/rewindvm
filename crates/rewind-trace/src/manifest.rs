@@ -244,6 +244,14 @@ impl Spec {
         }
     }
 
+    /// The steps the schedule perturbs, first and end, when it has an
+    /// end: `rewind check` confines a schedule to such a window as it
+    /// narrows one down. A schedule that runs to the end of the run has
+    /// none.
+    pub fn window(&self) -> Option<(u64, u64)> {
+        (self.schedule_until != u64::MAX).then_some((self.schedule_from, self.schedule_until))
+    }
+
     /// The spec without its schedule, and without the paths of inputs a
     /// run's id counts by content: two runs whose specs are equal this way
     /// are the same build on the same machine, perturbed or not.

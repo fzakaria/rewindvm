@@ -1,20 +1,17 @@
 //! Opening a run from disk.
 //!
 //! A run is a directory holding `manifest.json` and `trace.bin`, or a bare
-//! trace file. The manifest format is not settled yet, so the app reads
-//! each field it knows on its own and ignores everything else: a field of
-//! an unexpected type costs only that field, and a manifest that is not
-//! JSON at all is set aside with a warning rather than refusing the run.
-//! Both the draft layout (`drv`, `seed` and `command` at the top) and the
-//! engine's (`source.drv`, `spec.seed`, `spec.job`) are understood.
+//! trace file. The manifest is read with the engine's own types
+//! (rewind_trace::manifest). One this build cannot read, such as one
+//! another build of the engine wrote, is set aside with a warning, and the
+//! run opens as its trace alone.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
 use rewind_trace::Trace;
+use rewind_trace::manifest::{MANIFEST, Manifest, Parent, RunId, Source, TRACE};
 use rewind_trace::stop::Stop;
-use serde::Deserialize;
-use serde_json::Value;
 
 use rewind_trace::signal_name;
 
@@ -22,209 +19,6 @@ use crate::archive;
 use crate::describe::{self, thousands};
 use crate::model::{Comparison, ExitStatus, Timeline};
 
-/// The trace inside a run directory.
-pub const TRACE_FILE: &str = "trace.bin";
-/// The manifest inside a run directory.
-pub const MANIFEST_FILE: &str = "manifest.json";
-
-/// What a run's manifest says about it. Every field may be missing.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Manifest {
-    /// The engine's id for the run: the hash of its inputs.
-    pub id: Option<String>,
-    pub name: Option<String>,
-    pub command: Option<Vec<String>>,
-    /// "nix" or "image"; kept as text so an unknown mode still loads.
-    pub mode: Option<String>,
-    pub drv: Option<String>,
-    pub seed: Option<u64>,
-    /// The schedule perturbation the run was made with; 0 for none.
-    pub schedule: Option<u64>,
-    /// The run this one was forked from, and the step it was forked at.
-    pub parent: Option<Parent>,
-    pub outcome: Option<Outcome>,
-    /// The BLAKE3 hash of the run's input image, which with the command
-    /// names a build that is not a derivation.
-    pub image_hash: Option<String>,
-    /// The BLAKE3 hash of the run's trace: runs with equal hashes did the
-    /// same thing.
-    pub trace_hash: Option<String>,
-    /// For a fork, the step where it first differs from its parent.
-    pub first_difference: Option<u64>,
-    /// When the run was made, in seconds since the epoch.
-    pub created: Option<u64>,
-    /// The vCPUs the VM had.
-    pub cores: Option<u64>,
-    /// The steps a perturbed schedule was confined to, when it was: the
-    /// first and the last.
-    pub window: Option<(u64, u64)>,
-    /// Whether the run came from an export: `rewind import` keeps an
-    /// imported run's kernel among its inputs, under the run's id.
-    pub imported: bool,
-    /// A key for the run's inputs less its schedule: runs with equal keys
-    /// are the same build on the same machine, perturbed or not.
-    pub inputs: Option<String>,
-}
-
-/// Where a forked run branched off.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Parent {
-    pub id: String,
-    pub step: u64,
-}
-
-/// How a run ended, as the engine recorded it.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Outcome {
-    /// How the machine stopped.
-    pub stop: Option<Stop>,
-    /// The last step of the run.
-    pub step: Option<u64>,
-    /// The job's wait status, if the guest's init reported one.
-    pub status: Option<i64>,
-}
-
-impl Manifest {
-    /// Reads the fields the app knows from a manifest's JSON, each on its
-    /// own, looking in the draft's place first and the engine's second.
-    pub fn from_json(json: &Value) -> Manifest {
-        let source = json.get("source");
-        let spec = json.get("spec");
-        let job = spec.and_then(|s| s.get("job"));
-        let first_text = |candidates: &[Option<&Value>]| candidates.iter().find_map(|v| text(*v));
-        let first_list =
-            |candidates: &[Option<&Value>]| candidates.iter().find_map(|v| strings(*v));
-
-        Manifest {
-            id: text(json.get("id")),
-            name: text(json.get("name")),
-            command: first_list(&[
-                json.get("command"),
-                job.and_then(|j| j.get("argv")),
-                job.and_then(|j| j.get("command")),
-            ]),
-            mode: first_text(&[json.get("mode"), source.and_then(|s| s.get("mode"))]),
-            drv: first_text(&[json.get("drv"), source.and_then(|s| s.get("drv"))]),
-            seed: seed(json.get("seed")).or_else(|| seed(spec.and_then(|s| s.get("seed")))),
-            schedule: spec.and_then(|s| s.get("schedule")).and_then(Value::as_u64),
-            parent: parent(json.get("parent")),
-            image_hash: text(spec.and_then(|s| s.get("image_hash"))),
-            trace_hash: text(json.get("trace_hash")),
-            first_difference: json.get("first_difference").and_then(Value::as_u64),
-            created: json.get("created").and_then(Value::as_u64),
-            cores: spec.and_then(|s| s.get("cores")).and_then(Value::as_u64),
-            imported: imported(text(json.get("id")).as_deref(), spec),
-            window: window(spec),
-            inputs: spec.and_then(inputs_key),
-            outcome: json
-                .get("outcome")
-                .filter(|o| o.is_object())
-                .map(|o| Outcome {
-                    stop: o.get("stop").and_then(|s| Stop::deserialize(s).ok()),
-                    step: o.get("step").and_then(Value::as_u64),
-                    status: o.get("status").and_then(Value::as_i64),
-                }),
-        }
-    }
-}
-
-/// A JSON string, if the value is one and is not empty.
-/// The spec's fields that say how the schedule is perturbed, and the
-/// paths on this machine of inputs the spec also names by content or the
-/// run id counts by content.
-const NOT_INPUTS: [&str; 7] = [
-    "schedule",
-    "schedule_from",
-    "schedule_until",
-    "inherited_schedules",
-    "kernel",
-    "initrd",
-    "image",
-];
-
-/// Where `rewind import` puts an imported run's kernel, initrd and image:
-/// a directory named for the run in the home's inputs.
-const IMPORTED_INPUTS_DIR: &str = "inputs";
-
-/// The steps the spec confines its schedule to, when it has an end: the
-/// engine writes the largest u64 for a schedule that runs to the end.
-fn window(spec: Option<&Value>) -> Option<(u64, u64)> {
-    let field = |name| spec?.get(name)?.as_u64();
-    let until = field("schedule_until").filter(|u| *u != u64::MAX)?;
-    Some((field("schedule_from").unwrap_or(0), until))
-}
-
-/// Whether the spec's kernel is in the imported inputs of run `id`.
-fn imported(id: Option<&str>, spec: Option<&Value>) -> bool {
-    let (Some(id), Some(kernel)) = (id, spec.and_then(|s| text(s.get("kernel")))) else {
-        return false;
-    };
-    let Some(dir) = Path::new(&kernel).parent() else {
-        return false;
-    };
-    let named = |p: Option<&Path>, name: &str| {
-        p.and_then(Path::file_name)
-            .is_some_and(|n| n.to_string_lossy() == name)
-    };
-    named(Some(dir), id) && named(dir.parent(), IMPORTED_INPUTS_DIR)
-}
-
-/// A hash of a manifest's spec without the fields in `NOT_INPUTS`.
-fn inputs_key(spec: &Value) -> Option<String> {
-    use std::hash::{Hash, Hasher};
-
-    let mut spec = spec.as_object()?.clone();
-    for field in NOT_INPUTS {
-        spec.remove(field);
-    }
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    Value::Object(spec).to_string().hash(&mut hasher);
-    Some(format!("{:016x}", hasher.finish()))
-}
-
-fn text(value: Option<&Value>) -> Option<String> {
-    value
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-}
-
-/// The strings of a JSON array, if the value is a non-empty array of them.
-fn strings(value: Option<&Value>) -> Option<Vec<String>> {
-    let list: Vec<String> = value?
-        .as_array()?
-        .iter()
-        .filter_map(|v| v.as_str().map(str::to_string))
-        .collect();
-    (!list.is_empty()).then_some(list)
-}
-
-/// A parent written as the engine does: `{"run": id, "step": step}`.
-fn parent(value: Option<&Value>) -> Option<Parent> {
-    let parent = rewind_trace::manifest::Parent::deserialize(value?).ok()?;
-    Some(Parent {
-        id: parent.run.to_string(),
-        step: parent.step,
-    })
-}
-
-/// A seed written as a number, a decimal string or a 0x-prefixed hex
-/// string.
-fn seed(value: Option<&Value>) -> Option<u64> {
-    const HEX_PREFIX: &str = "0x";
-    const HEX_RADIX: u32 = 16;
-    let value = value?;
-    if let Some(n) = value.as_u64() {
-        return Some(n);
-    }
-    let s = value.as_str()?.trim();
-    match s.strip_prefix(HEX_PREFIX) {
-        Some(hex) => u64::from_str_radix(hex, HEX_RADIX).ok(),
-        None => s.parse().ok(),
-    }
-}
-
-/// A run, read and indexed.
 /// Where a run came from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Origin {
@@ -257,7 +51,9 @@ pub struct Run {
     /// export's is the directory it was unpacked into.
     pub path: PathBuf,
     pub origin: Origin,
-    pub manifest: Manifest,
+    /// What the engine recorded of the run; None for a bare trace, and for
+    /// a manifest this build cannot read.
+    pub manifest: Option<Manifest>,
     /// Why the manifest was set aside, when it did not parse.
     pub manifest_warning: Option<String>,
     pub timeline: Timeline,
@@ -301,7 +97,7 @@ impl Run {
 
     fn open_at(path: &Path, origin: Origin) -> Result<Run> {
         let (trace_path, manifest_path) = if path.is_dir() {
-            (path.join(TRACE_FILE), Some(path.join(MANIFEST_FILE)))
+            (path.join(TRACE), Some(path.join(MANIFEST)))
         } else {
             (path.to_path_buf(), None)
         };
@@ -309,19 +105,21 @@ impl Run {
             bail!("no trace at {}", trace_path.display());
         }
 
-        // The manifest is optional, and a broken one only costs its fields.
+        // The manifest is optional, and one that does not read leaves the
+        // trace to open alone.
         let (manifest, manifest_warning) = match manifest_path.filter(|p| p.is_file()) {
-            None => (Manifest::default(), None),
+            None => (None, None),
             Some(p) => match read_manifest(&p) {
-                Ok(m) => (m, None),
-                Err(e) => (Manifest::default(), Some(format!("{e:#}"))),
+                Ok(m) => (Some(m), None),
+                Err(e) => (None, Some(format!("{e:#}"))),
             },
         };
 
         let trace = Trace::read(&trace_path)
             .with_context(|| format!("reading {}", trace_path.display()))?;
-        let total_hint = manifest.outcome.as_ref().and_then(|o| o.step);
-        let stop = manifest.outcome.as_ref().and_then(|o| o.stop.as_ref());
+        let outcome = manifest.as_ref().and_then(|m| m.outcome.as_ref());
+        let total_hint = outcome.map(|o| o.step);
+        let stop = outcome.map(|o| &o.stop);
         let timeline = Timeline::new(trace, total_hint, stop);
         Ok(Run {
             path: path.to_path_buf(),
@@ -334,8 +132,8 @@ impl Run {
 
     /// A short name: the manifest's, else the directory or file name.
     pub fn name(&self) -> String {
-        if let Some(name) = self.manifest.name.as_ref().filter(|n| !n.is_empty()) {
-            return name.clone();
+        if let Some(m) = self.manifest.as_ref().filter(|m| !m.name.is_empty()) {
+            return m.name.clone();
         }
         let stem = self.path.file_name().or(self.path.file_stem());
         stem.map_or_else(
@@ -347,19 +145,23 @@ impl Run {
     /// What the run built or ran: the derivation, else the command, else
     /// the path it was opened from.
     pub fn subject(&self) -> String {
-        if let Some(drv) = self.manifest.drv.as_ref().filter(|d| !d.is_empty()) {
-            return drv.clone();
+        let Some(m) = &self.manifest else {
+            return self.path.display().to_string();
+        };
+        match &m.source {
+            Source::Nix { drv, .. } => drv.clone(),
+            Source::Image { .. } => m.spec.job.argv.join(" "),
         }
-        if let Some(cmd) = self.manifest.command.as_ref().filter(|c| !c.is_empty()) {
-            return cmd.join(" ");
-        }
-        self.path.display().to_string()
     }
 
-    /// The seed the run was recorded with, for `rewind fork`; 0 when the
-    /// manifest does not say.
-    pub fn seed(&self) -> u64 {
-        self.manifest.seed.unwrap_or(0)
+    /// The engine's id for the run: the hash of its inputs.
+    pub fn id(&self) -> Option<&RunId> {
+        Some(&self.manifest.as_ref()?.id)
+    }
+
+    /// The run this one was forked from, and the step it was forked at.
+    pub fn parent(&self) -> Option<&Parent> {
+        self.manifest.as_ref()?.parent.as_ref()
     }
 
     /// Whether the run failed. The job's wait status decides when the
@@ -385,7 +187,7 @@ impl Run {
 
     /// How the machine stopped, once the run has finished.
     pub fn stop(&self) -> Option<&Stop> {
-        self.manifest.outcome.as_ref()?.stop.as_ref()
+        Some(&self.manifest.as_ref()?.outcome.as_ref()?.stop)
     }
 
     /// How the machine stopped, at the step it stopped at, when it
@@ -400,9 +202,8 @@ impl Run {
     pub fn status(&self) -> Option<u32> {
         let from_manifest = self
             .manifest
-            .outcome
             .as_ref()
-            .and_then(|o| o.status)
+            .and_then(|m| m.outcome.as_ref()?.status)
             .and_then(|s| u32::try_from(s).ok());
         let from_mark = self
             .timeline
@@ -428,7 +229,7 @@ impl Run {
     /// How the run is named on screen: its id cut short when the engine
     /// gave it one, since runs of one build share a name; else its name.
     pub fn label(&self) -> String {
-        match &self.manifest.id {
+        match self.id() {
             Some(id) => short_id(id),
             None => self.name(),
         }
@@ -437,9 +238,9 @@ impl Run {
     /// The directory of the run this one was forked from, when it sits
     /// next to this one, as runs in one Rewind home do.
     pub fn parent_dir(&self) -> Option<PathBuf> {
-        let parent = self.manifest.parent.as_ref()?;
-        let dir = self.path.parent()?.join(&parent.id);
-        dir.join(MANIFEST_FILE).is_file().then_some(dir)
+        let parent = self.parent()?;
+        let dir = self.path.parent()?.join(&parent.run);
+        dir.join(MANIFEST).is_file().then_some(dir)
     }
 }
 
@@ -464,11 +265,11 @@ impl Verdict {
 /// one: a directory with a manifest.
 fn run_dir_of(path: &Path) -> Option<PathBuf> {
     let name = path.file_name()?;
-    if name != MANIFEST_FILE && name != TRACE_FILE {
+    if name != MANIFEST && name != TRACE {
         return None;
     }
     let dir = path.parent()?;
-    dir.join(MANIFEST_FILE).is_file().then(|| dir.to_path_buf())
+    dir.join(MANIFEST).is_file().then(|| dir.to_path_buf())
 }
 
 pub fn short_id(id: &str) -> String {
@@ -477,11 +278,13 @@ pub fn short_id(id: &str) -> String {
 }
 
 pub(crate) fn read_manifest(path: &Path) -> Result<Manifest> {
-    let text =
-        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    let json: Value =
-        serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
-    Ok(Manifest::from_json(&json))
+    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    serde_json::from_slice(&bytes).with_context(|| {
+        format!(
+            "{} was written by another build of rewind, which this app cannot read",
+            path.display()
+        )
+    })
 }
 
 /// The run on screen and, optionally, the run it is compared with.
@@ -636,10 +439,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("rewind-app-rundir-{}", std::process::id()));
         let run = dir.join("abc");
         std::fs::create_dir_all(&run).unwrap();
-        std::fs::write(run.join(MANIFEST_FILE), "{}").unwrap();
-        assert_eq!(run_dir_of(&run.join(MANIFEST_FILE)), Some(run.clone()));
-        assert_eq!(run_dir_of(&run.join(TRACE_FILE)), Some(run.clone()));
-        assert_eq!(run_dir_of(&dir.join(TRACE_FILE)), None);
+        std::fs::write(run.join(MANIFEST), "{}").unwrap();
+        assert_eq!(run_dir_of(&run.join(MANIFEST)), Some(run.clone()));
+        assert_eq!(run_dir_of(&run.join(TRACE)), Some(run.clone()));
+        assert_eq!(run_dir_of(&dir.join(TRACE)), None);
         assert_eq!(run_dir_of(&run.join("other.json")), None);
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -647,7 +450,7 @@ mod tests {
     // Opening runs from a temporary directory: each test writes a trace and
     // perhaps a manifest, opens the run, and checks what the app shows.
     use super::*;
-    use crate::examples::{FAILING, PASSING, Until, trace_of, trace_until};
+    use crate::examples::{FAILING, PASSING, Until, manifest_of, trace_of, trace_until};
 
     /// A run stopped at its time limit while computing in user space.
     fn hung_in_user_space() -> Stop {
@@ -669,38 +472,53 @@ mod tests {
 
     /// The failing example's trace, which crashes, in `dir`.
     fn small_trace(dir: &Path) {
-        std::fs::write(dir.join(TRACE_FILE), trace_of(FAILING)).unwrap();
+        std::fs::write(dir.join(TRACE), trace_of(FAILING)).unwrap();
+    }
+
+    /// Writes `manifest` into the run directory `dir`.
+    fn write_manifest(dir: &Path, manifest: &Manifest) {
+        std::fs::write(dir.join(MANIFEST), serde_json::to_vec(manifest).unwrap()).unwrap();
     }
 
     #[test]
-    fn a_manifest_names_the_run_and_unknown_fields_are_ignored() {
-        // The draft layout, with a mode and a field the app does not know.
+    fn a_manifest_names_the_run_and_fields_it_does_not_know_are_ignored() {
+        // The failing example's manifest, renamed and with a field the
+        // engine does not write: the run takes the name and the derivation
+        // it built, with no warning.
         let dir = temp_dir("manifest");
         small_trace(&dir);
-        std::fs::write(
-            dir.join(MANIFEST_FILE),
-            r#"{"name": "run #3", "drv": "/nix/store/x-mylib.drv", "seed": "0x10",
-                "mode": "spaceship", "extra": [1, 2], "outcome": {"stop": {"how": "powered_off"}, "step": 5}}"#,
-        )
-        .unwrap();
+        let mut manifest = serde_json::to_value(manifest_of(FAILING)).unwrap();
+        manifest["name"] = "run #3".into();
+        manifest["extra"] = serde_json::json!([1, 2]);
+        std::fs::write(dir.join(MANIFEST), manifest.to_string()).unwrap();
         let run = Run::open(&dir).unwrap();
         assert_eq!(run.name(), "run #3");
-        assert_eq!(run.subject(), "/nix/store/x-mylib.drv");
-        assert_eq!(run.seed(), 16);
-        assert_eq!(run.manifest.mode.as_deref(), Some("spaceship"));
+        assert!(
+            run.subject().ends_with("-mylib-0.3.0.drv"),
+            "{}",
+            run.subject()
+        );
         assert_eq!(run.manifest_warning, None);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn a_broken_manifest_is_set_aside_with_a_warning() {
-        // A manifest that is not JSON leaves the run named after its directory.
+        // A manifest that is not JSON, and one another build wrote without
+        // a field this one needs, leave the run named after its directory.
         let dir = temp_dir("broken");
         small_trace(&dir);
-        std::fs::write(dir.join(MANIFEST_FILE), "{not json").unwrap();
+        std::fs::write(dir.join(MANIFEST), "{not json").unwrap();
         let run = Run::open(&dir).unwrap();
         assert!(run.manifest_warning.is_some());
         assert_eq!(run.name(), dir.file_name().unwrap().to_string_lossy());
+
+        let mut older = serde_json::to_value(manifest_of(FAILING)).unwrap();
+        older.as_object_mut().unwrap().remove("recorded_by");
+        std::fs::write(dir.join(MANIFEST), older.to_string()).unwrap();
+        let run = Run::open(&dir).unwrap();
+        assert!(run.manifest.is_none());
+        assert!(run.manifest_warning.is_some());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -709,49 +527,11 @@ mod tests {
         // A trace file opened by itself, and a path with nothing there.
         let dir = temp_dir("bare");
         small_trace(&dir);
-        let run = Run::open(&dir.join(TRACE_FILE)).unwrap();
-        assert_eq!(run.name(), TRACE_FILE);
+        let run = Run::open(&dir.join(TRACE)).unwrap();
+        assert_eq!(run.name(), TRACE);
         assert_eq!(run.verdict(), Verdict::Failed);
         assert!(Run::open(&dir.join("nope.bin")).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn the_engines_manifest_layout_is_understood() {
-        // The layout rewind-core writes: the derivation under source, the
-        // seed and the job under spec, and a wait status in the outcome.
-        let json: Value = serde_json::from_str(
-            r#"{"version": 1, "id": "ab12", "name": "mylib", "created": 1,
-                "source": {"mode": "nix", "drv": "/nix/store/x-mylib.drv", "outputs": ["out"]},
-                "spec": {"seed": 7, "job": {"argv": ["make", "check"]}},
-                "parent": null,
-                "outcome": {"stop": {"how": "powered_off"}, "step": 99, "virtual_ns": 1, "status": 512, "wall_ms": 3}}"#,
-        )
-        .unwrap();
-        let m = Manifest::from_json(&json);
-        assert_eq!(m.name.as_deref(), Some("mylib"));
-        assert_eq!(m.drv.as_deref(), Some("/nix/store/x-mylib.drv"));
-        assert_eq!(m.mode.as_deref(), Some("nix"));
-        assert_eq!(m.seed, Some(7));
-        assert_eq!(
-            m.command,
-            Some(vec!["make".to_string(), "check".to_string()])
-        );
-        let outcome = m.outcome.unwrap();
-        assert_eq!((outcome.step, outcome.status), (Some(99), Some(512)));
-    }
-
-    #[test]
-    fn a_field_of_the_wrong_type_costs_only_that_field() {
-        // Wrong types for the name, seed and outcome; the drv still reads.
-        let json: Value =
-            serde_json::from_str(r#"{"name": 5, "seed": "not a seed", "drv": "/d", "outcome": 3}"#)
-                .unwrap();
-        let m = Manifest::from_json(&json);
-        assert_eq!(m.name, None);
-        assert_eq!(m.seed, None);
-        assert_eq!(m.drv.as_deref(), Some("/d"));
-        assert_eq!(m.outcome, None);
     }
 
     #[test]
@@ -761,10 +541,13 @@ mod tests {
         // time limit fails and says timed-out, as `rewind ls` does; one
         // whose machine faulted fails; one whose guest powered off passes.
         let dir = temp_dir("stops");
-        std::fs::write(dir.join(TRACE_FILE), trace_until(PASSING, Until::JobStart)).unwrap();
+        std::fs::write(dir.join(TRACE), trace_until(PASSING, Until::JobStart)).unwrap();
         let with_stop = |stop: Stop| {
-            let manifest = serde_json::json!({ "outcome": { "stop": stop } });
-            std::fs::write(dir.join(MANIFEST_FILE), manifest.to_string()).unwrap();
+            let mut manifest = manifest_of(PASSING);
+            let outcome = manifest.outcome.as_mut().unwrap();
+            outcome.stop = stop;
+            outcome.status = None;
+            write_manifest(&dir, &manifest);
             Run::open(&dir).unwrap()
         };
 
@@ -782,11 +565,15 @@ mod tests {
         // words for it at the step it stopped at and after, and none
         // before; a run that powered off gives none anywhere.
         let dir = temp_dir("hang-words");
-        std::fs::write(dir.join(TRACE_FILE), trace_until(PASSING, Until::JobExit)).unwrap();
+        std::fs::write(dir.join(TRACE), trace_until(PASSING, Until::JobExit)).unwrap();
         let hung = hung_in_user_space();
         let with_stop = |stop: &Stop| {
-            let manifest = serde_json::json!({ "outcome": { "stop": stop } });
-            std::fs::write(dir.join(MANIFEST_FILE), manifest.to_string()).unwrap();
+            let mut manifest = manifest_of(PASSING);
+            let outcome = manifest.outcome.as_mut().unwrap();
+            outcome.stop = stop.clone();
+            outcome.status = None;
+            outcome.step = 0;
+            write_manifest(&dir, &manifest);
             Run::open(&dir).unwrap()
         };
 
@@ -819,11 +606,15 @@ mod tests {
         // The passing example's boot, before its job, under manifests with
         // two wait statuses.
         let dir = temp_dir("status");
-        std::fs::write(dir.join(TRACE_FILE), trace_until(PASSING, Until::JobStart)).unwrap();
-        std::fs::write(dir.join(MANIFEST_FILE), r#"{"outcome": {"status": 256}}"#).unwrap();
-        assert_eq!(Run::open(&dir).unwrap().verdict(), Verdict::Failed);
-        std::fs::write(dir.join(MANIFEST_FILE), r#"{"outcome": {"status": 0}}"#).unwrap();
-        assert_eq!(Run::open(&dir).unwrap().verdict(), Verdict::Passed);
+        std::fs::write(dir.join(TRACE), trace_until(PASSING, Until::JobStart)).unwrap();
+        let with_status = |status: i32| {
+            let mut manifest = manifest_of(PASSING);
+            manifest.outcome.as_mut().unwrap().status = Some(status);
+            write_manifest(&dir, &manifest);
+            Run::open(&dir).unwrap()
+        };
+        assert_eq!(with_status(1 << 8).verdict(), Verdict::Failed);
+        assert_eq!(with_status(0).verdict(), Verdict::Passed);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -834,37 +625,30 @@ mod tests {
         // next door are read once, all four of them, and kept for the
         // families the app lists.
         let dir = temp_dir("forks");
-        let write = |name: &str, manifest: &str| {
-            let run = dir.join(name);
-            std::fs::create_dir_all(&run).unwrap();
-            small_trace(&run);
-            std::fs::write(run.join(MANIFEST_FILE), manifest).unwrap();
+        let id = |id: &str| RunId::parse(id).unwrap();
+        let write = |run: &str, parent: Option<(&str, u64)>| {
+            let mut manifest = manifest_of(FAILING);
+            manifest.id = id(run);
+            manifest.parent = parent.map(|(run, step)| Parent { run: id(run), step });
+            let dir = dir.join(run);
+            std::fs::create_dir_all(&dir).unwrap();
+            small_trace(&dir);
+            write_manifest(&dir, &manifest);
         };
         const BASE: &str = "0000000000000ba5";
         const F1: &str = "00000000000000f1";
-        let parent = |run: &str, step: u64| serde_json::json!({ "run": run, "step": step });
-        write(BASE, &serde_json::json!({ "id": BASE }).to_string());
-        write(
-            F1,
-            &serde_json::json!({ "id": F1, "parent": parent(BASE, 10) }).to_string(),
-        );
-        write(
-            "00000000000000f2",
-            &serde_json::json!({ "id": "00000000000000f2", "parent": parent(BASE, 20) })
-                .to_string(),
-        );
-        write(
-            "0000000000000003",
-            &serde_json::json!({ "id": "0000000000000003", "parent": parent(F1, 5) }).to_string(),
-        );
+        write(BASE, None);
+        write(F1, Some((BASE, 10)));
+        write("00000000000000f2", Some((BASE, 20)));
+        write("0000000000000003", Some((F1, 5)));
         let session = Session::open(&dir.join(BASE), None).unwrap();
         assert!(session.other.is_none());
         let fork = Session::open(&dir.join(F1), None).unwrap();
         assert_eq!(fork.other.unwrap().path, dir.join(BASE));
         assert_eq!(
-            fork.run.manifest.parent,
-            Some(Parent {
-                id: BASE.into(),
+            fork.run.parent(),
+            Some(&Parent {
+                run: id(BASE),
                 step: 10
             })
         );
@@ -888,7 +672,7 @@ mod tests {
                 replayable: false,
             })
         );
-        assert!(run.path.join(TRACE_FILE).is_file());
+        assert!(run.path.join(TRACE).is_file());
         assert_eq!(run.verdict(), Verdict::Failed);
         std::fs::remove_dir_all(&dir).unwrap();
     }

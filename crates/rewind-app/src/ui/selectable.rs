@@ -744,12 +744,14 @@ impl Scrubber {
             let shown = self
                 .session
                 .as_ref()
-                .and_then(|s| s.run.manifest.id.clone());
+                .and_then(|s| s.run.id())
+                .map(ToString::to_string);
             let compared = self
                 .session
                 .as_ref()
                 .and_then(|s| s.other.as_ref())
-                .and_then(|o| o.manifest.id.clone());
+                .and_then(|o| o.id())
+                .map(ToString::to_string);
             if let [run] = runs.as_slice()
                 && Some(&run.id) != shown.as_ref()
                 && Some(&run.id) != compared.as_ref()

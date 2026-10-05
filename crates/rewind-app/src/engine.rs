@@ -17,9 +17,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
-use crate::run::MANIFEST_FILE;
 use crate::source::{Located, Thread};
 use crate::viewer::{self, FetchedAll};
+use rewind_trace::manifest::MANIFEST;
 
 /// The engine's command, looked up on PATH.
 pub const DEFAULT_PROGRAM: &str = "rewind";
@@ -379,7 +379,7 @@ impl Engine for CliEngine {
             return Err(EngineError::Failed { command, message });
         };
         let summary = result.summary();
-        let dir = if result.dir.join(MANIFEST_FILE).is_file() {
+        let dir = if result.dir.join(MANIFEST).is_file() {
             result.dir
         } else {
             locate_run(&result.id, run).ok_or(EngineError::Lost {
@@ -762,7 +762,7 @@ fn locate_run(id: &str, parent: &Path) -> Option<PathBuf> {
     }
     candidates
         .into_iter()
-        .find(|dir| dir.join(MANIFEST_FILE).is_file())
+        .find(|dir| dir.join(MANIFEST).is_file())
 }
 
 /// The directory the engine keeps its runs in: under REWIND_HOME when it
@@ -1051,7 +1051,7 @@ mod tests {
         let runs = dir.join("runs");
         std::fs::create_dir_all(runs.join("parent")).unwrap();
         std::fs::create_dir_all(runs.join("abc123")).unwrap();
-        std::fs::write(runs.join("abc123").join(MANIFEST_FILE), "{}").unwrap();
+        std::fs::write(runs.join("abc123").join(MANIFEST), "{}").unwrap();
         let json = format!(
             r#"{{"id":"abc123","dir":"{}","status":512,"first_difference":3492}}\n"#,
             runs.join("abc123").display()

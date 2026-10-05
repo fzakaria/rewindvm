@@ -10,17 +10,30 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use rewind_trace::manifest::{MANIFEST, Manifest, Source, Spec};
 use rewind_trace::signal_name;
 
 use crate::describe::{ago, thousands};
 use crate::model::ExitStatus;
-use crate::run::{MANIFEST_FILE, Manifest, Parent, read_manifest, short_id};
+use crate::run::{read_manifest, short_id};
 
 /// What a run without a recorded exit status is listed as.
 const UNKNOWN_ENDING: &str = "unknown";
 
 /// The directory of a run's own keyframes, as the engine names it.
 const KEYFRAMES_DIR: &str = "keyframes";
+
+/// The run a row's run was forked from, by id, and the step it was
+/// forked at.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Parent {
+    pub id: String,
+    pub step: u64,
+}
+
+/// Where `rewind import` puts an imported run's kernel, initrd and image:
+/// a directory named for the run in the home's inputs.
+const IMPORTED_INPUTS_DIR: &str = "inputs";
 
 /// One run, as its manifest describes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -63,33 +76,40 @@ impl RunEntry {
     /// The run in `dir`, from its manifest, or None without one.
     pub fn read(dir: &Path) -> Option<RunEntry> {
         let modified = std::fs::metadata(dir).ok()?.modified().ok()?;
-        let manifest = read_manifest(&dir.join(MANIFEST_FILE)).ok()?;
+        let manifest = read_manifest(&dir.join(MANIFEST)).ok()?;
         let mut entry = RunEntry::from_manifest(dir, &manifest, modified);
         entry.has_keyframes = dir.join(KEYFRAMES_DIR).is_dir();
         Some(entry)
     }
 
     pub fn from_manifest(dir: &Path, manifest: &Manifest, modified: SystemTime) -> RunEntry {
-        let command = manifest.command.as_ref().map(|c| c.join(" "));
-        let title = [manifest.name.clone(), manifest.drv.clone(), command.clone()]
-            .into_iter()
-            .flatten()
-            .find(|t| !t.is_empty())
-            .unwrap_or_else(|| dir.display().to_string());
-        let family = match (&manifest.drv, &command) {
-            (Some(drv), _) => drv.clone(),
-            (None, Some(command)) => format!(
-                "{command}\u{0}{}",
-                manifest.image_hash.as_deref().unwrap_or_default()
-            ),
-            (None, None) => dir.display().to_string(),
+        let spec = &manifest.spec;
+        let command = spec.job.argv.join(" ");
+        let drv = match &manifest.source {
+            Source::Nix { drv, .. } => Some(drv.clone()),
+            Source::Image { .. } => None,
         };
-        let status = manifest
-            .outcome
-            .as_ref()
+        let title = [
+            Some(manifest.name.clone()),
+            drv.clone(),
+            Some(command.clone()),
+        ]
+        .into_iter()
+        .flatten()
+        .find(|t| !t.is_empty())
+        .unwrap_or_else(|| dir.display().to_string());
+        let family = match &drv {
+            Some(drv) => drv.clone(),
+            None => format!(
+                "{command}\u{0}{}",
+                spec.image_hash.as_deref().unwrap_or_default()
+            ),
+        };
+        let outcome = manifest.outcome.as_ref();
+        let status = outcome
             .and_then(|o| o.status)
             .and_then(|s| u32::try_from(s).ok());
-        let stop = manifest.outcome.as_ref().and_then(|o| o.stop.as_ref());
+        let stop = outcome.map(|o| &o.stop);
         let ending = match status.map(ExitStatus::from_raw) {
             Some(ExitStatus::Code(code)) => format!("exited:{code}"),
             Some(ExitStatus::Signal { signo, .. }) => format!("killed:{}", signal_name(signo)),
@@ -107,29 +127,55 @@ impl RunEntry {
         };
         RunEntry {
             dir: dir.to_path_buf(),
-            id: manifest.id.clone().unwrap_or_default(),
+            id: manifest.id.to_string(),
             title,
             family,
-            parent: manifest.parent.clone(),
-            schedule: manifest.schedule.unwrap_or(0),
+            parent: manifest.parent.as_ref().map(|p| Parent {
+                id: p.run.to_string(),
+                step: p.step,
+            }),
+            schedule: spec.schedule,
             ending,
             failed,
             first_difference: manifest.first_difference,
             trace_hash: manifest.trace_hash.clone(),
-            cores: manifest.cores.unwrap_or(DEFAULT_CORES),
-            window: manifest.window,
-            imported: manifest.imported,
-            inputs: manifest.inputs.clone(),
-            created: manifest.created.unwrap_or(0),
+            cores: u64::from(spec.cores),
+            window: spec.window(),
+            imported: imported(manifest),
+            inputs: Some(inputs_key(spec)),
+            created: manifest.created,
             has_keyframes: false,
             modified,
         }
     }
 }
 
-/// The vCPUs of a run whose manifest does not say, as the engine's
-/// default.
-const DEFAULT_CORES: u64 = 1;
+/// Whether the run came from an export: `rewind import` keeps an imported
+/// run's kernel among its inputs, under the run's id.
+fn imported(manifest: &Manifest) -> bool {
+    let Some(dir) = manifest.spec.kernel.parent() else {
+        return false;
+    };
+    let named = |p: Option<&Path>, name: &str| {
+        p.and_then(Path::file_name)
+            .is_some_and(|n| n.to_string_lossy() == name)
+    };
+    named(Some(dir), manifest.id.as_str()) && named(dir.parent(), IMPORTED_INPUTS_DIR)
+}
+
+/// A key for a run's inputs less its schedule and the paths of inputs on
+/// this machine: runs with equal keys are the same build on the same
+/// machine, perturbed or not.
+fn inputs_key(spec: &Spec) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut inputs = spec.unscheduled();
+    inputs.kernel = PathBuf::new();
+    inputs.initrd = PathBuf::new();
+    let json = serde_json::to_string(&inputs).expect("a spec always serializes");
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    json.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
 
 /// Every run under `runs` with a readable manifest.
 pub fn scan(runs: &Path) -> Vec<RunEntry> {
@@ -837,6 +883,8 @@ mod tests {
     use std::time::Duration;
 
     const DRV: &str = "/nix/store/x-mylib.drv";
+    /// The vCPUs a run has unless asked for more.
+    const ONE_CORE: u64 = 1;
     const INPUTS: &str = "one core";
 
     fn run(id: &str, parent: Option<(&str, u64)>, schedule: u64, ending: &str) -> RunEntry {
@@ -854,7 +902,7 @@ mod tests {
             failed: ending != "exited:0",
             first_difference: None,
             trace_hash: Some(format!("hash-{id}")),
-            cores: DEFAULT_CORES,
+            cores: ONE_CORE,
             window: None,
             imported: false,
             inputs: Some(INPUTS.to_string()),
@@ -1007,10 +1055,13 @@ mod tests {
         // A manifest with no wait status whose machine was stopped at its
         // time limit: the start screen and the Runs panel call it
         // timed-out and failed, as the header does, not unknown.
-        let manifest = Manifest::from_json(&serde_json::json!({
-            "id": "abc",
-            "outcome": { "stop": { "how": "timed_out", "since_exit_ms": 0, "doing": { "what": "making_exits" } } }
-        }));
+        let mut manifest = crate::examples::manifest_of(crate::examples::FAILING);
+        let outcome = manifest.outcome.as_mut().unwrap();
+        outcome.status = None;
+        outcome.stop = rewind_trace::stop::Stop::TimedOut(rewind_trace::stop::Timeout {
+            since_exit_ms: 0,
+            doing: rewind_trace::stop::Doing::MakingExits,
+        });
         let entry =
             RunEntry::from_manifest(Path::new("/runs/abc"), &manifest, SystemTime::UNIX_EPOCH);
         assert_eq!(entry.ending, "timed-out");

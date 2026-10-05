@@ -540,9 +540,10 @@ impl Scrubber {
         }
         // Steps jumped from in another run mean nothing in this one; the
         // same run shown again, as an import does, keeps them.
-        let same_run = self.session.as_ref().is_some_and(|shown| {
-            shown.run.manifest.id.is_some() && shown.run.manifest.id == session.run.manifest.id
-        });
+        let same_run = self
+            .session
+            .as_ref()
+            .is_some_and(|shown| shown.run.id().is_some() && shown.run.id() == session.run.id());
         if !same_run {
             self.history = History::default();
             self.stride = Stride::Every;
@@ -577,7 +578,13 @@ impl Scrubber {
             let now = std::time::SystemTime::now();
             let runs = std::iter::once(&session.run)
                 .chain(session.other.as_ref())
-                .map(|run| RunEntry::from_manifest(&run.path, &run.manifest, now))
+                .filter_map(|run| {
+                    Some(RunEntry::from_manifest(
+                        &run.path,
+                        run.manifest.as_ref()?,
+                        now,
+                    ))
+                })
                 .collect();
             self.family = Some(Family { runs });
             self.runs_changed += 1;
@@ -617,7 +624,8 @@ impl Scrubber {
                 .session
                 .as_ref()
                 .filter(|s| s.run.origin == Origin::Local)
-                .and_then(|s| s.run.manifest.id.clone());
+                .and_then(|s| s.run.id())
+                .map(ToString::to_string);
             self.family = shown.and_then(|id| family_of(runs.clone(), &id));
             self.runs_changed += 1;
         }
@@ -671,7 +679,9 @@ impl Scrubber {
     /// them. The runs on screen and compared always have rows of their own.
     pub(super) fn runs_rows(&self) -> Rc<Vec<Row>> {
         let ids = |run: Option<&crate::run::Run>| {
-            run.and_then(|r| r.manifest.id.clone()).unwrap_or_default()
+            run.and_then(|r| r.id())
+                .map(ToString::to_string)
+                .unwrap_or_default()
         };
         let shown = ids(self.session.as_ref().map(|s| &s.run));
         let compared = ids(self.session.as_ref().and_then(|s| s.other.as_ref()));
@@ -916,7 +926,8 @@ impl Scrubber {
                 let shown = this
                     .session
                     .as_ref()
-                    .and_then(|s| s.run.manifest.id.clone());
+                    .and_then(|s| s.run.id())
+                    .map(ToString::to_string);
 
                 // The nearest ancestor of the run on screen that is left.
                 let mut replacement = None;
@@ -1360,7 +1371,7 @@ impl Scrubber {
             return;
         }
         let step = self.step;
-        let id = session.run.manifest.id.as_deref().unwrap_or_default();
+        let id = session.run.id().map_or("", |id| id.as_str());
         let schedule = next_fork_schedule(self.family.as_ref(), id, &self.forks);
         let run = session.run.path.clone();
         let parent = run.clone();
@@ -1525,11 +1536,8 @@ impl Scrubber {
 
         let name = session
             .run
-            .manifest
-            .id
-            .as_deref()
-            .filter(|id| !id.is_empty())
-            .unwrap_or(EXPORT_FALLBACK_NAME);
+            .id()
+            .map_or(EXPORT_FALLBACK_NAME, |id| id.as_str());
         let suggested = format!("{name}.{EXPORT_EXTENSION}");
         let directory = export_directory();
         let fallback = directory.join(&suggested);
@@ -1813,13 +1821,15 @@ mod tests {
         // Forks of base with seeds 1 and 4 on disk, a fork of another run
         // with seed 9, and one of base being made with seed 5: the next
         // fork of base takes 6, and of a run with no forks, 1.
-        let entry = |id: &str, parent: Option<&str>, schedule: u64| {
-            let mut json = serde_json::json!({ "id": id, "spec": { "schedule": schedule } });
-            if let Some(parent) = parent {
-                json["parent"] = serde_json::json!([parent, 10]);
-            }
-            let manifest = crate::run::Manifest::from_json(&json);
-            RunEntry::from_manifest(Path::new(id), &manifest, std::time::SystemTime::UNIX_EPOCH)
+        let manifest = crate::examples::manifest_of(crate::examples::FAILING);
+        let entry = |id: &str, parent: Option<&str>, schedule: u64| RunEntry {
+            id: id.into(),
+            parent: parent.map(|id| crate::family::Parent {
+                id: id.into(),
+                step: 10,
+            }),
+            schedule,
+            ..RunEntry::from_manifest(Path::new(id), &manifest, std::time::SystemTime::UNIX_EPOCH)
         };
         let family = Family {
             runs: vec![
@@ -1858,7 +1868,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let trace = crate::examples::trace_of(crate::examples::FAILING);
-        std::fs::write(dir.join(crate::run::TRACE_FILE), trace).unwrap();
+        std::fs::write(dir.join(rewind_trace::manifest::TRACE), trace).unwrap();
         let mut session = Session::open(&dir, None).unwrap();
         assert_eq!(replay_unavailable(&session, Replay::Fork, false), None);
 

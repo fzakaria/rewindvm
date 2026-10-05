@@ -330,11 +330,10 @@ impl Scrubber {
         }
 
         // Where a forked run branched off its parent.
-        if let Some(parent) = &run.manifest.parent {
-            let schedule = run
-                .manifest
-                .schedule
-                .map_or_else(String::new, |s| format!(" \u{b7} schedule {s}"));
+        if let Some(m) = &run.manifest
+            && let Some(parent) = &m.parent
+        {
+            let schedule = format!(" \u{b7} schedule {}", m.spec.schedule);
             left = left.child(
                 div()
                     .min_w_0()
@@ -344,7 +343,7 @@ impl Scrubber {
                     .text_color(rgb(theme::MUTED))
                     .child(format!(
                         "fork of {} at {}{schedule}",
-                        short_id(&parent.id),
+                        short_id(&parent.run),
                         thousands(parent.step)
                     )),
             );
@@ -553,7 +552,7 @@ impl Scrubber {
             })
         };
         // The step this run was forked from its parent at.
-        if let Some(parent) = &session.run.manifest.parent {
+        if let Some(parent) = session.run.parent() {
             track = track.children(
                 marker(parent.step, size::FORK_MARK_WIDTH, theme::AMBER_PALE).map(|m| {
                     m.bg(rgba(0))
@@ -564,7 +563,11 @@ impl Scrubber {
             );
         }
         // Forks of this run on disk, from this session or before it.
-        let shown_id = session.run.manifest.id.clone().unwrap_or_default();
+        let shown_id = session
+            .run
+            .id()
+            .map(ToString::to_string)
+            .unwrap_or_default();
         let disk_forks = self
             .family
             .iter()
@@ -1736,12 +1739,18 @@ impl Scrubber {
     fn render_runs(&self, family: &Family, cx: &mut Context<Self>) -> Div {
         let rows = self.runs_rows();
         let count = rows.len();
-        let shown_id = self.session().run.manifest.id.clone().unwrap_or_default();
+        let shown_id = self
+            .session()
+            .run
+            .id()
+            .map(ToString::to_string)
+            .unwrap_or_default();
         let compared_id = self
             .session()
             .other
             .as_ref()
-            .and_then(|o| o.manifest.id.clone())
+            .and_then(|o| o.id())
+            .map(ToString::to_string)
             .unwrap_or_default();
         let picked = self.runs_picked.clone();
         let identical = self.identical_forks();
