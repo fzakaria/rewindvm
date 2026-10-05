@@ -145,6 +145,22 @@ pub struct Job {
     /// compared by what they built.
     #[serde(default)]
     pub outputs: Vec<String>,
+    /// What the job's standard output and error are.
+    pub output: Output,
+}
+
+/// What a job's standard output and error are. Programs ask: one whose
+/// output is a terminal writes a line at a time, and colors it; one whose
+/// output is not buffers it and writes it in blocks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Output {
+    /// A terminal in raw mode, as nix-daemon gives a builder a
+    /// pseudoterminal.
+    Terminal,
+    /// Devices that are not a terminal, as `docker run` gives a container
+    /// without -t.
+    Plain,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

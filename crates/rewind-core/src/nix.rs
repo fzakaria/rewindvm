@@ -14,7 +14,7 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 use nix_derivation::store_path::hash_placeholder;
 use nix_derivation::{NixHash, StorePath, StructuredAttrsFiles, nixbase32};
-use rewind_init::{Job, JobFile, Root};
+use rewind_init::{Job, JobFile, Output, Root};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -505,6 +505,8 @@ pub fn job(drv: &Derivation, graphs: &ReferenceGraphs, cores: u32) -> Result<Job
         gid: BUILDER_GID,
         hostname: "localhost".into(),
         root: Root::Store,
+        // nix-daemon gives a builder a pseudoterminal for its output.
+        output: Output::Terminal,
         files,
         outputs: drv
             .outputs

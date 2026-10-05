@@ -118,7 +118,7 @@ diff -ruN a/arch/x86/kernel/cpu/Makefile b/arch/x86/kernel/cpu/Makefile
 diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 --- a/arch/x86/kernel/cpu/rewind.c	1969-12-31 16:00:00.000000000 -0800
 +++ b/arch/x86/kernel/cpu/rewind.c	1969-12-31 16:00:00.000000000 -0800
-@@ -0,0 +1,1188 @@
+@@ -0,0 +1,1302 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Rewind VM guest platform.
@@ -141,6 +141,8 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 + *   - a console, and an event stream of exec, fork, exit, signals, file
 + *     writes and program output, each written to the monitor with the
 + *     guest physical address of a record,
++ *   - a terminal for the workload's output, as nix-daemon gives a
++ *     builder, whose writes join the event stream,
 + *   - the CPU count the affinity system calls report, which may exceed the
 + *     one vCPU (rewind.cpus=).
 + *
@@ -172,6 +174,8 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +#include <linux/static_call.h>
 +#include <linux/string.h>
 +#include <linux/task_work.h>
++#include <linux/tty.h>
++#include <linux/tty_driver.h>
 +#include <linux/uaccess.h>
 +#include <linux/umh.h>
 +#include <linux/wait.h>
@@ -1279,6 +1283,112 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +	  .mode = 0600 },
 +};
 +
++/*
++ * /dev/rewind-tty0 and /dev/rewind-tty1: the workload's standard output
++ * and error as a terminal, the way nix-daemon gives a builder a
++ * pseudoterminal. A program that asks whether its output is a terminal is
++ * told it is, and writes a line at a time rather than in blocks, as it
++ * does under Nix. The lines start raw, as cfmakeraw() leaves Nix's, so
++ * nothing written is translated, and every write is recorded with the pid
++ * that made it, as the plain devices above record theirs. Line 0 is
++ * standard output, fd 1, and line 1 standard error, fd 2.
++ */
++#define REWIND_TTY_LINES	2
++#define REWIND_TTY_ROOM		65536
++
++static struct tty_driver *rewind_tty_driver;
++static struct tty_port rewind_tty_ports[REWIND_TTY_LINES];
++static const struct tty_port_operations rewind_tty_port_ops;
++
++static int rewind_tty_open(struct tty_struct *tty, struct file *filp)
++{
++	/* One record for each write, as large as a record holds. */
++	set_bit(TTY_NO_WRITE_SPLIT, &tty->flags);
++	return tty_port_open(&rewind_tty_ports[tty->index], tty, filp);
++}
++
++static void rewind_tty_close(struct tty_struct *tty, struct file *filp)
++{
++	tty_port_close(&rewind_tty_ports[tty->index], tty, filp);
++}
++
++static void rewind_tty_hangup(struct tty_struct *tty)
++{
++	tty_port_hangup(&rewind_tty_ports[tty->index]);
++}
++
++static ssize_t rewind_tty_write(struct tty_struct *tty, const u8 *buf,
++				size_t count)
++{
++	u32 fd = tty->index + 1;
++	size_t done = 0;
++
++	while (done < count) {
++		size_t n = min(count - done, REWIND_PAYLOAD_MAX);
++
++		rewind_emit(REWIND_EV_OUTPUT, 0, current->tgid, current->pid,
++			    fd, buf + done, n, NULL, 0);
++		done += n;
++	}
++	return count;
++}
++
++static unsigned int rewind_tty_write_room(struct tty_struct *tty)
++{
++	return REWIND_TTY_ROOM;
++}
++
++static const struct tty_operations rewind_tty_ops = {
++	.open		= rewind_tty_open,
++	.close		= rewind_tty_close,
++	.hangup		= rewind_tty_hangup,
++	.write		= rewind_tty_write,
++	.write_room	= rewind_tty_write_room,
++};
++
++static int __init rewind_tty_init(void)
++{
++	struct tty_driver *driver;
++	struct ktermios *t;
++	int i, err;
++
++	driver = tty_alloc_driver(REWIND_TTY_LINES,
++				  TTY_DRIVER_RESET_TERMIOS |
++				  TTY_DRIVER_REAL_RAW);
++	if (IS_ERR(driver))
++		return PTR_ERR(driver);
++
++	driver->driver_name = "rewind-tty";
++	driver->name = "rewind-tty";
++	driver->type = TTY_DRIVER_TYPE_SERIAL;
++	driver->subtype = SERIAL_TYPE_NORMAL;
++	driver->init_termios = tty_std_termios;
++	t = &driver->init_termios;
++	t->c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR |
++			ICRNL | IXON);
++	t->c_oflag &= ~OPOST;
++	t->c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
++	t->c_cflag &= ~(CSIZE | PARENB);
++	t->c_cflag |= CS8;
++	tty_set_operations(driver, &rewind_tty_ops);
++
++	for (i = 0; i < REWIND_TTY_LINES; i++) {
++		tty_port_init(&rewind_tty_ports[i]);
++		rewind_tty_ports[i].ops = &rewind_tty_port_ops;
++		tty_port_link_device(&rewind_tty_ports[i], driver, i);
++	}
++
++	err = tty_register_driver(driver);
++	if (err) {
++		tty_driver_kref_put(driver);
++		for (i = 0; i < REWIND_TTY_LINES; i++)
++			tty_port_destroy(&rewind_tty_ports[i]);
++		return err;
++	}
++	rewind_tty_driver = driver;
++	return 0;
++}
++
 +static int __init rewind_events_init(void)
 +{
 +	int i, err;
@@ -1297,6 +1407,10 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +		if (err)
 +			return err;
 +	}
++
++	err = rewind_tty_init();
++	if (err)
++		return err;
 +
 +	WARN_ON(register_trace_sched_process_exec(rewind_probe_exec, NULL));
 +	WARN_ON(register_trace_sched_process_fork(rewind_probe_fork, NULL));

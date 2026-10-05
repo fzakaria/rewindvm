@@ -17,7 +17,7 @@ use std::process::{Command, Stdio};
 use rewind_init::{
     EXIT_MARK, IMAGE_ROOT, INSPECT_ARG, INSPECT_BEGIN_MARK, INSPECT_CAT, INSPECT_END_MARK,
     INSPECT_FILES, INSPECT_RUNNING, INSPECT_SHELL, INSPECT_WITH, InspectStatus, JOB_PATH, Job,
-    OUTPUT_MARK, RESIZE_ESCAPE, RESIZE_LEN, RESIZE_TAG, RUNNING_ENV, Root, SECTION_MAPS,
+    OUTPUT_MARK, Output, RESIZE_ESCAPE, RESIZE_LEN, RESIZE_TAG, RUNNING_ENV, Root, SECTION_MAPS,
     SECTION_PID, START_MARK, nar_hash, section_header,
 };
 
@@ -32,9 +32,13 @@ const DEVICE_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
 const DEVICE_POLL: std::time::Duration = std::time::Duration::from_millis(1);
 
 /// Where output goes: one device per stream, so each write reaches the
-/// monitor tagged with the pid that made it.
+/// monitor tagged with the pid that made it. The plain devices are not a
+/// terminal; the guest kernel's terminal lines are, for a job that asks
+/// for one.
 const STDOUT_DEVICE: &str = "/dev/rewind-stdout";
 const STDERR_DEVICE: &str = "/dev/rewind-stderr";
+const STDOUT_TERMINAL: &str = "/dev/rewind-tty0";
+const STDERR_TERMINAL: &str = "/dev/rewind-tty1";
 const MARK_DEVICE: &str = "/dev/rewind";
 
 type Result<T> = std::result::Result<T, String>;
@@ -285,8 +289,13 @@ fn default_hosts(image: &Path, root: &Path) -> Result<()> {
 /// then stops the rest. Returns the main process's wait status.
 fn spawn_and_reap(job: &Job, root: &str) -> Result<i32> {
     let program = resolve(job, root)?;
-    let stdout = open_device(STDOUT_DEVICE)?;
-    let stderr = open_device(STDERR_DEVICE)?;
+    let (stdout, stderr) = match job.output {
+        Output::Plain => (open_device(STDOUT_DEVICE)?, open_device(STDERR_DEVICE)?),
+        Output::Terminal => (
+            open_terminal(STDOUT_TERMINAL, job)?,
+            open_terminal(STDERR_TERMINAL, job)?,
+        ),
+    };
 
     let mut cmd = Command::new(&program);
     cmd.arg0(&job.argv[0])
@@ -1160,6 +1169,29 @@ fn open_device(path: &str) -> Result<File> {
         .map_err(|e| format!("opening {path}: {e}"))
 }
 
+/// A terminal line for the job's output, as nix-daemon opens a builder's
+/// pseudoterminal: not init's controlling terminal, and owned by the job's
+/// user, so a program can open it again by name, as /dev/stdout.
+fn open_terminal(path: &str, job: &Job) -> Result<File> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NOCTTY)
+        .open(path)
+        .map_err(|e| format!("opening {path}: {e}"))?;
+    // SAFETY: changes the owner of the open file's device node.
+    let rc = unsafe { libc::fchown(file.as_raw_fd(), job.uid, job.gid) };
+    if rc != 0 {
+        return Err(format!(
+            "giving {path} to the job: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(file)
+}
+
 /// Writes a mark to the timeline. Best effort.
 fn mark(text: &str) {
     if let Ok(mut f) = open_device(MARK_DEVICE) {
@@ -1277,6 +1309,7 @@ mod tests {
             root: Root::Store,
             files: vec![],
             outputs: vec![],
+            output: Output::Terminal,
         };
         assert_eq!(
             resolve(&job, "/").unwrap(),

@@ -1818,6 +1818,7 @@ pub(crate) mod tests {
                 root: rewind_init::Root::Initramfs,
                 files: Vec::new(),
                 outputs: Vec::new(),
+                output: rewind_init::Output::Plain,
             },
         }
     }

@@ -22,7 +22,7 @@ use rewind_core::run::{
 };
 use rewind_core::{Echo, Execution, Guest, Home, Keyframes, Run, Source, Spec, TimeLimit};
 use rewind_core::{compare, export, image, nix};
-use rewind_init::{Job, Root};
+use rewind_init::{Job, Output, Root};
 
 /// The help of every argument that names a run.
 const RUN_HELP: &str = "The run: its id or the start of one, its name, @ for the newest";
@@ -217,6 +217,14 @@ struct ImageArgs {
     /// The working directory inside the VM.
     #[arg(long, default_value = "/")]
     cwd: String,
+    /// Give the command a terminal for its output, as `docker run -t` does.
+    ///
+    /// A program whose output is a terminal writes it a line at a time and
+    /// may color it; without one, it buffers its output and writes it in
+    /// blocks, as under `docker run` without -t. A Nix build always gets
+    /// one, as nix-daemon gives a builder.
+    #[arg(long, short = 't')]
+    tty: bool,
     /// The command and its arguments.
     #[arg(last = true)]
     argv: Vec<String>,
@@ -2078,6 +2086,11 @@ fn prepare_image(home: &Home, args: &ImageArgs) -> Result<(String, Source, Optio
         root: Root::Image,
         files: Vec::new(),
         outputs: Vec::new(),
+        output: if args.tty {
+            Output::Terminal
+        } else {
+            Output::Plain
+        },
     };
     let source = Source::Image {
         root: root.display().to_string(),

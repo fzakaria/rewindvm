@@ -200,8 +200,12 @@ Booting it and running `/bin/true` takes 315 exits.
 The same patch makes the kernel report what the guest does. It registers
 probes on the `sched_process_exec`, `fork`, `exit`, `signal_deliver` and
 `sys_enter` tracepoints, and adds a console and three devices:
-`/dev/rewind-stdout`, `/dev/rewind-stderr` and `/dev/rewind` for marks. Each
-report is a record in a static buffer. The kernel writes the buffer's physical
+`/dev/rewind-stdout`, `/dev/rewind-stderr` and `/dev/rewind` for marks. It
+also adds a terminal of two lines, `/dev/rewind-tty0` and `/dev/rewind-tty1`,
+raw as Nix leaves a builder's pseudoterminal: a Nix build's output goes there,
+as does a command's run with `--tty`, so programs that ask see a terminal and
+write a line at a time, as they do under nix-daemon. Each write to either is a
+record with the pid that made it. Each report is a record in a static buffer. The kernel writes the buffer's physical
 address to a port, and the monitor reads the record out of guest memory and
 stamps it with the step.
 

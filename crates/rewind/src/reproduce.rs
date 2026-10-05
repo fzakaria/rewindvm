@@ -8,6 +8,7 @@
 
 use rewind_core::run::{BASE_CMDLINE, DEFAULT_CORES, DEFAULT_QUANTUM};
 use rewind_core::{Manifest, Source};
+use rewind_init::Output;
 
 /// The arguments after `rewind` that make the run `m` describes again: a
 /// fork of its parent, or a run or Nix build from boot. Inputs no
@@ -65,6 +66,9 @@ pub fn command(m: &Manifest) -> Result<Vec<String>, Unset> {
             };
             for (key, value) in env {
                 flag(&mut args, "env", format!("{key}={value}"));
+            }
+            if job.output == Output::Terminal {
+                args.push("--tty".into());
             }
             None
         }
@@ -206,6 +210,7 @@ mod tests {
             root: Root::Image,
             files: Vec::new(),
             outputs: Vec::new(),
+            output: Output::Plain,
         }
     }
 
@@ -231,13 +236,15 @@ mod tests {
     #[test]
     fn a_command_in_a_root_spells_out_every_input() {
         // Every machine option away from its default, an environment
-        // variable after the default PATH, a working directory, extra
-        // kernel arguments, and a run that timed out after 2.5 s.
+        // variable after the default PATH, a working directory, a
+        // terminal, extra kernel arguments, and a run that timed out after
+        // 2.5 s.
         let mut s = spec(job(
             &["make", "check"],
             &[("PATH", crate::DEFAULT_PATH), ("CC", "gcc -O1")],
             "/src",
         ));
+        s.job.output = Output::Terminal;
         s.seed = 3;
         s.schedule = 4;
         s.schedule_from = 100;
@@ -264,7 +271,7 @@ mod tests {
             wall_ms: 2_500,
         });
         let mut want = words(
-            "run --root mylib.tar --cwd /src --env CC=gcc_-O1 --epoch 1791072000 --seed 3 \
+            "run --root mylib.tar --cwd /src --env CC=gcc_-O1 --tty --epoch 1791072000 --seed 3 \
              --schedule 4 --schedule-from 100 --schedule-until 200 --cores 4 --mem 2048 \
              --cpu host --clock branches --kernel-args norandmaps --timeout 3 --name",
         );

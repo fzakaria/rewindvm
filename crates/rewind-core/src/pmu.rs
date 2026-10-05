@@ -311,6 +311,7 @@ pub fn selftest(guest: &Guest) -> Result<SelfTest> {
             root: Root::Initramfs,
             files: Vec::new(),
             outputs: Vec::new(),
+            output: rewind_init::Output::Plain,
         },
     };
     let config = spec.config()?;
