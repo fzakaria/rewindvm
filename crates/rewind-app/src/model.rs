@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-use rewind_trace::{Event, EventKind, Trace};
+use rewind_trace::{Event, EventKind, JobExit, Trace};
 
 use crate::shown_line::{Pen, shown};
 
@@ -49,21 +49,6 @@ const BOOT_PHASE: &str = "boot";
 const SETUP_PHASE: &str = "setup";
 /// The segment from the start mark on, in a job without phases.
 const JOB_PHASE: &str = "job";
-
-/// Marks the guest's init writes to /dev/rewind (the constants in
-/// crates/rewind-init/src/lib.rs). They shape the timeline and the verdict
-/// and never show in the log.
-mod init_mark {
-    /// Every init mark starts with this.
-    pub const PREFIX: &str = "rewind-";
-    /// Written right before the job starts: everything before is boot.
-    pub const START: &str = "rewind-start";
-    /// Written when the job exits, followed by its wait status.
-    pub const EXIT: &str = "rewind-exit ";
-    /// Written per output after a successful job: the path, a space, and
-    /// the output's tree hash.
-    pub const OUTPUT: &str = "rewind-output ";
-}
 
 /// Opens of device files (/dev/null, /dev/rewind and the like) are not
 /// files the job wrote, and are left out of the files list.
@@ -331,14 +316,6 @@ impl Motion {
     }
 }
 
-/// The job's exit, as the guest's init reported it with its exit mark.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct JobExit {
-    pub step: u64,
-    /// The job's wait status.
-    pub status: u32,
-}
-
 /// One run, indexed for scrubbing.
 pub struct Timeline {
     pub trace: Trace,
@@ -375,8 +352,8 @@ impl Timeline {
         let phases = phase_spans(&trace, &output_lines, total);
         let rows = process_rows(&trace);
         let files = file_events(&trace);
-        let job_exit = job_exit(&trace);
-        let job_start = job_start(&trace);
+        let job_exit = trace.job_exit();
+        let job_start = trace.job_start();
         let failure = find_failure(&trace, job_exit, total, stopped);
 
         // Command names for event descriptions: the latest process per pid
@@ -642,10 +619,17 @@ fn starts_a_word(text: &str, marker: &str) -> bool {
     })
 }
 
-/// A mark someone wrote to /dev/rewind on purpose: not empty, and not one
-/// of init's own.
-fn is_user_mark(text: &str) -> bool {
-    !text.trim().is_empty() && !text.starts_with(init_mark::PREFIX)
+/// The text of a mark someone wrote to /dev/rewind on purpose: not
+/// empty, and not one of init's own, which shape the timeline and the
+/// verdict instead.
+fn user_mark(event: &Event) -> Option<&str> {
+    let EventKind::Mark { text } = &event.kind else {
+        return None;
+    };
+    if text.trim().is_empty() || event.init_mark().is_some() {
+        return None;
+    }
+    Some(text)
 }
 
 /// Standard output and error as lines, plus user marks, in step order.
@@ -680,16 +664,16 @@ fn output_lines(trace: &Trace) -> Vec<LogLine> {
     let marks: Vec<LogLine> = trace
         .events
         .iter()
-        .filter_map(|e| match &e.kind {
-            EventKind::Mark { text } if is_user_mark(text) => Some(LogLine {
+        .filter_map(|e| {
+            let text = user_mark(e)?;
+            Some(LogLine {
                 step: e.step,
                 pid: e.pid,
                 stream: Stream::Mark,
                 text: format!("{MARK_LINE_PREFIX}{text}"),
                 tone: Tone::Phase,
                 pens: Vec::new(),
-            }),
-            _ => None,
+            })
         })
         .collect();
     if !marks.is_empty() {
@@ -776,7 +760,7 @@ fn phase_spans(trace: &Trace, lines: &[LogLine], total: u64) -> Vec<PhaseSpan> {
     }
 
     // The start mark, if init wrote one, splits boot from the job.
-    let start_mark = job_start(trace);
+    let start_mark = trace.job_start();
     let first = starts.first().map(|(step, _)| *step);
     let mut openers: Vec<(u64, &str)> = Vec::new();
     match (start_mark, first) {
@@ -821,28 +805,6 @@ fn short_phase_name(name: &str) -> String {
         Some(short) if !short.is_empty() => short.to_string(),
         _ => name.to_string(),
     }
-}
-
-/// The step the job started on, from init's start mark.
-fn job_start(trace: &Trace) -> Option<u64> {
-    trace.events.iter().find_map(|e| match &e.kind {
-        EventKind::Mark { text } if text.trim() == init_mark::START => Some(e.step),
-        _ => None,
-    })
-}
-
-/// The job's exit, from init's exit mark.
-fn job_exit(trace: &Trace) -> Option<JobExit> {
-    trace.events.iter().find_map(|e| {
-        let EventKind::Mark { text } = &e.kind else {
-            return None;
-        };
-        let status = text.strip_prefix(init_mark::EXIT)?.trim().parse().ok()?;
-        Some(JobExit {
-            step: e.step,
-            status,
-        })
-    })
 }
 
 /// Where the run failed. A job whose init reports status 0 did not fail.
@@ -952,11 +914,10 @@ fn file_events(trace: &Trace) -> Vec<FileEvent> {
                 EventKind::Open { path, .. } => (FileOp::Write, path.clone(), None),
                 EventKind::Unlink { path } => (FileOp::Unlink, path.clone(), None),
                 EventKind::Rename { from, to } => (FileOp::Rename, to.clone(), Some(from.clone())),
-                EventKind::Mark { text } => {
-                    let rest = text.strip_prefix(init_mark::OUTPUT)?;
-                    let (path, hash) = rest.trim().rsplit_once(' ')?;
-                    (FileOp::Output, path.to_string(), Some(hash.to_string()))
-                }
+                EventKind::Mark { .. } => match e.init_mark()? {
+                    rewind_trace::Mark::Output { path, hash } => (FileOp::Output, path, Some(hash)),
+                    _ => return None,
+                },
                 _ => return None,
             };
             if path.starts_with(DEVICE_PREFIX) {
@@ -1438,6 +1399,32 @@ mod tests {
                 step: 28,
                 status: 2 << 8
             })
+        );
+    }
+
+    #[test]
+    fn a_job_cannot_write_inits_marks() {
+        // The failing job, with cc (pid 44) writing init's exit words with
+        // status 0 before init's own exit mark: the job still failed with
+        // init's status, and the forged words show in the log as the job's
+        // own mark.
+        let mut events = job(2 << 8).trace.events;
+        events.push(ev(
+            26,
+            44,
+            44,
+            EventKind::Mark {
+                text: "rewind-exit 0".into(),
+            },
+        ));
+        events.sort_by_key(|e| e.step);
+        let t = Timeline::new(Trace { events }, None, None);
+        assert_eq!(t.job_exit.map(|j| j.status), Some(2 << 8));
+        assert!(t.failure.is_some());
+        assert!(
+            t.lines(LogFilter::Output)
+                .iter()
+                .any(|l| l.stream == Stream::Mark && l.text.ends_with("rewind-exit 0"))
         );
     }
 

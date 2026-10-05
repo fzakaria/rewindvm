@@ -106,6 +106,19 @@ pub enum DecodeError {
 }
 
 impl Event {
+    /// The mark this event is when init wrote it: a mark from init's pid
+    /// that reads as one of init's. The job can write the same words, and
+    /// they stay plain marks.
+    pub fn init_mark(&self) -> Option<rewind_init::Mark> {
+        let EventKind::Mark { text } = &self.kind else {
+            return None;
+        };
+        if self.pid != rewind_init::INIT_PID {
+            return None;
+        }
+        rewind_init::Mark::parse(text)
+    }
+
     /// Decodes one record as the guest wrote it.
     pub fn decode(step: u64, record: &[u8]) -> Result<Event, DecodeError> {
         if record.len() < HEADER_LEN {

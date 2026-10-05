@@ -3504,6 +3504,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
+name = "nix-archive"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "033c9031c4b23ed3d19a97810eb4e89f81fc7fbdd0afba351c56f6684350265e"
+dependencies = [
+ "digest",
+ "libc",
+ "rustix",
+ "sha2",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "no_std_io2"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4827,6 +4840,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rewind-init"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "nix-archive",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "rewind-text-input"
 version = "0.1.0"
 dependencies = [
@@ -4838,6 +4861,7 @@ dependencies = [
 name = "rewind-trace"
 version = "0.4.1"
 dependencies = [
+ "rewind-init",
  "serde",
  "thiserror 2.0.21",
 ]

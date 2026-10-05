@@ -12,11 +12,13 @@ use crate::show::{self, KernelThreads};
 /// how it ended, and the outputs its job hashed and left uncreated.
 pub fn run(run: &Run) -> Result<Value> {
     let m = &run.manifest;
-    let (status, hashed) = show::outcome_key(run)?;
+    let show::OutcomeKey {
+        status,
+        outputs: hashed,
+    } = show::outcome_key(run)?;
     let missing = show::missing_outputs(&m.spec.job.outputs, &hashed);
     let outputs: Vec<Value> = hashed
         .iter()
-        .filter_map(|h| h.split_once(' '))
         .map(|(path, hash)| json!({ "path": path, "hash": hash }))
         .collect();
     let outcome = m.outcome.as_ref();

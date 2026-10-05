@@ -36,29 +36,27 @@ pub fn finished(run: &Run, stop: Option<&str>) -> String {
     )
 }
 
-/// How a run ended, as something two runs can be compared by: the exit
-/// status and the hash of every output.
-pub fn outcome_key(run: &Run) -> anyhow::Result<(Option<i32>, Vec<String>)> {
-    let status = run.manifest.outcome.as_ref().and_then(|o| o.status);
-    let mut outputs = Vec::new();
-    for e in &run.trace()?.events {
-        if let EventKind::Mark { text } = &e.kind
-            && let Some(rest) = text.strip_prefix(rewind_init::OUTPUT_MARK)
-        {
-            outputs.push(rest.to_string());
-        }
-    }
-    Ok((status, outputs))
+/// How a run ended, as something two runs can be compared by.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutcomeKey {
+    /// The job's wait status.
+    pub status: Option<i32>,
+    /// Each output init hashed, by path, with its hash.
+    pub outputs: Vec<(String, String)>,
+}
+
+/// How `run` ended: its exit status and the hash of every output.
+pub fn outcome_key(run: &Run) -> anyhow::Result<OutcomeKey> {
+    Ok(OutcomeKey {
+        status: run.manifest.outcome.as_ref().and_then(|o| o.status),
+        outputs: run.trace()?.outputs(),
+    })
 }
 
 /// The step the job started on, from init's start mark; 0 if there is
 /// none.
 pub fn start_step(trace: &Trace) -> u64 {
-    trace
-        .events
-        .iter()
-        .find(|e| matches!(&e.kind, EventKind::Mark { text } if text == rewind_init::START_MARK))
-        .map_or(0, |e| e.step)
+    trace.job_start().unwrap_or(0)
 }
 
 /// A file size the way people read one: bytes, KB or MB, in decimal
@@ -99,17 +97,13 @@ pub fn divergence_in(left: &Trace, right: &Trace, argv: &[String]) -> String {
 }
 
 /// The outputs the job was to create that init never hashed, from the
-/// `path hash` lines of [`outcome_key`]. Init hashes outputs only after
+/// paths and hashes of [`outcome_key`]. Init hashes outputs only after
 /// the job exits 0, so for such a job these are the outputs it did not
 /// create.
-pub fn missing_outputs(expected: &[String], hashed: &[String]) -> Vec<String> {
+pub fn missing_outputs(expected: &[String], hashed: &[(String, String)]) -> Vec<String> {
     expected
         .iter()
-        .filter(|path| {
-            !hashed
-                .iter()
-                .any(|h| h.split_once(' ').is_some_and(|(p, _)| p == *path))
-        })
+        .filter(|path| !hashed.iter().any(|(p, _)| p == *path))
         .cloned()
         .collect()
 }
@@ -213,7 +207,10 @@ pub const DIFFERS_NOTE: &str = "rewind: a store path names a build's inputs, not
 
 /// One line per run for `rewind check`.
 pub fn outcome_line(run: &Run) -> anyhow::Result<String> {
-    let (status_, outputs) = outcome_key(run)?;
+    let OutcomeKey {
+        status: status_,
+        outputs,
+    } = outcome_key(run)?;
     let missing = missing_outputs(&run.manifest.spec.job.outputs, &outputs);
     let stop = run
         .manifest
@@ -223,7 +220,6 @@ pub fn outcome_line(run: &Run) -> anyhow::Result<String> {
     let steps = run.manifest.outcome.as_ref().map_or(0, |o| o.step);
     let hashes: Vec<String> = outputs
         .iter()
-        .filter_map(|o| o.split_once(' '))
         .map(|(_, h)| {
             let digest = h.strip_prefix(rewind_init::NAR_HASH_PREFIX).unwrap_or(h);
             digest.get(..CHECK_HASH_SHOWN).unwrap_or(digest).to_string()
@@ -401,7 +397,7 @@ mod tests {
     #[test]
     fn an_output_init_never_hashed_is_missing() {
         let expected = vec![OUT.to_string(), DEV.to_string()];
-        let hashed = vec![format!("{OUT} 0123abcd")];
+        let hashed = vec![(OUT.to_string(), "0123abcd".to_string())];
         assert_eq!(missing_outputs(&expected, &hashed), vec![DEV.to_string()]);
         assert!(missing_outputs(&expected[..1], &hashed).is_empty());
     }

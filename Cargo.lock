@@ -725,6 +725,7 @@ dependencies = [
 name = "rewind-trace"
 version = "0.4.1"
 dependencies = [
+ "rewind-init",
  "serde",
  "thiserror",
 ]

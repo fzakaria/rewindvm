@@ -961,8 +961,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
             // When the unperturbed run is the one that fails, the schedules
             // that end differently are the ones that pass. A job that exits
             // 0 without creating every output fails, as under nix-daemon.
-            let base_missing = show::missing_outputs(&base.manifest.spec.job.outputs, &base_key.1);
-            let base_failed = !show::passed(base_key.0, &base_missing);
+            let base_missing =
+                show::missing_outputs(&base.manifest.spec.job.outputs, &base_key.outputs);
+            let base_failed = !show::passed(base_key.status, &base_missing);
             let differs = |run: &Run| -> Result<bool> { Ok(show::outcome_key(run)? != base_key) };
 
             // Perturbed schedules, a machine per job at a time, in order.
@@ -2299,12 +2300,7 @@ struct Compared {
 /// Asks this machine's store and the binary caches `lookup` names about
 /// each output the run's job hashed.
 fn compare_outputs(run: &Run, lookup: &compare::Lookup) -> Result<Compared> {
-    let (status, hashed) = show::outcome_key(run)?;
-    let outputs: Vec<(String, String)> = hashed
-        .iter()
-        .filter_map(|h| h.split_once(' '))
-        .map(|(path, hash)| (path.to_string(), hash.to_string()))
-        .collect();
+    let show::OutcomeKey { status, outputs } = show::outcome_key(run)?;
 
     // The caches to ask; without Nix's configuration, only the store.
     let caches = match compare::caches(lookup) {
@@ -2321,7 +2317,7 @@ fn compare_outputs(run: &Run, lookup: &compare::Lookup) -> Result<Compared> {
     };
     let results = compare::compare(&outputs, &caches, &netrc);
     let missing = if status == Some(0) {
-        show::missing_outputs(&run.manifest.spec.job.outputs, &hashed)
+        show::missing_outputs(&run.manifest.spec.job.outputs, &outputs)
     } else {
         Vec::new()
     };

@@ -56,18 +56,28 @@ in
 
   # The app is a Cargo workspace of its own with its own Cargo.lock, so the
   # source is only that crate, the rewind-trace crate it reads traces with,
-  # and the root Cargo.toml that rewind-trace inherits its version, edition
-  # and license from. A change to the engine does not rebuild the app.
+  # the rewind-init crate whose marks traces hold, and the root Cargo.toml
+  # that rewind-trace inherits its version, edition and license from. A
+  # change to the rest of the engine does not rebuild the app.
   app = skipCheck // {
     inherit version;
     strictDeps = true;
     src = fs.toSource {
       root = ../.;
-      fileset = fs.difference (fs.unions [
-        ../Cargo.toml
-        ../crates/rewind-app
-        ../crates/rewind-trace
-      ]) (fs.maybeMissing ../crates/rewind-app/target);
+      fileset =
+        fs.difference
+          (fs.unions [
+            ../Cargo.toml
+            ../crates/rewind-app
+            ../crates/rewind-trace
+            ../crates/rewind-init
+          ])
+          (
+            fs.unions [
+              (fs.maybeMissing ../crates/rewind-app/target)
+              (fs.maybeMissing ../crates/rewind-init/target)
+            ]
+          );
     };
     cargoLock = ../crates/rewind-app/Cargo.lock;
     cargoToml = ../crates/rewind-app/Cargo.toml;

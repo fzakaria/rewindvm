@@ -19,6 +19,9 @@ use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::Path;
 
 pub use event::{DecodeError, Event, EventKind, HEADER_LEN, signal_name};
+/// Init's marks, which every trace holds, for readers that do not depend
+/// on the init themselves.
+pub use rewind_init::Mark;
 
 /// The words, before the step, that a replay making other records than its
 /// run made is reported with: the engine writes them and the desktop app
@@ -90,6 +93,14 @@ pub struct Divergence {
     pub right_step: u64,
 }
 
+/// The job's exit, as init reported it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct JobExit {
+    pub step: u64,
+    /// The job's wait status.
+    pub status: i32,
+}
+
 /// A line of output, reassembled from the writes that made it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Line {
@@ -142,6 +153,38 @@ impl Trace {
     /// The step of the event after `step`, if any.
     pub fn next_step(&self, step: u64) -> Option<u64> {
         self.events.get(self.index_after(step)).map(|e| e.step)
+    }
+
+    /// The step the job started on, from init's start mark: before it the
+    /// VM is still booting.
+    pub fn job_start(&self) -> Option<u64> {
+        self.events
+            .iter()
+            .find(|e| e.init_mark() == Some(Mark::Start))
+            .map(|e| e.step)
+    }
+
+    /// The job's exit, from init's exit mark.
+    pub fn job_exit(&self) -> Option<JobExit> {
+        self.events.iter().find_map(|e| match e.init_mark()? {
+            Mark::Exit { status } => Some(JobExit {
+                step: e.step,
+                status,
+            }),
+            _ => None,
+        })
+    }
+
+    /// What the job built, as init reported after it succeeded: each
+    /// output's path and tree hash.
+    pub fn outputs(&self) -> Vec<(String, String)> {
+        self.events
+            .iter()
+            .filter_map(|e| match e.init_mark()? {
+                Mark::Output { path, hash } => Some((path, hash)),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Every process the trace saw, in the order they started.
@@ -564,6 +607,47 @@ mod tests {
                 bytes: text.as_bytes().to_vec(),
             },
         )
+    }
+
+    #[test]
+    fn only_inits_own_marks_frame_the_job() {
+        // Init (pid 1) marks the start, an output and the exit; the job
+        // (pid 7) writes the same words first. Only init's count, and the
+        // job's are plain marks.
+        let mark = |step, pid, text: &str| {
+            ev(
+                step,
+                pid,
+                pid,
+                EventKind::Mark {
+                    text: text.to_string(),
+                },
+            )
+        };
+        let trace = Trace {
+            events: vec![
+                mark(5, 1, "rewind-start"),
+                mark(6, 7, "rewind-exit 0"),
+                mark(7, 7, "rewind-output /nix/store/x-fake sha256:00"),
+                mark(8, 7, "rewind-start"),
+                mark(9, 1, "rewind-output /nix/store/x-out sha256:ff"),
+                mark(10, 1, "rewind-exit 512"),
+            ],
+        };
+        assert_eq!(trace.job_start(), Some(5));
+        assert_eq!(
+            trace.job_exit(),
+            Some(JobExit {
+                step: 10,
+                status: 512
+            })
+        );
+        assert_eq!(
+            trace.outputs(),
+            vec![("/nix/store/x-out".to_string(), "sha256:ff".to_string())]
+        );
+        assert_eq!(trace.events[1].init_mark(), None);
+        assert_eq!(trace.events[0].init_mark(), Some(rewind_init::Mark::Start));
     }
 
     fn sample() -> Trace {

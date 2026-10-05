@@ -738,7 +738,7 @@ impl Machine {
     /// or the idle task's. An interrupt the APIC does not accept goes again
     /// at the next exit. Only for machines forked from a run, since the
     /// request is not part of any recording.
-    pub fn request_inspection(&mut self, args: &[&str]) -> Result<()> {
+    pub fn request_inspection(&mut self, args: &[String]) -> Result<()> {
         let shared = self
             .dev
             .shared

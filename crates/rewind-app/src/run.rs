@@ -405,7 +405,11 @@ impl Run {
             .as_ref()
             .and_then(|o| o.status)
             .and_then(|s| u32::try_from(s).ok());
-        from_manifest.or(self.timeline.job_exit.map(|j| j.status))
+        let from_mark = self
+            .timeline
+            .job_exit
+            .and_then(|j| u32::try_from(j.status).ok());
+        from_manifest.or(from_mark)
     }
 
     /// How the run ended, in the engine's words when there is a wait

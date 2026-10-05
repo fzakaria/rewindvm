@@ -12,7 +12,7 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use rewind_init::{EXIT_MARK, Job};
+use rewind_init::Job;
 use rewind_trace::{Event, EventKind, Trace, TraceWriter};
 use rewind_vmm::{Config, Machine, Observer, Outcome, Stop};
 use serde::{Deserialize, Serialize};
@@ -484,9 +484,9 @@ impl Observer for Recorder {
                     _ => std::io::stdout().write_all(bytes),
                 };
             }
-            EventKind::Mark { text } => {
-                if let Some(status) = text.strip_prefix(EXIT_MARK) {
-                    self.status = status.trim().parse().ok();
+            EventKind::Mark { .. } => {
+                if let Some(rewind_init::Mark::Exit { status }) = event.init_mark() {
+                    self.status = Some(status);
                 }
             }
             _ => {}

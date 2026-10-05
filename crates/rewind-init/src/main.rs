@@ -15,10 +15,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use rewind_init::{
-    EXIT_MARK, IMAGE_ROOT, INSPECT_ARG, INSPECT_BEGIN_MARK, INSPECT_CAT, INSPECT_END_MARK,
-    INSPECT_FILES, INSPECT_RUNNING, INSPECT_SHELL, INSPECT_WITH, InspectStatus, JOB_PATH, Job,
-    OUTPUT_MARK, Output, RESIZE_ESCAPE, RESIZE_LEN, RESIZE_TAG, RUNNING_ENV, Root, SECTION_MAPS,
-    SECTION_PID, START_MARK, nar_hash, section_header,
+    IMAGE_ROOT, INSPECT_ARG, InspectRequest, InspectStatus, JOB_PATH, Job, Mark, Output,
+    RESIZE_ESCAPE, RESIZE_LEN, RESIZE_TAG, RUNNING_ENV, Root, SECTION_MAPS, SECTION_PID, nar_hash,
+    section_header,
 };
 
 /// The image the monitor maps as persistent memory.
@@ -132,7 +131,7 @@ fn main() {
     }
     if let Err(e) = run() {
         eprintln!("rewind-init: {e}");
-        mark(&format!("{EXIT_MARK}{}", 127 << 8));
+        mark(&Mark::Exit { status: 127 << 8 });
     }
     power_off();
 }
@@ -184,17 +183,20 @@ fn run() -> Result<()> {
         chown(&path.to_string_lossy(), job.uid, job.gid)?;
     }
 
-    mark(START_MARK);
+    mark(&Mark::Start);
     let status = spawn_and_reap(&job, root)?;
     if status == 0 {
         for output in &job.outputs {
             match nar_hash(&within(root, output)) {
-                Ok(hash) => mark(&format!("{OUTPUT_MARK}{output} {hash}")),
+                Ok(hash) => mark(&Mark::Output {
+                    path: output.clone(),
+                    hash,
+                }),
                 Err(e) => eprintln!("rewind-init: hashing {output}: {e}"),
             }
         }
     }
-    mark(&format!("{EXIT_MARK}{status}"));
+    mark(&Mark::Exit { status });
     // SAFETY: sync has no preconditions.
     unsafe { libc::sync() };
     Ok(())
@@ -394,10 +396,8 @@ fn selftest() {
 fn inspect(request: &[String]) {
     // The devices are opened now, before entering the job's view, which
     // may not have them.
-    let answer = |status: InspectStatus| {
-        mark(&format!("{INSPECT_END_MARK}{}", status.code()));
-    };
-    mark(INSPECT_BEGIN_MARK);
+    let answer = |status: InspectStatus| mark(&Mark::InspectEnd(status));
+    mark(&Mark::InspectBegin);
 
     // Errors go to standard error, where Rewind shows them.
     let (Ok(mut out), Ok(mut err)) = (open_device(STDOUT_DEVICE), open_device(STDERR_DEVICE))
@@ -406,33 +406,25 @@ fn inspect(request: &[String]) {
         return;
     };
 
+    let Some(request) = InspectRequest::parse(request) else {
+        let _ = writeln!(err, "inspect: unknown request {request:?}");
+        answer(InspectStatus::Failed);
+        return;
+    };
+    // A pid as the process calls take it; 0 for the job's view.
+    let pid_t = |pid: Option<u32>| pid.and_then(|p| i32::try_from(p).ok());
+    let view = |pid: Option<u32>| pid_t(pid).unwrap_or(0);
     let status = match request {
-        [op, pid, path] if op == INSPECT_CAT => {
-            cat(pid.parse().unwrap_or(0), path, &mut out, &mut err)
-        }
-        [op] if op == INSPECT_RUNNING => running(None, &mut out, &mut err),
-        [op, pid] if op == INSPECT_RUNNING => running(pid.parse().ok(), &mut out, &mut err),
-        [op, pid] if op == INSPECT_FILES => files(pid.parse().unwrap_or(0), &mut out, &mut err),
-        [op, pid, cols, rows, extras @ ..] if op == INSPECT_SHELL => {
-            let size = (cols.parse().unwrap_or(80), rows.parse().unwrap_or(24));
-            // `--with <bin dir>...`: the extras slot holds more packages.
-            let with = match extras {
-                [] => None,
-                [flag, bins @ ..] if flag == INSPECT_WITH => Some(bins.to_vec()),
-                _ => None,
-            };
-            match shell(pid.parse().unwrap_or(0), size, with) {
-                Ok(()) => InspectStatus::Done,
-                Err(e) => {
-                    let _ = writeln!(err, "inspect: {e}");
-                    InspectStatus::Failed
-                }
+        InspectRequest::Cat { pid, path } => cat(view(pid), &path, &mut out, &mut err),
+        InspectRequest::Running { pid } => running(pid_t(pid), &mut out, &mut err),
+        InspectRequest::Files { pid } => files(view(pid), &mut out, &mut err),
+        InspectRequest::Shell { pid, size, with } => match shell(view(pid), size, with) {
+            Ok(()) => InspectStatus::Done,
+            Err(e) => {
+                let _ = writeln!(err, "inspect: {e}");
+                InspectStatus::Failed
             }
-        }
-        _ => {
-            let _ = writeln!(err, "inspect: unknown request {request:?}");
-            InspectStatus::Failed
-        }
+        },
     };
     answer(status);
 }
@@ -1193,9 +1185,11 @@ fn open_terminal(path: &str, job: &Job) -> Result<File> {
 }
 
 /// Writes a mark to the timeline. Best effort.
-fn mark(text: &str) {
+/// Writes `mark` to /dev/rewind in one write, which the device records as
+/// one mark.
+fn mark(mark: &Mark) {
     if let Ok(mut f) = open_device(MARK_DEVICE) {
-        let _ = writeln!(f, "{text}");
+        let _ = f.write_all(mark.to_string().as_bytes());
     }
 }
 

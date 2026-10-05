@@ -15,57 +15,203 @@ pub const JOB_PATH: &str = "/rewind/job.json";
 /// such as those in its memory map, start with it.
 pub const IMAGE_ROOT: &str = "/newroot";
 
-/// The mark init writes to /dev/rewind when the job's main process exits,
-/// followed by its wait status in decimal.
-pub const EXIT_MARK: &str = "rewind-exit ";
+/// Init's process id. Any process can write to /dev/rewind, so only marks
+/// from this pid are init's: a job that writes `rewind-exit 0` there
+/// reports nothing.
+pub const INIT_PID: u32 = 1;
 
-/// The mark init writes right before it starts the job, so everything
-/// before it is boot and setup, the same for every job.
-pub const START_MARK: &str = "rewind-start";
+/// A mark init writes to /dev/rewind, one write each: around the job, and
+/// around an inspection's answer. The kernel stops every other process
+/// while an inspection runs, so the inspection's marks come from the
+/// inspecting process alone.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Mark {
+    /// Right before the job starts, so everything before is boot and
+    /// setup, the same for every job.
+    Start,
+    /// The job's main process exited, with this wait status.
+    Exit { status: i32 },
+    /// After a successful job, for each output: its path, and its tree
+    /// hash as [`nar_hash`] gives it.
+    Output { path: String, hash: String },
+    /// The inspecting process is about to answer: everything it writes
+    /// until [`Mark::InspectEnd`] is the answer.
+    InspectBegin,
+    /// The inspection is over, and how it ended.
+    InspectEnd(InspectStatus),
+}
 
-/// The mark init writes for each output after a successful job: the path,
-/// a space, and the output's tree hash in hex.
-pub const OUTPUT_MARK: &str = "rewind-output ";
+/// How each mark starts. A mark with more to say has it after a space.
+const START_MARK: &str = "rewind-start";
+const EXIT_MARK: &str = "rewind-exit";
+const OUTPUT_MARK: &str = "rewind-output";
+const INSPECT_BEGIN_MARK: &str = "rewind-inspect-begin";
+const INSPECT_END_MARK: &str = "rewind-inspect-end";
+
+impl Mark {
+    /// The mark a write to /dev/rewind holds, if it is one of these.
+    pub fn parse(text: &str) -> Option<Mark> {
+        let (word, rest) = match text.split_once(' ') {
+            Some((word, rest)) => (word, Some(rest)),
+            None => (text, None),
+        };
+        match (word, rest) {
+            (START_MARK, None) => Some(Mark::Start),
+            (EXIT_MARK, Some(status)) => Some(Mark::Exit {
+                status: status.parse().ok()?,
+            }),
+            (OUTPUT_MARK, Some(rest)) => {
+                let (path, hash) = rest.rsplit_once(' ')?;
+                Some(Mark::Output {
+                    path: path.to_string(),
+                    hash: hash.to_string(),
+                })
+            }
+            (INSPECT_BEGIN_MARK, None) => Some(Mark::InspectBegin),
+            (INSPECT_END_MARK, Some(code)) => Some(Mark::InspectEnd(InspectStatus::from_code(
+                code.parse().ok()?,
+            ))),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for Mark {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Mark::Start => write!(f, "{START_MARK}"),
+            Mark::Exit { status } => write!(f, "{EXIT_MARK} {status}"),
+            Mark::Output { path, hash } => write!(f, "{OUTPUT_MARK} {path} {hash}"),
+            Mark::InspectBegin => write!(f, "{INSPECT_BEGIN_MARK}"),
+            Mark::InspectEnd(status) => write!(f, "{INSPECT_END_MARK} {}", status.code()),
+        }
+    }
+}
 
 /// The argument the kernel starts this binary with when Rewind asks what a
-/// forked run looks like inside at some step, followed by the request.
-/// The first request is `cat <pid> <path>`: the file's bytes on
-/// standard output, with the path resolved in the root and working
-/// directory of process `pid`, or the job's when `pid` is 0 or gone.
+/// forked run looks like inside at some step, followed by the request's
+/// [`InspectRequest::args`].
 pub const INSPECT_ARG: &str = "--inspect";
-pub const INSPECT_CAT: &str = "cat";
 
-/// The other request: `shell <pid> <cols> <rows>`, an interactive shell in
-/// the root and working directory of process `pid` (the job's when 0 or
-/// gone), with the job's environment, on a pty of that size. Its terminal
-/// is /dev/rewind-console: what the shell prints arrives as output on
-/// [`CONSOLE_FD`], and what Rewind sends is typed into it.
-pub const INSPECT_SHELL: &str = "shell";
+/// What Rewind asks a forked run at some step. A `pid` of None means the
+/// job's view for every request but `Running`; a process that is gone by
+/// the step means the job's view too.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InspectRequest {
+    /// The file's bytes on standard output, with the path resolved in the
+    /// root and working directory of process `pid`.
+    Cat { pid: Option<u32>, path: String },
+    /// The process that was running at the step, which the kernel names
+    /// in [`RUNNING_ENV`], or process `pid` when given. The answer is in
+    /// [sections](section_header): the pid as [`SECTION_PID`], its
+    /// /proc/<pid>/maps as [`SECTION_MAPS`], and then each ELF file it had
+    /// mapped that did not come from the input image's store, named by its
+    /// path as init sees it. Those are the files only the VM has, such as a
+    /// program the job compiled. Not found when the kernel or the idle task
+    /// was running, or when there is no process `pid`.
+    Running { pid: Option<u32> },
+    /// Files' bytes in sections named by their paths, resolved as process
+    /// `pid` sees them. A request has room for few arguments, so the paths
+    /// come as input on the console instead, one per line, ending with an
+    /// empty line. Files that are missing, are not regular files or are
+    /// too large are left out.
+    Files { pid: Option<u32> },
+    /// An interactive shell in the root and working directory of process
+    /// `pid`, with the job's environment, on a pty of `size` (columns,
+    /// rows). Its terminal is /dev/rewind-console: what the shell prints
+    /// arrives as output on [`CONSOLE_FD`], and what Rewind sends is typed
+    /// into it. With `with`, the extras slot holds more Nix packages, whose
+    /// store paths the shell sees, and those bin directories go first on
+    /// its PATH (`rewind shell --with`).
+    Shell {
+        pid: Option<u32>,
+        size: (u16, u16),
+        with: Option<Vec<String>>,
+    },
+}
 
-/// After the shell's size: the extras slot holds more Nix packages, whose
-/// store paths the shell sees, and the bin directories that follow go
-/// first on its PATH (`rewind shell --with`).
-pub const INSPECT_WITH: &str = "--with";
+/// The words a request's arguments start with.
+const INSPECT_CAT: &str = "cat";
+const INSPECT_RUNNING: &str = "running";
+const INSPECT_FILES: &str = "files";
+const INSPECT_SHELL: &str = "shell";
 
-/// The third request: `running [pid]`, the process that was running at
-/// the step, which the kernel names in [`RUNNING_ENV`], or process `pid`
-/// when given. The answer is in [sections](section_header): the pid as
-/// [`SECTION_PID`], its /proc/<pid>/maps as [`SECTION_MAPS`], and then
-/// each ELF file it had mapped that did not come from the input image's
-/// store, named by its path as init sees it. Those are the files only the
-/// VM has, such as a program the job compiled. Not found when the kernel
-/// or the idle task was running, or when there is no process `pid`.
-pub const INSPECT_RUNNING: &str = "running";
+/// After a shell's size: the bin directories of the extras slot follow.
+const INSPECT_WITH: &str = "--with";
+
+/// How a request names the job's view in place of a pid.
+const JOBS_VIEW: u32 = 0;
+
+impl InspectRequest {
+    /// The request as the arguments the kernel passes on to init.
+    pub fn args(&self) -> Vec<String> {
+        let pid = |pid: &Option<u32>| pid.unwrap_or(JOBS_VIEW).to_string();
+        match self {
+            InspectRequest::Cat { pid: p, path } => {
+                vec![INSPECT_CAT.into(), pid(p), path.clone()]
+            }
+            InspectRequest::Running { pid: None } => vec![INSPECT_RUNNING.into()],
+            InspectRequest::Running { pid: Some(p) } => {
+                vec![INSPECT_RUNNING.into(), p.to_string()]
+            }
+            InspectRequest::Files { pid: p } => vec![INSPECT_FILES.into(), pid(p)],
+            InspectRequest::Shell {
+                pid: p,
+                size: (cols, rows),
+                with,
+            } => {
+                let mut args = vec![
+                    INSPECT_SHELL.into(),
+                    pid(p),
+                    cols.to_string(),
+                    rows.to_string(),
+                ];
+                if let Some(bins) = with {
+                    args.push(INSPECT_WITH.into());
+                    args.extend(bins.iter().cloned());
+                }
+                args
+            }
+        }
+    }
+
+    /// The request `args` make, as init reads them after [`INSPECT_ARG`].
+    pub fn parse(args: &[String]) -> Option<InspectRequest> {
+        let pid = |arg: &str| -> Option<Option<u32>> {
+            let pid: u32 = arg.parse().ok()?;
+            Some((pid != JOBS_VIEW).then_some(pid))
+        };
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        match args.as_slice() {
+            [INSPECT_CAT, p, path] => Some(InspectRequest::Cat {
+                pid: pid(p)?,
+                path: path.to_string(),
+            }),
+            [INSPECT_RUNNING] => Some(InspectRequest::Running { pid: None }),
+            [INSPECT_RUNNING, p] => Some(InspectRequest::Running {
+                pid: Some(p.parse().ok()?),
+            }),
+            [INSPECT_FILES, p] => Some(InspectRequest::Files { pid: pid(p)? }),
+            [INSPECT_SHELL, p, cols, rows, extras @ ..] => {
+                let with = match extras {
+                    [] => None,
+                    [INSPECT_WITH, bins @ ..] => Some(bins.iter().map(|b| b.to_string()).collect()),
+                    _ => return None,
+                };
+                Some(InspectRequest::Shell {
+                    pid: pid(p)?,
+                    size: (cols.parse().ok()?, rows.parse().ok()?),
+                    with,
+                })
+            }
+            _ => None,
+        }
+    }
+}
+
+/// The names of a running answer's first two sections.
 pub const SECTION_PID: &str = "pid";
 pub const SECTION_MAPS: &str = "maps";
-
-/// The fourth request: `files <pid>`, files' bytes in sections named by
-/// their paths, resolved as process `pid` sees them (the job's view when
-/// 0 or gone). A request has room for few arguments, so the paths come as
-/// input on the console instead, one per line, ending with an empty line.
-/// Files that are missing, are not regular files or are too large are
-/// left out.
-pub const INSPECT_FILES: &str = "files";
 
 /// The variable the kernel starts every inspection with: the thread group
 /// id of the process that was running at the step, or 0.
@@ -87,12 +233,6 @@ pub fn resize_message(cols: u16, rows: u16) -> [u8; RESIZE_LEN] {
     let [r0, r1] = rows.to_le_bytes();
     [RESIZE_ESCAPE, RESIZE_TAG, c0, c1, r0, r1]
 }
-
-/// The marks around an inspection's answer: everything its process writes
-/// between them is the answer, and the end mark carries an
-/// [`InspectStatus`] code in decimal.
-pub const INSPECT_BEGIN_MARK: &str = "rewind-inspect-begin";
-pub const INSPECT_END_MARK: &str = "rewind-inspect-end ";
 
 /// How an inspection ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -266,6 +406,85 @@ mod tests {
                 ("/build/a b".to_string(), &b"\n\x7fELF\n"[..])
             ]
         );
+    }
+
+    #[test]
+    fn marks_read_back_as_init_wrote_them() {
+        // Each mark's text parses back to the mark; text that only starts
+        // like one, or says too little or too much, is not one.
+        let marks = [
+            Mark::Start,
+            Mark::Exit { status: 512 },
+            Mark::Output {
+                path: "/nix/store/x-mylib".into(),
+                hash: "sha256:00ff".into(),
+            },
+            Mark::InspectBegin,
+            Mark::InspectEnd(InspectStatus::NotFound),
+        ];
+        for mark in marks {
+            assert_eq!(Mark::parse(&mark.to_string()), Some(mark));
+        }
+        assert_eq!(
+            Mark::parse("rewind-exit 512"),
+            Some(Mark::Exit { status: 512 })
+        );
+        for not_a_mark in [
+            "rewind-exit",
+            "rewind-exit x",
+            "rewind-start now",
+            "rewind-started",
+            "build",
+            "",
+        ] {
+            assert_eq!(Mark::parse(not_a_mark), None, "{not_a_mark:?}");
+        }
+    }
+
+    #[test]
+    fn requests_read_back_as_rewind_made_them() {
+        // Each request's arguments parse back to the request, the job's
+        // view as pid 0; malformed arguments are no request.
+        let requests = [
+            InspectRequest::Cat {
+                pid: None,
+                path: "/build/a b".into(),
+            },
+            InspectRequest::Cat {
+                pid: Some(42),
+                path: "x".into(),
+            },
+            InspectRequest::Running { pid: None },
+            InspectRequest::Running { pid: Some(7) },
+            InspectRequest::Files { pid: Some(3) },
+            InspectRequest::Shell {
+                pid: None,
+                size: (80, 24),
+                with: None,
+            },
+            InspectRequest::Shell {
+                pid: Some(9),
+                size: (120, 40),
+                with: Some(vec!["/nix/store/x-gdb/bin".into()]),
+            },
+        ];
+        for request in requests {
+            assert_eq!(InspectRequest::parse(&request.args()), Some(request));
+        }
+        let parse = |args: &[&str]| {
+            InspectRequest::parse(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>())
+        };
+        assert_eq!(
+            parse(&["cat", "0", "/a"]).unwrap(),
+            InspectRequest::Cat {
+                pid: None,
+                path: "/a".into()
+            }
+        );
+        assert_eq!(parse(&["cat", "x", "/a"]), None);
+        assert_eq!(parse(&["shell", "0", "80"]), None);
+        assert_eq!(parse(&["shell", "0", "80", "24", "--without"]), None);
+        assert_eq!(parse(&["format", "/"]), None);
     }
 
     #[test]

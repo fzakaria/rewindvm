@@ -16,10 +16,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use anyhow::{Result, bail};
-use rewind_init::{
-    CONSOLE_FD, EXIT_MARK, INSPECT_BEGIN_MARK, INSPECT_CAT, INSPECT_END_MARK, INSPECT_FILES,
-    INSPECT_RUNNING, INSPECT_SHELL, INSPECT_WITH, InspectStatus,
-};
+use rewind_init::{CONSOLE_FD, InspectRequest, InspectStatus, Mark};
 use rewind_trace::{Event, EventKind};
 use rewind_vmm::pv::GuestExit;
 use rewind_vmm::{Ignore, Input, Machine, Observer, Outcome, Stop};
@@ -106,8 +103,8 @@ pub enum Inspection {
 /// process is gone by then.
 pub fn cat(home: &Home, run: &Run, step: u64, pid: Option<u32>, path: &str) -> Result<Inspection> {
     let (mut machine, step) = fork_at(home, run, step)?;
-    let pid = pid.unwrap_or(0).to_string();
-    machine.request_inspection(&[INSPECT_CAT, &pid, path])?;
+    let path = path.to_string();
+    machine.request_inspection(&InspectRequest::Cat { pid, path }.args())?;
 
     let mut answer = Answer::default();
     let status = finish(&mut machine, step, &mut answer, "the file could be read")?;
@@ -120,10 +117,7 @@ pub fn cat(home: &Home, run: &Run, step: u64, pid: Option<u32>, path: &str) -> R
 /// kernel was running, or when there is no process `pid`.
 pub fn running(home: &Home, run: &Run, step: u64, pid: Option<u32>) -> Result<Inspection> {
     let (mut machine, step) = fork_at(home, run, step)?;
-    let pid = pid.map(|p| p.to_string());
-    let mut request = vec![INSPECT_RUNNING];
-    request.extend(pid.as_deref());
-    machine.request_inspection(&request)?;
+    machine.request_inspection(&InspectRequest::Running { pid }.args())?;
 
     let mut answer = Answer::default();
     let status = finish(
@@ -146,8 +140,7 @@ pub fn files(
     paths: &[String],
 ) -> Result<Inspection> {
     let (mut machine, step) = fork_at(home, run, step)?;
-    let pid = pid.unwrap_or(0).to_string();
-    machine.request_inspection(&[INSPECT_FILES, &pid])?;
+    machine.request_inspection(&InspectRequest::Files { pid }.args())?;
 
     // The list goes in as typing: one path a line, then an empty line.
     let mut list = paths.join("\n");
@@ -188,15 +181,15 @@ pub fn shell(
         extras,
     } = session;
     let (mut machine, step) = fork_at(home, run, step)?;
-    let pid = pid.unwrap_or(0).to_string();
-    let (cols, rows) = (cols.to_string(), rows.to_string());
-    let mut request = vec![INSPECT_SHELL, &pid, &cols, &rows];
     if let Some(extras) = &extras {
         machine.attach_extras(&extras.image)?;
-        request.push(INSPECT_WITH);
-        request.extend(extras.bins.iter().map(String::as_str));
     }
-    machine.request_inspection(&request)?;
+    let request = InspectRequest::Shell {
+        pid,
+        size: (cols, rows),
+        with: extras.map(|e| e.bins),
+    };
+    machine.request_inspection(&request.args())?;
 
     let mut answer = Answer {
         console: Some(console),
@@ -217,10 +210,7 @@ pub fn shell(
 /// changes, and once power off has begun nothing more can run in the VM:
 /// a later step is moved back to that report.
 fn fork_at(home: &Home, run: &Run, step: u64) -> Result<(Machine, u64)> {
-    let exited_at = run.trace()?.events.iter().find_map(|e| match &e.kind {
-        EventKind::Mark { text } if text.trim().starts_with(EXIT_MARK.trim()) => Some(e.step),
-        _ => None,
-    });
+    let exited_at = run.trace()?.job_exit().map(|exit| exit.step);
     let step = exited_at.map_or(step, |exited| step.min(exited));
     Ok((
         run.machine_at(home, step, Keep::Keyframe, &mut Ignore)?,
@@ -312,17 +302,19 @@ impl Observer for Answer {
 
         // The begin mark names the process; nothing before it is ours.
         if let EventKind::Mark { text } = &event.kind {
-            let text = text.trim();
-            if text == INSPECT_BEGIN_MARK {
-                self.pid = Some(event.pid);
-                return;
-            }
-            if let Some(code) = text.strip_prefix(INSPECT_END_MARK) {
-                if self.pid == Some(event.pid) {
-                    self.status = Some(InspectStatus::from_code(code.parse().unwrap_or(1)));
-                    self.done.set(true);
+            match Mark::parse(text) {
+                Some(Mark::InspectBegin) => {
+                    self.pid = Some(event.pid);
+                    return;
                 }
-                return;
+                Some(Mark::InspectEnd(status)) => {
+                    if self.pid == Some(event.pid) {
+                        self.status = Some(status);
+                        self.done.set(true);
+                    }
+                    return;
+                }
+                _ => {}
             }
         }
         if self.pid != Some(event.pid) {
@@ -368,16 +360,20 @@ mod tests {
         r
     }
 
+    fn mark(pid: u32, mark: Mark) -> Vec<u8> {
+        record(KIND_MARK, pid, 0, mark.to_string().as_bytes())
+    }
+
     #[test]
     fn collects_only_the_inspecting_process() {
         // A job keeps printing while pid 40 answers; the job's bytes stay out.
         let mut a = Answer::default();
         a.record(1, &record(KIND_OUTPUT, 7, 1, b"job before\n"));
-        a.record(2, &record(KIND_MARK, 40, 0, b"rewind-inspect-begin\n"));
+        a.record(2, &mark(40, Mark::InspectBegin));
         a.record(3, &record(KIND_OUTPUT, 40, 1, b"hello "));
         a.record(4, &record(KIND_OUTPUT, 7, 1, b"job during\n"));
         a.record(5, &record(KIND_OUTPUT, 40, 1, b"world\n"));
-        a.record(6, &record(KIND_MARK, 40, 0, b"rewind-inspect-end 0\n"));
+        a.record(6, &mark(40, Mark::InspectEnd(InspectStatus::Done)));
         let status = a.status.unwrap();
         assert_eq!(
             a.into_inspection(status),
@@ -389,12 +385,12 @@ mod tests {
     fn a_missing_file_reports_the_message() {
         // Code 2 is a missing file, with the VM's message from stderr.
         let mut a = Answer::default();
-        a.record(1, &record(KIND_MARK, 40, 0, b"rewind-inspect-begin\n"));
+        a.record(1, &mark(40, Mark::InspectBegin));
         a.record(
             2,
             &record(KIND_OUTPUT, 40, 2, b"/x: no such file at this step\n"),
         );
-        a.record(3, &record(KIND_MARK, 40, 0, b"rewind-inspect-end 2\n"));
+        a.record(3, &mark(40, Mark::InspectEnd(InspectStatus::NotFound)));
         let status = a.status.unwrap();
         assert_eq!(
             a.into_inspection(status),
