@@ -42,12 +42,19 @@ impl Scrubber {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let request = self.requests.issue();
+        self.opening = Some(request);
         self.loading = Some("the example run".into());
         cx.notify();
         let read = cx.background_executor().spawn(async { examples::open() });
         cx.spawn_in(window, async move |this, cx| {
             let result = read.await;
             let _ = this.update_in(cx, |this, window, cx| {
+                // A run asked for after the example is the one to show.
+                if this.opening != Some(request) {
+                    return;
+                }
+                this.opening = None;
                 this.loading = None;
                 match result {
                     Ok(session) => {

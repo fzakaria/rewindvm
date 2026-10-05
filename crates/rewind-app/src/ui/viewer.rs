@@ -17,6 +17,7 @@ use gpui::{
 
 use crate::describe::{short_store_paths, thousands};
 use crate::engine::{EngineError, FileAtStep};
+use crate::request::Request;
 use crate::run::{Origin, Session};
 use crate::selection::{Mapped, Surface, part_of_line};
 use crate::sideways::{Sideways, line_width, text_column};
@@ -94,8 +95,9 @@ pub struct FileViewer {
     pub unavailable: Option<&'static str>,
     pub shown: Option<Fetched>,
     pub loading: bool,
-    /// Counts requests; an answer to anything but the latest is dropped.
-    generation: u64,
+    /// The request whose answer this waits on; an answer to any other,
+    /// from before the playhead moved or this was opened, is dropped.
+    request: Request,
     scroll: UniformListScrollHandle,
     /// The shown text's colors, as far as they have been drawn.
     highlighter: Highlighter,
@@ -131,7 +133,7 @@ impl Scrubber {
             unavailable,
             shown: None,
             loading: unavailable.is_none(),
-            generation: 0,
+            request: self.requests.issue(),
             scroll: UniformListScrollHandle::new(),
             highlighter: Highlighter::new(None),
             sideways: Sideways::default(),
@@ -217,16 +219,13 @@ impl Scrubber {
         }
         viewer.step = step;
         viewer.loading = true;
-        viewer.generation += 1;
-        let generation = viewer.generation;
+        viewer.request = self.requests.issue();
+        let request = viewer.request;
         let timer = cx.background_executor().timer(DEBOUNCE);
         cx.spawn(async move |this, cx| {
             timer.await;
             let _ = this.update(cx, |this, cx| {
-                let still_latest = this
-                    .viewer
-                    .as_ref()
-                    .is_some_and(|v| v.generation == generation);
+                let still_latest = this.viewer.as_ref().is_some_and(|v| v.request == request);
                 if still_latest {
                     this.fetch_file(cx);
                 }
@@ -241,7 +240,7 @@ impl Scrubber {
         let (Some(viewer), Some(session)) = (&mut self.viewer, &self.session) else {
             return;
         };
-        viewer.generation += 1;
+        viewer.request = self.requests.issue();
 
         // While the VM boots there are no files of the job to read yet.
         let job_start = session.run.timeline.job_start.unwrap_or(0);
@@ -255,7 +254,7 @@ impl Scrubber {
             return;
         }
         viewer.loading = true;
-        let generation = viewer.generation;
+        let request = viewer.request;
         let (run, step, pid, path) = (
             session.run.path.clone(),
             viewer.step,
@@ -272,7 +271,7 @@ impl Scrubber {
                 let Some(viewer) = &mut this.viewer else {
                     return;
                 };
-                if viewer.generation != generation {
+                if viewer.request != request {
                     return;
                 }
                 viewer.loading = false;
@@ -429,7 +428,7 @@ impl Scrubber {
                         let Some(FileViewer {
                             shown: Some(Fetched::Contents { view, .. }),
                             highlighter,
-                            generation,
+                            request,
                             ..
                         }) = this.viewer.as_mut()
                         else {
@@ -499,7 +498,7 @@ impl Scrubber {
                         // Lines too far down to color in this frame wait for
                         // the rest of the file, colored on another thread.
                         if let Some(rest) = highlighter.to_finish() {
-                            finish_colors(rest, view.lines.clone(), *generation, cx);
+                            finish_colors(rest, view.lines.clone(), *request, cx);
                         }
                         rows
                     }),
@@ -564,11 +563,11 @@ impl Scrubber {
 
 /// Colors the rest of the viewer's file with `rest` on a background
 /// thread, and shows the colors if the viewer still shows the same
-/// contents, those of request `generation`, when they are done.
+/// contents, the answer to `request`, when they are done.
 fn finish_colors(
     rest: Highlighter,
     lines: Vec<String>,
-    generation: u64,
+    request: Request,
     cx: &mut Context<Scrubber>,
 ) {
     let task = cx
@@ -580,7 +579,7 @@ fn finish_colors(
             let Some(viewer) = &mut this.viewer else {
                 return;
             };
-            if viewer.generation != generation {
+            if viewer.request != request {
                 return;
             }
             viewer.highlighter = finished;

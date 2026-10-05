@@ -17,6 +17,7 @@ use crate::describe::thousands;
 use crate::engine::{Engine, EngineError, EngineResult, Forked};
 use crate::family::{Family, Row, RowKind, RunEntry, families, family_of, scan};
 use crate::model::{LogFilter, Motion};
+use crate::request::{Request, Requests};
 use crate::run::{Origin, Session, short_id};
 use crate::selection::Surface;
 use crate::theme::size;
@@ -67,6 +68,8 @@ pub enum ForkState {
 /// A fork made from the playhead, marked on the timeline.
 #[derive(Clone, Debug)]
 pub struct ForkMark {
+    /// The fork's request, which its answer finds the mark by.
+    pub request: Request,
     pub step: u64,
     /// The schedule seed the fork perturbs the run with.
     pub schedule: u64,
@@ -211,8 +214,14 @@ pub struct Scrubber {
     pub(super) session: Option<Session>,
     /// A run being read in the background.
     pub(super) loading: Option<PathBuf>,
-    /// A replayable export being imported into the engine's runs.
-    pub(super) importing: Option<PathBuf>,
+    /// The request that reads it, the latest run asked for; a run read
+    /// for an earlier request is not shown.
+    pub(super) opening: Option<Request>,
+    /// The request importing a replayable export into the engine's runs.
+    pub(super) importing: Option<Request>,
+    /// Where requests to the engine and other background work get their
+    /// numbers (see `crate::request`).
+    pub(super) requests: Requests,
     /// The families of the engine's runs that changed last, for the empty
     /// state.
     pub(super) recent: Vec<Family>,
@@ -293,7 +302,9 @@ impl Scrubber {
             engine: launch.engine,
             session: None,
             loading: None,
+            opening: None,
             importing: None,
+            requests: Requests::default(),
             link_dialog: None,
             recent: Vec::new(),
             family: None,
@@ -799,7 +810,8 @@ impl Scrubber {
     /// fork and file buttons work on it. The app already has the file, so
     /// nothing is downloaded again. A failure leaves the trace on screen.
     fn bring_in(&mut self, file: PathBuf, cx: &mut Context<Self>) {
-        self.importing = Some(file.clone());
+        let request = self.requests.issue();
+        self.importing = Some(request);
         let compare = self
             .session
             .as_ref()
@@ -816,6 +828,10 @@ impl Scrubber {
         cx.spawn(async move |this, cx| {
             let result = read.await;
             let _ = this.update(cx, |this, cx| {
+                // An import started after this one is the one to wait on.
+                if this.importing != Some(request) {
+                    return;
+                }
                 this.importing = None;
 
                 // Another run opened meanwhile keeps the screen.
@@ -1068,8 +1084,9 @@ impl Scrubber {
         let schedule = 1 + session.forks_on_disk as u64 + self.forks.len() as u64;
         let run = session.run.path.clone();
         let parent = run.clone();
-        let index = self.forks.len();
+        let request = self.requests.issue();
         self.forks.push(ForkMark {
+            request,
             step,
             schedule,
             state: ForkState::Pending,
@@ -1080,12 +1097,14 @@ impl Scrubber {
             cx,
             move |engine| engine.fork(&run, step, schedule),
             move |this, result, cx| {
-                let Some(mark) = this.forks.get_mut(index) else {
-                    return;
-                };
+                // The fork's mark, unless another run was shown meanwhile;
+                // the fork is made either way, so it is announced either way.
+                let mark = this.forks.iter_mut().find(|m| m.request == request);
                 match result {
                     Ok(forked) => {
-                        mark.state = ForkState::Created(forked.clone());
+                        if let Some(mark) = mark {
+                            mark.state = ForkState::Created(forked.clone());
+                        }
                         this.reload_runs(cx);
                         this.offer(
                             NoticeTone::Info,
@@ -1106,7 +1125,9 @@ impl Scrubber {
                         );
                     }
                     Err(e) => {
-                        mark.state = ForkState::Failed(e.to_string());
+                        if let Some(mark) = mark {
+                            mark.state = ForkState::Failed(e.to_string());
+                        }
                         this.report("Could not fork", e, cx);
                     }
                 }
@@ -1369,6 +1390,8 @@ impl Scrubber {
     /// Reads a run, and the run to compare it with, on a background
     /// thread and shows them.
     pub(super) fn open(&mut self, path: PathBuf, compare: Option<PathBuf>, cx: &mut Context<Self>) {
+        let request = self.requests.issue();
+        self.opening = Some(request);
         self.loading = Some(path.clone());
         cx.notify();
         let read = cx
@@ -1377,6 +1400,11 @@ impl Scrubber {
         cx.spawn(async move |this, cx| {
             let result = read.await;
             let _ = this.update(cx, |this, cx| {
+                // A run asked for after this one is the one to show.
+                if this.opening != Some(request) {
+                    return;
+                }
+                this.opening = None;
                 this.loading = None;
                 match result {
                     Ok(session) => this.show(session, None, cx),

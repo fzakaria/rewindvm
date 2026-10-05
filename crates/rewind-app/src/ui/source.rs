@@ -26,6 +26,7 @@ use gpui::{
 };
 
 use crate::describe::thousands;
+use crate::request::Request;
 use crate::selection::{Mapped, Pos, Surface, part_of_line};
 use crate::sideways::{Sideways, line_width, text_column};
 use crate::source::{Frame, Located, Progress, Shown, SourceFile, shown, target};
@@ -60,8 +61,9 @@ pub struct SourcePanel {
     pub loading: bool,
     /// What the engine has said while it looks for the latest request.
     pub progress: Progress,
-    /// Counts requests; an answer to anything but the latest is dropped.
-    generation: u64,
+    /// The request whose answer this waits on; an answer to any other,
+    /// from before the playhead moved or this was opened, is dropped.
+    request: Request,
     /// The shown file's scroll position.
     scroll: UniformListScrollHandle,
     /// Each file's colors, as far as they have been drawn, by the path
@@ -88,7 +90,7 @@ impl Scrubber {
             shown: None,
             loading: readable,
             progress: Progress::default(),
-            generation: 0,
+            request: self.requests.issue(),
             scroll: UniformListScrollHandle::new(),
             highlighters: HashMap::new(),
             sideways: Sideways::default(),
@@ -127,16 +129,13 @@ impl Scrubber {
         }
         panel.step = step;
         panel.loading = true;
-        panel.generation += 1;
-        let generation = panel.generation;
+        panel.request = self.requests.issue();
+        let request = panel.request;
         let timer = cx.background_executor().timer(DEBOUNCE);
         cx.spawn(async move |this, cx| {
             timer.await;
             let _ = this.update(cx, |this, cx| {
-                let still_latest = this
-                    .source
-                    .as_ref()
-                    .is_some_and(|p| p.generation == generation);
+                let still_latest = this.source.as_ref().is_some_and(|p| p.request == request);
                 if still_latest {
                     this.fetch_source(cx);
                 }
@@ -152,7 +151,7 @@ impl Scrubber {
         let (Some(panel), Some(session)) = (&mut self.source, &self.session) else {
             return;
         };
-        panel.generation += 1;
+        panel.request = self.requests.issue();
         let step = panel.step;
 
         // While the VM boots no thread of the job runs, and the kernel's
@@ -182,7 +181,7 @@ impl Scrubber {
 
         panel.loading = true;
         panel.progress = Progress::default();
-        let generation = panel.generation;
+        let request = panel.request;
         let run = session.run.path.clone();
         let engine = self.engine.clone();
 
@@ -202,7 +201,7 @@ impl Scrubber {
                     let Some(panel) = &mut this.source else {
                         return;
                     };
-                    if panel.generation != generation {
+                    if panel.request != request {
                         return;
                     }
                     panel.progress.said(&line);
@@ -218,7 +217,7 @@ impl Scrubber {
                 let Some(panel) = &mut this.source else {
                     return;
                 };
-                if panel.generation != generation {
+                if panel.request != request {
                     return;
                 }
                 panel.loading = false;
@@ -522,7 +521,7 @@ impl Scrubber {
                 let Some(SourcePanel {
                     shown: Some(shown),
                     highlighters,
-                    generation,
+                    request,
                     ..
                 }) = this.source.as_mut()
                 else {
@@ -586,7 +585,7 @@ impl Scrubber {
                 // colored on another thread.
                 if let Some(rest) = highlighter.to_finish() {
                     let key = key.to_string();
-                    finish_colors(rest, file.lines.clone(), key, *generation, cx);
+                    finish_colors(rest, file.lines.clone(), key, *request, cx);
                 }
                 rows
             }),
@@ -694,12 +693,12 @@ impl Scrubber {
 
 /// Colors the rest of the file the answer keys by `key` with `rest` on a
 /// background thread, and keeps the colors if the panel still shows the
-/// answer to request `generation` when they are done.
+/// answer to `request` when they are done.
 fn finish_colors(
     rest: Highlighter,
     lines: Vec<String>,
     key: String,
-    generation: u64,
+    request: Request,
     cx: &mut Context<Scrubber>,
 ) {
     let task = cx
@@ -711,7 +710,7 @@ fn finish_colors(
             let Some(panel) = &mut this.source else {
                 return;
             };
-            if panel.generation != generation {
+            if panel.request != request {
                 return;
             }
             panel.highlighters.insert(key, finished);

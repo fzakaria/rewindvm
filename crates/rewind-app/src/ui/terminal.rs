@@ -21,6 +21,7 @@ use gpui::{
 
 use crate::describe::thousands;
 use crate::engine::CommandLine;
+use crate::request::Request;
 use crate::selection::{Surface, part_of_line};
 use crate::terminal::{CursorKeys, GridSize, Key, Mods, Screen, Session, encode_key};
 use crate::theme::{self, layout, size};
@@ -55,6 +56,9 @@ pub enum Ended {
 
 /// The open pane.
 pub struct TerminalPane {
+    /// The request that started the pane's command, which its events
+    /// carry: a pane opened in its place gets none of this one's.
+    request: Request,
     pub kind: PaneKind,
     /// The step the command forked the run at.
     pub step: u64,
@@ -161,7 +165,9 @@ impl Scrubber {
         };
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
+        let request = self.requests.issue();
         self.terminal = Some(TerminalPane {
+            request,
             kind,
             step,
             pid,
@@ -172,16 +178,21 @@ impl Scrubber {
             measured: Rc::new(Cell::new(None)),
         });
         self.clear_selection_in(&[Surface::Terminal]);
-        self.listen_to_terminal(events, cx);
+        self.listen_to_terminal(events, request, cx);
         cx.notify();
     }
 
     /// Reads the terminal's events on the UI thread for as long as the
-    /// pane's session lives.
-    fn listen_to_terminal(&mut self, mut events: UnboundedReceiver<Event>, cx: &mut Context<Self>) {
+    /// pane's session lives. They belong to the pane `request` started.
+    fn listen_to_terminal(
+        &mut self,
+        mut events: UnboundedReceiver<Event>,
+        request: Request,
+        cx: &mut Context<Self>,
+    ) {
         cx.spawn(async move |this, cx| {
             while let Some(event) = events.next().await {
-                let alive = this.update(cx, |this, cx| this.terminal_event(event, cx));
+                let alive = this.update(cx, |this, cx| this.terminal_event(event, request, cx));
                 if alive.is_err() {
                     break;
                 }
@@ -190,8 +201,11 @@ impl Scrubber {
         .detach();
     }
 
-    fn terminal_event(&mut self, event: Event, cx: &mut Context<Self>) {
-        let Some(pane) = &mut self.terminal else {
+    fn terminal_event(&mut self, event: Event, request: Request, cx: &mut Context<Self>) {
+        // An event of a pane since closed or replaced is dropped: its
+        // answers to the program would be typed into another's pty, and
+        // its exit would close the pane now open.
+        let Some(pane) = self.terminal.as_mut().filter(|p| p.request == request) else {
             return;
         };
         match event {
