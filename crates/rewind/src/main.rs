@@ -1341,6 +1341,13 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     );
                 }
             }
+            // The packages first, while Ctrl-C still stops a slow Nix
+            // build, then the terminal raw for the shell.
+            let extras = if with.is_empty() {
+                None
+            } else {
+                Some(rewind_core::inspect::Extras::build(&home, &with)?)
+            };
             let size =
                 terminal::size(std::io::stdout().as_raw_fd()).unwrap_or(terminal::DEFAULT_SIZE);
             eprintln!(
@@ -1349,11 +1356,6 @@ fn run(cli: Cli) -> Result<ExitCode> {
             );
             terminal::wake_on_resize();
             let raw = terminal::RawMode::enter();
-            let extras = if with.is_empty() {
-                None
-            } else {
-                Some(rewind_core::inspect::Extras::build(&home, &with)?)
-            };
             let result = rewind_core::inspect::shell(
                 &home,
                 &run,

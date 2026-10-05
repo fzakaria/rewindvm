@@ -326,10 +326,10 @@ pub fn run_gdb(
         })
     });
     let served = match fork {
-        Some((debuggee, listener)) => {
-            let (conn, _) = listener.accept()?;
-            debuggee.serve(conn).map(|_| ())
-        }
+        Some((debuggee, listener)) => match accept_while_running(listener, &mut child)? {
+            Some(conn) => debuggee.serve(conn).map(|_| ()),
+            None => Ok(()),
+        },
         None => Ok(()),
     };
     let status = child.wait()?;
@@ -348,6 +348,33 @@ pub fn run_gdb(
 
 /// The host's gdb.
 const GDB_PROGRAM: &str = "gdb";
+
+/// How often a wait for gdb to connect looks whether gdb has exited.
+const CONNECT_POLL: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// The connection `gdb` makes to `listener`, or None once gdb exits
+/// without making one, as `gdb --version` does. gdb loading large symbol
+/// files can take minutes to connect, so there is no time limit.
+fn accept_while_running(
+    listener: &TcpListener,
+    gdb: &mut Child,
+) -> Result<Option<std::net::TcpStream>> {
+    listener.set_nonblocking(true)?;
+    loop {
+        match listener.accept() {
+            Ok((conn, _)) => {
+                conn.set_nonblocking(false)?;
+                return Ok(Some(conn));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(e) => return Err(e.into()),
+        }
+        if gdb.try_wait()?.is_some() {
+            return Ok(None);
+        }
+        std::thread::sleep(CONNECT_POLL);
+    }
+}
 
 /// Reads `pipe` to its end a line at a time, handing each line to `each`,
 /// without its newline, as it is read. Returns everything read.
@@ -1437,6 +1464,24 @@ mod tests {
             "pipe with confirm off -- add-symbol-file /nix/store/abc-glibc/lib/libc.so.6 -o 0x7f0000000000 | {DOWNLOADS_ONLY}"
         );
         assert!(args.contains(&expected), "{args:?}");
+    }
+
+    /// A gdb that exits without connecting, as `gdb --version` does, is
+    /// not waited for; one that connects is served. `true` stands in for
+    /// the first, a thread connecting while `sleep` runs for the second.
+    #[test]
+    fn a_gdb_that_never_connects_is_not_waited_for() {
+        let listener = TcpListener::bind(GDB_LOCAL).unwrap();
+        let mut gdb = Command::new("true").spawn().unwrap();
+        assert!(accept_while_running(&listener, &mut gdb).unwrap().is_none());
+
+        let mut gdb = Command::new("sleep").arg("5").spawn().unwrap();
+        let address = listener.local_addr().unwrap();
+        let client = std::thread::spawn(move || std::net::TcpStream::connect(address).unwrap());
+        assert!(accept_while_running(&listener, &mut gdb).unwrap().is_some());
+        client.join().unwrap();
+        gdb.kill().unwrap();
+        gdb.wait().unwrap();
     }
 
     /// The kernel's gdb scripts need its DWARF. Builds gdb's arguments for
