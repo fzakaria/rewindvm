@@ -1417,7 +1417,7 @@ fn prepare_nix(
         );
         let tmp = image::temp_beside(&image);
         image::from_store_paths(&closure, &tmp)?;
-        std::fs::rename(&tmp, &image)?;
+        image::place(&tmp, &image)?;
     }
 
     let graphs = nix::reference_graphs(&drv, &closure)?;
@@ -1649,7 +1649,7 @@ fn root_image(home: &Home, root: &std::path::Path) -> Result<PathBuf> {
             home.images().join(format!("{}.erofs", &hash[..32]))
         }
     };
-    std::fs::rename(&tmp, &path)?;
+    image::place(&tmp, &path)?;
     Ok(path)
 }
 

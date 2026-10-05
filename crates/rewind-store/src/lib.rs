@@ -492,6 +492,11 @@ impl Store {
             .as_ref()
             .is_none_or(|p| p.len + compressed.len() as u64 > PACK_MAX);
         if full {
+            // A full pack is synced as it is let go, since `sync` only
+            // reaches the pack this store is writing.
+            if let Some(old) = self.pack.take() {
+                old.file.sync_data()?;
+            }
             self.pack = Some(self.claim_pack()?);
         }
         let pack = self.pack.as_mut().expect("claimed above");
@@ -541,6 +546,16 @@ impl Store {
         let n = zstd::bulk::decompress_to_buffer(&compressed, out)?;
         if n != out.len() {
             bail!("page {} is {n} bytes, expected {}", hex(hash), out.len());
+        }
+
+        // A page is named by its hash, so one whose bytes hash to anything
+        // else, from a damaged pack or index, is refused rather than
+        // restored into a machine as if it were the page.
+        if Self::hash(out) != *hash {
+            bail!(
+                "page {} in the store is damaged: its bytes are another page's",
+                hex(hash)
+            );
         }
         Ok(())
     }
@@ -1175,6 +1190,40 @@ mod tests {
             assert_eq!(out, page(fill));
         }
         assert_eq!(store.stats().pages, 3);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_page_that_reads_back_wrong_is_refused() {
+        // Two pages, then an index whose entry for the first names where
+        // the second is, as a damaged index or a torn write could leave
+        // it: reading the first fails, saying the page is damaged, rather
+        // than handing back the second's bytes.
+        let dir = tmp("damaged-page");
+        let (a, b) = {
+            let mut store = Store::open(&dir).unwrap();
+            let hashes = put_pages(&mut store, 1, 2);
+            (hashes[0], hashes[1])
+        };
+        let mut index = fs::read(dir.join(INDEX)).unwrap();
+        let entry_of = |index: &[u8], hash: &Hash| {
+            index
+                .chunks(INDEX_ENTRY)
+                .position(|e| e[..32] == hash[..])
+                .unwrap()
+                * INDEX_ENTRY
+        };
+        let (at_a, at_b) = (entry_of(&index, &a), entry_of(&index, &b));
+        let b_location = index[at_b + 32..at_b + INDEX_ENTRY].to_vec();
+        index[at_a + 32..at_a + INDEX_ENTRY].copy_from_slice(&b_location);
+        fs::write(dir.join(INDEX), &index).unwrap();
+
+        let store = Store::open(&dir).unwrap();
+        let mut out = vec![0u8; PAGE];
+        let err = store.get(&a, &mut out).unwrap_err();
+        assert!(err.to_string().contains("damaged"), "{err}");
+        store.get(&b, &mut out).unwrap();
+        assert_eq!(out, page(2));
         fs::remove_dir_all(&dir).unwrap();
     }
 

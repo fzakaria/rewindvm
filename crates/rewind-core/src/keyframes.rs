@@ -330,6 +330,9 @@ pub fn run_with_keyframes(
         }
         let mut kf = machine.keyframe(&mut StorePages(store), parent)?;
         memory.trim(kf.parent, &mut kf.pages);
+
+        // The pages first, durably, then the keyframe naming them.
+        store.sync()?;
         save(run_dir, &kf)?;
         parent = Some(kf.step);
 

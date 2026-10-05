@@ -830,6 +830,10 @@ impl Run {
                     let mut kf =
                         machine.keyframe(&mut crate::keyframes::StorePages(store), parent)?;
                     memory.trim(kf.parent, &mut kf.pages);
+
+                    // The pages first, durably, then the keyframe naming
+                    // them.
+                    store.sync()?;
                     if crate::keyframes::save(&s.owner, &kf).is_err() {
                         crate::keyframes::save(&dir, &kf)?;
                     }

@@ -155,6 +155,21 @@ pub fn is_temp_beside(path: &Path, name: &Path) -> bool {
         .starts_with(prefix.as_encoded_bytes())
 }
 
+/// Puts the file written at `tmp` in place at `path`, durably: its bytes
+/// reach the disk before the rename, and the rename before this returns,
+/// so a crash never leaves a short image under its final name, where a
+/// later run would take it as whole.
+pub fn place(tmp: &Path, path: &Path) -> Result<()> {
+    fs::File::open(tmp)
+        .and_then(|f| f.sync_all())
+        .with_context(|| format!("syncing {}", tmp.display()))?;
+    fs::rename(tmp, path).with_context(|| format!("renaming {} into place", tmp.display()))?;
+    if let Some(dir) = path.parent() {
+        fs::File::open(dir)?.sync_all()?;
+    }
+    Ok(())
+}
+
 /// Writes `bytes` to `path` atomically, so a crash never leaves a half
 /// written image where a whole one is expected. Writers of the same path in
 /// other processes or threads each get their own temporary file, and the
@@ -199,6 +214,24 @@ mod tests {
         assert_eq!(first.parent(), image.parent());
         let name = first.file_name().unwrap().to_string_lossy().into_owned();
         assert!(name.contains(&std::process::id().to_string()), "{name}");
+    }
+
+    #[test]
+    fn a_placed_file_is_at_its_name_only() {
+        // A file written under a temporary name and placed is at its final
+        // name with its bytes, replacing what was there, and nothing is
+        // left at the temporary name.
+        let dir = std::env::temp_dir().join(format!("rewind-place-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let image = dir.join("root.erofs");
+        fs::write(&image, b"old").unwrap();
+        let tmp = temp_beside(&image);
+        fs::write(&tmp, b"new").unwrap();
+        place(&tmp, &image).unwrap();
+        assert_eq!(fs::read(&image).unwrap(), b"new");
+        assert!(!tmp.exists());
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

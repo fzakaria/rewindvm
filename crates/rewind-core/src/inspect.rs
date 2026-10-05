@@ -78,7 +78,7 @@ impl Extras {
             eprintln!("rewind: packing {} store paths for --with", closure.len());
             let tmp = crate::image::temp_beside(&image);
             crate::image::from_store_paths(&closure, &tmp)?;
-            std::fs::rename(&tmp, &image)?;
+            crate::image::place(&tmp, &image)?;
         }
         let bins = outputs
             .iter()
