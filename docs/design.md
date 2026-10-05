@@ -179,7 +179,14 @@ DWARF and sources for everything in the store come by build ID from
 nixseparatedebuginfod2, which Rewind starts for the session on a socket it
 binds itself and hands over the way systemd's socket activation does. It serves
 the local store's `debug` outputs and cache.nixos.org's, so glibc's DWARF and
-source arrive as gdb asks for them. The kernel's `debug` output is nixpkgs'
+source arrive as gdb asks for them. The first time, the server fetches a
+library's `debug` output or its source from the cache before it answers,
+which can take a minute, and gdb says nothing about a download until the
+answer starts. `rewind where` runs gdb with `DEBUGINFOD_VERBOSE` set, so
+libdebuginfod logs each URL it asks on standard error before it waits, and
+says `rewind: downloading debug info for libc.so.6; first time only` as each
+download starts, and the same once for each library's sources. `rewind gdb`
+shows gdb's own lines about downloads. The kernel's `debug` output is nixpkgs'
 separateDebugInfo layout with an overlay of the files the Rewind patch adds or
 changes. Rewind fetches the output itself the first time, because Cachix keeps
 no index by build ID, opens its vmlinux in gdb, and puts the overlay on gdb's

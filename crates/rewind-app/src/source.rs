@@ -195,6 +195,41 @@ const PREDATES_MARKER: &str = "does not say where its tasks are";
 /// How the rewind command starts its messages.
 const ENGINE_PREFIX: &str = "rewind: ";
 
+/// What the panel says while the engine looks, until the engine says
+/// something of its own.
+pub const LOOKING: &str = "Rewind is forking the run at this step and walking the thread's stack in gdb. This takes a few seconds.";
+
+/// What the panel says while the engine looks: the latest of the engine's
+/// own lines, once it has said one.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Progress {
+    latest: Option<String>,
+}
+
+impl Progress {
+    /// Takes `line`, which the engine said on its standard error; only
+    /// rewind's own lines, not ones it passes on from gdb, are kept.
+    pub fn said(&mut self, line: &str) {
+        let Some(own) = line.strip_prefix(ENGINE_PREFIX) else {
+            return;
+        };
+        self.latest = Some(own.trim().to_string());
+    }
+
+    /// The text in place of an answer: the latest line as a sentence, or
+    /// LOOKING before the first.
+    pub fn text(&self) -> String {
+        let Some(latest) = &self.latest else {
+            return LOOKING.to_string();
+        };
+        let mut chars = latest.chars();
+        let Some(first) = chars.next() else {
+            return LOOKING.to_string();
+        };
+        format!("{}{}.", first.to_uppercase(), chars.as_str())
+    }
+}
+
 /// The panel's view of the engine's answer for `step`.
 pub fn shown(step: u64, answer: Result<Located, EngineError>) -> Shown {
     match answer {
@@ -381,5 +416,27 @@ mod tests {
             panic!("not a failure");
         };
         assert!(message.contains("needs the rewind command"));
+    }
+
+    /// The panel's loading text: the fixed sentence until the engine says
+    /// a line of its own, then that line, the latest replacing the one
+    /// before; lines without rewind's prefix change nothing. Feeds lines
+    /// to a fresh Progress and reads its text after each.
+    #[test]
+    fn the_loading_text_is_the_engine_s_latest_line() {
+        let mut progress = Progress::default();
+        assert_eq!(progress.text(), LOOKING);
+
+        progress.said("warning: something gdb said");
+        assert_eq!(progress.text(), LOOKING);
+
+        progress.said("rewind: walking thread 173's stack in gdb");
+        assert_eq!(progress.text(), "Walking thread 173's stack in gdb.");
+
+        progress.said("rewind: downloading debug info for libc.so.6; first time only");
+        assert_eq!(
+            progress.text(),
+            "Downloading debug info for libc.so.6; first time only."
+        );
     }
 }

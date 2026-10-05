@@ -1,5 +1,6 @@
 //! The `rewind` command.
 
+mod downloads;
 mod gdb;
 mod locate;
 mod show;

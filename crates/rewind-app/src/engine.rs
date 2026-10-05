@@ -11,7 +11,7 @@
 //! REWIND_HOME among it, is the app's.
 
 use std::ffi::OsString;
-use std::io::Read;
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -158,8 +158,17 @@ pub trait Engine: Send + Sync {
     /// Where in the program's own code thread `tid` of process `pid` was
     /// at `step` of `run`: the thread's frames, the innermost of them in
     /// the program's own code, and its source. The engine forks the run at
-    /// the step and walks the thread's stack in gdb, which takes seconds.
-    fn locate(&self, run: &Path, step: u64, pid: u32, tid: u32) -> EngineResult<Located>;
+    /// the step and walks the thread's stack in gdb, which takes seconds,
+    /// or a minute the first time gdb downloads a library's debug info;
+    /// `progress` is handed each line the engine says while it works.
+    fn locate(
+        &self,
+        run: &Path,
+        step: u64,
+        pid: u32,
+        tid: u32,
+        progress: &mut dyn FnMut(&str),
+    ) -> EngineResult<Located>;
 }
 
 /// A program and its arguments, for the terminal pane to run.
@@ -485,14 +494,28 @@ impl Engine for CliEngine {
         }
     }
 
-    fn locate(&self, run: &Path, step: u64, pid: u32, tid: u32) -> EngineResult<Located> {
-        self.where_json(run, step, pid, tid)
+    fn locate(
+        &self,
+        run: &Path,
+        step: u64,
+        pid: u32,
+        tid: u32,
+        progress: &mut dyn FnMut(&str),
+    ) -> EngineResult<Located> {
+        self.where_json(run, step, pid, tid, progress)
     }
 }
 
 impl CliEngine {
     /// `rewind where`, as Engine::locate describes it.
-    fn where_json(&self, run: &Path, step: u64, pid: u32, tid: u32) -> EngineResult<Located> {
+    fn where_json(
+        &self,
+        run: &Path,
+        step: u64,
+        pid: u32,
+        tid: u32,
+        progress: &mut dyn FnMut(&str),
+    ) -> EngineResult<Located> {
         // rewind where <run> <step> --pid P --tid T --json
         let args: [OsString; 8] = [
             "where".into(),
@@ -505,23 +528,49 @@ impl CliEngine {
             "--json".into(),
         ];
         let command = self.command_line(&args);
-        let output = Command::new(&self.program)
+        let mut child = Command::new(&self.program)
             .args(&args)
             .stdin(Stdio::null())
-            .output()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .map_err(|e| self.spawn_error(e, &command))?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
+
+        // The answer is read beside the engine's lines, so a full pipe
+        // cannot stop the engine.
+        let mut stdout_pipe = child.stdout.take().expect("stdout is piped");
+        let answer = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = stdout_pipe.read_to_end(&mut bytes);
+            bytes
+        });
+
+        // The engine's lines, each handed on as it says it.
+        let mut stderr = String::new();
+        if let Some(pipe) = child.stderr.take() {
+            for line in BufReader::new(pipe).lines() {
+                let Ok(line) = line else {
+                    break;
+                };
+                progress(&line);
+                stderr.push_str(&line);
+                stderr.push('\n');
+            }
+        }
+        let status = child.wait().map_err(|e| self.spawn_error(e, &command))?;
+        let stdout = answer.join().unwrap_or_default();
+
+        let stdout = String::from_utf8_lossy(&stdout);
         let located = stdout
             .lines()
             .rev()
             .find_map(|line| serde_json::from_str::<Located>(line).ok());
         match located {
-            Some(located) if output.status.success() => Ok(located),
+            Some(located) if status.success() => Ok(located),
             _ => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
                 let message = last_line(&stderr)
                     .map(str::to_string)
-                    .unwrap_or_else(|| output.status.to_string());
+                    .unwrap_or_else(|| status.to_string());
                 Err(EngineError::Failed { command, message })
             }
         }
@@ -786,7 +835,7 @@ mod tests {
         let run = dir.join("run");
         let json = r#"{"run":"r","step":5060,"pid":166,"tid":174,"process":"test_pool_shutdown","frames":[{"level":0,"function":"worker","file":"src/pool.c","fullname":null,"line":77,"pc":"0x55bfaf437437","object":"/build/mylib/tests/test_pool_shutdown"}],"chosen":0,"sources":[null]}\n"#;
         let engine = fake_engine(&dir, json, "rewind: walking the stack in gdb\n", 0);
-        let located = retrying(|| engine.locate(&run, 5_060, 166, 174)).unwrap();
+        let located = retrying(|| engine.locate(&run, 5_060, 166, 174, &mut |_| {})).unwrap();
         assert_eq!(
             located.chosen_frame().unwrap().place_label(),
             "src/pool.c:77"
@@ -798,11 +847,52 @@ mod tests {
         );
 
         let refusing = fake_engine(&dir, "", "rewind: no process 166 at this step\n", 1);
-        let err = retrying(|| refusing.locate(&run, 10, 166, 166)).unwrap_err();
+        let err = retrying(|| refusing.locate(&run, 10, 166, 166, &mut |_| {})).unwrap_err();
         let EngineError::Failed { message, .. } = err else {
             panic!("{err:?}");
         };
         assert_eq!(message, "rewind: no process 166 at this step");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The engine's lines reach the caller while it runs. The stand-in
+    /// says a line, then waits up to five seconds for a file the caller
+    /// makes when the line reaches it, and answers only once the file is
+    /// there; a caller that read the lines after the engine exited gets
+    /// no answer.
+    #[test]
+    fn locate_hands_on_the_engine_s_lines_as_they_come() {
+        let dir = temp_dir("where-progress");
+        let run = dir.join("run");
+        let go = dir.join("go");
+        let script = dir.join("rewind");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf 'rewind: downloading debug info for libc.so.6; first time only\\n' >&2\n\
+                 i=0; while [ ! -e '{go}' ] && [ $i -lt 500 ]; do sleep 0.01; i=$((i + 1)); done\n\
+                 [ -e '{go}' ] || exit 1\n\
+                 printf '%s\\n' '{{\"run\":\"r\",\"step\":1,\"pid\":2,\"tid\":2,\"process\":\"p\",\"frames\":[],\"chosen\":null,\"sources\":[]}}'\n",
+                go = go.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let engine = CliEngine::new(script);
+
+        let said = std::cell::RefCell::new(Vec::new());
+        let located = retrying(|| {
+            engine.locate(&run, 1, 2, 2, &mut |line| {
+                said.borrow_mut().push(line.to_string());
+                std::fs::write(&go, "").unwrap();
+            })
+        })
+        .unwrap();
+        assert_eq!(located.process, "p");
+        assert_eq!(
+            said.into_inner(),
+            vec!["rewind: downloading debug info for libc.so.6; first time only".to_string()]
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

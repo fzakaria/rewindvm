@@ -127,7 +127,9 @@ pub fn walk(home: &Home, run: &Run, step: u64, pid: u32, tid: u32) -> Result<Ans
         script.display().to_string(),
     ]);
     eprintln!("rewind: walking thread {tid}'s stack in gdb");
-    let (_, printed) = gdb::run_gdb(&args, Some((&mut debuggee, &listener)), Output::Captured)?;
+    let names = symbols.file_names();
+    let output = Output::CapturedSayingDownloads(&names);
+    let (_, printed) = gdb::run_gdb(&args, Some((&mut debuggee, &listener)), output)?;
     let walked: Walked = script_answer(&printed)?;
     if let Some(error) = walked.error {
         bail!("gdb could not walk thread {tid}'s stack: {error}");

@@ -5,18 +5,21 @@
 //! file opens in the file viewer. The engine forks the run at the step and
 //! walks the thread's stack in gdb, which takes seconds, so the panel asks
 //! again only once the playhead rests, and the last answer stays on
-//! screen, dimmed, until the new one arrives. Runs the engine cannot fork
+//! screen, dimmed, until the new one arrives. With no answer on screen,
+//! the panel shows the engine's latest line while it works, such as the
+//! debug info gdb downloads the first time, which can take a minute. Runs the engine cannot fork
 //! say so instead, as do runs recorded before the guest kernel listed its
 //! tasks. Clicking a frame in the list shows that frame's source, from the
 //! same answer, until the next answer shows its chosen frame again.
 
+use futures::StreamExt;
 use gpui::{
     Context, CursorStyle, Div, MouseButton, Role, SharedString, div, prelude::*, px, relative, rgb,
 };
 
 use crate::describe::thousands;
 use crate::selection::{Mapped, Surface, part_of_line};
-use crate::source::{Frame, Located, PANEL_RADIUS, Shown, shown, target};
+use crate::source::{Frame, Located, PANEL_RADIUS, Progress, Shown, shown, target};
 use crate::theme::{self, layout, size};
 use crate::ui::icons::Icon;
 use crate::ui::scrubber::{Replay, Scrubber, replay_unavailable};
@@ -40,6 +43,8 @@ pub struct SourcePanel {
     pub unavailable: Option<String>,
     pub shown: Option<Shown>,
     pub loading: bool,
+    /// What the engine has said while it looks for the latest request.
+    pub progress: Progress,
     /// Counts requests; an answer to anything but the latest is dropped.
     generation: u64,
 }
@@ -60,6 +65,7 @@ impl Scrubber {
             unavailable,
             shown: None,
             loading: readable,
+            progress: Progress::default(),
             generation: 0,
         });
         self.clear_selection_in(&[Surface::Viewer, Surface::Source]);
@@ -150,13 +156,38 @@ impl Scrubber {
         };
 
         panel.loading = true;
+        panel.progress = Progress::default();
         let generation = panel.generation;
         let run = session.run.path.clone();
         let engine = self.engine.clone();
-        let task = cx
-            .background_executor()
-            .spawn(async move { engine.locate(&run, step, pid, tid) });
+
+        // The engine's lines come through a channel as it says them, and
+        // the channel closes when the engine is done.
+        let (lines, mut said) = futures::channel::mpsc::unbounded::<String>();
+        let task = cx.background_executor().spawn(async move {
+            engine.locate(&run, step, pid, tid, &mut |line| {
+                let _ = lines.unbounded_send(line.to_string());
+            })
+        });
         cx.spawn(async move |this, cx| {
+            // Each line becomes the panel's loading text while the panel
+            // still waits for this request.
+            while let Some(line) = said.next().await {
+                let alive = this.update(cx, |this, cx| {
+                    let Some(panel) = &mut this.source else {
+                        return;
+                    };
+                    if panel.generation != generation {
+                        return;
+                    }
+                    panel.progress.said(&line);
+                    cx.notify();
+                });
+                if alive.is_err() {
+                    break;
+                }
+            }
+
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
                 let Some(panel) = &mut this.source else {
@@ -532,9 +563,6 @@ fn source_message(panel: &SourcePanel) -> Option<(String, u32)> {
         ),
         Some(Shown::Unreadable { message, .. }) => (message.to_string(), theme::SOFT),
         Some(Shown::Failed { message, .. }) => (message.clone(), theme::RED_SOFT),
-        None => (
-            "Rewind is forking the run at this step and walking the thread's stack in gdb. This takes a few seconds.".to_string(),
-            theme::MUTED,
-        ),
+        None => (panel.progress.text(), theme::MUTED),
     })
 }

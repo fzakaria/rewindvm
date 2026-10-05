@@ -31,6 +31,8 @@ use rewind_core::maps::{ImageMount, Origin, Running, SymbolFile};
 use rewind_core::source_cache::{self, Entry, SourceCache, Version};
 use rewind_core::{Home, Run};
 
+use crate::downloads::{self, Downloads, FileNames};
+
 /// The address `rewind gdb` serves on when it starts gdb itself: any free
 /// port on the loopback interface.
 pub const GDB_LOCAL: &str = "127.0.0.1:0";
@@ -204,9 +206,13 @@ pub fn fork(
 
 /// Where gdb's output goes: to the terminal, or back to the caller.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Output {
+pub enum Output<'a> {
     Terminal,
     Captured,
+    /// Back to the caller, with each download gdb's debuginfod client
+    /// starts said as it starts, the programs and libraries named by their
+    /// build IDs here.
+    CapturedSayingDownloads(&'a FileNames),
 }
 
 /// What gdb printed when its output was captured.
@@ -226,26 +232,48 @@ pub fn run_gdb(
 ) -> Result<(std::process::ExitStatus, Printed)> {
     let mut command = Command::new(GDB_PROGRAM);
     command.args(args);
-    if output == Output::Captured {
+    if output != Output::Terminal {
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
     }
+
+    // The debuginfod client's log on gdb's standard error, for the
+    // downloads to be said as they start.
+    let names = match output {
+        Output::CapturedSayingDownloads(names) => {
+            command.env(downloads::VERBOSE_ENV, downloads::VERBOSE_ON);
+            Some(names.clone())
+        }
+        Output::Terminal | Output::Captured => None,
+    };
     let mut child = command.spawn().context(
         "starting gdb; is it on PATH? `rewind gdb --listen 127.0.0.1:1234` serves without it",
     )?;
 
     // gdb's output is read beside the serving, so a full pipe cannot stop
-    // gdb while the fork waits for it.
-    let read = |pipe: Option<Box<dyn std::io::Read + Send>>| {
-        pipe.map(|mut pipe| {
-            std::thread::spawn(move || {
-                let mut text = String::new();
-                let _ = pipe.read_to_string(&mut text);
-                text
-            })
+    // gdb while the fork waits for it. The client's downloads are said as
+    // they start, since a library's DWARF or sources can take a minute to
+    // download the first time, and its log is left out of what gdb said.
+    let stdout = child
+        .stdout
+        .take()
+        .map(|pipe| std::thread::spawn(move || read_lines(pipe, |_| {})));
+    let stderr = child.stderr.take().map(|pipe| {
+        std::thread::spawn(move || {
+            let Some(names) = names else {
+                return read_lines(pipe, |_| {});
+            };
+            let mut downloads = Downloads::new(&names);
+            let text = read_lines(pipe, |line| {
+                if let Some(message) = downloads.message(line) {
+                    Say::Aloud.line(message);
+                }
+            });
+            text.lines()
+                .filter(|line| !downloads::is_client_log(line))
+                .map(|line| format!("{line}\n"))
+                .collect()
         })
-    };
-    let stdout = read(child.stdout.take().map(|p| Box::new(p) as _));
-    let stderr = read(child.stderr.take().map(|p| Box::new(p) as _));
+    });
     let served = match fork {
         Some((debuggee, listener)) => {
             let (conn, _) = listener.accept()?;
@@ -269,6 +297,32 @@ pub fn run_gdb(
 
 /// The host's gdb.
 const GDB_PROGRAM: &str = "gdb";
+
+/// Reads `pipe` to its end a line at a time, handing each line to `each`,
+/// without its newline, as it is read. Returns everything read.
+fn read_lines(pipe: impl std::io::Read, mut each: impl FnMut(&str)) -> String {
+    let mut reader = std::io::BufReader::new(pipe);
+    let mut text = String::new();
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        match std::io::BufRead::read_until(&mut reader, b'\n', &mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        let line = String::from_utf8_lossy(&line);
+        each(line.trim_end_matches('\n'));
+        text.push_str(&line);
+    }
+    text
+}
+
+/// A shell command for gdb's pipe command that passes on only gdb's lines
+/// about downloads, such as "Downloading 4.35 M separate debug info for
+/// /nix/store/...-glibc-2.44/lib/libc.so.6...", to gdb's own standard
+/// output. gdb runs the command with /bin/sh, whatever the person's shell.
+const DOWNLOADS_ONLY: &str =
+    r#"while IFS= read -r line; do case $line in Downloading*) printf '%s\n' "$line";; esac; done"#;
 
 /// What gdb is told about a run at a step: the kernel's symbols, the
 /// process's programs and libraries with their sources, and a debuginfod
@@ -312,6 +366,26 @@ impl Symbols {
     /// the symbols do.
     pub fn dir(&self) -> &Path {
         &self.session.dir
+    }
+
+    /// The process's programs and libraries by their build IDs, which the
+    /// debuginfod client asks for them by. A file with no build ID is left
+    /// out.
+    pub fn file_names(&self) -> FileNames {
+        let mut names = FileNames::new();
+        for file in &self.process.files {
+            let Ok(mut opened) = std::fs::File::open(&file.path) else {
+                continue;
+            };
+            let Some(id) = rewind_core::maps::build_id(&mut opened) else {
+                continue;
+            };
+            let Some(name) = file.path.file_name() else {
+                continue;
+            };
+            names.insert(id, name.to_string_lossy().into_owned());
+        }
+        names
     }
 
     /// gdb's arguments for these symbols, connecting to `target` when
@@ -385,19 +459,17 @@ fn arguments(
             format!("set substitute-path {} {}", from.display(), to.display()),
         );
     }
-    // Each is loaded through gdb's Python, which keeps add-symbol-file's
-    // line about the file and its offset to itself.
+    // Each is loaded through gdb's pipe command into a filter that keeps
+    // add-symbol-file's line about the file and its offset to itself and
+    // passes on gdb's line about downloading the file's debug info, which
+    // can take a minute the first time.
     for file in &process.files {
-        let command = format!(
-            "with confirm off -- add-symbol-file {} -o {:#x}",
-            file.path.display(),
-            file.offset
-        );
         ex(
             "-ex",
             format!(
-                "python gdb.execute({}, to_string=True)",
-                python_string(&command)
+                "pipe with confirm off -- add-symbol-file {} -o {:#x} | {DOWNLOADS_ONLY}",
+                file.path.display(),
+                file.offset
             ),
         );
     }
@@ -1055,11 +1127,6 @@ fn store_root(path: &Path) -> Option<PathBuf> {
     Some(Path::new(NIX_STORE).join(first))
 }
 
-/// A Python string literal holding `text`.
-fn python_string(text: &str) -> String {
-    format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
-}
-
 /// An argument as a shell would need it typed.
 fn quote(arg: &str) -> String {
     if arg.contains([' ', '\'', '"', '$', '\\']) {
@@ -1282,9 +1349,35 @@ mod tests {
         );
     }
 
+    /// Each line of a pipe reaches the callback as it is read, without its
+    /// newline, and the whole text comes back: two lines, the last with no
+    /// newline, read from a byte slice.
     #[test]
-    fn a_python_string_escapes_quotes_and_backslashes() {
-        assert_eq!(python_string(r#"a "b" \c"#), r#""a \"b\" \\c""#);
+    fn lines_are_handed_on_as_they_are_read_and_kept() {
+        let mut seen = Vec::new();
+        let text = read_lines(&b"one\ntwo"[..], |line| seen.push(line.to_string()));
+        assert_eq!(seen, vec!["one".to_string(), "two".to_string()]);
+        assert_eq!(text, "one\ntwo");
+    }
+
+    /// Each program or library is loaded through gdb's pipe command into
+    /// the filter that passes on only download lines. Builds the arguments
+    /// for a process with one library and checks its command.
+    #[test]
+    fn a_library_is_loaded_with_only_its_download_lines_shown() {
+        let process = Process {
+            files: vec![SymbolFile {
+                path: PathBuf::from("/nix/store/abc-glibc/lib/libc.so.6"),
+                offset: 0x7f00_0000_0000,
+                origin: Origin::Store,
+            }],
+            ..Process::default()
+        };
+        let args = arguments(&KernelSymbols::none(), &process, &[], None);
+        let expected = format!(
+            "pipe with confirm off -- add-symbol-file /nix/store/abc-glibc/lib/libc.so.6 -o 0x7f0000000000 | {DOWNLOADS_ONLY}"
+        );
+        assert!(args.contains(&expected), "{args:?}");
     }
 
     #[test]
