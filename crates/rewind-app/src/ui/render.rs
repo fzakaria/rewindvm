@@ -4,6 +4,8 @@
 //! Every frame reads the precomputed tables in `model::Timeline`; nothing
 //! here walks the trace.
 
+use std::path::Path;
+
 use gpui::{
     AnyElement, Bounds, ClickEvent, Context, CursorStyle, DispatchPhase, Div, FontWeight,
     HighlightStyle, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels,
@@ -322,12 +324,17 @@ impl Scrubber {
             left = left.child(self.with_callout(toggle, Anchor::RunsPill, cx));
         }
 
+        // The run's size, or, while another run is read to take its place,
+        // which one.
         let timeline = &run.timeline;
-        let stats = format!(
-            "{} steps \u{b7} {} events \u{b7} {VCPUS} vCPU",
-            thousands(timeline.total),
-            thousands(timeline.trace.events.len() as u64)
-        );
+        let stats = match &self.loading {
+            Some(path) => opening_label(path),
+            None => format!(
+                "{} steps \u{b7} {} events \u{b7} {VCPUS} vCPU",
+                thousands(timeline.total),
+                thousands(timeline.trace.events.len() as u64)
+            ),
+        };
         self.header_frame(left, Some(stats), window, cx)
     }
 
@@ -2061,5 +2068,36 @@ impl Scrubber {
             ),
         };
         vec![Mapped::plain(title), mapped(&body)]
+    }
+}
+
+/// What the header says while the run at `path` is read: its file name,
+/// cut to fit.
+fn opening_label(path: &Path) -> String {
+    let name = path.file_name().map_or_else(
+        || path.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    );
+    format!("opening {}\u{2026}", describe::clip(&name, MAX_NAME_CHARS))
+}
+
+#[cfg(test)]
+mod tests {
+    // What the header says, with no window.
+    use super::*;
+
+    #[test]
+    fn the_header_names_the_run_being_opened() {
+        // A run's directory is named by its last part, a long name cut to
+        // the header's width, and a path with no name as a whole.
+        assert_eq!(
+            opening_label(Path::new(
+                "/home/u/.local/share/rewind/runs/8fd5378ddf70075e"
+            )),
+            "opening 8fd5378ddf70075e\u{2026}"
+        );
+        let long = format!("/tmp/{}.rwd", "x".repeat(80));
+        assert!(opening_label(Path::new(&long)).chars().count() < 60);
+        assert_eq!(opening_label(Path::new("/")), "opening /\u{2026}");
     }
 }
