@@ -1171,9 +1171,24 @@ impl Debuginfod {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .process_group(0);
-        // SAFETY: dup2 and fcntl are async-signal-safe.
+
+        // The server ends with rewind however rewind ends, even by a signal
+        // that skips Drop, as when the app cancels a lookup by stopping
+        // its process group, which the server is not in. Starting it on a
+        // thread that ends sooner would end it then too; `Symbols::load`
+        // runs on the thread the command runs on.
+        let parent = std::process::id();
+        // SAFETY: prctl, getppid, dup2 and fcntl are async-signal-safe.
         unsafe {
             cmd.pre_exec(move || {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if u32::try_from(libc::getppid()).ok() != Some(parent) {
+                    return Err(std::io::Error::other(
+                        "rewind ended before the server started",
+                    ));
+                }
                 let moved = if fd == LISTEN_FD {
                     libc::fcntl(fd, libc::F_SETFD, 0)
                 } else {
