@@ -226,6 +226,9 @@ pub trait Engine: Send + Sync {
     /// ids of the runs removed, `run` first.
     fn remove(&self, run: &Path) -> EngineResult<Vec<String>>;
 
+    /// The engine's version, as `rewind --version` prints it.
+    fn version(&self) -> EngineResult<EngineVersion>;
+
     /// The command that opens an interactive shell inside a fork of `run`
     /// at `step`, in process `pid`'s root and working directory, or the
     /// job's when no process is given.
@@ -498,6 +501,28 @@ impl Engine for CliEngine {
         Err(EngineError::Failed { command, message })
     }
 
+    fn version(&self) -> EngineResult<EngineVersion> {
+        let args: [OsString; 1] = ["--version".into()];
+        let command = self.command_line(&args);
+        let output = Command::new(&self.program)
+            .args(&args)
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|e| self.spawn_error(e, &command))?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        match EngineVersion::parse(&stdout) {
+            Some(version) if output.status.success() => Ok(version),
+            _ => Err(EngineError::Failed {
+                command,
+                message: last_line(&stdout)
+                    .or_else(|| last_line(&stderr))
+                    .map(str::to_string)
+                    .unwrap_or_else(|| output.status.to_string()),
+            }),
+        }
+    }
+
     fn shell_command(&self, run: &Path, step: u64, pid: Option<u32>) -> CommandLine {
         // rewind shell <run> <step> [--pid P]
         let mut args: Vec<OsString> = vec!["shell".into(), run.into(), step.to_string().into()];
@@ -758,8 +783,60 @@ fn default_home() -> Option<PathBuf> {
     Some(data.join(DEFAULT_HOME_DIR))
 }
 
+/// The last line of what the engine said, which is its reason for a
+/// refusal. Clap's usage and its pointer at --help, which follow its error
+/// for a command or option the engine does not have, are skipped.
 fn last_line(text: &str) -> Option<&str> {
-    text.lines().map(str::trim).rfind(|l| !l.is_empty())
+    const CLAP_TRAILERS: [&str; 2] = ["For more information, try", "Usage:"];
+    text.lines()
+        .map(str::trim)
+        .rfind(|l| !l.is_empty() && !CLAP_TRAILERS.iter().any(|t| l.starts_with(t)))
+}
+
+/// The engine's version, as `rewind --version` prints it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EngineVersion {
+    pub version: String,
+    /// The commit the engine was built from, when its build knew it.
+    pub commit: Option<String>,
+}
+
+impl EngineVersion {
+    /// Reads `rewind <version>`, or `rewind <version> (<commit>)`.
+    pub fn parse(output: &str) -> Option<EngineVersion> {
+        const PREFIX: &str = "rewind ";
+        let rest = output.trim().strip_prefix(PREFIX)?;
+        let (version, commit) = match rest.split_once(' ') {
+            Some((version, commit)) => (version, Some(commit)),
+            None => (rest, None),
+        };
+        if !version.starts_with(|c: char| c.is_ascii_digit()) {
+            return None;
+        }
+        let commit = match commit {
+            Some(c) => Some(c.strip_prefix('(')?.strip_suffix(')')?.to_string()),
+            None => None,
+        };
+        Some(EngineVersion {
+            version: version.to_string(),
+            commit,
+        })
+    }
+
+    /// What to tell the user when this engine is not of `app_version`.
+    pub fn mismatch(&self, app_version: &str) -> Option<String> {
+        if self.version == app_version {
+            return None;
+        }
+        let commit = self
+            .commit
+            .as_ref()
+            .map_or_else(String::new, |c| format!(" ({c})"));
+        Some(format!(
+            "This app is version {app_version} and its engine is rewind {}{commit}. A command the engine does not have, or answers another way, fails or shows the wrong thing; install rewind {app_version}, or set {PROGRAM_ENV} to it.",
+            self.version
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -768,6 +845,60 @@ mod tests {
     // written to a temporary directory play `rewind`, and a name that does
     // not exist plays a machine without it.
     use super::*;
+
+    #[test]
+    fn the_engine_s_version_line_is_read_with_or_without_a_commit() {
+        // `rewind --version` names the version and, for a build that knew
+        // it, the commit, dirty or not; anything else is not a version.
+        assert_eq!(
+            EngineVersion::parse("rewind 0.4.1 (0bcd0207385d)\n"),
+            Some(EngineVersion {
+                version: "0.4.1".into(),
+                commit: Some("0bcd0207385d".into()),
+            })
+        );
+        assert_eq!(
+            EngineVersion::parse("rewind 0.4.1 (0bcd0207385d-dirty)")
+                .unwrap()
+                .commit
+                .as_deref(),
+            Some("0bcd0207385d-dirty")
+        );
+        assert_eq!(
+            EngineVersion::parse("rewind 0.4.1"),
+            Some(EngineVersion {
+                version: "0.4.1".into(),
+                commit: None,
+            })
+        );
+        assert_eq!(EngineVersion::parse("gdb 15.1"), None);
+        assert_eq!(EngineVersion::parse(""), None);
+    }
+
+    #[test]
+    fn an_engine_of_another_version_is_named_in_the_warning() {
+        // The same version is fine whatever its commit; another version
+        // is named, with its commit, beside the app's.
+        let engine = |version: &str| EngineVersion {
+            version: version.into(),
+            commit: Some("abc123".into()),
+        };
+        assert_eq!(engine("0.4.1").mismatch("0.4.1"), None);
+        let warning = engine("0.4.0").mismatch("0.4.1").unwrap();
+        assert!(warning.contains("0.4.0 (abc123)") && warning.contains("0.4.1"));
+    }
+
+    #[test]
+    fn clap_s_usage_trailer_is_not_the_reason_given() {
+        // An engine too old for a command answers with clap's error, then
+        // a line pointing at --help; the error is the reason shown.
+        let stderr = "error: unrecognized subcommand 'where'\n\nUsage: rewind <COMMAND>\n\nFor more information, try '--help'.\n";
+        assert_eq!(
+            last_line(stderr),
+            Some("error: unrecognized subcommand 'where'")
+        );
+        assert_eq!(last_line("rewind: no run\n"), Some("rewind: no run"));
+    }
 
     #[test]
     fn a_replay_that_went_another_way_is_told_apart() {

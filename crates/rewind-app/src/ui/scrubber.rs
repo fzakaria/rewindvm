@@ -18,8 +18,8 @@ use crate::answers::{Answers, FileKey, PlaceKey};
 use crate::bookmarks::Bookmarks;
 use crate::describe::thousands;
 use crate::engine::{
-    Engine, EngineError, EngineResult, FileAtStep, Forked, GdbAt, REPLAYS_ANOTHER_WAY,
-    goes_another_way,
+    Engine, EngineError, EngineResult, EngineVersion, FileAtStep, Forked, GdbAt, PROGRAM_ENV,
+    REPLAYS_ANOTHER_WAY, goes_another_way,
 };
 use crate::family::{Family, Row, RowKind, RunEntry, families, family_of, scan};
 use crate::history::History;
@@ -46,6 +46,9 @@ use crate::ui::viewer::FileViewer;
 use crate::ui::widgets::Fonts;
 use crate::ui::{Launch, RightColumn};
 use crate::view::View;
+
+/// The app's version, which the engine's should match.
+const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// How long a notice that informs stays up.
 const NOTICE_DURATION: Duration = Duration::from_secs(8);
@@ -447,7 +450,48 @@ impl Scrubber {
             this.reload_runs(cx);
         }
         this.start_licensing(cx);
+        this.check_engine(cx);
         this
+    }
+
+    /// Asks the engine its version once, at start, in the background, and
+    /// says so when it is missing or of another version than the app: an
+    /// older engine lacks commands the app runs, and its refusals would
+    /// show where the answers go.
+    fn check_engine(&mut self, cx: &mut Context<Self>) {
+        let engine = self.engine.clone();
+        let asked = cx
+            .background_executor()
+            .spawn(async move { engine.version() });
+        cx.spawn(async move |this, cx| {
+            let result = asked.await;
+            let _ = this.update(cx, |this, cx| this.engine_checked(result, cx));
+        })
+        .detach();
+    }
+
+    fn engine_checked(&mut self, result: EngineResult<EngineVersion>, cx: &mut Context<Self>) {
+        match result {
+            Ok(engine) => {
+                if let Some(warning) = engine.mismatch(APP_VERSION) {
+                    self.notify_user(
+                        NoticeTone::Error,
+                        "The engine is another version",
+                        warning,
+                        cx,
+                    );
+                }
+            }
+            Err(EngineError::Missing { program }) => self.notify_user(
+                NoticeTone::Info,
+                "The engine is not installed",
+                format!(
+                    "Runs open and scrub without it. Files, source, shells, gdb and forks need the engine command {program} on PATH, or {PROGRAM_ENV} naming it."
+                ),
+                cx,
+            ),
+            Err(e) => self.report("The engine did not say its version", e, cx),
+        }
     }
 
     /// Puts a session on screen with the playhead at `step`, or at the
