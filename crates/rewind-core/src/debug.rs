@@ -341,6 +341,8 @@ pub struct Debuggee {
     machine: Machine,
     traps: Traps,
     mode: Mode,
+    /// The thread gdb asked to step, which it expects the step to stop.
+    stepped: Option<Tid>,
     /// The process gdb debugs, if any.
     process: Option<u32>,
     /// The page table of the process gdb debugs, if any.
@@ -381,6 +383,7 @@ impl Debuggee {
             machine,
             traps: Traps::default(),
             mode: Mode::Continue,
+            stepped: None,
             process,
             space,
             layout,
@@ -636,6 +639,7 @@ impl MultiThreadResume for Debuggee {
 
     fn clear_resume_actions(&mut self) -> Result<(), Self::Error> {
         self.mode = Mode::Continue;
+        self.stepped = None;
         Ok(())
     }
 
@@ -671,13 +675,14 @@ impl MultiThreadSchedulerLocking for Debuggee {
 impl MultiThreadSingleStep for Debuggee {
     fn set_resume_action_step(
         &mut self,
-        _tid: Tid,
+        tid: Tid,
         signal: Option<Signal>,
     ) -> Result<(), Self::Error> {
         if signal.is_some() {
             return Err("a signal cannot be delivered to the whole VM".into());
         }
         self.mode = Mode::Step;
+        self.stepped = Some(tid);
         Ok(())
     }
 }
@@ -764,9 +769,24 @@ impl BlockingEventLoop for EventLoop {
             target.refresh_threads();
             Ok(Event::TargetStopped(reason(cpu_tid())))
         };
-        let step_done = |tid| MultiThreadStopReason::SignalWithThread {
-            tid,
-            signal: Signal::SIGTRAP,
+
+        // A step is the vCPU's one instruction, done in the thread gdb
+        // stepped, which gdb expects to stop; a stop in another thread
+        // would read to gdb as a signal it never asked for. The process's
+        // thread on the CPU shows its user registers while the vCPU runs
+        // the kernel, so its pc moves once the kernel returns to it.
+        let step_done = |target: &mut Debuggee| {
+            target.refresh_threads();
+            let tid = target
+                .stepped
+                .filter(|&tid| target.source(tid).is_some())
+                .unwrap_or_else(cpu_tid);
+            Ok(Event::TargetStopped(
+                MultiThreadStopReason::SignalWithThread {
+                    tid,
+                    signal: Signal::SIGTRAP,
+                },
+            ))
         };
 
         loop {
@@ -786,14 +806,14 @@ impl BlockingEventLoop for EventLoop {
                 );
             }
             match outcome {
-                Outcome::Debug(DebugStop::Step) => return stop(target, step_done),
+                Outcome::Debug(DebugStop::Step) => return step_done(target),
                 // A trap in another process's address space is passed:
                 // the fork runs on, or a step is done.
                 Outcome::Debug(DebugStop::Breakpoint(address))
                     if !target.in_scope(address).map_err(target_error)? =>
                 {
                     if target.mode == Mode::Step {
-                        return stop(target, step_done);
+                        return step_done(target);
                     }
                     target.pass_breakpoint().map_err(target_error)?;
                     continue;
@@ -802,7 +822,7 @@ impl BlockingEventLoop for EventLoop {
                     if !target.in_scope(address).map_err(target_error)? =>
                 {
                     if target.mode == Mode::Step {
-                        return stop(target, step_done);
+                        return step_done(target);
                     }
                     continue;
                 }
@@ -814,7 +834,10 @@ impl BlockingEventLoop for EventLoop {
                     let tid = cpu_tid();
                     let reason = match target.traps.watch_at(piece) {
                         Some((addr, kind)) => MultiThreadStopReason::Watch { tid, kind, addr },
-                        None => step_done(tid),
+                        None => MultiThreadStopReason::SignalWithThread {
+                            tid,
+                            signal: Signal::SIGTRAP,
+                        },
                     };
                     return Ok(Event::TargetStopped(reason));
                 }
