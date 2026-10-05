@@ -164,7 +164,7 @@ impl Running {
     /// `dir` when the VM sent it, else at its store path when this machine
     /// has that, else under `dir` when it was read out of the run's image.
     fn local(&self, path: &str, dir: &Path) -> Option<(PathBuf, Origin)> {
-        let copy = dir.join(path.trim_start_matches('/'));
+        let copy = crate::guest_path::under(dir, path)?;
         if self.sent.iter().any(|(p, _)| p == path) {
             return Some((copy, Origin::Sent));
         }
@@ -190,7 +190,9 @@ impl Running {
         mount: Option<ImageMount>,
     ) -> std::io::Result<Vec<SymbolFile>> {
         for (path, bytes) in &self.sent {
-            let to = dir.join(path.trim_start_matches('/'));
+            let Some(to) = crate::guest_path::under(dir, path) else {
+                continue;
+            };
             if let Some(parent) = to.parent() {
                 std::fs::create_dir_all(parent)?;
             }
@@ -210,7 +212,9 @@ impl Running {
                 let Some(inside) = mount.inside(path) else {
                     continue;
                 };
-                let to = dir.join(path.trim_start_matches('/'));
+                let Some(to) = crate::guest_path::under(dir, path) else {
+                    continue;
+                };
                 if let Some(parent) = to.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
@@ -529,6 +533,23 @@ mod tests {
         }));
         assert!(!running.missing(&dir).contains(&"/build/source/test-helper"));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_sent_file_never_lands_outside_the_session() {
+        // A file the VM sent under a path that climbs above its root, as a
+        // forged answer could name, is not written, and is not offered to
+        // gdb; one beside it at a plain path is.
+        let root = std::env::temp_dir().join(format!("rewind-maps-escape-{}", std::process::id()));
+        let dir = root.join("session");
+        let escaped = "/../escaped";
+        let running =
+            Running::parse(&answer(&[(escaped, &elf(0)), ("/build/helper", &elf(1))])).unwrap();
+        let files = running.symbol_files(&dir, None).unwrap();
+        assert!(!root.join("escaped").exists());
+        assert!(dir.join("build/helper").exists());
+        assert!(files.iter().all(|f| !f.path.ends_with("escaped")));
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     /// A store file the VM did not send and this machine lacks is read out

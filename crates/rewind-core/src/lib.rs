@@ -6,6 +6,7 @@ pub mod cpio;
 pub mod debug;
 pub mod export;
 pub mod gc;
+pub mod guest_path;
 pub mod home;
 pub mod image;
 pub mod inspect;

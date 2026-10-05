@@ -775,7 +775,9 @@ fn fetch_sources(
 
     let mut dirs: Vec<(PathBuf, PathBuf)> = Vec::new();
     for (path, bytes) in found {
-        let to = dir.join(path.trim_start_matches('/'));
+        let Some(to) = rewind_core::guest_path::under(dir, &path) else {
+            continue;
+        };
         // Dated at the epoch, older than the programs written before them,
         // or gdb warns that each source is newer than its program.
         let written = to
