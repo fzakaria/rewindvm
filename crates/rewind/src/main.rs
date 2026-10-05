@@ -1,5 +1,6 @@
 //! The `rewind` command.
 
+mod doctor;
 mod downloads;
 mod gdb;
 mod json;
@@ -504,6 +505,13 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Whether this machine can record runs and look inside them.
+    ///
+    /// Checks KVM, the guest, which clock runs get, gdb and its Python, the
+    /// debuginfod server, nix and mkfs.erofs, the disk the home takes, and
+    /// runs whose manifests do not read, saying what to do about each
+    /// problem. Exits 1 when runs cannot be recorded here.
+    Doctor,
     /// Whether this host's performance counters can drive virtual time.
     Pmu {
         #[command(subcommand)]
@@ -740,6 +748,7 @@ impl Command {
             | Command::Remove { .. }
             | Command::Gc { .. }
             | Command::Pmu { .. }
+            | Command::Doctor
             | Command::Ls { .. }
             | Command::Show { .. }
             | Command::Log { .. }
@@ -1818,6 +1827,19 @@ fn run(cli: Cli) -> Result<ExitCode> {
             }
         }
         Command::Generate { what } => generate(what),
+        Command::Doctor => {
+            println!("rewind {}", rewind_core::VERSION);
+            let found = doctor::findings(&home);
+            for finding in &found {
+                println!("{}", finding.line());
+            }
+            let failed = found.iter().any(|f| f.level == doctor::Level::Fail);
+            Ok(if failed {
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            })
+        }
         Command::Diff { left, right, json } => {
             let left = Run::find(&home, &left)?;
             let right = Run::find(&home, &right)?;
@@ -2426,6 +2448,7 @@ mod tests {
             "rewind remove abc",
             "rewind gc",
             "rewind pmu status",
+            "rewind doctor",
         ] {
             assert_eq!(hold(line), HomeHold::Unheld, "{line}");
         }

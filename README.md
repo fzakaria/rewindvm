@@ -120,6 +120,9 @@ $ rewind check github:fzakaria/rewindvm#mylib
 # any command in a root filesystem: a directory, an erofs image, or a docker export
 $ rewind run --root mylib.tar --cwd /src -- make check
 
+# whether this machine can record runs, and what to fix where it cannot
+$ rewind doctor
+
 # list runs and look inside one
 $ rewind ls
 $ rewind show <run>
