@@ -41,6 +41,7 @@ use crate::ui::icons::Icon;
 use crate::ui::scrubber::{Replay, Scrubber, replay_unavailable};
 use crate::ui::selectable::{colored, selectable, selects, viewer_line};
 use crate::ui::sideways::{shifted, sideways_layer};
+use crate::ui::splits::{Edge, grip, measure};
 use crate::ui::tabs::RightTab;
 use crate::ui::widgets::{icon, panel_title};
 
@@ -62,10 +63,6 @@ const STALE_OPACITY: f32 = 0.45;
 
 /// What marks the frame whose source is shown in the frame list.
 const SHOWN_MARKER: &str = "\u{25b8}";
-
-/// How many rows of the frame list show before the list scrolls, so the
-/// file above keeps the rest of the panel however deep the stack.
-const FRAME_ROWS_SHOWN: f32 = 4.0;
 
 /// The open panel.
 pub struct SourcePanel {
@@ -542,17 +539,19 @@ impl Scrubber {
         };
 
         // The frame list, pinned under the file area so it stays in reach
-        // however small the window.
+        // however small the window, as high as its top edge was dragged.
         let frames = located.map(|located| self.render_frames(located, at, cx).opacity(dim));
 
         Some(
             div()
+                .relative()
                 .flex()
                 .flex_col()
                 .min_w_0()
                 .min_h_0()
                 .flex_basis(relative(0.0))
                 .bg(rgb(theme::PANEL))
+                .child(measure(|m| &m.source, &self.measured))
                 .child(title)
                 .child(heading)
                 .child(selects(
@@ -685,8 +684,8 @@ impl Scrubber {
 
     /// The thread's frames, innermost first, the one whose source is
     /// shown marked: each frame's level, function and place, in a list of
-    /// its own that scrolls past a few rows. Clicking a row shows that
-    /// frame's source.
+    /// its own that scrolls, as high as its top edge was dragged. Clicking
+    /// a row shows that frame's source.
     fn render_frames(&self, located: &Located, at: Option<usize>, cx: &mut Context<Self>) -> Div {
         let row = |i: usize, frame: &Frame| {
             let shown = at == Some(i);
@@ -741,6 +740,7 @@ impl Scrubber {
                 )
         };
         div()
+            .relative()
             .flex()
             .flex_col()
             .flex_none()
@@ -764,7 +764,7 @@ impl Scrubber {
                     .id("source-frames")
                     .flex()
                     .flex_col()
-                    .max_h(px(FRAME_ROWS_SHOWN * size::LOG_ROW_HEIGHT))
+                    .h(px(self.splits.frames))
                     .overflow_y_scroll()
                     .children(
                         located
@@ -774,6 +774,7 @@ impl Scrubber {
                             .map(|(i, frame)| row(i, frame)),
                     ),
             )
+            .child(grip(Edge::Frames, cx))
     }
 }
 

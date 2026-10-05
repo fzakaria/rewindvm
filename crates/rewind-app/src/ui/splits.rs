@@ -1,7 +1,8 @@
 //! The edges between the scrubber's panels, which drag to resize them:
 //! the build log, the processes and files and the right column side by
-//! side, the process tree over the files, and the terminal pane under all
-//! of them. A double click on an edge puts it back.
+//! side, the process tree over the files, the terminal pane under all of
+//! them, and the source panel's frame list under its file. A double click
+//! on an edge puts it back.
 //!
 //! Each edge is a thin grip on the left or top of the panel after it, drawn
 //! after the panel before it so it is on top of both. The panels keep their
@@ -21,8 +22,9 @@ use crate::theme::{layout, size};
 use crate::ui::scrubber::Scrubber;
 
 /// How the panels share the window: the three columns' flex weights, the
-/// process tree's and the files' weights in their column, and the
-/// terminal pane's share of the height.
+/// process tree's and the files' weights in their column, the terminal
+/// pane's share of the height, and the source panel's frame list's height
+/// in pixels.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Splits {
     pub log: f32,
@@ -31,6 +33,7 @@ pub struct Splits {
     pub procs: f32,
     pub files: f32,
     pub terminal: f32,
+    pub frames: f32,
 }
 
 impl Default for Splits {
@@ -42,6 +45,7 @@ impl Default for Splits {
             procs: layout::FILL,
             files: layout::FILL,
             terminal: layout::TERMINAL_SHARE,
+            frames: layout::FRAMES_HEIGHT,
         }
     }
 }
@@ -79,6 +83,11 @@ impl Splits {
             } else {
                 start.terminal
             },
+            frames: if saved.frames.is_finite() {
+                saved.frames.max(FRAMES_MIN)
+            } else {
+                start.frames
+            },
         }
     }
 
@@ -103,12 +112,14 @@ pub enum Edge {
     ProcsFiles,
     /// The terminal pane's top edge.
     Terminal,
+    /// The top edge of the source panel's frame list.
+    Frames,
 }
 
 impl Edge {
     fn cursor(self) -> CursorStyle {
         match self {
-            Edge::ProcsFiles | Edge::Terminal => CursorStyle::ResizeUpDown,
+            Edge::ProcsFiles | Edge::Terminal | Edge::Frames => CursorStyle::ResizeUpDown,
             _ => CursorStyle::ResizeLeftRight,
         }
     }
@@ -119,6 +130,7 @@ impl Edge {
             Edge::MiddleRight => "edge-middle-right",
             Edge::ProcsFiles => "edge-procs-files",
             Edge::Terminal => "edge-terminal",
+            Edge::Frames => "edge-frames",
         }
     }
 }
@@ -142,6 +154,8 @@ pub struct Measured {
     pub middle: Cell<Option<Bounds<Pixels>>>,
     /// The whole run view, header to terminal.
     pub session: Cell<Option<Bounds<Pixels>>>,
+    /// The source panel, title to frame list.
+    pub source: Cell<Option<Bounds<Pixels>>>,
 }
 
 /// The narrowest a panel drags to, and the terminal's least and greatest
@@ -150,6 +164,22 @@ const MIN_PANEL: f32 = 140.0;
 const MIN_LIST: f32 = 60.0;
 const TERMINAL_MIN: f32 = 0.15;
 const TERMINAL_MAX: f32 = 0.8;
+
+/// The frame list's least height, and the least of the source panel it
+/// leaves the file above it.
+const FRAMES_MIN: f32 = MIN_LIST;
+const SOURCE_FILE_MIN: f32 = MIN_PANEL;
+
+/// The frame list's height after its top edge moves `moved` pixels down
+/// from where it was `start` high, in a source panel `panel` pixels high
+/// when it has been painted.
+pub fn frames_height(start: f32, moved: f32, panel: Option<f32>) -> f32 {
+    let height = (start - moved).max(FRAMES_MIN);
+    match panel {
+        Some(panel) => height.min((panel - SOURCE_FILE_MIN).max(FRAMES_MIN)),
+        None => height,
+    }
+}
 
 /// Two neighbours' flex weights after the edge between them moves
 /// `moved` pixels toward the second, in an area `width` pixels across
@@ -179,7 +209,7 @@ pub fn grip(edge: Edge, cx: &mut Context<Scrubber>) -> Stateful<Div> {
     let half = px(size::EDGE_GRIP / 2.0);
     let along = div().id(edge.id()).absolute().cursor(edge.cursor());
     let along = match edge {
-        Edge::ProcsFiles | Edge::Terminal => {
+        Edge::ProcsFiles | Edge::Terminal | Edge::Frames => {
             along.left_0().right_0().top(-half).h(px(size::EDGE_GRIP))
         }
         _ => along.top_0().bottom_0().left(-half).w(px(size::EDGE_GRIP)),
@@ -279,6 +309,10 @@ impl Scrubber {
                     self.splits.terminal = share.clamp(TERMINAL_MIN, TERMINAL_MAX);
                 }
             }
+            Edge::Frames => {
+                let panel = self.measured.source.get().map(|b| f32::from(b.size.height));
+                self.splits.frames = frames_height(start.frames, dy, panel);
+            }
         }
         cx.notify();
     }
@@ -311,6 +345,7 @@ impl Scrubber {
                 (self.splits.procs, self.splits.files) = (start.procs, start.files);
             }
             Edge::Terminal => self.splits.terminal = start.terminal,
+            Edge::Frames => self.splits.frames = start.frames,
         }
         self.keep_splits();
         cx.notify();
@@ -370,6 +405,21 @@ mod tests {
         assert_eq!(read.log, Splits::default().log);
         assert_eq!(read.terminal, TERMINAL_MAX);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_frame_list_follows_its_edge_and_leaves_the_file_room() {
+        // Dragged up 50 pixels from 88 high it is 138; down past its least
+        // height it stops there; up past what leaves the file its least
+        // in a source panel 500 high it stops short; with the panel not
+        // yet painted only the least height holds.
+        assert_eq!(frames_height(88.0, -50.0, Some(500.0)), 138.0);
+        assert_eq!(frames_height(88.0, 200.0, Some(500.0)), FRAMES_MIN);
+        assert_eq!(
+            frames_height(88.0, -900.0, Some(500.0)),
+            500.0 - SOURCE_FILE_MIN
+        );
+        assert_eq!(frames_height(88.0, -900.0, None), 988.0);
     }
 
     #[test]

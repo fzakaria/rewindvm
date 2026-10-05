@@ -296,6 +296,9 @@ pub mod layout {
     /// The terminal pane's share of the window's height at first: room
     /// for a backtrace, leaving the panels most of the window.
     pub const TERMINAL_SHARE: f32 = 0.3;
+    /// The source panel's frame list's height at first: four frames, so
+    /// the file above keeps the rest of the panel however deep the stack.
+    pub const FRAMES_HEIGHT: f32 = 4.0 * super::size::LOG_ROW_HEIGHT;
     /// A disabled button is drawn at this opacity.
     pub const DISABLED_OPACITY: f32 = 0.4;
 }
