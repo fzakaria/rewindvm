@@ -13,6 +13,7 @@ mod sideways;
 mod source;
 mod splits;
 mod step_entry;
+mod stride;
 mod terminal;
 mod tour;
 mod viewer;

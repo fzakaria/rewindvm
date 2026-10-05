@@ -135,6 +135,9 @@ impl Render for Scrubber {
         if let Some(menu) = self.render_context_menu(cx) {
             window_root = window_root.child(menu);
         }
+        if let Some(menu) = self.render_stride_menu(cx) {
+            window_root = window_root.child(menu);
+        }
         window_root = window_root.child(self.selection_listener(cx));
 
         // Drawing its own chrome, the window needs a visible edge and
@@ -731,11 +734,13 @@ impl Scrubber {
             ButtonStyle::Neutral,
             Availability::Enabled,
         )
+        .aria_label("Previous stop (Left)")
         .child(icon(Icon::ChevronLeft, size::ICON_CHEVRON, theme::TEXT))
-        .child("Previous event")
+        .child("Previous")
         .on_click(cx.listener(|this, _, _, cx| this.go(Motion::PreviousEvent, cx)));
         let next = button("next-event", ButtonStyle::Neutral, Availability::Enabled)
-            .child("Next event")
+            .aria_label("Next stop (Right)")
+            .child("Next")
             .child(icon(Icon::ChevronRight, size::ICON_CHEVRON, theme::TEXT))
             .on_click(cx.listener(|this, _, _, cx| this.go(Motion::NextEvent, cx)));
         let divergence = button("to-divergence", ButtonStyle::Divergence, has_divergence)
@@ -779,6 +784,7 @@ impl Scrubber {
                     .child(start)
                     .child(previous)
                     .child(next)
+                    .child(self.render_stride_chooser(cx))
                     .child(divergence)
                     .child(failure),
             )

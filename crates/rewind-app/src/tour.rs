@@ -56,7 +56,7 @@ pub const STOPS: [Stop; 6] = [
     Stop {
         anchor: Anchor::Timeline,
         title: "The whole run",
-        body: "One step is one time the VM stops and hands control to Rewind, and a step always means the same machine state. Drag the playhead, or use Left and Right to move between events and Shift for single steps. The segments are the build's phases.",
+        body: "One step is one time the VM stops and hands control to Rewind, and a step always means the same machine state. Drag the playhead, or use Left and Right to move between events and Shift for single steps; Stop at picks which events, such as one thread's. The segments are the build's phases.",
         playhead: Playhead::CheckPhase,
         needs: Needs::Nothing,
     },

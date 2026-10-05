@@ -28,6 +28,7 @@ use crate::request::{Request, Requests};
 use crate::run::{Origin, Replays, Session, short_id};
 use crate::selection::Surface;
 use crate::source::Located;
+use crate::stride::{Direction, Stride};
 use crate::theme::size;
 use crate::tour::Tour;
 use crate::ui::licensing::Licensing;
@@ -308,6 +309,10 @@ pub struct Scrubber {
     pub(super) history: History,
     /// The step readout's field, while a step is being typed.
     pub(super) step_entry: Option<StepEntry>,
+    /// What Previous and Next stop at.
+    pub(super) stride: Stride,
+    /// Where the "Stop at" menu opened, while it is open.
+    pub(super) stride_menu: Option<gpui::Point<gpui::Pixels>>,
     pub(super) log_filter: LogFilter,
     pub(super) log_scroll: UniformListScrollHandle,
     pub(super) files_scroll: UniformListScrollHandle,
@@ -388,6 +393,8 @@ impl Scrubber {
             step: 0,
             history: History::default(),
             step_entry: None,
+            stride: Stride::Every,
+            stride_menu: None,
             log_filter: LogFilter::Output,
             log_scroll: UniformListScrollHandle::new(),
             files_scroll: UniformListScrollHandle::new(),
@@ -446,6 +453,7 @@ impl Scrubber {
         });
         if !same_run {
             self.history = History::default();
+            self.stride = Stride::Every;
         }
         self.step = start;
         self.forks.clear();
@@ -1020,7 +1028,11 @@ impl Scrubber {
             self.jump_to(target, cx);
             return;
         }
-        self.go_to(target, cx);
+        match motion {
+            Motion::PreviousEvent => self.step_by_stride(Direction::Back, cx),
+            Motion::NextEvent => self.step_by_stride(Direction::Forward, cx),
+            _ => self.go_to(target, cx),
+        }
     }
 
     /// Closes the nearest thing open, as Escape does outside the
@@ -1028,13 +1040,16 @@ impl Scrubber {
     /// the terminal pane, and gives the keyboard back to the scrubber.
     pub(super) fn close_nearest(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let open = Open {
-            menu: self.selecting.menu.is_some(),
+            menu: self.selecting.menu.is_some() || self.stride_menu.is_some(),
             viewer: self.viewer.is_some(),
             source: self.source.is_some(),
             terminal: self.terminal.is_some(),
         };
         match escape_closes(open) {
-            Some(Closable::Menu) => self.close_context_menu(cx),
+            Some(Closable::Menu) => {
+                self.close_context_menu(cx);
+                self.close_stride_menu(cx);
+            }
             Some(Closable::Viewer) => self.close_viewer(cx),
             Some(Closable::Source) => self.close_source(cx),
             Some(Closable::Terminal) => self.close_terminal(cx),
