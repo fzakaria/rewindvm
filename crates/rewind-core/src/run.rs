@@ -364,6 +364,46 @@ pub enum Echo {
     Output,
     /// Nothing is printed.
     Quiet,
+    /// No program output, but a status line on standard error with the
+    /// step reached and the time taken, for a terminal that would
+    /// otherwise show nothing while a long run executes.
+    Progress,
+}
+
+/// How often the status line is drawn again, at most.
+const PROGRESS_EVERY: Duration = Duration::from_millis(250);
+
+/// What a terminal is sent to go back to the start of the line and clear
+/// it, so the status line is drawn over itself and then taken away.
+pub const CLEAR_LINE: &str = "\r\x1b[K";
+
+/// The status line of an execution with `Echo::Progress`.
+struct ProgressLine {
+    started: Instant,
+    drawn: Option<Instant>,
+}
+
+impl ProgressLine {
+    fn new(started: Instant) -> ProgressLine {
+        ProgressLine {
+            started,
+            drawn: None,
+        }
+    }
+
+    /// The line to draw at `step` and `now`, or None when one was drawn
+    /// less than PROGRESS_EVERY ago.
+    fn at(&mut self, step: u64, now: Instant) -> Option<String> {
+        if self
+            .drawn
+            .is_some_and(|drawn| now.duration_since(drawn) < PROGRESS_EVERY)
+        {
+            return None;
+        }
+        self.drawn = Some(now);
+        let taken = now.duration_since(self.started).as_secs();
+        Some(format!("rewind: step {step}, {taken}s"))
+    }
 }
 
 /// Passes a replay's records on to `inner` and compares each with the
@@ -416,6 +456,7 @@ impl Observer for Checked<'_> {
 struct Recorder {
     trace: TraceWriter<fs::File>,
     echo: Echo,
+    progress: ProgressLine,
     status: Option<i32>,
     error: Option<anyhow::Error>,
 }
@@ -424,6 +465,11 @@ impl Observer for Recorder {
     fn record(&mut self, step: u64, record: &[u8]) {
         if let Err(e) = self.trace.record(step, record) {
             self.error.get_or_insert(e.into());
+        }
+        if self.echo == Echo::Progress
+            && let Some(line) = self.progress.at(step, Instant::now())
+        {
+            eprint!("{CLEAR_LINE}{line}");
         }
         let Ok(event) = Event::decode(step, record) else {
             return;
@@ -785,13 +831,14 @@ impl Run {
         }
 
         let (new_trace, trace_file) = NewTrace::create(&dir)?;
+        let start = Instant::now();
         let mut recorder = Recorder {
             trace: TraceWriter::new(trace_file),
             echo,
+            progress: ProgressLine::new(start),
             status: None,
             error: None,
         };
-        let start = Instant::now();
         let config = manifest.spec.config()?;
         let store = || rewind_store::Store::open(&home.store());
 
@@ -861,6 +908,9 @@ impl Run {
         };
 
         let wall = start.elapsed();
+        if echo == Echo::Progress {
+            eprint!("{CLEAR_LINE}");
+        }
         if let Some(e) = recorder.error {
             return Err(e.context("writing the trace"));
         }
@@ -911,6 +961,7 @@ impl Run {
         let mut recorder = Recorder {
             trace: TraceWriter::new(fs::File::create(&tmp)?),
             echo: Echo::Quiet,
+            progress: ProgressLine::new(Instant::now()),
             status: None,
             error: None,
         };
@@ -1109,6 +1160,7 @@ impl Run {
         let mut recorder = Recorder {
             trace: TraceWriter::new(fs::File::create(&tmp)?),
             echo: Echo::Quiet,
+            progress: ProgressLine::new(Instant::now()),
             status: None,
             error: None,
         };
@@ -1389,6 +1441,19 @@ pub(crate) mod tests {
             stopped,
             Path::new("/k")
         )));
+    }
+
+    #[test]
+    fn a_status_line_is_drawn_a_few_times_a_second() {
+        // The first record draws the line; one PROGRESS_EVERY later draws
+        // it again with the step and the whole seconds taken; any sooner
+        // draws nothing.
+        let started = Instant::now();
+        let mut line = ProgressLine::new(started);
+        assert_eq!(line.at(10, started).as_deref(), Some("rewind: step 10, 0s"));
+        assert_eq!(line.at(20, started + PROGRESS_EVERY / 2), None);
+        let later = started + Duration::from_secs(3);
+        assert_eq!(line.at(30, later).as_deref(), Some("rewind: step 30, 3s"));
     }
 
     #[test]

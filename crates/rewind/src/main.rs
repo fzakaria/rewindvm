@@ -98,6 +98,10 @@ struct MachineArgs {
     /// Print nothing while the run executes.
     #[arg(long, short)]
     quiet: bool,
+    /// Whether a quiet run shows a status line on a terminal; rewind check
+    /// asks for one on the run every other starts from.
+    #[arg(skip)]
+    progress: Progress,
     /// Skip keyframes: faster, but seeking into the run starts from boot.
     #[arg(long)]
     no_keyframes: bool,
@@ -462,6 +466,64 @@ enum Command {
     Diff { left: String, right: String },
 }
 
+/// Whether a run echoes its program's output while it executes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Loudness {
+    Output,
+    Quiet,
+}
+
+/// Whether a quiet run shows a status line while it executes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Progress {
+    #[default]
+    Hidden,
+    Shown,
+}
+
+/// Whether standard error is a terminal, where a status line can be drawn
+/// over itself; in a pipe or a log it would only add lines.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Terminal {
+    Yes,
+    No,
+}
+
+impl Terminal {
+    fn stderr() -> Terminal {
+        use std::io::IsTerminal;
+        if std::io::stderr().is_terminal() {
+            Terminal::Yes
+        } else {
+            Terminal::No
+        }
+    }
+}
+
+/// What a run prints while it executes.
+fn echo_for(loudness: Loudness, progress: Progress, terminal: Terminal) -> Echo {
+    match (loudness, progress, terminal) {
+        (Loudness::Output, _, _) => Echo::Output,
+        (Loudness::Quiet, Progress::Shown, Terminal::Yes) => Echo::Progress,
+        (Loudness::Quiet, _, _) => Echo::Quiet,
+    }
+}
+
+/// Draws `text` as the status line on standard error, over the last one,
+/// when it is a terminal.
+fn status(text: &str) {
+    if Terminal::stderr() == Terminal::Yes {
+        eprint!("{}{text}", rewind_core::run::CLEAR_LINE);
+    }
+}
+
+/// Takes the status line away, before anything else is printed.
+fn clear_status() {
+    if Terminal::stderr() == Terminal::Yes {
+        eprint!("{}", rewind_core::run::CLEAR_LINE);
+    }
+}
+
 /// Whether a command holds the home in use while it runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum HomeHold {
@@ -596,6 +658,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             machine.schedule_from = 0;
             let with_keyframes = MachineArgs {
                 no_keyframes: false,
+                progress: Progress::Shown,
                 ..machine.clone()
             };
             let base = execute(
@@ -650,7 +713,14 @@ fn run(cli: Cli) -> Result<ExitCode> {
                         ..machine.clone()
                     })
                     .collect();
-                for run in execute_all(&home, &guest, &prepared, machines, from_base.clone())? {
+                status(&format!(
+                    "rewind: schedules {}..{} executing",
+                    batch[0],
+                    batch[batch.len() - 1]
+                ));
+                let runs = execute_all(&home, &guest, &prepared, machines, from_base.clone());
+                clear_status();
+                for run in runs? {
                     println!(
                         "schedule {:>3}: {}",
                         run.manifest.spec.schedule,
@@ -711,6 +781,12 @@ fn run(cli: Cli) -> Result<ExitCode> {
 
             print_timeout(&home, machine.schedule, &worst);
             let probe_all = |windows: Vec<(u64, u64)>| -> Result<Vec<Run>> {
+                let lo = windows.iter().map(|w| w.0).min().unwrap_or(0);
+                let hi = windows.iter().map(|w| w.1).max().unwrap_or(0);
+                status(&format!(
+                    "rewind: narrowing, {} windows within steps {lo}..{hi}",
+                    windows.len()
+                ));
                 let machines = windows
                     .into_iter()
                     .map(|(from, until)| MachineArgs {
@@ -778,6 +854,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 }
             }
             let (lo, until) = (from, hi);
+            clear_status();
             println!("perturbing only steps {lo}..{until} still ends differently\n");
             let base = base.add_keyframes(&home)?;
             let worst = worst.add_keyframes(&home)?;
@@ -1476,11 +1553,12 @@ fn execute(
             .to_string(),
         job: prepared.job.clone(),
     };
-    let echo = if machine.quiet {
-        Echo::Quiet
+    let loudness = if machine.quiet {
+        Loudness::Quiet
     } else {
-        Echo::Output
+        Loudness::Output
     };
+    let echo = echo_for(loudness, machine.progress, Terminal::stderr());
     let keyframes = if machine.no_keyframes {
         Keyframes::Skip
     } else {
@@ -1696,6 +1774,30 @@ mod tests {
     // Command lines parsed the way the shell would hand them over, without
     // running anything.
     use super::*;
+
+    #[test]
+    fn a_quiet_run_shows_a_status_line_only_when_asked_on_a_terminal() {
+        // A run that is not quiet echoes its output wherever it goes. A
+        // quiet one draws a status line only when asked to and standard
+        // error is a terminal, and is silent otherwise, as in a pipe or a
+        // log.
+        assert_eq!(
+            echo_for(Loudness::Output, Progress::Hidden, Terminal::Yes),
+            Echo::Output
+        );
+        assert_eq!(
+            echo_for(Loudness::Quiet, Progress::Shown, Terminal::Yes),
+            Echo::Progress
+        );
+        assert_eq!(
+            echo_for(Loudness::Quiet, Progress::Shown, Terminal::No),
+            Echo::Quiet
+        );
+        assert_eq!(
+            echo_for(Loudness::Quiet, Progress::Hidden, Terminal::Yes),
+            Echo::Quiet
+        );
+    }
 
     #[test]
     fn commands_that_boot_a_run_or_read_pages_hold_the_home() {
