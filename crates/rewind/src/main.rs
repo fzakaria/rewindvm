@@ -462,6 +462,47 @@ enum Command {
     Diff { left: String, right: String },
 }
 
+/// Whether a command holds the home in use while it runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HomeHold {
+    /// It packs images, executes runs, boots a run's image or opens the
+    /// page store, so `rewind gc` must not remove an image between its
+    /// packing and the manifest of the run that boots it, nor pages under
+    /// a machine that reads them.
+    InUse,
+    /// It reads only manifests and traces, or, as gc does, takes the home
+    /// its own way.
+    Unheld,
+}
+
+impl Command {
+    /// Every command says, so a new one cannot forget to.
+    fn home_hold(&self) -> HomeHold {
+        match self {
+            Command::Run { .. }
+            | Command::Nix { .. }
+            | Command::Check { .. }
+            | Command::Fork { .. }
+            | Command::Cat { .. }
+            | Command::Shell { .. }
+            | Command::Gdb { .. }
+            | Command::Where { .. }
+            | Command::Replay { .. }
+            | Command::Export { .. }
+            | Command::Import { .. } => HomeHold::InUse,
+            Command::Prune { .. }
+            | Command::Remove { .. }
+            | Command::Gc { .. }
+            | Command::Pmu { .. }
+            | Command::Ls
+            | Command::Log { .. }
+            | Command::Ps { .. }
+            | Command::Events { .. }
+            | Command::Diff { .. } => HomeHold::Unheld,
+        }
+    }
+}
+
 fn main() -> ExitCode {
     // Printing into a closed pipe, as `rewind ls | head` does, should end
     // the program quietly the way it ends any other Unix tool.
@@ -488,20 +529,11 @@ fn run(cli: Cli) -> Result<ExitCode> {
 
     let home = Home::open()?;
 
-    // Commands that pack images, execute runs, mount extras or fork a run to
-    // look inside it hold the home in use until they exit, so `rewind gc`
-    // never removes an image between its packing and the manifest of the run
-    // that boots it, nor collects pages under a fork that reads them.
-    let _in_use = match &cli.command {
-        Command::Run { .. }
-        | Command::Nix { .. }
-        | Command::Check { .. }
-        | Command::Fork { .. }
-        | Command::Shell { .. }
-        | Command::Gdb { .. }
-        | Command::Where { .. }
-        | Command::Import { .. } => Some(home.in_use()?),
-        _ => None,
+    // Commands that pack images, boot a run or read pages hold the home in
+    // use until they exit (see `HomeHold`).
+    let _in_use = match cli.command.home_hold() {
+        HomeHold::InUse => Some(home.in_use()?),
+        HomeHold::Unheld => None,
     };
     match cli.command {
         Command::Run { image, machine } => {
@@ -1656,5 +1688,52 @@ fn exit_status(run: &Run) -> ExitCode {
         Some(0) => ExitCode::SUCCESS,
         Some(s) => ExitCode::from(show::exit_code(s)),
         None => ExitCode::FAILURE,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Command lines parsed the way the shell would hand them over, without
+    // running anything.
+    use super::*;
+
+    #[test]
+    fn commands_that_boot_a_run_or_read_pages_hold_the_home() {
+        // Every command that packs an image, boots a run's image or opens
+        // the page store holds the home in use, so `rewind gc` waits for
+        // it; the ones that read only manifests and traces, and gc itself,
+        // do not.
+        let hold = |line: &str| {
+            let cli = Cli::try_parse_from(line.split_whitespace()).unwrap();
+            cli.command.home_hold()
+        };
+        for line in [
+            "rewind run --root r -- true",
+            "rewind nix nixpkgs#hello",
+            "rewind check nixpkgs#hello",
+            "rewind fork abc 5 --schedule 2",
+            "rewind cat abc 5 /etc/hosts",
+            "rewind shell abc 5",
+            "rewind gdb abc 5",
+            "rewind where abc 5",
+            "rewind replay abc",
+            "rewind export abc",
+            "rewind import a.rwd",
+        ] {
+            assert_eq!(hold(line), HomeHold::InUse, "{line}");
+        }
+        for line in [
+            "rewind ls",
+            "rewind log abc",
+            "rewind ps abc",
+            "rewind events abc",
+            "rewind diff abc def",
+            "rewind prune abc --identical",
+            "rewind remove abc",
+            "rewind gc",
+            "rewind pmu status",
+        ] {
+            assert_eq!(hold(line), HomeHold::Unheld, "{line}");
+        }
     }
 }
