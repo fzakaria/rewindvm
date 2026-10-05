@@ -925,10 +925,17 @@ impl Run {
         self.keyframes().is_ok_and(|k| !k.steps().is_empty())
     }
 
-    /// Executes this run's spec again, taking keyframes. The run is the
-    /// same, so its trace and manifest come out as they were. A run that
-    /// timed out gets as long as it had, and may stop at another step.
+    /// Executes this run's spec again, taking keyframes, unless it has
+    /// keyframes of its own already. The run is the same, so its trace and
+    /// manifest come out as they were. A run that timed out gets as long as
+    /// it had, and may stop at another step.
     pub fn add_keyframes(&self, home: &Home) -> Result<Run> {
+        // A run with readable keyframes of its own has them already, and
+        // executing it again would keep those and take none.
+        if crate::keyframes::own_state(&self.dir) == crate::keyframes::Own::Readable {
+            return Run::open(&self.dir);
+        }
+
         let limit = match &self.manifest.outcome {
             Some(o) if o.stop.starts_with(TIMED_OUT) => {
                 TimeLimit::Wall(std::time::Duration::from_millis(o.wall_ms))
@@ -1721,6 +1728,33 @@ pub(crate) mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn keyframes_are_added_only_to_a_run_without_them() {
+        // A finished run that has keyframes of its own: adding keyframes
+        // runs nothing, which this spec, with no kernel to boot, would
+        // fail at, and leaves the run as it was.
+        let root = runs_dir("add-keyframes");
+        let home = Home::at(root.clone()).unwrap();
+        let mut m = manifest("abc", "r", 0);
+        m.outcome = Some(RunOutcome {
+            stop: rewind_trace::stop::POWERED_OFF.into(),
+            step: 9,
+            virtual_ns: 0,
+            status: Some(0),
+            wall_ms: 0,
+        });
+        let dir = write_run(&home.runs(), &m, &[3, 5, 9], b"a");
+        let mut kf = rewind_vmm::snapshot::Keyframe::default();
+        kf.step = 4;
+        crate::keyframes::save(&dir, &kf).unwrap();
+        let trace = fs::read(dir.join(TRACE)).unwrap();
+
+        let run = Run::open(&dir).unwrap().add_keyframes(&home).unwrap();
+        assert_eq!(run.manifest, m);
+        assert_eq!(fs::read(dir.join(TRACE)).unwrap(), trace);
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
