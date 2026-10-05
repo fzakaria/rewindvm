@@ -18,6 +18,7 @@ pub mod ending;
 mod event;
 pub mod machine;
 pub mod manifest;
+pub mod prune;
 pub mod stop;
 
 use std::collections::BTreeMap;

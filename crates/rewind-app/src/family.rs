@@ -12,6 +12,7 @@ use std::time::{Duration, SystemTime};
 
 use rewind_trace::ending::Ending;
 use rewind_trace::manifest::{MANIFEST, Manifest, Source, Spec};
+use rewind_trace::prune::{self, Forks, Member, Reads};
 
 use crate::describe::{ago, thousands};
 use crate::run::{read_manifest, short_id};
@@ -33,6 +34,13 @@ pub struct Parent {
 /// Where `rewind import` puts an imported run's kernel, initrd and image:
 /// a directory named for the run in the home's inputs.
 const IMPORTED_INPUTS_DIR: &str = "inputs";
+
+/// A fork `rewind prune --identical` would remove: the run it repeats the
+/// trace of, and the run prune is given to reach it.
+struct Repeat {
+    same_as: String,
+    root: String,
+}
 
 /// One run, as its manifest describes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -57,6 +65,10 @@ pub struct RunEntry {
     pub passed: bool,
     pub first_difference: Option<u64>,
     pub trace_hash: Option<String>,
+    /// Whether the engine has recorded how it ended.
+    pub finished: bool,
+    /// The run it reads keyframes from, and up to which step.
+    pub shares: Option<Reads>,
     /// The vCPUs the VM had.
     pub cores: u64,
     /// The steps its schedule was confined to, for the runs rewind check
@@ -131,6 +143,11 @@ impl RunEntry {
             passed: ended.is_some_and(Ending::passed),
             first_difference: manifest.first_difference,
             trace_hash: manifest.trace_hash.clone(),
+            finished: manifest.outcome.is_some(),
+            shares: manifest.shared_keyframes.as_ref().map(|s| Reads {
+                run: s.run.to_string(),
+                through: s.through,
+            }),
             cores: u64::from(spec.cores),
             window: spec.window(),
             imported: imported(manifest),
@@ -634,26 +651,9 @@ impl Family {
             }
         }
 
-        // Forks repeat a trace within what rewind prune takes in: a run
-        // without a parent here and every fork below it through parents,
-        // which leaves out the runs from boot drawn under the recorded run.
-        // There the original of a trace is that run when it has the trace,
-        // as prune keeps the run it is given, and the oldest fork otherwise.
-        let mut originals: HashMap<(&str, &str), (&RunEntry, bool)> = HashMap::new();
-        for (run, _, _, _) in &order {
-            let Some(hash) = &run.trace_hash else {
-                continue;
-            };
-            let top = Self::chain_root_in(run, &by_id);
-            let is_top = top.id == run.id;
-            let original = originals
-                .entry((top.id.as_str(), hash.as_str()))
-                .or_insert((run, is_top));
-            let older = (run.created, &run.id) < (original.0.created, &original.0.id);
-            if is_top || (!original.1 && older) {
-                *original = (run, is_top);
-            }
-        }
+        // The forks `rewind prune --identical` would remove, by the run
+        // each repeats.
+        let repeats = self.repeats();
 
         // With more than one recorded run, each says what tells it apart.
         let is_recorded = |r: &RunEntry| r.parent.is_none() && r.schedule == 0;
@@ -687,14 +687,7 @@ impl Family {
                         kind: *kind,
                     };
                 }
-                let top = Self::chain_root_in(run, &by_id).id.as_str();
-                let identical_to = match (run.parent.is_some(), &run.trace_hash) {
-                    (true, Some(hash)) => originals
-                        .get(&(top, hash.as_str()))
-                        .filter(|(original, _)| original.id != run.id)
-                        .map(|(original, _)| original.id.clone()),
-                    _ => None,
-                };
+                let identical_to = repeats.get(&run.id).map(|r| r.same_as.clone());
                 Row {
                     run: run.clone(),
                     depth,
@@ -788,54 +781,73 @@ impl Family {
     /// The runs without a parent here that have identical forks under
     /// them, for `rewind prune --identical`.
     pub fn roots_with_identical(&self) -> Vec<RunEntry> {
-        let by_id = self.by_id();
-        let mut roots: Vec<RunEntry> = Vec::new();
-        for row in self.rows() {
-            if row.identical_to.is_none() {
-                continue;
-            }
-            let top = Self::chain_root_in(&row.run, &by_id);
-            if !roots.iter().any(|r| r.id == top.id) {
-                roots.push(top.clone());
-            }
-        }
-        roots
+        let repeats = self.repeats();
+        let roots: HashSet<&str> = repeats.values().map(|r| r.root.as_str()).collect();
+        self.runs
+            .iter()
+            .filter(|r| roots.contains(&r.id.as_str()))
+            .cloned()
+            .collect()
     }
 
-    /// The run `run` descends from through parents among the runs `by_id`
-    /// holds, with no parent there itself: what rewind prune is given to
-    /// reach `run`. Imported runs that name each other as parents in a
-    /// loop end the walk at the first run met again.
-    fn chain_root_in<'a>(run: &'a RunEntry, by_id: &HashMap<&str, &'a RunEntry>) -> &'a RunEntry {
-        let mut at = run;
-        let mut seen = HashSet::from([run.id.as_str()]);
-        while let Some(parent) = at.parent.as_ref().and_then(|p| by_id.get(p.id.as_str())) {
-            if !seen.insert(parent.id.as_str()) {
-                break;
+    /// The family's runs as `rewind prune` sees them.
+    fn members(&self) -> Vec<Member> {
+        self.runs
+            .iter()
+            .map(|r| Member {
+                id: r.id.clone(),
+                parent: r.parent.as_ref().map(|p| p.id.clone()),
+                shares: r.shares.clone(),
+                created: r.created,
+                trace_hash: r.trace_hash.clone(),
+                finished: r.finished,
+                executing: false,
+            })
+            .collect()
+    }
+
+    /// The forks `rewind prune --identical` would remove from under each
+    /// run without a parent here, by id, with the run each repeats and
+    /// the run prune is given to reach it.
+    fn repeats(&self) -> HashMap<String, Repeat> {
+        let by_id = self.by_id();
+        let members = self.members();
+
+        // Only a run with forks can have forks that repeat it; the runs
+        // `rewind check` makes from boot have none, and are most of them.
+        let parents: HashSet<&str> = self
+            .runs
+            .iter()
+            .filter_map(|r| Some(r.parent.as_ref()?.id.as_str()))
+            .collect();
+        let roots = self
+            .runs
+            .iter()
+            .filter(|r| parents.contains(r.id.as_str()) && !Self::has_parent_in(r, &by_id));
+        let mut repeats = HashMap::new();
+        for root in roots {
+            for removal in prune::identical(&root.id, &members) {
+                let repeat = Repeat {
+                    same_as: removal.same_as,
+                    root: root.id.clone(),
+                };
+                repeats.insert(removal.id, repeat);
             }
-            at = parent;
         }
-        at
+        repeats
     }
 
     /// Every run descended from the run `id` through its forks, nearest
-    /// first: what removing it removes along with it. Each run comes once,
-    /// even from runs that name each other as parents in a loop.
+    /// first: what removing it removes along with it.
     pub fn descendants(&self, id: &str) -> Vec<&RunEntry> {
-        let mut found: Vec<&RunEntry> = Vec::new();
-        let mut seen = HashSet::from([id.to_string()]);
-        let mut frontier = vec![id.to_string()];
-        while let Some(parent) = frontier.pop() {
-            for run in &self.runs {
-                if run.parent.as_ref().is_some_and(|p| p.id == parent)
-                    && seen.insert(run.id.clone())
-                {
-                    found.push(run);
-                    frontier.push(run.id.clone());
-                }
-            }
-        }
-        found
+        let members = self.members();
+        let by_id = self.by_id();
+        Forks::of(&members)
+            .descendants(id)
+            .into_iter()
+            .skip(1)
+            .filter_map(|d| by_id.get(d).copied())
+            .collect()
     }
 
     /// How many forks repeat the trace of a run listed before them, and
@@ -895,6 +907,8 @@ mod tests {
             passed: ending == "exited:0",
             first_difference: None,
             trace_hash: Some(format!("hash-{id}")),
+            finished: true,
+            shares: None,
             cores: ONE_CORE,
             window: None,
             imported: false,
@@ -1139,6 +1153,26 @@ mod tests {
         assert_eq!(ids("f1"), vec!["f1a"]);
         assert_eq!(ids("f1a"), Vec::<&str>::new());
         assert_eq!(ids("base"), vec!["dup", "f1", "f1a", "f2"]);
+    }
+
+    #[test]
+    fn a_repeating_fork_another_fork_needs_is_not_marked() {
+        // dup repeats f1, but dup2 is a fork of dup that ran another way:
+        // rewind prune --identical keeps dup for it, so the panel does not
+        // mark dup as a repeat, and only removing dup would take dup2.
+        let mut f = family();
+        f.runs.push(run("dup2", Some(("dup", 60)), 1, "exited:2"));
+        let marked = |f: &Family| -> Vec<String> {
+            f.rows()
+                .into_iter()
+                .filter(|r| r.identical_to.is_some())
+                .map(|r| r.run.id)
+                .collect()
+        };
+        assert_eq!(marked(&family()), vec!["dup".to_string()]);
+        assert!(marked(&f).is_empty());
+        let ids: Vec<&str> = f.descendants("dup").iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, vec!["dup2"]);
     }
 
     #[test]
