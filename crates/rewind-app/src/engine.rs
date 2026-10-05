@@ -733,7 +733,8 @@ impl CliEngine {
         let located = stdout
             .lines()
             .rev()
-            .find_map(|line| serde_json::from_str::<Located>(line).ok());
+            .find_map(|line| serde_json::from_str::<rewind_trace::located::Located>(line).ok())
+            .map(Located::from);
         match located {
             Some(located) if status.success() => Ok(located),
             _ => {

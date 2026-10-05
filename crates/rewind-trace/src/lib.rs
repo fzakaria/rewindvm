@@ -16,6 +16,7 @@ pub mod compare;
 pub mod contents;
 pub mod ending;
 mod event;
+pub mod located;
 pub mod machine;
 pub mod manifest;
 pub mod prune;

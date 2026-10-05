@@ -16,7 +16,8 @@ use anyhow::{Context, Result, bail};
 use rewind_core::threads::OnTheCpu;
 use rewind_core::{Home, Run};
 use rewind_trace::Trace;
-use serde::{Deserialize, Serialize};
+use rewind_trace::located::{Extent, Frame, Located, SourceFile};
+use serde::Deserialize;
 
 use crate::gdb::{self, Kernel, Needs, Output, Say, Symbols};
 
@@ -44,24 +45,6 @@ const JSON_LIMITS: Limits = Limits {
 pub enum Format {
     Text,
     Json,
-}
-
-/// What `rewind where` prints with `--json`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Answer {
-    pub run: String,
-    pub step: u64,
-    pub pid: u32,
-    pub tid: u32,
-    pub process: String,
-    /// The thread's frames, innermost first, and the one in the program's
-    /// own code.
-    pub frames: Vec<Frame>,
-    pub chosen: Option<usize>,
-    /// Each source file the frames are in, once, by the path the frames'
-    /// `fullname` gives it. A frame without a source file and line, or
-    /// whose file was not found, has none here.
-    pub files: BTreeMap<String, SourceFile>,
 }
 
 /// What the gdb script prints for a thread.
@@ -138,7 +121,7 @@ fn walk(
     machine: rewind_vmm::Machine,
     pid: u32,
     tid: u32,
-) -> Result<Answer> {
+) -> Result<Located> {
     // The fork as gdb sees it, then the symbols, which take inspections on
     // forks of their own.
     let scope = rewind_core::debug::Scope::Process(pid);
@@ -187,7 +170,7 @@ fn walk(
         .map(|(path, file)| (in_vm(&path), file))
         .collect();
 
-    Ok(Answer {
+    Ok(Located {
         run: run.manifest.id.to_string(),
         step,
         pid,
@@ -388,22 +371,6 @@ fn process_name(trace: &Trace, pid: u32) -> String {
     name.rsplit('/').next().unwrap_or(&name).to_string()
 }
 
-/// One frame of a thread's stack, as the gdb script lists it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Frame {
-    pub level: u32,
-    pub function: Option<String>,
-    /// The source file as the program's DWARF names it, and where it was
-    /// found here.
-    pub file: Option<String>,
-    pub fullname: Option<String>,
-    pub line: Option<u32>,
-    /// The instruction, in hex: a frame's pc, or a caller's return address.
-    pub pc: String,
-    /// The program or library the instruction is in, by its path in the VM.
-    pub object: Option<String>,
-}
-
 /// Where x86-64's lower half, user space, ends: an instruction at or
 /// above it is the kernel's.
 const USER_END: u64 = 0x0000_8000_0000_0000;
@@ -422,7 +389,16 @@ const LIBRARY_SOURCES: &[&str] = &[
     "/.cargo/git/",
 ];
 
-impl Frame {
+/// What frame choice asks of a frame.
+trait Choice {
+    fn address(&self) -> Option<u64>;
+    fn in_user_space(&self) -> bool;
+    fn in_system_library(&self) -> bool;
+    fn in_library_source(&self) -> bool;
+    fn own_code(&self) -> bool;
+}
+
+impl Choice for Frame {
     /// The instruction's address.
     fn address(&self) -> Option<u64> {
         u64::from_str_radix(self.pc.trim_start_matches("0x"), 16).ok()
@@ -518,37 +494,13 @@ fn source_files(
     files
 }
 
-/// How much of a source file an answer carries.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Extent {
-    /// The whole file.
-    Whole,
-    /// The lines around its frames' lines, of a file too large to carry.
-    Window,
+/// What the text answer and the JSON one take of a source file.
+trait Carry {
+    fn window(text: &str, on: &BTreeSet<u32>, radius: u32) -> Option<SourceFile>;
+    fn around(&self, line: u32, radius: u32) -> Option<Source>;
 }
 
-/// A source file, or the part of it an answer carries.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SourceFile {
-    pub extent: Extent,
-    /// The number of the first line of `text`: 1 for a whole file.
-    pub first: u32,
-    /// The file's text from line `first` on: the whole file as it reads,
-    /// or a window's lines joined by newlines.
-    pub text: String,
-}
-
-impl SourceFile {
-    /// The whole of `text`.
-    pub fn whole(text: &str) -> SourceFile {
-        SourceFile {
-            extent: Extent::Whole,
-            first: 1,
-            text: text.to_string(),
-        }
-    }
-
+impl Carry for SourceFile {
     /// The lines of `text` from `radius` above the first of `on` to
     /// `radius` below the last, cut at the file's ends. None when every
     /// line of `on` is past the file's end.
@@ -572,7 +524,7 @@ impl SourceFile {
 
     /// The lines within `radius` of line `line`, counted from 1, cut to
     /// what the file carries. None when it does not carry that line.
-    pub fn around(&self, line: u32, radius: u32) -> Option<Source> {
+    fn around(&self, line: u32, radius: u32) -> Option<Source> {
         let count = u32::try_from(self.text.lines().count()).ok()?;
         let end = self.first.checked_add(count)?;
         if line < self.first || line >= end {

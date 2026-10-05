@@ -32,7 +32,9 @@ use crate::request::Request;
 use crate::run::Replays;
 use crate::selection::{Mapped, Pos, Surface, part_of_line};
 use crate::sideways::{Sideways, line_width, text_column};
-use crate::source::{Frame, Located, Progress, Shown, SourceFile, Thread, shown, target};
+use crate::source::{
+    Frame, Located, Progress, Shown, SourceFile, Thread, shown, target, without_source,
+};
 use crate::syntax::{Highlighter, Language};
 use crate::theme::{self, layout, size};
 use crate::ui::icons::Icon;
@@ -391,8 +393,7 @@ impl Scrubber {
         if let Some((located, Some(at))) = self.located()
             && let Some(frame) = located.frames.get(at)
         {
-            return frame
-                .without_source()
+            return without_source(frame)
                 .into_iter()
                 .map(Mapped::plain)
                 .collect();
@@ -501,7 +502,7 @@ impl Scrubber {
             (Some((file, frame)), _, _) => self.render_file(file, frame, panel, selected, cx),
             (None, Some(frame), _) => {
                 let mut rows = div().flex().flex_col().py(px(size::LIST_PAD_Y));
-                for (i, text) in frame.without_source().into_iter().enumerate() {
+                for (i, text) in without_source(frame).into_iter().enumerate() {
                     let part = selected
                         .as_ref()
                         .and_then(|r| part_of_line(r, i, text.len()));

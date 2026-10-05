@@ -11,69 +11,26 @@
 
 use std::collections::BTreeMap;
 
-use serde::Deserialize;
-
 use crate::engine::EngineError;
 use crate::sideways::widest_line;
 
-/// One frame of the thread's stack, innermost first.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
-pub struct Frame {
-    pub level: u32,
-    pub function: Option<String>,
-    /// The source file as the program's DWARF names it, and its line.
-    pub file: Option<String>,
-    /// The path the answer's files key the source file by.
-    pub fullname: Option<String>,
-    pub line: Option<u32>,
-    /// The instruction, in hex.
-    pub pc: String,
-    /// The program or library the instruction is in, by its path in the VM.
-    pub object: Option<String>,
-}
+pub use rewind_trace::located::{Extent, Frame};
 
-impl Frame {
-    /// The frame's function, or its address when it has no name.
-    pub fn function_label(&self) -> String {
-        self.function.clone().unwrap_or_else(|| self.pc.clone())
-    }
-
-    /// Where the frame is: its source line, else its program's file name.
-    pub fn place_label(&self) -> String {
-        match (&self.file, self.line, &self.object) {
-            (Some(file), Some(line), _) => format!("{file}:{line}"),
-            (_, _, Some(object)) => object.rsplit('/').next().unwrap_or(object).to_string(),
-            _ => String::new(),
-        }
-    }
-
-    /// What the panel shows in place of the source of a frame without
-    /// any: the frame's address and program, and a line saying so.
-    pub fn without_source(&self) -> Vec<String> {
-        let place = match &self.object {
-            Some(object) => format!("{}  {object}", self.pc),
-            None => self.pc.clone(),
-        };
-        vec![place, NO_SOURCE.to_string()]
-    }
+/// What the panel shows in place of the source of a frame without any:
+/// the frame's address and program, and a line saying so.
+pub fn without_source(frame: &Frame) -> Vec<String> {
+    let place = match &frame.object {
+        Some(object) => format!("{}  {object}", frame.pc),
+        None => frame.pc.clone(),
+    };
+    vec![place, NO_SOURCE.to_string()]
 }
 
 /// What the panel says of a frame the engine found no source for.
 const NO_SOURCE: &str = "no source";
 
-/// How much of a source file the answer carries.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Extent {
-    /// The whole file.
-    Whole,
-    /// The lines around its frames' lines, of a file too large to carry.
-    Window,
-}
-
 /// A source file as the answer carries it, split into lines once.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
-#[serde(from = "Carried")]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SourceFile {
     pub extent: Extent,
     /// The number of the first line.
@@ -83,17 +40,8 @@ pub struct SourceFile {
     pub widest: usize,
 }
 
-/// A source file as `rewind where --json` prints it: its text in one
-/// string, which is shorter than a list of lines.
-#[derive(Deserialize)]
-struct Carried {
-    extent: Extent,
-    first: u32,
-    text: String,
-}
-
-impl From<Carried> for SourceFile {
-    fn from(carried: Carried) -> SourceFile {
+impl From<rewind_trace::located::SourceFile> for SourceFile {
+    fn from(carried: rewind_trace::located::SourceFile) -> SourceFile {
         let lines: Vec<String> = carried.text.lines().map(str::to_string).collect();
         SourceFile {
             extent: carried.extent,
@@ -141,8 +89,8 @@ impl SourceFile {
     }
 }
 
-/// What `rewind where --json` prints.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+/// What `rewind where --json` prints, with its files split into lines.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Located {
     pub pid: u32,
     pub tid: u32,
@@ -154,6 +102,23 @@ pub struct Located {
     /// Each source file the frames are in, by the path a frame's
     /// `fullname` gives it.
     pub files: BTreeMap<String, SourceFile>,
+}
+
+impl From<rewind_trace::located::Located> for Located {
+    fn from(answer: rewind_trace::located::Located) -> Located {
+        Located {
+            pid: answer.pid,
+            tid: answer.tid,
+            process: answer.process,
+            frames: answer.frames,
+            chosen: answer.chosen,
+            files: answer
+                .files
+                .into_iter()
+                .map(|(path, file)| (path, file.into()))
+                .collect(),
+        }
+    }
 }
 
 impl Located {
@@ -372,7 +337,9 @@ mod tests {
     }
 
     fn located() -> Located {
-        serde_json::from_str(&at_the_crash()).unwrap()
+        serde_json::from_str::<rewind_trace::located::Located>(&at_the_crash())
+            .unwrap()
+            .into()
     }
 
     /// The answer reads into the frames, the chosen one, and each source
@@ -478,7 +445,7 @@ mod tests {
     fn a_frame_without_source_says_where_it_is() {
         let located = located();
         assert_eq!(
-            located.frames[2].without_source(),
+            without_source(&located.frames[2]),
             vec![
                 "0x7f61585d9b1c  /nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6"
                     .to_string(),
@@ -490,7 +457,7 @@ mod tests {
             ..located.frames[2].clone()
         };
         assert_eq!(
-            bare.without_source(),
+            without_source(&bare),
             vec!["0x7f61585d9b1c".to_string(), "no source".to_string()]
         );
     }
