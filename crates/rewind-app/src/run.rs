@@ -493,6 +493,9 @@ pub struct Session {
     /// The runs next to the run, read once when it opened. None for a run
     /// with no id, which no run names as its parent.
     pub neighbours: Option<Neighbours>,
+    /// Why the run asked to be compared with could not be opened, such as
+    /// one removed meanwhile, for a notice; the run then opens alone.
+    pub unopened_compare: Option<String>,
 }
 
 /// The runs in one directory, as their manifests read at one time.
@@ -529,6 +532,7 @@ impl Session {
             comparison,
             forks_on_disk,
             neighbours,
+            unopened_compare: None,
         }
     }
 
@@ -537,8 +541,16 @@ impl Session {
     pub fn open(path: &Path, compare: Option<&Path>) -> Result<Session> {
         let run = Run::open(path)?;
         let compare = compare.map(Path::to_path_buf).or_else(|| run.parent_dir());
-        let other = compare.as_deref().map(Run::open).transpose()?;
-        Ok(Session::new(run, other))
+
+        // A comparison that does not open leaves the run to open alone.
+        let (other, unopened) = match compare.as_deref().map(Run::open) {
+            None => (None, None),
+            Some(Ok(other)) => (Some(other), None),
+            Some(Err(e)) => (None, Some(format!("{e:#}"))),
+        };
+        let mut session = Session::new(run, other);
+        session.unopened_compare = unopened;
+        Ok(session)
     }
 
     /// The step of the first divergence from the compared run.
@@ -790,6 +802,22 @@ mod tests {
         assert_eq!(run.stopped_at(end), Some(hung));
         assert_eq!(run.stopped_at(end - 1), None);
         assert_eq!(with_stop("poweroff").stopped_at(end), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_run_whose_comparison_is_gone_opens_alone() {
+        // A run asked to open beside a run that was removed meanwhile opens
+        // by itself, with no comparison, and says why for a notice; beside
+        // a run that is there, it says nothing.
+        let dir = temp_dir("compare-gone");
+        small_trace(&dir);
+        let session = Session::open(&dir, Some(&dir.join("removed"))).unwrap();
+        assert!(session.other.is_none());
+        assert!(session.comparison.is_none());
+        assert!(session.unopened_compare.is_some());
+        let beside_itself = Session::open(&dir, Some(&dir)).unwrap();
+        assert!(beside_itself.unopened_compare.is_none());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

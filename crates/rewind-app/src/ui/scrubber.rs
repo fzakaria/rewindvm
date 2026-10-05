@@ -363,6 +363,14 @@ impl Scrubber {
         if let Some(warning) = &session.run.manifest_warning {
             self.notify_user(NoticeTone::Error, "Manifest ignored", warning.clone(), cx);
         }
+        if let Some(why) = &session.unopened_compare {
+            self.notify_user(
+                NoticeTone::Info,
+                "Opened without a comparison",
+                format!("The run to compare with did not open: {why}"),
+                cx,
+            );
+        }
         self.step = start;
         self.forks.clear();
         self.tour = None;
@@ -704,6 +712,13 @@ impl Scrubber {
                     }
                 };
                 this.runs_picked.retain(|id| !removed.contains(id));
+
+                // A comparison chosen with a run that is gone is dropped,
+                // or every run opened after would be compared with nothing.
+                this.pinned_compare = this
+                    .pinned_compare
+                    .take()
+                    .filter(|dir| !removed.iter().any(|id| dir.ends_with(id)));
                 let shown = this
                     .session
                     .as_ref()
