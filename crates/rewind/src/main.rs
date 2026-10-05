@@ -2,6 +2,7 @@
 
 mod downloads;
 mod gdb;
+mod json;
 mod list;
 mod locate;
 mod show;
@@ -232,6 +233,11 @@ enum Command {
     Run {
         #[command(flatten)]
         image: ImageArgs,
+        /// Print the run as one JSON object on standard output once it
+        /// ends, for programs, instead of its output and summary: its id,
+        /// name, directory, how it ended and the outputs its job hashed.
+        #[arg(long)]
+        json: bool,
         #[command(flatten)]
         machine: MachineArgs,
     },
@@ -249,6 +255,11 @@ enum Command {
         /// binary cache.
         #[arg(long)]
         no_compare: bool,
+        /// Print the run as one JSON object on standard output once it
+        /// ends, for programs, instead of its output and summary: as `run
+        /// --json` does, with what each store and cache said of each output.
+        #[arg(long)]
+        json: bool,
         #[command(flatten)]
         machine: MachineArgs,
     },
@@ -274,6 +285,12 @@ enum Command {
         /// How many machines to run at once; one per CPU by default.
         #[arg(long, short)]
         jobs: Option<usize>,
+        /// Print one JSON object on standard output once the search ends,
+        /// for programs: each schedule tried, as `rewind ls --json` and
+        /// `fork --json` describe runs, and the window, the two runs and
+        /// where they part when one ended differently.
+        #[arg(long)]
+        json: bool,
         #[command(flatten)]
         machine: MachineArgs,
     },
@@ -544,6 +561,11 @@ enum Command {
         /// Show the kernel's own threads too.
         #[arg(long)]
         all: bool,
+        /// Print one JSON object on standard output, for programs: the step
+        /// and each process alive then, with its parent, command line and
+        /// threads.
+        #[arg(long)]
+        json: bool,
     },
     /// Print a run's events.
     Events {
@@ -566,6 +588,11 @@ enum Command {
         /// Start from the keyframe at or before this step instead of boot.
         #[arg(long, value_name = "STEP")]
         from: Option<u64>,
+        /// Print one JSON object on standard output, for programs: whether
+        /// the trace came out identical, the keyframe it started from, and
+        /// where it first differed.
+        #[arg(long)]
+        json: bool,
     },
     /// Compare two runs and show where they first differ.
     ///
@@ -575,6 +602,10 @@ enum Command {
         left: String,
         #[arg(help = RUN_HELP, long_help = RUN_LONG_HELP)]
         right: String,
+        /// Print one JSON object on standard output, for programs: the two
+        /// runs' ids and where they first differ, null when identical.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -710,19 +741,29 @@ fn run(cli: Cli) -> Result<ExitCode> {
         HomeHold::Unheld => None,
     };
     match cli.command {
-        Command::Run { image, machine } => {
+        Command::Run {
+            image,
+            json,
+            machine,
+        } => {
             let guest = Guest::from_env()?;
-            let run = run_workload(&home, &guest, &Workload::Image(image), &machine)?;
+            let workload = Workload::Image(image);
+            let run = run_workload(&home, &guest, &workload, &machine, Report::of(json))?;
+            if json {
+                println!("{}", json::run(&run)?);
+            }
             Ok(exit_status(&run))
         }
         Command::Nix {
             installable,
             compare_with,
             no_compare,
+            json,
             machine,
         } => {
             let guest = Guest::from_env()?;
-            let run = run_workload(&home, &guest, &Workload::Nix(installable), &machine)?;
+            let workload = Workload::Nix(installable);
+            let run = run_workload(&home, &guest, &workload, &machine, Report::of(json))?;
             let lookup = if no_compare {
                 compare::Lookup::Off
             } else {
@@ -730,8 +771,26 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     extra: compare_with,
                 }
             };
-            let missing = report_outputs(&run, &lookup)?;
-            if !missing.is_empty() {
+            let compared = compare_outputs(&run, &lookup)?;
+            if json {
+                let mut value = json::run(&run)?;
+                value["outputs"] = compared
+                    .outputs
+                    .iter()
+                    .map(|(path, hash, comparisons)| {
+                        serde_json::json!({
+                            "path": path,
+                            "hash": hash,
+                            "comparisons": json::comparisons(comparisons),
+                        })
+                    })
+                    .collect();
+                value["not_asked"] = compared.skipped.clone().into();
+                println!("{value}");
+            } else {
+                print_compared(&compared);
+            }
+            if !compared.missing.is_empty() {
                 return Ok(ExitCode::FAILURE);
             }
             Ok(exit_status(&run))
@@ -742,8 +801,15 @@ fn run(cli: Cli) -> Result<ExitCode> {
             schedules,
             all,
             jobs,
+            json,
             mut machine,
         } => {
+            // Lines as the search goes, unless it ends in one JSON object.
+            let say = |line: String| {
+                if !json {
+                    println!("{line}");
+                }
+            };
             let guest = Guest::from_env()?;
             let jobs = jobs
                 .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
@@ -787,8 +853,11 @@ fn run(cli: Cli) -> Result<ExitCode> {
             // before then instead of at boot: a narrowed window late in a
             // long build runs only from near the window.
             let from_base = Start::After(base.manifest.id.clone());
-            println!("schedule   0: {}", show::outcome_line(&base)?);
-            print_timeout(&home, 0, &base);
+            say(format!("schedule   0: {}", show::outcome_line(&base)?));
+            if !json {
+                print_timeout(&home, 0, &base);
+            }
+            let mut tried_runs = vec![schedule_json(&base)?];
 
             // A schedule can make a program loop forever where schedule 0
             // did not, so unless told otherwise each other run gets a
@@ -833,11 +902,12 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 let runs = execute_all(&home, &guest, &prepared, machines, from_base.clone());
                 clear_status();
                 for run in runs? {
-                    println!(
+                    say(format!(
                         "schedule {:>3}: {}",
                         run.manifest.spec.schedule,
                         show::outcome_line(&run)?
-                    );
+                    ));
+                    tried_runs.push(schedule_json(&run)?);
                     tried += 1;
                     if differs(&run)? {
                         differing += 1;
@@ -851,14 +921,28 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 }
             }
             if all && base_failed {
-                println!(
+                say(format!(
                     "schedule 0 failed; {differing} of {tried} perturbed schedules ended differently"
-                );
+                ));
             } else if all {
-                println!("{differing} of {tried} perturbed schedules ended differently");
+                say(format!(
+                    "{differing} of {tried} perturbed schedules ended differently"
+                ));
             }
+            let search = |narrowed: serde_json::Value| {
+                serde_json::json!({
+                    "schedules": tried_runs,
+                    "tried": tried,
+                    "differing": differing,
+                    "schedule_0_failed": base_failed,
+                    "narrowed": narrowed,
+                })
+            };
             let Some(mut worst) = failing else {
-                println!("same result under all {} schedules", tried + 1);
+                say(format!("same result under all {} schedules", tried + 1));
+                if json {
+                    println!("{}", search(serde_json::Value::Null));
+                }
                 return Ok(ExitCode::SUCCESS);
             };
 
@@ -880,18 +964,19 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 .map_or(start, |o| o.step)
                 .min(user_until);
             if base_failed {
-                println!(
+                say(format!(
                     "\nschedule {} passes where schedule 0 fails; narrowing the steps it perturbs",
                     machine.schedule
-                );
+                ));
             } else {
-                println!(
+                say(format!(
                     "\nschedule {} ends differently; narrowing the steps it perturbs",
                     machine.schedule
-                );
+                ));
             }
-
-            print_timeout(&home, machine.schedule, &worst);
+            if !json {
+                print_timeout(&home, machine.schedule, &worst);
+            }
             let probe_all = |windows: Vec<(u64, u64)>| -> Result<Vec<Run>> {
                 let lo = windows.iter().map(|w| w.0).min().unwrap_or(0);
                 let hi = windows.iter().map(|w| w.1).max().unwrap_or(0);
@@ -967,7 +1052,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
             }
             let (lo, until) = (from, hi);
             clear_status();
-            println!("perturbing only steps {lo}..{until} still ends differently\n");
+            say(format!(
+                "perturbing only steps {lo}..{until} still ends differently\n"
+            ));
             let base = base.add_keyframes(&home)?;
             let worst = worst.add_keyframes(&home)?;
             let (passing, failing) = if base_failed {
@@ -975,10 +1062,28 @@ fn run(cli: Cli) -> Result<ExitCode> {
             } else {
                 (base, worst)
             };
+            let (pt, ft) = (passing.trace()?, failing.trace()?);
+            let culprit = ft.culprit_against(pt);
+            if json {
+                let divergence = match &culprit {
+                    Some(argv) => json::program_divergence(pt, ft, argv),
+                    None => json::divergence(pt, ft),
+                };
+                let narrowed = serde_json::json!({
+                    "schedule": machine.schedule,
+                    "from": lo,
+                    "until": until,
+                    "passing": json::run(&passing)?,
+                    "failing": json::run(&failing)?,
+                    "program": culprit,
+                    "divergence": divergence,
+                });
+                println!("{}", search(narrowed));
+                return Ok(ExitCode::FAILURE);
+            }
             println!("passing: run {}", passing.manifest.id);
             println!("failing: run {}", failing.manifest.id);
-            let (pt, ft) = (passing.trace()?, failing.trace()?);
-            match ft.culprit_against(pt) {
+            match culprit {
                 Some(argv) => {
                     println!("\nwhere {} first behaves differently:", argv.join(" "));
                     print!("{}", show::divergence_in(pt, ft, &argv));
@@ -1029,16 +1134,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             )?;
             let first_difference = child.manifest.first_difference;
             if json {
-                let status = child.manifest.outcome.as_ref().and_then(|o| o.status);
-                println!(
-                    "{}",
-                    serde_json::json!({
-                        "id": child.manifest.id,
-                        "dir": child.dir,
-                        "status": status,
-                        "first_difference": first_difference,
-                    })
-                );
+                println!("{}", json::run(&child)?);
                 return Ok(exit_status(&child));
             }
             let stop = locate::describe_stall(&home, &child);
@@ -1455,7 +1551,12 @@ fn run(cli: Cli) -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        Command::Ps { run, step, all } => {
+        Command::Ps {
+            run,
+            step,
+            all,
+            json,
+        } => {
             let run = Run::find(&home, &run)?;
             let at = step.map(|s| run.check_step(s)).transpose()?;
             let trace = run.trace()?;
@@ -1465,6 +1566,10 @@ fn run(cli: Cli) -> Result<ExitCode> {
             } else {
                 show::KernelThreads::Hide
             };
+            if json {
+                println!("{}", json::processes(trace, at, threads));
+                return Ok(ExitCode::SUCCESS);
+            }
             print!("{}", show::process_tree(trace, at, threads));
             Ok(ExitCode::SUCCESS)
         }
@@ -1495,11 +1600,28 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Replay {
             run,
             from: Some(step),
+            json,
         } => {
             let run = Run::find(&home, &run)?;
             let step = run.check_step(step)?;
             let started = std::time::Instant::now();
             let (kf, original, again) = run.replay_from(&home, step)?;
+            let identical = original.divergence(&again).is_none();
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "identical": identical,
+                        "keyframe": kf,
+                        "divergence": json::divergence(&original, &again),
+                    })
+                );
+                return Ok(if identical {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::FAILURE
+                });
+            }
             match original.divergence(&again) {
                 None => {
                     println!(
@@ -1515,9 +1637,36 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 }
             }
         }
-        Command::Replay { run, from: None } => {
+        Command::Replay {
+            run,
+            from: None,
+            json,
+        } => {
             let run = Run::find(&home, &run)?;
-            match run.replay()? {
+            let replayed = run.replay()?;
+            if json {
+                let divergence = replayed.as_ref().map(|d| {
+                    serde_json::json!({
+                        "index": d.index,
+                        "left_step": d.left_step,
+                        "right_step": d.right_step,
+                    })
+                });
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "identical": replayed.is_none(),
+                        "keyframe": null,
+                        "divergence": divergence,
+                    })
+                );
+                return Ok(if replayed.is_none() {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::FAILURE
+                });
+            }
+            match replayed {
                 None => {
                     println!(
                         "identical: {} events over {} steps",
@@ -1535,11 +1684,22 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 }
             }
         }
-        Command::Diff { left, right } => {
+        Command::Diff { left, right, json } => {
             let left = Run::find(&home, &left)?;
             let right = Run::find(&home, &right)?;
             let (lt, rt) = (left.trace()?, right.trace()?);
-            print!("{}", show::divergence(lt, rt));
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "left": left.manifest.id,
+                        "right": right.manifest.id,
+                        "divergence": json::divergence(lt, rt),
+                    })
+                );
+            } else {
+                print!("{}", show::divergence(lt, rt));
+            }
             match lt.divergence(rt) {
                 None => Ok(ExitCode::SUCCESS),
                 Some(_) => Ok(ExitCode::FAILURE),
@@ -1578,16 +1738,39 @@ struct Prepared {
     job: Job,
 }
 
-/// Runs a workload with the given machine options.
+/// How `run` and `nix` report a run: its output as it executes and a
+/// summary when it ends, or nothing until one JSON object.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Report {
+    Text,
+    Json,
+}
+
+impl Report {
+    fn of(json: bool) -> Report {
+        if json { Report::Json } else { Report::Text }
+    }
+}
+
+/// Runs a workload with the given machine options, reported as `report`
+/// says.
 fn run_workload(
     home: &Home,
     guest: &Guest,
     workload: &Workload,
     machine: &MachineArgs,
+    report: Report,
 ) -> Result<Run> {
     let mut machine = machine.clone();
     let prepared = prepare(home, guest, workload, &mut machine)?;
-    execute(home, guest, &prepared, &machine, Start::Boot, Announce::Yes)
+    let announce = match report {
+        Report::Text => Announce::Yes,
+        Report::Json => {
+            machine.quiet = true;
+            Announce::No
+        }
+    };
+    execute(home, guest, &prepared, &machine, Start::Boot, announce)
 }
 
 fn prepare(
@@ -1789,6 +1972,13 @@ fn execute_all(
     })
 }
 
+/// A run `rewind check` tried, for its JSON: the run, and its schedule.
+fn schedule_json(run: &Run) -> Result<serde_json::Value> {
+    let mut value = json::run(run)?;
+    value["schedule"] = run.manifest.spec.schedule.into();
+    Ok(value)
+}
+
 /// For a schedule of `rewind check` that hit its time limit, how and where:
 /// a guest stuck computing without exits is often what the search found.
 /// A user-space address is named by the program's symbols when it can be.
@@ -1818,11 +2008,22 @@ const CHECK_TIMEOUT_FACTOR: u64 = 10;
 /// The least time `rewind check` gives each schedule after schedule 0.
 const CHECK_TIMEOUT_MIN: Duration = Duration::from_secs(60);
 
-/// Prints each output's hash from the guest, and what this machine's store
-/// and the binary caches `lookup` names say about their builds of it. A
-/// job that exited 0 without creating an output failed, as nix-daemon
-/// judges it: those outputs are printed as missing and returned.
-fn report_outputs(run: &Run, lookup: &compare::Lookup) -> Result<Vec<String>> {
+/// What this machine's store and the binary caches said about a Nix run's
+/// outputs.
+struct Compared {
+    /// Each output's path and hash from the guest, and what each source
+    /// said about its build of it.
+    outputs: Vec<(String, String, Vec<compare::Comparison>)>,
+    /// Substituters that are not HTTP binary caches, which were not asked.
+    skipped: Vec<String>,
+    /// For a job that exited 0, the outputs it did not create: it failed,
+    /// as nix-daemon judges it.
+    missing: Vec<String>,
+}
+
+/// Asks this machine's store and the binary caches `lookup` names about
+/// each output the run's job hashed.
+fn compare_outputs(run: &Run, lookup: &compare::Lookup) -> Result<Compared> {
     let (status, hashed) = show::outcome_key(run)?;
     let outputs: Vec<(String, String)> = hashed
         .iter()
@@ -1844,31 +2045,45 @@ fn report_outputs(run: &Run, lookup: &compare::Lookup) -> Result<Vec<String>> {
         compare::Netrc::load()
     };
     let results = compare::compare(&outputs, &caches, &netrc);
-    for ((path, hash), result) in outputs.iter().zip(&results) {
-        println!("{}", show::verdict_line(path, hash, &result.comparisons));
+    let missing = if status == Some(0) {
+        show::missing_outputs(&run.manifest.spec.job.outputs, &hashed)
+    } else {
+        Vec::new()
+    };
+    Ok(Compared {
+        outputs: outputs
+            .into_iter()
+            .zip(results)
+            .map(|((path, hash), result)| (path, hash, result.comparisons))
+            .collect(),
+        skipped: caches.skipped,
+        missing,
+    })
+}
+
+/// Prints each output's hash from the guest and what each source said
+/// about it, then the outputs a job that exited 0 did not create.
+fn print_compared(compared: &Compared) {
+    for (path, hash, comparisons) in &compared.outputs {
+        println!("{}", show::verdict_line(path, hash, comparisons));
     }
-    let differs = results
+    let differs = compared
+        .outputs
         .iter()
-        .flat_map(|r| &r.comparisons)
+        .flat_map(|(_, _, comparisons)| comparisons)
         .any(|c| c.verdict == compare::Verdict::Differs);
     if differs {
         println!("{}", show::DIFFERS_NOTE);
     }
-    if !outputs.is_empty() && !caches.skipped.is_empty() {
+    if !compared.outputs.is_empty() && !compared.skipped.is_empty() {
         println!(
             "rewind: did not ask {}, which are not HTTP binary caches",
-            caches.skipped.join(", ")
+            compared.skipped.join(", ")
         );
     }
-
-    if status != Some(0) {
-        return Ok(Vec::new());
-    }
-    let missing = show::missing_outputs(&run.manifest.spec.job.outputs, &hashed);
-    for path in &missing {
+    for path in &compared.missing {
         println!("{path} missing: the builder exited 0 without creating it");
     }
-    Ok(missing)
 }
 
 /// Builds or reuses the erofs image for a root filesystem argument.

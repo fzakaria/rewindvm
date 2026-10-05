@@ -304,6 +304,7 @@ in
         test "$status" = 1
         grep -q 'first difference' diff
         rewind diff a a | grep -qx identical
+        rewind diff a a --json | grep -q '"divergence":null'
 
         # A fork reads its parent's keyframes up to its step and replays
         # like any run, from boot and from a keyframe on either side of the

@@ -307,14 +307,21 @@ pub enum KernelThreads {
 /// kthreadd, the parent of every kernel thread.
 const KTHREADD: u32 = 2;
 
-/// The process tree alive at a step, indented by parent.
-pub fn process_tree(trace: &Trace, step: u64, kernel: KernelThreads) -> String {
-    let procs = trace.processes();
-    let alive: Vec<_> = procs
-        .iter()
+/// The processes alive at a step, the kernel's own threads only when
+/// `kernel` says so.
+pub fn alive(trace: &Trace, step: u64, kernel: KernelThreads) -> Vec<rewind_trace::Process> {
+    trace
+        .processes()
+        .into_iter()
         .filter(|p| p.alive_at(step))
         .filter(|p| kernel == KernelThreads::Show || (p.pid != KTHREADD && p.parent != KTHREADD))
-        .collect();
+        .collect()
+}
+
+/// The process tree alive at a step, indented by parent.
+pub fn process_tree(trace: &Trace, step: u64, kernel: KernelThreads) -> String {
+    let procs = alive(trace, step, kernel);
+    let alive: Vec<_> = procs.iter().collect();
     let mut out = String::new();
     let roots = alive
         .iter()
