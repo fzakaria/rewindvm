@@ -14,7 +14,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use rewind_core::inspect::Inspection;
 use rewind_core::run::{
     BASE_CMDLINE, DEFAULT_CORES, DEFAULT_QUANTUM, MAX_CORES, Start, default_epoch,
@@ -226,6 +226,18 @@ enum PmuAction {
     ///
     /// Run it as root: sudo rewind pmu enable.
     Enable,
+}
+
+/// What `rewind generate` writes, for packagers.
+#[derive(Subcommand)]
+enum Generate {
+    /// A shell's completions, on standard output.
+    Completions {
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
+    /// A man page for rewind and one for each of its commands, in DIR.
+    Man { dir: PathBuf },
 }
 
 /// What a run runs.
@@ -617,6 +629,12 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Shell completions and man pages, which the packages install.
+    #[command(hide = true)]
+    Generate {
+        #[command(subcommand)]
+        what: Generate,
+    },
     /// Compare two runs and show where they first differ.
     ///
     /// Exits 0 when the runs are identical and 1 when they differ.
@@ -727,7 +745,8 @@ impl Command {
             | Command::Log { .. }
             | Command::Ps { .. }
             | Command::Events { .. }
-            | Command::Diff { .. } => HomeHold::Unheld,
+            | Command::Diff { .. }
+            | Command::Generate { .. } => HomeHold::Unheld,
         }
     }
 }
@@ -756,15 +775,21 @@ fn run(cli: Cli) -> Result<ExitCode> {
         return pmu_enable();
     }
 
+    // Completions and man pages need no runs, and a package's build has no
+    // home to find them under.
+    let command = match cli.command {
+        Command::Generate { what } => return generate(what),
+        command => command,
+    };
     let home = Home::open()?;
 
     // Commands that pack images, boot a run or read pages hold the home in
     // use until they exit (see `HomeHold`).
-    let _in_use = match cli.command.home_hold() {
+    let _in_use = match command.home_hold() {
         HomeHold::InUse => Some(home.in_use()?),
         HomeHold::Unheld => None,
     };
-    match cli.command {
+    match command {
         Command::Run {
             image,
             json,
@@ -1792,6 +1817,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 }
             }
         }
+        Command::Generate { what } => generate(what),
         Command::Diff { left, right, json } => {
             let left = Run::find(&home, &left)?;
             let right = Run::find(&home, &right)?;
@@ -1814,6 +1840,25 @@ fn run(cli: Cli) -> Result<ExitCode> {
             }
         }
     }
+}
+
+/// `rewind generate`: completions on standard output, or man pages in a
+/// directory.
+fn generate(what: Generate) -> Result<ExitCode> {
+    match what {
+        Generate::Completions { shell } => completions(shell, &mut std::io::stdout()),
+        Generate::Man { dir } => {
+            std::fs::create_dir_all(&dir)?;
+            clap_mangen::generate_to(Cli::command(), &dir)
+                .with_context(|| format!("writing man pages to {}", dir.display()))?;
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `shell`'s completions for every command and option, written to `out`.
+fn completions(shell: clap_complete::Shell, out: &mut dyn std::io::Write) {
+    clap_complete::generate(shell, &mut Cli::command(), "rewind", out);
 }
 
 /// After runs are removed, says how much of the image cache `rewind gc`
@@ -2301,6 +2346,24 @@ mod tests {
             echo_for(Loudness::Quiet, Progress::Hidden, Terminal::Yes),
             Echo::Quiet
         );
+    }
+
+    #[test]
+    fn completions_and_man_pages_cover_every_command() {
+        // The man pages are one for rewind and one for each command it
+        // shows; bash's completions name a command.
+        let dir = std::env::temp_dir().join(format!("rewind-man-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        generate(Generate::Man { dir: dir.clone() }).unwrap();
+        for page in ["rewind.1", "rewind-fork.1", "rewind-show.1"] {
+            assert!(dir.join(page).exists(), "{page}");
+        }
+        assert!(!dir.join("rewind-generate.1").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        let mut bash = Vec::new();
+        completions(clap_complete::Shell::Bash, &mut bash);
+        assert!(String::from_utf8(bash).unwrap().contains("fork"));
     }
 
     #[test]

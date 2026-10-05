@@ -84,6 +84,16 @@ pkgs.runCommand "rewind-release" { } ''
     ${guest.initrd}/initrd $dir/share/rewind/
   chmod -R u+w $dir/share/rewind
   cp ${../LICENSE} $dir/LICENSE
+
+  # Completions and man pages where a prefix keeps them, which man finds
+  # from bin on PATH.
+  mkdir -p $dir/share/man/man1 $dir/share/bash-completion/completions \
+    $dir/share/zsh/site-functions $dir/share/fish/vendor_completions.d
+  ${static}/bin/rewind generate man $dir/share/man/man1
+  ${static}/bin/rewind generate completions bash > $dir/share/bash-completion/completions/rewind
+  ${static}/bin/rewind generate completions zsh > $dir/share/zsh/site-functions/_rewind
+  ${static}/bin/rewind generate completions fish > $dir/share/fish/vendor_completions.d/rewind.fish
+
   mkdir -p $out
   tar --sort=name --owner=0 --group=0 --numeric-owner --mtime=@1 \
     -czf $out/$dir.tar.gz $dir

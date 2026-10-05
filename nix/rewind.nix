@@ -33,6 +33,17 @@ let
       # The commit, for `rewind --version`; given to this build alone, so
       # the dependencies' build does not change with every commit.
       REWIND_COMMIT = commit;
+      # Completions for bash, zsh and fish and a man page per command, from
+      # the command's own definitions.
+      nativeBuildInputs = [ pkgs.installShellFiles ];
+      postInstall = ''
+        installShellCompletion --cmd rewind \
+          --bash <($out/bin/rewind generate completions bash) \
+          --zsh <($out/bin/rewind generate completions zsh) \
+          --fish <($out/bin/rewind generate completions fish)
+        $out/bin/rewind generate man man
+        installManPage man/*.1
+      '';
       # erofs-utils for the test that reads a file out of an image.
       nativeCheckInputs = [
         pkgs.cpio
@@ -64,12 +75,16 @@ let
 in
 pkgs.runCommand "rewind"
   {
-    nativeBuildInputs = [ pkgs.makeWrapper ];
+    nativeBuildInputs = [
+      pkgs.makeWrapper
+      pkgs.lndir
+    ];
     inherit (unwrapped) meta;
     passthru = { inherit unwrapped; };
   }
   ''
-    mkdir -p $out/bin
+    mkdir -p $out/bin $out/share
+    lndir -silent ${unwrapped}/share $out/share
     makeWrapper ${unwrapped}/bin/rewind $out/bin/rewind \
       --prefix PATH : ${lib.makeBinPath runtimeTools} \
       --suffix PATH : ${lib.makeBinPath [ pkgs.gdb ]} \
