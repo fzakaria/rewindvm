@@ -265,12 +265,12 @@ in
         # new execution finishes: one killed partway, as by Ctrl-C, leaves
         # the trace and the manifest byte for byte as they were. 200,000
         # writes take a few seconds, long enough to kill.
-        many='for i in $(seq 200000); do echo $i; done'
-        rewind run -q --name many --root ${busyboxRoot} -- sh -c "$many"
+        writes='for i in $(seq 200000); do echo $i; done'
+        rewind run -q --name many --root ${busyboxRoot} -- sh -c "$writes"
         many=$(dirname "$(grep -l '"name": "many"' $REWIND_HOME/runs/*/manifest.json)")
         cp $many/trace.bin $many/manifest.json $TMPDIR/
         status=0
-        timeout -s INT 1 rewind run -q --name many --root ${busyboxRoot} -- sh -c "$many" || status=$?
+        timeout -s INT 1 rewind run -q --name many --root ${busyboxRoot} -- sh -c "$writes" || status=$?
         test $status = 124
         cmp $many/trace.bin $TMPDIR/trace.bin
         cmp $many/manifest.json $TMPDIR/manifest.json
