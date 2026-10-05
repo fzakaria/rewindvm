@@ -288,7 +288,8 @@ enum Command {
     /// with their imported inputs. Refused, removing nothing, while one of
     /// them has not finished or a run that stays reads keyframes from one
     /// of them. The images and pages they used stay until `rewind gc`.
-    /// Many runs at once take one call: `xargs rewind remove < ids`.
+    /// Many runs at once take one call: `xargs rewind remove < ids`. A run
+    /// `rewind ls` lists as unreadable is named by its id.
     Remove {
         #[arg(value_name = "RUN", required = true)]
         runs: Vec<String>,
@@ -436,7 +437,9 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// List runs, newest first.
+    /// List runs, newest first, then the directories whose manifests
+    /// another build of rewind wrote, as unreadable, with why; `rewind
+    /// remove` takes those by id.
     Ls,
     /// Print a run's output, up to a step.
     Log {
@@ -987,11 +990,15 @@ fn run(cli: Cli) -> Result<ExitCode> {
             dry_run,
             json,
         } => {
-            // Every run named must resolve before any is removed.
+            // Every run named must resolve before any is removed. One whose
+            // manifest does not read is named by its id or a prefix of it.
             let runs = runs
                 .iter()
-                .map(|run| Run::find(&home, run))
-                .collect::<Result<Vec<Run>>>()?;
+                .map(|run| match Run::find(&home, run) {
+                    Ok(found) => Ok(found.manifest.id),
+                    Err(e) => Run::find_unreadable(&home, run).map(|u| u.id).ok_or(e),
+                })
+                .collect::<Result<Vec<String>>>()?;
             let act = if dry_run {
                 rewind_core::prune::Act::DryRun
             } else {
@@ -1279,8 +1286,14 @@ fn run(cli: Cli) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Command::Ls => {
-            for r in Run::list(&home)? {
-                println!("{}", show::summary(&r));
+            // Every run, then every directory whose manifest does not read,
+            // with why.
+            let listing = Run::list_all(&home)?;
+            for r in &listing.runs {
+                println!("{}", show::summary(r));
+            }
+            for u in &listing.unreadable {
+                println!("{}  unreadable  {}", u.id, u.reason);
             }
             Ok(ExitCode::SUCCESS)
         }

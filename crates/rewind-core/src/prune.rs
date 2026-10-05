@@ -19,7 +19,7 @@ use anyhow::{Context, Result};
 
 use crate::home::Home;
 use crate::keyframes::Shared;
-use crate::run::{Run, TRACE};
+use crate::run::{Run, TRACE, Unreadable};
 
 /// What pruning needs to know about one run.
 #[derive(Clone, Debug)]
@@ -64,6 +64,20 @@ impl Member {
             trace_hash,
             finished,
             executing: !finished && run.executing(),
+        }
+    }
+
+    /// A run whose manifest does not read: nothing is known of what it
+    /// needs or ran, and its forks name it as their parent all the same.
+    fn unreadable(run: &Unreadable) -> Member {
+        Member {
+            id: run.id.clone(),
+            parent: None,
+            shares: None,
+            created: run.written,
+            trace_hash: None,
+            finished: false,
+            executing: false,
         }
     }
 
@@ -299,11 +313,18 @@ pub fn remove_tree(home: &Home, ids: &[&str], runs: &[Member], act: Act) -> Resu
     Ok(set)
 }
 
-/// `remove_tree` of `roots` over the runs in the home, which are listed
-/// once however many runs go.
-pub fn remove_with_forks(home: &Home, roots: &[Run], act: Act) -> Result<Vec<String>> {
-    let members: Vec<Member> = Run::list(home)?.iter().map(Member::of).collect();
-    let ids: Vec<&str> = roots.iter().map(|r| r.manifest.id.as_str()).collect();
+/// `remove_tree` of the runs `ids` over the runs in the home, which are
+/// listed once however many runs go. Runs whose manifests do not read are
+/// among them, so one can be removed by its id.
+pub fn remove_with_forks(home: &Home, ids: &[String], act: Act) -> Result<Vec<String>> {
+    let listing = Run::list_all(home)?;
+    let members: Vec<Member> = listing
+        .runs
+        .iter()
+        .map(Member::of)
+        .chain(listing.unreadable.iter().map(Member::unreadable))
+        .collect();
+    let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
     remove_tree(home, &ids, &members, act)
 }
 
@@ -565,6 +586,36 @@ mod tests {
         assert!(home.inputs().join("r").exists());
         assert!(!home.source_cache().join("a").exists());
         assert!(home.source_cache().join("r").exists());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn an_unreadable_run_is_removed_with_its_forks() {
+        // u's manifest does not read, and f, which does, is its fork:
+        // removing u by its id takes both, and leaves the run beside them.
+        use crate::run::tests::manifest;
+        let root =
+            std::env::temp_dir().join(format!("rewind-remove-unreadable-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let home = Home::at(root.clone()).unwrap();
+        let write = |id: &str, bytes: &[u8]| {
+            let dir = home.runs().join(id);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join(crate::run::MANIFEST), bytes).unwrap();
+        };
+        let u = "0000000000000001";
+        write(u, b"{}");
+        let mut fork = manifest("0000000000000002", "fork", 2);
+        fork.parent = Some((u.into(), 7));
+        write(&fork.id, &serde_json::to_vec(&fork).unwrap());
+        let other = manifest("0000000000000003", "other", 3);
+        write(&other.id, &serde_json::to_vec(&other).unwrap());
+
+        let removed = remove_with_forks(&home, &[u.to_string()], Act::Remove).unwrap();
+        assert_eq!(removed, vec![u.to_string(), fork.id.clone()]);
+        assert!(!home.runs().join(u).exists());
+        assert!(!home.runs().join(&fork.id).exists());
+        assert!(home.runs().join(&other.id).exists());
         fs::remove_dir_all(&root).unwrap();
     }
 

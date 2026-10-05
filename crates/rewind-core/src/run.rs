@@ -1181,18 +1181,49 @@ impl Run {
 
     /// The runs in a home, newest first.
     pub fn list(home: &Home) -> Result<Vec<Run>> {
-        let mut runs = Vec::new();
-        let Ok(entries) = fs::read_dir(home.runs()) else {
-            return Ok(runs);
-        };
-        for entry in entries {
-            let dir = entry?.path();
-            if let Ok(run) = Run::open(&dir) {
-                runs.push(run);
+        Ok(Run::list_all(home)?.runs)
+    }
+
+    /// The runs in a home, newest first, and the directories beside them
+    /// whose manifests do not read. A directory a process is executing a
+    /// run into may not have its manifest yet, and is in neither.
+    pub fn list_all(home: &Home) -> Result<Listing> {
+        let mut listing = Listing::default();
+        for dir in Run::dirs_starting(home, "")? {
+            if !dir.is_dir() {
+                continue;
+            }
+            match Run::open(&dir) {
+                Ok(run) => listing.runs.push(run),
+                Err(_) if executing(&dir) => {}
+                Err(e) => listing.unreadable.push(Unreadable::of(&dir, &e)),
             }
         }
-        runs.sort_by_cached_key(|r| newest_first(r.manifest.created, &r.dir));
-        Ok(runs)
+        listing
+            .runs
+            .sort_by_cached_key(|r| newest_first(r.manifest.created, &r.dir));
+        listing
+            .unreadable
+            .sort_by_key(|u| std::cmp::Reverse(u.written));
+        Ok(listing)
+    }
+
+    /// The directory whose manifest does not read that `what` names, by
+    /// its id or the start of the one id it begins.
+    pub fn find_unreadable(home: &Home, what: &str) -> Option<Unreadable> {
+        let mut matches: Vec<Unreadable> = Run::list_all(home)
+            .ok()?
+            .unreadable
+            .into_iter()
+            .filter(|u| u.id.starts_with(what))
+            .collect();
+        if let Some(exact) = matches.iter().position(|u| u.id == what) {
+            return Some(matches.swap_remove(exact));
+        }
+        match matches.len() {
+            1 => matches.pop(),
+            _ => None,
+        }
     }
 
     /// Finds a run by path, id, `@`, name, or id prefix. A path to a run's
@@ -1303,6 +1334,47 @@ impl Run {
                     .is_some_and(|n| n.to_string_lossy().starts_with(what))
             })?;
         Run::open(&dir).err()
+    }
+}
+
+/// Every run in a home, and the directories beside them whose manifests
+/// do not read.
+#[derive(Default)]
+pub struct Listing {
+    pub runs: Vec<Run>,
+    pub unreadable: Vec<Unreadable>,
+}
+
+/// A run directory whose manifest does not read, most often because
+/// another build of rewind wrote it with other fields.
+#[derive(Clone, Debug)]
+pub struct Unreadable {
+    /// The directory's name, which is the run's id.
+    pub id: String,
+    pub dir: PathBuf,
+    /// Why, in the words of the manifest's parser or the file system.
+    pub reason: String,
+    /// When the directory last changed, in seconds since the Unix epoch.
+    pub written: u64,
+}
+
+impl Unreadable {
+    fn of(dir: &Path, error: &anyhow::Error) -> Unreadable {
+        let written = fs::metadata(dir)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_secs());
+        Unreadable {
+            id: dir
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned(),
+            dir: dir.to_path_buf(),
+            reason: error.root_cause().to_string(),
+            written,
+        }
     }
 }
 
@@ -2011,6 +2083,55 @@ pub(crate) mod tests {
             "@0 names no run: @ or @1 is the newest, @2 the one before it"
         );
         assert_eq!(id("mylib"), "cccc000000000000");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn runs_whose_manifests_do_not_read_are_listed_apart() {
+        // A home with one run, a directory whose manifest another build
+        // wrote with other fields, and one with no manifest at all: the
+        // run is listed, the two others are unreadable with the parser's
+        // reason, and either is found by its id or a prefix of it. A
+        // directory a process is executing into has no manifest yet and
+        // is neither.
+        let root = runs_dir("unreadable");
+        let home = Home::at(root.clone()).unwrap();
+        let runs = home.runs();
+        write_run(&runs, &manifest("aaaa000000000000", "good", 1), &[3], b"a");
+        fs::create_dir_all(runs.join("bbbb000000000000")).unwrap();
+        fs::write(runs.join("bbbb000000000000").join(MANIFEST), b"{}").unwrap();
+        fs::create_dir_all(runs.join("cccc000000000000")).unwrap();
+        let making = runs.join("dddd000000000000");
+        fs::create_dir_all(&making).unwrap();
+        let _executing = lock_executing(&making).unwrap();
+
+        let listing = Run::list_all(&home).unwrap();
+        let ids: Vec<&str> = listing
+            .runs
+            .iter()
+            .map(|r| r.manifest.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["aaaa000000000000"]);
+        let mut unreadable: Vec<&str> = listing.unreadable.iter().map(|u| u.id.as_str()).collect();
+        unreadable.sort();
+        assert_eq!(unreadable, vec!["bbbb000000000000", "cccc000000000000"]);
+        let bad = listing
+            .unreadable
+            .iter()
+            .find(|u| u.id == "bbbb000000000000")
+            .unwrap();
+        assert!(bad.reason.contains("missing field"), "{}", bad.reason);
+
+        assert_eq!(
+            Run::find_unreadable(&home, "bbbb000000000000").unwrap().id,
+            "bbbb000000000000"
+        );
+        assert_eq!(
+            Run::find_unreadable(&home, "ccc").unwrap().id,
+            "cccc000000000000"
+        );
+        assert!(Run::find_unreadable(&home, "aaaa").is_none());
+        assert!(Run::find_unreadable(&home, "dddd").is_none());
         fs::remove_dir_all(&root).unwrap();
     }
 
