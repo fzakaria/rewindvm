@@ -32,7 +32,7 @@ use crate::search::Index;
 use crate::selection::Surface;
 use crate::source::Located;
 use crate::stride::{Direction, Stride};
-use crate::theme::{self, size};
+use crate::theme;
 use crate::tour::Tour;
 use crate::ui::bookmarks::{BookmarkEditor, bookmarks_dir};
 use crate::ui::licensing::Licensing;
@@ -42,6 +42,7 @@ use crate::ui::selectable::SelectionState;
 use crate::ui::source::SourcePanel;
 use crate::ui::splits::{Drag, Measured, Splits, layout_path};
 use crate::ui::step_entry::StepEntry;
+use crate::ui::tabs::RightTab;
 use crate::ui::terminal::{PaneKind, TerminalPane};
 use crate::ui::viewer::FileViewer;
 use crate::ui::widgets::Fonts;
@@ -279,10 +280,9 @@ pub struct Scrubber {
     /// The family of the run on screen: every run of its build, its forks
     /// among them.
     pub(super) family: Option<Family>,
-    /// Whether the Runs panel, the family as a tree, is open.
-    pub(super) runs_open: bool,
-    /// The Runs panel's width, which its left edge drags.
-    pub(super) runs_width: f32,
+    /// What the right column shows: "At this step", the Runs panel, the
+    /// file viewer or the source panel.
+    pub(super) right_tab: RightTab,
     /// How the panels share the window, which their edges drag.
     pub(super) splits: Splits,
     /// The edge being dragged, if one is.
@@ -410,8 +410,7 @@ impl Scrubber {
             link_dialog: None,
             recent: Vec::new(),
             family: None,
-            runs_open: false,
-            runs_width: size::RUNS_PANEL_WIDTH,
+            right_tab: RightTab::AtStep,
             splits: layout_path().map(|p| Splits::load(&p)).unwrap_or_default(),
             split_drag: None,
             measured: Rc::new(Measured::default()),
@@ -547,6 +546,9 @@ impl Scrubber {
         self.tour = None;
         self.viewer = None;
         self.source = None;
+        if self.right_tab != RightTab::Runs {
+            self.right_tab = RightTab::AtStep;
+        }
         self.log_followed = None;
         self.files_followed = None;
         self.selecting.selection = None;
@@ -611,10 +613,14 @@ impl Scrubber {
         cx.notify();
     }
 
-    /// Opens or closes the Runs panel.
+    /// Shows the Runs panel, or "At this step" again when it shows.
     pub(super) fn toggle_runs(&mut self, cx: &mut Context<Self>) {
-        self.runs_open = !self.runs_open;
-        cx.notify();
+        let tab = if self.right_tab == RightTab::Runs {
+            RightTab::AtStep
+        } else {
+            RightTab::Runs
+        };
+        self.select_tab(tab, cx);
     }
 
     /// Opens a run of the family; the run it was forked from, when there
@@ -944,10 +950,10 @@ impl Scrubber {
     }
 
     /// Opens a family from the empty state: a failing run compared with a
-    /// passing one when it has both, else its base run, with the Runs
-    /// panel open when the family has more than that one.
+    /// passing one when it has both, else its base run, with "At this
+    /// step" showing where the two part.
     pub(super) fn open_family(&mut self, family: &Family, cx: &mut Context<Self>) {
-        self.runs_open = family.runs.len() > 1;
+        self.right_tab = RightTab::AtStep;
         self.pinned_compare = None;
         let (run, compare) = family.to_open();
         self.open(run.dir.clone(), compare.map(|c| c.dir.clone()), cx);
@@ -1089,8 +1095,13 @@ impl Scrubber {
             Surface::EventCard,
             Surface::Divergence,
         ]);
-        self.playhead_moved(cx);
-        self.source_playhead_moved(cx);
+        // Only the tab on screen follows the playhead; one behind it
+        // catches up when it is chosen.
+        match self.right_tab {
+            RightTab::File => self.playhead_moved(cx),
+            RightTab::Source => self.source_playhead_moved(cx),
+            RightTab::AtStep | RightTab::Runs => {}
+        }
         cx.notify();
     }
 
@@ -1126,13 +1137,12 @@ impl Scrubber {
     }
 
     /// Closes the nearest thing open, as Escape does outside the
-    /// terminal pane: the menu, the file viewer or the source panel, or
-    /// the terminal pane, and gives the keyboard back to the scrubber.
+    /// terminal pane: the menu, the file, source or runs tab on screen,
+    /// or the terminal pane, and gives the keyboard back to the scrubber.
     pub(super) fn close_nearest(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let open = Open {
             menu: self.selecting.menu.is_some() || self.stride_menu.is_some(),
-            viewer: self.viewer.is_some(),
-            source: self.source.is_some(),
+            tab: self.right_tab,
             terminal: self.terminal.is_some(),
         };
         match escape_closes(open) {
@@ -1140,8 +1150,7 @@ impl Scrubber {
                 self.close_context_menu(cx);
                 self.close_stride_menu(cx);
             }
-            Some(Closable::Viewer) => self.close_viewer(cx),
-            Some(Closable::Source) => self.close_source(cx),
+            Some(Closable::Tab(tab)) => self.close_tab(tab, cx),
             Some(Closable::Terminal) => self.close_terminal(cx),
             None => return,
         }
@@ -1710,8 +1719,8 @@ fn export_directory() -> PathBuf {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Open {
     menu: bool,
-    viewer: bool,
-    source: bool,
+    /// The tab the right column shows.
+    tab: RightTab,
     terminal: bool,
 }
 
@@ -1719,22 +1728,19 @@ struct Open {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Closable {
     Menu,
-    Viewer,
-    Source,
+    Tab(RightTab),
     Terminal,
 }
 
 /// What one press of Escape closes: the nearest thing open, from the
-/// menu over everything to the terminal pane under the panels.
+/// menu over everything, through the file, source or runs tab on screen,
+/// to the terminal pane under the panels.
 fn escape_closes(open: Open) -> Option<Closable> {
     if open.menu {
         return Some(Closable::Menu);
     }
-    if open.viewer {
-        return Some(Closable::Viewer);
-    }
-    if open.source {
-        return Some(Closable::Source);
+    if open.tab != RightTab::AtStep {
+        return Some(Closable::Tab(open.tab));
     }
     if open.terminal {
         return Some(Closable::Terminal);
@@ -1762,27 +1768,25 @@ mod tests {
 
     #[test]
     fn escape_closes_the_nearest_thing_first() {
-        // With everything open, Escape takes the menu first, then the
-        // file viewer or the source panel, then the terminal pane; with
-        // nothing open it closes nothing.
+        // With everything open, Escape takes the menu first, then the tab
+        // on screen unless it is "At this step", then the terminal pane;
+        // with nothing open it closes nothing.
         let all = Open {
             menu: true,
-            viewer: true,
-            source: false,
+            tab: RightTab::File,
             terminal: true,
         };
         assert_eq!(escape_closes(all), Some(Closable::Menu));
-        let panels = Open { menu: false, ..all };
-        assert_eq!(escape_closes(panels), Some(Closable::Viewer));
-        let source = Open {
-            viewer: false,
-            source: true,
-            ..panels
+        let tabs = Open { menu: false, ..all };
+        assert_eq!(escape_closes(tabs), Some(Closable::Tab(RightTab::File)));
+        let runs = Open {
+            tab: RightTab::Runs,
+            ..tabs
         };
-        assert_eq!(escape_closes(source), Some(Closable::Source));
+        assert_eq!(escape_closes(runs), Some(Closable::Tab(RightTab::Runs)));
         let terminal = Open {
-            source: false,
-            ..source
+            tab: RightTab::AtStep,
+            ..tabs
         };
         assert_eq!(escape_closes(terminal), Some(Closable::Terminal));
         let nothing = Open {

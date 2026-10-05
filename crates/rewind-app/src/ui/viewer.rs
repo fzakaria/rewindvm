@@ -30,6 +30,7 @@ use crate::ui::icons::Icon;
 use crate::ui::scrubber::Scrubber;
 use crate::ui::selectable::{colored, selectable, selects, viewer_line};
 use crate::ui::sideways::{shifted, sideways_layer};
+use crate::ui::tabs::RightTab;
 use crate::ui::widgets::{icon, panel_title};
 use crate::viewer::{self, Kind, View, hex_spans};
 
@@ -149,7 +150,7 @@ impl Scrubber {
             return;
         };
         let unavailable = unavailable(session);
-        self.source = None;
+        self.right_tab = RightTab::File;
         self.viewer = Some(FileViewer {
             path,
             pid,
@@ -174,6 +175,9 @@ impl Scrubber {
 
     pub(super) fn close_viewer(&mut self, cx: &mut Context<Self>) {
         self.viewer = None;
+        if self.right_tab == RightTab::File {
+            self.right_tab = RightTab::AtStep;
+        }
         self.clear_selection_in(&[Surface::Viewer]);
         cx.notify();
     }

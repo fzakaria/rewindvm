@@ -40,6 +40,7 @@ use crate::ui::icons::Icon;
 use crate::ui::scrubber::{Replay, Scrubber, replay_unavailable};
 use crate::ui::selectable::{colored, selectable, selects, viewer_line};
 use crate::ui::sideways::{shifted, sideways_layer};
+use crate::ui::tabs::RightTab;
 use crate::ui::widgets::{icon, panel_title};
 
 /// Whose stack the panel shows at `step`: the thread of the latest event
@@ -107,15 +108,14 @@ impl Drop for SourcePanel {
 }
 
 impl Scrubber {
-    /// Opens the source panel at the playhead, closing the file viewer,
-    /// which shares its place.
+    /// Opens the source panel at the playhead, in a tab of its own.
     pub(super) fn open_source(&mut self, cx: &mut Context<Self>) {
         let Some(session) = &self.session else {
             return;
         };
         let unavailable = replay_unavailable(session, Replay::Where, self.importing.is_some());
         let readable = unavailable.is_none();
-        self.viewer = None;
+        self.right_tab = RightTab::Source;
         self.source = Some(SourcePanel {
             step: self.step,
             unavailable,
@@ -138,15 +138,20 @@ impl Scrubber {
 
     pub(super) fn close_source(&mut self, cx: &mut Context<Self>) {
         self.source = None;
+        if self.right_tab == RightTab::Source {
+            self.right_tab = RightTab::AtStep;
+        }
         self.clear_selection_in(&[Surface::Source]);
         cx.notify();
     }
 
-    /// Opens the panel, or closes it when it is open.
+    /// Opens the panel; shows its tab when it is open behind another; or
+    /// closes it when it shows.
     pub(super) fn toggle_source(&mut self, cx: &mut Context<Self>) {
-        match self.source {
-            Some(_) => self.close_source(cx),
-            None => self.open_source(cx),
+        match (&self.source, self.right_tab) {
+            (Some(_), RightTab::Source) => self.close_source(cx),
+            (Some(_), _) => self.select_tab(RightTab::Source, cx),
+            (None, _) => self.open_source(cx),
         }
     }
 

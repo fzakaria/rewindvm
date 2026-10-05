@@ -25,6 +25,7 @@ use crate::ui::icons::Icon;
 use crate::ui::scrubber::{ForkState, NoticeAction, NoticeTone, Scrub, Scrubber};
 use crate::ui::selectable::{PID_CHARS, mapped, process_row, selectable, selects};
 use crate::ui::splits::{Edge, grip, measure};
+use crate::ui::tabs::RightTab;
 use crate::ui::tour::explore_button;
 use crate::ui::widgets::{
     Availability, ButtonStyle, PillTone, button, icon, panel_title, pill, readout, tooltip,
@@ -180,16 +181,28 @@ impl Scrubber {
         let timeline = self.render_timeline(window, cx);
         let log = self.render_log(cx);
         let middle = self.render_middle(cx);
-        // The right column: the file viewer when a file is open, or the
-        // source panel when it is, either taking the log's share of the
-        // width, else "At this step".
+        // The right column: the tab chosen, "At this step" at the width
+        // of a side column, the runs, a file or the source at the log's.
         let splits = self.splits;
         let wide = splits.right * layout::LOG_FLEX / layout::SIDE_FLEX;
-        let (at_step, right_flex) = match self.render_viewer(cx).or_else(|| self.render_source(cx))
-        {
+        let chosen = match self.right_tab {
+            RightTab::File => self.render_viewer(cx),
+            RightTab::Source => self.render_source(cx),
+            RightTab::Runs => self.family.as_ref().map(|f| self.render_runs(f, cx)),
+            RightTab::AtStep => None,
+        };
+        let (panel, right_flex) = match chosen {
             Some(panel) => (panel, wide),
             None => (self.render_at_step(cx), splits.right),
         };
+        let at_step = div()
+            .flex()
+            .flex_col()
+            .min_w_0()
+            .min_h_0()
+            .flex_basis(relative(0.0))
+            .child(self.render_tabs(cx))
+            .child(panel.flex_grow(layout::FILL));
 
         // The panel row: three columns with one pixel rules between them,
         // drawn by the row's background showing through the gaps. Each
@@ -204,11 +217,6 @@ impl Scrubber {
             .relative()
             .flex_grow(right_flex)
             .child(grip(Edge::MiddleRight, cx));
-        let runs_column = self
-            .family
-            .as_ref()
-            .filter(|_| self.runs_open)
-            .map(|family| self.render_runs(family, cx));
         let panels = div()
             .relative()
             .flex()
@@ -219,7 +227,6 @@ impl Scrubber {
             .child(log_column)
             .child(middle_column)
             .child(at_step_column)
-            .children(runs_column)
             .child(measure(|m| &m.panels, &self.measured));
 
         // The terminal pane, while a shell or gdb runs, under the panels.
@@ -335,7 +342,7 @@ impl Scrubber {
 
         // The Runs panel's toggle, with how many runs the build has.
         if let Some(family) = &self.family {
-            let open = self.runs_open;
+            let open = self.right_tab == RightTab::Runs;
             let toggle = div()
                     .id("runs-toggle")
                     .flex_none()
@@ -1375,19 +1382,23 @@ impl Scrubber {
                             .on_click(cx.listener(|this, _, _, cx| this.export(cx))),
                     ),
             );
-        column = column.child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(size::CARD_GAP))
-                .child(
-                    div()
-                        .text_size(px(size::TEXT_SMALL))
-                        .text_color(rgb(theme::MUTED))
-                        .child("INSPECT"),
-                )
-                .child(grid),
-        );
+        // The buttons stay at the foot of the column however long the
+        // cards above them grow, which scroll instead.
+        let inspect = div()
+            .flex()
+            .flex_none()
+            .flex_col()
+            .gap(px(size::CARD_GAP))
+            .p(px(size::PANEL_PAD_X))
+            .border_t_1()
+            .border_color(rgb(theme::LINE_SOFT))
+            .child(
+                div()
+                    .text_size(px(size::TEXT_SMALL))
+                    .text_color(rgb(theme::MUTED))
+                    .child("INSPECT"),
+            )
+            .child(grid);
 
         div()
             .flex()
@@ -1396,8 +1407,8 @@ impl Scrubber {
             .min_h_0()
             .flex_basis(relative(0.0))
             .bg(rgb(theme::PANEL))
-            .child(panel_title("At this step", None))
             .child(column)
+            .child(inspect)
     }
 
     /// Notices stacked over the bottom right corner, newest last.
@@ -1863,11 +1874,9 @@ impl Scrubber {
             .relative()
             .flex()
             .flex_col()
-            .flex_none()
-            .w(px(self.runs_width))
+            .min_w_0()
             .min_h_0()
             .bg(rgb(theme::PANEL))
-            .child(grip(Edge::Runs, cx))
             .child(panel_title(
                 &format!("Runs of this build \u{b7} {}", family.runs.len()),
                 Some(

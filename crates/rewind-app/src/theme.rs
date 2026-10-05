@@ -238,13 +238,10 @@ pub mod size {
     pub const TOOLTIP_PAD_X: f32 = 10.0;
     pub const TOOLTIP_PAD_Y: f32 = 7.0;
 
+    /// The grip along an edge between panels, which drags it.
+    pub const EDGE_GRIP: f32 = 6.0;
+
     // The Runs panel.
-    pub const RUNS_PANEL_WIDTH: f32 = 530.0;
-    /// The Runs panel's width can be dragged between these.
-    pub const RUNS_PANEL_MIN: f32 = 320.0;
-    pub const RUNS_PANEL_MAX: f32 = 900.0;
-    /// The grip on the panel's left edge.
-    pub const RUNS_GRIP: f32 = 6.0;
     pub const RUNS_ROW_HEIGHT: f32 = 30.0;
     /// The family graph: the width of a lane, the radius of a run's dot,
     /// the ring around the run on screen, the radius of the curve off a

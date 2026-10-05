@@ -109,7 +109,7 @@ impl Scrubber {
         );
         // The stop about the Runs panel opens it.
         if stop.anchor == tour::Anchor::RunsPill {
-            self.runs_open = true;
+            self.right_tab = crate::ui::tabs::RightTab::Runs;
         }
         self.go_to(step, cx);
         cx.notify();

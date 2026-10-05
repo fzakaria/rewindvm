@@ -1,7 +1,7 @@
 //! The edges between the scrubber's panels, which drag to resize them:
-//! the build log, the processes and files, "At this step" and the Runs
-//! panel side by side, the process tree over the files, and the terminal
-//! pane under all of them. A double click on an edge puts it back.
+//! the build log, the processes and files and the right column side by
+//! side, the process tree over the files, and the terminal pane under all
+//! of them. A double click on an edge puts it back.
 //!
 //! Each edge is a thin grip on the left or top of the panel after it, drawn
 //! after the panel before it so it is on top of both. The panels keep their
@@ -97,10 +97,8 @@ impl Splits {
 pub enum Edge {
     /// Between the build log and the processes and files.
     LogMiddle,
-    /// Between the processes and files and "At this step".
+    /// Between the processes and files and the right column.
     MiddleRight,
-    /// The Runs panel's left edge.
-    Runs,
     /// Between the process tree and the files.
     ProcsFiles,
     /// The terminal pane's top edge.
@@ -119,7 +117,6 @@ impl Edge {
         match self {
             Edge::LogMiddle => "edge-log-middle",
             Edge::MiddleRight => "edge-middle-right",
-            Edge::Runs => "edge-runs",
             Edge::ProcsFiles => "edge-procs-files",
             Edge::Terminal => "edge-terminal",
         }
@@ -133,7 +130,6 @@ pub struct Drag {
     pub edge: Edge,
     pub from: Point<Pixels>,
     pub splits: Splits,
-    pub runs_width: f32,
 }
 
 /// Where the areas the edges divide were last painted, which turns a
@@ -180,13 +176,13 @@ pub fn shift(a: f32, b: f32, total: f32, width: f32, moved: f32, min: f32) -> (f
 /// top edge for the edges that drag up and down. The panel must be
 /// `relative`.
 pub fn grip(edge: Edge, cx: &mut Context<Scrubber>) -> Stateful<Div> {
-    let half = px(size::RUNS_GRIP / 2.0);
+    let half = px(size::EDGE_GRIP / 2.0);
     let along = div().id(edge.id()).absolute().cursor(edge.cursor());
     let along = match edge {
         Edge::ProcsFiles | Edge::Terminal => {
-            along.left_0().right_0().top(-half).h(px(size::RUNS_GRIP))
+            along.left_0().right_0().top(-half).h(px(size::EDGE_GRIP))
         }
-        _ => along.top_0().bottom_0().left(-half).w(px(size::RUNS_GRIP)),
+        _ => along.top_0().bottom_0().left(-half).w(px(size::EDGE_GRIP)),
     };
     along.on_mouse_down(
         MouseButton::Left,
@@ -200,7 +196,6 @@ pub fn grip(edge: Edge, cx: &mut Context<Scrubber>) -> Stateful<Div> {
                 edge,
                 from: e.position,
                 splits: this.splits,
-                runs_width: this.runs_width,
             });
         }),
     )
@@ -233,15 +228,12 @@ impl Scrubber {
         let dx = f32::from(at.x - drag.from.x);
         let dy = f32::from(at.y - drag.from.y);
 
-        // The three flex columns' width: the row less the Runs panel.
-        let columns_width = self.measured.panels.get().map_or(0.0, |b| {
-            let runs = if self.runs_open && self.family.is_some() {
-                self.runs_width
-            } else {
-                0.0
-            };
-            f32::from(b.size.width) - runs
-        });
+        // The three flex columns' width: the whole row.
+        let columns_width = self
+            .measured
+            .panels
+            .get()
+            .map_or(0.0, |b| f32::from(b.size.width));
         let columns_total = start.log + start.middle + start.right;
 
         match drag.edge {
@@ -264,10 +256,6 @@ impl Scrubber {
                     dx,
                     MIN_PANEL,
                 );
-            }
-            Edge::Runs => {
-                self.runs_width =
-                    (drag.runs_width - dx).clamp(size::RUNS_PANEL_MIN, size::RUNS_PANEL_MAX);
             }
             Edge::ProcsFiles => {
                 let height = self
@@ -319,7 +307,6 @@ impl Scrubber {
                 (self.splits.log, self.splits.middle, self.splits.right) =
                     (start.log, start.middle, start.right);
             }
-            Edge::Runs => self.runs_width = size::RUNS_PANEL_WIDTH,
             Edge::ProcsFiles => {
                 (self.splits.procs, self.splits.files) = (start.procs, start.files);
             }

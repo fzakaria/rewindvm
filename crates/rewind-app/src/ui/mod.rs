@@ -16,6 +16,7 @@ mod source;
 mod splits;
 mod step_entry;
 mod stride;
+mod tabs;
 mod terminal;
 mod tour;
 mod viewer;
