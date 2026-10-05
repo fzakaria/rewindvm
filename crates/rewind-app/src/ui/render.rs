@@ -1554,7 +1554,7 @@ impl Scrubber {
             .and_then(|o| o.manifest.id.clone())
             .unwrap_or_default();
         let picked = self.runs_picked.clone();
-        let identical = family.identical();
+        let identical = self.identical_forks();
 
         // What the rings in the graph mean, as the header's pills.
         let legend_dot = |color: u32, label: &'static str| {

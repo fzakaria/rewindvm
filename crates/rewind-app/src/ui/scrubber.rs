@@ -18,6 +18,7 @@ use crate::engine::{
     Engine, EngineError, EngineResult, Forked, REPLAYS_ANOTHER_WAY, goes_another_way,
 };
 use crate::family::{Family, Row, RowKind, RunEntry, families, family_of, scan};
+use crate::memo::Memo;
 use crate::model::{LogFilter, Motion};
 use crate::request::{Request, Requests};
 use crate::run::{Origin, Replays, Session, short_id};
@@ -271,6 +272,14 @@ pub struct Scrubber {
     /// The schedule 0 runs whose runs from boot that ended as they did
     /// the Runs panel shows one by one instead of folded into one row.
     pub(super) runs_unfolded: HashSet<String>,
+    /// Counts changes to `family` and `runs_unfolded`, which the Runs
+    /// panel's rows are laid out from: whatever changes either bumps it.
+    runs_changed: u64,
+    /// The Runs panel's rows, laid out again only when `runs_changed` or
+    /// the runs on screen change, rather than every frame.
+    runs_rows_memo: Memo<(u64, String, String), Vec<Row>>,
+    /// How many forks repeat an older fork's trace, likewise.
+    identical_memo: Memo<u64, usize>,
     /// The Open link dialog, when it is open.
     pub(super) link_dialog: Option<LinkDialog>,
     pub(super) step: u64,
@@ -337,6 +346,9 @@ impl Scrubber {
             runs_scroll: UniformListScrollHandle::new(),
             pruning: false,
             runs_unfolded: HashSet::new(),
+            runs_changed: 0,
+            runs_rows_memo: Memo::default(),
+            identical_memo: Memo::default(),
             step: 0,
             log_filter: LogFilter::Output,
             log_scroll: UniformListScrollHandle::new(),
@@ -413,6 +425,7 @@ impl Scrubber {
                 .map(|run| RunEntry::from_manifest(&run.path, &run.manifest, now))
                 .collect();
             self.family = Some(Family { runs });
+            self.runs_changed += 1;
         }
 
         // The engine's runs are read after the run is on screen, for its
@@ -451,6 +464,7 @@ impl Scrubber {
                 .filter(|s| s.run.origin == Origin::Local)
                 .and_then(|s| s.run.manifest.id.clone());
             self.family = shown.and_then(|id| family_of(runs.clone(), &id));
+            self.runs_changed += 1;
         }
         self.recent = families(runs).into_iter().take(RECENT_SHOWN).collect();
         cx.notify();
@@ -496,21 +510,30 @@ impl Scrubber {
 
     /// The Runs panel's rows as it draws them, folded as the user left
     /// them. The runs on screen and compared always have rows of their own.
-    pub(super) fn runs_rows(&self) -> Vec<Row> {
-        let Some(family) = &self.family else {
-            return Vec::new();
-        };
+    pub(super) fn runs_rows(&self) -> Rc<Vec<Row>> {
         let ids = |run: Option<&crate::run::Run>| {
             run.and_then(|r| r.manifest.id.clone()).unwrap_or_default()
         };
         let shown = ids(self.session.as_ref().map(|s| &s.run));
         let compared = ids(self.session.as_ref().and_then(|s| s.other.as_ref()));
-        family.rows_folded(&self.runs_unfolded, &[&shown, &compared])
+        let key = (self.runs_changed, shown.clone(), compared.clone());
+        self.runs_rows_memo.get(key, || match &self.family {
+            Some(family) => family.rows_folded(&self.runs_unfolded, &[&shown, &compared]),
+            None => Vec::new(),
+        })
+    }
+
+    /// How many forks of the family repeat an older fork's trace.
+    pub(super) fn identical_forks(&self) -> usize {
+        let count = self.identical_memo.get(self.runs_changed, || {
+            self.family.as_ref().map_or(0, Family::identical)
+        });
+        *count
     }
 
     /// The Runs panel's row `index`, as the panel draws it.
     pub(super) fn runs_row(&self, index: usize) -> Option<Row> {
-        self.runs_rows().into_iter().nth(index)
+        self.runs_rows().get(index).cloned()
     }
 
     /// The folding row that Runs panel row `index` goes with, as the id
@@ -536,6 +559,7 @@ impl Scrubber {
         if !self.runs_unfolded.remove(under) {
             self.runs_unfolded.insert(under.to_string());
         }
+        self.runs_changed += 1;
         cx.notify();
     }
 
@@ -754,6 +778,7 @@ impl Scrubber {
                     if replacement.is_none() {
                         this.session = None;
                         this.family = None;
+                        this.runs_changed += 1;
                     }
                 }
                 this.notify_user(
