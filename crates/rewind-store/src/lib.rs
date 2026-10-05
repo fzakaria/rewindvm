@@ -290,11 +290,13 @@ impl Store {
     pub fn open(dir: &Path) -> Result<Store> {
         fs::create_dir_all(dir.join(PACKS))?;
         let index_path = dir.join(INDEX);
-        let index_log = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .read(true)
-            .open(&index_path)?;
+        let open_index = || {
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .read(true)
+                .open(&index_path)
+        };
 
         // A partial last index entry can only be a crash's, and only an
         // opener with the store to itself may cut it off: with others open
@@ -302,10 +304,11 @@ impl Store {
         // sorted copy still being written.
         let lock = File::create(dir.join(LOCK))?;
         if lock.try_lock().is_ok() {
-            let len = index_log.metadata()?.len();
+            let index = open_index()?;
+            let len = index.metadata()?.len();
             let whole = len / INDEX_ENTRY as u64 * INDEX_ENTRY as u64;
             if whole != len {
-                index_log.set_len(whole)?;
+                index.set_len(whole)?;
             }
 
             // A sorted copy a crash left half written, under its writer's
@@ -324,6 +327,11 @@ impl Store {
         }
         lock.lock_shared()
             .with_context(|| format!("locking {}", dir.display()))?;
+
+        // The index this store appends to, opened only under the shared
+        // lock: a collector that had the store to itself until now may have
+        // renamed a new index over the one there was before.
+        let index_log = open_index()?;
 
         // The sorted copy, unless it covers more than the index holds, which
         // only a hand could make.
@@ -1169,6 +1177,41 @@ mod tests {
         assert_eq!(store.stats().pages, 3);
         fs::remove_dir_all(&dir).unwrap();
     }
+
+    #[test]
+    fn a_store_opened_during_a_collection_writes_to_the_new_index() {
+        // A store opened while a collector has the store to itself waits
+        // for the collection to end, then appends to the index the
+        // collector left, not the one it renamed over: a page it puts reads
+        // back from a store opened afterwards. The opener starts before the
+        // collection, and the sleep gives it time to reach the lock.
+        let dir = tmp("open-during-collect");
+        let hashes = {
+            let mut store = Store::open(&dir).unwrap();
+            put_pages(&mut store, 1, 3)
+        };
+        let collector = Collector::lock(&dir).unwrap().unwrap();
+        let opener = {
+            let dir = dir.clone();
+            std::thread::spawn(move || {
+                let mut store = Store::open(&dir).unwrap();
+                put_pages(&mut store, 20, 1)[0]
+            })
+        };
+        std::thread::sleep(OPENER_WAIT);
+        collector.collect(&live(&hashes[..1]), Act::Remove).unwrap();
+        drop(collector);
+        let added = opener.join().unwrap();
+
+        let store = Store::open(&dir).unwrap();
+        let mut out = vec![0u8; PAGE];
+        store.get(&added, &mut out).unwrap();
+        assert_eq!(out, page(20));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// How long a test gives a thread opening a store to reach its lock.
+    const OPENER_WAIT: std::time::Duration = std::time::Duration::from_millis(200);
 
     #[test]
     fn a_store_whose_pages_all_live_is_left_as_it_is() {
