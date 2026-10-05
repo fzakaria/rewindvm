@@ -343,7 +343,7 @@ impl Scrubber {
 
     /// Puts a session on screen with the playhead at `step`, or at the
     /// failure, or at the end.
-    pub(super) fn show(&mut self, session: Session, step: Option<u64>, cx: &mut Context<Self>) {
+    pub(super) fn show(&mut self, mut session: Session, step: Option<u64>, cx: &mut Context<Self>) {
         let timeline = &session.run.timeline;
         let start = step
             .or(timeline.failure.map(|f| f.step))
@@ -377,11 +377,21 @@ impl Scrubber {
                 .collect();
             self.family = Some(Family { runs });
         }
+
+        // The runs next to the run were read when it opened; when they are
+        // the engine's runs, they are shown rather than read again.
+        let neighbours = session
+            .neighbours
+            .take()
+            .filter(|n| crate::engine::runs_dir().is_some_and(|runs| same_dir(&runs, &n.dir)));
         self.session = Some(session);
         if let Some(file) = replayable {
             self.bring_in(file, cx);
         }
-        self.reload_runs(cx);
+        match neighbours {
+            Some(neighbours) => self.apply_runs(neighbours.runs, cx),
+            None => self.reload_runs(cx),
+        }
         cx.notify();
     }
 
@@ -395,21 +405,25 @@ impl Scrubber {
         });
         cx.spawn(async move |this, cx| {
             let runs = read.await;
-            let _ = this.update(cx, |this, cx| {
-                let origin = this.session.as_ref().map(|s| &s.run.origin);
-                if origin != Some(&Origin::Example) {
-                    let shown = this
-                        .session
-                        .as_ref()
-                        .filter(|s| s.run.origin == Origin::Local)
-                        .and_then(|s| s.run.manifest.id.clone());
-                    this.family = shown.and_then(|id| family_of(runs.clone(), &id));
-                }
-                this.recent = families(runs).into_iter().take(RECENT_SHOWN).collect();
-                cx.notify();
-            });
+            let _ = this.update(cx, |this, cx| this.apply_runs(runs, cx));
         })
         .detach();
+    }
+
+    /// Shows `runs`, the engine's runs: the families the empty state lists
+    /// and the family of the run on screen.
+    fn apply_runs(&mut self, runs: Vec<RunEntry>, cx: &mut Context<Self>) {
+        let origin = self.session.as_ref().map(|s| &s.run.origin);
+        if origin != Some(&Origin::Example) {
+            let shown = self
+                .session
+                .as_ref()
+                .filter(|s| s.run.origin == Origin::Local)
+                .and_then(|s| s.run.manifest.id.clone());
+            self.family = shown.and_then(|id| family_of(runs.clone(), &id));
+        }
+        self.recent = families(runs).into_iter().take(RECENT_SHOWN).collect();
+        cx.notify();
     }
 
     /// Opens or closes the Runs panel.
@@ -1388,4 +1402,12 @@ fn export_directory() -> PathBuf {
         .filter(|home| home.is_dir())
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| Path::new("/").to_path_buf())
+}
+
+/// Whether `a` and `b` name one directory.
+fn same_dir(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    matches!((a.canonicalize(), b.canonicalize()), (Ok(a), Ok(b)) if a == b)
 }

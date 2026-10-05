@@ -18,6 +18,7 @@ use rewind_trace::signal_name;
 
 use crate::archive;
 use crate::describe::{self, thousands};
+use crate::family::{RunEntry, scan};
 use crate::model::{Comparison, ExitStatus, Timeline};
 
 /// The trace inside a run directory.
@@ -417,28 +418,6 @@ impl Run {
         }
     }
 
-    /// How many runs next to this one name it as their parent.
-    pub fn count_forks(&self) -> usize {
-        let Some(id) = &self.manifest.id else {
-            return 0;
-        };
-        let Some(Ok(entries)) = self.path.parent().map(std::fs::read_dir) else {
-            return 0;
-        };
-        entries
-            .filter_map(Result::ok)
-            .filter(|entry| {
-                let Ok(text) = std::fs::read_to_string(entry.path().join(MANIFEST_FILE)) else {
-                    return false;
-                };
-                let Ok(json) = serde_json::from_str::<Value>(&text) else {
-                    return false;
-                };
-                parent(json.get("parent")).is_some_and(|p| &p.id == id)
-            })
-            .count()
-    }
-
     /// The directory of the run this one was forked from, when it sits
     /// next to this one, as runs in one Rewind home do.
     pub fn parent_dir(&self) -> Option<PathBuf> {
@@ -497,6 +476,15 @@ pub struct Session {
     /// Forks of the run already on disk next to it, for picking the next
     /// fork's schedule seed.
     pub forks_on_disk: usize,
+    /// The runs next to the run, read once when it opened. None for a run
+    /// with no id, which no run names as its parent.
+    pub neighbours: Option<Neighbours>,
+}
+
+/// The runs in one directory, as their manifests read at one time.
+pub struct Neighbours {
+    pub dir: PathBuf,
+    pub runs: Vec<RunEntry>,
 }
 
 impl Session {
@@ -504,12 +492,29 @@ impl Session {
         let comparison = other
             .as_ref()
             .map(|o| Comparison::new(&run.timeline, &o.timeline));
-        let forks_on_disk = run.count_forks();
+
+        // The runs next to this one, each manifest read once: the forks
+        // among them, and, when they are the engine's runs, the families
+        // the app lists.
+        let neighbours = run.manifest.id.as_ref().and_then(|_| {
+            let dir = run.path.parent()?.to_path_buf();
+            let runs = scan(&dir);
+            Some(Neighbours { dir, runs })
+        });
+        let forks_on_disk = match (&run.manifest.id, &neighbours) {
+            (Some(id), Some(neighbours)) => neighbours
+                .runs
+                .iter()
+                .filter(|r| r.parent.as_ref().is_some_and(|p| &p.id == id))
+                .count(),
+            _ => 0,
+        };
         Session {
             run,
             other,
             comparison,
             forks_on_disk,
+            neighbours,
         }
     }
 
@@ -743,7 +748,9 @@ mod tests {
     #[test]
     fn forks_are_counted_and_the_parent_is_compared_with() {
         // Two runs name "base" as their parent and one does not; opening a
-        // fork without --compare picks its parent from next door.
+        // fork without --compare picks its parent from next door. The runs
+        // next door are read once, all four of them, and kept for the
+        // families the app lists.
         let dir = temp_dir("forks");
         let write = |name: &str, manifest: &str| {
             let run = dir.join(name);
@@ -757,6 +764,11 @@ mod tests {
         write("other", r#"{"id": "other", "parent": ["f1", 5]}"#);
         let session = Session::open(&dir.join("base"), None).unwrap();
         assert_eq!(session.forks_on_disk, 2);
+        let neighbours = session.neighbours.as_ref().unwrap();
+        assert_eq!(neighbours.dir, dir);
+        let mut neighbours: Vec<&str> = neighbours.runs.iter().map(|r| r.id.as_str()).collect();
+        neighbours.sort();
+        assert_eq!(neighbours, ["base", "f1", "f2", "other"]);
         assert!(session.other.is_none());
         let fork = Session::open(&dir.join("f1"), None).unwrap();
         assert_eq!(fork.other.unwrap().path, dir.join("base"));
