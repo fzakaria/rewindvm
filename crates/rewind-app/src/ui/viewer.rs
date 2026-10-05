@@ -19,11 +19,13 @@ use crate::describe::{short_store_paths, thousands};
 use crate::engine::{EngineError, FileAtStep};
 use crate::run::{Origin, Session};
 use crate::selection::{Mapped, Surface, part_of_line};
+use crate::sideways::{Sideways, line_width, text_column};
 use crate::syntax::{Highlighter, Language};
 use crate::theme::{self, layout, size};
 use crate::ui::icons::Icon;
 use crate::ui::scrubber::Scrubber;
 use crate::ui::selectable::{colored, selectable, selects, viewer_line};
+use crate::ui::sideways::{shifted, sideways_layer};
 use crate::ui::widgets::{icon, panel_title};
 use crate::viewer::{self, Kind, View, hex_spans};
 
@@ -97,6 +99,9 @@ pub struct FileViewer {
     scroll: UniformListScrollHandle,
     /// The shown text's colors, as far as they have been drawn.
     highlighter: Highlighter,
+    /// How far the lines are scrolled sideways; kept as the playhead
+    /// moves, so a long line stays in view from step to step.
+    sideways: Sideways,
 }
 
 /// Why a session's files cannot be read, if they cannot.
@@ -129,6 +134,7 @@ impl Scrubber {
             generation: 0,
             scroll: UniformListScrollHandle::new(),
             highlighter: Highlighter::new(None),
+            sideways: Sideways::default(),
         });
         self.clear_selection_in(&[Surface::Viewer, Surface::Source]);
         if unavailable.is_none() {
@@ -157,6 +163,21 @@ impl Scrubber {
         if let Some(viewer) = &self.viewer {
             viewer.scroll.scroll_to_item(line, ScrollStrategy::Top);
         }
+    }
+
+    /// Scrolls the viewer's lines `pixels` sideways, in an area `width`
+    /// pixels wide.
+    fn scroll_viewer_sideways(&mut self, pixels: f32, width: f32, cx: &mut Context<Self>) {
+        let Some(view) = self.viewer_view() else {
+            return;
+        };
+        let widest = line_width(view.widest);
+        let visible = text_column(width, gutter_digits(view));
+        let Some(viewer) = &mut self.viewer else {
+            return;
+        };
+        viewer.sideways.scroll_by(pixels, widest, visible);
+        cx.notify();
     }
 
     /// The message the viewer shows in place of contents, as one line.
@@ -392,7 +413,14 @@ impl Scrubber {
             (Some(Fetched::Contents { view, .. }), None, _) => {
                 let lines = view.lines.len();
                 let numbered = view.kind == Kind::Text;
-                let digits = lines.max(1).to_string().len();
+                let digits = gutter_digits(view);
+
+                // The sideways offset, kept within what the list's width,
+                // as of the last frame, allows.
+                let width = f32::from(viewer.scroll.0.borrow().base_handle.bounds().size.width);
+                let offset = viewer
+                    .sideways
+                    .offset(line_width(view.widest), text_column(width, digits));
                 uniform_list(
                     "viewer-lines",
                     lines,
@@ -451,7 +479,8 @@ impl Scrubber {
                                             )
                                         })
                                         .child(
-                                            div().text_color(rgb(theme::SOFT)).child(
+                                            shifted(
+                                                offset,
                                                 selectable(
                                                     Surface::Viewer,
                                                     i,
@@ -460,7 +489,8 @@ impl Scrubber {
                                                     &registry,
                                                 )
                                                 .with_highlights(colors),
-                                            ),
+                                            )
+                                            .text_color(rgb(theme::SOFT)),
                                         ),
                                 )
                             })
@@ -512,6 +542,7 @@ impl Scrubber {
                 .child(heading)
                 .child(selects(
                     div()
+                        .relative()
                         .flex()
                         .flex_col()
                         .flex_grow(layout::FILL)
@@ -520,7 +551,10 @@ impl Scrubber {
                         .cursor(CursorStyle::IBeam)
                         .font_family(mono)
                         .text_size(px(size::TEXT_MONO))
-                        .child(body),
+                        .child(body)
+                        .when(self.viewer_view().is_some(), |area| {
+                            area.child(sideways_layer(Self::scroll_viewer_sideways, cx))
+                        }),
                     Surface::Viewer,
                     cx,
                 )),
@@ -554,6 +588,15 @@ fn finish_colors(
         });
     })
     .detach();
+}
+
+/// The digits of the line numbers in the gutter, or none for a hex dump,
+/// which has no gutter.
+fn gutter_digits(view: &View) -> usize {
+    match view.kind {
+        Kind::Text => view.lines.len().max(1).to_string().len(),
+        Kind::Binary => 0,
+    }
 }
 
 /// The language a file's text is in, by its path and first line; none

@@ -87,7 +87,8 @@ listed in a short list pinned below the file, with the chosen one marked.
 Clicking another frame shows its file instead, scrolled to its line and
 marked; a frame without source shows its address and program. A file over a
 mebibyte comes as the lines around its frames' lines, and the panel says
-which. When the playhead rests on another step the panel
+which. Long lines scroll sideways with Shift and the wheel, or a sideways
+swipe, while the line numbers stay put. When the playhead rests on another step the panel
 asks again, back at the chosen frame, dimming the last answer meanwhile; each
 answer forks the run, so it takes a few seconds. Runs the app cannot fork
 say so instead: the bundled example and an export that holds only the trace.

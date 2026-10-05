@@ -27,12 +27,14 @@ use gpui::{
 
 use crate::describe::thousands;
 use crate::selection::{Mapped, Pos, Surface, part_of_line};
+use crate::sideways::{Sideways, line_width, text_column};
 use crate::source::{Frame, Located, Progress, Shown, SourceFile, shown, target};
 use crate::syntax::{Highlighter, Language};
 use crate::theme::{self, layout, size};
 use crate::ui::icons::Icon;
 use crate::ui::scrubber::{Replay, Scrubber, replay_unavailable};
 use crate::ui::selectable::{colored, selectable, selects, viewer_line};
+use crate::ui::sideways::{shifted, sideways_layer};
 use crate::ui::widgets::{icon, panel_title};
 
 /// How long the playhead must rest before the panel asks again.
@@ -65,6 +67,8 @@ pub struct SourcePanel {
     /// Each file's colors, as far as they have been drawn, by the path
     /// the answer keys the file by.
     highlighters: HashMap<String, Highlighter>,
+    /// How far the shown file's lines are scrolled sideways.
+    sideways: Sideways,
 }
 
 impl Scrubber {
@@ -87,6 +91,7 @@ impl Scrubber {
             generation: 0,
             scroll: UniformListScrollHandle::new(),
             highlighters: HashMap::new(),
+            sideways: Sideways::default(),
         });
         self.clear_selection_in(&[Surface::Viewer, Surface::Source]);
         if readable {
@@ -219,6 +224,7 @@ impl Scrubber {
                 panel.loading = false;
                 panel.shown = Some(shown(step, result));
                 panel.highlighters.clear();
+                panel.sideways = Sideways::default();
                 this.clear_selection_in(&[Surface::Source]);
                 this.centre_shown_line();
                 cx.notify();
@@ -234,14 +240,18 @@ impl Scrubber {
     }
 
     /// Shows frame `frame`'s source, when a row of the frame list is
-    /// clicked.
+    /// clicked, from the start of its lines.
     fn select_frame(&mut self, frame: usize, cx: &mut Context<Self>) {
-        let Some(shown) = self.source.as_mut().and_then(|p| p.shown.as_mut()) else {
+        let Some(panel) = self.source.as_mut() else {
+            return;
+        };
+        let Some(shown) = panel.shown.as_mut() else {
             return;
         };
         if !shown.select_frame(frame) {
             return;
         }
+        panel.sideways = Sideways::default();
         self.clear_selection_in(&[Surface::Source]);
         self.centre_shown_line();
         cx.notify();
@@ -265,6 +275,21 @@ impl Scrubber {
         if let Some(row) = located.centred_row(at) {
             panel.scroll.scroll_to_item(row, ScrollStrategy::Center);
         }
+    }
+
+    /// Scrolls the shown file's lines `pixels` sideways, in an area
+    /// `width` pixels wide.
+    fn scroll_source_sideways(&mut self, pixels: f32, width: f32, cx: &mut Context<Self>) {
+        let Some((file, _)) = self.shown_file() else {
+            return;
+        };
+        let widest = line_width(file.widest);
+        let visible = text_column(width, file.digits());
+        let Some(panel) = &mut self.source else {
+            return;
+        };
+        panel.sideways.scroll_by(pixels, widest, visible);
+        cx.notify();
     }
 
     /// Scrolls the shown file so row `row` is at its top.
@@ -389,9 +414,7 @@ impl Scrubber {
         let registry = self.selecting.registry.clone();
         let selected = self.selected_range(Surface::Source);
         let file_area = match (shown_file, frame_shown, source_message(panel)) {
-            (Some((file, frame)), _, _) => {
-                self.render_file(file, frame, &panel.scroll, selected, cx)
-            }
+            (Some((file, frame)), _, _) => self.render_file(file, frame, panel, selected, cx),
             (None, Some(frame), _) => {
                 let mut rows = div().flex().flex_col().py(px(size::LIST_PAD_Y));
                 for (i, text) in frame.without_source().into_iter().enumerate() {
@@ -450,6 +473,7 @@ impl Scrubber {
                 .child(selects(
                     div()
                         .id("source-body")
+                        .relative()
                         .flex()
                         .flex_col()
                         .flex_grow(layout::FILL)
@@ -458,7 +482,10 @@ impl Scrubber {
                         .cursor(CursorStyle::IBeam)
                         .font_family(mono)
                         .text_size(px(size::TEXT_MONO))
-                        .child(file_area),
+                        .child(file_area)
+                        .when(shown_file.is_some(), |body| {
+                            body.child(sideways_layer(Self::scroll_source_sideways, cx))
+                        }),
                     Surface::Source,
                     cx,
                 ))
@@ -466,19 +493,27 @@ impl Scrubber {
         )
     }
 
-    /// The lines of `file`, drawn only where they are on screen, with
-    /// `frame`'s line marked and the selected part of each highlighted.
+    /// The lines of `file`, drawn only where they are on screen and moved
+    /// left as far as `panel` is scrolled sideways, with `frame`'s line
+    /// marked and the selected part of each highlighted.
     fn render_file(
         &self,
         file: &SourceFile,
         frame: &Frame,
-        scroll: &UniformListScrollHandle,
+        panel: &SourcePanel,
         selected: Option<Range<Pos>>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let count = file.lines.len();
-        let digits = file.number_of(count.saturating_sub(1)).to_string().len();
+        let digits = file.digits();
         let marked_row = frame.line.and_then(|line| file.row_of(line));
+
+        // The sideways offset, kept within what the list's width, as of
+        // the last frame, allows.
+        let width = f32::from(panel.scroll.0.borrow().base_handle.bounds().size.width);
+        let offset = panel
+            .sideways
+            .offset(line_width(file.widest), text_column(width, digits));
         uniform_list(
             "source-lines",
             count,
@@ -533,16 +568,14 @@ impl Scrubber {
                                         .child(format!("{number:>digits$}")),
                                 )
                                 .child(
-                                    div()
-                                        .text_color(rgb(if marked {
-                                            theme::TEXT
-                                        } else {
-                                            theme::SOFT
-                                        }))
-                                        .child(
-                                            selectable(Surface::Source, row, text, part, &registry)
-                                                .with_highlights(colors),
-                                        ),
+                                    shifted(
+                                        offset,
+                                        selectable(Surface::Source, row, text, part, &registry)
+                                            .with_highlights(colors),
+                                    )
+                                    .text_color(rgb(
+                                        if marked { theme::TEXT } else { theme::SOFT },
+                                    )),
                                 ),
                         )
                     })
@@ -558,7 +591,7 @@ impl Scrubber {
                 rows
             }),
         )
-        .track_scroll(scroll)
+        .track_scroll(&panel.scroll)
         .flex_grow(layout::FILL)
         .min_h_0()
         .py(px(size::LIST_PAD_Y))

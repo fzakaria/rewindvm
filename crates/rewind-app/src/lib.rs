@@ -16,6 +16,7 @@ pub mod license;
 pub mod model;
 pub mod run;
 pub mod selection;
+pub mod sideways;
 pub mod source;
 pub mod syntax;
 pub mod synth;

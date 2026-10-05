@@ -177,8 +177,9 @@ failure, or to the first point where the run parts from a passing one and says
 in words what each did next. Click a file to read it as it was at the
 playhead, its syntax colored for C, C++, Rust, Go, Python, shell (Nix's
 env-vars among it), Makefiles, Markdown, Nix, assembly and Dockerfiles, and
-a binary file as a hex dump colored by byte. Fork from here branches the run
-under a new schedule.
+a binary file as a hex dump colored by byte. Long lines do not wrap: Shift
+with the wheel, or a sideways swipe, scrolls them while the line numbers stay
+put. Fork from here branches the run under a new schedule.
 
 <p align="center">
   <img src="docs/img/app-file-viewer.png" alt="The Rewind desktop app with a file open at the playhead: /build/env-vars as of step 4,583, next to the build log and the process tree." />
@@ -190,7 +191,8 @@ both in a terminal pane below the scrubber. Show source, or the s key, opens
 a panel with the whole source file of the program's own code the playhead's
 thread was in, scrolled to the line it was on, and the frames that led there
 in a short list below; clicking a frame shows its file at its line. The
-file's syntax is colored as in the file viewer.
+file's syntax is colored, and its long lines scroll sideways, as in the file
+viewer.
 
 Every run of a build is one family: the run under schedule 0, with its
 threads left alone, the schedules `rewind check` tried, and every fork. The

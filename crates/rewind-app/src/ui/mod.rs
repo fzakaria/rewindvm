@@ -9,6 +9,7 @@ mod link;
 mod render;
 mod scrubber;
 mod selectable;
+mod sideways;
 mod source;
 mod splits;
 mod terminal;

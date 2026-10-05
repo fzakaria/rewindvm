@@ -2,6 +2,7 @@
 //! else as a hex dump, both cut to a size a panel can hold.
 
 use crate::selection::{Lines, Mapped, Splice};
+use crate::sideways::widest_line;
 use crate::theme;
 
 /// The most bytes the viewer shows; the rest is summed up in a note.
@@ -34,6 +35,8 @@ pub struct View {
     pub lines: Vec<String>,
     /// The bytes a hex dump shows, for coloring them; empty for text.
     pub bytes: Vec<u8>,
+    /// The characters in the widest line, for scrolling sideways.
+    pub widest: usize,
     /// The file's whole size in bytes.
     pub size: usize,
     /// Whether only the first `MAX_SHOWN` bytes are shown. `fetched_all`
@@ -48,7 +51,7 @@ impl View {
         let truncated = shown.len() < bytes.len() || fetched_all == FetchedAll::No;
         let sniff = &shown[..shown.len().min(SNIFF)];
         let is_text = !sniff.contains(&0) && utf8_prefix_ok(sniff);
-        let (kind, lines, dumped) = if is_text {
+        let (kind, lines, dumped): (Kind, Vec<String>, Vec<u8>) = if is_text {
             let text = String::from_utf8_lossy(shown);
             let lines = text.lines().map(str::to_string).collect();
             (Kind::Text, lines, Vec::new())
@@ -62,6 +65,7 @@ impl View {
         };
         View {
             kind,
+            widest: widest_line(&lines),
             lines,
             bytes: dumped,
             size: bytes.len(),

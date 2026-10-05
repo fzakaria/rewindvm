@@ -14,6 +14,7 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 
 use crate::engine::EngineError;
+use crate::sideways::widest_line;
 
 /// One frame of the thread's stack, innermost first.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -78,6 +79,8 @@ pub struct SourceFile {
     /// The number of the first line.
     pub first: u32,
     pub lines: Vec<String>,
+    /// The characters in the widest line, for scrolling sideways.
+    pub widest: usize,
 }
 
 /// A source file as `rewind where --json` prints it: its text in one
@@ -91,10 +94,12 @@ struct Carried {
 
 impl From<Carried> for SourceFile {
     fn from(carried: Carried) -> SourceFile {
+        let lines: Vec<String> = carried.text.lines().map(str::to_string).collect();
         SourceFile {
             extent: carried.extent,
             first: carried.first,
-            lines: carried.text.lines().map(str::to_string).collect(),
+            widest: widest_line(&lines),
+            lines,
         }
     }
 }
@@ -110,6 +115,14 @@ impl SourceFile {
     /// The number of line `row` of `lines`.
     pub fn number_of(&self, row: usize) -> u32 {
         self.first + row as u32
+    }
+
+    /// The digits in the number of the file's last line, which the line
+    /// numbers are padded to.
+    pub fn digits(&self) -> usize {
+        self.number_of(self.lines.len().saturating_sub(1))
+            .to_string()
+            .len()
     }
 
     /// What the panel says of a window of a large file: which lines it
@@ -386,6 +399,7 @@ mod tests {
         assert_eq!((pool.extent, pool.first), (Extent::Whole, 1));
         assert_eq!(pool.lines.len(), 133);
         assert_eq!(pool.lines[76], "\t\t\tp->queue->completed++;");
+        assert_eq!(pool.widest, "\t\t\tp->queue->completed++;".len() + 9);
         assert_eq!(located.file_of(1), None);
         let clone3 = located.file_of(2).unwrap();
         assert_eq!((clone3.extent, clone3.first), (Extent::Window, 70));
