@@ -81,6 +81,8 @@ pub enum Stride {
     File(String),
     /// Processes starting, replacing their program, and exiting.
     Lifecycle,
+    /// The run's bookmarks.
+    Bookmarks,
 }
 
 /// Which way to step.
@@ -108,7 +110,7 @@ impl Stride {
                 EventKind::Exec { .. } => true,
                 _ => false,
             },
-            Stride::LogLine => false,
+            Stride::LogLine | Stride::Bookmarks => false,
         }
     }
 
@@ -154,28 +156,41 @@ fn named_file(kind: &EventKind) -> Option<&str> {
     }
 }
 
+/// The nearest of `steps`, in step order, after `step` going forward or
+/// before it going back.
+pub fn nearest(steps: &[u64], direction: Direction, step: u64) -> Option<u64> {
+    match direction {
+        Direction::Forward => {
+            let after = steps.partition_point(|s| *s <= step);
+            steps.get(after).copied()
+        }
+        Direction::Back => {
+            let before = steps.partition_point(|s| *s < step);
+            before.checked_sub(1).map(|i| steps[i])
+        }
+    }
+}
+
 /// The step of the next or previous stop of `stride` from `step`, with
-/// the log shown under `filter`; None when there is none that way.
+/// the log shown under `filter` and the run's bookmarks at `bookmarks`;
+/// None when there is none that way.
 pub fn step_by(
     timeline: &Timeline,
     stride: &Stride,
     filter: LogFilter,
+    bookmarks: &[u64],
     direction: Direction,
     step: u64,
 ) -> Option<u64> {
-    // The log's lines are steps of their own, in step order.
-    if *stride == Stride::LogLine {
-        let lines = timeline.lines(filter);
-        return match direction {
-            Direction::Forward => {
-                let after = lines.partition_point(|l| l.step <= step);
-                lines.get(after).map(|l| l.step)
-            }
-            Direction::Back => {
-                let before = lines.partition_point(|l| l.step < step);
-                before.checked_sub(1).map(|i| lines[i].step)
-            }
-        };
+    // The log's lines and the bookmarks are steps of their own, in step
+    // order.
+    match stride {
+        Stride::LogLine => {
+            let lines: Vec<u64> = timeline.lines(filter).iter().map(|l| l.step).collect();
+            return nearest(&lines, direction, step);
+        }
+        Stride::Bookmarks => return nearest(bookmarks, direction, step),
+        _ => {}
     }
 
     // Events, from the playhead outward.
@@ -287,7 +302,7 @@ mod tests {
         let walk = |direction, from| {
             let mut at = from;
             let mut seen = Vec::new();
-            while let Some(next) = step_by(&t, stride, filter, direction, at) {
+            while let Some(next) = step_by(&t, stride, filter, &[15, 65], direction, at) {
                 seen.push(next);
                 at = next;
             }
@@ -348,6 +363,15 @@ mod tests {
             stops(&Stride::LogLine, LogFilter::WithConsole).1,
             vec![60, 55, 50, 25, 20]
         );
+    }
+
+    #[test]
+    fn bookmarks_are_stops_of_their_own() {
+        // The bookmarks at 15 and 65 are the stops, though no event is
+        // there.
+        let (forward, back) = stops(&Stride::Bookmarks, LogFilter::Output);
+        assert_eq!(forward, vec![15, 65]);
+        assert_eq!(back, vec![65, 15]);
     }
 
     #[test]

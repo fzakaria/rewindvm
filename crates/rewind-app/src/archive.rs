@@ -1,12 +1,13 @@
 //! Exported runs: `.rwd` files.
 //!
 //! `rewind export` writes a run as one file: a tar archive compressed with
-//! zstd holding `manifest.json` and `trace.bin`, and for a replayable
-//! export also keyframes, memory pages and the run's inputs (see
-//! crates/rewind-core/src/export.rs). The scrubber needs only the manifest
-//! and the trace, so the app unpacks those two into the user's cache,
-//! under the run's id, and opens that directory like any other run. The
-//! rest stays in the file for `rewind import`, which can replay it.
+//! zstd holding `manifest.json`, `trace.bin` and any `bookmarks.json`, and
+//! for a replayable export also keyframes, memory pages and the run's
+//! inputs (see crates/rewind-core/src/export.rs). The scrubber needs only
+//! the manifest, the trace and the bookmarks, so the app unpacks those into
+//! the user's cache, under the run's id, and opens that directory like any
+//! other run. The rest stays in the file for `rewind import`, which can
+//! replay it.
 
 use std::fs::{self, File};
 use std::io::{self, Read};
@@ -15,6 +16,7 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
+use crate::bookmarks::{BOOKMARKS_FILE, MAX_BYTES as BOOKMARKS_MAX_BYTES};
 use crate::run::{MANIFEST_FILE, TRACE_FILE};
 
 /// The first four bytes of every zstd frame.
@@ -180,7 +182,12 @@ fn unpack(reader: impl Read, staging: &Path) -> Result<bool> {
         if REPLAY_DIRS.iter().any(|d| path.starts_with(d)) {
             replayable = true;
         }
-        let wanted = path == Path::new(MANIFEST_FILE) || path == Path::new(TRACE_FILE);
+        // The run's bookmarks come too, as a regular file no larger than
+        // the engine writes.
+        let bookmarks = path == Path::new(BOOKMARKS_FILE)
+            && entry.header().entry_type().is_file()
+            && entry.size() <= BOOKMARKS_MAX_BYTES;
+        let wanted = path == Path::new(MANIFEST_FILE) || path == Path::new(TRACE_FILE) || bookmarks;
         if !wanted {
             continue;
         }
@@ -345,6 +352,32 @@ mod tests {
         assert!(!run.join("pages").exists() && !run.join("inputs").exists());
         let left: Vec<_> = fs::read_dir(&dir).unwrap().collect();
         assert_eq!(left.len(), 1, "staging left behind");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_export_s_bookmarks_come_with_it_when_they_are_small() {
+        // The run's bookmarks file is unpacked beside its trace; one larger
+        // than the engine would write is left in the archive.
+        let dir = temp_dir("bookmarks");
+        let marks = br#"[{"step": 40, "note": "here"}]"#;
+        let bytes = archive(&[
+            ("manifest.json", br#"{"id": "marked"}"#),
+            ("trace.bin", b"trace"),
+            (crate::bookmarks::BOOKMARKS_FILE, marks),
+        ]);
+        let run = import(&bytes[..], &dir).unwrap().dir;
+        let kept = fs::read(run.join(crate::bookmarks::BOOKMARKS_FILE)).unwrap();
+        assert_eq!(kept, marks);
+
+        let huge = vec![b' '; crate::bookmarks::MAX_BYTES as usize + 1];
+        let bytes = archive(&[
+            ("manifest.json", br#"{"id": "huge"}"#),
+            ("trace.bin", b"trace"),
+            (crate::bookmarks::BOOKMARKS_FILE, &huge),
+        ]);
+        let run = import(&bytes[..], &dir).unwrap().dir;
+        assert!(!run.join(crate::bookmarks::BOOKMARKS_FILE).exists());
         fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -10,6 +10,7 @@
 
 pub mod answers;
 pub mod archive;
+pub mod bookmarks;
 pub mod describe;
 pub mod engine;
 pub mod examples;

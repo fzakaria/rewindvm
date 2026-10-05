@@ -15,6 +15,7 @@ use gpui::{
 };
 
 use crate::answers::{Answers, FileKey, PlaceKey};
+use crate::bookmarks::Bookmarks;
 use crate::describe::thousands;
 use crate::engine::{
     Engine, EngineError, EngineResult, FileAtStep, Forked, GdbAt, REPLAYS_ANOTHER_WAY,
@@ -32,6 +33,7 @@ use crate::source::Located;
 use crate::stride::{Direction, Stride};
 use crate::theme::size;
 use crate::tour::Tour;
+use crate::ui::bookmarks::{BookmarkEditor, bookmarks_dir};
 use crate::ui::licensing::Licensing;
 use crate::ui::link::LinkDialog;
 use crate::ui::search::SearchBox;
@@ -315,6 +317,10 @@ pub struct Scrubber {
     pub(super) stride: Stride,
     /// The search box, while it is open.
     pub(super) search: Option<SearchBox>,
+    /// The run's bookmarks.
+    pub(super) bookmarks: Bookmarks,
+    /// The bookmark note dialog, while it is open.
+    pub(super) bookmark_editor: Option<BookmarkEditor>,
     /// The searchable text of the run it was built for, by its path.
     pub(super) search_index: Option<(PathBuf, Rc<Index>)>,
     /// Where the "Stop at" menu opened, while it is open.
@@ -403,6 +409,8 @@ impl Scrubber {
             stride_menu: None,
             search: None,
             search_index: None,
+            bookmarks: Bookmarks::default(),
+            bookmark_editor: None,
             log_filter: LogFilter::Output,
             log_scroll: UniformListScrollHandle::new(),
             files_scroll: UniformListScrollHandle::new(),
@@ -465,6 +473,10 @@ impl Scrubber {
         }
         self.step = start;
         self.search = None;
+        self.bookmark_editor = None;
+        self.bookmarks = bookmarks_dir(&session.run)
+            .map(|dir| Bookmarks::load(&dir))
+            .unwrap_or_default();
         self.forks.clear();
         self.tour = None;
         self.viewer = None;

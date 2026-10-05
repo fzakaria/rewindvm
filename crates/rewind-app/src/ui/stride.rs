@@ -27,7 +27,7 @@ const MAX_CHOSEN_CHARS: usize = 22;
 const MENU_WIDTH: f32 = 300.0;
 
 /// What the chooser says it does when pointed at.
-const CHOOSER_NOTE: &str = "What Previous, Next and the Left and Right keys stop at: every event, the build log's lines, processes starting and exiting, or the thread, process, kind of event or file of the event at the playhead.";
+const CHOOSER_NOTE: &str = "What Previous, Next and the Left and Right keys stop at: every event, the build log's lines, processes starting and exiting, the bookmarks, or the thread, process, kind of event or file of the event at the playhead.";
 
 /// What a stride is called in the chooser and its menu.
 pub fn stride_label(stride: &Stride, timeline: &Timeline) -> String {
@@ -40,6 +40,7 @@ pub fn stride_label(stride: &Stride, timeline: &Timeline) -> String {
         Stride::Every => "every event".to_string(),
         Stride::LogLine => "log lines".to_string(),
         Stride::Lifecycle => "process starts and exits".to_string(),
+        Stride::Bookmarks => "bookmarks".to_string(),
         Stride::Thread { pid, tid } => format!("thread {tid} of {pid}{}", name(*pid)),
         Stride::Process { pid } => format!("process {pid}{}", name(*pid)),
         Stride::Kind(kind) => format!("{} events", kind.call()),
@@ -57,10 +58,12 @@ impl Scrubber {
             return;
         };
         let timeline = &session.run.timeline;
+        let bookmarks: Vec<u64> = self.bookmarks.iter().map(|b| b.step).collect();
         let found = step_by(
             timeline,
             &self.stride,
             self.log_filter,
+            &bookmarks,
             direction,
             self.step,
         );
@@ -116,6 +119,9 @@ impl Scrubber {
     /// viewer.
     fn offered_strides(&self) -> Vec<Stride> {
         let mut offered = vec![Stride::Every, Stride::LogLine, Stride::Lifecycle];
+        if !self.bookmarks.is_empty() {
+            offered.push(Stride::Bookmarks);
+        }
         let Some(session) = &self.session else {
             return offered;
         };

@@ -30,9 +30,9 @@ use crate::ui::widgets::{
     Availability, ButtonStyle, PillTone, button, icon, panel_title, pill, readout, tooltip,
 };
 use crate::ui::{
-    CloseNearest, CopySelection, EnterLicense, ForkHere, GoBack, GoForward, GoToEnd, GoToStart,
-    GoToStep, JumpToDivergence, JumpToFailure, KEY_CONTEXT, NextEvent, NextPhase, OpenRun,
-    OpenSearch, PreviousEvent, PreviousPhase, SelectAll, StartTour, StepBack, StepForward,
+    AddBookmark, CloseNearest, CopySelection, EnterLicense, ForkHere, GoBack, GoForward, GoToEnd,
+    GoToStart, GoToStep, JumpToDivergence, JumpToFailure, KEY_CONTEXT, NextEvent, NextPhase,
+    OpenRun, OpenSearch, PreviousEvent, PreviousPhase, SelectAll, StartTour, StepBack, StepForward,
     ToggleSource,
 };
 
@@ -80,6 +80,9 @@ impl Render for Scrubber {
                 cx.listener(|this, _: &GoToStep, window, cx| this.open_step_entry(window, cx)),
             )
             .on_action(cx.listener(|this, _: &OpenSearch, window, cx| this.open_search(window, cx)))
+            .on_action(cx.listener(|this, _: &AddBookmark, window, cx| {
+                this.open_bookmark_editor(window, cx)
+            }))
             .on_action(cx.listener(|this, _: &GoBack, _, cx| this.go_back(cx)))
             .on_action(cx.listener(|this, _: &GoForward, _, cx| this.go_forward(cx)))
             .on_mouse_down(
@@ -142,6 +145,9 @@ impl Render for Scrubber {
         }
         if let Some(search) = self.render_search(cx) {
             window_root = window_root.child(search);
+        }
+        if let Some(dialog) = self.render_bookmark_editor(cx) {
+            window_root = window_root.child(dialog);
         }
         window_root = window_root.child(self.selection_listener(cx));
 
@@ -560,6 +566,7 @@ impl Scrubber {
         if let Some(divergence) = session.divergence_step() {
             track = track.child(marker(divergence, size::DIVERGENCE_WIDTH, theme::BLUE));
         }
+        track = track.children(self.bookmark_marks(|step| t.fraction_of(step)));
         if let Some(failure) = t.failure {
             track = track.child(marker(failure.step, size::FAILURE_WIDTH, theme::RED));
         }
@@ -1277,6 +1284,9 @@ impl Scrubber {
             }
             column = column.child(selects(fork, Surface::ForkCard, cx));
         }
+
+        // The run's bookmarks.
+        column = column.child(self.render_bookmarks_card(cx));
 
         // Inspect: engine actions at the playhead.
         let inspect = |id: &'static str, label: String, availability: Availability| {
