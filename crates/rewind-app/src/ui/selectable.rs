@@ -23,7 +23,7 @@ use crate::family::{Folds, RowKind};
 use crate::selection::{DrawnText, Lines, Mapped, Pos, Selection, Surface, Unit, nearest_line};
 use crate::theme::{self, size};
 use crate::ui::scrubber::Scrubber;
-use crate::viewer::expand_tabs;
+use crate::viewer::{TabbedLines, expand_tabs};
 
 /// What GPUI draws in place of the part of a line cut to fit.
 const ELLIPSIS: &str = "\u{2026}";
@@ -377,25 +377,6 @@ impl Lines for LogLines<'_> {
     }
 }
 
-/// The viewer's lines, read on demand for the same reason.
-struct ViewerLines<'a> {
-    lines: &'a [String],
-}
-
-impl Lines for ViewerLines<'_> {
-    fn line_count(&self) -> usize {
-        self.lines.len()
-    }
-
-    fn shown(&self, line: usize) -> Option<String> {
-        self.lines.get(line).map(|l| viewer_line(l).shown)
-    }
-
-    fn copied(&self, line: usize, range: Range<usize>) -> Option<String> {
-        self.lines.get(line).map(|l| viewer_line(l).copy(range))
-    }
-}
-
 impl Scrubber {
     /// What takes the keyboard after a press in `surface`: the terminal
     /// pane and the license dialog keep their own, the rest is the
@@ -424,8 +405,12 @@ impl Scrubber {
                 })
             }
             Surface::Viewer => match self.viewer_view() {
-                Some(view) => Box::new(ViewerLines { lines: &view.lines }),
+                Some(view) => Box::new(TabbedLines(&view.lines)),
                 None => Box::new(self.viewer_message_lines()),
+            },
+            Surface::Source => match self.shown_file() {
+                Some((file, _)) => Box::new(TabbedLines(&file.lines)),
+                None => Box::new(self.source_lines()),
             },
             Surface::Terminal => match self.terminal_session() {
                 Some(session) => Box::new(session),
@@ -456,8 +441,7 @@ impl Scrubber {
                 .unwrap_or_default(),
             Surface::LicenseDialog => self.license_dialog_lines(),
             Surface::Runs => self.runs_lines(),
-            Surface::Source => self.source_lines(),
-            Surface::Log | Surface::Viewer | Surface::Terminal => Vec::new(),
+            Surface::Log | Surface::Viewer | Surface::Source | Surface::Terminal => Vec::new(),
         }
     }
 
@@ -551,6 +535,7 @@ impl Scrubber {
                 .files_scroll
                 .scroll_to_item(target, ScrollStrategy::Top),
             Surface::Viewer => self.scroll_viewer_to(target),
+            Surface::Source => self.scroll_source_to(target),
             Surface::Terminal => self.scroll_terminal_toward(at.y < top),
             _ => {}
         }

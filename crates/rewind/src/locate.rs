@@ -8,7 +8,7 @@
 //! innermost that is the program's own code, not the C library's, Rust's
 //! standard library's or a dependency's, is the answer.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::TcpListener;
 use std::process::ExitCode;
 
@@ -25,11 +25,18 @@ const SCRIPT: &str = include_str!("locate.py");
 const SCRIPT_NAME: &str = "where.py";
 const ANSWER_MARKER: &str = "rewind-where: ";
 
-/// The source lines around a frame's line: a few around the chosen
-/// frame's for a person to read, more around every frame's for a program,
-/// such as the desktop app, to scroll through.
+/// The source lines around the chosen frame's line the text answer shows
+/// a person.
 const TEXT_SOURCE_RADIUS: u32 = 2;
-const JSON_SOURCE_RADIUS: u32 = 40;
+
+/// How much of each source file `--json` carries for a program, such as
+/// the desktop app, to scroll through: a file up to a mebibyte whole, and
+/// of a larger one the lines from a few hundred above its frames' lines to
+/// a few hundred below.
+const JSON_LIMITS: Limits = Limits {
+    max_whole: 1 << 20,
+    radius: 200,
+};
 
 /// How `rewind where` answers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,10 +57,10 @@ pub struct Answer {
     /// own code.
     pub frames: Vec<Frame>,
     pub chosen: Option<usize>,
-    /// Each frame's source lines around its line, in the order of
-    /// `frames`: null for a frame without a source file and line, or whose
-    /// file was not found.
-    pub sources: Vec<Option<Source>>,
+    /// Each source file the frames are in, once, by the path the frames'
+    /// `fullname` gives it. A frame without a source file and line, or
+    /// whose file was not found, has none here.
+    pub files: BTreeMap<String, SourceFile>,
 }
 
 /// What the gdb script prints for a thread.
@@ -86,8 +93,9 @@ pub fn locate(
                 step,
             };
             let text_source = answer.chosen.and_then(|i| {
-                let source = answer.sources.get(i)?.as_ref()?;
-                narrowed(source, answer.frames[i].line?, TEXT_SOURCE_RADIUS)
+                let frame = &answer.frames[i];
+                let file = answer.files.get(frame.fullname.as_ref()?)?;
+                file.around(frame.line?, TEXT_SOURCE_RADIUS)
             });
             print!(
                 "{}",
@@ -136,21 +144,25 @@ pub fn walk(home: &Home, run: &Run, step: u64, pid: u32, tid: u32) -> Result<Ans
     }
     let mut frames = walked.frames.unwrap_or_default();
 
-    // Each frame's source, read while the session's copies are here,
-    // then every path as the VM had it.
+    // Each source file, read while the session's copies are here, then
+    // every path, the files' own too, as the VM had it.
     let chosen = chosen(&frames);
-    let sources = frame_sources(&frames, JSON_SOURCE_RADIUS, |path| {
+    let files = source_files(&frames, &JSON_LIMITS, |path| {
         std::fs::read_to_string(path).ok()
     });
+    let in_vm = |path: &String| {
+        gdb::path_in_vm(std::path::Path::new(path), symbols.dir())
+            .display()
+            .to_string()
+    };
     for frame in &mut frames {
-        let in_vm = |path: &String| {
-            gdb::path_in_vm(std::path::Path::new(path), symbols.dir())
-                .display()
-                .to_string()
-        };
         frame.fullname = frame.fullname.as_ref().map(in_vm);
         frame.object = frame.object.as_ref().map(in_vm);
     }
+    let files = files
+        .into_iter()
+        .map(|(path, file)| (in_vm(&path), file))
+        .collect();
 
     Ok(Answer {
         run: run.manifest.id.clone(),
@@ -160,7 +172,7 @@ pub fn walk(home: &Home, run: &Run, step: u64, pid: u32, tid: u32) -> Result<Ans
         process: process_name(run.trace()?, pid),
         frames,
         chosen,
-        sources,
+        files,
     })
 }
 
@@ -338,18 +350,6 @@ fn process_name(trace: &Trace, pid: u32) -> String {
     name.rsplit('/').next().unwrap_or(&name).to_string()
 }
 
-/// `source`'s lines within `radius` of `line`.
-fn narrowed(source: &Source, line: u32, radius: u32) -> Option<Source> {
-    let first = line.saturating_sub(radius).max(source.first);
-    let skip = (first - source.first) as usize;
-    let take = (line + radius + 1).saturating_sub(first) as usize;
-    let lines: Vec<String> = source.lines.iter().skip(skip).take(take).cloned().collect();
-    if lines.is_empty() {
-        return None;
-    }
-    Some(Source { first, lines })
-}
-
 /// One frame of a thread's stack, as the gdb script lists it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Frame {
@@ -434,51 +434,131 @@ pub fn chosen(frames: &[Frame]) -> Option<usize> {
     })
 }
 
-/// For each of `frames`, the lines within `radius` of its line in its
-/// source file, as `read` gives the file by its path here: None for a
-/// frame without both, or whose file `read` cannot give. Each file is
-/// read once, however many frames are in it.
-fn frame_sources(
-    frames: &[Frame],
+/// How much of a source file `--json` carries: files up to `max_whole`
+/// bytes whole, larger ones as the lines within `radius` of their
+/// frames' lines.
+struct Limits {
+    max_whole: usize,
     radius: u32,
-    mut read: impl FnMut(&str) -> Option<String>,
-) -> Vec<Option<Source>> {
-    let mut files: HashMap<&str, Option<String>> = HashMap::new();
-    frames
-        .iter()
-        .map(|frame| {
-            let path = frame.fullname.as_deref()?;
-            let line = frame.line?;
-            let text = files.entry(path).or_insert_with(|| read(path)).as_deref()?;
-            source_around(text, line, radius)
-        })
-        .collect()
 }
 
-/// Lines of a source file around one.
+/// The source files `frames` are in, by their paths here, as `read` gives
+/// them: whole, or a window around the frames' lines for a file over the
+/// limit. A frame without a path and a line adds none, nor does one whose
+/// file `read` cannot give. Each file is read once, however many frames
+/// are in it.
+fn source_files(
+    frames: &[Frame],
+    limits: &Limits,
+    mut read: impl FnMut(&str) -> Option<String>,
+) -> BTreeMap<String, SourceFile> {
+    // The lines each file's frames are on.
+    let mut lines: BTreeMap<&str, BTreeSet<u32>> = BTreeMap::new();
+    for frame in frames {
+        let (Some(path), Some(line)) = (frame.fullname.as_deref(), frame.line) else {
+            continue;
+        };
+        lines.entry(path).or_default().insert(line);
+    }
+
+    // Each file whole when it is small enough, else the lines around its
+    // frames' lines.
+    let mut files = BTreeMap::new();
+    for (path, on) in lines {
+        let Some(text) = read(path) else {
+            continue;
+        };
+        let file = if text.len() <= limits.max_whole {
+            Some(SourceFile::whole(&text))
+        } else {
+            SourceFile::window(&text, &on, limits.radius)
+        };
+        if let Some(file) = file {
+            files.insert(path.to_string(), file);
+        }
+    }
+    files
+}
+
+/// How much of a source file an answer carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Extent {
+    /// The whole file.
+    Whole,
+    /// The lines around its frames' lines, of a file too large to carry.
+    Window,
+}
+
+/// A source file, or the part of it an answer carries.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceFile {
+    pub extent: Extent,
+    /// The number of the first line of `text`: 1 for a whole file.
+    pub first: u32,
+    /// The file's text from line `first` on: the whole file as it reads,
+    /// or a window's lines joined by newlines.
+    pub text: String,
+}
+
+impl SourceFile {
+    /// The whole of `text`.
+    pub fn whole(text: &str) -> SourceFile {
+        SourceFile {
+            extent: Extent::Whole,
+            first: 1,
+            text: text.to_string(),
+        }
+    }
+
+    /// The lines of `text` from `radius` above the first of `on` to
+    /// `radius` below the last, cut at the file's ends. None when every
+    /// line of `on` is past the file's end.
+    fn window(text: &str, on: &BTreeSet<u32>, radius: u32) -> Option<SourceFile> {
+        let count = u32::try_from(text.lines().count()).ok()?;
+        let lowest = *on.iter().find(|&&line| line >= 1 && line <= count)?;
+        let highest = *on.range(..=count).next_back()?;
+        let first = lowest.saturating_sub(radius).max(1);
+        let last = highest.saturating_add(radius).min(count);
+        let lines: Vec<&str> = text
+            .lines()
+            .skip((first - 1) as usize)
+            .take((last - first + 1) as usize)
+            .collect();
+        Some(SourceFile {
+            extent: Extent::Window,
+            first,
+            text: lines.join("\n"),
+        })
+    }
+
+    /// The lines within `radius` of line `line`, counted from 1, cut to
+    /// what the file carries. None when it does not carry that line.
+    pub fn around(&self, line: u32, radius: u32) -> Option<Source> {
+        let count = u32::try_from(self.text.lines().count()).ok()?;
+        let end = self.first.checked_add(count)?;
+        if line < self.first || line >= end {
+            return None;
+        }
+        let first = line.saturating_sub(radius).max(self.first);
+        let last = line.saturating_add(radius).min(end - 1);
+        let lines = self
+            .text
+            .lines()
+            .skip((first - self.first) as usize)
+            .take((last - first + 1) as usize)
+            .map(String::from)
+            .collect();
+        Some(Source { first, lines })
+    }
+}
+
+/// Lines of a source file around one, as the text answer shows them.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Source {
     /// The number of the first line.
     pub first: u32,
     pub lines: Vec<String>,
-}
-
-/// The lines of `text` within `radius` of line `line`, counted from 1.
-/// None when the file has no such line.
-pub fn source_around(text: &str, line: u32, radius: u32) -> Option<Source> {
-    let count = u32::try_from(text.lines().count()).ok()?;
-    if line == 0 || line > count {
-        return None;
-    }
-    let first = line.saturating_sub(radius).max(1);
-    let last = line.saturating_add(radius).min(count);
-    let lines = text
-        .lines()
-        .skip((first - 1) as usize)
-        .take((last - first + 1) as usize)
-        .map(String::from)
-        .collect();
-    Some(Source { first, lines })
 }
 
 /// Whose stack it was, for the header line.
@@ -714,34 +794,42 @@ mod tests {
     }
 
     /// Source lines around a line, cut at the start and the end of the
-    /// file, and none for a line past the end.
+    /// file, and none for a line past the end. A window of a file counts
+    /// its lines from its first, and has none outside it. Builds whole
+    /// files and a window by hand.
     #[test]
     fn source_lines_are_cut_at_either_end_of_the_file() {
         let text = "a\nb\nc\nd\ne\nf\n";
-        assert_eq!(
-            source_around(text, 3, 2),
+        let whole = SourceFile::whole(text);
+        let lines = |first: u32, lines: &[&str]| {
             Some(Source {
-                first: 1,
-                lines: ["a", "b", "c", "d", "e"].map(String::from).to_vec(),
+                first,
+                lines: lines.iter().map(|l| l.to_string()).collect(),
             })
-        );
-        assert_eq!(
-            source_around(text, 6, 2),
-            Some(Source {
-                first: 4,
-                lines: ["d", "e", "f"].map(String::from).to_vec(),
-            })
-        );
-        assert_eq!(source_around(text, 7, 2), None);
+        };
+        assert_eq!(whole.around(3, 2), lines(1, &["a", "b", "c", "d", "e"]));
+        assert_eq!(whole.around(6, 2), lines(4, &["d", "e", "f"]));
+        assert_eq!(whole.around(7, 2), None);
+        assert_eq!(whole.around(0, 2), None);
+
+        let window = SourceFile {
+            extent: Extent::Window,
+            first: 10,
+            text: "j\nk\nl".to_string(),
+        };
+        assert_eq!(window.around(11, 1), lines(10, &["j", "k", "l"]));
+        assert_eq!(window.around(12, 5), lines(10, &["j", "k", "l"]));
+        assert_eq!(window.around(9, 1), None);
+        assert_eq!(window.around(13, 1), None);
     }
 
-    /// Every frame with a file and a line gets the lines around its own
-    /// line, two frames in one file each their own, and the file is read
-    /// once. A frame without a line, or whose file cannot be read, gets
-    /// none. Frames as the gdb script lists them, over files held in a
-    /// map.
+    /// Each source file the frames are in is carried once, whole, keyed
+    /// by the path the frames name it by, and read once however many
+    /// frames are in it. A frame without a line, or whose file cannot be
+    /// read, adds none. Frames as the gdb script lists them, over files
+    /// held in a map.
     #[test]
-    fn each_frame_with_a_line_gets_its_own_window() {
+    fn each_file_is_carried_once_and_whole() {
         let stack = frames(
             r#"[
             {"level":0,"function":"run_job","file":"src/pool.c","fullname":"/s/pool.c","line":2,"pc":"0x1","object":null},
@@ -751,26 +839,67 @@ mod tests {
         ]"#,
         );
         let mut reads = 0;
-        let sources = frame_sources(&stack, 1, |path| {
+        let files = source_files(&stack, &JSON_LIMITS, |path| {
             reads += 1;
             (path == "/s/pool.c").then(|| "a\nb\nc\nd\ne\nf\n".to_string())
         });
-        let lines = |first: u32, lines: &[&str]| {
-            Some(Source {
-                first,
-                lines: lines.iter().map(|l| l.to_string()).collect(),
-            })
+        let expected = BTreeMap::from([(
+            "/s/pool.c".to_string(),
+            SourceFile {
+                extent: Extent::Whole,
+                first: 1,
+                text: "a\nb\nc\nd\ne\nf\n".to_string(),
+            },
+        )]);
+        assert_eq!(files, expected);
+        assert_eq!(reads, 2);
+    }
+
+    /// A file larger than the cap is carried as the lines from a radius
+    /// above its first frame's line to a radius below its last, cut at
+    /// the file's ends; a file whose frames' lines are all past its end
+    /// is not carried. Twenty numbered lines under a ten-byte cap.
+    #[test]
+    fn a_large_file_is_carried_as_a_window_around_its_frames_lines() {
+        let stack = frames(
+            r#"[
+            {"level":0,"function":"inner","file":"big.c","fullname":"/s/big.c","line":10,"pc":"0x1","object":null},
+            {"level":1,"function":"outer","file":"big.c","fullname":"/s/big.c","line":8,"pc":"0x2","object":null},
+            {"level":2,"function":"main","file":"edge.c","fullname":"/s/edge.c","line":19,"pc":"0x3","object":null},
+            {"level":3,"function":"past","file":"short.c","fullname":"/s/short.c","line":40,"pc":"0x4","object":null}
+        ]"#,
+        );
+        let numbered: String = (1..=20).map(|n| format!("{n}\n")).collect();
+        let limits = Limits {
+            max_whole: 10,
+            radius: 2,
+        };
+        let files = source_files(&stack, &limits, |_| Some(numbered.clone()));
+        let window = |first: u32, text: &str| SourceFile {
+            extent: Extent::Window,
+            first,
+            text: text.to_string(),
+        };
+        assert_eq!(files["/s/big.c"], window(6, "6\n7\n8\n9\n10\n11\n12"));
+        assert_eq!(files["/s/edge.c"], window(17, "17\n18\n19\n20"));
+        assert!(!files.contains_key("/s/short.c"));
+    }
+
+    /// A carried file reads as its extent, its first line and its text,
+    /// the extent in lower case, so the JSON says which files are whole.
+    #[test]
+    fn a_carried_file_says_whether_it_is_whole() {
+        let whole = serde_json::to_string(&SourceFile::whole("x\n")).unwrap();
+        assert_eq!(whole, r#"{"extent":"whole","first":1,"text":"x\n"}"#);
+        let window = SourceFile {
+            extent: Extent::Window,
+            first: 7,
+            text: "y".to_string(),
         };
         assert_eq!(
-            sources,
-            vec![
-                lines(1, &["a", "b", "c"]),
-                lines(4, &["d", "e", "f"]),
-                None,
-                None
-            ]
+            serde_json::to_string(&window).unwrap(),
+            r#"{"extent":"window","first":7,"text":"y"}"#
         );
-        assert_eq!(reads, 2);
     }
 
     /// The text answer: who and when, the chosen frame by its level with

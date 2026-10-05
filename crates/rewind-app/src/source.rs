@@ -6,8 +6,10 @@
 //! the thread's stack in gdb and picks the innermost frame that is the
 //! program's own code, past the C library, Rust's standard library and
 //! dependencies. That takes seconds, so the panel asks only once the
-//! playhead rests. The answer carries every frame's source, so showing
-//! another frame's needs no new answer.
+//! playhead rests. The answer carries every source file the frames are
+//! in, whole, so showing another frame's needs no new answer.
+
+use std::collections::BTreeMap;
 
 use serde::Deserialize;
 
@@ -20,6 +22,8 @@ pub struct Frame {
     pub function: Option<String>,
     /// The source file as the program's DWARF names it, and its line.
     pub file: Option<String>,
+    /// The path the answer's files key the source file by.
+    pub fullname: Option<String>,
     pub line: Option<u32>,
     /// The instruction, in hex.
     pub pc: String,
@@ -56,12 +60,72 @@ impl Frame {
 /// What the panel says of a frame the engine found no source for.
 const NO_SOURCE: &str = "no source";
 
-/// Lines of a frame's source file around its line.
+/// How much of a source file the answer carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Extent {
+    /// The whole file.
+    Whole,
+    /// The lines around its frames' lines, of a file too large to carry.
+    Window,
+}
+
+/// A source file as the answer carries it, split into lines once.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
-pub struct Source {
+#[serde(from = "Carried")]
+pub struct SourceFile {
+    pub extent: Extent,
     /// The number of the first line.
     pub first: u32,
     pub lines: Vec<String>,
+}
+
+/// A source file as `rewind where --json` prints it: its text in one
+/// string, which is shorter than a list of lines.
+#[derive(Deserialize)]
+struct Carried {
+    extent: Extent,
+    first: u32,
+    text: String,
+}
+
+impl From<Carried> for SourceFile {
+    fn from(carried: Carried) -> SourceFile {
+        SourceFile {
+            extent: carried.extent,
+            first: carried.first,
+            lines: carried.text.lines().map(str::to_string).collect(),
+        }
+    }
+}
+
+impl SourceFile {
+    /// The index in `lines` of line `line`, counted from 1, when the
+    /// file carries it.
+    pub fn row_of(&self, line: u32) -> Option<usize> {
+        let row = line.checked_sub(self.first)? as usize;
+        (row < self.lines.len()).then_some(row)
+    }
+
+    /// The number of line `row` of `lines`.
+    pub fn number_of(&self, row: usize) -> u32 {
+        self.first + row as u32
+    }
+
+    /// What the panel says of a window of a large file: which lines it
+    /// shows. None for a file carried whole.
+    pub fn note(&self) -> Option<String> {
+        match self.extent {
+            Extent::Whole => None,
+            Extent::Window => {
+                let last = self.number_of(self.lines.len().saturating_sub(1));
+                Some(format!(
+                    "showing lines {}\u{2013}{last} of a large file",
+                    self.first
+                ))
+            }
+        }
+    }
 }
 
 /// What `rewind where --json` prints.
@@ -74,14 +138,10 @@ pub struct Located {
     /// The index in `frames` of the innermost frame in the program's own
     /// code, when there is one.
     pub chosen: Option<usize>,
-    /// Each frame's source lines, in the order of `frames`: None for a
-    /// frame the engine found no source for.
-    pub sources: Vec<Option<Source>>,
+    /// Each source file the frames are in, by the path a frame's
+    /// `fullname` gives it.
+    pub files: BTreeMap<String, SourceFile>,
 }
-
-/// How many lines either side of a frame's line the panel shows: the line
-/// sits in the middle, with room for the frames below.
-pub const PANEL_RADIUS: u32 = 8;
 
 impl Located {
     /// The chosen frame.
@@ -89,17 +149,18 @@ impl Located {
         self.frames.get(self.chosen?)
     }
 
-    /// Frame `frame`'s source lines within `radius` of its line, and the
-    /// number of the first of them.
-    pub fn source_around(&self, frame: usize, radius: u32) -> Option<(u32, &[String])> {
-        let source = self.sources.get(frame)?.as_ref()?;
+    /// The source file frame `frame` is in, when the answer carries it.
+    pub fn file_of(&self, frame: usize) -> Option<&SourceFile> {
+        let path = self.frames.get(frame)?.fullname.as_ref()?;
+        self.files.get(path)
+    }
+
+    /// The row of frame `frame`'s file that holds the frame's line, which
+    /// the panel marks and scrolls to the middle. None when the frame has
+    /// no file, or its file does not carry the line.
+    pub fn centred_row(&self, frame: usize) -> Option<usize> {
         let line = self.frames.get(frame)?.line?;
-        let first = line.saturating_sub(radius).max(source.first);
-        let skip = (first - source.first) as usize;
-        let take = (line + radius + 1).saturating_sub(first) as usize;
-        let end = (skip + take).min(source.lines.len());
-        let lines = source.lines.get(skip..end)?;
-        Some((first, lines))
+        self.file_of(frame)?.row_of(line)
     }
 }
 
@@ -270,19 +331,48 @@ mod tests {
     // the panel's model, and the engine's refusals turned into what the
     // panel says.
     use super::*;
+    use crate::selection::{Pos, Selection, Surface, Unit};
+    use crate::viewer::TabbedLines;
+
+    /// pool.c as the answer carries it, whole: 133 lines, with the lines
+    /// around the crash's line 77 as the program has them, a tab-indented
+    /// line far below it, and the rest numbered.
+    fn pool_c() -> String {
+        (1..=133)
+            .map(|n| match n {
+                76 => "\t\t\tfflush(stdout);\n".to_string(),
+                77 => "\t\t\tp->queue->completed++;\n".to_string(),
+                120 => "\tfree(p->queue);\n".to_string(),
+                _ => format!("line {n}\n"),
+            })
+            .collect()
+    }
 
     /// The answer for the Nix tutorial's failing run at the crash, as
-    /// `rewind where 8fd5378d 5060 --json` printed it, with the first
-    /// frame's source cut to three lines and glibc's sources, in this
-    /// machine's debuginfod cache, left out.
-    const AT_THE_CRASH: &str = r#"{"run":"8fd5378ddf70075e","step":5060,"pid":166,"tid":174,"process":"test_pool_shutdown","frames":[{"level":0,"function":"worker","file":"src/pool.c","fullname":"/build/mylib/src/pool.c","line":77,"pc":"0x55bfaf437437","object":"/build/mylib/tests/test_pool_shutdown"},{"level":1,"function":"start_thread","file":"pthread_create.c","fullname":null,"line":454,"pc":"0x7f615854d7d1","object":"/nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6"},{"level":2,"function":"__GI___clone3","file":"../sysdeps/unix/sysv/linux/x86_64/clone3.S","fullname":null,"line":78,"pc":"0x7f61585d9b1c","object":"/nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6"}],"chosen":0,"sources":[{"first":76,"lines":["\t\t\tfflush(stdout);","\t\t\tp->queue->completed++;","\t\t}"]},null,null]}"#;
+    /// `rewind where 8fd5378d 5060 --json` printed it, with pool.c cut
+    /// down as `pool_c` says, pthread_create.c's frame without a file,
+    /// and clone3.S carried as a window of lines 70 to 86, as for a file
+    /// too large to carry whole.
+    fn at_the_crash() -> String {
+        let clone3: Vec<String> = (70..=86).map(|n| format!("asm {n}")).collect();
+        format!(
+            r#"{{"run":"8fd5378ddf70075e","step":5060,"pid":166,"tid":174,"process":"test_pool_shutdown","frames":[{{"level":0,"function":"worker","file":"src/pool.c","fullname":"/build/mylib/src/pool.c","line":77,"pc":"0x55bfaf437437","object":"/build/mylib/tests/test_pool_shutdown"}},{{"level":1,"function":"start_thread","file":"pthread_create.c","fullname":null,"line":454,"pc":"0x7f615854d7d1","object":"/nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6"}},{{"level":2,"function":"__GI___clone3","file":"../sysdeps/unix/sysv/linux/x86_64/clone3.S","fullname":"/glibc/clone3.S","line":78,"pc":"0x7f61585d9b1c","object":"/nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6"}}],"chosen":0,"files":{{"/build/mylib/src/pool.c":{{"extent":"whole","first":1,"text":{pool}}},"/glibc/clone3.S":{{"extent":"window","first":70,"text":{clone3}}}}}}}"#,
+            pool = serde_json::to_string(&pool_c()).unwrap(),
+            clone3 = serde_json::to_string(&clone3.join("\n")).unwrap(),
+        )
+    }
 
-    /// The answer reads into the frames, the chosen one, and each frame's
-    /// source, null where the engine had none; fields the panel does not
-    /// use, such as fullname, are skipped.
+    fn located() -> Located {
+        serde_json::from_str(&at_the_crash()).unwrap()
+    }
+
+    /// The answer reads into the frames, the chosen one, and each source
+    /// file once, split into lines; a frame finds its file by its
+    /// fullname, and one without a fullname, or whose file the answer
+    /// does not carry, has none.
     #[test]
-    fn an_answer_reads_into_the_frames_and_their_sources() {
-        let located: Located = serde_json::from_str(AT_THE_CRASH).unwrap();
+    fn an_answer_reads_into_the_frames_and_their_files() {
+        let located = located();
         assert_eq!((located.pid, located.tid), (166, 174));
         assert_eq!(located.process, "test_pool_shutdown");
         assert_eq!(located.frames.len(), 3);
@@ -290,26 +380,60 @@ mod tests {
         let chosen = &located.frames[0];
         assert_eq!(chosen.function_label(), "worker");
         assert_eq!(chosen.place_label(), "src/pool.c:77");
-        assert_eq!(located.sources.len(), 3);
-        assert_eq!(located.sources[0].as_ref().unwrap().first, 76);
-        assert_eq!(located.sources[1], None);
+
+        assert_eq!(located.files.len(), 2);
+        let pool = located.file_of(0).unwrap();
+        assert_eq!((pool.extent, pool.first), (Extent::Whole, 1));
+        assert_eq!(pool.lines.len(), 133);
+        assert_eq!(pool.lines[76], "\t\t\tp->queue->completed++;");
+        assert_eq!(located.file_of(1), None);
+        let clone3 = located.file_of(2).unwrap();
+        assert_eq!((clone3.extent, clone3.first), (Extent::Window, 70));
+        assert_eq!(clone3.lines.len(), 17);
+        assert_eq!(located.file_of(3), None);
     }
 
-    /// The panel's lines are a frame's source within a radius of its line,
-    /// cut where the engine's lines end; a frame without source has none.
+    /// The row a frame's file is scrolled to so the frame's line sits in
+    /// the middle: the line's index among the lines the answer carries,
+    /// counted from a window's first line. None for a frame without a
+    /// file, or whose line the file does not have.
     #[test]
-    fn the_panel_shows_the_lines_around_a_frame_s_line() {
-        let located: Located = serde_json::from_str(AT_THE_CRASH).unwrap();
-        let (first, lines) = located.source_around(0, 1).unwrap();
-        assert_eq!(first, 76);
-        assert_eq!(lines.len(), 3);
-        let (first, lines) = located.source_around(0, 0).unwrap();
-        assert_eq!((first, lines.len()), (77, 1));
-        assert_eq!(lines[0], "\t\t\tp->queue->completed++;");
-        let (first, lines) = located.source_around(0, PANEL_RADIUS).unwrap();
-        assert_eq!((first, lines.len()), (76, 3));
-        assert_eq!(located.source_around(1, PANEL_RADIUS), None);
-        assert_eq!(located.source_around(3, PANEL_RADIUS), None);
+    fn the_frame_s_line_is_the_row_centred() {
+        let mut located = located();
+        assert_eq!(located.centred_row(0), Some(76));
+        assert_eq!(located.centred_row(1), None);
+        assert_eq!(located.centred_row(2), Some(8));
+        assert_eq!(located.centred_row(3), None);
+
+        located.frames[0].line = Some(134);
+        assert_eq!(located.centred_row(0), None);
+        located.frames[2].line = Some(69);
+        assert_eq!(located.centred_row(2), None);
+    }
+
+    /// A file carried whole needs no note; a window of a large one says
+    /// which lines it holds.
+    #[test]
+    fn a_window_of_a_large_file_says_which_lines_it_shows() {
+        let located = located();
+        assert_eq!(located.file_of(0).unwrap().note(), None);
+        assert_eq!(
+            located.file_of(2).unwrap().note().as_deref(),
+            Some("showing lines 70\u{2013}86 of a large file")
+        );
+    }
+
+    /// The panel's text is the whole file, so a selection reaches lines
+    /// far from the frame's: lines 119 to 121 select and copy as the file
+    /// has them, the tab included, though line 77 is the one marked.
+    /// Selects over the file's lines as the panel reads them.
+    #[test]
+    fn a_selection_reaches_lines_far_from_the_frame_s() {
+        let located = located();
+        let lines = TabbedLines(&located.file_of(0).unwrap().lines);
+        let mut selection = Selection::press(Surface::Source, Pos::new(118, 0), Unit::Char, &lines);
+        selection.extend_to(Pos::new(120, 4));
+        assert_eq!(selection.text(&lines), "line 119\n\tfree(p->queue);\nline");
     }
 
     /// A new answer shows its chosen frame. Clicking another frame shows
@@ -317,7 +441,7 @@ mod tests {
     /// while the panel shows no answer, changes nothing.
     #[test]
     fn a_clicked_frame_is_shown_until_the_next_answer() {
-        let located: Located = serde_json::from_str(AT_THE_CRASH).unwrap();
+        let located = located();
         let mut answer = shown(5060, Ok(located.clone()));
         assert_eq!(answer.located().map(|(_, at)| at), Some(Some(0)));
 
@@ -339,7 +463,7 @@ mod tests {
     /// line saying it has no source.
     #[test]
     fn a_frame_without_source_says_where_it_is() {
-        let located: Located = serde_json::from_str(AT_THE_CRASH).unwrap();
+        let located = located();
         assert_eq!(
             located.frames[2].without_source(),
             vec![
@@ -366,6 +490,7 @@ mod tests {
             level: 3,
             function: None,
             file: None,
+            fullname: None,
             line: None,
             pc: "0x401913".into(),
             object: Some("/newroot/src/big".into()),

@@ -689,7 +689,8 @@ in
   # At the worker's write, the innermost frames are musl's printf
   # machinery, which has no line table; the answer is the worker's printf
   # in pool.c, with its source from the VM and the line marked, and two
-  # frames that called it. --json lists the same frame as the chosen one.
+  # frames that called it. --json lists the same frame as the chosen one,
+  # and carries pool.c whole with the write on that line.
   # The main thread, off the CPU then, waits in pool_run's join, called
   # from main. Boots the VM, so it needs /dev/kvm.
   where =
@@ -728,6 +729,10 @@ in
         test "$(grep -c '^rewind: fetched ' stderr)" = 0
         jq -e --argjson line "$(line 'the write')" \
           '.frames[.chosen] | .function == "worker" and .line == $line' where.json
+        jq -e --argjson line "$(line 'the write')" \
+          '.frames[.chosen] as $f | .files[$f.fullname]
+            | .extent == "whole" and .first == 1
+              and (.text | split("\n")[$line - 1] | contains("printf("))' where.json
 
         rewind where pool "$step" --tid "$pid" > main
         cat main

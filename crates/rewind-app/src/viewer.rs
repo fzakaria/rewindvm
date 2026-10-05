@@ -1,7 +1,7 @@
 //! A file's contents as the viewer shows them: text as lines, anything
 //! else as a hex dump, both cut to a size a panel can hold.
 
-use crate::selection::{Mapped, Splice};
+use crate::selection::{Lines, Mapped, Splice};
 
 /// The most bytes the viewer shows; the rest is summed up in a note.
 pub const MAX_SHOWN: usize = 1 << 20;
@@ -130,6 +130,24 @@ pub fn expand_tabs(line: &str) -> Mapped {
         });
     }
     Mapped::new(shown, line.to_string(), splices)
+}
+
+/// Lines of text with their tabs drawn as spaces, read on demand: a file
+/// can be long, and a selection reads only the lines it covers.
+pub struct TabbedLines<'a>(pub &'a [String]);
+
+impl Lines for TabbedLines<'_> {
+    fn line_count(&self) -> usize {
+        self.0.len()
+    }
+
+    fn shown(&self, line: usize) -> Option<String> {
+        self.0.get(line).map(|l| expand_tabs(l).shown)
+    }
+
+    fn copied(&self, line: usize, range: std::ops::Range<usize>) -> Option<String> {
+        self.0.get(line).map(|l| expand_tabs(l).copy(range))
+    }
 }
 
 #[cfg(test)]

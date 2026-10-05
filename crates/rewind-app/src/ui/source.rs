@@ -7,19 +7,26 @@
 //! again only once the playhead rests, and the last answer stays on
 //! screen, dimmed, until the new one arrives. With no answer on screen,
 //! the panel shows the engine's latest line while it works, such as the
-//! debug info gdb downloads the first time, which can take a minute. Runs the engine cannot fork
-//! say so instead, as do runs recorded before the guest kernel listed its
-//! tasks. Clicking a frame in the list shows that frame's source, from the
-//! same answer, until the next answer shows its chosen frame again.
+//! debug info gdb downloads the first time, which can take a minute. Runs
+//! the engine cannot fork say so instead, as do runs recorded before the
+//! guest kernel listed its tasks.
+//!
+//! The panel shows the whole source file of the frame it shows, scrolled
+//! so the frame's line is in the middle, with the frame list pinned below
+//! it. Clicking a frame in the list shows that frame's file, from the same
+//! answer, until the next answer shows its chosen frame again.
+
+use std::ops::Range;
 
 use futures::StreamExt;
 use gpui::{
-    Context, CursorStyle, Div, MouseButton, Role, SharedString, div, prelude::*, px, relative, rgb,
+    AnyElement, Context, CursorStyle, Div, MouseButton, Role, ScrollStrategy, SharedString,
+    UniformListScrollHandle, div, prelude::*, px, relative, rgb, uniform_list,
 };
 
 use crate::describe::thousands;
-use crate::selection::{Mapped, Surface, part_of_line};
-use crate::source::{Frame, Located, PANEL_RADIUS, Progress, Shown, shown, target};
+use crate::selection::{Mapped, Pos, Surface, part_of_line};
+use crate::source::{Frame, Located, Progress, Shown, SourceFile, shown, target};
 use crate::theme::{self, layout, size};
 use crate::ui::icons::Icon;
 use crate::ui::scrubber::{Replay, Scrubber, replay_unavailable};
@@ -35,6 +42,10 @@ const STALE_OPACITY: f32 = 0.45;
 /// What marks the frame whose source is shown in the frame list.
 const SHOWN_MARKER: &str = "\u{25b8}";
 
+/// How many rows of the frame list show before the list scrolls, so the
+/// file above keeps the rest of the panel however deep the stack.
+const FRAME_ROWS_SHOWN: f32 = 4.0;
+
 /// The open panel.
 pub struct SourcePanel {
     /// The step the panel shows or is loading.
@@ -47,6 +58,8 @@ pub struct SourcePanel {
     pub progress: Progress,
     /// Counts requests; an answer to anything but the latest is dropped.
     generation: u64,
+    /// The shown file's scroll position.
+    scroll: UniformListScrollHandle,
 }
 
 impl Scrubber {
@@ -67,6 +80,7 @@ impl Scrubber {
             loading: readable,
             progress: Progress::default(),
             generation: 0,
+            scroll: UniformListScrollHandle::new(),
         });
         self.clear_selection_in(&[Surface::Viewer, Surface::Source]);
         if readable {
@@ -199,6 +213,7 @@ impl Scrubber {
                 panel.loading = false;
                 panel.shown = Some(shown(step, result));
                 this.clear_selection_in(&[Surface::Source]);
+                this.centre_shown_line();
                 cx.notify();
             });
         })
@@ -221,24 +236,49 @@ impl Scrubber {
             return;
         }
         self.clear_selection_in(&[Surface::Source]);
+        self.centre_shown_line();
         cx.notify();
     }
 
-    /// The selectable lines of the panel: the shown frame's source, what
-    /// stands in for it when the frame has none, or the message in place
-    /// of an answer.
+    /// The source file the panel shows, and the frame it is shown for.
+    pub(super) fn shown_file(&self) -> Option<(&SourceFile, &Frame)> {
+        let (located, at) = self.located()?;
+        let at = at?;
+        Some((located.file_of(at)?, located.frames.get(at)?))
+    }
+
+    /// Scrolls the shown file so the shown frame's line is in the middle.
+    fn centre_shown_line(&self) {
+        let Some(panel) = &self.source else {
+            return;
+        };
+        let Some((located, Some(at))) = self.located() else {
+            return;
+        };
+        if let Some(row) = located.centred_row(at) {
+            panel.scroll.scroll_to_item(row, ScrollStrategy::Center);
+        }
+    }
+
+    /// Scrolls the shown file so row `row` is at its top.
+    pub(super) fn scroll_source_to(&self, row: usize) {
+        if let Some(panel) = &self.source {
+            panel.scroll.scroll_to_item(row, ScrollStrategy::Top);
+        }
+    }
+
+    /// The selectable lines of the panel when it shows no file: what
+    /// stands in for the source of a frame without any, or the message in
+    /// place of an answer. A shown file's lines are read from the file.
     pub(super) fn source_lines(&self) -> Vec<Mapped> {
-        if let Some((located, Some(at))) = self.located() {
-            if let Some((_, lines)) = located.source_around(at, PANEL_RADIUS) {
-                return lines.iter().map(|l| viewer_line(l)).collect();
-            }
-            if let Some(frame) = located.frames.get(at) {
-                return frame
-                    .without_source()
-                    .into_iter()
-                    .map(Mapped::plain)
-                    .collect();
-            }
+        if let Some((located, Some(at))) = self.located()
+            && let Some(frame) = located.frames.get(at)
+        {
+            return frame
+                .without_source()
+                .into_iter()
+                .map(Mapped::plain)
+                .collect();
         }
         self.source
             .as_ref()
@@ -294,6 +334,12 @@ impl Scrubber {
             (Some(Shown::Unreadable { .. }), None) => "not available for this run".to_string(),
             (Some(Shown::Failed { .. }), None) => "could not walk the stack".to_string(),
         };
+        // A window of a large file says which of its lines it holds.
+        let shown_file = self.shown_file();
+        let status = match shown_file.and_then(|(file, _)| file.note()) {
+            Some(note) => format!("{status} \u{b7} {note}"),
+            None => status,
+        };
         let status = if panel.loading && panel.shown.is_some() {
             format!(
                 "{status} \u{b7} walking the stack at step {}\u{2026}",
@@ -330,50 +376,125 @@ impl Scrubber {
                     .child(status),
             );
 
-        // The body: the shown frame's source with its line marked, or its
-        // address and program when it has none, then the frame list; or a
-        // message in their place.
+        // The file area: the shown frame's whole file with its line marked,
+        // its address and program when it has no file, or a message in
+        // place of an answer.
         let registry = self.selecting.registry.clone();
         let selected = self.selected_range(Surface::Source);
-        let body = match (located, source_message(panel)) {
-            (Some(located), _) => {
-                let mut body = div().flex().flex_col().py(px(size::LIST_PAD_Y));
-                let source = at.and_then(|at| located.source_around(at, PANEL_RADIUS));
-                if let (None, Some(frame)) = (source, frame_shown) {
-                    for (i, text) in frame.without_source().into_iter().enumerate() {
-                        let part = selected
-                            .as_ref()
-                            .and_then(|r| part_of_line(r, i, text.len()));
-                        body = body.child(
-                            div()
-                                .w_full()
-                                .h(px(size::LOG_ROW_HEIGHT))
-                                .flex()
-                                .flex_none()
-                                .items_center()
-                                .px(px(size::PANEL_PAD_X))
-                                .whitespace_nowrap()
-                                .text_color(rgb(theme::MUTED))
-                                .child(selectable(Surface::Source, i, text, part, &registry)),
-                        );
-                    }
+        let file_area = match (shown_file, frame_shown, source_message(panel)) {
+            (Some((file, frame)), _, _) => {
+                self.render_file(file, frame, &panel.scroll, selected, cx)
+            }
+            (None, Some(frame), _) => {
+                let mut rows = div().flex().flex_col().py(px(size::LIST_PAD_Y));
+                for (i, text) in frame.without_source().into_iter().enumerate() {
+                    let part = selected
+                        .as_ref()
+                        .and_then(|r| part_of_line(r, i, text.len()));
+                    rows = rows.child(
+                        div()
+                            .w_full()
+                            .h(px(size::LOG_ROW_HEIGHT))
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .px(px(size::PANEL_PAD_X))
+                            .whitespace_nowrap()
+                            .text_color(rgb(theme::MUTED))
+                            .child(selectable(Surface::Source, i, text, part, &registry)),
+                    );
                 }
-                if let (Some((first, lines)), Some(frame)) = (source, frame_shown) {
-                    let last = first as usize + lines.len();
-                    let digits = last.to_string().len();
-                    for (i, line) in lines.iter().enumerate() {
-                        let number = first + i as u32;
-                        let marked = Some(number) == frame.line;
+                rows.into_any_element()
+            }
+            (None, None, Some((text, color))) => {
+                let part = selected
+                    .as_ref()
+                    .and_then(|r| part_of_line(r, 0, text.len()));
+                div()
+                    .p(px(size::PANEL_PAD_X))
+                    .font_family(self.fonts.ui.clone())
+                    .text_size(px(size::TEXT_UI))
+                    .text_color(rgb(color))
+                    .child(selectable(Surface::Source, 0, text, part, &registry))
+                    .into_any_element()
+            }
+            (None, None, None) => div().into_any_element(),
+        };
+        let dim = if panel.loading && panel.shown.is_some() {
+            STALE_OPACITY
+        } else {
+            1.0
+        };
+
+        // The frame list, pinned under the file area so it stays in reach
+        // however small the window.
+        let frames = located.map(|located| self.render_frames(located, at, cx).opacity(dim));
+
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .min_w_0()
+                .min_h_0()
+                .flex_basis(relative(0.0))
+                .bg(rgb(theme::PANEL))
+                .child(title)
+                .child(heading)
+                .child(selects(
+                    div()
+                        .id("source-body")
+                        .flex()
+                        .flex_col()
+                        .flex_grow(layout::FILL)
+                        .min_h_0()
+                        .opacity(dim)
+                        .cursor(CursorStyle::IBeam)
+                        .font_family(mono)
+                        .text_size(px(size::TEXT_MONO))
+                        .child(file_area),
+                    Surface::Source,
+                    cx,
+                ))
+                .children(frames),
+        )
+    }
+
+    /// The lines of `file`, drawn only where they are on screen, with
+    /// `frame`'s line marked and the selected part of each highlighted.
+    fn render_file(
+        &self,
+        file: &SourceFile,
+        frame: &Frame,
+        scroll: &UniformListScrollHandle,
+        selected: Option<Range<Pos>>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let count = file.lines.len();
+        let digits = file.number_of(count.saturating_sub(1)).to_string().len();
+        let marked_row = frame.line.and_then(|line| file.row_of(line));
+        uniform_list(
+            "source-lines",
+            count,
+            cx.processor(move |this, range: Range<usize>, _, _| {
+                let Some((file, _)) = this.shown_file() else {
+                    return Vec::new();
+                };
+                let registry = this.selecting.registry.clone();
+                range
+                    .filter_map(|row| {
+                        let line = file.lines.get(row)?;
+                        let marked = Some(row) == marked_row;
+                        let number = file.number_of(row);
                         let text = viewer_line(line).shown;
                         let part = selected
                             .as_ref()
-                            .and_then(|r| part_of_line(r, i, text.len()));
-                        body = body.child(
+                            .and_then(|r| part_of_line(r, row, text.len()));
+                        Some(
                             div()
+                                .id(row)
                                 .w_full()
                                 .h(px(size::LOG_ROW_HEIGHT))
                                 .flex()
-                                .flex_none()
                                 .items_center()
                                 .gap(px(size::LOG_COLUMN_GAP))
                                 .px(px(size::PANEL_PAD_X))
@@ -398,70 +519,28 @@ impl Scrubber {
                                         }))
                                         .child(selectable(
                                             Surface::Source,
-                                            i,
+                                            row,
                                             text,
                                             part,
                                             &registry,
                                         )),
                                 ),
-                        );
-                    }
-                }
-                body.child(self.render_frames(located, at, cx))
-                    .into_any_element()
-            }
-            (None, Some((text, color))) => {
-                let part = selected
-                    .as_ref()
-                    .and_then(|r| part_of_line(r, 0, text.len()));
-                div()
-                    .p(px(size::PANEL_PAD_X))
-                    .font_family(self.fonts.ui.clone())
-                    .text_size(px(size::TEXT_UI))
-                    .text_color(rgb(color))
-                    .child(selectable(Surface::Source, 0, text, part, &registry))
-                    .into_any_element()
-            }
-            (None, None) => div().into_any_element(),
-        };
-        let dim = if panel.loading && panel.shown.is_some() {
-            STALE_OPACITY
-        } else {
-            1.0
-        };
-
-        Some(
-            div()
-                .flex()
-                .flex_col()
-                .min_w_0()
-                .min_h_0()
-                .flex_basis(relative(0.0))
-                .bg(rgb(theme::PANEL))
-                .child(title)
-                .child(heading)
-                .child(selects(
-                    div()
-                        .id("source-body")
-                        .flex()
-                        .flex_col()
-                        .flex_grow(layout::FILL)
-                        .min_h_0()
-                        .overflow_y_scroll()
-                        .opacity(dim)
-                        .cursor(CursorStyle::IBeam)
-                        .font_family(mono)
-                        .text_size(px(size::TEXT_MONO))
-                        .child(body),
-                    Surface::Source,
-                    cx,
-                )),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            }),
         )
+        .track_scroll(scroll)
+        .flex_grow(layout::FILL)
+        .min_h_0()
+        .py(px(size::LIST_PAD_Y))
+        .into_any_element()
     }
 
     /// The thread's frames, innermost first, the one whose source is
-    /// shown marked: each frame's level, function and place. Clicking a
-    /// row shows that frame's source.
+    /// shown marked: each frame's level, function and place, in a list of
+    /// its own that scrolls past a few rows. Clicking a row shows that
+    /// frame's source.
     fn render_frames(&self, located: &Located, at: Option<usize>, cx: &mut Context<Self>) -> Div {
         let row = |i: usize, frame: &Frame| {
             let shown = at == Some(i);
@@ -518,7 +597,13 @@ impl Scrubber {
         div()
             .flex()
             .flex_col()
-            .mt(px(size::SECTION_GAP))
+            .flex_none()
+            .pt(px(size::CARD_GAP))
+            .pb(px(size::LIST_PAD_Y))
+            .border_t_1()
+            .border_color(rgb(theme::LINE_SOFT))
+            .font_family(self.fonts.mono.clone())
+            .text_size(px(size::TEXT_MONO))
             .child(
                 div()
                     .px(px(size::PANEL_PAD_X))
@@ -528,12 +613,20 @@ impl Scrubber {
                     .text_color(rgb(theme::MUTED))
                     .child("FRAMES"),
             )
-            .children(
-                located
-                    .frames
-                    .iter()
-                    .enumerate()
-                    .map(|(i, frame)| row(i, frame)),
+            .child(
+                div()
+                    .id("source-frames")
+                    .flex()
+                    .flex_col()
+                    .max_h(px(FRAME_ROWS_SHOWN * size::LOG_ROW_HEIGHT))
+                    .overflow_y_scroll()
+                    .children(
+                        located
+                            .frames
+                            .iter()
+                            .enumerate()
+                            .map(|(i, frame)| row(i, frame)),
+                    ),
             )
     }
 }

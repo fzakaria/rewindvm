@@ -833,7 +833,7 @@ mod tests {
     fn locate_returns_the_chosen_frame_or_the_engines_reason() {
         let dir = temp_dir("where");
         let run = dir.join("run");
-        let json = r#"{"run":"r","step":5060,"pid":166,"tid":174,"process":"test_pool_shutdown","frames":[{"level":0,"function":"worker","file":"src/pool.c","fullname":null,"line":77,"pc":"0x55bfaf437437","object":"/build/mylib/tests/test_pool_shutdown"}],"chosen":0,"sources":[null]}\n"#;
+        let json = r#"{"run":"r","step":5060,"pid":166,"tid":174,"process":"test_pool_shutdown","frames":[{"level":0,"function":"worker","file":"src/pool.c","fullname":null,"line":77,"pc":"0x55bfaf437437","object":"/build/mylib/tests/test_pool_shutdown"}],"chosen":0,"files":{}}\n"#;
         let engine = fake_engine(&dir, json, "rewind: walking the stack in gdb\n", 0);
         let located = retrying(|| engine.locate(&run, 5_060, 166, 174, &mut |_| {})).unwrap();
         assert_eq!(
@@ -872,7 +872,7 @@ mod tests {
                 "#!/bin/sh\nprintf 'rewind: downloading debug info for libc.so.6; first time only\\n' >&2\n\
                  i=0; while [ ! -e '{go}' ] && [ $i -lt 500 ]; do sleep 0.01; i=$((i + 1)); done\n\
                  [ -e '{go}' ] || exit 1\n\
-                 printf '%s\\n' '{{\"run\":\"r\",\"step\":1,\"pid\":2,\"tid\":2,\"process\":\"p\",\"frames\":[],\"chosen\":null,\"sources\":[]}}'\n",
+                 printf '%s\\n' '{{\"run\":\"r\",\"step\":1,\"pid\":2,\"tid\":2,\"process\":\"p\",\"frames\":[],\"chosen\":null,\"files\":{{}}}}'\n",
                 go = go.display()
             ),
         )

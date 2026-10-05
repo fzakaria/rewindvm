@@ -385,8 +385,9 @@ enum Command {
         /// How many frames that called the chosen one to show.
         #[arg(long, default_value_t = DEFAULT_CALLERS)]
         frames: usize,
-        /// Print every frame, each with the source lines around its line,
-        /// and the chosen one's index as one JSON object on standard
+        /// Print every frame, the chosen one's index and each source file
+        /// the frames are in, whole up to a mebibyte and the lines around
+        /// the frames' lines past that, as one JSON object on standard
         /// output, for programs such as the desktop app.
         #[arg(long)]
         json: bool,

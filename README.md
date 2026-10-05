@@ -184,8 +184,9 @@ playhead. Fork from here branches the run under a new schedule.
 Open shell starts a shell inside the VM at the playhead, in the build's
 directory with its environment, and Attach gdb opens gdb on the same fork,
 both in a terminal pane below the scrubber. Show source, or the s key, opens
-a panel with the line of the program's own code the playhead's thread was
-on, and the frames that led there; clicking a frame shows its source.
+a panel with the whole source file of the program's own code the playhead's
+thread was in, scrolled to the line it was on, and the frames that led there
+in a short list below; clicking a frame shows its file at its line.
 
 Every run of a build is one family: the run under schedule 0, with its
 threads left alone, the schedules `rewind check` tried, and every fork. The

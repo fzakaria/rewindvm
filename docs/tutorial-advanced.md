@@ -81,10 +81,13 @@ work on runs recorded with a guest that lists its tasks, as these were.
 
 In the app, Show source under Inspect, or the s key, opens the source panel
 in place of At this step. It names the line `rewind where` would for the
-thread of the playhead's event, marks it in the source around it, and lists
-the thread's frames below with the chosen one marked. Clicking another frame
-shows its source instead, with its line marked; a frame without source shows
-its address and program. When the playhead rests on another step the panel
+thread of the playhead's event and shows that line's whole source file,
+scrolled so the line, marked, sits in the middle. The thread's frames are
+listed in a short list pinned below the file, with the chosen one marked.
+Clicking another frame shows its file instead, scrolled to its line and
+marked; a frame without source shows its address and program. A file over a
+mebibyte comes as the lines around its frames' lines, and the panel says
+which. When the playhead rests on another step the panel
 asks again, back at the chosen frame, dimming the last answer meanwhile; each
 answer forks the run, so it takes a few seconds. Runs the app cannot fork
 say so instead: the bundled example and an export that holds only the trace.
