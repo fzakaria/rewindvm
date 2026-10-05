@@ -156,6 +156,9 @@ $ rewind prune <run> --identical
 $ rewind remove <run> --dry-run
 $ rewind remove <run>
 
+# remove many runs in one call, here every fork, keeping the runs forked from
+$ rewind ls | awk '/fork of/ {print $1}' | xargs rewind remove
+
 # remove the cached images and stored pages no run uses any more
 $ rewind gc --dry-run
 $ rewind gc

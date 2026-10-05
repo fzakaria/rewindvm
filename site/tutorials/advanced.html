@@ -523,7 +523,9 @@ d07651b4715961ca  exited:0          6586 steps  mylib-0.3.0 (fork of 77cb8e22b8c
 removed d07651b4715961ca
 rewind: `rewind gc` removes the pages no run uses any more</code></pre>
         <p>
-          <code>remove</code> takes a run with every run forked from it.
+          <code>remove</code> takes a run with every run forked from it, and takes many runs in one
+          call. Every fork goes, and the runs they were forked from stay, with
+          <code>rewind ls | awk '/fork of/ {print $1}' | xargs rewind remove</code>.
           <code>prune --identical</code> removes forks that ran exactly as an older one did.
         </p>
       </section>

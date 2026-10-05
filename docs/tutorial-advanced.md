@@ -336,8 +336,10 @@ removed d07651b4715961ca
 rewind: `rewind gc` removes the pages no run uses any more
 ```
 
-`remove` takes a run with every run forked from it. `prune --identical`
-removes forks that ran exactly as an older one did.
+`remove` takes a run with every run forked from it, and takes many runs in
+one call. Every fork goes, and the runs they were forked from stay, with
+`rewind ls | awk '/fork of/ {print $1}' | xargs rewind remove`.
+`prune --identical` removes forks that ran exactly as an older one did.
 
 ## What to read next
 

@@ -448,15 +448,20 @@ fails with the id of the run it needs; `rewind replay` from boot still works.
 
 ### Removing runs
 
-`rewind remove <run>` removes the run and every run that descends from it
-through `parent`, with any inputs an import placed for them, the deepest
-first, so a removal cut short never leaves a fork whose parent is gone. It
-removes nothing while a process is executing one of those runs, or while a
-run outside them reads keyframes from one of them, and names that run. A
-run whose execution was killed is interrupted, and goes like any other. Such a
-reader is rare, since a run reads keyframes only from its parent, but
+`rewind remove <run>...` removes the runs and every run that descends from
+them through `parent`, with any inputs an import placed for them, the
+deepest first, so a removal cut short never leaves a fork whose parent is
+gone. It removes nothing while a process is executing one of those runs, or
+while a run outside them reads keyframes from one of them, and names that
+run. A run whose execution was killed is interrupted, and goes like any other.
+Such a reader is rare, since a run reads keyframes only from its parent, but
 running a fork's inputs again as a plain run makes one: the run keeps the
 fork's keyframes and loses its parent.
+
+Each call reads every manifest in the home once, so many runs go in one call
+rather than one call each: on a home of 8,000 runs, removing 6,000 with one
+call per run took 35 minutes, and the refusals are checked once for the
+whole set, so a run and the run that reads its keyframes can go together.
 
 `rewind prune <run> --identical` removes forks in a run's family, its forks
 and their forks, whose `trace_hash` equals an older member's. The run itself

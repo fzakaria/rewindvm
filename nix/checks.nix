@@ -348,6 +348,10 @@ in
         grep -q "{\"removed\":\[\"$leaf\"\]}" removed
         test ! -e $REWIND_HOME/runs/$leaf
 
+        # Two more leaves of the fork of a fork, removed together below.
+        leaf1=$(rewind fork $fork2 $((step + 20)) --schedule 10 --json | id)
+        leaf2=$(rewind fork $fork2 $((step + 30)) --schedule 11 --json | id)
+
         # Running the fork's inputs again as a plain run leaves the fork
         # with no parent, still reading a's keyframes, so a stays.
         rewind run -q --schedule 3 --schedule-from 400 --root ${busyboxRoot} -- sh -c '${workload}'
@@ -356,6 +360,16 @@ in
         cat refused
         grep -q "run $fork reads its keyframes up to step 399 from " refused
         rewind replay a --from 300 | grep '^identical'
+
+        # Several runs go in one call, each once, and one refused among
+        # them keeps them all.
+        ! rewind remove $leaf1 a 2> refused
+        grep -q "run $fork reads its keyframes up to step 399 from " refused
+        test -d $REWIND_HOME/runs/$leaf1
+        rewind remove $leaf1 $leaf2 $leaf1 --json | tee removed
+        grep -q "{\"removed\":\[\"$leaf1\",\"$leaf2\"\]}" removed
+        test ! -e $REWIND_HOME/runs/$leaf1
+        test ! -e $REWIND_HOME/runs/$leaf2
 
         rewind remove $fork2 --dry-run | tee planned
         grep -q "would remove $fork2" planned

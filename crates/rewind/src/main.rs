@@ -279,17 +279,19 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Remove a run and every run forked from it, from those, and so on,
+    /// Remove runs and every run forked from them, from those, and so on,
     /// with their imported inputs. Refused, removing nothing, while one of
     /// them has not finished or a run that stays reads keyframes from one
     /// of them. The images and pages they used stay until `rewind gc`.
+    /// Many runs at once take one call: `xargs rewind remove < ids`.
     Remove {
-        run: String,
+        #[arg(value_name = "RUN", required = true)]
+        runs: Vec<String>,
         /// Show what would be removed and remove nothing.
         #[arg(long)]
         dry_run: bool,
-        /// Print {"removed": [ids]} on standard output, the run first, for
-        /// programs such as the desktop app.
+        /// Print {"removed": [ids]} on standard output, each run named
+        /// before its forks, for programs such as the desktop app.
         #[arg(long)]
         json: bool,
     },
@@ -857,14 +859,22 @@ fn run(cli: Cli) -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        Command::Remove { run, dry_run, json } => {
-            let run = Run::find(&home, &run)?;
+        Command::Remove {
+            runs,
+            dry_run,
+            json,
+        } => {
+            // Every run named must resolve before any is removed.
+            let runs = runs
+                .iter()
+                .map(|run| Run::find(&home, run))
+                .collect::<Result<Vec<Run>>>()?;
             let act = if dry_run {
                 rewind_core::prune::Act::DryRun
             } else {
                 rewind_core::prune::Act::Remove
             };
-            let removed = rewind_core::prune::remove_with_forks(&home, &run, act)?;
+            let removed = rewind_core::prune::remove_with_forks(&home, &runs, act)?;
             if json {
                 println!("{}", serde_json::json!({ "removed": removed }));
                 return Ok(ExitCode::SUCCESS);
