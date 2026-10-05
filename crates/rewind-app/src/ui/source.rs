@@ -26,7 +26,7 @@ use gpui::{
 };
 
 use crate::describe::thousands;
-use crate::engine::{REPLAYS_ANOTHER_WAY, goes_another_way};
+use crate::engine::{Cancel, REPLAYS_ANOTHER_WAY, goes_another_way};
 use crate::request::Request;
 use crate::run::Replays;
 use crate::selection::{Mapped, Pos, Surface, part_of_line};
@@ -66,6 +66,8 @@ pub struct SourcePanel {
     /// The request whose answer this waits on; an answer to any other,
     /// from before the playhead moved or this was opened, is dropped.
     request: Request,
+    /// Stops the engine command of the latest request while it runs.
+    in_flight: Option<Cancel>,
     /// The shown file's scroll position.
     scroll: UniformListScrollHandle,
     /// Each file's colors, as far as they have been drawn, by the path
@@ -73,6 +75,23 @@ pub struct SourcePanel {
     highlighters: HashMap<String, Highlighter>,
     /// How far the shown file's lines are scrolled sideways.
     sideways: Sideways,
+}
+
+impl SourcePanel {
+    /// Stops the engine command the latest request started, if it still
+    /// runs: a newer request, or the panel closing, leaves its answer with
+    /// no one to read it.
+    fn supersede(&mut self) {
+        if let Some(cancel) = self.in_flight.take() {
+            cancel.cancel();
+        }
+    }
+}
+
+impl Drop for SourcePanel {
+    fn drop(&mut self) {
+        self.supersede();
+    }
 }
 
 impl Scrubber {
@@ -92,6 +111,7 @@ impl Scrubber {
             loading: readable,
             progress: Progress::default(),
             request: self.requests.issue(),
+            in_flight: None,
             scroll: UniformListScrollHandle::new(),
             highlighters: HashMap::new(),
             sideways: Sideways::default(),
@@ -130,6 +150,7 @@ impl Scrubber {
         }
         panel.step = step;
         panel.loading = true;
+        panel.supersede();
         panel.request = self.requests.issue();
         let request = panel.request;
         let timer = cx.background_executor().timer(DEBOUNCE);
@@ -152,6 +173,7 @@ impl Scrubber {
         let (Some(panel), Some(session)) = (&mut self.source, &self.session) else {
             return;
         };
+        panel.supersede();
         panel.request = self.requests.issue();
         let step = panel.step;
 
@@ -189,8 +211,10 @@ impl Scrubber {
         // The engine's lines come through a channel as it says them, and
         // the channel closes when the engine is done.
         let (lines, mut said) = futures::channel::mpsc::unbounded::<String>();
+        let cancel = Cancel::default();
+        panel.in_flight = Some(cancel.clone());
         let task = cx.background_executor().spawn(async move {
-            engine.locate(&run, step, pid, tid, &mut |line| {
+            engine.locate(&run, step, pid, tid, &cancel, &mut |line| {
                 let _ = lines.unbounded_send(line.to_string());
             })
         });

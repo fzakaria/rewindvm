@@ -10,7 +10,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    Context, FocusHandle, PathPromptOptions, SharedString, UniformListScrollHandle, Window,
+    Context, FocusHandle, PathPromptOptions, SharedString, Subscription, UniformListScrollHandle,
+    Window,
 };
 
 use crate::describe::thousands;
@@ -227,6 +228,8 @@ pub fn replay_unavailable(session: &Session, replay: Replay, importing: bool) ->
 
 /// The scrubber: one run, the playhead over it, and everything around.
 pub struct Scrubber {
+    /// Kept for as long as the scrubber, which keeps its quit hook.
+    _on_quit: Subscription,
     pub(super) focus: FocusHandle,
     pub(super) fonts: Fonts,
     pub(super) engine: Arc<dyn Engine>,
@@ -323,7 +326,16 @@ impl Scrubber {
     pub fn new(launch: Launch, fonts: Fonts, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
+
+        // Lookups still running when the app quits are stopped, as
+        // dropping the viewer and the source panel stops them.
+        let on_quit = cx.on_app_quit(|this: &mut Scrubber, _| {
+            this.viewer = None;
+            this.source = None;
+            async {}
+        });
         let mut this = Scrubber {
+            _on_quit: on_quit,
             focus,
             fonts,
             engine: launch.engine,

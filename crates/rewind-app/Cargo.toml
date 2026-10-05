@@ -21,6 +21,9 @@ base64 = "0.22"
 ed25519-dalek = "2"
 # Channels from the terminal's reader thread to the UI.
 futures = "0.3"
+# Signals to stop an engine command's process group when its lookup is
+# cancelled.
+libc = "0.2"
 # .rwd exports: a tar archive compressed with zstd, as the engine writes them.
 tar = "0.4"
 zstd = "0.13"

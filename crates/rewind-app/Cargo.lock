@@ -4813,6 +4813,7 @@ dependencies = [
  "futures",
  "gpui-pre",
  "gpui-pre-platform",
+ "libc",
  "log",
  "rewind-text-input",
  "rewind-trace",

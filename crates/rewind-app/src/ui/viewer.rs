@@ -16,7 +16,7 @@ use gpui::{
 };
 
 use crate::describe::{short_store_paths, thousands};
-use crate::engine::{EngineError, FileAtStep, REPLAYS_ANOTHER_WAY, goes_another_way};
+use crate::engine::{Cancel, EngineError, FileAtStep, REPLAYS_ANOTHER_WAY, goes_another_way};
 use crate::request::Request;
 use crate::run::{Origin, Replays, Session};
 use crate::selection::{Mapped, Surface, part_of_line};
@@ -98,12 +98,31 @@ pub struct FileViewer {
     /// The request whose answer this waits on; an answer to any other,
     /// from before the playhead moved or this was opened, is dropped.
     request: Request,
+    /// Stops the engine command of the latest request while it runs.
+    in_flight: Option<Cancel>,
     scroll: UniformListScrollHandle,
     /// The shown text's colors, as far as they have been drawn.
     highlighter: Highlighter,
     /// How far the lines are scrolled sideways; kept as the playhead
     /// moves, so a long line stays in view from step to step.
     sideways: Sideways,
+}
+
+impl FileViewer {
+    /// Stops the engine command the latest request started, if it still
+    /// runs: a newer request, or the viewer closing, leaves its answer
+    /// with no one to read it.
+    fn supersede(&mut self) {
+        if let Some(cancel) = self.in_flight.take() {
+            cancel.cancel();
+        }
+    }
+}
+
+impl Drop for FileViewer {
+    fn drop(&mut self) {
+        self.supersede();
+    }
 }
 
 /// Why a session's files cannot be read, if they cannot.
@@ -137,6 +156,7 @@ impl Scrubber {
             shown: None,
             loading: unavailable.is_none(),
             request: self.requests.issue(),
+            in_flight: None,
             scroll: UniformListScrollHandle::new(),
             highlighter: Highlighter::new(None),
             sideways: Sideways::default(),
@@ -222,6 +242,7 @@ impl Scrubber {
         }
         viewer.step = step;
         viewer.loading = true;
+        viewer.supersede();
         viewer.request = self.requests.issue();
         let request = viewer.request;
         let timer = cx.background_executor().timer(DEBOUNCE);
@@ -243,6 +264,7 @@ impl Scrubber {
         let (Some(viewer), Some(session)) = (&mut self.viewer, &self.session) else {
             return;
         };
+        viewer.supersede();
         viewer.request = self.requests.issue();
 
         // While the VM boots there are no files of the job to read yet.
@@ -265,9 +287,11 @@ impl Scrubber {
             viewer.path.clone(),
         );
         let engine = self.engine.clone();
+        let cancel = Cancel::default();
+        viewer.in_flight = Some(cancel.clone());
         let task = cx
             .background_executor()
-            .spawn(async move { engine.cat(&run, step, Some(pid), &path) });
+            .spawn(async move { engine.cat(&run, step, Some(pid), &path, &cancel) });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {

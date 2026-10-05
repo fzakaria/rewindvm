@@ -12,8 +12,10 @@
 
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 
 use crate::run::MANIFEST_FILE;
 use crate::source::Located;
@@ -47,6 +49,9 @@ pub enum EngineError {
     Failed { command: String, message: String },
     /// The engine made a run the app cannot find on disk.
     Lost { id: String },
+    /// The request was cancelled, superseded by a newer one, before the
+    /// engine answered.
+    Cancelled,
 }
 
 impl std::fmt::Display for EngineError {
@@ -61,11 +66,70 @@ impl std::fmt::Display for EngineError {
                 f,
                 "The engine made run {id}, but it is not next to its parent or in the Rewind home."
             ),
+            EngineError::Cancelled => write!(f, "The request was cancelled."),
         }
     }
 }
 
 impl std::error::Error for EngineError {}
+
+/// A way to stop an engine command from another thread. The UI keeps one
+/// beside each lookup it waits on and cancels it when a newer request
+/// supersedes the lookup or the window closes, so the engine's VM and gdb
+/// stop instead of running on for an answer nobody reads.
+#[derive(Clone, Default)]
+pub struct Cancel(Arc<Mutex<CancelState>>);
+
+#[derive(Default)]
+struct CancelState {
+    cancelled: bool,
+    /// The process group of the engine command while it runs.
+    group: Option<u32>,
+}
+
+impl Cancel {
+    /// Stops the command, now if it runs, or as soon as it starts.
+    pub fn cancel(&self) {
+        let mut state = self.0.lock().unwrap();
+        state.cancelled = true;
+        if let Some(group) = state.group.take() {
+            stop_group(group);
+        }
+    }
+
+    fn cancelled(&self) -> bool {
+        self.0.lock().unwrap().cancelled
+    }
+
+    /// Records the command's process group, the engine's process id, as
+    /// it starts. False, with the group stopped, when the request was
+    /// cancelled meanwhile.
+    fn started(&self, group: u32) -> bool {
+        let mut state = self.0.lock().unwrap();
+        if state.cancelled {
+            stop_group(group);
+            return false;
+        }
+        state.group = Some(group);
+        true
+    }
+
+    /// Forgets the group once the command has been waited for, so a later
+    /// cancel cannot signal a process group whose id was reused.
+    fn finished(&self) {
+        self.0.lock().unwrap().group = None;
+    }
+}
+
+/// Asks every process in the engine command's group to end: the engine,
+/// and gdb when it runs one.
+fn stop_group(group: u32) {
+    let Ok(group) = i32::try_from(group) else {
+        return;
+    };
+    // SAFETY: sends a signal to a process group this app started.
+    unsafe { libc::kill(-group, libc::SIGTERM) };
+}
 
 /// What the app says of a run this build of rewind replays another way than
 /// the build that recorded it, in place of files, source, a shell, gdb or
@@ -165,20 +229,30 @@ pub trait Engine: Send + Sync {
     /// Reads `path` inside the VM as it was at `step` of `run`, as process
     /// `pid` saw it when one is given. The engine brings the run back to
     /// the step to read it, which takes seconds.
-    fn cat(&self, run: &Path, step: u64, pid: Option<u32>, path: &str) -> EngineResult<FileAtStep>;
+    /// `cancel` stops it early.
+    fn cat(
+        &self,
+        run: &Path,
+        step: u64,
+        pid: Option<u32>,
+        path: &str,
+        cancel: &Cancel,
+    ) -> EngineResult<FileAtStep>;
 
     /// Where in the program's own code thread `tid` of process `pid` was
     /// at `step` of `run`: the thread's frames, the innermost of them in
     /// the program's own code, and its source. The engine forks the run at
     /// the step and walks the thread's stack in gdb, which takes seconds,
     /// or a minute the first time gdb downloads a library's debug info;
-    /// `progress` is handed each line the engine says while it works.
+    /// `progress` is handed each line the engine says while it works, and
+    /// `cancel` stops it early.
     fn locate(
         &self,
         run: &Path,
         step: u64,
         pid: u32,
         tid: u32,
+        cancel: &Cancel,
         progress: &mut dyn FnMut(&str),
     ) -> EngineResult<Located>;
 }
@@ -436,7 +510,14 @@ impl Engine for CliEngine {
         }
     }
 
-    fn cat(&self, run: &Path, step: u64, pid: Option<u32>, path: &str) -> EngineResult<FileAtStep> {
+    fn cat(
+        &self,
+        run: &Path,
+        step: u64,
+        pid: Option<u32>,
+        path: &str,
+        cancel: &Cancel,
+    ) -> EngineResult<FileAtStep> {
         // `rewind cat` exits 2 for a file that did not exist at the step.
         const MISSING_STATUS: i32 = 2;
 
@@ -456,11 +537,17 @@ impl Engine for CliEngine {
             command: command.clone(),
             message,
         };
+
+        // In a process group of its own, which cancelling stops whole.
+        if cancel.cancelled() {
+            return Err(EngineError::Cancelled);
+        }
         let mut child = Command::new(&self.program)
             .args(&args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .process_group(0)
             .spawn()
             .map_err(|e| match e.kind() {
                 std::io::ErrorKind::NotFound => EngineError::Missing {
@@ -468,6 +555,10 @@ impl Engine for CliEngine {
                 },
                 _ => failed(e.to_string()),
             })?;
+        if !cancel.started(child.id()) {
+            let _ = child.wait();
+            return Err(EngineError::Cancelled);
+        }
 
         // Read no more than the viewer shows, and one byte more to know
         // whether there was more; stop the engine if there was.
@@ -482,6 +573,7 @@ impl Engine for CliEngine {
             bytes.truncate(viewer::MAX_SHOWN);
             let _ = child.kill();
             let _ = child.wait();
+            cancel.finished();
             return Ok(FileAtStep::Exists {
                 bytes,
                 complete: FetchedAll::No,
@@ -492,6 +584,10 @@ impl Engine for CliEngine {
             let _ = pipe.read_to_string(&mut stderr);
         }
         let status = child.wait().map_err(|e| failed(e.to_string()))?;
+        cancel.finished();
+        if cancel.cancelled() {
+            return Err(EngineError::Cancelled);
+        }
         match status.code() {
             Some(0) => Ok(FileAtStep::Exists {
                 bytes,
@@ -512,9 +608,10 @@ impl Engine for CliEngine {
         step: u64,
         pid: u32,
         tid: u32,
+        cancel: &Cancel,
         progress: &mut dyn FnMut(&str),
     ) -> EngineResult<Located> {
-        self.where_json(run, step, pid, tid, progress)
+        self.where_json(run, step, pid, tid, cancel, progress)
     }
 }
 
@@ -526,6 +623,7 @@ impl CliEngine {
         step: u64,
         pid: u32,
         tid: u32,
+        cancel: &Cancel,
         progress: &mut dyn FnMut(&str),
     ) -> EngineResult<Located> {
         // rewind where <run> <step> --pid P --tid T --json
@@ -540,13 +638,24 @@ impl CliEngine {
             "--json".into(),
         ];
         let command = self.command_line(&args);
+
+        // In a process group of its own, with the gdb it starts, which
+        // cancelling stops whole.
+        if cancel.cancelled() {
+            return Err(EngineError::Cancelled);
+        }
         let mut child = Command::new(&self.program)
             .args(&args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .process_group(0)
             .spawn()
             .map_err(|e| self.spawn_error(e, &command))?;
+        if !cancel.started(child.id()) {
+            let _ = child.wait();
+            return Err(EngineError::Cancelled);
+        }
 
         // The answer is read beside the engine's lines, so a full pipe
         // cannot stop the engine.
@@ -570,7 +679,11 @@ impl CliEngine {
             }
         }
         let status = child.wait().map_err(|e| self.spawn_error(e, &command))?;
+        cancel.finished();
         let stdout = answer.join().unwrap_or_default();
+        if cancel.cancelled() {
+            return Err(EngineError::Cancelled);
+        }
 
         let stdout = String::from_utf8_lossy(&stdout);
         let located = stdout
@@ -694,6 +807,80 @@ mod tests {
         .unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         CliEngine::new(script)
+    }
+
+    /// The first `Some` that `attempt` gives, trying again a moment later
+    /// while it gives None; `what` names the wait when it never ends.
+    fn wait_for<T>(what: &str, mut attempt: impl FnMut() -> Option<T>) -> T {
+        const TRIES: u32 = 500;
+        const PAUSE: std::time::Duration = std::time::Duration::from_millis(10);
+        for _ in 0..TRIES {
+            if let Some(found) = attempt() {
+                return found;
+            }
+            std::thread::sleep(PAUSE);
+        }
+        panic!("gave up waiting for {what}");
+    }
+
+    /// A stand-in engine that writes its process id to `pid` in `dir` and
+    /// then waits half a minute, as a lookup on a long run does.
+    fn slow_engine(dir: &Path) -> CliEngine {
+        let script = dir.join("rewind");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\necho $$ > \"{}/pid\"\nexec sleep 30\n",
+                dir.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        CliEngine::new(script)
+    }
+
+    #[test]
+    fn a_cancelled_lookup_stops_the_engine() {
+        // A `rewind cat` that would take half a minute, cancelled once the
+        // engine has started: the call returns as cancelled within a few
+        // seconds, and the engine's process is gone.
+        const GIVE_UP: std::time::Duration = std::time::Duration::from_secs(5);
+        let dir = temp_dir("cancel");
+        let engine = slow_engine(&dir);
+        let cancel = Cancel::default();
+        let call = {
+            let cancel = cancel.clone();
+            std::thread::spawn(move || {
+                engine.cat(Path::new("/run"), 5, None, "/etc/hosts", &cancel)
+            })
+        };
+        let pid_file = dir.join("pid");
+        let pid: i32 = wait_for("the engine to start", || {
+            std::fs::read_to_string(&pid_file).ok()?.trim().parse().ok()
+        });
+
+        let asked = std::time::Instant::now();
+        cancel.cancel();
+        let result = call.join().unwrap();
+        assert!(asked.elapsed() < GIVE_UP);
+        assert!(matches!(result, Err(EngineError::Cancelled)), "{result:?}");
+        // SAFETY: signal 0 only asks whether the process exists.
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_lookup_cancelled_before_it_starts_runs_nothing() {
+        // A request superseded before its engine call begins returns as
+        // cancelled without starting the engine.
+        let dir = temp_dir("cancel-early");
+        let engine = slow_engine(&dir);
+        let cancel = Cancel::default();
+        cancel.cancel();
+        let result = engine.cat(Path::new("/run"), 5, None, "/etc/hosts", &cancel);
+        assert!(matches!(result, Err(EngineError::Cancelled)));
+        assert!(!dir.join("pid").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -867,7 +1054,9 @@ mod tests {
         let run = dir.join("run");
         let json = r#"{"run":"r","step":5060,"pid":166,"tid":174,"process":"test_pool_shutdown","frames":[{"level":0,"function":"worker","file":"src/pool.c","fullname":null,"line":77,"pc":"0x55bfaf437437","object":"/build/mylib/tests/test_pool_shutdown"}],"chosen":0,"files":{}}\n"#;
         let engine = fake_engine(&dir, json, "rewind: walking the stack in gdb\n", 0);
-        let located = retrying(|| engine.locate(&run, 5_060, 166, 174, &mut |_| {})).unwrap();
+        let located =
+            retrying(|| engine.locate(&run, 5_060, 166, 174, &Cancel::default(), &mut |_| {}))
+                .unwrap();
         assert_eq!(
             located.chosen_frame().unwrap().place_label(),
             "src/pool.c:77"
@@ -879,7 +1068,8 @@ mod tests {
         );
 
         let refusing = fake_engine(&dir, "", "rewind: no process 166 at this step\n", 1);
-        let err = retrying(|| refusing.locate(&run, 10, 166, 166, &mut |_| {})).unwrap_err();
+        let err = retrying(|| refusing.locate(&run, 10, 166, 166, &Cancel::default(), &mut |_| {}))
+            .unwrap_err();
         let EngineError::Failed { message, .. } = err else {
             panic!("{err:?}");
         };
@@ -914,7 +1104,7 @@ mod tests {
 
         let said = std::cell::RefCell::new(Vec::new());
         let located = retrying(|| {
-            engine.locate(&run, 1, 2, 2, &mut |line| {
+            engine.locate(&run, 1, 2, 2, &Cancel::default(), &mut |line| {
                 said.borrow_mut().push(line.to_string());
                 std::fs::write(&go, "").unwrap();
             })
@@ -936,7 +1126,16 @@ mod tests {
         let dir = temp_dir("cat");
         let run = dir.join("run");
         let engine = fake_engine(&dir, "CFLAGS = -O1\\n", "", 0);
-        let read = retrying(|| engine.cat(&run, 3_795, Some(174), "/build/Makefile")).unwrap();
+        let read = retrying(|| {
+            engine.cat(
+                &run,
+                3_795,
+                Some(174),
+                "/build/Makefile",
+                &Cancel::default(),
+            )
+        })
+        .unwrap();
         assert_eq!(
             read,
             FileAtStep::Exists {
@@ -948,11 +1147,12 @@ mod tests {
         assert!(args.contains("cat") && args.contains("3795 /build/Makefile --pid 174"));
 
         let engine = fake_engine(&dir, "", "rewind: no such file then\\n", 2);
-        let read = retrying(|| engine.cat(&run, 10, None, "/build/core")).unwrap();
+        let read =
+            retrying(|| engine.cat(&run, 10, None, "/build/core", &Cancel::default())).unwrap();
         assert_eq!(read, FileAtStep::Missing);
 
         let engine = fake_engine(&dir, "", "rewind: no keyframes for this run\\n", 1);
-        let err = retrying(|| engine.cat(&run, 10, None, "/x")).unwrap_err();
+        let err = retrying(|| engine.cat(&run, 10, None, "/x", &Cancel::default())).unwrap_err();
         let EngineError::Failed { message, .. } = err else {
             panic!("{err:?}");
         };
