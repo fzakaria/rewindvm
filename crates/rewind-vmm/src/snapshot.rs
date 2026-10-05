@@ -240,20 +240,12 @@ impl Machine {
         }
         let mut m = Self::create(config)?;
 
-        // Memory: each keyframe's pages over the ones before it.
+        // Memory: each page once, with the contents the last keyframe that
+        // lists it gives it.
         let ram = m.dev.ram.as_mut_slice();
-        for kf in chain {
-            for (index, hash) in &kf.pages {
-                let at = *index as usize * PAGE_SIZE;
-                let page = ram
-                    .get_mut(at..at + PAGE_SIZE)
-                    .context("keyframe page is outside the VM's memory")?;
-                if *hash == ZERO_PAGE {
-                    page.fill(0);
-                } else {
-                    pages.get(hash, page)?;
-                }
-            }
+        for (index, hash) in final_pages(chain, ram.len() / PAGE_SIZE)? {
+            let at = index as usize * PAGE_SIZE;
+            pages.get(hash, &mut ram[at..at + PAGE_SIZE])?;
         }
         // Start the dirty log afresh from the restored memory.
         m.vm.get_dirty_log(SLOT_RAM, m.dev.ram.len())?;
@@ -305,5 +297,72 @@ impl Machine {
         m.dev.step = d.step;
         m.work_base = d.branches;
         Ok(m)
+    }
+}
+
+/// The pages restoring `chain` leaves non-zero, in page order, each once
+/// with the hash of the contents the last keyframe that lists it gives it:
+/// each keyframe's pages are written over the ones before it. A page whose
+/// last contents are zero is left out, since a new machine's memory is
+/// zero. A chain of keyframes taken while a run executes lists the pages a
+/// build keeps rewriting many times over, so this reads each from the
+/// store once instead of once per keyframe. Fails when a page is past the
+/// machine's `ram_pages`.
+fn final_pages(chain: &[Keyframe], ram_pages: usize) -> Result<Vec<(u32, &[u8; 32])>> {
+    let mut last: Vec<Option<&[u8; 32]>> = vec![None; ram_pages];
+    for kf in chain {
+        for (index, hash) in &kf.pages {
+            let slot = last
+                .get_mut(*index as usize)
+                .context("keyframe page is outside the VM's memory")?;
+            *slot = Some(hash);
+        }
+    }
+    Ok((0u32..)
+        .zip(last)
+        .filter_map(|(index, hash)| Some((index, hash?)))
+        .filter(|(_, hash)| **hash != ZERO_PAGE)
+        .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    // Keyframe chains as restoring reads them, with no VM.
+    use super::*;
+
+    /// A keyframe at `step` over the one at `parent`, listing `pages`.
+    fn kf(step: u64, parent: Option<u64>, pages: &[(u32, u8)]) -> Keyframe {
+        Keyframe {
+            step,
+            parent,
+            pages: pages.iter().map(|&(i, h)| (i, [h; 32])).collect(),
+            ..Keyframe::default()
+        }
+    }
+
+    #[test]
+    fn a_chain_restores_each_page_once_with_its_last_contents() {
+        // A full keyframe and two over it that rewrite page 1 twice and page
+        // 2 back to zero: page 1 is restored once, from the last keyframe,
+        // page 2 not at all, since a new machine's memory is zero, and the
+        // pages come in page order.
+        let chain = [
+            kf(10, None, &[(0, 1), (1, 2), (2, 3)]),
+            kf(20, Some(10), &[(1, 4), (3, 5)]),
+            kf(30, Some(20), &[(1, 6), (2, 0)]),
+        ];
+        let pages: Vec<(u32, u8)> = final_pages(&chain, 8)
+            .unwrap()
+            .into_iter()
+            .map(|(i, h)| (i, h[0]))
+            .collect();
+        assert_eq!(pages, [(0, 1), (1, 6), (3, 5)]);
+    }
+
+    #[test]
+    fn a_page_past_the_machines_memory_is_refused() {
+        // A keyframe naming page 8 of an eight-page machine does not restore.
+        let chain = [kf(10, None, &[(8, 1)])];
+        assert!(final_pages(&chain, 8).is_err());
     }
 }
