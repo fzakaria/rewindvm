@@ -39,6 +39,10 @@ pub const RELEASE_DATE: Date = Date {
     day: 4,
 };
 
+/// Years of updates a license of either edition includes, from the day
+/// it was issued.
+pub const UPDATE_YEARS: i32 = 3;
+
 /// The file a license is kept in, under the user's config directory.
 const CONFIG_SUBDIR: &str = "rewind";
 const LICENSE_FILE: &str = "license.txt";
@@ -67,16 +71,6 @@ pub enum Edition {
 }
 
 impl Edition {
-    /// Years of updates a license of this edition includes.
-    pub fn update_years(self) -> i32 {
-        const PERSONAL_YEARS: i32 = 3;
-        const COMMERCIAL_YEARS: i32 = 1;
-        match self {
-            Edition::Personal => PERSONAL_YEARS,
-            Edition::Commercial => COMMERCIAL_YEARS,
-        }
-    }
-
     pub fn as_str(self) -> &'static str {
         match self {
             Edition::Personal => "Personal",

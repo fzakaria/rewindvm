@@ -32,8 +32,8 @@ order shown, with the values trimmed. Pasting tolerates CRLF line ends,
 indentation and text around the block. The app keeps the block in
 `$XDG_CONFIG_HOME/rewind/license.txt` (or `~/.config/rewind/license.txt`).
 
-- Personal licenses include 3 years of updates, Commercial 1 year.
-  `Updates-Until` is what counts.
+- Personal and Commercial licenses both include 3 years of updates
+  (`UPDATE_YEARS` in `src/license.rs`). `Updates-Until` is what counts.
 - A license whose `Updates-Until` is before the app's release date
   (`RELEASE_DATE` in `src/license.rs`) still registers that version; the
   header says "License covers versions until <date>". Raise

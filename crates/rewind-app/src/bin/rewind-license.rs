@@ -144,7 +144,7 @@ fn issue(opts: &HashMap<String, String>) -> Result<(), String> {
         seats,
         id: license::new_id().map_err(|e| e.to_string())?,
         issued,
-        updates_until: issued.add_years(edition.update_years()),
+        updates_until: issued.add_years(license::UPDATE_YEARS),
     };
     print!("{}", license.sign(&key));
     Ok(())
