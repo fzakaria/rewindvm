@@ -294,7 +294,8 @@ enum Command {
         json: bool,
     },
     /// Remove the cached images no run names and the pages in the page
-    /// store no keyframe names, which `remove` and `prune` leave behind.
+    /// store no keyframe names, which `remove` and `prune` leave behind,
+    /// and the source files cached for runs that are gone.
     /// Refused, removing nothing, while another rewind process is packing
     /// an image, executing a run, has a shell open or has the page store
     /// open.
@@ -303,7 +304,8 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
         /// Print what was removed as one JSON object on standard output:
-        /// {"images": [{"path", "bytes"}], "pages", "page_bytes", "bytes"}.
+        /// {"images": [{"path", "bytes"}], "source_caches": [paths], "pages",
+        /// "page_bytes", "bytes"}.
         #[arg(long)]
         json: bool,
     },
@@ -892,6 +894,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     "{}",
                     serde_json::json!({
                         "images": images,
+                        "source_caches": garbage.source_caches,
                         "pages": garbage.pages.pages,
                         "page_bytes": garbage.pages.bytes,
                         "bytes": garbage.bytes(),
@@ -910,6 +913,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     image.path.display(),
                     show::size(image.bytes)
                 );
+            }
+            for cache in &garbage.source_caches {
+                println!("{verb} {}", cache.display());
             }
             println!(
                 "{verb} {} pages ({})",

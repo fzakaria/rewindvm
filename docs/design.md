@@ -167,6 +167,13 @@ mapping of the file's start less the address its first loadable segment was
 linked at. For the files only the VM had, gdb lists the source files their
 DWARF names, and a `files` inspection reads them in the process's view; the
 list goes in as console input, since a request has room for few arguments.
+Rewind keeps what the inspection read in `cache/sources/<run>`, by the step of
+the last event that wrote, renamed or unlinked each path, or as original when
+none did, and keeps the paths the VM did not have as absent. A later lookup
+whose step has the same last event for a path reads it from there, and makes
+no `files` fork when every path is there. An open for writing counts once the
+process that opened the file has exited, since the trace does not record the
+writes themselves; until then the file is read from the VM each time.
 
 DWARF and sources for everything in the store come by build ID from
 nixseparatedebuginfod2, which Rewind starts for the session on a socket it
@@ -297,6 +304,7 @@ it again.
   runs/<id>/keyframes/*.kf    keyframes, by step
   images/2/*.erofs            input images, by content
   store/                      the page store
+  cache/sources/<id>/         source files read out of a run's VM
   lock                        held while a process adds images or runs
 ```
 
@@ -455,9 +463,11 @@ and their forks, whose `trace_hash` equals an older member's. The run itself
 always stays, and so does any run another run here names as its parent or
 reads keyframes from.
 
-Neither command removes images or pages, which other runs may share. `rewind
-gc` removes the images in `images/` and its subdirectories that no run's
-manifest names, and the pages that no keyframe in any run's directory names.
+Both take the source files cached for the runs they remove. Neither command
+removes images or pages, which other runs may share. `rewind gc` removes the
+images in `images/` and its subdirectories that no run's manifest names, the
+pages that no keyframe in any run's directory names, and the source file
+caches of runs no longer in `runs/`.
 A fork reads keyframes from the directories of the runs it shares them with,
 so counting every directory's keyframes counts every keyframe a run reads.
 `--dry-run` reports the same figures and removes nothing. On a machine with

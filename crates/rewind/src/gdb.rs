@@ -8,8 +8,9 @@
 //! each program and library it had mapped is loaded at the address it was
 //! loaded at in the VM: from this machine's store, or, for files only the
 //! VM has, from copies the inspection sends, with the source files a third
-//! fork reads for them. A store file this machine lacks, or a program too
-//! large for the VM to send, is read out of the run's input image.
+//! fork reads for them, or the run's source cache keeps from an earlier
+//! lookup. A store file this machine lacks, or a program too large for the
+//! VM to send, is read out of the run's input image.
 //!
 //! DWARF and source files for all of them come from a debuginfod server
 //! started for the session, nixseparatedebuginfod2, which serves the
@@ -27,6 +28,7 @@ use std::process::{Child, Command, ExitCode, Stdio};
 use anyhow::{Context, Result, bail};
 use rewind_core::inspect::Inspection;
 use rewind_core::maps::{ImageMount, Origin, Running, SymbolFile};
+use rewind_core::source_cache::{self, Entry, SourceCache, Version};
 use rewind_core::{Home, Run};
 
 /// The address `rewind gdb` serves on when it starts gdb itself: any free
@@ -654,9 +656,11 @@ fn debugged_process(
     }
 }
 
-/// Fetches from a fork the source files at `paths`, named by programs the
-/// VM built, and writes them under `dir`. Returns the tree each was in,
-/// with where it is here, for gdb's substitute-path.
+/// Fetches the source files at `paths`, named by programs the VM built,
+/// and writes them under `dir`: from the run's source cache when it holds
+/// them as they were at `step`, else from a fork, keeping them in the
+/// cache for the next lookup. Returns the tree each was in, with where it
+/// is here, for gdb's substitute-path.
 fn fetch_sources(
     home: &Home,
     run: &Run,
@@ -675,25 +679,47 @@ fn fetch_sources(
         return Vec::new();
     }
 
-    let answer = match rewind_core::inspect::files(home, run, step, Some(pid), &paths) {
-        Ok(Inspection::Contents(bytes)) => bytes,
-        Ok(Inspection::NotFound(message) | Inspection::Failed(message)) => {
-            say.line(format_args!("no source files: {message}"));
-            return Vec::new();
+    // What the cache holds of each file as it was at the step. Without a
+    // trace to say which version that is, every file is fetched.
+    let trace = run.trace().ok();
+    let cache = SourceCache::of(home, &run.manifest.id);
+    let mut found: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut missing: Vec<(String, Version)> = Vec::new();
+    for path in paths {
+        let version = trace
+            .as_ref()
+            .map_or(Version::Changing, |t| source_cache::version(t, &path, step));
+        match cache.get(version, &path) {
+            Some(Entry::File(bytes)) => found.push((path, bytes)),
+            Some(Entry::Absent) => {}
+            None => missing.push((path, version)),
         }
-        Err(e) => {
-            say.line(format_args!("no source files: {e:#}"));
-            return Vec::new();
+    }
+    let cached = found.len();
+
+    // The rest from a fork, each kept whether the VM had it or not. A
+    // cache that cannot be written only means fetching again next time.
+    let mut fetched = None;
+    if !missing.is_empty() {
+        let names: Vec<String> = missing.iter().map(|(path, _)| path.clone()).collect();
+        match files_in_vm(home, run, step, pid, &names) {
+            Ok(mut sections) => {
+                for (path, version) in &missing {
+                    let entry = match sections.iter().find(|(name, _)| name == path) {
+                        Some((_, bytes)) => Entry::File(bytes.clone()),
+                        None => Entry::Absent,
+                    };
+                    let _ = cache.put(*version, path, &entry);
+                }
+                fetched = Some(sections.len());
+                found.append(&mut sections);
+            }
+            Err(message) => say.line(format_args!("no source files: {message}")),
         }
-    };
-    let Some(sections) = rewind_init::sections(&answer) else {
-        say.line(format_args!("no source files: the answer was cut short"));
-        return Vec::new();
-    };
+    }
 
     let mut dirs: Vec<(PathBuf, PathBuf)> = Vec::new();
-    let mut fetched = 0;
-    for (path, bytes) in sections {
+    for (path, bytes) in found {
         let to = dir.join(path.trim_start_matches('/'));
         // Dated at the epoch, older than the programs written before them,
         // or gdb warns that each source is newer than its program.
@@ -706,15 +732,45 @@ fn fetch_sources(
         if written.is_err() {
             continue;
         }
-        fetched += 1;
         let from = source_tree(Path::new(&path));
         if !dirs.iter().any(|(f, _)| *f == from) {
             let here = dir.join(from.strip_prefix("/").unwrap_or(&from));
             dirs.push((from, here));
         }
     }
-    say.line(format_args!("fetched {fetched} source files from the VM"));
+    if let Some(fetched) = fetched {
+        say.line(format_args!("fetched {fetched} source files from the VM"));
+    }
+    if cached > 0 {
+        say.line(format_args!(
+            "read {cached} source files fetched from the VM earlier"
+        ));
+    }
     dirs
+}
+
+/// The files at `paths` in a fork of `run` at `step`, as process `pid`
+/// would open them, each by its path. Files the VM did not have are left
+/// out. Fails with a message when the fork could not answer.
+fn files_in_vm(
+    home: &Home,
+    run: &Run,
+    step: u64,
+    pid: u32,
+    paths: &[String],
+) -> std::result::Result<Vec<(String, Vec<u8>)>, String> {
+    let answer = match rewind_core::inspect::files(home, run, step, Some(pid), paths) {
+        Ok(Inspection::Contents(bytes)) => bytes,
+        Ok(Inspection::NotFound(message) | Inspection::Failed(message)) => return Err(message),
+        Err(e) => return Err(format!("{e:#}")),
+    };
+    let Some(sections) = rewind_init::sections(&answer) else {
+        return Err("the answer was cut short".into());
+    };
+    Ok(sections
+        .into_iter()
+        .map(|(path, bytes)| (path, bytes.to_vec()))
+        .collect())
 }
 
 /// How many directories down a source tree starts, as in /build/<name>

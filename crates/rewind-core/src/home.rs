@@ -105,6 +105,12 @@ impl Home {
         self.root.join("store")
     }
 
+    /// The source files read out of each run's VM, by run id (see
+    /// [`crate::source_cache`]).
+    pub fn source_cache(&self) -> PathBuf {
+        self.root.join("cache").join("sources")
+    }
+
     fn lock_file(&self) -> Result<File> {
         let path = self.root.join(LOCK);
         File::create(&path).with_context(|| format!("creating {}", path.display()))

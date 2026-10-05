@@ -3,8 +3,8 @@
 //!
 //! A run another run on this machine names as its parent, or reads
 //! keyframes from, is never removed while that run stays. Removing a run
-//! deletes its directory and its imported inputs; pages its keyframes
-//! named stay in the page store.
+//! deletes its directory, its imported inputs and its source file cache;
+//! pages its keyframes named stay in the page store.
 //!
 //! A family is a run and every run forked from it, from those, and so on.
 //! Two runs with the same trace hash did the same thing, so of each such
@@ -261,7 +261,8 @@ pub fn remove_with_forks(home: &Home, run: &Run, act: Act) -> Result<Vec<String>
     remove_tree(home, &run.manifest.id, &members, act)
 }
 
-/// Deletes a run's directory and its imported inputs.
+/// Deletes a run's directory, its imported inputs and its source file
+/// cache.
 fn delete(home: &Home, id: &str) -> Result<()> {
     let dir = home.runs().join(id);
     fs::remove_dir_all(&dir).with_context(|| format!("removing {}", dir.display()))?;
@@ -269,7 +270,7 @@ fn delete(home: &Home, id: &str) -> Result<()> {
     if inputs.exists() {
         fs::remove_dir_all(&inputs).with_context(|| format!("removing {}", inputs.display()))?;
     }
-    Ok(())
+    crate::source_cache::remove(home, id)
 }
 
 #[cfg(test)]
@@ -475,17 +476,24 @@ mod tests {
     }
 
     #[test]
-    fn removing_takes_the_runs_and_their_inputs_and_a_dry_run_nothing() {
+    fn removing_takes_the_runs_their_inputs_and_caches_and_a_dry_run_nothing() {
         // A home with r, its fork a and a's fork b, each with imported
-        // inputs. A dry run of removing a names a and b and deletes
-        // nothing; the removal then deletes both runs and their inputs and
-        // leaves r.
+        // inputs, and r and a with cached source files. A dry run of
+        // removing a names a and b and deletes nothing; the removal then
+        // deletes both runs, their inputs and a's cache, and leaves r's.
+        use crate::source_cache::{Entry, SourceCache, Version};
         let root = std::env::temp_dir().join(format!("rewind-remove-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let home = Home::at(root.clone()).unwrap();
         for id in ["r", "a", "b"] {
             fs::create_dir_all(home.runs().join(id)).unwrap();
             fs::create_dir_all(home.inputs().join(id)).unwrap();
+        }
+        let file = Entry::File(b"int x;\n".to_vec());
+        for id in ["r", "a"] {
+            SourceCache::of(&home, id)
+                .put(Version::Original, "/src/a.c", &file)
+                .unwrap();
         }
         let runs = [
             run("r", None, 0, "h0"),
@@ -499,6 +507,7 @@ mod tests {
                 .iter()
                 .all(|id| home.runs().join(id).exists())
         );
+        assert!(home.source_cache().join("a").exists());
 
         let removed = remove_tree(&home, "a", &runs, Act::Remove).unwrap();
         assert_eq!(removed, vec!["a".to_string(), "b".to_string()]);
@@ -508,6 +517,8 @@ mod tests {
         }
         assert!(home.runs().join("r").exists());
         assert!(home.inputs().join("r").exists());
+        assert!(!home.source_cache().join("a").exists());
+        assert!(home.source_cache().join("r").exists());
         fs::remove_dir_all(&root).unwrap();
     }
 }

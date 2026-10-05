@@ -1,7 +1,8 @@
-//! Removing what no run uses: cached images no run's manifest names, and
-//! pages in the page store no keyframe names. `rewind remove` and `rewind
-//! prune` delete runs and leave both behind, since another run may still
-//! use them.
+//! Removing what no run uses: cached images no run's manifest names,
+//! pages in the page store no keyframe names, and the source file caches
+//! of runs that are gone. `rewind remove` and `rewind prune` delete runs
+//! and leave images and pages behind, since another run may still use
+//! them.
 //!
 //! Collecting is safe against every other rewind process. It holds the
 //! home alone (see [`Home::alone`]), which a process packing an image,
@@ -49,6 +50,8 @@ pub struct Garbage {
     /// of rewind wrote. No build can restore them, so the pages they name
     /// are not kept for them.
     pub unreadable_keyframes: usize,
+    /// The source file caches of runs that are no longer in the home.
+    pub source_caches: Vec<PathBuf>,
 }
 
 impl Garbage {
@@ -125,9 +128,10 @@ pub fn collect(home: &Home, act: Act) -> Result<Garbage> {
         return Err(Refusal::StoreOpen.into());
     };
 
-    // Every check has passed: find both kinds of garbage, then remove the
-    // pages, then the images.
+    // Every check has passed: find the garbage, then remove the pages,
+    // then the images and the source caches.
     let images = unused_images(home)?;
+    let source_caches = orphan_source_caches(home)?;
     let (live, unreadable_keyframes) = live_pages(home)?;
     let store_act = match act {
         Act::DryRun => rewind_store::Act::DryRun,
@@ -141,12 +145,36 @@ pub fn collect(home: &Home, act: Act) -> Result<Garbage> {
             fs::remove_file(&image.path)
                 .with_context(|| format!("removing {}", image.path.display()))?;
         }
+        for cache in &source_caches {
+            fs::remove_dir_all(cache).with_context(|| format!("removing {}", cache.display()))?;
+        }
     }
     Ok(Garbage {
         images,
         pages,
         unreadable_keyframes,
+        source_caches,
     })
+}
+
+/// The source file caches whose run is not in the home, removed or
+/// imported elsewhere before `rewind remove` took its cache with it.
+fn orphan_source_caches(home: &Home) -> Result<Vec<PathBuf>> {
+    let entries = match fs::read_dir(home.source_cache()) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e).context("reading the source file caches"),
+    };
+    let mut orphans = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        if home.runs().join(entry.file_name()).is_dir() {
+            continue;
+        }
+        orphans.push(entry.path());
+    }
+    orphans.sort();
+    Ok(orphans)
 }
 
 /// The images in the cache that no run's manifest names, by path. Reads
@@ -457,6 +485,34 @@ mod tests {
         assert!(!store.contains(&hashes[3]));
         assert!(!store.contains(&hashes[4]));
         drop(store);
+        fs::remove_dir_all(home.root()).unwrap();
+    }
+
+    #[test]
+    fn source_caches_of_runs_that_are_gone_go() {
+        // Runs r and gone each had source files cached, and gone's
+        // directory was since removed: gone's cache goes, r's stays, and a
+        // dry run names the one and removes nothing.
+        use crate::source_cache::{Entry, SourceCache, Version};
+        let home = home("source-caches");
+        run(&home, "r", None, &[]);
+        let file = Entry::File(b"int x;\n".to_vec());
+        for id in ["r", "gone"] {
+            SourceCache::of(&home, id)
+                .put(Version::Original, "/src/a.c", &file)
+                .unwrap();
+        }
+        let gone = home.source_cache().join("gone");
+
+        let planned = settled(&home, Act::DryRun);
+        assert_eq!(planned.source_caches, vec![gone.clone()]);
+        assert!(gone.exists());
+
+        let collected = settled(&home, Act::Remove);
+        assert_eq!(collected.source_caches, vec![gone.clone()]);
+        assert!(!gone.exists());
+        let kept = SourceCache::of(&home, "r").get(Version::Original, "/src/a.c");
+        assert_eq!(kept, Some(file));
         fs::remove_dir_all(home.root()).unwrap();
     }
 

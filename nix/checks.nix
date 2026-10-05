@@ -706,7 +706,12 @@ in
         grep -q "^> *$(line 'the write')  .*printf(" where
         test "$(grep -c '^called from ' where)" = 2
 
-        rewind where pool "$step" --json > where.json
+        # The second lookup reads the source files the first fetched from
+        # the run's source cache, with no fork for them.
+        rewind where pool "$step" --json > where.json 2> stderr
+        cat stderr
+        grep -q '^rewind: read [0-9]* source files fetched from the VM earlier$' stderr
+        test "$(grep -c '^rewind: fetched ' stderr)" = 0
         jq -e --argjson line "$(line 'the write')" \
           '.frames[.chosen] | .function == "worker" and .line == $line' where.json
 
@@ -714,6 +719,12 @@ in
         cat main
         grep -q "^#[1-9][0-9]* pool_run (pool.c:$(line 'the wait'))$" main
         grep -q '^called from #[0-9]* main (main.c:' main
+
+        # Removing the run takes its source cache with it.
+        id=$(basename "$(dirname "$(grep -l '"name": "pool"' $REWIND_HOME/runs/*/manifest.json)")")
+        test -d $REWIND_HOME/cache/sources/$id
+        rewind remove pool
+        test ! -e $REWIND_HOME/cache/sources/$id
         touch $out
       '';
 

@@ -15,6 +15,7 @@ pub mod nix;
 pub mod pmu;
 pub mod prune;
 pub mod run;
+pub mod source_cache;
 pub mod threads;
 
 pub use home::{Guest, Home};
