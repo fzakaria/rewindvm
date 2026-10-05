@@ -9,6 +9,8 @@ version = "0.4.1"
 edition = "2024"
 license = "LicenseRef-Proprietary"
 publish = false
+# The app, not the license issuer, is what `cargo run` starts.
+default-run = "rewind-app"
 
 [workspace]
 
