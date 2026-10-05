@@ -21,6 +21,18 @@ use rewind_core::{Echo, Execution, Guest, Home, Keyframes, Run, Source, Spec, Ti
 use rewind_core::{compare, export, image, nix};
 use rewind_init::{Job, Root};
 
+/// The help of every argument that names a run.
+const RUN_HELP: &str = "The run: its id or the start of one, its name, @ for the newest";
+const RUN_LONG_HELP: &str = "The run: its id or the start of one, its name for the newest run \
+     with that name, @ for the newest run and @2, @3 and on for the ones before it, or its \
+     directory.";
+
+/// The help of every argument that names a step of a run.
+const STEP_HELP: &str = "A step of the run, as `rewind events` numbers them";
+const STEP_LONG_HELP: &str = "A step of the run: how many times the VM had stopped for the \
+     host by then, as `rewind events` and `rewind log --steps` number them, from 0 to the \
+     step the run ended at.";
+
 /// `rewind cat`'s exit status when the file did not exist at the step.
 const CAT_NOT_FOUND: u8 = 2;
 
@@ -40,18 +52,21 @@ struct Cli {
 /// The machine options every way of starting a run shares.
 #[derive(clap::Args, Clone)]
 struct MachineArgs {
-    /// Seeds the VM's randomness. Runs with the same inputs and seed are
-    /// identical; a different seed explores a different run.
+    /// Seeds the VM's randomness.
+    ///
+    /// Runs with the same inputs and seed are identical; a different seed
+    /// explores a different run.
     #[arg(long, default_value_t = 0)]
     seed: u64,
-    /// Asks the VM to reschedule at steps this seed picks, to explore
-    /// other thread interleavings. The inputs, --seed and --epoch stay as
-    /// they are, but values programs draw from the kernel's randomness,
-    /// such as ephemeral port numbers and where programs are loaded, can
-    /// differ: the schedule decides which process draws first.
-    /// `--kernel-args norandmaps` turns address randomization off, to tell
-    /// an interleaving apart from a layout change. 0 is the unperturbed
-    /// schedule.
+    /// Asks the VM to reschedule at steps this seed picks, to explore other
+    /// thread interleavings.
+    ///
+    /// The inputs, --seed and --epoch stay as they are, but values programs
+    /// draw from the kernel's randomness, such as ephemeral port numbers and
+    /// where programs are loaded, can differ: the schedule decides which
+    /// process draws first. `--kernel-args norandmaps` turns address
+    /// randomization off, to tell an interleaving apart from a layout change.
+    /// 0 is the unperturbed schedule.
     #[arg(long, default_value_t = 0)]
     schedule: u64,
     /// The first step a reschedule may be asked at; before it the run is the
@@ -64,32 +79,38 @@ struct MachineArgs {
     cpu: CpuArg,
     /// What moves the VM's clock besides exits: the work done inside it,
     /// counted by this machine's branch counter (`branches`), or nothing
-    /// (`exits`). `auto` uses the counter when `rewind pmu status` finds it
-    /// exact.
+    /// (`exits`).
+    ///
+    /// `auto` uses the counter when `rewind pmu status` finds it exact.
     #[arg(long, value_enum, default_value_t = ClockArg::Auto)]
     clock: ClockArg,
-    /// Experimental: with counter time, also interrupt a VM computing
-    /// without exits at the timer's branch count. See docs/pmu.md.
+    /// Experimental: with counter time, also interrupt a VM computing without
+    /// exits at the timer's branch count.
+    ///
+    /// See docs/pmu.md.
     #[arg(long, hide = true)]
     experimental_preempt: bool,
     /// The clock `clock` resolved to, once per command.
     #[arg(skip)]
     resolved_clock: Option<rewind_vmm::ClockSource>,
-    /// The step after which no more reschedules are asked.
-    #[arg(long, default_value_t = u64::MAX)]
+    /// The step after which no more reschedules are asked; by default none
+    /// is.
+    #[arg(long, default_value_t = u64::MAX, hide_default_value = true)]
     schedule_until: u64,
     /// The VM's memory in MiB.
     #[arg(long, default_value_t = 1024)]
     mem: u64,
-    /// The CPUs programs in the VM are told it has, and for a Nix build
-    /// its NIX_BUILD_CORES, which stdenv passes to make, ninja and test
-    /// runners as their job count. The VM still has one vCPU: the threads
-    /// and jobs sized by the count interleave on it, so schedules can
-    /// reorder them.
+    /// The CPUs programs in the VM are told it has, and for a Nix build its
+    /// NIX_BUILD_CORES, which stdenv passes to make, ninja and test runners
+    /// as their job count.
+    ///
+    /// The VM still has one vCPU: the threads and jobs sized by the count
+    /// interleave on it, so schedules can reorder them.
     #[arg(long, default_value_t = DEFAULT_CORES,
           value_parser = clap::value_parser!(u32).range(1..=i64::from(MAX_CORES)))]
     cores: u32,
     /// The VM's wall clock at boot, in seconds since the Unix epoch.
+    ///
     /// Defaults to the start of today, UTC.
     #[arg(long)]
     epoch: Option<u64>,
@@ -107,9 +128,11 @@ struct MachineArgs {
     #[arg(long)]
     no_keyframes: bool,
     /// Stop the run after this many seconds on this machine, however far it
-    /// got. It then ends as timed-out, which depends on how fast this
-    /// machine is. Unless this is set, rewind check gives each perturbed
-    /// schedule ten times as long as schedule 0 took, and at least a minute.
+    /// got.
+    ///
+    /// It then ends as timed-out, which depends on how fast this machine is.
+    /// Unless this is set, rewind check gives each perturbed schedule ten
+    /// times as long as schedule 0 took, and at least a minute.
     #[arg(long, value_name = "SECONDS")]
     timeout: Option<u64>,
     /// Extra kernel command line arguments; `loglevel=7` shows the kernel's
@@ -188,8 +211,10 @@ struct ImageArgs {
 enum PmuAction {
     /// Show the CPU, the workaround's state, and a self-test of the counter.
     Status,
-    /// Apply rr's workaround for AMD Zen's branch counter on every CPU,
-    /// until reboot. Run it as root: sudo rewind pmu enable.
+    /// Apply rr's workaround for AMD Zen's branch counter on every CPU, until
+    /// reboot.
+    ///
+    /// Run it as root: sudo rewind pmu enable.
     Enable,
 }
 
@@ -213,7 +238,9 @@ enum Command {
         /// A .drv path or an installable such as `nixpkgs#hello`.
         installable: String,
         /// Also compare the outputs with this binary cache's builds of them,
-        /// besides the substituters Nix is configured with. Repeatable.
+        /// besides the substituters Nix is configured with.
+        ///
+        /// Repeatable.
         #[arg(long = "compare-with", value_name = "URL")]
         compare_with: Vec<String>,
         /// Compare the outputs with this machine's store only, asking no
@@ -223,9 +250,12 @@ enum Command {
         #[command(flatten)]
         machine: MachineArgs,
     },
-    /// Run a Nix derivation, or a command with --root, under several
-    /// schedules and show where the first run that ends differently went
-    /// its own way.
+    /// Find a schedule that changes how a build or command ends, and where
+    /// it went its own way.
+    ///
+    /// Runs a Nix derivation, or a command with --root, under several
+    /// schedules, narrows the steps the first one that ends differently
+    /// perturbs, and shows where it parts from the run that did not.
     Check {
         /// A .drv or installable; leave it out and give --root and a
         /// command to check a command instead.
@@ -248,15 +278,19 @@ enum Command {
     /// Branch a run at a step: the same run up to the step, then another
     /// interleaving from there.
     Fork {
+        #[arg(help = RUN_HELP, long_help = RUN_LONG_HELP)]
         run: String,
+        #[arg(help = STEP_HELP, long_help = STEP_LONG_HELP)]
         step: u64,
-        /// The schedule seed for the new branch. As with a run's
-        /// --schedule, values programs draw from the kernel's randomness
-        /// after the step, such as load addresses, can differ from the
-        /// parent's; a run recorded with `--kernel-args norandmaps` loads
+        /// The schedule seed for the new branch.
+        ///
+        /// As with a run's --schedule, values programs draw from the kernel's
+        /// randomness after the step, such as load addresses, can differ from
+        /// the parent's; a run recorded with `--kernel-args norandmaps` loads
         /// programs at fixed addresses.
         #[arg(long, default_value_t = 1)]
         schedule: u64,
+        /// Print nothing while the fork executes.
         #[arg(long, short)]
         quiet: bool,
         /// Print the result as one JSON object on standard output, for
@@ -269,9 +303,12 @@ enum Command {
         timeout: Option<u64>,
     },
     /// Remove forks of a run, and forks of those, that ran exactly as an
-    /// older one did. The run itself stays, and so does any run another
-    /// run here was forked from or reads keyframes from.
+    /// older one did.
+    ///
+    /// The run itself stays, and so does any run another run here was forked
+    /// from or reads keyframes from.
     Prune {
+        #[arg(help = RUN_HELP, long_help = RUN_LONG_HELP)]
         run: String,
         /// Remove forks whose trace is the same as an older fork's in the
         /// family, or the run's own.
@@ -285,14 +322,15 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Remove runs and every run forked from them, from those, and so on,
-    /// with their imported inputs. Refused, removing nothing, while one of
-    /// them has not finished or a run that stays reads keyframes from one
-    /// of them. The images and pages they used stay until `rewind gc`.
-    /// Many runs at once take one call: `xargs rewind remove < ids`. A run
-    /// `rewind ls` lists as unreadable is named by its id.
+    /// Remove runs, with every run forked from them and from those.
+    ///
+    /// Their imported inputs go with them. Refused, removing nothing, while one of them has not finished or a run
+    /// that stays reads keyframes from one of them. The images and pages they
+    /// used stay until `rewind gc`. Many runs at once take one call: `xargs
+    /// rewind remove < ids`. A run `rewind ls` lists as unreadable is named
+    /// by its id.
     Remove {
-        #[arg(value_name = "RUN", required = true)]
+        #[arg(value_name = "RUN", required = true, help = RUN_HELP, long_help = RUN_LONG_HELP)]
         runs: Vec<String>,
         /// Show what would be removed and remove nothing.
         #[arg(long)]
@@ -302,12 +340,12 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Remove the cached images no run names and the pages in the page
-    /// store no keyframe names, which `remove` and `prune` leave behind,
-    /// and the source files cached for runs that are gone.
-    /// Refused, removing nothing, while another rewind process is packing
-    /// an image, executing a run, has a shell open or has the page store
-    /// open.
+    /// Remove the images, pages and source files no run uses any more.
+    ///
+    /// These are the cached images no run names and the pages in the page
+    /// store no keyframe names, which `remove` and `prune` leave behind, and
+    /// the source files cached for runs that are gone. Refused, removing nothing, while another rewind process is packing an
+    /// image, executing a run, has a shell open or has the page store open.
     Gc {
         /// Show what would be removed and remove nothing.
         #[arg(long)]
@@ -318,49 +356,64 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Print a file as it was at a step of a run. Rewind forks the run at
-    /// the step and reads the file inside the VM, so this takes about as
-    /// long as seeking there. Exits 2 when the file did not exist then.
+    /// Print a file as it was at a step of a run.
+    ///
+    /// Rewind forks the run at the step and reads the file inside the VM, so
+    /// this takes about as long as seeking there. Exits 2 when the file did
+    /// not exist then.
     Cat {
+        #[arg(help = RUN_HELP, long_help = RUN_LONG_HELP)]
         run: String,
+        #[arg(help = STEP_HELP, long_help = STEP_LONG_HELP)]
         step: u64,
         /// The path, absolute or relative to the process's working
         /// directory.
         path: String,
         /// Resolve the path as this process saw it, in its root and working
-        /// directory. By default, and once it has exited, the job's.
+        /// directory.
+        ///
+        /// By default, and once it has exited, the job's.
         #[arg(long)]
         pid: Option<u32>,
     },
-    /// A shell inside the VM at a step of a run, with the job's environment,
-    /// in a process's root and working directory, while everything else in
-    /// the VM stays stopped where it was. Nothing done in it changes the
-    /// run: it happens in a throwaway fork.
+    /// A shell inside the VM at a step of a run.
+    ///
+    /// It has the job's environment and starts in a process's root and
+    /// working directory, while everything else in the VM stays stopped
+    /// where it was. Nothing done in it changes the run: it happens in a
+    /// throwaway fork.
     Shell {
+        #[arg(help = RUN_HELP, long_help = RUN_LONG_HELP)]
         run: String,
+        #[arg(help = STEP_HELP, long_help = STEP_LONG_HELP)]
         step: u64,
-        /// The process whose root and working directory the shell starts
-        /// in. By default, and once it has exited, the job's.
+        /// The process whose root and working directory the shell starts in.
+        ///
+        /// By default, and once it has exited, the job's.
         #[arg(long)]
         pid: Option<u32>,
         /// More packages in the shell, from Nix: an installable such as
-        /// nixpkgs#strace, built or fetched here, its closure visible in
-        /// the VM's /nix/store and its bin directory first on PATH. Repeat
-        /// for several.
+        /// nixpkgs#strace, built or fetched here, its closure visible in the
+        /// VM's /nix/store and its bin directory first on PATH.
+        ///
+        /// Repeat for several.
         #[arg(long = "with", value_name = "INSTALLABLE")]
         with: Vec<String>,
     },
-    /// gdb on a fork of a run at a step: one x86-64 CPU and every thread of
-    /// the process debugged, the VM's memory as its page tables map it,
-    /// breakpoints and single steps. Starts the host's gdb with the symbols
-    /// of the VM's kernel and of the process running at the step, or of
-    /// --pid's, and a debuginfod server for their DWARF and sources; with
-    /// --listen, only serves the GDB remote protocol for a gdb started some
-    /// other way. gdb starts in the thread `rewind where` looks at, in the
-    /// registers it entered the kernel with, rather than in the CPU's,
-    /// which at a step are in the kernel.
+    /// gdb on a fork of a run at a step.
+    ///
+    /// It debugs one x86-64 CPU and every thread of the process, the VM's
+    /// memory as its page tables map it, with breakpoints and single steps.
+    /// Starts the host's gdb with the symbols of the VM's kernel and of the
+    /// process running at the step, or of --pid's, and a debuginfod server
+    /// for their DWARF and sources; with --listen, only serves the GDB remote
+    /// protocol for a gdb started some other way. gdb starts in the thread
+    /// `rewind where` looks at, in the registers it entered the kernel with,
+    /// rather than in the CPU's, which at a step are in the kernel.
     Gdb {
+        #[arg(help = RUN_HELP, long_help = RUN_LONG_HELP)]
         run: String,
+        #[arg(help = STEP_HELP, long_help = STEP_LONG_HELP)]
         step: u64,
         /// Debug this process, whether or not it was running at the step:
         /// its symbols, its breakpoints and every one of its threads.
@@ -377,21 +430,24 @@ enum Command {
         /// Serve on this address, such as 127.0.0.1:1234, and start no gdb.
         #[arg(long)]
         listen: Option<String>,
-        /// More arguments for gdb, after `--`, such as -batch -ex bt. They
-        /// come after the ones that load the symbols and connect.
+        /// More arguments for gdb, after `--`, such as -batch -ex bt.
+        ///
+        /// They come after the ones that load the symbols and connect.
         #[arg(last = true)]
         gdb_args: Vec<String>,
     },
-    /// Where in the program's own code a thread was at a step: its
-    /// innermost frame outside the kernel, the C library, Rust's standard
-    /// library and dependencies, with its source, and the frames that
-    /// called it. By default the thread of the step's own event, the pid
-    /// and tid `rewind events` prints, and at a step with no event or the
-    /// kernel's own, such as a console line, the thread on the CPU. Takes
-    /// gdb with Python on PATH, and a run recorded with a kernel that
-    /// lists its tasks.
+    /// Where in the program's own code a thread was at a step.
+    ///
+    /// Prints its innermost frame outside the kernel, the C library, Rust's
+    /// standard library and dependencies, with its source, and the frames
+    /// that called it. By default the thread of the step's own event, the pid and tid `rewind
+    /// events` prints, and at a step with no event or the kernel's own, such
+    /// as a console line, the thread on the CPU. Takes gdb with Python on
+    /// PATH, and a run recorded with a kernel that lists its tasks.
     Where {
+        #[arg(help = RUN_HELP, long_help = RUN_LONG_HELP)]
         run: String,
+        #[arg(help = STEP_HELP, long_help = STEP_LONG_HELP)]
         step: u64,
         /// Look at this process; by default the step's event's.
         #[arg(long)]
@@ -417,6 +473,7 @@ enum Command {
     },
     /// Write a run to a single .rwd file.
     Export {
+        #[arg(help = RUN_HELP, long_help = RUN_LONG_HELP)]
         run: String,
         /// Where to write it; <id>.rwd by default.
         #[arg(long, short)]
@@ -439,8 +496,10 @@ enum Command {
         json: bool,
     },
     /// List runs, newest first: each one's id, how it ended, its steps and
-    /// its name. A run whose manifest another build of rewind wrote is
-    /// listed as unreadable, with why; `rewind remove` takes it by id.
+    /// its name.
+    ///
+    /// A run whose manifest another build of rewind wrote is listed as
+    /// unreadable, with why; `rewind remove` takes it by id.
     Ls {
         /// List only the newest N of the runs the other options pick.
         #[arg(short = 'n', long = "limit", value_name = "N")]
@@ -466,6 +525,7 @@ enum Command {
     },
     /// Print a run's output, up to a step.
     Log {
+        #[arg(help = RUN_HELP, long_help = RUN_LONG_HELP)]
         run: String,
         #[arg(long)]
         at: Option<u64>,
@@ -475,6 +535,7 @@ enum Command {
     },
     /// Show the processes alive at a step.
     Ps {
+        #[arg(help = RUN_HELP, long_help = RUN_LONG_HELP)]
         run: String,
         #[arg(long)]
         at: Option<u64>,
@@ -484,6 +545,7 @@ enum Command {
     },
     /// Print a run's events.
     Events {
+        #[arg(help = RUN_HELP, long_help = RUN_LONG_HELP)]
         run: String,
         #[arg(long)]
         from: Option<u64>,
@@ -495,13 +557,19 @@ enum Command {
     },
     /// Run a run's inputs again and check the trace comes out identical.
     Replay {
+        #[arg(help = RUN_HELP, long_help = RUN_LONG_HELP)]
         run: String,
         /// Start from the keyframe at or before this step instead of boot.
         #[arg(long)]
         from: Option<u64>,
     },
     /// Compare two runs and show where they first differ.
-    Diff { left: String, right: String },
+    Diff {
+        #[arg(help = RUN_HELP, long_help = RUN_LONG_HELP)]
+        left: String,
+        #[arg(help = RUN_HELP, long_help = RUN_LONG_HELP)]
+        right: String,
+    },
 }
 
 /// Whether a run echoes its program's output while it executes.

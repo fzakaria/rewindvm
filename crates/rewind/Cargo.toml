@@ -16,7 +16,7 @@ rewind-trace = { path = "../rewind-trace" }
 rewind-vmm = { path = "../rewind-vmm" }
 anyhow = "1"
 # Derive-based argument parsing, as in omnibin.
-clap = { version = "4", features = ["derive", "env"] }
+clap = { version = "4", features = ["derive", "env", "wrap_help"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 blake3 = "1"
