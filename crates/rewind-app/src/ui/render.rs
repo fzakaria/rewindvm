@@ -33,8 +33,8 @@ use crate::ui::widgets::{
 use crate::ui::{
     AddBookmark, CloseNearest, CopySelection, EnterLicense, ForkHere, GoBack, GoForward, GoToEnd,
     GoToStart, GoToStep, JumpToDivergence, JumpToFailure, KEY_CONTEXT, NextEvent, NextPhase,
-    OpenRun, OpenSearch, PreviousEvent, PreviousPhase, SelectAll, StartTour, StepBack, StepForward,
-    ToggleSource, ZoomIn, ZoomOut, ZoomReset,
+    OpenRun, OpenSearch, PreviousEvent, PreviousPhase, SelectAll, ShowShortcuts, StartTour,
+    StepBack, StepForward, ToggleSource, ZoomIn, ZoomOut, ZoomReset,
 };
 
 /// Header labels are cut to this many characters.
@@ -81,6 +81,11 @@ impl Render for Scrubber {
                 cx.listener(|this, _: &GoToStep, window, cx| this.open_step_entry(window, cx)),
             )
             .on_action(cx.listener(|this, _: &OpenSearch, window, cx| this.open_search(window, cx)))
+            .on_action(
+                cx.listener(|this, _: &ShowShortcuts, window, cx| {
+                    this.toggle_shortcuts(window, cx)
+                }),
+            )
             .on_action(cx.listener(|this, _: &ZoomIn, _, cx| this.zoom_in(cx)))
             .on_action(cx.listener(|this, _: &ZoomOut, _, cx| this.zoom_out(cx)))
             .on_action(cx.listener(|this, _: &ZoomReset, _, cx| this.zoom_reset(cx)))
@@ -152,6 +157,9 @@ impl Render for Scrubber {
         }
         if let Some(dialog) = self.render_bookmark_editor(cx) {
             window_root = window_root.child(dialog);
+        }
+        if let Some(sheet) = self.render_shortcuts(cx) {
+            window_root = window_root.child(sheet);
         }
         window_root = window_root.child(self.selection_listener(cx));
 
@@ -429,12 +437,12 @@ impl Scrubber {
         self.titlebar(header, window, cx)
     }
 
-    /// The "?" button that starts the tour.
+    /// The "?" button that lists the keys, and starts the tour from there.
     fn help_button(&self, cx: &mut Context<Self>) -> gpui::Stateful<Div> {
         div()
             .id("help")
             .role(Role::Button)
-            .aria_label("Start the tour (F1)")
+            .aria_label("Keys and the tour (?)")
             .size(px(size::ICON_BUTTON_WIDTH))
             .flex()
             .items_center()
@@ -446,7 +454,7 @@ impl Scrubber {
             .text_color(rgb(theme::MUTED))
             .hover(|s| s.text_color(rgb(theme::TEXT)).bg(rgb(theme::RAISED_HOVER)))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_click(cx.listener(|this, _, window, cx| this.start_tour(window, cx)))
+            .on_click(cx.listener(|this, _, window, cx| this.toggle_shortcuts(window, cx)))
             .child("?")
     }
 

@@ -352,6 +352,9 @@ pub struct Scrubber {
     /// The guided tour, while it runs, and the focus its callout takes.
     pub(super) tour: Option<Tour>,
     pub(super) tour_focus: FocusHandle,
+    /// Whether the shortcut sheet is open, and the focus it takes.
+    pub(super) shortcuts_open: bool,
+    pub(super) shortcuts_focus: FocusHandle,
     /// The file viewer, while a file is open in it.
     pub(super) viewer: Option<FileViewer>,
     /// The source panel, while it is open; it shares the file viewer's
@@ -445,6 +448,8 @@ impl Scrubber {
             licensing: Licensing::load(),
             tour: None,
             tour_focus: cx.focus_handle(),
+            shortcuts_open: false,
+            shortcuts_focus: cx.focus_handle(),
             titlebar_armed: false,
             selecting: SelectionState::default(),
             terminal: None,

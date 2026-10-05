@@ -11,6 +11,7 @@ mod render;
 mod scrubber;
 mod search;
 mod selectable;
+mod shortcuts;
 mod sideways;
 mod source;
 mod splits;
@@ -60,6 +61,7 @@ actions!(
         ZoomIn,
         ZoomOut,
         ZoomReset,
+        ShowShortcuts,
         SearchNext,
         SearchPrevious,
         ForkHere,
@@ -100,6 +102,9 @@ const LICENSE_CONTEXT: &str = "LicenseDialog";
 
 /// The key context of the Open link dialog's field.
 const LINK_CONTEXT: &str = "LinkDialog";
+
+/// The key context of the shortcut sheet.
+const SHORTCUTS_CONTEXT: &str = "Shortcuts";
 
 /// The key context of the bookmark dialog's field.
 const BOOKMARK_CONTEXT: &str = "BookmarkField";
@@ -216,18 +221,13 @@ fn load_bundled_fonts(cx: &App) {
     }
 }
 
-/// The keyboard map. Arrows move between events, Shift+arrows by one
-/// step, Page Up and Page Down between phases, Home and End to the ends,
-/// f to the failure and d to the divergence, and Alt+arrows back and
-/// forward through those jumps; s opens or closes the source
-/// panel, Escape closes the file viewer, the source panel or the
-/// terminal pane, g opens the step readout to type a step into, and
-/// Ctrl+F or / opens the search box, b bookmarks the playhead's step,
-/// and + and - zoom the timeline around the playhead, 0 back out.
-/// Ctrl+C copies the selected
-/// text and Ctrl+A selects all of the panel last clicked in; in the
-/// terminal pane, where Ctrl+C belongs to the command, Ctrl+Shift+C and
-/// Ctrl+Shift+V copy and paste.
+/// The keyboard map. The shortcut sheet lists every key by what it does
+/// (`shortcuts::SHORTCUTS`), so a key added here is added there too.
+///
+/// The scrubber's keys apply outside the terminal pane and the text
+/// fields, where they are typed; each dialog and field binds Enter and
+/// Escape in its own key context. In the terminal pane, where Ctrl+C
+/// belongs to the command, Ctrl+Shift+C and Ctrl+Shift+V copy and paste.
 fn bind_keys(cx: &mut App) {
     // The Open link dialog's text field edits with its own keys.
     cx.bind_keys(rewind_text_input::bindings());
@@ -255,6 +255,11 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-=", ZoomIn, context),
         KeyBinding::new("-", ZoomOut, context),
         KeyBinding::new("0", ZoomReset, context),
+        KeyBinding::new("?", ShowShortcuts, context),
+        KeyBinding::new("shift-/", ShowShortcuts, context),
+        KeyBinding::new("escape", CloseDialog, Some(SHORTCUTS_CONTEXT)),
+        KeyBinding::new("?", ShowShortcuts, Some(SHORTCUTS_CONTEXT)),
+        KeyBinding::new("shift-/", ShowShortcuts, Some(SHORTCUTS_CONTEXT)),
         KeyBinding::new("s", ToggleSource, context),
         KeyBinding::new("ctrl-c", CopySelection, context),
         KeyBinding::new("ctrl-a", SelectAll, context),
