@@ -458,6 +458,24 @@ pub(crate) fn executing(dir: &Path) -> bool {
     file.try_lock_shared().is_err()
 }
 
+/// Whether bringing a machine to a step of a run keeps a keyframe there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Keep {
+    /// Keep one when the keyframe restored is far enough back, for a fork
+    /// that looks inside the run, which is often followed by more forks
+    /// at the same step or near it.
+    Keyframe,
+    Nothing,
+}
+
+/// The keyframe a machine was restored from, the chain that rebuilt it,
+/// and the page store it was read from, kept open.
+struct Restored {
+    kf: u64,
+    chain: Vec<rewind_vmm::snapshot::Keyframe>,
+    store: rewind_store::Store,
+}
+
 /// A run on disk.
 pub struct Run {
     pub dir: PathBuf,
@@ -791,18 +809,33 @@ impl Run {
 
     /// A machine at `step` of this run: the latest keyframe at or before
     /// it, restored, and run forward to the step. Events on the way go to
-    /// `obs`.
-    pub fn machine_at(&self, home: &Home, step: u64, obs: &mut dyn Observer) -> Result<Machine> {
+    /// `obs`. With `Keep::Keyframe`, a keyframe at the step is kept when
+    /// the one restored was far enough back (see
+    /// [`crate::keyframes::worth_keeping`]), so the next fork there
+    /// restores it instead of replaying.
+    pub fn machine_at(
+        &self,
+        home: &Home,
+        step: u64,
+        keep: Keep,
+        obs: &mut dyn Observer,
+    ) -> Result<Machine> {
         let config = self.manifest.spec.config()?;
         let keyframes = self.keyframes()?;
-        let from = keyframes.steps().into_iter().rfind(|s| *s <= step);
-        let mut machine = match from {
+        let steps = keyframes.steps();
+        let from = steps.iter().copied().rfind(|s| *s <= step);
+
+        // The store stays open until a kept keyframe's pages are written
+        // and the keyframe names them: `rewind gc` refuses while it is.
+        let (mut machine, restored) = match from {
             Some(kf) => {
                 let store = rewind_store::Store::open(&home.store())?;
                 let chain = keyframes.chain(kf)?;
-                Machine::restore(&config, &chain, &crate::keyframes::ReadPages(&store))?
+                let machine =
+                    Machine::restore(&config, &chain, &crate::keyframes::ReadPages(&store))?;
+                (machine, Some(Restored { kf, chain, store }))
             }
-            None => Machine::boot(&config)?,
+            None => (Machine::boot(&config)?, None),
         };
 
         // On the way to the step, the replay must make the records the run
@@ -816,7 +849,7 @@ impl Run {
             .filter(|(s, _)| from.is_none_or(|kf| *s > kf))
             .collect();
         let mut checked = Checked::new(obs, made);
-        machine.run(Some(step), &mut checked)?;
+        let outcome = machine.run(Some(step), &mut checked)?;
         if let Some(differs) = checked.differs_at {
             bail!(
                 "replaying run {} went another way at step {differs} than when it was \
@@ -825,7 +858,61 @@ impl Run {
                 self.manifest.id
             );
         }
+
+        // A keyframe at the step, when asked for, the machine got there,
+        // and the one it started from is far enough back.
+        if keep == Keep::Nothing {
+            return Ok(machine);
+        }
+        let reached = matches!(outcome, Outcome::Paused) && machine.step() == step;
+        let Some(mut restored) = restored.filter(|_| reached) else {
+            return Ok(machine);
+        };
+        if crate::keyframes::worth_keeping(&steps, step) {
+            self.keep_keyframe(&mut machine, &mut restored)?;
+        }
         Ok(machine)
+    }
+
+    /// Saves a keyframe of `machine`, at a step of this run it reached
+    /// from the keyframe `restored`, in the directory of the run that owns
+    /// the step, where every fork made there finds it (see
+    /// [`crate::keyframes::Layers::owner`]). Its pages are the ones
+    /// written since that keyframe.
+    ///
+    /// The owner's executing lock is held meanwhile, so `rewind gc`, which
+    /// refuses while a run is executing, does not collect the pages
+    /// between their writing and the keyframe that names them, and two
+    /// forks at nearby steps do not both keep one. Nothing is kept while
+    /// another process holds the lock, executing the run or keeping a
+    /// keyframe of its own, or when a keyframe near the step appeared
+    /// since this fork chose where to start.
+    ///
+    /// A keyframe added to a run changes no fork's restored state. A fork
+    /// sees a run's keyframes only up to the last step the two share,
+    /// where the runs are the same machine, and each keyframe names the
+    /// step of its parent, so the chains of keyframes already written
+    /// resolve as before. Only the step a fork near the new keyframe
+    /// replays from moves, as it does when an execution keeps the
+    /// keyframe at the step where it parts from its parent.
+    fn keep_keyframe(&self, machine: &mut Machine, restored: &mut Restored) -> Result<()> {
+        let step = machine.step();
+        let layers = self.keyframes()?;
+        let owner = layers.owner(step).to_path_buf();
+        let Ok(_executing) = lock_executing(&owner) else {
+            return Ok(());
+        };
+        if !crate::keyframes::worth_keeping(&self.keyframes()?.steps(), step) {
+            return Ok(());
+        }
+
+        // The pages first, durably, then the keyframe naming them.
+        let pages = &mut crate::keyframes::StorePages(&mut restored.store);
+        let mut kf = machine.keyframe(pages, Some(restored.kf))?;
+        crate::keyframes::Memory::of(&restored.chain).trim(kf.parent, &mut kf.pages);
+        restored.store.sync()?;
+        crate::keyframes::save(&owner, &kf)
+            .with_context(|| format!("keeping a keyframe at step {step} in {}", owner.display()))
     }
 
     /// The records the run made after `step`, with their steps: what a
@@ -857,7 +944,7 @@ impl Run {
             status: None,
             error: None,
         };
-        let mut machine = self.machine_at(home, kf, &mut recorder)?;
+        let mut machine = self.machine_at(home, kf, Keep::Nothing, &mut recorder)?;
         machine.run(None, &mut recorder)?;
         recorder.trace.finish()?;
         let again = Trace::read(&tmp)?;

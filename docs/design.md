@@ -343,6 +343,17 @@ at most about one interval. `rewind replay --from` restores a keyframe, runs
 to the end and compares the rest of the trace with the original. Every
 keyframe checked this way reproduces the rest of its run exactly.
 
+A fork that looks inside a run, for `rewind where`, `gdb`, `cat` or `shell`,
+also keeps a keyframe at its step when the latest one before it is more than
+512 steps back. `rewind where` forks two or three times at one step, and the
+app asks again wherever the playhead rests, so the later forks restore that
+keyframe instead of replaying to it. In a mylib build of 5102 steps, a lookup
+at step 5060 replayed 3621 steps from the keyframe at 1439 in 0.28 s on each fork, and
+keeping the keyframe took 0.1 s. The keyframe holds the pages written since
+the one restored and goes where a fork's shared keyframe goes (see
+[Forks](#forks)), written under that run's executing lock with the page store
+open, so `rewind gc` waits. A run recorded without keyframes keeps none.
+
 A delta lists the pages KVM's dirty log names, less the ones whose contents
 are what they were at the parent keyframe, often zero. About one entry in ten
 of the shared keyframe a fork takes (see [Forks](#forks)) is a page written

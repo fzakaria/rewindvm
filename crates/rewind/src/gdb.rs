@@ -182,7 +182,12 @@ pub fn fork(
     scope: rewind_core::debug::Scope,
     needs: Needs,
 ) -> Result<rewind_core::debug::Debuggee> {
-    let machine = run.machine_at(home, step, &mut rewind_vmm::Ignore)?;
+    let machine = run.machine_at(
+        home,
+        step,
+        rewind_core::run::Keep::Keyframe,
+        &mut rewind_vmm::Ignore,
+    )?;
     if let Needs::Tasks(what) = needs
         && machine.task_layout()?.is_none()
     {

@@ -261,6 +261,27 @@ in
         rewind replay a --from 400 | tee replay-from
         grep -q '^identical' replay-from
 
+        # A look inside a run more than 512 steps past its nearest
+        # keyframe keeps one at its step. A second look there keeps none,
+        # since it restores that keyframe and replays nothing, and the run
+        # replays from the kept keyframe like from any other. A run of
+        # thousands of writes has keyframes far enough apart.
+        rewind run -q --name long --root ${busyboxRoot} -- sh -c 'for i in $(seq 3000); do echo $i; done'
+        long=$(dirname "$(grep -l '"name": "long"' $REWIND_HOME/runs/*/manifest.json)")
+        keyframes() { ls "$long/keyframes" | sed 's/\.kf$//; s/^0*//'; }
+        end=$(rewind events long | grep 'mark "rewind-exit ' | awk '{print $1}')
+        far=$( (keyframes; echo "$end") | sort -n | awk -v end="$end" \
+          'NR > 1 && $1 - last > 600 && last + 600 < end { print last + 600; exit } { last = $1 }')
+        echo "looking at step ''${far:-none} of long, keyframes: $(keyframes | tr '\n' ' ')"
+        test -n "$far"
+        count=$(keyframes | wc -l)
+        rewind cat long "$far" /bin/busybox > /dev/null
+        test "$(keyframes | wc -l)" = $((count + 1))
+        keyframes | grep -qx "$far"
+        rewind cat long "$far" /bin/busybox > /dev/null
+        test "$(keyframes | wc -l)" = $((count + 1))
+        rewind replay long --from "$far" | grep "^identical from the keyframe at step $far "
+
         rewind run -q --name b --seed 1 --root ${busyboxRoot} -- sh -c '${workload}'
         rewind diff a b | tee diff
         grep -q 'first difference' diff

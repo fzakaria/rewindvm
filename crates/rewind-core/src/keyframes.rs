@@ -285,6 +285,31 @@ impl Memory {
     }
 }
 
+/// How far past the nearest earlier keyframe, in steps, a fork must be
+/// before it keeps a keyframe at its step. Keeping one costs about 10 ms
+/// plus the pages written since that keyframe, and spares every later
+/// fork at the step the replay to it. In a Nix build of a small C
+/// library, replaying 200 steps took 12 ms and keeping a keyframe after
+/// them 25 ms; 500 steps took 26 ms and 29 ms; 800 took 35 ms and 28 ms.
+/// So from about 512 steps one later fork at the step, of the one or two
+/// more `rewind where` makes, pays for the keyframe, and kept keyframes
+/// are never closer together than that.
+pub const KEEP_AFTER: u64 = 512;
+
+/// Whether a fork at `step` of a run with keyframes at `steps` keeps a
+/// keyframe there: when the nearest keyframe at or before the step, the
+/// one the fork restored, is more than KEEP_AFTER steps back. A run with
+/// no keyframes keeps none: such a run was recorded or imported without
+/// them, an import says whether a run is replayable by whether it has
+/// any, and `Run::add_keyframes` takes a full set only for a run with
+/// none of its own.
+pub fn worth_keeping(steps: &[u64], step: u64) -> bool {
+    let Some(nearest) = steps.iter().copied().rfind(|s| *s <= step) else {
+        return false;
+    };
+    step - nearest > KEEP_AFTER
+}
+
 /// Runs a machine to the end, taking keyframes as it goes. The first one
 /// holds the pages written since the keyframe at `parent`, which the
 /// machine was restored from or last took, or every page without one.
@@ -423,6 +448,22 @@ mod tests {
         assert_eq!(layers.owner(1000), g.as_path());
         assert_eq!(layers.owner(2000), p.as_path());
         assert_eq!(layers.owner(3000), c.as_path());
+    }
+
+    #[test]
+    fn a_lookup_keeps_a_keyframe_only_far_from_the_one_it_restored() {
+        // worth_keeping() over lists of keyframe steps: a step more than
+        // KEEP_AFTER past the nearest earlier keyframe is worth one, a
+        // step at or nearer to it is not, keyframes after the step do not
+        // count, and a run without keyframes gets none.
+        let steps = [256, 512, 1439];
+        assert!(worth_keeping(&steps, 1439 + KEEP_AFTER + 1));
+        assert!(worth_keeping(&steps, 5060));
+        assert!(!worth_keeping(&steps, 1439 + KEEP_AFTER));
+        assert!(!worth_keeping(&steps, 1439));
+        assert!(!worth_keeping(&steps, 600));
+        assert!(worth_keeping(&[256, 9000], 256 + KEEP_AFTER + 1));
+        assert!(!worth_keeping(&[], 5060));
     }
 
     #[test]

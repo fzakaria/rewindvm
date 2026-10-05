@@ -25,7 +25,7 @@ use rewind_vmm::pv::GuestExit;
 use rewind_vmm::{Ignore, Input, Machine, Observer, Outcome, Stop};
 
 use crate::home::Home;
-use crate::run::Run;
+use crate::run::{Keep, Run};
 
 /// How far a fork runs between checks on the answer, in steps.
 const CHUNK_STEPS: u64 = 20_000;
@@ -222,7 +222,10 @@ fn fork_at(home: &Home, run: &Run, step: u64) -> Result<(Machine, u64)> {
         _ => None,
     });
     let step = exited_at.map_or(step, |exited| step.min(exited));
-    Ok((run.machine_at(home, step, &mut Ignore)?, step))
+    Ok((
+        run.machine_at(home, step, Keep::Keyframe, &mut Ignore)?,
+        step,
+    ))
 }
 
 /// Runs the machine in chunks until the inspection's end mark arrives.
