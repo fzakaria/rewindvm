@@ -15,8 +15,11 @@ use gpui::{
     prelude::*, px, relative, rgb, uniform_list,
 };
 
+use crate::answers::FileKey;
 use crate::describe::{short_store_paths, thousands};
-use crate::engine::{Cancel, EngineError, FileAtStep, REPLAYS_ANOTHER_WAY, goes_another_way};
+use crate::engine::{
+    Cancel, EngineError, EngineResult, FileAtStep, REPLAYS_ANOTHER_WAY, goes_another_way,
+};
 use crate::request::Request;
 use crate::run::{Origin, Replays, Session};
 use crate::selection::{Mapped, Surface, part_of_line};
@@ -245,6 +248,13 @@ impl Scrubber {
         viewer.supersede();
         viewer.request = self.requests.issue();
         let request = viewer.request;
+
+        // An answer the engine gave for the same version of the file shows
+        // at once; anything else waits for the playhead to rest.
+        if let Some(answer) = self.known_file() {
+            self.show_file(step, Ok(answer), cx);
+            return;
+        }
         let timer = cx.background_executor().timer(DEBOUNCE);
         cx.spawn(async move |this, cx| {
             timer.await;
@@ -258,8 +268,27 @@ impl Scrubber {
         .detach();
     }
 
+    /// The answer kept for the file at the viewer's step, when the engine
+    /// gave one for the version the file has there. None while the VM
+    /// boots, which the viewer says instead.
+    fn known_file(&self) -> Option<FileAtStep> {
+        let (viewer, session) = (self.viewer.as_ref()?, self.session.as_ref()?);
+        let timeline = &session.run.timeline;
+        if viewer.step < timeline.job_start.unwrap_or(0) {
+            return None;
+        }
+        let key = FileKey::at(
+            &session.run.path,
+            &timeline.trace,
+            &viewer.path,
+            viewer.pid,
+            viewer.step,
+        );
+        self.file_answers.get(&key)
+    }
+
     /// Asks the engine for the file at the viewer's step, on a background
-    /// thread.
+    /// thread, unless an answer for the file's version there is kept.
     fn fetch_file(&mut self, cx: &mut Context<Self>) {
         let (Some(viewer), Some(session)) = (&mut self.viewer, &self.session) else {
             return;
@@ -278,14 +307,20 @@ impl Scrubber {
             cx.notify();
             return;
         }
+        let step = viewer.step;
+        if let Some(answer) = self.known_file() {
+            self.show_file(step, Ok(answer), cx);
+            return;
+        }
+
+        // The engine's answer, kept by the file's version.
+        let (Some(viewer), Some(session)) = (&mut self.viewer, &self.session) else {
+            return;
+        };
         viewer.loading = true;
         let request = viewer.request;
-        let (run, step, pid, path) = (
-            session.run.path.clone(),
-            viewer.step,
-            viewer.pid,
-            viewer.path.clone(),
-        );
+        let (run, pid, path) = (session.run.path.clone(), viewer.pid, viewer.path.clone());
+        let key = FileKey::at(&run, &session.run.timeline.trace, &path, pid, step);
         let engine = self.engine.clone();
         let cancel = Cancel::default();
         viewer.in_flight = Some(cancel.clone());
@@ -295,57 +330,64 @@ impl Scrubber {
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
-                let Some(viewer) = &mut this.viewer else {
-                    return;
-                };
-                if viewer.request != request {
+                if this.viewer.as_ref().is_none_or(|v| v.request != request) {
                     return;
                 }
-                viewer.loading = false;
-                this.selecting.selection = this
-                    .selecting
-                    .selection
-                    .filter(|s| s.surface != Surface::Viewer);
-                let Some(viewer) = &mut this.viewer else {
-                    return;
-                };
-                // A run this build replays another way is so at every step,
-                // so the viewer stops asking, and so does everything else
-                // that brings the run to a step.
-                if result.as_ref().is_err_and(goes_another_way) {
-                    viewer.unavailable = Some(REPLAYS_ANOTHER_WAY);
-                    if let Some(session) = &mut this.session {
-                        session.replays = Replays::AnotherWay;
-                    }
+                if let Ok(answer) = &result {
+                    this.file_answers.insert(key, answer.clone());
                 }
-
-                // Colors start over with the new contents; only text in a
-                // known language has any.
-                viewer.highlighter = Highlighter::new(None);
-                viewer.shown = Some(match result {
-                    Ok(FileAtStep::Exists { bytes, complete }) => {
-                        let view = View::new(&bytes, complete);
-                        viewer.highlighter = Highlighter::new(language_of(&viewer.path, &view));
-                        Fetched::Contents { step, view }
-                    }
-                    Ok(FileAtStep::Missing) => Fetched::Missing { step },
-                    Err(e) if predates_inspection(&e) => Fetched::Unreadable {
-                        step,
-                        message: PREDATES_REASON,
-                    },
-                    Err(e) if goes_another_way(&e) => Fetched::Unreadable {
-                        step,
-                        message: REPLAYS_ANOTHER_WAY,
-                    },
-                    Err(e) => Fetched::Failed {
-                        step,
-                        message: explain(&e),
-                    },
-                });
-                cx.notify();
+                this.show_file(step, result, cx);
             });
         })
         .detach();
+    }
+
+    /// Shows the engine's answer for the file at `step`.
+    fn show_file(&mut self, step: u64, result: EngineResult<FileAtStep>, cx: &mut Context<Self>) {
+        self.selecting.selection = self
+            .selecting
+            .selection
+            .filter(|s| s.surface != Surface::Viewer);
+        let Some(viewer) = &mut self.viewer else {
+            return;
+        };
+        viewer.loading = false;
+        viewer.in_flight = None;
+
+        // A run this build replays another way is so at every step, so the
+        // viewer stops asking, and so does everything else that brings the
+        // run to a step.
+        if result.as_ref().is_err_and(goes_another_way) {
+            viewer.unavailable = Some(REPLAYS_ANOTHER_WAY);
+            if let Some(session) = &mut self.session {
+                session.replays = Replays::AnotherWay;
+            }
+        }
+
+        // Colors start over with the new contents; only text in a known
+        // language has any.
+        viewer.highlighter = Highlighter::new(None);
+        viewer.shown = Some(match result {
+            Ok(FileAtStep::Exists { bytes, complete }) => {
+                let view = View::new(&bytes, complete);
+                viewer.highlighter = Highlighter::new(language_of(&viewer.path, &view));
+                Fetched::Contents { step, view }
+            }
+            Ok(FileAtStep::Missing) => Fetched::Missing { step },
+            Err(e) if predates_inspection(&e) => Fetched::Unreadable {
+                step,
+                message: PREDATES_REASON,
+            },
+            Err(e) if goes_another_way(&e) => Fetched::Unreadable {
+                step,
+                message: REPLAYS_ANOTHER_WAY,
+            },
+            Err(e) => Fetched::Failed {
+                step,
+                message: explain(&e),
+            },
+        });
+        cx.notify();
     }
 
     /// The viewer in place of the right column.

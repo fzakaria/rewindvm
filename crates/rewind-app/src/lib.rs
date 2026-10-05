@@ -8,6 +8,7 @@
 //! text surface; `synth` writes synthetic runs for development and tests;
 //! `request` numbers background work so a late answer is told apart.
 
+pub mod answers;
 pub mod archive;
 pub mod describe;
 pub mod engine;

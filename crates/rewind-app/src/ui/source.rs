@@ -25,8 +25,9 @@ use gpui::{
     UniformListScrollHandle, div, prelude::*, px, relative, rgb, uniform_list,
 };
 
+use crate::answers::PlaceKey;
 use crate::describe::thousands;
-use crate::engine::{Cancel, REPLAYS_ANOTHER_WAY, goes_another_way};
+use crate::engine::{Cancel, EngineResult, REPLAYS_ANOTHER_WAY, goes_another_way};
 use crate::request::Request;
 use crate::run::Replays;
 use crate::selection::{Mapped, Pos, Surface, part_of_line};
@@ -153,6 +154,13 @@ impl Scrubber {
         panel.supersede();
         panel.request = self.requests.issue();
         let request = panel.request;
+
+        // An answer the engine gave for this thread at this step shows at
+        // once; anything else waits for the playhead to rest.
+        if let Some(answer) = self.known_place() {
+            self.show_place(step, Ok(answer), cx);
+            return;
+        }
         let timer = cx.background_executor().timer(DEBOUNCE);
         cx.spawn(async move |this, cx| {
             timer.await;
@@ -201,11 +209,20 @@ impl Scrubber {
         let Some((pid, tid)) = thread else {
             return;
         };
+        let run = session.run.path.clone();
+        if let Some(answer) = self.known_place() {
+            self.show_place(step, Ok(answer), cx);
+            return;
+        }
 
+        // The engine's answer, kept by the thread and the step.
+        let Some(panel) = &mut self.source else {
+            return;
+        };
         panel.loading = true;
         panel.progress = Progress::default();
         let request = panel.request;
-        let run = session.run.path.clone();
+        let key: PlaceKey = (run.clone(), pid, tid, step);
         let engine = self.engine.clone();
 
         // The engine's lines come through a channel as it says them, and
@@ -239,32 +256,58 @@ impl Scrubber {
 
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
-                let Some(panel) = &mut this.source else {
-                    return;
-                };
-                if panel.request != request {
+                if this.source.as_ref().is_none_or(|p| p.request != request) {
                     return;
                 }
-                panel.loading = false;
-
-                // A run this build replays another way is so at every step,
-                // so the panel stops asking, and so does everything else
-                // that brings the run to a step.
-                if result.as_ref().is_err_and(goes_another_way) {
-                    panel.unavailable = Some(REPLAYS_ANOTHER_WAY.to_string());
-                    if let Some(session) = &mut this.session {
-                        session.replays = Replays::AnotherWay;
-                    }
+                if let Ok(answer) = &result {
+                    this.place_answers.insert(key, answer.clone());
                 }
-                panel.shown = Some(shown(step, result));
-                panel.highlighters.clear();
-                panel.sideways = Sideways::default();
-                this.clear_selection_in(&[Surface::Source]);
-                this.centre_shown_line();
-                cx.notify();
+                this.show_place(step, result, cx);
             });
         })
         .detach();
+    }
+
+    /// The answer kept for the thread of the panel's step, when the engine
+    /// gave one there. None while the VM boots or the kernel runs, which
+    /// the panel says instead.
+    fn known_place(&self) -> Option<Located> {
+        let (panel, session) = (self.source.as_ref()?, self.session.as_ref()?);
+        let timeline = &session.run.timeline;
+        if panel.step < timeline.job_start.unwrap_or(0) {
+            return None;
+        }
+        let event = timeline
+            .event_index_at(panel.step)
+            .and_then(|i| timeline.event(i))?;
+        let (pid, tid) = target(event.pid, event.tid)?;
+        let key: PlaceKey = (session.run.path.clone(), pid, tid, panel.step);
+        self.place_answers.get(&key)
+    }
+
+    /// Shows the engine's answer for the thread at `step`.
+    fn show_place(&mut self, step: u64, result: EngineResult<Located>, cx: &mut Context<Self>) {
+        let Some(panel) = &mut self.source else {
+            return;
+        };
+        panel.loading = false;
+        panel.in_flight = None;
+
+        // A run this build replays another way is so at every step, so the
+        // panel stops asking, and so does everything else that brings the
+        // run to a step.
+        if result.as_ref().is_err_and(goes_another_way) {
+            panel.unavailable = Some(REPLAYS_ANOTHER_WAY.to_string());
+            if let Some(session) = &mut self.session {
+                session.replays = Replays::AnotherWay;
+            }
+        }
+        panel.shown = Some(shown(step, result));
+        panel.highlighters.clear();
+        panel.sideways = Sideways::default();
+        self.clear_selection_in(&[Surface::Source]);
+        self.centre_shown_line();
+        cx.notify();
     }
 
     /// The answer on screen, when the panel shows one, and the frame whose

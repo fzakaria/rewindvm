@@ -14,9 +14,10 @@ use gpui::{
     Window,
 };
 
+use crate::answers::{Answers, FileKey, PlaceKey};
 use crate::describe::thousands;
 use crate::engine::{
-    Engine, EngineError, EngineResult, Forked, REPLAYS_ANOTHER_WAY, goes_another_way,
+    Engine, EngineError, EngineResult, FileAtStep, Forked, REPLAYS_ANOTHER_WAY, goes_another_way,
 };
 use crate::family::{Family, Row, RowKind, RunEntry, families, family_of, scan};
 use crate::memo::Memo;
@@ -24,6 +25,7 @@ use crate::model::{LogFilter, Motion};
 use crate::request::{Request, Requests};
 use crate::run::{Origin, Replays, Session, short_id};
 use crate::selection::Surface;
+use crate::source::Located;
 use crate::theme::size;
 use crate::tour::Tour;
 use crate::ui::licensing::Licensing;
@@ -244,6 +246,10 @@ pub struct Scrubber {
     /// Where requests to the engine and other background work get their
     /// numbers (see `crate::request`).
     pub(super) requests: Requests,
+    /// What files held at steps, as the engine said, by the file's version.
+    pub(super) file_answers: Answers<FileKey, FileAtStep>,
+    /// Where threads were at steps, as the engine said.
+    pub(super) place_answers: Answers<PlaceKey, Located>,
     /// The families of the engine's runs that changed last, for the empty
     /// state.
     pub(super) recent: Vec<Family>,
@@ -344,6 +350,8 @@ impl Scrubber {
             opening: None,
             importing: None,
             requests: Requests::default(),
+            file_answers: Answers::default(),
+            place_answers: Answers::default(),
             link_dialog: None,
             recent: Vec::new(),
             family: None,
