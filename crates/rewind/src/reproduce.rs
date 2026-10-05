@@ -59,7 +59,10 @@ pub fn command(m: &Manifest) -> Result<Vec<String>, Unset> {
             if job.cwd != "/" {
                 flag(&mut args, "cwd", job.cwd.clone());
             }
-            let default_path = ("PATH".to_string(), crate::DEFAULT_PATH.to_string());
+            let default_path = (
+                "PATH".to_string(),
+                crate::cmd::record::DEFAULT_PATH.to_string(),
+            );
             let env = match job.env.first() {
                 Some(first) if *first == default_path => &job.env[1..],
                 _ => &job.env[..],
@@ -93,7 +96,7 @@ pub fn command(m: &Manifest) -> Result<Vec<String>, Unset> {
     if spec.cores != DEFAULT_CORES {
         flag(&mut args, "cores", spec.cores.to_string());
     }
-    if spec.mem_mib != crate::DEFAULT_MEM_MIB {
+    if spec.mem_mib != crate::cmd::record::DEFAULT_MEM_MIB {
         flag(&mut args, "mem", spec.mem_mib.to_string());
     }
     if spec.cpu == rewind_vmm::CpuModel::Host {
@@ -175,7 +178,7 @@ mod tests {
             kernel_debug: None,
             image: Some("/images/x.erofs".into()),
             image_hash: Some("ab".into()),
-            mem_mib: crate::DEFAULT_MEM_MIB,
+            mem_mib: crate::cmd::record::DEFAULT_MEM_MIB,
             cores: DEFAULT_CORES,
             seed: 0,
             epoch: 1_791_072_000,
@@ -239,7 +242,10 @@ mod tests {
         // 2.5 s.
         let mut s = spec(job(
             &["make", "check"],
-            &[("PATH", crate::DEFAULT_PATH), ("CC", "gcc -O1")],
+            &[
+                ("PATH", crate::cmd::record::DEFAULT_PATH),
+                ("CC", "gcc -O1"),
+            ],
             "/src",
         ));
         s.job.output = Output::Terminal;
