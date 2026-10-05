@@ -98,8 +98,9 @@ mod tests {
     // The compiled-in examples, unpacked into a temporary cache directory
     // and indexed as the app would show them.
     use super::*;
-    use crate::model::{FailureKind, signo};
+    use crate::model::FailureKind;
     use crate::run::{Origin, Verdict};
+    use rewind_trace::signal;
 
     #[test]
     fn the_examples_show_a_crash_and_where_the_runs_part() {
@@ -112,7 +113,7 @@ mod tests {
         assert!(matches!(
             failure.kind,
             FailureKind::Signal {
-                signo: signo::SIGSEGV,
+                signo: signal::SIGSEGV,
                 ..
             }
         ));

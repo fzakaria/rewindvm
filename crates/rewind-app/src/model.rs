@@ -9,21 +9,9 @@
 
 use std::collections::HashMap;
 
-use rewind_trace::{Event, EventKind, JobExit, Trace};
+use rewind_trace::{Event, EventKind, JobExit, Trace, signal};
 
 use crate::shown_line::{Pen, shown};
-
-/// Signal numbers the app treats as a crash.
-pub mod signo {
-    pub const SIGILL: u32 = 4;
-    pub const SIGABRT: u32 = 6;
-    pub const SIGBUS: u32 = 7;
-    pub const SIGFPE: u32 = 8;
-    pub const SIGSEGV: u32 = 11;
-
-    /// A delivered signal in this list means the run crashed.
-    pub const FATAL: [u32; 5] = [SIGSEGV, SIGBUS, SIGABRT, SIGILL, SIGFPE];
-}
 
 /// The file descriptor of standard error.
 const STDERR_FD: u32 = 2;
@@ -702,7 +690,7 @@ fn find_failure(
         let EventKind::Signal { signo, addr, .. } = e.kind else {
             return None;
         };
-        if !signo::FATAL.contains(&signo) {
+        if !signal::FATAL.contains(&signo) {
             return None;
         }
         Some(Failure {
@@ -1046,7 +1034,7 @@ mod tests {
             fork(11, 2, 4, false),
             exec(12, 4, &["test_pool"]),
             fork(13, 4, 5, true),
-            signal(14, 4, 5, signo::SIGSEGV),
+            signal(14, 4, 5, signal::SIGSEGV),
             exit(15, 4, 5, 11, "worker-0", true),
             exit(16, 4, 4, 0x8b, "test_pool", false),
             ev(
@@ -1165,7 +1153,7 @@ mod tests {
         assert_eq!(
             f.kind,
             FailureKind::Signal {
-                signo: signo::SIGSEGV,
+                signo: signal::SIGSEGV,
                 addr: 0x10
             }
         );
@@ -1334,7 +1322,7 @@ mod tests {
         // failure is still cc's exit, where the job failed.
         let mut events = job(2 << 8).trace.events;
         events.push(fork(21, 41, 45, false));
-        events.push(signal(30, 45, 45, signo::SIGSEGV));
+        events.push(signal(30, 45, 45, signal::SIGSEGV));
         events.push(exit(31, 45, 45, SIGKILL_STATUS, "sleep", false));
         events.sort_by_key(|e| e.step);
         let t = Timeline::new(Trace { events }, None, None);
@@ -1373,7 +1361,7 @@ mod tests {
         assert_eq!((f.step, f.kind), (50, FailureKind::Stopped));
         assert_eq!(hung.seek(Motion::Failure, 0, None), 50);
 
-        events.push(signal(30, 44, 44, signo::SIGSEGV));
+        events.push(signal(30, 44, 44, signal::SIGSEGV));
         let crashed = Timeline::new(Trace { events }, Some(50), Some(&HUNG));
         assert_eq!(crashed.failure.unwrap().step, 30);
     }

@@ -343,7 +343,7 @@ impl Trace {
                 .map(|p| p.argv.clone())
         };
         let signalled = self.events.iter().filter_map(|e| match &e.kind {
-            EventKind::Signal { signo, .. } if FATAL_SIGNALS.contains(signo) => {
+            EventKind::Signal { signo, .. } if signal::FATAL.contains(signo) => {
                 Some((argv_of(e.pid)?, Ending::Signal(*signo)))
             }
             _ => None,
@@ -405,9 +405,18 @@ impl Trace {
     }
 }
 
-/// Signals that end a process unless it handles them: SIGILL, SIGABRT,
-/// SIGBUS, SIGFPE and SIGSEGV.
-pub const FATAL_SIGNALS: [u32; 5] = [4, 6, 7, 8, 11];
+/// The signals a crash is made of.
+pub mod signal {
+    pub const SIGILL: u32 = 4;
+    pub const SIGABRT: u32 = 6;
+    pub const SIGBUS: u32 = 7;
+    pub const SIGFPE: u32 = 8;
+    pub const SIGSEGV: u32 = 11;
+
+    /// Signals that end a process unless it handles them; one delivered
+    /// means the process crashed.
+    pub const FATAL: [u32; 5] = [SIGSEGV, SIGBUS, SIGABRT, SIGILL, SIGFPE];
+}
 
 /// How a program ended badly, for comparing failures between runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

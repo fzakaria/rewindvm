@@ -7,9 +7,9 @@
 
 use rewind_trace::{Event, EventKind, signal_name};
 
-use crate::model::signo;
 use crate::selection::{Mapped, Splice};
 use rewind_trace::ending::ExitStatus;
+use rewind_trace::signal;
 
 /// Text inside a described event is cut to this many characters.
 const MAX_QUOTED_CHARS: usize = 160;
@@ -100,7 +100,7 @@ pub fn describe(event: &Event) -> Described {
         }
         EventKind::Signal { signo, code, addr } => {
             let name = signal_name(*signo);
-            if signo::FATAL.contains(signo) {
+            if signal::FATAL.contains(signo) {
                 return error(format!("{name} at {addr:#x} (si_code {code})"));
             }
             normal(format!("{name} delivered (si_code {code})"))
@@ -411,7 +411,7 @@ fn plain_from(
         }
         EventKind::Signal { signo, addr, .. } => {
             let name = signal_name(*signo);
-            if signo::FATAL.contains(signo) {
+            if signal::FATAL.contains(signo) {
                 return format!("{who} gets {name} at {addr:#x}");
             }
             format!("{who} gets {name}")
