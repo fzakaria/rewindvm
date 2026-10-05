@@ -18,7 +18,6 @@ use rewind_trace::signal_name;
 
 use crate::archive;
 use crate::describe::{self, thousands};
-use crate::family::{RunEntry, scan};
 use crate::model::{Comparison, ExitStatus, Timeline};
 
 /// The trace inside a run directory.
@@ -487,12 +486,6 @@ pub struct Session {
     pub run: Run,
     pub other: Option<Run>,
     pub comparison: Option<Comparison>,
-    /// Forks of the run already on disk next to it, for picking the next
-    /// fork's schedule seed.
-    pub forks_on_disk: usize,
-    /// The runs next to the run, read once when it opened. None for a run
-    /// with no id, which no run names as its parent.
-    pub neighbours: Option<Neighbours>,
     /// Why the run asked to be compared with could not be opened, such as
     /// one removed meanwhile, for a notice; the run then opens alone.
     pub unopened_compare: Option<String>,
@@ -511,40 +504,15 @@ pub enum Replays {
     AnotherWay,
 }
 
-/// The runs in one directory, as their manifests read at one time.
-pub struct Neighbours {
-    pub dir: PathBuf,
-    pub runs: Vec<RunEntry>,
-}
-
 impl Session {
     pub fn new(run: Run, other: Option<Run>) -> Session {
         let comparison = other
             .as_ref()
             .map(|o| Comparison::new(&run.timeline, &o.timeline));
-
-        // The runs next to this one, each manifest read once: the forks
-        // among them, and, when they are the engine's runs, the families
-        // the app lists.
-        let neighbours = run.manifest.id.as_ref().and_then(|_| {
-            let dir = run.path.parent()?.to_path_buf();
-            let runs = scan(&dir);
-            Some(Neighbours { dir, runs })
-        });
-        let forks_on_disk = match (&run.manifest.id, &neighbours) {
-            (Some(id), Some(neighbours)) => neighbours
-                .runs
-                .iter()
-                .filter(|r| r.parent.as_ref().is_some_and(|p| &p.id == id))
-                .count(),
-            _ => 0,
-        };
         Session {
             run,
             other,
             comparison,
-            forks_on_disk,
-            neighbours,
             unopened_compare: None,
             replays: Replays::AsRecorded,
         }
@@ -866,12 +834,6 @@ mod tests {
         write("f2", r#"{"id": "f2", "parent": ["base", 20]}"#);
         write("other", r#"{"id": "other", "parent": ["f1", 5]}"#);
         let session = Session::open(&dir.join("base"), None).unwrap();
-        assert_eq!(session.forks_on_disk, 2);
-        let neighbours = session.neighbours.as_ref().unwrap();
-        assert_eq!(neighbours.dir, dir);
-        let mut neighbours: Vec<&str> = neighbours.runs.iter().map(|r| r.id.as_str()).collect();
-        neighbours.sort();
-        assert_eq!(neighbours, ["base", "f1", "f2", "other"]);
         assert!(session.other.is_none());
         let fork = Session::open(&dir.join("f1"), None).unwrap();
         assert_eq!(fork.other.unwrap().path, dir.join("base"));

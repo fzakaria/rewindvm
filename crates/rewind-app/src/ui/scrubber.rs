@@ -372,7 +372,7 @@ impl Scrubber {
 
     /// Puts a session on screen with the playhead at `step`, or at the
     /// failure, or at the end.
-    pub(super) fn show(&mut self, mut session: Session, step: Option<u64>, cx: &mut Context<Self>) {
+    pub(super) fn show(&mut self, session: Session, step: Option<u64>, cx: &mut Context<Self>) {
         let timeline = &session.run.timeline;
         let start = step
             .or(timeline.failure.map(|f| f.step))
@@ -415,20 +415,13 @@ impl Scrubber {
             self.family = Some(Family { runs });
         }
 
-        // The runs next to the run were read when it opened; when they are
-        // the engine's runs, they are shown rather than read again.
-        let neighbours = session
-            .neighbours
-            .take()
-            .filter(|n| crate::engine::runs_dir().is_some_and(|runs| same_dir(&runs, &n.dir)));
+        // The engine's runs are read after the run is on screen, for its
+        // family and the forks it has.
         self.session = Some(session);
         if let Some(file) = replayable {
             self.bring_in(file, cx);
         }
-        match neighbours {
-            Some(neighbours) => self.apply_runs(neighbours.runs, cx),
-            None => self.reload_runs(cx),
-        }
+        self.reload_runs(cx);
         cx.notify();
     }
 
@@ -1116,7 +1109,8 @@ impl Scrubber {
             return;
         }
         let step = self.step;
-        let schedule = 1 + session.forks_on_disk as u64 + self.forks.len() as u64;
+        let id = session.run.manifest.id.as_deref().unwrap_or_default();
+        let schedule = next_fork_schedule(self.family.as_ref(), id, &self.forks);
         let run = session.run.path.clone();
         let parent = run.clone();
         let request = self.requests.issue();
@@ -1472,12 +1466,17 @@ fn export_directory() -> PathBuf {
         .unwrap_or_else(|| Path::new("/").to_path_buf())
 }
 
-/// Whether `a` and `b` name one directory.
-fn same_dir(a: &Path, b: &Path) -> bool {
-    if a == b {
-        return true;
-    }
-    matches!((a.canonicalize(), b.canonicalize()), (Ok(a), Ok(b)) if a == b)
+/// The schedule seed for the next fork of the run `id`: one past the
+/// highest any fork of it has, on disk in `family` or still being made in
+/// `pending`, so two forks of one run never share a seed.
+fn next_fork_schedule(family: Option<&Family>, id: &str, pending: &[ForkMark]) -> u64 {
+    let on_disk = family
+        .into_iter()
+        .flat_map(|f| &f.runs)
+        .filter(|r| r.parent.as_ref().is_some_and(|p| p.id == id))
+        .map(|r| r.schedule);
+    let being_made = pending.iter().map(|m| m.schedule);
+    1 + on_disk.chain(being_made).max().unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -1485,6 +1484,38 @@ mod tests {
     // What the scrubber decides about a run, with no window.
     use super::*;
     use crate::synth::{self, SynthConfig, Variant};
+
+    #[test]
+    fn each_fork_of_a_run_gets_a_schedule_of_its_own() {
+        // Forks of base with seeds 1 and 4 on disk, a fork of another run
+        // with seed 9, and one of base being made with seed 5: the next
+        // fork of base takes 6, and of a run with no forks, 1.
+        let entry = |id: &str, parent: Option<&str>, schedule: u64| {
+            let mut json = serde_json::json!({ "id": id, "spec": { "schedule": schedule } });
+            if let Some(parent) = parent {
+                json["parent"] = serde_json::json!([parent, 10]);
+            }
+            let manifest = crate::run::Manifest::from_json(&json);
+            RunEntry::from_manifest(Path::new(id), &manifest, std::time::SystemTime::UNIX_EPOCH)
+        };
+        let family = Family {
+            runs: vec![
+                entry("base", None, 0),
+                entry("f1", Some("base"), 1),
+                entry("f4", Some("base"), 4),
+                entry("g9", Some("f1"), 9),
+            ],
+        };
+        let pending = [ForkMark {
+            request: Requests::default().issue(),
+            step: 20,
+            schedule: 5,
+            state: ForkState::Pending,
+        }];
+        assert_eq!(next_fork_schedule(Some(&family), "base", &pending), 6);
+        assert_eq!(next_fork_schedule(Some(&family), "f4", &[]), 1);
+        assert_eq!(next_fork_schedule(None, "base", &[]), 1);
+    }
 
     #[test]
     fn an_error_stays_until_it_is_closed() {
