@@ -68,6 +68,14 @@ pub const GREEN_SOFT: u32 = 0x9fd8a4;
 pub const GREEN_PILL: u32 = 0x15221a;
 pub const GREEN_BORDER: u32 = 0x24402c;
 
+/// The terminal's 16 colors as the log draws them on the panel: the
+/// theme's own red, green, amber, blue and text for theirs, and for black
+/// a grey that shows on the dark panel. Then the same eight brighter.
+pub const ANSI: [u32; 16] = [
+    FAINT, RED, GREEN_SOFT, AMBER, BLUE, 0xd59bf6, 0x7fd6d8, SOFT, MUTED, RED_SOFT, 0xb8e8bb,
+    0xffc46b, 0xa3c8ff, 0xe5b8fa, 0xa3e6e8, TEXT,
+];
+
 /// Standard error lines in the log: the soft text pulled toward red.
 pub const STDERR: u32 = 0xe0b4a8;
 /// The log row under the playhead.

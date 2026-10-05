@@ -20,6 +20,7 @@ use crate::run::{Agreement, Session, Verdict, short_id};
 use crate::selection::{Mapped, Surface, part_of_line};
 use crate::theme::{self, layout, size};
 use crate::tour::Anchor;
+use crate::ui::ansi::penned;
 use crate::ui::chrome::client_tiling;
 use crate::ui::icons::Icon;
 use crate::ui::scrubber::{ForkState, NoticeAction, NoticeTone, Scrub, Scrubber};
@@ -925,7 +926,11 @@ impl Scrubber {
                             Tone::Console => theme::MUTED,
                             Tone::Normal => theme::SOFT,
                         };
-                        let text = mapped(&line.text).shown;
+                        // The line in its tone's color, with the runs its
+                        // program colored on its terminal in theirs.
+                        let shown = mapped(&line.text);
+                        let pens = penned(&shown, &line.pens);
+                        let text = shown.shown;
                         let part = selected
                             .as_ref()
                             .and_then(|r| part_of_line(r, i, text.len()));
@@ -955,7 +960,10 @@ impl Scrubber {
                                     .min_w_0()
                                     .truncate()
                                     .text_color(rgb(color))
-                                    .child(selectable(Surface::Log, i, text, part, &registry)),
+                                    .child(
+                                        selectable(Surface::Log, i, text, part, &registry)
+                                            .with_highlights(pens),
+                                    ),
                             )
                     })
                     .collect::<Vec<_>>()

@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 use rewind_trace::{Event, EventKind, Trace};
 
-use crate::shown_line::shown;
+use crate::shown_line::{Pen, shown};
 
 /// Signal numbers the app treats as a crash.
 pub mod signo {
@@ -140,6 +140,9 @@ pub struct LogLine {
     pub stream: Stream,
     pub text: String,
     pub tone: Tone,
+    /// The runs of `text` its program drew in colors or weights of their
+    /// own, by byte range; the rest is drawn in the tone's color.
+    pub pens: Vec<(std::ops::Range<usize>, Pen)>,
 }
 
 /// Which lines the build log shows.
@@ -653,20 +656,21 @@ fn output_lines(trace: &Trace) -> Vec<LogLine> {
         .lines_until(u64::MAX)
         .into_iter()
         .map(|line| (shown(&line.text), line))
-        .filter(|(text, _)| !text.starts_with(NIX_LOG_PREFIX))
-        .map(|(text, line)| {
+        .filter(|(shown, _)| !shown.text.starts_with(NIX_LOG_PREFIX))
+        .map(|(shown, line)| {
             let stream = if line.fd == STDERR_FD {
                 Stream::Stderr
             } else {
                 Stream::Stdout
             };
-            let tone = tone_of(&text, stream);
+            let tone = tone_of(&shown.text, stream);
             LogLine {
                 step: line.step,
                 pid: line.pid,
                 stream,
-                text,
+                text: shown.text,
                 tone,
+                pens: shown.pens,
             }
         })
         .collect();
@@ -683,6 +687,7 @@ fn output_lines(trace: &Trace) -> Vec<LogLine> {
                 stream: Stream::Mark,
                 text: format!("{MARK_LINE_PREFIX}{text}"),
                 tone: Tone::Phase,
+                pens: Vec::new(),
             }),
             _ => None,
         })
@@ -712,6 +717,7 @@ fn console_lines(trace: &Trace) -> Vec<LogLine> {
                 stream: Stream::Console,
                 text: part.trim_end().to_string(),
                 tone,
+                pens: Vec::new(),
             });
         }
     }

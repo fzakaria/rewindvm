@@ -2,6 +2,7 @@
 //!
 //! `scrubber` holds the view's state and what it does; `render` draws it.
 
+mod ansi;
 mod bookmarks;
 mod chrome;
 mod icons;
