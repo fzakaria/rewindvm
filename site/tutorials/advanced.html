@@ -54,6 +54,7 @@
         <p class="toc-head">Recipes</p>
         <ol>
           <li><a href="#the-runs">The runs</a></li>
+          <li><a href="#find-the-line-a-thread-was-on">Find the line a thread was on</a></li>
           <li><a href="#watch-both-sides-of-the-race">Watch both sides of the race</a></li>
           <li><a href="#follow-the-fault-into-the-kernel">Follow the fault into the kernel</a></li>
           <li><a href="#use-your-own-gdb">Use your own gdb</a></li>
@@ -77,9 +78,102 @@
 rewind: packing 62 store paths for mylib-0.3.0
 schedule 1 ends differently; narrowing the steps it perturbs
 perturbing only steps 4396..5048 still ends differently
-passing: run af648d629627479e
-failing: run 8fd5378ddf70075e</code></pre>
+passing: run f9d89f1535ecd781
+failing: run 77cb8e22b8ce6d9d</code></pre>
         <p>The failing run crashes at step 5060.</p>
+      </section>
+
+      <section class="step">
+        <h2 id="find-the-line-a-thread-was-on">
+          <a class="anchor" href="#find-the-line-a-thread-was-on">Find the line a thread was on</a>
+        </h2>
+        <p>
+          <code>rewind where</code> names the line of the program's own code a thread was on at a
+          step, past the C library and, in Rust, the standard library and dependencies. By default
+          it looks at the thread of the step's own event, the pid/tid pair
+          <code>rewind events</code> prints; at 5060 that is the worker that segfaulted:
+        </p>
+        <pre
+          class="console"
+        ><code><span class="cmd"><span class="prompt">$</span> rewind where 77cb8e22 5060</span>
+rewind: process 166 at step 5060; loading symbols for 4 of its files
+rewind: fetched 3 source files from the VM
+rewind: walking thread 174's stack in gdb
+process 166 (test_pool_shutdown), thread 174, at step 5060
+#0 worker (src/pool.c:77)
+      75  			printf("job %d done: %ld\n", job, result &amp; 0xffff);
+      76  			fflush(stdout);
+&gt;     77  			p-&gt;queue-&gt;completed++;
+      78  		}
+      79  	}
+called from #1 start_thread (pthread_create.c:454)
+called from #2 __GI___clone3 (../sysdeps/unix/sysv/linux/x86_64/clone3.S:78)</code></pre>
+        <p>
+          <code>--tid</code> picks another thread, on the CPU or not. At step 5057, the worker's
+          last write, the main thread is waiting to join the workers:
+        </p>
+        <pre
+          class="console"
+        ><code><span class="cmd"><span class="prompt">$</span> rewind where 77cb8e22 5057 --tid 166</span>
+rewind: process 166 at step 5057; loading symbols for 4 of its files
+rewind: fetched 3 source files from the VM
+rewind: walking thread 166's stack in gdb
+process 166 (test_pool_shutdown), thread 166, at step 5057
+#7 pool_shutdown (src/pool.c:128)
+     126
+     127  	for (int i = 0; i &lt; POOL_WORKERS; i++)
+&gt;    128  		pthread_join(p-&gt;workers[i], NULL);
+     129  	pthread_cond_destroy(&amp;p-&gt;ready);
+     130  	pthread_mutex_destroy(&amp;p-&gt;lock);
+called from #8 main (tests/test_pool_shutdown.c:24)
+called from #9 __libc_start_call_main (../sysdeps/nptl/libc_start_call_main.h:59)</code></pre>
+        <p>
+          <code>--json</code> prints every frame and which one was chosen. For every frame of every
+          thread, ask gdb for all the stacks of the process:
+        </p>
+        <pre
+          class="console"
+        ><code><span class="cmd"><span class="prompt">$</span> rewind gdb 77cb8e22 5057 --pid 166 -- -batch -ex 'thread apply all bt' 2&gt;/dev/null | grep -E '^Thread|src/|tests/'</span>
+Thread 4 (Thread 1.174 (test_pool_shutd, on the CPU)):
+#9  0x000055bfaf437433 in worker (arg=0x55bfe41ff010) at src/pool.c:76
+Thread 3 (Thread 1.173 (test_pool_shutd)):
+#5  0x000055bfaf4373a9 in run_job (job=18) at src/pool.c:45
+#6  worker (arg=0x55bfe41ff010) at src/pool.c:73
+Thread 2 (Thread 1.166 (test_pool_shutd)):
+#7  0x000055bfaf4375b3 in pool_shutdown (p=p@entry=0x55bfe41ff010) at src/pool.c:128
+#8  0x000055bfaf437272 in main () at tests/test_pool_shutdown.c:24
+Thread 1 (Thread 1.4194305 (the CPU, in test_pool_shutd 174)):</code></pre>
+        <p>
+          Both read each thread's registers from the VM kernel's task list, so they work on runs
+          recorded with a guest that lists its tasks, as these were.
+        </p>
+        <p>
+          In the app, Show source under Inspect, or the s key, opens the source panel in place of At
+          this step. It names the line <code>rewind where</code> would for the thread of the
+          playhead's event, marks it in the source around it, and lists the thread's frames below
+          with the chosen one marked. When the playhead rests on another step the panel asks again,
+          dimming the last answer meanwhile; each answer forks the run, so it takes a few seconds.
+          Runs the app cannot fork say so instead: the bundled example and an export that holds only
+          the trace. So does a run recorded before the guest listed its tasks, which has to be
+          recorded again.
+        </p>
+        <figure class="shot">
+          <picture>
+            <source srcset="../img/app-source.webp" type="image/webp" />
+            <img
+              src="../img/app-source.png"
+              width="1440"
+              height="900"
+              loading="lazy"
+              alt="The app&#x27;s source panel at step 5060 of the failing run: worker at src/pool.c:77 with p-&gt;queue-&gt;completed++ marked, and the frames worker, start_thread and clone3 below"
+            />
+          </picture>
+          <figcaption>
+            The app&#x27;s source panel at step 5060 of the failing run: worker at src/pool.c:77
+            with p-&gt;queue-&gt;completed++ marked, and the frames worker, start_thread and clone3
+            below
+          </figcaption>
+        </figure>
       </section>
 
       <section class="step">
@@ -92,11 +186,10 @@ failing: run 8fd5378ddf70075e</code></pre>
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind gdb 8fd5378d 5017 -- -batch -ex 'break src/pool.c:74' -ex continue -ex 'watch -l p-&gt;queue' -ex 'delete 1' -ex continue -ex 'bt 2' -ex 'break src/pool.c:77 if p-&gt;queue == 0' -ex continue -ex 'bt 1'</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind gdb 77cb8e22 5017 -- -batch -ex 'break src/pool.c:74' -ex continue -ex 'watch -l p-&gt;queue' -ex 'delete 1' -ex continue -ex 'bt 2' -ex 'break src/pool.c:77 if p-&gt;queue == 0' -ex continue -ex 'bt 1'</span>
 rewind: step 5017 ran in process 166; loading symbols for 4 of its files
 rewind: fetched 3 source files from the VM
-rewind: gdb at step 5017 of 8fd5378ddf70075e
-Downloading 740.00 B source file /build/linux-7.2.8/./arch/x86/include/asm/shared/io.h...
+rewind: gdb at step 5017 of 77cb8e22b8ce6d9d
 0xffffffff81285085 in __outl (value=&lt;optimized out&gt;, port=1504) at ./arch/x86/include/asm/shared/io.h:24
 24	BUILDIO(l,  , u32)
 Breakpoint 1 at 0x55bfaf4373a9: file src/pool.c, line 74.
@@ -157,10 +250,10 @@ Thread 1 hit Breakpoint 3, worker (arg=0x55bfe41ff010) at src/pool.c:77
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind gdb 8fd5378d 5057 -- -batch -ex 'break force_sig_fault' -ex continue -ex 'bt 4' -ex 'pipe lx-ps | tail -4' -ex 'pipe lx-dmesg | tail -2'</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind gdb 77cb8e22 5057 -- -batch -ex 'break force_sig_fault' -ex continue -ex 'bt 4' -ex 'pipe lx-ps | tail -4' -ex 'pipe lx-dmesg | tail -2'</span>
 rewind: step 5057 ran in process 166; loading symbols for 4 of its files
 rewind: fetched 3 source files from the VM
-rewind: gdb at step 5057 of 8fd5378ddf70075e
+rewind: gdb at step 5057 of 77cb8e22b8ce6d9d
 0xffffffff81285085 in __outl (value=&lt;optimized out&gt;, port=1504) at ./arch/x86/include/asm/shared/io.h:24
 24	BUILDIO(l,  , u32)
 Downloading 133.41 K source file /build/linux-7.2.8/kernel/signal.c...
@@ -212,10 +305,10 @@ Thread 1 hit Breakpoint 1, force_sig_fault (sig=11, code=1, addr=0x108) at kerne
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind gdb 8fd5378d 5060 --listen 127.0.0.1:1234</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind gdb 77cb8e22 5060 --listen 127.0.0.1:1234</span>
 rewind: step 5060 ran in process 166; loading symbols for 4 of its files
 rewind: fetched 3 source files from the VM
-rewind: gdb at step 5060 of 8fd5378ddf70075e; connect with: gdb -q -iex 'set debuginfod enabled on' -iex 'set debuginfod urls http://127.0.0.1:37735' -ex 'file /nix/store/6ivm05j96w01zx0zpj0b0ksbjsfp89zw-rewind-guest-kernel-7.2.8- ...</code></pre>
+rewind: gdb at step 5060 of 77cb8e22b8ce6d9d; connect with: gdb -q -iex 'set debuginfod enabled on' -iex 'set debuginfod urls http://127.0.0.1:38601' -ex 'file /nix/store/6ivm05j96w01zx0zpj0b0ksbjsfp89zw-rewind-guest-kernel-7.2.8- ...</code></pre>
       </section>
 
       <section class="step">
@@ -228,8 +321,8 @@ rewind: gdb at step 5060 of 8fd5378ddf70075e; connect with: gdb -q -iex 'set deb
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> printf 'objdump -d --no-show-raw-insn --start-address=0x142c --stop-address=0x143e tests/test_pool_shutdown | tail -4; exit\n' | rewind shell 8fd5378d 5060 --pid 166 --with nixpkgs#binutils</span>
-rewind: a shell at step 5060 of 8fd5378ddf70075e; exit it to leave
+        ><code><span class="cmd"><span class="prompt">$</span> printf 'objdump -d --no-show-raw-insn --start-address=0x142c --stop-address=0x143e tests/test_pool_shutdown | tail -4; exit\n' | rewind shell 77cb8e22 5060 --pid 166 --with nixpkgs#binutils</span>
+rewind: a shell at step 5060 of 77cb8e22b8ce6d9d; exit it to leave
 rewind: packing 21 store paths for --with
 [rewind] /build/mylib # objdump -d --no-show-raw-insn --start-address=0x142c --stop-address=0x143e tests/test_pool_shutdown | tail -4; exit
     142c:	mov    (%rax),%edi
@@ -251,12 +344,12 @@ rewind: packing 21 store paths for --with
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind nix --cores 4 --epoch 1790985600 github:fzakaria/rewindvm#mylib</span>
 ...
-rewind: run 6ac02071c42df94c exited:0 after 6160 steps, 0.216s virtual, 1.057s wall (poweroff)
+rewind: run 8927ee7b268db403 exited:0 after 6160 steps, 0.216s virtual, 1.562s wall (poweroff)
 /nix/store/f6a9gy362szw6nxx3ikrklr8glr6rdln-mylib-0.3.0 a9d703ba89774f3d  matches your store, rewindvm.cachix.org</code></pre>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> printf 'nproc; echo $NIX_BUILD_CORES; exit\n' | rewind shell 6ac02071 2464 --pid 110</span>
-rewind: a shell at step 2464 of 6ac02071c42df94c; exit it to leave
+        ><code><span class="cmd"><span class="prompt">$</span> printf 'nproc; echo $NIX_BUILD_CORES; exit\n' | rewind shell 8927ee7b 2464 --pid 110</span>
+rewind: a shell at step 2464 of 8927ee7b268db403; exit it to leave
 [rewind] /build/mylib # nproc; echo $NIX_BUILD_CORES; exit
 4
 4</code></pre>
@@ -276,20 +369,20 @@ rewind: a shell at step 2464 of 6ac02071c42df94c; exit it to leave
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind fork 8fd5378d 4960 --schedule 1 --quiet</span>
-rewind: run dcc03c839807c4f8 exited:2 after 5105 steps, 0.203s virtual, 0.467s wall (poweroff)
+        ><code><span class="cmd"><span class="prompt">$</span> rewind fork 77cb8e22 4960 --schedule 1 --quiet</span>
+rewind: run 5394d164cd605147 exited:2 after 5105 steps, 0.203s virtual, 0.632s wall (poweroff)
 rewind: the fork first differs from its parent at step 5070
 
-<span class="cmd"><span class="prompt">$</span> rewind fork 8fd5378d 4960 --schedule 2 --quiet</span>
-rewind: run cad35e7ca8a9c5df exited:0 after 6586 steps, 0.221s virtual, 0.501s wall (poweroff)
+<span class="cmd"><span class="prompt">$</span> rewind fork 77cb8e22 4960 --schedule 2 --quiet</span>
+rewind: run d07651b4715961ca exited:0 after 6586 steps, 0.221s virtual, 0.745s wall (poweroff)
 rewind: the fork first differs from its parent at step 4966
 
-<span class="cmd"><span class="prompt">$</span> rewind fork 8fd5378d 4960 --schedule 3 --quiet</span>
-rewind: run 72ed4708d813fe85 exited:0 after 6639 steps, 0.225s virtual, 0.298s wall (poweroff)
+<span class="cmd"><span class="prompt">$</span> rewind fork 77cb8e22 4960 --schedule 3 --quiet</span>
+rewind: run c37f3d899daee0bf exited:0 after 6639 steps, 0.225s virtual, 0.431s wall (poweroff)
 rewind: the fork first differs from its parent at step 4966
 
-<span class="cmd"><span class="prompt">$</span> rewind fork 8fd5378d 4960 --schedule 4 --quiet</span>
-rewind: run 6e5e9554534b9f82 exited:0 after 6604 steps, 0.224s virtual, 0.287s wall (poweroff)
+<span class="cmd"><span class="prompt">$</span> rewind fork 77cb8e22 4960 --schedule 4 --quiet</span>
+rewind: run 8a9f1778cc770d96 exited:0 after 6604 steps, 0.224s virtual, 0.418s wall (poweroff)
 rewind: the fork first differs from its parent at step 4966</code></pre>
         <p>
           The app's Runs panel shows every run of the build, with forks under the run and step they
@@ -324,7 +417,7 @@ rewind: the fork first differs from its parent at step 4966</code></pre>
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind nix --quiet --epoch 1790985600 --schedule 1 --schedule-from 4396 --schedule-until 5048 github:fzakaria/rewindvm#mylib</span>
-rewind: run 8fd5378ddf70075e exited:2 after 5102 steps, 0.203s virtual, 0.588s wall (poweroff)</code></pre>
+rewind: run 77cb8e22b8ce6d9d exited:2 after 5102 steps, 0.203s virtual, 0.867s wall (poweroff)</code></pre>
       </section>
 
       <section class="step">
@@ -337,7 +430,7 @@ rewind: run 8fd5378ddf70075e exited:2 after 5102 steps, 0.203s virtual, 0.588s w
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind diff af648d62 8fd5378d</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind diff f9d89f15 77cb8e22</span>
 first difference at event 1586: step 4404 on the left, step 4405 on the right
   both        4383   166/169   write(1, "worker picked job 5\n")
   both        4393   166/170   write(1, "job 4 done: 3480\n")
@@ -380,13 +473,13 @@ first difference at event 1586: step 4404 on the left, step 4405 on the right
         </h2>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind export 8fd5378d --replayable -o crash.rwd</span>
-rewind: wrote crash.rwd (201.3 MB)
+        ><code><span class="cmd"><span class="prompt">$</span> rewind export 77cb8e22 --replayable -o crash.rwd</span>
+rewind: wrote crash.rwd (201.2 MB)
 
 <span class="cmd"><span class="prompt">$</span> REWIND_HOME=elsewhere rewind import crash.rwd</span>
-8fd5378ddf70075e  exited:2          5102 steps  mylib-0.3.0
+77cb8e22b8ce6d9d  exited:2          5102 steps  mylib-0.3.0
 
-<span class="cmd"><span class="prompt">$</span> REWIND_HOME=elsewhere rewind replay 8fd5378d</span>
+<span class="cmd"><span class="prompt">$</span> REWIND_HOME=elsewhere rewind replay 77cb8e22</span>
 identical: 1715 events over 5102 steps</code></pre>
         <p>
           A replayable export carries the keyframes, the image and the VM's kernel, and replays on
@@ -404,7 +497,7 @@ identical: 1715 events over 5102 steps</code></pre>
 cpu: AMD Zen (family 25)
 amd workaround (MSR 0xc0011020 bit 54): set by `rewind pmu enable` this boot
 perf_event_paranoid: 2
-self-test: 40046313 and 40046313 branches, exact at every exit
+self-test: 40046319 and 40046319 branches, exact at every exit
 runs will use counter time</code></pre>
         <p>
           With counter time the VM's clock follows the work done inside it; with exit time
@@ -421,12 +514,13 @@ runs will use counter time</code></pre>
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> REWIND_HOME=elsewhere rewind ls</span>
-cad35e7ca8a9c5df  exited:0          6586 steps  mylib-0.3.0 (fork of 8fd5378ddf70075e at 4960, schedule 2)
-dcc03c839807c4f8  exited:2          5105 steps  mylib-0.3.0 (fork of 8fd5378ddf70075e at 4960, schedule 1)
-8fd5378ddf70075e  exited:2          5102 steps  mylib-0.3.0
+d07651b4715961ca  exited:0          6586 steps  mylib-0.3.0 (fork of 77cb8e22b8ce6d9d at 4960, schedule 2)
+5394d164cd605147  exited:2          5105 steps  mylib-0.3.0 (fork of 77cb8e22b8ce6d9d at 4960, schedule 1)
+77cb8e22b8ce6d9d  exited:2          5102 steps  mylib-0.3.0
 
-<span class="cmd"><span class="prompt">$</span> REWIND_HOME=elsewhere rewind remove cad35e7c</span>
-removed cad35e7ca8a9c5df</code></pre>
+<span class="cmd"><span class="prompt">$</span> REWIND_HOME=elsewhere rewind remove d07651b4</span>
+removed d07651b4715961ca
+rewind: `rewind gc` removes the pages no run uses any more</code></pre>
         <p>
           <code>remove</code> takes a run with every run forked from it.
           <code>prune --identical</code> removes forks that ran exactly as an older one did.
