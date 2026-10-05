@@ -84,10 +84,10 @@ impl Entry {
             Executing::No
         };
         Entry {
-            id: m.id.clone(),
+            id: m.id.to_string(),
             name: Some(m.name.clone()),
             created: m.created,
-            parent: m.parent.as_ref().map(|(id, _)| id.clone()),
+            parent: m.parent.as_ref().map(|p| p.run.to_string()),
             status: Status::of(m.outcome.as_ref(), executing),
         }
     }
@@ -170,7 +170,7 @@ pub fn json(entry: &Entry, row: &Row) -> serde_json::Value {
         "name": m.name,
         "dir": run.dir,
         "created": m.created,
-        "parent": m.parent.as_ref().map(|(id, step)| serde_json::json!({"run": id, "step": step})),
+        "parent": m.parent,
         "state": entry.status.word(),
         "status": outcome.and_then(|o| o.status),
         "ending": outcome.map(|o| crate::show::ending(&o.stop, o.status, &[])),

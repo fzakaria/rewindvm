@@ -235,18 +235,15 @@ fn unpack_and_place(home: &Home, reader: impl Read, source: &str, staging: &Path
         store.sync()?;
     }
 
-    // The run the export names, by an id that stays inside the runs
-    // directory, and the hash of the trace it actually carries.
+    // The run the export names, and the hash of the trace it actually
+    // carries. Every run a manifest names, its own, its parent and the
+    // one it shares keyframes with, is a run id, which stays inside the
+    // runs directory, or the manifest does not parse.
     let manifest_path = staging.join(MANIFEST);
     let mut manifest: Manifest = serde_json::from_slice(
         &fs::read(&manifest_path).context("the export has no manifest.json")?,
-    )?;
-    if !crate::run::is_run_id(&manifest.id) {
-        bail!(
-            "{source} names its run {:?}, which is not a run id",
-            manifest.id
-        );
-    }
+    )
+    .with_context(|| format!("reading the manifest {source} carries"))?;
     let staged_trace = staging.join(TRACE);
     if !staged_trace.exists() {
         bail!("the export has no trace.bin");
@@ -412,18 +409,42 @@ mod tests {
 
     #[test]
     fn an_import_refuses_a_run_id_that_is_not_one() {
-        // A manifest whose id is not sixteen lowercase hex digits, such as
-        // one that climbs out of the runs directory, is refused before
-        // anything is placed, and the home is left with no run and nothing
-        // beside its own directories.
+        // A manifest naming a run that is not sixteen lowercase hex digits,
+        // such as one that climbs out of the runs directory, as its own id,
+        // its parent or its keyframes' source, is refused before anything
+        // is placed, and the home is left with no run and nothing beside
+        // its own directories.
         let home = home("bad-id");
+        let naming = |field: &str, value: serde_json::Value| {
+            let mut manifest: serde_json::Value = serde_json::from_slice(&finished(ID)).unwrap();
+            manifest[field] = value;
+            serde_json::to_vec(&manifest).unwrap()
+        };
+        let mut manifests = Vec::new();
         for id in ["../escape", "0123", "0123456789ABCDEF", "0123456789abcdeg"] {
-            let manifest = finished(id);
+            manifests.push(naming("id", id.into()));
+        }
+
+        // A parent or a keyframe source outside the runs directory is
+        // refused the same way.
+        manifests.push(naming(
+            "parent",
+            serde_json::json!({ "run": "../escape", "step": 1 }),
+        ));
+        manifests.push(naming(
+            "shared_keyframes",
+            serde_json::json!({ "run": "../escape", "through": 1 }),
+        ));
+        for manifest in manifests {
             let bytes = archive(&[
                 Entry::File(MANIFEST, &manifest),
                 Entry::File(TRACE, b"trace"),
             ]);
-            assert!(import_bytes(&home, &bytes).is_err(), "{id}");
+            assert!(
+                import_bytes(&home, &bytes).is_err(),
+                "{}",
+                String::from_utf8_lossy(&manifest)
+            );
         }
         assert!(!home.root().join("escape").exists());
         assert_eq!(fs::read_dir(home.runs()).unwrap().count(), 0);

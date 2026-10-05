@@ -188,7 +188,7 @@ fn walk(
         .collect();
 
     Ok(Answer {
-        run: run.manifest.id.clone(),
+        run: run.manifest.id.to_string(),
         step,
         pid,
         tid,

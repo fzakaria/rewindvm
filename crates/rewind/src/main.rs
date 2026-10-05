@@ -1289,7 +1289,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             let runs = runs
                 .iter()
                 .map(|run| match Run::find(&home, run) {
-                    Ok(found) => Ok(found.manifest.id),
+                    Ok(found) => Ok(found.manifest.id.to_string()),
                     Err(e) => Run::find_unreadable(&home, run).map(|u| u.id).ok_or(e),
                 })
                 .collect::<Result<Vec<String>>>()?;
@@ -1649,7 +1649,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             // other as parents in a loop, which ends at the first repeat.
             let mut chain = vec![run.manifest.clone()];
             let mut gone = None;
-            while let Some((parent, _)) = chain.last().and_then(|m| m.parent.clone()) {
+            while let Some(parent) = chain.last().and_then(|m| m.parent.clone()).map(|p| p.run) {
                 if chain.iter().any(|m| m.id == parent) {
                     break;
                 }

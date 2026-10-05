@@ -199,12 +199,13 @@ fn strings(value: Option<&Value>) -> Option<Vec<String>> {
     (!list.is_empty()).then_some(list)
 }
 
-/// A parent written as the engine does: `[id, step]`.
+/// A parent written as the engine does: `{"run": id, "step": step}`.
 fn parent(value: Option<&Value>) -> Option<Parent> {
-    let pair = value?.as_array()?;
-    let id = pair.first()?.as_str()?.to_string();
-    let step = pair.get(1)?.as_u64()?;
-    Some(Parent { id, step })
+    let parent = rewind_trace::manifest::Parent::deserialize(value?).ok()?;
+    Some(Parent {
+        id: parent.run.to_string(),
+        step: parent.step,
+    })
 }
 
 /// A seed written as a number, a decimal string or a 0x-prefixed hex
@@ -830,7 +831,7 @@ mod tests {
 
     #[test]
     fn forks_are_counted_and_the_parent_is_compared_with() {
-        // Two runs name "base" as their parent and one does not; opening a
+        // Two runs name the base as their parent and one does not; opening a
         // fork without --compare picks its parent from next door. The runs
         // next door are read once, all four of them, and kept for the
         // families the app lists.
@@ -841,18 +842,31 @@ mod tests {
             small_trace(&run);
             std::fs::write(run.join(MANIFEST_FILE), manifest).unwrap();
         };
-        write("base", r#"{"id": "base"}"#);
-        write("f1", r#"{"id": "f1", "parent": ["base", 10]}"#);
-        write("f2", r#"{"id": "f2", "parent": ["base", 20]}"#);
-        write("other", r#"{"id": "other", "parent": ["f1", 5]}"#);
-        let session = Session::open(&dir.join("base"), None).unwrap();
+        const BASE: &str = "0000000000000ba5";
+        const F1: &str = "00000000000000f1";
+        let parent = |run: &str, step: u64| serde_json::json!({ "run": run, "step": step });
+        write(BASE, &serde_json::json!({ "id": BASE }).to_string());
+        write(
+            F1,
+            &serde_json::json!({ "id": F1, "parent": parent(BASE, 10) }).to_string(),
+        );
+        write(
+            "00000000000000f2",
+            &serde_json::json!({ "id": "00000000000000f2", "parent": parent(BASE, 20) })
+                .to_string(),
+        );
+        write(
+            "0000000000000003",
+            &serde_json::json!({ "id": "0000000000000003", "parent": parent(F1, 5) }).to_string(),
+        );
+        let session = Session::open(&dir.join(BASE), None).unwrap();
         assert!(session.other.is_none());
-        let fork = Session::open(&dir.join("f1"), None).unwrap();
-        assert_eq!(fork.other.unwrap().path, dir.join("base"));
+        let fork = Session::open(&dir.join(F1), None).unwrap();
+        assert_eq!(fork.other.unwrap().path, dir.join(BASE));
         assert_eq!(
             fork.run.manifest.parent,
             Some(Parent {
-                id: "base".into(),
+                id: BASE.into(),
                 step: 10
             })
         );

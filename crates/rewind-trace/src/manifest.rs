@@ -27,10 +27,83 @@ pub const MANIFEST_VERSION: u32 = 1;
 /// How many hex digits of the hash of its inputs a run id keeps.
 pub const ID_LEN: usize = 16;
 
-/// Whether `id` is one a spec's hash could give: ID_LEN lowercase hex
-/// digits, and so a name that stays inside the runs directory.
-pub fn is_run_id(id: &str) -> bool {
-    id.len() == ID_LEN && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+/// A run's id: ID_LEN lowercase hex digits of the hash of its inputs, and
+/// so a name that stays inside the runs directory. A manifest that names
+/// anything else as a run, its own id, its parent or the run it shares
+/// keyframes with, does not parse.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct RunId(String);
+
+impl RunId {
+    /// The id `id` is, if it is one a spec's hash could give.
+    pub fn parse(id: &str) -> Option<RunId> {
+        let hex = id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+        (id.len() == ID_LEN && hex).then(|| RunId(id.to_string()))
+    }
+
+    /// The id of a run whose inputs hash to `hex`: its first ID_LEN
+    /// digits. None for a hash too short or not hex.
+    pub fn of_hash(hex: &str) -> Option<RunId> {
+        RunId::parse(hex.get(..ID_LEN)?)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for RunId {
+    type Error = String;
+
+    fn try_from(id: String) -> Result<RunId, String> {
+        RunId::parse(&id).ok_or_else(|| format!("{id:?} is not a run id"))
+    }
+}
+
+impl From<RunId> for String {
+    fn from(id: RunId) -> String {
+        id.0
+    }
+}
+
+impl std::fmt::Display for RunId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::ops::Deref for RunId {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<std::path::Path> for RunId {
+    fn as_ref(&self) -> &std::path::Path {
+        std::path::Path::new(&self.0)
+    }
+}
+
+impl PartialEq<str> for RunId {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
+impl PartialEq<&str> for RunId {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
+/// The run a fork was forked from, and the step it was forked at.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Parent {
+    pub run: RunId,
+    pub step: u64,
 }
 
 /// Everything that determines a run. Two equal specs make equal runs.
@@ -110,13 +183,13 @@ pub struct RunOutcome {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Manifest {
     pub version: u32,
-    pub id: String,
+    pub id: RunId,
     pub name: String,
     pub created: u64,
     pub source: Source,
     pub spec: Spec,
     /// The run this one was forked from, and the step it was forked at.
-    pub parent: Option<(String, u64)>,
+    pub parent: Option<Parent>,
     /// Where the keyframes this run did not take itself are: another run's,
     /// up to the last step the two runs share.
     pub shared_keyframes: Option<SharedKeyframes>,
@@ -136,7 +209,7 @@ pub struct Manifest {
 /// last step at which the two runs were still the same run.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SharedKeyframes {
-    pub run: String,
+    pub run: RunId,
     pub through: u64,
 }
 
@@ -184,5 +257,45 @@ impl Spec {
             kernel_debug: None,
             ..self.clone()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Run ids as manifests carry them: what parses as one, and a manifest
+    // field naming something else.
+    use super::*;
+
+    #[test]
+    fn a_run_id_is_sixteen_lowercase_hex_digits() {
+        // A spec's hash cut to length is an id; a path, an id in capitals
+        // and one too short or too long are not.
+        let id = RunId::parse("0123456789abcdef").unwrap();
+        assert_eq!(id.as_str(), "0123456789abcdef");
+        assert_eq!(RunId::of_hash("0123456789abcdef0123456789abcdef"), Some(id));
+        for not_an_id in [
+            "../../etc/passwd",
+            "0123456789ABCDEF",
+            "0123",
+            "0123456789abcdef0",
+            "",
+        ] {
+            assert_eq!(RunId::parse(not_an_id), None, "{not_an_id:?}");
+        }
+    }
+
+    #[test]
+    fn a_parent_or_shared_run_that_is_no_id_does_not_parse() {
+        // An imported manifest could name any path as the run it was forked
+        // from or reads keyframes from; either is refused when it is read.
+        let parent: serde_json::Result<Parent> =
+            serde_json::from_str(r#"{"run": "../../../tmp/x", "step": 1}"#);
+        assert!(parent.is_err());
+        let shared: serde_json::Result<SharedKeyframes> =
+            serde_json::from_str(r#"{"run": "../other", "through": 9}"#);
+        assert!(shared.is_err());
+        let good: Parent =
+            serde_json::from_str(r#"{"run": "fedcba9876543210", "step": 400}"#).unwrap();
+        assert_eq!(good.run, "fedcba9876543210");
     }
 }

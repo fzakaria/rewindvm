@@ -18,11 +18,11 @@ pub fn command(m: &Manifest) -> Result<Vec<String>, Unset> {
     let mut args: Vec<String> = Vec::new();
 
     // A fork is its parent's run up to its step, then its own schedule.
-    if let Some((parent, step)) = &m.parent {
+    if let Some(parent) = &m.parent {
         let mut args = vec![
             "fork".to_string(),
-            parent.clone(),
-            step.to_string(),
+            parent.run.to_string(),
+            parent.step.to_string(),
             "--schedule".to_string(),
             spec.schedule.to_string(),
         ];
@@ -317,7 +317,10 @@ mod tests {
             until: 400,
         }];
         let mut m = manifest("x (fork)", Source::Image { root: "/r".into() }, s);
-        m.parent = Some(("fedcba9876543210".into(), 400));
+        m.parent = Some(rewind_core::run::Parent {
+            run: rewind_core::run::RunId::parse("fedcba9876543210").unwrap(),
+            step: 400,
+        });
         assert_eq!(
             command(&m).unwrap(),
             words("fork fedcba9876543210 400 --schedule 5")

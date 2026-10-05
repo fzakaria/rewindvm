@@ -22,8 +22,8 @@ use crate::cpio;
 use crate::home::Home;
 
 pub use rewind_trace::manifest::{
-    BOOKMARKS, ID_LEN, MANIFEST, MANIFEST_VERSION, Manifest, RunOutcome, ScheduleSegment, Source,
-    Spec, TRACE, is_run_id,
+    BOOKMARKS, ID_LEN, MANIFEST, MANIFEST_VERSION, Manifest, Parent, RunId, RunOutcome,
+    ScheduleSegment, Source, Spec, TRACE,
 };
 
 /// The kernel command line every guest boots with. The first two keep the
@@ -74,7 +74,7 @@ pub trait SpecExt {
     /// The run's id: the BLAKE3 hash of every input, short enough to type.
     /// Files count by their contents, not their paths, so a run keeps its
     /// id on another machine or after an import moves its inputs.
-    fn id(&self) -> String;
+    fn id(&self) -> RunId;
 
     /// The last step through which a run of this spec and a run of
     /// `other` are the same run: they differ only in their schedules, and
@@ -94,7 +94,7 @@ pub trait SpecExt {
 }
 
 impl SpecExt for Spec {
-    fn id(&self) -> String {
+    fn id(&self) -> RunId {
         let mut inputs = self.clone();
         inputs.image = None;
         inputs.kernel_debug = None;
@@ -104,7 +104,7 @@ impl SpecExt for Spec {
         inputs.initrd = PathBuf::from(content(&self.initrd));
         let bytes = serde_json::to_vec(&inputs).expect("a spec always serializes");
         let hash = blake3::hash(&bytes).to_hex();
-        hash[..ID_LEN].to_string()
+        RunId::of_hash(&hash).expect("a BLAKE3 hash in hex is longer than a run id")
     }
 
     fn same_through(&self, other: &Spec) -> Option<u64> {
@@ -184,11 +184,11 @@ pub enum Start {
     Boot,
     /// As a fork of `parent` at `step`: the parent's run up to the step,
     /// from the parent's latest keyframe among the steps the two share.
-    Fork { parent: String, step: u64 },
+    Fork { parent: RunId, step: u64 },
     /// At the latest keyframe of this run, by id, among the steps the two
     /// share, without being its fork: the runs `rewind check` makes match
     /// its unperturbed run up to where their schedules start.
-    After(String),
+    After(RunId),
 }
 
 /// How long a run may take on the host.
@@ -579,7 +579,7 @@ impl Run {
     ) -> Result<Run> {
         let (parent, start_from) = match start {
             Start::Boot => (None, None),
-            Start::Fork { parent, step } => (Some((parent, step)), None),
+            Start::Fork { parent, step } => (Some(Parent { run: parent, step }), None),
             Start::After(run) => (None, Some(run)),
         };
         let manifest = Manifest {
@@ -596,7 +596,7 @@ impl Run {
             first_difference: None,
             recorded_by: crate::VERSION.to_string(),
         };
-        Run::execute_manifest(home, manifest, start_from.as_deref(), how)
+        Run::execute_manifest(home, manifest, start_from.as_ref(), how)
     }
 
     /// Executes the run `manifest` describes, filling in how it ended,
@@ -604,7 +604,7 @@ impl Run {
     fn execute_manifest(
         home: &Home,
         mut manifest: Manifest,
-        start_from: Option<&str>,
+        start_from: Option<&RunId>,
         how: Execution,
     ) -> Result<Run> {
         let Execution {
@@ -779,7 +779,7 @@ impl Run {
         if let Some(parent) = manifest
             .parent
             .as_ref()
-            .and_then(|(id, _)| Run::open(&home.runs().join(id)).ok())
+            .and_then(|p| Run::open(&home.runs().join(&p.run)).ok())
         {
             let ours = Trace::read(&dir.join(TRACE))?;
             manifest.first_difference = parent.trace()?.divergence(&ours).map(|d| d.right_step);
@@ -1290,8 +1290,8 @@ impl Shortcut {
     /// or else its parent, is here, shares steps with it, and has a
     /// keyframe among them. Anything missing or unreadable means starting
     /// from boot, which is never wrong.
-    fn find(home: &Home, manifest: &Manifest, start_from: Option<&str>) -> Option<Shortcut> {
-        let parent_id = start_from.or(manifest.parent.as_ref().map(|(id, _)| id.as_str()))?;
+    fn find(home: &Home, manifest: &Manifest, start_from: Option<&RunId>) -> Option<Shortcut> {
+        let parent_id = start_from.or(manifest.parent.as_ref().map(|p| &p.run))?;
         if *parent_id == manifest.id {
             return None;
         }
@@ -1752,11 +1752,21 @@ pub(crate) mod tests {
         assert_eq!(spec().same_through(&other), None);
     }
 
+    /// The id a test gives the run it calls `name`: `name` itself when it
+    /// is an id, else its bytes in hex, padded to an id's length.
+    pub(crate) fn id(name: &str) -> RunId {
+        RunId::parse(name).unwrap_or_else(|| {
+            let hex: String = name.bytes().map(|b| format!("{b:02x}")).collect();
+            RunId::parse(&format!("{hex:0>width$}", width = ID_LEN))
+                .expect("a test run's name is at most 8 bytes")
+        })
+    }
+
     /// A manifest for run `id` named `name`, made at `created`.
     pub(crate) fn manifest(id: &str, name: &str, created: u64) -> Manifest {
         Manifest {
             version: MANIFEST_VERSION,
-            id: id.into(),
+            id: self::id(id),
             name: name.into(),
             created,
             source: Source::Image { root: "/".into() },

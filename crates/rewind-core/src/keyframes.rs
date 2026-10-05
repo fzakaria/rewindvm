@@ -362,19 +362,20 @@ mod tests {
     /// A run directory with empty keyframe files at `steps` and a manifest
     /// that shares keyframes with `shared`.
     fn run(runs: &Path, id: &str, steps: &[u64], shared: Option<Shared>) -> PathBuf {
-        let dir = runs.join(id);
+        let dir = runs.join(crate::run::tests::id(id));
         fs::create_dir_all(dir.join(DIR)).unwrap();
         for step in steps {
             fs::write(path(&dir, *step), b"").unwrap();
         }
-        let manifest = serde_json::json!({ "id": id, "shared_keyframes": shared });
+        let manifest =
+            serde_json::json!({ "id": crate::run::tests::id(id), "shared_keyframes": shared });
         fs::write(dir.join(crate::run::MANIFEST), manifest.to_string()).unwrap();
         dir
     }
 
     fn share(run: &str, through: u64) -> Option<Shared> {
         Some(Shared {
-            run: run.into(),
+            run: crate::run::tests::id(run),
             through,
         })
     }
@@ -510,7 +511,10 @@ mod tests {
             .err()
             .expect("opening should fail");
         let message = format!("{err:#}");
-        assert!(message.contains("gone"), "{message}");
+        assert!(
+            message.contains(crate::run::tests::id("gone").as_str()),
+            "{message}"
+        );
         assert!(message.contains("2400"), "{message}");
     }
 }

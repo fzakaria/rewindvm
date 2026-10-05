@@ -18,7 +18,6 @@ use std::fs;
 use anyhow::{Context, Result};
 
 use crate::home::Home;
-use crate::keyframes::Shared;
 use crate::run::{Run, Unreadable};
 
 /// What pruning needs to know about one run.
@@ -28,7 +27,7 @@ pub struct Member {
     /// The run it was forked from.
     pub parent: Option<String>,
     /// The run it reads keyframes from, and up to which step.
-    pub shares: Option<Shared>,
+    pub shares: Option<Reads>,
     pub created: u64,
     pub trace_hash: Option<String>,
     /// Whether it ran to the end; a run still going may yet differ.
@@ -36,6 +35,14 @@ pub struct Member {
     /// Whether a process is executing it now. An unfinished run that is
     /// not executing was interrupted.
     pub executing: bool,
+}
+
+/// The run a member reads keyframes from, by the name of its directory,
+/// and the last step it reads them for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Reads {
+    pub run: String,
+    pub through: u64,
 }
 
 /// A run to remove, and the run with the same trace that stays.
@@ -50,9 +57,12 @@ impl Member {
         let m = &run.manifest;
         let finished = m.outcome.is_some();
         Member {
-            id: m.id.clone(),
-            parent: m.parent.as_ref().map(|(id, _)| id.clone()),
-            shares: m.shared_keyframes.clone(),
+            id: m.id.to_string(),
+            parent: m.parent.as_ref().map(|p| p.run.to_string()),
+            shares: m.shared_keyframes.as_ref().map(|s| Reads {
+                run: s.run.to_string(),
+                through: s.through,
+            }),
             created: m.created,
             trace_hash: m.trace_hash.clone(),
             finished,
@@ -75,8 +85,11 @@ impl Member {
     }
 
     /// The runs this one cannot do without.
-    fn needs(&self) -> impl Iterator<Item = &String> {
-        self.parent.iter().chain(self.shares.iter().map(|s| &s.run))
+    fn needs(&self) -> impl Iterator<Item = &str> {
+        self.parent
+            .iter()
+            .map(String::as_str)
+            .chain(self.shares.iter().map(|s| s.run.as_str()))
     }
 }
 
@@ -116,7 +129,7 @@ pub fn identical(root: &str, runs: &[Member]) -> Vec<Removal> {
         let needed: Vec<&str> = runs
             .iter()
             .filter(|r| !removable.contains_key(r.id.as_str()))
-            .flat_map(|r| r.needs().map(String::as_str))
+            .flat_map(|r| r.needs())
             .filter(|need| removable.contains_key(need))
             .collect();
         if needed.is_empty() {
@@ -283,7 +296,7 @@ pub fn removal_set(ids: &[&str], runs: &[Member]) -> std::result::Result<Vec<Str
         .filter_map(|r| {
             let shared = r.shares.as_ref()?;
             all.contains(shared.run.as_str())
-                .then(|| (r.id.clone(), shared.run.clone(), shared.through))
+                .then(|| (r.id.clone(), shared.run.to_string(), shared.through))
         })
         .collect();
     if !readers.is_empty() {
@@ -353,8 +366,8 @@ mod tests {
         }
     }
 
-    fn share(run: &str, through: u64) -> Shared {
-        Shared {
+    fn share(run: &str, through: u64) -> Reads {
+        Reads {
             run: run.into(),
             through,
         }
@@ -599,13 +612,16 @@ mod tests {
         let u = "0000000000000001";
         write(u, b"{}");
         let mut fork = manifest("0000000000000002", "fork", 2);
-        fork.parent = Some((u.into(), 7));
+        fork.parent = Some(crate::run::Parent {
+            run: crate::run::RunId::parse(u).unwrap(),
+            step: 7,
+        });
         write(&fork.id, &serde_json::to_vec(&fork).unwrap());
         let other = manifest("0000000000000003", "other", 3);
         write(&other.id, &serde_json::to_vec(&other).unwrap());
 
         let removed = remove_with_forks(&home, &[u.to_string()], Act::Remove).unwrap();
-        assert_eq!(removed, vec![u.to_string(), fork.id.clone()]);
+        assert_eq!(removed, vec![u.to_string(), fork.id.to_string()]);
         assert!(!home.runs().join(u).exists());
         assert!(!home.runs().join(&fork.id).exists());
         assert!(home.runs().join(&other.id).exists());

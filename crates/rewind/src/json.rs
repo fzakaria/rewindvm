@@ -26,7 +26,7 @@ pub fn run(run: &Run) -> Result<Value> {
         "id": m.id,
         "name": m.name,
         "dir": run.dir,
-        "parent": m.parent.as_ref().map(|(id, step)| json!({ "run": id, "step": step })),
+        "parent": m.parent,
         "status": status,
         "ending": outcome.map(|o| show::ending(&o.stop, status, &missing)),
         "steps": outcome.map(|o| o.step),
