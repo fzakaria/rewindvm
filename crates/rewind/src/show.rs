@@ -125,8 +125,8 @@ pub fn passed(status: Option<i32>, missing: &[String]) -> bool {
 /// missing-output for a job that exited 0 without creating every output,
 /// and otherwise the status.
 pub fn ending(stop: &str, status_: Option<i32>, missing: &[String]) -> String {
-    if stop.starts_with(rewind_core::run::TIMED_OUT) {
-        return TIMED_OUT.into();
+    if rewind_trace::stop::timed_out(stop) {
+        return rewind_trace::stop::TIMED_OUT_ENDING.into();
     }
     if status_ == Some(0) && !missing.is_empty() {
         return MISSING_OUTPUT.into();
@@ -136,9 +136,6 @@ pub fn ending(stop: &str, status_: Option<i32>, missing: &[String]) -> String {
 
 /// What [`ending`] calls a job that exited 0 but left an output uncreated.
 const MISSING_OUTPUT: &str = "missing-output";
-
-/// What [`ending`] calls a run stopped at its time limit.
-const TIMED_OUT: &str = "timed-out";
 
 /// One line for an output of a Nix run: its path, the start of its NAR
 /// hash, and what this machine's store and the caches said about it.

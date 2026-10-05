@@ -361,10 +361,9 @@ impl Run {
 
     /// Whether the run failed. The job's wait status decides when the
     /// manifest or init's exit mark gives one; otherwise a crash or
-    /// failing exit in the trace, or an outcome that says it stopped on an
-    /// error.
+    /// failing exit in the trace, or a machine that stopped any way but
+    /// its guest powering off, such as at its time limit.
     pub fn verdict(&self) -> Verdict {
-        const FAILING_STOPS: &[&str] = &["fail", "error", "crash", "panic", "signal", "timeout"];
         if let Some(status) = self.status() {
             return if status == 0 {
                 Verdict::Passed
@@ -375,17 +374,19 @@ impl Run {
         if self.timeline.failure.is_some() {
             return Verdict::Failed;
         }
-        let stop = self
-            .manifest
-            .outcome
-            .as_ref()
-            .and_then(|o| o.stop.as_deref())
-            .unwrap_or_default()
-            .to_lowercase();
-        if FAILING_STOPS.iter().any(|word| stop.contains(word)) {
+        if self
+            .stop()
+            .is_some_and(|stop| !rewind_trace::stop::clean(stop))
+        {
             return Verdict::Failed;
         }
         Verdict::Passed
+    }
+
+    /// How the machine stopped, in the engine's words, once the run has
+    /// finished.
+    pub fn stop(&self) -> Option<&str> {
+        self.manifest.outcome.as_ref()?.stop.as_deref()
     }
 
     /// The job's wait status: the manifest's, else init's exit mark's.
@@ -400,11 +401,15 @@ impl Run {
     }
 
     /// How the run ended, in the engine's words when there is a wait
-    /// status (exited:2, killed:SIGSEGV), else passed or failed.
+    /// status (exited:2, killed:SIGSEGV) or it was stopped at its time
+    /// limit (timed-out), else passed or failed.
     pub fn verdict_label(&self) -> String {
         match self.status().map(ExitStatus::from_raw) {
             Some(ExitStatus::Code(code)) => format!("exited:{code}"),
             Some(ExitStatus::Signal { signo, .. }) => format!("killed:{}", signal_name(signo)),
+            None if self.stop().is_some_and(rewind_trace::stop::timed_out) => {
+                rewind_trace::stop::TIMED_OUT_ENDING.to_string()
+            }
             None => self.verdict().label().to_string(),
         }
     }
@@ -730,6 +735,30 @@ mod tests {
         assert_eq!(m.seed, None);
         assert_eq!(m.drv.as_deref(), Some("/d"));
         assert_eq!(m.outcome, None);
+    }
+
+    #[test]
+    fn a_run_without_a_wait_status_passes_only_if_it_powered_off() {
+        // The passing synthetic trace under manifests with no wait status
+        // and the ways the engine words a stop: one stopped at its time
+        // limit fails and says timed-out, as `rewind ls` does; one whose
+        // machine faulted fails; one whose guest powered off passes.
+        let dir = temp_dir("stops");
+        let config = SynthConfig::small(Variant::Passing);
+        std::fs::write(dir.join(TRACE_FILE), synth::generate(&config)).unwrap();
+        let with_stop = |stop: &str| {
+            let manifest = serde_json::json!({ "outcome": { "stop": stop } });
+            std::fs::write(dir.join(MANIFEST_FILE), manifest.to_string()).unwrap();
+            Run::open(&dir).unwrap()
+        };
+
+        let hung =
+            with_stop("timed out computing without exits for 2.2s, in user space at 0x41b33e");
+        assert_eq!(hung.verdict(), Verdict::Failed);
+        assert_eq!(hung.verdict_label(), "timed-out");
+        assert_eq!(with_stop("triple fault").verdict(), Verdict::Failed);
+        assert_eq!(with_stop("poweroff").verdict(), Verdict::Passed);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

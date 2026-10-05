@@ -81,10 +81,21 @@ impl RunEntry {
             .as_ref()
             .and_then(|o| o.status)
             .and_then(|s| u32::try_from(s).ok());
+        let stop = manifest.outcome.as_ref().and_then(|o| o.stop.as_deref());
         let ending = match status.map(ExitStatus::from_raw) {
             Some(ExitStatus::Code(code)) => format!("exited:{code}"),
             Some(ExitStatus::Signal { signo, .. }) => format!("killed:{}", signal_name(signo)),
+            None if stop.is_some_and(rewind_trace::stop::timed_out) => {
+                rewind_trace::stop::TIMED_OUT_ENDING.to_string()
+            }
             None => UNKNOWN_ENDING.to_string(),
+        };
+
+        // Failed by a wait status other than 0, or with none by a machine
+        // that stopped any way but its guest powering off.
+        let failed = match status {
+            Some(s) => s != 0,
+            None => stop.is_some_and(|stop| !rewind_trace::stop::clean(stop)),
         };
         RunEntry {
             dir: dir.to_path_buf(),
@@ -94,7 +105,7 @@ impl RunEntry {
             parent: manifest.parent.clone(),
             schedule: manifest.schedule.unwrap_or(0),
             ending,
-            failed: status.is_some_and(|s| s != 0),
+            failed,
             first_difference: manifest.first_difference,
             trace_hash: manifest.trace_hash.clone(),
             cores: manifest.cores.unwrap_or(DEFAULT_CORES),
@@ -850,6 +861,21 @@ mod tests {
                 ("check3".to_string(), graph(&[], true, false)),
             ]
         );
+    }
+
+    #[test]
+    fn a_run_stopped_at_its_time_limit_is_listed_as_failed() {
+        // A manifest with no wait status whose machine was stopped at its
+        // time limit: the start screen and the Runs panel call it
+        // timed-out and failed, as the header does, not unknown.
+        let manifest = Manifest::from_json(&serde_json::json!({
+            "id": "abc",
+            "outcome": { "stop": "timed out while still making exits" }
+        }));
+        let entry =
+            RunEntry::from_manifest(Path::new("/runs/abc"), &manifest, SystemTime::UNIX_EPOCH);
+        assert_eq!(entry.ending, "timed-out");
+        assert!(entry.failed);
     }
 
     #[test]

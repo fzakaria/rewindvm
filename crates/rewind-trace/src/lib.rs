@@ -11,6 +11,7 @@
 //! in, and where two runs first went different ways.
 
 mod event;
+pub mod stop;
 
 use std::collections::BTreeMap;
 use std::io::{self, BufReader, BufWriter, Read, Write};

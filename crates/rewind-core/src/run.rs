@@ -345,7 +345,7 @@ pub struct Execution {
 }
 
 /// How a run that reached its [`TimeLimit`] stopped, in its outcome.
-pub const TIMED_OUT: &str = "timed out";
+pub use rewind_trace::stop::TIMED_OUT;
 
 /// Whether a run takes keyframes as it executes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1327,6 +1327,9 @@ fn kernel_symbol(map: &str, addr: u64) -> Option<String> {
 fn describe(outcome: Outcome, kernel: &Path) -> String {
     match outcome {
         Outcome::Paused => "paused".into(),
+        Outcome::Stopped(Stop::Guest(rewind_vmm::pv::GuestExit::PowerOff)) => {
+            rewind_trace::stop::POWERED_OFF.into()
+        }
         Outcome::Stopped(Stop::Guest(exit)) => format!("{exit:?}").to_lowercase(),
         Outcome::Stopped(Stop::TripleFault) => "triple fault".into(),
         Outcome::Stopped(Stop::Stalled) => "stalled: idle with no timer armed".into(),
@@ -1341,6 +1344,21 @@ pub(crate) mod tests {
     // agree, which decides what a fork may share with its parent, and the
     // manifest fields the desktop app reads by name.
     use super::*;
+
+    #[test]
+    fn a_guest_that_powered_off_is_worded_as_the_readers_expect() {
+        // The words for a guest that powered off are the ones rewind-trace
+        // gives the CLI and the app to recognize a clean stop by.
+        let stopped = Outcome::Stopped(Stop::Guest(rewind_vmm::pv::GuestExit::PowerOff));
+        assert_eq!(
+            describe(stopped, Path::new("/k")),
+            rewind_trace::stop::POWERED_OFF
+        );
+        assert!(rewind_trace::stop::clean(&describe(
+            stopped,
+            Path::new("/k")
+        )));
+    }
 
     #[test]
     fn a_new_trace_replaces_the_recording_only_when_kept() {
