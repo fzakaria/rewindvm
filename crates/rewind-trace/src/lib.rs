@@ -271,6 +271,14 @@ impl Trace {
             .collect()
     }
 
+    /// The process that had id `pid` at `step`: the one alive then, else
+    /// the nearest before it, else the first after it. A pid is given out
+    /// again once its process has exited, so the newest process with an id
+    /// is not always the one a step means.
+    pub fn process_at(&self, pid: u32, step: u64) -> Option<Process> {
+        process_in(&self.processes(), pid, step).cloned()
+    }
+
     /// Output lines completed by `step`, both streams interleaved in the
     /// order they were written. A write without a trailing newline is held
     /// until the rest of its line arrives, as a terminal would show it.
@@ -338,16 +346,14 @@ impl Trace {
     /// signal first, then those that exited non-zero, each in order.
     fn failures(&self) -> Vec<(Vec<String>, Ending)> {
         let procs = self.processes();
-        let argv_of = |pid: u32| {
-            procs
-                .iter()
-                .rev()
-                .find(|p| p.pid == pid && !p.argv.is_empty())
+        let argv_of = |pid: u32, step: u64| {
+            process_in(&procs, pid, step)
+                .filter(|p| !p.argv.is_empty())
                 .map(|p| p.argv.clone())
         };
         let signalled = self.events.iter().filter_map(|e| match &e.kind {
             EventKind::Signal { signo, .. } if signal::FATAL.contains(signo) => {
-                Some((argv_of(e.pid)?, Ending::Signal(*signo)))
+                Some((argv_of(e.pid, e.step)?, Ending::Signal(*signo)))
             }
             _ => None,
         });
@@ -356,7 +362,7 @@ impl Trace {
                 status,
                 thread: false,
                 ..
-            } if *status != 0 => Some((argv_of(e.pid)?, Ending::Exit(*status))),
+            } if *status != 0 => Some((argv_of(e.pid, e.step)?, Ending::Exit(*status))),
             _ => None,
         });
         signalled.chain(exited).collect()
@@ -406,6 +412,20 @@ impl Trace {
             right,
         })
     }
+}
+
+/// The process among `procs` that had id `pid` at `step`, as
+/// [`Trace::process_at`] finds it.
+fn process_in(procs: &[Process], pid: u32, step: u64) -> Option<&Process> {
+    let with_pid = procs.iter().filter(|p| p.pid == pid);
+    if let Some(alive) = with_pid.clone().find(|p| p.alive_at(step)) {
+        return Some(alive);
+    }
+    let before = with_pid
+        .clone()
+        .filter(|p| p.start <= step)
+        .max_by_key(|p| p.start);
+    before.or_else(|| with_pid.min_by_key(|p| p.start))
 }
 
 /// The signals a crash is made of.
@@ -589,6 +609,65 @@ mod tests {
                 bytes: text.as_bytes().to_vec(),
             },
         )
+    }
+
+    #[test]
+    fn a_reused_pid_names_the_process_alive_at_the_step() {
+        // Process 5 runs "first" from step 1 to 3, then a second process 5
+        // runs "second" from step 6: each step names the one alive then,
+        // or the nearest before it, and a pid the run never had is none.
+        use EventKind::*;
+        let fork = |step, child| {
+            ev(
+                step,
+                1,
+                1,
+                Fork {
+                    child,
+                    thread: false,
+                },
+            )
+        };
+        let exec = |step, pid, name: &str| {
+            ev(
+                step,
+                pid,
+                pid,
+                Exec {
+                    filename: name.into(),
+                    argv: vec![name.into()],
+                    old_pid: pid,
+                },
+            )
+        };
+        let exit = |step, pid| {
+            ev(
+                step,
+                pid,
+                pid,
+                Exit {
+                    status: 0,
+                    comm: String::new(),
+                    thread: false,
+                },
+            )
+        };
+        let trace = Trace {
+            events: vec![
+                fork(1, 5),
+                exec(2, 5, "first"),
+                exit(3, 5),
+                fork(6, 5),
+                exec(7, 5, "second"),
+            ],
+        };
+        let name = |step| trace.process_at(5, step).map(|p| p.name());
+        assert_eq!(name(2).as_deref(), Some("first"));
+        assert_eq!(name(4).as_deref(), Some("first"));
+        assert_eq!(name(8).as_deref(), Some("second"));
+        assert!(trace.process_at(5, 2).unwrap().alive_at(2));
+        assert!(!trace.process_at(5, 4).unwrap().alive_at(4));
+        assert_eq!(trace.process_at(9, 2), None);
     }
 
     #[test]

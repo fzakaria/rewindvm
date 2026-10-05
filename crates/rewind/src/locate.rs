@@ -175,7 +175,7 @@ fn walk(
         step,
         pid,
         tid,
-        process: process_name(run.trace()?, pid),
+        process: process_name(run.trace()?, pid, step),
         frames,
         chosen,
         files,
@@ -241,7 +241,7 @@ pub fn describe_stall(home: &Home, run: &Run) -> Option<String> {
         Some(thread) => (thread.pid, thread.name.clone(), Certainty::OnTheCpu),
         None => {
             let event = trace.events.iter().rev().find(|e| e.pid != 0)?;
-            let name = process_name(trace, event.pid);
+            let name = process_name(trace, event.pid, event.step);
             (event.pid, name, Certainty::LastEvent)
         }
     };
@@ -349,7 +349,11 @@ pub fn thread_at(trace: &Trace, step: u64, pid: Option<u32>, tid: Option<u32>) -
             Ok(Pick::Thread { pid, tid })
         }
         (None, Some(tid)) => {
-            let Some(seen) = trace.events.iter().find(|e| e.tid == tid) else {
+            // The thread's latest event by the step, else its first after:
+            // a thread id is given out again once its thread has ended.
+            let by_step = trace.until(step).iter().rev().find(|e| e.tid == tid);
+            let seen = by_step.or_else(|| trace.events.iter().find(|e| e.tid == tid));
+            let Some(seen) = seen else {
                 bail!("the run has no thread {tid}; give --pid with --tid");
             };
             Ok(Pick::Thread { pid: seen.pid, tid })
@@ -364,9 +368,10 @@ pub fn thread_at(trace: &Trace, step: u64, pid: Option<u32>, tid: Option<u32>) -
     }
 }
 
-/// A process's name: the file name of the program it last ran.
-fn process_name(trace: &Trace, pid: u32) -> String {
-    let process = trace.processes().into_iter().rev().find(|p| p.pid == pid);
+/// The name of the process with id `pid` at `step`: the file name of the
+/// program it last ran.
+fn process_name(trace: &Trace, pid: u32, step: u64) -> String {
+    let process = trace.process_at(pid, step);
     let name = process.map_or_else(|| format!("pid {pid}"), |p| p.name());
     name.rsplit('/').next().unwrap_or(&name).to_string()
 }
@@ -687,8 +692,9 @@ mod tests {
     /// The thread looked at: the step's event's by default, a process
     /// given alone in the event's thread when the event is its own and in
     /// its main thread otherwise, and a thread given alone in the process
-    /// the trace saw it in. At a step with no event, or the kernel's, it is
-    /// the thread on the CPU. Builds a trace of a few writes by hand.
+    /// the trace saw it in last by the step, as thread ids are given out
+    /// again. At a step with no event, or the kernel's, it is the thread on
+    /// the CPU. Builds a trace of a few writes by hand.
     #[test]
     fn the_thread_is_the_event_s_unless_given() {
         let write = |step, pid, tid| rewind_trace::Event {
@@ -724,6 +730,20 @@ mod tests {
         assert_eq!(thread_at(&trace, 11, None, None).unwrap(), Pick::OnTheCpu);
         assert_eq!(thread_at(&trace, 12, None, None).unwrap(), Pick::OnTheCpu);
         assert!(thread_at(&trace, 10, None, Some(999)).is_err());
+
+        // Thread 168 again later, in process 300, after 166's thread 168
+        // had ended: a step after it means process 300's.
+        let reused = Trace {
+            events: vec![write(10, 166, 168), write(20, 300, 168)],
+        };
+        assert_eq!(
+            thread_at(&reused, 15, None, Some(168)).unwrap(),
+            thread(166, 168)
+        );
+        assert_eq!(
+            thread_at(&reused, 25, None, Some(168)).unwrap(),
+            thread(300, 168)
+        );
     }
 
     /// A stopped instruction in words: its function and offset, then its

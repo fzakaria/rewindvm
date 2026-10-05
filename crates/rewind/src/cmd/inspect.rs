@@ -87,8 +87,7 @@ pub fn shell(home: &Home, args: ShellArgs) -> Result<ExitCode> {
     // A pid is checked against the run: one it never had is a
     // mistake, and one gone by the step falls back to its parent.
     if let Some(pid) = pid {
-        let procs = run.trace()?.processes();
-        let Some(p) = procs.iter().rev().find(|p| p.pid == pid) else {
+        let Some(p) = run.trace()?.process_at(pid, step) else {
             bail!(
                 "run {} has no process {pid}; see `rewind ps`",
                 run.manifest.id
