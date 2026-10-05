@@ -324,9 +324,8 @@ impl Scrubber {
         let engine = self.engine.clone();
         let cancel = Cancel::default();
         viewer.in_flight = Some(cancel.clone());
-        let task = cx
-            .background_executor()
-            .spawn(async move { engine.cat(&run, step, Some(pid), &path, &cancel) });
+        let task =
+            crate::jobs::on_own_thread(move || engine.cat(&run, step, Some(pid), &path, &cancel));
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {

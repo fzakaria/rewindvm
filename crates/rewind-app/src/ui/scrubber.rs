@@ -485,9 +485,7 @@ impl Scrubber {
     /// show where the answers go.
     fn check_engine(&mut self, cx: &mut Context<Self>) {
         let engine = self.engine.clone();
-        let asked = cx
-            .background_executor()
-            .spawn(async move { engine.version() });
+        let asked = crate::jobs::on_own_thread(move || engine.version());
         cx.spawn(async move |this, cx| {
             let result = asked.await;
             let _ = this.update(cx, |this, cx| this.engine_checked(result, cx));
@@ -1041,9 +1039,9 @@ impl Scrubber {
             .and_then(|s| s.other.as_ref())
             .map(|other| other.path.clone());
         let engine = self.engine.clone();
-        let read = cx.background_executor().spawn({
+        let read = crate::jobs::on_own_thread({
             let file = file.clone();
-            async move {
+            move || {
                 let imported = engine.import(&file).map_err(|e| e.to_string())?;
                 Session::open(&imported.dir, compare.as_deref()).map_err(|e| format!("{e:#}"))
             }
@@ -1329,9 +1327,7 @@ impl Scrubber {
     ) {
         self.count_engine_action(cx);
         let engine = self.engine.clone();
-        let task = cx
-            .background_executor()
-            .spawn(async move { call(engine.as_ref()) });
+        let task = crate::jobs::on_own_thread(move || call(engine.as_ref()));
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {

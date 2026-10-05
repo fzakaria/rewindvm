@@ -233,7 +233,7 @@ impl Scrubber {
         let (lines, mut said) = futures::channel::mpsc::unbounded::<String>();
         let cancel = Cancel::default();
         panel.in_flight = Some(cancel.clone());
-        let task = cx.background_executor().spawn(async move {
+        let task = crate::jobs::on_own_thread(move || {
             engine.locate(&run, step, thread, &cancel, &mut |line| {
                 let _ = lines.unbounded_send(line.to_string());
             })

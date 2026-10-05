@@ -6,7 +6,8 @@
 //! `viewer` and `source` lay out, and `syntax` highlights; `terminal` runs
 //! the shell and gdb in a pty; `selection` is the text selection over every
 //! text surface; `request` numbers background work so a late answer is
-//! told apart.
+//! told apart, and `jobs` runs the engine's calls, which wait on a child
+//! process, on threads of their own.
 
 pub mod answers;
 pub mod archive;
@@ -16,6 +17,7 @@ pub mod engine;
 pub mod examples;
 pub mod family;
 pub mod history;
+pub mod jobs;
 pub mod license;
 pub mod memo;
 pub mod model;
