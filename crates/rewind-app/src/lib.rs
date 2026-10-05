@@ -20,6 +20,7 @@ pub mod memo;
 pub mod model;
 pub mod request;
 pub mod run;
+pub mod search;
 pub mod selection;
 pub mod sideways;
 pub mod source;

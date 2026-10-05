@@ -8,6 +8,7 @@ mod licensing;
 mod link;
 mod render;
 mod scrubber;
+mod search;
 mod selectable;
 mod sideways;
 mod source;
@@ -49,6 +50,10 @@ actions!(
         CloseNearest,
         GoToStep,
         ConfirmStep,
+        OpenSearch,
+        ConfirmSearch,
+        SearchNext,
+        SearchPrevious,
         ForkHere,
         ToggleSource,
         OpenRun,
@@ -87,6 +92,9 @@ const LICENSE_CONTEXT: &str = "LicenseDialog";
 
 /// The key context of the Open link dialog's field.
 const LINK_CONTEXT: &str = "LinkDialog";
+
+/// The key context of the search box's field.
+const SEARCH_CONTEXT: &str = "SearchField";
 
 /// The key context of the step readout's field.
 const STEP_CONTEXT: &str = "StepField";
@@ -202,7 +210,8 @@ fn load_bundled_fonts(cx: &App) {
 /// f to the failure and d to the divergence, and Alt+arrows back and
 /// forward through those jumps; s opens or closes the source
 /// panel, Escape closes the file viewer, the source panel or the
-/// terminal pane, and g opens the step readout to type a step into.
+/// terminal pane, g opens the step readout to type a step into, and
+/// Ctrl+F or / opens the search box.
 /// Ctrl+C copies the selected
 /// text and Ctrl+A selects all of the panel last clicked in; in the
 /// terminal pane, where Ctrl+C belongs to the command, Ctrl+Shift+C and
@@ -226,6 +235,8 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("alt-right", GoForward, context),
         KeyBinding::new("escape", CloseNearest, context),
         KeyBinding::new("g", GoToStep, context),
+        KeyBinding::new("ctrl-f", OpenSearch, context),
+        KeyBinding::new("/", OpenSearch, context),
         KeyBinding::new("s", ToggleSource, context),
         KeyBinding::new("ctrl-c", CopySelection, context),
         KeyBinding::new("ctrl-a", SelectAll, context),
@@ -235,6 +246,10 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-shift-v", TerminalPaste, Some(TERMINAL_CONTEXT)),
         KeyBinding::new("ctrl-v", PasteLicense, Some(LICENSE_CONTEXT)),
         KeyBinding::new("escape", CloseDialog, Some(LICENSE_CONTEXT)),
+        KeyBinding::new("enter", ConfirmSearch, Some(SEARCH_CONTEXT)),
+        KeyBinding::new("escape", CloseDialog, Some(SEARCH_CONTEXT)),
+        KeyBinding::new("down", SearchNext, Some(SEARCH_CONTEXT)),
+        KeyBinding::new("up", SearchPrevious, Some(SEARCH_CONTEXT)),
         KeyBinding::new("enter", ConfirmStep, Some(STEP_CONTEXT)),
         KeyBinding::new("escape", CloseDialog, Some(STEP_CONTEXT)),
         KeyBinding::new("enter", ConfirmLink, Some(LINK_CONTEXT)),

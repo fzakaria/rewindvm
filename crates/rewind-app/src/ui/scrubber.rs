@@ -26,6 +26,7 @@ use crate::memo::Memo;
 use crate::model::{LogFilter, Motion};
 use crate::request::{Request, Requests};
 use crate::run::{Origin, Replays, Session, short_id};
+use crate::search::Index;
 use crate::selection::Surface;
 use crate::source::Located;
 use crate::stride::{Direction, Stride};
@@ -33,6 +34,7 @@ use crate::theme::size;
 use crate::tour::Tour;
 use crate::ui::licensing::Licensing;
 use crate::ui::link::LinkDialog;
+use crate::ui::search::SearchBox;
 use crate::ui::selectable::SelectionState;
 use crate::ui::source::SourcePanel;
 use crate::ui::splits::{Drag, Measured, Splits};
@@ -311,6 +313,10 @@ pub struct Scrubber {
     pub(super) step_entry: Option<StepEntry>,
     /// What Previous and Next stop at.
     pub(super) stride: Stride,
+    /// The search box, while it is open.
+    pub(super) search: Option<SearchBox>,
+    /// The searchable text of the run it was built for, by its path.
+    pub(super) search_index: Option<(PathBuf, Rc<Index>)>,
     /// Where the "Stop at" menu opened, while it is open.
     pub(super) stride_menu: Option<gpui::Point<gpui::Pixels>>,
     pub(super) log_filter: LogFilter,
@@ -395,6 +401,8 @@ impl Scrubber {
             step_entry: None,
             stride: Stride::Every,
             stride_menu: None,
+            search: None,
+            search_index: None,
             log_filter: LogFilter::Output,
             log_scroll: UniformListScrollHandle::new(),
             files_scroll: UniformListScrollHandle::new(),
@@ -456,6 +464,7 @@ impl Scrubber {
             self.stride = Stride::Every;
         }
         self.step = start;
+        self.search = None;
         self.forks.clear();
         self.tour = None;
         self.viewer = None;

@@ -32,7 +32,8 @@ use crate::ui::widgets::{
 use crate::ui::{
     CloseNearest, CopySelection, EnterLicense, ForkHere, GoBack, GoForward, GoToEnd, GoToStart,
     GoToStep, JumpToDivergence, JumpToFailure, KEY_CONTEXT, NextEvent, NextPhase, OpenRun,
-    PreviousEvent, PreviousPhase, SelectAll, StartTour, StepBack, StepForward, ToggleSource,
+    OpenSearch, PreviousEvent, PreviousPhase, SelectAll, StartTour, StepBack, StepForward,
+    ToggleSource,
 };
 
 /// Header labels are cut to this many characters.
@@ -78,6 +79,7 @@ impl Render for Scrubber {
             .on_action(
                 cx.listener(|this, _: &GoToStep, window, cx| this.open_step_entry(window, cx)),
             )
+            .on_action(cx.listener(|this, _: &OpenSearch, window, cx| this.open_search(window, cx)))
             .on_action(cx.listener(|this, _: &GoBack, _, cx| this.go_back(cx)))
             .on_action(cx.listener(|this, _: &GoForward, _, cx| this.go_forward(cx)))
             .on_mouse_down(
@@ -137,6 +139,9 @@ impl Render for Scrubber {
         }
         if let Some(menu) = self.render_stride_menu(cx) {
             window_root = window_root.child(menu);
+        }
+        if let Some(search) = self.render_search(cx) {
+            window_root = window_root.child(search);
         }
         window_root = window_root.child(self.selection_listener(cx));
 
