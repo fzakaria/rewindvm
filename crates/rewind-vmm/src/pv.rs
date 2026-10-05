@@ -27,10 +27,9 @@ pub const LSR_IDLE: u8 = 0x60;
 pub const SHARED_NOW: u64 = 0;
 pub const SHARED_EPOCH: u64 = 8;
 
-/// The largest record the guest writes, header included.
-pub const RECORD_MAX: usize = 8192;
-/// The record header: len, kind, flags, pid, tid, aux.
-pub const RECORD_HEADER: usize = 20;
+/// The largest record the guest writes, header included, and its header:
+/// len, kind, flags, pid, tid, aux.
+pub use rewind_trace::{HEADER_LEN as RECORD_HEADER, RECORD_MAX};
 
 /// Values the guest writes to [`PORT_EXIT`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

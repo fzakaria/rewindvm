@@ -8,6 +8,10 @@ use serde::{Deserialize, Serialize};
 
 pub const HEADER_LEN: usize = 20;
 
+/// The longest record the guest writes, header included: its
+/// REWIND_RECORD_MAX, which the monitor holds it to.
+pub const RECORD_MAX: usize = 8192;
+
 /// Record kinds, as numbered by the guest.
 mod kind {
     pub const CONSOLE: u16 = 1;

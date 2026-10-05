@@ -27,7 +27,7 @@ use std::collections::BTreeMap;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::Path;
 
-pub use event::{DecodeError, Event, EventKind, HEADER_LEN, signal_name};
+pub use event::{DecodeError, Event, EventKind, HEADER_LEN, RECORD_MAX, signal_name};
 /// Init's marks, which every trace holds, for readers that do not depend
 /// on the init themselves.
 pub use rewind_init::Mark;
@@ -511,9 +511,14 @@ pub fn records(path: &Path) -> io::Result<Vec<(u64, Vec<u8>)>> {
             Err(e) if cut_off(&e) => break,
             Err(e) => return Err(e),
         }
+        // A length no record has is corruption, not a cut-off end, and is
+        // refused before anything is read or allocated for it.
         let len = u32::from_le_bytes(len) as usize;
-        if len < HEADER_LEN {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "short record"));
+        if !(HEADER_LEN..=RECORD_MAX).contains(&len) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("a record of {len} bytes, which no record is"),
+            ));
         }
         let mut record = vec![0u8; len];
         record[..4].copy_from_slice(&(len as u32).to_le_bytes());
@@ -553,8 +558,36 @@ impl<W: Write> TraceWriter<W> {
 #[cfg(test)]
 mod partial_tests {
     // A trace cut off mid-record, as one is when the process writing it is
-    // killed, reads up to its last whole record.
+    // killed, reads up to its last whole record; one corrupted in the
+    // middle is refused.
     use super::*;
+
+    #[test]
+    fn a_length_no_record_has_is_refused_without_reading_it() {
+        // A whole record, then one whose length field says more than the
+        // guest ever writes, then one too short for its header: each is
+        // refused as corrupt, rather than read as a cut-off end or met by
+        // allocating what the length asks for.
+        let path = std::env::temp_dir().join(format!("rewind-corrupt-{}.bin", std::process::id()));
+        let record = |len: u32| {
+            let mut r = len.to_le_bytes().to_vec();
+            r.resize(len as usize, 0);
+            r
+        };
+        for bad_len in [u32::MAX, RECORD_MAX as u32 + 1, HEADER_LEN as u32 - 1] {
+            let mut writer = TraceWriter::new(std::fs::File::create(&path).unwrap());
+            writer.record(3, &record(HEADER_LEN as u32)).unwrap();
+            let mut bytes = writer.finish().unwrap();
+            use std::io::Write;
+            bytes.write_all(&7u64.to_le_bytes()).unwrap();
+            bytes.write_all(&bad_len.to_le_bytes()).unwrap();
+            bytes.write_all(&[0u8; 64]).unwrap();
+            drop(bytes);
+            let err = records(&path).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData, "length {bad_len}");
+        }
+        std::fs::remove_file(&path).unwrap();
+    }
 
     #[test]
     fn a_trace_cut_off_mid_record_reads_its_whole_records() {
