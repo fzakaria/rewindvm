@@ -219,6 +219,7 @@ mod tests {
             "spec": spec,
             "parent": null,
             "outcome": null,
+            "recorded_by": rewind_core::VERSION,
         }))
         .unwrap()
     }

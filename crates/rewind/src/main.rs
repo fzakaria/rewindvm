@@ -1694,9 +1694,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 return Ok(ExitCode::SUCCESS);
             }
             println!("{}", show::summary(&run));
-            if let Some(version) = &run.manifest.recorded_by {
-                println!("recorded by rewind {version}");
-            }
+            println!("recorded by rewind {}", run.manifest.recorded_by);
             if let Some(parent) = gone {
                 eprintln!(
                     "rewind: run {parent}, which the first of these forks, is not in this home"

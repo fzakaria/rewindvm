@@ -179,9 +179,8 @@ pub struct Manifest {
     /// parent's; absent when the two are identical.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_difference: Option<u64>,
-    /// The rewind that recorded the run, as [`crate::VERSION`] names it;
-    /// None for a run recorded before manifests said.
-    pub recorded_by: Option<String>,
+    /// The rewind that recorded the run, as [`crate::VERSION`] names it.
+    pub recorded_by: String,
 }
 
 impl Spec {
@@ -783,7 +782,7 @@ impl Run {
             outcome: None,
             trace_hash: None,
             first_difference: None,
-            recorded_by: Some(crate::VERSION.to_string()),
+            recorded_by: crate::VERSION.to_string(),
         };
         Run::execute_manifest(home, manifest, start_from.as_deref(), how)
     }
@@ -1032,7 +1031,7 @@ impl Run {
         };
         let manifest = Manifest {
             created: now(),
-            recorded_by: Some(crate::VERSION.to_string()),
+            recorded_by: crate::VERSION.to_string(),
             ..self.manifest.clone()
         };
         let how = Execution {
@@ -1087,17 +1086,14 @@ impl Run {
         let mut checked = Checked::new(obs, made);
         let outcome = machine.run(Some(step), &mut checked)?;
         if let Some(differs) = checked.differs_at {
-            let recorder = match &self.manifest.recorded_by {
-                Some(version) => format!("rewind {version}, which recorded it"),
-                None => "the build that recorded it".to_string(),
-            };
             bail!(
                 "replaying run {} {} {differs} than when it was recorded, so this build of \
-                 rewind, {}, runs its inputs differently from {recorder}; use that build, or \
-                 record the run again with this one",
+                 rewind, {}, runs its inputs differently from rewind {}, which recorded it; use \
+                 that build, or record the run again with this one",
                 self.manifest.id,
                 rewind_trace::WENT_ANOTHER_WAY,
-                crate::VERSION
+                crate::VERSION,
+                self.manifest.recorded_by
             );
         }
 
@@ -1953,7 +1949,7 @@ pub(crate) mod tests {
             outcome: None,
             trace_hash: None,
             first_difference: None,
-            recorded_by: None,
+            recorded_by: crate::VERSION.into(),
         }
     }
 
@@ -2234,19 +2230,17 @@ pub(crate) mod tests {
 
     #[test]
     fn a_manifest_names_the_rewind_that_recorded_it() {
-        // A new run's manifest names this rewind by its version and the
-        // commit it was built from; one written before manifests did reads
-        // as recorded by a rewind no one knows.
+        // A run's manifest names the rewind that recorded it by its
+        // version and the commit it was built from; one without that name
+        // does not read.
         assert!(crate::VERSION.starts_with(env!("CARGO_PKG_VERSION")));
-        let mut m = manifest("c", "r", 0);
-        m.recorded_by = Some(crate::VERSION.into());
+        let m = manifest("c", "r", 0);
         let json = serde_json::to_value(&m).unwrap();
         assert_eq!(json["recorded_by"], crate::VERSION);
 
         let mut older = json;
         older.as_object_mut().unwrap().remove("recorded_by");
-        let older: Manifest = serde_json::from_value(older).unwrap();
-        assert_eq!(older.recorded_by, None);
+        assert!(serde_json::from_value::<Manifest>(older).is_err());
     }
 
     #[test]
@@ -2266,7 +2260,7 @@ pub(crate) mod tests {
             outcome: None,
             trace_hash: None,
             first_difference: None,
-            recorded_by: None,
+            recorded_by: crate::VERSION.into(),
         };
         let json = serde_json::to_value(&m).unwrap();
         assert!(json.get("trace_hash").is_none());
