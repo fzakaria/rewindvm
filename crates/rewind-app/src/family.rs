@@ -766,23 +766,32 @@ impl Family {
 
     /// The run `run` descends from through parents among the runs `by_id`
     /// holds, with no parent there itself: what rewind prune is given to
-    /// reach `run`.
+    /// reach `run`. Imported runs that name each other as parents in a
+    /// loop end the walk at the first run met again.
     fn chain_root_in<'a>(run: &'a RunEntry, by_id: &HashMap<&str, &'a RunEntry>) -> &'a RunEntry {
         let mut at = run;
+        let mut seen = HashSet::from([run.id.as_str()]);
         while let Some(parent) = at.parent.as_ref().and_then(|p| by_id.get(p.id.as_str())) {
+            if !seen.insert(parent.id.as_str()) {
+                break;
+            }
             at = parent;
         }
         at
     }
 
     /// Every run descended from the run `id` through its forks, nearest
-    /// first: what removing it removes along with it.
+    /// first: what removing it removes along with it. Each run comes once,
+    /// even from runs that name each other as parents in a loop.
     pub fn descendants(&self, id: &str) -> Vec<&RunEntry> {
         let mut found: Vec<&RunEntry> = Vec::new();
+        let mut seen = HashSet::from([id.to_string()]);
         let mut frontier = vec![id.to_string()];
         while let Some(parent) = frontier.pop() {
             for run in &self.runs {
-                if run.parent.as_ref().is_some_and(|p| p.id == parent) {
+                if run.parent.as_ref().is_some_and(|p| p.id == parent)
+                    && seen.insert(run.id.clone())
+                {
                     found.push(run);
                     frontier.push(run.id.clone());
                 }
@@ -1085,6 +1094,28 @@ mod tests {
         assert_eq!(ids("f1"), vec!["f1a"]);
         assert_eq!(ids("f1a"), Vec::<&str>::new());
         assert_eq!(ids("base"), vec!["dup", "f1", "f1a", "f2"]);
+    }
+
+    #[test]
+    fn runs_that_name_each_other_as_parents_end_the_walks() {
+        // Two imported runs, each naming the other as its parent: each is
+        // the other's one descendant, and the family's repeats come back
+        // as they were without the two instead of walking the loop
+        // forever.
+        let mut f = family();
+        f.runs
+            .push(run("loop-a", Some(("loop-b", 10)), 1, "exited:2"));
+        f.runs
+            .push(run("loop-b", Some(("loop-a", 10)), 1, "exited:2"));
+        let ids =
+            |id: &str| -> Vec<String> { f.descendants(id).iter().map(|r| r.id.clone()).collect() };
+        assert_eq!(ids("loop-a"), vec!["loop-b"]);
+        assert_eq!(ids("loop-b"), vec!["loop-a"]);
+        assert_eq!(f.identical(), family().identical());
+        assert_eq!(
+            f.roots_with_identical().len(),
+            family().roots_with_identical().len()
+        );
     }
 
     #[test]

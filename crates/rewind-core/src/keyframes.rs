@@ -228,11 +228,22 @@ impl Layers {
 
     /// The chain of keyframes that rebuilds the one at `step`, full one
     /// first. The chain may cross from a run's own keyframes into shared
-    /// ones.
+    /// ones. Each parent must be at an earlier step than the keyframe
+    /// naming it, so a chain from an import that names itself or a later
+    /// keyframe is refused rather than followed forever.
     pub fn chain(&self, step: u64) -> Result<Vec<Keyframe>> {
         let mut chain = vec![self.load(step)?];
+        let mut at = step;
         while let Some(parent) = chain.last().unwrap().parent {
+            if parent >= at {
+                bail!(
+                    "the keyframe at step {at} of run {} names step {parent} as its parent, \
+                     which is not before it",
+                    self.layers[0].dir.display()
+                );
+            }
             chain.push(self.load(parent)?);
+            at = parent;
         }
         chain.reverse();
         Ok(chain)
@@ -393,6 +404,33 @@ mod tests {
         let mut next = vec![(2, a), (4, ZERO_PAGE)];
         memory.trim(Some(512), &mut next);
         assert_eq!(next, vec![(4, ZERO_PAGE)]);
+    }
+
+    #[test]
+    fn a_chain_whose_parents_do_not_go_back_is_refused() {
+        // Keyframes saved with their parents: 0 full, 256 over 0, and 512
+        // naming itself, as an imported keyframe could. The chain to 256
+        // goes back to 0; the one to 512 is refused instead of looping,
+        // as is one through a keyframe naming a later step as its parent.
+        let runs = runs("chain");
+        let dir = run(&runs, "a", &[], None);
+        let at = |step, parent| {
+            let mut kf = Keyframe::default();
+            kf.step = step;
+            kf.parent = parent;
+            kf
+        };
+        for kf in [at(0, None), at(256, Some(0)), at(512, Some(512))] {
+            save(&dir, &kf).unwrap();
+        }
+        let layers = Layers::open(&dir, None).unwrap();
+        let steps = |c: Vec<Keyframe>| c.iter().map(|k| k.step).collect::<Vec<_>>();
+        assert_eq!(steps(layers.chain(256).unwrap()), vec![0, 256]);
+        assert!(layers.chain(512).is_err());
+
+        save(&dir, &at(768, Some(1024))).unwrap();
+        save(&dir, &at(1024, Some(768))).unwrap();
+        assert!(layers.chain(1024).is_err());
     }
 
     #[test]

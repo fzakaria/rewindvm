@@ -246,9 +246,7 @@ fn finish(
             bail!("the VM {} before {what}", stopped(stop));
         }
         if answer.pid.is_none() && machine.step() >= step + START_WITHIN_STEPS {
-            bail!(
-                "the VM did not start the inspection within {START_WITHIN_STEPS} steps"
-            );
+            bail!("the VM did not start the inspection within {START_WITHIN_STEPS} steps");
         }
     }
 }

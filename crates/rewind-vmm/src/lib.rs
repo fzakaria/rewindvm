@@ -919,8 +919,13 @@ impl Devices {
                 let now = self.clock.now;
                 self.ram
                     .write(shared + pv::SHARED_NOW, &now.to_le_bytes())?;
+
+                // A string read (`rep insl`) asks for several reads in one
+                // exit, and each gets the clock's low 32 bits.
                 let bytes = (now as u32).to_le_bytes();
-                data.copy_from_slice(&bytes[..data.len()]);
+                for (i, b) in data.iter_mut().enumerate() {
+                    *b = bytes[i % bytes.len()];
+                }
             }
             pv::PORT_COM1_LSR => data.fill(pv::LSR_IDLE),
             _ => data.fill(0xff),
@@ -934,4 +939,49 @@ fn port_value(data: &[u8]) -> u32 {
     let mut bytes = [0u8; 4];
     bytes[..data.len().min(4)].copy_from_slice(&data[..data.len().min(4)]);
     u32::from_le_bytes(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    // Port reads the guest makes, answered by a machine's devices built
+    // without KVM: one page of RAM holding the shared page at 0.
+    use super::*;
+
+    const QUANTUM: u64 = 5000;
+    const PAGE: usize = 4096;
+
+    /// The devices of a machine that has set up its shared page at 0.
+    fn devices(now: u64) -> Devices {
+        let mut clock = Clock::new(QUANTUM);
+        clock.now = now;
+        Devices {
+            ram: Mapping::anonymous(PAGE).unwrap(),
+            clock,
+            schedule: Schedule::default(),
+            shared: Some(0),
+            epoch: 0,
+            step: 0,
+            stop: None,
+            inspect: false,
+            input: None,
+            typed: std::collections::VecDeque::new(),
+            input_sent: false,
+        }
+    }
+
+    #[test]
+    fn a_repeated_clock_read_gets_the_clock_each_time() {
+        // `rep insl` from the clock port asks for two 4-byte reads in one
+        // exit: each gets the low 32 bits of the clock. A single read of
+        // two bytes gets the low two.
+        let now = 0x1122_3344_5566_7788u64;
+        let mut dev = devices(now);
+        let mut two_reads = [0u8; 8];
+        dev.io_in(pv::PORT_CLOCK, &mut two_reads).unwrap();
+        assert_eq!(two_reads, [0x88, 0x77, 0x66, 0x55, 0x88, 0x77, 0x66, 0x55]);
+
+        let mut short = [0u8; 2];
+        dev.io_in(pv::PORT_CLOCK, &mut short).unwrap();
+        assert_eq!(short, [0x88, 0x77]);
+    }
 }

@@ -1644,10 +1644,14 @@ fn run(cli: Cli) -> Result<ExitCode> {
             let run = Run::find(&home, &run)?;
 
             // The run and the runs it was forked from, oldest first, as far
-            // back as this home has them.
+            // back as this home has them. Imported manifests can name each
+            // other as parents in a loop, which ends at the first repeat.
             let mut chain = vec![run.manifest.clone()];
             let mut gone = None;
             while let Some((parent, _)) = chain.last().and_then(|m| m.parent.clone()) {
+                if chain.iter().any(|m| m.id == parent) {
+                    break;
+                }
                 match Run::find(&home, &parent) {
                     Ok(p) => chain.push(p.manifest),
                     Err(_) => {
