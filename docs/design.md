@@ -459,7 +459,7 @@ use something it would remove:
   exit, and `rewind gc` takes it exclusively. An image is packed before the
   manifest of the run that boots it is written, so between the two no run
   names it; the lock covers that window. An extras image for `rewind shell
-  --with` is named by no run at all, and goes like any unused image once no
+--with` is named by no run at all, and goes like any unused image once no
   shell holds the home in use; the next shell with the same packages packs it
   again.
 - **A run is executing**, by the same test `rewind remove` uses, for a
