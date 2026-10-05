@@ -29,9 +29,11 @@ use anyhow::{Context, Result, bail};
 use rewind_core::inspect::Inspection;
 use rewind_core::maps::{ImageMount, Origin, Running, SymbolFile};
 use rewind_core::source_cache::{self, Entry, SourceCache, Version};
+use rewind_core::threads::{OnTheCpu, Tasks};
 use rewind_core::{Home, Run};
 
 use crate::downloads::{self, Downloads, FileNames};
+use crate::locate::Pick;
 
 /// The address `rewind gdb` serves on when it starts gdb itself: any free
 /// port on the loopback interface.
@@ -85,33 +87,68 @@ const ENV_DEBUGINFOD_URLS: &str = "DEBUGINFOD_URLS";
 /// way the session's server gets its listening socket.
 const LISTEN_FD: i32 = 3;
 
-/// Serves gdb on a fork of `run` at `step`, debugging process `pid`, or
-/// when None the process running at the step: on `listen` if given, else
-/// on a free local port with the host's gdb started against it, with
-/// `extra` after the arguments this makes. Ctrl-C belongs to gdb, which
-/// turns it into an interrupt for the fork, so this process ignores it
-/// meanwhile.
+/// Where gdb starts on a fork: in thread `tid` of process `pid`, or when
+/// both are None the thread `rewind where` would look at, and in frame
+/// `frame` of it, else its innermost.
+pub struct Start {
+    pub pid: Option<u32>,
+    pub tid: Option<u32>,
+    pub frame: Option<u32>,
+}
+
+/// Serves gdb on a fork of `run` at `step`, debugging the process `start`
+/// names: on `listen` if given, else on a free local port with the host's
+/// gdb started against it, with `extra` after the arguments this makes.
+/// Ctrl-C belongs to gdb, which turns it into an interrupt for the fork,
+/// so this process ignores it meanwhile.
 pub fn gdb(
     home: &Home,
     run: &Run,
     step: u64,
-    pid: Option<u32>,
+    start: Start,
     listen: Option<&str>,
     extra: &[String],
 ) -> Result<ExitCode> {
-    // What gdb is told before the fork it debugs is made: the inspection
-    // that finds the process needs a fork of its own.
-    let symbols = Symbols::load(home, run, step, pid, Kernel::Load, Say::Aloud)?;
-
-    // Finding a process that is not on the CPU takes the kernel's task
-    // list, which kernels before it do not publish.
-    let needs = match pid {
-        Some(pid) => Needs::Tasks(format!("--pid cannot find process {pid}")),
-        None => Needs::Nothing,
+    // The fork, then the thread: the one given, else the step's event's,
+    // else the one on the CPU. Finding a process that is not on the CPU
+    // takes the kernel's task list, which kernels before it do not
+    // publish.
+    let pick = crate::locate::thread_at(run.trace()?, step, start.pid, start.tid)?;
+    let needs = match (start.pid, start.tid) {
+        (None, None) => Needs::Nothing,
+        _ => Needs::Tasks("--pid and --tid cannot find threads".into()),
     };
-    let mut debuggee = fork(home, run, step, symbols.process.scope, needs)?;
+    let machine = fork(home, run, step, needs)?;
+    let thread = match pick {
+        Pick::Thread { pid, tid } => Some((pid, tid)),
+        Pick::OnTheCpu => match on_the_cpu(&machine)? {
+            Some(OnTheCpu::Thread { pid, tid }) => Some((pid, tid)),
+            Some(OnTheCpu::WithoutMemory { .. } | OnTheCpu::Idle) | None => None,
+        },
+    };
+
+    // What gdb is told about the process, which takes inspections on forks
+    // of their own: the one given or the thread's, else the one the
+    // inspection finds running. A process it does not find leaves gdb
+    // debugging the kernel alone, and starting in the CPU's thread.
+    let pid = match (start.pid, start.tid) {
+        (None, None) => None,
+        _ => thread.map(|(pid, _)| pid),
+    };
+    let symbols = Symbols::load(home, run, step, pid, Kernel::Load, Say::Aloud)?;
+    let mut debuggee = debuggee(run, step, machine, symbols.process.scope)?;
     let listener = TcpListener::bind(listen.unwrap_or(GDB_LOCAL)).context("listening for gdb")?;
     let mut args = symbols.arguments(Some(listener.local_addr()?));
+
+    // gdb starts in the thread, whose registers are the user registers it
+    // saved entering the kernel, rather than in the CPU's, which at a step
+    // are in the kernel's hypercall; then in the frame asked for.
+    if let Some(number) = thread.and_then(|(_, tid)| debuggee.thread_number(tid)) {
+        args.extend(["-ex".to_string(), format!("thread {number}")]);
+    }
+    if let Some(frame) = start.frame {
+        args.extend(["-ex".to_string(), format!("frame {frame}")]);
+    }
     args.extend(extra.iter().cloned());
 
     // Only serving: say how to connect, then wait for gdb. The debuginfod
@@ -177,15 +214,9 @@ pub enum Needs {
     Tasks(String),
 }
 
-/// A fork of `run` at `step` for gdb, seeing `scope`'s threads, refused
-/// when the run's kernel lacks what `needs` names.
-pub fn fork(
-    home: &Home,
-    run: &Run,
-    step: u64,
-    scope: rewind_core::debug::Scope,
-    needs: Needs,
-) -> Result<rewind_core::debug::Debuggee> {
+/// A fork of `run` at `step` for gdb, refused when the run's kernel lacks
+/// what `needs` names.
+pub fn fork(home: &Home, run: &Run, step: u64, needs: Needs) -> Result<rewind_vmm::Machine> {
     let machine = run.machine_at(
         home,
         step,
@@ -200,8 +231,28 @@ pub fn fork(
             run.manifest.id
         );
     }
+    Ok(machine)
+}
+
+/// gdb's view of `machine`, a fork of `run` at `step`, seeing `scope`'s
+/// threads.
+pub fn debuggee(
+    run: &Run,
+    step: u64,
+    machine: rewind_vmm::Machine,
+    scope: rewind_core::debug::Scope,
+) -> Result<rewind_core::debug::Debuggee> {
     let made = run.records_after(step)?;
     rewind_core::debug::Debuggee::new(machine, made, scope)
+}
+
+/// What the CPU ran at the fork's step, or None from a kernel that does
+/// not say where its tasks are.
+pub fn on_the_cpu(machine: &rewind_vmm::Machine) -> Result<Option<OnTheCpu>> {
+    let Some(layout) = machine.task_layout()? else {
+        return Ok(None);
+    };
+    Ok(Some(Tasks::new(machine, layout).on_the_cpu()?))
 }
 
 /// Where gdb's output goes: to the terminal, or back to the caller.

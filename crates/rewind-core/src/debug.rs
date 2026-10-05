@@ -145,6 +145,16 @@ fn seen(cpu: Option<&Thread>, process: &[Thread]) -> Vec<Seen> {
     std::iter::once(on_cpu).chain(threads).collect()
 }
 
+/// The number gdb gives thread `tid` of the debugged process among
+/// `threads`: gdb numbers the threads a stub lists from 1, in the order
+/// listed, and the CPU comes first. None for a thread the process lacks.
+fn thread_number(threads: &[Seen], tid: u32) -> Option<usize> {
+    threads
+        .iter()
+        .position(|t| matches!(t.source, Source::Task(..)) && t.tid.get() == tid as usize)
+        .map(|index| index + 1)
+}
+
 /// gdb's registers from a struct pt_regs: the user registers a thread
 /// saved, with the data segments user space runs with, which are 0.
 fn saved_registers(words: &[u64; pt_regs::WORDS]) -> X86_64CoreRegs {
@@ -418,6 +428,13 @@ impl Debuggee {
     /// Where thread `tid`'s registers come from, if gdb sees it.
     fn source(&self, tid: Tid) -> Option<Source> {
         self.threads.iter().find(|t| t.tid == tid).map(|t| t.source)
+    }
+
+    /// The number gdb gives thread `tid` of the debugged process when it
+    /// connects, for its `thread` command; None when the process has no
+    /// such thread at this stop.
+    pub fn thread_number(&self, tid: u32) -> Option<usize> {
+        thread_number(&self.threads, tid)
     }
 
     /// Whether the CPU is running user space.
@@ -891,6 +908,19 @@ mod tests {
                 .iter()
                 .all(|t| matches!(t.source, Source::Task(_, OnCpu::No)))
         );
+    }
+
+    /// gdb numbers threads from 1 in the order the stub lists them, so the
+    /// CPU is thread 1 and the process's threads follow; the CPU's own id
+    /// and a thread the process lacks have no process thread's number.
+    #[test]
+    fn gdb_numbers_the_process_threads_after_the_cpu() {
+        let process = [thread(40, 0x100), thread(41, 0x200), thread(42, 0x300)];
+        let threads = seen(Some(&thread(41, 0x200)), &process);
+        assert_eq!(thread_number(&threads, 40), Some(2));
+        assert_eq!(thread_number(&threads, 42), Some(4));
+        assert_eq!(thread_number(&threads, 43), None);
+        assert_eq!(thread_number(&threads, CPU_TID as u32), None);
     }
 
     /// A saved thread's registers are its pt_regs words in gdb's order,

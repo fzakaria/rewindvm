@@ -13,6 +13,7 @@ use std::net::TcpListener;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
+use rewind_core::threads::OnTheCpu;
 use rewind_core::{Home, Run};
 use rewind_trace::Trace;
 use serde::{Deserialize, Serialize};
@@ -81,8 +82,23 @@ pub fn locate(
     callers: usize,
     format: Format,
 ) -> Result<ExitCode> {
-    let (pid, tid) = thread_at(run.trace()?, step, pid, tid)?;
-    let answer = walk(home, run, step, pid, tid)?;
+    let pick = thread_at(run.trace()?, step, pid, tid)?;
+    let needs = Needs::Tasks("`rewind where` cannot find threads".into());
+    let machine = gdb::fork(home, run, step, needs)?;
+    let (pid, tid) = match pick {
+        Pick::Thread { pid, tid } => (pid, tid),
+        Pick::OnTheCpu => match gdb::on_the_cpu(&machine)? {
+            Some(OnTheCpu::Thread { pid, tid }) => (pid, tid),
+            Some(OnTheCpu::WithoutMemory { tid, name }) => bail!(
+                "at step {step} the CPU ran {name} ({tid}) with no memory of its own: a kernel \
+                 thread, or a process exiting; give --pid"
+            ),
+            Some(OnTheCpu::Idle) | None => {
+                bail!("at step {step} the CPU was idle, in no process; give --pid")
+            }
+        },
+    };
+    let answer = walk(home, run, step, machine, pid, tid)?;
     match format {
         Format::Json => println!("{}", serde_json::to_string(&answer)?),
         Format::Text => {
@@ -112,14 +128,21 @@ pub fn locate(
     Ok(ExitCode::SUCCESS)
 }
 
-/// Thread `tid`'s frames at `step`, with process `pid`'s symbols, and the
-/// one in the program's own code with its source.
-pub fn walk(home: &Home, run: &Run, step: u64, pid: u32, tid: u32) -> Result<Answer> {
-    // The fork, refused first for a run whose kernel lists no tasks, then
-    // the symbols, which take inspections on forks of their own.
-    let needs = Needs::Tasks(format!("`rewind where` cannot find thread {tid}"));
+/// Thread `tid`'s frames on `machine`, a fork of `run` at `step`, with
+/// process `pid`'s symbols, and the one in the program's own code with its
+/// source.
+fn walk(
+    home: &Home,
+    run: &Run,
+    step: u64,
+    machine: rewind_vmm::Machine,
+    pid: u32,
+    tid: u32,
+) -> Result<Answer> {
+    // The fork as gdb sees it, then the symbols, which take inspections on
+    // forks of their own.
     let scope = rewind_core::debug::Scope::Process(pid);
-    let mut debuggee = gdb::fork(home, run, step, scope, needs)?;
+    let mut debuggee = gdb::debuggee(run, step, machine, scope)?;
     let symbols = Symbols::load(home, run, step, Some(pid), Kernel::Skip, Say::Aloud)?;
 
     // gdb with the script, against the fork.
@@ -313,33 +336,45 @@ fn script_answer<T: serde::de::DeserializeOwned>(printed: &gdb::Printed) -> Resu
     serde_json::from_str(line).context("reading the gdb script's answer")
 }
 
-/// The process and thread `rewind where` looks at: those given, else those
-/// of the event at `step`. A process given alone is looked at in the
-/// event's thread when the event is that process's, else in its main
-/// thread; a thread given alone is in the process the trace saw it in.
-fn thread_at(trace: &Trace, step: u64, pid: Option<u32>, tid: Option<u32>) -> Result<(u32, u32)> {
+/// The thread a question about a step is about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pick {
+    Thread {
+        pid: u32,
+        tid: u32,
+    },
+    /// Whichever thread the CPU ran, which only a fork at the step can
+    /// read.
+    OnTheCpu,
+}
+
+/// The process and thread `rewind where` and `rewind gdb` look at: those
+/// given, else those of the event at `step`. A process given alone is
+/// looked at in the event's thread when the event is that process's, else
+/// in its main thread; a thread given alone is in the process the trace
+/// saw it in. At a step with no event, or with the kernel's own, such as a
+/// console line, it is the thread on the CPU.
+pub fn thread_at(trace: &Trace, step: u64, pid: Option<u32>, tid: Option<u32>) -> Result<Pick> {
     let event = trace.events.iter().find(|e| e.step == step);
     match (pid, tid) {
-        (Some(pid), Some(tid)) => Ok((pid, tid)),
+        (Some(pid), Some(tid)) => Ok(Pick::Thread { pid, tid }),
         (Some(pid), None) => {
             let tid = event.filter(|e| e.pid == pid).map_or(pid, |e| e.tid);
-            Ok((pid, tid))
+            Ok(Pick::Thread { pid, tid })
         }
         (None, Some(tid)) => {
             let Some(seen) = trace.events.iter().find(|e| e.tid == tid) else {
                 bail!("the run has no thread {tid}; give --pid with --tid");
             };
-            Ok((seen.pid, tid))
+            Ok(Pick::Thread { pid: seen.pid, tid })
         }
-        (None, None) => {
-            let Some(event) = event else {
-                bail!("no event at step {step}; give --pid, or a step `rewind events` lists");
-            };
-            if event.pid == 0 {
-                bail!("step {step} ran in the kernel, in no process; give --pid");
-            }
-            Ok((event.pid, event.tid))
-        }
+        (None, None) => match event {
+            Some(event) if event.pid != 0 => Ok(Pick::Thread {
+                pid: event.pid,
+                tid: event.tid,
+            }),
+            _ => Ok(Pick::OnTheCpu),
+        },
     }
 }
 
@@ -697,8 +732,8 @@ mod tests {
     /// The thread looked at: the step's event's by default, a process
     /// given alone in the event's thread when the event is its own and in
     /// its main thread otherwise, and a thread given alone in the process
-    /// the trace saw it in. A step with no event, or the kernel's, needs a
-    /// process. Builds a trace of a few writes by hand.
+    /// the trace saw it in. At a step with no event, or the kernel's, it is
+    /// the thread on the CPU. Builds a trace of a few writes by hand.
     #[test]
     fn the_thread_is_the_event_s_unless_given() {
         let write = |step, pid, tid| rewind_trace::Event {
@@ -713,16 +748,26 @@ mod tests {
         let trace = Trace {
             events: vec![write(10, 166, 168), write(12, 0, 0), write(14, 170, 170)],
         };
-        assert_eq!(thread_at(&trace, 10, None, None).unwrap(), (166, 168));
-        assert_eq!(thread_at(&trace, 10, Some(166), None).unwrap(), (166, 168));
-        assert_eq!(thread_at(&trace, 10, Some(170), None).unwrap(), (170, 170));
-        assert_eq!(thread_at(&trace, 14, None, Some(168)).unwrap(), (166, 168));
+        let thread = |pid, tid| Pick::Thread { pid, tid };
+        assert_eq!(thread_at(&trace, 10, None, None).unwrap(), thread(166, 168));
+        assert_eq!(
+            thread_at(&trace, 10, Some(166), None).unwrap(),
+            thread(166, 168)
+        );
+        assert_eq!(
+            thread_at(&trace, 10, Some(170), None).unwrap(),
+            thread(170, 170)
+        );
+        assert_eq!(
+            thread_at(&trace, 14, None, Some(168)).unwrap(),
+            thread(166, 168)
+        );
         assert_eq!(
             thread_at(&trace, 11, Some(166), Some(167)).unwrap(),
-            (166, 167)
+            thread(166, 167)
         );
-        assert!(thread_at(&trace, 11, None, None).is_err());
-        assert!(thread_at(&trace, 12, None, None).is_err());
+        assert_eq!(thread_at(&trace, 11, None, None).unwrap(), Pick::OnTheCpu);
+        assert_eq!(thread_at(&trace, 12, None, None).unwrap(), Pick::OnTheCpu);
         assert!(thread_at(&trace, 10, None, Some(999)).is_err());
     }
 

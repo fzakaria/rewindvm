@@ -354,7 +354,9 @@ enum Command {
     /// of the VM's kernel and of the process running at the step, or of
     /// --pid's, and a debuginfod server for their DWARF and sources; with
     /// --listen, only serves the GDB remote protocol for a gdb started some
-    /// other way.
+    /// other way. gdb starts in the thread `rewind where` looks at, in the
+    /// registers it entered the kernel with, rather than in the CPU's,
+    /// which at a step are in the kernel.
     Gdb {
         run: String,
         step: u64,
@@ -362,6 +364,14 @@ enum Command {
         /// its symbols, its breakpoints and every one of its threads.
         #[arg(long)]
         pid: Option<u32>,
+        /// Start in this thread; by default the step's event's, or the
+        /// main thread of --pid.
+        #[arg(long)]
+        tid: Option<u32>,
+        /// Start in this frame of the thread, as `rewind where --json`
+        /// numbers them; by default the innermost.
+        #[arg(long)]
+        frame: Option<u32>,
         /// Serve on this address, such as 127.0.0.1:1234, and start no gdb.
         #[arg(long)]
         listen: Option<String>,
@@ -374,8 +384,10 @@ enum Command {
     /// innermost frame outside the kernel, the C library, Rust's standard
     /// library and dependencies, with its source, and the frames that
     /// called it. By default the thread of the step's own event, the pid
-    /// and tid `rewind events` prints. Takes gdb with Python on PATH, and
-    /// a run recorded with a kernel that lists its tasks.
+    /// and tid `rewind events` prints, and at a step with no event or the
+    /// kernel's own, such as a console line, the thread on the CPU. Takes
+    /// gdb with Python on PATH, and a run recorded with a kernel that
+    /// lists its tasks.
     Where {
         run: String,
         step: u64,
@@ -1144,11 +1156,14 @@ fn run(cli: Cli) -> Result<ExitCode> {
             run,
             step,
             pid,
+            tid,
+            frame,
             listen,
             gdb_args,
         } => {
             let run = Run::find(&home, &run)?;
-            gdb::gdb(&home, &run, step, pid, listen.as_deref(), &gdb_args)
+            let start = gdb::Start { pid, tid, frame };
+            gdb::gdb(&home, &run, step, start, listen.as_deref(), &gdb_args)
         }
         Command::Where {
             run,

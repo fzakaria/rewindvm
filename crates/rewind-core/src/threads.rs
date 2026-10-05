@@ -33,6 +33,19 @@ pub struct Thread {
     pub name: String,
 }
 
+/// What the CPU was running.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OnTheCpu {
+    /// A thread of a process with memory of its own.
+    Thread { pid: u32, tid: u32 },
+    /// A thread with no memory of its own, and so no program: one of the
+    /// kernel's own threads, or a process's thread exiting, past letting
+    /// its memory go.
+    WithoutMemory { tid: u32, name: String },
+    /// The idle task: nothing was ready to run.
+    Idle,
+}
+
 /// The VM kernel's tasks, read through `mem`.
 pub struct Tasks<'a, M: Memory + ?Sized> {
     mem: &'a M,
@@ -58,6 +71,25 @@ impl<'a, M: Memory + ?Sized> Tasks<'a, M> {
             name: self.name(task)?,
         };
         Ok((self.tgid(task)?, thread))
+    }
+
+    /// What the CPU is running: a process's thread, a thread without
+    /// memory, or nothing.
+    pub fn on_the_cpu(&self) -> Result<OnTheCpu> {
+        let (pid, thread) = self.current_thread()?;
+        if thread.tid == 0 {
+            return Ok(OnTheCpu::Idle);
+        }
+        if self.page_table(thread.task)?.is_none() {
+            return Ok(OnTheCpu::WithoutMemory {
+                tid: thread.tid,
+                name: thread.name,
+            });
+        }
+        Ok(OnTheCpu::Thread {
+            pid,
+            tid: thread.tid,
+        })
     }
 
     /// A task's thread id: its pid, which is 0 for the idle task.
@@ -329,6 +361,33 @@ mod tests {
                 }
             )
         );
+    }
+
+    /// What the CPU ran, from current_task: a thread of a process with
+    /// memory of its own, a kernel thread, which has none, or the idle
+    /// task, whose id is 0.
+    #[test]
+    fn the_cpu_ran_a_process_a_kernel_thread_or_nothing() {
+        let (fake, _) = kernel();
+        let l = layout();
+        let tasks = Tasks::new(&fake, l);
+        assert_eq!(
+            tasks.on_the_cpu().unwrap(),
+            OnTheCpu::Thread { pid: 40, tid: 41 }
+        );
+
+        let t50 = tasks.process(50).unwrap().unwrap();
+        fake.put_u64(l.current_task, t50);
+        assert_eq!(
+            tasks.on_the_cpu().unwrap(),
+            OnTheCpu::WithoutMemory {
+                tid: 50,
+                name: "kworker/0:1".into()
+            }
+        );
+
+        fake.put_u64(l.current_task, l.init_task);
+        assert_eq!(tasks.on_the_cpu().unwrap(), OnTheCpu::Idle);
     }
 
     /// The page table is mm->pgd's physical address; a kernel thread has
