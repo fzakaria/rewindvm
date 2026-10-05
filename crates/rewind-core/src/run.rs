@@ -22,8 +22,8 @@ use crate::cpio;
 use crate::home::Home;
 
 pub use rewind_trace::manifest::{
-    BOOKMARKS, ID_LEN, MANIFEST, MANIFEST_VERSION, Manifest, Parent, RunId, RunOutcome,
-    ScheduleSegment, Source, Spec, TRACE,
+    BOOKMARKS, EXECUTING_LOCK, ID_LEN, MANIFEST, MANIFEST_VERSION, Manifest, Parent, RunId,
+    RunOutcome, ScheduleSegment, Source, Spec, TRACE, executing,
 };
 
 /// The kernel command line every guest boots with. The first two keep the
@@ -355,11 +355,6 @@ impl Observer for Recorder {
     }
 }
 
-/// The file in a run's directory that the process executing the run holds
-/// a lock on. The kernel drops the lock when that process dies, however it
-/// dies, so a run with no outcome and no lock held was interrupted.
-const EXECUTING_LOCK: &str = "executing.lock";
-
 /// A trace an execution writes beside the run's recorded one. The new
 /// trace takes the recording's place only through `keep`, once the
 /// execution has finished; dropped before then, as when the execution
@@ -446,16 +441,6 @@ pub(crate) fn lock_executing(dir: &Path) -> Result<fs::File> {
         );
     }
     Ok(file)
-}
-
-/// Whether a process is executing the run in `dir` now.
-pub(crate) fn executing(dir: &Path) -> bool {
-    let Ok(file) = fs::File::open(dir.join(EXECUTING_LOCK)) else {
-        return false;
-    };
-    // A shared lock is refused only while an execution holds its own, and
-    // goes when the file is dropped.
-    file.try_lock_shared().is_err()
 }
 
 /// Whether bringing a machine to a step of a run keeps a keyframe there.

@@ -3,7 +3,7 @@
 //! manifests and every reader, the desktop app included, reads them with
 //! these types.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use rewind_init::Job;
 use serde::{Deserialize, Serialize};
@@ -23,6 +23,21 @@ pub const BOOKMARKS: &str = "bookmarks.json";
 
 /// The directory of a run's own keyframes, inside the run's directory.
 pub const KEYFRAMES_DIR: &str = "keyframes";
+
+/// The file in a run's directory that the process executing the run holds
+/// a lock on. The kernel drops the lock when that process dies, however it
+/// dies, so a run with no outcome and no lock held was interrupted.
+pub const EXECUTING_LOCK: &str = "executing.lock";
+
+/// Whether a process is executing the run in `dir` now.
+pub fn executing(dir: &Path) -> bool {
+    let Ok(file) = std::fs::File::open(dir.join(EXECUTING_LOCK)) else {
+        return false;
+    };
+    // A shared lock is refused only while an execution holds its own, and
+    // goes when the file is dropped.
+    file.try_lock_shared().is_err()
+}
 
 /// The version of the manifest format.
 pub const MANIFEST_VERSION: u32 = 1;
@@ -293,6 +308,25 @@ mod tests {
         ] {
             assert_eq!(RunId::parse(not_an_id), None, "{not_an_id:?}");
         }
+    }
+
+    #[test]
+    fn a_run_executes_while_its_lock_is_held() {
+        // A run directory with no lock file, or with one nobody holds, is
+        // not executing; one whose lock a process holds is, until the lock
+        // is dropped.
+        let dir = std::env::temp_dir().join(format!("rewind-trace-lock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!executing(&dir));
+
+        let lock = std::fs::File::create(dir.join(EXECUTING_LOCK)).unwrap();
+        assert!(!executing(&dir));
+        lock.try_lock().unwrap();
+        assert!(executing(&dir));
+        drop(lock);
+        assert!(!executing(&dir));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
