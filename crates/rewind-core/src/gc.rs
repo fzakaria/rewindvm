@@ -379,23 +379,26 @@ mod tests {
         hashes
     }
 
-    /// How often, and how far apart, `settled` tries again.
-    const SETTLE_TRIES: u32 = 200;
-    const SETTLE_WAIT: std::time::Duration = std::time::Duration::from_millis(10);
-
-    /// `collect` once the locks a test let go of are free. Other tests in
-    /// this process start programs, and a child holds a copy of every open
-    /// file, and so every lock, from its fork until it execs; a lock this
-    /// test dropped can stay held that long.
+    /// `collect` once the locks a test let go of are free (see
+    /// [`crate::settle`]).
     fn settled(home: &Home, act: Act) -> Garbage {
-        for _ in 0..SETTLE_TRIES {
+        crate::settle::settle("collecting without a refusal", || {
             match collect(home, act) {
-                Ok(garbage) => return garbage,
-                Err(e) if e.downcast_ref::<Refusal>().is_some() => std::thread::sleep(SETTLE_WAIT),
+                Ok(garbage) => Some(garbage),
+                Err(e) if e.downcast_ref::<Refusal>().is_some() => None,
                 Err(e) => panic!("collecting failed: {e:#}"),
             }
-        }
-        panic!("collecting was refused {SETTLE_TRIES} times");
+        })
+    }
+
+    /// Waits until `collect` refuses with `expected`. A lock the test let
+    /// go of may still look held for a moment (see [`crate::settle`]) and
+    /// make `collect` refuse for that reason first.
+    fn refused_with(home: &Home, act: Act, expected: Refusal) {
+        let what = format!("collecting to refuse with {expected:?}");
+        crate::settle::settle(&what, || {
+            (refusal(collect(home, act)) == expected).then_some(())
+        });
     }
 
     /// The refusal `collect` failed with.
@@ -529,10 +532,7 @@ mod tests {
         let executing = crate::run::lock_executing(&dir).unwrap();
 
         for act in [Act::DryRun, Act::Remove] {
-            assert_eq!(
-                refusal(collect(&home, act)),
-                Refusal::Executing(vec!["u".into()])
-            );
+            refused_with(&home, act, Refusal::Executing(vec!["u".into()]));
         }
         assert!(unused.exists());
         assert!(Store::open(&home.store()).unwrap().contains(&hashes[0]));
@@ -550,7 +550,7 @@ mod tests {
         let home = home("in-use");
         let unused = image(&home.images().join("store-x.erofs"), 10);
         let in_use = home.in_use().unwrap();
-        assert_eq!(refusal(collect(&home, Act::Remove)), Refusal::InUse);
+        refused_with(&home, Act::Remove, Refusal::InUse);
         assert!(unused.exists());
         drop(in_use);
         settled(&home, Act::Remove);
@@ -565,7 +565,7 @@ mod tests {
         let home = home("store-open");
         let unused = image(&home.images().join("store-x.erofs"), 10);
         let store = Store::open(&home.store()).unwrap();
-        assert_eq!(refusal(collect(&home, Act::Remove)), Refusal::StoreOpen);
+        refused_with(&home, Act::Remove, Refusal::StoreOpen);
         assert!(unused.exists());
         drop(store);
         fs::remove_dir_all(home.root()).unwrap();

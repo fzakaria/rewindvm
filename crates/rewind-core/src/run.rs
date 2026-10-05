@@ -1331,7 +1331,13 @@ mod tests {
         assert!(executing(&dir));
         assert!(lock_executing(&dir).is_err());
         drop(held);
-        assert!(!executing(&dir));
+
+        // A program another test started may hold a copy of the lock until
+        // it execs, so the run stops executing soon after the drop rather
+        // than at once (see `crate::settle`).
+        crate::settle::settle("the run to stop executing", || {
+            (!executing(&dir)).then_some(())
+        });
         fs::remove_dir_all(&dir).unwrap();
     }
 

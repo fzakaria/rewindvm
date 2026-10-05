@@ -15,6 +15,8 @@ pub mod nix;
 pub mod pmu;
 pub mod prune;
 pub mod run;
+#[cfg(test)]
+mod settle;
 pub mod source_cache;
 pub mod threads;
 
