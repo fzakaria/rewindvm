@@ -12,6 +12,7 @@ mod selectable;
 mod sideways;
 mod source;
 mod splits;
+mod step_entry;
 mod terminal;
 mod tour;
 mod viewer;
@@ -45,6 +46,8 @@ actions!(
         GoBack,
         GoForward,
         CloseNearest,
+        GoToStep,
+        ConfirmStep,
         ForkHere,
         ToggleSource,
         OpenRun,
@@ -68,8 +71,9 @@ actions!(
 const KEY_CONTEXT: &str = "Scrubber";
 
 /// Where the scrubber's keys apply: anywhere in it but the terminal pane,
-/// which sends its keys to the command running in it.
-const SCRUBBER_KEYS: &str = "Scrubber && !Terminal";
+/// which sends its keys to the command running in it, and a text field,
+/// where letters are typed.
+const SCRUBBER_KEYS: &str = "Scrubber && !Terminal && !TextInput";
 
 /// The key context of the terminal pane.
 pub const TERMINAL_CONTEXT: &str = "Terminal";
@@ -82,6 +86,9 @@ const LICENSE_CONTEXT: &str = "LicenseDialog";
 
 /// The key context of the Open link dialog's field.
 const LINK_CONTEXT: &str = "LinkDialog";
+
+/// The key context of the step readout's field.
+const STEP_CONTEXT: &str = "StepField";
 
 /// The key context of the tour's callout.
 const TOUR_CONTEXT: &str = "Tour";
@@ -193,8 +200,9 @@ fn load_bundled_fonts(cx: &App) {
 /// step, Page Up and Page Down between phases, Home and End to the ends,
 /// f to the failure and d to the divergence, and Alt+arrows back and
 /// forward through those jumps; s opens or closes the source
-/// panel, and Escape closes the file viewer, the source panel or the
-/// terminal pane. Ctrl+C copies the selected
+/// panel, Escape closes the file viewer, the source panel or the
+/// terminal pane, and g opens the step readout to type a step into.
+/// Ctrl+C copies the selected
 /// text and Ctrl+A selects all of the panel last clicked in; in the
 /// terminal pane, where Ctrl+C belongs to the command, Ctrl+Shift+C and
 /// Ctrl+Shift+V copy and paste.
@@ -216,6 +224,7 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("alt-left", GoBack, context),
         KeyBinding::new("alt-right", GoForward, context),
         KeyBinding::new("escape", CloseNearest, context),
+        KeyBinding::new("g", GoToStep, context),
         KeyBinding::new("s", ToggleSource, context),
         KeyBinding::new("ctrl-c", CopySelection, context),
         KeyBinding::new("ctrl-a", SelectAll, context),
@@ -225,6 +234,8 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-shift-v", TerminalPaste, Some(TERMINAL_CONTEXT)),
         KeyBinding::new("ctrl-v", PasteLicense, Some(LICENSE_CONTEXT)),
         KeyBinding::new("escape", CloseDialog, Some(LICENSE_CONTEXT)),
+        KeyBinding::new("enter", ConfirmStep, Some(STEP_CONTEXT)),
+        KeyBinding::new("escape", CloseDialog, Some(STEP_CONTEXT)),
         KeyBinding::new("enter", ConfirmLink, Some(LINK_CONTEXT)),
         KeyBinding::new("escape", CloseDialog, Some(LINK_CONTEXT)),
         KeyBinding::new("enter", TourNext, Some(TOUR_CONTEXT)),

@@ -31,8 +31,8 @@ use crate::ui::widgets::{
 };
 use crate::ui::{
     CloseNearest, CopySelection, EnterLicense, ForkHere, GoBack, GoForward, GoToEnd, GoToStart,
-    JumpToDivergence, JumpToFailure, KEY_CONTEXT, NextEvent, NextPhase, OpenRun, PreviousEvent,
-    PreviousPhase, SelectAll, StartTour, StepBack, StepForward, ToggleSource,
+    GoToStep, JumpToDivergence, JumpToFailure, KEY_CONTEXT, NextEvent, NextPhase, OpenRun,
+    PreviousEvent, PreviousPhase, SelectAll, StartTour, StepBack, StepForward, ToggleSource,
 };
 
 /// Header labels are cut to this many characters.
@@ -74,6 +74,9 @@ impl Render for Scrubber {
             )
             .on_action(
                 cx.listener(|this, _: &CloseNearest, window, cx| this.close_nearest(window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &GoToStep, window, cx| this.open_step_entry(window, cx)),
             )
             .on_action(cx.listener(|this, _: &GoBack, _, cx| this.go_back(cx)))
             .on_action(cx.listener(|this, _: &GoForward, _, cx| this.go_forward(cx)))
@@ -753,12 +756,7 @@ impl Scrubber {
             .gap(px(size::READOUT_GAP))
             .font_family(self.fonts.mono.clone())
             .text_size(px(size::TEXT_READOUT))
-            .child(readout(
-                "step",
-                format!("{} / {}", thousands(self.step), thousands(t.total)),
-                theme::AMBER,
-                FontWeight::SEMIBOLD,
-            ))
+            .child(self.render_step_readout(cx))
             .child(readout("phase", phase, theme::TEXT, FontWeight::NORMAL));
         let fork = button("fork", ButtonStyle::Primary, Availability::Enabled)
             .child(icon(Icon::Fork, size::ICON_FORK, theme::AMBER_INK))

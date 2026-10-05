@@ -112,6 +112,12 @@ impl TextInput {
         self.replace_text_in_range(None, &line, window, cx);
     }
 
+    /// Selects everything typed, so the next key typed replaces it.
+    pub fn select_everything(&mut self, cx: &mut Context<Self>) {
+        self.move_to(0, cx);
+        self.select_to(self.content.len(), cx)
+    }
+
     fn left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
             self.move_to(self.previous_boundary(self.cursor_offset()), cx);

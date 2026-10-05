@@ -23,6 +23,7 @@ pub mod run;
 pub mod selection;
 pub mod sideways;
 pub mod source;
+pub mod step_entry;
 pub mod syntax;
 pub mod synth;
 pub mod terminal;

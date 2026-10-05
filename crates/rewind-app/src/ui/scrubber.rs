@@ -34,6 +34,7 @@ use crate::ui::link::LinkDialog;
 use crate::ui::selectable::SelectionState;
 use crate::ui::source::SourcePanel;
 use crate::ui::splits::{Drag, Measured, Splits};
+use crate::ui::step_entry::StepEntry;
 use crate::ui::terminal::{PaneKind, TerminalPane};
 use crate::ui::viewer::FileViewer;
 use crate::ui::widgets::Fonts;
@@ -304,6 +305,8 @@ pub struct Scrubber {
     pub(super) step: u64,
     /// The steps the playhead jumped from, for Back and Forward.
     pub(super) history: History,
+    /// The step readout's field, while a step is being typed.
+    pub(super) step_entry: Option<StepEntry>,
     pub(super) log_filter: LogFilter,
     pub(super) log_scroll: UniformListScrollHandle,
     pub(super) files_scroll: UniformListScrollHandle,
@@ -383,6 +386,7 @@ impl Scrubber {
             identical_memo: Memo::default(),
             step: 0,
             history: History::default(),
+            step_entry: None,
             log_filter: LogFilter::Output,
             log_scroll: UniformListScrollHandle::new(),
             files_scroll: UniformListScrollHandle::new(),
