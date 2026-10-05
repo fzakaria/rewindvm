@@ -138,7 +138,21 @@ pub fn hash_file(path: &Path) -> Result<String> {
 pub fn temp_beside(path: &Path) -> PathBuf {
     static WRITES: AtomicU64 = AtomicU64::new(0);
     let n = WRITES.fetch_add(1, Ordering::Relaxed);
-    path.with_extension(format!("tmp-{}-{n}", std::process::id()))
+    path.with_extension(format!("{TEMP_EXTENSION}{}-{n}", std::process::id()))
+}
+
+/// What a name `temp_beside` gives has in place of the file's extension,
+/// before the writer's process id and count.
+const TEMP_EXTENSION: &str = "tmp-";
+
+/// Whether `name` is one `temp_beside(path)` gives, in any process.
+pub fn is_temp_beside(path: &Path, name: &Path) -> bool {
+    let prefix = path.with_extension(TEMP_EXTENSION);
+    let (Some(prefix), Some(name)) = (prefix.file_name(), name.file_name()) else {
+        return false;
+    };
+    name.as_encoded_bytes()
+        .starts_with(prefix.as_encoded_bytes())
 }
 
 /// Writes `bytes` to `path` atomically, so a crash never leaves a half
@@ -185,5 +199,19 @@ mod tests {
         assert_eq!(first.parent(), image.parent());
         let name = first.file_name().unwrap().to_string_lossy().into_owned();
         assert!(name.contains(&std::process::id().to_string()), "{name}");
+    }
+
+    #[test]
+    fn a_temporary_name_is_known_as_its_files_only() {
+        // Names temp_beside gives a trace, here and as another process's
+        // would look, are its temporary names; the trace itself, another
+        // file's temporary name and a file merely named like one are not.
+        let trace = Path::new("/runs/abc/trace.bin");
+        assert!(is_temp_beside(trace, &temp_beside(trace)));
+        assert!(is_temp_beside(trace, Path::new("/runs/abc/trace.tmp-1-0")));
+        assert!(!is_temp_beside(trace, trace));
+        let manifest = Path::new("/runs/abc/manifest.json");
+        assert!(!is_temp_beside(trace, &temp_beside(manifest)));
+        assert!(!is_temp_beside(trace, Path::new("/runs/abc/trace.tmp")));
     }
 }

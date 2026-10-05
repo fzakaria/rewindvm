@@ -435,6 +435,80 @@ impl Observer for Recorder {
 /// dies, so a run with no outcome and no lock held was interrupted.
 const EXECUTING_LOCK: &str = "executing.lock";
 
+/// A trace an execution writes beside the run's recorded one. The new
+/// trace takes the recording's place only through `keep`, once the
+/// execution has finished; dropped before then, as when the execution
+/// fails, it is removed and the recording stays as it was.
+struct NewTrace {
+    path: PathBuf,
+    tmp: PathBuf,
+    kept: bool,
+}
+
+impl NewTrace {
+    /// A new trace for the run in `dir`, and the file to write it to. The
+    /// caller holds the run's executing lock, so a new trace already here
+    /// is one an execution that was killed left, and goes.
+    fn create(dir: &Path) -> Result<(NewTrace, fs::File)> {
+        let path = dir.join(TRACE);
+        for entry in fs::read_dir(dir)? {
+            let left = entry?.path();
+            if crate::image::is_temp_beside(&path, &left) {
+                fs::remove_file(&left)?;
+            }
+        }
+
+        let tmp = crate::image::temp_beside(&path);
+        let file = fs::File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
+        let new = NewTrace {
+            path,
+            tmp,
+            kept: false,
+        };
+        Ok((new, file))
+    }
+
+    /// Where the new trace is until it is kept.
+    fn tmp(&self) -> &Path {
+        &self.tmp
+    }
+
+    /// Puts the new trace in the recording's place.
+    fn keep(mut self) -> Result<()> {
+        fs::rename(&self.tmp, &self.path)
+            .with_context(|| format!("renaming {} into place", self.tmp.display()))?;
+        self.kept = true;
+        Ok(())
+    }
+}
+
+impl Drop for NewTrace {
+    fn drop(&mut self) {
+        if !self.kept {
+            let _ = fs::remove_file(&self.tmp);
+        }
+    }
+}
+
+/// Whether a new execution's trace, hashed `new`, may replace the run's
+/// recording. An execution that kept an earlier one's keyframes, whose
+/// trace hashed `kept`, may replace it only with the same trace: those
+/// keyframes are of the earlier execution, and seeking with them in
+/// another trace goes another way.
+fn replaces(kept: Option<&str>, new: &str) -> Result<()> {
+    let Some(kept) = kept else {
+        return Ok(());
+    };
+    if kept != new {
+        bail!(
+            "this build of rewind runs the inputs differently from the build that recorded \
+             the run, and the run's keyframes are of that recording; the recording stays as \
+             it was. Remove the run to record it with this build"
+        );
+    }
+    Ok(())
+}
+
 /// Takes `dir`'s executing lock, held until the file is dropped. Refused
 /// while another execution of the same run holds it.
 pub(crate) fn lock_executing(dir: &Path) -> Result<fs::File> {
@@ -659,6 +733,17 @@ impl Run {
         }
         let shortcut = Shortcut::find(home, &manifest, start_from);
 
+        // A finished earlier execution's recording, trace and manifest,
+        // stays in place until this execution finishes and replaces it. When
+        // this one keeps that one's keyframes, its trace must hash the same.
+        let recorded = previous
+            .as_ref()
+            .is_some_and(|p| p.manifest.outcome.is_some());
+        let kept_hash = previous
+            .as_ref()
+            .filter(|_| keep)
+            .and_then(|p| p.manifest.trace_hash.clone());
+
         // A run that takes no keyframes of its own replays from boot, so it
         // reads none of another run's either: starting from them only made
         // this execution shorter, and removing that run takes nothing from
@@ -673,12 +758,19 @@ impl Run {
                 .map(|s| s.shared.clone());
             keyframes
         };
+
+        // A run executing for the first time, or again after an execution
+        // that never finished, is listed while it executes, with no outcome
+        // yet. A run with a recording goes on showing that recording.
         manifest.outcome = None;
         manifest.trace_hash = None;
-        write_manifest(&manifest)?;
+        if !recorded {
+            write_manifest(&manifest)?;
+        }
 
+        let (new_trace, trace_file) = NewTrace::create(&dir)?;
         let mut recorder = Recorder {
-            trace: TraceWriter::new(fs::File::create(dir.join(TRACE))?),
+            trace: TraceWriter::new(trace_file),
             echo,
             status: None,
             error: None,
@@ -752,7 +844,7 @@ impl Run {
         if let Some(e) = recorder.error {
             return Err(e.context("writing the trace"));
         }
-        recorder.trace.finish()?;
+        recorder.trace.finish()?.sync_all()?;
 
         // Which thread a run computing in user space stopped in, read from
         // the VM's kernel while the machine is here.
@@ -764,7 +856,12 @@ impl Run {
             status: recorder.status,
             wall_ms: wall.as_millis() as u64,
         });
-        manifest.trace_hash = Some(crate::image::hash_file(&dir.join(TRACE))?);
+
+        // The new trace replaces the recording, if it may.
+        let trace_hash = crate::image::hash_file(new_trace.tmp())?;
+        replaces(kept_hash.as_deref(), &trace_hash)?;
+        new_trace.keep()?;
+        manifest.trace_hash = Some(trace_hash);
 
         // Where a fork parts from its parent, while the parent is here to
         // compare with; otherwise what an earlier execution found stays.
@@ -1231,6 +1328,54 @@ mod tests {
     // agree, which decides what a fork may share with its parent, and the
     // manifest fields the desktop app reads by name.
     use super::*;
+
+    #[test]
+    fn a_new_trace_replaces_the_recording_only_when_kept() {
+        // A run directory with a recorded trace, one a killed execution
+        // left beside it, and a new trace written there: the killed one's
+        // goes when the new one starts; the new one dropped, as when its
+        // execution fails, goes too and the recording stays byte for byte;
+        // kept, it takes the recording's place and nothing else is left in
+        // the directory.
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("rewind-new-trace-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(TRACE), b"recorded").unwrap();
+        fs::write(crate::image::temp_beside(&dir.join(TRACE)), b"killed").unwrap();
+        let names = || {
+            let mut names: Vec<String> = fs::read_dir(&dir)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        };
+
+        let (new, mut file) = NewTrace::create(&dir).unwrap();
+        file.write_all(b"half").unwrap();
+        drop(new);
+        assert_eq!(fs::read(dir.join(TRACE)).unwrap(), b"recorded");
+        assert_eq!(names(), [TRACE]);
+
+        let (new, mut file) = NewTrace::create(&dir).unwrap();
+        file.write_all(b"whole").unwrap();
+        file.sync_all().unwrap();
+        new.keep().unwrap();
+        assert_eq!(fs::read(dir.join(TRACE)).unwrap(), b"whole");
+        assert_eq!(names(), [TRACE]);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_trace_that_differs_from_its_kept_keyframes_recording_is_refused() {
+        // A new execution that kept the keyframes of an earlier one may
+        // replace that one's trace only with the same trace; with none
+        // kept, any trace replaces it.
+        assert!(replaces(Some("aa"), "aa").is_ok());
+        assert!(replaces(Some("aa"), "bb").is_err());
+        assert!(replaces(None, "bb").is_ok());
+    }
 
     #[test]
     fn a_replay_that_goes_another_way_is_caught() {
