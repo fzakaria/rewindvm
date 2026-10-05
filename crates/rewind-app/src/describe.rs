@@ -271,6 +271,10 @@ pub fn short_store_paths_mapped(text: &str) -> Mapped {
 /// Quoted text in a plain sentence is cut to this many characters.
 const MAX_PLAIN_QUOTE: usize = 48;
 
+/// How many characters before where two quoted texts differ their quotes
+/// show, when the difference is past what a quote shows from the start.
+const QUOTE_LEAD: usize = 16;
+
 /// One run's side of a divergence, for describing it in words.
 #[derive(Clone, Copy, Debug)]
 pub struct Party<'a> {
@@ -297,8 +301,18 @@ pub fn difference(
     program: Option<&str>,
     name_of: &dyn Fn(u32) -> Option<String>,
 ) -> Difference {
+    // Two texts alike for longer than a quote shows are both quoted from
+    // shortly before where they differ, so the difference is on screen.
+    let texts = (
+        here.and_then(|p| quotable(p.event)),
+        there.and_then(|p| quotable(p.event)),
+    );
+    let from = match texts {
+        (Some(a), Some(b)) => quote_start(&a, &b),
+        _ => 0,
+    };
     let said = |party: Option<Party>| match party {
-        Some(p) => plain(p, program, name_of),
+        Some(p) => plain_from(p, program, name_of, from),
         None => match program {
             Some(program) => format!("{program} does nothing more"),
             None => "the run ends".to_string(),
@@ -339,8 +353,51 @@ pub fn plain(
     program: Option<&str>,
     name_of: &dyn Fn(u32) -> Option<String>,
 ) -> String {
+    plain_from(party, program, name_of, 0)
+}
+
+/// The text an event's sentence quotes: what it wrote, the command line it
+/// ran, or the mark or console line.
+fn quotable(event: &Event) -> Option<String> {
+    let text = match &event.kind {
+        EventKind::Output { bytes, .. } => String::from_utf8_lossy(bytes).into_owned(),
+        EventKind::Exec { argv, .. } => argv.join(" "),
+        EventKind::Mark { text } | EventKind::Console { text } => text.clone(),
+        _ => return None,
+    };
+    Some(text.trim_end().to_string())
+}
+
+/// The character two quoted texts are quoted from: 0 when they differ
+/// within what a quote shows, else shortly before where they differ.
+fn quote_start(a: &str, b: &str) -> usize {
+    let alike = a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count();
+    if alike + QUOTE_LEAD < MAX_PLAIN_QUOTE {
+        return 0;
+    }
+    alike - QUOTE_LEAD
+}
+
+/// `text` cut to `max` characters from character `from`, marked as cut at
+/// either end.
+fn clip_from(text: &str, from: usize, max: usize) -> String {
+    if from == 0 {
+        return clip(text, max);
+    }
+    let rest: String = text.chars().skip(from).collect();
+    format!("{ELLIPSIS}{}", clip(&rest, max.saturating_sub(1)))
+}
+
+/// What an event did, as `plain` says it, with its quote starting at
+/// character `from`.
+fn plain_from(
+    party: Party,
+    program: Option<&str>,
+    name_of: &dyn Fn(u32) -> Option<String>,
+    from: usize,
+) -> String {
     let who = subject(party, program, name_of);
-    let quoted = |text: &str| format!("\"{}\"", clip(text.trim_end(), MAX_PLAIN_QUOTE));
+    let quoted = |text: &str| format!("\"{}\"", clip_from(text.trim_end(), from, MAX_PLAIN_QUOTE));
     match &party.event.kind {
         EventKind::Output { fd, bytes } => {
             let text = String::from_utf8_lossy(bytes);
@@ -623,6 +680,55 @@ mod tests {
         assert_eq!(
             d.detail.as_deref(),
             Some("Both write to the same stream; the text differs.")
+        );
+    }
+
+    #[test]
+    fn long_texts_that_differ_late_show_where_they_differ() {
+        // Two command lines alike for longer than a quote shows, then
+        // different: both quotes start shortly before the difference, so
+        // the words that differ are in both sentences. Texts that differ
+        // early are quoted from their start.
+        let exec = |last: &str| {
+            ev(EventKind::Exec {
+                filename: "/nix/store/x-gcc/bin/gcc".into(),
+                argv: vec![
+                    "gcc".into(),
+                    "-O2".into(),
+                    "-g".into(),
+                    "-Wall".into(),
+                    "-I/build/philosophers/include".into(),
+                    "-c".into(),
+                    last.into(),
+                ],
+                old_pid: 7,
+            })
+        };
+        let (a, b) = (exec("fork.c"), exec("table.c"));
+        let party = |event| Party {
+            event,
+            thread: None,
+        };
+        let named = |_| Some("gcc".to_string());
+        let d = difference(Some(party(&a)), Some(party(&b)), None, &named);
+        assert!(d.here.contains("fork.c"), "{}", d.here);
+        assert!(d.there.contains("table.c"), "{}", d.there);
+        assert!(d.here.starts_with("gcc runs \"\u{2026}"), "{}", d.here);
+
+        let mut c = exec("fork.c");
+        if let EventKind::Exec { argv, .. } = &mut c.kind {
+            argv[1] = "-O0".into();
+        }
+        let early = difference(Some(party(&c)), Some(party(&a)), None, &named);
+        assert!(
+            early.here.starts_with("gcc runs \"gcc -O0"),
+            "{}",
+            early.here
+        );
+        assert!(
+            early.there.starts_with("gcc runs \"gcc -O2"),
+            "{}",
+            early.there
         );
     }
 
