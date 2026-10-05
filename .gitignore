@@ -11,3 +11,4 @@ result
 result-*
 target/
 __pycache__/
+.direnv/
