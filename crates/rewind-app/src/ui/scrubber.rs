@@ -34,7 +34,7 @@ use crate::ui::viewer::FileViewer;
 use crate::ui::widgets::Fonts;
 use crate::ui::{Launch, RightColumn};
 
-/// How long a notice stays up.
+/// How long a notice that informs stays up.
 const NOTICE_DURATION: Duration = Duration::from_secs(8);
 
 /// How often a running export's notice reports the size written so far.
@@ -83,6 +83,18 @@ pub struct ForkMark {
 pub enum NoticeTone {
     Info,
     Error,
+}
+
+impl NoticeTone {
+    /// How long a notice of this tone stays up by itself: an error stays
+    /// until it is closed, since it may arrive while the user looks
+    /// elsewhere.
+    fn lifetime(self) -> Option<Duration> {
+        match self {
+            NoticeTone::Info => Some(NOTICE_DURATION),
+            NoticeTone::Error => None,
+        }
+    }
 }
 
 /// Something a notice offers to do.
@@ -951,7 +963,8 @@ impl Scrubber {
         cx.notify();
     }
 
-    /// Shows a notice, and takes it down after `NOTICE_DURATION`.
+    /// Shows a notice, and takes it down after its tone's lifetime; an
+    /// error stays until it is closed.
     pub(super) fn notify_user(
         &mut self,
         tone: NoticeTone,
@@ -960,7 +973,10 @@ impl Scrubber {
         cx: &mut Context<Self>,
     ) {
         let id = self.post(tone, title.into(), body.into(), Vec::new(), cx);
-        let timer = cx.background_executor().timer(NOTICE_DURATION);
+        let Some(lifetime) = tone.lifetime() else {
+            return;
+        };
+        let timer = cx.background_executor().timer(lifetime);
         cx.spawn(async move |this, cx| {
             timer.await;
             let _ = this.update(cx, |this, cx| this.dismiss(id, cx));
@@ -1469,6 +1485,15 @@ mod tests {
     // What the scrubber decides about a run, with no window.
     use super::*;
     use crate::synth::{self, SynthConfig, Variant};
+
+    #[test]
+    fn an_error_stays_until_it_is_closed() {
+        // A notice that informs goes after a while; one that reports an
+        // error stays until it is closed, so a message arriving while the
+        // user looks elsewhere is still there to read.
+        assert_eq!(NoticeTone::Info.lifetime(), Some(NOTICE_DURATION));
+        assert_eq!(NoticeTone::Error.lifetime(), None);
+    }
 
     #[test]
     fn a_run_replayed_another_way_cannot_be_brought_to_a_step() {
