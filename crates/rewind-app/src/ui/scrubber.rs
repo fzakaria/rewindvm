@@ -3,7 +3,6 @@
 //! Drawing lives in `render`.
 
 use std::cell::Cell;
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -15,6 +14,8 @@ use gpui::{
 };
 use rewind_text_input::{TextInput, TextInputStyle};
 
+use super::notices::Notices;
+use super::runs::{Pick, RunsPanel};
 use crate::answers::{Answers, FileKey, PlaceKey};
 use crate::bookmarks::Bookmarks;
 use crate::describe::thousands;
@@ -24,7 +25,6 @@ use crate::engine::{
 };
 use crate::family::{Family, Row, RowKind, RunEntry, families, family_of, scan};
 use crate::history::History;
-use crate::memo::Memo;
 use crate::model::{LogFilter, Motion};
 use crate::request::{Request, Requests};
 use crate::run::{Origin, Replays, Session, short_id};
@@ -155,13 +155,6 @@ impl NoticeAction {
 /// A message over the bottom right corner. One without actions goes away
 /// on its own; one with actions stays until an action or its close button.
 #[derive(Clone, Debug)]
-pub struct Notice {
-    pub id: u64,
-    pub tone: NoticeTone,
-    pub title: SharedString,
-    pub body: SharedString,
-    pub actions: Vec<NoticeAction>,
-}
 
 /// An export the engine is writing.
 pub struct ExportJob {
@@ -277,9 +270,9 @@ pub struct Scrubber {
     pub(super) recent_filter: Entity<TextInput>,
     /// Draws the list again as the filter is typed into.
     _recent_typed: Subscription,
-    /// The family of the run on screen: every run of its build, its forks
-    /// among them.
-    pub(super) family: Option<Family>,
+    /// The Runs panel: the family of the run on screen, the runs picked
+    /// in it, its folds and its chosen comparison.
+    pub(super) runs: RunsPanel,
     /// What the right column shows: "At this step", the Runs panel, the
     /// file viewer or the source panel.
     pub(super) right_tab: RightTab,
@@ -294,29 +287,6 @@ pub struct Scrubber {
     pub(super) split_drag: Option<Drag>,
     /// Where the areas the edges divide were last painted.
     pub(super) measured: Rc<Measured>,
-    /// Runs picked with Ctrl and Shift clicks, by id, for copying their
-    /// ids or deleting them together.
-    pub(super) runs_picked: Vec<String>,
-    /// The row a Shift click picks from.
-    pub(super) runs_anchor: Option<usize>,
-    /// The run chosen with Compare against this run, which every run
-    /// opened from the Runs panel is compared with until the choice is
-    /// dropped. Without one, a run is compared with its parent.
-    pub(super) pinned_compare: Option<PathBuf>,
-    pub(super) runs_scroll: UniformListScrollHandle,
-    /// Whether identical forks are being removed.
-    pub(super) pruning: bool,
-    /// The schedule 0 runs whose runs from boot that ended as they did
-    /// the Runs panel shows one by one instead of folded into one row.
-    pub(super) runs_unfolded: HashSet<String>,
-    /// Counts changes to `family` and `runs_unfolded`, which the Runs
-    /// panel's rows are laid out from: whatever changes either bumps it.
-    runs_changed: u64,
-    /// The Runs panel's rows, laid out again only when `runs_changed` or
-    /// the runs on screen change, rather than every frame.
-    runs_rows_memo: Memo<(u64, String, String), Vec<Row>>,
-    /// How many forks repeat an older fork's trace, likewise.
-    identical_memo: Memo<u64, usize>,
     /// The Open link dialog, when it is open.
     pub(super) link_dialog: Option<LinkDialog>,
     pub(super) step: u64,
@@ -351,7 +321,7 @@ pub struct Scrubber {
     /// timeline's mouse listeners, which outlive a render.
     pub(super) dragging: Rc<Cell<bool>>,
     pub(super) forks: Vec<ForkMark>,
-    pub(super) notices: Vec<Notice>,
+    pub(super) notices: Notices,
     /// The license, the dialog to enter one, and the reminder.
     pub(super) licensing: Licensing,
     /// The guided tour, while it runs, and the focus its callout takes.
@@ -374,7 +344,6 @@ pub struct Scrubber {
     pub(super) terminal: Option<TerminalPane>,
     /// The export the engine is writing, if any.
     pub(super) exporting: Option<ExportJob>,
-    next_notice: u64,
     /// The window title last set, to set it only when it changes.
     title: Option<String>,
 }
@@ -417,22 +386,13 @@ impl Scrubber {
             place_answers: Answers::default(),
             link_dialog: None,
             recent: Vec::new(),
-            family: None,
+            runs: RunsPanel::default(),
             right_tab: RightTab::AtStep,
             runs_tab: false,
             bookmarks_tab: false,
             splits: layout_path().map(|p| Splits::load(&p)).unwrap_or_default(),
             split_drag: None,
             measured: Rc::new(Measured::default()),
-            runs_picked: Vec::new(),
-            runs_anchor: None,
-            pinned_compare: None,
-            runs_scroll: UniformListScrollHandle::new(),
-            pruning: false,
-            runs_unfolded: HashSet::new(),
-            runs_changed: 0,
-            runs_rows_memo: Memo::default(),
-            identical_memo: Memo::default(),
             step: 0,
             history: History::default(),
             step_entry: None,
@@ -451,7 +411,7 @@ impl Scrubber {
             files_followed: None,
             dragging: Rc::new(Cell::new(false)),
             forks: Vec::new(),
-            notices: Vec::new(),
+            notices: Notices::default(),
             licensing: Licensing::load(),
             tour: None,
             tour_focus: cx.focus_handle(),
@@ -463,7 +423,6 @@ impl Scrubber {
             exporting: None,
             viewer: None,
             source: None,
-            next_notice: 0,
             title: None,
         };
         if let Some(session) = launch.session {
@@ -584,8 +543,7 @@ impl Scrubber {
                     ))
                 })
                 .collect();
-            self.family = Some(Family { runs });
-            self.runs_changed += 1;
+            self.runs.set_family(Some(Family { runs }));
         }
 
         // The engine's runs are read after the run is on screen, for its
@@ -624,8 +582,8 @@ impl Scrubber {
                 .filter(|s| s.run.origin == Origin::Local)
                 .and_then(|s| s.run.id())
                 .map(ToString::to_string);
-            self.family = shown.and_then(|id| family_of(runs.clone(), &id));
-            self.runs_changed += 1;
+            self.runs
+                .set_family(shown.and_then(|id| family_of(runs.clone(), &id)));
         }
         self.recent = families(runs);
         cx.notify();
@@ -661,11 +619,13 @@ impl Scrubber {
         // Without one, the run is compared with the run it hangs under in
         // the panel, which for a run from boot is not in its manifest.
         let above = self
+            .runs
             .family
             .as_ref()
             .and_then(|f| f.tree_parent(&run))
             .map(|r| r.dir.clone());
         let compare = self
+            .runs
             .pinned_compare
             .clone()
             .filter(|pinned| *pinned != run.dir)
@@ -683,50 +643,23 @@ impl Scrubber {
         };
         let shown = ids(self.session.as_ref().map(|s| &s.run));
         let compared = ids(self.session.as_ref().and_then(|s| s.other.as_ref()));
-        let key = (self.runs_changed, shown.clone(), compared.clone());
-        self.runs_rows_memo.get(key, || match &self.family {
-            Some(family) => family.rows_folded(&self.runs_unfolded, &[&shown, &compared]),
-            None => Vec::new(),
-        })
+        self.runs.rows(&shown, &compared)
     }
 
     /// How many forks of the family repeat an older fork's trace.
     pub(super) fn identical_forks(&self) -> usize {
-        let count = self.identical_memo.get(self.runs_changed, || {
-            self.family.as_ref().map_or(0, Family::identical)
-        });
-        *count
-    }
-
-    /// The Runs panel's row `index`, as the panel draws it.
-    pub(super) fn runs_row(&self, index: usize) -> Option<Row> {
-        self.runs_rows().get(index).cloned()
+        self.runs.identical()
     }
 
     /// The folding row that Runs panel row `index` goes with, as the id
-    /// of the schedule 0 run it is under and whether it is folded: the
-    /// row itself, or for a run the row of its schedule 0 run.
+    /// of the schedule 0 run it is under and whether it is folded.
     pub(super) fn fold_for_row(&self, index: usize) -> Option<(String, RowKind)> {
-        let family = self.family.as_ref()?;
-        let rows = self.runs_rows();
-        let row = rows.get(index)?;
-        if row.kind != RowKind::Run {
-            return Some((row.run.id.clone(), row.kind));
-        }
-        // A run with windows folded under it answers for those first.
-        let fold = Family::fold_row(&rows, &row.run).or_else(|| {
-            let under = family.fold_under(&row.run)?;
-            Family::fold_row(&rows, under)
-        })?;
-        Some((fold.run.id.clone(), fold.kind))
+        self.runs.fold_for_row(&self.runs_rows(), index)
     }
 
     /// Shows the runs a folding row stands for, or folds them again.
     pub(super) fn toggle_fold(&mut self, under: &str, cx: &mut Context<Self>) {
-        if !self.runs_unfolded.remove(under) {
-            self.runs_unfolded.insert(under.to_string());
-        }
-        self.runs_changed += 1;
+        self.runs.toggle_fold(under);
         cx.notify();
     }
 
@@ -737,18 +670,18 @@ impl Scrubber {
         let Some(shown) = self.session.as_ref().map(|s| s.run.path.clone()) else {
             return;
         };
-        self.pinned_compare = Some(run.dir.clone());
+        self.runs.pinned_compare = Some(run.dir.clone());
         self.open(shown, Some(run.dir), cx);
     }
 
     /// Drops the chosen comparison: the run on screen, and every run
     /// opened after, is compared with its parent again.
     pub(super) fn compare_with_parents(&mut self, cx: &mut Context<Self>) {
-        self.pinned_compare = None;
+        self.runs.pinned_compare = None;
         let Some(shown) = self.session.as_ref().map(|s| s.run.path.clone()) else {
             return;
         };
-        let above = self.family.as_ref().and_then(|f| {
+        let above = self.runs.family.as_ref().and_then(|f| {
             let run = f.runs.iter().find(|r| r.dir == shown)?;
             f.tree_parent(run).map(|r| r.dir.clone())
         });
@@ -764,128 +697,54 @@ impl Scrubber {
         modifiers: gpui::Modifiers,
         cx: &mut Context<Self>,
     ) -> bool {
-        let rows = self.runs_rows();
-        let Some(row) = rows.get(index) else {
-            return false;
-        };
-        if row.kind != RowKind::Run {
-            return false;
-        }
-        if modifiers.shift {
-            let from = self.runs_anchor.unwrap_or(index);
-            let (lo, hi) = (from.min(index), from.max(index));
-            for r in rows[lo..=hi.min(rows.len() - 1)]
-                .iter()
-                .filter(|r| r.kind == RowKind::Run)
-            {
-                if !self.runs_picked.contains(&r.run.id) {
-                    self.runs_picked.push(r.run.id.clone());
-                }
-            }
+        let how = if modifiers.shift {
+            Pick::Range
         } else if modifiers.control || modifiers.platform {
-            let id = &row.run.id;
-            match self.runs_picked.iter().position(|p| p == id) {
-                Some(at) => {
-                    self.runs_picked.remove(at);
-                }
-                None => self.runs_picked.push(id.clone()),
-            }
-            self.runs_anchor = Some(index);
+            Pick::Toggle
         } else {
-            self.runs_picked.clear();
-            self.runs_anchor = Some(index);
-            return false;
+            Pick::Open
+        };
+        let picked = self.runs.pick(&self.runs_rows(), index, how);
+        if picked {
+            cx.notify();
         }
-        cx.notify();
-        true
+        picked
     }
 
     /// Picks every run in the Runs panel.
     pub(super) fn pick_all_runs(&mut self, cx: &mut Context<Self>) {
-        if let Some(family) = &self.family {
-            self.runs_picked = family.rows().into_iter().map(|r| r.run.id).collect();
-            cx.notify();
-        }
+        self.runs.pick_all();
+        cx.notify();
     }
 
     /// A right click on row `index`: the row joins the pick unless it is
     /// in it already, when the click acts on every picked run.
     pub(super) fn pick_for_menu(&mut self, index: usize) {
-        let Some(row) = self.runs_row(index) else {
-            return;
-        };
-
-        // A folding row is no run: the menu on it acts on no picked run,
-        // so none from an earlier click is deleted by mistake.
-        if row.kind != RowKind::Run {
-            self.runs_picked.clear();
-            return;
-        }
-        if !self.runs_picked.contains(&row.run.id) {
-            self.runs_picked = vec![row.run.id];
-            self.runs_anchor = Some(index);
-        }
+        let rows = self.runs_rows();
+        self.runs.pick_for_menu(&rows, index);
     }
 
     /// The runs the Runs panel's menu acts on: the picked ones, in the
     /// panel's order.
     pub(super) fn runs_menu_targets(&self) -> Vec<RunEntry> {
-        let Some(family) = &self.family else {
-            return Vec::new();
-        };
-        family
-            .rows()
-            .into_iter()
-            .filter(|r| self.runs_picked.contains(&r.run.id))
-            .map(|r| r.run)
-            .collect()
+        self.runs.menu_targets()
     }
 
-    /// Deletes `runs` and their forks. A single fork with no forks of its
-    /// own goes at once: the same step and seed make it again. Anything
-    /// more is asked about first, with how many runs go in all.
+    /// Deletes `runs` and their forks: a single fork with no forks of its
+    /// own at once, anything more once the user says so.
     pub(super) fn ask_delete_runs(&mut self, runs: Vec<RunEntry>, cx: &mut Context<Self>) {
-        let Some(family) = &self.family else {
+        let Some(deletion) = self.runs.deletion(&runs) else {
             return;
         };
-        let picked: Vec<&str> = runs.iter().map(|r| r.id.as_str()).collect();
-
-        // Runs under another picked run go with it.
-        let tops: Vec<&RunEntry> = runs
-            .iter()
-            .filter(|r| {
-                !picked
-                    .iter()
-                    .any(|p| family.descendants(p).iter().any(|d| d.id == r.id))
-            })
-            .collect();
-        let mut gone: Vec<&str> = Vec::new();
-        for top in &tops {
-            for id in std::iter::once(top.id.as_str())
-                .chain(family.descendants(&top.id).iter().map(|d| d.id.as_str()))
-            {
-                if !gone.contains(&id) {
-                    gone.push(id);
-                }
-            }
-        }
-        let dirs: Vec<PathBuf> = tops.iter().map(|r| r.dir.clone()).collect();
-        if tops.len() == 1 && tops[0].parent.is_some() && gone.len() == 1 {
-            self.remove_runs(dirs, cx);
+        let Some(question) = deletion.question else {
+            self.remove_runs(deletion.dirs, cx);
             return;
-        }
-        let title = match (tops.len(), gone.len() - tops.len()) {
-            (1, 0) => format!("Delete run {}?", short_id(&tops[0].id)),
-            (1, 1) => format!("Delete run {} and its fork?", short_id(&tops[0].id)),
-            (1, n) => format!("Delete run {} and its {n} forks?", short_id(&tops[0].id)),
-            (k, 0) => format!("Delete {k} runs?"),
-            (k, n) => format!("Delete {k} runs and their {n} forks?"),
         };
         self.offer(
             NoticeTone::Info,
-            title,
+            question,
             "Their traces and keyframes are deleted from Rewind's runs. Pages other runs share stay.",
-            vec![NoticeAction::RemoveRuns(dirs), NoticeAction::Dismiss],
+            vec![NoticeAction::RemoveRuns(deletion.dirs), NoticeAction::Dismiss],
             cx,
         );
     }
@@ -913,11 +772,12 @@ impl Scrubber {
                         return;
                     }
                 };
-                this.runs_picked.retain(|id| !removed.contains(id));
+                this.runs.picked.retain(|id| !removed.contains(id));
 
                 // A comparison chosen with a run that is gone is dropped,
                 // or every run opened after would be compared with nothing.
-                this.pinned_compare = this
+                this.runs.pinned_compare = this
+                    .runs
                     .pinned_compare
                     .take()
                     .filter(|dir| !removed.iter().any(|id| dir.ends_with(id)));
@@ -929,7 +789,7 @@ impl Scrubber {
 
                 // The nearest ancestor of the run on screen that is left.
                 let mut replacement = None;
-                if let (Some(shown), Some(family)) = (&shown, &this.family)
+                if let (Some(shown), Some(family)) = (&shown, &this.runs.family)
                     && removed.contains(shown)
                 {
                     let mut at = family.runs.iter().find(|r| &r.id == shown);
@@ -945,8 +805,7 @@ impl Scrubber {
                     }
                     if replacement.is_none() {
                         this.session = None;
-                        this.family = None;
-                        this.runs_changed += 1;
+                        this.runs.set_family(None);
                     }
                 }
                 this.notify_user(
@@ -975,7 +834,7 @@ impl Scrubber {
     /// step" showing where the two part.
     pub(super) fn open_family(&mut self, family: &Family, cx: &mut Context<Self>) {
         self.right_tab = RightTab::AtStep;
-        self.pinned_compare = None;
+        self.runs.pinned_compare = None;
         let (run, compare) = family.to_open();
         self.open(run.dir.clone(), compare.map(|c| c.dir.clone()), cx);
     }
@@ -984,7 +843,7 @@ impl Scrubber {
     /// under each run of the family that has some, then reads the runs
     /// again.
     pub(super) fn prune_identical(&mut self, cx: &mut Context<Self>) {
-        let Some(family) = &self.family else {
+        let Some(family) = &self.runs.family else {
             return;
         };
         let roots: Vec<PathBuf> = family
@@ -995,7 +854,7 @@ impl Scrubber {
         if roots.is_empty() {
             return;
         }
-        self.pruning = true;
+        self.runs.pruning = true;
         cx.notify();
         self.with_engine(
             cx,
@@ -1007,7 +866,7 @@ impl Scrubber {
                 Ok(removed)
             },
             |this, result, cx| {
-                this.pruning = false;
+                this.runs.pruning = false;
                 match result {
                     Ok(removed) => this.notify_user(
                         NoticeTone::Info,
@@ -1252,8 +1111,7 @@ impl Scrubber {
 
     /// Changes the body of a notice on screen.
     pub(super) fn update_notice(&mut self, id: u64, body: String, cx: &mut Context<Self>) {
-        if let Some(notice) = self.notices.iter_mut().find(|n| n.id == id) {
-            notice.body = body.into();
+        if self.notices.set_body(id, body.into()) {
             cx.notify();
         }
     }
@@ -1266,24 +1124,13 @@ impl Scrubber {
         actions: Vec<NoticeAction>,
         cx: &mut Context<Self>,
     ) -> u64 {
-        // The same message again replaces the one on screen rather than
-        // stacking a copy.
-        self.notices.retain(|n| n.title != title || n.body != body);
-        let id = self.next_notice;
-        self.next_notice += 1;
-        self.notices.push(Notice {
-            id,
-            tone,
-            title,
-            body,
-            actions,
-        });
+        let id = self.notices.post(tone, title, body, actions);
         cx.notify();
         id
     }
 
     pub(super) fn dismiss(&mut self, id: u64, cx: &mut Context<Self>) {
-        self.notices.retain(|n| n.id != id);
+        self.notices.remove(id);
         self.clear_selection_in(&[Surface::Notice(id)]);
         cx.notify();
     }
@@ -1368,7 +1215,7 @@ impl Scrubber {
         }
         let step = self.step;
         let id = session.run.id().map_or("", |id| id.as_str());
-        let schedule = next_fork_schedule(self.family.as_ref(), id, &self.forks);
+        let schedule = next_fork_schedule(self.runs.family.as_ref(), id, &self.forks);
         let run = session.run.path.clone();
         let parent = run.clone();
         let request = self.requests.issue();

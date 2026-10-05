@@ -87,7 +87,7 @@ impl Scrubber {
         let stops = tour::stops_for(
             session.run.timeline.failure.is_some(),
             session.divergence_step().is_some(),
-            self.family.as_ref().is_some_and(|f| f.runs.len() > 1),
+            self.runs.family.as_ref().is_some_and(|f| f.runs.len() > 1),
         );
         self.tour = Some(Tour::new(stops));
         self.show_tour_stop(cx);

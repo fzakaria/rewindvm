@@ -184,7 +184,7 @@ impl Scrubber {
             }
         }
         self.licensing.registration = Registration::Registered(license);
-        self.notices.retain(|n| n.title.as_ref() != REMINDER_TITLE);
+        self.notices.remove_titled(REMINDER_TITLE);
         cx.notify();
     }
 

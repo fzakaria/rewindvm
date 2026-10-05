@@ -81,7 +81,7 @@ impl Scrubber {
     /// and the source while they are open.
     fn tabs(&self) -> Vec<RightTab> {
         let mut tabs = vec![RightTab::AtStep];
-        if self.runs_tab && self.family.is_some() {
+        if self.runs_tab && self.runs.family.is_some() {
             tabs.push(RightTab::Runs);
         }
         if self.bookmarks_tab {
@@ -99,7 +99,7 @@ impl Scrubber {
     fn tab_label(&self, tab: RightTab) -> String {
         match tab {
             RightTab::AtStep => "At this step".to_string(),
-            RightTab::Runs => match &self.family {
+            RightTab::Runs => match &self.runs.family {
                 Some(family) => format!("Runs \u{b7} {}", family.runs.len()),
                 None => "Runs".to_string(),
             },

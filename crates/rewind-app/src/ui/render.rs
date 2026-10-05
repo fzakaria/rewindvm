@@ -197,7 +197,7 @@ impl Scrubber {
         let chosen = match self.right_tab {
             RightTab::File => self.render_viewer(cx),
             RightTab::Source => self.render_source(cx),
-            RightTab::Runs => self.family.as_ref().map(|f| self.render_runs(f, cx)),
+            RightTab::Runs => self.runs.family.as_ref().map(|f| self.render_runs(f, cx)),
             RightTab::Bookmarks => Some(self.render_bookmarks_panel(cx)),
             RightTab::AtStep => None,
         };
@@ -321,7 +321,7 @@ impl Scrubber {
                         PillTone::Compared,
                         fonts,
                     ))
-                    .tooltip(tooltip(if self.pinned_compare.is_some() {
+                    .tooltip(tooltip(if self.runs.pinned_compare.is_some() {
                         COMPARED_PINNED_NOTE
                     } else {
                         COMPARED_NOTE
@@ -350,7 +350,7 @@ impl Scrubber {
         }
 
         // The Runs panel's toggle, with how many runs the build has.
-        if let Some(family) = &self.family {
+        if let Some(family) = &self.runs.family {
             let open = self.right_tab == RightTab::Runs;
             let toggle = div()
                     .id("runs-toggle")
@@ -569,6 +569,7 @@ impl Scrubber {
             .map(ToString::to_string)
             .unwrap_or_default();
         let disk_forks = self
+            .runs
             .family
             .iter()
             .flat_map(|f| f.runs.iter())
@@ -1442,7 +1443,7 @@ impl Scrubber {
             .flex_col()
             .gap(px(size::CARD_GAP));
         let registry = self.selecting.registry.clone();
-        for notice in &self.notices {
+        for notice in self.notices.iter() {
             let surface = Surface::Notice(notice.id);
             let range = self.selected_range(surface);
             let line = |i: usize, text: String| {
@@ -1752,7 +1753,7 @@ impl Scrubber {
             .and_then(|o| o.id())
             .map(ToString::to_string)
             .unwrap_or_default();
-        let picked = self.runs_picked.clone();
+        let picked = self.runs.picked.clone();
         let identical = self.identical_forks();
 
         // What the rings in the graph mean, as the header's pills.
@@ -1778,7 +1779,7 @@ impl Scrubber {
                 d.child(legend_dot(theme::BLUE, "compared"))
             });
         let prune = (identical > 0).then(|| {
-            let label = if self.pruning {
+            let label = if self.runs.pruning {
                 "removing\u{2026}".to_string()
             } else {
                 format!("remove {identical} identical")
@@ -1891,7 +1892,7 @@ impl Scrubber {
                     .collect::<Vec<_>>()
             }),
         )
-        .track_scroll(&self.runs_scroll)
+        .track_scroll(&self.runs.scroll)
         .flex_grow(layout::FILL)
         .min_h_0()
         .py(px(size::LIST_PAD_Y));

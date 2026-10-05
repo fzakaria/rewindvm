@@ -451,8 +451,7 @@ impl Scrubber {
             Surface::ForkCard => self.fork_card_lines(),
             Surface::Notice(id) => self
                 .notices
-                .iter()
-                .find(|n| n.id == id)
+                .find(id)
                 .map(|n| {
                     std::iter::once(Mapped::plain(n.title.to_string()))
                         .chain(n.body.lines().map(mapped))
@@ -766,7 +765,7 @@ impl Scrubber {
                     ),
                 );
             }
-            if self.pinned_compare.is_some() {
+            if self.runs.pinned_compare.is_some() {
                 items = items.child(
                     item(
                         "menu-run-parents",
