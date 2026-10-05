@@ -1028,7 +1028,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     "narrowed": narrowed,
                 })
             };
-            let Some(mut worst) = failing else {
+            let Some(worst) = failing else {
                 say(format!("same result under all {} schedules", tried + 1));
                 if json {
                     println!("{}", search(serde_json::Value::Null));
@@ -1036,16 +1036,8 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 return Ok(ExitCode::SUCCESS);
             };
 
-            // Narrow it to a window of steps: first the latest start that
-            // still changes the outcome, then the earliest end. Each step's
-            // perturbation depends only on the seed and the step, so a
-            // smaller window perturbs a subset of the same steps. The two
-            // runs are identical up to the window, so where they part is
-            // inside it, next to the interleaving that matters. The start
-            // comes first because in a long run a perturbation anywhere
-            // early changes everything after it; the latest start keeps the
-            // window near the end that differs. Each round tries a point per
-            // job, so a round divides the range by jobs + 1.
+            // Narrow it to the smallest window of steps its perturbation
+            // still ends differently from (see rewind_core::check).
             machine.schedule = worst.manifest.spec.schedule;
             let end = worst
                 .manifest
@@ -1084,63 +1076,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     .collect();
                 execute_all(&home, &guest, &prepared, machines, from_base.clone())
             };
-            let points = |lo: u64, hi: u64| -> Vec<u64> {
-                let n = (jobs as u64).min(hi - lo - 1).max(1);
-                (1..=n).map(|i| lo + (hi - lo) * i / (n + 1)).collect()
-            };
-
-            // The latest start: `lo` differs, `hi` (an empty window) does not.
-            let (mut lo, mut hi) = (start, end);
-            while hi - lo > 1 {
-                let starts = points(lo, hi);
-                let runs = probe_all(starts.iter().map(|&f| (f, end)).collect())?;
-                let mut found = None;
-                for (f, run) in starts.iter().zip(runs).rev() {
-                    if differs(&run)? {
-                        found = Some((*f, run));
-                        break;
-                    }
-                }
-                match found {
-                    Some((f, run)) => {
-                        lo = f;
-                        hi = starts
-                            .iter()
-                            .copied()
-                            .filter(|x| *x > f)
-                            .min()
-                            .unwrap_or(hi);
-                        worst = run;
-                    }
-                    None => hi = starts[0],
-                }
-            }
-            let from = lo;
-
-            // The earliest end: `hi` differs, `lo` (an empty window) does not.
-            let (mut lo, mut hi) = (from, end);
-            while hi - lo > 1 {
-                let ends = points(lo, hi);
-                let runs = probe_all(ends.iter().map(|&e| (from, e)).collect())?;
-                let mut next_lo = *ends.last().unwrap();
-                let mut found = None;
-                for (e, run) in ends.iter().zip(runs) {
-                    if differs(&run)? {
-                        found = Some((*e, run));
-                        break;
-                    }
-                    next_lo = *e;
-                }
-                match found {
-                    Some((e, run)) => {
-                        hi = e;
-                        lo = ends.iter().copied().filter(|x| *x < e).max().unwrap_or(lo);
-                        worst = run;
-                    }
-                    None => lo = next_lo,
-                }
-            }
-            let (lo, until) = (from, hi);
+            let narrowed =
+                rewind_core::check::narrow((start, end), jobs, worst, probe_all, differs)?;
+            let (lo, until, worst) = (narrowed.from, narrowed.until, narrowed.run);
             clear_status();
             say(format!(
                 "perturbing only steps {lo}..{until} still ends differently\n"
