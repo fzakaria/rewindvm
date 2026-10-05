@@ -1875,4 +1875,42 @@ mod tests {
         }
         std::fs::remove_dir_all(&dir).unwrap();
     }
+
+    #[test]
+    fn a_run_that_cannot_be_forked_here_says_what_would_let_it() {
+        // The same run opened from each place a run comes from: a run
+        // directory can be forked; the example, a view export, a bare
+        // trace, and a replayable export still importing or whose import
+        // failed each say what to do instead, naming what was asked for.
+        let dir = std::env::temp_dir().join(format!("rewind-app-origins-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let trace = crate::examples::trace_of(crate::examples::FAILING);
+        std::fs::write(dir.join(rewind_trace::manifest::TRACE), trace).unwrap();
+        let mut session = Session::open(&dir, None).unwrap();
+        let export = |replayable| {
+            Origin::Export(crate::run::Export {
+                source: "/tmp/crash.rwd".into(),
+                file: "/tmp/crash.rwd".into(),
+                replayable,
+            })
+        };
+        let mut why = |origin, importing| {
+            session.run.origin = origin;
+            replay_unavailable(&session, Replay::Shell, importing)
+        };
+        assert_eq!(why(Origin::Local, false), None);
+        let example = why(Origin::Example, false).unwrap();
+        assert!(example.contains("rewind nix to open a shell"), "{example}");
+        let view = why(export(false), false).unwrap();
+        assert!(view.contains("-replayable.rwd"), "{view}");
+        let importing = why(export(true), true).unwrap();
+        assert!(importing.contains("being imported"), "{importing}");
+        let failed = why(export(true), false).unwrap();
+        assert!(failed.contains("rewind import /tmp/crash.rwd"), "{failed}");
+        let bare = why(Origin::TraceFile, false).unwrap();
+        assert!(bare.contains("run directory"), "{bare}");
+        assert!(bare.starts_with("Opening a shell forks the run"), "{bare}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }
