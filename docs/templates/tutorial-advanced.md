@@ -23,6 +23,55 @@ $ rewind check --epoch {{epoch}} {{flake}} | grep -E 'ends differently|perturbin
 
 The failing run crashes at step {{crash_step}}.
 
+## Find the line a thread was on
+
+`rewind where` names the line of the program's own code a thread was on at a
+step, past the C library and, in Rust, the standard library and
+dependencies. By default it looks at the thread of the step's own event, the
+pid/tid pair `rewind events` prints; at {{crash_step}} that is the worker that
+segfaulted:
+
+```console run name=where
+$ rewind where {{failing|short}} {{crash_step}}
+```
+
+<!-- assert: grep -q '^#0 worker (src/pool.c:77)' {{out:where}} && grep -q '^> *77 .*p->queue->completed++;' {{out:where}} && grep -q 'start_thread' {{out:where}} && grep -q 'clone3' {{out:where}} -->
+
+`--tid` picks another thread, on the CPU or not. At step {{last_write}}, the
+worker's last write, the main thread is waiting to join the workers:
+
+```console run name=where_main
+$ rewind where {{failing|short}} {{last_write}} --tid {{pid}}
+```
+
+<!-- assert: grep -q 'pool_shutdown (src/pool.c:128)' {{out:where_main}} && grep -q 'pthread_join' {{out:where_main}} -->
+
+`--json` prints every frame and which one was chosen. For every frame of
+every thread, ask gdb for all the stacks of the process:
+
+```console run name=all_bt
+$ rewind gdb {{failing|short}} {{last_write}} --pid {{pid}} -- -batch -ex 'thread apply all bt' 2>/dev/null | grep -E '^Thread|src/|tests/'
+```
+
+<!-- assert: grep -q 'in pool_shutdown .* at src/pool.c:128' {{out:all_bt}} && grep -q 'in main () at tests/test_pool_shutdown.c' {{out:all_bt}} -->
+
+Both read each thread's registers from the VM kernel's task list, so they
+work on runs recorded with a guest that lists its tasks, as these were.
+
+In the app, Show source under Inspect, or the s key, opens the source panel
+in place of At this step. It names the line `rewind where` would for the
+thread of the playhead's event, marks it in the source around it, and lists
+the thread's frames below with the chosen one marked. When the playhead rests
+on another step the panel asks again, dimming the last answer meanwhile; each
+answer forks the run, so it takes a few seconds. Runs the app cannot fork
+say so instead: the bundled example and an export that holds only the trace.
+So does a run recorded before the guest listed its tasks, which has to be
+recorded again.
+
+<!-- screenshot site/img/app-source: {{home}}/runs/{{failing}} --compare {{home}}/runs/{{passing}} --step {{crash_step}} --source ;; wait 20 -->
+
+![The app's source panel at step {{crash_step}} of the failing run: worker at src/pool.c:77 with p->queue->completed++ marked, and the frames worker, start_thread and clone3 below](../site/img/app-source.png)
+
 ## Watch both sides of the race
 
 A watchpoint finds who freed the queue the crash reads. Break in a worker so
