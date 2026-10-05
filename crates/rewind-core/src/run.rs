@@ -1187,15 +1187,17 @@ impl Run {
                 runs.push(run);
             }
         }
-        runs.sort_by_key(|r| std::cmp::Reverse(r.manifest.created));
+        runs.sort_by_cached_key(|r| newest_first(r.manifest.created, &r.dir));
         Ok(runs)
     }
 
-    /// Finds a run by path, id, name, or id prefix. A path to a run's
+    /// Finds a run by path, id, `@`, name, or id prefix. A path to a run's
     /// directory, or a run's full id, opens that run without reading any
-    /// other. Otherwise a run named exactly `what` wins over ids that
-    /// start with it, so a run named `a` is found even when another run's
-    /// id starts with an `a`; only names need every manifest read.
+    /// other. `@` is the newest run, as `rewind ls` lists them first, and
+    /// `@N` the Nth newest. Otherwise the newest run named exactly `what`
+    /// wins over ids that start with it, so a run named `a` is found even
+    /// when another run's id starts with an `a`; only `@` and names need
+    /// every manifest read.
     pub fn find(home: &Home, what: &str) -> Result<Run> {
         let path = Path::new(what);
         if path.join(MANIFEST).exists() {
@@ -1207,47 +1209,66 @@ impl Run {
             return Run::open(&dir);
         }
 
-        // The runs named `what`, else those whose id starts with it. Only
-        // their manifests are read whole, and ones that do not read are
-        // left out, as `Run::list` leaves them out.
-        let named = Run::named(home, what)?;
-        let matches: Vec<Run> = if named.is_empty() {
-            Run::dirs_starting(home, what)?
-                .iter()
-                .filter_map(|dir| Run::open(dir).ok())
-                .collect()
-        } else {
-            named
-        };
+        // `@` and `@N`: the runs in the order `rewind ls` prints them.
+        if let Some(nth) = newest_index(what)? {
+            let headers = Run::headers(home)?;
+            let Some((dir, _)) = headers.get(nth - 1) else {
+                bail!(
+                    "there are {} runs, so {what} is past the oldest; see `rewind ls`",
+                    headers.len()
+                );
+            };
+            return Run::open(dir);
+        }
+
+        // The newest run named `what`.
+        let named = Run::headers(home)?
+            .into_iter()
+            .find(|(_, header)| header.name == what);
+        if let Some((dir, _)) = named {
+            return Run::open(&dir);
+        }
+
+        // Else the runs whose id starts with `what`. Ones whose manifests
+        // do not read are left out, as `Run::list` leaves them out.
+        let mut matches: Vec<Run> = Run::dirs_starting(home, what)?
+            .iter()
+            .filter_map(|dir| Run::open(dir).ok())
+            .collect();
         match matches.len() {
             0 => Err(Run::unreadable(home, what)
                 .unwrap_or_else(|| anyhow::anyhow!("no run matches {what:?}; see `rewind ls`"))),
-            1 => Ok(matches.into_iter().next().unwrap()),
-            n => bail!("{n} runs match {what:?}; give more of the id"),
+            1 => Ok(matches.remove(0)),
+            n => {
+                matches.sort_by_cached_key(|r| newest_first(r.manifest.created, &r.dir));
+                let mut message = format!("{n} runs match {what:?}; give more of the id:");
+                for run in matches.iter().take(CANDIDATES_SHOWN) {
+                    message.push_str(&format!("\n  {}  {}", run.manifest.id, run.manifest.name));
+                }
+                if n > CANDIDATES_SHOWN {
+                    message.push_str(&format!("\n  and {} more", n - CANDIDATES_SHOWN));
+                }
+                Err(anyhow::anyhow!(message))
+            }
         }
     }
 
-    /// The runs in the home named `name`. Each manifest is read for its
-    /// name alone, and only the ones with this name are opened.
-    fn named(home: &Home, name: &str) -> Result<Vec<Run>> {
-        #[derive(Deserialize)]
-        struct Named {
-            name: String,
-        }
-        let mut runs = Vec::new();
+    /// Every readable run's directory and the parts of its manifest
+    /// `find` matches on, newest first. Each manifest is read for those
+    /// fields alone, which is faster than opening every run.
+    fn headers(home: &Home) -> Result<Vec<(PathBuf, Header)>> {
+        let mut headers = Vec::new();
         for dir in Run::dirs_starting(home, "")? {
             let Ok(bytes) = fs::read(dir.join(MANIFEST)) else {
                 continue;
             };
-            let is_named = serde_json::from_slice::<Named>(&bytes).is_ok_and(|n| n.name == name);
-            if !is_named {
+            let Ok(header) = serde_json::from_slice::<Header>(&bytes) else {
                 continue;
-            }
-            if let Ok(run) = Run::open(&dir) {
-                runs.push(run);
-            }
+            };
+            headers.push((dir, header));
         }
-        Ok(runs)
+        headers.sort_by_cached_key(|(dir, header)| newest_first(header.created, dir));
+        Ok(headers)
     }
 
     /// The directories in the home's runs directory whose names start with
@@ -1278,6 +1299,50 @@ impl Run {
                     .is_some_and(|n| n.to_string_lossy().starts_with(what))
             })?;
         Run::open(&dir).err()
+    }
+}
+
+/// What [`Run::find`] reads of a manifest to order runs and match a name.
+#[derive(Deserialize)]
+struct Header {
+    name: String,
+    created: u64,
+}
+
+/// How many runs an ambiguous id prefix lists.
+const CANDIDATES_SHOWN: usize = 5;
+
+/// What a run argument starts with to name a run by how new it is.
+const NEWEST: char = '@';
+
+/// The order `rewind ls` lists runs in, as a sort key: the newest first,
+/// and of runs made in the same second the one whose manifest was written
+/// last, as when `rewind check` makes several at once.
+fn newest_first(
+    created: u64,
+    dir: &Path,
+) -> (std::cmp::Reverse<u64>, std::cmp::Reverse<SystemTime>) {
+    let written = fs::metadata(dir.join(MANIFEST))
+        .and_then(|m| m.modified())
+        .unwrap_or(UNIX_EPOCH);
+    (std::cmp::Reverse(created), std::cmp::Reverse(written))
+}
+
+/// Which run, counting from the newest as 1, `@` (the newest) or `@N`
+/// names; None when `what` is neither.
+fn newest_index(what: &str) -> Result<Option<usize>> {
+    let Some(count) = what.strip_prefix(NEWEST) else {
+        return Ok(None);
+    };
+    if count.is_empty() {
+        return Ok(Some(1));
+    }
+    if !count.bytes().all(|b| b.is_ascii_digit()) {
+        return Ok(None);
+    }
+    match count.parse::<usize>() {
+        Ok(nth) if nth >= 1 => Ok(Some(nth)),
+        _ => bail!("{what} names no run: @ or @1 is the newest, @2 the one before it"),
     }
 }
 
@@ -1908,7 +1973,67 @@ pub(crate) mod tests {
         write_run(&runs, &manifest("8f01bbbbbbbbbbbb", "other", 5), &[3], b"a");
         assert_eq!(
             Run::find(&home, "8f0").err().unwrap().to_string(),
-            "2 runs match \"8f0\"; give more of the id"
+            "2 runs match \"8f0\"; give more of the id:\n  \
+             8f01bbbbbbbbbbbb  other\n  \
+             8f00aaaaaaaaaaaa  8f"
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn the_newest_runs_are_found_by_at_and_a_name_by_its_newest() {
+        // find() over a home of three runs: two named mylib, made at 1 and
+        // 3, and one named other, made at 2. `@` and `@1` are the newest,
+        // `@2` and `@3` the ones before it, and past the oldest is an
+        // error. A name two runs share finds the newer of them.
+        let root = runs_dir("newest");
+        let home = Home::at(root.clone()).unwrap();
+        let runs = home.runs();
+        let id = |what: &str| Run::find(&home, what).unwrap().manifest.id;
+        write_run(&runs, &manifest("aaaa000000000000", "mylib", 1), &[3], b"a");
+        write_run(&runs, &manifest("bbbb000000000000", "other", 2), &[3], b"a");
+        write_run(&runs, &manifest("cccc000000000000", "mylib", 3), &[3], b"a");
+
+        assert_eq!(id("@"), "cccc000000000000");
+        assert_eq!(id("@1"), "cccc000000000000");
+        assert_eq!(id("@2"), "bbbb000000000000");
+        assert_eq!(id("@3"), "aaaa000000000000");
+        assert_eq!(
+            Run::find(&home, "@4").err().unwrap().to_string(),
+            "there are 3 runs, so @4 is past the oldest; see `rewind ls`"
+        );
+        assert_eq!(
+            Run::find(&home, "@0").err().unwrap().to_string(),
+            "@0 names no run: @ or @1 is the newest, @2 the one before it"
+        );
+        assert_eq!(id("mylib"), "cccc000000000000");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn an_ambiguous_prefix_lists_the_newest_five_matches() {
+        // Seven runs whose ids start with 8f, made at 0 to 6: the error
+        // names the five newest, newest first, and counts the rest.
+        let root = runs_dir("ambiguous");
+        let home = Home::at(root.clone()).unwrap();
+        for i in 0..7u64 {
+            let id = format!("8f{i:014}");
+            write_run(
+                &home.runs(),
+                &manifest(&id, &format!("r{i}"), i),
+                &[3],
+                b"a",
+            );
+        }
+        assert_eq!(
+            Run::find(&home, "8f").err().unwrap().to_string(),
+            "7 runs match \"8f\"; give more of the id:\n  \
+             8f00000000000006  r6\n  \
+             8f00000000000005  r5\n  \
+             8f00000000000004  r4\n  \
+             8f00000000000003  r3\n  \
+             8f00000000000002  r2\n  \
+             and 2 more"
         );
         fs::remove_dir_all(&root).unwrap();
     }
