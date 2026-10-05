@@ -44,6 +44,7 @@ actions!(
         JumpToDivergence,
         GoBack,
         GoForward,
+        CloseNearest,
         ForkHere,
         ToggleSource,
         OpenRun,
@@ -192,7 +193,8 @@ fn load_bundled_fonts(cx: &App) {
 /// step, Page Up and Page Down between phases, Home and End to the ends,
 /// f to the failure and d to the divergence, and Alt+arrows back and
 /// forward through those jumps; s opens or closes the source
-/// panel. Ctrl+C copies the selected
+/// panel, and Escape closes the file viewer, the source panel or the
+/// terminal pane. Ctrl+C copies the selected
 /// text and Ctrl+A selects all of the panel last clicked in; in the
 /// terminal pane, where Ctrl+C belongs to the command, Ctrl+Shift+C and
 /// Ctrl+Shift+V copy and paste.
@@ -213,6 +215,7 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("d", JumpToDivergence, context),
         KeyBinding::new("alt-left", GoBack, context),
         KeyBinding::new("alt-right", GoForward, context),
+        KeyBinding::new("escape", CloseNearest, context),
         KeyBinding::new("s", ToggleSource, context),
         KeyBinding::new("ctrl-c", CopySelection, context),
         KeyBinding::new("ctrl-a", SelectAll, context),

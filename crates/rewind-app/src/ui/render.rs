@@ -30,9 +30,9 @@ use crate::ui::widgets::{
     Availability, ButtonStyle, PillTone, button, icon, panel_title, pill, readout, tooltip,
 };
 use crate::ui::{
-    CopySelection, EnterLicense, ForkHere, GoBack, GoForward, GoToEnd, GoToStart, JumpToDivergence,
-    JumpToFailure, KEY_CONTEXT, NextEvent, NextPhase, OpenRun, PreviousEvent, PreviousPhase,
-    SelectAll, StartTour, StepBack, StepForward, ToggleSource,
+    CloseNearest, CopySelection, EnterLicense, ForkHere, GoBack, GoForward, GoToEnd, GoToStart,
+    JumpToDivergence, JumpToFailure, KEY_CONTEXT, NextEvent, NextPhase, OpenRun, PreviousEvent,
+    PreviousPhase, SelectAll, StartTour, StepBack, StepForward, ToggleSource,
 };
 
 /// Header labels are cut to this many characters.
@@ -71,6 +71,9 @@ impl Render for Scrubber {
             .on_action(cx.listener(|this, _: &JumpToFailure, _, cx| this.go(Motion::Failure, cx)))
             .on_action(
                 cx.listener(|this, _: &JumpToDivergence, _, cx| this.go(Motion::Divergence, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &CloseNearest, window, cx| this.close_nearest(window, cx)),
             )
             .on_action(cx.listener(|this, _: &GoBack, _, cx| this.go_back(cx)))
             .on_action(cx.listener(|this, _: &GoForward, _, cx| this.go_forward(cx)))

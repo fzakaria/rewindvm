@@ -1018,6 +1018,26 @@ impl Scrubber {
         self.go_to(target, cx);
     }
 
+    /// Closes the nearest thing open, as Escape does outside the
+    /// terminal pane: the menu, the file viewer or the source panel, or
+    /// the terminal pane, and gives the keyboard back to the scrubber.
+    pub(super) fn close_nearest(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let open = Open {
+            menu: self.selecting.menu.is_some(),
+            viewer: self.viewer.is_some(),
+            source: self.source.is_some(),
+            terminal: self.terminal.is_some(),
+        };
+        match escape_closes(open) {
+            Some(Closable::Menu) => self.close_context_menu(cx),
+            Some(Closable::Viewer) => self.close_viewer(cx),
+            Some(Closable::Source) => self.close_source(cx),
+            Some(Closable::Terminal) => self.close_terminal(cx),
+            None => return,
+        }
+        window.focus(&self.focus, cx);
+    }
+
     /// Moves the playhead back to the step it last jumped from.
     pub(super) fn go_back(&mut self, cx: &mut Context<Self>) {
         if let Some(step) = self.history.back(self.step) {
@@ -1566,6 +1586,42 @@ fn export_directory() -> PathBuf {
         .unwrap_or_else(|| Path::new("/").to_path_buf())
 }
 
+/// What is open over or beside the panels, for Escape.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Open {
+    menu: bool,
+    viewer: bool,
+    source: bool,
+    terminal: bool,
+}
+
+/// What Escape closes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Closable {
+    Menu,
+    Viewer,
+    Source,
+    Terminal,
+}
+
+/// What one press of Escape closes: the nearest thing open, from the
+/// menu over everything to the terminal pane under the panels.
+fn escape_closes(open: Open) -> Option<Closable> {
+    if open.menu {
+        return Some(Closable::Menu);
+    }
+    if open.viewer {
+        return Some(Closable::Viewer);
+    }
+    if open.source {
+        return Some(Closable::Source);
+    }
+    if open.terminal {
+        return Some(Closable::Terminal);
+    }
+    None
+}
+
 /// The schedule seed for the next fork of the run `id`: one past the
 /// highest any fork of it has, on disk in `family` or still being made in
 /// `pending`, so two forks of one run never share a seed.
@@ -1583,6 +1639,38 @@ fn next_fork_schedule(family: Option<&Family>, id: &str, pending: &[ForkMark]) -
 mod tests {
     // What the scrubber decides about a run, with no window.
     use super::*;
+
+    #[test]
+    fn escape_closes_the_nearest_thing_first() {
+        // With everything open, Escape takes the menu first, then the
+        // file viewer or the source panel, then the terminal pane; with
+        // nothing open it closes nothing.
+        let all = Open {
+            menu: true,
+            viewer: true,
+            source: false,
+            terminal: true,
+        };
+        assert_eq!(escape_closes(all), Some(Closable::Menu));
+        let panels = Open { menu: false, ..all };
+        assert_eq!(escape_closes(panels), Some(Closable::Viewer));
+        let source = Open {
+            viewer: false,
+            source: true,
+            ..panels
+        };
+        assert_eq!(escape_closes(source), Some(Closable::Source));
+        let terminal = Open {
+            source: false,
+            ..source
+        };
+        assert_eq!(escape_closes(terminal), Some(Closable::Terminal));
+        let nothing = Open {
+            terminal: false,
+            ..terminal
+        };
+        assert_eq!(escape_closes(nothing), None);
+    }
     use crate::synth::{self, SynthConfig, Variant};
 
     #[test]
