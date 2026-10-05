@@ -74,8 +74,8 @@ pub struct Config {
 }
 
 /// Whether a machine reserves the extras slot, empty persistent memory a
-/// fork can fill with more Nix packages (`rewind shell --with`). Runs
-/// recorded before the slot existed have none, and replay without it.
+/// fork can fill with more Nix packages (`rewind shell --with`). Every run
+/// reserves it; the PMU's self-test machine does not.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Extras {

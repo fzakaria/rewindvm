@@ -89,7 +89,6 @@ pub struct Spec {
     /// Where the kernel's DWARF is, for `rewind gdb`: the kernel package's
     /// `debug` output, which may not be on this machine until it is
     /// fetched. Not an input: it is left out of the run's id.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kernel_debug: Option<PathBuf>,
     /// The input image and its BLAKE3 hash; the hash is what makes the
     /// run's id, since the path can be reused.
@@ -168,16 +167,13 @@ pub struct Manifest {
     pub parent: Option<(String, u64)>,
     /// Where the keyframes this run did not take itself are: another run's,
     /// up to the last step the two runs share.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shared_keyframes: Option<crate::keyframes::Shared>,
     pub outcome: Option<RunOutcome>,
     /// The BLAKE3 hash of trace.bin in hex, once the run has finished. Runs
     /// with equal hashes did the same thing.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trace_hash: Option<String>,
     /// For a fork, the step where its trace first differs from its
     /// parent's; absent when the two are identical.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_difference: Option<u64>,
     /// The rewind that recorded the run, as [`crate::VERSION`] names it.
     pub recorded_by: String,
@@ -2242,38 +2238,5 @@ pub(crate) mod tests {
         let mut older = json;
         older.as_object_mut().unwrap().remove("recorded_by");
         assert!(serde_json::from_value::<Manifest>(older).is_err());
-    }
-
-    #[test]
-    fn the_app_reads_trace_hash_and_first_difference_by_name() {
-        // The fields sit at the top level of manifest.json under exactly
-        // these names, are left out when unknown, and a manifest without
-        // them parses back to the same value.
-        let mut m = Manifest {
-            version: MANIFEST_VERSION,
-            id: "c".into(),
-            name: "fork".into(),
-            created: 0,
-            source: Source::Image { root: "/".into() },
-            spec: spec(),
-            parent: Some(("p".into(), 4855)),
-            shared_keyframes: None,
-            outcome: None,
-            trace_hash: None,
-            first_difference: None,
-            recorded_by: crate::VERSION.into(),
-        };
-        let json = serde_json::to_value(&m).unwrap();
-        assert!(json.get("trace_hash").is_none());
-        assert!(json.get("first_difference").is_none());
-        assert!(json.get("shared_keyframes").is_none());
-        let old: Manifest = serde_json::from_value(json).unwrap();
-        assert_eq!(old, m);
-
-        m.trace_hash = Some("ab".into());
-        m.first_difference = Some(4872);
-        let json = serde_json::to_value(&m).unwrap();
-        assert_eq!(json["trace_hash"], "ab");
-        assert_eq!(json["first_difference"], 4872);
     }
 }

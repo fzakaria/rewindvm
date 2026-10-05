@@ -264,13 +264,6 @@ impl Shown {
     }
 }
 
-/// Why a run's kernel cannot give a thread's stack: it was recorded
-/// before the guest kernel listed its tasks.
-pub const PREDATES_REASON: &str = "This run was recorded with a kernel from before Rewind could find a thread's stack at a step. Record it again to see its source here.";
-
-/// What the engine says for such a run.
-const PREDATES_MARKER: &str = "does not say where its tasks are";
-
 /// How the rewind command starts its messages.
 const ENGINE_PREFIX: &str = "rewind: ";
 
@@ -317,12 +310,6 @@ pub fn shown(step: u64, answer: Result<Located, EngineError>) -> Shown {
             selected: located.chosen,
             located,
         },
-        Err(EngineError::Failed { message, .. }) if message.contains(PREDATES_MARKER) => {
-            Shown::Unreadable {
-                step,
-                message: PREDATES_REASON,
-            }
-        }
         Err(e) if crate::engine::goes_another_way(&e) => Shown::Unreadable {
             step,
             message: crate::engine::REPLAYS_ANOTHER_WAY,
@@ -533,29 +520,14 @@ mod tests {
         assert_eq!(target(166, 174), Thread::Of { pid: 166, tid: 174 });
     }
 
-    /// A run recorded before its kernel listed its tasks says to record
-    /// it again; any other refusal is shown with the engine's words, and
-    /// a missing engine says what it is needed for.
+    /// A refusal is shown with the engine's words, and a missing engine
+    /// says what it is needed for.
     #[test]
     fn refusals_become_what_the_panel_says() {
         let failed = |message: &str| EngineError::Failed {
             command: "rewind where".into(),
             message: message.into(),
         };
-        let predates = shown(
-            10,
-            Err(failed(
-                "rewind: run 9d540a70's kernel does not say where its tasks are, so `rewind where` cannot find thread 34; record the run again",
-            )),
-        );
-        assert_eq!(
-            predates,
-            Shown::Unreadable {
-                step: 10,
-                message: PREDATES_REASON
-            }
-        );
-
         let Shown::Failed { message, .. } = shown(10, Err(failed("rewind: no process 7"))) else {
             panic!("not a failure");
         };

@@ -70,7 +70,6 @@ struct DeviceState {
     epoch: u64,
     step: u64,
     /// Guest branches counted so far, when virtual time follows them.
-    #[serde(default)]
     branches: u64,
 }
 

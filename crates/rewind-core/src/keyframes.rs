@@ -122,7 +122,6 @@ pub struct Shared {
 /// The one field of a manifest that says where else a run's keyframes are.
 #[derive(Deserialize)]
 struct Sharing {
-    #[serde(default)]
     shared_keyframes: Option<Shared>,
 }
 

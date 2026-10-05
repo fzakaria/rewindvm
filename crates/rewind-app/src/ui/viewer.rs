@@ -45,10 +45,6 @@ const EXAMPLE_REASON: &str = "This example was recorded on another machine and s
 const EXPORT_TRACE_REASON: &str = "This run was opened from a .rwd file that holds its trace only. Open its replayable export, the -replayable.rwd file, to read its files at any step.";
 const EXPORT_IMPORTING_REASON: &str = "This run is being imported into Rewind from its .rwd file. Its files can be read at any step once it is in.";
 const TRACE_REASON: &str = "This run was opened from a bare trace file. Open its run directory instead to read its files at any step.";
-const PREDATES_REASON: &str = "This run was recorded with a kernel from before Rewind could read files at a step. Record it again to read its files.";
-
-/// What the engine says when a run's kernel cannot be inspected.
-const PREDATES_MARKER: &str = "predate inspections";
 
 /// Whether the viewer follows the playhead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -378,10 +374,6 @@ impl Scrubber {
                 Fetched::Contents { step, view }
             }
             Ok(FileAtStep::Missing) => Fetched::Missing { step },
-            Err(e) if predates_inspection(&e) => Fetched::Unreadable {
-                step,
-                message: PREDATES_REASON,
-            },
             Err(e) if goes_another_way(&e) => Fetched::Unreadable {
                 step,
                 message: REPLAYS_ANOTHER_WAY,
@@ -760,9 +752,3 @@ fn explain(error: &EngineError) -> String {
 
 /// How the rewind command starts its messages.
 const ENGINE_PREFIX: &str = "rewind: ";
-
-/// Whether the engine refused because the run's kernel is too old to be
-/// inspected, which is a fact about the run rather than an error.
-fn predates_inspection(error: &EngineError) -> bool {
-    matches!(error, EngineError::Failed { message, .. } if message.contains(PREDATES_MARKER))
-}

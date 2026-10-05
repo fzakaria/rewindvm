@@ -138,12 +138,10 @@ pub struct Job {
     pub hostname: String,
     pub root: Root,
     /// Files init writes before the job starts, owned by the job's user.
-    #[serde(default)]
     pub files: Vec<JobFile>,
     /// Paths the job produces. After it succeeds, init hashes each with
     /// [`nar_hash`] and reports the hash as a mark, so two runs can be
     /// compared by what they built.
-    #[serde(default)]
     pub outputs: Vec<String>,
     /// What the job's standard output and error are.
     pub output: Output,

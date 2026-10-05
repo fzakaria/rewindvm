@@ -8,8 +8,7 @@
 //! screen, dimmed, until the new one arrives. With no answer on screen,
 //! the panel shows the engine's latest line while it works, such as the
 //! debug info gdb downloads the first time, which can take a minute. Runs
-//! the engine cannot fork say so instead, as do runs recorded before the
-//! guest kernel listed its tasks.
+//! the engine cannot fork say so instead.
 //!
 //! The panel shows the whole source file of the frame it shows, scrolled
 //! so the frame's line is in the middle, with the frame list pinned below

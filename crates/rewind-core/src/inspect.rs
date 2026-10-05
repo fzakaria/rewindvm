@@ -31,8 +31,8 @@ use crate::run::{Keep, Run};
 const CHUNK_STEPS: u64 = 20_000;
 
 /// How long a fork may run without the inspection starting, in steps. A
-/// kernel that predates inspections ignores the request, and the fork would
-/// otherwise run to the end of the job.
+/// kernel that never starts it would otherwise run the fork to the end of
+/// the job.
 const START_WITHIN_STEPS: u64 = 2_000_000;
 
 /// Standard output and error, as the Rewind devices tag them.
@@ -247,8 +247,7 @@ fn finish(
         }
         if answer.pid.is_none() && machine.step() >= step + START_WITHIN_STEPS {
             bail!(
-                "the VM did not start the inspection within {START_WITHIN_STEPS} steps; \
-                 the run's kernel may predate inspections, so record it again"
+                "the VM did not start the inspection within {START_WITHIN_STEPS} steps"
             );
         }
     }

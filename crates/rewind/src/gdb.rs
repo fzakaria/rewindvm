@@ -227,7 +227,7 @@ pub fn fork(home: &Home, run: &Run, step: u64, needs: Needs) -> Result<rewind_vm
         && machine.task_layout()?.is_none()
     {
         bail!(
-            "run {}'s kernel does not say where its tasks are, so {what}; record the run again",
+            "run {}'s kernel has not said where its tasks are by step {step}, so {what}",
             run.manifest.id
         );
     }

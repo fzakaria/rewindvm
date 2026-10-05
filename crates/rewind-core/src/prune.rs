@@ -19,7 +19,7 @@ use anyhow::{Context, Result};
 
 use crate::home::Home;
 use crate::keyframes::Shared;
-use crate::run::{Run, TRACE, Unreadable};
+use crate::run::{Run, Unreadable};
 
 /// What pruning needs to know about one run.
 #[derive(Clone, Debug)]
@@ -49,19 +49,12 @@ impl Member {
     fn of(run: &Run) -> Member {
         let m = &run.manifest;
         let finished = m.outcome.is_some();
-
-        // Runs made before manifests kept the hash get it from the trace.
-        let trace_hash = m.trace_hash.clone().or_else(|| {
-            finished
-                .then(|| crate::image::hash_file(&run.dir.join(TRACE)).ok())
-                .flatten()
-        });
         Member {
             id: m.id.clone(),
             parent: m.parent.as_ref().map(|(id, _)| id.clone()),
             shares: m.shared_keyframes.clone(),
             created: m.created,
-            trace_hash,
+            trace_hash: m.trace_hash.clone(),
             finished,
             executing: !finished && run.executing(),
         }
