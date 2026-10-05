@@ -672,7 +672,7 @@ impl Scrubber {
                         // An edge between panels, while it is dragged.
                         if this.split_drag.is_some() {
                             if e.pressed_button != Some(MouseButton::Left) {
-                                this.split_drag = None;
+                                this.end_edge_drag();
                                 return;
                             }
                             this.drag_edge(e.position, cx);
@@ -692,7 +692,7 @@ impl Scrubber {
                 window.on_mouse_event(move |e: &MouseUpEvent, _, _, cx| {
                     if e.button == MouseButton::Left {
                         up_view.update(cx, |this, _| {
-                            this.split_drag = None;
+                            this.end_edge_drag();
                             this.selection_release();
                         });
                     }

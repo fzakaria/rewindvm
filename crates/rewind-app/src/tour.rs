@@ -177,12 +177,18 @@ const CONFIG_SUBDIR: &str = "rewind";
 const XDG_CONFIG_ENV: &str = "XDG_CONFIG_HOME";
 const HOME_CONFIG_DIR: &str = ".config";
 
-fn dismissed_path() -> Option<PathBuf> {
+/// The app's settings directory: $XDG_CONFIG_HOME/rewind, else
+/// ~/.config/rewind.
+pub fn config_dir() -> Option<PathBuf> {
     let config = std::env::var_os(XDG_CONFIG_ENV)
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(HOME_CONFIG_DIR)))?;
-    Some(config.join(CONFIG_SUBDIR).join(DISMISSED_FILE))
+    Some(config.join(CONFIG_SUBDIR))
+}
+
+fn dismissed_path() -> Option<PathBuf> {
+    Some(config_dir()?.join(DISMISSED_FILE))
 }
 
 /// Whether the user has finished or skipped the tour before.

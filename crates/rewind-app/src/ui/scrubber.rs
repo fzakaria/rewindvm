@@ -40,7 +40,7 @@ use crate::ui::link::LinkDialog;
 use crate::ui::search::SearchBox;
 use crate::ui::selectable::SelectionState;
 use crate::ui::source::SourcePanel;
-use crate::ui::splits::{Drag, Measured, Splits};
+use crate::ui::splits::{Drag, Measured, Splits, layout_path};
 use crate::ui::step_entry::StepEntry;
 use crate::ui::terminal::{PaneKind, TerminalPane};
 use crate::ui::viewer::FileViewer;
@@ -412,7 +412,7 @@ impl Scrubber {
             family: None,
             runs_open: false,
             runs_width: size::RUNS_PANEL_WIDTH,
-            splits: Splits::default(),
+            splits: layout_path().map(|p| Splits::load(&p)).unwrap_or_default(),
             split_drag: None,
             measured: Rc::new(Measured::default()),
             runs_picked: Vec::new(),

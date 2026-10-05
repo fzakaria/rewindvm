@@ -8,12 +8,14 @@
 //! layout; the edges only change their shares.
 
 use std::cell::Cell;
+use std::path::Path;
 use std::rc::Rc;
 
 use gpui::{
     Bounds, Context, CursorStyle, Div, MouseButton, MouseDownEvent, Pixels, Point, Stateful,
     canvas, div, prelude::*, px,
 };
+use serde::{Deserialize, Serialize};
 
 use crate::theme::{layout, size};
 use crate::ui::scrubber::Scrubber;
@@ -21,7 +23,7 @@ use crate::ui::scrubber::Scrubber;
 /// How the panels share the window: the three columns' flex weights, the
 /// process tree's and the files' weights in their column, and the
 /// terminal pane's share of the height.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Splits {
     pub log: f32,
     pub middle: f32,
@@ -41,6 +43,52 @@ impl Default for Splits {
             files: layout::FILL,
             terminal: layout::TERMINAL_SHARE,
         }
+    }
+}
+
+/// The file the panels' shares are kept in, in the app's settings.
+const LAYOUT_FILE: &str = "layout.json";
+
+/// Where the panels' shares are kept between launches.
+pub fn layout_path() -> Option<std::path::PathBuf> {
+    Some(crate::tour::config_dir()?.join(LAYOUT_FILE))
+}
+
+impl Splits {
+    /// The shares saved at `path`, each brought inside its bounds; the
+    /// default ones when there is no file or it does not read.
+    pub fn load(path: &Path) -> Splits {
+        let saved: Option<Splits> = std::fs::read(path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+        let Some(saved) = saved else {
+            return Splits::default();
+        };
+        let start = Splits::default();
+        let weight = |w: f32, start: f32| {
+            if w.is_finite() && w > 0.0 { w } else { start }
+        };
+        Splits {
+            log: weight(saved.log, start.log),
+            middle: weight(saved.middle, start.middle),
+            right: weight(saved.right, start.right),
+            procs: weight(saved.procs, start.procs),
+            files: weight(saved.files, start.files),
+            terminal: if saved.terminal.is_finite() {
+                saved.terminal.clamp(TERMINAL_MIN, TERMINAL_MAX)
+            } else {
+                start.terminal
+            },
+        }
+    }
+
+    /// Saves the shares to `path`, making its directory.
+    pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let bytes = serde_json::to_vec_pretty(self).map_err(std::io::Error::other)?;
+        std::fs::write(path, bytes)
     }
 }
 
@@ -247,6 +295,22 @@ impl Scrubber {
         cx.notify();
     }
 
+    /// Ends dragging an edge, if one was dragged, and keeps the shares it
+    /// left for the next launch.
+    pub(super) fn end_edge_drag(&mut self) {
+        if self.split_drag.take().is_some() {
+            self.keep_splits();
+        }
+    }
+
+    /// Saves the panels' shares. A failure to write only means the next
+    /// launch starts from the default ones.
+    fn keep_splits(&self) {
+        if let Some(path) = layout_path() {
+            let _ = self.splits.save(&path);
+        }
+    }
+
     /// Puts an edge back where it starts.
     fn reset_edge(&mut self, edge: Edge, cx: &mut Context<Self>) {
         let start = Splits::default();
@@ -261,6 +325,7 @@ impl Scrubber {
             }
             Edge::Terminal => self.splits.terminal = start.terminal,
         }
+        self.keep_splits();
         cx.notify();
     }
 }
@@ -287,6 +352,37 @@ mod tests {
         assert!((a / 3.5 * 700.0 - 400.0).abs() < 0.01);
         let (a, _) = shift(1.5, 1.0, 3.5, 700.0, -500.0, 100.0);
         assert!((a / 3.5 * 700.0 - 100.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn the_shares_are_kept_between_launches() {
+        // Shares saved to a file read back the same; a file that is not
+        // shares reads as the default ones, and shares out of bounds are
+        // brought back inside them.
+        let dir = std::env::temp_dir().join(format!("rewind-app-splits-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("layout.json");
+        let moved = Splits {
+            log: 2.0,
+            terminal: 0.5,
+            ..Splits::default()
+        };
+        moved.save(&path).unwrap();
+        assert_eq!(Splits::load(&path), moved);
+
+        std::fs::write(&path, "not json").unwrap();
+        assert_eq!(Splits::load(&path), Splits::default());
+
+        let wild = Splits {
+            log: -3.0,
+            terminal: 7.0,
+            ..Splits::default()
+        };
+        wild.save(&path).unwrap();
+        let read = Splits::load(&path);
+        assert_eq!(read.log, Splits::default().log);
+        assert_eq!(read.terminal, TERMINAL_MAX);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

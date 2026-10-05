@@ -288,8 +288,9 @@ pub mod layout {
     pub const LABEL_MIN_SHARE: f32 = 0.05;
     /// About this many tick marks along the timeline.
     pub const TICK_TARGET: u64 = 12;
-    /// The terminal pane's share of the window's height.
-    pub const TERMINAL_SHARE: f32 = 0.42;
+    /// The terminal pane's share of the window's height at first: room
+    /// for a backtrace, leaving the panels most of the window.
+    pub const TERMINAL_SHARE: f32 = 0.3;
     /// A disabled button is drawn at this opacity.
     pub const DISABLED_OPACITY: f32 = 0.4;
 }
