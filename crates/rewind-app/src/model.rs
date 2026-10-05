@@ -11,6 +11,8 @@ use std::collections::HashMap;
 
 use rewind_trace::{Event, EventKind, Trace};
 
+use crate::shown_line::shown;
+
 /// Signal numbers the app treats as a crash.
 pub mod signo {
     pub const SIGILL: u32 = 4;
@@ -634,22 +636,25 @@ fn is_user_mark(text: &str) -> bool {
 
 /// Standard output and error as lines, plus user marks, in step order.
 fn output_lines(trace: &Trace) -> Vec<LogLine> {
+    // Each line as a terminal shows it: a builder's output is a terminal,
+    // which programs color and write progress counters over.
     let mut lines: Vec<LogLine> = trace
         .lines_until(u64::MAX)
         .into_iter()
-        .filter(|line| !line.text.starts_with(NIX_LOG_PREFIX))
-        .map(|line| {
+        .map(|line| (shown(&line.text), line))
+        .filter(|(text, _)| !text.starts_with(NIX_LOG_PREFIX))
+        .map(|(text, line)| {
             let stream = if line.fd == STDERR_FD {
                 Stream::Stderr
             } else {
                 Stream::Stdout
             };
-            let tone = tone_of(&line.text, stream);
+            let tone = tone_of(&text, stream);
             LogLine {
                 step: line.step,
                 pid: line.pid,
                 stream,
-                text: line.text,
+                text,
                 tone,
             }
         })
@@ -1251,6 +1256,43 @@ mod tests {
         assert_eq!(all.len(), 5);
         assert_eq!(all[1].stream, Stream::Console);
         assert_eq!(all[1].text, "[0.1] booted");
+    }
+
+    #[test]
+    fn a_line_written_to_a_terminal_shows_as_the_terminal_shows_it() {
+        // A colored line and a counter rewritten in place show their text
+        // without escape sequences, and the error in red still reads as
+        // an error.
+        let t = Timeline::new(
+            Trace {
+                events: vec![
+                    ev(
+                        1,
+                        7,
+                        7,
+                        EventKind::Output {
+                            fd: 1,
+                            bytes: b"[1/2] cc a.c\r[2/2] cc b.c\n".to_vec(),
+                        },
+                    ),
+                    ev(
+                        2,
+                        7,
+                        7,
+                        EventKind::Output {
+                            fd: 2,
+                            bytes: b"\x1b[01;31merror:\x1b[m bad\n".to_vec(),
+                        },
+                    ),
+                ],
+            },
+            None,
+            None,
+        );
+        let lines = t.lines(LogFilter::Output);
+        assert_eq!(lines[0].text, "[2/2] cc b.c");
+        assert_eq!(lines[1].text, "error: bad");
+        assert_eq!(lines[1].tone, Tone::Error);
     }
 
     #[test]

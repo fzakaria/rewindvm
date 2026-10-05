@@ -23,6 +23,7 @@ pub mod request;
 pub mod run;
 pub mod search;
 pub mod selection;
+pub mod shown_line;
 pub mod sideways;
 pub mod source;
 pub mod step_entry;
