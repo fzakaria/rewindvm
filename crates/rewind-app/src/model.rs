@@ -795,9 +795,17 @@ fn find_failure(trace: &Trace, job_exit: Option<JobExit>) -> Option<Failure> {
         return None;
     }
 
+    // Only what happened up to the job's exit, when init reported one:
+    // after it, init tears down what the job left running, and those
+    // processes die by its hand, not the job's failure.
+    let until = job_exit.map_or(u64::MAX, |j| j.step);
+
     // A crash signal anywhere wins: the exits after it are its
     // consequences.
     let signal = trace.events.iter().enumerate().find_map(|(index, e)| {
+        if e.step > until {
+            return None;
+        }
         let EventKind::Signal { signo, addr, .. } = e.kind else {
             return None;
         };
@@ -821,7 +829,7 @@ fn find_failure(trace: &Trace, job_exit: Option<JobExit>) -> Option<Failure> {
     let procs = trace.processes();
     let failed: Vec<&rewind_trace::Process> = procs
         .iter()
-        .filter(|p| p.end.is_some() && p.status.is_some_and(|s| s != 0))
+        .filter(|p| p.end.is_some_and(|end| end <= until) && p.status.is_some_and(|s| s != 0))
         .collect();
 
     // Walk down from the last nonzero exit to the child it followed.
@@ -1332,6 +1340,25 @@ mod tests {
         assert_eq!((f.step, f.pid), (25, 44));
         assert_eq!(f.kind, FailureKind::Exit { status: 1 << 8 });
     }
+
+    #[test]
+    fn what_happens_after_the_job_exits_is_not_its_failure() {
+        // The failing job, with a background process the shell started
+        // that is still alive when init writes its exit mark at step 28:
+        // in the teardown after it, the process crashes and is killed. The
+        // failure is still cc's exit, where the job failed.
+        let mut events = job(2 << 8).trace.events;
+        events.push(fork(21, 41, 45, false));
+        events.push(signal(30, 45, 45, signo::SIGSEGV));
+        events.push(exit(31, 45, 45, SIGKILL_STATUS, "sleep", false));
+        events.sort_by_key(|e| e.step);
+        let t = Timeline::new(Trace { events }, None);
+        let f = t.failure.unwrap();
+        assert_eq!((f.step, f.pid), (25, 44));
+    }
+
+    /// The exit_code of a process killed by SIGKILL.
+    const SIGKILL_STATUS: u32 = 9;
 
     #[test]
     fn processes_are_named_by_the_file_name_of_their_program() {
