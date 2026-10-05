@@ -369,7 +369,7 @@ mod tests {
     fn finished(id: &str) -> Vec<u8> {
         let mut m = manifest(id, "test", 0);
         m.outcome = Some(RunOutcome {
-            stop: "poweroff".into(),
+            stop: rewind_trace::stop::Stop::PoweredOff,
             step: 1,
             virtual_ns: 0,
             status: Some(0),

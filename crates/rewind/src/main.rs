@@ -2262,10 +2262,10 @@ fn print_timeout(home: &Home, schedule: u64, run: &Run) {
     let Some(o) = run.manifest.outcome.as_ref() else {
         return;
     };
-    if !o.stop.starts_with(rewind_core::run::TIMED_OUT) {
+    if o.stop.timeout().is_none() {
         return;
     }
-    let stop = locate::describe_stall(home, run).unwrap_or_else(|| o.stop.clone());
+    let stop = locate::describe_stall(home, run).unwrap_or_else(|| o.stop.to_string());
     println!("schedule {schedule}: {stop}");
 }
 

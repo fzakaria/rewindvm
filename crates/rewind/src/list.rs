@@ -36,7 +36,7 @@ impl Status {
     /// as failed too.
     pub fn of(outcome: Option<&RunOutcome>, executing: Executing) -> Status {
         match (outcome, executing) {
-            (Some(o), _) if rewind_trace::stop::timed_out(&o.stop) => Status::TimedOut,
+            (Some(o), _) if o.stop.timeout().is_some() => Status::TimedOut,
             (Some(o), _) if o.status == Some(0) => Status::Passed,
             (Some(_), _) => Status::Failed,
             (None, Executing::Yes) => Status::Running,
@@ -285,6 +285,7 @@ mod tests {
     // Which runs `rewind ls` keeps, over entries made by hand, and the
     // times --since takes.
     use super::*;
+    use rewind_trace::stop::{Doing, Stop, Timeout};
 
     fn entry(id: &str, name: &str, created: u64, parent: Option<&str>, status: Status) -> Entry {
         Entry {
@@ -296,9 +297,9 @@ mod tests {
         }
     }
 
-    fn outcome(stop: &str, status: Option<i32>) -> RunOutcome {
+    fn outcome(stop: Stop, status: Option<i32>) -> RunOutcome {
         RunOutcome {
-            stop: stop.into(),
+            stop,
             step: 10,
             virtual_ns: 0,
             status,
@@ -313,10 +314,14 @@ mod tests {
         // outcome is running while executed and interrupted otherwise.
         use Status::*;
         let ended = |stop, status| Status::of(Some(&outcome(stop, status)), Executing::No);
-        assert_eq!(ended("poweroff", Some(0)), Passed);
-        assert_eq!(ended("poweroff", Some(2 << 8)), Failed);
-        assert_eq!(ended("poweroff", None), Failed);
-        assert_eq!(ended(rewind_core::run::TIMED_OUT, None), TimedOut);
+        let hung = Stop::TimedOut(Timeout {
+            since_exit_ms: 0,
+            doing: Doing::MakingExits,
+        });
+        assert_eq!(ended(Stop::PoweredOff, Some(0)), Passed);
+        assert_eq!(ended(Stop::PoweredOff, Some(2 << 8)), Failed);
+        assert_eq!(ended(Stop::PoweredOff, None), Failed);
+        assert_eq!(ended(hung, None), TimedOut);
         assert_eq!(Status::of(None, Executing::Yes), Running);
         assert_eq!(Status::of(None, Executing::No), Interrupted);
     }

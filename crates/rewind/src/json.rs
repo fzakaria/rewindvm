@@ -30,7 +30,7 @@ pub fn run(run: &Run) -> Result<Value> {
         "status": status,
         "ending": outcome.map(|o| show::ending(&o.stop, status, &missing)),
         "steps": outcome.map(|o| o.step),
-        "stop": outcome.map(|o| o.stop.as_str()),
+        "stop": outcome.map(|o| o.stop.to_string()),
         "first_difference": m.first_difference,
         "recorded_by": m.recorded_by,
         "outputs": outputs,

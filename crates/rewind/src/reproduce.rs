@@ -150,9 +150,7 @@ fn flag(args: &mut Vec<String>, name: &str, value: String) {
 /// the machine is.
 fn timed_out_after(m: &Manifest) -> Option<u64> {
     let o = m.outcome.as_ref()?;
-    if !rewind_trace::stop::timed_out(&o.stop) {
-        return None;
-    }
+    o.stop.timeout()?;
     Some(o.wall_ms.div_ceil(1000))
 }
 
@@ -264,7 +262,10 @@ mod tests {
             s,
         );
         m.outcome = Some(RunOutcome {
-            stop: rewind_core::run::TIMED_OUT.into(),
+            stop: rewind_trace::stop::Stop::TimedOut(rewind_trace::stop::Timeout {
+                since_exit_ms: 0,
+                doing: rewind_trace::stop::Doing::MakingExits,
+            }),
             step: 9,
             virtual_ns: 0,
             status: None,

@@ -89,11 +89,11 @@ impl RunEntry {
             .as_ref()
             .and_then(|o| o.status)
             .and_then(|s| u32::try_from(s).ok());
-        let stop = manifest.outcome.as_ref().and_then(|o| o.stop.as_deref());
+        let stop = manifest.outcome.as_ref().and_then(|o| o.stop.as_ref());
         let ending = match status.map(ExitStatus::from_raw) {
             Some(ExitStatus::Code(code)) => format!("exited:{code}"),
             Some(ExitStatus::Signal { signo, .. }) => format!("killed:{}", signal_name(signo)),
-            None if stop.is_some_and(rewind_trace::stop::timed_out) => {
+            None if stop.is_some_and(|s| s.timeout().is_some()) => {
                 rewind_trace::stop::TIMED_OUT_ENDING.to_string()
             }
             None => UNKNOWN_ENDING.to_string(),
@@ -103,7 +103,7 @@ impl RunEntry {
         // that stopped any way but its guest powering off.
         let failed = match status {
             Some(s) => s != 0,
-            None => stop.is_some_and(|stop| !rewind_trace::stop::clean(stop)),
+            None => stop.is_some_and(|stop| !stop.is_clean()),
         };
         RunEntry {
             dir: dir.to_path_buf(),
@@ -1009,7 +1009,7 @@ mod tests {
         // timed-out and failed, as the header does, not unknown.
         let manifest = Manifest::from_json(&serde_json::json!({
             "id": "abc",
-            "outcome": { "stop": "timed out while still making exits" }
+            "outcome": { "stop": { "how": "timed_out", "since_exit_ms": 0, "doing": { "what": "making_exits" } } }
         }));
         let entry =
             RunEntry::from_manifest(Path::new("/runs/abc"), &manifest, SystemTime::UNIX_EPOCH);

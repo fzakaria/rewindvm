@@ -247,11 +247,14 @@ enum Certainty {
 /// process it was in. None when the run did not stop that way or the
 /// instruction has no symbol, and the run's own words stand.
 pub fn describe_stall(home: &Home, run: &Run) -> Option<String> {
-    let stalled = run.stalled.as_ref()?;
+    let timeout = run.manifest.outcome.as_ref()?.stop.timeout()?;
+    let rewind_trace::stop::Doing::User { rip, thread } = &timeout.doing else {
+        return None;
+    };
     let trace = run.trace().ok()?;
 
     // The process: the thread on the CPU, else the last event's.
-    let (pid, name, certainty) = match &stalled.thread {
+    let (pid, name, certainty) = match thread {
         Some(thread) => (thread.pid, thread.name.clone(), Certainty::OnTheCpu),
         None => {
             let event = trace.events.iter().rev().find(|e| e.pid != 0)?;
@@ -262,11 +265,11 @@ pub fn describe_stall(home: &Home, run: &Run) -> Option<String> {
 
     // The instruction, with the process's symbols as of the last step:
     // the address is reached after it, but the map rarely changes then.
-    let place = place(home, run, trace.last_step(), pid, stalled.stall.rip).ok()?;
+    let place = place(home, run, trace.last_step(), pid, *rip).ok()?;
     let words = place_words(&place)?;
     Some(format!(
         "{}, {}",
-        rewind_core::run::describe_user_stall(&stalled.stall, &words),
+        timeout.in_user_space(&words),
         process_words(pid, &name, certainty)
     ))
 }

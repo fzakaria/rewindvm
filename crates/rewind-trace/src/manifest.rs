@@ -9,6 +9,7 @@ use rewind_init::Job;
 use serde::{Deserialize, Serialize};
 
 use crate::machine::{ClockSource, CpuModel, Extras, Preemption};
+use crate::stop::Stop;
 
 /// The manifest inside a run directory.
 pub const MANIFEST: &str = "manifest.json";
@@ -98,7 +99,7 @@ pub enum Source {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunOutcome {
     /// How the machine stopped.
-    pub stop: String,
+    pub stop: Stop,
     pub step: u64,
     pub virtual_ns: u64,
     /// The job's wait status, if init reported one.

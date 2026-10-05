@@ -341,10 +341,14 @@ impl Timeline {
     /// event, for a run whose manifest says it went on longer.
     /// The timeline of `trace`, `total_hint` steps long when the run went
     /// on past its last event, and stopped as the engine's `stop` says.
-    pub fn new(trace: Trace, total_hint: Option<u64>, stop: Option<&str>) -> Timeline {
+    pub fn new(
+        trace: Trace,
+        total_hint: Option<u64>,
+        stop: Option<&rewind_trace::stop::Stop>,
+    ) -> Timeline {
         let total = trace.last_step().max(total_hint.unwrap_or(0));
         let stopped = match stop {
-            Some(stop) if !rewind_trace::stop::clean(stop) => Stopped::Abnormally,
+            Some(stop) if !stop.is_clean() => Stopped::Abnormally,
             _ => Stopped::Otherwise,
         };
         let output_lines = output_lines(&trace);
@@ -1478,8 +1482,12 @@ mod tests {
     /// The exit_code of a process killed by SIGKILL.
     const SIGKILL_STATUS: u32 = 9;
 
-    /// How the engine words a run it stopped at its time limit.
-    const HUNG: &str = "timed out computing without exits for 2.2s, in user space at 0x41b33e";
+    /// A run the engine stopped at its time limit.
+    const HUNG: rewind_trace::stop::Stop =
+        rewind_trace::stop::Stop::TimedOut(rewind_trace::stop::Timeout {
+            since_exit_ms: 2200,
+            doing: rewind_trace::stop::Doing::MakingExits,
+        });
 
     #[test]
     fn a_run_stopped_before_its_job_exited_fails_where_it_stopped() {
@@ -1496,14 +1504,14 @@ mod tests {
                 events: events.clone(),
             },
             Some(50),
-            Some(HUNG),
+            Some(&HUNG),
         );
         let f = hung.failure.unwrap();
         assert_eq!((f.step, f.kind), (50, FailureKind::Stopped));
         assert_eq!(hung.seek(Motion::Failure, 0, None), 50);
 
         events.push(signal(30, 44, 44, signo::SIGSEGV));
-        let crashed = Timeline::new(Trace { events }, Some(50), Some(HUNG));
+        let crashed = Timeline::new(Trace { events }, Some(50), Some(&HUNG));
         assert_eq!(crashed.failure.unwrap().step, 30);
     }
 

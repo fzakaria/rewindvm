@@ -2206,7 +2206,7 @@ impl Scrubber {
         // Where the machine stopped before the job exited, how it stopped.
         if let Some(stop) = session.run.stopped_at(self.step) {
             let meta = format!("machine stopped \u{b7} step {}", thousands(t.total));
-            return vec![Mapped::plain(meta), mapped(stop)];
+            return vec![Mapped::plain(meta), mapped(&stop.to_string())];
         }
 
         let Some(event) = t.event_index_at(self.step).and_then(|i| t.event(i)) else {

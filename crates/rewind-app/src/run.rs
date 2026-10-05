@@ -12,6 +12,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
 use rewind_trace::Trace;
+use rewind_trace::stop::Stop;
+use serde::Deserialize;
 use serde_json::Value;
 
 use rewind_trace::signal_name;
@@ -74,8 +76,8 @@ pub struct Parent {
 /// How a run ended, as the engine recorded it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Outcome {
-    /// How the machine stopped, in words.
-    pub stop: Option<String>,
+    /// How the machine stopped.
+    pub stop: Option<Stop>,
     /// The last step of the run.
     pub step: Option<u64>,
     /// The job's wait status, if the guest's init reported one.
@@ -118,7 +120,7 @@ impl Manifest {
                 .get("outcome")
                 .filter(|o| o.is_object())
                 .map(|o| Outcome {
-                    stop: text(o.get("stop")),
+                    stop: o.get("stop").and_then(|s| Stop::deserialize(s).ok()),
                     step: o.get("step").and_then(Value::as_u64),
                     status: o.get("status").and_then(Value::as_i64),
                 }),
@@ -318,7 +320,7 @@ impl Run {
         let trace = Trace::read(&trace_path)
             .with_context(|| format!("reading {}", trace_path.display()))?;
         let total_hint = manifest.outcome.as_ref().and_then(|o| o.step);
-        let stop = manifest.outcome.as_ref().and_then(|o| o.stop.as_deref());
+        let stop = manifest.outcome.as_ref().and_then(|o| o.stop.as_ref());
         let timeline = Timeline::new(trace, total_hint, stop);
         Ok(Run {
             path: path.to_path_buf(),
@@ -374,26 +376,22 @@ impl Run {
         if self.timeline.failure.is_some() {
             return Verdict::Failed;
         }
-        if self
-            .stop()
-            .is_some_and(|stop| !rewind_trace::stop::clean(stop))
-        {
+        if self.stop().is_some_and(|stop| !stop.is_clean()) {
             return Verdict::Failed;
         }
         Verdict::Passed
     }
 
-    /// How the machine stopped, in the engine's words, once the run has
-    /// finished.
-    pub fn stop(&self) -> Option<&str> {
-        self.manifest.outcome.as_ref()?.stop.as_deref()
+    /// How the machine stopped, once the run has finished.
+    pub fn stop(&self) -> Option<&Stop> {
+        self.manifest.outcome.as_ref()?.stop.as_ref()
     }
 
-    /// The engine's words for how the machine stopped, at the step it
-    /// stopped at, when it stopped any way but its guest powering off,
-    /// such as at its time limit; None at any other step or run.
-    pub fn stopped_at(&self, step: u64) -> Option<&str> {
-        let stop = self.stop().filter(|s| !rewind_trace::stop::clean(s))?;
+    /// How the machine stopped, at the step it stopped at, when it
+    /// stopped any way but its guest powering off, such as at its time
+    /// limit; None at any other step or run.
+    pub fn stopped_at(&self, step: u64) -> Option<&Stop> {
+        let stop = self.stop().filter(|s| !s.is_clean())?;
         (step >= self.timeline.total).then_some(stop)
     }
 
@@ -419,7 +417,7 @@ impl Run {
         match self.status().map(ExitStatus::from_raw) {
             Some(ExitStatus::Code(code)) => format!("exited:{code}"),
             Some(ExitStatus::Signal { signo, .. }) => format!("killed:{}", signal_name(signo)),
-            None if self.stop().is_some_and(rewind_trace::stop::timed_out) => {
+            None if self.stop().is_some_and(|s| s.timeout().is_some()) => {
                 rewind_trace::stop::TIMED_OUT_ENDING.to_string()
             }
             None => self.verdict().label().to_string(),
@@ -650,6 +648,17 @@ mod tests {
     use super::*;
     use crate::synth::{self, SynthConfig, Variant};
 
+    /// A run stopped at its time limit while computing in user space.
+    fn hung_in_user_space() -> Stop {
+        Stop::TimedOut(rewind_trace::stop::Timeout {
+            since_exit_ms: 2200,
+            doing: rewind_trace::stop::Doing::User {
+                rip: 0x41b33e,
+                thread: None,
+            },
+        })
+    }
+
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("rewind-app-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -670,7 +679,7 @@ mod tests {
         std::fs::write(
             dir.join(MANIFEST_FILE),
             r#"{"name": "run #3", "drv": "/nix/store/x-mylib.drv", "seed": "0x10",
-                "mode": "spaceship", "extra": [1, 2], "outcome": {"stop": "exit", "step": 5}}"#,
+                "mode": "spaceship", "extra": [1, 2], "outcome": {"stop": {"how": "powered_off"}, "step": 5}}"#,
         )
         .unwrap();
         let run = Run::open(&dir).unwrap();
@@ -715,7 +724,7 @@ mod tests {
                 "source": {"mode": "nix", "drv": "/nix/store/x-mylib.drv", "outputs": ["out"]},
                 "spec": {"seed": 7, "job": {"argv": ["make", "check"]}},
                 "parent": null,
-                "outcome": {"stop": "exit", "step": 99, "virtual_ns": 1, "status": 512, "wall_ms": 3}}"#,
+                "outcome": {"stop": {"how": "powered_off"}, "step": 99, "virtual_ns": 1, "status": 512, "wall_ms": 3}}"#,
         )
         .unwrap();
         let m = Manifest::from_json(&json);
@@ -753,18 +762,17 @@ mod tests {
         let dir = temp_dir("stops");
         let config = SynthConfig::small(Variant::Passing);
         std::fs::write(dir.join(TRACE_FILE), synth::generate(&config)).unwrap();
-        let with_stop = |stop: &str| {
+        let with_stop = |stop: Stop| {
             let manifest = serde_json::json!({ "outcome": { "stop": stop } });
             std::fs::write(dir.join(MANIFEST_FILE), manifest.to_string()).unwrap();
             Run::open(&dir).unwrap()
         };
 
-        let hung =
-            with_stop("timed out computing without exits for 2.2s, in user space at 0x41b33e");
+        let hung = with_stop(hung_in_user_space());
         assert_eq!(hung.verdict(), Verdict::Failed);
         assert_eq!(hung.verdict_label(), "timed-out");
-        assert_eq!(with_stop("triple fault").verdict(), Verdict::Failed);
-        assert_eq!(with_stop("poweroff").verdict(), Verdict::Passed);
+        assert_eq!(with_stop(Stop::TripleFault).verdict(), Verdict::Failed);
+        assert_eq!(with_stop(Stop::PoweredOff).verdict(), Verdict::Passed);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -776,18 +784,18 @@ mod tests {
         let dir = temp_dir("hang-words");
         let config = SynthConfig::small(Variant::Passing);
         std::fs::write(dir.join(TRACE_FILE), synth::generate(&config)).unwrap();
-        let hung = "timed out while still making exits";
-        let with_stop = |stop: &str| {
+        let hung = hung_in_user_space();
+        let with_stop = |stop: &Stop| {
             let manifest = serde_json::json!({ "outcome": { "stop": stop } });
             std::fs::write(dir.join(MANIFEST_FILE), manifest.to_string()).unwrap();
             Run::open(&dir).unwrap()
         };
 
-        let run = with_stop(hung);
+        let run = with_stop(&hung);
         let end = run.timeline.total;
-        assert_eq!(run.stopped_at(end), Some(hung));
+        assert_eq!(run.stopped_at(end), Some(&hung));
         assert_eq!(run.stopped_at(end - 1), None);
-        assert_eq!(with_stop("poweroff").stopped_at(end), None);
+        assert_eq!(with_stop(&Stop::PoweredOff).stopped_at(end), None);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

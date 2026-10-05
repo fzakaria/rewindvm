@@ -13,6 +13,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use rewind_init::Job;
+use rewind_trace::stop::StalledThread;
 use rewind_trace::{Event, EventKind, Trace, TraceWriter};
 use rewind_vmm::{Config, Machine, Observer, Outcome, Stop};
 use serde::Deserialize;
@@ -196,8 +197,8 @@ pub enum TimeLimit {
     /// As long as it takes.
     None,
     /// Stop it after this much wall-clock time, however far it got. It
-    /// then ends as [`TIMED_OUT`], which is the host's doing: the same run
-    /// may finish on a faster host.
+    /// then ends as [`Stop::TimedOut`], which is the host's doing: the same
+    /// run may finish on a faster host.
     Wall(std::time::Duration),
 }
 
@@ -208,9 +209,6 @@ pub struct Execution {
     pub keyframes: Keyframes,
     pub limit: TimeLimit,
 }
-
-/// How a run that reached its [`TimeLimit`] stopped, in its outcome.
-pub use rewind_trace::stop::TIMED_OUT;
 
 /// Whether a run takes keyframes as it executes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -482,10 +480,6 @@ struct Restored {
 pub struct Run {
     pub dir: PathBuf,
     pub manifest: Manifest,
-    /// Where the run was when it timed out computing in user space, known
-    /// only to the execution that stopped it: the manifest keeps the
-    /// timeout in words.
-    pub stalled: Option<Stalled>,
     /// The trace file's records and the trace decoded from them, read the
     /// first time either is asked for. A Run is opened on a finished run,
     /// or made when its execution has finished writing the file, so this
@@ -493,46 +487,6 @@ pub struct Run {
     /// run meanwhile is seen as of the first read.
     records: OnceLock<Vec<(u64, Vec<u8>)>>,
     trace: OnceLock<Trace>,
-}
-
-/// Where a run that timed out computing in user space was stopped: the
-/// vCPU's instruction, and the thread on the CPU, when the VM's kernel
-/// says where its tasks are.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Stalled {
-    pub stall: rewind_vmm::Stall,
-    pub thread: Option<StalledThread>,
-}
-
-/// The thread a run was computing in when it timed out.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StalledThread {
-    pub pid: u32,
-    pub tid: u32,
-    /// The thread's name, as the kernel keeps it.
-    pub name: String,
-}
-
-/// Where `machine`, stopped with `outcome`, was computing in user space,
-/// when it timed out doing so.
-fn stalled(machine: &Machine, outcome: Outcome) -> Option<Stalled> {
-    let Outcome::Stopped(Stop::TimedOut(stall)) = outcome else {
-        return None;
-    };
-    if stall.mode != rewind_vmm::CpuMode::User || stall.since_exit < COMPUTING_AFTER {
-        return None;
-    }
-    let thread = machine.task_layout().ok().flatten().and_then(|layout| {
-        let (pid, thread) = crate::threads::Tasks::new(machine, layout)
-            .current_thread()
-            .ok()?;
-        Some(StalledThread {
-            pid,
-            tid: thread.tid,
-            name: thread.name,
-        })
-    });
-    Some(Stalled { stall, thread })
 }
 
 impl Run {
@@ -554,7 +508,6 @@ impl Run {
         Ok(Run {
             dir: dir.to_path_buf(),
             manifest,
-            stalled: None,
             records: OnceLock::new(),
             trace: OnceLock::new(),
         })
@@ -804,11 +757,11 @@ impl Run {
         }
         recorder.trace.finish()?.sync_all()?;
 
-        // Which thread a run computing in user space stopped in, read from
-        // the VM's kernel while the machine is here.
-        let stalled = stalled(&machine, outcome);
+        // How the machine stopped, with the thread a run computing in user
+        // space stopped in, read from the VM's kernel while the machine is
+        // here.
         manifest.outcome = Some(RunOutcome {
-            stop: describe(outcome, &manifest.spec.kernel),
+            stop: stop_of(outcome, &manifest.spec.kernel, || thread_on_cpu(&machine))?,
             step: machine.step(),
             virtual_ns: machine.now(),
             status: recorder.status,
@@ -835,7 +788,6 @@ impl Run {
         Ok(Run {
             dir,
             manifest,
-            stalled,
             records: OnceLock::new(),
             trace: OnceLock::new(),
         })
@@ -883,7 +835,7 @@ impl Run {
         }
 
         let limit = match &self.manifest.outcome {
-            Some(o) if o.stop.starts_with(TIMED_OUT) => {
+            Some(o) if o.stop.timeout().is_some() => {
                 TimeLimit::Wall(std::time::Duration::from_millis(o.wall_ms))
             }
             _ => TimeLimit::None,
@@ -1378,41 +1330,18 @@ impl Shortcut {
 /// computing, not making system calls, and where it was is worth saying.
 const COMPUTING_AFTER: Duration = Duration::from_secs(1);
 
-/// A timeout in words: still making exits, or computing without them for
-/// how long and at which instruction, named by its kernel symbol if it was
-/// in the kernel.
-fn describe_timeout(stall: &rewind_vmm::Stall, kernel: &Path) -> String {
-    if stall.since_exit < COMPUTING_AFTER {
-        return format!("{TIMED_OUT} while still making exits");
-    }
-    let place = match stall.mode {
-        rewind_vmm::CpuMode::User => {
-            return describe_user_stall(stall, &format!("at {:#x}", stall.rip));
-        }
-        rewind_vmm::CpuMode::Kernel => {
-            let map = kernel.with_file_name(SYSTEM_MAP);
-            let symbol = fs::read_to_string(map)
-                .ok()
-                .and_then(|text| kernel_symbol(&text, stall.rip));
-            format!(
-                "in the kernel at {}",
-                symbol.unwrap_or_else(|| format!("{:#x}", stall.rip))
-            )
-        }
-    };
-    format!(
-        "{TIMED_OUT} computing without exits for {:.1}s, {place}",
-        stall.since_exit.as_secs_f64()
-    )
-}
-
-/// A timeout computing in user space in words, the instruction named by
-/// `place`: its address, or what the program's symbols say of it.
-pub fn describe_user_stall(stall: &rewind_vmm::Stall, place: &str) -> String {
-    format!(
-        "{TIMED_OUT} computing without exits for {:.1}s, in user space {place}",
-        stall.since_exit.as_secs_f64()
-    )
+/// The thread on `machine`'s CPU, when its kernel says where its tasks
+/// are.
+fn thread_on_cpu(machine: &Machine) -> Option<StalledThread> {
+    let layout = machine.task_layout().ok().flatten()?;
+    let (pid, thread) = crate::threads::Tasks::new(machine, layout)
+        .current_thread()
+        .ok()?;
+    Some(StalledThread {
+        pid,
+        tid: thread.tid,
+        name: thread.name,
+    })
 }
 
 /// The kernel's symbol table, beside its bzImage.
@@ -1433,20 +1362,45 @@ fn kernel_symbol(map: &str, addr: u64) -> Option<String> {
         .map(|(start, name)| format!("{name}+{:#x}", addr - start))
 }
 
-/// How a run stopped, in words. `kernel` is the guest kernel the run
-/// booted, whose System.map names a kernel address a timeout stopped at.
-fn describe(outcome: Outcome, kernel: &Path) -> String {
-    match outcome {
-        Outcome::Paused => "paused".into(),
-        Outcome::Stopped(Stop::Guest(rewind_vmm::pv::GuestExit::PowerOff)) => {
-            rewind_trace::stop::POWERED_OFF.into()
+/// How a run stopped, for its manifest. `kernel` is the guest kernel the
+/// run booted, whose System.map names a kernel address a timeout stopped
+/// at, and `thread` reads the thread on the CPU, asked only for a run that
+/// timed out computing in user space.
+fn stop_of(
+    outcome: Outcome,
+    kernel: &Path,
+    thread: impl FnOnce() -> Option<StalledThread>,
+) -> Result<rewind_trace::stop::Stop> {
+    use rewind_trace::stop::{Doing, Stop as Stopped, Timeout};
+    let Outcome::Stopped(stop) = outcome else {
+        bail!("the machine did not stop: {outcome:?}");
+    };
+    Ok(match stop {
+        Stop::Guest(rewind_vmm::pv::GuestExit::PowerOff) => Stopped::PoweredOff,
+        Stop::Guest(rewind_vmm::pv::GuestExit::Restart) => Stopped::Restarted,
+        Stop::Guest(rewind_vmm::pv::GuestExit::Halt) => Stopped::Halted,
+        Stop::TripleFault => Stopped::TripleFault,
+        Stop::Stalled => Stopped::Idle,
+        Stop::TimedOut(stall) => {
+            let doing = match stall.mode {
+                _ if stall.since_exit < COMPUTING_AFTER => Doing::MakingExits,
+                rewind_vmm::CpuMode::User => Doing::User {
+                    rip: stall.rip,
+                    thread: thread(),
+                },
+                rewind_vmm::CpuMode::Kernel => Doing::Kernel {
+                    rip: stall.rip,
+                    symbol: fs::read_to_string(kernel.with_file_name(SYSTEM_MAP))
+                        .ok()
+                        .and_then(|text| kernel_symbol(&text, stall.rip)),
+                },
+            };
+            Stopped::TimedOut(Timeout {
+                since_exit_ms: stall.since_exit.as_millis() as u64,
+                doing,
+            })
         }
-        Outcome::Stopped(Stop::Guest(exit)) => format!("{exit:?}").to_lowercase(),
-        Outcome::Stopped(Stop::TripleFault) => "triple fault".into(),
-        Outcome::Stopped(Stop::Stalled) => "stalled: idle with no timer armed".into(),
-        Outcome::Stopped(Stop::TimedOut(stall)) => describe_timeout(&stall, kernel),
-        Outcome::Debug(stop) => format!("stopped by the debugger: {stop:?}"),
-    }
+    })
 }
 
 #[cfg(test)]
@@ -1457,18 +1411,13 @@ pub(crate) mod tests {
     use super::*;
 
     #[test]
-    fn a_guest_that_powered_off_is_worded_as_the_readers_expect() {
-        // The words for a guest that powered off are the ones rewind-trace
-        // gives the CLI and the app to recognize a clean stop by.
+    fn a_guest_that_powered_off_stopped_cleanly() {
+        // A guest that powered off is the clean stop the CLI and the app
+        // recognize; a machine that never stopped has no stop to record.
         let stopped = Outcome::Stopped(Stop::Guest(rewind_vmm::pv::GuestExit::PowerOff));
-        assert_eq!(
-            describe(stopped, Path::new("/k")),
-            rewind_trace::stop::POWERED_OFF
-        );
-        assert!(rewind_trace::stop::clean(&describe(
-            stopped,
-            Path::new("/k")
-        )));
+        let stop = stop_of(stopped, Path::new("/k"), || None).unwrap();
+        assert!(stop.is_clean());
+        assert!(stop_of(Outcome::Paused, Path::new("/k"), || None).is_err());
     }
 
     #[test]
@@ -1562,8 +1511,10 @@ pub(crate) mod tests {
     fn a_timeout_says_where_the_guest_was() {
         // A run stopped while it was still making exits says only that. One
         // stopped after a long stretch without exits says for how long and
-        // where the vCPU was: a user-space address as it is, a kernel one
-        // by its symbol in the System.map beside the kernel.
+        // where the vCPU was: a user-space address with the thread on the
+        // CPU, a kernel one by its symbol in the System.map beside the
+        // kernel.
+        use rewind_trace::stop::{Doing, Stop as Stopped, Timeout};
         use rewind_vmm::{CpuMode, Stall};
         let dir = std::env::temp_dir().join(format!("rewind-timeout-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
@@ -1574,48 +1525,54 @@ pub(crate) mod tests {
         )
         .unwrap();
         let kernel = dir.join("bzImage");
+        let worker = StalledThread {
+            pid: 34,
+            tid: 36,
+            name: "worker".into(),
+        };
         let timed_out = |rip, mode, since_exit_ms| {
-            describe(
-                Outcome::Stopped(Stop::TimedOut(Stall {
-                    rip,
-                    mode,
-                    since_exit: std::time::Duration::from_millis(since_exit_ms),
-                })),
-                &kernel,
-            )
+            let stall = Stall {
+                rip,
+                mode,
+                since_exit: std::time::Duration::from_millis(since_exit_ms),
+            };
+            stop_of(Outcome::Stopped(Stop::TimedOut(stall)), &kernel, || {
+                Some(worker.clone())
+            })
+            .unwrap()
+        };
+        let timeout = |since_exit_ms, doing| {
+            Stopped::TimedOut(Timeout {
+                since_exit_ms,
+                doing,
+            })
         };
 
         assert_eq!(
             timed_out(0x55ce_d9ab_18a7, CpuMode::User, 12_300),
-            "timed out computing without exits for 12.3s, in user space at 0x55ced9ab18a7"
+            timeout(
+                12_300,
+                Doing::User {
+                    rip: 0x55ce_d9ab_18a7,
+                    thread: Some(worker.clone()),
+                }
+            )
         );
         assert_eq!(
             timed_out(0xffff_ffff_8128_5085, CpuMode::Kernel, 2_000),
-            "timed out computing without exits for 2.0s, in the kernel at rewind_clock_read+0x5"
+            timeout(
+                2_000,
+                Doing::Kernel {
+                    rip: 0xffff_ffff_8128_5085,
+                    symbol: Some("rewind_clock_read+0x5".into()),
+                }
+            )
         );
         assert_eq!(
             timed_out(0xffff_ffff_8128_5085, CpuMode::Kernel, 3),
-            "timed out while still making exits"
+            timeout(3, Doing::MakingExits)
         );
-        assert!(timed_out(0x1000, CpuMode::User, 3).starts_with(TIMED_OUT));
         fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// A user-space stall in words with its place named some other way,
-    /// as the rewind command names it with the program's symbols: the
-    /// same sentence as with the bare address.
-    #[test]
-    fn a_user_space_stall_takes_any_place() {
-        use rewind_vmm::{CpuMode, Stall};
-        let stall = Stall {
-            rip: 0x5585_7720_5154,
-            mode: CpuMode::User,
-            since_exit: std::time::Duration::from_millis(7_100),
-        };
-        assert_eq!(
-            describe_user_stall(&stall, "in spin+11 (spin.c:5)"),
-            "timed out computing without exits for 7.1s, in user space in spin+11 (spin.c:5)"
-        );
     }
 
     #[test]
@@ -1860,7 +1817,7 @@ pub(crate) mod tests {
         let home = Home::at(root.clone()).unwrap();
         let mut m = manifest("abc", "r", 0);
         m.outcome = Some(RunOutcome {
-            stop: rewind_trace::stop::POWERED_OFF.into(),
+            stop: rewind_trace::stop::Stop::PoweredOff,
             step: 9,
             virtual_ns: 0,
             status: Some(0),
@@ -2033,7 +1990,7 @@ pub(crate) mod tests {
         let home = Home::at(root.clone()).unwrap();
         let mut finished = manifest("aaaa000000000000", "finished", 1);
         finished.outcome = Some(RunOutcome {
-            stop: rewind_trace::stop::POWERED_OFF.into(),
+            stop: rewind_trace::stop::Stop::PoweredOff,
             step: 12,
             virtual_ns: 0,
             status: Some(0),
