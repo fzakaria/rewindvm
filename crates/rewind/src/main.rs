@@ -23,6 +23,7 @@ use rewind_core::run::{
 use rewind_core::{Echo, Execution, Guest, Home, Keyframes, Run, Source, Spec, TimeLimit};
 use rewind_core::{compare, export, image, nix};
 use rewind_init::{Job, Output, Root};
+use rewind_trace::compare::Comparison;
 
 /// The help of every argument that names a run.
 const RUN_HELP: &str = "The run: its id or the start of one, its name, @ for the newest";
@@ -1151,21 +1152,19 @@ fn run(cli: Cli) -> Result<ExitCode> {
             } else {
                 (base, worst)
             };
+            // Where the failing run first behaves differently from the
+            // passing one, as the app shows it.
             let (pt, ft) = (passing.trace()?, failing.trace()?);
-            let culprit = ft.culprit_against(pt);
+            let comparison = Comparison::of(ft, failing.last_step()?, pt, passing.last_step()?);
             if json {
-                let divergence = match &culprit {
-                    Some(argv) => json::program_divergence(pt, ft, argv),
-                    None => json::divergence(pt, ft),
-                };
                 let narrowed = serde_json::json!({
                     "schedule": machine.schedule,
                     "from": lo,
                     "until": until,
                     "passing": json::run(&passing)?,
                     "failing": json::run(&failing)?,
-                    "program": culprit,
-                    "divergence": divergence,
+                    "program": comparison.program,
+                    "divergence": json::comparison(ft, pt, &comparison),
                 });
                 println!("{}", search(narrowed));
                 return Ok(ExitCode::FAILURE);
@@ -1175,20 +1174,16 @@ fn run(cli: Cli) -> Result<ExitCode> {
 
             // Where they part, in words, and the failing run's step there,
             // where the app opens it beside the passing one.
-            let parts_at = match &culprit {
-                Some(argv) => {
-                    println!("\nwhere {} first behaves differently:", argv.join(" "));
-                    print!("{}", show::divergence_in(pt, ft, argv));
-                    pt.divergence_in(ft, argv)
-                        .and_then(|d| d.right_event())
-                        .map(|(i, _)| ft.events[i].step)
-                }
-                None => {
-                    print!("{}", show::divergence(pt, ft));
-                    pt.divergence(ft).map(|d| d.right_step)
-                }
-            };
-            let open = open_line(&failing.manifest.id, parts_at, Some(&passing.manifest.id));
+            println!();
+            print!(
+                "{}",
+                show::comparison((ft, "failing"), (pt, "passing"), &comparison)
+            );
+            let open = open_line(
+                &failing.manifest.id,
+                comparison.step(),
+                Some(&passing.manifest.id),
+            );
             println!("\nopen both in the desktop app: {open}");
             Ok(ExitCode::FAILURE)
         }

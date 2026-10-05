@@ -308,9 +308,10 @@ pub enum Replays {
 
 impl Session {
     pub fn new(run: Run, other: Option<Run>) -> Session {
-        let comparison = other
-            .as_ref()
-            .map(|o| Comparison::new(&run.timeline, &o.timeline));
+        let comparison = other.as_ref().map(|o| {
+            let (this, other) = (&run.timeline, &o.timeline);
+            Comparison::of(&this.trace, this.total, &other.trace, other.total)
+        });
         Session {
             run,
             other,

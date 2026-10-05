@@ -54,16 +54,25 @@ pub fn divergence(left: &Trace, right: &Trace) -> Value {
     })
 }
 
-/// Where the program `argv` first behaves differently in two runs, with
-/// its first event that differs on each side; null when its events agree.
-pub fn program_divergence(left: &Trace, right: &Trace, argv: &[String]) -> Value {
-    let Some(d) = left.divergence_in(right, argv) else {
+/// Where two runs first behave differently, as
+/// [`rewind_trace::compare::Comparison`] finds it
+/// with `this` the run it was made from, with the first event that differs
+/// on each side and the program compared, if it was about one; null when
+/// they did the same things.
+pub fn comparison(this: &Trace, other: &Trace, c: &rewind_trace::compare::Comparison) -> Value {
+    let Some(point) = &c.point else {
         return Value::Null;
     };
+    let event = |t: &'_ Trace, side: Option<rewind_trace::compare::Side>| {
+        side.and_then(|s| t.events.get(s.index).cloned())
+    };
     json!({
-        "program": argv,
-        "left_event": d.left_event().map(|(i, _)| &left.events[i]),
-        "right_event": d.right_event().map(|(i, _)| &right.events[i]),
+        "program": c.program,
+        "matched": point.matched,
+        "step": point.step,
+        "other_step": point.other_step,
+        "event": event(this, point.here),
+        "other_event": event(other, point.there),
     })
 }
 

@@ -7,9 +7,12 @@
 //!
 //! This crate reads and writes traces and answers the questions the
 //! scrubber asks of one: which processes were alive at a step, what they
-//! had printed, which files they had written, which phase the build was
-//! in, and where two runs first went different ways.
+//! had printed, which files they had written, and where two runs first
+//! went different ways. It also holds what the engine records beside a
+//! trace and the app reads: the manifest, and how a run stopped and
+//! ended.
 
+pub mod compare;
 pub mod contents;
 pub mod ending;
 mod event;
@@ -74,15 +77,6 @@ impl Process {
             None => format!("pid {}", self.pid),
         }
     }
-}
-
-/// A named stretch of the run: a nixpkgs build phase, or the span between
-/// two marks written to /dev/rewind.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Phase {
-    pub name: String,
-    pub start: u64,
-    pub end: u64,
 }
 
 /// Where two traces first disagree.
@@ -299,37 +293,10 @@ impl Trace {
         lines
     }
 
-    /// Phases, from nixpkgs' "Running phase: X" lines and from marks.
-    pub fn phases(&self) -> Vec<Phase> {
-        const NIX_PHASE: &str = "Running phase: ";
-        let mut starts: Vec<(u64, String)> = Vec::new();
-        for line in self.lines_until(u64::MAX) {
-            if let Some(name) = line.text.trim().strip_prefix(NIX_PHASE) {
-                starts.push((line.step, name.trim().to_string()));
-            }
-        }
-        for e in &self.events {
-            if let EventKind::Mark { text } = &e.kind {
-                starts.push((e.step, text.clone()));
-            }
-        }
-        starts.sort_by_key(|(step, _)| *step);
-
-        let last = self.last_step();
-        let mut phases = Vec::new();
-        for (i, (start, name)) in starts.iter().enumerate() {
-            let end = starts.get(i + 1).map_or(last, |(s, _)| *s);
-            phases.push(Phase {
-                name: name.clone(),
-                start: *start,
-                end,
-            });
-        }
-        phases
-    }
-
-    /// The first place two traces differ. None when they are identical,
-    /// which for two runs of the same inputs is always the answer.
+    /// The first place two traces differ record for record, steps
+    /// included. None when they are identical, which for two runs of the
+    /// same inputs is always the answer. Where two runs first behave
+    /// differently is [`compare::Comparison`].
     pub fn divergence(&self, other: &Trace) -> Option<Divergence> {
         let n = self.events.len().min(other.events.len());
         let index = (0..n)
@@ -774,15 +741,6 @@ mod tests {
         let lines = t.lines_until(7);
         assert_eq!(lines[1].text, "compiling");
         assert_eq!(lines[1].step, 7);
-    }
-
-    #[test]
-    fn phases_come_from_nixpkgs_output() {
-        let phases = sample().phases();
-        assert_eq!(phases.len(), 2);
-        assert_eq!(phases[0].name, "buildPhase");
-        assert_eq!((phases[0].start, phases[0].end), (2, 11));
-        assert_eq!((phases[1].start, phases[1].end), (11, 13));
     }
 
     #[test]

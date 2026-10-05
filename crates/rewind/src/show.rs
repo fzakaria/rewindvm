@@ -78,25 +78,47 @@ pub fn size(bytes: u64) -> String {
     }
 }
 
-/// Where one program's own events first differ between two runs (see
-/// `Trace::divergence_in`), with the events around it on each side.
-pub fn divergence_in(left: &Trace, right: &Trace, argv: &[String]) -> String {
-    let Some(d) = left.divergence_in(right, argv) else {
-        return "  no difference in its own events\n".into();
-    };
-    let i = d.position;
-
+/// Where two runs first behave differently, as
+/// [`rewind_trace::compare::Comparison`] finds it,
+/// with the events around it on each side: the culprit program's own
+/// events when the comparison is about one, else every event. `this` is
+/// the run the comparison was made from, `other` the run it was compared
+/// with, each with the word its lines start with.
+pub fn comparison(
+    (this, this_name): (&Trace, &str),
+    (other, other_name): (&Trace, &str),
+    c: &rewind_trace::compare::Comparison,
+) -> String {
     const BEFORE: usize = 3;
     const AFTER: usize = 4;
-    let mut out = String::new();
-    for &e in &d.left.indices[i.saturating_sub(BEFORE)..i] {
-        let _ = writeln!(out, "  both  {}", event(&left.events[e]));
+    const BOTH: &str = "both";
+
+    let mut out = match &c.program {
+        Some(argv) => format!("where {} first behaves differently:\n", argv.join(" ")),
+        None => "where the runs first behave differently:\n".to_string(),
+    };
+    let Some(point) = &c.point else {
+        out.push_str("  no difference in what they did\n");
+        return out;
+    };
+
+    // The events compared on each side, in order.
+    let compared = |t: &Trace| -> Vec<usize> {
+        match &c.program {
+            Some(argv) => t.program_events(argv).indices,
+            None => (0..t.events.len()).collect(),
+        }
+    };
+    let (mine, theirs) = (compared(this), compared(other));
+    let width = this_name.len().max(other_name.len()).max(BOTH.len());
+    let i = point.matched;
+    for &e in &mine[i.saturating_sub(BEFORE)..i] {
+        let _ = writeln!(out, "  {BOTH:<width$}  {}", event(&this.events[e]));
     }
-    for &e in d.left.indices.iter().skip(i).take(AFTER) {
-        let _ = writeln!(out, "  left  {}", event(&left.events[e]));
-    }
-    for &e in d.right.indices.iter().skip(i).take(AFTER) {
-        let _ = writeln!(out, "  right {}", event(&right.events[e]));
+    for (name, trace, indices) in [(this_name, this, &mine), (other_name, other, &theirs)] {
+        for &e in indices.iter().skip(i).take(AFTER) {
+            let _ = writeln!(out, "  {name:<width$}  {}", event(&trace.events[e]));
+        }
     }
     out
 }

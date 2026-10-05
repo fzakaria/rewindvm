@@ -467,116 +467,7 @@ impl Timeline {
     }
 }
 
-/// Two runs side by side: where the one on screen first behaves
-/// differently from the other.
-///
-/// When the failing run names a culprit program (the one that crashed or
-/// failed first), only that program's own events are compared, with
-/// threads numbered by the order they appear and steps ignored, as
-/// `Trace::divergence_in` does. Otherwise, or when the program behaved the
-/// same in both runs, every event is compared by what happened and in
-/// which process and thread, still ignoring steps. Either way a difference
-/// that is only a shift in steps is not a divergence.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Comparison {
-    /// The program compared, when the comparison is about one.
-    pub program: Option<Vec<String>>,
-    /// Where the runs part; None when they did the same things.
-    pub point: Option<DivergencePoint>,
-}
-
-/// One run's side of a divergence: the first event that differs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Side {
-    /// The index of the event in the run's trace.
-    pub index: usize,
-    /// The event's thread number within the program (0 for its first
-    /// thread), when the comparison is about one program.
-    pub thread: Option<usize>,
-}
-
-/// Where two runs part.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DivergencePoint {
-    /// How many events matched before.
-    pub matched: usize,
-    /// The first differing event on this run's side and on the other's;
-    /// None on a side whose events ran out first.
-    pub here: Option<Side>,
-    pub there: Option<Side>,
-    /// The step the difference is at in this run: its differing event,
-    /// or the last matching one when this run's events ran out first.
-    pub step: u64,
-}
-
-impl Comparison {
-    pub fn new(this: &Timeline, other: &Timeline) -> Comparison {
-        let (a, b) = (&this.trace, &other.trace);
-
-        // The culprit's own events first.
-        let program = a.culprit_against(b).or_else(|| b.culprit_against(a));
-        if let Some(argv) = &program
-            && let Some(d) = a.divergence_in(b, argv)
-        {
-            let side = |event: Option<(usize, usize)>| {
-                event.map(|(index, thread)| Side {
-                    index,
-                    thread: Some(thread),
-                })
-            };
-            let here = side(d.left_event());
-            let last_same = d.position.checked_sub(1).map(|i| d.left.indices[i]);
-            let point = DivergencePoint {
-                matched: d.position,
-                here,
-                there: side(d.right_event()),
-                step: step_of(a, here.map(|s| s.index).or(last_same), this.total),
-            };
-            return Comparison {
-                program,
-                point: Some(point),
-            };
-        }
-
-        // Every event, by what happened and where, but not when.
-        let same = |x: &Event, y: &Event| x.pid == y.pid && x.tid == y.tid && x.kind == y.kind;
-        let n = a.events.len().min(b.events.len());
-        let position = (0..n)
-            .find(|&i| !same(&a.events[i], &b.events[i]))
-            .or((a.events.len() != b.events.len()).then_some(n));
-        let point = position.map(|i| {
-            let side = |t: &Trace| {
-                (i < t.events.len()).then_some(Side {
-                    index: i,
-                    thread: None,
-                })
-            };
-            let here = side(a);
-            DivergencePoint {
-                matched: i,
-                here,
-                there: side(b),
-                step: step_of(a, here.map(|s| s.index).or(i.checked_sub(1)), this.total),
-            }
-        });
-        Comparison {
-            program: None,
-            point,
-        }
-    }
-
-    /// The step of the first divergence, in the run on screen.
-    pub fn step(&self) -> Option<u64> {
-        self.point.as_ref().map(|p| p.step)
-    }
-}
-
-/// The step of event `index`, or the end of the run without one.
-fn step_of(trace: &Trace, index: Option<usize>, total: u64) -> u64 {
-    index
-        .and_then(|i| trace.events.get(i))
-        .map_or(total, |e| e.step)
-}
+pub use rewind_trace::compare::{Comparison, DivergencePoint, Side};
 
 /// Whether a line reads as an error.
 pub fn is_error_text(text: &str) -> bool {
@@ -1662,9 +1553,15 @@ mod tests {
         let mut events = a.trace.events.clone();
         events[6] = out(7, 3, 2, "pool.c:3: warning: other\n");
         let b = Timeline::new(Trace { events }, None, None);
-        assert_eq!(Comparison::new(&a, &b).step(), Some(7));
+        assert_eq!(
+            Comparison::of(&a.trace, a.total, &b.trace, b.total).step(),
+            Some(7)
+        );
         let same = Timeline::new(a.trace.clone(), None, None);
-        assert_eq!(Comparison::new(&a, &same).step(), None);
+        assert_eq!(
+            Comparison::of(&a.trace, a.total, &same.trace, same.total).step(),
+            None
+        );
     }
 
     #[test]
@@ -1682,7 +1579,7 @@ mod tests {
         let b = Timeline::new(Trace { events }, None, None);
         assert_eq!(a.trace.divergence(&b.trace).unwrap().index, 3);
 
-        let c = Comparison::new(&a, &b);
+        let c = Comparison::of(&a.trace, a.total, &b.trace, b.total);
         assert_eq!(c.program, Some(vec!["test_pool".to_string()]));
         let p = c.point.unwrap();
         assert_eq!(p.matched, 2);
