@@ -9,13 +9,13 @@ use std::path::Path;
 use gpui::{
     AnyElement, Bounds, ClickEvent, Context, CursorStyle, DispatchPhase, Div, FontWeight,
     HighlightStyle, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection,
-    PathBuilder, Pixels, Point, Role, ScrollStrategy, SharedString, Window, canvas, div, fill,
-    point, prelude::*, px, relative, rgb, rgba, uniform_list,
+    PathBuilder, Pixels, Point, Role, ScrollStrategy, ScrollWheelEvent, SharedString, Window,
+    canvas, div, fill, point, prelude::*, px, relative, rgb, rgba, uniform_list,
 };
 
 use crate::describe::{self, EventTone, short_store_paths, thousands};
 use crate::family::{Family, Row, RowKind as RunsRowKind, RunEntry};
-use crate::model::{FileOp, FileTone, LogFilter, Motion, RowKind, Tone, ticks};
+use crate::model::{FileOp, FileTone, LogFilter, Motion, RowKind, Tone};
 use crate::run::{Agreement, Session, Verdict, short_id};
 use crate::selection::{Mapped, Surface, part_of_line};
 use crate::theme::{self, layout, size};
@@ -33,7 +33,7 @@ use crate::ui::{
     AddBookmark, CloseNearest, CopySelection, EnterLicense, ForkHere, GoBack, GoForward, GoToEnd,
     GoToStart, GoToStep, JumpToDivergence, JumpToFailure, KEY_CONTEXT, NextEvent, NextPhase,
     OpenRun, OpenSearch, PreviousEvent, PreviousPhase, SelectAll, StartTour, StepBack, StepForward,
-    ToggleSource,
+    ToggleSource, ZoomIn, ZoomOut, ZoomReset,
 };
 
 /// Header labels are cut to this many characters.
@@ -80,6 +80,9 @@ impl Render for Scrubber {
                 cx.listener(|this, _: &GoToStep, window, cx| this.open_step_entry(window, cx)),
             )
             .on_action(cx.listener(|this, _: &OpenSearch, window, cx| this.open_search(window, cx)))
+            .on_action(cx.listener(|this, _: &ZoomIn, _, cx| this.zoom_in(cx)))
+            .on_action(cx.listener(|this, _: &ZoomOut, _, cx| this.zoom_out(cx)))
+            .on_action(cx.listener(|this, _: &ZoomReset, _, cx| this.zoom_reset(cx)))
             .on_action(cx.listener(|this, _: &AddBookmark, window, cx| {
                 this.open_bookmark_editor(window, cx)
             }))
@@ -449,6 +452,11 @@ impl Scrubber {
         let active_phase = t.phase_index_at(step);
         let mono = self.fonts.mono.clone();
 
+        // Where a step sits along the track, which shows the zoomed
+        // window or the whole run.
+        let view = self.timeline_view();
+        let place = |s: u64| view.fraction_of(s);
+
         let mut track = div()
             .id("track")
             .relative()
@@ -458,10 +466,15 @@ impl Scrubber {
             .font_family(mono)
             .text_size(px(size::TEXT_SMALL));
 
-        // The phases, each a segment as wide as its share of the run.
+        // The phases, each a segment as wide as its share of the steps
+        // shown.
         for (i, phase) in t.phases.iter().enumerate() {
-            let start = t.fraction_of(phase.start);
-            let share = t.fraction_of(phase.end) - start;
+            let start = place(phase.start).max(0.0);
+            let end = place(phase.end).min(1.0);
+            if end <= start {
+                continue;
+            }
+            let share = end - start;
             let active = Some(i) == active_phase;
             let (bg, fg) = if active {
                 (theme::AMBER_DEEP, theme::AMBER_PALE)
@@ -497,11 +510,11 @@ impl Scrubber {
         }
 
         // Tick marks under the track at round step counts.
-        for tick in ticks(t.total, layout::TICK_TARGET) {
+        for tick in view.ticks(layout::TICK_TARGET) {
             track = track.child(
                 div()
                     .absolute()
-                    .left(relative(t.fraction_of(tick)))
+                    .left(relative(place(tick)))
                     .bottom(px(-size::TICK_DROP))
                     .w(px(size::TICK_WIDTH))
                     .h(px(size::TICK_HEIGHT))
@@ -509,24 +522,28 @@ impl Scrubber {
             );
         }
 
-        // Markers: forks made from here, the first divergence, the failure.
+        // Markers: forks made from here, the first divergence, the failure,
+        // each where the track shows its step.
         let marker = |at: u64, width: f32, color: u32| {
-            div()
-                .absolute()
-                .left(relative(t.fraction_of(at)))
-                .top(px(-size::MARKER_OVERHANG))
-                .bottom(px(-size::MARKER_OVERHANG))
-                .w(px(width))
-                .bg(rgb(color))
+            view.contains(at).then(|| {
+                div()
+                    .absolute()
+                    .left(relative(place(at)))
+                    .top(px(-size::MARKER_OVERHANG))
+                    .bottom(px(-size::MARKER_OVERHANG))
+                    .w(px(width))
+                    .bg(rgb(color))
+            })
         };
         // The step this run was forked from its parent at.
         if let Some(parent) = &session.run.manifest.parent {
-            track = track.child(
-                marker(parent.step, size::FORK_MARK_WIDTH, theme::AMBER_PALE)
-                    .bg(rgba(0))
-                    .border_l_2()
-                    .border_dashed()
-                    .border_color(rgb(theme::AMBER_PALE)),
+            track = track.children(
+                marker(parent.step, size::FORK_MARK_WIDTH, theme::AMBER_PALE).map(|m| {
+                    m.bg(rgba(0))
+                        .border_l_2()
+                        .border_dashed()
+                        .border_color(rgb(theme::AMBER_PALE))
+                }),
             );
         }
         // Forks of this run on disk, from this session or before it.
@@ -542,60 +559,66 @@ impl Scrubber {
                     .map(|p| p.step)
             });
         for step in disk_forks {
-            track = track.child(
-                marker(step, size::FORK_MARK_WIDTH, theme::AMBER_PALE)
-                    .bg(rgba(0))
-                    .border_l_1()
-                    .border_dashed()
-                    .border_color(rgb(theme::AMBER_PALE)),
-            );
+            track = track.children(marker(step, size::FORK_MARK_WIDTH, theme::AMBER_PALE).map(
+                |m| {
+                    m.bg(rgba(0))
+                        .border_l_1()
+                        .border_dashed()
+                        .border_color(rgb(theme::AMBER_PALE))
+                },
+            ));
         }
         for fork in &self.forks {
             let color = match fork.state {
                 ForkState::Failed(_) => theme::MUTED,
                 ForkState::Pending | ForkState::Created(_) => theme::AMBER_PALE,
             };
-            track = track.child(
-                marker(fork.step, size::FORK_MARK_WIDTH, color)
-                    .bg(rgba(0))
+            track = track.children(marker(fork.step, size::FORK_MARK_WIDTH, color).map(|m| {
+                m.bg(rgba(0))
                     .border_l_2()
                     .border_dashed()
-                    .border_color(rgb(color)),
-            );
+                    .border_color(rgb(color))
+            }));
         }
         if let Some(divergence) = session.divergence_step() {
-            track = track.child(marker(divergence, size::DIVERGENCE_WIDTH, theme::BLUE));
+            track = track.children(marker(divergence, size::DIVERGENCE_WIDTH, theme::BLUE));
         }
-        track = track.children(self.bookmark_marks(|step| t.fraction_of(step)));
+        track = track.children(self.bookmark_marks(view));
         if let Some(failure) = t.failure {
-            track = track.child(marker(failure.step, size::FAILURE_WIDTH, theme::RED));
+            track = track.children(marker(failure.step, size::FAILURE_WIDTH, theme::RED));
         }
 
-        // The playhead: an amber bar in a soft glow.
-        let at = relative(t.fraction_of(step));
-        track = track
-            .child(
-                div()
-                    .absolute()
-                    .left(at)
-                    .ml(px(-size::PLAYHEAD_GLOW_WIDTH / 2.0))
-                    .top(px(-size::PLAYHEAD_OVERHANG - size::PLAYHEAD_WIDTH))
-                    .bottom(px(-size::PLAYHEAD_OVERHANG - size::PLAYHEAD_WIDTH))
-                    .w(px(size::PLAYHEAD_GLOW_WIDTH))
-                    .rounded(px(size::PLAYHEAD_GLOW_WIDTH / 2.0))
-                    .bg(rgba(theme::AMBER_GLOW_A)),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .left(at)
-                    .ml(px(-size::PLAYHEAD_WIDTH / 2.0))
-                    .top(px(-size::PLAYHEAD_OVERHANG))
-                    .bottom(px(-size::PLAYHEAD_OVERHANG))
-                    .w(px(size::PLAYHEAD_WIDTH))
-                    .rounded(px(size::RADIUS_PLAYHEAD))
-                    .bg(rgb(theme::AMBER)),
-            );
+        // The step under the pointer, and the steps a zoom shows.
+        track = track.children(self.track_labels());
+
+        // The playhead: an amber bar in a soft glow, when the track shows
+        // its step.
+        let at = relative(place(step));
+        if view.contains(step) {
+            track = track
+                .child(
+                    div()
+                        .absolute()
+                        .left(at)
+                        .ml(px(-size::PLAYHEAD_GLOW_WIDTH / 2.0))
+                        .top(px(-size::PLAYHEAD_OVERHANG - size::PLAYHEAD_WIDTH))
+                        .bottom(px(-size::PLAYHEAD_OVERHANG - size::PLAYHEAD_WIDTH))
+                        .w(px(size::PLAYHEAD_GLOW_WIDTH))
+                        .rounded(px(size::PLAYHEAD_GLOW_WIDTH / 2.0))
+                        .bg(rgba(theme::AMBER_GLOW_A)),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .left(at)
+                        .ml(px(-size::PLAYHEAD_WIDTH / 2.0))
+                        .top(px(-size::PLAYHEAD_OVERHANG))
+                        .bottom(px(-size::PLAYHEAD_OVERHANG))
+                        .w(px(size::PLAYHEAD_WIDTH))
+                        .rounded(px(size::RADIUS_PLAYHEAD))
+                        .bg(rgb(theme::AMBER)),
+                );
+        }
 
         // The focus ring, while the scrubber has the keyboard.
         if self.focus.is_focused(window) {
@@ -658,10 +681,17 @@ impl Scrubber {
                     });
                 });
 
-                // Moving with the button held drags the playhead.
+                // Moving with the button held drags the playhead; moving
+                // without it over the track shows the step under the
+                // pointer.
                 let (move_view, move_drag) = (view.clone(), dragging.clone());
                 window.on_mouse_event(move |e: &MouseMoveEvent, phase, _, cx| {
-                    if phase != DispatchPhase::Bubble || !move_drag.get() {
+                    if phase != DispatchPhase::Bubble {
+                        return;
+                    }
+                    let over = bounds.contains(&e.position).then(|| along(e.position));
+                    move_view.update(cx, |this, cx| this.set_hover(over, cx));
+                    if !move_drag.get() {
                         return;
                     }
                     if e.pressed_button != Some(MouseButton::Left) {
@@ -670,6 +700,17 @@ impl Scrubber {
                     }
                     move_view.update(cx, |this, cx| {
                         this.scrub_to(along(e.position), Scrub::Drag, cx)
+                    });
+                });
+
+                // The wheel over the track zooms and pans.
+                let wheel_view = view.clone();
+                window.on_mouse_event(move |e: &ScrollWheelEvent, phase, _, cx| {
+                    if phase != DispatchPhase::Bubble || !bounds.contains(&e.position) {
+                        return;
+                    }
+                    wheel_view.update(cx, |this, cx| {
+                        this.track_wheel(along(e.position), e.delta, e.modifiers.shift, cx)
                     });
                 });
 

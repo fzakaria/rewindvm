@@ -45,6 +45,7 @@ use crate::ui::terminal::{PaneKind, TerminalPane};
 use crate::ui::viewer::FileViewer;
 use crate::ui::widgets::Fonts;
 use crate::ui::{Launch, RightColumn};
+use crate::view::View;
 
 /// How long a notice that informs stays up.
 const NOTICE_DURATION: Duration = Duration::from_secs(8);
@@ -321,6 +322,10 @@ pub struct Scrubber {
     pub(super) bookmarks: Bookmarks,
     /// The bookmark note dialog, while it is open.
     pub(super) bookmark_editor: Option<BookmarkEditor>,
+    /// The steps the timeline is zoomed in on; None shows the whole run.
+    pub(super) view: Option<View>,
+    /// How far along the track the pointer is, while it is over it.
+    pub(super) hover: Option<f32>,
     /// The searchable text of the run it was built for, by its path.
     pub(super) search_index: Option<(PathBuf, Rc<Index>)>,
     /// Where the "Stop at" menu opened, while it is open.
@@ -411,6 +416,8 @@ impl Scrubber {
             search_index: None,
             bookmarks: Bookmarks::default(),
             bookmark_editor: None,
+            view: None,
+            hover: None,
             log_filter: LogFilter::Output,
             log_scroll: UniformListScrollHandle::new(),
             files_scroll: UniformListScrollHandle::new(),
@@ -470,6 +477,7 @@ impl Scrubber {
         if !same_run {
             self.history = History::default();
             self.stride = Stride::Every;
+            self.view = None;
         }
         self.step = start;
         self.search = None;
@@ -1011,6 +1019,7 @@ impl Scrubber {
             return;
         }
         self.step = step;
+        self.keep_playhead_in_view();
 
         // The lists and cards say what is true at the playhead, so a
         // selection in them would now cover other text.
@@ -1098,10 +1107,10 @@ impl Scrubber {
     /// Moves the playhead to a point along the track, from 0 to 1. A
     /// press there is a jump; dragging on from it is not.
     pub(super) fn scrub_to(&mut self, fraction: f32, scrub: Scrub, cx: &mut Context<Self>) {
-        let Some(session) = &self.session else {
+        if self.session.is_none() {
             return;
-        };
-        let step = session.run.timeline.step_at_fraction(fraction);
+        }
+        let step = self.timeline_view().step_at(fraction);
         match scrub {
             Scrub::Press => self.jump_to(step, cx),
             Scrub::Drag => self.go_to(step, cx),

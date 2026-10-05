@@ -33,4 +33,5 @@ pub mod terminal;
 pub mod theme;
 pub mod tour;
 pub mod ui;
+pub mod view;
 pub mod viewer;

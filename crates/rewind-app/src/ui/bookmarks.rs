@@ -17,6 +17,7 @@ use crate::theme::{self, size};
 use crate::ui::scrubber::{NoticeTone, Scrubber};
 use crate::ui::widgets::{Availability, ButtonStyle, button, tooltip};
 use crate::ui::{BOOKMARK_CONTEXT, CloseDialog, SaveBookmark};
+use crate::view::View;
 
 /// The dialog's backdrop and width, as the Open link dialog's.
 const BACKDROP_A: u32 = 0x0000_00a0;
@@ -202,14 +203,15 @@ impl Scrubber {
         )
     }
 
-    /// The bookmarks' marks on the track, as children positioned by step.
-    pub(super) fn bookmark_marks(&self, fraction_of: impl Fn(u64) -> f32) -> Vec<Div> {
+    /// The marks of the bookmarks the track shows, by step.
+    pub(super) fn bookmark_marks(&self, view: View) -> Vec<Div> {
         self.bookmarks
             .iter()
+            .filter(|mark| view.contains(mark.step))
             .map(|mark| {
                 div()
                     .absolute()
-                    .left(relative(fraction_of(mark.step)))
+                    .left(relative(view.fraction_of(mark.step)))
                     .ml(px(-MARK_SIZE / 2.0))
                     .top(px(-size::MARKER_OVERHANG - MARK_SIZE))
                     .size(px(MARK_SIZE))

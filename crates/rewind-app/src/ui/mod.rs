@@ -20,6 +20,7 @@ mod terminal;
 mod tour;
 mod viewer;
 mod widgets;
+mod zoom;
 
 use std::sync::Arc;
 
@@ -55,6 +56,9 @@ actions!(
         ConfirmSearch,
         AddBookmark,
         SaveBookmark,
+        ZoomIn,
+        ZoomOut,
+        ZoomReset,
         SearchNext,
         SearchPrevious,
         ForkHere,
@@ -217,7 +221,8 @@ fn load_bundled_fonts(cx: &App) {
 /// forward through those jumps; s opens or closes the source
 /// panel, Escape closes the file viewer, the source panel or the
 /// terminal pane, g opens the step readout to type a step into, and
-/// Ctrl+F or / opens the search box, and b bookmarks the playhead's step.
+/// Ctrl+F or / opens the search box, b bookmarks the playhead's step,
+/// and + and - zoom the timeline around the playhead, 0 back out.
 /// Ctrl+C copies the selected
 /// text and Ctrl+A selects all of the panel last clicked in; in the
 /// terminal pane, where Ctrl+C belongs to the command, Ctrl+Shift+C and
@@ -244,6 +249,11 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-f", OpenSearch, context),
         KeyBinding::new("/", OpenSearch, context),
         KeyBinding::new("b", AddBookmark, context),
+        KeyBinding::new("=", ZoomIn, context),
+        KeyBinding::new("+", ZoomIn, context),
+        KeyBinding::new("shift-=", ZoomIn, context),
+        KeyBinding::new("-", ZoomOut, context),
+        KeyBinding::new("0", ZoomReset, context),
         KeyBinding::new("s", ToggleSource, context),
         KeyBinding::new("ctrl-c", CopySelection, context),
         KeyBinding::new("ctrl-a", SelectAll, context),
