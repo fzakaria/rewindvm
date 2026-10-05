@@ -14,6 +14,7 @@ pub mod describe;
 pub mod engine;
 pub mod examples;
 pub mod family;
+pub mod history;
 pub mod license;
 pub mod memo;
 pub mod model;

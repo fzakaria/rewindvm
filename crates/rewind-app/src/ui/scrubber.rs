@@ -20,6 +20,7 @@ use crate::engine::{
     Engine, EngineError, EngineResult, FileAtStep, Forked, REPLAYS_ANOTHER_WAY, goes_another_way,
 };
 use crate::family::{Family, Row, RowKind, RunEntry, families, family_of, scan};
+use crate::history::History;
 use crate::memo::Memo;
 use crate::model::{LogFilter, Motion};
 use crate::request::{Request, Requests};
@@ -228,6 +229,15 @@ pub fn replay_unavailable(session: &Session, replay: Replay, importing: bool) ->
     Some(format!("{needs} {why}"))
 }
 
+/// How the pointer moved the playhead on the track.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scrub {
+    /// A press, which jumps.
+    Press,
+    /// A drag on from a press.
+    Drag,
+}
+
 /// The scrubber: one run, the playhead over it, and everything around.
 pub struct Scrubber {
     /// Kept for as long as the scrubber, which keeps its quit hook.
@@ -292,6 +302,8 @@ pub struct Scrubber {
     /// The Open link dialog, when it is open.
     pub(super) link_dialog: Option<LinkDialog>,
     pub(super) step: u64,
+    /// The steps the playhead jumped from, for Back and Forward.
+    pub(super) history: History,
     pub(super) log_filter: LogFilter,
     pub(super) log_scroll: UniformListScrollHandle,
     pub(super) files_scroll: UniformListScrollHandle,
@@ -370,6 +382,7 @@ impl Scrubber {
             runs_rows_memo: Memo::default(),
             identical_memo: Memo::default(),
             step: 0,
+            history: History::default(),
             log_filter: LogFilter::Output,
             log_scroll: UniformListScrollHandle::new(),
             files_scroll: UniformListScrollHandle::new(),
@@ -420,6 +433,14 @@ impl Scrubber {
                 format!("The run to compare with did not open: {why}"),
                 cx,
             );
+        }
+        // Steps jumped from in another run mean nothing in this one; the
+        // same run shown again, as an import does, keeps them.
+        let same_run = self.session.as_ref().is_some_and(|shown| {
+            shown.run.manifest.id.is_some() && shown.run.manifest.id == session.run.manifest.id
+        });
+        if !same_run {
+            self.history = History::default();
         }
         self.step = start;
         self.forks.clear();
@@ -970,8 +991,18 @@ impl Scrubber {
         cx.notify();
     }
 
+    /// Moves the playhead to `step` as a jump, which Back undoes.
+    pub(super) fn jump_to(&mut self, step: u64, cx: &mut Context<Self>) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        let step = step.min(session.run.timeline.total);
+        self.history.jumped(self.step, step);
+        self.go_to(step, cx);
+    }
+
     /// Moves the playhead by a motion: an event, a step, a phase, or to
-    /// one of the markers.
+    /// one of the markers. Motions that leave the neighbourhood are jumps.
     pub(super) fn go(&mut self, motion: Motion, cx: &mut Context<Self>) {
         let Some(session) = &self.session else {
             return;
@@ -980,16 +1011,40 @@ impl Scrubber {
             .run
             .timeline
             .seek(motion, self.step, session.divergence_step());
+        if motion.is_jump() {
+            self.jump_to(target, cx);
+            return;
+        }
         self.go_to(target, cx);
     }
 
-    /// Moves the playhead to a point along the track, from 0 to 1.
-    pub(super) fn scrub_to(&mut self, fraction: f32, cx: &mut Context<Self>) {
+    /// Moves the playhead back to the step it last jumped from.
+    pub(super) fn go_back(&mut self, cx: &mut Context<Self>) {
+        if let Some(step) = self.history.back(self.step) {
+            self.go_to(step, cx);
+        }
+        cx.notify();
+    }
+
+    /// Moves the playhead forward to the step Back last left.
+    pub(super) fn go_forward(&mut self, cx: &mut Context<Self>) {
+        if let Some(step) = self.history.forward(self.step) {
+            self.go_to(step, cx);
+        }
+        cx.notify();
+    }
+
+    /// Moves the playhead to a point along the track, from 0 to 1. A
+    /// press there is a jump; dragging on from it is not.
+    pub(super) fn scrub_to(&mut self, fraction: f32, scrub: Scrub, cx: &mut Context<Self>) {
         let Some(session) = &self.session else {
             return;
         };
         let step = session.run.timeline.step_at_fraction(fraction);
-        self.go_to(step, cx);
+        match scrub {
+            Scrub::Press => self.jump_to(step, cx),
+            Scrub::Drag => self.go_to(step, cx),
+        }
     }
 
     pub(super) fn toggle_console(&mut self, cx: &mut Context<Self>) {

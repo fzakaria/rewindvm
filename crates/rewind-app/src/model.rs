@@ -307,6 +307,25 @@ pub enum Motion {
     Divergence,
 }
 
+impl Motion {
+    /// Whether the motion leaves the playhead's neighbourhood, so Back
+    /// should be able to return from it: the ends, the phases and the
+    /// markers, but not an event or a step.
+    pub fn is_jump(self) -> bool {
+        match self {
+            Motion::Start
+            | Motion::End
+            | Motion::PreviousPhase
+            | Motion::NextPhase
+            | Motion::Failure
+            | Motion::Divergence => true,
+            Motion::PreviousEvent | Motion::NextEvent | Motion::StepBack | Motion::StepForward => {
+                false
+            }
+        }
+    }
+}
+
 /// The job's exit, as the guest's init reported it with its exit mark.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct JobExit {

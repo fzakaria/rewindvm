@@ -15,6 +15,9 @@ pub enum Icon {
     GoToStart,
     ChevronLeft,
     ChevronRight,
+    /// Back and Forward through the playhead's jumps.
+    Back,
+    Forward,
     Fork,
     Close,
     Minimize,
@@ -23,11 +26,13 @@ pub enum Icon {
 }
 
 impl Icon {
-    const ALL: [Icon; 9] = [
+    const ALL: [Icon; 11] = [
         Icon::Mark,
         Icon::GoToStart,
         Icon::ChevronLeft,
         Icon::ChevronRight,
+        Icon::Back,
+        Icon::Forward,
         Icon::Fork,
         Icon::Close,
         Icon::Minimize,
@@ -41,6 +46,8 @@ impl Icon {
             Icon::GoToStart => "icons/go-to-start.svg",
             Icon::ChevronLeft => "icons/chevron-left.svg",
             Icon::ChevronRight => "icons/chevron-right.svg",
+            Icon::Back => "icons/back.svg",
+            Icon::Forward => "icons/forward.svg",
             Icon::Fork => "icons/fork.svg",
             Icon::Close => "icons/close.svg",
             Icon::Minimize => "icons/minimize.svg",
@@ -59,6 +66,8 @@ impl Icon {
             Icon::GoToStart => ("2", r#"<path d="M6 5v14"/><path d="M18 5l-9 7 9 7z"/>"#),
             Icon::ChevronLeft => ("2.2", r#"<path d="M15 18l-6-6 6-6"/>"#),
             Icon::ChevronRight => ("2.2", r#"<path d="M9 18l6-6-6-6"/>"#),
+            Icon::Back => ("2", r#"<path d="M19 12H5"/><path d="M11 18l-6-6 6-6"/>"#),
+            Icon::Forward => ("2", r#"<path d="M5 12h14"/><path d="M13 18l6-6-6-6"/>"#),
             Icon::Fork => (
                 "2.2",
                 r#"<circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="8" r="2"/><path d="M6 7v10"/><path d="M18 10c0 4-6 3-12 7"/>"#,

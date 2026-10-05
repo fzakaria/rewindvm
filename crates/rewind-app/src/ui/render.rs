@@ -8,9 +8,9 @@ use std::path::Path;
 
 use gpui::{
     AnyElement, Bounds, ClickEvent, Context, CursorStyle, DispatchPhase, Div, FontWeight,
-    HighlightStyle, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels,
-    Point, Role, ScrollStrategy, SharedString, Window, canvas, div, fill, point, prelude::*, px,
-    relative, rgb, rgba, uniform_list,
+    HighlightStyle, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection,
+    PathBuilder, Pixels, Point, Role, ScrollStrategy, SharedString, Window, canvas, div, fill,
+    point, prelude::*, px, relative, rgb, rgba, uniform_list,
 };
 
 use crate::describe::{self, EventTone, short_store_paths, thousands};
@@ -22,7 +22,7 @@ use crate::theme::{self, layout, size};
 use crate::tour::Anchor;
 use crate::ui::chrome::client_tiling;
 use crate::ui::icons::Icon;
-use crate::ui::scrubber::{ForkState, NoticeAction, NoticeTone, Scrubber};
+use crate::ui::scrubber::{ForkState, NoticeAction, NoticeTone, Scrub, Scrubber};
 use crate::ui::selectable::{PID_CHARS, mapped, process_row, selectable, selects};
 use crate::ui::splits::{Edge, grip, measure};
 use crate::ui::tour::explore_button;
@@ -30,9 +30,9 @@ use crate::ui::widgets::{
     Availability, ButtonStyle, PillTone, button, icon, panel_title, pill, readout, tooltip,
 };
 use crate::ui::{
-    CopySelection, EnterLicense, ForkHere, GoToEnd, GoToStart, JumpToDivergence, JumpToFailure,
-    KEY_CONTEXT, NextEvent, NextPhase, OpenRun, PreviousEvent, PreviousPhase, SelectAll, StartTour,
-    StepBack, StepForward, ToggleSource,
+    CopySelection, EnterLicense, ForkHere, GoBack, GoForward, GoToEnd, GoToStart, JumpToDivergence,
+    JumpToFailure, KEY_CONTEXT, NextEvent, NextPhase, OpenRun, PreviousEvent, PreviousPhase,
+    SelectAll, StartTour, StepBack, StepForward, ToggleSource,
 };
 
 /// Header labels are cut to this many characters.
@@ -71,6 +71,16 @@ impl Render for Scrubber {
             .on_action(cx.listener(|this, _: &JumpToFailure, _, cx| this.go(Motion::Failure, cx)))
             .on_action(
                 cx.listener(|this, _: &JumpToDivergence, _, cx| this.go(Motion::Divergence, cx)),
+            )
+            .on_action(cx.listener(|this, _: &GoBack, _, cx| this.go_back(cx)))
+            .on_action(cx.listener(|this, _: &GoForward, _, cx| this.go_forward(cx)))
+            .on_mouse_down(
+                MouseButton::Navigate(NavigationDirection::Back),
+                cx.listener(|this, _, _, cx| this.go_back(cx)),
+            )
+            .on_mouse_down(
+                MouseButton::Navigate(NavigationDirection::Forward),
+                cx.listener(|this, _, _, cx| this.go_forward(cx)),
             )
             .on_action(cx.listener(|this, _: &ForkHere, _, cx| this.fork_here(cx)))
             .on_action(cx.listener(|this, _: &ToggleSource, _, cx| this.toggle_source(cx)))
@@ -622,7 +632,9 @@ impl Scrubber {
                     }
                     down_drag.set(true);
                     window.focus(&focus, cx);
-                    down_view.update(cx, |this, cx| this.scrub_to(along(e.position), cx));
+                    down_view.update(cx, |this, cx| {
+                        this.scrub_to(along(e.position), Scrub::Press, cx)
+                    });
                 });
 
                 // Moving with the button held drags the playhead.
@@ -635,7 +647,9 @@ impl Scrubber {
                         move_drag.set(false);
                         return;
                     }
-                    move_view.update(cx, |this, cx| this.scrub_to(along(e.position), cx));
+                    move_view.update(cx, |this, cx| {
+                        this.scrub_to(along(e.position), Scrub::Drag, cx)
+                    });
                 });
 
                 // Letting go anywhere ends the drag.
@@ -668,6 +682,37 @@ impl Scrubber {
         } else {
             Availability::Disabled
         };
+
+        // Back and Forward through the playhead's jumps.
+        let availability = |can: bool| {
+            if can {
+                Availability::Enabled
+            } else {
+                Availability::Disabled
+            }
+        };
+        let back = button(
+            "back",
+            ButtonStyle::Neutral,
+            availability(self.history.can_go_back()),
+        )
+        .aria_label("Back (Alt+Left)")
+        .tooltip(tooltip(BACK_NOTE))
+        .w(px(size::ICON_BUTTON_WIDTH))
+        .px_0()
+        .child(icon(Icon::Back, size::ICON_START, theme::TEXT))
+        .on_click(cx.listener(|this, _, _, cx| this.go_back(cx)));
+        let forward = button(
+            "forward",
+            ButtonStyle::Neutral,
+            availability(self.history.can_go_forward()),
+        )
+        .aria_label("Forward (Alt+Right)")
+        .tooltip(tooltip(FORWARD_NOTE))
+        .w(px(size::ICON_BUTTON_WIDTH))
+        .px_0()
+        .child(icon(Icon::Forward, size::ICON_START, theme::TEXT))
+        .on_click(cx.listener(|this, _, _, cx| this.go_forward(cx)));
 
         let start = button("to-start", ButtonStyle::Neutral, Availability::Enabled)
             .aria_label("Go to start (Home)")
@@ -728,6 +773,8 @@ impl Scrubber {
                     .flex()
                     .items_center()
                     .gap(px(size::CONTROL_GAP))
+                    .child(back)
+                    .child(forward)
                     .child(start)
                     .child(previous)
                     .child(next)
@@ -1748,6 +1795,9 @@ const COMPARED_PINNED_NOTE: &str = "The run you chose to compare against, which 
 const SOURCE_NOTE: &str = "The line of the program's own code the thread at the playhead was on, past the C library and other libraries, with the frames that called it. Rewind finds it in gdb on a throwaway copy of the VM at this step, and again when the playhead rests elsewhere. Key: s.";
 const GDB_NOTE: &str = "gdb on a throwaway copy of the VM at this step: its one CPU, stopped in the kernel and the process running there, with their symbols and sources. Breakpoints and watchpoints in user space stop only in that process. Breakpoints, step and continue run the copy forward; the recording does not change.";
 const SHELL_NOTE: &str = "A shell inside a throwaway copy of the VM at this step, in the process's directory with its environment, while everything else in the VM stays where it was. Nothing done in it changes the recording.";
+const BACK_NOTE: &str = "Back to where the playhead was before its last jump: to the failure, the divergence, a phase, an end, a clicked line or a step typed in. Key: Alt+Left, or the mouse's back button.";
+const FORWARD_NOTE: &str =
+    "Forward again, after Back. Key: Alt+Right, or the mouse's forward button.";
 const EXPORT_NOTE: &str = "Writes this run to one .rwd file, with its keyframes and inputs, that another machine can open, replay and fork.";
 
 /// A Runs panel row's text: the run's id and how it came to be, or what

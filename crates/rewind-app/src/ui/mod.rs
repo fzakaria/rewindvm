@@ -42,6 +42,8 @@ actions!(
         NextPhase,
         JumpToFailure,
         JumpToDivergence,
+        GoBack,
+        GoForward,
         ForkHere,
         ToggleSource,
         OpenRun,
@@ -188,7 +190,8 @@ fn load_bundled_fonts(cx: &App) {
 
 /// The keyboard map. Arrows move between events, Shift+arrows by one
 /// step, Page Up and Page Down between phases, Home and End to the ends,
-/// f to the failure and d to the divergence; s opens or closes the source
+/// f to the failure and d to the divergence, and Alt+arrows back and
+/// forward through those jumps; s opens or closes the source
 /// panel. Ctrl+C copies the selected
 /// text and Ctrl+A selects all of the panel last clicked in; in the
 /// terminal pane, where Ctrl+C belongs to the command, Ctrl+Shift+C and
@@ -208,6 +211,8 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("pagedown", NextPhase, context),
         KeyBinding::new("f", JumpToFailure, context),
         KeyBinding::new("d", JumpToDivergence, context),
+        KeyBinding::new("alt-left", GoBack, context),
+        KeyBinding::new("alt-right", GoForward, context),
         KeyBinding::new("s", ToggleSource, context),
         KeyBinding::new("ctrl-c", CopySelection, context),
         KeyBinding::new("ctrl-a", SelectAll, context),
