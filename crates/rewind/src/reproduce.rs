@@ -96,12 +96,12 @@ pub fn command(m: &Manifest) -> Result<Vec<String>, Unset> {
     if spec.mem_mib != crate::DEFAULT_MEM_MIB {
         flag(&mut args, "mem", spec.mem_mib.to_string());
     }
-    if spec.cpu == rewind_vmm::cpu::Model::Host {
+    if spec.cpu == rewind_vmm::CpuModel::Host {
         flag(&mut args, "cpu", "host".into());
     }
     let clock = match spec.clock {
         rewind_vmm::ClockSource::Exits => "exits",
-        rewind_vmm::ClockSource::Branches(rewind_vmm::pmu::Event::Instructions) => {
+        rewind_vmm::ClockSource::Branches(rewind_vmm::CounterEvent::Instructions) => {
             return Err(Unset("a clock that counts instructions".into()));
         }
         rewind_vmm::ClockSource::Branches(_) => "branches",
@@ -186,7 +186,7 @@ mod tests {
             schedule_from: 0,
             schedule_until: u64::MAX,
             inherited_schedules: Vec::new(),
-            cpu: rewind_vmm::cpu::Model::V3,
+            cpu: rewind_vmm::CpuModel::V3,
             clock: rewind_vmm::ClockSource::Exits,
             preemption: rewind_vmm::Preemption::AtExits,
             extras: rewind_vmm::Extras::Reserved,
@@ -251,9 +251,9 @@ mod tests {
         s.schedule_until = 200;
         s.cores = 4;
         s.mem_mib = 2048;
-        s.cpu = rewind_vmm::cpu::Model::Host;
+        s.cpu = rewind_vmm::CpuModel::Host;
         s.clock = rewind_vmm::ClockSource::Branches(
-            rewind_vmm::pmu::Event::AmdRetiredConditionalBranches,
+            rewind_vmm::CounterEvent::AmdRetiredConditionalBranches,
         );
         s.cmdline = format!("{BASE_CMDLINE} norandmaps");
         let mut m = manifest(

@@ -12,6 +12,7 @@ use kvm_bindings::{
 };
 use kvm_ioctls::{Kvm, VcpuFd};
 
+use crate::CpuModel;
 use crate::layout::*;
 
 /// The boot GDT: null, 64-bit code, data, and a TSS the vCPU's task
@@ -177,27 +178,12 @@ pub const SIGNATURE: &[u8; 12] = b"RewindRewind";
 
 const HYPERVISOR_LEAF: u32 = 0x4000_0000;
 
-/// The CPU a guest is shown.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Model {
-    /// The host's features, less the ones that break determinism. A run
-    /// made this way replays only on the same CPU model: software picks
-    /// code paths by the features it sees.
-    Host,
-    /// A fixed x86-64-v3 CPU: the same features, cache sizes, family and
-    /// address widths on every host that supports them, so a run replays
-    /// across machines.
-    #[default]
-    V3,
-}
-
 /// The host's CPUID shaped for a deterministic guest of the given model.
-pub fn cpuid(kvm: &Kvm, model: Model) -> Result<CpuId> {
+pub fn cpuid(kvm: &Kvm, model: CpuModel) -> Result<CpuId> {
     let host = host_cpuid(kvm)?;
     match model {
-        Model::Host => CpuId::from_entries(&host).context("building CPUID"),
-        Model::V3 => {
+        CpuModel::Host => CpuId::from_entries(&host).context("building CPUID"),
+        CpuModel::V3 => {
             let entries = baseline(&host)?;
             CpuId::from_entries(&entries).context("building CPUID")
         }

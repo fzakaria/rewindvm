@@ -12,6 +12,8 @@
 
 pub mod contents;
 mod event;
+pub mod machine;
+pub mod manifest;
 pub mod stop;
 
 use std::collections::BTreeMap;

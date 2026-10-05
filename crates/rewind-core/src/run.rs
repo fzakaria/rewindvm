@@ -15,29 +15,15 @@ use anyhow::{Context, Result, bail};
 use rewind_init::Job;
 use rewind_trace::{Event, EventKind, Trace, TraceWriter};
 use rewind_vmm::{Config, Machine, Observer, Outcome, Stop};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use crate::cpio;
 use crate::home::Home;
 
-pub const MANIFEST: &str = "manifest.json";
-pub const TRACE: &str = "trace.bin";
-
-/// The desktop app's bookmarks of a run, kept in the run's directory and
-/// carried in its exports. The engine never reads them.
-pub const BOOKMARKS: &str = "bookmarks.json";
-
-/// The version of the manifest format.
-const MANIFEST_VERSION: u32 = 1;
-
-/// How many hex digits of the hash of its inputs a run id keeps.
-const ID_LEN: usize = 16;
-
-/// Whether `id` is one `Spec::id` could give: ID_LEN lowercase hex digits,
-/// and so a name that stays inside the runs directory.
-pub fn is_run_id(id: &str) -> bool {
-    id.len() == ID_LEN && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-}
+pub use rewind_trace::manifest::{
+    BOOKMARKS, ID_LEN, MANIFEST, MANIFEST_VERSION, Manifest, RunOutcome, ScheduleSegment, Source,
+    Spec, TRACE, is_run_id,
+};
 
 /// The kernel command line every guest boots with. The first two keep the
 /// kernel from waiting on hardware time. loglevel=7 sends informational
@@ -81,109 +67,33 @@ pub fn default_epoch() -> u64 {
     now - now % DAY
 }
 
-/// Everything that determines a run. Two equal specs make equal runs.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Spec {
-    pub kernel: PathBuf,
-    pub initrd: PathBuf,
-    /// Where the kernel's DWARF is, for `rewind gdb`: the kernel package's
-    /// `debug` output, which may not be on this machine until it is
-    /// fetched. Not an input: it is left out of the run's id.
-    pub kernel_debug: Option<PathBuf>,
-    /// The input image and its BLAKE3 hash; the hash is what makes the
-    /// run's id, since the path can be reused.
-    pub image: Option<PathBuf>,
-    pub image_hash: Option<String>,
-    pub mem_mib: u64,
-    /// The CPUs the guest tells user space it has, through the affinity
-    /// system calls, sysfs and /proc/cpuinfo, and a Nix build's
-    /// NIX_BUILD_CORES. The VM has one vCPU whatever this is: threads
-    /// sized by the count interleave on it.
-    pub cores: u32,
-    pub seed: u64,
-    pub epoch: u64,
-    pub quantum: u64,
-    /// Perturbs where timer interrupts, and so preemptions, land; 0 for
-    /// none.
-    pub schedule: u64,
-    /// The steps the schedule perturbation applies to, `from..until`.
-    pub schedule_from: u64,
-    pub schedule_until: u64,
-    /// For a fork of a fork, the perturbations of the runs it came from,
-    /// each over its window and all ending by `schedule_from`, so the fork
-    /// is its parent up to its own step.
-    pub inherited_schedules: Vec<ScheduleSegment>,
-    /// The CPU the guest is shown.
-    pub cpu: rewind_vmm::cpu::Model,
-    /// What moves virtual time besides exits and idling.
-    pub clock: rewind_vmm::ClockSource,
-    /// Where a computing guest can be interrupted.
-    pub preemption: rewind_vmm::Preemption,
-    /// Whether the machine reserves the extras slot for `rewind shell
-    /// --with`.
-    pub extras: rewind_vmm::Extras,
-    pub cmdline: String,
-    pub job: Job,
-}
-
-/// One schedule seed over the steps `from..until`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ScheduleSegment {
-    pub seed: u64,
-    pub from: u64,
-    pub until: u64,
-}
-
-/// What kind of workload a run is, for display.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "mode", rename_all = "snake_case")]
-pub enum Source {
-    /// A command in a root filesystem.
-    Image { root: String },
-    /// A Nix derivation.
-    Nix { drv: String, outputs: Vec<String> },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RunOutcome {
-    /// How the machine stopped.
-    pub stop: String,
-    pub step: u64,
-    pub virtual_ns: u64,
-    /// The job's wait status, if init reported one.
-    pub status: Option<i32>,
-    pub wall_ms: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Manifest {
-    pub version: u32,
-    pub id: String,
-    pub name: String,
-    pub created: u64,
-    pub source: Source,
-    pub spec: Spec,
-    /// The run this one was forked from, and the step it was forked at.
-    pub parent: Option<(String, u64)>,
-    /// Where the keyframes this run did not take itself are: another run's,
-    /// up to the last step the two runs share.
-    pub shared_keyframes: Option<crate::keyframes::Shared>,
-    pub outcome: Option<RunOutcome>,
-    /// The BLAKE3 hash of trace.bin in hex, once the run has finished. Runs
-    /// with equal hashes did the same thing.
-    pub trace_hash: Option<String>,
-    /// For a fork, the step where its trace first differs from its
-    /// parent's; absent when the two are identical.
-    pub first_difference: Option<u64>,
-    /// The rewind that recorded the run, as [`crate::VERSION`] names it.
-    pub recorded_by: String,
-}
-
-impl Spec {
+/// What only the engine does with a spec: hash it into a run id, build
+/// the machine it describes, and tell how far two specs run alike.
+pub trait SpecExt {
     /// The run's id: the BLAKE3 hash of every input, short enough to type.
     /// Files count by their contents, not their paths, so a run keeps its
     /// id on another machine or after an import moves its inputs.
-    pub fn id(&self) -> String {
+    fn id(&self) -> String;
+
+    /// The last step through which a run of this spec and a run of
+    /// `other` are the same run: they differ only in their schedules, and
+    /// the schedules perturb the same steps the same way up to it. None
+    /// when anything else differs, u64::MAX when nothing does. A keyframe
+    /// of one run at or before this step is a keyframe of the other.
+    fn same_through(&self, other: &Spec) -> Option<u64>;
+
+    /// The 32 bytes the guest kernel seeds its RNG with.
+    fn rng_seed(&self) -> [u8; 32];
+
+    /// The kernel's command line: the spec's, then the CPU count.
+    fn boot_cmdline(&self) -> String;
+
+    /// The machine config: the base initramfs with the job appended.
+    fn config(&self) -> Result<Config>;
+}
+
+impl SpecExt for Spec {
+    fn id(&self) -> String {
         let mut inputs = self.clone();
         inputs.image = None;
         inputs.kernel_debug = None;
@@ -196,89 +106,26 @@ impl Spec {
         hash[..ID_LEN].to_string()
     }
 
-    /// The spec of a fork of this run at `step` under schedule `seed`:
-    /// this run's perturbations up to the step, the new one from it.
-    pub fn fork(&self, step: u64, seed: u64) -> Spec {
-        let own = ScheduleSegment {
-            seed: self.schedule,
-            from: self.schedule_from,
-            until: self.schedule_until,
-        };
-
-        // Each earlier perturbation is cut off at the fork step, and one
-        // that perturbs nothing before it is dropped.
-        let inherited = self
-            .inherited_schedules
-            .iter()
-            .chain(std::iter::once(&own))
-            .map(|s| ScheduleSegment {
-                until: s.until.min(step),
-                ..s.clone()
-            })
-            .filter(|s| s.seed != 0 && s.from < s.until)
-            .collect();
-        Spec {
-            schedule: seed,
-            schedule_from: step,
-            schedule_until: u64::MAX,
-            inherited_schedules: inherited,
-            ..self.clone()
-        }
-    }
-
-    /// The perturbations the machine applies.
-    fn schedule(&self) -> rewind_vmm::pv::Schedule {
-        rewind_vmm::pv::Schedule {
-            seed: self.schedule,
-            window: self.schedule_from..self.schedule_until,
-            earlier: self
-                .inherited_schedules
-                .iter()
-                .map(|s| rewind_vmm::pv::Segment {
-                    seed: s.seed,
-                    window: s.from..s.until,
-                })
-                .collect(),
-        }
-    }
-
-    /// The last step through which a run of this spec and a run of
-    /// `other` are the same run: they differ only in their schedules, and
-    /// the schedules perturb the same steps the same way up to it. None
-    /// when anything else differs, u64::MAX when nothing does. A keyframe
-    /// of one run at or before this step is a keyframe of the other.
-    pub fn same_through(&self, other: &Spec) -> Option<u64> {
+    fn same_through(&self, other: &Spec) -> Option<u64> {
         // Everything but the schedule must match, compared the way the id
         // compares it.
-        let unscheduled = |s: &Spec| Spec {
-            schedule: 0,
-            schedule_from: 0,
-            schedule_until: u64::MAX,
-            inherited_schedules: Vec::new(),
-            image: None,
-            kernel_debug: None,
-            ..s.clone()
-        };
-        if unscheduled(self) != unscheduled(other) {
+        if self.unscheduled() != other.unscheduled() {
             return None;
         }
-        Some(self.schedule().same_through(&other.schedule()))
+        Some(schedule(self).same_through(&schedule(other)))
     }
 
-    /// The 32 bytes the guest kernel seeds its RNG with.
-    pub fn rng_seed(&self) -> [u8; 32] {
+    fn rng_seed(&self) -> [u8; 32] {
         let mut hasher = blake3::Hasher::new_derive_key("rewind-vm guest rng seed");
         hasher.update(&self.seed.to_le_bytes());
         *hasher.finalize().as_bytes()
     }
 
-    /// The kernel's command line: the spec's, then the CPU count.
-    pub fn boot_cmdline(&self) -> String {
+    fn boot_cmdline(&self) -> String {
         format!("{} {CORES_PARAM}={}", self.cmdline, self.cores)
     }
 
-    /// The machine config: the base initramfs with the job appended.
-    pub fn config(&self) -> Result<Config> {
+    fn config(&self) -> Result<Config> {
         let mut initrd =
             fs::read(&self.initrd).with_context(|| format!("reading {}", self.initrd.display()))?;
         initrd.extend_from_slice(&job_archive(&self.job)?);
@@ -291,12 +138,28 @@ impl Spec {
             seed: self.rng_seed(),
             epoch: self.epoch,
             quantum: self.quantum,
-            schedule: self.schedule(),
+            schedule: schedule(self),
             cpu: self.cpu,
             clock: self.clock,
             preemption: self.preemption,
             extras: self.extras,
         })
+    }
+}
+
+/// The perturbations the machine applies for `spec`.
+fn schedule(spec: &Spec) -> rewind_vmm::pv::Schedule {
+    rewind_vmm::pv::Schedule {
+        seed: spec.schedule,
+        window: spec.schedule_from..spec.schedule_until,
+        earlier: spec
+            .inherited_schedules
+            .iter()
+            .map(|s| rewind_vmm::pv::Segment {
+                seed: s.seed,
+                window: s.from..s.until,
+            })
+            .collect(),
     }
 }
 
@@ -1797,7 +1660,7 @@ pub(crate) mod tests {
             schedule_from: 0,
             schedule_until: u64::MAX,
             inherited_schedules: Vec::new(),
-            cpu: rewind_vmm::cpu::Model::V3,
+            cpu: rewind_vmm::CpuModel::V3,
             clock: rewind_vmm::ClockSource::Exits,
             preemption: rewind_vmm::Preemption::AtExits,
             extras: rewind_vmm::Extras::Reserved,

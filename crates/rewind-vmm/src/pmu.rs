@@ -13,6 +13,8 @@ use std::io;
 
 use anyhow::{Context, Result, bail};
 
+use crate::CounterEvent;
+
 /// perf_event_attr, as far as this monitor uses it.
 #[repr(C)]
 #[derive(Default)]
@@ -76,20 +78,6 @@ pub(crate) fn overflow_signal() -> i32 {
     libc::SIGRTMIN() + 3
 }
 
-/// Which events to count.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Event {
-    /// AMD Zen's retired conditional branches (PMCx0D1), what rr counts on
-    /// AMD.
-    AmdRetiredConditionalBranches,
-    /// Intel's retired conditional branches (BR_INST_RETIRED.CONDITIONAL,
-    /// event 0xc4 umask 0x01), what rr counts on Intel.
-    IntelRetiredConditionalBranches,
-    /// Retired instructions, which some microarchitectures overcount.
-    Instructions,
-}
-
 /// Whether guest kernel mode is counted too. Counting it needs
 /// perf_event_paranoid at 1 or lower, or CAP_PERFMON.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -105,7 +93,7 @@ pub struct Counter {
 impl Counter {
     /// A counter of guest-mode events on the calling thread, which must be
     /// the vCPU's.
-    pub fn open(event: Event, modes: Modes) -> Result<Counter> {
+    pub fn open(event: CounterEvent, modes: Modes) -> Result<Counter> {
         let fd = open_event(event, modes, 0)?;
         // SAFETY: a counter fd we own.
         if unsafe { libc::ioctl(fd, PERF_EVENT_IOC_ENABLE as _, 0) } != 0 {
@@ -135,7 +123,7 @@ pub struct Overflow {
 
 impl Overflow {
     /// Must be called on the vCPU's thread, which the signal is sent to.
-    pub fn open(event: Event, modes: Modes) -> Result<Overflow> {
+    pub fn open(event: CounterEvent, modes: Modes) -> Result<Overflow> {
         install_signal_handler();
         // A period so large it never fires until armed.
         let fd = open_event(event, modes, 1 << 62)?;
@@ -215,12 +203,12 @@ fn read_count(fd: i32) -> Result<u64> {
 
 /// Opens a guest-mode counter on the calling thread, disabled; with a
 /// sample period, it overflows every that many events.
-fn open_event(event: Event, modes: Modes, sample_period: u64) -> Result<i32> {
+fn open_event(event: CounterEvent, modes: Modes, sample_period: u64) -> Result<i32> {
     {
         let (type_, config) = match event {
-            Event::AmdRetiredConditionalBranches => (PERF_TYPE_RAW, 0xd1),
-            Event::IntelRetiredConditionalBranches => (PERF_TYPE_RAW, 0x01c4),
-            Event::Instructions => (PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS),
+            CounterEvent::AmdRetiredConditionalBranches => (PERF_TYPE_RAW, 0xd1),
+            CounterEvent::IntelRetiredConditionalBranches => (PERF_TYPE_RAW, 0x01c4),
+            CounterEvent::Instructions => (PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS),
         };
         let mut flags = FLAG_DISABLED | FLAG_EXCLUDE_HV | FLAG_EXCLUDE_HOST;
         if modes == Modes::UserOnly {

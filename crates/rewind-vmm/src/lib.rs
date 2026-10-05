@@ -33,6 +33,7 @@ use kvm_ioctls::{Kvm, VcpuExit, VcpuFd, VmFd};
 use layout::*;
 use memory::Mapping;
 use pv::{Clock, GuestExit, Schedule};
+pub use rewind_trace::machine::{ClockSource, CounterEvent, CpuModel, Extras, Preemption};
 
 /// The memory slot of guest RAM, and of the input image.
 pub(crate) const SLOT_RAM: u32 = 0;
@@ -64,55 +65,13 @@ pub struct Config {
     /// Where to ask the guest to reschedule; see [`pv::Schedule`].
     pub schedule: Schedule,
     /// The CPU the guest is shown.
-    pub cpu: cpu::Model,
+    pub cpu: CpuModel,
     /// What moves virtual time besides exits and idling.
     pub clock: ClockSource,
     /// Where a guest that computes without exits can be interrupted.
     pub preemption: Preemption,
     /// Whether the machine reserves the extras slot (layout::EXTRAS_START).
     pub extras: Extras,
-}
-
-/// Whether a machine reserves the extras slot, empty persistent memory a
-/// fork can fill with more Nix packages (`rewind shell --with`). Every run
-/// reserves it; the PMU's self-test machine does not.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Extras {
-    #[default]
-    Absent,
-    Reserved,
-}
-
-/// Where the monitor may interrupt the guest.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Preemption {
-    /// Only at exits the guest makes: a thread computing without system
-    /// calls runs until it makes one.
-    #[default]
-    AtExits,
-    /// Experimental, with counter time only: also at the branch count
-    /// where the armed timer falls due, reached by arming the counter's
-    /// overflow short of it and single-stepping the rest. Single-stepping
-    /// sets the trap flag, which the guest can see through pushf and
-    /// syscall; a process that saves and restores it takes a SIGTRAP that
-    /// would not happen outside the VM, as a nixpkgs build of GNU hello
-    /// does. So it stays off until the steps are made invisible.
-    AtBranchCounts,
-}
-
-/// What virtual time follows.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ClockSource {
-    /// Exits and idling only: computation between exits takes no time.
-    #[default]
-    Exits,
-    /// Also the guest's work: every retired conditional branch in guest
-    /// user mode, counted by the host's performance counter, adds
-    /// [`PS_PER_BRANCH`] picoseconds.
-    Branches(pmu::Event),
 }
 
 /// Whether a step adds the per-exit quantum: an exit does, a step the
@@ -151,7 +110,7 @@ pub(crate) struct Work {
 const PREEMPT_MARGIN: u64 = 256;
 
 impl Work {
-    fn open(event: pmu::Event, base: u64) -> Result<Work> {
+    fn open(event: CounterEvent, base: u64) -> Result<Work> {
         Ok(Work {
             counter: pmu::Counter::open(event, pmu::Modes::UserOnly)?,
             overflow: pmu::Overflow::open(event, pmu::Modes::UserOnly)?,

@@ -195,11 +195,11 @@ enum CpuArg {
     Host,
 }
 
-impl From<CpuArg> for rewind_vmm::cpu::Model {
+impl From<CpuArg> for rewind_vmm::CpuModel {
     fn from(c: CpuArg) -> Self {
         match c {
-            CpuArg::V3 => rewind_vmm::cpu::Model::V3,
-            CpuArg::Host => rewind_vmm::cpu::Model::Host,
+            CpuArg::V3 => rewind_vmm::CpuModel::V3,
+            CpuArg::Host => rewind_vmm::CpuModel::Host,
         }
     }
 }

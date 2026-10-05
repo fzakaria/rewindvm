@@ -19,11 +19,12 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use rewind_init::{Job, Root};
-use rewind_vmm::pmu::{Counter, Event, Modes};
+use rewind_vmm::CounterEvent as Event;
+use rewind_vmm::pmu::{Counter, Modes};
 use rewind_vmm::{Ignore, Machine};
 
 use crate::home::Guest;
-use crate::run::{BASE_CMDLINE, DEFAULT_CORES, DEFAULT_QUANTUM, Spec};
+use crate::run::{BASE_CMDLINE, DEFAULT_CORES, DEFAULT_QUANTUM, Spec, SpecExt};
 
 /// Where to read about all this.
 pub const DOCS_URL: &str = "https://rewindvm.dev/counter-time.html";
@@ -295,7 +296,7 @@ pub fn selftest(guest: &Guest) -> Result<SelfTest> {
         schedule_from: 0,
         schedule_until: u64::MAX,
         inherited_schedules: Vec::new(),
-        cpu: rewind_vmm::cpu::Model::default(),
+        cpu: rewind_vmm::CpuModel::default(),
         clock: rewind_vmm::ClockSource::Exits,
         preemption: rewind_vmm::Preemption::AtExits,
         extras: rewind_vmm::Extras::Absent,

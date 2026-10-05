@@ -14,7 +14,7 @@ use anyhow::{Context, Result, bail};
 use rewind_store::Store;
 use rewind_vmm::snapshot::{Keyframe, Pages, ZERO_PAGE};
 use rewind_vmm::{Machine, Observer, Outcome};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 /// The wall time one stretch between keyframes aims for.
 pub const TARGET: Duration = Duration::from_millis(250);
@@ -110,14 +110,7 @@ fn own_steps(run_dir: &Path) -> Vec<u64> {
     steps
 }
 
-/// Keyframes a run reads from another run's directory instead of keeping
-/// copies: every one of that run's keyframes at or before `through`, the
-/// last step at which the two runs were still the same run.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Shared {
-    pub run: String,
-    pub through: u64,
-}
+pub use rewind_trace::manifest::SharedKeyframes as Shared;
 
 /// The one field of a manifest that says where else a run's keyframes are.
 #[derive(Deserialize)]

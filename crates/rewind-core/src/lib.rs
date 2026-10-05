@@ -27,4 +27,6 @@ pub use home::{Guest, Home};
 /// version, and in parentheses the commit it was built from when the
 /// build knew it, as in `0.4.1 (5a6d5c6b072e)`.
 pub const VERSION: &str = env!("REWIND_VERSION");
-pub use run::{Echo, Execution, Keyframes, Manifest, Run, RunOutcome, Source, Spec, TimeLimit};
+pub use run::{
+    Echo, Execution, Keyframes, Manifest, Run, RunOutcome, Source, Spec, SpecExt, TimeLimit,
+};
