@@ -26,6 +26,8 @@ const REMINDER_CHECK: Duration = Duration::from_secs(60);
 const REMINDER_TITLE: &str = "Rewind VM is unregistered";
 const REMINDER_BODY: &str =
     "It works fully while you evaluate it; a license is $49 personal or $99 per seat.";
+const UPDATES_ENDED_TITLE: &str = "Your license's updates have ended";
+const UPDATES_ENDED_PILL: &str = "Updates ended \u{b7} Renew";
 
 /// The dialog's backdrop: the window behind it, dimmed.
 const BACKDROP_A: u32 = 0x0000_00a0;
@@ -61,8 +63,9 @@ impl Licensing {
         }
     }
 
+    /// Whether this version runs registered, without reminders.
     fn is_registered(&self) -> bool {
-        matches!(self.registration, Registration::Registered(_))
+        self.registration.covers_this_version()
     }
 }
 
@@ -102,19 +105,29 @@ impl Scrubber {
         }
     }
 
-    /// Shows the reminder, unless one is already up.
+    /// Shows the reminder, unless one is already up. A license whose
+    /// updates ended before this version gets its own words.
     fn remind(&mut self, cx: &mut Context<Self>) {
         let showing = self
             .notices
             .iter()
-            .any(|n| n.title.as_ref() == REMINDER_TITLE);
+            .any(|n| [REMINDER_TITLE, UPDATES_ENDED_TITLE].contains(&n.title.as_ref()));
         if showing {
             return;
         }
+        let (title, body) = match &self.licensing.registration {
+            Registration::Registered(license) => (
+                UPDATES_ENDED_TITLE,
+                updates_ended_body(license.updates_until),
+            ),
+            Registration::Unregistered | Registration::Invalid(_) => {
+                (REMINDER_TITLE, REMINDER_BODY.to_string())
+            }
+        };
         self.offer(
             NoticeTone::Info,
-            REMINDER_TITLE,
-            REMINDER_BODY,
+            title,
+            body,
             vec![
                 NoticeAction::Buy,
                 NoticeAction::EnterLicense,
@@ -167,12 +180,17 @@ impl Scrubber {
         self.close_license_dialog(window, cx);
         match license::save(&text) {
             Ok(path) => {
-                self.notify_user(
-                    NoticeTone::Info,
-                    format!("Registered to {}", license.name),
-                    format!("Thank you. The license is kept in {}.", path.display()),
-                    cx,
-                );
+                let title = match license.coverage() {
+                    Coverage::Current => format!("Registered to {}", license.name),
+                    Coverage::EndedBefore(_) => UPDATES_ENDED_TITLE.to_string(),
+                };
+                let body = match license.coverage() {
+                    Coverage::Current => {
+                        format!("Thank you. The license is kept in {}.", path.display())
+                    }
+                    Coverage::EndedBefore(until) => updates_ended_body(until),
+                };
+                self.notify_user(NoticeTone::Info, title, body, cx);
             }
             Err(e) => {
                 self.notify_user(
@@ -184,23 +202,21 @@ impl Scrubber {
             }
         }
         self.licensing.registration = Registration::Registered(license);
-        self.notices.remove_titled(REMINDER_TITLE);
+        if self.licensing.is_registered() {
+            self.notices.remove_titled(REMINDER_TITLE);
+        }
         cx.notify();
     }
 
     /// The header's license pill: "Unregistered", which opens the dialog,
-    /// or the licensee, with the versions an older license covers.
+    /// the licensee, or that the license's updates ended before this
+    /// version.
     pub(super) fn render_license_pill(&self, cx: &mut Context<Self>) -> Div {
         let fonts = &self.fonts;
         let label = match &self.licensing.registration {
             Registration::Registered(license) => match license.coverage() {
                 Coverage::Current => license.name.clone(),
-                Coverage::EndedBefore(until) => {
-                    format!(
-                        "{} \u{b7} License covers versions until {until}",
-                        license.name
-                    )
-                }
+                Coverage::EndedBefore(_) => UPDATES_ENDED_PILL.to_string(),
             },
             Registration::Unregistered | Registration::Invalid(_) => "Unregistered".to_string(),
         };
@@ -371,6 +387,14 @@ impl Scrubber {
     }
 }
 
+/// What a license whose updates ended before this version means.
+fn updates_ended_body(until: license::Date) -> String {
+    format!(
+        "It registers the versions released until {until}. This one, released {}, runs fully as an evaluation; a new license covers it and 3 more years of updates.",
+        license::RELEASE_DATE
+    )
+}
+
 /// What checking the pasted text said, in its color.
 fn verdict(result: &Option<Result<License, LicenseError>>) -> Option<(u32, String)> {
     match result {
@@ -378,9 +402,7 @@ fn verdict(result: &Option<Result<License, LicenseError>>) -> Option<(u32, Strin
         Some(Ok(license)) => {
             let coverage = match license.coverage() {
                 Coverage::Current => String::new(),
-                Coverage::EndedBefore(until) => {
-                    format!(" Updates ended {until}; this version still registers.")
-                }
+                Coverage::EndedBefore(until) => format!(" {}", updates_ended_body(until)),
             };
             Some((
                 theme::GREEN_SOFT,

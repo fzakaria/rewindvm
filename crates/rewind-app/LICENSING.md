@@ -34,10 +34,11 @@ indentation and text around the block. The app keeps the block in
 
 - Personal and Commercial licenses both include 3 years of updates
   (`UPDATE_YEARS` in `src/license.rs`). `Updates-Until` is what counts.
-- A license whose `Updates-Until` is before the app's release date
-  (`RELEASE_DATE` in `src/license.rs`) still registers that version; the
-  header says "License covers versions until <date>". Raise
-  `RELEASE_DATE` with every release.
+- A license registers every version released on or before its
+  `Updates-Until`, forever. A version released after it
+  (`RELEASE_DATE` in `src/license.rs`) runs as an evaluation, fully and
+  with the reminders, and the header says "Updates ended · Renew"; a new
+  license covers it. Raise `RELEASE_DATE` with every release.
 - Ids in `REVOKED` (refunds, leaked keys) are refused. Revocation takes
   effect in the next release.
 

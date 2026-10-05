@@ -31,8 +31,8 @@ pub const PUBLIC_KEY: [u8; 32] = [
 pub const REVOKED: &[&str] = &[];
 
 /// The day this version of the app was released. A license whose updates
-/// ended before it still registers the app, and the header says which
-/// versions it covers.
+/// ended before it registers only the versions released until then; this
+/// one runs as an evaluation, fully, with the reminders.
 pub const RELEASE_DATE: Date = Date {
     year: 2026,
     month: 10,
@@ -224,7 +224,8 @@ impl std::error::Error for LicenseError {}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Coverage {
     Current,
-    /// Updates ended before this version; the license still registers it.
+    /// Updates ended before this version was released, which runs as an
+    /// evaluation; the license registers the versions released until then.
     EndedBefore(Date),
 }
 
@@ -373,6 +374,17 @@ pub enum Registration {
     Registered(License),
     /// A license file is there but does not check out.
     Invalid(String),
+}
+
+impl Registration {
+    /// Whether this version runs registered: under a license that checks
+    /// out and whose updates had not ended when this version was released.
+    pub fn covers_this_version(&self) -> bool {
+        match self {
+            Registration::Registered(license) => license.coverage() == Coverage::Current,
+            Registration::Unregistered | Registration::Invalid(_) => false,
+        }
+    }
 }
 
 /// Reads and checks the stored license.
@@ -574,6 +586,21 @@ mod tests {
         );
         license.updates_until = RELEASE_DATE;
         assert_eq!(license.coverage(), Coverage::Current);
+    }
+
+    #[test]
+    fn a_license_whose_updates_ended_leaves_this_version_evaluating() {
+        // A license registers the versions released while its updates
+        // ran. A version released after they ended runs as an evaluation,
+        // as an unregistered copy or one with a license that does not
+        // check out does.
+        let mut license = sample();
+        license.updates_until = RELEASE_DATE;
+        assert!(Registration::Registered(license.clone()).covers_this_version());
+        license.updates_until = Date::parse("2026-09-29").unwrap();
+        assert!(!Registration::Registered(license).covers_this_version());
+        assert!(!Registration::Unregistered.covers_this_version());
+        assert!(!Registration::Invalid("bad".into()).covers_this_version());
     }
 
     #[test]
