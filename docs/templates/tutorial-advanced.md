@@ -10,7 +10,7 @@ and in the desktop app. They use the Nix tutorial's runs and install.
 ## The runs
 
 ```console run name=check
-$ rewind check --epoch {{epoch}} {{flake}} | grep -E 'ends differently|perturbing only|passing:|failing:'
+$ rewind check --epoch {{epoch}} {{flake}} | grep -E 'ends differently|perturbing only|passing:|failing:|open both'
 ```
 
 <!-- capture passing: passing: run (\w+) -->
@@ -55,11 +55,25 @@ $ rewind gdb {{failing|short}} {{last_write}} --pid {{pid}} -- -batch -ex 'threa
 
 <!-- assert: grep -q 'in pool_shutdown .* at src/pool.c:128' {{out:all_bt}} && grep -q 'in main () at tests/test_pool_shutdown.c' {{out:all_bt}} -->
 
-Both read each thread's registers from the VM kernel's task list, so they
-work on runs recorded with a guest that lists its tasks, as these were.
+<!-- set main_frame: rewind where {{failing}} {{last_write}} --tid {{pid}} --json 2>/dev/null | jq .chosen -->
+
+`rewind gdb` starts in the thread `rewind where` looks at, in its innermost
+frame. `--tid` and `--frame` start it elsewhere, with frames numbered as
+`where --json` numbers them. In the main thread's frame that `where` chose,
+`pool_shutdown` has already set the queue to NULL:
+
+```console run name=gdb_frame
+$ rewind gdb {{failing|short}} {{last_write}} --tid {{pid}} --frame {{main_frame}} -- -batch -ex 'p p->queue'
+```
+
+<!-- assert: grep -q 'in pool_shutdown .* at src/pool.c:128' {{out:gdb_frame}} && grep -q '(struct queue \*) 0x0' {{out:gdb_frame}} -->
+
+`where` and gdb read each thread's registers from the VM kernel's task list,
+so they work on runs recorded with a guest that lists its tasks, as these
+were.
 
 In the app, Show source under Inspect, or the s key, opens the source panel
-in place of At this step. It names the line `rewind where` would for the
+in a tab beside At this step. It names the line `rewind where` would for the
 thread of the playhead's event and shows that line's whole source file,
 syntax colored, scrolled so the line, marked, sits in the middle. The thread's frames are
 listed in a short list pinned below the file, with the chosen one marked.
@@ -180,26 +194,62 @@ $ rewind fork {{failing|short}} {{fork_from}} --schedule 4 --quiet
 
 <!-- assert: grep -q 'exited:0' {{out:forks}} && grep -q 'exited:[1-9]' {{out:forks}} -->
 
-The app's Runs panel shows every run of the build, with forks under the run
-and step they branched from:
+The app's Runs tab, or the runs pill in its header, shows every run of the
+build, with forks under the run and step they branched from:
 
 <!-- screenshot site/img/app-runs: {{home}}/runs/{{failing}} --compare {{home}}/runs/{{passing}} --step {{crash_step}} ;; click 785 27 ;; wait 3 -->
 
 ![The app's Runs panel: check's schedules, and the forks of the failing run, failing and passing](../site/img/app-runs.png)
 
+## Find a run again
+
+A command takes a run by its id or the start of one, by `@` for the newest
+run and `@2`, `@3` and on for the ones before it, by a name for the newest
+run with that name, or by its directory. `rewind ls` lists runs newest first,
+and filters them:
+
+```console run name=ls
+$ rewind ls -n 3
+$ rewind ls --forks-of {{failing|short}} --status failed
+```
+
+<!-- assert: rewind ls -n 1 | grep -q 'fork of {{failing}} at {{fork_from}}, schedule 4)' -->
+
+`--name mylib` keeps the runs whose name contains `mylib`, and `--since` the
+runs made in the last `30m`, `2h` or `7d`, or since a day such as
+`2026-10-01`.
+`--status` takes `passed`, `failed`, `timed-out`, `running`, `interrupted` or
+`unreadable`, and `failed` takes timed-out runs too. A Nix run is named after
+its derivation, and `--name` names any run.
+
+`rewind open` starts the app on a run, at a step and beside another run.
+`check` and `fork` print the command that opens what they made, as the last
+line of `check` above shows. The failing run at the crash, beside the passing
+one:
+
+```console
+$ rewind open {{failing|short}} {{crash_step}} --compare {{passing|short}}
+```
+
 ## Rebuild a run exactly
 
-<!-- set spec: python3 -c 'import json,sys; s=json.load(open(sys.argv[1]))["spec"]; print(s["epoch"], s["schedule"], s["schedule_from"], s["schedule_until"])' {{home}}/runs/{{failing}}/manifest.json -->
-<!-- set s_epoch: echo {{spec}} | awk '{print $1}' -->
-<!-- set s_schedule: echo {{spec}} | awk '{print $2}' -->
-<!-- set s_from: echo {{spec}} | awk '{print $3}' -->
-<!-- set s_until: echo {{spec}} | awk '{print $4}' -->
+A run's id is the hash of its inputs, which its `manifest.json` lists, so the
+same command makes the same run on a machine with the same CPU vendor and
+guest. `rewind show` prints that command with every input spelled out, the
+epoch above all, which by default is the start of the day the run was made.
+For a fork it prints its parents' commands first, each with the id it makes.
+`@`, the newest run, is the schedule 4 fork:
 
-A run's id is the hash of its inputs, which its `manifest.json` lists. The
-same flags make the same run:
+```console run name=show elide
+$ rewind show @
+```
 
-```console run name=rebuild
-$ rewind nix --quiet --epoch {{s_epoch}} --schedule {{s_schedule}} --schedule-from {{s_from}} --schedule-until {{s_until}} {{flake}}
+<!-- assert: grep -q '# {{failing}}$' {{out:show}} && grep -q '^rewind fork {{failing}} {{fork_from}} --schedule 4  # ' {{out:show}} -->
+
+The failing run's command makes it again, with the same id:
+
+```console run name=rebuild show=-1:
+$ rewind show {{failing|short}} | tail -1 | sh
 ```
 
 <!-- assert: grep -q 'run {{failing}} ' {{out:rebuild}} -->
@@ -220,6 +270,56 @@ timeline and in the divergence card:
 
 ![The app at the step where the failing run leaves the passing one, with the divergence card naming both threads' writes](../site/img/app-compare.png)
 
+## Script it
+
+`run`, `nix` and `fork` exit with the job's status, as a shell would report
+it, so a shell loop can ask which schedules fail from a step:
+
+```console run name=loop
+$ for s in 5 6 7 8; do rewind fork {{failing|short}} {{fork_from}} --schedule $s --quiet 2>/dev/null; echo "schedule $s: exit $?"; done
+```
+
+<!-- assert: test $(grep -c '^schedule [5-8]: exit [0-9]*$' {{out:loop}}) -eq 4 -->
+
+`check` exits 1 when a schedule ends differently and 0 when none does, `diff`
+1 when the runs differ, `cat` 3 when the file did not exist at the step, and
+`doctor` 1 when this machine cannot record runs. With `--json`, commands
+print JSON for a program to read in place of their text: one object, or from
+`ls` and `events` one a line.
+
+```console run name=json
+$ rewind ls --forks-of {{failing|short}} --status failed --json | jq -r .id
+$ rewind diff {{passing|short}} {{failing|short}} --json | jq -c '.divergence | {left_step, right_step}'
+```
+
+<!-- assert: grep -q '"left_step":[0-9]*,"right_step":[0-9]*' {{out:json}} -->
+
+## Move around a long run
+
+Builds of larger projects run to hundreds of thousands of steps. In the app,
+the step readout is a field: click it, or press g, and type a step such as
+3,495, or +100 or -100 to move from the playhead. Previous and Next, and the
+Left and Right keys, stop where the Stop at chooser beside them says: at every
+event, the build log's lines, processes starting and exiting, the bookmarks,
+or the thread, process, kind of event or file of the event at the playhead. A
+click on a log line, a file's step or a process goes to its step.
+
+Alt+Left and Alt+Right, or the mouse's back and forward buttons, go back and
+forward through jumps, so a press of f or d can be undone. The b key
+bookmarks the playhead's step with a note: the timeline marks it, the
+Bookmarks tab lists every bookmark, and they are kept with the run. Ctrl+F or
+/ searches the build log, the kernel's console, file paths and events, and
+lists the matches by step.
+
+The wheel over the timeline zooms around the pointer, down to 16 steps
+across; Shift and the wheel pan, + and - zoom around the playhead, and 0 shows
+the whole run. A label names the step under the pointer. The ? key, or the ?
+button in the header, opens the sheet of every key:
+
+<!-- screenshot site/img/app-keys: {{home}}/runs/{{failing}} --compare {{home}}/runs/{{passing}} --step {{crash_step}} ;; key question ;; wait 1 -->
+
+![The app's sheet of keys: moving the playhead, the timeline, looking around, and the app](../site/img/app-keys.png)
+
 ## Hand a failure to someone else
 
 ```console run
@@ -233,7 +333,8 @@ $ REWIND_HOME=elsewhere rewind replay {{failing|short}}
 A replayable export carries the keyframes, the image and the VM's kernel, and
 replays on any machine with the same CPU vendor. Without `--replayable` it is
 the events alone, {{small}}: enough to read and to scrub in the app, whose
-Export button writes the replayable kind.
+Export button writes the replayable kind. Either kind carries the run's
+bookmarks from the app, notes included.
 
 ## Which clock
 
@@ -243,7 +344,39 @@ $ rewind pmu status
 
 With counter time the VM's clock follows the work done inside it; with exit
 time computation takes no virtual time. `--clock` picks one. [Counter
-time](pmu.md) explains.
+time](pmu.md) explains. `rewind doctor` checks the clock with KVM, gdb and
+the rest of what rewind uses, and says what to do about each problem.
+
+## Find where a run hung
+
+A thread gives up the VM's one CPU only at a step, so a loop that makes no
+system call keeps it, and the run hangs. `--timeout` stops a run after that
+many seconds on your machine. When the guest had gone a second or more
+without an exit, rewind says where it was stuck. A program that spins, built
+static with its symbols:
+
+```console run hide
+$ printf 'volatile unsigned long n;\nint main(void) { for (;;) n++; }\n' > spin.c
+$ mkdir -p spin/bin
+$ nix shell nixpkgs#pkgsStatic.stdenv.cc -c x86_64-unknown-linux-musl-cc -static -g -o spin/bin/spin spin.c
+```
+
+```console run name=spin show=-1:
+$ rewind run --root spin --timeout 5 --name spin -- /bin/spin
+```
+
+<!-- assert: grep -q 'timed out computing without exits for [0-9.]*s, in user space in main[+0-9]* (spin.c:2), process [0-9]* (spin)' {{out:spin}} -->
+
+The place is a function, offset and source line from the program's symbols,
+and the process the VM's kernel had on the CPU. A run that timed out while
+still making exits was slow rather than stuck, and says so. `rewind check`
+gives each perturbed schedule ten times as long as schedule 0 took, and at
+least a minute, and names the place the same way for a schedule that hit its
+limit. `--status timed-out` lists such runs:
+
+```console run
+$ rewind ls --status timed-out
+```
 
 ## Keep the run directory tidy
 
