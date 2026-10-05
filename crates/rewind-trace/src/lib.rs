@@ -10,6 +10,7 @@
 //! had printed, which files they had written, which phase the build was
 //! in, and where two runs first went different ways.
 
+pub mod contents;
 mod event;
 pub mod stop;
 

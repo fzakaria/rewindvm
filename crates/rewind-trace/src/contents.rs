@@ -1,0 +1,205 @@
+//! Which contents a file had at a step of a run, as far as its trace
+//! tells.
+//!
+//! A file keeps its contents until something writes, renames or unlinks
+//! it, and the trace records each of those, so whatever reads a file at one
+//! step can serve every step with the same last such event: the engine's
+//! cache of source files out of the VM, and the desktop app's file viewer.
+
+use std::path::{Component, Path, PathBuf};
+
+use crate::{EventKind, Trace};
+
+/// Which contents a path had at a step, as far as the trace tells.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Version {
+    /// No event wrote, renamed or unlinked the path, or a directory above
+    /// it, up to the step: it holds what the run started with.
+    Original,
+    /// The last such event was at this step, and nothing writes the file
+    /// since: a rename or an unlink, or an open for writing by a process
+    /// that had exited by the step.
+    Since(u64),
+    /// A process that opened the file for writing was still running at the
+    /// step, and may write more. Not kept.
+    Changing,
+}
+
+/// The version of `path` at `step` of the run `trace` is of.
+///
+/// An open for writing marks only the start of the writes, which the
+/// trace does not record one by one, so its version is finished once the
+/// process that opened the file has exited. A process it forked after
+/// opening could hold the file open longer; builds do not write source
+/// files that way.
+pub fn version(trace: &Trace, path: &str, step: u64) -> Version {
+    // Events name absolute paths without `.` or `..`.
+    let Some(path) = normal(path) else {
+        return Version::Changing;
+    };
+    let path = path.as_str();
+
+    // The last event up to the step that changed the path.
+    let events = trace.until(step);
+    let Some(last) = events.iter().rposition(|e| changes(&e.kind, path)) else {
+        return Version::Original;
+    };
+    let event = &events[last];
+    let EventKind::Open { .. } = event.kind else {
+        return Version::Since(event.step);
+    };
+
+    // An open is finished once its process has exited.
+    let exited = events[last..]
+        .iter()
+        .any(|e| e.pid == event.pid && matches!(e.kind, EventKind::Exit { thread: false, .. }));
+    if exited {
+        Version::Since(event.step)
+    } else {
+        Version::Changing
+    }
+}
+
+/// An absolute path with its `.` and `..` components resolved, as the
+/// kernel resolves them when no symbolic link is on the way, such as
+/// /build/mylib/src/pool.h for /build/mylib/tests/../src/pool.h. None for
+/// a relative path.
+pub fn normal(path: &str) -> Option<String> {
+    let path = Path::new(path);
+    if !path.is_absolute() {
+        return None;
+    }
+    let mut parts: Vec<&std::ffi::OsStr> = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => parts.push(part),
+            Component::ParentDir => {
+                parts.pop();
+            }
+            Component::RootDir | Component::CurDir | Component::Prefix(_) => {}
+        }
+    }
+    let joined: PathBuf = parts.iter().collect();
+    Some(format!("/{}", joined.to_str()?))
+}
+
+/// Whether an event of `kind` changes the file at `path`: writes it,
+/// renames or unlinks it, or renames or removes a directory above it.
+fn changes(kind: &EventKind, path: &str) -> bool {
+    let at_or_above = |changed: &str| {
+        path == changed
+            || path
+                .strip_prefix(changed)
+                .is_some_and(|rest| rest.starts_with('/'))
+    };
+    match kind {
+        EventKind::Open { path: opened, .. } => opened == path,
+        EventKind::Unlink { path: unlinked } => at_or_above(unlinked),
+        EventKind::Rename { from, to } => at_or_above(from) || at_or_above(to),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // The version of a path from hand-built traces of a Nix build's
+    // unpacking, renaming and cleaning up.
+    use super::*;
+    use crate::Event;
+
+    /// An event of `kind` by process `pid` at `step`.
+    fn event(step: u64, pid: u32, kind: EventKind) -> Event {
+        Event {
+            step,
+            pid,
+            tid: pid,
+            kind,
+        }
+    }
+
+    fn open(step: u64, pid: u32, path: &str) -> Event {
+        event(
+            step,
+            pid,
+            EventKind::Open {
+                path: path.into(),
+                flags: 0o301,
+            },
+        )
+    }
+
+    fn exit(step: u64, pid: u32) -> Event {
+        event(
+            step,
+            pid,
+            EventKind::Exit {
+                status: 0,
+                comm: "tar".into(),
+                thread: false,
+            },
+        )
+    }
+
+    /// tar, pid 76, writes pool.c at 10 and exits at 20; mv, pid 80,
+    /// renames the tree at 30; rm, pid 90, unlinks pool.c at 40.
+    fn build() -> Trace {
+        Trace {
+            events: vec![
+                open(10, 76, "/build/src/pool.c"),
+                exit(20, 76),
+                event(
+                    30,
+                    80,
+                    EventKind::Rename {
+                        from: "/build/src".into(),
+                        to: "/build/mylib".into(),
+                    },
+                ),
+                event(
+                    40,
+                    90,
+                    EventKind::Unlink {
+                        path: "/build/mylib/pool.c".into(),
+                    },
+                ),
+            ],
+        }
+    }
+
+    #[test]
+    fn a_path_s_version_is_its_last_finished_change() {
+        // Before tar opens pool.c it is the original; while tar runs it is
+        // changing; once tar exits it is the version tar wrote. Renaming
+        // the directory above a path, or unlinking the path, is a version
+        // too. A path no event names stays the original, a path through
+        // `..` is the one it leads to, and a relative path, which no event
+        // names, is taken to be changing.
+        let trace = build();
+        assert_eq!(version(&trace, "/build/src/pool.c", 5), Version::Original);
+        assert_eq!(version(&trace, "/build/src/pool.c", 15), Version::Changing);
+        assert_eq!(version(&trace, "/build/src/pool.c", 25), Version::Since(10));
+        assert_eq!(version(&trace, "/build/src/pool.c", 35), Version::Since(30));
+        assert_eq!(
+            version(&trace, "/build/mylib/pool.c", 35),
+            Version::Since(30)
+        );
+        assert_eq!(
+            version(&trace, "/build/mylib/pool.c", 45),
+            Version::Since(40)
+        );
+        assert_eq!(
+            version(&trace, "/build/mylib/main.c", 45),
+            Version::Since(30)
+        );
+        assert_eq!(
+            version(&trace, "/build/mylibx/main.c", 45),
+            Version::Original
+        );
+        assert_eq!(version(&trace, "/src/main.c", 45), Version::Original);
+        assert_eq!(
+            version(&trace, "/build/src/./tests/../pool.c", 25),
+            Version::Since(10)
+        );
+        assert_eq!(version(&trace, "src/pool.c", 5), Version::Changing);
+    }
+}
