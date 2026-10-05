@@ -837,13 +837,14 @@ impl Scrubber {
         let list = uniform_list(
             "log",
             count,
-            cx.processor(move |this, range: std::ops::Range<usize>, _window, _cx| {
+            cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
                 let lines = this.session().run.timeline.lines(this.log_filter);
                 let registry = this.selecting.registry.clone();
                 range
                     .map(|i| {
                         let line = &lines[i];
                         let now = i + 1 == count;
+                        let seek = seek_on_click(line.step, cx);
                         let color = match line.tone {
                             Tone::Error => theme::RED,
                             Tone::Phase => theme::AMBER,
@@ -863,7 +864,9 @@ impl Scrubber {
                             .items_center()
                             .gap(px(size::LOG_COLUMN_GAP))
                             .px(px(size::PANEL_PAD_X))
+                            .hover(|s| s.bg(rgb(theme::ROW_HOVER)))
                             .when(now, |d| d.bg(rgb(theme::ROW_NOW)))
+                            .on_click(seek)
                             .child(
                                 div()
                                     .flex_none()
@@ -957,11 +960,16 @@ impl Scrubber {
                     (id_end..text.len(), color_only(label_color)),
                 ];
                 div()
+                    .id(SharedString::from(format!("proc-{i}")))
                     .flex()
                     .w_full()
                     .flex_none()
                     .items_center()
                     .h(px(size::LIST_ROW_HEIGHT))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgb(theme::ROW_HOVER)))
+                    .on_click(seek_on_click(row.start, cx))
+                    .tooltip(tooltip(PROCESS_ROW_NOTE))
                     .pl(px(size::PANEL_PAD_X + row.depth as f32 * size::TREE_INDENT))
                     .pr(px(size::PANEL_PAD_X))
                     .child(
@@ -1004,15 +1012,16 @@ impl Scrubber {
                             FileOp::Output => "out",
                         };
 
-                        // A click opens the file in the viewer; a drag or a
+                        // A click on the step goes there; a click anywhere
+                        // else opens the file in the viewer. A drag or a
                         // double click selects its path instead.
                         let (path, pid) = (file.path.clone(), file.pid);
                         let open = cx.listener(move |this, e: &ClickEvent, _, cx| {
-                            let selecting = this.selected_text().is_some();
-                            if e.click_count() == 1 && !selecting {
+                            if this.plain_click(e) {
                                 this.open_file(path.clone(), pid, cx)
                             }
                         });
+                        let seek = seek_on_click(file.step, cx);
                         let text = mapped(&file.path).shown;
                         let part = selected
                             .as_ref()
@@ -1032,11 +1041,15 @@ impl Scrubber {
                             .px(px(size::PANEL_PAD_X))
                             .child(
                                 div()
+                                    .id(SharedString::from(format!("file-step-{i}")))
                                     .flex_none()
                                     .w(step_width)
                                     .flex()
                                     .justify_end()
                                     .text_color(rgb(theme::FAINT))
+                                    .hover(|s| s.text_color(rgb(theme::AMBER)))
+                                    .on_click(seek)
+                                    .tooltip(tooltip(FILE_STEP_NOTE))
                                     .child(thousands(file.step)),
                             )
                             .child(
@@ -1798,6 +1811,8 @@ const COMPARED_PINNED_NOTE: &str = "The run you chose to compare against, which 
 const SOURCE_NOTE: &str = "The line of the program's own code the thread at the playhead was on, past the C library and other libraries, with the frames that called it. Rewind finds it in gdb on a throwaway copy of the VM at this step, and again when the playhead rests elsewhere. Key: s.";
 const GDB_NOTE: &str = "gdb on a throwaway copy of the VM at this step: its one CPU, stopped in the kernel and the process running there, with their symbols and sources. Breakpoints and watchpoints in user space stop only in that process. Breakpoints, step and continue run the copy forward; the recording does not change.";
 const SHELL_NOTE: &str = "A shell inside a throwaway copy of the VM at this step, in the process's directory with its environment, while everything else in the VM stays where it was. Nothing done in it changes the recording.";
+const FILE_STEP_NOTE: &str = "The step this file was last written, removed or renamed at. Click to go there; click the path to see the file at the playhead.";
+const PROCESS_ROW_NOTE: &str = "Click to go to the step this process or thread started at.";
 const BACK_NOTE: &str = "Back to where the playhead was before its last jump: to the failure, the divergence, a phase, an end, a clicked line or a step typed in. Key: Alt+Left, or the mouse's back button.";
 const FORWARD_NOTE: &str =
     "Forward again, after Back. Key: Alt+Right, or the mouse's forward button.";
@@ -1990,6 +2005,21 @@ fn color_only(color: u32) -> HighlightStyle {
         color: Some(rgb(color).into()),
         ..Default::default()
     }
+}
+
+/// A click handler that jumps the playhead to `step`, unless the click
+/// was a double click or ended a drag that selected text. The click stops
+/// here, so a row the target sits in does not take it too.
+fn seek_on_click(
+    step: u64,
+    cx: &mut Context<Scrubber>,
+) -> impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static {
+    cx.listener(move |this, e: &ClickEvent, _, cx| {
+        cx.stop_propagation();
+        if this.plain_click(e) {
+            this.jump_to(step, cx);
+        }
+    })
 }
 
 /// Muted text standing in for an empty list.

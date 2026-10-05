@@ -597,6 +597,12 @@ impl Scrubber {
         }
     }
 
+    /// Whether a click is a plain one: a single click that did not end a
+    /// drag selecting text. A double click selects a word instead.
+    pub(super) fn plain_click(&self, e: &gpui::ClickEvent) -> bool {
+        e.click_count() == 1 && self.selected_text().is_none()
+    }
+
     /// The selected text, if any is selected.
     pub(super) fn selected_text(&self) -> Option<String> {
         let selection = self.selecting.selection?;
