@@ -228,7 +228,7 @@ impl Scrubber {
         // The paste field: what was pasted, or how to paste.
         let focused_border = rgba(theme::FOCUS_RING_A);
         let field_text: SharedString = if dialog.text.is_empty() {
-            "Press Ctrl+V to paste the license block from your email.".into()
+            "Press Ctrl+v to paste the license block from your email.".into()
         } else {
             dialog.text.clone().into()
         };

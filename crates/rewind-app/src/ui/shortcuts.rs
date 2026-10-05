@@ -51,21 +51,21 @@ pub const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
     (
         "Looking around",
         &[
-            ("Ctrl+F  /", "search the log, files and events"),
+            ("Ctrl+f  /", "search the log, files and events"),
             ("b", "bookmark the playhead's step"),
             ("s", "show or hide the source panel"),
             ("Escape", "close the tab, menu or terminal pane"),
-            ("Ctrl+C  Ctrl+A", "copy, select all"),
-            ("Ctrl+Shift+C  V", "copy and paste in the terminal pane"),
+            ("Ctrl+c  Ctrl+a", "copy, select all"),
+            ("Ctrl+Shift+c  v", "copy and paste in the terminal pane"),
         ],
     ),
     (
         "The app",
         &[
-            ("Ctrl+O", "open a run"),
+            ("Ctrl+o", "open a run"),
             ("F1", "start the tour"),
             ("?", "this sheet"),
-            ("Ctrl+Q", "quit"),
+            ("Ctrl+q", "quit"),
         ],
     ),
 ];
