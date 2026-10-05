@@ -2,6 +2,7 @@
 
 mod downloads;
 mod gdb;
+mod list;
 mod locate;
 mod show;
 mod terminal;
@@ -437,10 +438,32 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// List runs, newest first, then the directories whose manifests
-    /// another build of rewind wrote, as unreadable, with why; `rewind
-    /// remove` takes those by id.
-    Ls,
+    /// List runs, newest first: each one's id, how it ended, its steps and
+    /// its name. A run whose manifest another build of rewind wrote is
+    /// listed as unreadable, with why; `rewind remove` takes it by id.
+    Ls {
+        /// List only the newest N of the runs the other options pick.
+        #[arg(short = 'n', long = "limit", value_name = "N")]
+        limit: Option<usize>,
+        /// Only runs whose name contains TEXT.
+        #[arg(long, value_name = "TEXT")]
+        name: Option<String>,
+        /// Only runs that stand so.
+        #[arg(long, value_enum)]
+        status: Option<list::Status>,
+        /// Only the runs forked from RUN, and forks of those.
+        #[arg(long, value_name = "RUN")]
+        forks_of: Option<String>,
+        /// Only runs made since WHEN: an amount ago, such as 30m, 2h, 7d or
+        /// 2w, or a day, such as 2026-10-01, from its start in UTC.
+        #[arg(long, value_name = "WHEN")]
+        since: Option<String>,
+        /// Print one JSON object a line per run, for programs: its id,
+        /// name, directory, when it was made, its parent, how it stands,
+        /// its wait status, ending and steps.
+        #[arg(long)]
+        json: bool,
+    },
     /// Print a run's output, up to a step.
     Log {
         run: String,
@@ -571,7 +594,7 @@ impl Command {
             | Command::Remove { .. }
             | Command::Gc { .. }
             | Command::Pmu { .. }
-            | Command::Ls
+            | Command::Ls { .. }
             | Command::Log { .. }
             | Command::Ps { .. }
             | Command::Events { .. }
@@ -1285,15 +1308,58 @@ fn run(cli: Cli) -> Result<ExitCode> {
             println!("{}", show::summary(&run));
             Ok(ExitCode::SUCCESS)
         }
-        Command::Ls => {
-            // Every run, then every directory whose manifest does not read,
-            // with why.
+        Command::Ls {
+            limit,
+            name,
+            status,
+            forks_of,
+            since,
+            json,
+        } => {
+            // Every run and every unreadable one, in one list, newest first.
             let listing = Run::list_all(&home)?;
-            for r in &listing.runs {
-                println!("{}", show::summary(r));
-            }
-            for u in &listing.unreadable {
-                println!("{}  unreadable  {}", u.id, u.reason);
+            let mut rows: Vec<(list::Entry, list::Row)> = listing
+                .runs
+                .iter()
+                .map(|r| (list::Entry::of(r), list::Row::Run(r)))
+                .chain(
+                    listing
+                        .unreadable
+                        .iter()
+                        .map(|u| (list::Entry::unreadable(u), list::Row::Unreadable(u))),
+                )
+                .collect();
+            rows.sort_by_key(|(entry, _)| std::cmp::Reverse(entry.created));
+
+            // The runs the options pick, the newest `limit` of them.
+            let entries: Vec<list::Entry> = rows.iter().map(|(e, _)| e.clone()).collect();
+            let among = match &forks_of {
+                Some(run) => Some(list::forks_of(
+                    &entries,
+                    &Run::find(&home, run)?.manifest.id,
+                )),
+                None => None,
+            };
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let filter = list::Filter {
+                name,
+                status,
+                among,
+                since: since.map(|s| list::since(&s, now)).transpose()?,
+            };
+            let picked = rows
+                .iter()
+                .filter(|(entry, _)| filter.keeps(entry))
+                .take(limit.unwrap_or(usize::MAX));
+            for (entry, row) in picked {
+                if json {
+                    println!("{}", list::json(entry, row));
+                } else {
+                    println!("{}", list::line(row));
+                }
             }
             Ok(ExitCode::SUCCESS)
         }
