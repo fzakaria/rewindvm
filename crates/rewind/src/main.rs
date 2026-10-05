@@ -33,8 +33,10 @@ const STEP_LONG_HELP: &str = "A step of the run: how many times the VM had stopp
      host by then, as `rewind events` and `rewind log --steps` number them, from 0 to the \
      step the run ended at.";
 
-/// `rewind cat`'s exit status when the file did not exist at the step.
-const CAT_NOT_FOUND: u8 = 2;
+/// `rewind cat`'s exit status when the file did not exist at the step:
+/// apart from 1, which any failure exits with, and 2, clap's for a
+/// command line it refused.
+const CAT_NOT_FOUND: u8 = 3;
 
 /// How many callers of the chosen frame `rewind where` shows.
 const DEFAULT_CALLERS: usize = 2;
@@ -359,7 +361,7 @@ enum Command {
     /// Print a file as it was at a step of a run.
     ///
     /// Rewind forks the run at the step and reads the file inside the VM, so
-    /// this takes about as long as seeking there. Exits 2 when the file did
+    /// this takes about as long as seeking there. Exits 3 when the file did
     /// not exist then.
     Cat {
         #[arg(help = RUN_HELP, long_help = RUN_LONG_HELP)]
@@ -564,6 +566,8 @@ enum Command {
         from: Option<u64>,
     },
     /// Compare two runs and show where they first differ.
+    ///
+    /// Exits 0 when the runs are identical and 1 when they differ.
     Diff {
         #[arg(help = RUN_HELP, long_help = RUN_LONG_HELP)]
         left: String,
@@ -1524,7 +1528,10 @@ fn run(cli: Cli) -> Result<ExitCode> {
             let right = Run::find(&home, &right)?;
             let (lt, rt) = (left.trace()?, right.trace()?);
             print!("{}", show::divergence(lt, rt));
-            Ok(ExitCode::SUCCESS)
+            match lt.divergence(rt) {
+                None => Ok(ExitCode::SUCCESS),
+                Some(_) => Ok(ExitCode::FAILURE),
+            }
         }
     }
 }

@@ -297,8 +297,13 @@ in
         rewind replay long --from "$far" | grep "^identical from the keyframe at step $far "
 
         rewind run -q --name b --seed 1 --root ${busyboxRoot} -- sh -c '${workload}'
-        rewind diff a b | tee diff
+        # rewind diff exits 1 for runs that differ, 0 for identical ones.
+        status=0
+        rewind diff a b > diff || status=$?
+        cat diff
+        test "$status" = 1
         grep -q 'first difference' diff
+        rewind diff a a | grep -qx identical
 
         # A fork reads its parent's keyframes up to its step and replays
         # like any run, from boot and from a keyframe on either side of the
@@ -473,7 +478,7 @@ in
         # rewind cat: missing before the job, both lines at the end.
         status=0
         rewind cat w "$start" /notes.txt || status=$?
-        test "$status" = 2
+        test "$status" = 3
         rewind cat w 999999 /notes.txt | tee cat
         grep -q second cat
 

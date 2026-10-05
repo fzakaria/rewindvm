@@ -539,8 +539,8 @@ impl Engine for CliEngine {
         path: &str,
         cancel: &Cancel,
     ) -> EngineResult<FileAtStep> {
-        // `rewind cat` exits 2 for a file that did not exist at the step.
-        const MISSING_STATUS: i32 = 2;
+        // `rewind cat` exits 3 for a file that did not exist at the step.
+        const MISSING_STATUS: i32 = 3;
 
         // rewind cat <run> <step> <path> [--pid P]
         let mut args: Vec<OsString> = vec![
@@ -1167,7 +1167,7 @@ mod tests {
 
     #[test]
     fn cat_returns_the_file_or_says_it_was_missing() {
-        // The stand-in prints a file and exits 0, exits 2 for a file that
+        // The stand-in prints a file and exits 0, exits 3 for a file that
         // did not exist, or exits 1 with a reason; the arguments name the
         // step, the process and the path.
         let dir = temp_dir("cat");
@@ -1193,7 +1193,7 @@ mod tests {
         let args = std::fs::read_to_string(dir.join("args")).unwrap();
         assert!(args.contains("cat") && args.contains("3795 /build/Makefile --pid 174"));
 
-        let engine = fake_engine(&dir, "", "rewind: no such file then\\n", 2);
+        let engine = fake_engine(&dir, "", "rewind: no such file then\\n", 3);
         let read =
             retrying(|| engine.cat(&run, 10, None, "/build/core", &Cancel::default())).unwrap();
         assert_eq!(read, FileAtStep::Missing);
