@@ -382,6 +382,78 @@ mod tests {
     }
 
     #[test]
+    fn a_run_exported_and_imported_elsewhere_arrives_whole() {
+        // A finished run with bookmarks, its inputs on disk, and a keyframe
+        // at step 5 naming one page in the store. Its replayable export
+        // imported into another home brings the same manifest, trace and
+        // bookmarks, the keyframe, the page, and the inputs, which the
+        // manifest then names in the new home. Its view export brings the
+        // first three alone.
+        let (from, to, view) = (home("from"), home("to"), home("view"));
+        let inputs = from.root().join("given");
+        fs::create_dir_all(&inputs).unwrap();
+        fs::write(inputs.join("kernel"), b"kernel").unwrap();
+        fs::write(inputs.join("initrd"), b"initrd").unwrap();
+
+        let mut m: Manifest = serde_json::from_slice(&finished(ID)).unwrap();
+        m.spec.kernel = inputs.join("kernel");
+        m.spec.initrd = inputs.join("initrd");
+        m.trace_hash = Some(blake3_hex(b"trace"));
+        let dir = from.runs().join(ID);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(MANIFEST), serde_json::to_vec_pretty(&m).unwrap()).unwrap();
+        fs::write(dir.join(TRACE), b"trace").unwrap();
+        fs::write(dir.join(BOOKMARKS), br#"[{"step":3,"note":"here"}]"#).unwrap();
+
+        let page = vec![7u8; PAGE_SIZE];
+        let hash = {
+            let mut store = Store::open(&from.store()).unwrap();
+            let hash = store.put(&page).unwrap();
+            store.sync().unwrap();
+            hash
+        };
+        let mut kf = rewind_vmm::snapshot::Keyframe::default();
+        kf.step = 5;
+        kf.pages = vec![(0, hash)];
+        keyframes::save(&dir, &kf).unwrap();
+        let run = Run::open(&dir).unwrap();
+
+        // The replayable export, imported.
+        let file = from.root().join("run.rwd");
+        export(&from, &run, Contents::Replayable, &file).unwrap();
+        let got = import(&to, &file).unwrap();
+        assert_eq!(got.manifest.id, m.id);
+        assert_eq!(got.manifest.outcome, m.outcome);
+        assert_eq!(fs::read(got.dir.join(TRACE)).unwrap(), b"trace");
+        assert_eq!(
+            fs::read(got.dir.join(BOOKMARKS)).unwrap(),
+            fs::read(dir.join(BOOKMARKS)).unwrap()
+        );
+        assert_eq!(got.keyframes().unwrap().steps(), vec![5]);
+        let mut read = vec![0u8; PAGE_SIZE];
+        Store::open(&to.store())
+            .unwrap()
+            .get(&hash, &mut read)
+            .unwrap();
+        assert_eq!(read, page);
+        assert!(got.manifest.spec.kernel.starts_with(to.inputs()));
+        assert_eq!(fs::read(&got.manifest.spec.kernel).unwrap(), b"kernel");
+        assert_eq!(fs::read(&got.manifest.spec.initrd).unwrap(), b"initrd");
+
+        // The view export, imported: the run to read, nothing to replay.
+        let file = from.root().join("view.rwd");
+        export(&from, &run, Contents::View, &file).unwrap();
+        let got = import(&view, &file).unwrap();
+        assert_eq!(fs::read(got.dir.join(TRACE)).unwrap(), b"trace");
+        assert!(got.dir.join(BOOKMARKS).is_file());
+        assert!(got.keyframes().unwrap().steps().is_empty());
+        assert_eq!(got.manifest.spec.kernel, m.spec.kernel);
+        for home in [from, to, view] {
+            fs::remove_dir_all(home.root()).unwrap();
+        }
+    }
+
+    #[test]
     fn an_import_hashes_the_trace_it_brings() {
         // An export whose manifest names a trace hash its trace does not
         // have imports with the hash of the trace it carries, which prune
