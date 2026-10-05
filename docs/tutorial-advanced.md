@@ -80,7 +80,7 @@ Both read each thread's registers from the VM kernel's task list, so they
 work on runs recorded with a guest that lists its tasks, as these were.
 
 In the app, Show source under Inspect, or the s key, opens the source panel
-in place of At this step. It names the line `rewind where` would for the
+in a tab beside At this step. It names the line `rewind where` would for the
 thread of the playhead's event and shows that line's whole source file,
 syntax colored, scrolled so the line, marked, sits in the middle. The thread's frames are
 listed in a short list pinned below the file, with the chosen one marked.
@@ -251,8 +251,8 @@ rewind: run 8a9f1778cc770d96 exited:0 after 6604 steps, 0.224s virtual, 0.418s w
 rewind: the fork first differs from its parent at step 4966
 ```
 
-The app's Runs panel shows every run of the build, with forks under the run
-and step they branched from:
+The app's Runs tab, or the runs pill in its header, shows every run of the
+build, with forks under the run and step they branched from:
 
 ![The app's Runs panel: check's schedules, and the forks of the failing run, failing and passing](../site/img/app-runs.png)
 
