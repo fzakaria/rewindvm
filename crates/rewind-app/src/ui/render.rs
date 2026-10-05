@@ -938,24 +938,28 @@ impl Scrubber {
                         let part = selected
                             .as_ref()
                             .and_then(|r| part_of_line(r, i, text.len()));
+                        // A click on the step goes there; the line itself
+                        // is text to select.
                         div()
-                            .id(i)
                             .w_full()
                             .h(px(size::LOG_ROW_HEIGHT))
                             .flex()
                             .items_center()
                             .gap(px(size::LOG_COLUMN_GAP))
                             .px(px(size::PANEL_PAD_X))
-                            .hover(|s| s.bg(rgb(theme::ROW_HOVER)))
                             .when(now, |d| d.bg(rgb(theme::ROW_NOW)))
-                            .on_click(seek)
                             .child(
                                 div()
+                                    .id(SharedString::from(format!("log-step-{i}")))
                                     .flex_none()
                                     .w(step_width)
                                     .flex()
                                     .justify_end()
+                                    .cursor_pointer()
                                     .text_color(rgb(theme::FAINT))
+                                    .hover(|s| s.text_color(rgb(theme::AMBER)))
+                                    .on_click(seek)
+                                    .tooltip(tooltip(LOG_STEP_NOTE))
                                     .child(thousands(line.step)),
                             )
                             .child(
@@ -1947,6 +1951,7 @@ const SOURCE_NOTE: &str = "The line of the program's own code the thread at the 
 const GDB_NOTE: &str = "gdb on a throwaway copy of the VM at this step, with the symbols and sources of the kernel and the process. It starts in the thread and frame the source panel shows, or else in the thread that ran at this step. Breakpoints and watchpoints in user space stop only in that process. Breakpoints, step and continue run the copy forward; the recording does not change.";
 const SHELL_NOTE: &str = "A shell inside a throwaway copy of the VM at this step, in the process's directory with its environment, while everything else in the VM stays where it was. Nothing done in it changes the recording.";
 const FILE_STEP_NOTE: &str = "The step this file was last written, removed or renamed at. Click to go there; click the path to see the file at the playhead.";
+const LOG_STEP_NOTE: &str = "The step this line was written at. Click to go there.";
 const PROCESS_ROW_NOTE: &str = "Click to go to the step this process or thread started at.";
 const BACK_NOTE: &str = "Back to where the playhead was before its last jump: to the failure, the divergence, a phase, an end, a clicked line or a step typed in. Key: Alt+Left, or the mouse's back button.";
 const FORWARD_NOTE: &str =

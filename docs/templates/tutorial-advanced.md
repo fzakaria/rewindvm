@@ -302,7 +302,8 @@ the step readout is a field: click it, or press g, and type a step such as
 Left and Right keys, stop where the Stop at chooser beside them says: at every
 event, the build log's lines, processes starting and exiting, the bookmarks,
 or the thread, process, kind of event or file of the event at the playhead. A
-click on a log line, a file's step or a process goes to its step.
+click on the step beside a log line or a file, or on a process, goes to its
+step.
 
 Alt+Left and Alt+Right, or the mouse's back and forward buttons, go back and
 forward through jumps, so a press of f or d can be undone. The b key
