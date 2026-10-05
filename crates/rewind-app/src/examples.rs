@@ -60,9 +60,9 @@ mod tests {
         assert_eq!(
             lines,
             vec![
-                "test_pool_shutdown did the same things in the same order in both runs until step 4,256.",
-                "Then in this run, thread 2 of test_pool_shutdown writes \"job 7 done: 5785\" to stdout.",
-                "In the passing run, thread 3 of test_pool_shutdown writes \"job 6 done: 13750\" to stdout.",
+                "test_pool_shutdown did the same things in the same order in both runs until step 4,760.",
+                "Then in this run, thread 9 of test_pool_shutdown writes \"job 1 done: 35269\" to stdout.",
+                "In the passing run, thread 8 of test_pool_shutdown writes \"job 0 done: 12727\" to stdout.",
                 "Both write to the same stream; the text differs.",
             ]
         );
