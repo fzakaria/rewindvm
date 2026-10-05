@@ -386,7 +386,10 @@ in
         # nothing left.
         rewind gc --dry-run | tee planned
         grep -q '^would remove [1-9][0-9]* pages' planned
-        rewind gc --dry-run | grep -q '^would remove [1-9][0-9]* pages'
+        # Into a file, not straight into grep -q: grep exits at its first
+        # match, and gc's next line would then die of SIGPIPE.
+        rewind gc --dry-run > planned-again
+        grep -q '^would remove [1-9][0-9]* pages' planned-again
         rewind gc --json | tee collected
         grep -q '"pages":[1-9]' collected
         rewind replay a --from 300 | grep '^identical'
@@ -450,7 +453,8 @@ in
         export REWIND_HOME=$TMPDIR/rewind
         rewind run -q --name w --root ${busyboxRoot} -- \
           sh -c 'echo first > /notes.txt; sleep 1; echo second >> /notes.txt'
-        start=$(rewind events w | grep 'rewind-start' | head -1 | awk '{print $1}')
+        rewind events w > events
+        start=$(awk '/rewind-start/ { print $1; exit }' events)
 
         # rewind cat: missing before the job, both lines at the end.
         status=0
