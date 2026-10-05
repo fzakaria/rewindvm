@@ -19,6 +19,9 @@ use crate::run::{MANIFEST_FILE, Manifest, Parent, read_manifest, short_id};
 /// What a run without a recorded exit status is listed as.
 const UNKNOWN_ENDING: &str = "unknown";
 
+/// The directory of a run's own keyframes, as the engine names it.
+const KEYFRAMES_DIR: &str = "keyframes";
+
 /// One run, as its manifest describes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RunEntry {
@@ -50,6 +53,9 @@ pub struct RunEntry {
     /// When the run was made, for ordering runs made in the same second
     /// apart from when their directories last changed.
     pub created: u64,
+    /// Whether it has keyframes of its own, as the runs `rewind check`
+    /// reports do, so seeking into it does not replay from boot.
+    pub has_keyframes: bool,
     pub modified: SystemTime,
 }
 
@@ -58,7 +64,9 @@ impl RunEntry {
     pub fn read(dir: &Path) -> Option<RunEntry> {
         let modified = std::fs::metadata(dir).ok()?.modified().ok()?;
         let manifest = read_manifest(&dir.join(MANIFEST_FILE)).ok()?;
-        Some(RunEntry::from_manifest(dir, &manifest, modified))
+        let mut entry = RunEntry::from_manifest(dir, &manifest, modified);
+        entry.has_keyframes = dir.join(KEYFRAMES_DIR).is_dir();
+        Some(entry)
     }
 
     pub fn from_manifest(dir: &Path, manifest: &Manifest, modified: SystemTime) -> RunEntry {
@@ -113,6 +121,7 @@ impl RunEntry {
             imported: manifest.imported,
             inputs: manifest.inputs.clone(),
             created: manifest.created.unwrap_or(0),
+            has_keyframes: false,
             modified,
         }
     }
@@ -283,6 +292,50 @@ impl Family {
             .min_by_key(|r| r.created)
             .or_else(|| roots().min_by_key(|r| r.created))
             .unwrap_or(&self.runs[0])
+    }
+
+    /// What the start screen leads the family's row with, and whether it
+    /// reads as a failure: how many runs failed, when any did among
+    /// several, else the base's ending.
+    pub fn headline(&self) -> (String, bool) {
+        let base = self.base();
+        let failed = self.runs.iter().filter(|r| r.failed).count();
+        if self.runs.len() == 1 || failed == 0 {
+            return (base.ending.clone(), base.failed);
+        }
+        (format!("{failed} failed"), true)
+    }
+
+    /// The run to open for the family, and the run to compare it with: a
+    /// failing run against a passing one when there are both. A passing
+    /// base is compared with its first failing run, and a failing base
+    /// with its first passing one; a run with keyframes, as `rewind check`
+    /// reports, comes before one without, which would replay from boot.
+    pub fn to_open(&self) -> (&RunEntry, Option<&RunEntry>) {
+        let base = self.base();
+        let first = |failed: bool| {
+            self.runs
+                .iter()
+                .filter(|r| r.failed == failed && r.id != base.id)
+                .min_by_key(|r| (!r.has_keyframes, r.created))
+        };
+        match first(!base.failed) {
+            Some(other) if base.failed => (base, Some(other)),
+            Some(other) => (other, Some(base)),
+            None => (base, None),
+        }
+    }
+
+    /// Whether `query` is in the family's title, its derivation or
+    /// command, or a run's id, ignoring case. A blank query matches.
+    pub fn matches(&self, query: &str) -> bool {
+        let query = query.trim().to_lowercase();
+        if query.is_empty() {
+            return true;
+        }
+        let base = self.base();
+        let has = |text: &str| text.to_lowercase().contains(&query);
+        has(&base.title) || has(&base.family) || self.runs.iter().any(|r| has(&r.id))
     }
 
     /// When any run of the family last changed.
@@ -797,6 +850,7 @@ mod tests {
             imported: false,
             inputs: Some(INPUTS.to_string()),
             created: 0,
+            has_keyframes: false,
             modified: SystemTime::UNIX_EPOCH,
         }
     }
@@ -818,6 +872,74 @@ mod tests {
                 same,
             ],
         }
+    }
+
+    #[test]
+    fn a_family_leads_with_its_failures() {
+        // Four of the six runs failed, so the family says so, whatever
+        // its base did; a lone run, or runs that all passed, show the
+        // base's ending.
+        assert_eq!(family().headline(), ("4 failed".to_string(), true));
+        let lone = Family {
+            runs: vec![run("base", None, 0, "exited:0")],
+        };
+        assert_eq!(lone.headline(), ("exited:0".to_string(), false));
+        let passing = Family {
+            runs: vec![
+                run("base", None, 0, "exited:0"),
+                run("f1", Some(("base", 5)), 1, "exited:0"),
+            ],
+        };
+        assert_eq!(passing.headline(), ("exited:0".to_string(), false));
+    }
+
+    #[test]
+    fn opening_a_family_shows_a_failing_run_against_a_passing_one() {
+        // A passing base opens its first failing run, one with keyframes
+        // before one without, compared with the base. A failing base
+        // opens itself against a passing run. Runs that all passed open
+        // the base alone.
+        let mut passing_base = family();
+        for r in &mut passing_base.runs {
+            if r.id == "base" {
+                r.ending = "exited:0".into();
+                r.failed = false;
+            }
+            if r.id == "dup" {
+                r.has_keyframes = true;
+            }
+        }
+        let (open, compare) = passing_base.to_open();
+        assert_eq!(open.id, "dup");
+        assert_eq!(compare.map(|c| c.id.as_str()), Some("base"));
+
+        for r in &mut passing_base.runs {
+            r.has_keyframes = false;
+        }
+        assert_eq!(passing_base.to_open().0.id, "check3");
+
+        let failing_base = family();
+        let (open, compare) = failing_base.to_open();
+        assert_eq!(open.id, "base");
+        assert_eq!(compare.map(|c| c.id.as_str()), Some("f2"));
+
+        let lone = Family {
+            runs: vec![run("base", None, 0, "exited:0")],
+        };
+        let (open, compare) = lone.to_open();
+        assert_eq!((open.id.as_str(), compare), ("base", None));
+    }
+
+    #[test]
+    fn a_family_is_found_by_its_title_derivation_or_a_run_id() {
+        // The filter matches the title, the derivation and any run's id,
+        // ignoring case; a blank filter matches every family.
+        let f = family();
+        assert!(f.matches("MYLIB"));
+        assert!(f.matches("x-mylib.drv"));
+        assert!(f.matches("check3"));
+        assert!(f.matches("  "));
+        assert!(!f.matches("philosophers"));
     }
 
     #[test]

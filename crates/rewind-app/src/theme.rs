@@ -225,6 +225,8 @@ pub mod size {
     pub const EMPTY_GAP: f32 = 14.0;
     pub const TEXT_EMPTY_TITLE: f32 = 26.0;
     pub const RECENT_WIDTH: f32 = 640.0;
+    /// The most the list of builds grows before it scrolls: eight rows.
+    pub const RECENT_MAX_HEIGHT: f32 = 400.0;
     pub const RECENT_ROW_PAD_X: f32 = 12.0;
     pub const RECENT_ROW_PAD_Y: f32 = 7.0;
     /// Wide enough for the longest ending, killed:SIGSEGV, so the ids

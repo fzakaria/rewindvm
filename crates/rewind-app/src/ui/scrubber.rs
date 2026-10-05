@@ -10,9 +10,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    Context, FocusHandle, PathPromptOptions, SharedString, Subscription, UniformListScrollHandle,
-    Window,
+    AppContext, Context, Entity, FocusHandle, PathPromptOptions, SharedString, Subscription,
+    UniformListScrollHandle, Window, rgb, rgba,
 };
+use rewind_text_input::{TextInput, TextInputStyle};
 
 use crate::answers::{Answers, FileKey, PlaceKey};
 use crate::bookmarks::Bookmarks;
@@ -31,7 +32,7 @@ use crate::search::Index;
 use crate::selection::Surface;
 use crate::source::Located;
 use crate::stride::{Direction, Stride};
-use crate::theme::size;
+use crate::theme::{self, size};
 use crate::tour::Tour;
 use crate::ui::bookmarks::{BookmarkEditor, bookmarks_dir};
 use crate::ui::licensing::Licensing;
@@ -161,9 +162,6 @@ pub struct Notice {
     pub actions: Vec<NoticeAction>,
 }
 
-/// How many families of runs the empty state lists.
-const RECENT_SHOWN: usize = 8;
-
 /// An export the engine is writing.
 pub struct ExportJob {
     pub out: PathBuf,
@@ -271,9 +269,13 @@ pub struct Scrubber {
     pub(super) file_answers: Answers<FileKey, FileAtStep>,
     /// Where threads were at steps, as the engine said.
     pub(super) place_answers: Answers<PlaceKey, Located>,
-    /// The families of the engine's runs that changed last, for the empty
-    /// state.
+    /// The families of the engine's runs, the one changed last first, for
+    /// the empty state.
     pub(super) recent: Vec<Family>,
+    /// The empty state's field that filters the families it lists.
+    pub(super) recent_filter: Entity<TextInput>,
+    /// Draws the list again as the filter is typed into.
+    _recent_typed: Subscription,
     /// The family of the run on screen: every run of its build, its forks
     /// among them.
     pub(super) family: Option<Family>,
@@ -381,8 +383,20 @@ impl Scrubber {
             this.source = None;
             async {}
         });
+        let recent_filter = cx.new(|cx| {
+            let style = TextInputStyle {
+                placeholder: "Filter by name, derivation or run id".into(),
+                placeholder_color: rgb(theme::MUTED).into(),
+                caret_color: rgb(theme::AMBER).into(),
+                selection_color: rgba(theme::FOCUS_RING_A).into(),
+            };
+            TextInput::new(style, cx)
+        });
+        let recent_typed = cx.observe(&recent_filter, |_, _, cx| cx.notify());
         let mut this = Scrubber {
             _on_quit: on_quit,
+            recent_filter,
+            _recent_typed: recent_typed,
             focus,
             fonts,
             engine: launch.engine,
@@ -593,7 +607,7 @@ impl Scrubber {
             self.family = shown.and_then(|id| family_of(runs.clone(), &id));
             self.runs_changed += 1;
         }
-        self.recent = families(runs).into_iter().take(RECENT_SHOWN).collect();
+        self.recent = families(runs);
         cx.notify();
     }
 
@@ -929,12 +943,14 @@ impl Scrubber {
         );
     }
 
-    /// Opens a family from the empty state: its base run, with the Runs
+    /// Opens a family from the empty state: a failing run compared with a
+    /// passing one when it has both, else its base run, with the Runs
     /// panel open when the family has more than that one.
     pub(super) fn open_family(&mut self, family: &Family, cx: &mut Context<Self>) {
         self.runs_open = family.runs.len() > 1;
         self.pinned_compare = None;
-        self.open(family.base().dir.clone(), None, cx);
+        let (run, compare) = family.to_open();
+        self.open(run.dir.clone(), compare.map(|c| c.dir.clone()), cx);
     }
 
     /// Has the engine remove the forks that repeat an older fork's trace,

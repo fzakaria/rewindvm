@@ -1580,24 +1580,48 @@ impl Scrubber {
 }
 
 impl Scrubber {
-    /// The families of runs that changed last, newest first, one row
-    /// each however many forks they hold: the base run's ending, id and
-    /// title, how many runs and how they ended, and when one last changed.
-    /// A row opens the base run.
+    /// The families of runs, the one changed last first, one row each
+    /// however many forks they hold: how many failed, or else the base
+    /// run's ending, its id and title, how many runs and how they ended,
+    /// and when one last changed. A row opens a failing run against a
+    /// passing one, and the field above filters the rows.
     fn render_recent(&self, cx: &mut Context<Self>) -> Div {
         let now = std::time::SystemTime::now();
-        let mut list = card(theme::PANEL, theme::LINE)
-            .w(px(size::RECENT_WIDTH))
-            .child(card_title(theme::MUTED).child("Recent runs"));
-        for (i, family) in self.recent.iter().enumerate() {
+        let query = self.recent_filter.read(cx).text().to_string();
+        let shown: Vec<&Family> = self.recent.iter().filter(|f| f.matches(&query)).collect();
+        let filter = div()
+            .p(px(size::NOTICE_PAD / 2.0))
+            .rounded(px(size::RADIUS_BUTTON))
+            .bg(rgb(theme::BG))
+            .border_1()
+            .border_color(rgb(theme::LINE_2))
+            .text_color(rgb(theme::TEXT))
+            .child(self.recent_filter.clone());
+        let count = match (shown.len(), self.recent.len()) {
+            (n, all) if n == all => format!("{all} builds"),
+            (n, all) => format!("{n} of {all} builds"),
+        };
+        let mut rows = div()
+            .id("recent-rows")
+            .flex()
+            .flex_col()
+            .max_h(px(size::RECENT_MAX_HEIGHT))
+            .overflow_y_scroll();
+        for (i, family) in shown.into_iter().enumerate() {
             let base = family.base();
+            let (headline, failed) = family.headline();
+            let headline_tone = if failed {
+                PillTone::Failed
+            } else {
+                PillTone::Passed
+            };
             let when = now
                 .duration_since(family.modified())
                 .map(crate::describe::ago)
                 .unwrap_or_default();
             let summary = (family.runs.len() > 1).then(|| family.summary());
             let family = family.clone();
-            list = list.child(
+            rows = rows.child(
                 div()
                     .id(SharedString::from(format!("recent-{i}")))
                     .flex()
@@ -1612,7 +1636,7 @@ impl Scrubber {
                         div()
                             .flex_none()
                             .w(px(size::RECENT_ENDING_WIDTH))
-                            .child(pill(base.ending.clone(), ending_tone(base), &self.fonts)),
+                            .child(pill(headline, headline_tone, &self.fonts)),
                     )
                     .child(
                         div()
@@ -1658,7 +1682,22 @@ impl Scrubber {
                     .on_click(cx.listener(move |this, _, _, cx| this.open_family(&family, cx))),
             );
         }
-        list
+        card(theme::PANEL, theme::LINE)
+            .w(px(size::RECENT_WIDTH))
+            .child(
+                div()
+                    .flex()
+                    .justify_between()
+                    .child(card_title(theme::MUTED).child("Recent runs"))
+                    .child(
+                        div()
+                            .text_size(px(size::TEXT_SMALL))
+                            .text_color(rgb(theme::MUTED))
+                            .child(count),
+                    ),
+            )
+            .child(filter)
+            .child(rows)
     }
 
     /// The Runs panel: the family of the run on screen as a tree, the run
