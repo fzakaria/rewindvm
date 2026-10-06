@@ -428,7 +428,56 @@ impl Machine {
     }
 
     /// Runs until the guest stops, or until step `until` if given.
+    ///
+    /// The machine's counters count only in here. A counter counts its
+    /// thread's guest, whichever machine's that is, and a thread can run
+    /// another machine between two calls, as `rewind gdb` runs the forks
+    /// it inspects the process with before the fork it debugs goes on.
     pub fn run(&mut self, until: Option<u64>, obs: &mut dyn Observer) -> Result<Outcome> {
+        self.resume_counting()?;
+        let outcome = self.run_counted(until, obs);
+        let paused = self.pause_counting();
+        let outcome = outcome?;
+        paused?;
+        Ok(outcome)
+    }
+
+    /// Counts again, and aims again at the timer the guest was running
+    /// toward when the machine last stopped: the overflow a margin short
+    /// of its branch count, or single steps when it is closer than that.
+    fn resume_counting(&mut self) -> Result<()> {
+        if let Some((counter, _)) = &self.pmu {
+            counter.resume()?;
+        }
+        let Some(work) = &self.work else {
+            return Ok(());
+        };
+        work.counter.resume()?;
+        let (Some(target), false) = (work.target, work.stepping) else {
+            return Ok(());
+        };
+        let left = target.saturating_sub(work.count()?);
+        if left > PREEMPT_MARGIN {
+            work.overflow.arm(left - PREEMPT_MARGIN)?;
+            return Ok(());
+        }
+        self.start_stepping()
+    }
+
+    /// Stops the counters until the machine runs again, the overflow
+    /// with them, so neither counts another machine's guest.
+    fn pause_counting(&mut self) -> Result<()> {
+        if let Some((counter, _)) = &self.pmu {
+            counter.pause()?;
+        }
+        if let Some(work) = &self.work {
+            work.counter.pause()?;
+            work.overflow.disarm()?;
+        }
+        Ok(())
+    }
+
+    fn run_counted(&mut self, until: Option<u64>, obs: &mut dyn Observer) -> Result<Outcome> {
         if let Some(stop) = self.dev.stop {
             return Ok(Outcome::Stopped(stop));
         }

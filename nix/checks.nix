@@ -659,6 +659,57 @@ in
         touch $out
       '';
 
+  # checks.gdb-cold: a fork made for gdb at a step with no keyframe yet
+  # stays on the recording under the branch clock. Such a fork replays to
+  # the step, opening its branch counters, before gdb's symbols are looked
+  # up in forks of their own on the same thread; a counter counts the
+  # thread's guest, whichever machine's, so a fork that counted them too
+  # fired its timer early and went its own way. Two shells race under the
+  # branch clock, and gdb continues to the end from every third step of
+  # the run. A machine whose branch counter cannot be opened, as CI's
+  # cannot, skips the check and says so. Boots the VM, so it needs
+  # /dev/kvm.
+  gdb-cold =
+    pkgs.runCommand "rewind-gdb-cold"
+      {
+        nativeBuildInputs = [
+          rewind
+          pkgs.gdb
+        ];
+        requiredSystemFeatures = [ "kvm" ];
+      }
+      ''
+        export REWIND_HOME=$TMPDIR/rewind
+        # No debuginfod server: without a network, each of gdb's questions
+        # to it waits out a timeout.
+        export REWIND_DEBUGINFOD=/nonexistent
+
+        if ! rewind run -q --clock branches --name busy --root ${busyboxRoot} -- \
+          sh -c 'for i in 1 2; do (n=0; while [ $n -lt 20000 ]; do n=$((n+1)); done; echo $i) & done; wait' \
+          > run 2>&1; then
+          cat run
+          grep -q 'perf_event_open' run
+          echo "skipped: this machine's branch counter cannot drive virtual time"
+          touch $out
+          exit 0
+        fi
+        start=$(rewind events busy | grep 'rewind-start' | head -1 | awk '{print $1}')
+        end=$(rewind events busy | grep 'rewind-exit' | head -1 | awk '{print $1}')
+
+        sessions=0
+        for step in $(seq "$start" 3 "$end"); do
+          rewind gdb busy "$step" -- -batch -ex continue > gdb 2>&1 || true
+          if ! grep -q 'exited normally' gdb || grep -q 'left the recording\|SIGTRAP' gdb; then
+            echo "from step $step:"
+            cat gdb
+            exit 1
+          fi
+          sessions=$((sessions + 1))
+        done
+        echo "$sessions forks for gdb, each made at a step without a keyframe, stayed on the recording"
+        touch $out
+      '';
+
   # checks.gdb-threads: `rewind gdb` shows every thread of the process it
   # debugs, those off the CPU included. Three workers wait on a futex
   # while the main thread sleeps, then prints. At that print, gdb lists

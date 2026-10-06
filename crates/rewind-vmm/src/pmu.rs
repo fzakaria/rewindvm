@@ -105,6 +105,25 @@ impl Counter {
     pub fn read(&self) -> Result<u64> {
         read_count(self.fd)
     }
+
+    /// Stops counting until `resume`. The counter counts the thread's
+    /// guest, whichever machine's that is, so a machine that is not
+    /// running pauses its counter while another runs on the thread.
+    pub fn pause(&self) -> Result<()> {
+        // SAFETY: an ioctl on an fd we own.
+        if unsafe { libc::ioctl(self.fd, PERF_EVENT_IOC_DISABLE as _, 0) } != 0 {
+            bail!("pausing the counter: {}", io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    pub fn resume(&self) -> Result<()> {
+        // SAFETY: an ioctl on an fd we own.
+        if unsafe { libc::ioctl(self.fd, PERF_EVENT_IOC_ENABLE as _, 0) } != 0 {
+            bail!("resuming the counter: {}", io::Error::last_os_error());
+        }
+        Ok(())
+    }
 }
 
 impl Drop for Counter {
