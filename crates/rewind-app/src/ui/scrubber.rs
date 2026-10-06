@@ -79,8 +79,9 @@ const STILL_RUNNING: &str = "Its trace is written when it finishes, which for a 
 const RUNNING_POLL: Duration = Duration::from_secs(1);
 
 /// Where "Buy" goes: the site's pricing section, whose buttons open
-/// the Stripe checkouts.
-pub const BUY_URL: &str = "https://rewindvm.dev/#pricing";
+/// the Stripe checkouts, tagged so the site's analytics count the visit
+/// as coming from the app.
+pub const BUY_URL: &str = "https://rewindvm.dev/?utm_source=rewind-app&utm_medium=app#pricing";
 
 /// Where a fork made from the playhead stands.
 #[derive(Clone, Debug, PartialEq, Eq)]

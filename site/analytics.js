@@ -61,8 +61,11 @@
   const EVENT_PURCHASE = "purchase";
 
   // The license prices, in dollars, by data-edition on the Buy buttons.
+  // A commercial license is per seat, and the buyer picks the seats at
+  // checkout.
   const CURRENCY = "USD";
   const PRICES = { personal: 49, commercial: 99 };
+  const PER_SEAT = "commercial";
 
   // Home page sections whose first sight counts as an event.
   const WATCHED_SECTIONS = ["pricing", "download"];
@@ -182,7 +185,9 @@
 
   // The sale, on the thank-you page, unless it was a test checkout. The
   // checkout session id is the transaction id, so GA4 counts a reload of
-  // the page only once.
+  // the page only once. Stripe's redirect does not say how many seats a
+  // commercial license was for, so that sale is counted with no value
+  // rather than one seat's; Stripe's dashboard has what was paid.
   const query = new URLSearchParams(window.location.search);
   const session = query.get(SESSION_PARAM);
   const bought = query.get(EDITION_PARAM);
@@ -192,10 +197,12 @@
     !session.startsWith(TEST_SESSION_PREFIX) &&
     Object.hasOwn(PRICES, bought)
   ) {
-    gtag("event", EVENT_PURCHASE, {
-      transaction_id: session,
-      ...license(bought),
-    });
+    const sale = license(bought);
+    if (bought === PER_SEAT) {
+      delete sale.value;
+      delete sale.items[0].price;
+    }
+    gtag("event", EVENT_PURCHASE, { transaction_id: session, ...sale });
   }
 
   // Install commands: a copy from any block marked data-install counts,
