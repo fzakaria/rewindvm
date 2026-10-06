@@ -183,15 +183,24 @@ where the run parts from a passing one.
 - Click a file to read it as it was at the playhead, syntax colored, or as a
   colored hex dump.
 - Show source (`s`) opens the line of the program's own code the thread was
-  on, with the frames that led there.
+  on, with the stack frames that led there; click a frame to see its line.
+  Debug info and sources come from the program itself, or from
+  nixseparatedebuginfod2 for Nix packages.
+- Search (`Ctrl+F` or `/`) finds text in the build log, the console, file
+  paths and events, and takes the playhead to each match.
+- Bookmarks (`b`) mark a step with a note, kept with the run and in its
+  `.rwd` exports.
+- Previous and Next can stop at one thread, process, file or kind of event.
 - Open shell and Attach gdb work inside the VM at the playhead.
 - Fork from here branches the run under another schedule.
-- The Runs panel draws a build's runs as a tree of schedules and forks, the
-  way ISL and Jujutsu draw a history.
+- The Runs panel draws a build's runs as a tree of schedules and forks.
 
 <p align="center">
-  <img src="docs/img/app-file-viewer.png" width="49%" alt="The Rewind desktop app with a file open at the playhead: /build/env-vars as of step 4,583, next to the build log and the process tree." />
-  <img src="docs/img/app-shell.png" width="49%" alt="The Rewind desktop app at the step a test segfaulted, with a terminal pane below the scrubber running a shell inside the VM: ls, type gcc and head work in /build/mylib." />
+  <img src="docs/img/app-file-viewer.png" width="70%" alt="The Rewind desktop app with a file open at the playhead: /build/env-vars as of step 4,583, next to the build log and the process tree." />
+</p>
+
+<p align="center">
+  <img src="docs/img/app-shell.png" width="70%" alt="The Rewind desktop app at the step a test segfaulted, with a terminal pane below the scrubber running a shell inside the VM: ls, type gcc and head work in /build/mylib." />
 </p>
 
 <p align="center">
