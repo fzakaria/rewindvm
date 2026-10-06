@@ -388,8 +388,12 @@ impl Store {
             let lock = File::create(dir.join(SORTING_LOCK))?;
             lock.lock()
                 .with_context(|| format!("waiting to sort {}", dir.display()))?;
+
+            // Another opener may have sorted it while this one waited.
             sorted = sorted_copy()?;
-            sorting = Some(lock);
+            if past(&sorted)? >= COMPACT_AT as u64 {
+                sorting = Some(lock);
+            }
         }
         let read = sorted.as_ref().map_or(0, |s| s.covers * INDEX_ENTRY as u64);
 
@@ -405,16 +409,22 @@ impl Store {
             readers: Mutex::new(HashMap::new()),
             _lock: lock,
         };
-        store.refresh()?;
-        if store.index.lock().unwrap().pages.len() >= COMPACT_AT {
+
+        // The entries past the copy go straight from the index file into
+        // the new one, rather than through the map first, which would hold
+        // them all twice.
+        if sorting.is_some() {
+            let len = store.index_log.metadata()?.len();
+            store.index.lock().unwrap().read = len / INDEX_ENTRY as u64 * INDEX_ENTRY as u64;
             store.compact()?;
         }
         drop(sorting);
+        store.refresh()?;
         Ok(store)
     }
 
-    /// Writes a new sorted copy that covers every entry this store has read,
-    /// and reads from it from now on.
+    /// Writes a new sorted copy that covers the index up to where this store
+    /// has read it, and reads from it from now on.
     fn compact(&self) -> Result<()> {
         let mut index = self.index.lock().unwrap();
         let covered = index.sorted.as_ref().map_or(0, |s| s.covers);
