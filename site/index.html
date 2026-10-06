@@ -586,7 +586,12 @@ programs.rewind.amdBranchCounterWorkaround = <span class="kw">true</span>;</code
             </p>
             <ul>
               <li>
-                <code>rewind run</code>, <code>rewind nix</code> and <code>rewind check</code>
+                <code>rewind run</code>, <code>nix</code>, <code>check</code>, <code>fork</code> and
+                <code>diff</code>
+              </li>
+              <li>
+                Any step at the prompt: <code>log</code>, <code>ps</code>, <code>cat</code>,
+                <code>where</code>, <code>shell</code> and <code>gdb</code>
               </li>
               <li>Open source, for any use</li>
             </ul>
@@ -624,6 +629,17 @@ programs.rewind.amdBranchCounterWorkaround = <span class="kw">true</span>;</code
             >
           </div>
         </div>
+        <p class="note">
+          The command line answers one question at a time. The app puts the whole run on one screen:
+          a timeline to scrub from boot to the end, the failing run beside a passing one with where
+          they first differ in words, the log, processes, files and source line at the playhead, a
+          tree of every fork and schedule tried, and a fork, gdb or a shell at any step in a click.
+        </p>
+        <p class="note">
+          A personal license is for one person, bought by that person, on all their machines. Use at
+          a company takes a commercial license: a seat for each person who uses the app, on as many
+          machines as they use it on.
+        </p>
         <p class="note refund">
           Every license comes with a full refund within 30 days, for any reason. See the
           <a href="refunds.html">refund policy</a>.
