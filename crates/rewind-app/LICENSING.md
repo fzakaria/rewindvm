@@ -29,7 +29,9 @@ Signature: <base64 Ed25519 signature>
 
 The signature covers the lines above it exactly as `Key: value\n` in the
 order shown, with the values trimmed. Pasting tolerates CRLF line ends,
-indentation and text around the block. The app keeps the block in
+indentation, text around the block, the `> ` a reply quotes lines with,
+no-break spaces, and lines a mail client wrapped: a line with no key goes
+on the end of the value before it. The app keeps the block in
 `$XDG_CONFIG_HOME/rewind/license.txt` (or `~/.config/rewind/license.txt`).
 
 - Personal and Commercial licenses both include 3 years of updates

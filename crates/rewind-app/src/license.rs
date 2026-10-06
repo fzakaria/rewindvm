@@ -268,42 +268,96 @@ impl License {
     }
 }
 
+/// Characters some mail clients put in place of a space.
+const NO_BREAK_SPACES: [char; 2] = ['\u{a0}', '\u{202f}'];
+
+/// What a reply puts before each line it quotes.
+const QUOTE: char = '>';
+
+/// A pasted line as it was issued: with no-break spaces as spaces, and
+/// without the quote marks replies added or the spaces around it.
+fn unquoted(line: &str) -> String {
+    let line = line.replace(NO_BREAK_SPACES, " ");
+    let mut rest = line.trim();
+    while let Some(inner) = rest.strip_prefix(QUOTE) {
+        rest = inner.trim_start();
+    }
+    rest.to_string()
+}
+
+/// A line inside the block.
+enum Line<'a> {
+    /// `Key: value`, for a key the format has.
+    Field(&'static str, &'a str),
+    /// No key: the rest of the line before, which a mail client wrapped.
+    Continues,
+}
+
+/// What `line` is, or that it names a key the format does not have.
+fn classify(line: &str) -> Result<Line<'_>, LicenseError> {
+    let Some((key, value)) = line.split_once(':') else {
+        return Ok(Line::Continues);
+    };
+    let key = key.trim();
+    let known = field::SIGNED
+        .iter()
+        .chain(std::iter::once(&field::SIGNATURE))
+        .find(|k| **k == key);
+    if let Some(known) = known {
+        return Ok(Line::Field(known, value));
+    }
+
+    // A word and a colon is a field this build does not know; anything
+    // else with a colon in it is wrapped text.
+    let a_key = !key.is_empty() && key.chars().all(|c| c.is_ascii_alphabetic() || c == '-');
+    if a_key {
+        return Err(LicenseError::Unknown(line.to_string()));
+    }
+    Ok(Line::Continues)
+}
+
 /// Reads a license block out of pasted text: anything around the BEGIN and
-/// END lines is ignored, as are CR line ends and spaces around lines.
-/// Returns the license and its signature, unchecked.
+/// END lines is ignored, as are CR line ends, spaces around lines, the
+/// quote marks of a reply, no-break spaces, and lines a mail client
+/// wrapped. Returns the license and its signature, unchecked.
 pub fn parse(text: &str) -> Result<(License, Vec<u8>), LicenseError> {
-    let lines: Vec<&str> = text.lines().map(str::trim).collect();
+    let lines: Vec<String> = text.lines().map(unquoted).collect();
     let begin = lines
         .iter()
-        .position(|l| *l == BEGIN)
+        .position(|l| l == BEGIN)
         .ok_or(LicenseError::NoBlock)?;
     let end = lines[begin..]
         .iter()
-        .position(|l| *l == END)
+        .position(|l| l == END)
         .map(|i| begin + i)
         .ok_or(LicenseError::NoBlock)?;
 
-    // Each line inside is `Key: value`; blank lines are skipped.
-    let mut values: Vec<(&str, &str)> = Vec::new();
+    // Each line inside is `Key: value`, and blank lines are skipped. A
+    // line with no key goes on the end of the value before it: the
+    // signature's base64 as is, other values after the space the wrap
+    // took.
+    let mut values: Vec<(&str, String)> = Vec::new();
     for line in &lines[begin + 1..end] {
         if line.is_empty() {
             continue;
         }
-        let (key, value) = line
-            .split_once(':')
-            .ok_or_else(|| LicenseError::Unknown(line.to_string()))?;
-        let key = key.trim();
-        let known = field::SIGNED.contains(&key) || key == field::SIGNATURE;
-        if !known {
-            return Err(LicenseError::Unknown(line.to_string()));
+        if let Line::Field(key, value) = classify(line)? {
+            values.push((key, value.trim().to_string()));
+            continue;
         }
-        values.push((key, value.trim()));
+        let Some((key, value)) = values.last_mut() else {
+            return Err(LicenseError::Unknown(line.clone()));
+        };
+        if *key != field::SIGNATURE && !value.is_empty() {
+            value.push(' ');
+        }
+        value.push_str(line);
     }
     let get = |name: &'static str| {
         values
             .iter()
             .find(|(k, _)| *k == name)
-            .map(|(_, v)| *v)
+            .map(|(_, v)| v.as_str())
             .ok_or(LicenseError::Missing(name))
     };
     let bad = |field: &'static str, value: &str| LicenseError::BadValue {
@@ -551,6 +605,42 @@ mod tests {
                 .join("\r\n")
         );
         assert_eq!(verify_with(&pasted, &public(), &[]).unwrap(), sample());
+    }
+
+    #[test]
+    fn pasting_tolerates_what_mail_clients_do_to_a_block() {
+        // A mail client wraps lines near 78 characters, which breaks the
+        // 99 character Signature line inside its base64 and a long name
+        // at a space; a reply quotes every line with "> ", once or more;
+        // and some clients turn spaces into no-break spaces. The block
+        // still verifies.
+        const WRAP: usize = 78;
+        let mut license = sample();
+        license.name =
+            "Augusta Ada King, Countess of Lovelace, Translator of the Analytical Engine Notes"
+                .into();
+        let block = license.sign(&test_key());
+        let wrapped: String = block
+            .lines()
+            .flat_map(|line| {
+                if line.len() <= WRAP {
+                    return vec![line.to_string()];
+                }
+                // Break at the last space before the limit, else hard.
+                let cut = line[..WRAP].rfind(' ').unwrap_or(WRAP);
+                let (head, tail) = line.split_at(cut);
+                vec![head.to_string(), tail.trim_start().to_string()]
+            })
+            .map(|l| format!("{l}\n"))
+            .collect();
+        assert!(wrapped.lines().count() > block.lines().count());
+        assert_eq!(verify_with(&wrapped, &public(), &[]).unwrap(), license);
+
+        let quoted: String = block.lines().map(|l| format!("> > {l}\n")).collect();
+        assert_eq!(verify_with(&quoted, &public(), &[]).unwrap(), license);
+
+        let no_break = block.replace(' ', "\u{a0}");
+        assert_eq!(verify_with(&no_break, &public(), &[]).unwrap(), license);
     }
 
     #[test]
