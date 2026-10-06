@@ -166,6 +166,17 @@
 
           # the dining philosophers, a deadlock (nix/examples.nix)
           philosophers = p.examples.philosophers;
+
+          # two tellers losing a deposit, a lost update (nix/examples.nix)
+          bank = p.examples.bank;
+
+          # a config read while it is rewritten, a file race between
+          # processes (nix/examples.nix)
+          config-reload = p.examples.config-reload;
+
+          # a parent waiting on a signal that already came, a lost wakeup
+          # (nix/examples.nix)
+          waiter = p.examples.waiter;
         }
       );
 
