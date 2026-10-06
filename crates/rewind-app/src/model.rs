@@ -287,6 +287,8 @@ pub struct Timeline {
     pub rows: Vec<ProcRow>,
     pub files: Vec<FileEvent>,
     pub failure: Option<Failure>,
+    /// How the run's machine stopped, which finding the failure again needs.
+    stopped: Stopped,
     /// The job's exit, when init reported it.
     pub job_exit: Option<JobExit>,
     /// The step the job started on, when init wrote its start mark:
@@ -318,7 +320,7 @@ impl Timeline {
         let files = file_events(&trace);
         let job_exit = trace.job_exit();
         let job_start = trace.job_start();
-        let failure = find_failure(&trace, job_exit, total, stopped);
+        let failure = find_failure(&trace, job_exit, total, stopped, None);
 
         // Command names for event descriptions: the latest process per pid
         // wins, which is the right one for any pid that was not reused.
@@ -336,10 +338,22 @@ impl Timeline {
             rows,
             files,
             failure,
+            stopped,
             job_exit,
             job_start,
             names,
         }
+    }
+
+    /// Finds the failure again with the steps before `shared` left out:
+    /// steps a passing run compared with this one made too, so nothing in
+    /// them failed this run, such as a child that exits nonzero in both.
+    /// With none, or nothing failing after them, the failure is the one
+    /// the run has alone.
+    pub fn fail_past(&mut self, shared: Option<u64>) {
+        let find =
+            |shared| find_failure(&self.trace, self.job_exit, self.total, self.stopped, shared);
+        self.failure = shared.and_then(|s| find(Some(s))).or_else(|| find(None));
     }
 
     /// Every log line under a filter, in step order.
@@ -665,12 +679,15 @@ fn short_phase_name(name: &str) -> String {
 /// Where the run failed. A job whose init reports status 0 did not fail.
 /// Otherwise the first crash signal is the failure, and without one, the
 /// start of the chain of nonzero exits that ended the run: from the last
-/// process to exit nonzero, down through the child it exited after.
+/// process to exit nonzero, down through the child it exited after. A
+/// signal or exit before step `shared`, which a passing run made too, is
+/// not the failure.
 fn find_failure(
     trace: &Trace,
     job_exit: Option<JobExit>,
     total: u64,
     stopped: Stopped,
+    shared: Option<u64>,
 ) -> Option<Failure> {
     if job_exit.is_some_and(|j| j.status == 0) {
         return None;
@@ -683,8 +700,9 @@ fn find_failure(
 
     // A crash signal anywhere wins: the exits after it are its
     // consequences.
+    let made_too = |step: u64| shared.is_some_and(|s| step < s);
     let signal = trace.events.iter().enumerate().find_map(|(index, e)| {
-        if e.step > until {
+        if e.step > until || made_too(e.step) {
             return None;
         }
         let EventKind::Signal { signo, addr, .. } = e.kind else {
@@ -724,7 +742,8 @@ fn find_failure(
     let procs = trace.processes();
     let failed: Vec<&rewind_trace::Process> = procs
         .iter()
-        .filter(|p| p.end.is_some_and(|end| end <= until) && p.status.is_some_and(|s| s != 0))
+        .filter(|p| p.end.is_some_and(|end| end <= until && !made_too(end)))
+        .filter(|p| p.status.is_some_and(|s| s != 0))
         .collect();
 
     // Walk down from the last nonzero exit to the child it followed.
@@ -1170,6 +1189,32 @@ mod tests {
         let f = t.failure.unwrap();
         assert_eq!((f.step, f.pid), (16, 4));
         assert_eq!(f.kind, FailureKind::Exit { status: 0x8b });
+    }
+
+    #[test]
+    fn an_exit_a_passing_run_made_too_is_not_the_failure() {
+        // A test whose task fails on purpose: the test process (40) forks
+        // the task's shell (43), which exits 1, and later fails itself with
+        // 101. Alone, the walk down from 40 ends at the shell. Compared
+        // with a passing run that is the same until step 1273, the shell's
+        // exit at 1266 is that run's too, and the test's own exit is the
+        // failure. With every failure inside the shared steps, the run's
+        // own guess stays, and so it does with no passing run to share any.
+        let events = vec![
+            fork(1264, 40, 43, false),
+            exec(1265, 43, &["/bin/sh", "/build/script.sh"]),
+            exit(1266, 43, 43, 1 << 8, "script.sh", false),
+            exit(1338, 40, 40, 101 << 8, "devenv-tasks-te", false),
+        ];
+        let mut t = Timeline::new(Trace { events }, None, None);
+        assert_eq!(t.failure.unwrap().step, 1266);
+        t.fail_past(Some(1273));
+        let f = t.failure.unwrap();
+        assert_eq!((f.step, f.pid), (1338, 40));
+        t.fail_past(Some(2000));
+        assert_eq!(t.failure.unwrap().step, 1266);
+        t.fail_past(None);
+        assert_eq!(t.failure.unwrap().step, 1266);
     }
 
     fn mark(step: u64, text: &str) -> Event {

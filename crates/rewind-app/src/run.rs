@@ -348,7 +348,7 @@ impl Session {
     }
 
     /// A session of `run` compared with `other` by `program`'s events.
-    fn compared(run: Run, other: Option<Run>, program: Program) -> Session {
+    fn compared(mut run: Run, other: Option<Run>, program: Program) -> Session {
         let comparison = other.as_ref().map(|o| {
             let (this, other) = (&run.timeline, &o.timeline);
             match program {
@@ -371,6 +371,18 @@ impl Session {
             (Some(o), Some(c)) => crate::compare::rows(&run.timeline.trace, &o.timeline.trace, c),
             _ => Vec::new(),
         };
+
+        // Beside a passing run, what the two did alike up to the divergence
+        // did not fail this one, such as a child exiting nonzero in both.
+        let passing_beside = other
+            .as_ref()
+            .is_some_and(|o| o.verdict() == Verdict::Passed)
+            && run.verdict() == Verdict::Failed;
+        let shared = match passing_beside {
+            true => comparison.as_ref().and_then(Comparison::step),
+            false => None,
+        };
+        run.timeline.fail_past(shared);
         Session {
             run,
             other,
