@@ -199,6 +199,9 @@ where the run parts from a passing one.
 - Two runs that differ only in their schedules show the step where the
   schedules part, as a dashed blue mark, and the card says what only one of
   them got there, such as a reschedule.
+- The Compare tab sets the two runs' events side by side from just before
+  they part, in full, with what differs marked; `x` swaps to the compared
+  run at the matching step.
 - Previous and Next can stop at one thread, process, file or kind of event.
 - Open shell and Attach gdb work inside the VM at the playhead.
 - Fork from here branches the run under another schedule.

@@ -126,7 +126,7 @@ each by the line of the program's own code it was on. Each lookup takes a fork
 and gdb, so it is a flag:
 
 ```console run name=check_where
-$ rewind check --where --epoch {{epoch}} {{flake}} 2>/dev/null | sed -n '/^where the threads were/,/^$/p'
+$ rewind check --where --epoch {{epoch}} {{flake}} 2>/dev/null | sed -n '/^where the threads were/,/first event that differs$/p'
 ```
 
 <!-- assert: grep -q 'main (tests/test_pool_shutdown.c:23), on the CPU at the deciding step$' {{out:check_where}} && grep -q 'worker (src/pool.c:77), at the first event that differs$' {{out:check_where}} -->
@@ -331,6 +331,18 @@ timeline and in the divergence card:
 <!-- screenshot site/img/app-compare: {{home}}/runs/{{failing}} --compare {{home}}/runs/{{passing}} ;; key d ;; wait 2 -->
 
 ![The app at the step where the failing run leaves the passing one, with the divergence card naming both threads' writes](../site/img/app-compare.png)
+
+The card's link, Compare side by side, opens the Compare tab beside At this
+step. It lists the last events both runs had, once each with both runs'
+steps, then each run's next events side by side and in full, with the part of
+each pair that differs in amber. A click on this run's event moves the
+playhead there. A click on the other run's, Show in the other run, or the x
+key puts the compared run on screen in this one's place, at the matching step
+and compared with this one, so x again comes back:
+
+<!-- screenshot site/img/app-compare-tab: {{home}}/runs/{{failing}} --compare {{home}}/runs/{{passing}} ;; key d ;; click 1153 221 ;; wait 2 -->
+
+![The app's Compare tab: the writes both runs made before they part, then the failing run's SIGSEGV beside the passing run's write, each run's text in full with what differs in amber](../site/img/app-compare-tab.png)
 
 ## Script it
 
