@@ -181,7 +181,8 @@ spins waiting for a thread that never runs.
 
 ## Steer the perturbation
 
-<!-- set fork_from: echo $(( {{crash_step}} - 100 )) -->
+<!-- set fork_from: d={{work}}/fork-search; rm -rf $d; mkdir -p $d; for x in runs store cache; do cp -a {{home}}/$x $d/; done; ln -s {{home}}/images $d/images; for back in 100 80 60 40 30 20 10; do s=$(( {{crash_step}} - back )); mixed=$(for k in 1 2 3 4; do REWIND_HOME=$d rewind fork {{failing}} $s --schedule $k --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])'; done | python3 -c 'import sys; s=[int(l) != 0 for l in sys.stdin]; print(int(any(s) and not all(s)))'); if [ "$mixed" = 1 ]; then echo $s; break; fi; done; rm -rf $d -->
+<!-- assert: test -n "{{fork_from}}" -->
 
 `check --schedules N` tries more or fewer schedules, `--all` all of them.
 `rewind fork` asks which schedules fail from a given step:
