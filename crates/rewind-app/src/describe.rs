@@ -45,8 +45,30 @@ pub struct Described {
     pub tone: EventTone,
 }
 
+/// How much of an event's text a description keeps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Length {
+    /// Quotes and argument lists cut to fit a line.
+    Short,
+    /// Everything, for comparing two events in full.
+    Whole,
+}
+
 /// Describes an event as a system call or signal.
 pub fn describe(event: &Event) -> Described {
+    describe_as(event, Length::Short)
+}
+
+/// Describes an event as a system call or signal, at `length`.
+pub fn describe_as(event: &Event, length: Length) -> Described {
+    let quote = |text: &str| match length {
+        Length::Short => quote(text),
+        Length::Whole => quote_whole(text),
+    };
+    let max_argv = match length {
+        Length::Short => MAX_ARGV,
+        Length::Whole => usize::MAX,
+    };
     let normal = |text: String| Described {
         text,
         tone: EventTone::Normal,
@@ -67,8 +89,8 @@ pub fn describe(event: &Event) -> Described {
             normal(line)
         }
         EventKind::Exec { filename, argv, .. } => {
-            let mut shown: Vec<String> = argv.iter().take(MAX_ARGV).map(|a| quote(a)).collect();
-            if argv.len() > MAX_ARGV {
+            let mut shown: Vec<String> = argv.iter().take(max_argv).map(|a| quote(a)).collect();
+            if argv.len() > max_argv {
                 shown.push(ELLIPSIS.to_string());
             }
             normal(format!(
@@ -162,9 +184,20 @@ fn open_flags(flags: u32) -> String {
 /// Text in double quotes with control characters escaped, cut to
 /// `MAX_QUOTED_CHARS`.
 pub fn quote(text: &str) -> String {
+    quote_up_to(text, MAX_QUOTED_CHARS)
+}
+
+/// Text in double quotes with control characters escaped, all of it.
+pub fn quote_whole(text: &str) -> String {
+    quote_up_to(text, usize::MAX)
+}
+
+/// Text in double quotes with control characters escaped, cut to `max`
+/// characters.
+fn quote_up_to(text: &str, max: usize) -> String {
     let mut out = String::from("\"");
     for (count, c) in text.chars().enumerate() {
-        if count == MAX_QUOTED_CHARS {
+        if count == max {
             out.push(ELLIPSIS);
             break;
         }

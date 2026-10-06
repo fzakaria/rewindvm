@@ -36,6 +36,7 @@ pub const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("Page Up  Page Down", "the previous or next phase"),
             ("Home  End", "the start or the end of the run"),
             ("f  d", "the failure, the divergence"),
+            ("x", "the compared run, at the matching step"),
             ("g", "type a step to go to"),
             ("Alt+Left  Alt+Right", "back and forward through jumps"),
         ],

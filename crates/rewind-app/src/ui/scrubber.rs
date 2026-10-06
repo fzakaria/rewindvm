@@ -524,7 +524,12 @@ impl Scrubber {
         self.tour = None;
         self.viewer = None;
         self.source = None;
-        if !matches!(self.right_tab, RightTab::Runs | RightTab::Bookmarks) {
+        let keeps = match self.right_tab {
+            RightTab::Runs | RightTab::Bookmarks => true,
+            RightTab::Compare => session.other.is_some(),
+            RightTab::AtStep | RightTab::File | RightTab::Source => false,
+        };
+        if !keeps {
             self.right_tab = RightTab::AtStep;
         }
         self.log_followed = None;
@@ -1034,7 +1039,7 @@ impl Scrubber {
         match self.right_tab {
             RightTab::File => self.playhead_moved(cx),
             RightTab::Source => self.source_playhead_moved(cx),
-            RightTab::AtStep | RightTab::Runs | RightTab::Bookmarks => {}
+            RightTab::AtStep | RightTab::Compare | RightTab::Runs | RightTab::Bookmarks => {}
         }
         cx.notify();
     }

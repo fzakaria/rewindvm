@@ -55,6 +55,19 @@ impl Comparison {
         let program = this
             .culprit_against(other)
             .or_else(|| other.culprit_against(this));
+        Comparison::about(this, this_end, other, other_end, program)
+    }
+
+    /// How `this` run compares with `other`, by the events of `program`
+    /// when it is given and they part, else by every event: the comparison
+    /// [`Comparison::of`] made one way round, made the other way round.
+    pub fn about(
+        this: &Trace,
+        this_end: u64,
+        other: &Trace,
+        other_end: u64,
+        program: Option<Vec<String>>,
+    ) -> Comparison {
         if let Some(argv) = &program
             && let Some(d) = this.divergence_in(other, argv)
         {
@@ -165,5 +178,49 @@ mod tests {
         assert!(a.divergence(&b).is_some());
         let parted = Comparison::of(&a, 5, &c, 6).point.unwrap();
         assert_eq!((parted.matched, parted.step, parted.other_step), (1, 5, 6));
+    }
+
+    #[test]
+    fn a_comparison_about_a_program_compares_that_program() {
+        // Told the program, the comparison takes its events whichever way
+        // round the runs are, and parts where they part; told none, it
+        // compares every event.
+        let program = |pid: u32| -> Vec<Event> {
+            vec![
+                Event {
+                    step: 1,
+                    pid: 1,
+                    tid: 1,
+                    kind: EventKind::Fork {
+                        child: pid,
+                        thread: false,
+                    },
+                },
+                Event {
+                    step: 2,
+                    pid,
+                    tid: pid,
+                    kind: EventKind::Exec {
+                        filename: "/t/pool".into(),
+                        argv: vec!["./pool".into()],
+                        old_pid: pid,
+                    },
+                },
+            ]
+        };
+        let mut a = Trace { events: program(4) };
+        a.events
+            .extend([write(3, 4, "one\n"), write(5, 4, "two\n")]);
+        let mut b = Trace { events: program(4) };
+        b.events
+            .extend([write(3, 4, "one\n"), write(6, 4, "three\n")]);
+        let argv = Some(vec!["./pool".to_string()]);
+        let forward = Comparison::about(&a, 5, &b, 6, argv.clone());
+        let back = Comparison::about(&b, 6, &a, 5, argv.clone());
+        assert_eq!(forward.program, argv);
+        let (f, r) = (forward.point.unwrap(), back.point.unwrap());
+        assert_eq!((f.step, f.other_step), (5, 6));
+        assert_eq!((r.step, r.other_step), (6, 5));
+        assert_eq!(Comparison::about(&a, 5, &b, 6, None).program, None);
     }
 }

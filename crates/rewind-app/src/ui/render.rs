@@ -35,8 +35,8 @@ use crate::ui::widgets::{
 use crate::ui::{
     AddBookmark, CloseNearest, CopySelection, EnterLicense, ForkHere, GoBack, GoForward, GoToEnd,
     GoToStart, GoToStep, JumpToDivergence, JumpToFailure, KEY_CONTEXT, NextEvent, NextPhase,
-    OpenRun, OpenSearch, PreviousEvent, PreviousPhase, SelectAll, ShowShortcuts, StartTour,
-    StepBack, StepForward, ToggleSource, ZoomIn, ZoomOut, ZoomReset,
+    OpenRun, OpenSearch, PreviousEvent, PreviousPhase, SelectAll, ShowOtherRun, ShowShortcuts,
+    StartTour, StepBack, StepForward, ToggleSource, ZoomIn, ZoomOut, ZoomReset,
 };
 
 /// Header labels are cut to this many characters.
@@ -76,6 +76,7 @@ impl Render for Scrubber {
             .on_action(
                 cx.listener(|this, _: &JumpToDivergence, _, cx| this.go(Motion::Divergence, cx)),
             )
+            .on_action(cx.listener(|this, _: &ShowOtherRun, _, cx| this.show_other_run(None, cx)))
             .on_action(
                 cx.listener(|this, _: &CloseNearest, window, cx| this.close_nearest(window, cx)),
             )
@@ -180,7 +181,7 @@ impl Render for Scrubber {
 }
 
 impl Scrubber {
-    fn session(&self) -> &Session {
+    pub(super) fn session(&self) -> &Session {
         self.session
             .as_ref()
             .expect("rendering a session without one")
@@ -200,6 +201,7 @@ impl Scrubber {
             RightTab::Source => self.render_source(cx),
             RightTab::Runs => self.runs.family.as_ref().map(|f| self.render_runs(f, cx)),
             RightTab::Bookmarks => Some(self.render_bookmarks_panel(cx)),
+            RightTab::Compare => Some(self.render_compare(cx)),
             RightTab::AtStep => None,
         };
         let (panel, right_flex) = match chosen {
@@ -1401,6 +1403,10 @@ impl Scrubber {
                 });
             }
             column = column.child(selects(divergence, Surface::Divergence, cx));
+            column = column.child(
+                crate::ui::bookmarks::link("compare-open", "Compare side by side")
+                    .on_click(cx.listener(|this, _, _, cx| this.select_tab(RightTab::Compare, cx))),
+            );
         }
 
         // The latest fork made from the playhead.

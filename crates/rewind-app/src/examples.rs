@@ -106,6 +106,37 @@ mod tests {
     use rewind_trace::signal;
 
     #[test]
+    fn a_step_of_one_example_matches_a_step_of_the_other() {
+        // The two are the same machine until the deciding step, so a step
+        // before it is the same step in the other run; past where they
+        // part, it is where the other run's events part. Swapped, the
+        // passing run is on screen, compared with the failing one, and
+        // only the failing one has the reschedule.
+        crate::archive::test_cache();
+        let session = open().unwrap();
+        let split = session.split.clone().unwrap();
+        let point = session.comparison.clone().unwrap().point.unwrap();
+        assert_eq!(
+            session.matching_step(split.step - 100),
+            Some(split.step - 100)
+        );
+        assert_eq!(
+            session.matching_step(point.step + 5),
+            Some(point.other_step)
+        );
+
+        let swapped = session.swapped();
+        assert_eq!(swapped.divergence_step(), Some(point.other_step));
+        assert_eq!(swapped.run.verdict(), Verdict::Passed);
+        assert_eq!(swapped.other.as_ref().unwrap().verdict(), Verdict::Failed);
+        let flipped = swapped.split.unwrap();
+        assert_eq!(
+            (flipped.step, flipped.here, flipped.there),
+            (split.step, split.there, split.here)
+        );
+    }
+
+    #[test]
     fn the_examples_show_a_crash_and_where_the_runs_part() {
         // The failing run fails with a SIGSEGV and the passing run passes.
         // Their schedules part before the crash, and their events part at

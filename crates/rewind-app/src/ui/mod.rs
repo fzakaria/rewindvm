@@ -5,6 +5,7 @@
 mod ansi;
 mod bookmarks;
 mod chrome;
+mod compare;
 mod icons;
 mod licensing;
 mod link;
@@ -52,6 +53,7 @@ actions!(
         NextPhase,
         JumpToFailure,
         JumpToDivergence,
+        ShowOtherRun,
         GoBack,
         GoForward,
         CloseNearest,
@@ -246,6 +248,7 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("pagedown", NextPhase, context),
         KeyBinding::new("f", JumpToFailure, context),
         KeyBinding::new("d", JumpToDivergence, context),
+        KeyBinding::new("x", ShowOtherRun, context),
         KeyBinding::new("alt-left", GoBack, context),
         KeyBinding::new("alt-right", GoForward, context),
         KeyBinding::new("escape", CloseNearest, context),

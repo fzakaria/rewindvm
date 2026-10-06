@@ -414,7 +414,7 @@ impl Scrubber {
 }
 
 /// A text link in the accent color.
-fn link(id: impl Into<gpui::ElementId>, text: impl Into<SharedString>) -> Stateful<Div> {
+pub(super) fn link(id: impl Into<gpui::ElementId>, text: impl Into<SharedString>) -> Stateful<Div> {
     div()
         .id(id)
         .cursor_pointer()

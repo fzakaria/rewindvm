@@ -30,6 +30,8 @@ const CLOSE_PAD: f32 = 4.0;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RightTab {
     AtStep,
+    /// The two runs' events side by side, while a run is compared.
+    Compare,
     Runs,
     Bookmarks,
     File,
@@ -48,7 +50,7 @@ impl Scrubber {
         match tab {
             RightTab::File => self.playhead_moved(cx),
             RightTab::Source => self.source_playhead_moved(cx),
-            RightTab::AtStep | RightTab::Runs | RightTab::Bookmarks => {}
+            RightTab::AtStep | RightTab::Compare | RightTab::Runs | RightTab::Bookmarks => {}
         }
         cx.notify();
     }
@@ -73,7 +75,7 @@ impl Scrubber {
                 }
                 cx.notify();
             }
-            RightTab::AtStep => {}
+            RightTab::AtStep | RightTab::Compare => {}
         }
     }
 
@@ -81,6 +83,9 @@ impl Scrubber {
     /// and the source while they are open.
     fn tabs(&self) -> Vec<RightTab> {
         let mut tabs = vec![RightTab::AtStep];
+        if self.session.as_ref().is_some_and(|s| s.other.is_some()) {
+            tabs.push(RightTab::Compare);
+        }
         if self.runs_tab && self.runs.family.is_some() {
             tabs.push(RightTab::Runs);
         }
@@ -99,6 +104,7 @@ impl Scrubber {
     fn tab_label(&self, tab: RightTab) -> String {
         match tab {
             RightTab::AtStep => "At this step".to_string(),
+            RightTab::Compare => "Compare".to_string(),
             RightTab::Runs => match &self.runs.family {
                 Some(family) => format!("Runs \u{b7} {}", family.runs.len()),
                 None => "Runs".to_string(),
@@ -131,7 +137,7 @@ impl Scrubber {
             .text_size(px(size::TEXT_SMALL));
         for tab in self.tabs() {
             let chosen = tab == self.right_tab;
-            let closable = tab != RightTab::AtStep;
+            let closable = !matches!(tab, RightTab::AtStep | RightTab::Compare);
             let name = format!("{tab:?}");
             let mut item = div()
                 .id(SharedString::from(format!("tab-{name}")))

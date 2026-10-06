@@ -38,6 +38,8 @@ pub enum Surface {
     Terminal,
     /// The Runs panel's rows.
     Runs,
+    /// The Compare tab's events.
+    Compare,
 }
 
 /// A place in a surface's text: a line and a byte offset into it, always

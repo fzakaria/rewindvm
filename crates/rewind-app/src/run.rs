@@ -314,11 +314,21 @@ pub struct Session {
     /// Where the two runs' schedules part, when they are runs of the same
     /// inputs on the same machine under different schedules.
     pub split: Option<ScheduleSplit>,
+    /// The Compare tab's rows: the two runs' events around where they part.
+    pub rows: Vec<crate::compare::Row>,
     /// Why the run asked to be compared with could not be opened, such as
     /// one removed meanwhile, for a notice; the run then opens alone.
     pub unopened_compare: Option<String>,
     /// Whether this build of rewind brings the run to a step as recorded.
     pub replays: Replays,
+}
+
+/// Which program's events a session compares its two runs by.
+enum Program {
+    /// The culprit of the failure, as `Comparison::of` finds it.
+    Culprit,
+    /// This one, or every event for None.
+    Given(Option<Vec<String>>),
 }
 
 /// Whether this build of rewind brings a run to a step as it was recorded.
@@ -334,9 +344,21 @@ pub enum Replays {
 
 impl Session {
     pub fn new(run: Run, other: Option<Run>) -> Session {
+        Session::compared(run, other, Program::Culprit)
+    }
+
+    /// A session of `run` compared with `other` by `program`'s events.
+    fn compared(run: Run, other: Option<Run>, program: Program) -> Session {
         let comparison = other.as_ref().map(|o| {
             let (this, other) = (&run.timeline, &o.timeline);
-            Comparison::of(&this.trace, this.total, &other.trace, other.total)
+            match program {
+                Program::Culprit => {
+                    Comparison::of(&this.trace, this.total, &other.trace, other.total)
+                }
+                Program::Given(argv) => {
+                    Comparison::about(&this.trace, this.total, &other.trace, other.total, argv)
+                }
+            }
         });
         let split = match (
             &run.manifest,
@@ -345,11 +367,16 @@ impl Session {
             (Some(this), Some(that)) => ScheduleSplit::of(&this.spec, &that.spec),
             _ => None,
         };
+        let rows = match (&other, &comparison) {
+            (Some(o), Some(c)) => crate::compare::rows(&run.timeline.trace, &o.timeline.trace, c),
+            _ => Vec::new(),
+        };
         Session {
             run,
             other,
             comparison,
             split,
+            rows,
             unopened_compare: None,
             replays: Replays::AsRecorded,
         }
@@ -370,6 +397,32 @@ impl Session {
         let mut session = Session::new(run, other);
         session.unopened_compare = unopened;
         Ok(session)
+    }
+
+    /// The step of the compared run that matches `step` of this one: the
+    /// same step before their schedules part, since until then they are
+    /// the same machine, else as the Compare tab pairs their events. None
+    /// without a compared run.
+    pub fn matching_step(&self, step: u64) -> Option<u64> {
+        let other = self.other.as_ref()?;
+        let end = other.timeline.total;
+        if self.split.as_ref().is_some_and(|s| step < s.step) {
+            return Some(step.min(end));
+        }
+        let comparison = self.comparison.as_ref()?;
+        let (this, that) = (&self.run.timeline.trace, &other.timeline.trace);
+        Some(crate::compare::matching_step(this, that, comparison, step).unwrap_or(step.min(end)))
+    }
+
+    /// This session the other way round: the compared run on screen,
+    /// compared with this one by the same program's events, so the two
+    /// views part at the same events. Without a compared run, itself.
+    pub fn swapped(self) -> Session {
+        let program = self.comparison.as_ref().and_then(|c| c.program.clone());
+        match self.other {
+            Some(other) => Session::compared(other, Some(self.run), Program::Given(program)),
+            None => self,
+        }
     }
 
     /// The step of the first divergence from the compared run.
