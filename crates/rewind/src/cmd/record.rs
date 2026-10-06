@@ -347,13 +347,9 @@ pub fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
     // it is the run to compare with; a window of one step leaves schedule
     // 0 itself.
     let deciding = until - 1;
-    let words = worst.manifest.spec.schedule().words_at(deciding);
     let makes = if base_failed { "pass" } else { "fail" };
     say(format!(
         "perturbing only steps {lo}..{until} still ends differently"
-    ));
-    say(format!(
-        "step {deciding} decides it: {words} there makes the run {makes}\n"
     ));
     let partner = narrowed.without_last.unwrap_or(base);
     let (worst, partner) = std::thread::scope(|scope| {
@@ -362,6 +358,14 @@ pub fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
         (worst.join().expect("taking keyframes panicked"), partner)
     });
     let (worst, partner) = (worst?, partner?);
+
+    // Whether a late timer is part of what the step does depends on
+    // whether its exit armed one, which only running it shows.
+    let timer = worst.armed_timer_at(home, deciding)?;
+    let words = worst.manifest.spec.schedule().words_at(deciding, timer);
+    say(format!(
+        "step {deciding} decides it: {words} there makes the run {makes}\n"
+    ));
     let (passing, failing) = if base_failed {
         (worst, partner)
     } else {

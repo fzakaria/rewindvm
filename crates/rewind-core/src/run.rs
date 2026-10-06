@@ -13,6 +13,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use rewind_init::Job;
+use rewind_trace::schedule::Timer;
 use rewind_trace::stop::StalledThread;
 use rewind_trace::{Event, EventKind, Trace, TraceWriter};
 use rewind_vmm::{Config, Machine, Observer, Outcome, Stop};
@@ -804,6 +805,21 @@ impl Run {
             limit,
         };
         Run::execute_manifest(home, manifest, None, how)
+    }
+
+    /// Whether the exit that made `step` armed the guest's timer, which
+    /// the trace does not say: a schedule's late timer at that step changes
+    /// the run only if it did. The run is brought to the step before and
+    /// made to take that one exit, so the monitor sees it.
+    pub fn armed_timer_at(&self, home: &Home, step: u64) -> Result<Timer> {
+        let before = step.saturating_sub(1);
+        let mut machine = self.machine_at(home, before, Keep::Nothing, &mut rewind_vmm::Ignore)?;
+        machine.run(Some(step), &mut rewind_vmm::Ignore)?;
+        Ok(if machine.timer_armed_at() == Some(step) {
+            Timer::Armed
+        } else {
+            Timer::NotArmed
+        })
     }
 
     /// A machine at `step` of this run: the latest keyframe at or before

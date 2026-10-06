@@ -12,6 +12,7 @@ use anyhow::{Context as _, Result, bail};
 use rewind_trace::Trace;
 use rewind_trace::ending::{Ending, ExitStatus};
 use rewind_trace::manifest::{MANIFEST, Manifest, Parent, RunId, Source, Spec, TRACE, executing};
+use rewind_trace::schedule::Timer;
 use rewind_trace::stop::Stop;
 
 use crate::archive;
@@ -470,7 +471,7 @@ impl ScheduleSplit {
         let words = |spec: &Spec| {
             let schedule = spec.schedule();
             (schedule.preempt_at(step) || schedule.stall_at(step).is_some())
-                .then(|| schedule.words_at(step))
+                .then(|| schedule.words_at(step, Timer::Unknown))
         };
         Some(ScheduleSplit {
             step,
@@ -768,7 +769,10 @@ mod tests {
         assert_eq!(split.step, until - 1);
         let schedule = failing.schedule();
         let exact = schedule.preempt_at(until - 1) || schedule.stall_at(until - 1).is_some();
-        assert_eq!(split.here, exact.then(|| schedule.words_at(until - 1)));
+        assert_eq!(
+            split.here,
+            exact.then(|| schedule.words_at(until - 1, Timer::Unknown))
+        );
         assert_eq!(split.there, None);
         let unperturbed = Spec {
             schedule: 0,

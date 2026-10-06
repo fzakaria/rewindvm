@@ -26,6 +26,16 @@ const NS_PER_US: u64 = 1_000;
 pub const STALL_MIN_NS: u64 = 10_000;
 pub const STALL_DOUBLINGS: u64 = 8;
 
+/// Whether the exit that made a step armed the guest's timer, which only
+/// the monitor sees as it runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Timer {
+    Armed,
+    NotArmed,
+    /// Asked of a run's spec alone, with no machine to run.
+    Unknown,
+}
+
 /// A perturbed schedule. At some exits, chosen by the seed, the guest is
 /// asked to reschedule, so another runnable thread may run from there, and
 /// timers armed in the window fire a little late, so sleepers wake in a
@@ -114,10 +124,12 @@ impl Schedule {
     }
 
     /// What the seed does at `step`, in words: "a reschedule", "a 160 µs
-    /// stall", both, or "a timer 23.4 µs late". A step's timer is late only
-    /// if the guest arms one at that exit, which only the monitor sees, so
-    /// a late timer is named only for a step that carries nothing else.
-    pub fn words_at(&self, step: u64) -> String {
+    /// stall", "a timer 23.4 µs late", or several joined with "and". A
+    /// late timer changes the run only if the exit that made the step armed
+    /// one, which only the monitor sees: `timer` says whether it did. Not
+    /// knowing, a late timer is named only for a step that carries nothing
+    /// else.
+    pub fn words_at(&self, step: u64, timer: Timer) -> String {
         let mut parts = Vec::new();
         if self.preempt_at(step) {
             parts.push("a reschedule".to_string());
@@ -125,9 +137,18 @@ impl Schedule {
         if let Some(ns) = self.stall_at(step) {
             parts.push(format!("a {} µs stall", ns / NS_PER_US));
         }
+        let slack = self.slack_at(step);
+        let late = match timer {
+            Timer::Armed => slack > 0,
+            Timer::Unknown => parts.is_empty(),
+            Timer::NotArmed => false,
+        };
+        if late {
+            let us = slack as f64 / NS_PER_US as f64;
+            parts.push(format!("a timer {us:.1} µs late"));
+        }
         if parts.is_empty() {
-            let late = self.slack_at(step) as f64 / NS_PER_US as f64;
-            parts.push(format!("a timer {late:.1} µs late"));
+            return "nothing".into();
         }
         parts.join(" and ")
     }
@@ -272,27 +293,39 @@ mod tests {
     #[test]
     fn a_step_reads_as_what_the_seed_does_there() {
         // A reschedule or a stall where the seed asks for one, both where
-        // it asks for both, and a late timer only where it asks for
-        // neither, since only the monitor sees whether a timer was armed.
+        // it asks for both, and a late timer where the exit armed one. Not
+        // knowing whether it did, a late timer is named only where nothing
+        // else is, and where the exit armed none, nothing late is named.
         let s = Schedule {
             seed: 4,
             window: 0..u64::MAX,
             earlier: Vec::new(),
         };
         let find = |f: &dyn Fn(u64) -> bool| (0..100_000).find(|&step| f(step)).unwrap();
-        let reschedule = find(&|st| s.preempt_at(st) && s.stall_at(st).is_none());
-        assert_eq!(s.words_at(reschedule), "a reschedule");
+        let late = |step: u64| format!("a timer {:.1} µs late", s.slack_at(step) as f64 / 1e3);
+        let reschedule =
+            find(&|st| s.preempt_at(st) && s.stall_at(st).is_none() && s.slack_at(st) > 0);
+        assert_eq!(s.words_at(reschedule, Timer::Unknown), "a reschedule");
+        assert_eq!(s.words_at(reschedule, Timer::NotArmed), "a reschedule");
+        assert_eq!(
+            s.words_at(reschedule, Timer::Armed),
+            format!("a reschedule and {}", late(reschedule))
+        );
         let stall = find(&|st| !s.preempt_at(st) && s.stall_at(st).is_some());
         let us = s.stall_at(stall).unwrap() / NS_PER_US;
-        assert_eq!(s.words_at(stall), format!("a {us} µs stall"));
+        assert_eq!(
+            s.words_at(stall, Timer::NotArmed),
+            format!("a {us} µs stall")
+        );
         let both = find(&|st| s.preempt_at(st) && s.stall_at(st).is_some());
         let us = s.stall_at(both).unwrap() / NS_PER_US;
         assert_eq!(
-            s.words_at(both),
+            s.words_at(both, Timer::NotArmed),
             format!("a reschedule and a {us} µs stall")
         );
         let timer = find(&|st| !s.preempt_at(st) && s.stall_at(st).is_none() && s.slack_at(st) > 0);
-        let late = s.slack_at(timer) as f64 / NS_PER_US as f64;
-        assert_eq!(s.words_at(timer), format!("a timer {late:.1} µs late"));
+        assert_eq!(s.words_at(timer, Timer::Armed), late(timer));
+        assert_eq!(s.words_at(timer, Timer::Unknown), late(timer));
+        assert_eq!(s.words_at(timer, Timer::NotArmed), "nothing");
     }
 }

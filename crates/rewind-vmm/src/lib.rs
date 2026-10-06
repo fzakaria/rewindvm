@@ -233,6 +233,10 @@ pub(crate) struct Devices {
     /// Input placed in the shared page whose interrupt the VM's APIC has
     /// not yet taken.
     pub input_sent: bool,
+    /// The step of the exit that last armed the timer, since this machine
+    /// was booted or restored: a schedule's late timer at a step changes
+    /// the run only if that step armed one.
+    pub timer_armed_at: Option<u64>,
 }
 
 pub struct Machine {
@@ -350,6 +354,7 @@ impl Machine {
                 input: None,
                 typed: std::collections::VecDeque::new(),
                 input_sent: false,
+                timer_armed_at: None,
             },
             pmem,
             extras,
@@ -392,6 +397,12 @@ impl Machine {
     /// The number of exits so far.
     pub fn step(&self) -> u64 {
         self.dev.step
+    }
+
+    /// The step of the exit that last armed the timer since this machine
+    /// was booted or restored, which only the monitor sees.
+    pub fn timer_armed_at(&self) -> Option<u64> {
+        self.dev.timer_armed_at
     }
 
     /// Guest branches counted so far, when virtual time follows them.
@@ -883,6 +894,7 @@ impl Devices {
                 let slack = if delta == 0 {
                     0
                 } else {
+                    self.timer_armed_at = Some(self.step);
                     self.schedule.slack_at(self.step)
                 };
                 self.clock.arm(delta + slack);
@@ -976,7 +988,23 @@ mod tests {
             input: None,
             typed: std::collections::VecDeque::new(),
             input_sent: false,
+            timer_armed_at: None,
         }
+    }
+
+    #[test]
+    fn the_devices_keep_the_step_the_timer_was_last_armed_at() {
+        // Arming the timer marks the step of the exit that armed it;
+        // disarming it, by writing 0, does not.
+        let mut dev = devices(0);
+        dev.step = 7;
+        dev.io_out(pv::PORT_TIMER, &1000u32.to_le_bytes(), &mut Ignore)
+            .unwrap();
+        assert_eq!(dev.timer_armed_at, Some(7));
+        dev.step = 9;
+        dev.io_out(pv::PORT_TIMER, &0u32.to_le_bytes(), &mut Ignore)
+            .unwrap();
+        assert_eq!(dev.timer_armed_at, Some(7));
     }
 
     #[test]
