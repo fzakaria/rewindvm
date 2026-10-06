@@ -120,6 +120,17 @@ reschedule at step {{deciding}}, the main thread sets the queue to NULL
 between a worker's check and its count, and the worker faults on it
 {{gap}} steps later. Without it, the worker counts first and the test passes.
 
+`check --where` looks both threads up itself: the one on the CPU at the
+deciding step, and the one of the failing run's first event that differs,
+each by the line of the program's own code it was on. Each lookup takes a fork
+and gdb, so it is a flag:
+
+```console run name=check_where
+$ rewind check --where --epoch {{epoch}} {{flake}} 2>/dev/null | sed -n '/^where the threads were/,/^$/p'
+```
+
+<!-- assert: grep -q 'main (tests/test_pool_shutdown.c:23), on the CPU at the deciding step$' {{out:check_where}} && grep -q 'worker (src/pool.c:77), at the first event that differs$' {{out:check_where}} -->
+
 In the app, two runs that differ only in their schedules show the step where
 the schedules part as a dashed blue mark on the timeline, before the solid
 one where their events first differ. Pointing at it says what only one of

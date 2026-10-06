@@ -613,6 +613,11 @@ nothing.
    after the deciding reschedule; against schedule 0, which differs from
    the failing run from the window's start on, they parted 974 steps
    before it.
+6. With `--where`, says where the threads involved were, as `rewind where`
+   finds them: the thread on the CPU at the deciding step, and the thread
+   of the failing run's first event that differs, each by the line of the
+   program's own code it was on. Each takes a fork and gdb, and the first
+   for a build can wait for debug info to download, so it is asked for.
 
 For mylib, whose shutdown test fails in about one host build in eight, 9 of 64
 perturbed schedules fail with counter time and 34 of 64 with exit time.

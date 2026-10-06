@@ -120,6 +120,9 @@ $ rewind nix nixpkgs#hello
 # run the derivation under many thread schedules, and name the step that decides a failure
 $ rewind check github:fzakaria/rewindvm#mylib
 
+# the same, with the line of code each thread involved was on
+$ rewind check --where github:fzakaria/rewindvm#mylib
+
 # any command in a root filesystem: a directory, an erofs image, or a docker export
 $ rewind run --root mylib.tar --cwd /src -- make check
 
