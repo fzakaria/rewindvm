@@ -17,12 +17,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 
-/// The lines a license block starts and ends with. The block carries no
-/// version number: these lines are its version. Licenses already issued
-/// are in this format, and every later app reads them. A license in
-/// another format, with other fields or another signature, starts with a
-/// line of its own, such as `----- BEGIN REWIND VM LICENSE 2 -----`, so an
-/// app tells the two apart and still reads this one.
+/// The lines a license block starts and ends with.
 pub const BEGIN: &str = "----- BEGIN REWIND VM LICENSE -----";
 pub const END: &str = "----- END REWIND VM LICENSE -----";
 
@@ -57,6 +52,14 @@ const XDG_CONFIG_ENV: &str = "XDG_CONFIG_HOME";
 const LICENSE_MODE: u32 = 0o600;
 const HOME_CONFIG_DIR: &str = ".config";
 
+/// The format of license block this app reads. A block names its format
+/// on a `Version:` line, which the signature does not cover; a block with
+/// none is format 1, as every license issued before the line existed is,
+/// and every later app reads those. A license with other fields or another
+/// signature says a later version, which this app refuses before reading
+/// its fields, saying a newer app reads it.
+pub const LICENSE_VERSION: u32 = 1;
+
 /// The license's fields, in the order the signature covers them.
 mod field {
     pub const NAME: &str = "Name";
@@ -67,6 +70,8 @@ mod field {
     pub const ISSUED: &str = "Issued";
     pub const UPDATES_UNTIL: &str = "Updates-Until";
     pub const SIGNATURE: &str = "Signature";
+    /// The block's format, outside the signature.
+    pub const VERSION: &str = "Version";
 
     pub const SIGNED: [&str; 7] = [NAME, EMAIL, EDITION, SEATS, ID, ISSUED, UPDATES_UNTIL];
 }
@@ -215,9 +220,14 @@ pub enum LicenseError {
     NoBlock,
     Missing(&'static str),
     Unknown(String),
-    BadValue { field: &'static str, value: String },
+    BadValue {
+        field: &'static str,
+        value: String,
+    },
     BadSignature,
     Revoked(String),
+    /// A license of a later format than this app reads.
+    Format(u32),
 }
 
 impl fmt::Display for LicenseError {
@@ -239,6 +249,10 @@ impl fmt::Display for LicenseError {
                 "The signature does not match. The block was changed after it was issued, or it was cut short."
             ),
             LicenseError::Revoked(id) => write!(f, "License {id} has been revoked."),
+            LicenseError::Format(version) => write!(
+                f,
+                "This license is in format {version}, which a newer version of the app reads. Update the app to register it."
+            ),
         }
     }
 }
@@ -331,7 +345,7 @@ fn classify(line: &str) -> Result<Line<'_>, LicenseError> {
     let key = key.trim();
     let known = field::SIGNED
         .iter()
-        .chain(std::iter::once(&field::SIGNATURE))
+        .chain([&field::SIGNATURE, &field::VERSION])
         .find(|k| **k == key);
     if let Some(known) = known {
         return Ok(Line::Field(known, value));
@@ -361,6 +375,28 @@ pub fn parse(text: &str) -> Result<(License, Vec<u8>), LicenseError> {
         .position(|l| l == END)
         .map(|i| begin + i)
         .ok_or(LicenseError::NoBlock)?;
+
+    // The block's format first, so a later one is refused before any
+    // field this app does not know.
+    for line in &lines[begin + 1..end] {
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        if key.trim() != field::VERSION {
+            continue;
+        }
+        let version = value.trim();
+        match version.parse::<u32>() {
+            Ok(LICENSE_VERSION) => {}
+            Ok(later) => return Err(LicenseError::Format(later)),
+            Err(_) => {
+                return Err(LicenseError::BadValue {
+                    field: field::VERSION,
+                    value: version.to_string(),
+                });
+            }
+        }
+    }
 
     // Each line inside is `Key: value`, and blank lines are skipped. A
     // line with no key goes on the end of the value before it: the
@@ -697,6 +733,26 @@ mod tests {
         // Sign, then check against the matching public key.
         let block = sample().sign(&test_key());
         assert_eq!(verify_with(&block, &public(), &[]).unwrap(), sample());
+    }
+
+    #[test]
+    fn a_license_names_its_format_or_is_format_1() {
+        // A block with no Version line is format 1, as every license issued
+        // so far is, and so is one that says 1, which the signature does
+        // not cover. One of a later format is refused before any field it
+        // has and this app does not know, so the app can say to update.
+        let block = sample().sign(&test_key());
+        let with_one = block.replacen(BEGIN, &format!("{BEGIN}\nVersion: 1"), 1);
+        assert_eq!(verify_with(&with_one, &public(), &[]).unwrap(), sample());
+
+        let later = block.replacen(
+            BEGIN,
+            &format!("{BEGIN}\nVersion: {}\nColor: blue", LICENSE_VERSION + 1),
+            1,
+        );
+        let err = verify_with(&later, &public(), &[]).unwrap_err();
+        assert_eq!(err, LicenseError::Format(LICENSE_VERSION + 1));
+        assert!(err.to_string().contains("newer"), "{err}");
     }
 
     #[test]

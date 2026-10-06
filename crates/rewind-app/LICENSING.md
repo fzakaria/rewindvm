@@ -39,7 +39,10 @@ Signature: <base64 Ed25519 signature>
 ```
 
 The signature covers the lines above it exactly as `Key: value\n` in the
-order shown, with the values trimmed. Pasting tolerates CRLF line ends,
+order shown, with the values trimmed. A block may also have a `Version:`
+line, outside the signature, naming its format: a block without one is
+format 1, as every license issued so far is, and an app refuses a block
+of a later format than it reads, saying to update. Pasting tolerates CRLF line ends,
 indentation, text around the block, the `> ` a reply quotes lines with,
 no-break spaces, and lines a mail client wrapped: a line with no key goes
 on the end of the value before it. The app keeps the block alone,
