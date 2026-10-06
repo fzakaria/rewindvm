@@ -5,7 +5,9 @@
 //! Each step's perturbation depends only on the seed and the step, so a
 //! smaller window perturbs a subset of the same steps, and two runs are
 //! identical up to their window, so where they part is inside it, next to
-//! the interleaving that matters.
+//! the interleaving that matters. The window one step shorter ends like
+//! schedule 0, and its run is the same as the window's until that last
+//! step: the schedule's perturbation there decides how the run ends.
 
 use anyhow::Result;
 
@@ -14,6 +16,11 @@ pub struct Narrowed<R> {
     pub from: u64,
     pub until: u64,
     pub run: R,
+    /// The run over `from..until - 1`, which does not end differently and
+    /// is the same run as `run` until step `until - 1`. None when the
+    /// window is one step, since without it nothing is perturbed and the
+    /// run is schedule 0's.
+    pub without_last: Option<R>,
 }
 
 /// The window within `start..end` a schedule's perturbation narrows to
@@ -68,33 +75,37 @@ pub fn narrow<R>(
     }
     let from = lo;
 
-    // The earliest end: `hi` differs, `lo` (an empty window) does not.
+    // The earliest end: `hi` differs, `lo` (an empty window, whose run is
+    // schedule 0's and none of these) does not. `lo_run` is the run that
+    // ends at `lo`, once one does.
     let (mut lo, mut hi) = (from, end);
+    let mut lo_run = None;
     while hi.saturating_sub(lo) > 1 {
         let ends = points(lo, hi);
         let runs = probe(ends.iter().map(|&e| (from, e)).collect())?;
-        let mut next_lo = *ends.last().expect("a round tries at least one point");
+        let mut below = None;
         let mut found = None;
         for (e, run) in ends.iter().zip(runs) {
             if differs(&run)? {
                 found = Some((*e, run));
                 break;
             }
-            next_lo = *e;
+            below = Some((*e, run));
         }
-        match found {
-            Some((e, run)) => {
-                hi = e;
-                lo = ends.iter().copied().filter(|x| *x < e).max().unwrap_or(lo);
-                found_run = run;
-            }
-            None => lo = next_lo,
+        if let Some((e, run)) = below {
+            lo = e;
+            lo_run = Some(run);
+        }
+        if let Some((e, run)) = found {
+            hi = e;
+            found_run = run;
         }
     }
     Ok(Narrowed {
         from,
         until: hi,
         run: found_run,
+        without_last: lo_run,
     })
 }
 
@@ -114,8 +125,9 @@ mod tests {
     #[test]
     fn the_window_closes_on_the_steps_that_matter() {
         // From 100..10_000, with 1, 4 and 16 jobs, and one step or a few
-        // that matter: the window ends up exactly those steps, and the run
-        // returned is the one made with it.
+        // that matter: the window ends up exactly those steps, the run
+        // returned is the one made with it, and the run without the
+        // window's last step is there too, unless that leaves no window.
         for jobs in [1, 4, 16] {
             for matters in [4_321..4_322, 7_000..7_013, 100..101, 9_999..10_000] {
                 let mut probed = 0;
@@ -136,6 +148,9 @@ mod tests {
                     "jobs {jobs}"
                 );
                 assert_eq!(narrowed.run, (matters.start, matters.end));
+                let shorter =
+                    (matters.end - 1 > matters.start).then_some((matters.start, matters.end - 1));
+                assert_eq!(narrowed.without_last, shorter, "jobs {jobs}");
                 assert!(probed < 200, "{probed} runs for jobs {jobs}");
             }
         }
@@ -157,5 +172,6 @@ mod tests {
             (narrowed.from, narrowed.until, narrowed.run),
             (50, 51, "whole")
         );
+        assert_eq!(narrowed.without_last, None);
     }
 }
