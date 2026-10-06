@@ -706,6 +706,16 @@ struct Process {
     vdso: Option<std::ops::Range<u64>>,
 }
 
+/// The step of process `pid`'s latest event before `step`, if it made one.
+fn last_event_before(trace: &rewind_trace::Trace, pid: u32, step: u64) -> Option<u64> {
+    trace
+        .until(step.saturating_sub(1))
+        .iter()
+        .rev()
+        .find(|e| e.pid == pid)
+        .map(|e| e.step)
+}
+
 /// Process `pid` at `step`, or when None the process running there: its
 /// programs and libraries, from this machine's store or, when only the VM
 /// or the run's image has them, written under `dir`, with the source files
@@ -746,6 +756,25 @@ fn debugged_process(
         ));
         return Process::default();
     };
+
+    // A process with nothing mapped died in the inspection's own fork, as
+    // one with a fatal signal pending does once the inspection's stop
+    // wakes it. Its files are read at its last event before the step,
+    // where it was alive; what it maps rarely changes after it starts.
+    let earlier = run
+        .trace()
+        .ok()
+        .and_then(|trace| last_event_before(trace, running.pid, step));
+    if running.mappings.is_empty()
+        && let Some(earlier) = earlier
+    {
+        say.line(format_args!(
+            "process {} had died by the time its map was read at step {step}; \
+             reading its files at step {earlier}, its last event before",
+            running.pid
+        ));
+        return debugged_process(home, run, earlier, Some(running.pid), dir, say);
+    }
     // A Nix run's store, or a run's root filesystem, was mounted from its
     // input image, so a file this machine lacks is read from there.
     let mount = run
@@ -1349,6 +1378,29 @@ mod tests {
 
     /// A file written into the session is named by its path in the VM,
     /// and the vDSO, which is no file there, as the VM's map names it.
+    #[test]
+    fn a_dead_process_s_files_are_read_at_its_last_event_before() {
+        // The step of process 140's latest event before the one asked
+        // about; another process's events and its own later ones do not
+        // count, and with none before there is no step to read them at.
+        let event = |step, pid| rewind_trace::Event {
+            step,
+            pid,
+            tid: pid,
+            kind: rewind_trace::EventKind::Output {
+                fd: 1,
+                bytes: b"x".to_vec(),
+            },
+        };
+        let trace = rewind_trace::Trace {
+            events: vec![event(3788, 140), event(3795, 147), event(6299, 140)],
+        };
+        assert_eq!(last_event_before(&trace, 140, 6298), Some(3788));
+        assert_eq!(last_event_before(&trace, 140, 6300), Some(6299));
+        assert_eq!(last_event_before(&trace, 140, 3788), None);
+        assert_eq!(last_event_before(&trace, 147, 3795), None);
+    }
+
     #[test]
     fn a_session_file_is_named_as_the_vm_had_it() {
         let dir = Path::new("/home/u/.local/share/rewind/gdb/42");

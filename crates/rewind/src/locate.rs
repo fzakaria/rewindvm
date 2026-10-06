@@ -66,7 +66,7 @@ pub fn locate(
     format: Format,
 ) -> Result<ExitCode> {
     let answer = located(home, run, step, (pid, tid))?;
-    let (pid, tid) = (answer.pid, answer.tid);
+    let (pid, tid, step) = (answer.pid, answer.tid, answer.step);
     match format {
         Format::Json => println!("{}", serde_json::to_string(&answer)?),
         Format::Text => {
@@ -106,6 +106,23 @@ pub fn located(
     (pid, tid): (Option<u32>, Option<u32>),
 ) -> Result<Located> {
     let pick = thread_at(run.trace()?, step, pid, tid)?;
+
+    // A process at its own exit has no memory left to name its frames
+    // with, so it is looked at the step before, as it was killed or as it
+    // called exit.
+    let step = match pick {
+        Pick::Thread { pid, .. } => {
+            let alive = alive_step(run.trace()?, step, pid);
+            if alive != step {
+                eprintln!(
+                    "rewind: process {pid} exits at step {step}, its memory gone; \
+                     looking at step {alive}, the last it had it"
+                );
+            }
+            alive
+        }
+        Pick::OnTheCpu => step,
+    };
     let needs = Needs::Tasks("`rewind where` cannot find threads".into());
     let machine = gdb::fork(home, run, step, needs)?;
     let (pid, tid) = match pick {
@@ -411,6 +428,22 @@ pub fn thread_at(trace: &Trace, step: u64, pid: Option<u32>, tid: Option<u32>) -
             }),
             _ => Ok(Pick::OnTheCpu),
         },
+    }
+}
+
+/// The step `rewind where` looks at process `pid` at, asked about `step`:
+/// the step itself, or the one before when the step's event is the
+/// process's own exit, since by then the kernel has taken its memory and,
+/// with it, every file that names its frames.
+fn alive_step(trace: &Trace, step: u64, pid: u32) -> u64 {
+    let exits = trace.events.iter().any(|e| {
+        e.step == step
+            && e.pid == pid
+            && matches!(e.kind, rewind_trace::EventKind::Exit { thread: false, .. })
+    });
+    match exits {
+        true => step.saturating_sub(1),
+        false => step,
     }
 }
 
@@ -835,6 +868,44 @@ mod tests {
     /// the trace saw it in last by the step, as thread ids are given out
     /// again. At a step with no event, or the kernel's, it is the thread on
     /// the CPU. Builds a trace of a few writes by hand.
+    #[test]
+    fn a_process_s_own_exit_is_looked_at_a_step_before() {
+        // At its own exit a process's memory is gone, so its frames are
+        // looked at the step before, the last it had it; a thread's exit
+        // leaves the process its memory, and any other step stays.
+        let event = |step, pid, tid, kind| rewind_trace::Event {
+            step,
+            pid,
+            tid,
+            kind,
+        };
+        let exit = |thread| rewind_trace::EventKind::Exit {
+            status: 15,
+            comm: "waiter".into(),
+            thread,
+        };
+        let trace = Trace {
+            events: vec![
+                event(
+                    6299,
+                    140,
+                    140,
+                    rewind_trace::EventKind::Signal {
+                        signo: 15,
+                        code: 0,
+                        addr: 0,
+                    },
+                ),
+                event(6300, 140, 140, exit(false)),
+                event(6310, 150, 151, exit(true)),
+            ],
+        };
+        assert_eq!(alive_step(&trace, 6300, 140), 6299);
+        assert_eq!(alive_step(&trace, 6299, 140), 6299);
+        assert_eq!(alive_step(&trace, 6310, 150), 6310);
+        assert_eq!(alive_step(&trace, 6300, 141), 6300);
+    }
+
     #[test]
     fn the_thread_is_the_event_s_unless_given() {
         let write = |step, pid, tid| rewind_trace::Event {
