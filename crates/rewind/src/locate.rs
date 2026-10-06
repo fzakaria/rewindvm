@@ -126,7 +126,8 @@ fn walk(
     // forks of their own.
     let scope = rewind_core::debug::Scope::Process(pid);
     let mut debuggee = gdb::debuggee(run, step, machine, scope)?;
-    let symbols = Symbols::load(home, run, step, Some(pid), Kernel::Skip, Say::Aloud)?;
+    let mut symbols = Symbols::load(home, run, step, Some(pid), Kernel::Skip, Say::Aloud)?;
+    symbols.add_vdso(&debuggee, Say::Aloud);
 
     // gdb with the script, against the fork.
     let script = symbols.dir().join(SCRIPT_NAME);

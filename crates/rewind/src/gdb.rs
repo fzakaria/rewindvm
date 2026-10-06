@@ -76,6 +76,10 @@ const DEBUGINFOD_PROGRAM: &str = "nixseparatedebuginfod2";
 const DEBUGINFOD_SUBSTITUTERS: &[&str] = &["local:", "https://cache.nixos.org"];
 const DEBUGINFOD_EXPIRATION: &str = "1 day";
 
+/// The most bytes of vDSO read: a few pages in any kernel, so a map that
+/// says more is not believed.
+const MAX_VDSO: u64 = 1 << 20;
+
 /// Where gdb sessions keep the files only the VM has, under Rewind's
 /// data directory, one directory per session.
 const SESSIONS_DIR: &str = "gdb";
@@ -135,8 +139,9 @@ pub fn gdb(
         (None, None) => None,
         _ => thread.map(|(pid, _)| pid),
     };
-    let symbols = Symbols::load(home, run, step, pid, Kernel::Load, Say::Aloud)?;
+    let mut symbols = Symbols::load(home, run, step, pid, Kernel::Load, Say::Aloud)?;
     let mut debuggee = debuggee(run, step, machine, symbols.process.scope)?;
+    symbols.add_vdso(&debuggee, Say::Aloud);
     let listener = TcpListener::bind(listen.unwrap_or(GDB_LOCAL)).context("listening for gdb")?;
     let mut args = symbols.arguments(Some(listener.local_addr()?));
 
@@ -440,6 +445,38 @@ impl Symbols {
         })
     }
 
+    /// Adds the process's vDSO, where clock_gettime and the like run, to
+    /// the files gdb loads. No file holds it, so it is read out of
+    /// `debuggee`, the fork, in the process's address space; without it gdb
+    /// can neither name a frame in it nor unwind past one. A vDSO that does
+    /// not read is said, and left out, as is one the process has not
+    /// called into yet, which no frame can be in.
+    pub fn add_vdso(&mut self, debuggee: &rewind_core::debug::Debuggee, say: Say) {
+        let Some(range) = self.process.vdso.clone() else {
+            return;
+        };
+        let len = range.end.saturating_sub(range.start);
+        if len > MAX_VDSO {
+            say.line(format_args!(
+                "no symbols for the vDSO: its {len} bytes are past {MAX_VDSO}"
+            ));
+            return;
+        }
+        let bytes = match debuggee.read_vdso(range.clone()) {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => return,
+            Err(e) => {
+                say.line(format_args!("no symbols for the vDSO: {e:#}"));
+                return;
+            }
+        };
+        match rewind_core::maps::vdso_file(&self.session.dir, range.start, &bytes) {
+            Ok(Some(file)) => self.process.files.push(file),
+            Ok(None) => say.line("no symbols for the vDSO: it is not ELF"),
+            Err(e) => say.line(format_args!("no symbols for the vDSO: {e}")),
+        }
+    }
+
     /// The directory the session's files are written to, which goes when
     /// the symbols do.
     pub fn dir(&self) -> &Path {
@@ -665,6 +702,8 @@ struct Process {
     /// with where its files are here: written from the VM, or a
     /// derivation's src in the store.
     source_dirs: Vec<(PathBuf, PathBuf)>,
+    /// Where its vDSO is mapped, which [`Symbols::add_vdso`] reads.
+    vdso: Option<std::ops::Range<u64>>,
 }
 
 /// Process `pid` at `step`, or when None the process running there: its
@@ -788,6 +827,7 @@ fn debugged_process(
         scope: rewind_core::debug::Scope::Process(running.pid),
         files,
         source_dirs,
+        vdso: running.vdso,
     }
 }
 
@@ -1009,9 +1049,11 @@ fn sources_outside_store(files: &[SymbolFile]) -> Vec<Vec<String>> {
 }
 
 /// The path a symbol file had in the VM: its path under `dir` when it was
-/// written there, else its own path.
+/// written there, else its own path. The vDSO is no file in the VM, and
+/// keeps the name the VM's map gives it.
 pub fn path_in_vm(file: &Path, dir: &Path) -> PathBuf {
     match file.strip_prefix(dir) {
+        Ok(inside) if inside == Path::new(rewind_core::maps::VDSO) => inside.to_path_buf(),
         Ok(inside) => Path::new("/").join(inside),
         Err(_) => file.to_path_buf(),
     }
@@ -1304,6 +1346,25 @@ mod tests {
     // Store paths cut to the path Nix fetches, and arguments quoted for a
     // shell.
     use super::*;
+
+    /// A file written into the session is named by its path in the VM,
+    /// and the vDSO, which is no file there, as the VM's map names it.
+    #[test]
+    fn a_session_file_is_named_as_the_vm_had_it() {
+        let dir = Path::new("/home/u/.local/share/rewind/gdb/42");
+        assert_eq!(
+            path_in_vm(&dir.join("build/source/helper"), dir),
+            PathBuf::from("/build/source/helper")
+        );
+        assert_eq!(
+            path_in_vm(&dir.join("[vdso]"), dir),
+            PathBuf::from("[vdso]")
+        );
+        assert_eq!(
+            path_in_vm(Path::new("/nix/store/abc-glibc/lib/libc.so.6"), dir),
+            PathBuf::from("/nix/store/abc-glibc/lib/libc.so.6")
+        );
+    }
 
     #[test]
     fn a_file_in_a_store_path_is_fetched_as_the_whole_path() {

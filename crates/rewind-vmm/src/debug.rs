@@ -229,20 +229,10 @@ impl Machine {
     /// running: a process's memory while another runs. Returns how many
     /// bytes could be read, which stops short at the first unmapped page.
     pub fn read_virtual_in(&self, page_table: u64, address: u64, buf: &mut [u8]) -> Result<usize> {
-        let levels = if self.vcpu.get_sregs()?.cr4 & CR4_LA57 != 0 {
-            Levels::Five
-        } else {
-            Levels::Four
-        };
-        let read = |physical: u64| {
-            let mut entry = [0u8; PTE_SIZE as usize];
-            self.dev.ram.read(physical, &mut entry).ok()?;
-            Some(u64::from_le_bytes(entry))
-        };
         let mut done = 0;
         while done < buf.len() {
             let at = address + done as u64;
-            let Some(physical) = walk(read, page_table, at, levels) else {
+            let Some(physical) = self.physical_in(page_table, at)? else {
                 break;
             };
             let n = page_remainder(at).min(buf.len() - done);
@@ -257,6 +247,27 @@ impl Machine {
             done += n;
         }
         Ok(done)
+    }
+
+    /// The physical address behind a virtual one as the page table at
+    /// physical address `page_table` maps it, if it is mapped.
+    pub fn physical_in(&self, page_table: u64, address: u64) -> Result<Option<u64>> {
+        let levels = if self.vcpu.get_sregs()?.cr4 & CR4_LA57 != 0 {
+            Levels::Five
+        } else {
+            Levels::Four
+        };
+        let read = |physical: u64| {
+            let mut entry = [0u8; PTE_SIZE as usize];
+            self.dev.ram.read(physical, &mut entry).ok()?;
+            Some(u64::from_le_bytes(entry))
+        };
+        Ok(walk(read, page_table, address, levels))
+    }
+
+    /// Reads the VM's memory at a physical address.
+    pub fn read_physical(&self, physical: u64, buf: &mut [u8]) -> Result<()> {
+        self.dev.ram.read(physical, buf)
     }
 
     /// What the kernel published about its tasks at setup, or None from a

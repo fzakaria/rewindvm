@@ -35,14 +35,15 @@ let
     done
   '';
 
-  # A root of five static programs for gdb, built with their symbols: one
+  # A root of six static programs for gdb, built with their symbols: one
   # prints, forks, and waits for its child; one forks a child that prints
   # and writes a global, then writes the same global twice itself; one
   # forks a child that sleeps before writing to a pipe, prints, and blocks
   # reading the pipe; one starts three threads that block on a futex until
   # the main thread, after a sleep, prints and wakes them; one starts a
   # thread that prints and faults at once while the main thread waits on
-  # a vfork child.
+  # a vfork child; one reads the clock, which musl does in the vDSO, after
+  # each of two prints.
   gdbRoot =
     pkgs.runCommand "rewind-gdb-root"
       {
@@ -204,6 +205,23 @@ let
         }
         EOF
         $CC -static -O1 -g -pthread -o $out/bin/crash crash.c
+
+        cat > vdso.c <<'EOF'
+        #include <time.h>
+        #include <unistd.h>
+
+        int main(void)
+        {
+          struct timespec now;
+
+          write(1, "start\n", 6);
+          clock_gettime(CLOCK_MONOTONIC, &now);
+          write(1, "again\n", 6);
+          clock_gettime(CLOCK_MONOTONIC, &now);
+          return 0;
+        }
+        EOF
+        $CC -static -O1 -g -o $out/bin/vdso vdso.c
       '';
 
   # A root with a static program in two files, like mylib: main hands a
@@ -864,6 +882,40 @@ in
         cat hit
         grep -q '^Thread [2-9] hit Breakpoint 1, ' hit
         grep -q '^\* [2-9] .*on the CPU' hit
+        touch $out
+      '';
+
+  # checks.gdb-vdso: gdb knows the vDSO's code. The kernel maps the vDSO,
+  # which holds clock_gettime, into every process, and it is no file, so
+  # rewind reads it out of the fork's memory. From the print between the
+  # program's two clock reads, a breakpoint on __vdso_clock_gettime stops
+  # in the second, and the stack walks out of it into musl's
+  # clock_gettime. Boots the VM, so it needs /dev/kvm.
+  gdb-vdso =
+    pkgs.runCommand "rewind-gdb-vdso"
+      {
+        nativeBuildInputs = [
+          rewind
+          pkgs.gdb
+        ];
+        requiredSystemFeatures = [ "kvm" ];
+      }
+      ''
+        export REWIND_HOME=$TMPDIR/rewind
+        # No debuginfod server: without a network, each of gdb's questions
+        # to it waits out a timeout.
+        export REWIND_DEBUGINFOD=/nonexistent
+
+        rewind run -q --clock exits --name vdso --root ${gdbRoot} -- /bin/vdso
+        rewind events vdso > events
+        again=$(grep 'write(1, "again' events | awk '{print $1}')
+
+        rewind gdb vdso "$again" -- -batch -ex 'break __vdso_clock_gettime' -ex continue \
+          -ex 'bt 2' > gdb 2>&1 || true
+        cat gdb
+        # gdb names the vDSO's function by its other name, clock_gettime.
+        grep -q 'hit Breakpoint 1, 0x00007f[0-9a-f]* in clock_gettime ()' gdb
+        grep -q '^#1  0x0000000000[0-9a-f]* in clock_gettime ()' gdb
         touch $out
       '';
 

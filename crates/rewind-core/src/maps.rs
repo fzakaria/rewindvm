@@ -14,7 +14,7 @@
 //! large for the VM to send.
 
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -31,6 +31,10 @@ const STORE_MOUNT: &str = "/nix/store";
 /// What the kernel appends to the path of a file deleted since it was
 /// mapped.
 const DELETED: &str = " (deleted)";
+
+/// What /proc/<pid>/maps calls the vDSO's mapping, and the name of the
+/// file it is written to for gdb.
+pub const VDSO: &str = "[vdso]";
 
 /// Pages are 4 KiB; a mapping starts on a page boundary.
 const PAGE_MASK: u64 = !0xfff;
@@ -81,6 +85,9 @@ impl<'a> ImageMount<'a> {
 pub struct Running {
     pub pid: u32,
     pub mappings: Vec<Mapping>,
+    /// Where the kernel mapped its vDSO into the process, which holds the
+    /// code of clock_gettime and the like and is no file.
+    pub vdso: Option<std::ops::Range<u64>>,
     /// The mapped files only the VM has, by their paths there, with their
     /// bytes.
     pub sent: Vec<(String, Vec<u8>)>,
@@ -114,12 +121,15 @@ pub enum Origin {
     /// The file was read out of the run's input image, which the VM's
     /// store was mounted from.
     Image,
+    /// Read out of the process's memory: the vDSO, which no file holds.
+    Memory,
 }
 
 impl Running {
     /// The answer of a `running` inspection, in sections: the pid, the
     /// map, then the files only the VM has. Lines of the map that map no
-    /// file, such as the heap, the stack and the vDSO, are left out.
+    /// file, such as the heap, the stack and the vDSO, are no mappings;
+    /// the vDSO's range is kept on its own.
     pub fn parse(answer: &[u8]) -> Option<Running> {
         let mut parts = sections(answer)?.into_iter();
         let (name, pid) = parts.next()?;
@@ -131,14 +141,14 @@ impl Running {
         if name != SECTION_MAPS {
             return None;
         }
-        let mappings = String::from_utf8_lossy(maps)
-            .lines()
-            .filter_map(parse_line)
-            .collect();
+        let maps = String::from_utf8_lossy(maps);
+        let mappings = maps.lines().filter_map(parse_line).collect();
+        let vdso = maps.lines().find_map(vdso_range);
         let sent = parts.map(|(path, bytes)| (path, bytes.to_vec())).collect();
         Some(Running {
             pid,
             mappings,
+            vdso,
             sent,
         })
     }
@@ -341,6 +351,39 @@ fn parse_line(line: &str) -> Option<Mapping> {
     })
 }
 
+/// The vDSO's bytes, read from a process that mapped it at `start`,
+/// written into `dir` as a file for gdb's `add-symbol-file`. None when the
+/// bytes are not ELF.
+pub fn vdso_file(dir: &Path, start: u64, bytes: &[u8]) -> std::io::Result<Option<SymbolFile>> {
+    if !bytes.starts_with(ELF_MAGIC) {
+        return Ok(None);
+    }
+    std::fs::create_dir_all(dir)?;
+    let path = dir.join(VDSO);
+    std::fs::write(&path, bytes)?;
+    let Some(offset) = load_offset(&mut Cursor::new(bytes), start) else {
+        return Ok(None);
+    };
+    Ok(Some(SymbolFile {
+        path,
+        offset,
+        origin: Origin::Memory,
+    }))
+}
+
+/// The range of a line of /proc/<pid>/maps when the line maps the vDSO.
+fn vdso_range(line: &str) -> Option<std::ops::Range<u64>> {
+    let mut fields = line.split_whitespace();
+    let range = fields.next()?;
+    if fields.last()? != VDSO {
+        return None;
+    }
+    let (start, end) = range.split_once('-')?;
+    let start = u64::from_str_radix(start, 16).ok()?;
+    let end = u64::from_str_radix(end, 16).ok()?;
+    Some(start..end)
+}
+
 /// ELF's magic, the class byte for 64 bits, and the program header types
 /// of a loadable segment and a note segment.
 const ELF_MAGIC: &[u8; 4] = b"\x7fELF";
@@ -505,6 +548,35 @@ mod tests {
         assert_eq!(running.mappings.len(), 5);
         assert_eq!(running.mappings[4].path, "/build/source/test-helper");
         assert_eq!(running.sent.len(), 1);
+    }
+
+    /// The vDSO maps no file, so it is no mapping, but its range is kept
+    /// for gdb, which has its symbols only from the process's memory. A
+    /// map without one has none.
+    #[test]
+    fn the_vdso_is_kept_by_its_range() {
+        let running = Running::parse(&answer(&[])).unwrap();
+        assert_eq!(running.vdso, Some(0x7ffd00100000..0x7ffd00102000));
+        assert!(running.mappings.iter().all(|m| !m.path.contains("vdso")));
+
+        let without = MAPS.replace("[vdso]", "[vvar]");
+        let running = Running::parse(&answer_with(&without, &[])).unwrap();
+        assert_eq!(running.vdso, None);
+    }
+
+    /// The vDSO's bytes, read from the process's memory, become a file in
+    /// the session that gdb loads at the vDSO's start, which is its load
+    /// offset since the vDSO is linked at 0; bytes that are not ELF are
+    /// no file.
+    #[test]
+    fn the_vdso_is_written_as_a_file_at_its_start() {
+        let dir = std::env::temp_dir().join(format!("rewind-maps-vdso-{}", std::process::id()));
+        let file = vdso_file(&dir, 0x7ffd00100000, &elf(0)).unwrap().unwrap();
+        assert_eq!(file.offset, 0x7ffd00100000);
+        assert_eq!(file.origin, Origin::Memory);
+        assert_eq!(std::fs::read(&file.path).unwrap(), elf(0));
+        assert_eq!(vdso_file(&dir, 0x7ffd00100000, &[0u8; 64]).unwrap(), None);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

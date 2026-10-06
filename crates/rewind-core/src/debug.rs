@@ -61,6 +61,9 @@ const MAX_PIECE: u64 = 8;
 /// a user and a kernel one.
 const CR3_PAGE_TABLE: u64 = 0x000f_ffff_ffff_f000;
 
+/// The size of a page, which the vDSO is a whole number of.
+const PAGE_SIZE: u64 = 4096;
+
 /// Where x86-64's lower half, user space, ends.
 const USER_END: u64 = 0x0000_8000_0000_0000;
 
@@ -482,6 +485,43 @@ impl Debuggee {
     /// such thread at this stop.
     pub fn thread_number(&self, tid: u32) -> Option<usize> {
         thread_number(&self.threads, tid)
+    }
+
+    /// The vDSO the debugged process, or with none the process on the CPU,
+    /// maps at `range`. Its pages are the kernel's one copy of the image,
+    /// page after page in physical memory, and a page table maps each
+    /// page only once the process has touched it, so the image is read in
+    /// a row from the physical address of the pages that are mapped, which
+    /// must agree on where it starts. None when the process has touched
+    /// none of them yet, as before its first call into the vDSO, when no
+    /// frame can be in it.
+    pub fn read_vdso(&self, range: std::ops::Range<u64>) -> Result<Option<Vec<u8>>> {
+        let space = match self.space {
+            Some(space) => space,
+            None => page_table(self.machine.special_registers()?.cr3),
+        };
+
+        // Where each mapped page says the image starts.
+        let mut start = None;
+        for address in (range.start..range.end).step_by(PAGE_SIZE as usize) {
+            let Some(physical) = self.machine.physical_in(space, address)? else {
+                continue;
+            };
+            let from = physical
+                .checked_sub(address - range.start)
+                .context("the vDSO's first page would be below physical 0")?;
+            if start.is_some_and(|s| s != from) {
+                anyhow::bail!("the vDSO's pages are not in a row in physical memory");
+            }
+            start = Some(from);
+        }
+        let Some(start) = start else {
+            return Ok(None);
+        };
+
+        let mut bytes = vec![0u8; (range.end - range.start) as usize];
+        self.machine.read_physical(start, &mut bytes)?;
+        Ok(Some(bytes))
     }
 
     /// Which half the CPU is running, by its code segment's privilege.
