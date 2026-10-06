@@ -45,6 +45,14 @@
         else
           null;
 
+      # The day the commit was made, YYYY-MM-DD in UTC: the desktop app's
+      # release date, which a license's Updates-Until is held against.
+      releaseDate =
+        let
+          d = self.lastModifiedDate;
+        in
+        "${builtins.substring 0 4 d}-${builtins.substring 4 2 d}-${builtins.substring 6 2 d}";
+
       # Everything a system's outputs share, built once per system.
       per =
         system:
@@ -62,7 +70,14 @@
               commit
               ;
           };
-          app = import ./nix/app.nix { inherit pkgs rust rewind; };
+          app = import ./nix/app.nix {
+            inherit
+              pkgs
+              rust
+              rewind
+              releaseDate
+              ;
+          };
         in
         {
           inherit
@@ -82,10 +97,17 @@
               ;
           };
           releaseDebug = import ./nix/release-debug.nix { inherit pkgs kernel; };
-          appRelease = import ./nix/app-release.nix { inherit pkgs rust; };
+          appRelease = import ./nix/app-release.nix { inherit pkgs rust releaseDate; };
           site = import ./nix/site.nix { inherit pkgs; };
           examples = import ./nix/examples.nix { inherit pkgs; };
-          license = import ./nix/license.nix { inherit pkgs rust app; };
+          license = import ./nix/license.nix {
+            inherit
+              pkgs
+              rust
+              app
+              releaseDate
+              ;
+          };
         };
     in
     {

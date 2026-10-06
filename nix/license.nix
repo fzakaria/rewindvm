@@ -9,12 +9,14 @@
   pkgs,
   rust,
   app,
+  releaseDate,
 }:
 rust.craneLib.buildPackage (
   rust.app
   // {
     pname = "rewind-license";
     inherit (app) cargoArtifacts;
+    REWIND_RELEASE_DATE = releaseDate;
 
     cargoExtraArgs = "--locked --features issuer";
     cargoBuildExtraArgs = "--bin rewind-license";

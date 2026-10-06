@@ -11,12 +11,16 @@
 #
 # The launcher runs the app against the system's libraries and graphics
 # drivers. Nix users run the flake's `app` package instead.
-{ pkgs, rust }:
+{
+  pkgs,
+  rust,
+  releaseDate,
+}:
 let
   inherit (pkgs) lib;
   dir = "rewind-app-x86_64-linux";
 
-  portable = import ./app-portable.nix { inherit pkgs rust; };
+  portable = import ./app-portable.nix { inherit pkgs rust releaseDate; };
 
   # The weights the app draws with (src/theme.rs).
   plex = "${pkgs.ibm-plex}/share/fonts/opentype";

@@ -15,7 +15,11 @@
 #
 # nix/app-release.nix puts the result in the tarball, and the tarball's
 # flake patches the same binary to run on NixOS.
-{ pkgs, rust }:
+{
+  pkgs,
+  rust,
+  releaseDate,
+}:
 let
   inherit (pkgs) lib;
 
@@ -70,6 +74,10 @@ rust.craneLib.mkCargoDerivation (
   // {
     cargoArtifacts = rust.craneLib.buildDepsOnly common;
     doInstallCargoArtifacts = false;
+
+    # The day the commit was made, which licenses are held against
+    # (build.rs), as in nix/app.nix.
+    REWIND_RELEASE_DATE = releaseDate;
 
     installPhaseCommand = ''
       install -D target/${target}/release/rewind-app $out/libexec/rewind-app

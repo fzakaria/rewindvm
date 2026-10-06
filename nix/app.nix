@@ -21,6 +21,7 @@
   pkgs,
   rust,
   rewind,
+  releaseDate,
 }:
 let
   inherit (pkgs) lib;
@@ -53,6 +54,11 @@ let
     // {
       pname = "rewind-app";
       inherit cargoArtifacts;
+
+      # The day the commit was made, which licenses are held against
+      # (build.rs); given to this build alone, so the dependencies' build
+      # does not change with every commit.
+      REWIND_RELEASE_DATE = releaseDate;
 
       # Writable copies: crane's install hooks rewrite toolchain paths in
       # every file of the output, the desktop entry and icon among them.

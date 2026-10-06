@@ -32,14 +32,11 @@ pub const PUBLIC_KEY: [u8; 32] = [
 /// License ids the app refuses: refunded or leaked keys.
 pub const REVOKED: &[&str] = &[];
 
-/// The day this version of the app was released. A license whose updates
-/// ended before it registers only the versions released until then; this
-/// one runs as an evaluation, fully, with the reminders.
-pub const RELEASE_DATE: Date = Date {
-    year: 2026,
-    month: 10,
-    day: 4,
-};
+/// The day this version of the app was released: the day the commit it
+/// was built from was made (build.rs). A license whose updates ended
+/// before it registers only the versions released until then; this one
+/// runs as an evaluation, fully, with the reminders.
+pub const RELEASE_DATE: Date = include!(concat!(env!("OUT_DIR"), "/release_date.rs"));
 
 /// Years of updates a license of either edition includes, from the day
 /// it was issued.

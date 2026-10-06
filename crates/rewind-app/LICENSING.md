@@ -52,7 +52,9 @@ as it was issued, in `$XDG_CONFIG_HOME/rewind/license.txt` (or
   `Updates-Until`, forever. A version released after it
   (`RELEASE_DATE` in `src/license.rs`) runs as an evaluation, fully and
   with the reminders, and the header says "Updates ended · Renew"; a new
-  license covers it. Raise `RELEASE_DATE` with every release.
+  license covers it. `RELEASE_DATE` is the day, in UTC, of the commit the
+  app is built from: the flake passes it as `REWIND_RELEASE_DATE`, and a
+  cargo build in a checkout asks git (`build.rs`).
 - Ids in `REVOKED` (refunds, leaked keys) are refused. Revocation takes
   effect in the next release.
 
