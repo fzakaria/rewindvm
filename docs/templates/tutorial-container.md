@@ -112,7 +112,6 @@ $ rewind check --all --root mylib.tar --cwd /src -- make check | grep 'ended dif
 <!-- set pid: rewind events {{failing}} | grep -m1 SIGSEGV | awk '{print $2}' | cut -d/ -f1 -->
 <!-- set crash_tid: rewind events {{failing}} | grep -m1 SIGSEGV | awk '{print $2}' | cut -d/ -f2 -->
 <!-- set last_write: rewind events {{failing}} --to {{crash_step}} | grep -E " {{pid}}/{{crash_tid}} +write" | tail -1 | awk '{print $1}' -->
-<!-- set gdb_from: rewind events {{failing}} --to {{crash_step}} | grep -E " {{pid}}/{{crash_tid}} +write" | tail -2 | head -1 | awk '{print $1}' -->
 <!-- set events_to: echo $(( {{crash_step}} + 2 )) -->
 
 ```console run
@@ -142,11 +141,11 @@ $ printf 'pwd; ls; exit\n' | rewind shell {{failing|short}} {{crash_step}} --pid
 
 `rewind gdb` loads the symbols of the VM's kernel and of the process running
 at the step. Debian strips its libc; `DEBUGINFOD_URLS` names Debian's
-debuginfod server, which has its symbols. From step {{gdb_from}}, thread
-{{crash_tid}}'s write before its last, continue to the line that faulted:
+debuginfod server, which has its symbols. From step {{last_write}}, thread
+{{crash_tid}}'s last write, continue to the line that faulted:
 
 ```console run name=gdb
-$ DEBUGINFOD_URLS=https://debuginfod.debian.net rewind gdb {{failing|short}} {{gdb_from}} -- -batch -ex 'break src/pool.c:77 if p->queue == 0' -ex continue -ex 'bt 3' -ex 'p p->queue' -ex list
+$ DEBUGINFOD_URLS=https://debuginfod.debian.net rewind gdb {{failing|short}} {{last_write}} -- -batch -ex 'break src/pool.c:77 if p->queue == 0' -ex continue -ex 'bt 3' -ex 'p p->queue' -ex list
 ```
 
 <!-- assert: grep -q 'Breakpoint 1, worker' {{out:gdb}} && grep -q 'in start_thread' {{out:gdb}} -->
