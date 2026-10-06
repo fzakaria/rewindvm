@@ -61,12 +61,14 @@
           rust = import ./nix/crane.nix { inherit pkgs crane; };
           kernel = import ./nix/kernel.nix { inherit pkgs; };
           guest = import ./nix/guest.nix { inherit pkgs; };
+          nixseparatedebuginfod2 = import ./nix/debuginfod.nix { inherit pkgs; };
           rewind = import ./nix/rewind.nix {
             inherit
               pkgs
               rust
               kernel
               guest
+              nixseparatedebuginfod2
               commit
               ;
           };
@@ -84,6 +86,7 @@
             pkgs
             kernel
             guest
+            nixseparatedebuginfod2
             rewind
             app
             ;
@@ -93,6 +96,7 @@
               rust
               kernel
               guest
+              nixseparatedebuginfod2
               commit
               ;
           };
@@ -134,6 +138,10 @@
 
           # the same kernel's DWARF, by build ID, for `rewind gdb`
           kernel-debug = p.kernel.debug;
+
+          # the debuginfod server `rewind gdb` starts, patched so sessions
+          # share its cache (nix/debuginfod.nix)
+          debuginfod = p.nixseparatedebuginfod2;
 
           # the guest's init and initramfs (nix/guest.nix)
           init = p.guest.init;
@@ -214,6 +222,7 @@
             pkgs
             kernel
             guest
+            nixseparatedebuginfod2
             app
             ;
         }

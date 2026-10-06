@@ -7,6 +7,7 @@
   rust,
   kernel,
   guest,
+  nixseparatedebuginfod2,
   commit,
 }:
 let
@@ -62,9 +63,11 @@ let
   # package's closure stays without them: the kernel's DWARF, which runs
   # record the path of, and nixseparatedebuginfod2, the debuginfod server
   # that hands gdb DWARF and source files from the store and
-  # cache.nixos.org. `rewind gdb` fetches each the first time it runs.
+  # cache.nixos.org, patched (nix/debuginfod.nix), so it comes from
+  # Rewind's binary cache. `rewind gdb` fetches each the first time it
+  # runs.
   kernelDebug = builtins.unsafeDiscardStringContext "${kernel.debug}";
-  debuginfod = builtins.unsafeDiscardStringContext (lib.getExe pkgs.nixseparatedebuginfod2);
+  debuginfod = builtins.unsafeDiscardStringContext (lib.getExe nixseparatedebuginfod2);
 
   # gdb comes after the user's own PATH, for `rewind gdb`, so a gdb the
   # user prefers wins.

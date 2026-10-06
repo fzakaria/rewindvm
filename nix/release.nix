@@ -12,6 +12,7 @@
   rust,
   kernel,
   guest,
+  nixseparatedebuginfod2,
   commit,
 }:
 let
@@ -49,7 +50,7 @@ let
   # and sources are a release asset of their own (nix/release-debug.nix),
   # which the launcher names when it is unpacked next to this one.
   kernelDebug = builtins.unsafeDiscardStringContext "${kernel.debug}";
-  debuginfod = builtins.unsafeDiscardStringContext (lib.getExe pkgs.nixseparatedebuginfod2);
+  debuginfod = builtins.unsafeDiscardStringContext (lib.getExe nixseparatedebuginfod2);
 
   launcher = pkgs.writeText "rewind" ''
     #!/bin/sh

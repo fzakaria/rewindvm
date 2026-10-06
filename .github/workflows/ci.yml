@@ -9,7 +9,8 @@
 #     GitHub's Linux runners have but do not open to the build user.
 #
 # Then the packages build: the command, the desktop app, the three release
-# assets and the site. Everything built is pushed to rewindvm.cachix.org.
+# assets, the site and the patched debuginfod server `rewind gdb` fetches.
+# Everything built is pushed to rewindvm.cachix.org.
 name: ci
 
 on:
@@ -67,16 +68,17 @@ jobs:
         run: nix flake check -L
 
       - name: Packages
-        run: nix build -L .#rewind .#app .#release .#release-debug .#app-release .#site
+        run: nix build -L .#rewind .#app .#release .#release-debug .#app-release .#site .#debuginfod
 
       # The latest builds of main, pinned so they stay when the cache fills
       # and the dependency builds go: the last five of each, the kernel's
-      # debug output among them, for `rewind gdb` on runs made with them.
-      # Releases pin theirs for good (release.yml).
+      # debug output and the patched debuginfod server among them, for
+      # `rewind gdb` on runs made with them. Releases pin theirs for good
+      # (release.yml).
       - name: Pin main's packages
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
-          for attr in rewind app kernel kernel-debug; do
+          for attr in rewind app kernel kernel-debug debuginfod; do
             cachix pin rewindvm "main-$attr" \
               "$(nix build --no-link --print-out-paths ".#$attr")" --keep-revisions 5
           done

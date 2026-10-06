@@ -7,6 +7,7 @@
   pkgs,
   kernel,
   guest,
+  nixseparatedebuginfod2,
   app,
 }:
 {
@@ -26,7 +27,7 @@
     REWIND_KERNEL = "${kernel}/bzImage";
     REWIND_INITRD = "${guest.initrd}/initrd";
     REWIND_KERNEL_DEBUG = "${kernel.debug}";
-    REWIND_DEBUGINFOD = pkgs.lib.getExe pkgs.nixseparatedebuginfod2;
+    REWIND_DEBUGINFOD = pkgs.lib.getExe nixseparatedebuginfod2;
   };
 
   # `nix develop .#app`: the desktop app's toolchain and libraries, for
