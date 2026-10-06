@@ -35,12 +35,14 @@ let
     done
   '';
 
-  # A root of four static programs for gdb, built with their symbols: one
+  # A root of five static programs for gdb, built with their symbols: one
   # prints, forks, and waits for its child; one forks a child that prints
   # and writes a global, then writes the same global twice itself; one
   # forks a child that sleeps before writing to a pipe, prints, and blocks
   # reading the pipe; one starts three threads that block on a futex until
-  # the main thread, after a sleep, prints and wakes them.
+  # the main thread, after a sleep, prints and wakes them; one starts a
+  # thread that prints and faults at once while the main thread waits on
+  # a vfork child.
   gdbRoot =
     pkgs.runCommand "rewind-gdb-root"
       {
@@ -160,6 +162,48 @@ let
         }
         EOF
         $CC -static -O1 -g -pthread -o $out/bin/threads threads.c
+
+        cat > crash.c <<'EOF'
+        #define _GNU_SOURCE
+        #include <linux/futex.h>
+        #include <pthread.h>
+        #include <sys/syscall.h>
+        #include <time.h>
+        #include <unistd.h>
+
+        static int go;
+
+        /* Waits for the vfork child's word, then prints and faults at once:
+           the print is its last system call. */
+        static void *worker(void *arg)
+        {
+          while (!__atomic_load_n(&go, __ATOMIC_ACQUIRE))
+            syscall(SYS_futex, &go, FUTEX_WAIT, 0, 0, 0, 0);
+          write(1, "dying\n", 6);
+          *(volatile int *)0 = 1;
+          return arg;
+        }
+
+        int main(void)
+        {
+          pthread_t t;
+          struct timespec second = { 1, 0 };
+
+          pthread_create(&t, 0, worker, 0);
+
+          /* The main thread waits for the vfork child in a sleep that no
+             stop signal wakes, so only a signal to the worker stops it. */
+          if (vfork() == 0) {
+            __atomic_store_n(&go, 1, __ATOMIC_RELEASE);
+            syscall(SYS_futex, &go, FUTEX_WAKE, 1, 0, 0, 0);
+            syscall(SYS_nanosleep, &second, 0);
+            syscall(SYS_exit, 0);
+          }
+          pthread_join(t, 0);
+          return 0;
+        }
+        EOF
+        $CC -static -O1 -g -pthread -o $out/bin/crash crash.c
       '';
 
   # A root with a static program in two files, like mylib: main hands a
@@ -707,6 +751,38 @@ in
           sessions=$((sessions + 1))
         done
         echo "$sessions forks for gdb, each made at a step without a keyframe, stayed on the recording"
+        touch $out
+      '';
+
+  # checks.inspect-stops-threads: an inspection sees the machine at the step
+  # it asks about, every thread stopped there. A worker prints and faults
+  # at once while the main thread waits on a vfork child, a sleep no stop
+  # signal wakes. At the print, the step the worker is on the CPU in, the
+  # worker is stopped and the process alive, where a stop sent only to the
+  # process left the worker to run on into its fault. Boots the VM, so it
+  # needs /dev/kvm.
+  inspect-stops-threads =
+    pkgs.runCommand "rewind-inspect-stops-threads"
+      {
+        nativeBuildInputs = [ rewind ];
+        requiredSystemFeatures = [ "kvm" ];
+      }
+      ''
+        export REWIND_HOME=$TMPDIR/rewind
+        rewind run -q --clock exits --name crash --root ${gdbRoot} -- /bin/crash || true
+        rewind events crash | grep -q 'SIGSEGV'
+        write=$(rewind events crash | grep 'write(1, "dying')
+        step=$(echo "$write" | awk '{print $1}')
+        pid=$(echo "$write" | awk '{print $2}' | cut -d/ -f1)
+        tid=$(echo "$write" | awk '{print $2}' | cut -d/ -f2)
+        test "$pid" != "$tid"
+
+        rewind cat crash "$step" /proc/$pid/status > status
+        cat status
+        ! grep -q '^State:.*zombie' status
+        rewind cat crash "$step" /proc/$pid/task/$tid/stat > stat
+        cat stat
+        test "$(awk '{print $3}' stat)" = T
         touch $out
       '';
 

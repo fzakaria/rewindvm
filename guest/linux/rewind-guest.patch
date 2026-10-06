@@ -118,7 +118,7 @@ diff -ruN a/arch/x86/kernel/cpu/Makefile b/arch/x86/kernel/cpu/Makefile
 diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 --- a/arch/x86/kernel/cpu/rewind.c	1969-12-31 16:00:00.000000000 -0800
 +++ b/arch/x86/kernel/cpu/rewind.c	1969-12-31 16:00:00.000000000 -0800
-@@ -0,0 +1,1302 @@
+@@ -0,0 +1,1306 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Rewind VM guest platform.
@@ -489,19 +489,23 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +/*
 + * Stops every user process but init where it stands. Called from the
 + * interrupt, so the machine stops at the step the monitor asked about
-+ * rather than whenever the worker gets to run. Linux never stops init with
-+ * a signal, so init is held at its next system call instead
-+ * (rewind_probe_sys_enter), before it can start the job or anything else.
++ * rather than whenever the worker gets to run. SIGSTOP goes to each
++ * thread, not once to each process: a signal sent to a process wakes one
++ * of its threads, and the thread the interrupt came in on would return to
++ * user space and run on, into a crash at worst, before that one stopped
++ * it. Linux never stops init with a signal, so init is held at its next
++ * system call instead (rewind_probe_sys_enter), before it can start the
++ * job or anything else.
 + */
 +static void rewind_stop_user_tasks(void)
 +{
-+	struct task_struct *p;
++	struct task_struct *p, *t;
 +
 +	rcu_read_lock();
-+	for_each_process(p) {
-+		if ((p->flags & PF_KTHREAD) || is_global_init(p))
++	for_each_process_thread(p, t) {
++		if ((t->flags & PF_KTHREAD) || is_global_init(p))
 +			continue;
-+		send_sig(SIGSTOP, p, 1);
++		send_sig(SIGSTOP, t, 1);
 +	}
 +	rcu_read_unlock();
 +}
