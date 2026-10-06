@@ -31,8 +31,9 @@ The signature covers the lines above it exactly as `Key: value\n` in the
 order shown, with the values trimmed. Pasting tolerates CRLF line ends,
 indentation, text around the block, the `> ` a reply quotes lines with,
 no-break spaces, and lines a mail client wrapped: a line with no key goes
-on the end of the value before it. The app keeps the block in
-`$XDG_CONFIG_HOME/rewind/license.txt` (or `~/.config/rewind/license.txt`).
+on the end of the value before it. The app keeps the block alone,
+as it was issued, in `$XDG_CONFIG_HOME/rewind/license.txt` (or
+`~/.config/rewind/license.txt`), readable by its owner only.
 
 - Personal and Commercial licenses both include 3 years of updates
   (`UPDATE_YEARS` in `src/license.rs`). `Updates-Until` is what counts.

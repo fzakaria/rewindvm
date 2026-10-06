@@ -8,7 +8,9 @@
 //! LICENSING.md for the format, the keys and how licenses are issued.
 
 use std::fmt;
-use std::path::PathBuf;
+use std::io::Write as _;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
@@ -47,6 +49,10 @@ pub const UPDATE_YEARS: i32 = 3;
 const CONFIG_SUBDIR: &str = "rewind";
 const LICENSE_FILE: &str = "license.txt";
 const XDG_CONFIG_ENV: &str = "XDG_CONFIG_HOME";
+
+/// The license file's permissions: its owner reads and writes it, nobody
+/// else reads it.
+const LICENSE_MODE: u32 = 0o600;
 const HOME_CONFIG_DIR: &str = ".config";
 
 /// The license's fields, in the order the signature covers them.
@@ -252,11 +258,16 @@ impl License {
     /// Signs the license and returns the block to send the buyer.
     pub fn sign(&self, key: &SigningKey) -> String {
         let signature = key.sign(self.payload().as_bytes());
+        self.block(&signature.to_bytes())
+    }
+
+    /// The block for the license and its `signature`, as it was issued.
+    fn block(&self, signature: &[u8]) -> String {
         format!(
             "{BEGIN}\n{}{}: {}\n{END}\n",
             self.payload(),
             field::SIGNATURE,
-            BASE64.encode(signature.to_bytes())
+            BASE64.encode(signature)
         )
     }
 
@@ -455,15 +466,43 @@ pub fn load() -> Registration {
     }
 }
 
-/// Stores a license block that checked out.
+/// Stores the license block in `text`, which must check out, where the
+/// app looks for it.
 pub fn save(text: &str) -> std::io::Result<PathBuf> {
     let path =
         license_path().ok_or_else(|| std::io::Error::other("no HOME to keep the license in"))?;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    std::fs::write(&path, text.trim().to_string() + "\n")?;
+    save_to(&path, text, &PUBLIC_KEY)?;
     Ok(path)
+}
+
+/// Stores the license block in `text` at `path`, checked against
+/// `public_key`: the block alone, as it was issued, whatever was pasted
+/// around it, readable by its owner only. The file is written whole or
+/// not at all, to a temporary file renamed over the old one.
+pub fn save_to(path: &Path, text: &str, public_key: &[u8; 32]) -> std::io::Result<()> {
+    let invalid = |e: LicenseError| std::io::Error::new(std::io::ErrorKind::InvalidData, e);
+    let license = verify_with(text, public_key, REVOKED).map_err(invalid)?;
+    let (_, signature) = parse(text).map_err(invalid)?;
+    let block = license.block(&signature);
+
+    let dir = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("the license path has no directory"))?;
+    std::fs::create_dir_all(dir)?;
+    let tmp = dir.join(format!(".{LICENSE_FILE}.{}", std::process::id()));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(LICENSE_MODE)
+        .open(&tmp)?;
+
+    // A file left by an earlier attempt keeps its own permissions, which
+    // the mode above does not change.
+    file.set_permissions(std::fs::Permissions::from_mode(LICENSE_MODE))?;
+    file.write_all(block.as_bytes())?;
+    file.sync_all()?;
+    std::fs::rename(&tmp, path)
 }
 
 /// When to remind an unregistered user: after every
@@ -641,6 +680,37 @@ mod tests {
 
         let no_break = block.replace(' ', "\u{a0}");
         assert_eq!(verify_with(&no_break, &public(), &[]).unwrap(), license);
+    }
+
+    #[test]
+    fn a_saved_license_is_the_block_alone_readable_only_by_its_owner() {
+        // Whatever was pasted around a quoted block, the file holds the
+        // block as it was issued, and only its owner can read it. Saving
+        // again replaces the file whole and leaves no temporary file.
+        use std::os::unix::fs::PermissionsExt;
+        const OWNER_ONLY: u32 = 0o600;
+        const MODE_BITS: u32 = 0o777;
+
+        let block = sample().sign(&test_key());
+        let pasted: String = std::iter::once("Thanks for buying!\n".to_string())
+            .chain(block.lines().map(|l| format!("> {l}\n")))
+            .collect();
+        let dir = std::env::temp_dir().join(format!("rewind-license-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join(LICENSE_FILE);
+
+        save_to(&path, &pasted, &public()).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), block);
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & MODE_BITS, OWNER_ONLY);
+
+        save_to(&path, &block, &public()).unwrap();
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        assert_eq!(
+            save_to(&path, "hello", &public()).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
