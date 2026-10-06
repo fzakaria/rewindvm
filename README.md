@@ -176,61 +176,35 @@ $ rewind import https://github.com/fzakaria/rewindvm/releases/download/case-stud
 
 ## The desktop app
 
-The app scrubs a recorded run: drag the playhead over the timeline of phases,
-and the build log, the process tree and the files follow it. It jumps to the
-failure, or to the first point where the run parts from a passing one and says
-in words what each did next. Click a file to read it as it was at the
-playhead, its syntax colored for C, C++, Rust, Go, Python, shell (Nix's
-env-vars among it), Makefiles, Markdown, Nix, assembly and Dockerfiles, and
-a binary file as a hex dump colored by byte. Long lines do not wrap: Shift
-with the wheel, or a sideways swipe, scrolls them while the line numbers stay
-put. Fork from here branches the run under a new schedule.
+The app scrubs a recorded run. Drag the playhead along the timeline and the
+build log, process tree and files follow it, or jump to the failure or to
+where the run parts from a passing one.
+
+- Click a file to read it as it was at the playhead, syntax colored, or as a
+  colored hex dump.
+- Show source (`s`) opens the line of the program's own code the thread was
+  on, with the frames that led there.
+- Open shell and Attach gdb work inside the VM at the playhead.
+- Fork from here branches the run under another schedule.
+- The Runs panel draws a build's runs as a tree of schedules and forks, the
+  way ISL and Jujutsu draw a history.
 
 <p align="center">
-  <img src="docs/img/app-file-viewer.png" alt="The Rewind desktop app with a file open at the playhead: /build/env-vars as of step 4,583, next to the build log and the process tree." />
-</p>
-
-Open shell starts a shell inside the VM at the playhead, in the build's
-directory with its environment, and Attach gdb opens gdb on the same fork,
-both in a terminal pane below the scrubber. Show source, or the s key, opens
-a panel with the whole source file of the program's own code the playhead's
-thread was in, scrolled to the line it was on, and the frames that led there
-in a short list below; clicking a frame shows its file at its line. The
-file's syntax is colored, and its long lines scroll sideways, as in the file
-viewer.
-
-Every run of a build is one family: the run under schedule 0, with its
-threads left alone, the schedules `rewind check` tried, and every fork. The
-start screen lists one line per family however many runs it has, and the runs
-pill in the header opens the Runs panel, which draws the family as a tree the
-way ISL and Jujutsu draw a history. Each fork branches off the run it came
-from, red for failed and green for passed, with the step it forked at, its
-schedule and where it first differs. The schedules `rewind check` ran from
-boot hang off the schedule 0 run, and those that ended the way it did fold into
-one row that opens on a click. The runs `check` makes narrowing a schedule to a
-window of steps hang off that schedule and fold the same way, but for the
-narrowest window that still ends as it did. A family recorded on two machines,
-or with different `--cores`, has a schedule 0 run for each. Click a run to open it
-beside the run it hangs under; right-click it to compare it with the run on
-screen, copy its id, or remove it with its forks.
-
-<p align="center">
-  <img src="docs/img/app-runs.png" alt="The Runs panel: the mylib build's 170 runs as a tree under the passing schedule 0 run, with twelve forks of it at step 2,713, one crashed fork with forks of its own at steps 4,400 and 4,520 and a fork of a fork at 4,500, one row folding the 53 schedules from boot that passed like the schedule 0 run, then schedule 4, which failed, with a row folding the 88 windows rewind check narrowed it to and the narrowest window that still fails." />
+  <img src="docs/img/app-file-viewer.png" width="49%" alt="The Rewind desktop app with a file open at the playhead: /build/env-vars as of step 4,583, next to the build log and the process tree." />
+  <img src="docs/img/app-shell.png" width="49%" alt="The Rewind desktop app at the step a test segfaulted, with a terminal pane below the scrubber running a shell inside the VM: ls, type gcc and head work in /build/mylib." />
 </p>
 
 <p align="center">
-  <img src="docs/img/app-shell.png" alt="The Rewind desktop app at the step a test segfaulted, with a terminal pane below the scrubber running a shell inside the VM: ls, type gcc and head work in /build/mylib." />
+  <img src="docs/img/app-runs.png" width="300" alt="The Runs panel: the mylib build's 170 runs as a tree under the passing schedule 0 run, with twelve forks of it at step 2,713, one crashed fork with forks of its own at steps 4,400 and 4,520 and a fork of a fork at 4,500, one row folding the 53 schedules from boot that passed like the schedule 0 run, then schedule 4, which failed, with a row folding the 88 windows rewind check narrowed it to and the narrowest window that still fails." />
 </p>
 
 ```console
 $ nix run github:fzakaria/rewindvm#app -- ~/.local/share/rewind/runs/<run>
 ```
 
-It opens `.rwd` exports too, from a file or an https URL. A replayable export
-goes into Rewind's runs in the background while it is on screen, so the shell,
-gdb and forks work on it. The start screen lists the runs recorded most
-recently, and the app comes with an example run and a short tour.
-See [pricing](https://rewindvm.dev/#pricing) for licenses.
+It opens `.rwd` exports too, from a file or an https URL, and comes with an
+example run and a short tour. See [pricing](https://rewindvm.dev/#pricing) for
+licenses.
 
 ## Case studies
 
