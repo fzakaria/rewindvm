@@ -1,4 +1,4 @@
 # The guest the tutorials were recorded with, by tools/record-tutorials.py.
 # The release workflow refuses a tag whose guest is another.
 initrd /nix/store/a9nlm3ash6gpjk50v66dnv8d6w27mp8x-rewind-initrd
-kernel /nix/store/yw5w4vvza9sn0ql0wxv6hzs9nj35rp30-rewind-guest-kernel-7.2.8
+kernel /nix/store/8bqjmjsqrzl7c1x30z6mx7qp2xl8f1hd-rewind-guest-kernel-7.2.8

@@ -84,10 +84,10 @@ rewind: packing 62 store paths for mylib-0.3.0
 schedule 6 ends differently; narrowing the steps it perturbs
 perturbing only steps 3629..5140 still ends differently
 step 5139 decides it: a reschedule there makes the run fail
-passing: run 1989f6d02c080616, schedule 6 over steps 3629..5139
-failing: run 5c910df9774b38f2, schedule 6 over steps 3629..5140
+passing: run 8c4bd4a91be9cbeb, schedule 6 over steps 3629..5139
+failing: run 3ed5e3f30d73bb41, schedule 6 over steps 3629..5140
 the two are the same run until step 5139
-open both in the desktop app: rewind open 5c910df9774b38f2 5153 --compare 1989f6d02c080616</code></pre>
+open both in the desktop app: rewind open 3ed5e3f30d73bb41 5153 --compare 8c4bd4a91be9cbeb</code></pre>
         <p>The failing run crashes at step 5153.</p>
       </section>
 
@@ -103,7 +103,7 @@ open both in the desktop app: rewind open 5c910df9774b38f2 5153 --compare 1989f6
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind where 5c910df9 5153</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind where 3ed5e3f3 5153</span>
 rewind: process 166 at step 5153; loading symbols for 4 of its files
 rewind: fetched 3 source files from the VM
 rewind: walking thread 174's stack in gdb
@@ -127,7 +127,7 @@ called from #2 __GI___clone3 (../sysdeps/unix/sysv/linux/x86_64/clone3.S:78)</co
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind where 5c910df9 5150 --tid 166</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind where 3ed5e3f3 5150 --tid 166</span>
 rewind: process 166 at step 5150; loading symbols for 4 of its files
 rewind: read 3 source files fetched from the VM earlier
 rewind: walking thread 166's stack in gdb
@@ -147,7 +147,7 @@ called from #9 __libc_start_call_main (../sysdeps/nptl/libc_start_call_main.h:59
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind gdb 5c910df9 5150 --pid 166 -- -batch -ex 'thread apply all bt' 2&gt;/dev/null | grep -E '^Thread|src/|tests/'</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind gdb 3ed5e3f3 5150 --pid 166 -- -batch -ex 'thread apply all bt' 2&gt;/dev/null | grep -E '^Thread|src/|tests/'</span>
 Thread 4 (Thread 1.174 (test_pool_shutd, on the CPU)):
 #14 worker (arg=0x5556f833c010) at src/pool.c:75
 Thread 3 (Thread 1.173 (test_pool_shutd)):
@@ -165,10 +165,10 @@ Thread 1 (Thread 1.4194305 (the CPU, in test_pool_shutd 174)):</code></pre>
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind gdb 5c910df9 5150 --tid 166 --frame 7 -- -batch -ex 'p p-&gt;queue'</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind gdb 3ed5e3f3 5150 --tid 166 --frame 7 -- -batch -ex 'p p-&gt;queue'</span>
 rewind: process 166 at step 5150; loading symbols for 4 of its files
 rewind: read 3 source files fetched from the VM earlier
-rewind: gdb at step 5150 of 5c910df9774b38f2
+rewind: gdb at step 5150 of 3ed5e3f30d73bb41
 arch_local_irq_restore (flags=518) at ./arch/x86/include/asm/irqflags.h:146
 146		return !(flags &amp; X86_EFLAGS_IF);
 [Switching to thread 2 (Thread 1.166)]
@@ -229,7 +229,7 @@ $1 = (struct queue *) 0x0
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind where 5c910df9 5139</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind where 3ed5e3f3 5139</span>
 rewind: process 166 at step 5139; loading symbols for 4 of its files
 rewind: read 3 source files fetched from the VM earlier
 rewind: walking thread 166's stack in gdb
@@ -258,11 +258,10 @@ called from #7 __libc_start_main_impl (../csu/libc-start.c:372)</code></pre>
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind check --where --epoch 1790985600 github:fzakaria/rewindvm#mylib 2&gt;/dev/null | sed -n '/^where the threads were/,/^$/p'</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind check --where --epoch 1790985600 github:fzakaria/rewindvm#mylib 2&gt;/dev/null | sed -n '/^where the threads were/,/first event that differs$/p'</span>
 where the threads were:
         5139   166/166   main (tests/test_pool_shutdown.c:23), on the CPU at the deciding step
-        5153   166/174   worker (src/pool.c:77), at the first event that differs
-</code></pre>
+        5153   166/174   worker (src/pool.c:77), at the first event that differs</code></pre>
         <p>
           In the app, two runs that differ only in their schedules show the step where the schedules
           part as a dashed blue mark on the timeline, before the solid one where their events first
@@ -301,10 +300,10 @@ where the threads were:
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind gdb 5c910df9 5103 -- -batch -ex 'break src/pool.c:74' -ex continue -ex 'watch -l p-&gt;queue' -ex 'delete 1' -ex continue -ex 'bt 2' -ex 'break src/pool.c:77 if p-&gt;queue == 0' -ex continue -ex 'bt 1'</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind gdb 3ed5e3f3 5103 -- -batch -ex 'break src/pool.c:74' -ex continue -ex 'watch -l p-&gt;queue' -ex 'delete 1' -ex continue -ex 'bt 2' -ex 'break src/pool.c:77 if p-&gt;queue == 0' -ex continue -ex 'bt 1'</span>
 rewind: step 5103 ran in process 166; loading symbols for 4 of its files
 rewind: read 3 source files fetched from the VM earlier
-rewind: gdb at step 5103 of 5c910df9774b38f2
+rewind: gdb at step 5103 of 3ed5e3f30d73bb41
 arch_local_irq_restore (flags=518) at ./arch/x86/include/asm/irqflags.h:146
 146		return !(flags &amp; X86_EFLAGS_IF);
 [Switching to thread 3 (Thread 1.173)]
@@ -370,10 +369,10 @@ Thread 4 hit Breakpoint 3, worker (arg=0x5556f833c010) at src/pool.c:77
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind gdb 5c910df9 5150 -- -batch -ex 'break force_sig_fault' -ex continue -ex 'bt 4' -ex 'pipe lx-ps | tail -4' -ex 'pipe lx-dmesg | tail -2'</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind gdb 3ed5e3f3 5150 -- -batch -ex 'break force_sig_fault' -ex continue -ex 'bt 4' -ex 'pipe lx-ps | tail -4' -ex 'pipe lx-dmesg | tail -2'</span>
 rewind: step 5150 ran in process 166; loading symbols for 4 of its files
 rewind: read 3 source files fetched from the VM earlier
-rewind: gdb at step 5150 of 5c910df9774b38f2
+rewind: gdb at step 5150 of 3ed5e3f30d73bb41
 arch_local_irq_restore (flags=518) at ./arch/x86/include/asm/irqflags.h:146
 146		return !(flags &amp; X86_EFLAGS_IF);
 [Switching to thread 4 (Thread 1.174)]
@@ -429,10 +428,10 @@ Thread 1 hit Breakpoint 1, force_sig_fault (sig=11, code=1, addr=0x108) at kerne
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind gdb 5c910df9 5153 --listen 127.0.0.1:1234</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind gdb 3ed5e3f3 5153 --listen 127.0.0.1:1234</span>
 rewind: step 5153 ran in process 166; loading symbols for 4 of its files
 rewind: read 3 source files fetched from the VM earlier
-rewind: gdb at step 5153 of 5c910df9774b38f2; connect with: gdb -q -iex 'set debuginfod enabled on' -iex 'set debuginfod urls http://127.0.0.1:34065' -ex 'file /nix/store/vid1cadd24y1ay54ksi4fqpiab4wz761-rewind-guest-kernel-7.2.8- ...</code></pre>
+rewind: gdb at step 5153 of 3ed5e3f30d73bb41; connect with: gdb -q -iex 'set debuginfod enabled on' -iex 'set debuginfod urls http://127.0.0.1:43765' -ex 'file /nix/store/c9z53nkphz0zaan797qgmydxslw4l5bi-rewind-guest-kernel-7.2.8- ...</code></pre>
       </section>
 
       <section class="step">
@@ -445,9 +444,9 @@ rewind: gdb at step 5153 of 5c910df9774b38f2; connect with: gdb -q -iex 'set deb
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> printf 'objdump -d --no-show-raw-insn --start-address=0x142c --stop-address=0x143e tests/test_pool_shutdown | tail -4; exit\n' | rewind shell 5c910df9 5153 --pid 166 --with nixpkgs#binutils</span>
+        ><code><span class="cmd"><span class="prompt">$</span> printf 'objdump -d --no-show-raw-insn --start-address=0x142c --stop-address=0x143e tests/test_pool_shutdown | tail -4; exit\n' | rewind shell 3ed5e3f3 5153 --pid 166 --with nixpkgs#binutils</span>
 rewind: packing 21 store paths for --with
-rewind: a shell at step 5153 of 5c910df9774b38f2; exit it to leave
+rewind: a shell at step 5153 of 3ed5e3f30d73bb41; exit it to leave
 [rewind] /build/mylib # objdump -d --no-show-raw-insn --start-address=0x142c --stop-address=0x143e tests/test_pool_shutdown | tail -4; exit
     142c:	mov    (%rax),%edi
     142e:	call   10c0 &lt;fflush@plt&gt;
@@ -468,12 +467,12 @@ rewind: a shell at step 5153 of 5c910df9774b38f2; exit it to leave
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind nix --cores 4 --epoch 1790985600 github:fzakaria/rewindvm#mylib</span>
 ...
-rewind: run a3a03895342cba33 exited:0 after 6174 steps, 0.216s virtual, 1.059s wall (poweroff)
+rewind: run c2dcda95802e9b88 exited:0 after 6174 steps, 0.216s virtual, 1.100s wall (poweroff)
 /nix/store/f6a9gy362szw6nxx3ikrklr8glr6rdln-mylib-0.3.0 a9d703ba89774f3d  matches your store, rewindvm.cachix.org</code></pre>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> printf 'nproc; echo $NIX_BUILD_CORES; exit\n' | rewind shell a3a03895 2467 --pid 110</span>
-rewind: a shell at step 2467 of a3a03895342cba33; exit it to leave
+        ><code><span class="cmd"><span class="prompt">$</span> printf 'nproc; echo $NIX_BUILD_CORES; exit\n' | rewind shell c2dcda95 2467 --pid 110</span>
+rewind: a shell at step 2467 of c2dcda95802e9b88; exit it to leave
 [rewind] /build/mylib # nproc; echo $NIX_BUILD_CORES; exit
 4
 4</code></pre>
@@ -493,25 +492,25 @@ rewind: a shell at step 2467 of a3a03895342cba33; exit it to leave
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind fork 5c910df9 5123 --schedule 1 --quiet</span>
-rewind: run bb5217051025dbe2 exited:0 after 6766 steps, 0.226s virtual, 0.325s wall (poweroff)
+        ><code><span class="cmd"><span class="prompt">$</span> rewind fork 3ed5e3f3 5123 --schedule 1 --quiet</span>
+rewind: run 0a18bfa4106b10ea exited:0 after 6766 steps, 0.226s virtual, 0.328s wall (poweroff)
 rewind: the fork first differs from its parent at step 5151
-rewind: open it beside its parent in the desktop app: rewind open bb5217051025dbe2 5151 --compare 5c910df9774b38f2
+rewind: open it beside its parent in the desktop app: rewind open 0a18bfa4106b10ea 5151 --compare 3ed5e3f30d73bb41
 
-<span class="cmd"><span class="prompt">$</span> rewind fork 5c910df9 5123 --schedule 2 --quiet</span>
-rewind: run 0b1210ebb800ad34 exited:2 after 5204 steps, 0.203s virtual, 0.262s wall (poweroff)
+<span class="cmd"><span class="prompt">$</span> rewind fork 3ed5e3f3 5123 --schedule 2 --quiet</span>
+rewind: run 217f5d98224a4a60 exited:2 after 5204 steps, 0.203s virtual, 0.263s wall (poweroff)
 rewind: the fork first differs from its parent at step 5151
-rewind: open it beside its parent in the desktop app: rewind open 0b1210ebb800ad34 5151 --compare 5c910df9774b38f2
+rewind: open it beside its parent in the desktop app: rewind open 217f5d98224a4a60 5151 --compare 3ed5e3f30d73bb41
 
-<span class="cmd"><span class="prompt">$</span> rewind fork 5c910df9 5123 --schedule 3 --quiet</span>
-rewind: run 1a5358100ed204c7 exited:2 after 5202 steps, 0.203s virtual, 0.257s wall (poweroff)
+<span class="cmd"><span class="prompt">$</span> rewind fork 3ed5e3f3 5123 --schedule 3 --quiet</span>
+rewind: run a62e1bc38700fde6 exited:2 after 5202 steps, 0.203s virtual, 0.266s wall (poweroff)
 rewind: the fork first differs from its parent at step 5142
-rewind: open it beside its parent in the desktop app: rewind open 1a5358100ed204c7 5142 --compare 5c910df9774b38f2
+rewind: open it beside its parent in the desktop app: rewind open a62e1bc38700fde6 5142 --compare 3ed5e3f30d73bb41
 
-<span class="cmd"><span class="prompt">$</span> rewind fork 5c910df9 5123 --schedule 4 --quiet</span>
-rewind: run b98cd6853c6161e1 exited:2 after 5236 steps, 0.204s virtual, 0.265s wall (poweroff)
+<span class="cmd"><span class="prompt">$</span> rewind fork 3ed5e3f3 5123 --schedule 4 --quiet</span>
+rewind: run 383acd539d9e1313 exited:2 after 5236 steps, 0.204s virtual, 0.262s wall (poweroff)
 rewind: the fork first differs from its parent at step 5148
-rewind: open it beside its parent in the desktop app: rewind open b98cd6853c6161e1 5148 --compare 5c910df9774b38f2</code></pre>
+rewind: open it beside its parent in the desktop app: rewind open 383acd539d9e1313 5148 --compare 3ed5e3f30d73bb41</code></pre>
         <p>
           The app's Runs tab, or the runs pill in its header, shows every run of the build, with
           forks under the run and step they branched from:
@@ -556,14 +555,14 @@ rewind: open it beside its parent in the desktop app: rewind open b98cd6853c6161
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind ls -n 3</span>
-b98cd6853c6161e1  exited:2          5236 steps  mylib-0.3.0 (fork of 5c910df9774b38f2 at 5123, schedule 4)
-1a5358100ed204c7  exited:2          5202 steps  mylib-0.3.0 (fork of 5c910df9774b38f2 at 5123, schedule 3)
-0b1210ebb800ad34  exited:2          5204 steps  mylib-0.3.0 (fork of 5c910df9774b38f2 at 5123, schedule 2)
+383acd539d9e1313  exited:2          5236 steps  mylib-0.3.0 (fork of 3ed5e3f30d73bb41 at 5123, schedule 4)
+a62e1bc38700fde6  exited:2          5202 steps  mylib-0.3.0 (fork of 3ed5e3f30d73bb41 at 5123, schedule 3)
+217f5d98224a4a60  exited:2          5204 steps  mylib-0.3.0 (fork of 3ed5e3f30d73bb41 at 5123, schedule 2)
 
-<span class="cmd"><span class="prompt">$</span> rewind ls --forks-of 5c910df9 --status failed</span>
-b98cd6853c6161e1  exited:2          5236 steps  mylib-0.3.0 (fork of 5c910df9774b38f2 at 5123, schedule 4)
-1a5358100ed204c7  exited:2          5202 steps  mylib-0.3.0 (fork of 5c910df9774b38f2 at 5123, schedule 3)
-0b1210ebb800ad34  exited:2          5204 steps  mylib-0.3.0 (fork of 5c910df9774b38f2 at 5123, schedule 2)</code></pre>
+<span class="cmd"><span class="prompt">$</span> rewind ls --forks-of 3ed5e3f3 --status failed</span>
+383acd539d9e1313  exited:2          5236 steps  mylib-0.3.0 (fork of 3ed5e3f30d73bb41 at 5123, schedule 4)
+a62e1bc38700fde6  exited:2          5202 steps  mylib-0.3.0 (fork of 3ed5e3f30d73bb41 at 5123, schedule 3)
+217f5d98224a4a60  exited:2          5204 steps  mylib-0.3.0 (fork of 3ed5e3f30d73bb41 at 5123, schedule 2)</code></pre>
         <p>
           <code>--name mylib</code> keeps the runs whose name contains <code>mylib</code>, and
           <code>--since</code> the runs made in the last <code>30m</code>, <code>2h</code> or
@@ -581,7 +580,7 @@ b98cd6853c6161e1  exited:2          5236 steps  mylib-0.3.0 (fork of 5c910df9774
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind open 5c910df9 5153 --compare 1989f6d0</span></code></pre>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind open 3ed5e3f3 5153 --compare 8c4bd4a9</span></code></pre>
       </section>
 
       <section class="step">
@@ -599,16 +598,16 @@ b98cd6853c6161e1  exited:2          5236 steps  mylib-0.3.0 (fork of 5c910df9774
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind show @</span>
-b98cd6853c6161e1  exited:2          5236 steps  mylib-0.3.0 (fork of 5c910df9774b38f2 at 5123, schedule 4)
-recorded by rewind 0.5.0 (8fa5b6b6c40d)
-rewind nix /nix/store/...-mylib-0.3.0.drv --epoch 1790985600 --schedule 6 --schedule-from 3629 --schedule-until 5140 --clock branches --name mylib-0.3.0  # 5c910df9774b38f2
-rewind fork 5c910df9774b38f2 5123 --schedule 4  # b98cd6853c6161e1</code></pre>
+383acd539d9e1313  exited:2          5236 steps  mylib-0.3.0 (fork of 3ed5e3f30d73bb41 at 5123, schedule 4)
+recorded by rewind 0.5.0 (04e7139a26ff)
+rewind nix /nix/store/...-mylib-0.3.0.drv --epoch 1790985600 --schedule 6 --schedule-from 3629 --schedule-until 5140 --clock branches --name mylib-0.3.0  # 3ed5e3f30d73bb41
+rewind fork 3ed5e3f30d73bb41 5123 --schedule 4  # 383acd539d9e1313</code></pre>
         <p>The failing run's command makes it again, with the same id:</p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind show 5c910df9 | tail -1 | sh</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind show 3ed5e3f3 | tail -1 | sh</span>
 ...
-rewind: run 5c910df9774b38f2 exited:2 after 5192 steps, 0.203s virtual, 0.621s wall (poweroff)</code></pre>
+rewind: run 3ed5e3f30d73bb41 exited:2 after 5192 steps, 0.203s virtual, 0.580s wall (poweroff)</code></pre>
       </section>
 
       <section class="step">
@@ -621,7 +620,7 @@ rewind: run 5c910df9774b38f2 exited:2 after 5192 steps, 0.203s virtual, 0.621s w
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind diff 1989f6d0 5c910df9</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind diff 8c4bd4a9 3ed5e3f3</span>
 first difference at event 1688: step 5147 on the left, step 5143 on the right
   both        5100   166/173   write(1, "job 14 done: 39906\n")
   both        5103   166/173   write(1, "worker picked job 16\n")
@@ -654,6 +653,31 @@ first difference at event 1688: step 5147 on the left, step 5143 on the right
             card naming both threads&#x27; writes
           </figcaption>
         </figure>
+        <p>
+          The card's link, Compare side by side, opens the Compare tab beside At this step. It lists
+          the last events both runs had, once each with both runs' steps, then each run's next
+          events side by side and in full, with the part of each pair that differs in amber. A click
+          on this run's event moves the playhead there. A click on the other run's, Show in the
+          other run, or the x key puts the compared run on screen in this one's place, at the
+          matching step and compared with this one, so x again comes back:
+        </p>
+        <figure class="shot">
+          <picture>
+            <source srcset="../img/app-compare-tab.webp" type="image/webp" />
+            <img
+              src="../img/app-compare-tab.png"
+              width="1440"
+              height="900"
+              loading="lazy"
+              alt="The app&#x27;s Compare tab: the writes both runs made before they part, then the failing run&#x27;s SIGSEGV beside the passing run&#x27;s write, each run&#x27;s text in full with what differs in amber"
+            />
+          </picture>
+          <figcaption>
+            The app&#x27;s Compare tab: the writes both runs made before they part, then the failing
+            run&#x27;s SIGSEGV beside the passing run&#x27;s write, each run&#x27;s text in full
+            with what differs in amber
+          </figcaption>
+        </figure>
       </section>
 
       <section class="step">
@@ -664,7 +688,7 @@ first difference at event 1688: step 5147 on the left, step 5143 on the right
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> for s in 5 6 7 8; do rewind fork 5c910df9 5123 --schedule $s --quiet 2&gt;/dev/null; echo "schedule $s: exit $?"; done</span>
+        ><code><span class="cmd"><span class="prompt">$</span> for s in 5 6 7 8; do rewind fork 3ed5e3f3 5123 --schedule $s --quiet 2&gt;/dev/null; echo "schedule $s: exit $?"; done</span>
 schedule 5: exit 0
 schedule 6: exit 2
 schedule 7: exit 2
@@ -678,15 +702,15 @@ schedule 8: exit 2</code></pre>
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind ls --forks-of 5c910df9 --status failed --json | jq -r .id</span>
-20331831cfcdd898
-0cbb7d7817529112
-d2823e0f1cc54e4d
-b98cd6853c6161e1
-1a5358100ed204c7
-0b1210ebb800ad34
+        ><code><span class="cmd"><span class="prompt">$</span> rewind ls --forks-of 3ed5e3f3 --status failed --json | jq -r .id</span>
+230b2cca8ca2ef0e
+91b136461428f080
+a4f0407b01429d73
+383acd539d9e1313
+a62e1bc38700fde6
+217f5d98224a4a60
 
-<span class="cmd"><span class="prompt">$</span> rewind diff 1989f6d0 5c910df9 --json | jq -c '.divergence | {left_step, right_step}'</span>
+<span class="cmd"><span class="prompt">$</span> rewind diff 8c4bd4a9 3ed5e3f3 --json | jq -c '.divergence | {left_step, right_step}'</span>
 {"left_step":5147,"right_step":5143}</code></pre>
       </section>
 
@@ -742,13 +766,13 @@ b98cd6853c6161e1
         </h2>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind export 5c910df9 --replayable -o crash.rwd</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind export 3ed5e3f3 --replayable -o crash.rwd</span>
 rewind: wrote crash.rwd (201.3 MB)
 
 <span class="cmd"><span class="prompt">$</span> REWIND_HOME=elsewhere rewind import crash.rwd</span>
-5c910df9774b38f2  exited:2          5192 steps  mylib-0.3.0
+3ed5e3f30d73bb41  exited:2          5192 steps  mylib-0.3.0
 
-<span class="cmd"><span class="prompt">$</span> REWIND_HOME=elsewhere rewind replay 5c910df9</span>
+<span class="cmd"><span class="prompt">$</span> REWIND_HOME=elsewhere rewind replay 3ed5e3f3</span>
 identical: 1713 events over 5192 steps</code></pre>
         <p>
           A replayable export carries the keyframes, the image and the VM's kernel, and replays on
@@ -795,7 +819,7 @@ runs will use counter time</code></pre>
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind run --root spin --timeout 5 --name spin -- /bin/spin</span>
-rewind: run cc190e45e42c5906 timed-out after 308 steps, 0.002s virtual, 5.008s wall (timed out computing without exits for 4.4s, in user space in main+15 (spin.c:2), process 34 (spin))</code></pre>
+rewind: run adddf6a8e32d3b29 timed-out after 308 steps, 0.002s virtual, 5.008s wall (timed out computing without exits for 4.4s, in user space in main+15 (spin.c:2), process 34 (spin))</code></pre>
         <p>
           The place is a function, offset and source line from the program's symbols, and the
           process the VM's kernel had on the CPU. A run that timed out while still making exits was
@@ -807,7 +831,7 @@ rewind: run cc190e45e42c5906 timed-out after 308 steps, 0.002s virtual, 5.008s w
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind ls --status timed-out</span>
-cc190e45e42c5906  timed-out          308 steps  spin</code></pre>
+adddf6a8e32d3b29  timed-out          308 steps  spin</code></pre>
       </section>
 
       <section class="step">
@@ -818,12 +842,12 @@ cc190e45e42c5906  timed-out          308 steps  spin</code></pre>
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> REWIND_HOME=elsewhere rewind ls</span>
-0b1210ebb800ad34  exited:2          5204 steps  mylib-0.3.0 (fork of 5c910df9774b38f2 at 5123, schedule 2)
-bb5217051025dbe2  exited:0          6766 steps  mylib-0.3.0 (fork of 5c910df9774b38f2 at 5123, schedule 1)
-5c910df9774b38f2  exited:2          5192 steps  mylib-0.3.0
+217f5d98224a4a60  exited:2          5204 steps  mylib-0.3.0 (fork of 3ed5e3f30d73bb41 at 5123, schedule 2)
+0a18bfa4106b10ea  exited:0          6766 steps  mylib-0.3.0 (fork of 3ed5e3f30d73bb41 at 5123, schedule 1)
+3ed5e3f30d73bb41  exited:2          5192 steps  mylib-0.3.0
 
-<span class="cmd"><span class="prompt">$</span> REWIND_HOME=elsewhere rewind remove 0b1210eb</span>
-removed 0b1210ebb800ad34
+<span class="cmd"><span class="prompt">$</span> REWIND_HOME=elsewhere rewind remove 217f5d98</span>
+removed 217f5d98224a4a60
 rewind: `rewind gc` removes the pages no run uses any more</code></pre>
         <p>
           <code>remove</code> takes a run with every run forked from it, and takes many runs in one
