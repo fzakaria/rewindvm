@@ -59,6 +59,8 @@ the story differently is noticed rather than published.
 """
 
 import argparse
+import hashlib
+import json
 import os
 import re
 import shlex
@@ -140,7 +142,10 @@ class Recording:
             "release": paths["release"],
             "release_debug": paths["release-debug"],
         }
-        self.env = dict(os.environ)
+        # The caller's REWIND_ variables are left out: a REWIND_KERNEL that
+        # a development shell exported would boot every run on that shell's
+        # guest rather than the recorded commit's.
+        self.env = {k: v for k, v in os.environ.items() if not k.startswith("REWIND_")}
         self.env["PATH"] = (
             f"{paths['rewind']}/bin:{paths['app']}/bin:{self.env['PATH']}"
         )
@@ -406,6 +411,27 @@ def collapse(page):
     return out
 
 
+def check_guest(home, paths):
+    """Every run in `home` booted the guest of the recorded commit, the one
+    RECORDED_WITH names, compared by content, since a release boots its own
+    copy of it. A run on any other guest has an id no reader's install
+    makes."""
+
+    def digest(path):
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+    files = {"kernel": "bzImage", "initrd": "initrd"}
+    want = {name: digest(Path(paths[name]) / file) for name, file in files.items()}
+    for manifest in sorted((home / "runs").glob("*/manifest.json")):
+        spec = json.loads(manifest.read_text())["spec"]
+        for name in files:
+            if digest(spec[name]) != want[name]:
+                raise Failed(
+                    f"run {manifest.parent.name} booted {spec[name]}, not the "
+                    f"{name} of the recorded commit, {paths[name]}"
+                )
+
+
 def record(name, work, home, paths):
     """Records one tutorial and writes its page."""
     template = TEMPLATES / f"tutorial-{name}.md"
@@ -439,6 +465,10 @@ def record(name, work, home, paths):
             i += 1
         except Failed as e:
             sys.exit(f"{where}: {e}")
+    try:
+        check_guest(home, paths)
+    except Failed as e:
+        sys.exit(f"{template.relative_to(REPO)}: {e}")
     out = REPO / "docs" / f"tutorial-{name}.md"
     out.write_text("\n".join(collapse(page)) + "\n")
 
