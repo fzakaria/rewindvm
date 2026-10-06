@@ -1096,20 +1096,21 @@ a:focus-visible {
   left: 45.5%;
   top: 61.4%;
 }
-/* The "At this step" panel, between the SIGSEGV and the divergence card. */
+/* The "At this step" panel, between the SIGSEGV and the divergence card,
+   right of the card's title. */
 .pin-4 {
-  left: 67.2%;
-  top: 46.7%;
+  left: 95.8%;
+  top: 40.7%;
 }
 /* The "Fork from here" button, just under it so the label stays readable. */
 .pin-5 {
   left: 93.3%;
   top: 23%;
 }
-/* The Runs panel, in the space under the tree of runs. */
+/* The runs pill in the header, which opens the Runs panel. */
 .pin-6 {
-  left: 84%;
-  top: 62%;
+  left: 61.9%;
+  top: 6.5%;
 }
 
 .tour-cards {

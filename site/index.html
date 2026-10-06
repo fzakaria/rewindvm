@@ -260,7 +260,7 @@
                     width="1440"
                     height="900"
                     loading="lazy"
-                    alt="The Rewind desktop app on a failing mylib run: the timeline with the playhead in the check phase, the build log, the process tree, files written, the SIGSEGV at 0x108 above where the run parted from a passing run of the same build, and the Runs panel with the build's runs drawn as a tree of forks, red for failed and green for passed. Opens the full-size image."
+                    alt="The Rewind desktop app on a failing mylib run: the timeline with the playhead in the check phase, the build log, the process tree, files written, the SIGSEGV at 0x108 above where the run parted from a passing run of the same build, and the runs pill that opens every run of the build as a tree of forks. Opens the full-size image."
                   />
                 </picture>
               </a>
@@ -294,7 +294,7 @@
               <button
                 type="button"
                 class="pin pin-6"
-                aria-label="6: the Runs panel, every run of the build as a tree of forks"
+                aria-label="6: the runs pill, which opens every run of the build as a tree of forks"
               >
                 6
               </button>
@@ -336,11 +336,11 @@
             <li class="tour-card" id="tour-6" tabindex="0">
               <h3>Every run of this build</h3>
               <p>
-                Schedule 0, the run with its threads left alone, every fork, and the schedules
-                <code>rewind check</code> tried, drawn as a tree: each fork branches off the run it
-                came from, red for failed and green for passed, and the schedules that ended the way
-                schedule 0 did fold into one row. Click one to open it beside the run it hangs
-                under; right-click to compare, copy or remove it with its forks.
+                The runs pill opens schedule 0, the run with its threads left alone, every fork, and
+                the schedules <code>rewind check</code> tried, drawn as a tree: each fork branches
+                off the run it came from, red for failed and green for passed, and the schedules
+                that ended the way schedule 0 did fold into one row. Click one to open it beside the
+                run it hangs under; right-click to compare, copy or remove it with its forks.
               </p>
             </li>
           </ol>
