@@ -3,15 +3,22 @@
 //! gdb` serves these over the GDB remote protocol.
 //!
 //! Breakpoints and watchpoints are the CPU's four debug address registers
-//! rather than int3 written into memory or a value compared after every
-//! step, so nothing in the VM changes and it runs at full speed. A debug
-//! trap is a VM exit the VM never sees, and it is not a step: a machine
-//! runs the same whether or not it is being debugged.
+//! rather than a value compared after every step, so the VM runs at full
+//! speed. A debug trap is a VM exit the VM never sees, and it is not a
+//! step: a machine runs the same whether or not it is being debugged.
+//! Breakpoints past the registers are int3 written into the VM's memory,
+//! whose #BP KVM hands the monitor rather than the guest. Memory reads see
+//! the byte int3 replaced. An int3 is in a physical page, and a page of
+//! code is often mapped by many processes, so the debugger decides which
+//! stops are its and lifts int3 for the others' one instruction, stepped
+//! with interrupts held. An int3 of the guest's own goes back to the
+//! guest. A process that reads the file a page of code belongs to sees
+//! int3 in it, and the fork then goes its own way.
 
 use anyhow::{Context, Result, bail};
 use kvm_bindings::{
-    KVM_GUESTDBG_ENABLE, KVM_GUESTDBG_SINGLESTEP, KVM_GUESTDBG_USE_HW_BP, kvm_guest_debug,
-    kvm_regs, kvm_sregs,
+    KVM_GUESTDBG_BLOCKIRQ, KVM_GUESTDBG_ENABLE, KVM_GUESTDBG_SINGLESTEP, KVM_GUESTDBG_USE_HW_BP,
+    KVM_GUESTDBG_USE_SW_BP, kvm_guest_debug, kvm_regs, kvm_sregs,
 };
 
 use crate::Machine;
@@ -43,6 +50,13 @@ const DR6_SINGLE_STEP: u64 = 1 << 14;
 
 /// RFLAGS' trap flag, which KVM sets to single-step the vCPU.
 const RFLAGS_TF: u64 = 1 << 8;
+
+/// RFLAGS' resume flag: the next instruction runs without its breakpoint
+/// trapping, and the CPU clears it once that instruction has.
+const RFLAGS_RF: u64 = 1 << 16;
+
+/// The exception int3 raises.
+const BP_VECTOR: u32 = 3;
 
 const PAGE_SIZE: u64 = 4096;
 const PAGE_SHIFT: u32 = 12;
@@ -106,9 +120,120 @@ pub enum Trap {
 }
 
 /// What a debugger has asked of the machine.
+#[derive(Clone, Debug)]
 pub(crate) struct Debugging {
     stepping: Stepping,
     traps: Vec<Trap>,
+}
+
+/// The int3 instruction, one byte long.
+pub const INT3: u8 = 0xcc;
+
+/// int3 written into the machine's memory for a debugger, by physical
+/// address, with the bytes they replaced.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Int3s {
+    pub(crate) replaced: std::collections::BTreeMap<u64, u8>,
+    /// The one put back to its byte while the instruction there runs once.
+    pub(crate) lifted: Option<u64>,
+}
+
+impl Int3s {
+    /// Puts the bytes int3 replaced into `chunk`, just read from physical
+    /// address `physical`.
+    pub(crate) fn shadow(&self, physical: u64, chunk: &mut [u8]) {
+        let end = physical + chunk.len() as u64;
+        for (&at, &byte) in self.replaced.range(physical..end) {
+            chunk[(at - physical) as usize] = byte;
+        }
+    }
+
+    /// Readies `data` to be written at physical address `physical`: where
+    /// int3 is written, the byte written becomes the one int3 replaced, and
+    /// int3 stays in memory, unless it is lifted.
+    pub(crate) fn write_through(&mut self, physical: u64, data: &mut [u8]) {
+        let end = physical + data.len() as u64;
+        let lifted = self.lifted;
+        for (&at, byte) in self.replaced.range_mut(physical..end) {
+            let i = (at - physical) as usize;
+            *byte = data[i];
+            if lifted != Some(at) {
+                data[i] = INT3;
+            }
+        }
+    }
+}
+
+/// Whose a #DB exit is: the debugger's, a step the machine took itself,
+/// or a stray single step nobody took.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DbExit {
+    Stop(DebugStop),
+    Machine,
+    Stray,
+}
+
+/// Whose a #DB exit with this DR6 is, given the debugger's `traps` and
+/// whether the debugger and the machine are single-stepping. A watched
+/// access is the debugger's even when a step trapped with it, since the
+/// step's instruction made it; a breakpoint only when no step did, as it
+/// traps again when the machine resumes. A single step is the debugger's
+/// when it asked for one, else the machine's when it took one, else stray:
+/// TF that a step left in a saved copy of RFLAGS.
+fn db_exit(dr6: u64, traps: &[Trap], debugger: Stepping, machine: Stepping) -> DbExit {
+    let hits = (0..MAX_TRAPS)
+        .filter(|i| dr6 & DR6_HIT_MASK & (1 << i) != 0)
+        .filter_map(|i| traps.get(i));
+    let mut breakpoint = None;
+    for trap in hits {
+        match *trap {
+            Trap::Watch { address, .. } => return DbExit::Stop(DebugStop::Watchpoint(address)),
+            Trap::Execute(address) => breakpoint = breakpoint.or(Some(address)),
+        }
+    }
+    if dr6 & DR6_SINGLE_STEP != 0 {
+        return match (debugger, machine) {
+            (Stepping::Yes, _) => DbExit::Stop(DebugStop::Step),
+            (Stepping::No, Stepping::Yes) => DbExit::Machine,
+            (Stepping::No, Stepping::No) => DbExit::Stray,
+        };
+    }
+    match breakpoint {
+        Some(address) => DbExit::Stop(DebugStop::Breakpoint(address)),
+        None => DbExit::Machine,
+    }
+}
+
+/// What KVM traps for the debugger, the monitor and the int3s together:
+/// the debugger's debug registers and steps; with int3 written anywhere,
+/// every #BP, so none reaches the guest unseen; and while the monitor
+/// steps toward a preemption point or an int3 is lifted, single steps
+/// with interrupts held, so each lands after its one instruction.
+fn guest_debug(
+    debugging: Option<&Debugging>,
+    monitor: Stepping,
+    int3s: &Int3s,
+) -> Result<kvm_guest_debug> {
+    let mut debug = kvm_guest_debug::default();
+    if let Some(debugging) = debugging {
+        debug.control |= KVM_GUESTDBG_ENABLE | KVM_GUESTDBG_USE_HW_BP;
+        if debugging.stepping == Stepping::Yes {
+            debug.control |= KVM_GUESTDBG_SINGLESTEP;
+        }
+        debug.arch.debugreg[DR7_INDEX] = dr7(&debugging.traps)?;
+        for (i, trap) in debugging.traps.iter().enumerate() {
+            debug.arch.debugreg[i] = match trap {
+                Trap::Execute(address) | Trap::Watch { address, .. } => *address,
+            };
+        }
+    }
+    if !int3s.replaced.is_empty() {
+        debug.control |= KVM_GUESTDBG_ENABLE | KVM_GUESTDBG_USE_SW_BP;
+    }
+    if monitor == Stepping::Yes || int3s.lifted.is_some() {
+        debug.control |= KVM_GUESTDBG_ENABLE | KVM_GUESTDBG_SINGLESTEP | KVM_GUESTDBG_BLOCKIRQ;
+    }
+    Ok(debug)
 }
 
 /// Why a debugged machine stopped.
@@ -127,63 +252,151 @@ impl Machine {
     /// Turns debugging on with these traps, one per debug address register,
     /// stepping one instruction at a time when asked. With debugging on,
     /// `run` returns [`crate::Outcome::Debug`] at every trap that is the
-    /// debugger's.
+    /// debugger's, an int3 of [`Machine::insert_int3`] among them.
     ///
-    /// Interrupts are not held off while stepping, though a step then
-    /// lands in an interrupt handler now and then: one held off is taken
-    /// later than when the run was recorded, and the machine goes another
-    /// way from there.
+    /// Interrupts are not held off while the debugger steps, though a step
+    /// then lands in an interrupt handler now and then: one held off is
+    /// taken later than when the run was recorded, and the machine goes
+    /// another way from there.
     pub fn set_debug(&mut self, stepping: Stepping, traps: &[Trap]) -> Result<()> {
-        let mut debug = kvm_guest_debug {
-            control: KVM_GUESTDBG_ENABLE | KVM_GUESTDBG_USE_HW_BP,
-            ..Default::default()
-        };
-        if stepping == Stepping::Yes {
-            debug.control |= KVM_GUESTDBG_SINGLESTEP;
-        }
-        debug.arch.debugreg[DR7_INDEX] = dr7(traps)?;
-        for (i, trap) in traps.iter().enumerate() {
-            debug.arch.debugreg[i] = match trap {
-                Trap::Execute(address) | Trap::Watch { address, .. } => *address,
-            };
-        }
-        self.vcpu.set_guest_debug(&debug)?;
         self.debugging = Some(Debugging {
             stepping,
             traps: traps.to_vec(),
         });
-        Ok(())
+        self.apply_guest_debug()
     }
 
-    /// Turns debugging off.
+    /// Turns debugging off. int3s still written keep their #BPs trapped.
     pub fn clear_debug(&mut self) -> Result<()> {
-        self.vcpu.set_guest_debug(&kvm_guest_debug::default())?;
         self.debugging = None;
-        Ok(())
+        self.apply_guest_debug()
     }
 
-    /// What a debug trap with this DR6 means, given the traps set.
-    pub(crate) fn debug_stop(&self, dr6: u64) -> DebugStop {
-        let traps = self.debugging.as_ref().map_or(&[][..], |d| &d.traps[..]);
-        stop_for(dr6, traps)
+    /// Tells KVM what to trap for the debugger, the monitor's steps toward
+    /// a preemption point and the int3s together, after any of them
+    /// changes.
+    pub(crate) fn apply_guest_debug(&mut self) -> Result<()> {
+        let monitor = match &self.work {
+            Some(work) if work.stepping => Stepping::Yes,
+            _ => Stepping::No,
+        };
+        let debug = guest_debug(self.debugging.as_ref(), monitor, &self.int3s)?;
+        Ok(self.vcpu.set_guest_debug(&debug)?)
     }
 
-    /// Whether a debug trap is stray, and if so clears the TF behind it, so
-    /// the guest runs on as it did when the run was recorded. KVM steps
-    /// the vCPU by setting TF, and an instruction that saves RFLAGS while
-    /// it is set, `syscall` into R11, `pushf`, or an interrupt's frame,
-    /// keeps a copy that sets TF again when the guest restores it, after
-    /// the debugger has stopped stepping. The trap comes after the
-    /// instruction has run, and KVM keeps it from the guest.
-    pub(crate) fn clear_stray_trap(&mut self, dr6: u64) -> Result<bool> {
-        let stepping = self.debugging.as_ref().map_or(Stepping::No, |d| d.stepping);
-        if !stray_trap(dr6, stepping) {
-            return Ok(false);
+    /// What a debug exit means for the debugger, once the machine has done
+    /// its own part. A #BP at an int3 the debugger wrote stops at it; any
+    /// other #BP is the guest's own int3 and goes back to the guest. A
+    /// single step puts a lifted int3 back. A stray single step's TF is
+    /// cleared, so the guest runs on as it did when the run was recorded:
+    /// KVM steps the vCPU by setting TF, and an instruction that saves
+    /// RFLAGS while it is set, `syscall` into R11, `pushf`, or an
+    /// interrupt's frame, keeps a copy that sets TF again when the guest
+    /// restores it. The trap comes after the instruction has run, and KVM
+    /// keeps it from the guest.
+    pub(crate) fn debug_exit(
+        &mut self,
+        exception: u32,
+        pc: u64,
+        dr6: u64,
+    ) -> Result<Option<DebugStop>> {
+        if exception == BP_VECTOR {
+            let written = self.translate(pc)?.is_some_and(|physical| {
+                self.int3s.replaced.contains_key(&physical) && self.int3s.lifted != Some(physical)
+            });
+            if written {
+                return Ok(Some(DebugStop::Breakpoint(pc)));
+            }
+            self.reinject_breakpoint()?;
+            return Ok(None);
         }
+
+        // A #DB: the machine's own steps first.
+        let mut machine = match &self.work {
+            Some(work) if work.stepping => Stepping::Yes,
+            _ => Stepping::No,
+        };
+        if dr6 & DR6_SINGLE_STEP != 0
+            && let Some(physical) = self.int3s.lifted.take()
+        {
+            if self.int3s.replaced.contains_key(&physical) {
+                self.dev.ram.write(physical, &[INT3])?;
+            }
+            self.apply_guest_debug()?;
+            machine = Stepping::Yes;
+        }
+
+        let (traps, debugger) = match &self.debugging {
+            Some(debugging) => (&debugging.traps[..], debugging.stepping),
+            None => (&[][..], Stepping::No),
+        };
+        match db_exit(dr6, traps, debugger, machine) {
+            DbExit::Stop(stop) => Ok(Some(stop)),
+            DbExit::Machine => Ok(None),
+            DbExit::Stray => {
+                let mut regs = self.vcpu.get_regs()?;
+                regs.rflags &= !RFLAGS_TF;
+                self.vcpu.set_regs(&regs)?;
+                Ok(None)
+            }
+        }
+    }
+
+    /// Gives the guest the #BP of an int3 that is its own, which KVM keeps
+    /// from it while the debugger has int3 written anywhere: the guest
+    /// takes it as it would have without the debugger.
+    fn reinject_breakpoint(&mut self) -> Result<()> {
+        let mut events = self.vcpu.get_vcpu_events()?;
+        events.exception.injected = 1;
+        events.exception.nr = BP_VECTOR as u8;
+        events.exception.has_error_code = 0;
+        events.exception.error_code = 0;
+        Ok(self.vcpu.set_vcpu_events(&events)?)
+    }
+
+    /// Writes int3 over the byte at physical address `physical`, for a
+    /// breakpoint past the debug registers. The guest's #BP there stops
+    /// `run` for the debugger, in whichever process reaches it, and reads
+    /// of the machine's memory see the byte rather than int3.
+    pub fn insert_int3(&mut self, physical: u64) -> Result<()> {
+        if self.int3s.replaced.contains_key(&physical) {
+            return Ok(());
+        }
+        let mut byte = [0u8];
+        self.dev.ram.read(physical, &mut byte)?;
+        self.dev.ram.write(physical, &[INT3])?;
+        self.int3s.replaced.insert(physical, byte[0]);
+        self.apply_guest_debug()
+    }
+
+    /// Puts back the byte int3 replaced at physical address `physical`.
+    pub fn remove_int3(&mut self, physical: u64) -> Result<()> {
+        let Some(byte) = self.int3s.replaced.remove(&physical) else {
+            return Ok(());
+        };
+        if self.int3s.lifted == Some(physical) {
+            self.int3s.lifted = None;
+        }
+        self.dev.ram.write(physical, &[byte])?;
+        self.apply_guest_debug()
+    }
+
+    /// Lets the instruction at the breakpoint the machine stopped at run
+    /// once without stopping there, as another process reaching it must:
+    /// an int3 is lifted, its byte put back while the machine single-steps
+    /// that instruction with interrupts held, then written again; a debug
+    /// register's breakpoint is passed with RF.
+    pub fn pass_breakpoint(&mut self) -> Result<()> {
         let mut regs = self.vcpu.get_regs()?;
-        regs.rflags &= !RFLAGS_TF;
-        self.vcpu.set_regs(&regs)?;
-        Ok(true)
+        if let Some(physical) = self.translate(regs.rip)?
+            && let Some(&byte) = self.int3s.replaced.get(&physical)
+        {
+            self.dev.ram.write(physical, &[byte])?;
+            self.int3s.lifted = Some(physical);
+            return self.apply_guest_debug();
+        }
+        regs.rflags |= RFLAGS_RF;
+        Ok(self.vcpu.set_regs(&regs)?)
     }
 
     /// The general purpose registers, the instruction pointer and flags.
@@ -211,17 +424,20 @@ impl Machine {
                 break;
             };
             let n = page_remainder(address + done as u64).min(buf.len() - done);
-            if self
-                .dev
-                .ram
-                .read(physical, &mut buf[done..done + n])
-                .is_err()
-            {
+            if self.read_ram(physical, &mut buf[done..done + n]).is_err() {
                 break;
             }
             done += n;
         }
         Ok(done)
+    }
+
+    /// Reads the VM's memory at a physical address as the guest wrote it:
+    /// where the debugger wrote int3, the byte int3 replaced.
+    fn read_ram(&self, physical: u64, buf: &mut [u8]) -> Result<()> {
+        self.dev.ram.read(physical, buf)?;
+        self.int3s.shadow(physical, buf);
+        Ok(())
     }
 
     /// Reads the VM's memory at a virtual address as the page table at
@@ -236,12 +452,7 @@ impl Machine {
                 break;
             };
             let n = page_remainder(at).min(buf.len() - done);
-            if self
-                .dev
-                .ram
-                .read(physical, &mut buf[done..done + n])
-                .is_err()
-            {
+            if self.read_ram(physical, &mut buf[done..done + n]).is_err() {
                 break;
             }
             done += n;
@@ -265,9 +476,9 @@ impl Machine {
         Ok(walk(read, page_table, address, levels))
     }
 
-    /// Reads the VM's memory at a physical address.
+    /// Reads the VM's memory at a physical address, as the guest wrote it.
     pub fn read_physical(&self, physical: u64, buf: &mut [u8]) -> Result<()> {
-        self.dev.ram.read(physical, buf)
+        self.read_ram(physical, buf)
     }
 
     /// What the kernel published about its tasks at setup, or None from a
@@ -288,6 +499,8 @@ impl Machine {
     }
 
     /// Writes the VM's memory at a virtual address, all or nothing per page.
+    /// A byte written where the debugger wrote int3 becomes the byte int3
+    /// stands for, and int3 stays.
     pub fn write_virtual(&mut self, address: u64, data: &[u8]) -> Result<()> {
         let mut done = 0;
         while done < data.len() {
@@ -295,7 +508,9 @@ impl Machine {
                 .translate(address + done as u64)?
                 .with_context(|| format!("{:#x} is not mapped", address + done as u64))?;
             let n = page_remainder(address + done as u64).min(data.len() - done);
-            self.dev.ram.write(physical, &data[done..done + n])?;
+            let mut chunk = data[done..done + n].to_vec();
+            self.int3s.write_through(physical, &mut chunk);
+            self.dev.ram.write(physical, &chunk)?;
             done += n;
         }
         Ok(())
@@ -348,32 +563,6 @@ fn dr7(traps: &[Trap]) -> Result<u64> {
         dr7 |= condition << (DR7_CONDITIONS + DR7_BITS_PER_CONDITION * i as u32);
     }
     Ok(dr7)
-}
-
-/// What a debug trap with this DR6 means. A watched access is reported
-/// even when a step trapped with it, since the step's instruction made
-/// it; a breakpoint only when no step did.
-fn stop_for(dr6: u64, traps: &[Trap]) -> DebugStop {
-    let hits = (0..MAX_TRAPS)
-        .filter(|i| dr6 & DR6_HIT_MASK & (1 << i) != 0)
-        .filter_map(|i| traps.get(i));
-    let mut breakpoint = None;
-    for trap in hits {
-        match *trap {
-            Trap::Watch { address, .. } => return DebugStop::Watchpoint(address),
-            Trap::Execute(address) => breakpoint = breakpoint.or(Some(address)),
-        }
-    }
-    match breakpoint {
-        Some(address) if dr6 & DR6_SINGLE_STEP == 0 => DebugStop::Breakpoint(address),
-        _ => DebugStop::Step,
-    }
-}
-
-/// Whether a debug trap with this DR6 is a single step the debugger did
-/// not ask for.
-fn stray_trap(dr6: u64, stepping: Stepping) -> bool {
-    dr6 & DR6_SINGLE_STEP != 0 && dr6 & DR6_HIT_MASK == 0 && stepping == Stepping::No
 }
 
 /// How many bytes from `address` to the end of its page.
@@ -453,11 +642,16 @@ mod tests {
         assert!(dr7(&[watch(0x2001, 1), watch(0x2004, 4)]).is_ok());
     }
 
-    /// A trap names the register that matched in DR6: a watched address
-    /// stops as a watchpoint even when a step trapped with it, an executed
-    /// one as a breakpoint, and a step alone as a step.
+    /// A #DB exit is the debugger's stop when one of its traps matched or
+    /// it asked to step. A single step the monitor took toward a
+    /// preemption point, or one a lifted int3 took, is the machine's own,
+    /// and one nobody took is TF that a step left in a saved copy of
+    /// RFLAGS. A watched access is reported even when a step trapped with
+    /// it, since the step's instruction made it; a breakpoint only when no
+    /// step did, as it traps again when the machine resumes.
     #[test]
-    fn a_trap_stops_for_the_register_that_matched() {
+    fn a_debug_trap_is_the_debuggers_the_machines_or_stray() {
+        use Stepping::{No, Yes};
         let traps = [
             Trap::Execute(0x1000),
             Trap::Watch {
@@ -466,24 +660,106 @@ mod tests {
                 access: Access::Write,
             },
         ];
-        assert_eq!(stop_for(0b10, &traps), DebugStop::Watchpoint(0x2000));
+        let step = DR6_SINGLE_STEP;
+        let watchpoint = DbExit::Stop(DebugStop::Watchpoint(0x2000));
+        assert_eq!(db_exit(0b10, &traps, No, No), watchpoint);
+        assert_eq!(db_exit(0b10 | step, &traps, No, Yes), watchpoint);
+        let breakpoint = DbExit::Stop(DebugStop::Breakpoint(0x1000));
+        assert_eq!(db_exit(0b01, &traps, No, No), breakpoint);
         assert_eq!(
-            stop_for(0b10 | DR6_SINGLE_STEP, &traps),
-            DebugStop::Watchpoint(0x2000)
+            db_exit(step, &traps, Yes, No),
+            DbExit::Stop(DebugStop::Step)
         );
-        assert_eq!(stop_for(0b01, &traps), DebugStop::Breakpoint(0x1000));
-        assert_eq!(stop_for(DR6_SINGLE_STEP, &traps), DebugStop::Step);
+        assert_eq!(
+            db_exit(step, &traps, Yes, Yes),
+            DbExit::Stop(DebugStop::Step)
+        );
+        assert_eq!(
+            db_exit(step | 0b01, &traps, Yes, No),
+            DbExit::Stop(DebugStop::Step)
+        );
+        assert_eq!(db_exit(step | 0b01, &traps, No, Yes), DbExit::Machine);
+        assert_eq!(db_exit(step, &traps, No, Yes), DbExit::Machine);
+        assert_eq!(db_exit(step, &traps, No, No), DbExit::Stray);
     }
 
-    /// A single-step trap is the debugger's only when it asked to step;
-    /// otherwise it is TF that one of its steps left in a saved copy of
-    /// RFLAGS. A breakpoint's trap is always the debugger's.
+    /// KVM's debug settings combine the debugger's traps and steps, the
+    /// monitor's steps toward a preemption point and the int3s written, so
+    /// neither the monitor's steps nor a lifted int3 drop the debugger's
+    /// traps, and no int3's #BP reaches the guest while one is written.
     #[test]
-    fn a_single_step_trap_the_debugger_did_not_ask_for_is_stray() {
-        assert!(stray_trap(DR6_SINGLE_STEP, Stepping::No));
-        assert!(!stray_trap(DR6_SINGLE_STEP, Stepping::Yes));
-        assert!(!stray_trap(1, Stepping::No));
-        assert!(!stray_trap(DR6_SINGLE_STEP | 1, Stepping::No));
+    fn guest_debug_keeps_every_partys_traps() {
+        use kvm_bindings::{
+            KVM_GUESTDBG_BLOCKIRQ as BLOCKIRQ, KVM_GUESTDBG_ENABLE as ENABLE,
+            KVM_GUESTDBG_SINGLESTEP as SINGLESTEP, KVM_GUESTDBG_USE_HW_BP as HW_BP,
+            KVM_GUESTDBG_USE_SW_BP as SW_BP,
+        };
+        let debugger = Debugging {
+            stepping: Stepping::No,
+            traps: vec![Trap::Execute(0x1000)],
+        };
+        let stepping = Debugging {
+            stepping: Stepping::Yes,
+            traps: Vec::new(),
+        };
+        let none = Int3s::default();
+        let mut written = Int3s::default();
+        written.replaced.insert(0x5000, 0x55);
+        let mut lifted = written.clone();
+        lifted.lifted = Some(0x5000);
+        let control =
+            |d: Option<&Debugging>, monitor, int3s| guest_debug(d, monitor, int3s).unwrap().control;
+
+        assert_eq!(control(None, Stepping::No, &none), 0);
+        assert_eq!(
+            control(None, Stepping::Yes, &none),
+            ENABLE | SINGLESTEP | BLOCKIRQ
+        );
+        assert_eq!(
+            control(Some(&stepping), Stepping::No, &none),
+            ENABLE | HW_BP | SINGLESTEP
+        );
+        assert_eq!(
+            control(Some(&debugger), Stepping::No, &written),
+            ENABLE | HW_BP | SW_BP
+        );
+        assert_eq!(
+            control(Some(&debugger), Stepping::Yes, &written),
+            ENABLE | HW_BP | SW_BP | SINGLESTEP | BLOCKIRQ
+        );
+        assert_eq!(
+            control(Some(&debugger), Stepping::No, &lifted),
+            ENABLE | HW_BP | SW_BP | SINGLESTEP | BLOCKIRQ
+        );
+        let d = guest_debug(Some(&debugger), Stepping::Yes, &written).unwrap();
+        assert_eq!(d.arch.debugreg[0], 0x1000);
+        assert_eq!(d.arch.debugreg[DR7_INDEX], 1);
+    }
+
+    /// Reads see the bytes int3 replaced, not int3, and a write over an
+    /// int3 changes the byte kept for it while int3 stays in memory, or
+    /// the byte itself while the int3 is lifted.
+    #[test]
+    fn reads_and_writes_see_the_bytes_int3_replaced() {
+        let mut int3s = Int3s::default();
+        int3s.replaced.insert(0x1002, 0x55);
+        let mut read = [0x90, 0x90, INT3, 0x90];
+        int3s.shadow(0x1000, &mut read);
+        assert_eq!(read, [0x90, 0x90, 0x55, 0x90]);
+        let mut beside = [0x90, 0x90];
+        int3s.shadow(0x1003, &mut beside);
+        assert_eq!(beside, [0x90, 0x90]);
+
+        let mut write = [0x11, 0x22, 0x33];
+        int3s.write_through(0x1001, &mut write);
+        assert_eq!(write, [0x11, INT3, 0x33]);
+        assert_eq!(int3s.replaced[&0x1002], 0x22);
+
+        int3s.lifted = Some(0x1002);
+        let mut write = [0x44];
+        int3s.write_through(0x1002, &mut write);
+        assert_eq!(write, [0x44]);
+        assert_eq!(int3s.replaced[&0x1002], 0x44);
     }
 
     /// Page tables as a map from physical address to entry, built one

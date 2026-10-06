@@ -256,6 +256,8 @@ pub struct Machine {
     pub(crate) work_base: u64,
     /// What a debugger has asked for, while one is attached (debug.rs).
     pub(crate) debugging: Option<debug::Debugging>,
+    /// int3 the debugger had written into memory (debug.rs).
+    pub(crate) int3s: debug::Int3s,
     /// When to stop the machine, however far it has got.
     pub(crate) deadline: Option<std::time::Instant>,
     /// When the guest last exited, while a deadline is watched: how long it
@@ -357,6 +359,7 @@ impl Machine {
             work: None,
             work_base: 0,
             debugging: None,
+            int3s: debug::Int3s::default(),
             deadline: None,
             last_exit: std::time::Instant::now(),
         })
@@ -510,6 +513,7 @@ impl Machine {
 
             // The port of a counted exit; MMIO exits count under MMIO_PORT.
             const MMIO_PORT: u16 = 0xffff;
+            let mut debug_stop = None;
             let counted = match self.vcpu.run() {
                 Ok(exit) => match exit {
                     VcpuExit::IoOut(port, data) => {
@@ -536,17 +540,14 @@ impl Machine {
                         None
                     }
                     // A signal to the monitor thread, a counter overflow
-                    // among them, or one single step: not the guest's
-                    // doing, so not a step of its own.
-                    // A debugger's trap ends the run for the debugger; a
-                    // stray one is cleared and is not a step.
-                    VcpuExit::Debug(arch) if self.debugging.is_some() => {
-                        if !self.clear_stray_trap(arch.dr6)? {
-                            return Ok(Outcome::Debug(self.debug_stop(arch.dr6)));
-                        }
+                    // among them, or a debug exit: not the guest's doing,
+                    // so not a step of its own. A debugger's trap ends the
+                    // run for the debugger once the timer has had its say.
+                    VcpuExit::Debug(arch) => {
+                        debug_stop = self.debug_exit(arch.exception, arch.pc, arch.dr6)?;
                         None
                     }
-                    VcpuExit::Intr | VcpuExit::Debug(_) => None,
+                    VcpuExit::Intr => None,
                     VcpuExit::Hlt => bail!("the VM executed HLT; is its kernel built for Rewind?"),
                     other => bail!("unexpected exit at step {}: {other:?}", self.dev.step),
                 },
@@ -562,16 +563,23 @@ impl Machine {
             }
             let Some(port) = counted else {
                 // Close in on the timer's branch count; reaching it is a
-                // step, the one where the timer fires.
+                // step, the one where the timer fires. A debugger's stop
+                // waits for that, so the count is not passed by while the
+                // debugger has the machine.
+                let mut preempted = false;
                 if self.work.is_some()
                     && self.config.preemption == Preemption::AtBranchCounts
                     && self.reached_preemption()?
                 {
                     self.dev.step += 1;
                     self.after_step(Quantum::Skip)?;
-                    if until.is_some_and(|u| self.dev.step >= u) {
-                        return Ok(Outcome::Paused);
-                    }
+                    preempted = true;
+                }
+                if let Some(stop) = debug_stop {
+                    return Ok(Outcome::Debug(stop));
+                }
+                if preempted && until.is_some_and(|u| self.dev.step >= u) {
+                    return Ok(Outcome::Paused);
                 }
                 continue;
             };
@@ -608,14 +616,14 @@ impl Machine {
         }
         if let Some(work) = &mut self.work {
             self.dev.clock.now += work.advance()? * PS_PER_BRANCH / 1000;
-            // Whatever the guest was stepping toward, this step settles it.
-            if work.stepping {
-                work.stepping = false;
-                self.vcpu
-                    .set_guest_debug(&kvm_bindings::kvm_guest_debug::default())?;
-            }
+            // Whatever the guest was stepping toward, this step settles it,
+            // and the debugger's traps stay as they were.
+            let stepped = std::mem::take(&mut work.stepping);
             work.target = None;
             work.overflow.disarm()?;
+            if stepped {
+                self.apply_guest_debug()?;
+            }
         }
         // The guest's scheduler clock reads this without an exit, so it is
         // refreshed at every step.
@@ -825,17 +833,11 @@ impl Machine {
         Ok(false)
     }
 
+    /// Single-steps the guest, interrupts held, alongside whatever a
+    /// debugger traps.
     fn start_stepping(&mut self) -> Result<()> {
-        use kvm_bindings::{
-            KVM_GUESTDBG_BLOCKIRQ, KVM_GUESTDBG_ENABLE, KVM_GUESTDBG_SINGLESTEP, kvm_guest_debug,
-        };
-        let debug = kvm_guest_debug {
-            control: KVM_GUESTDBG_ENABLE | KVM_GUESTDBG_SINGLESTEP | KVM_GUESTDBG_BLOCKIRQ,
-            ..Default::default()
-        };
-        self.vcpu.set_guest_debug(&debug)?;
         self.work.as_mut().unwrap().stepping = true;
-        Ok(())
+        self.apply_guest_debug()
     }
 
     /// Records why in the shared page and sends the monitor's interrupt as

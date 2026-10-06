@@ -11,7 +11,9 @@
 //! it, a trap in the kernel the CPU's, and a step the thread gdb stepped.
 //! Breakpoints and watchpoints at user addresses stop the fork only in the
 //! process gdb is debugging; other processes map the same addresses to
-//! memory of their own. Continuing and stepping run the fork, never the
+//! memory of their own. Breakpoints take the CPU's four debug registers
+//! first and are int3 in memory past them; an int3 is in a physical page,
+//! often one other processes map too, and their stops there are passed. Continuing and stepping run the fork, never the
 //! recording. The fork's
 //! records are compared with the run's as it goes, and gdb's user is told
 //! the step where the two first differ: from there on the fork is not the
@@ -66,10 +68,6 @@ const PAGE_SIZE: u64 = 4096;
 
 /// Where x86-64's lower half, user space, ends.
 const USER_END: u64 = 0x0000_8000_0000_0000;
-
-/// RFLAGS' resume flag: the next instruction runs without its breakpoint
-/// trapping, and the CPU clears it once that instruction has.
-const RFLAGS_RF: u64 = 1 << 16;
 
 /// The CPU's thread id for gdb, the same at every stop whichever task is
 /// on it, so a step of the CPU stops the thread gdb stepped. One past
@@ -254,67 +252,176 @@ struct Watch {
     kind: WatchKind,
 }
 
-/// gdb's breakpoints and watchpoints, which share the CPU's four debug
-/// address registers. A watched range takes one register for each aligned
-/// piece of it the CPU can watch.
+/// Which breakpoint gdb asked for: `break`, which takes a debug register
+/// or else int3 in memory, or `hbreak`, which takes a register or none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    Software,
+    Hardware,
+}
+
+/// Where a breakpoint is: in a debug register, or int3 written into memory
+/// at this physical address.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Place {
+    Register,
+    Int3(u64),
+}
+
+/// One of gdb's breakpoints.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Breakpoint {
+    address: u64,
+    kind: Kind,
+    place: Place,
+}
+
+/// Writes int3 into the machine's memory and takes it out, for [`Traps`].
+trait Int3Memory {
+    /// Writes int3 at virtual address `address`, returning the physical
+    /// address it went to, or None when nothing is mapped there.
+    fn insert(&mut self, address: u64) -> Result<Option<u64>>;
+
+    /// Takes the int3 at physical address `physical` out.
+    fn remove(&mut self, physical: u64) -> Result<()>;
+}
+
+/// gdb's breakpoints and watchpoints. They share the CPU's four debug
+/// address registers, where nothing in the VM changes, and a watched range
+/// takes one register for each aligned piece of it the CPU can watch.
+/// Breakpoints past the registers are int3 in memory.
 #[derive(Default)]
 struct Traps {
-    breakpoints: Vec<u64>,
+    breakpoints: Vec<Breakpoint>,
     watches: Vec<Watch>,
-    /// Breakpoints refused for want of a register, said once each.
+    /// Breakpoints refused, said once each.
     refused: Vec<u64>,
 }
 
 impl Traps {
-    fn add_breakpoint(&mut self, address: u64) -> bool {
-        if self.breakpoints.contains(&address) {
-            return true;
+    /// Adds a breakpoint in a free debug register, else for `break` as
+    /// int3 written into `memory`. One that cannot be int3, `hbreak` or
+    /// `break` where nothing is mapped yet, takes a register from a `break`
+    /// that can. False when none of that can be had.
+    fn add_breakpoint(
+        &mut self,
+        address: u64,
+        kind: Kind,
+        memory: &mut impl Int3Memory,
+    ) -> Result<bool> {
+        if self.breakpoints.iter().any(|b| b.address == address) {
+            return Ok(true);
         }
-        if self.registers().len() == MAX_TRAPS {
-            return false;
-        }
-        self.breakpoints.push(address);
-        true
+        let int3 = match kind {
+            Kind::Software if self.registers().len() == MAX_TRAPS => memory.insert(address)?,
+            Kind::Software | Kind::Hardware => None,
+        };
+        let place = if self.registers().len() < MAX_TRAPS {
+            Place::Register
+        } else if let Some(physical) = int3 {
+            Place::Int3(physical)
+        } else if self.free_registers(1, memory)? {
+            Place::Register
+        } else {
+            return Ok(false);
+        };
+        self.breakpoints.push(Breakpoint {
+            address,
+            kind,
+            place,
+        });
+        Ok(true)
     }
 
-    /// Says that a breakpoint at `address` found no debug register, the
-    /// first time gdb asks for it, and returns false for gdb. gdb reports
-    /// a breakpoint it cannot insert, except one in a shared library, which
+    /// Makes `needed` registers free by moving `break` breakpoints out of
+    /// registers into `memory` as int3, one at a time. False when not
+    /// enough can move; those moved stay in memory.
+    fn free_registers(&mut self, needed: usize, memory: &mut impl Int3Memory) -> Result<bool> {
+        while MAX_TRAPS.saturating_sub(self.registers().len()) < needed {
+            let mut moved = false;
+            for breakpoint in self
+                .breakpoints
+                .iter_mut()
+                .filter(|b| b.kind == Kind::Software && b.place == Place::Register)
+            {
+                if let Some(physical) = memory.insert(breakpoint.address)? {
+                    breakpoint.place = Place::Int3(physical);
+                    moved = true;
+                    break;
+                }
+            }
+            if !moved {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Says why a breakpoint at `address` of `kind` was refused, the first
+    /// time gdb asks for it, and returns false for gdb. gdb reports a
+    /// breakpoint it cannot insert, except one in a shared library, which
     /// it sets aside without a word in batch mode, and the session would
     /// run past it.
-    fn refuse_breakpoint(&mut self, address: u64) -> bool {
-        if !self.refused.contains(&address) {
-            self.refused.push(address);
-            eprintln!(
-                "rewind: no debug register left for a breakpoint at {address:#x}: \
-                 breakpoints and watchpoints share the CPU's {MAX_TRAPS}, one for each \
-                 location; delete one to set this"
-            );
+    fn refuse_breakpoint(&mut self, address: u64, kind: Kind) -> bool {
+        if self.refused.contains(&address) {
+            return false;
+        }
+        self.refused.push(address);
+        match kind {
+            Kind::Hardware => eprintln!(
+                "rewind: no debug register left for a hardware breakpoint at {address:#x}: \
+                 the CPU's {MAX_TRAPS} hold watchpoints and breakpoints that cannot be \
+                 int3; `break` writes int3 instead"
+            ),
+            Kind::Software => eprintln!(
+                "rewind: no debug register left for a breakpoint at {address:#x}, where \
+                 nothing is mapped yet to write int3 into: the CPU's {MAX_TRAPS} hold \
+                 watchpoints and breakpoints that cannot be int3 either"
+            ),
         }
         false
     }
 
-    fn remove_breakpoint(&mut self, address: u64) -> bool {
-        let before = self.breakpoints.len();
-        self.breakpoints.retain(|b| *b != address);
-        self.breakpoints.len() != before
+    /// Removes the breakpoint at `address`, taking its int3 out of
+    /// `memory` when it was one and no other breakpoint's address maps to
+    /// the same byte.
+    fn remove_breakpoint(&mut self, address: u64, memory: &mut impl Int3Memory) -> Result<bool> {
+        let Some(index) = self.breakpoints.iter().position(|b| b.address == address) else {
+            return Ok(false);
+        };
+        let removed = self.breakpoints.remove(index);
+        if let Place::Int3(physical) = removed.place
+            && !self.breakpoints.iter().any(|b| b.place == removed.place)
+        {
+            memory.remove(physical)?;
+        }
+        Ok(true)
     }
 
-    /// Adds a watch if all its pieces fit in the registers left. x86 has
-    /// no trap on reads alone, so a read watch is refused, and gdb says so.
-    fn add_watch(&mut self, address: u64, len: u64, kind: WatchKind) -> bool {
+    /// Adds a watch if all its pieces fit in the registers left, once
+    /// `break` breakpoints in registers have moved into `memory` as int3
+    /// to make room. x86 has no trap on reads alone, so a read watch is
+    /// refused, and gdb says so.
+    fn add_watch(
+        &mut self,
+        address: u64,
+        len: u64,
+        kind: WatchKind,
+        memory: &mut impl Int3Memory,
+    ) -> Result<bool> {
         let watch = Watch { address, len, kind };
         if kind == WatchKind::Read {
-            return false;
+            return Ok(false);
         }
         if self.watches.contains(&watch) {
-            return true;
+            return Ok(true);
         }
-        if self.registers().len() + pieces(address, len).len() > MAX_TRAPS {
-            return false;
+
+        if !self.free_registers(pieces(address, len).len(), memory)? {
+            return Ok(false);
         }
         self.watches.push(watch);
-        true
+        Ok(true)
     }
 
     fn remove_watch(&mut self, address: u64, len: u64, kind: WatchKind) -> bool {
@@ -323,9 +430,14 @@ impl Traps {
         self.watches.len() != before
     }
 
-    /// One trap per register: the breakpoints, then each watch's pieces.
+    /// One trap per register: the breakpoints in registers, then each
+    /// watch's pieces.
     fn registers(&self) -> Vec<Trap> {
-        let breakpoints = self.breakpoints.iter().map(|a| Trap::Execute(*a));
+        let breakpoints = self
+            .breakpoints
+            .iter()
+            .filter(|b| b.place == Place::Register)
+            .map(|b| Trap::Execute(b.address));
         let watches = self.watches.iter().flat_map(|w| {
             let access = match w.kind {
                 WatchKind::Write => Access::Write,
@@ -549,14 +661,6 @@ impl Debuggee {
     fn in_scope(&self, address: u64) -> Result<bool> {
         let cr3 = self.machine.special_registers()?.cr3;
         Ok(in_scope(address, self.space, cr3))
-    }
-
-    /// Lets the instruction at a breakpoint another process reached run
-    /// without trapping again.
-    fn pass_breakpoint(&mut self) -> Result<()> {
-        let mut regs = self.machine.registers()?;
-        regs.rflags |= RFLAGS_RF;
-        self.machine.set_registers(&regs)
     }
 
     /// Serves gdb on `conn` until it detaches or the connection closes.
@@ -785,9 +889,10 @@ impl MultiThreadSingleStep for Debuggee {
     }
 }
 
-// gdb's `break` and `hbreak` both become debug register breakpoints, so
-// nothing is written into the VM's memory, and `watch` and `awatch` become
-// debug register watchpoints; there are four registers between them.
+// gdb's `break` takes a debug register while one is free and is int3 in
+// memory past them, `hbreak` takes a register or none, and `watch` and
+// `awatch` take one register for each piece of what they watch; a watch
+// moves breakpoints out of the registers into int3 when it needs them.
 impl Breakpoints for Debuggee {
     fn support_sw_breakpoint(&mut self) -> Option<SwBreakpointOps<'_, Self>> {
         Some(self)
@@ -802,23 +907,74 @@ impl Breakpoints for Debuggee {
     }
 }
 
+/// The machine's memory as the debugged process maps it, or with none the
+/// process on the CPU, for writing int3.
+struct Int3Writer<'a> {
+    machine: &'a mut Machine,
+    space: Option<u64>,
+}
+
+impl Int3Memory for Int3Writer<'_> {
+    fn insert(&mut self, address: u64) -> Result<Option<u64>> {
+        let table = match self.space {
+            Some(space) => space,
+            None => page_table(self.machine.special_registers()?.cr3),
+        };
+        let Some(physical) = self.machine.physical_in(table, address)? else {
+            return Ok(None);
+        };
+        self.machine.insert_int3(physical)?;
+        Ok(Some(physical))
+    }
+
+    fn remove(&mut self, physical: u64) -> Result<()> {
+        self.machine.remove_int3(physical)
+    }
+}
+
+impl Debuggee {
+    /// Adds a breakpoint of `kind` at `address` for gdb, saying why when it
+    /// cannot be had.
+    fn add_breakpoint(&mut self, address: u64, kind: Kind) -> TargetResult<bool, Self> {
+        let mut memory = Int3Writer {
+            machine: &mut self.machine,
+            space: self.space,
+        };
+        let added = self
+            .traps
+            .add_breakpoint(address, kind, &mut memory)
+            .map_err(fatal)?;
+        Ok(added || self.traps.refuse_breakpoint(address, kind))
+    }
+
+    fn remove_breakpoint(&mut self, address: u64) -> TargetResult<bool, Self> {
+        let mut memory = Int3Writer {
+            machine: &mut self.machine,
+            space: self.space,
+        };
+        self.traps
+            .remove_breakpoint(address, &mut memory)
+            .map_err(fatal)
+    }
+}
+
 impl SwBreakpoint for Debuggee {
     fn add_sw_breakpoint(&mut self, address: u64, _kind: usize) -> TargetResult<bool, Self> {
-        Ok(self.traps.add_breakpoint(address) || self.traps.refuse_breakpoint(address))
+        self.add_breakpoint(address, Kind::Software)
     }
 
     fn remove_sw_breakpoint(&mut self, address: u64, _kind: usize) -> TargetResult<bool, Self> {
-        Ok(self.traps.remove_breakpoint(address))
+        self.remove_breakpoint(address)
     }
 }
 
 impl HwBreakpoint for Debuggee {
     fn add_hw_breakpoint(&mut self, address: u64, _kind: usize) -> TargetResult<bool, Self> {
-        Ok(self.traps.add_breakpoint(address) || self.traps.refuse_breakpoint(address))
+        self.add_breakpoint(address, Kind::Hardware)
     }
 
     fn remove_hw_breakpoint(&mut self, address: u64, _kind: usize) -> TargetResult<bool, Self> {
-        Ok(self.traps.remove_breakpoint(address))
+        self.remove_breakpoint(address)
     }
 }
 
@@ -829,7 +985,13 @@ impl HwWatchpoint for Debuggee {
         len: u64,
         kind: WatchKind,
     ) -> TargetResult<bool, Self> {
-        Ok(self.traps.add_watch(address, len, kind))
+        let mut memory = Int3Writer {
+            machine: &mut self.machine,
+            space: self.space,
+        };
+        self.traps
+            .add_watch(address, len, kind, &mut memory)
+            .map_err(fatal)
     }
 
     fn remove_hw_watchpoint(
@@ -907,17 +1069,17 @@ impl BlockingEventLoop for EventLoop {
             }
             match outcome {
                 Outcome::Debug(DebugStop::Step) => return step_done(target),
-                // A trap in another process's address space is passed:
-                // the fork runs on, or a step is done.
+                // A breakpoint in another process's address space is
+                // passed: that process runs the instruction there, which
+                // is the step when gdb is stepping, and the fork runs on.
                 Outcome::Debug(DebugStop::Breakpoint(address))
                     if !target.in_scope(address).map_err(target_error)? =>
                 {
-                    if target.mode == Mode::Step {
-                        return step_done(target);
-                    }
-                    target.pass_breakpoint().map_err(target_error)?;
+                    target.machine.pass_breakpoint().map_err(target_error)?;
                     continue;
                 }
+                // A watched write in another process's address space has
+                // happened: the fork runs on, or a step is done.
                 Outcome::Debug(DebugStop::Watchpoint(address))
                     if !target.in_scope(address).map_err(target_error)? =>
                 {
@@ -1100,17 +1262,66 @@ mod tests {
         assert_eq!(pieces(0x1000, 0), vec![]);
     }
 
+    /// Where [`FakeMemory`] maps nothing, and how far above a virtual
+    /// address it puts the physical one.
+    const UNMAPPED: u64 = 0x8000;
+    const PHYSICAL: u64 = 0x10_0000;
+
+    /// Memory for int3 that maps every address below [`UNMAPPED`], and
+    /// keeps the physical addresses int3 is written at.
+    #[derive(Default)]
+    struct FakeMemory {
+        written: Vec<u64>,
+    }
+
+    impl Int3Memory for FakeMemory {
+        fn insert(&mut self, address: u64) -> Result<Option<u64>> {
+            if address >= UNMAPPED {
+                return Ok(None);
+            }
+            self.written.push(address + PHYSICAL);
+            Ok(Some(address + PHYSICAL))
+        }
+
+        fn remove(&mut self, physical: u64) -> Result<()> {
+            self.written.retain(|p| *p != physical);
+            Ok(())
+        }
+    }
+
     /// Breakpoints and watch pieces share the four registers: a watch that
     /// does not fit is refused whole, a read-only watch is refused since
-    /// x86 has none, and a hit on any piece names the watch gdb set.
+    /// x86 has none, and a hit on any piece names the watch gdb set. The
+    /// breakpoint here is where no int3 can go, so it keeps its register.
     #[test]
     fn breakpoints_and_watches_share_the_four_registers() {
+        let mut memory = FakeMemory::default();
         let mut traps = Traps::default();
-        assert!(traps.add_breakpoint(0x400000));
-        assert!(traps.add_watch(0x1000, 8, WatchKind::Write));
-        assert!(!traps.add_watch(0x2001, 7, WatchKind::Write));
-        assert!(!traps.add_watch(0x3000, 4, WatchKind::Read));
-        assert!(traps.add_watch(0x2002, 6, WatchKind::ReadWrite));
+        assert!(
+            traps
+                .add_breakpoint(0x400000, Kind::Software, &mut memory)
+                .unwrap()
+        );
+        assert!(
+            traps
+                .add_watch(0x1000, 8, WatchKind::Write, &mut memory)
+                .unwrap()
+        );
+        assert!(
+            !traps
+                .add_watch(0x2001, 7, WatchKind::Write, &mut memory)
+                .unwrap()
+        );
+        assert!(
+            !traps
+                .add_watch(0x3000, 4, WatchKind::Read, &mut memory)
+                .unwrap()
+        );
+        assert!(
+            traps
+                .add_watch(0x2002, 6, WatchKind::ReadWrite, &mut memory)
+                .unwrap()
+        );
         assert_eq!(
             traps.registers(),
             vec![
@@ -1137,6 +1348,143 @@ mod tests {
 
         assert!(traps.remove_watch(0x2002, 6, WatchKind::ReadWrite));
         assert!(!traps.remove_watch(0x2002, 6, WatchKind::ReadWrite));
+        assert_eq!(traps.registers().len(), 2);
+        assert!(memory.written.is_empty());
+    }
+
+    /// Breakpoints take the debug registers first and int3 past them.
+    /// Removing a breakpoint written as int3 takes int3 out of memory, and
+    /// one in a register frees the register.
+    #[test]
+    fn breakpoints_past_the_registers_are_int3() {
+        let mut memory = FakeMemory::default();
+        let mut traps = Traps::default();
+        for address in [0x1000, 0x1100, 0x1200, 0x1300] {
+            assert!(
+                traps
+                    .add_breakpoint(address, Kind::Software, &mut memory)
+                    .unwrap()
+            );
+        }
+        assert!(memory.written.is_empty());
+        assert!(
+            traps
+                .add_breakpoint(0x1400, Kind::Software, &mut memory)
+                .unwrap()
+        );
+        assert_eq!(memory.written, vec![0x1400 + PHYSICAL]);
+        assert_eq!(traps.registers().len(), MAX_TRAPS);
+
+        assert!(traps.remove_breakpoint(0x1400, &mut memory).unwrap());
+        assert!(memory.written.is_empty());
+        assert!(traps.remove_breakpoint(0x1000, &mut memory).unwrap());
+        assert!(
+            traps
+                .add_breakpoint(0x1500, Kind::Hardware, &mut memory)
+                .unwrap()
+        );
+        assert!(memory.written.is_empty());
+    }
+
+    /// With the registers full, a breakpoint that cannot be int3, `break`
+    /// where nothing is mapped yet or `hbreak`, takes a register from a
+    /// `break` that can, which moves into memory. With none left that can,
+    /// it is refused.
+    #[test]
+    fn a_breakpoint_that_cannot_be_int3_takes_a_register() {
+        let mut memory = FakeMemory::default();
+        let mut traps = Traps::default();
+        for address in [0x1000, 0x1100, 0x1200, 0x1300] {
+            assert!(
+                traps
+                    .add_breakpoint(address, Kind::Software, &mut memory)
+                    .unwrap()
+            );
+        }
+        assert!(
+            traps
+                .add_breakpoint(UNMAPPED, Kind::Software, &mut memory)
+                .unwrap()
+        );
+        assert_eq!(memory.written, vec![0x1000 + PHYSICAL]);
+        assert!(
+            traps
+                .add_breakpoint(0x1500, Kind::Hardware, &mut memory)
+                .unwrap()
+        );
+        assert_eq!(memory.written, vec![0x1000 + PHYSICAL, 0x1100 + PHYSICAL]);
+        assert_eq!(
+            traps.registers(),
+            vec![
+                Trap::Execute(0x1200),
+                Trap::Execute(0x1300),
+                Trap::Execute(UNMAPPED),
+                Trap::Execute(0x1500),
+            ]
+        );
+
+        for address in [UNMAPPED + 1, UNMAPPED + 2] {
+            assert!(
+                traps
+                    .add_breakpoint(address, Kind::Software, &mut memory)
+                    .unwrap()
+            );
+        }
+        assert!(
+            !traps
+                .add_breakpoint(UNMAPPED + 3, Kind::Software, &mut memory)
+                .unwrap()
+        );
+        assert!(
+            !traps
+                .add_breakpoint(0x1600, Kind::Hardware, &mut memory)
+                .unwrap()
+        );
+    }
+
+    /// A watch takes the registers it needs from `break` breakpoints, which
+    /// move into memory as int3; a breakpoint where no int3 can go keeps
+    /// its register, and a watch that cannot have enough is refused.
+    #[test]
+    fn a_watch_moves_breakpoints_into_memory() {
+        let mut memory = FakeMemory::default();
+        let mut traps = Traps::default();
+        assert!(
+            traps
+                .add_breakpoint(UNMAPPED, Kind::Software, &mut memory)
+                .unwrap()
+        );
+        for address in [0x1000, 0x1100, 0x1200] {
+            assert!(
+                traps
+                    .add_breakpoint(address, Kind::Software, &mut memory)
+                    .unwrap()
+            );
+        }
+        assert!(
+            traps
+                .add_watch(0x2000, 8, WatchKind::Write, &mut memory)
+                .unwrap()
+        );
+        assert_eq!(memory.written, vec![0x1000 + PHYSICAL]);
+        assert_eq!(
+            traps.registers(),
+            vec![
+                Trap::Execute(UNMAPPED),
+                Trap::Execute(0x1100),
+                Trap::Execute(0x1200),
+                Trap::Watch {
+                    address: 0x2000,
+                    len: 8,
+                    access: Access::Write
+                },
+            ]
+        );
+        assert!(
+            !traps
+                .add_watch(0x3000, 32, WatchKind::Write, &mut memory)
+                .unwrap()
+        );
         assert_eq!(traps.registers().len(), 2);
     }
 

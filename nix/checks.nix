@@ -43,7 +43,9 @@ let
   # the main thread, after a sleep, prints and wakes them; one starts a
   # thread that prints and faults at once while the main thread waits on
   # a vfork child; one reads the clock, which musl does in the vDSO, after
-  # each of two prints.
+  # each of two prints; one forks a child that calls a function three times
+  # and runs an int3 of its own, then calls the same function and six
+  # others itself.
   gdbRoot =
     pkgs.runCommand "rewind-gdb-root"
       {
@@ -222,6 +224,54 @@ let
         }
         EOF
         $CC -static -O1 -g -o $out/bin/vdso vdso.c
+
+        cat > int3.c <<'EOF'
+        #include <signal.h>
+        #include <sys/wait.h>
+        #include <unistd.h>
+
+        volatile int calls;
+
+        /* Calls for gdb to break on, each kept out of line. */
+        __attribute__((noinline)) void first(void) { calls += 1; }
+        __attribute__((noinline)) void second(void) { calls += 2; }
+        __attribute__((noinline)) void third(void) { calls += 3; }
+        __attribute__((noinline)) void fourth(void) { calls += 4; }
+        __attribute__((noinline)) void fifth(void) { calls += 5; }
+        __attribute__((noinline)) void sixth(void) { calls += 6; }
+
+        /* Called by the child, then by the parent: one page of code. */
+        __attribute__((noinline)) void shared(int who) { calls += who; }
+
+        static void on_trap(int sig)
+        {
+          (void)sig;
+          write(1, "trapped\n", 8);
+        }
+
+        int main(void)
+        {
+          signal(SIGTRAP, on_trap);
+          write(1, "start\n", 6);
+          if (fork() == 0) {
+            for (int i = 0; i < 3; i++)
+              shared(1);
+            __asm__ volatile("int3");
+            _exit(0);
+          }
+          wait(0);
+          shared(0);
+          first();
+          second();
+          third();
+          fourth();
+          fifth();
+          sixth();
+          write(1, "done\n", 5);
+          return 0;
+        }
+        EOF
+        $CC -static -O1 -g -o $out/bin/int3 int3.c
       '';
 
   # A root with a static program in two files, like mylib: main hands a
@@ -681,9 +731,7 @@ in
   # recording. Its child writes the global at the same address in its own
   # address space first, and calls write first, which must stop gdb at
   # neither a watchpoint nor a breakpoint. x86 has no trap on reads alone,
-  # so `rwatch` is refused, and a fifth breakpoint, past the CPU's four
-  # debug registers, is refused out loud. Boots the VM, so it needs
-  # /dev/kvm.
+  # so `rwatch` is refused. Boots the VM, so it needs /dev/kvm.
   gdb-watch =
     pkgs.runCommand "rewind-gdb-watch"
       {
@@ -723,13 +771,6 @@ in
         rewind gdb watch "$start" -- -batch -ex 'rwatch counter' -ex continue > read 2>&1 || true
         cat read
         grep -q 'Could not insert' read
-
-        # A fifth breakpoint has no debug register; rewind says so, since
-        # gdb sets one in a shared library aside without a word.
-        rewind gdb watch "$start" -- -batch -ex 'break main' -ex 'break write' \
-          -ex 'break fork' -ex 'break wait' -ex 'break _exit' -ex continue > five 2>&1 || true
-        cat five
-        grep -q 'no debug register left for a breakpoint' five
         touch $out
       '';
 
@@ -882,6 +923,76 @@ in
         cat hit
         grep -q '^Thread [2-9] hit Breakpoint 1, ' hit
         grep -q '^\* [2-9] .*on the CPU' hit
+        touch $out
+      '';
+
+  # checks.gdb-int3: breakpoints past the CPU's four debug registers are
+  # int3 in memory, and the fork stays on its recording through them,
+  # under exit time and, where the branch counter opens, counter time. Of
+  # seven breakpoints three are int3. One is in code a forked child runs
+  # three times before the parent does: the child's calls are passed, and
+  # the first stop is the parent's. The child's own int3 goes back to it,
+  # and its handler prints. Then each of the parent's six calls stops in
+  # turn, and the run ends. A breakpoint in the kernel past the registers
+  # stops too, and with breakpoints left in memory, gdb reads the code's
+  # own byte where int3 is. Boots the VM, so it needs /dev/kvm.
+  gdb-int3 =
+    pkgs.runCommand "rewind-gdb-int3"
+      {
+        nativeBuildInputs = [
+          rewind
+          pkgs.gdb
+        ];
+        requiredSystemFeatures = [ "kvm" ];
+      }
+      ''
+        export REWIND_HOME=$TMPDIR/rewind
+        # No debuginfod server: without a network, each of gdb's questions
+        # to it waits out a timeout.
+        export REWIND_DEBUGINFOD=/nonexistent
+
+        breaks=""
+        for f in first second third fourth fifth sixth shared; do
+          breaks="$breaks -ex 'break $f'"
+        done
+        for clock in exits branches; do
+          if ! rewind run -q --clock "$clock" --name "int3-$clock" --root ${gdbRoot} -- /bin/int3 \
+            > run 2>&1; then
+            cat run
+            grep -q 'perf_event_open' run
+            echo "skipped counter time: this machine's branch counter cannot drive it"
+            continue
+          fi
+          rewind events "int3-$clock" > events
+          grep -q 'trapped' events
+          start=$(grep 'write(1, "start' events | awk '{print $1}')
+
+          eval "rewind gdb int3-$clock $start -- -batch $breaks" \
+            -ex continue -ex continue -ex continue -ex continue -ex continue \
+            -ex continue -ex continue -ex continue > gdb 2>&1 || true
+          cat gdb
+          grep 'hit Breakpoint' gdb > hits
+          test "$(wc -l < hits)" = 7
+          sed -n 1p hits > first
+          grep -Eq 'Breakpoint 7, shared \(who=(who@entry=)?0\)' first
+          sed -n 7p hits > last
+          grep -q 'Breakpoint 6, sixth' last
+          grep -q 'exited normally' gdb
+          ! grep -q 'left the recording\|SIGTRAP\|no debug register' gdb
+        done
+
+        # A kernel function past the registers, and gdb's reads with
+        # breakpoints left in memory.
+        rewind gdb int3-exits "$start" -- -batch -ex 'break first' -ex 'break second' \
+          -ex 'break third' -ex 'break fourth' -ex 'break __x64_sys_wait4' -ex continue \
+          -ex 'set breakpoint always-inserted on' -ex 'break sixth' -ex 'x/1bx sixth' \
+          -ex 'delete' -ex continue > kernel 2>&1 || true
+        cat kernel
+        grep -q 'hit Breakpoint 5, .*__x64_sys_wait4' kernel
+        grep -q '^0x[0-9a-f]* <sixth>:' kernel
+        ! grep -q '^0x[0-9a-f]* <sixth>:.*0xcc' kernel
+        grep -q 'exited normally' kernel
+        ! grep -q 'left the recording' kernel
         touch $out
       '';
 

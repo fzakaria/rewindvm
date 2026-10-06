@@ -132,9 +132,20 @@ costs no CPU.
 `gdbstub` crate: registers through KVM, and memory through KVM's address
 translation, so gdb reads the kernel and the running process's user space as
 the VM's own page tables map them. Breakpoints are the CPU's four debug
-address registers rather than `int3` in memory, and a single step holds
-interrupts off. A debug trap is a VM exit the VM never sees and not a step, so
-a debugged fork runs exactly as it would have.
+address registers first, which change nothing in the VM. A debug trap is a VM
+exit the VM never sees and not a step, so a debugged fork runs exactly as it
+would have. Breakpoints past the registers, and those a watchpoint takes the
+registers from, are `int3` written into the VM's memory, and KVM hands every
+`#BP` to Rewind rather than the guest while one is there. An `int3` is in a
+physical page, which other processes may map too, as they do a shared library's
+code: a `#BP` in another process's address space is passed by putting the byte
+back for that one instruction, stepped with interrupts held, and writing `int3`
+again. An `int3` of the guest's own goes back to the guest. gdb and Rewind's
+own reads of memory see the byte `int3` replaced. A process that reads the
+file a page of code belongs to sees the `int3` in it, though, and the fork then
+goes its own way, which Rewind reports as it reports any. Rewind's own single
+steps toward a preemption point, for counter time, keep every one of the
+debugger's traps.
 
 gdb's first thread is the CPU, named for the task on it, with the same id at
 every stop. Every thread of the process gdb debugs, the one running at the step
