@@ -1,9 +1,50 @@
+Rewind VM desktop app license
+
 Copyright (c) 2026 Lunch Time Surf LLC. All rights reserved.
 
-This software and its source code are proprietary to Lunch Time Surf LLC.
-You may run the software to evaluate it. Copying, modifying, distributing,
-sublicensing or selling the software, in whole or in part, requires the
-prior written permission of Lunch Time Surf LLC.
+The Rewind VM desktop app (the app) and its source code are proprietary to
+Lunch Time Surf LLC. Copying, modifying, distributing, sublicensing or
+selling the app, in whole or in part, requires the prior written permission
+of Lunch Time Surf LLC, except as this license allows.
+
+EVALUATION
+
+Anyone may download the app and run it to evaluate it, for as long as they
+like, with every feature. A copy without a license says it is evaluating and
+now and then reminds its user to buy one.
+
+LICENSES
+
+A license is a signed block of text that Lunch Time Surf LLC sends a buyer
+by email. Entered into the app, it lets the people it covers use the app
+without the reminders.
+
+- A Personal license is for one person, and is bought by that person. It
+  covers that person's use of the app on all of their machines. It does not
+  cover use at a company.
+
+- A Commercial license is for use at a company, and has a number of seats.
+  Each seat covers one person's use of the app, on as many machines as that
+  person uses it on. A company may move a seat from a person who has stopped
+  using the app to another.
+
+The people a license covers may copy the app onto the machines it covers
+them on.
+
+UPDATES
+
+A license covers every version of the app released on or before the
+Updates-Until date in its block, for as long as its holder likes. A version
+released after that date runs as an evaluation until a new license covers
+it.
+
+REFUNDS
+
+A license may be refunded in full within 30 days of its purchase, as
+https://rewindvm.dev/refunds.html says. A refunded license is revoked:
+versions of the app released after the refund refuse it.
+
+NO WARRANTY
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
@@ -12,6 +53,8 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+THIRD PARTY SOFTWARE
 
 The software links against third party libraries under their own licenses,
 among them GPUI (Apache-2.0) and rewind-trace (MIT). Nothing here changes the
