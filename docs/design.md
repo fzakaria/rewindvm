@@ -137,9 +137,11 @@ interrupts off. A debug trap is a VM exit the VM never sees and not a step, so
 a debugged fork runs exactly as it would have.
 
 gdb's first thread is the CPU, named for the task on it, with the same id at
-every stop, so a step or a trap always stops the thread gdb ran. Every thread
-of the process gdb debugs, the one running at the step or the one `--pid`
-names, is a thread too, by its own id. At setup the kernel writes into the shared page where its
+every stop. Every thread of the process gdb debugs, the one running at the step
+or the one `--pid` names, is a thread too, by its own id. A breakpoint or
+watchpoint hit in user space stops the process's thread that hit it, one hit
+in the kernel stops the CPU's thread, and a step stops the thread gdb
+stepped. At setup the kernel writes into the shared page where its
 tasks are: `init_task`, the variable holding the running task, the direct
 map's base, and the offsets in `task_struct`, `signal_struct` and `mm_struct`
 needed to walk from the list of processes to a process's threads and its page

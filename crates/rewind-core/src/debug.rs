@@ -3,11 +3,12 @@
 //! VM's page tables map it: the kernel, which the VM kernel's vmlinux has
 //! the symbols for, and the user space of whichever process was running.
 //! The CPU is gdb's first thread, with the same id at every stop and
-//! named for the task on it, so steps and traps always stop the thread gdb
-//! ran. Every thread of the process gdb debugs is a thread too, with its
-//! process's memory and the user registers it saved when it last entered
-//! the kernel, or the vCPU's while it runs in user space, so gdb shows
-//! where each one waits; they move only when the CPU runs them.
+//! named for the task on it. Every thread of the process gdb debugs is a
+//! thread too, with its process's memory and the user registers it saved
+//! when it last entered the kernel, or the vCPU's while it runs in user
+//! space, so gdb shows where each one waits; they move only when the CPU
+//! runs them. A trap in user space stops the process's thread that hit
+//! it, a trap in the kernel the CPU's, and a step the thread gdb stepped.
 //! Breakpoints and watchpoints at user addresses stop the fork only in the
 //! process gdb is debugging; other processes map the same addresses to
 //! memory of their own. Continuing and stepping run the fork, never the
@@ -68,7 +69,7 @@ const USER_END: u64 = 0x0000_8000_0000_0000;
 const RFLAGS_RF: u64 = 1 << 16;
 
 /// The CPU's thread id for gdb, the same at every stop whichever task is
-/// on it, so a step or a trap always stops the thread gdb ran. One past
+/// on it, so a step of the CPU stops the thread gdb stepped. One past
 /// PID_MAX_LIMIT, the most pids a 64-bit kernel hands out, so no task has
 /// it.
 const CPU_TID: usize = 4_194_305;
@@ -143,6 +144,30 @@ fn seen(cpu: Option<&Thread>, process: &[Thread]) -> Vec<Seen> {
         })
     });
     std::iter::once(on_cpu).chain(threads).collect()
+}
+
+/// Which half of the address space the CPU runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Running {
+    UserSpace,
+    Kernel,
+}
+
+/// The thread among `threads` that gdb is told a stop happened in: the
+/// debugged process's thread on the CPU while the CPU runs user space,
+/// so gdb names the thread that hit the trap. A stop in the kernel is the
+/// CPU's, since a process's thread shows the user registers it entered
+/// the kernel with, which are not where the CPU stopped. So is one with
+/// no thread of the process on the CPU, such as a vfork child running in
+/// the process's address space.
+fn stopped_thread(threads: &[Seen], running: Running) -> Tid {
+    if running == Running::Kernel {
+        return cpu_tid();
+    }
+    threads
+        .iter()
+        .find(|t| matches!(t.source, Source::Task(_, OnCpu::Yes)))
+        .map_or_else(cpu_tid, |t| t.tid)
 }
 
 /// The number gdb gives thread `tid` of the debugged process among
@@ -459,10 +484,19 @@ impl Debuggee {
         thread_number(&self.threads, tid)
     }
 
-    /// Whether the CPU is running user space.
-    fn in_user_space(&self) -> Result<bool> {
+    /// Which half the CPU is running, by its code segment's privilege.
+    fn running(&self) -> Result<Running> {
         let cs = self.machine.special_registers()?.cs.selector;
-        Ok(u64::from(cs) & SELECTOR_RPL == USER_RPL)
+        if u64::from(cs) & SELECTOR_RPL == USER_RPL {
+            return Ok(Running::UserSpace);
+        }
+        Ok(Running::Kernel)
+    }
+
+    /// The thread gdb is told the machine stopped in, read after the stop
+    /// refreshed the threads.
+    fn stopped_thread(&self) -> Result<Tid> {
+        Ok(stopped_thread(&self.threads, self.running()?))
     }
 
     /// Whether the CPU is in the address space gdb debugs.
@@ -547,7 +581,7 @@ impl MultiThreadBase for Debuggee {
         // such as one that exited since the last stop, is an error gdb
         // reports for that thread; the session goes on.
         if let Some(Source::Task(task, on)) = self.source(tid)
-            && !(on == OnCpu::Yes && self.in_user_space().map_err(fatal)?)
+            && !(on == OnCpu::Yes && self.running().map_err(fatal)? == Running::UserSpace)
         {
             let layout = self.layout.ok_or(TargetError::NonFatal)?;
             let words = Tasks::new(&self.machine, layout)
@@ -788,10 +822,12 @@ impl BlockingEventLoop for EventLoop {
             .set_debug(target.mode.stepping(), &traps)
             .map_err(target_error)?;
 
-        // Each stop reads the threads again, and names the CPU's.
+        // Each stop reads the threads again, and names the thread it
+        // happened in.
         let stop = |target: &mut Debuggee, reason: fn(Tid) -> MultiThreadStopReason<u64>| {
             target.refresh_threads();
-            Ok(Event::TargetStopped(reason(cpu_tid())))
+            let tid = target.stopped_thread().map_err(target_error)?;
+            Ok(Event::TargetStopped(reason(tid)))
         };
 
         // A step is the vCPU's one instruction, done in the thread gdb
@@ -855,7 +891,7 @@ impl BlockingEventLoop for EventLoop {
                 }
                 Outcome::Debug(DebugStop::Watchpoint(piece)) => {
                     target.refresh_threads();
-                    let tid = cpu_tid();
+                    let tid = target.stopped_thread().map_err(target_error)?;
                     let reason = match target.traps.watch_at(piece) {
                         Some((addr, kind)) => MultiThreadStopReason::Watch { tid, kind, addr },
                         None => MultiThreadStopReason::SignalWithThread {
@@ -886,7 +922,7 @@ impl BlockingEventLoop for EventLoop {
     fn on_interrupt(target: &mut Debuggee) -> Result<Option<Self::StopReason>, String> {
         target.refresh_threads();
         Ok(Some(MultiThreadStopReason::SignalWithThread {
-            tid: cpu_tid(),
+            tid: target.stopped_thread().map_err(|e| e.to_string())?,
             signal: Signal::SIGINT,
         }))
     }
@@ -955,6 +991,24 @@ mod tests {
                 .iter()
                 .all(|t| matches!(t.source, Source::Task(_, OnCpu::No)))
         );
+    }
+
+    /// A stop in user space is reported in the debugged process's thread on
+    /// the CPU, so gdb names the thread that hit it; a stop in the kernel,
+    /// or with no thread of the process on the CPU, in the CPU's.
+    #[test]
+    fn a_stop_in_user_space_is_the_threads_on_the_cpu() {
+        let process = [thread(40, 0x100), thread(41, 0x200), thread(42, 0x300)];
+        let threads = seen(Some(&thread(41, 0x200)), &process);
+        assert_eq!(stopped_thread(&threads, Running::UserSpace).get(), 41);
+        assert_eq!(stopped_thread(&threads, Running::Kernel).get(), CPU_TID);
+
+        let vfork_child = thread(43, 0x400);
+        let threads = seen(Some(&vfork_child), &process);
+        assert_eq!(stopped_thread(&threads, Running::UserSpace).get(), CPU_TID);
+
+        let threads = seen(Some(&thread(41, 0x200)), &[]);
+        assert_eq!(stopped_thread(&threads, Running::UserSpace).get(), CPU_TID);
     }
 
     /// gdb numbers threads from 1 in the order the stub lists them, so the

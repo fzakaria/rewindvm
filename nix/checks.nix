@@ -805,7 +805,7 @@ in
   # the CPU and the four threads, and finds each worker waiting in its own
   # function, from the registers the kernel saved for it. At a step that
   # ran in no process, `--pid` names the process, and gdb still finds the
-  # three.
+  # three. A breakpoint a worker hits stops in that worker's thread.
   # Boots the VM, so it needs /dev/kvm.
   gdb-threads =
     pkgs.runCommand "rewind-gdb-threads"
@@ -856,6 +856,14 @@ in
         test -n "$idle"
 
         threads_at 5 "$idle" --pid "$pid"
+
+        # A breakpoint a worker hits on its way out stops that worker, the
+        # thread on the CPU, not the CPU's own thread.
+        rewind gdb threads "$open" -- -batch -ex 'break pthread_exit' -ex continue \
+          -ex 'info threads' > hit 2>&1 || true
+        cat hit
+        grep -q '^Thread [2-9] hit Breakpoint 1, ' hit
+        grep -q '^\* [2-9] .*on the CPU' hit
         touch $out
       '';
 
