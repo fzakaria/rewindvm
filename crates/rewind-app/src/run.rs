@@ -298,7 +298,7 @@ pub fn short_id(id: &str) -> String {
 
 pub(crate) fn read_manifest(path: &Path) -> Result<Manifest> {
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-    serde_json::from_slice(&bytes).with_context(|| {
+    Manifest::parse(&bytes).with_context(|| {
         format!(
             "{} was written by another build of rewind, which this app cannot read",
             path.display()
