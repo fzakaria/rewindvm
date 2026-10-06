@@ -292,6 +292,11 @@ impl Machine {
             quantum: config.quantum,
         };
         m.dev.shared = d.shared;
+        // A keyframe taken after setup restores the interface the guest
+        // kernel named then, which must be this monitor's too.
+        if let Some(shared) = m.dev.shared {
+            crate::pv::check_interface(m.dev.guest_interface(shared)?)?;
+        }
         m.dev.epoch = d.epoch;
         m.dev.step = d.step;
         m.work_base = d.branches;

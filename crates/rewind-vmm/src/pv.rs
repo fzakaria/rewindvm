@@ -139,6 +139,29 @@ pub const SHARED_STALL_NS: u64 = SHARED_INPUT + INPUT_MAX as u64;
 /// and aligned to 8 bytes, as [`TaskLayout`]'s fields in order, each a u64.
 pub const SHARED_TASKS: u64 = (SHARED_STALL_NS + 4).next_multiple_of(8);
 
+/// The version of the interface between the monitor and the guest kernel:
+/// the ports, the records and the shared page. The kernel writes it into
+/// the shared page, after the task layout, before it sends setup; a kernel
+/// from before rewind 1.0 wrote none, and the field reads 0.
+pub const INTERFACE_VERSION: u32 = 1;
+pub const SHARED_INTERFACE: u64 = SHARED_TASKS + 8 * TASK_LAYOUT_FIELDS as u64;
+
+/// Whether a guest kernel that names interface `version` is one this
+/// monitor runs.
+pub fn check_interface(version: u32) -> anyhow::Result<()> {
+    match version {
+        INTERFACE_VERSION => Ok(()),
+        0 => anyhow::bail!(
+            "the run's guest kernel names no interface: it is from before rewind 1.0, \
+             which this build does not run; record the run again"
+        ),
+        other => anyhow::bail!(
+            "the run's guest kernel speaks interface {other}, and this build of rewind \
+             speaks interface {INTERFACE_VERSION}"
+        ),
+    }
+}
+
 /// Where `rewind gdb` finds a process's threads: what the kernel writes
 /// into the shared page at setup. Addresses are kernel virtual ones;
 /// offsets are within the struct each field names. All zero from a kernel
@@ -223,6 +246,40 @@ pub mod pt_regs {
     pub const RFLAGS: usize = 18;
     pub const RSP: usize = 19;
     pub const SS: usize = 20;
+}
+
+#[cfg(test)]
+mod interface_tests {
+    // The interface number: where the kernel writes it in struct
+    // rewind_shared, and which numbers the monitor runs.
+    use super::*;
+
+    /// The number follows the task layout in struct rewind_shared: the
+    /// clock, epoch, pending and request_len, the request, input_len, the
+    /// input, stall_ns, padding to 8 bytes, then the layout's u64s.
+    #[test]
+    fn the_interface_follows_the_task_layout() {
+        let tasks = 8 + 8 + 4 + 4 + REQUEST_MAX as u64 + 4 + INPUT_MAX as u64 + 4;
+        assert_eq!(SHARED_TASKS, tasks.next_multiple_of(8));
+        assert_eq!(
+            SHARED_INTERFACE,
+            SHARED_TASKS + 8 * TASK_LAYOUT_FIELDS as u64
+        );
+    }
+
+    /// The monitor runs only a kernel that names the interface it speaks;
+    /// a kernel from before rewind 1.0 names none, which reads as 0.
+    #[test]
+    fn the_monitor_runs_only_its_own_interface() {
+        assert!(check_interface(INTERFACE_VERSION).is_ok());
+        let none = format!("{:#}", check_interface(0).unwrap_err());
+        assert!(none.contains("before rewind 1.0"), "{none}");
+        let other = format!("{:#}", check_interface(INTERFACE_VERSION + 1).unwrap_err());
+        assert!(
+            other.contains(&format!("interface {}", INTERFACE_VERSION + 1)),
+            "{other}"
+        );
+    }
 }
 
 #[cfg(test)]

@@ -118,7 +118,7 @@ diff -ruN a/arch/x86/kernel/cpu/Makefile b/arch/x86/kernel/cpu/Makefile
 diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 --- a/arch/x86/kernel/cpu/rewind.c	1969-12-31 16:00:00.000000000 -0800
 +++ b/arch/x86/kernel/cpu/rewind.c	1969-12-31 16:00:00.000000000 -0800
-@@ -0,0 +1,1306 @@
+@@ -0,0 +1,1316 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Rewind VM guest platform.
@@ -211,6 +211,14 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +#define REWIND_PORT_IDLE	0x5f0	/* outl: nothing is runnable */
 +#define REWIND_PORT_EXIT	0x5f4	/* outl: stop the machine */
 +#define REWIND_PORT_SETUP	0x5f8	/* outl: physical address of rewind_shared */
++
++/*
++ * The version of the interface between this kernel and the monitor: the
++ * ports, the records and struct rewind_shared. The kernel writes it into
++ * rewind_shared.interface before setup, and a monitor that speaks another
++ * stops rather than run it.
++ */
++#define REWIND_INTERFACE	1
 +
 +/* Values written to REWIND_PORT_EXIT. */
 +enum rewind_exit {
@@ -306,6 +314,7 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +	u8 input[REWIND_INPUT_MAX];
 +	u32 stall_ns;
 +	struct rewind_tasks tasks;
++	u32 interface;		/* REWIND_INTERFACE, written by the kernel */
 +};
 +
 +/* Reasons for an interrupt, in rewind_shared.pending. */
@@ -815,6 +824,7 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +{
 +	rewind_running = true;
 +	rewind_publish_tasks();
++	rewind_shared.interface = REWIND_INTERFACE;
 +	outl(__pa_symbol(&rewind_shared), REWIND_PORT_SETUP);
 +
 +	sysvec_install(HYPERVISOR_CALLBACK_VECTOR, sysvec_rewind_callback);

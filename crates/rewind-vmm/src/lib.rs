@@ -924,6 +924,7 @@ impl Devices {
             pv::PORT_EXIT => self.stop = Some(Stop::Guest(GuestExit::from_port(value))),
             pv::PORT_SETUP => {
                 let shared = value as u64;
+                pv::check_interface(self.guest_interface(shared)?)?;
                 self.ram
                     .write(shared + pv::SHARED_EPOCH, &self.epoch.to_le_bytes())?;
                 self.shared = Some(shared);
@@ -932,6 +933,14 @@ impl Devices {
             _ => {}
         }
         Ok(())
+    }
+
+    /// The interface the guest kernel named in its shared page at
+    /// `shared`.
+    pub(crate) fn guest_interface(&self, shared: u64) -> Result<u32> {
+        let mut version = [0u8; 4];
+        self.ram.read(shared + pv::SHARED_INTERFACE, &mut version)?;
+        Ok(u32::from_le_bytes(version))
     }
 
     fn io_in(&mut self, port: u16, data: &mut [u8]) -> Result<()> {
