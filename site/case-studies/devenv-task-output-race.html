@@ -207,23 +207,41 @@ schedule 0 failed; 49 of 256 perturbed schedules ended differently
 
 schedule 12 passes where schedule 0 fails; narrowing the steps it perturbs
 perturbing only steps 518..1270 still ends differently
+step 1269 decides it: a reschedule there makes the run pass
 
-passing: run 698c7c8455a9c8d9
-failing: run a25e89e017870cd4
+passing: run 698c7c8455a9c8d9, schedule 12 over steps 518..1270
+failing: run 5ceaeed290d6f3e2, schedule 12 over steps 518..1269
+the two are the same run until step 1269
 
-where /bin/sh /build/scriptBDto8u.sh first behaves differently:
-  failing        1162    43/43    execve("/build/scriptBDto8u.sh", ["/bin/sh", "/build/scriptBDto8u.sh"])
-  failing        1163    43/43    exit_group(scriptBDto8u.sh) exited:1
+where /nix/store/195dbbvj5h0yq9f4vnp833dsbgxpp8w0-devenv-tasks-tests-1.10.1/bin/devenv-tasks-tests test_failed_task_keeps_last_lines first behaves differently:
+  both           1166    40/42    open("/build/.tmpYGvd38/tasks.db-shm", 0o2400102)
+  both           1257    40/41    open("/build/devenv_task_outputDTNa6X.json", 0o2000302)
+  both           1264    40/41    fork() = 43
+  failing        1273    40/41    SIGCHLD code=1 addr=0x0
+  failing        1284    40/41    unlink("/build/devenv_task_outputDTNa6X.json")
+  failing        1291    40/41    unlink("/build/script4KXpsz.sh")
+  failing        1292    40/41    unlink("/build/.tmpYGvd38/tasks.db-shm")
+  passing        1297    40/41    unlink("/build/devenv_task_outputDTNa6X.json")
+  passing        1304    40/41    unlink("/build/script4KXpsz.sh")
+  passing        1305    40/41    unlink("/build/.tmpYGvd38/tasks.db-shm")
+  passing        1306    40/41    unlink("/build/.tmpYGvd38/tasks.db-wal")
 
-open both in the desktop app: rewind open a25e89e017870cd4 1162 --compare 698c7c8455a9c8d9</code></pre>
+open both in the desktop app: rewind open 5ceaeed290d6f3e2 1273 --compare 698c7c8455a9c8d9</code></pre>
         <p>208 of the 257 runs fail, all with <code>["line1", "line2"]</code>; 49 pass.</p>
+        <p>
+          <code>check</code> narrows schedule 12, which passes, to steps 518 to 1270, and names the
+          last of them: without the reschedule at step 1269, the same window fails like schedule 0.
+          Its two runs are the same until that step. In both, the task's shell forks at step 1264
+          and exits at 1266, and only in the failing one does a SIGCHLD reach the test's thread 41,
+          at step 1273, before the task is done.
+        </p>
       </section>
 
       <section class="step">
         <h2 id="where-the-third-line-went">
           <a class="anchor" href="#where-the-third-line-went">Where the third line went</a>
         </h2>
-        <p>The events of the failing run around the task:</p>
+        <p>The events of schedule 0's run, which fails, around the task:</p>
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind events a25e89e0 --from 1150 --to 1170</span>

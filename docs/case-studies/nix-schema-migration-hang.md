@@ -84,25 +84,32 @@ schedule 256: exited:1     680682 steps    run cb1d30fe6cad6e52
 
 schedule 81 ends differently; narrowing the steps it perturbs
 perturbing only steps 318..25010 still ends differently
+step 25009 decides it: a reschedule there makes the run fail
 
-passing: run 7187ba26156f5e8d
-failing: run 68bc655ad4f7901c
+passing: run ee608c9c8cebe778, schedule 81 over steps 318..25009
+failing: run 68bc655ad4f7901c, schedule 81 over steps 318..25010
+the two are the same run until step 25009
 
 where /nix/store/...-bash-5.3p3/bin/bash -x -e -u -o pipefail concurrent-builds.sh first behaves differently:
   both          35044   188/188   SIGCHLD code=1 addr=0x0
-  ...
+  both          37005   188/188   SIGCHLD code=1 addr=0x0
+  both          42508   188/188   SIGCHLD code=1 addr=0x0
   failing      266982   188/188   SIGTERM code=0 addr=0x0
   failing      266983   188/188   exit_group(bash) killed:SIGTERM
-  passing       32599   188/188   exit_group(bash) exited:0
+  passing       36524   188/188   exit_group(bash) exited:0
 
-open both in the desktop app: rewind open 68bc655ad4f7901c 266982 --compare 7187ba26156f5e8d
+open both in the desktop app: rewind open 68bc655ad4f7901c 266982 --compare ee608c9c8cebe778
 ```
 
 Narrowing keeps a wide window here, from early in boot to a few thousand steps
 after the six `nix` processes start at step 20551: they race from the moment
-they start, and the steps that matter are spread over all of them. `check`
-names the test script as the first process to behave differently, since in the
-narrowed run meson's SIGTERM ends it where in the passing run it exits 0. The
+they start, and the steps that matter are spread over all of them. The
+window's last step, 25009, decides it: without its reschedule the same window
+passes, and that run, ee608c9c, is the one `check` compares the failing run
+with. The two are the same run until step 25009, 4458 steps after the `nix`
+processes start. `check` names the test script as the first process to behave
+differently, since in the failing run meson's SIGTERM ends it where in the
+passing run it exits 0. The
 same derivation without gdb in its inputs failed under 7 of 256 schedules. On
 the host, the test passed 51 runs out of 51.
 

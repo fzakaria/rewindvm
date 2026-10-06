@@ -170,34 +170,43 @@ schedule 0 failed; 256 of 256 perturbed schedules ended differently
 
 schedule 1 passes where schedule 0 fails; narrowing the steps it perturbs
 perturbing only steps 31713..36075 still ends differently
+step 36074 decides it: a reschedule there makes the run pass
 
-passing: run 2a5867d1e68d5077
-failing: run 07bff4b968c5a5f5
+passing: run 2a5867d1e68d5077, schedule 1 over steps 31713..36075
+failing: run 7a139e98c78958d5, schedule 1 over steps 31713..36074
+the two are the same run until step 36074
 
 where /nix/store/10dxp0qxqxxsyiljrh2kp0xqhz6arhcx-bash-5.3p15/bin/bash -x -e -u -o pipefail gc-closure.sh first behaves differently:
-  both          33386   359/359   fork() = 416
-  both          33389   416/416   fork() = 417
-  both          33392   416/416   fork() = 418
-  failing       33451   417/417   SIGPIPE code=0 addr=0x0
-  failing       33452   417/417   exit_group(bash) killed:SIGPIPE
-  failing       33454   416/416   SIGCHLD code=1 addr=0x0
-  failing       33455   416/416   exit_group(bash) exited:141
-  passing       33551   417/417   exit_group(bash) exited:0
-  passing       33596   416/416   SIGCHLD code=1 addr=0x0
-  passing       33597   416/416   exit_group(bash) exited:0
-  passing       33599   359/359   SIGCHLD code=1 addr=0x0
+  both          70820   359/359   fork() = 534
+  both          70823   534/534   fork() = 535
+  both          70826   534/534   fork() = 536
+  failing       70885   535/535   SIGPIPE code=0 addr=0x0
+  failing       70886   535/535   exit_group(bash) killed:SIGPIPE
+  failing       70888   534/534   SIGCHLD code=1 addr=0x0
+  failing       70889   534/534   exit_group(bash) exited:141
+  passing       70859   535/535   exit_group(bash) exited:0
+  passing       70890   534/534   SIGCHLD code=1 addr=0x0
+  passing       70891   534/534   exit_group(bash) exited:0
+  passing       70893   359/359   SIGCHLD code=1 addr=0x0
 
-open both in the desktop app: rewind open 07bff4b968c5a5f5 33451 --compare 2a5867d1e68d5077
+open both in the desktop app: rewind open 7a139e98c78958d5 70885 --compare 2a5867d1e68d5077
 ```
 
 Only schedule 0 fails. All 256 perturbed schedules pass: the unperturbed
 schedule is the failing order here, and every perturbation the check tried
 moved the run off it. Schedule 1 passes, and narrowing it finds that
 perturbing steps 31713..36075 is enough to make the pipeline pass. That window
-opens 1673 steps before the pipeline's first fork, while the `nix build` of
-line 14 (process 408) is still running. In the passing run the `printf`
+opens 1673 steps before schedule 0's pipeline first forks, while the `nix build`
+of line 14 (process 408) is still running. In the passing run the `printf`
 subshell writes both lines and exits 0 at step 33551, before 418 has become
 `head`.
+
+The script calls `nix_gc_closure` three times, so the pipeline runs again
+later. Without the reschedule at step 36074, the window's last step, the same
+schedule gets through the first call and fails a later one with the same
+SIGPIPE, at step 70885. That run and the passing one are the same until step
+36074, so they are the pair `check` reports, and they part at the later
+call's pipeline.
 
 The same test from nixpkgs' Nix 2.35.2, which has the same line, passed
 schedule 0 and the first 256 perturbed schedules, the ones the check above
