@@ -217,7 +217,7 @@ pub(crate) mod tests {
 
     fn manifest(name: &str, source: Source, spec: Spec) -> Manifest {
         serde_json::from_value(serde_json::json!({
-            "version": 1,
+            "version": rewind_trace::manifest::MANIFEST_VERSION,
             "id": "0123456789abcdef",
             "name": name,
             "created": 0,

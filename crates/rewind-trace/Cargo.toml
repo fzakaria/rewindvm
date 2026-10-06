@@ -9,8 +9,6 @@ license.workspace = true
 # The marks the guest's init writes into every trace.
 rewind-init = { path = "../rewind-init" }
 serde = { version = "1", features = ["derive"] }
-thiserror = "2"
-
-[dev-dependencies]
-# Manifest types read back from the JSON they write.
+# Manifests, read by their version first.
 serde_json = "1"
+thiserror = "2"

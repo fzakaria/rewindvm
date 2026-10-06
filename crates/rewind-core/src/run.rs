@@ -447,9 +447,9 @@ impl Run {
     pub fn open(dir: &Path) -> Result<Run> {
         let path = dir.join(MANIFEST);
 
-        // A manifest that does not parse is, most often, one another build
-        // of rewind wrote with other fields.
-        let manifest = serde_json::from_slice(
+        // A manifest that does not read is, most often, one another build
+        // of rewind wrote, in another format or with other fields.
+        let manifest = Manifest::parse(
             &fs::read(&path).with_context(|| format!("reading {}", path.display()))?,
         )
         .with_context(|| {

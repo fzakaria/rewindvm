@@ -39,8 +39,40 @@ pub fn executing(dir: &Path) -> bool {
     file.try_lock_shared().is_err()
 }
 
-/// The version of the manifest format.
-pub const MANIFEST_VERSION: u32 = 1;
+/// The version of the manifest format. Every manifest before rewind 1.0
+/// said 1, whatever its fields, so 1.0's is 2.
+pub const MANIFEST_VERSION: u32 = 2;
+
+/// The version every manifest before rewind 1.0 named.
+const BEFORE_1_0: u32 = 1;
+
+/// Why a manifest does not read.
+#[derive(Debug, thiserror::Error)]
+pub enum ManifestError {
+    #[error("a manifest from before rewind 1.0, which this build does not read")]
+    BeforeFormats,
+    #[error("a manifest of format {0}; this build of rewind reads format {MANIFEST_VERSION}")]
+    Version(u32),
+    #[error("{0}")]
+    Json(#[from] serde_json::Error),
+}
+
+impl Manifest {
+    /// The manifest in `bytes`, read only when it names this build's
+    /// version of the format.
+    pub fn parse(bytes: &[u8]) -> Result<Manifest, ManifestError> {
+        #[derive(Deserialize)]
+        struct Version {
+            version: u32,
+        }
+        let Version { version } = serde_json::from_slice(bytes)?;
+        match version {
+            MANIFEST_VERSION => Ok(serde_json::from_slice(bytes)?),
+            BEFORE_1_0 => Err(ManifestError::BeforeFormats),
+            other => Err(ManifestError::Version(other)),
+        }
+    }
+}
 
 /// How many hex digits of the hash of its inputs a run id keeps.
 pub const ID_LEN: usize = 16;
@@ -313,6 +345,35 @@ impl Spec {
             kernel_debug: None,
             ..self.clone()
         }
+    }
+}
+
+#[cfg(test)]
+mod version_tests {
+    // A manifest's version is read before the rest of it: one of another
+    // version is refused, naming it, and one of this version goes on to be
+    // read whole.
+    use super::*;
+
+    #[test]
+    fn a_manifest_is_read_by_its_version_first() {
+        let newer = format!(r#"{{"version": {}}}"#, MANIFEST_VERSION + 1);
+        let err = Manifest::parse(newer.as_bytes()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains(&format!("format {}", MANIFEST_VERSION + 1)),
+            "{err}"
+        );
+
+        let before = br#"{"version": 1, "id": "0123456789abcdef", "spec": {}}"#;
+        let err = Manifest::parse(before).unwrap_err();
+        assert!(err.to_string().contains("before rewind 1.0"), "{err}");
+
+        let current = format!(r#"{{"version": {MANIFEST_VERSION}}}"#);
+        let err = Manifest::parse(current.as_bytes()).unwrap_err();
+        assert!(matches!(err, ManifestError::Json(_)), "{err}");
+        let err = Manifest::parse(b"not json").unwrap_err();
+        assert!(matches!(err, ManifestError::Json(_)), "{err}");
     }
 }
 

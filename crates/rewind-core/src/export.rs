@@ -230,10 +230,9 @@ fn unpack_and_place(home: &Home, reader: impl Read, source: &str, staging: &Path
     // one it shares keyframes with, is a run id, which stays inside the
     // runs directory, or the manifest does not parse.
     let manifest_path = staging.join(MANIFEST);
-    let mut manifest: Manifest = serde_json::from_slice(
-        &fs::read(&manifest_path).context("the export has no manifest.json")?,
-    )
-    .with_context(|| format!("reading the manifest {source} carries"))?;
+    let mut manifest =
+        Manifest::parse(&fs::read(&manifest_path).context("the export has no manifest.json")?)
+            .with_context(|| format!("reading the manifest {source} carries"))?;
     let staged_trace = staging.join(TRACE);
     if !staged_trace.exists() {
         bail!("the export has no trace.bin");
