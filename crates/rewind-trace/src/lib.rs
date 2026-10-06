@@ -492,6 +492,12 @@ impl ProgramDivergence {
     }
 }
 
+/// What a trace file starts with: this magic, then the version of its
+/// format as a little-endian u32. Its records follow.
+pub const TRACE_MAGIC: &[u8; 8] = b"rwtrace\0";
+pub const TRACE_VERSION: u32 = 1;
+const TRACE_HEADER_LEN: usize = TRACE_MAGIC.len() + 4;
+
 /// A trace file's records as the guest wrote them, each with its step,
 /// undecoded: what a fork copies from its parent's trace for the steps the
 /// two runs share. A trace cut off mid-record, as one is when the process
@@ -500,6 +506,33 @@ pub fn records(path: &Path) -> io::Result<Vec<(u64, Vec<u8>)>> {
     let mut r = BufReader::new(std::fs::File::open(path)?);
     let mut records = Vec::new();
     let cut_off = |e: &io::Error| e.kind() == io::ErrorKind::UnexpectedEof;
+
+    // The format first; a file cut off before its header is whole has no
+    // records yet.
+    let mut header = [0u8; TRACE_HEADER_LEN];
+    match r.read_exact(&mut header) {
+        Ok(()) => {}
+        Err(e) if cut_off(&e) => return Ok(records),
+        Err(e) => return Err(e),
+    }
+    let (magic, version) = header.split_at(TRACE_MAGIC.len());
+    if magic != TRACE_MAGIC {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "not a trace this build of rewind reads: traces written before rewind 1.0 \
+             name no format",
+        ));
+    }
+    let version = u32::from_le_bytes(version.try_into().expect("four bytes"));
+    if version != TRACE_VERSION {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "a trace of format {version}; this build of rewind reads format {TRACE_VERSION}"
+            ),
+        ));
+    }
+
     loop {
         let mut step = [0u8; 8];
         match r.read_exact(&mut step) {
@@ -536,26 +569,95 @@ pub fn records(path: &Path) -> io::Result<Vec<(u64, Vec<u8>)>> {
     Ok(records)
 }
 
-/// Appends events to a trace file as the guest emits them.
+/// Appends events to a trace file as the guest emits them, after the
+/// header naming the trace's format.
 pub struct TraceWriter<W: Write> {
     out: BufWriter<W>,
+    /// Whether the header is written yet.
+    headed: bool,
 }
 
 impl<W: Write> TraceWriter<W> {
     pub fn new(out: W) -> Self {
         TraceWriter {
             out: BufWriter::new(out),
+            headed: false,
         }
     }
 
     pub fn record(&mut self, step: u64, record: &[u8]) -> io::Result<()> {
+        self.head()?;
         self.out.write_all(&step.to_le_bytes())?;
         self.out.write_all(record)
     }
 
     pub fn finish(mut self) -> io::Result<W> {
+        self.head()?;
         self.out.flush()?;
         self.out.into_inner().map_err(|e| e.into_error())
+    }
+
+    /// Writes the header, once, before anything else.
+    fn head(&mut self) -> io::Result<()> {
+        if self.headed {
+            return Ok(());
+        }
+        self.out.write_all(TRACE_MAGIC)?;
+        self.out.write_all(&TRACE_VERSION.to_le_bytes())?;
+        self.headed = true;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod format_tests {
+    // A trace file names its format before its records. A trace of another
+    // format, or one from before traces named theirs, is refused with what
+    // it is; a file cut off before its header is whole, as when the run was
+    // killed before its first record, is a trace with no records.
+    use super::*;
+
+    #[test]
+    fn a_trace_names_its_format_first() {
+        let path = std::env::temp_dir().join(format!("rewind-format-{}.bin", std::process::id()));
+        let mut record = vec![0u8; HEADER_LEN];
+        record[..4].copy_from_slice(&(HEADER_LEN as u32).to_le_bytes());
+
+        let mut writer = TraceWriter::new(std::fs::File::create(&path).unwrap());
+        writer.record(3, &record).unwrap();
+        writer.finish().unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(&bytes[..TRACE_MAGIC.len()], TRACE_MAGIC);
+        assert_eq!(
+            bytes[TRACE_MAGIC.len()..TRACE_HEADER_LEN],
+            TRACE_VERSION.to_le_bytes()
+        );
+        assert_eq!(records(&path).unwrap(), vec![(3, record.clone())]);
+
+        let mut other = bytes.clone();
+        other[TRACE_MAGIC.len()..TRACE_HEADER_LEN]
+            .copy_from_slice(&(TRACE_VERSION + 1).to_le_bytes());
+        std::fs::write(&path, &other).unwrap();
+        let err = records(&path).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            err.to_string()
+                .contains(&format!("format {}", TRACE_VERSION + 1))
+        );
+
+        std::fs::write(&path, &bytes[TRACE_HEADER_LEN..]).unwrap();
+        let err = records(&path).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("before"));
+
+        std::fs::write(&path, &bytes[..TRACE_HEADER_LEN - 1]).unwrap();
+        assert_eq!(records(&path).unwrap(), Vec::new());
+
+        TraceWriter::new(std::fs::File::create(&path).unwrap())
+            .finish()
+            .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), bytes[..TRACE_HEADER_LEN]);
+        std::fs::remove_file(&path).unwrap();
     }
 }
 
