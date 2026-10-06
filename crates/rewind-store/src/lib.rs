@@ -23,8 +23,10 @@
 //! also kept sorted by hash, in a file searched where it lies, and an
 //! opener reads into memory only the entries after the ones it covers.
 //! The index only grows, so a sorted copy of its start never goes stale;
-//! an opener that finds many entries past it writes a new one, under
-//! another name first, and renames it over the old.
+//! an opener that finds many entries past it writes a new one, under a
+//! name no other writer has, and renames it over the old. Openers take
+//! turns at that, so a check's many threads sort the index once between
+//! them rather than each holding all of it in memory at once.
 //!
 //! Pages no keyframe names any more are removed by a [`Collector`], which
 //! needs the store to itself. It copies the pages that stay out of every
@@ -57,6 +59,10 @@ const INDEX: &str = "index";
 const PACKS: &str = "packs";
 const LOCK: &str = "lock";
 
+/// The file an opener holds an exclusive lock on while it sorts the
+/// index, so the others wait for its copy rather than sort it too.
+const SORTING_LOCK: &str = "sorting.lock";
+
 /// A pack's file name after its number.
 const PACK_SUFFIX: &str = ".pack";
 
@@ -68,11 +74,15 @@ const COLLECTING: &str = "index.collecting";
 const COLLECT_BUFFER: usize = 1 << 20;
 
 /// The sorted copy of the index's first entries: a header of a magic
-/// value and how many index entries it covers, then those entries, in the
-/// index's format, sorted by hash with each hash once.
+/// value, how many index entries it covers and how many it holds, then
+/// those it holds, in the index's format, sorted by hash with each hash
+/// once. A copy whose length disagrees with its header is not used. The
+/// first format had no count, so a copy cut short read as whole; its
+/// magic is no longer accepted, and a store with one sorts again from the
+/// index, which has every entry.
 const SORTED: &str = "index.sorted";
-const SORTED_MAGIC: &[u8; 8] = b"rwsort01";
-const SORTED_HEADER: usize = 16;
+const SORTED_MAGIC: &[u8; 8] = b"rwsort02";
+const SORTED_HEADER: usize = 24;
 
 /// How many index entries past the sorted copy an opener reads before it
 /// writes a new sorted copy that covers them too. Below this, reading them
@@ -123,22 +133,26 @@ impl Sorted {
     /// The sorted copy in `dir`, or None when there is none or the file is
     /// not one.
     fn open(dir: &Path) -> Option<Sorted> {
-        let file = File::open(dir.join(SORTED)).ok()?;
+        Sorted::of(File::open(dir.join(SORTED)).ok()?)
+    }
+
+    /// The sorted copy `file` holds, or None when it is not one.
+    fn of(file: File) -> Option<Sorted> {
         let mut header = [0u8; SORTED_HEADER];
         file.read_exact_at(&mut header, 0).ok()?;
         if &header[..8] != SORTED_MAGIC {
             return None;
         }
-        let covers = u64::from_le_bytes(header[8..].try_into().unwrap());
+        let covers = u64::from_le_bytes(header[8..16].try_into().unwrap());
+        let entries = u64::from_le_bytes(header[16..].try_into().unwrap());
         let body = file
             .metadata()
             .ok()?
             .len()
             .checked_sub(SORTED_HEADER as u64)?;
-        if body % INDEX_ENTRY as u64 != 0 {
+        if body != entries.checked_mul(INDEX_ENTRY as u64)? {
             return None;
         }
-        let entries = body / INDEX_ENTRY as u64;
         (entries <= covers).then_some(Sorted {
             file,
             entries,
@@ -196,19 +210,39 @@ impl Sorted {
 }
 
 /// Writes `entries`, sorted and each hash once, as the sorted copy of the
-/// index's first `covers` entries: to a file of this process's own, then
+/// index's first `covers` entries: to a file of this writer's own, then
 /// renamed over the old, so a store reading the old one keeps reading it.
-fn write_sorted(dir: &Path, entries: &[[u8; INDEX_ENTRY]], covers: u64) -> Result<()> {
-    let tmp = dir.join(format!("{SORTED}.{}", std::process::id()));
-    let mut out = std::io::BufWriter::new(File::create(&tmp)?);
+/// Returns the copy written, which another writer's may already have
+/// replaced under the name.
+///
+/// A process opens a store on each of its threads, as `rewind check`
+/// does, and any of them may write a sorted copy, so the file's name
+/// counts the copies this process has written as well as naming the
+/// process, and is created only if no file has it. A name two writers
+/// shared would be truncated under one by the other.
+fn write_sorted(dir: &Path, entries: &[[u8; INDEX_ENTRY]], covers: u64) -> Result<Sorted> {
+    #[cfg(test)]
+    tests::SORTED_WRITES.lock().unwrap().push(dir.to_path_buf());
+    static WRITTEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = WRITTEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = dir.join(format!("{SORTED}.{}.{n}", std::process::id()));
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .with_context(|| format!("creating {}", tmp.display()))?;
+    let mut out = std::io::BufWriter::new(file);
     out.write_all(SORTED_MAGIC)?;
     out.write_all(&covers.to_le_bytes())?;
+    out.write_all(&(entries.len() as u64).to_le_bytes())?;
     for entry in entries {
         out.write_all(entry)?;
     }
-    out.into_inner()?.sync_all()?;
+    let file = out.into_inner()?;
+    file.sync_all()?;
     fs::rename(&tmp, dir.join(SORTED))?;
-    Ok(())
+    Sorted::of(file).context("the sorted copy just written does not read")
 }
 
 /// Hashes a page's key for the index's map by taking its first eight
@@ -335,8 +369,28 @@ impl Store {
 
         // The sorted copy, unless it covers more than the index holds, which
         // only a hand could make.
-        let len = index_log.metadata()?.len();
-        let sorted = Sorted::open(dir).filter(|s| s.covers * INDEX_ENTRY as u64 <= len);
+        let sorted_copy = || -> Result<Option<Sorted>> {
+            let len = index_log.metadata()?.len();
+            Ok(Sorted::open(dir).filter(|s| s.covers * INDEX_ENTRY as u64 <= len))
+        };
+        let past = |sorted: &Option<Sorted>| -> Result<u64> {
+            let covered = sorted.as_ref().map_or(0, |s| s.covers);
+            Ok(index_log.metadata()?.len() / INDEX_ENTRY as u64 - covered)
+        };
+        let mut sorted = sorted_copy()?;
+
+        // An index run long past its sorted copy is sorted again, which
+        // takes all of it in memory. Stores opened at once, as a check's
+        // threads open them, take turns: the first sorts it, and the others
+        // then find its copy and read only what came after.
+        let mut sorting = None;
+        if past(&sorted)? >= COMPACT_AT as u64 {
+            let lock = File::create(dir.join(SORTING_LOCK))?;
+            lock.lock()
+                .with_context(|| format!("waiting to sort {}", dir.display()))?;
+            sorted = sorted_copy()?;
+            sorting = Some(lock);
+        }
         let read = sorted.as_ref().map_or(0, |s| s.covers * INDEX_ENTRY as u64);
 
         let store = Store {
@@ -355,6 +409,7 @@ impl Store {
         if store.index.lock().unwrap().pages.len() >= COMPACT_AT {
             store.compact()?;
         }
+        drop(sorting);
         Ok(store)
     }
 
@@ -378,8 +433,13 @@ impl Store {
         // Stable, so of two entries for one hash the earlier is kept.
         entries.sort_by(|a, b| a[..32].cmp(&b[..32]));
         entries.dedup_by(|a, b| a[..32] == b[..32]);
-        write_sorted(&self.dir, &entries, index.read / INDEX_ENTRY as u64)?;
-        index.sorted = Sorted::open(&self.dir);
+        // The copy this store wrote, which covers every entry it has read,
+        // rather than whichever copy has the name by now.
+        index.sorted = Some(write_sorted(
+            &self.dir,
+            &entries,
+            index.read / INDEX_ENTRY as u64,
+        )?);
         index.pages.clear();
         Ok(())
     }
@@ -856,7 +916,8 @@ impl Collector {
         if entries.len() < COMPACT_AT {
             return Ok(());
         }
-        write_sorted(&self.dir, &entries, entries.len() as u64)
+        write_sorted(&self.dir, &entries, entries.len() as u64)?;
+        Ok(())
     }
 }
 
@@ -881,6 +942,20 @@ mod tests {
     use super::*;
 
     const PAGE: usize = 4096;
+
+    /// Every directory a sorted copy was written in, once per copy, by any
+    /// test of this process.
+    pub(super) static SORTED_WRITES: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+    /// How many sorted copies were written in `dir`.
+    fn sorted_copies_written(dir: &Path) -> usize {
+        SORTED_WRITES
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|d| *d == dir)
+            .count()
+    }
 
     /// The index's map hashes a page's key to the key's first eight bytes,
     /// which BLAKE3 already makes uniform, rather than hashing 32 bytes
@@ -1049,6 +1124,49 @@ mod tests {
     }
 
     #[test]
+    fn stores_opening_at_once_on_many_threads_keep_every_page() {
+        // `rewind check` opens a store on each worker thread. Each round a
+        // writer puts more pages than COMPACT_AT, then sixteen threads of
+        // this one process open the store at once, so all of them write a
+        // sorted copy together. Every open succeeds, and every page is
+        // still found, through the sorted copy, by a store opened after.
+        const THREADS: usize = 16;
+        const ROUNDS: u8 = 12;
+        const PER_ROUND: u8 = 5;
+        let dir = tmp("threads");
+        let mut writer = Store::open(&dir).unwrap();
+        let mut hashes = Vec::new();
+        for round in 0..ROUNDS {
+            hashes.extend(put_pages(&mut writer, 1 + round * PER_ROUND, PER_ROUND));
+            writer.sync().unwrap();
+            let start = std::sync::Arc::new(std::sync::Barrier::new(THREADS));
+            let opens: Vec<_> = (0..THREADS)
+                .map(|_| {
+                    let (dir, start) = (dir.clone(), start.clone());
+                    std::thread::spawn(move || {
+                        start.wait();
+                        Store::open(&dir).map(drop).map_err(|e| format!("{e:#}"))
+                    })
+                })
+                .collect();
+            for open in opens {
+                open.join().unwrap().unwrap();
+            }
+        }
+        drop(writer);
+
+        let store = Store::open(&dir).unwrap();
+        let sorted = Sorted::open(&dir).expect("a sorted copy was written");
+        assert_eq!(sorted.entries, hashes.len() as u64);
+        let mut out = vec![0u8; PAGE];
+        for (hash, fill) in hashes.iter().zip(1..) {
+            store.get(hash, &mut out).unwrap();
+            assert_eq!(out, page(fill));
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn a_page_two_stores_wrote_is_sorted_once() {
         // Two stores open side by side both put the same page, so the log
         // names it twice; the sorted copy keeps one.
@@ -1064,6 +1182,63 @@ mod tests {
         let sorted = Sorted::open(&dir).unwrap();
         assert_eq!((sorted.entries, sorted.covers), (5, 6));
         assert_eq!(store.stats().pages, 5);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn stores_opening_at_once_sort_the_index_once() {
+        // Sixteen threads open a store whose index has run long past its
+        // sorted copy, as a `rewind check` does at its start. One of them
+        // sorts it; the others wait and use that copy, rather than every
+        // one of them holding and sorting the whole index at once.
+        const THREADS: usize = 16;
+        let dir = tmp("sort-once");
+        {
+            let mut store = Store::open(&dir).unwrap();
+            put_pages(&mut store, 1, 20);
+        }
+        let start = std::sync::Arc::new(std::sync::Barrier::new(THREADS));
+        let opens: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let (dir, start) = (dir.clone(), start.clone());
+                std::thread::spawn(move || {
+                    start.wait();
+                    drop(Store::open(&dir).unwrap());
+                })
+            })
+            .collect();
+        for open in opens {
+            open.join().unwrap();
+        }
+        assert_eq!(sorted_copies_written(&dir), 1);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_sorted_copy_cut_short_is_ignored() {
+        // A sorted copy missing its last entry, as two writers sharing one
+        // file left them before each had its own, names fewer pages than
+        // its header says. It is passed over for the log, which has every
+        // page, so the page it lost is found.
+        let dir = tmp("short");
+        let hashes = {
+            let mut store = Store::open(&dir).unwrap();
+            put_pages(&mut store, 1, 10)
+        };
+        drop(Store::open(&dir).unwrap());
+        let sorted = OpenOptions::new()
+            .write(true)
+            .open(dir.join(SORTED))
+            .unwrap();
+        let len = sorted.metadata().unwrap().len();
+        sorted.set_len(len - INDEX_ENTRY as u64).unwrap();
+
+        let store = Store::open(&dir).unwrap();
+        let mut out = vec![0u8; PAGE];
+        for (hash, fill) in hashes.iter().zip(1..) {
+            store.get(hash, &mut out).unwrap();
+            assert_eq!(out, page(fill));
+        }
         fs::remove_dir_all(&dir).unwrap();
     }
 
