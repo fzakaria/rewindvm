@@ -395,13 +395,16 @@ impl Trace {
     /// Only events of processes running `argv` count, steps are ignored,
     /// and threads are compared by the order they first appear rather
     /// than by their ids, which a rescheduled run may hand out
-    /// differently. None when the program did the same things in the same
-    /// order in both.
+    /// differently; so are the ids forks and execs name (see
+    /// [`EventKind::alike`]). None when the program did the same things in
+    /// the same order in both.
     pub fn divergence_in(&self, other: &Trace, argv: &[String]) -> Option<ProgramDivergence> {
         let (left, right) = (self.program_events(argv), other.program_events(argv));
         let same = |i: usize| {
             left.threads[i] == right.threads[i]
-                && self.events[left.indices[i]].kind == other.events[right.indices[i]].kind
+                && self.events[left.indices[i]]
+                    .kind
+                    .alike(&other.events[right.indices[i]].kind)
         };
         let n = left.indices.len().min(right.indices.len());
         let position = (0..n)
@@ -1017,6 +1020,34 @@ mod tests {
 
         let swapped = pool([1, 2, 3, 4, 5, 6], (9, "a\n"), (8, "b\n"), None);
         assert_eq!(a.divergence_in(&swapped, &argv), None);
+    }
+
+    #[test]
+    fn ids_the_kernel_hands_out_are_no_divergence() {
+        // A rescheduled run can give the program's threads other ids, so
+        // its forks name other children and its exec another old pid. The
+        // same threads doing the same things in the same order do not
+        // diverge; a fork of a process where the other run forks a thread
+        // does.
+        let argv = vec!["./pool".to_string()];
+        let a = pool([1, 2, 3, 4, 5, 6], (8, "a\n"), (9, "b\n"), None);
+        let mut renumbered = pool([1, 2, 3, 4, 5, 6], (18, "a\n"), (19, "b\n"), None);
+        for e in &mut renumbered.events {
+            match &mut e.kind {
+                EventKind::Fork { child, .. } if *child != 7 => *child += 10,
+                EventKind::Exec { old_pid, .. } => *old_pid = 70,
+                _ => {}
+            }
+        }
+        assert_eq!(a.divergence_in(&renumbered, &argv), None);
+
+        let mut process = a.clone();
+        for e in &mut process.events {
+            if let EventKind::Fork { child: 9, thread } = &mut e.kind {
+                *thread = false;
+            }
+        }
+        assert!(a.divergence_in(&process, &argv).is_some());
     }
 
     /// A process that execs `argv` as `pid`, forked from `parent`, and

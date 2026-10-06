@@ -435,6 +435,28 @@ fn plain_from(
     }
 }
 
+/// What differs between two execs, each a program file and a command
+/// line: the first argument that differs, else how many each passes, else
+/// the file.
+fn exec_difference(here: (&str, &[String]), there: (&str, &[String])) -> String {
+    let ((f, x), (g, y)) = (here, there);
+    if let Some(i) = x.iter().zip(y).position(|(a, b)| a != b) {
+        return format!(
+            "Both run a program; argument {i} differs: \"{}\" in this run, \"{}\" in the other.",
+            x[i], y[i]
+        );
+    }
+    if x.len() != y.len() {
+        let passed = |argv: &[String]| argv.len().saturating_sub(1);
+        return format!(
+            "Both run a program; this run passes {} arguments and the other {}.",
+            passed(x),
+            passed(y)
+        );
+    }
+    format!("Both run the same command line from another file: {f} in this run, {g} in the other.")
+}
+
 /// When both runs did the same kind of thing, the part that differs.
 fn detail(here: Party, there: Party) -> Option<String> {
     use std::mem::discriminant;
@@ -442,7 +464,7 @@ fn detail(here: Party, there: Party) -> Option<String> {
     if discriminant(a) != discriminant(b) {
         return None;
     }
-    if a == b {
+    if a.alike(b) {
         let (x, y) = (here.thread?, there.thread?);
         return Some(format!(
             "Both do the same thing, but from thread {} in this run and thread {} in the other.",
@@ -465,9 +487,18 @@ fn detail(here: Party, there: Party) -> Option<String> {
             "Both get the same signal, at a different address."
         }
         (EventKind::Exit { .. }, EventKind::Exit { .. }) => "Both exit, with a different status.",
-        (EventKind::Exec { .. }, EventKind::Exec { .. }) => {
-            "Both run a program, with a different command line."
-        }
+        (
+            EventKind::Exec {
+                filename: f,
+                argv: x,
+                ..
+            },
+            EventKind::Exec {
+                filename: g,
+                argv: y,
+                ..
+            },
+        ) => return Some(exec_difference((f, x), (g, y))),
         (EventKind::Open { .. }, EventKind::Open { .. })
         | (EventKind::Unlink { .. }, EventKind::Unlink { .. })
         | (EventKind::Rename { .. }, EventKind::Rename { .. }) => {
@@ -730,6 +761,68 @@ mod tests {
             early.there.starts_with("gcc runs \"gcc -O2"),
             "{}",
             early.there
+        );
+    }
+
+    #[test]
+    fn two_execs_say_what_differs() {
+        // Another argument is named by its place, with both values; the
+        // same command line from another file names both files; the same
+        // exec under another pid, which only the kernel chose, is the same
+        // thing from another thread; and one command line longer than the
+        // other says how many arguments each passes.
+        let exec = |file: &str, args: &[&str], old_pid| {
+            ev(EventKind::Exec {
+                filename: file.into(),
+                argv: args.iter().map(|a| a.to_string()).collect(),
+                old_pid,
+            })
+        };
+        let detail = |a: &Event, b: &Event, threads: (usize, usize)| {
+            let party = |event, thread| Party {
+                event,
+                thread: Some(thread),
+            };
+            let named = |_| None;
+            difference(
+                Some(party(a, threads.0)),
+                Some(party(b, threads.1)),
+                Some("nix"),
+                &named,
+            )
+            .detail
+        };
+        let nix = "/nix/store/41gk-nix/bin/nix";
+        let racy = exec(nix, &["nix", "build", "--file", "./racy.nix"], 224);
+        let calm = exec(nix, &["nix", "build", "--file", "./calm.nix"], 224);
+        assert_eq!(
+            detail(&racy, &calm, (3, 3)).as_deref(),
+            Some(
+                "Both run a program; argument 3 differs: \"./racy.nix\" in this run, \"./calm.nix\" in the other."
+            )
+        );
+        let elsewhere = exec(
+            "/nix/store/9xk2-nix/bin/nix",
+            &["nix", "build", "--file", "./racy.nix"],
+            224,
+        );
+        assert_eq!(
+            detail(&racy, &elsewhere, (3, 3)).as_deref(),
+            Some(
+                "Both run the same command line from another file: /nix/store/41gk-nix/bin/nix in this run, /nix/store/9xk2-nix/bin/nix in the other."
+            )
+        );
+        let renumbered = exec(nix, &["nix", "build", "--file", "./racy.nix"], 225);
+        assert_eq!(
+            detail(&racy, &renumbered, (3, 4)).as_deref(),
+            Some(
+                "Both do the same thing, but from thread 4 in this run and thread 5 in the other."
+            )
+        );
+        let shorter = exec(nix, &["nix", "build"], 224);
+        assert_eq!(
+            detail(&racy, &shorter, (3, 3)).as_deref(),
+            Some("Both run a program; this run passes 3 arguments and the other 1.")
         );
     }
 

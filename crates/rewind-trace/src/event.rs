@@ -109,6 +109,30 @@ pub enum DecodeError {
     Length { claimed: usize, actual: usize },
 }
 
+impl EventKind {
+    /// Whether two events did the same thing, apart from the ids the
+    /// kernel handed out, which a rescheduled run may hand out in another
+    /// order: the child a fork names and the pid an exec reports.
+    pub fn alike(&self, other: &EventKind) -> bool {
+        match (self, other) {
+            (EventKind::Fork { thread: a, .. }, EventKind::Fork { thread: b, .. }) => a == b,
+            (
+                EventKind::Exec {
+                    filename: f,
+                    argv: a,
+                    ..
+                },
+                EventKind::Exec {
+                    filename: g,
+                    argv: b,
+                    ..
+                },
+            ) => f == g && a == b,
+            _ => self == other,
+        }
+    }
+}
+
 impl Event {
     /// The mark this event is when init wrote it: a mark from init's pid
     /// that reads as one of init's. The job can write the same words, and
