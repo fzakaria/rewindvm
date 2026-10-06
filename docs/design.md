@@ -537,14 +537,19 @@ rewrites.
 ## Exploring interleavings
 
 A deterministic machine runs one interleaving of a multithreaded program, the
-same one every time. To find the others, a schedule seed perturbs a run in two
-ways. Both are fixed functions of the seed and the step, so a perturbed run
-repeats as exactly as any other.
+same one every time. To find the others, a schedule seed perturbs a run in
+three ways. Each is a fixed function of the seed and the step, so a perturbed
+run repeats as exactly as any other.
 
 - **Reschedule requests.** At one exit in four, the monitor asks the guest to
   reschedule. The kernel marks the current task, and the scheduler picks
   again on the way back to user space. With nothing else runnable, this
   changes nothing.
+- **Stalls.** At one exit in 128, the task running then sleeps when it next
+  returns to user space, for 10 microseconds to 1.28 milliseconds, each
+  doubling as likely as the next. A busy machine deschedules a process for
+  stretches like these, and many races need one task held up for a while
+  rather than switched away from for an instant.
 - **Timer slack.** A timer armed at a perturbed step fires up to 50
   microseconds late, which Linux's default timer slack for user tasks allows
   on real hardware. Sleepers wake in a different order.
@@ -590,11 +595,24 @@ nothing.
    them at the run's last step, by function, offset and source line, with
    the process the VM's kernel had on the CPU: "in user space in spin+11
    (spin.c:5), process 38 (spin)". The manifest keeps the bare address.
-3. Narrows the window, first its end and then its start, to the smallest
+3. Narrows the window, first its start and then its end, to the smallest
    window that still makes that schedule end differently. A smaller window
    perturbs a subset of the same steps, so the search is well defined.
-4. Shows where the failing program's own events first differ between the two
-   runs. It compares threads by the order they appear, not by their ids.
+4. Names the window's last step, which decides how the run ends. Narrowing
+   has already run the window one step shorter, which ends like schedule 0,
+   so that run and the window's are the same run until the last step and
+   differ only in what the schedule does there. `check` says what that is:
+   a reschedule, a stall, a late timer, or more than one. A late timer
+   changes the run only if the step's exit armed the timer, which the trace
+   does not record, so `check` replays that one exit and the monitor says
+   whether it did.
+5. Compares the failing run with the run one step shorter, not with
+   schedule 0, and shows where the failing program's own events first
+   differ between them. It compares threads by the order they appear, not
+   by their ids. On mylib the test's events part at the crash, 14 steps
+   after the deciding reschedule; against schedule 0, which differs from
+   the failing run from the window's start on, they parted 974 steps
+   before it.
 
 For mylib, whose shutdown test fails in about one host build in eight, 9 of 64
 perturbed schedules fail with counter time and 34 of 64 with exit time.
@@ -636,7 +654,7 @@ Two examples, each under 64 schedules:
 A job that mounts its own `/proc` or sysfs sees the kernel's files again,
 which say one CPU, while the affinity calls still say N.
 
-Two earlier designs did not work, and why is worth keeping.
+Three earlier designs did not work, and why is worth keeping.
 
 - **Jittering every exit's time.** This found failures, but a single shift
   moved every timer after it. Narrowing then could not localize anything,
@@ -645,6 +663,13 @@ Two earlier designs did not work, and why is worth keeping.
   nothing. With no TSC, the scheduler's clock was jiffies, which barely moved
   in a short run. Every task seemed to have run for no time, so the scheduler
   never switched. The virtual scheduler clock fixed that.
+- **Keeping only the perturbations a failure needs.** After narrowing,
+  leaving out stretches of the window's steps and keeping what still failed,
+  until every step left was needed, took six minutes on mylib instead of ten
+  seconds and kept 55 steps. A perturbation is tied to a step number, so
+  leaving one out moves every later one to other work in the program, and
+  nearly every step turns out to be needed. The window's last step already
+  gives two runs that differ by one perturbation, at no cost.
 
 ## Limits
 

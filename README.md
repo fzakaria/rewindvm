@@ -34,32 +34,35 @@ point.
 
 ```console
 $ rewind check github:fzakaria/rewindvm#mylib
-schedule   0: exited:0             6162 steps  aa30ea54dc47  run 3a7a903ba51d85aa
-schedule   1: exited:0             7115 steps  aa30ea54dc47  run deaf00808dc50162
-schedule   2: exited:0             7339 steps  aa30ea54dc47  run 0a7c28a6d574df14
-schedule   3: exited:0             7277 steps  aa30ea54dc47  run bbc132f6e733e2c1
-schedule   4: exited:2             5436 steps    run d2d679b756ff023c
+schedule   0: exited:0       6169 steps  a9d703ba8977  run 6380bb57fcb451da
+schedule   1: exited:0       7202 steps  a9d703ba8977  run e5003a7041880029
+schedule   2: exited:0       7233 steps  a9d703ba8977  run 70416cb698a5d521
+...
+schedule   6: exited:2       5468 steps    run 1506c6347419c2d2
 ...
 
-schedule 4 ends differently; narrowing the steps it perturbs
-perturbing only steps 2713..4571 still ends differently
+schedule 6 ends differently; narrowing the steps it perturbs
+perturbing only steps 3629..5140 still ends differently
+step 5139 decides it: a reschedule there makes the run fail
 
-passing: run 3a7a903ba51d85aa
-failing: run a0f799f19c9f85ed
+passing: run 1989f6d02c080616, schedule 6 over steps 3629..5139
+failing: run 5c910df9774b38f2, schedule 6 over steps 3629..5140
+the two are the same run until step 5139
 
 where ./tests/test_pool_shutdown first behaves differently:
   ...
-  left        4151   166/167   write(1, "worker picked job 2\n")
-  left        4162   166/168   write(1, "worker picked job 3\n")
-  right       4398   166/168   write(1, "worker picked job 2\n")
-  right       4422   166/167   write(1, "worker picked job 3\n")
+  both           5150   166/174   write(1, "job 15 done: 42559\n")
+  failing        5153   166/174   SIGSEGV code=1 addr=0x108
+  failing        5155   166/166   SIGSEGV code=0 addr=0x0
+  passing        5151   166/174   write(1, "worker picked job 18\n")
+  passing        5162   166/173   write(1, "job 17 done: 43360\n")
 
-$ rewind events a0f799f1 | grep SIGSEGV
-      4583   166/167   SIGSEGV code=1 addr=0x108
+$ rewind events 5c910df9 | grep SIGSEGV
+      5153   166/174   SIGSEGV code=1 addr=0x108
 ...
 
-$ rewind replay a0f799f1
-identical: 1595 events over 4623 steps
+$ rewind replay 5c910df9
+identical: 1713 events over 5192 steps
 ```
 
 ## Install
@@ -114,7 +117,7 @@ work done inside it; [Time inside the VM](docs/pmu.md) explains why.
 # build a derivation in the VM; the output is checked against the host's
 $ rewind nix nixpkgs#hello
 
-# run the derivation under many thread schedules and show where a failure parts ways
+# run the derivation under many thread schedules, and name the step that decides a failure
 $ rewind check github:fzakaria/rewindvm#mylib
 
 # any command in a root filesystem: a directory, an erofs image, or a docker export
@@ -190,6 +193,9 @@ where the run parts from a passing one.
   paths and events, and takes the playhead to each match.
 - Bookmarks (`b`) mark a step with a note, kept with the run and in its
   `.rwd` exports.
+- Two runs that differ only in their schedules show the step where the
+  schedules part, as a dashed blue mark, and the card says what only one of
+  them got there, such as a reschedule.
 - Previous and Next can stop at one thread, process, file or kind of event.
 - Open shell and Attach gdb work inside the VM at the playhead.
 - Fork from here branches the run under another schedule.
