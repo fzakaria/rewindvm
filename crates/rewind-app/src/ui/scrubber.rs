@@ -73,7 +73,7 @@ const EXPORT_EXTENSION: &str = "rwd";
 const EXAMPLE_FORK: &str = "Forking runs the build again from the playhead, which needs the engine and KVM on this machine. The example's inputs, its kernel, initramfs and Nix store paths, belong to the machine that recorded it. Record a run of your own with rewind nix to fork it.";
 
 /// Why a run the engine is still executing does not open.
-const STILL_RUNNING: &str = "Its trace is written when it finishes, which for a fork takes about as long as the run it was forked from did. Its row in the Runs panel changes to how it ended then; click it again.";
+const STILL_RUNNING: &str = "Its trace is written when it finishes, which for a fork takes about as long as the run it was forked from did.";
 
 /// How often the Runs panel is read again while a run in it is running.
 const RUNNING_POLL: Duration = Duration::from_secs(1);
