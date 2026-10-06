@@ -14,7 +14,7 @@ use gpui::{
 use crate::license::{self, Coverage, License, LicenseError, Registration, Reminder};
 use crate::selection::{Mapped, Surface, part_of_line};
 use crate::theme::{self, size};
-use crate::ui::scrubber::{NoticeAction, NoticeTone, Scrubber};
+use crate::ui::scrubber::{BUY_URL, NoticeAction, NoticeTone, Scrubber};
 use crate::ui::selectable::{selectable, selects};
 use crate::ui::widgets::{Availability, ButtonStyle, PillTone, button, pill};
 use crate::ui::{CloseDialog, CopySelection, LICENSE_CONTEXT, PasteLicense, SelectAll};
@@ -36,7 +36,7 @@ const PASTE_FIELD_HEIGHT: f32 = 220.0;
 
 /// The dialog's title and what it asks for.
 const DIALOG_TITLE: &str = "Enter license";
-const DIALOG_HELP: &str = "Paste the whole block, from the BEGIN line to the END line. It is checked on this machine; nothing is sent anywhere.";
+const DIALOG_HELP: &str = "Paste the whole block from your email, from the BEGIN line to the END line; a block that checks out registers at once. It is checked on this machine, and nothing is sent anywhere.";
 
 /// The license dialog's state: what was pasted and what checking it said.
 pub struct LicenseDialog {
@@ -154,8 +154,9 @@ impl Scrubber {
         cx.notify();
     }
 
-    /// Puts the clipboard's text in the paste field and checks it.
-    pub(super) fn paste_license(&mut self, cx: &mut Context<Self>) {
+    /// Puts the clipboard's text in the paste field and checks it,
+    /// registering with it when it checks out.
+    pub(super) fn paste_license(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = cx
             .read_from_clipboard()
             .and_then(|item| item.text())
@@ -163,8 +164,13 @@ impl Scrubber {
         let Some(dialog) = &mut self.licensing.dialog else {
             return;
         };
-        dialog.result = Some(license::verify(&text));
+        let result = license::verify(&text);
+        let valid = result.is_ok();
+        dialog.result = Some(result);
         dialog.text = text;
+        if valid {
+            self.register(window, cx);
+        }
         cx.notify();
     }
 
@@ -257,7 +263,9 @@ impl Scrubber {
             .id("license-field")
             .track_focus(&dialog.focus)
             .key_context(LICENSE_CONTEXT)
-            .on_action(cx.listener(|this, _: &PasteLicense, _, cx| this.paste_license(cx)))
+            .on_action(
+                cx.listener(|this, _: &PasteLicense, window, cx| this.paste_license(window, cx)),
+            )
             .on_action(cx.listener(|this, _: &CopySelection, _, cx| {
                 this.copy_selection(cx);
             }))
@@ -280,35 +288,35 @@ impl Scrubber {
 
         // What checking the pasted text said.
         let verdict = verdict(&dialog.result);
-        let can_register = if matches!(dialog.result, Some(Ok(_))) {
-            Availability::Enabled
-        } else {
-            Availability::Disabled
-        };
 
-        let buttons = div()
-            .flex()
-            .justify_end()
-            .gap(px(size::CONTROL_GAP))
-            .child(
-                button("license-paste", ButtonStyle::Neutral, Availability::Enabled)
-                    .child("Paste")
-                    .on_click(cx.listener(|this, _, _, cx| this.paste_license(cx))),
-            )
-            .child(
-                button(
-                    "license-cancel",
-                    ButtonStyle::Neutral,
-                    Availability::Enabled,
+        // Buy on the left, for someone who has no license yet; pasting,
+        // which registers, and closing on the right.
+        let buy = button("license-buy", ButtonStyle::Neutral, Availability::Enabled)
+            .child("Buy a license")
+            .on_click(|_, _, cx| cx.open_url(BUY_URL));
+        let buttons = div().flex().justify_between().child(buy).child(
+            div()
+                .flex()
+                .gap(px(size::CONTROL_GAP))
+                .child(
+                    button(
+                        "license-cancel",
+                        ButtonStyle::Neutral,
+                        Availability::Enabled,
+                    )
+                    .child("Cancel")
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.close_license_dialog(window, cx)),
+                    ),
                 )
-                .child("Cancel")
-                .on_click(cx.listener(|this, _, window, cx| this.close_license_dialog(window, cx))),
-            )
-            .child(
-                button("license-register", ButtonStyle::Primary, can_register)
-                    .child("Register")
-                    .on_click(cx.listener(|this, _, window, cx| this.register(window, cx))),
-            );
+                .child(
+                    button("license-paste", ButtonStyle::Primary, Availability::Enabled)
+                        .child("Paste")
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.paste_license(window, cx)),
+                        ),
+                ),
+        );
 
         let mut card = div()
             .w(px(DIALOG_WIDTH))

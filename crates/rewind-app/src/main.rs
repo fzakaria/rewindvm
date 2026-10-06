@@ -1,9 +1,12 @@
 //! `rewind-app`: the desktop scrubber.
 //!
 //!     rewind-app [<run>] [--compare <run>] [--step <n>] [--source]
+//!     rewind-app --license <file | ->
 //!
 //! A run is a run directory, a .rwd export, an http or https URL of one,
 //! or a bare trace file. --source opens the source panel at the step.
+//! --license registers the app with the license block in a file, or on
+//! standard input, and exits without opening a window.
 //!
 //! Without a run, the window opens on an empty state with buttons to open
 //! a file or a copied link, and the runs recorded here most recently.
@@ -16,7 +19,10 @@ use rewind_app::engine::CliEngine;
 use rewind_app::run::Session;
 use rewind_app::ui::{self, Launch, RightColumn};
 
-const USAGE: &str = "usage: rewind-app [<run>] [--compare <run>] [--step <n>] [--source]\n\na run is a run directory, a .rwd export, an https URL of one, or a bare trace file;\n--source opens the source panel at the step";
+const USAGE: &str = "usage: rewind-app [<run>] [--compare <run>] [--step <n>] [--source]\n       rewind-app --license <file | ->\n\na run is a run directory, a .rwd export, an https URL of one, or a bare trace file;\n--source opens the source panel at the step;\n--license registers with the license block in a file, or - for standard input, and exits";
+
+/// The --license value that means standard input.
+const STDIN: &str = "-";
 
 /// The command line, parsed.
 struct Args {
@@ -29,6 +35,8 @@ struct Args {
 /// What the command line asked for.
 enum Parsed {
     Run(Args),
+    /// Register with the license block in this file, or on standard input.
+    License(PathBuf),
     Help,
     Version,
 }
@@ -79,7 +87,17 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Parsed, String> {
         step: None,
         right: RightColumn::AtStep,
     };
+    let mut license = None;
+    let mut others = 0;
     while let Some(arg) = args.next() {
+        if arg == "--license" {
+            let value = args
+                .next()
+                .ok_or("--license needs a file, or - for standard input")?;
+            license = Some(PathBuf::from(value));
+            continue;
+        }
+        others += 1;
         match arg.as_str() {
             "-h" | "--help" => return Ok(Parsed::Help),
             "-V" | "--version" => return Ok(Parsed::Version),
@@ -105,6 +123,12 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Parsed, String> {
             }
         }
     }
+    if let Some(file) = license {
+        if others > 0 {
+            return Err("--license registers and exits; give it alone".into());
+        }
+        return Ok(Parsed::License(file));
+    }
     if parsed.compare.is_some() && parsed.run.is_none() {
         return Err("--compare needs a run to compare with".into());
     }
@@ -125,6 +149,18 @@ fn main() -> ExitCode {
         Ok(Parsed::Version) => {
             println!("rewind-app {}", env!("CARGO_PKG_VERSION"));
             return ExitCode::SUCCESS;
+        }
+        Ok(Parsed::License(file)) => {
+            return match register(&file) {
+                Ok(said) => {
+                    println!("{said}");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("rewind-app: {e}");
+                    ExitCode::FAILURE
+                }
+            };
         }
         Err(e) => {
             eprintln!("rewind-app: {e}\n{USAGE}");
@@ -161,6 +197,36 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// Checks and stores the license block in `file`, or on standard input,
+/// and says what it registered.
+fn register(file: &std::path::Path) -> Result<String, String> {
+    use rewind_app::license::{self, Coverage};
+
+    let text = if file.as_os_str() == STDIN {
+        std::io::read_to_string(std::io::stdin()).map_err(|e| format!("standard input: {e}"))?
+    } else {
+        std::fs::read_to_string(file).map_err(|e| format!("{}: {e}", file.display()))?
+    };
+    let license = license::verify(&text).map_err(|e| e.to_string())?;
+    let path = license::save(&text).map_err(|e| e.to_string())?;
+    let seats = if license.seats == 1 { "seat" } else { "seats" };
+    let mut said = format!(
+        "rewind-app: registered to {} ({}, {} {seats}), updates until {}; the license is kept in {}",
+        license.name,
+        license.edition.as_str(),
+        license.seats,
+        license.updates_until,
+        path.display()
+    );
+    if let Coverage::EndedBefore(until) = license.coverage() {
+        said.push_str(&format!(
+            "\nrewind-app: its updates ended {until}, before this version was released {}; this version runs as an evaluation",
+            license::RELEASE_DATE
+        ));
+    }
+    Ok(said)
+}
+
 #[cfg(test)]
 mod tests {
     // Command line parsing: each test hands `parse` an argument list and
@@ -182,6 +248,23 @@ mod tests {
         assert_eq!(args.run, Some(PathBuf::from("runs/fail")));
         assert_eq!(args.compare, Some(PathBuf::from("runs/pass")));
         assert_eq!(args.step, Some(1_204));
+    }
+
+    #[test]
+    fn a_license_file_registers_without_a_window() {
+        // --license takes a file, or - for standard input, and is the only
+        // thing on its command line: it registers and exits.
+        let Ok(Parsed::License(file)) = parse_list(&["--license", "license.txt"]) else {
+            panic!("refused");
+        };
+        assert_eq!(file, PathBuf::from("license.txt"));
+        assert!(matches!(
+            parse_list(&["--license", "-"]),
+            Ok(Parsed::License(_))
+        ));
+        assert!(parse_list(&["--license"]).is_err());
+        assert!(parse_list(&["runs/fail", "--license", "license.txt"]).is_err());
+        assert!(parse_list(&["--license", "license.txt", "--step", "3"]).is_err());
     }
 
     /// --source opens the source panel with the run, and is refused

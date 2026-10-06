@@ -12,7 +12,10 @@ and nothing phones home.
 ## The license block
 
 The buyer receives a text block by email and pastes it into the app
-(the "Unregistered" pill in the header opens the dialog):
+(the pill at the right of the header opens the dialog), where a block
+that checks out registers at once. `rewind-app --license <file>`, or
+`--license -` for standard input, registers without opening a window,
+for setting up machines from a script:
 
 ```
 ----- BEGIN REWIND VM LICENSE -----
