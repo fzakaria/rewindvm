@@ -1,9 +1,11 @@
 //! The example runs compiled into the app, so that someone without KVM or
 //! the engine can open a real run and take the tour.
 //!
-//! Both are trace-only exports of the tutorial's mylib build
-//! (docs/tutorial-nix.md): one where test_pool_shutdown crashes under a
-//! perturbed thread schedule, and the passing build it is compared with.
+//! Both are trace-only exports of the runs `rewind check` reports for the
+//! tutorial's mylib build (docs/tutorial-nix.md): one where
+//! test_pool_shutdown crashes under a perturbed thread schedule, and the
+//! passing run it is compared with, the same schedule without the step that
+//! decides the crash, so the two are the same run until that step.
 
 use anyhow::Result;
 
@@ -12,7 +14,8 @@ use crate::run::{Run, Session};
 /// The failing build: make check exits 2 after a SIGSEGV in a worker.
 pub const FAILING: &[u8] = include_bytes!("../examples/runs/mylib-fail.rwd");
 
-/// The same build under the default schedule, where every test passes.
+/// The same build without the deciding step's perturbation, where every
+/// test passes.
 pub const PASSING: &[u8] = include_bytes!("../examples/runs/mylib-pass.rwd");
 
 /// Unpacks both examples into the cache and opens the failing one
@@ -104,8 +107,9 @@ mod tests {
 
     #[test]
     fn the_examples_show_a_crash_and_where_the_runs_part() {
-        // The failing run fails with a SIGSEGV, the passing run passes,
-        // and the two first differ before the crash.
+        // The failing run fails with a SIGSEGV and the passing run passes.
+        // Their schedules part before the crash, and their events part at
+        // it, since the two are the same run until the deciding step.
         crate::archive::test_cache();
         let session = open().unwrap();
 
@@ -122,7 +126,9 @@ mod tests {
         let passing = session.other.as_ref().unwrap();
         assert_eq!(passing.verdict(), Verdict::Passed);
         let divergence = session.divergence_step().unwrap();
-        assert!(divergence < failure.step);
+        let split = session.split.as_ref().unwrap();
+        assert!(split.step < divergence);
+        assert_eq!(divergence, failure.step);
 
         // In words: where the schedules part, and the first thing
         // test_pool_shutdown does differently.
@@ -132,11 +138,10 @@ mod tests {
         assert_eq!(
             lines,
             vec![
-                "The two runs are the same until step 4,721, where only this run has a reschedule.",
-                "test_pool_shutdown did the same things in the same order in both runs until step 4,760.",
-                "Then in this run, thread 9 of test_pool_shutdown writes \"job 1 done: 35269\" to stdout.",
-                "In the passing run, thread 8 of test_pool_shutdown writes \"job 0 done: 12727\" to stdout.",
-                "Both write to the same stream; the text differs.",
+                "The two runs are the same until step 5,139, where only this run has a reschedule.",
+                "test_pool_shutdown did the same things in the same order in both runs until step 5,153.",
+                "Then in this run, thread 9 of test_pool_shutdown gets SIGSEGV at 0x108.",
+                "In the passing run, thread 9 of test_pool_shutdown writes \"worker picked job 18\" to stdout.",
             ]
         );
     }
