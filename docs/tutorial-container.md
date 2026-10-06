@@ -69,7 +69,7 @@ $ rewind run --root mylib.tar --cwd /src -- make check
 ...
 round 3: ok
 test_pool_shutdown: ok
-rewind: run 96c3bfb7f19bec6e exited:0 after 1321 steps, 0.019s virtual, 0.703s wall (poweroff)
+rewind: run 96c3bfb7f19bec6e exited:0 after 1321 steps, 0.019s virtual, 1.380s wall (poweroff)
 ```
 
 It passes, in the same 1321 steps every time. Nothing the command
@@ -104,29 +104,33 @@ schedule  16: exited:0       1524 steps    run 147c99d9d21bca07
 
 schedule 1 ends differently; narrowing the steps it perturbs
 perturbing only steps 903..1375 still ends differently
+step 1374 decides it: a timer 31.5 µs late there makes the run fail
 
-passing: run 96c3bfb7f19bec6e
-failing: run 0166a76a64cbdb85
+passing: run 1d874b3fca5afdfb, schedule 1 over steps 903..1374
+failing: run 0166a76a64cbdb85, schedule 1 over steps 903..1375
+the two are the same run until step 1374
 
 where ./tests/test_pool_shutdown first behaves differently:
-  both            965    39/44    write(1, "worker picked job 4\n")
-  both            974    39/45    write(1, "job 2 done: 30213\n")
-  both            975    39/45    write(1, "worker picked job 5\n")
-  failing         993    39/45    write(1, "job 5 done: 45034\n")
-  failing         994    39/45    write(1, "worker picked job 6\n")
-  failing         999    39/44    write(1, "job 4 done: 3480\n")
-  failing        1000    39/44    write(1, "worker picked job 7\n")
-  passing         968    39/45    write(1, "job 4 done: 3480\n")
-  passing         969    39/45    write(1, "worker picked job 6\n")
-  passing         979    39/44    write(1, "job 5 done: 45034\n")
-  passing         980    39/44    write(1, "worker picked job 7\n")
+  both           1357    39/46    write(1, "job 16 done: 5986\n")
+  both           1358    39/46    write(1, "worker picked job 18\n")
+  both           1370    39/47    write(1, "job 17 done: 43360\n")
+  failing        1387    39/46    write(1, "job 18 done: 26744\n")
+  failing        1390    39/46    SIGSEGV code=1 addr=0x108
+  failing        1392    39/39    SIGSEGV code=0 addr=0x0
+  failing        1395    39/46    thread exit(test_pool_shutd) killed:SIGSEGV
+  passing        1379    39/47    write(1, "worker picked job 19\n")
+  passing        1386    39/46    write(1, "job 18 done: 26744\n")
+  passing        1387    39/46    write(1, "worker picked job 20\n")
+  passing        1398    39/47    thread exit(test_pool_shutd) exited:0
 
-open both in the desktop app: rewind open 0166a76a64cbdb85 993 --compare 96c3bfb7f19bec6e
+open both in the desktop app: rewind open 0166a76a64cbdb85 1387 --compare 1d874b3fca5afdfb
 ```
 
 `check` narrows schedule 1's perturbation to steps 903
-to 1375 and keeps the passing and failing runs. The last block
-shows where the test's own output first differs. The search took
+to 1375, and the last of them, step 1374, decides it: the
+passing run is the same window less that step, and only the failing run gets
+a timer 31.5 µs late there. The last block shows where the test's own output
+then differs. The search took
 29 seconds. `--all` tries every schedule:
 
 ```console
@@ -207,8 +211,8 @@ $ DEBUGINFOD_URLS=https://debuginfod.debian.net rewind gdb 0166a76a 1387 -- -bat
 rewind: step 1387 ran in process 39; loading symbols for 3 of its files
 rewind: fetched 12 source files from the VM
 rewind: gdb at step 1387 of 0166a76a64cbdb85
-Downloading 3.97 M separate debug info for /home/fmzakari/.cache/rewind-record/home/gdb/3838740/newroot/usr/lib/x86_64-linux-gnu/libc.so.6...
-Downloading 539.96 K separate debug info for /home/fmzakari/.cache/rewind-record/home/gdb/3838740/newroot/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2...
+Downloading 3.97 M separate debug info for /home/fmzakari/.cache/rewind-record/home/gdb/88531/newroot/usr/lib/x86_64-linux-gnu/libc.so.6...
+Downloading 539.96 K separate debug info for /home/fmzakari/.cache/rewind-record/home/gdb/88531/newroot/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2...
 arch_local_irq_restore (flags=514) at ./arch/x86/include/asm/irqflags.h:146
 146		return !(flags & X86_EFLAGS_IF);
 [Switching to thread 3 (Thread 1.46)]
@@ -246,7 +250,7 @@ $ rewind replay 0166a76a
 identical: 396 events over 1417 steps
 
 $ rewind replay 0166a76a --from 903
-identical from the keyframe at step 512 to the end (0.47s)
+identical from the keyframe at step 512 to the end (0.41s)
 ```
 
 `--from` starts at the nearest keyframe before the step. A run replays on any
@@ -256,28 +260,28 @@ machine with the same CPU vendor.
 
 ```console
 $ rewind fork 96c3bfb7 903 --schedule 1 --quiet
-rewind: run 9fe9145122113d53 exited:2 after 1421 steps, 0.019s virtual, 0.482s wall (poweroff)
+rewind: run 9fe9145122113d53 exited:2 after 1421 steps, 0.019s virtual, 0.387s wall (poweroff)
 rewind: the fork first differs from its parent at step 910
 rewind: open it beside its parent in the desktop app: rewind open 9fe9145122113d53 910 --compare 96c3bfb7f19bec6e
 
 $ rewind fork 96c3bfb7 903 --schedule 2 --quiet
-rewind: run 3090c9c0f9a13f12 exited:2 after 1427 steps, 0.020s virtual, 0.734s wall (poweroff)
+rewind: run 3090c9c0f9a13f12 exited:2 after 1427 steps, 0.020s virtual, 0.395s wall (poweroff)
 rewind: the fork first differs from its parent at step 930
 rewind: open it beside its parent in the desktop app: rewind open 3090c9c0f9a13f12 930 --compare 96c3bfb7f19bec6e
 
 $ rewind fork 96c3bfb7 903 --schedule 3 --quiet
-rewind: run 5f5567c75ac0b453 exited:0 after 1403 steps, 0.019s virtual, 0.764s wall (poweroff)
+rewind: run 5f5567c75ac0b453 exited:0 after 1403 steps, 0.019s virtual, 0.383s wall (poweroff)
 rewind: the fork first differs from its parent at step 910
 rewind: open it beside its parent in the desktop app: rewind open 5f5567c75ac0b453 910 --compare 96c3bfb7f19bec6e
 
 $ rewind fork 96c3bfb7 903 --schedule 4 --quiet
-rewind: run 67d7f06715c87910 exited:0 after 1412 steps, 0.019s virtual, 0.772s wall (poweroff)
+rewind: run 67d7f06715c87910 exited:0 after 1412 steps, 0.019s virtual, 0.388s wall (poweroff)
 rewind: the fork first differs from its parent at step 910
 rewind: open it beside its parent in the desktop app: rewind open 67d7f06715c87910 910 --compare 96c3bfb7f19bec6e
 ```
 
-From step 903 of the passing run, some schedules crash and some
-pass.
+From step 903 of the schedule 0 run, some schedules crash and
+some pass.
 
 ## Scrub it in the app
 
@@ -286,7 +290,7 @@ the output, processes, files and event there, jump to the failure or to where
 the run left the passing one, and fork from the playhead.
 
 ```console
-$ rewind-app ~/.local/share/rewind/runs/0166a76a64cbdb85 --compare ~/.local/share/rewind/runs/96c3bfb7f19bec6e
+$ rewind-app ~/.local/share/rewind/runs/0166a76a64cbdb85 --compare ~/.local/share/rewind/runs/1d874b3fca5afdfb
 ```
 
 Press f to jump to the failure at step 1390, then s to open the
@@ -335,7 +339,7 @@ Rebuild the image, export it, and check again:
 
 ```console
 $ docker build -q -t mylib -f Containerfile . && docker export $(docker create mylib) -o mylib.tar
-sha256:18c7e926f4f5718f7cfa3f63c0e7d4d75d656fa568c906b0984bd6a9a109df32
+sha256:48a7bb3066b04ce6be293ce8b4de4a0ae6a0ed50d979d92b42cb1049f634479b
 
 $ rewind check --all --root mylib.tar --cwd /src -- make check
 ...

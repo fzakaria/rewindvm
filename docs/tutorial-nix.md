@@ -67,7 +67,7 @@ deterministic virtual machine:
 $ rewind nix --epoch 1790985600 github:fzakaria/rewindvm#mylib
 rewind: packing 62 store paths for mylib-0.3.0
 ...
-rewind: run 6380bb57fcb451da exited:0 after 6169 steps, 0.216s virtual, 1.265s wall (poweroff)
+rewind: run 6380bb57fcb451da exited:0 after 6169 steps, 0.216s virtual, 1.214s wall (poweroff)
 /nix/store/f6a9gy362szw6nxx3ikrklr8glr6rdln-mylib-0.3.0 a9d703ba89774f3d  matches your store, rewindvm.cachix.org
 ```
 
@@ -103,31 +103,34 @@ schedule  16: exited:0       7170 steps  a9d703ba8977  run 8733165044c0fe35
 
 schedule 6 ends differently; narrowing the steps it perturbs
 perturbing only steps 3629..5140 still ends differently
+step 5139 decides it: a reschedule there makes the run fail
 
-passing: run 6380bb57fcb451da
-failing: run 5c910df9774b38f2
+passing: run 1989f6d02c080616, schedule 6 over steps 3629..5139
+failing: run 5c910df9774b38f2, schedule 6 over steps 3629..5140
+the two are the same run until step 5139
 
 where ./tests/test_pool_shutdown first behaves differently:
-  both           4153   166/166   clone(CLONE_THREAD) = 168
-  both           4160   166/167   write(1, "worker picked job 0\n")
-  both           4167   166/168   write(1, "worker picked job 1\n")
-  failing        4179   166/168   write(1, "job 1 done: 35269\n")
-  failing        4180   166/168   write(1, "worker picked job 2\n")
-  failing        4187   166/167   write(1, "job 0 done: 12727\n")
-  failing        4188   166/167   write(1, "worker picked job 3\n")
-  passing        4145   166/167   write(1, "job 0 done: 12727\n")
-  passing        4146   166/167   write(1, "worker picked job 2\n")
-  passing        4156   166/168   write(1, "job 1 done: 35269\n")
-  passing        4157   166/168   write(1, "worker picked job 3\n")
+  both           5121   166/173   write(1, "job 16 done: 5986\n")
+  both           5143   166/173   write(1, "worker picked job 17\n")
+  both           5150   166/174   write(1, "job 15 done: 42559\n")
+  failing        5153   166/174   SIGSEGV code=1 addr=0x108
+  failing        5155   166/166   SIGSEGV code=0 addr=0x0
+  failing        5161   166/174   thread exit(test_pool_shutd) killed:SIGSEGV
+  failing        5165   166/166   exit_group(test_pool_shutd) killed:SIGSEGV
+  passing        5151   166/174   write(1, "worker picked job 18\n")
+  passing        5162   166/173   write(1, "job 17 done: 43360\n")
+  passing        5163   166/173   write(1, "worker picked job 19\n")
+  passing        5170   166/174   write(1, "job 18 done: 26744\n")
 
-open both in the desktop app: rewind open 5c910df9774b38f2 4179 --compare 6380bb57fcb451da
+open both in the desktop app: rewind open 5c910df9774b38f2 5153 --compare 1989f6d02c080616
 ```
 
 Schedule 6 fails. `check` narrows schedule 6's
-perturbation to steps 3629 to 5140 and keeps two runs,
-the passing one and the failing one, identical up to step 3629.
-The last block shows where the test's own output first differs. The search
-took 10 seconds.
+perturbation to steps 3629 to 5140, and the last of
+them, step 5139, decides it. The passing run is the same window less
+that step, so the two runs are the same until step 5139, and only the
+failing one gets a reschedule there. The last block shows where the
+test's own output then differs. The search took 10 seconds.
 
 `--all` tries every schedule, which measures how flaky a build is:
 
@@ -218,8 +221,9 @@ Downloading 3.12 K source file /build/linux-7.2.8/./arch/x86/include/asm/irqflag
 arch_local_irq_restore (flags=518) at ./arch/x86/include/asm/irqflags.h:146
 146		return !(flags & X86_EFLAGS_IF);
 [Switching to thread 4 (Thread 1.174)]
+Downloading 1.79 K source file /build/glibc-2.44/nptl/../sysdeps/unix/sysv/linux/x86_64/syscall_cancel.S...
 #0  __syscall_cancel_arch () at ../sysdeps/unix/sysv/linux/x86_64/syscall_cancel.S:56
-warning: 56	../sysdeps/unix/sysv/linux/x86_64/syscall_cancel.S: No such file or directory
+56		ret
 Breakpoint 1 at 0x5556d620d433: file src/pool.c, line 77.
 
 Thread 4 hit Breakpoint 1, worker (arg=0x5556f833c010) at src/pool.c:77
@@ -252,7 +256,7 @@ $ rewind replay 5c910df9
 identical: 1713 events over 5192 steps
 
 $ rewind replay 5c910df9 --from 3629
-identical from the keyframe at step 1659 to the end (0.46s)
+identical from the keyframe at step 1631 to the end (0.42s)
 ```
 
 `--from` starts at the nearest keyframe before the step. A run replays on any
@@ -264,37 +268,39 @@ A fork is its parent up to a step, then another schedule:
 
 ```console
 $ rewind fork 6380bb57 3629 --schedule 5 --quiet
-rewind: run 405c9c6df777a799 exited:0 after 6628 steps, 0.222s virtual, 0.377s wall (poweroff)
+rewind: run 405c9c6df777a799 exited:0 after 6628 steps, 0.222s virtual, 0.327s wall (poweroff)
 rewind: the fork first differs from its parent at step 3638
 rewind: open it beside its parent in the desktop app: rewind open 405c9c6df777a799 3638 --compare 6380bb57fcb451da
 
 $ rewind fork 6380bb57 3629 --schedule 6 --quiet
-rewind: run 8f024e4b0e651026 exited:2 after 5201 steps, 0.203s virtual, 0.334s wall (poweroff)
+rewind: run 8f024e4b0e651026 exited:2 after 5201 steps, 0.203s virtual, 0.300s wall (poweroff)
 rewind: the fork first differs from its parent at step 3638
 rewind: open it beside its parent in the desktop app: rewind open 8f024e4b0e651026 3638 --compare 6380bb57fcb451da
 
 $ rewind fork 6380bb57 3629 --schedule 7 --quiet
-rewind: run 4e5abadaa24c7bc5 exited:0 after 6634 steps, 0.222s virtual, 0.371s wall (poweroff)
+rewind: run 4e5abadaa24c7bc5 exited:0 after 6634 steps, 0.222s virtual, 0.336s wall (poweroff)
 rewind: the fork first differs from its parent at step 3662
 rewind: open it beside its parent in the desktop app: rewind open 4e5abadaa24c7bc5 3662 --compare 6380bb57fcb451da
 
 $ rewind fork 6380bb57 3629 --schedule 8 --quiet
-rewind: run 360e80c8b6a8c065 exited:2 after 4544 steps, 0.200s virtual, 0.317s wall (poweroff)
+rewind: run 360e80c8b6a8c065 exited:2 after 4544 steps, 0.200s virtual, 0.284s wall (poweroff)
 rewind: the fork first differs from its parent at step 3638
 rewind: open it beside its parent in the desktop app: rewind open 360e80c8b6a8c065 3638 --compare 6380bb57fcb451da
 ```
 
-From step 3629 of the passing build, schedules 6 and 8
-crash and 5 and 7 pass.
+From step 3629 of the schedule 0 build, schedules
+6 and 8 crash and 5 and 7 pass.
 
 ## Scrub it in the app
 
 The desktop app shows a run on a timeline: drag the playhead to any step for
 the output, processes, files and event there, jump to the failure or to where
-the run left the passing one, and fork from the playhead.
+the run left the passing one, and fork from the playhead. Opened on `check`'s
+two runs, a dashed blue mark on the timeline is step 5139, where only
+the failing run gets a reschedule.
 
 ```console
-$ rewind-app ~/.local/share/rewind/runs/5c910df9774b38f2 --compare ~/.local/share/rewind/runs/6380bb57fcb451da
+$ rewind-app ~/.local/share/rewind/runs/5c910df9774b38f2 --compare ~/.local/share/rewind/runs/1989f6d02c080616
 ```
 
 Press f to jump to the failure at step 5153, then s to open the
