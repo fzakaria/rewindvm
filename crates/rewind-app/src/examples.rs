@@ -124,13 +124,15 @@ mod tests {
         let divergence = session.divergence_step().unwrap();
         assert!(divergence < failure.step);
 
-        // In words: the first thing test_pool_shutdown does differently.
+        // In words: where the schedules part, and the first thing
+        // test_pool_shutdown does differently.
         let Some(crate::run::Agreement::Parted { lines, .. }) = session.agreement() else {
             panic!("the examples do not part");
         };
         assert_eq!(
             lines,
             vec![
+                "The two runs are the same until step 4,721, where only this run has a reschedule.",
                 "test_pool_shutdown did the same things in the same order in both runs until step 4,760.",
                 "Then in this run, thread 9 of test_pool_shutdown writes \"job 1 done: 35269\" to stdout.",
                 "In the passing run, thread 8 of test_pool_shutdown writes \"job 0 done: 12727\" to stdout.",

@@ -278,6 +278,20 @@ impl Spec {
         }
     }
 
+    /// The last step through which a run of this spec and a run of
+    /// `other` are the same run: they differ only in their schedules, and
+    /// the schedules perturb the same steps the same way up to it. None
+    /// when anything else differs, u64::MAX when nothing does. A keyframe
+    /// of one run at or before this step is a keyframe of the other.
+    pub fn same_through(&self, other: &Spec) -> Option<u64> {
+        // Everything but the schedule must match, compared the way the id
+        // compares it.
+        if self.unscheduled() != other.unscheduled() {
+            return None;
+        }
+        Some(self.schedule().same_through(&other.schedule()))
+    }
+
     /// The steps the schedule perturbs, first and end, when it has an
     /// end: `rewind check` confines a schedule to such a window as it
     /// narrows one down. A schedule that runs to the end of the run has

@@ -168,6 +168,9 @@ pub mod size {
     pub const PLAYHEAD_WIDTH: f32 = 3.0;
     pub const PLAYHEAD_GLOW_WIDTH: f32 = 9.0;
     pub const DIVERGENCE_WIDTH: f32 = 2.0;
+    /// How wide the dashed mark where two runs' schedules part answers
+    /// the pointer, wider than the line it draws.
+    pub const SPLIT_MARK_HIT_WIDTH: f32 = 9.0;
     pub const FAILURE_WIDTH: f32 = 3.0;
     pub const FORK_MARK_WIDTH: f32 = 2.0;
     /// The focus ring sits this far outside the track.

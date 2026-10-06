@@ -400,6 +400,8 @@ impl Family {
     /// base is compared with its first failing run, and a failing base
     /// with its first passing one; a run with keyframes, as `rewind check`
     /// reports, comes before one without, which would replay from boot.
+    /// When that run is a window `rewind check` narrowed, the window one
+    /// step shorter stands in for the base, as check reports the two.
     pub fn to_open(&self) -> (&RunEntry, Option<&RunEntry>) {
         let base = self.base();
         let first = |failed: bool| {
@@ -408,11 +410,40 @@ impl Family {
                 .filter(|r| r.failed == failed && r.id != base.id)
                 .min_by_key(|r| (!r.has_keyframes, r.created))
         };
-        match first(!base.failed) {
-            Some(other) if base.failed => (base, Some(other)),
-            Some(other) => (other, Some(base)),
-            None => (base, None),
+        let Some(other) = first(!base.failed) else {
+            return (base, None);
+        };
+        let partner = self.shorter_window(other).unwrap_or(base);
+        if base.failed {
+            (partner, Some(other))
+        } else {
+            (other, Some(partner))
         }
+    }
+
+    /// The run opening `run` compares it with: for a window `rewind check`
+    /// narrowed, the window one step shorter when it is here, which is the
+    /// same run until the window's last step; else the run it hangs under
+    /// in the tree.
+    pub fn compare_with(&self, run: &RunEntry) -> Option<&RunEntry> {
+        self.shorter_window(run).or_else(|| self.tree_parent(run))
+    }
+
+    /// The run of `run`'s inputs and schedule over its window less the
+    /// last step, which ended the other way: the run `rewind check`
+    /// compares a narrowed window with. None for a window of one step,
+    /// which is schedule 0 less that step.
+    fn shorter_window(&self, run: &RunEntry) -> Option<&RunEntry> {
+        let (from, until) = run.window?;
+        let shorter = (from, until - 1);
+        self.runs.iter().find(|r| {
+            r.parent.is_none()
+                && r.schedule == run.schedule
+                && r.inputs == run.inputs
+                && r.window == Some(shorter)
+                && shorter.0 < shorter.1
+                && r.failed != run.failed
+        })
     }
 
     /// Whether `query` is in the family's title, its derivation or
@@ -1506,6 +1537,71 @@ mod tests {
         let rows = f.rows_folded(&open, &[]);
         assert_eq!(rows.len(), 8);
         assert_eq!(rows[3].detail(), "hide the 3 windows of schedule 5");
+    }
+
+    #[test]
+    fn a_narrowed_window_is_compared_with_the_window_one_step_shorter() {
+        // rewind check reports the narrowest failing window against the
+        // window one step shorter, which passed and is the same run until
+        // that step. Opening w4 compares it with w5, and opening the family
+        // starts with that pair. A window without such a run here compares
+        // with the schedule 0 run, as does a window of one step, whose
+        // shorter window is no window at all.
+        let mut f = narrowed();
+        f.runs.push(RunEntry {
+            window: Some((40, 59)),
+            created: 5,
+            has_keyframes: true,
+            ..run("w5", None, 5, "exited:0")
+        });
+        f.runs.push(RunEntry {
+            window: Some((70, 71)),
+            created: 6,
+            ..run("w6", None, 5, "exited:1")
+        });
+        for r in &mut f.runs {
+            r.has_keyframes |= r.id == "w4";
+        }
+        let compared = |f: &Family, id: &str| {
+            let run = f.runs.iter().find(|r| r.id == id).unwrap();
+            f.compare_with(run).map(|r| r.id.clone())
+        };
+        assert_eq!(compared(&f, "w4").as_deref(), Some("w5"));
+        assert_eq!(compared(&f, "w1").as_deref(), Some("r"));
+        assert_eq!(compared(&f, "w6").as_deref(), Some("r"));
+        let (shown, other) = f.to_open();
+        assert_eq!(
+            (shown.id.as_str(), other.map(|r| r.id.as_str())),
+            ("w4", Some("w5"))
+        );
+
+        // When schedule 0 fails, check narrows a passing schedule, and the
+        // window one step shorter fails like schedule 0: the family opens
+        // on that failing window against the passing one.
+        let failing_base = Family {
+            runs: vec![
+                RunEntry {
+                    has_keyframes: true,
+                    ..run("r", None, 0, "exited:1")
+                },
+                run("s5", None, 5, "exited:0"),
+                RunEntry {
+                    window: Some((40, 60)),
+                    has_keyframes: true,
+                    ..run("p", None, 5, "exited:0")
+                },
+                RunEntry {
+                    window: Some((40, 59)),
+                    has_keyframes: true,
+                    ..run("q", None, 5, "exited:1")
+                },
+            ],
+        };
+        let (shown, other) = failing_base.to_open();
+        assert_eq!(
+            (shown.id.as_str(), other.map(|r| r.id.as_str())),
+            ("q", Some("p"))
+        );
     }
 
     #[test]

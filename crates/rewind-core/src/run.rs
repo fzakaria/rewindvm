@@ -76,13 +76,6 @@ pub trait SpecExt {
     /// id on another machine or after an import moves its inputs.
     fn id(&self) -> RunId;
 
-    /// The last step through which a run of this spec and a run of
-    /// `other` are the same run: they differ only in their schedules, and
-    /// the schedules perturb the same steps the same way up to it. None
-    /// when anything else differs, u64::MAX when nothing does. A keyframe
-    /// of one run at or before this step is a keyframe of the other.
-    fn same_through(&self, other: &Spec) -> Option<u64>;
-
     /// The 32 bytes the guest kernel seeds its RNG with.
     fn rng_seed(&self) -> [u8; 32];
 
@@ -105,15 +98,6 @@ impl SpecExt for Spec {
         let bytes = serde_json::to_vec(&inputs).expect("a spec always serializes");
         let hash = blake3::hash(&bytes).to_hex();
         RunId::of_hash(&hash).expect("a BLAKE3 hash in hex is longer than a run id")
-    }
-
-    fn same_through(&self, other: &Spec) -> Option<u64> {
-        // Everything but the schedule must match, compared the way the id
-        // compares it.
-        if self.unscheduled() != other.unscheduled() {
-            return None;
-        }
-        Some(self.schedule().same_through(&other.schedule()))
     }
 
     fn rng_seed(&self) -> [u8; 32] {

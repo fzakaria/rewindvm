@@ -77,7 +77,7 @@ pub const STOPS: [Stop; 6] = [
     Stop {
         anchor: Anchor::DivergenceButton,
         title: "Where the two runs part",
-        body: "The blue mark is the first event where this run differs from the one it is compared with, here a passing build of the same inputs. Before it the two are identical, event for event. Jump to divergence, or d, goes there.",
+        body: "The blue mark is the first event where this run differs from the one it is compared with, here a passing build of the same inputs. The dashed blue mark before it is the step where their schedules part: until then the two are the same run, and the card says what only one of them got there. Jump to divergence, or d, goes to the first difference.",
         playhead: Playhead::Divergence,
         needs: Needs::Divergence,
     },

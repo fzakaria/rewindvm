@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result, bail};
 use rewind_trace::Trace;
 use rewind_trace::ending::{Ending, ExitStatus};
-use rewind_trace::manifest::{MANIFEST, Manifest, Parent, RunId, Source, TRACE, executing};
+use rewind_trace::manifest::{MANIFEST, Manifest, Parent, RunId, Source, Spec, TRACE, executing};
 use rewind_trace::stop::Stop;
 
 use crate::archive;
@@ -310,6 +310,9 @@ pub struct Session {
     pub run: Run,
     pub other: Option<Run>,
     pub comparison: Option<Comparison>,
+    /// Where the two runs' schedules part, when they are runs of the same
+    /// inputs on the same machine under different schedules.
+    pub split: Option<ScheduleSplit>,
     /// Why the run asked to be compared with could not be opened, such as
     /// one removed meanwhile, for a notice; the run then opens alone.
     pub unopened_compare: Option<String>,
@@ -334,10 +337,18 @@ impl Session {
             let (this, other) = (&run.timeline, &o.timeline);
             Comparison::of(&this.trace, this.total, &other.trace, other.total)
         });
+        let split = match (
+            &run.manifest,
+            other.as_ref().and_then(|o| o.manifest.as_ref()),
+        ) {
+            (Some(this), Some(that)) => ScheduleSplit::of(&this.spec, &that.spec),
+            _ => None,
+        };
         Session {
             run,
             other,
             comparison,
+            split,
             unopened_compare: None,
             replays: Replays::AsRecorded,
         }
@@ -363,6 +374,19 @@ impl Session {
     /// The step of the first divergence from the compared run.
     pub fn divergence_step(&self) -> Option<u64> {
         self.comparison.as_ref().and_then(Comparison::step)
+    }
+
+    /// The compared run as the divergence card names it: "the passing
+    /// run" beside a failing one, else by its id. None without one.
+    pub fn other_run(&self) -> Option<String> {
+        let other = self.other.as_ref()?;
+        Some(
+            if other.verdict() == Verdict::Passed && self.run.verdict() == Verdict::Failed {
+                "the passing run".to_string()
+            } else {
+                format!("run {}", other.label())
+            },
+        )
     }
 
     /// How the run on screen and the compared run relate, in words. None
@@ -403,17 +427,13 @@ impl Session {
             }
             None => format!("Both runs did the same things in the same order until step {step}."),
         };
-        let other_run =
-            if other.verdict() == Verdict::Passed && self.run.verdict() == Verdict::Failed {
-                "the passing run".to_string()
-            } else {
-                format!("run {other_label}")
-            };
-        let mut lines = vec![
+        let other_run = self.other_run().unwrap_or_default();
+        let mut lines: Vec<String> = self.split.iter().map(|s| s.line(&other_run)).collect();
+        lines.extend([
             before,
             format!("Then in this run, {}.", difference.here),
             format!("In {other_run}, {}.", difference.there),
-        ];
+        ]);
         lines.extend(difference.detail);
         Some(Agreement::Parted {
             step: point.step,
@@ -423,6 +443,62 @@ impl Session {
             ),
             lines,
         })
+    }
+}
+
+/// Where two runs of the same inputs on the same machine first differ
+/// because their schedules do.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScheduleSplit {
+    /// The first step the two schedules treat differently. Until it the
+    /// two runs are the same machine, exit for exit.
+    pub step: u64,
+    /// What this run's schedule does there, in words, when it asks for a
+    /// reschedule or a stall. None when it does nothing there, or only
+    /// makes a timer late, which changes the run only if the guest armed
+    /// a timer at that exit, and only the monitor saw whether it did.
+    pub here: Option<String>,
+    /// The same for the other run.
+    pub there: Option<String>,
+}
+
+impl ScheduleSplit {
+    /// Where runs of `this` and `other` part by their schedules; None
+    /// when anything else differs between them, or nothing does.
+    pub fn of(this: &Spec, other: &Spec) -> Option<ScheduleSplit> {
+        let step = this.same_through(other)?.checked_add(1)?;
+        let words = |spec: &Spec| {
+            let schedule = spec.schedule();
+            (schedule.preempt_at(step) || schedule.stall_at(step).is_some())
+                .then(|| schedule.words_at(step))
+        };
+        Some(ScheduleSplit {
+            step,
+            here: words(this),
+            there: words(other),
+        })
+    }
+
+    /// The split as the divergence card's first line, `other_run` naming
+    /// the run compared with.
+    pub fn line(&self, other_run: &str) -> String {
+        let step = thousands(self.step);
+        let start = format!("The two runs are the same until step {step}, where");
+        match (&self.here, &self.there) {
+            (Some(what), None) => format!("{start} only this run has {what}."),
+            (None, Some(what)) => format!("{start} only {other_run} has {what}."),
+            _ => format!("{start} their schedules first differ."),
+        }
+    }
+
+    /// The split for the mark on the timeline, when pointed at.
+    pub fn tooltip(&self, other_run: &str) -> String {
+        let step = thousands(self.step);
+        match (&self.here, &self.there) {
+            (Some(what), None) => format!("Step {step}: only this run has {what}"),
+            (None, Some(what)) => format!("Step {step}: only {other_run} has {what}"),
+            _ => format!("Step {step}: the schedules first differ"),
+        }
     }
 }
 
@@ -673,6 +749,66 @@ mod tests {
         assert_eq!(unbuilt.verdict(), Verdict::Failed);
         assert_eq!(unbuilt.verdict_label(), "missing-output");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn two_runs_of_one_build_part_where_their_schedules_do() {
+        // The failing example perturbs its seed over a window. The same
+        // spec one step shorter is the same run until the window's last
+        // step, where only the failing run is perturbed; schedule 0 parts
+        // from it where the window starts. A run of other inputs, or of
+        // the same schedule, has no such step.
+        let failing = manifest_of(FAILING).spec;
+        let (from, until) = failing.window().unwrap();
+        let shorter = Spec {
+            schedule_until: until - 1,
+            ..failing.clone()
+        };
+        let split = ScheduleSplit::of(&failing, &shorter).unwrap();
+        assert_eq!(split.step, until - 1);
+        let schedule = failing.schedule();
+        let exact = schedule.preempt_at(until - 1) || schedule.stall_at(until - 1).is_some();
+        assert_eq!(split.here, exact.then(|| schedule.words_at(until - 1)));
+        assert_eq!(split.there, None);
+        let unperturbed = Spec {
+            schedule: 0,
+            schedule_from: 0,
+            schedule_until: u64::MAX,
+            ..failing.clone()
+        };
+        assert_eq!(
+            ScheduleSplit::of(&failing, &unperturbed).unwrap().step,
+            from
+        );
+        let more_cores = Spec {
+            cores: failing.cores + 1,
+            ..failing.clone()
+        };
+        assert_eq!(ScheduleSplit::of(&failing, &more_cores), None);
+        assert_eq!(ScheduleSplit::of(&failing, &failing), None);
+    }
+
+    #[test]
+    fn a_split_reads_as_what_only_one_run_has() {
+        // A reschedule or stall on one side is named; anything else is
+        // the schedules differing.
+        let split = |here: Option<&str>, there: Option<&str>| ScheduleSplit {
+            step: 5139,
+            here: here.map(String::from),
+            there: there.map(String::from),
+        };
+        assert_eq!(
+            split(Some("a reschedule"), None).line("the passing run"),
+            "The two runs are the same until step 5,139, where only this run has a reschedule."
+        );
+        assert_eq!(
+            split(None, Some("a 160 µs stall")).line("run 1989f6d0"),
+            "The two runs are the same until step 5,139, where only run 1989f6d0 has a 160 µs stall."
+        );
+        assert_eq!(
+            split(None, None).line("run 1989f6d0"),
+            "The two runs are the same until step 5,139, where their schedules first differ."
+        );
     }
 
     #[test]

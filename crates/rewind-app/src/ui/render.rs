@@ -460,6 +460,48 @@ impl Scrubber {
             .child("?")
     }
 
+    /// The mark of the step where the compared runs' schedules part, when
+    /// the track shows it: dashed blue, as it leads to the divergence, and
+    /// like the bookmarks it goes to its step on a click and says what the
+    /// schedules do there when pointed at.
+    fn split_mark(
+        &self,
+        view: crate::view::View,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::Stateful<Div>> {
+        let session = self.session.as_ref()?;
+        let split = session.split.as_ref()?;
+        let step = split.step;
+        if !view.contains(step) {
+            return None;
+        }
+        let note = split.tooltip(&session.other_run().unwrap_or_default());
+        Some(
+            div()
+                .id("split-mark")
+                .absolute()
+                .left(relative(view.fraction_of(step)))
+                .top(px(-size::MARKER_OVERHANG))
+                .bottom(px(-size::MARKER_OVERHANG))
+                .w(px(size::SPLIT_MARK_HIT_WIDTH))
+                .ml(px(-size::SPLIT_MARK_HIT_WIDTH / 2.0))
+                .flex()
+                .justify_center()
+                .cursor_pointer()
+                .tooltip(tooltip(note))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(move |this, _, _, cx| this.jump_to(step, cx)))
+                .child(
+                    div()
+                        .h_full()
+                        .w(px(size::DIVERGENCE_WIDTH))
+                        .border_l_2()
+                        .border_dashed()
+                        .border_color(rgb(theme::BLUE)),
+                ),
+        )
+    }
+
     /// The timeline: phase segments, ticks, markers and the playhead over
     /// a track that scrubs on click and drag, then the controls row.
     fn render_timeline(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
@@ -612,6 +654,7 @@ impl Scrubber {
         if let Some(divergence) = session.divergence_step() {
             track = track.children(marker(divergence, size::DIVERGENCE_WIDTH, theme::BLUE));
         }
+        track = track.children(self.split_mark(view, cx));
         track = track.children(self.bookmark_marks(view, cx));
         if let Some(failure) = t.failure {
             track = track.children(marker(failure.step, size::FAILURE_WIDTH, theme::RED));

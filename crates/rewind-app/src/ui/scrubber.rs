@@ -641,8 +641,8 @@ impl Scrubber {
         self.select_tab(RightTab::Runs, cx);
     }
 
-    /// Opens a run of the family; the run it was forked from, when there
-    /// is one, is what it is compared with.
+    /// Opens a run of the family, compared with the run
+    /// [`Family::compare_with`] names unless another comparison is pinned.
     pub(super) fn open_family_run(&mut self, run: RunEntry, cx: &mut Context<Self>) {
         // A run the engine is still executing has no trace to open yet.
         if run.progress == Progress::Running {
@@ -669,12 +669,14 @@ impl Scrubber {
         }
         // The chosen comparison holds, except against the run itself.
         // Without one, the run is compared with the run it hangs under in
-        // the panel, which for a run from boot is not in its manifest.
+        // the panel, which for a run from boot is not in its manifest, or
+        // for a window rewind check narrowed, with the window one step
+        // shorter, as check reports the two.
         let above = self
             .runs
             .family
             .as_ref()
-            .and_then(|f| f.tree_parent(&run))
+            .and_then(|f| f.compare_with(&run))
             .map(|r| r.dir.clone());
         let compare = self
             .runs
