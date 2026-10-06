@@ -17,7 +17,12 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 
-/// The lines a license block starts and ends with.
+/// The lines a license block starts and ends with. The block carries no
+/// version number: these lines are its version. Licenses already issued
+/// are in this format, and every later app reads them. A license in
+/// another format, with other fields or another signature, starts with a
+/// line of its own, such as `----- BEGIN REWIND VM LICENSE 2 -----`, so an
+/// app tells the two apart and still reads this one.
 pub const BEGIN: &str = "----- BEGIN REWIND VM LICENSE -----";
 pub const END: &str = "----- END REWIND VM LICENSE -----";
 
