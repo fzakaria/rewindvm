@@ -69,7 +69,7 @@ nix run .#license -- keygen
 
 prints the signing key once on standard error, as 64 hex digits, and the
 public key on standard output as a Rust array. Put the 64 digits in a
-1Password item's password field, clear the terminal, and paste the array
+1Password item's notes, clear the terminal, and paste the array
 over `PUBLIC_KEY` in `src/license.rs`. `keygen --out <dir>` writes the key to
 `<dir>/signing.key` instead (mode 0600, never overwriting one).
 
@@ -92,7 +92,7 @@ nix run .#license -- issue --key - \
 
 asks for the signing key without echoing it (paste it from 1Password) and
 prints the block. With the 1Password CLI, pipe it instead:
-`op read "op://<vault>/<item>/password" | nix run .#license -- issue --key - ...`.
+`op read "op://<vault>/<item>/notesPlain" | nix run .#license -- issue --key - ...`.
 `--key <file>` reads a `signing.key`. `--issued YYYY-MM-DD` backdates the
 license; without it the issue date is today (UTC). An unknown flag,
 `--seats 0` or a blank name or email is refused before the key is asked
