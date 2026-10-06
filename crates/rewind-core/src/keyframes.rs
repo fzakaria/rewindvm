@@ -52,14 +52,46 @@ impl Pages for ReadPages<'_> {
     }
 }
 
+/// What a keyframe file starts with: this magic, then the version of its
+/// format as a little-endian u32. The keyframe follows, in bincode.
+pub const KEYFRAME_MAGIC: &[u8; 8] = b"rwkeyfr\0";
+pub const KEYFRAME_VERSION: u32 = 1;
+const HEADER_LEN: usize = KEYFRAME_MAGIC.len() + 4;
+
+/// A keyframe as its file holds it.
+pub fn encode(kf: &Keyframe) -> Result<Vec<u8>> {
+    let mut bytes = KEYFRAME_MAGIC.to_vec();
+    bytes.extend(KEYFRAME_VERSION.to_le_bytes());
+    bytes.extend(bincode::serialize(kf)?);
+    Ok(bytes)
+}
+
+/// The keyframe a file holds, refusing one of another format and saying
+/// which.
+pub fn decode(bytes: &[u8]) -> Result<Keyframe> {
+    if bytes.len() < HEADER_LEN || &bytes[..KEYFRAME_MAGIC.len()] != KEYFRAME_MAGIC {
+        bail!(
+            "not a keyframe this build of rewind reads: keyframes written before rewind \
+             1.0 name no format"
+        );
+    }
+    let version = &bytes[KEYFRAME_MAGIC.len()..HEADER_LEN];
+    let version = u32::from_le_bytes(version.try_into().expect("four bytes"));
+    if version != KEYFRAME_VERSION {
+        bail!(
+            "a keyframe of format {version}; this build of rewind reads format {KEYFRAME_VERSION}"
+        );
+    }
+    Ok(bincode::deserialize(&bytes[HEADER_LEN..])?)
+}
+
 fn path(run_dir: &Path, step: u64) -> PathBuf {
     run_dir.join(DIR).join(format!("{step:016}.{EXTENSION}"))
 }
 
 pub fn save(run_dir: &Path, kf: &Keyframe) -> Result<()> {
     fs::create_dir_all(run_dir.join(DIR))?;
-    let bytes = bincode::serialize(kf)?;
-    crate::image::write_atomic(&path(run_dir, kf.step), &bytes)
+    crate::image::write_atomic(&path(run_dir, kf.step), &encode(kf)?)
 }
 
 /// What a run's own keyframe directory holds.
@@ -83,7 +115,7 @@ pub fn own_state(run_dir: &Path) -> Own {
     let reads = |step: &u64| {
         fs::read(path(run_dir, *step))
             .ok()
-            .and_then(|b| bincode::deserialize::<Keyframe>(&b).ok())
+            .and_then(|b| decode(&b).ok())
             .is_some()
     };
     if steps.iter().all(reads) {
@@ -216,7 +248,7 @@ impl Layers {
             )
         })?;
         let bytes = fs::read(&p).with_context(|| format!("reading {}", p.display()))?;
-        bincode::deserialize(&bytes).with_context(|| format!("reading {}", p.display()))
+        decode(&bytes).with_context(|| format!("reading {}", p.display()))
     }
 
     /// The chain of keyframes that rebuilds the one at `step`, full one
@@ -341,6 +373,40 @@ pub fn run_with_keyframes(
         let took = started.elapsed().max(Duration::from_micros(1));
         let scaled = interval as f64 * TARGET.as_secs_f64() / took.as_secs_f64();
         interval = (scaled as u64).clamp(MIN_INTERVAL, MAX_INTERVAL);
+    }
+}
+
+#[cfg(test)]
+mod format_tests {
+    // A keyframe file names its format before its contents: one of another
+    // format, or one from before keyframes named theirs, is refused with
+    // what it is.
+    use super::*;
+
+    #[test]
+    fn a_keyframe_names_its_format_first() {
+        let mut kf = Keyframe::default();
+        kf.step = 4;
+        let bytes = encode(&kf).unwrap();
+        assert_eq!(&bytes[..KEYFRAME_MAGIC.len()], KEYFRAME_MAGIC);
+        assert_eq!(
+            bytes[KEYFRAME_MAGIC.len()..HEADER_LEN],
+            KEYFRAME_VERSION.to_le_bytes()
+        );
+        assert_eq!(decode(&bytes).unwrap().step, 4);
+
+        let mut other = bytes.clone();
+        other[KEYFRAME_MAGIC.len()..HEADER_LEN]
+            .copy_from_slice(&(KEYFRAME_VERSION + 1).to_le_bytes());
+        let err = format!("{:#}", decode(&other).unwrap_err());
+        assert!(
+            err.contains(&format!("format {}", KEYFRAME_VERSION + 1)),
+            "{err}"
+        );
+
+        let before = bincode::serialize(&kf).unwrap();
+        let err = format!("{:#}", decode(&before).unwrap_err());
+        assert!(err.contains("before"), "{err}");
     }
 }
 

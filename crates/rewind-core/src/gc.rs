@@ -25,7 +25,6 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use rewind_store::{Collected, Collector, PageSet, ZERO_PAGE};
-use rewind_vmm::snapshot::Keyframe;
 use serde::Deserialize;
 
 use crate::home::Home;
@@ -306,7 +305,7 @@ fn live_pages(home: &Home) -> Result<(PageSet, usize)> {
                 continue;
             }
             let bytes = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
-            let Ok(kf) = bincode::deserialize::<Keyframe>(&bytes) else {
+            let Ok(kf) = crate::keyframes::decode(&bytes) else {
                 unreadable += 1;
                 continue;
             };
