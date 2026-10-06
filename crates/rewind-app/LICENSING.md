@@ -80,6 +80,10 @@ asks for the signing key without echoing it (paste it from 1Password) and
 prints the block. With the 1Password CLI, pipe it instead:
 `op read "op://<vault>/<item>/password" | nix run .#license -- issue --key - ...`.
 `--key <file>` reads a `signing.key`. `--issued YYYY-MM-DD` backdates the
-license; without it the issue date is today (UTC). The id is 16 random hex
+license; without it the issue date is today (UTC). An unknown flag,
+`--seats 0` or a blank name or email is refused before the key is asked
+for, and the name and email are trimmed. The block is read back against
+`PUBLIC_KEY` before it is printed, so a signing key that does not match
+the app's fails instead of printing a block every copy refuses. The id is 16 random hex
 digits; record it with the order so the license can be revoked on a
 refund.
