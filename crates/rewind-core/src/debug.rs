@@ -233,6 +233,8 @@ struct Watch {
 struct Traps {
     breakpoints: Vec<u64>,
     watches: Vec<Watch>,
+    /// Breakpoints refused for want of a register, said once each.
+    refused: Vec<u64>,
 }
 
 impl Traps {
@@ -245,6 +247,23 @@ impl Traps {
         }
         self.breakpoints.push(address);
         true
+    }
+
+    /// Says that a breakpoint at `address` found no debug register, the
+    /// first time gdb asks for it, and returns false for gdb. gdb reports
+    /// a breakpoint it cannot insert, except one in a shared library, which
+    /// it sets aside without a word in batch mode, and the session would
+    /// run past it.
+    fn refuse_breakpoint(&mut self, address: u64) -> bool {
+        if !self.refused.contains(&address) {
+            self.refused.push(address);
+            eprintln!(
+                "rewind: no debug register left for a breakpoint at {address:#x}: \
+                 breakpoints and watchpoints share the CPU's {MAX_TRAPS}, one for each \
+                 location; delete one to set this"
+            );
+        }
+        false
     }
 
     fn remove_breakpoint(&mut self, address: u64) -> bool {
@@ -711,7 +730,7 @@ impl Breakpoints for Debuggee {
 
 impl SwBreakpoint for Debuggee {
     fn add_sw_breakpoint(&mut self, address: u64, _kind: usize) -> TargetResult<bool, Self> {
-        Ok(self.traps.add_breakpoint(address))
+        Ok(self.traps.add_breakpoint(address) || self.traps.refuse_breakpoint(address))
     }
 
     fn remove_sw_breakpoint(&mut self, address: u64, _kind: usize) -> TargetResult<bool, Self> {
@@ -721,7 +740,7 @@ impl SwBreakpoint for Debuggee {
 
 impl HwBreakpoint for Debuggee {
     fn add_hw_breakpoint(&mut self, address: u64, _kind: usize) -> TargetResult<bool, Self> {
-        Ok(self.traps.add_breakpoint(address))
+        Ok(self.traps.add_breakpoint(address) || self.traps.refuse_breakpoint(address))
     }
 
     fn remove_hw_breakpoint(&mut self, address: u64, _kind: usize) -> TargetResult<bool, Self> {

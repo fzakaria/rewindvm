@@ -660,7 +660,9 @@ in
   # recording. Its child writes the global at the same address in its own
   # address space first, and calls write first, which must stop gdb at
   # neither a watchpoint nor a breakpoint. x86 has no trap on reads alone,
-  # so `rwatch` is refused. Boots the VM, so it needs /dev/kvm.
+  # so `rwatch` is refused, and a fifth breakpoint, past the CPU's four
+  # debug registers, is refused out loud. Boots the VM, so it needs
+  # /dev/kvm.
   gdb-watch =
     pkgs.runCommand "rewind-gdb-watch"
       {
@@ -700,6 +702,13 @@ in
         rewind gdb watch "$start" -- -batch -ex 'rwatch counter' -ex continue > read 2>&1 || true
         cat read
         grep -q 'Could not insert' read
+
+        # A fifth breakpoint has no debug register; rewind says so, since
+        # gdb sets one in a shared library aside without a word.
+        rewind gdb watch "$start" -- -batch -ex 'break main' -ex 'break write' \
+          -ex 'break fork' -ex 'break wait' -ex 'break _exit' -ex continue > five 2>&1 || true
+        cat five
+        grep -q 'no debug register left for a breakpoint' five
         touch $out
       '';
 
