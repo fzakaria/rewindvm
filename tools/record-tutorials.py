@@ -50,7 +50,7 @@ HTML comments, which are not written out:
                                   the repository
 
 The commands run against a run directory of the recording's own, {{home}},
-emptied when a recording starts, so `rewind ls`, the app's Runs panel and
+emptied before each tutorial, so `rewind ls`, the app's Runs panel and
 wall times are those of a reader's fresh install.
 
 Any command that fails, capture that does not match, or assertion that does
@@ -471,10 +471,12 @@ def main():
     )
     paths, commit = build(args.rev)
     print(f"recording with {commit[:12]}")
+    # Each tutorial starts from an empty home, as a reader's first does,
+    # so a page does not depend on which tutorials were recorded with it.
     home = args.work / "home"
-    shutil.rmtree(home, ignore_errors=True)
-    home.mkdir(parents=True)
     for name in names:
+        shutil.rmtree(home, ignore_errors=True)
+        home.mkdir(parents=True)
         work = args.work / name
         shutil.rmtree(work, ignore_errors=True)
         work.mkdir(parents=True)
