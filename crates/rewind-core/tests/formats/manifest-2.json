@@ -1,0 +1,65 @@
+{
+  "version": 2,
+  "id": "08f576bb8700d803",
+  "name": "sample",
+  "created": 1791307212,
+  "source": {
+    "mode": "image",
+    "root": "/nix/store/5pz3h3da5mlsvxk0armn7wqwxlsbdp71-rewind-gdb-root"
+  },
+  "spec": {
+    "kernel": "/nix/store/8bqjmjsqrzl7c1x30z6mx7qp2xl8f1hd-rewind-guest-kernel-7.2.8/bzImage",
+    "initrd": "/nix/store/a9nlm3ash6gpjk50v66dnv8d6w27mp8x-rewind-initrd/initrd",
+    "kernel_debug": "/nix/store/c9z53nkphz0zaan797qgmydxslw4l5bi-rewind-guest-kernel-7.2.8-debug",
+    "image": "/tmp/claude-1000/-home-fmzakari-code-github-com-fzakaria-rewind/94458ab8-5bc5-4020-90f0-67997e82236c/scratchpad/sample-home/images/2/c81e415d2bd4513297356e48ee5b6b71.erofs",
+    "image_hash": "c81e415d2bd4513297356e48ee5b6b71a59299190ff2dd066f36a1b91c581af3",
+    "mem_mib": 1024,
+    "cores": 1,
+    "seed": 0,
+    "epoch": 1791244800,
+    "quantum": 5000,
+    "schedule": 0,
+    "schedule_from": 0,
+    "schedule_until": 18446744073709551615,
+    "inherited_schedules": [],
+    "cpu": "v3",
+    "clock": "exits",
+    "preemption": "at_exits",
+    "extras": "reserved",
+    "cmdline": "nolapic_timer lpj=1000000 panic=-1 rdinit=/init loglevel=7 mitigations=off",
+    "job": {
+      "program": null,
+      "argv": [
+        "/bin/fork"
+      ],
+      "env": [
+        [
+          "PATH",
+          "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        ]
+      ],
+      "cwd": "/",
+      "uid": 0,
+      "gid": 0,
+      "hostname": "localhost",
+      "root": "image",
+      "files": [],
+      "outputs": [],
+      "output": "plain"
+    }
+  },
+  "parent": null,
+  "shared_keyframes": null,
+  "outcome": {
+    "stop": {
+      "how": "powered_off"
+    },
+    "step": 325,
+    "virtual_ns": 1620000,
+    "status": 0,
+    "wall_ms": 788
+  },
+  "trace_hash": "5c4753ae7fe3ee9005df25ae8a09a9fd731c92c99c0383dd413f903ba7638017",
+  "first_difference": null,
+  "recorded_by": "0.5.0 (f9fb53fe7cc1)"
+}
