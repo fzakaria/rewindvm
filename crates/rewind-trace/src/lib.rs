@@ -21,6 +21,7 @@ pub mod located;
 pub mod machine;
 pub mod manifest;
 pub mod prune;
+pub mod schedule;
 pub mod stop;
 
 use std::collections::BTreeMap;

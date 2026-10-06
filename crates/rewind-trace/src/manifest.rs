@@ -262,6 +262,22 @@ impl Spec {
         }
     }
 
+    /// Where and how this spec's schedule perturbs the run.
+    pub fn schedule(&self) -> crate::schedule::Schedule {
+        crate::schedule::Schedule {
+            seed: self.schedule,
+            window: self.schedule_from..self.schedule_until,
+            earlier: self
+                .inherited_schedules
+                .iter()
+                .map(|s| crate::schedule::Segment {
+                    seed: s.seed,
+                    window: s.from..s.until,
+                })
+                .collect(),
+        }
+    }
+
     /// The steps the schedule perturbs, first and end, when it has an
     /// end: `rewind check` confines a schedule to such a window as it
     /// narrows one down. A schedule that runs to the end of the run has

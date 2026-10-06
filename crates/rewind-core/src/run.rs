@@ -113,7 +113,7 @@ impl SpecExt for Spec {
         if self.unscheduled() != other.unscheduled() {
             return None;
         }
-        Some(schedule(self).same_through(&schedule(other)))
+        Some(self.schedule().same_through(&other.schedule()))
     }
 
     fn rng_seed(&self) -> [u8; 32] {
@@ -139,28 +139,12 @@ impl SpecExt for Spec {
             seed: self.rng_seed(),
             epoch: self.epoch,
             quantum: self.quantum,
-            schedule: schedule(self),
+            schedule: self.schedule(),
             cpu: self.cpu,
             clock: self.clock,
             preemption: self.preemption,
             extras: self.extras,
         })
-    }
-}
-
-/// The perturbations the machine applies for `spec`.
-fn schedule(spec: &Spec) -> rewind_vmm::pv::Schedule {
-    rewind_vmm::pv::Schedule {
-        seed: spec.schedule,
-        window: spec.schedule_from..spec.schedule_until,
-        earlier: spec
-            .inherited_schedules
-            .iter()
-            .map(|s| rewind_vmm::pv::Segment {
-                seed: s.seed,
-                window: s.from..s.until,
-            })
-            .collect(),
     }
 }
 
