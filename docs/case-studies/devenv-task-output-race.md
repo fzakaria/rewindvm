@@ -117,9 +117,9 @@ assertion `left == right` failed
   left: ["line1", "line2"]
  right: ["line1", "line2", "line3"]
 ...
-rewind: run a25e89e017870cd4 exited:101 after 1234 steps, 0.034s virtual, 2.298s wall (poweroff)
+rewind: run fc48fae072b4b043 exited:101 after 1234 steps, 0.034s virtual, 1.151s wall (poweroff)
 
-$ rewind replay a25e89e0
+$ rewind replay fc48fae0
 identical: 767 events over 1234 steps
 ```
 
@@ -129,20 +129,20 @@ in the issue. The issue was filed against devenv 1.10.0, and cecb0452 is
 
 ```console
 $ rewind check --all --schedules 256 'github:fzakaria/rewindvm?dir=examples/case-studies#devenv-last-lines-before-2296'
-schedule   0: exited:101       1234 steps    run a25e89e017870cd4
-schedule   1: exited:101       1258 steps    run bb1c72260aa4a018
-schedule   2: exited:101       1328 steps    run c255cf28bbf294cd
-schedule   3: exited:101       1337 steps    run 285d1f68d2d575a2
+schedule   0: exited:101       1234 steps    run fc48fae072b4b043
+schedule   1: exited:101       1258 steps    run ad8a286a6bc072ac
+schedule   2: exited:101       1328 steps    run cb8b3f7adf15c10b
+schedule   3: exited:101       1337 steps    run 7a74c84c3ef195ee
 ...
-schedule 256: exited:101       1326 steps    run 745ffb5b5dd47b5e
+schedule 256: exited:101       1326 steps    run 3b9bc8a5498ce4b8
 schedule 0 failed; 49 of 256 perturbed schedules ended differently
 
 schedule 12 passes where schedule 0 fails; narrowing the steps it perturbs
 perturbing only steps 518..1270 still ends differently
 step 1269 decides it: a reschedule there makes the run pass
 
-passing: run 698c7c8455a9c8d9, schedule 12 over steps 518..1270
-failing: run 5ceaeed290d6f3e2, schedule 12 over steps 518..1269
+passing: run c1819dea8a95110d, schedule 12 over steps 518..1270
+failing: run 1374febae23685d3, schedule 12 over steps 518..1269
 the two are the same run until step 1269
 
 where /nix/store/195dbbvj5h0yq9f4vnp833dsbgxpp8w0-devenv-tasks-tests-1.10.1/bin/devenv-tasks-tests test_failed_task_keeps_last_lines first behaves differently:
@@ -158,7 +158,7 @@ where /nix/store/195dbbvj5h0yq9f4vnp833dsbgxpp8w0-devenv-tasks-tests-1.10.1/bin/
   passing        1305    40/41    unlink("/build/.tmpYGvd38/tasks.db-shm")
   passing        1306    40/41    unlink("/build/.tmpYGvd38/tasks.db-wal")
 
-open both in the desktop app: rewind open 5ceaeed290d6f3e2 1273 --compare 698c7c8455a9c8d9
+open both in the desktop app: rewind open 1374febae23685d3 1273 --compare c1819dea8a95110d
 ```
 
 208 of the 257 runs fail, all with `["line1", "line2"]`; 49 pass.
@@ -175,7 +175,7 @@ done.
 The events of schedule 0's run, which fails, around the task:
 
 ```console
-$ rewind events a25e89e0 --from 1150 --to 1170
+$ rewind events fc48fae0 --from 1150 --to 1170
       1155    40/41    open("/build/devenv_task_outputtyCI1k.json", 0o2000302)
       1158    40/41    fork() = 43
       1162    43/43    execve("/build/scriptBDto8u.sh", ["/bin/sh", "/build/scriptBDto8u.sh"])
@@ -194,10 +194,11 @@ the stdout pipe (descriptor 13) and one on the `child.wait()` branch show
 what the loop did, from step 1155 on:
 
 ```console
-$ rewind gdb a25e89e0 1155 -- -batch -ex 'break read if $rdi == 13' -ex 'break task_state.rs:409' -ex continue -ex 'set $buf = $rsi' -ex finish -ex 'x/s $buf' -ex 'delete 1' -ex continue
+$ rewind gdb fc48fae0 1155 -- -batch -ex 'break read if $rdi == 13' -ex 'break task_state.rs:409' -ex continue -ex 'set $buf = $rsi' -ex finish -ex 'x/s $buf' -ex 'delete 1' -ex continue
 rewind: step 1155 ran in process 40; loading symbols for 5 of its files
 rewind: source files for /nix/store/195dbbvj5h0yq9f4vnp833dsbgxpp8w0-devenv-tasks-tests-1.10.1 from /nix/store/hs2328bm8f7s0cq77jjjgdlcqrc13mhm-source
-rewind: gdb at step 1155 of a25e89e017870cd4
+rewind: gdb at step 1155 of fc48fae072b4b043
+Downloading 740.00 B source file /build/linux-7.2.8/./arch/x86/include/asm/shared/io.h...
 0xffffffff812850a5 in __outl (value=<optimized out>, port=1504) at ./arch/x86/include/asm/shared/io.h:24
 24	BUILDIO(l,  , u32)
 [Switching to thread 3 (Thread 1.41)]
@@ -205,16 +206,15 @@ rewind: gdb at step 1155 of a25e89e017870cd4
 56		ret
 Breakpoint 1 at 0x7f5d4a330190: file ../sysdeps/unix/sysv/linux/read.c, line 25.
 Breakpoint 2 at 0x55e80f9698a7: task_state.rs:409. (2 locations)
-[Switching to Thread 1.4194305]
 
-Thread 1 hit Breakpoint 1, __GI___libc_read (fd=13, buf=0x7f5d44015f20, nbytes=8192) at ../sysdeps/unix/sysv/linux/read.c:25
+Thread 3 hit Breakpoint 1, __GI___libc_read (fd=13, buf=0x7f5d44015f20, nbytes=8192) at ../sysdeps/unix/sysv/linux/read.c:25
 25	{
 0x000055e80fc409bd in std::fs::{impl#9}::read (buf=..., self=<optimized out>) at /rustc/48a229ceaefd4985c50990b14116b6d856af0985/library/std/src/fs.rs:1335
 warning: 1335	/rustc/48a229ceaefd4985c50990b14116b6d856af0985/library/std/src/fs.rs: No such file or directory
 Value returned is $1 = 18
 0x7f5d44015f20:	"line1\nline2\nline3\n"
 
-Thread 1 hit Breakpoint 2.1, devenv_tasks::task_state::{impl#1}::run::{async_fn#0}::{async_block#0}::{async_block#0} () at devenv-tasks/src/task_state.rs:415
+Thread 3 hit Breakpoint 2.1, devenv_tasks::task_state::{impl#1}::run::{async_fn#0}::{async_block#0}::{async_block#0} () at devenv-tasks/src/task_state.rs:415
 415	                            let expanded_paths = expand_glob_patterns(&self.task.exec_if_modified);
 [Inferior 1 (process 1) detached]
 ```
@@ -226,7 +226,7 @@ printing, found standard error (descriptor 15) at its end, and the next time
 round ran the `child.wait()` branch with `line3` still in the buffer. The
 function returned, and the buffer was dropped with it.
 
-The same breakpoints on the passing run 698c7c84, from the step where it
+The same breakpoints on the passing run c1819dea, from the step where it
 opens the task's output file, hit `read` on standard output twice before the
 `child.wait()` branch. The first read there also returns all 18 bytes, but
 the loop took all three lines and reached the end of the pipe before it took
@@ -289,9 +289,9 @@ The same test at the merge commit passes every schedule:
 ```console
 $ rewind check --all --schedules 256 'github:fzakaria/rewindvm?dir=examples/case-studies#devenv-last-lines-2296'
 rewind: packing 57 store paths for devenv-tasks-test-last-lines-2296
-schedule   0: exited:0       1259 steps  77ac62e2629d  run ed972a9e9fcc92e8
-schedule   1: exited:0       1297 steps  77ac62e2629d  run 0b04f208fd5984d0
-schedule   2: exited:0       1355 steps  77ac62e2629d  run 65ef3bbd77236338
+schedule   0: exited:0       1259 steps  77ac62e2629d  run 82d3549171f8e81d
+schedule   1: exited:0       1297 steps  77ac62e2629d  run 04b64b4f6de6f8c8
+schedule   2: exited:0       1355 steps  77ac62e2629d  run edc9b6b8f308ca8e
 ...
 0 of 256 perturbed schedules ended differently
 same result under all 257 schedules
@@ -323,23 +323,23 @@ it downloads:
   (10.0 KB) is the trace alone, enough for `rewind events`, `rewind log` and
   the app.
 - [devenv-task-output-race-replayable.rwd](https://github.com/fzakaria/rewindvm/releases/download/case-studies/devenv-task-output-race-replayable.rwd)
-  (180.1 MB) adds the kernel, the input image and the keyframes, so
+  (185.0 MB) adds the kernel, the input image and the keyframes, so
   `rewind replay`, `rewind gdb` and `rewind shell` work on it.
 
 ```console
 $ rewind import https://github.com/fzakaria/rewindvm/releases/download/case-studies/devenv-task-output-race-replayable.rwd
-$ rewind replay a25e89e0
-$ rewind gdb a25e89e0 1155
+$ rewind replay fc48fae0
+$ rewind gdb fc48fae0 1155
 $ rewind-app https://github.com/fzakaria/rewindvm/releases/download/case-studies/devenv-task-output-race.rwd
 ```
 
 How they were made:
 
 ```console
-$ rewind replay a25e89e0 --from 1150
-identical from the keyframe at step 768 to the end (1.76s)
-$ rewind export a25e89e0 --replayable -o devenv-task-output-race-replayable.rwd
-rewind: wrote devenv-task-output-race-replayable.rwd (180.1 MB)
-$ rewind export a25e89e0 -o devenv-task-output-race.rwd
+$ rewind replay fc48fae0 --from 1150
+identical from the keyframe at step 1141 to the end (0.44s)
+$ rewind export fc48fae0 --replayable -o devenv-task-output-race-replayable.rwd
+rewind: wrote devenv-task-output-race-replayable.rwd (185.0 MB)
+$ rewind export fc48fae0 -o devenv-task-output-race.rwd
 rewind: wrote devenv-task-output-race.rwd (10.0 KB)
 ```

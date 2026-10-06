@@ -86,19 +86,19 @@ DEVENV_FIGURE = """<div class="tour tour-article">
           <img
             src="../img/devenv-sigchld.png"
             width="1440"
-            height="616"
+            height="672"
             loading="lazy"
-            alt="The Rewind desktop app on the failing devenv run at step 1,166, compared with the passing run 698c7c84: the build log stops at running 1 test, SIGCHLD has reached thread 41, and the run diverged at step 1,162. Opens the full-size image."
+            alt="The Rewind desktop app on the failing devenv run at step 1,166, compared with the passing run c1819dea: the build log stops at running 1 test, SIGCHLD has reached thread 41, and the run diverged at step 1,162. Opens the full-size image."
           />
         </picture>
       </a>
-      <button type="button" class="pin pin-1" style="left: 90.3%; top: 16.3%" aria-label="1: the timeline">1</button>
-      <button type="button" class="pin pin-2" style="left: 20.8%; top: 50.8%" aria-label="2: the build log">2</button>
-      <button type="button" class="pin pin-3" style="left: 96.9%; top: 53.6%" aria-label="3: the step's event, SIGCHLD">3</button>
-      <button type="button" class="pin pin-4" style="left: 97.2%; top: 76.2%" aria-label="4: where the run diverged">4</button>
+      <button type="button" class="pin pin-1" style="left: 90.3%; top: 14.9%" aria-label="1: the timeline">1</button>
+      <button type="button" class="pin pin-2" style="left: 20.8%; top: 46.6%" aria-label="2: the build log">2</button>
+      <button type="button" class="pin pin-3" style="left: 96.9%; top: 49.1%" aria-label="3: the step's event, SIGCHLD">3</button>
+      <button type="button" class="pin pin-4" style="left: 97.2%; top: 59.7%" aria-label="4: where the run diverged">4</button>
     </div>
     <figcaption>
-      The app on the failing run a25e89e0 at step 1,166, compared with the passing run 698c7c84.
+      The app on the failing run fc48fae0 at step 1,166, compared with the passing run c1819dea.
     </figcaption>
   </figure>
   <ol class="tour-cards">
@@ -116,7 +116,7 @@ DEVENV_FIGURE = """<div class="tour tour-article">
     </li>
     <li class="tour-card" id="tour-4" tabindex="0">
       <h3>Divergence</h3>
-      <p>The run left 698c7c84 at step 1,162, where the shell starts the task's script.</p>
+      <p>The run left c1819dea at step 1,162, where the shell starts the task's script.</p>
     </li>
   </ol>
 </div>

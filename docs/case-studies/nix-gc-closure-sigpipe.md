@@ -52,9 +52,9 @@ rewind: packing 217 store paths for nix-functional-gc-closure-2.36pre20260912_20
 ...
 1/1 main - nix-functional-tests:gc-closure FAIL             0.26s   (exit status 141 or signal 13 SIGPIPE)
 ...
-rewind: run 07bff4b968c5a5f5 exited:1 after 33640 steps, 1.417s virtual, 12.960s wall (poweroff)
+rewind: run b34ebac24f05c690 exited:1 after 33640 steps, 1.417s virtual, 5.359s wall (poweroff)
 
-$ rewind replay 07bff4b9
+$ rewind replay b34ebac2
 identical: 6180 events over 33640 steps
 ```
 
@@ -64,7 +64,7 @@ first call, line 15 got the right value,
 the failure:
 
 ```console
-$ rewind events 07bff4b9 --from 33376 --to 33476
+$ rewind events b34ebac2 --from 33376 --to 33476
      33386   359/359   fork() = 416
      33389   416/416   fork() = 417
      33392   416/416   fork() = 418
@@ -77,7 +77,7 @@ $ rewind events 07bff4b9 --from 33376 --to 33476
      33458   359/359   SIGCHLD code=1 addr=0x0
      33471   359/359   exit_group(bash) exited:141
 
-$ rewind ps 07bff4b9 33414
+$ rewind ps b34ebac2 33414
 ...
    359       /nix/store/10dxp0qxqxxsyiljrh2kp0xqhz6arhcx-bash-5.3p15/bin/bash -x -e -u -o pipefail gc-closure.sh
    416         /nix/store/10dxp0qxqxxsyiljrh2kp0xqhz6arhcx-bash-5.3p15/bin/bash -x -e -u -o pipefail gc-closure.sh (fork)
@@ -95,8 +95,8 @@ The trace does not record writes into pipes, but the kernel counts them.
 ```console
 $ for step in 33441 33445 33451; do
 >   echo "step $step"
->   rewind cat 07bff4b9 $step /proc/417/io | grep -E '^(wchar|syscw)' | sed 's/^/  417 /'
->   rewind cat 07bff4b9 $step /proc/418/io | grep -E '^(wchar|syscw)' | sed 's/^/  418 /'
+>   rewind cat b34ebac2 $step /proc/417/io | grep -E '^(wchar|syscw)' | sed 's/^/  417 /'
+>   rewind cat b34ebac2 $step /proc/418/io | grep -E '^(wchar|syscw)' | sed 's/^/  418 /'
 > done
 step 33441
   417 wchar: 224
@@ -130,8 +130,8 @@ On the host, with the same bash 5.3.15 and the two store paths from the run:
 ```console
 $ export X=$'/build/nix-test/main/gc-closure/store/ij8qwx0m6dvpmggqmq8zmhbaiw6ym8pg-dependencies-input-2\n/build/nix-test/main/gc-closure/store/hw6dm6rpynd7hmhl1mnp0z4m28lfbx4b-dependencies-input-2-out2'
 $ strace -f -e trace=write -o /dev/stdout bash -c 'set -o pipefail; y=$(printf "%s" "$X" | cat)' | grep write
-3948546 write(1, "/build/nix-test/main/gc-closure/"..., 92) = 92
-3948546 write(1, "/build/nix-test/main/gc-closure/"..., 96) = 96
+153665 write(1, "/build/nix-test/main/gc-closure/"..., 92) = 92
+153665 write(1, "/build/nix-test/main/gc-closure/"..., 96) = 96
 ```
 
 That is because bash makes its own standard output line-buffered when it
@@ -163,8 +163,8 @@ Under Rewind, on the build of Nix master:
 
 ```console
 $ rewind check --all --schedules 256 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-git-gc-closure'
-schedule   0: exited:1      33640 steps    run 07bff4b968c5a5f5
-schedule   1: exited:0      89507 steps  a50a5ab6d992  run 3a983392843b307f
+schedule   0: exited:1      33640 steps    run b34ebac24f05c690
+schedule   1: exited:0      89507 steps  a50a5ab6d992  run cd500b3a6372553f
 ...
 schedule 0 failed; 256 of 256 perturbed schedules ended differently
 
@@ -172,8 +172,8 @@ schedule 1 passes where schedule 0 fails; narrowing the steps it perturbs
 perturbing only steps 31713..36075 still ends differently
 step 36074 decides it: a reschedule there makes the run pass
 
-passing: run 2a5867d1e68d5077, schedule 1 over steps 31713..36075
-failing: run 7a139e98c78958d5, schedule 1 over steps 31713..36074
+passing: run da7e3e7b2369f89c, schedule 1 over steps 31713..36075
+failing: run eba86a81a195ddc6, schedule 1 over steps 31713..36074
 the two are the same run until step 36074
 
 where /nix/store/10dxp0qxqxxsyiljrh2kp0xqhz6arhcx-bash-5.3p15/bin/bash -x -e -u -o pipefail gc-closure.sh first behaves differently:
@@ -189,7 +189,7 @@ where /nix/store/10dxp0qxqxxsyiljrh2kp0xqhz6arhcx-bash-5.3p15/bin/bash -x -e -u 
   passing       70891   534/534   exit_group(bash) exited:0
   passing       70893   359/359   SIGCHLD code=1 addr=0x0
 
-open both in the desktop app: rewind open 7a139e98c78958d5 70885 --compare 2a5867d1e68d5077
+open both in the desktop app: rewind open eba86a81a195ddc6 70885 --compare da7e3e7b2369f89c
 ```
 
 Only schedule 0 fails. All 256 perturbed schedules pass: the unperturbed
@@ -216,9 +216,9 @@ each with SIGPIPE:
 ```console
 $ rewind check --all --schedules 1024 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-gc-closure'
 ...
-schedule 829: exited:1      58704 steps    run 4e21b8bab36d4d21
+schedule 829: exited:1      58704 steps    run 17d2961bb4852861
 ...
-schedule 938: exited:1      37996 steps    run a98ddce9d787b2ba
+schedule 938: exited:1      37996 steps    run 3ba52f9fc50ffb4a
 ...
 2 of 1024 perturbed schedules ended differently
 ```
@@ -258,8 +258,8 @@ pass, including schedule 0:
 
 ```console
 $ rewind check --all 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-git-gc-closure-fixed'
-schedule   0: exited:0      79733 steps  a50a5ab6d992  run 48be04bc79674105
-schedule   1: exited:0      89241 steps  a50a5ab6d992  run 7f2fb75666e75ddd
+schedule   0: exited:0      79733 steps  a50a5ab6d992  run f5d0c0e4fe8946cc
+schedule   1: exited:0      89241 steps  a50a5ab6d992  run 6e68b2180ef1ab5a
 ...
 0 of 64 perturbed schedules ended differently
 same result under all 65 schedules
@@ -279,26 +279,26 @@ desktop app (`rewind-app`) take either one, by path or URL, and unpack it as
 it downloads:
 
 - [nix-gc-closure-sigpipe.rwd](https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-gc-closure-sigpipe.rwd)
-  (71.3 KB) is the trace alone, enough for `rewind events`, `rewind log` and
+  (71.4 KB) is the trace alone, enough for `rewind events`, `rewind log` and
   the app.
 - [nix-gc-closure-sigpipe-replayable.rwd](https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-gc-closure-sigpipe-replayable.rwd)
-  (555.6 MB) adds the kernel, the input image and the keyframes, so
+  (530.9 MB) adds the kernel, the input image and the keyframes, so
   another AMD machine from Zen 2 on can `rewind replay` and `rewind shell` it.
 
 ```console
 $ rewind import https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-gc-closure-sigpipe-replayable.rwd
-$ rewind replay 07bff4b9
-$ rewind shell 07bff4b9 <step>
+$ rewind replay b34ebac2
+$ rewind shell b34ebac2 <step>
 $ rewind-app https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-gc-closure-sigpipe.rwd
 ```
 
 How they were made:
 
 ```console
-$ rewind export 07bff4b9 --replayable -o nix-gc-closure-sigpipe-replayable.rwd
-rewind: wrote nix-gc-closure-sigpipe-replayable.rwd (555.6 MB)
-$ rewind export 07bff4b9 -o nix-gc-closure-sigpipe.rwd
-rewind: wrote nix-gc-closure-sigpipe.rwd (71.3 KB)
+$ rewind export b34ebac2 --replayable -o nix-gc-closure-sigpipe-replayable.rwd
+rewind: wrote nix-gc-closure-sigpipe-replayable.rwd (530.9 MB)
+$ rewind export b34ebac2 -o nix-gc-closure-sigpipe.rwd
+rewind: wrote nix-gc-closure-sigpipe.rwd (71.4 KB)
 ```
 
 Imported into an empty `REWIND_HOME`, the replayable export replays
@@ -306,11 +306,11 @@ identically from boot and from a keyframe:
 
 ```console
 $ rewind import nix-gc-closure-sigpipe-replayable.rwd
-07bff4b968c5a5f5  exited:1         33640 steps  nix-functional-gc-closure-2.36pre20260912_203f85b2
-$ rewind replay 07bff4b9
+b34ebac24f05c690  exited:1         33640 steps  nix-functional-gc-closure-2.36pre20260912_203f85b2
+$ rewind replay b34ebac2
 identical: 6180 events over 33640 steps
-$ rewind replay 07bff4b9 --from 33000
-identical from the keyframe at step 30621 to the end (1.93s)
+$ rewind replay b34ebac2 --from 33000
+identical from the keyframe at step 29162 to the end (1.64s)
 ```
 
 ## Reproducing it
