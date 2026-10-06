@@ -333,6 +333,56 @@ let
           -o $out/bin/pool main.c pool.c
       '';
 
+  # A root with a static program whose two threads add to a total without
+  # a lock: each reads it, writes a dot, which is an exit a schedule can
+  # reschedule at, and stores what it read plus one. A reschedule between
+  # the read and the store loses an add, and the program exits 1. The
+  # source is in the root under /src, the directory its DWARF names.
+  raceRoot =
+    pkgs.runCommand "rewind-race-root"
+      {
+        nativeBuildInputs = [ pkgs.pkgsStatic.stdenv.cc ];
+        dontStrip = true;
+      }
+      ''
+        mkdir -p $out/bin $out/src
+        cd $out/src
+        cat > race.c <<'EOF'
+        #include <pthread.h>
+        #include <stdio.h>
+        #include <unistd.h>
+
+        #define WORKERS 2
+        #define ADDS 10
+
+        static long total;
+
+        static void *add(void *arg)
+        {
+          for (int i = 0; i < ADDS; i++) {
+            long seen = total;
+            write(1, ".", 1); /* the exit */
+            total = seen + 1;
+          }
+          return 0;
+        }
+
+        int main(void)
+        {
+          pthread_t t[WORKERS];
+
+          for (int i = 0; i < WORKERS; i++)
+            pthread_create(&t[i], 0, add, 0);
+          for (int i = 0; i < WORKERS; i++)
+            pthread_join(t[i], 0);
+          printf("\ntotal %ld\n", total);
+          return total != WORKERS * ADDS;
+        }
+        EOF
+        $CC -static -O1 -g -pthread -fdebug-prefix-map=$out/src=/src \
+          -o $out/bin/race race.c
+      '';
+
   # Background jobs racing through a pipe, the kernel's RNG, and a sleep:
   # everything that would differ between two runs of an ordinary VM.
   workload = ''
@@ -1089,6 +1139,45 @@ in
         test -d $REWIND_HOME/cache/sources/$id
         rewind remove pool
         test ! -e $REWIND_HOME/cache/sources/$id
+        touch $out
+      '';
+
+  # checks.check-where: `rewind check --where` says where the threads
+  # were when a schedule ends differently: the thread on the CPU at the
+  # step that decides it, and the thread of the failing run's first event
+  # that differs, each by a function and a line of race.c, in its text and
+  # in its JSON. Boots the VM, so it needs /dev/kvm.
+  check-where =
+    pkgs.runCommand "rewind-check-where"
+      {
+        nativeBuildInputs = [
+          rewind
+          pkgs.gdb
+          pkgs.jq
+        ];
+        requiredSystemFeatures = [ "kvm" ];
+      }
+      ''
+        export REWIND_HOME=$TMPDIR/rewind
+        # No debuginfod server: without a network, each of gdb's questions
+        # to it waits out a timeout.
+        export REWIND_DEBUGINFOD=/nonexistent
+
+        # check exits 1 when a schedule ends differently, which is what
+        # this needs.
+        ! rewind check --where -j 4 --clock exits --root ${raceRoot} -- /bin/race > found
+        cat found
+        grep -q ' decides it: ' found
+        # A reschedule decides it only where a thread is between its read
+        # and its store, in the write: add, at that line, not the C
+        # library's inline write it calls.
+        exit_line=$(grep -n 'the exit' ${raceRoot}/src/race.c | cut -d: -f1)
+        thread='^ +[0-9]+ +[0-9]+/[0-9]+ +'
+        grep -qE "$thread"'add \(race\.c:'"$exit_line"'\), on the CPU at the deciding step$' found
+        grep -qE "$thread"'[a-z_]+ \(race\.c:[0-9]+\), at the first event that differs$' found
+
+        ! rewind check --where --json -j 4 --clock exits --root ${raceRoot} -- /bin/race > found.json
+        jq -e '.narrowed.threads | length == 2 and all(.frame.file == "race.c")' found.json
         touch $out
       '';
 

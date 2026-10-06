@@ -15,6 +15,7 @@ use rewind_core::{
 };
 use rewind_init::{Job, Output, Root};
 use rewind_trace::compare::Comparison;
+use rewind_trace::located::Located;
 
 use crate::{
     RUN_HELP, RUN_LONG_HELP, STEP_HELP, STEP_LONG_HELP, Terminal, clear_status, json, locate, show,
@@ -141,6 +142,15 @@ pub struct CheckArgs {
     /// where they part when one ended differently.
     #[arg(long)]
     pub(crate) json: bool,
+    /// When a schedule ends differently, also show where its threads
+    /// were, as `rewind where` finds them: the line of the program's own
+    /// code the thread on the CPU at the deciding step was on, and the one
+    /// the thread of the failing run's first differing event was on.
+    ///
+    /// Each takes a fork and gdb, a few seconds, and the first time for a
+    /// build gdb may wait for its debug info to download.
+    #[arg(long = "where")]
+    pub(crate) show_where: bool,
     #[command(flatten)]
     pub(crate) machine: MachineArgs,
 }
@@ -153,6 +163,7 @@ pub fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
         all,
         jobs,
         json,
+        show_where,
         mut machine,
     } = args;
     // Lines as the search goes, unless it ends in one JSON object.
@@ -375,6 +386,37 @@ pub fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
     // passing one, as the app shows it.
     let (pt, ft) = (passing.trace()?, failing.trace()?);
     let comparison = Comparison::of(ft, failing.last_step()?, pt, passing.last_step()?);
+
+    // Where the threads involved were, when asked: the one on the CPU at
+    // the deciding step, and the one of the failing run's first event that
+    // differs. A lookup that fails says why in its place.
+    let threads: Vec<(locate::Involved, u64, Result<Located>)> = if show_where {
+        let first = comparison
+            .point
+            .as_ref()
+            .and_then(|p| p.here)
+            .and_then(|side| ft.events.get(side.index));
+        let mut asked = vec![(locate::Involved::AtTheDecidingStep, deciding, (None, None))];
+        if let Some(event) = first {
+            asked.push((
+                locate::Involved::AtTheFirstDifference,
+                event.step,
+                (Some(event.pid), Some(event.tid)),
+            ));
+        }
+        asked
+            .into_iter()
+            .map(|(involved, step, thread)| {
+                (
+                    involved,
+                    step,
+                    locate::located(home, &failing, step, thread),
+                )
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     if json {
         let narrowed = serde_json::json!({
             "schedule": machine.schedule,
@@ -385,6 +427,7 @@ pub fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
             "failing": json::run(&failing)?,
             "program": comparison.program,
             "divergence": json::comparison(ft, pt, &comparison),
+            "threads": threads.iter().map(|(involved, step, answer)| thread_json(*involved, *step, answer)).collect::<Vec<_>>(),
         });
         println!("{}", search(narrowed));
         return Ok(ExitCode::FAILURE);
@@ -408,6 +451,15 @@ pub fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
         "{}",
         show::comparison((ft, "failing"), (pt, "passing"), &comparison)
     );
+    if !threads.is_empty() {
+        println!("\nwhere the threads were:");
+    }
+    for (involved, step, answer) in &threads {
+        match answer {
+            Ok(answer) => println!("{}", locate::thread_line(answer, *involved)),
+            Err(e) => println!("  {step:>10}   {e:#}"),
+        }
+    }
     let open = open_line(
         &failing.manifest.id,
         comparison.step(),
@@ -415,6 +467,34 @@ pub fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
     );
     println!("\nopen both in the desktop app: {open}");
     Ok(ExitCode::FAILURE)
+}
+
+/// One thread `rewind check --where` names, for its JSON: why, the step,
+/// and the thread's frame in the program's own code, or why the lookup
+/// failed.
+fn thread_json(
+    involved: locate::Involved,
+    step: u64,
+    answer: &Result<Located>,
+) -> serde_json::Value {
+    let why = match involved {
+        locate::Involved::AtTheDecidingStep => "deciding_step",
+        locate::Involved::AtTheFirstDifference => "first_difference",
+    };
+    match answer {
+        Err(e) => serde_json::json!({ "why": why, "step": step, "error": format!("{e:#}") }),
+        Ok(a) => {
+            let frame = a.chosen.and_then(|i| a.frames.get(i));
+            serde_json::json!({
+                "why": why,
+                "step": step,
+                "pid": a.pid,
+                "tid": a.tid,
+                "process": a.process,
+                "frame": frame,
+            })
+        }
+    }
 }
 
 /// The arguments of `rewind fork`.

@@ -65,23 +65,8 @@ pub fn locate(
     callers: usize,
     format: Format,
 ) -> Result<ExitCode> {
-    let pick = thread_at(run.trace()?, step, pid, tid)?;
-    let needs = Needs::Tasks("`rewind where` cannot find threads".into());
-    let machine = gdb::fork(home, run, step, needs)?;
-    let (pid, tid) = match pick {
-        Pick::Thread { pid, tid } => (pid, tid),
-        Pick::OnTheCpu => match gdb::on_the_cpu(&machine)? {
-            Some(OnTheCpu::Thread { pid, tid }) => (pid, tid),
-            Some(OnTheCpu::WithoutMemory { tid, name }) => bail!(
-                "at step {step} the CPU ran {name} ({tid}) with no memory of its own: a kernel \
-                 thread, or a process exiting; give --pid"
-            ),
-            Some(OnTheCpu::Idle) | None => {
-                bail!("at step {step} the CPU was idle, in no process; give --pid")
-            }
-        },
-    };
-    let answer = walk(home, run, step, machine, pid, tid)?;
+    let answer = located(home, run, step, (pid, tid))?;
+    let (pid, tid) = (answer.pid, answer.tid);
     match format {
         Format::Json => println!("{}", serde_json::to_string(&answer)?),
         Format::Text => {
@@ -109,6 +94,66 @@ pub fn locate(
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Where thread `tid` of process `pid` was at `step` of `run`, by default
+/// the thread of the step's own event, else the one on the CPU: its frames,
+/// the one in the program's own code, and their source.
+pub fn located(
+    home: &Home,
+    run: &Run,
+    step: u64,
+    (pid, tid): (Option<u32>, Option<u32>),
+) -> Result<Located> {
+    let pick = thread_at(run.trace()?, step, pid, tid)?;
+    let needs = Needs::Tasks("`rewind where` cannot find threads".into());
+    let machine = gdb::fork(home, run, step, needs)?;
+    let (pid, tid) = match pick {
+        Pick::Thread { pid, tid } => (pid, tid),
+        Pick::OnTheCpu => match gdb::on_the_cpu(&machine)? {
+            Some(OnTheCpu::Thread { pid, tid }) => (pid, tid),
+            Some(OnTheCpu::WithoutMemory { tid, name }) => bail!(
+                "at step {step} the CPU ran {name} ({tid}) with no memory of its own: a kernel \
+                 thread, or a process exiting; give --pid"
+            ),
+            Some(OnTheCpu::Idle) | None => {
+                bail!("at step {step} the CPU was idle, in no process; give --pid")
+            }
+        },
+    };
+    walk(home, run, step, machine, pid, tid)
+}
+
+/// Which thread of a failure `rewind check --where` names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Involved {
+    /// The thread on the CPU at the step that decides how the run ends.
+    AtTheDecidingStep,
+    /// The thread of the failing run's first event that differs.
+    AtTheFirstDifference,
+}
+
+/// A line of `rewind check --where`: the thread `answer` describes, by the
+/// frame in the program's own code it was in, else its innermost one, and
+/// why it is named.
+pub fn thread_line(answer: &Located, involved: Involved) -> String {
+    let frame = answer
+        .chosen
+        .or((!answer.frames.is_empty()).then_some(0))
+        .map(|i| &answer.frames[i]);
+    let place = match frame {
+        None => "no frame names a function".to_string(),
+        Some(f) if f.place_label().is_empty() => f.function_label(),
+        Some(f) => format!("{} ({})", f.function_label(), f.place_label()),
+    };
+    let why = match involved {
+        Involved::AtTheDecidingStep => "on the CPU at the deciding step",
+        Involved::AtTheFirstDifference => "at the first event that differs",
+    };
+    format!(
+        "  {:>10}   {}/{}   {place}, {why}",
+        answer.step, answer.pid, answer.tid
+    )
 }
 
 /// Thread `tid`'s frames on `machine`, a fork of `run` at `step`, with
@@ -395,12 +440,21 @@ const LIBRARY_SOURCES: &[&str] = &[
     "/.cargo/git/",
 ];
 
+/// Where the system's headers are, whose inline functions, such as the C
+/// library's fortified `write`, are compiled into the program without
+/// being its code: a Nix package's top-level include directory, or the
+/// system's. A project's own headers sit deeper in its sources.
+const SYSTEM_HEADERS: &str = "/usr/include/";
+const STORE: &str = "/nix/store/";
+const PACKAGE_HEADERS: &str = "include";
+
 /// What frame choice asks of a frame.
 trait Choice {
     fn address(&self) -> Option<u64>;
     fn in_user_space(&self) -> bool;
     fn in_system_library(&self) -> bool;
     fn in_library_source(&self) -> bool;
+    fn in_system_header(&self) -> bool;
     fn own_code(&self) -> bool;
 }
 
@@ -432,15 +486,33 @@ impl Choice for Frame {
             .any(|path| LIBRARY_SOURCES.iter().any(|dir| path.contains(dir)))
     }
 
+    /// Whether the frame's source is a system header: in the system's
+    /// include directory, or in a store package's own.
+    fn in_system_header(&self) -> bool {
+        [&self.file, &self.fullname]
+            .into_iter()
+            .flatten()
+            .any(|path| {
+                if path.starts_with(SYSTEM_HEADERS) {
+                    return true;
+                }
+                let Some(in_store) = path.strip_prefix(STORE) else {
+                    return false;
+                };
+                in_store.split('/').nth(1) == Some(PACKAGE_HEADERS)
+            })
+    }
+
     /// Whether the frame is the program's own code: user space, with a
-    /// source line, outside the system's libraries and other code's
-    /// sources.
+    /// source line, outside the system's libraries and headers and other
+    /// code's sources.
     fn own_code(&self) -> bool {
         self.in_user_space()
             && self.file.is_some()
             && self.line.is_some()
             && !self.in_system_library()
             && !self.in_library_source()
+            && !self.in_system_header()
     }
 }
 
@@ -638,6 +710,43 @@ mod tests {
     // dependencies, and a stack with nothing of the program's own.
     use super::*;
 
+    #[test]
+    fn a_thread_line_names_its_function_line_and_why() {
+        // The chosen frame, the program's own, is named with its source
+        // line, past the C library's frames inside it; a thread whose stack
+        // gave no frames says so.
+        let answer = Located {
+            run: "5c910df9774b38f2".into(),
+            step: 5139,
+            pid: 166,
+            tid: 166,
+            process: "test_pool_shutdown".into(),
+            frames: frames(
+                r#"[
+                {"level": 0, "function": "__GI___clock_nanosleep", "file": "clock_nanosleep.c",
+                 "fullname": null, "line": 48, "pc": "0x7f0", "object": "/lib/libc.so.6"},
+                {"level": 5, "function": "main", "file": "tests/test_pool_shutdown.c",
+                 "fullname": null, "line": 23, "pc": "0x5a0", "object": "/build/t"}
+            ]"#,
+            ),
+            chosen: Some(1),
+            files: BTreeMap::new(),
+        };
+        assert_eq!(
+            thread_line(&answer, Involved::AtTheDecidingStep),
+            "        5139   166/166   main (tests/test_pool_shutdown.c:23), on the CPU at the deciding step"
+        );
+        let bare = Located {
+            frames: Vec::new(),
+            chosen: None,
+            ..answer
+        };
+        assert_eq!(
+            thread_line(&bare, Involved::AtTheFirstDifference),
+            "        5139   166/166   no frame names a function, at the first event that differs"
+        );
+    }
+
     /// A frame list as JSON, the way the gdb script prints it.
     fn frames(json: &str) -> Vec<Frame> {
         serde_json::from_str(json).unwrap()
@@ -671,6 +780,36 @@ mod tests {
         ]"#,
         );
         assert_eq!(chosen(&stack), Some(3));
+    }
+
+    /// A system header's inline function, such as the C library's
+    /// fortified `write`, is compiled into the program but is not its
+    /// code: the program's function that called it is chosen. A project's
+    /// own headers, under an include directory deeper in its sources, are
+    /// still its code.
+    #[test]
+    fn system_headers_inlined_into_the_program_are_passed_over() {
+        let stack = frames(
+            r#"[
+            {"level":0,"function":"__syscall_cp_c","file":null,"fullname":null,"line":null,"pc":"0x401920","object":"/newroot/bin/race"},
+            {"level":1,"function":"write","file":"/nix/store/gs38hik78n8wz9ylhhrbp7210zcr1dzp-fortify-headers-3.0.1/include/unistd.h","fullname":null,"line":185,"pc":"0x401155","object":"/newroot/bin/race"},
+            {"level":2,"function":"add","file":"race.c","fullname":"/newroot/src/race.c","line":15,"pc":"0x401155","object":"/newroot/bin/race"}
+        ]"#,
+        );
+        assert_eq!(chosen(&stack), Some(2));
+        let glibc = frames(
+            r#"[
+            {"level":0,"function":"strlen","file":"/usr/include/x86_64-linux-gnu/bits/string_fortified.h","fullname":null,"line":40,"pc":"0x401000","object":"/src/app"},
+            {"level":1,"function":"run","file":"app.c","fullname":null,"line":9,"pc":"0x401010","object":"/src/app"}
+        ]"#,
+        );
+        assert_eq!(chosen(&glibc), Some(1));
+        let own_header = frames(
+            r#"[
+            {"level":0,"function":"nix::Store::parseStorePath","file":"/nix/store/aaa-source/src/libstore/include/nix/store/store-api.hh","fullname":null,"line":300,"pc":"0x401000","object":"/bin/nix"}
+        ]"#,
+        );
+        assert_eq!(chosen(&own_header), Some(0));
     }
 
     /// With none of the program's own code on the stack, the innermost
