@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "marks": [
+    {
+      "step": 5,
+      "note": "five"
+    },
+    {
+      "step": 70,
+      "note": ""
+    }
+  ]
+}

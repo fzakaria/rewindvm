@@ -196,6 +196,40 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// The sample of the current format, under formats/, which never
+    /// changes once released, and the FNV-1a hash it is pinned to.
+    const SAMPLE: &[u8] = include_bytes!("../formats/bookmarks-1.json");
+    const SAMPLE_FNV: u64 = 0xf84d_ae13_d071_594c;
+
+    fn fnv1a(bytes: &[u8]) -> u64 {
+        const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+        const PRIME: u64 = 0x0000_0100_0000_01b3;
+        bytes
+            .iter()
+            .fold(OFFSET, |h, b| (h ^ u64::from(*b)).wrapping_mul(PRIME))
+    }
+
+    #[test]
+    fn the_bookmarks_sample_reads_and_writes_back() {
+        // The sample of this version is as checked in, reads, and saves
+        // back as the same bytes; changing the format without a new
+        // version, or editing the sample, fails here. A new version adds a
+        // sample of its own beside this one.
+        assert_eq!(
+            BOOKMARKS_VERSION, 1,
+            "add formats/bookmarks-{BOOKMARKS_VERSION}.json"
+        );
+        assert_eq!(fnv1a(SAMPLE), SAMPLE_FNV, "a released sample never changes");
+        let dir = temp_dir("sample");
+        fs::write(dir.join(BOOKMARKS_FILE), SAMPLE).unwrap();
+        let b = Bookmarks::load(&dir);
+        assert_eq!(b.len(), 2);
+        fs::remove_file(dir.join(BOOKMARKS_FILE)).unwrap();
+        b.save(&dir).unwrap();
+        assert_eq!(fs::read(dir.join(BOOKMARKS_FILE)).unwrap(), SAMPLE);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn a_bookmarks_file_names_its_format_and_is_kept_when_unread() {
         // Bookmarks save under the version of their format and read back.
