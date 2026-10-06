@@ -237,6 +237,16 @@ pub fn outcome_line(run: &Run) -> anyhow::Result<String> {
     ))
 }
 
+/// A run's schedule for `rewind check`'s report: schedule 0, or a seed
+/// and the steps it perturbs.
+pub fn schedule_words(spec: &rewind_core::Spec) -> String {
+    match (spec.schedule, spec.window()) {
+        (0, _) => "schedule 0".into(),
+        (seed, Some((from, until))) => format!("schedule {seed} over steps {from}..{until}"),
+        (seed, None) => format!("schedule {seed} from step {}", spec.schedule_from),
+    }
+}
+
 /// One event, in the syscall-ish notation the scrubber uses.
 pub fn event(e: &Event) -> String {
     let what = match &e.kind {
@@ -372,6 +382,21 @@ mod tests {
     // nix-daemon fails such a build, so Rewind calls it missing-output
     // rather than exited:0.
     use super::*;
+
+    use crate::reproduce::tests::{job, spec};
+
+    #[test]
+    fn a_schedule_reads_as_its_seed_and_window() {
+        // Schedule 0 is just that; a seed names the steps it perturbs, as
+        // a window or from a step on.
+        let mut s = spec(job(&["sh"], &[], "/"));
+        assert_eq!(schedule_words(&s), "schedule 0");
+        s.schedule = 6;
+        s.schedule_from = 3629;
+        assert_eq!(schedule_words(&s), "schedule 6 from step 3629");
+        s.schedule_until = 5140;
+        assert_eq!(schedule_words(&s), "schedule 6 over steps 3629..5140");
+    }
 
     const OUT: &str = "/nix/store/0000000000000000000000000000000b-x";
     const DEV: &str = "/nix/store/0000000000000000000000000000000c-x-dev";

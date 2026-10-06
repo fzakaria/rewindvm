@@ -21,6 +21,8 @@ pub const TIMER_SLACK_NS: u64 = 50_000;
 /// stretches like these, and many races need one task held up for a
 /// while rather than switched away from for an instant.
 const STALL_ONE_IN: u64 = 128;
+
+const NS_PER_US: u64 = 1_000;
 pub const STALL_MIN_NS: u64 = 10_000;
 pub const STALL_DOUBLINGS: u64 = 8;
 
@@ -109,6 +111,25 @@ impl Schedule {
         let h = mix(mix(seed ^ 0x57a1) ^ step);
         h.is_multiple_of(STALL_ONE_IN)
             .then(|| STALL_MIN_NS << ((h / STALL_ONE_IN) % STALL_DOUBLINGS))
+    }
+
+    /// What the seed does at `step`, in words: "a reschedule", "a 160 µs
+    /// stall", both, or "a timer 23.4 µs late". A step's timer is late only
+    /// if the guest arms one at that exit, which only the monitor sees, so
+    /// a late timer is named only for a step that carries nothing else.
+    pub fn words_at(&self, step: u64) -> String {
+        let mut parts = Vec::new();
+        if self.preempt_at(step) {
+            parts.push("a reschedule".to_string());
+        }
+        if let Some(ns) = self.stall_at(step) {
+            parts.push(format!("a {} µs stall", ns / NS_PER_US));
+        }
+        if parts.is_empty() {
+            let late = self.slack_at(step) as f64 / NS_PER_US as f64;
+            parts.push(format!("a timer {late:.1} µs late"));
+        }
+        parts.join(" and ")
     }
 
     /// Extra delay for a timer armed at `step`.
@@ -246,5 +267,32 @@ mod tests {
         assert_eq!(none.same_through(&none), u64::MAX);
         assert_eq!(none.same_through(&parent), 999);
         assert_eq!(fork_of_fork().same_through(&fork_of_fork()), u64::MAX);
+    }
+
+    #[test]
+    fn a_step_reads_as_what_the_seed_does_there() {
+        // A reschedule or a stall where the seed asks for one, both where
+        // it asks for both, and a late timer only where it asks for
+        // neither, since only the monitor sees whether a timer was armed.
+        let s = Schedule {
+            seed: 4,
+            window: 0..u64::MAX,
+            earlier: Vec::new(),
+        };
+        let find = |f: &dyn Fn(u64) -> bool| (0..100_000).find(|&step| f(step)).unwrap();
+        let reschedule = find(&|st| s.preempt_at(st) && s.stall_at(st).is_none());
+        assert_eq!(s.words_at(reschedule), "a reschedule");
+        let stall = find(&|st| !s.preempt_at(st) && s.stall_at(st).is_some());
+        let us = s.stall_at(stall).unwrap() / NS_PER_US;
+        assert_eq!(s.words_at(stall), format!("a {us} µs stall"));
+        let both = find(&|st| s.preempt_at(st) && s.stall_at(st).is_some());
+        let us = s.stall_at(both).unwrap() / NS_PER_US;
+        assert_eq!(
+            s.words_at(both),
+            format!("a reschedule and a {us} µs stall")
+        );
+        let timer = find(&|st| !s.preempt_at(st) && s.stall_at(st).is_none() && s.slack_at(st) > 0);
+        let late = s.slack_at(timer) as f64 / NS_PER_US as f64;
+        assert_eq!(s.words_at(timer), format!("a timer {late:.1} µs late"));
     }
 }

@@ -162,7 +162,7 @@ fn timed_out_after(m: &Manifest) -> Option<u64> {
 pub struct Unset(pub String);
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     // Commands for manifests built by hand: a command in a root
     // filesystem with every machine option away from its default, a Nix
     // build with them all at their defaults, and a fork.
@@ -171,7 +171,7 @@ mod tests {
     use rewind_core::run::{RunOutcome, ScheduleSegment};
     use rewind_init::{Job, Root};
 
-    fn spec(job: Job) -> Spec {
+    pub(crate) fn spec(job: Job) -> Spec {
         Spec {
             kernel: "/k".into(),
             initrd: "/i".into(),
@@ -196,7 +196,7 @@ mod tests {
         }
     }
 
-    fn job(argv: &[&str], env: &[(&str, &str)], cwd: &str) -> Job {
+    pub(crate) fn job(argv: &[&str], env: &[(&str, &str)], cwd: &str) -> Job {
         Job {
             program: None,
             argv: argv.iter().map(|a| a.to_string()).collect(),

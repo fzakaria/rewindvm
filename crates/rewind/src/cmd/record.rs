@@ -341,15 +341,31 @@ pub fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
     let narrowed = rewind_core::check::narrow((start, end), jobs, worst, probe_all, differs)?;
     let (lo, until, worst) = (narrowed.from, narrowed.until, narrowed.run);
     clear_status();
+
+    // The window's last step decides how the run ends. The window one step
+    // shorter ends like schedule 0 and is the same run until that step, so
+    // it is the run to compare with; a window of one step leaves schedule
+    // 0 itself.
+    let deciding = until - 1;
+    let words = worst.manifest.spec.schedule().words_at(deciding);
+    let makes = if base_failed { "pass" } else { "fail" };
     say(format!(
-        "perturbing only steps {lo}..{until} still ends differently\n"
+        "perturbing only steps {lo}..{until} still ends differently"
     ));
-    let base = base.add_keyframes(home)?;
-    let worst = worst.add_keyframes(home)?;
+    say(format!(
+        "step {deciding} decides it: {words} there makes the run {makes}\n"
+    ));
+    let partner = narrowed.without_last.unwrap_or(base);
+    let (worst, partner) = std::thread::scope(|scope| {
+        let worst = scope.spawn(|| worst.add_keyframes(home));
+        let partner = partner.add_keyframes(home);
+        (worst.join().expect("taking keyframes panicked"), partner)
+    });
+    let (worst, partner) = (worst?, partner?);
     let (passing, failing) = if base_failed {
-        (worst, base)
+        (worst, partner)
     } else {
-        (base, worst)
+        (partner, worst)
     };
     // Where the failing run first behaves differently from the
     // passing one, as the app shows it.
@@ -360,6 +376,7 @@ pub fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
             "schedule": machine.schedule,
             "from": lo,
             "until": until,
+            "deciding_step": deciding,
             "passing": json::run(&passing)?,
             "failing": json::run(&failing)?,
             "program": comparison.program,
@@ -368,8 +385,17 @@ pub fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
         println!("{}", search(narrowed));
         return Ok(ExitCode::FAILURE);
     }
-    println!("passing: run {}", passing.manifest.id);
-    println!("failing: run {}", failing.manifest.id);
+    println!(
+        "passing: run {}, {}",
+        passing.manifest.id,
+        show::schedule_words(&passing.manifest.spec)
+    );
+    println!(
+        "failing: run {}, {}",
+        failing.manifest.id,
+        show::schedule_words(&failing.manifest.spec)
+    );
+    println!("the two are the same run until step {deciding}");
 
     // Where they part, in words, and the failing run's step there,
     // where the app opens it beside the passing one.
