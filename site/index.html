@@ -111,6 +111,11 @@
             <div class="timeline">
               <div class="track" id="track">
                 <div class="segments" id="segments"></div>
+                <div
+                  class="flag split"
+                  id="mark-split"
+                  title="Step 11,030: only this run has a reschedule"
+                ></div>
                 <div class="flag divergence" id="mark-divergence" title="First divergence"></div>
                 <div class="flag failure" id="mark-failure" title="Failure"></div>
                 <div class="flag fork" id="mark-fork" hidden title="Fork"></div>
@@ -306,8 +311,9 @@
             <li class="tour-card" id="tour-1" tabindex="0">
               <h3>The timeline</h3>
               <p>
-                The run's phases, the playhead, where the failing run left the passing one, and the
-                failure. Drag to any step, or jump to the divergence or the failure.
+                The run's phases, the playhead, the step where the two runs' schedules part, dashed,
+                where the failing run then left the passing one, and the failure. Drag to any step,
+                or jump to the divergence or the failure.
               </p>
             </li>
             <li class="tour-card" id="tour-2" tabindex="0">
@@ -329,8 +335,8 @@
             <li class="tour-card" id="tour-5" tabindex="0">
               <h3>Fork from here</h3>
               <p>
-                Branch at the playhead under a new schedule, reschedule requests plus up to 50
-                &micro;s of timer slack, so the threads interleave differently from there on.
+                Branch at the playhead under a new schedule, reschedule requests, stalls and up to
+                50 &micro;s of timer slack, so the threads interleave differently from there on.
               </p>
             </li>
             <li class="tour-card" id="tour-6" tabindex="0">
@@ -363,7 +369,7 @@
                 <dt>flaky tests</dt>
                 <dd>
                   <code>rewind check</code> reruns the command under perturbed schedules until one
-                  ends differently, then narrows the perturbation to the steps that matter.
+                  ends differently, then names the step whose reschedule decides it.
                 </dd>
               </div>
               <div>
@@ -415,7 +421,8 @@
                 <dd>
                   <code>nix build --check</code> says the output "may not be deterministic".
                   <code>rewind check</code> builds under perturbed schedules, stops at the first
-                  build that ends differently, and shows where the two runs part.
+                  build that ends differently, and names the step that decides it: without that one
+                  perturbation, the build passes.
                 </dd>
               </div>
               <div>

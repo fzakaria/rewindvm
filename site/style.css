@@ -461,6 +461,13 @@ a:focus-visible {
 .flag.divergence {
   background: var(--blue);
 }
+.flag.split {
+  width: 2px;
+  background: repeating-linear-gradient(
+    var(--blue) 0 4px,
+    transparent 4px 7px
+  );
+}
 .flag.failure {
   width: 3px;
   background: var(--red);

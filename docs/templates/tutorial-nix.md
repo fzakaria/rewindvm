@@ -94,16 +94,22 @@ $ rewind check --epoch {{epoch}} {{flake}}
 <!-- capture narrowed: schedule (\d+) ends differently -->
 <!-- capture window_from: perturbing only steps (\d+)\.\. -->
 <!-- capture window_until: perturbing only steps \d+\.\.(\d+) -->
+<!-- capture deciding: step (\d+) decides it -->
+<!-- capture deciding_words: decides it: (.+) there makes the run fail -->
+<!-- capture base: schedule +0: .* run (\w+) -->
+<!-- assert: test {{deciding}} -eq $(( {{window_until}} - 1 )) -->
+<!-- assert: rewind show {{passing}} | tail -1 | grep -q -- '--schedule-until {{deciding}} ' -->
 <!-- set failed: grep -E '^schedule +[0-9]+: exited:[1-9]' {{out:check}} | awk '{print $2}' | tr -d : | tr '\n' ' ' -->
 <!-- assert: test $(echo {{failed}} | wc -w) -ge 1 -->
 <!-- set failed_said: python3 -c 'import sys; s = sys.argv[1:]; print(f"Schedule {s[0]} fails" if len(s) == 1 else f"Schedules {", ".join(s[:-1])} and {s[-1]} fail")' {{failed}} -->
 <!-- assert: test {{check_seconds}} -lt 60 -->
 
 {{failed_said}}. `check` narrows schedule {{narrowed}}'s
-perturbation to steps {{window_from}} to {{window_until}} and keeps two runs,
-the passing one and the failing one, identical up to step {{window_from}}.
-The last block shows where the test's own output first differs. The search
-took {{check_seconds}} seconds.
+perturbation to steps {{window_from}} to {{window_until}}, and the last of
+them, step {{deciding}}, decides it. The passing run is the same window less
+that step, so the two runs are the same until step {{deciding}}, and only the
+failing one gets {{deciding_words}} there. The last block shows where the
+test's own output then differs. The search took {{check_seconds}} seconds.
 
 `--all` tries every schedule, which measures how flaky a build is:
 
@@ -176,7 +182,7 @@ machine with the same CPU vendor.
 
 ## Fork it
 
-<!-- set fork_first: for s in $(seq 1 16); do rewind fork {{passing}} {{window_from}} --schedule $s --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])'; done | python3 -c 'import sys; s=[int(l) != 0 for l in sys.stdin]; print(next(i + 1 for i in range(len(s) - 3) if sum(s[i:i + 4]) == 2))' -->
+<!-- set fork_first: for s in $(seq 1 16); do rewind fork {{base}} {{window_from}} --schedule $s --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])'; done | python3 -c 'import sys; s=[int(l) != 0 for l in sys.stdin]; print(next(i + 1 for i in range(len(s) - 3) if sum(s[i:i + 4]) == 2))' -->
 <!-- set f2: echo $(( {{fork_first}} + 1 )) -->
 <!-- set f3: echo $(( {{fork_first}} + 2 )) -->
 <!-- set f4: echo $(( {{fork_first}} + 3 )) -->
@@ -184,10 +190,10 @@ machine with the same CPU vendor.
 A fork is its parent up to a step, then another schedule:
 
 ```console run name=forks
-$ rewind fork {{passing|short}} {{window_from}} --schedule {{fork_first}} --quiet
-$ rewind fork {{passing|short}} {{window_from}} --schedule {{f2}} --quiet
-$ rewind fork {{passing|short}} {{window_from}} --schedule {{f3}} --quiet
-$ rewind fork {{passing|short}} {{window_from}} --schedule {{f4}} --quiet
+$ rewind fork {{base|short}} {{window_from}} --schedule {{fork_first}} --quiet
+$ rewind fork {{base|short}} {{window_from}} --schedule {{f2}} --quiet
+$ rewind fork {{base|short}} {{window_from}} --schedule {{f3}} --quiet
+$ rewind fork {{base|short}} {{window_from}} --schedule {{f4}} --quiet
 ```
 
 <!-- set fork_failed: grep -o 'exited:[0-9]*' {{out:forks}} | paste - <(printf '%s\n' {{fork_first}} {{f2}} {{f3}} {{f4}}) | awk '$1 != "exited:0" {print $2}' | tr '\n' ' ' -->
@@ -195,16 +201,18 @@ $ rewind fork {{passing|short}} {{window_from}} --schedule {{f4}} --quiet
 <!-- set fork_run: grep -m1 -o 'run [0-9a-f]* exited:[1-9]' {{out:forks}} | awk '{print $2}' -->
 <!-- set fork_crash: rewind events {{fork_run}} | grep -m1 SIGSEGV | awk '{print $1}' -->
 
-From step {{window_from}} of the passing build, schedules {{fork_failed|and}}
-crash and {{fork_passed|and}} pass.
+From step {{window_from}} of the schedule 0 build, schedules
+{{fork_failed|and}} crash and {{fork_passed|and}} pass.
 
 ## Scrub it in the app
 
 The desktop app shows a run on a timeline: drag the playhead to any step for
 the output, processes, files and event there, jump to the failure or to where
-the run left the passing one, and fork from the playhead.
+the run left the passing one, and fork from the playhead. Opened on `check`'s
+two runs, a dashed blue mark on the timeline is step {{deciding}}, where only
+the failing run gets {{deciding_words}}.
 
-<!-- screenshot site/img/app-failure: {{home}}/runs/{{fork_run}} --compare {{home}}/runs/{{passing}} --step {{fork_crash}} -->
+<!-- screenshot site/img/app-failure: {{home}}/runs/{{fork_run}} --compare {{home}}/runs/{{base}} --step {{fork_crash}} -->
 
 ```console
 $ rewind-app ~/.local/share/rewind/runs/{{failing}} --compare ~/.local/share/rewind/runs/{{passing}}

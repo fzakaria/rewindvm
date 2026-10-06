@@ -10,11 +10,14 @@ and in the desktop app. They use the Nix tutorial's runs and install.
 ## The runs
 
 ```console run name=check
-$ rewind check --epoch {{epoch}} {{flake}} | grep -E 'ends differently|perturbing only|passing:|failing:|open both'
+$ rewind check --epoch {{epoch}} {{flake}} | grep -E 'ends differently|perturbing only|decides it|passing:|failing:|same run until|open both'
 ```
 
 <!-- capture passing: passing: run (\w+) -->
 <!-- capture failing: failing: run (\w+) -->
+<!-- capture deciding: step (\d+) decides it -->
+<!-- capture deciding_words: decides it: (.+) there makes the run fail -->
+<!-- capture window_from: perturbing only steps (\d+)\.\. -->
 <!-- set crash_step: rewind events {{failing}} | grep -m1 SIGSEGV | awk '{print $1}' -->
 <!-- set pid: rewind events {{failing}} | grep -m1 SIGSEGV | awk '{print $2}' | cut -d/ -f1 -->
 <!-- set crash_tid: rewind events {{failing}} | grep -m1 SIGSEGV | awk '{print $2}' | cut -d/ -f2 -->
@@ -92,6 +95,42 @@ recorded again.
 <!-- screenshot site/img/app-source: {{home}}/runs/{{failing}} --compare {{home}}/runs/{{passing}} --step {{crash_step}} --source ;; wait 20 -->
 
 ![The app's source panel at step {{crash_step}} of the failing run: worker at src/pool.c:77 with p->queue->completed++ marked, and the frames worker, start_thread and clone3 below](../site/img/app-source.png)
+
+## Find the step that decides it
+
+`check` narrows the failing schedule to the steps from {{window_from}} to
+{{deciding}}, and names the last of them. Its passing run is the same
+schedule without that one step, so the two runs are the same machine until
+step {{deciding}}, where only the failing run gets {{deciding_words}}, and
+everything they do differently follows from it. `rewind where` names the
+thread that was on the CPU there:
+
+<!-- set gap: echo $(( {{crash_step}} - {{deciding}} )) -->
+
+```console run name=decides
+$ rewind where {{failing|short}} {{deciding}}
+```
+
+<!-- assert: grep -q 'main (tests/test_pool_shutdown.c:23)' {{out:decides}} && grep -q 'usleep(100);' {{out:decides}} -->
+
+The test's main thread was waiting for half the jobs to finish before it
+shuts the pool down. A worker checks `p->stopping` without the lock and then
+counts its job through `p->queue`, which `pool_shutdown` frees. After the
+reschedule at step {{deciding}}, the main thread sets the queue to NULL
+between a worker's check and its count, and the worker faults on it
+{{gap}} steps later. Without it, the worker counts first and the test passes.
+
+In the app, two runs that differ only in their schedules show the step where
+the schedules part as a dashed blue mark on the timeline, before the solid
+one where their events first differ. Pointing at it says what only one of
+them got there, a click takes the playhead to it, and the divergence card's
+first line says the same. Opening a window `check` narrowed, from the Runs
+panel or from the list of builds, compares it with the window one step
+shorter, as `check` does. Zoomed in with + around the crash:
+
+<!-- screenshot site/img/app-decides: {{home}}/runs/{{failing}} --compare {{home}}/runs/{{passing}} --step {{crash_step}} ;; key plus ;; key plus ;; key plus ;; key plus ;; key plus ;; key plus ;; key plus ;; key plus ;; key plus ;; key plus ;; key plus ;; key plus ;; key plus ;; key plus -->
+
+![The app zoomed in around the crash: a dashed blue mark at step {{deciding}} on the timeline, the crash just after it, and the divergence card saying the two runs are the same until step {{deciding}}, where only this run has {{deciding_words}}](../site/img/app-decides.png)
 
 ## Watch both sides of the race
 

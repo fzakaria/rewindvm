@@ -7,6 +7,9 @@
 
   // The run: how many steps it has, and the two steps the app marks.
   const TOTAL_STEPS = 11760;
+  // Where the two runs' schedules part: only the failing run is
+  // rescheduled there, and everything after follows from it.
+  const SPLIT_STEP = 11030;
   const DIVERGENCE_STEP = 11204;
   const FAILURE_STEP = 11742;
   const START_STEP = FAILURE_STEP;
@@ -265,6 +268,7 @@
     track: $("track"),
     segments: $("segments"),
     playhead: $("playhead"),
+    split: $("mark-split"),
     divergence: $("mark-divergence"),
     failure: $("mark-failure"),
     fork: $("mark-fork"),
@@ -322,6 +326,7 @@
   fitLabels();
   window.addEventListener("resize", fitLabels);
   document.fonts.ready.then(fitLabels);
+  el.split.style.left = pct(SPLIT_STEP);
   el.divergence.style.left = pct(DIVERGENCE_STEP);
   el.failure.style.left = pct(FAILURE_STEP);
 
@@ -421,10 +426,11 @@
     const body = document.createElement("span");
     if (s < DIVERGENCE_STEP) {
       title.textContent = "Same as run #2 so far";
-      body.textContent = `The two runs are identical up to step ${fmt(DIVERGENCE_STEP)}.`;
+      body.textContent = `The two runs are the same until step ${fmt(SPLIT_STEP)}, where only this run has a reschedule. They do the same things until step ${fmt(DIVERGENCE_STEP)}.`;
     } else {
       title.textContent = `Diverged from run #2 at step ${fmt(DIVERGENCE_STEP)}`;
       body.textContent =
+        `The two runs are the same until step ${fmt(SPLIT_STEP)}, where only this run has a reschedule. ` +
         "In the passing run the shutdown futex woke worker-0 first. Here worker-1 wins and frees the queue while worker-0 still holds a pointer into it.";
     }
     el.diff.replaceChildren(title, body);
