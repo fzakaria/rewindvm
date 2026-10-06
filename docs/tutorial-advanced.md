@@ -162,6 +162,19 @@ reschedule at step 5139, the main thread sets the queue to NULL
 between a worker's check and its count, and the worker faults on it
 14 steps later. Without it, the worker counts first and the test passes.
 
+`check --where` looks both threads up itself: the one on the CPU at the
+deciding step, and the one of the failing run's first event that differs,
+each by the line of the program's own code it was on. Each lookup takes a fork
+and gdb, so it is a flag:
+
+```console
+$ rewind check --where --epoch 1790985600 github:fzakaria/rewindvm#mylib 2>/dev/null | sed -n '/^where the threads were/,/^$/p'
+where the threads were:
+        5139   166/166   main (tests/test_pool_shutdown.c:23), on the CPU at the deciding step
+        5153   166/174   worker (src/pool.c:77), at the first event that differs
+
+```
+
 In the app, two runs that differ only in their schedules show the step where
 the schedules part as a dashed blue mark on the timeline, before the solid
 one where their events first differ. Pointing at it says what only one of
@@ -269,7 +282,7 @@ prints the command line that loads the same symbols:
 $ rewind gdb 5c910df9 5153 --listen 127.0.0.1:1234
 rewind: step 5153 ran in process 166; loading symbols for 4 of its files
 rewind: read 3 source files fetched from the VM earlier
-rewind: gdb at step 5153 of 5c910df9774b38f2; connect with: gdb -q -iex 'set debuginfod enabled on' -iex 'set debuginfod urls http://127.0.0.1:42465' -ex 'file /nix/store/vid1cadd24y1ay54ksi4fqpiab4wz761-rewind-guest-kernel-7.2.8- ...
+rewind: gdb at step 5153 of 5c910df9774b38f2; connect with: gdb -q -iex 'set debuginfod enabled on' -iex 'set debuginfod urls http://127.0.0.1:34065' -ex 'file /nix/store/vid1cadd24y1ay54ksi4fqpiab4wz761-rewind-guest-kernel-7.2.8- ...
 ```
 
 ## Bring tools into the VM
@@ -297,7 +310,7 @@ interleave on the one vCPU:
 ```console
 $ rewind nix --cores 4 --epoch 1790985600 github:fzakaria/rewindvm#mylib
 ...
-rewind: run a3a03895342cba33 exited:0 after 6174 steps, 0.216s virtual, 1.009s wall (poweroff)
+rewind: run a3a03895342cba33 exited:0 after 6174 steps, 0.216s virtual, 1.059s wall (poweroff)
 /nix/store/f6a9gy362szw6nxx3ikrklr8glr6rdln-mylib-0.3.0 a9d703ba89774f3d  matches your store, rewindvm.cachix.org
 ```
 
@@ -329,12 +342,12 @@ rewind: the fork first differs from its parent at step 5151
 rewind: open it beside its parent in the desktop app: rewind open 0b1210ebb800ad34 5151 --compare 5c910df9774b38f2
 
 $ rewind fork 5c910df9 5123 --schedule 3 --quiet
-rewind: run 1a5358100ed204c7 exited:2 after 5202 steps, 0.203s virtual, 0.254s wall (poweroff)
+rewind: run 1a5358100ed204c7 exited:2 after 5202 steps, 0.203s virtual, 0.257s wall (poweroff)
 rewind: the fork first differs from its parent at step 5142
 rewind: open it beside its parent in the desktop app: rewind open 1a5358100ed204c7 5142 --compare 5c910df9774b38f2
 
 $ rewind fork 5c910df9 5123 --schedule 4 --quiet
-rewind: run b98cd6853c6161e1 exited:2 after 5236 steps, 0.204s virtual, 0.262s wall (poweroff)
+rewind: run b98cd6853c6161e1 exited:2 after 5236 steps, 0.204s virtual, 0.265s wall (poweroff)
 rewind: the fork first differs from its parent at step 5148
 rewind: open it beside its parent in the desktop app: rewind open b98cd6853c6161e1 5148 --compare 5c910df9774b38f2
 ```
@@ -401,7 +414,7 @@ For a fork it prints its parents' commands first, each with the id it makes.
 ```console
 $ rewind show @
 b98cd6853c6161e1  exited:2          5236 steps  mylib-0.3.0 (fork of 5c910df9774b38f2 at 5123, schedule 4)
-recorded by rewind 0.5.0 (492078b28182)
+recorded by rewind 0.5.0 (8fa5b6b6c40d)
 rewind nix /nix/store/...-mylib-0.3.0.drv --epoch 1790985600 --schedule 6 --schedule-from 3629 --schedule-until 5140 --clock branches --name mylib-0.3.0  # 5c910df9774b38f2
 rewind fork 5c910df9774b38f2 5123 --schedule 4  # b98cd6853c6161e1
 ```
@@ -411,7 +424,7 @@ The failing run's command makes it again, with the same id:
 ```console
 $ rewind show 5c910df9 | tail -1 | sh
 ...
-rewind: run 5c910df9774b38f2 exited:2 after 5192 steps, 0.203s virtual, 0.584s wall (poweroff)
+rewind: run 5c910df9774b38f2 exited:2 after 5192 steps, 0.203s virtual, 0.621s wall (poweroff)
 ```
 
 ## Compare any two runs
@@ -548,7 +561,7 @@ $ nix shell nixpkgs#pkgsStatic.stdenv.cc -c x86_64-unknown-linux-musl-cc -static
 
 ```console
 $ rewind run --root spin --timeout 5 --name spin -- /bin/spin
-rewind: run cc190e45e42c5906 timed-out after 308 steps, 0.002s virtual, 5.014s wall (timed out computing without exits for 4.4s, in user space in main+15 (spin.c:2), process 34 (spin))
+rewind: run cc190e45e42c5906 timed-out after 308 steps, 0.002s virtual, 5.008s wall (timed out computing without exits for 4.4s, in user space in main+15 (spin.c:2), process 34 (spin))
 ```
 
 The place is a function, offset and source line from the program's symbols,
