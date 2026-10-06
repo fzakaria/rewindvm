@@ -398,18 +398,34 @@ fn replaces(kept: Option<&str>, new: &str) -> Result<()> {
     Ok(())
 }
 
+/// How long taking a run's executing lock waits out a hold before refusing.
+/// A process spawned while the lock is held keeps a copy of it until it
+/// starts its program, a moment after the holder gave it up; an execution
+/// holds it far longer, and is still refused.
+const LOCK_PATIENCE: Duration = Duration::from_millis(250);
+const LOCK_RETRY: Duration = Duration::from_millis(1);
+
 /// Takes `dir`'s executing lock, held until the file is dropped. Refused
 /// while another execution of the same run holds it.
 pub(crate) fn lock_executing(dir: &Path) -> Result<fs::File> {
     let path = dir.join(EXECUTING_LOCK);
     let file = fs::File::create(&path).with_context(|| format!("creating {}", path.display()))?;
-    if file.try_lock().is_err() {
-        bail!(
-            "run {} is executing in another process",
-            dir.file_name().unwrap_or_default().to_string_lossy()
-        );
+    let start = Instant::now();
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(fs::TryLockError::WouldBlock) if start.elapsed() < LOCK_PATIENCE => {
+                std::thread::sleep(LOCK_RETRY);
+            }
+            Err(fs::TryLockError::WouldBlock) => bail!(
+                "run {} is executing in another process",
+                dir.file_name().unwrap_or_default().to_string_lossy()
+            ),
+            Err(fs::TryLockError::Error(e)) => {
+                return Err(e).with_context(|| format!("locking {}", path.display()));
+            }
+        }
     }
-    Ok(file)
 }
 
 /// Whether bringing a machine to a step of a run keeps a keyframe there.
@@ -1378,6 +1394,33 @@ pub(crate) mod tests {
     // agree, which decides what a fork may share with its parent, and the
     // manifest fields the desktop app reads by name.
     use super::*;
+
+    #[test]
+    fn a_lock_given_up_is_taken_again_while_processes_are_spawned() {
+        // A process another thread spawns holds a copy of every open file
+        // until it starts its program, a held executing lock among them, so
+        // the lock outlasts its File by a moment. Taking it again right
+        // after giving it up waits that out rather than refusing, the way
+        // an import of a run already here takes it twice.
+        let dir = std::env::temp_dir().join(format!("rewind-relock-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let spawning = {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    std::process::Command::new("true").status().unwrap();
+                }
+            })
+        };
+        let refused = (0..20_000)
+            .filter(|_| lock_executing(&dir).is_err())
+            .count();
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        spawning.join().unwrap();
+        fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(refused, 0);
+    }
 
     #[test]
     fn a_guest_that_powered_off_stopped_cleanly() {
