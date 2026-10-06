@@ -65,6 +65,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -354,7 +355,17 @@ class Recording:
             "-c",
             script,
         ]
-        done = subprocess.run(nix, env=self.env, capture_output=True, text=True)
+        # The app keeps its panels' sizes and its evaluation's days under
+        # the user's config and state directories; a fresh pair for each
+        # shot shows it as a reader first sees it, whatever this machine
+        # has kept.
+        fresh = Path(tempfile.mkdtemp(prefix="app-", dir=self.work))
+        env = dict(
+            self.env,
+            XDG_CONFIG_HOME=str(fresh / "config"),
+            XDG_STATE_HOME=str(fresh / "state"),
+        )
+        done = subprocess.run(nix, env=env, capture_output=True, text=True)
         if done.returncode != 0 or not png.exists():
             raise Failed(f"screenshot {path} failed:\n{done.stderr}")
 

@@ -111,7 +111,7 @@ runs at full speed until one fires. `watch` and `awatch` work; x86 has no
 
 In the app, Attach gdb opens the same session under the timeline:
 
-<!-- screenshot site/img/app-gdb-watch: {{home}}/runs/{{failing}} --compare {{home}}/runs/{{passing}} --step {{watch_from}} ;; click 1140 698 ;; wait 25 ;; type break src/pool.c:74 ;; wait 1 ;; type continue ;; wait 8 ;; type watch -l p->queue ;; wait 1 ;; type delete 1 ;; wait 1 ;; type continue ;; wait 8 -->
+<!-- screenshot site/img/app-gdb-watch: {{home}}/runs/{{failing}} --compare {{home}}/runs/{{passing}} --step {{watch_from}} ;; click 1140 808 ;; wait 25 ;; type break src/pool.c:74 ;; wait 1 ;; type continue ;; wait 8 ;; type watch -l p->queue ;; wait 1 ;; type delete 1 ;; wait 1 ;; type continue ;; wait 8 -->
 
 ![The app's gdb pane stopped at the watchpoint in pool_shutdown, with the old and new values of p->queue](../site/img/app-gdb-watch.png)
 
