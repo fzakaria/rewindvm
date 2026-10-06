@@ -142,6 +142,23 @@ impl Date {
         }
     }
 
+    /// Days from `earlier` to this day, negative when `earlier` is later.
+    pub fn days_since(self, earlier: Date) -> i64 {
+        self.to_days() - earlier.to_days()
+    }
+
+    /// Days after 1970-01-01 (Howard Hinnant's days_from_civil).
+    fn to_days(self) -> i64 {
+        let year = i64::from(self.year) - i64::from(self.month <= 2);
+        let era = year.div_euclid(YEARS_PER_ERA);
+        let yoe = year - era * YEARS_PER_ERA;
+        let month = i64::from(self.month);
+        let mp = if month > 2 { month - 3 } else { month + 9 };
+        let doy = (153 * mp + 2) / 5 + i64::from(self.day) - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        era * DAYS_PER_ERA + doe - EPOCH_SHIFT_DAYS
+    }
+
     /// The day `days` after 1970-01-01 (Howard Hinnant's civil_from_days).
     fn from_days(days: i64) -> Date {
         let z = days + EPOCH_SHIFT_DAYS;
@@ -505,40 +522,126 @@ pub fn save_to(path: &Path, text: &str, public_key: &[u8; 32]) -> std::io::Resul
     std::fs::rename(&tmp, path)
 }
 
-/// When to remind an unregistered user: after every
-/// `ACTIONS_PER_REMINDER` engine actions or `USE_PER_REMINDER` of use,
-/// whichever comes first. Either one resets both.
-#[derive(Clone, Debug, Default)]
-pub struct Reminder {
-    actions: u32,
-    last: Duration,
+/// Days an evaluation goes without a reminder, from the day the app first
+/// ran: the header's pill says it is evaluating, and nothing more.
+pub const QUIET_DAYS: i64 = 8;
+
+/// From this many days in, the reminder mentions the commercial license.
+pub const COMMERCIAL_DAYS: i64 = 30;
+
+/// Where the evaluation's record is kept, under the user's state
+/// directory.
+const XDG_STATE_ENV: &str = "XDG_STATE_HOME";
+const HOME_STATE_DIR: &str = ".local/state";
+const EVALUATION_FILE: &str = "evaluation";
+
+/// The record's lines: `started: YYYY-MM-DD`, then `reminded: YYYY-MM-DD`
+/// once the app has reminded.
+const STARTED_KEY: &str = "started";
+const REMINDED_KEY: &str = "reminded";
+
+/// What the reminder says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reminder {
+    /// The app works fully while it is evaluated, and what a license is.
+    Evaluating,
+    /// That too, and that use at a company needs the commercial license.
+    AtWork,
 }
 
-pub const ACTIONS_PER_REMINDER: u32 = 20;
-pub const USE_PER_REMINDER: Duration = Duration::from_secs(45 * 60);
+/// An evaluation, kept between runs of the app: the day it first ran, and
+/// the last day it reminded.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Evaluation {
+    pub started: Date,
+    pub reminded: Option<Date>,
+}
 
-impl Reminder {
-    /// Counts an engine action at `now` (time in use so far). Returns
-    /// whether to remind.
-    pub fn action(&mut self, now: Duration) -> bool {
-        self.actions += 1;
-        self.due(now)
-    }
-
-    /// Checks the clock at `now`. Returns whether to remind.
-    pub fn tick(&mut self, now: Duration) -> bool {
-        self.due(now)
-    }
-
-    fn due(&mut self, now: Duration) -> bool {
-        let due = self.actions >= ACTIONS_PER_REMINDER
-            || now.saturating_sub(self.last) >= USE_PER_REMINDER;
-        if due {
-            self.actions = 0;
-            self.last = now;
+impl Evaluation {
+    /// An evaluation that starts on `today`.
+    pub fn new(today: Date) -> Evaluation {
+        Evaluation {
+            started: today,
+            reminded: None,
         }
-        due
     }
+
+    /// Whether a value moment on `today` reminds, and with which words:
+    /// none in the first QUIET_DAYS, then at most one a day.
+    pub fn due(&self, today: Date) -> Option<Reminder> {
+        let days = today.days_since(self.started);
+        if days < QUIET_DAYS || self.reminded == Some(today) {
+            return None;
+        }
+        if days >= COMMERCIAL_DAYS {
+            return Some(Reminder::AtWork);
+        }
+        Some(Reminder::Evaluating)
+    }
+
+    /// Reads a record written by `to_text`.
+    pub fn parse(text: &str) -> Option<Evaluation> {
+        let mut started = None;
+        let mut reminded = None;
+        for line in text.lines() {
+            let (key, value) = line.split_once(':')?;
+            let date = Date::parse(value)?;
+            match key.trim() {
+                STARTED_KEY => started = Some(date),
+                REMINDED_KEY => reminded = Some(date),
+                _ => return None,
+            }
+        }
+        Some(Evaluation {
+            started: started?,
+            reminded,
+        })
+    }
+
+    pub fn to_text(&self) -> String {
+        let mut text = format!("{STARTED_KEY}: {}\n", self.started);
+        if let Some(reminded) = self.reminded {
+            text.push_str(&format!("{REMINDED_KEY}: {reminded}\n"));
+        }
+        text
+    }
+}
+
+/// Where the evaluation is kept: $XDG_STATE_HOME/rewind/evaluation, else
+/// ~/.local/state/rewind/evaluation.
+fn evaluation_path() -> Option<PathBuf> {
+    let state = std::env::var_os(XDG_STATE_ENV)
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(HOME_STATE_DIR)))?;
+    Some(state.join(CONFIG_SUBDIR).join(EVALUATION_FILE))
+}
+
+/// The evaluation as kept, or one that starts on `today`, kept from now
+/// on, when there is none or it does not read.
+pub fn load_evaluation(today: Date) -> Evaluation {
+    let kept = evaluation_path()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|text| Evaluation::parse(&text));
+    if let Some(evaluation) = kept {
+        return evaluation;
+    }
+    let evaluation = Evaluation::new(today);
+    let _ = save_evaluation(&evaluation);
+    evaluation
+}
+
+/// Keeps the evaluation, whole or not at all.
+pub fn save_evaluation(evaluation: &Evaluation) -> std::io::Result<()> {
+    let path = evaluation_path()
+        .ok_or_else(|| std::io::Error::other("no HOME to keep the evaluation in"))?;
+    let dir = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("the evaluation path has no directory"))?;
+    std::fs::create_dir_all(dir)?;
+    let tmp = dir.join(format!(".{EVALUATION_FILE}.{}", std::process::id()));
+    std::fs::write(&tmp, evaluation.to_text())?;
+    std::fs::rename(&tmp, &path)
 }
 
 /// A new license id: 16 random hex digits.
@@ -777,19 +880,51 @@ mod tests {
     }
 
     #[test]
-    fn reminders_come_after_twenty_actions_or_forty_five_minutes() {
-        // Nineteen actions do not remind and the twentieth does; with no
-        // actions the clock reminds at forty-five minutes, and each
-        // reminder starts both counts over.
-        let mut r = Reminder::default();
-        let minute = Duration::from_secs(60);
-        for _ in 1..ACTIONS_PER_REMINDER {
-            assert!(!r.action(minute));
+    fn days_count_across_months_and_years() {
+        // Counting days is the inverse of finding the day a count lands on.
+        let day = |s: &str| Date::parse(s).unwrap();
+        assert_eq!(day("2026-10-05").days_since(day("2026-09-30")), 5);
+        assert_eq!(day("2027-01-01").days_since(day("2026-12-31")), 1);
+        assert_eq!(day("2028-03-01").days_since(day("2028-02-28")), 2);
+        for days in [0, 20_726, 59, 60, 11_016] {
+            assert_eq!(Date::from_days(days).days_since(Date::from_days(0)), days);
         }
-        assert!(r.action(minute));
-        assert!(!r.tick(minute * 45));
-        assert!(r.tick(minute * 46));
-        assert!(!r.tick(minute * 47));
+    }
+
+    #[test]
+    fn an_evaluation_is_quiet_for_a_week_then_reminds_once_a_day() {
+        // Days 0 to 7 never remind. From day 8, the first value moment of
+        // a day reminds and later ones that day do not; from day 30 the
+        // reminder mentions the commercial license.
+        let start = Date::parse("2026-10-01").unwrap();
+        let day = |n: i64| Date::from_days(start.days_since(Date::from_days(0)) + n);
+        let mut evaluation = Evaluation::new(start);
+        for n in 0..QUIET_DAYS {
+            assert_eq!(evaluation.due(day(n)), None, "day {n}");
+        }
+        assert_eq!(evaluation.due(day(QUIET_DAYS)), Some(Reminder::Evaluating));
+        evaluation.reminded = Some(day(QUIET_DAYS));
+        assert_eq!(evaluation.due(day(QUIET_DAYS)), None);
+        assert_eq!(
+            evaluation.due(day(QUIET_DAYS + 1)),
+            Some(Reminder::Evaluating)
+        );
+        assert_eq!(evaluation.due(day(COMMERCIAL_DAYS)), Some(Reminder::AtWork));
+    }
+
+    #[test]
+    fn an_evaluation_record_reads_back() {
+        // The record as written reads back as itself, with or without a
+        // reminder in it; anything else does not read.
+        let mut evaluation = Evaluation::new(Date::parse("2026-10-01").unwrap());
+        assert_eq!(
+            Evaluation::parse(&evaluation.to_text()),
+            Some(evaluation.clone())
+        );
+        evaluation.reminded = Some(Date::parse("2026-10-12").unwrap());
+        assert_eq!(Evaluation::parse(&evaluation.to_text()), Some(evaluation));
+        assert_eq!(Evaluation::parse("started: soon"), None);
+        assert_eq!(Evaluation::parse(""), None);
     }
 
     /// The block `rewind-license issue` prints for this license, signed

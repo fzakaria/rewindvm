@@ -128,7 +128,6 @@ impl Scrubber {
         });
         self.clear_selection_in(&[Surface::Viewer, Surface::Source]);
         if readable {
-            self.count_engine_action(cx);
             self.fetch_source(cx);
         }
         cx.notify();

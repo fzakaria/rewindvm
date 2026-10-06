@@ -153,6 +153,9 @@ pub struct Forked {
     /// How the fork ended, in words: "exited:2, first differs from its
     /// parent at step 3781".
     pub summary: String,
+    /// The first step it differs from its parent at, or none when it ran
+    /// the same.
+    pub first_difference: Option<u64>,
 }
 
 /// What `rewind fork --json` prints on standard output.
@@ -389,6 +392,7 @@ impl Engine for CliEngine {
             id: result.id,
             dir,
             summary,
+            first_difference: result.first_difference,
         })
     }
 

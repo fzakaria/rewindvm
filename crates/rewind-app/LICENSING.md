@@ -1,9 +1,17 @@
 # Licensing the desktop app
 
-The app works fully without a license. An unregistered copy says so in the
-header and, after every 20 engine actions or 45 minutes of use, shows a
-notice with Buy, Enter license and Not now. Nothing is ever blocked or
-turned off. A license stops the reminders and shows the licensee's name.
+The app works fully without a license, and nothing is ever blocked or
+turned off. A copy without one says "Evaluating · Buy" in the header. For
+its first 8 days that is all. From then on, the first moment of a day
+where the app was worth something (a fork that differs from its parent,
+closing a shell or gdb pane, a jump to the divergence, a finished export)
+shows a reminder with Buy, Enter license and Not now, which closes itself
+after 20 seconds. It never shows while a terminal pane is open, during the
+tour or on the example run, and from day 30 it adds a line about the
+commercial license. The day the evaluation started and the last day it
+reminded are kept in `$XDG_STATE_HOME/rewind/evaluation` (or
+`~/.local/state/rewind/evaluation`). A license stops the reminders and
+shows the licensee's name.
 
 Licenses are checked offline against an Ed25519 public key compiled into
 the app (`PUBLIC_KEY` in `src/license.rs`). There is no activation server

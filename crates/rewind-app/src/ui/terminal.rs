@@ -150,7 +150,7 @@ impl Scrubber {
             cell_width: 8,
             cell_height: 18,
         };
-        self.close_terminal(cx);
+        self.drop_terminal(cx);
         let (session, events) = match Session::spawn(&command, FIRST) {
             Ok(started) => started,
             Err(e) => {
@@ -263,11 +263,22 @@ impl Scrubber {
     }
 
     /// Closes the pane and hangs up on its command if it still runs.
+    /// Closing a shell or gdb is a moment the app was worth something.
     pub(super) fn close_terminal(&mut self, cx: &mut Context<Self>) {
-        if self.terminal.take().is_some() {
-            self.clear_selection_in(&[Surface::Terminal]);
-            cx.notify();
+        if self.drop_terminal(cx) {
+            self.value_moment(cx);
         }
+    }
+
+    /// Takes the pane down, as a new one does the old. Returns whether
+    /// there was one.
+    fn drop_terminal(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.terminal.take().is_none() {
+            return false;
+        }
+        self.clear_selection_in(&[Surface::Terminal]);
+        cx.notify();
+        true
     }
 
     /// A key typed in the pane, sent to the command as xterm encodes it.

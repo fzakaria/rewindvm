@@ -193,7 +193,7 @@ pub enum PillTone {
     Passed,
     /// The run on screen is compared with this one.
     Compared,
-    /// A label with no verdict, like "Unregistered".
+    /// A label with no verdict, like the license pill's.
     Quiet,
     /// A run a process is executing now.
     Running,

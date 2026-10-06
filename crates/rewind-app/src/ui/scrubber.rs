@@ -441,7 +441,6 @@ impl Scrubber {
         } else {
             this.reload_runs(cx);
         }
-        this.start_licensing(cx);
         this.check_engine(cx);
         this
     }
@@ -1059,6 +1058,9 @@ impl Scrubber {
             .seek(motion, self.step, session.divergence_step());
         if motion.is_jump() {
             self.jump_to(target, cx);
+            if motion == Motion::Divergence {
+                self.value_moment(cx);
+            }
             return;
         }
         match motion {
@@ -1216,15 +1218,13 @@ impl Scrubber {
     }
 
     /// Runs an engine call on a background thread and hands its result to
-    /// `done` on the UI thread. Every call counts toward the evaluation
-    /// reminder.
+    /// `done` on the UI thread.
     fn with_engine<T: Send + 'static>(
         &mut self,
         cx: &mut Context<Self>,
         call: impl FnOnce(&dyn Engine) -> EngineResult<T> + Send + 'static,
         done: impl FnOnce(&mut Self, EngineResult<T>, &mut Context<Self>) + 'static,
     ) {
-        self.count_engine_action(cx);
         let engine = self.engine.clone();
         let task = crate::jobs::on_own_thread(move || call(engine.as_ref()));
         cx.spawn(async move |this, cx| {
@@ -1293,6 +1293,9 @@ impl Scrubber {
                             mark.state = ForkState::Created(forked.clone());
                         }
                         this.reload_runs(cx);
+                        if forked.first_difference.is_some() {
+                            this.value_moment(cx);
+                        }
                         this.offer(
                             NoticeTone::Info,
                             format!(
@@ -1388,7 +1391,6 @@ impl Scrubber {
             // a pane; fork_here and open_source do them.
             Replay::Fork | Replay::Where => return,
         };
-        self.count_engine_action(cx);
         self.open_terminal(kind, step, pid, command, window, cx);
     }
 
@@ -1512,6 +1514,7 @@ impl Scrubber {
                             ],
                             cx,
                         );
+                        this.value_moment(cx);
                     }
                     Err(e) => {
                         // A file the export started is half written.

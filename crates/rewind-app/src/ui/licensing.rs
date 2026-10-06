@@ -1,17 +1,23 @@
 //! Registration in the window: the license dialog, the header's license
-//! pill, and the reminder an unregistered copy shows now and then.
+//! pill, and the reminder an evaluating copy shows now and then.
 //!
-//! Nothing here blocks work or turns anything off. The reminder is a
-//! notice like any other, and the dialog closes with Escape.
+//! Nothing here blocks work or turns anything off. For its first week an
+//! evaluation shows only the pill. After that, the first moment of a day
+//! where the app was worth something, a fork that differs from its parent,
+//! a shell or gdb pane closed, a jump to the divergence or a finished
+//! export, shows the reminder, which closes itself.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use gpui::{
     Context, CursorStyle, Div, FocusHandle, FontWeight, MouseButton, SharedString, Window, div,
     prelude::*, px, rgb, rgba,
 };
 
-use crate::license::{self, Coverage, License, LicenseError, Registration, Reminder};
+use crate::license::{
+    self, Coverage, Date, Evaluation, License, LicenseError, Registration, Reminder,
+};
+use crate::run::Origin;
 use crate::selection::{Mapped, Surface, part_of_line};
 use crate::theme::{self, size};
 use crate::ui::scrubber::{BUY_URL, NoticeAction, NoticeTone, Scrubber};
@@ -19,13 +25,17 @@ use crate::ui::selectable::{selectable, selects};
 use crate::ui::widgets::{Availability, ButtonStyle, PillTone, button, pill};
 use crate::ui::{CloseDialog, CopySelection, LICENSE_CONTEXT, PasteLicense, SelectAll};
 
-/// How often the reminder's clock is checked.
-const REMINDER_CHECK: Duration = Duration::from_secs(60);
+/// How long the reminder stays up by itself.
+const REMINDER_LIFETIME: Duration = Duration::from_secs(20);
 
-/// The reminder's words.
-const REMINDER_TITLE: &str = "Rewind VM is unregistered";
-const REMINDER_BODY: &str =
-    "It works fully while you evaluate it; a license is $49 personal or $99 per seat.";
+/// The reminder's words, and the line it adds from COMMERCIAL_DAYS on.
+const REMINDER_TITLE: &str = "You are evaluating Rewind VM";
+const REMINDER_BODY: &str = "It works fully while you evaluate it. A license is $49 for personal use, or $99 per seat at a company, with 3 years of updates.";
+const AT_WORK_LINE: &str =
+    " Use at a company needs the commercial license, one seat for each person who uses the app.";
+
+/// The pill of a copy without a license.
+const EVALUATING_PILL: &str = "Evaluating \u{b7} Buy";
 const UPDATES_ENDED_TITLE: &str = "Your license's updates have ended";
 const UPDATES_ENDED_PILL: &str = "Updates ended \u{b7} Renew";
 const REFUSED_PILL: &str = "License not accepted";
@@ -58,11 +68,10 @@ pub struct LicenseDialog {
     pub result: Option<Result<License, LicenseError>>,
 }
 
-/// The app's registration and when to remind.
+/// The app's registration and its evaluation's record.
 pub struct Licensing {
     pub registration: Registration,
-    reminder: Reminder,
-    started: Instant,
+    evaluation: Evaluation,
     pub dialog: Option<LicenseDialog>,
 }
 
@@ -70,8 +79,7 @@ impl Licensing {
     pub fn load() -> Licensing {
         Licensing {
             registration: license::load(),
-            reminder: Reminder::default(),
-            started: Instant::now(),
+            evaluation: license::load_evaluation(Date::today()),
             dialog: None,
         }
     }
@@ -83,48 +91,35 @@ impl Licensing {
 }
 
 impl Scrubber {
-    /// Starts the reminder's clock. A stored license that did not check
-    /// out says so in the header's pill, and its dialog says why.
-    pub(super) fn start_licensing(&mut self, cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(REMINDER_CHECK).await;
-                let alive = this.update(cx, |this, cx| {
-                    let now = this.licensing.started.elapsed();
-                    if !this.licensing.is_registered() && this.licensing.reminder.tick(now) {
-                        this.remind(cx);
-                    }
-                });
-                if alive.is_err() {
-                    break;
-                }
-            }
-        })
-        .detach();
-    }
-
-    /// Counts an engine action toward the reminder.
-    pub(super) fn count_engine_action(&mut self, cx: &mut Context<Self>) {
+    /// A moment where the app was worth something: a fork that differs
+    /// from its parent, a shell or gdb pane closed, a jump to the
+    /// divergence, a finished export. The first of a day reminds an
+    /// evaluating copy past its quiet first week, unless a terminal pane is
+    /// open, the tour runs or the example is on screen.
+    pub(super) fn value_moment(&mut self, cx: &mut Context<Self>) {
         if self.licensing.is_registered() {
             return;
         }
-        let now = self.licensing.started.elapsed();
-        if self.licensing.reminder.action(now) {
-            self.remind(cx);
-        }
-    }
-
-    /// Shows the reminder, unless one is already up. A license whose
-    /// updates ended before this version gets its own words.
-    fn remind(&mut self, cx: &mut Context<Self>) {
-        let showing = self
-            .notices
-            .iter()
-            .any(|n| [REMINDER_TITLE, UPDATES_ENDED_TITLE].contains(&n.title.as_ref()));
-        if showing {
+        let example = self
+            .session
+            .as_ref()
+            .is_some_and(|s| s.run.origin == Origin::Example);
+        if self.terminal.is_some() || self.tour.is_some() || example {
             return;
         }
-        let (title, body) = match &self.licensing.registration {
+        let today = Date::today();
+        let Some(reminder) = self.licensing.evaluation.due(today) else {
+            return;
+        };
+        self.licensing.evaluation.reminded = Some(today);
+        let _ = license::save_evaluation(&self.licensing.evaluation);
+        self.remind(reminder, cx);
+    }
+
+    /// Shows the reminder, which closes itself after REMINDER_LIFETIME. A
+    /// license whose updates ended before this version gets its own words.
+    fn remind(&mut self, reminder: Reminder, cx: &mut Context<Self>) {
+        let (title, mut body) = match &self.licensing.registration {
             Registration::Registered(license) => (
                 UPDATES_ENDED_TITLE,
                 updates_ended_body(license.updates_until),
@@ -133,7 +128,10 @@ impl Scrubber {
                 (REMINDER_TITLE, REMINDER_BODY.to_string())
             }
         };
-        self.offer(
+        if reminder == Reminder::AtWork {
+            body.push_str(AT_WORK_LINE);
+        }
+        let id = self.offer(
             NoticeTone::Info,
             title,
             body,
@@ -144,6 +142,12 @@ impl Scrubber {
             ],
             cx,
         );
+        let timer = cx.background_executor().timer(REMINDER_LIFETIME);
+        cx.spawn(async move |this, cx| {
+            timer.await;
+            let _ = this.update(cx, |this, cx| this.dismiss(id, cx));
+        })
+        .detach();
     }
 
     /// Opens the license dialog: the license's details when the app has
@@ -238,8 +242,8 @@ impl Scrubber {
         cx.notify();
     }
 
-    /// The header's license pill, which opens the dialog: "Unregistered",
-    /// the licensee, that the license's updates ended before this version,
+    /// The header's license pill, which opens the dialog: that the copy is
+    /// evaluating, the licensee, that the license's updates ended before this version,
     /// or that the stored license was refused.
     pub(super) fn render_license_pill(&self, cx: &mut Context<Self>) -> Div {
         let fonts = &self.fonts;
@@ -248,7 +252,7 @@ impl Scrubber {
                 Coverage::Current => (license.name.clone(), PillTone::Quiet),
                 Coverage::EndedBefore(_) => (UPDATES_ENDED_PILL.to_string(), PillTone::Quiet),
             },
-            Registration::Unregistered => ("Unregistered".to_string(), PillTone::Quiet),
+            Registration::Unregistered => (EVALUATING_PILL.to_string(), PillTone::Quiet),
             Registration::Invalid(_) => (REFUSED_PILL.to_string(), PillTone::Failed),
         };
         div().child(

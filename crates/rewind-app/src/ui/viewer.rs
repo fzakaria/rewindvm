@@ -163,7 +163,6 @@ impl Scrubber {
         });
         self.clear_selection_in(&[Surface::Viewer, Surface::Source]);
         if unavailable.is_none() {
-            self.count_engine_action(cx);
             self.fetch_file(cx);
         }
         cx.notify();

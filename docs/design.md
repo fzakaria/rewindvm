@@ -706,10 +706,14 @@ The desktop app is proprietary to Lunch Time Surf LLC and sold like Sublime
 Text:
 
 - Evaluation has no time limit and never loses features.
-- While unregistered, a reminder appears after 20 engine actions or 45
-  minutes of use.
-- A personal license is $49 and includes three years of updates. A
-  commercial license is $99 per seat.
+- The first 8 days of an evaluation show only "Evaluating · Buy" in the
+  header. After that, the first fork that differs from its parent, closed
+  shell or gdb pane, jump to the divergence or finished export of a day
+  shows a reminder that closes itself after 20 seconds; from day 30 it
+  mentions the commercial license.
+- A personal license is $49, and a commercial license $99 per seat; both
+  include three years of updates. A version released after a license's
+  updates end runs as an evaluation.
 
 A license key is a signed text block. The app checks it offline against an
 Ed25519 public key built into it, and nothing is sent anywhere.
