@@ -13,6 +13,9 @@ use serde::{Deserialize, Serialize};
 pub use rewind_trace::export::MAX_BOOKMARKS as MAX_BYTES;
 pub use rewind_trace::manifest::BOOKMARKS as BOOKMARKS_FILE;
 
+/// The version of the format `bookmarks.json` is in.
+pub const BOOKMARKS_VERSION: u32 = 1;
+
 /// One marked step.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Bookmark {
@@ -20,27 +23,60 @@ pub struct Bookmark {
     pub note: String,
 }
 
+/// What `bookmarks.json` holds: the version of its format, then the marks.
+#[derive(Serialize, Deserialize)]
+struct File {
+    version: u32,
+    marks: Vec<Bookmark>,
+}
+
+/// A file's version alone, read before the rest of it.
+#[derive(Deserialize)]
+struct Version {
+    version: u32,
+}
+
 /// A run's bookmarks, one per step, in step order.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Bookmarks {
     marks: Vec<Bookmark>,
+    /// Why the run's bookmarks file was not read, when one is there that
+    /// is not bookmarks of this format. Saving leaves that file as it is.
+    unread: Option<String>,
 }
 
 impl Bookmarks {
-    /// The bookmarks kept in `dir`; none when it has no file, or one too
-    /// large or not readable as bookmarks.
+    /// The bookmarks kept in `dir`; none when it has no file, or one this
+    /// app does not read, which saving then leaves alone.
     pub fn load(dir: &Path) -> Bookmarks {
         let path = dir.join(BOOKMARKS_FILE);
-        let small = fs::metadata(&path).is_ok_and(|m| m.is_file() && m.len() <= MAX_BYTES);
-        if !small {
+        let Ok(meta) = fs::metadata(&path) else {
             return Bookmarks::default();
+        };
+        let unread = |why: String| Bookmarks {
+            unread: Some(why),
+            ..Bookmarks::default()
+        };
+        if !meta.is_file() || meta.len() > MAX_BYTES {
+            return unread(format!("is not a file of at most {MAX_BYTES} bytes"));
         }
-        let marks: Vec<Bookmark> = fs::read(&path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default();
+        let Ok(bytes) = fs::read(&path) else {
+            return unread("does not read".into());
+        };
+        match serde_json::from_slice::<Version>(&bytes) {
+            Ok(Version { version }) if version != BOOKMARKS_VERSION => {
+                return unread(format!(
+                    "is in format {version}, and this app reads format {BOOKMARKS_VERSION}"
+                ));
+            }
+            Ok(_) => {}
+            Err(_) => return unread("names no format this app reads".into()),
+        }
+        let Ok(file) = serde_json::from_slice::<File>(&bytes) else {
+            return unread("is not bookmarks".into());
+        };
         let mut bookmarks = Bookmarks::default();
-        for mark in marks {
+        for mark in file.marks {
             bookmarks.set(mark.step, mark.note);
         }
         bookmarks
@@ -48,8 +84,14 @@ impl Bookmarks {
 
     /// Writes the bookmarks to `dir`, whole or not at all: to a temporary
     /// file first, renamed over the old one. No bookmarks left removes the
-    /// file.
+    /// file. A file there that `load` could not read is left as it is, and
+    /// saving says why.
     pub fn save(&self, dir: &Path) -> io::Result<()> {
+        if let Some(why) = &self.unread {
+            return Err(io::Error::other(format!(
+                "{BOOKMARKS_FILE} {why}, so it is left as it is"
+            )));
+        }
         let path = dir.join(BOOKMARKS_FILE);
         if self.marks.is_empty() {
             return match fs::remove_file(&path) {
@@ -58,7 +100,11 @@ impl Bookmarks {
             };
         }
         let tmp = dir.join(format!(".{BOOKMARKS_FILE}.{}", std::process::id()));
-        let bytes = serde_json::to_vec_pretty(&self.marks).map_err(io::Error::other)?;
+        let file = File {
+            version: BOOKMARKS_VERSION,
+            marks: self.marks.clone(),
+        };
+        let bytes = serde_json::to_vec_pretty(&file).map_err(io::Error::other)?;
         fs::write(&tmp, bytes)?;
         fs::rename(&tmp, &path)
     }
@@ -147,6 +193,51 @@ mod tests {
 
         fs::write(dir.join(BOOKMARKS_FILE), "not json").unwrap();
         assert!(Bookmarks::load(&dir).is_empty());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_bookmarks_file_names_its_format_and_is_kept_when_unread() {
+        // Bookmarks save under the version of their format and read back.
+        // A file of another version, from before bookmarks named theirs,
+        // or not bookmarks at all reads as none and is neither saved over
+        // nor removed, so notes this app cannot read wait for one that can.
+        let dir = temp_dir("format");
+        let mut b = Bookmarks::default();
+        b.set(5, "five".into());
+        b.save(&dir).unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.join(BOOKMARKS_FILE)).unwrap()).unwrap();
+        assert_eq!(saved["version"], BOOKMARKS_VERSION);
+        assert_eq!(Bookmarks::load(&dir), b);
+
+        let other = format!(r#"{{"version": {}, "marks": []}}"#, BOOKMARKS_VERSION + 1);
+        let before = r#"[{"step": 5, "note": "before"}]"#.to_string();
+        for unread in [other, before, "not json".to_string()] {
+            fs::write(dir.join(BOOKMARKS_FILE), &unread).unwrap();
+            let mut loaded = Bookmarks::load(&dir);
+            assert!(loaded.is_empty());
+            assert!(loaded.save(&dir).is_err());
+            loaded.set(9, "new".into());
+            let err = loaded.save(&dir).unwrap_err().to_string();
+            assert!(err.contains(BOOKMARKS_FILE), "{err}");
+            assert_eq!(
+                fs::read_to_string(dir.join(BOOKMARKS_FILE)).unwrap(),
+                unread
+            );
+        }
+        let err = {
+            fs::write(
+                dir.join(BOOKMARKS_FILE),
+                format!(r#"{{"version": {}, "marks": []}}"#, BOOKMARKS_VERSION + 1),
+            )
+            .unwrap();
+            Bookmarks::load(&dir).save(&dir).unwrap_err().to_string()
+        };
+        assert!(
+            err.contains(&format!("format {}", BOOKMARKS_VERSION + 1)),
+            "{err}"
+        );
         fs::remove_dir_all(&dir).unwrap();
     }
 }
