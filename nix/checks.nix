@@ -335,7 +335,8 @@ in
         count=$(keyframes | wc -l)
         rewind cat long "$far" /bin/busybox > /dev/null
         test "$(keyframes | wc -l)" = $((count + 1))
-        keyframes | grep -qx "$far"
+        keyframes > kept
+        grep -qx "$far" kept
         rewind cat long "$far" /bin/busybox > /dev/null
         test "$(keyframes | wc -l)" = $((count + 1))
         rewind replay long --from "$far" | grep "^identical from the keyframe at step $far "
@@ -347,19 +348,21 @@ in
         cat diff
         test "$status" = 1
         grep -q 'first difference' diff
-        rewind diff a a | grep -qx identical
-        rewind diff a a --json | grep -q '"divergence":null'
+        rewind diff a a > same
+        grep -qx identical same
+        rewind diff a a --json > same.json
+        grep -q '"divergence":null' same.json
 
         # A fork reads its parent's keyframes up to its step and replays
         # like any run, from boot and from a keyframe on either side of the
         # step. So does a fork of that fork.
         id() { sed -n 's/.*"id":"\([0-9a-f]*\)".*/\1/p'; }
-        manifest() { cat $REWIND_HOME/runs/$1/manifest.json; }
+        manifest() { echo "$REWIND_HOME/runs/$1/manifest.json"; }
         # The step a run ended at, the run named by its id or its name.
         end() { rewind ls --json | sed -n "s/.*\"\(id\|name\)\":\"$1\",.*\"steps\":\([0-9]*\).*/\2/p"; }
         fork=$(rewind fork a 400 --schedule 3 --json | id)
-        manifest $fork | grep -q '"shared_keyframes"'
-        manifest $fork | grep -q '"trace_hash"'
+        grep -q '"shared_keyframes"' "$(manifest $fork)"
+        grep -q '"trace_hash"' "$(manifest $fork)"
         rewind replay $fork | grep '^identical'
         rewind replay $fork --from 300 | grep '^identical'
         rewind replay $fork --from "$(end $fork)" | grep '^identical'
@@ -371,7 +374,7 @@ in
         last=$(rewind events $fork | tail -1 | awk '{print $1}')
         step=$(( (400 + last) / 2 ))
         fork2=$(rewind fork $fork $step --schedule 5 --json | id)
-        differs=$(manifest $fork2 | sed -n 's/.*"first_difference": *\([0-9]*\).*/\1/p')
+        differs=$(sed -n 's/.*"first_difference": *\([0-9]*\).*/\1/p' "$(manifest $fork2)")
         echo "fork of a fork at $step first differs at ''${differs:-no step}"
         test -z "$differs" || test "$differs" -ge "$step"
         rewind replay $fork2 | grep '^identical'
@@ -398,8 +401,8 @@ in
         grep -q 'past its end' past
         same1=$(rewind fork a "$(end a)" --schedule 7 --json | id)
         same2=$(rewind fork a "$(end a)" --schedule 8 --json | id)
-        ! manifest $same1 | grep -q '"first_difference"'
-        manifest $fork | grep -q '"first_difference"'
+        ! grep -q '"first_difference"' "$(manifest $same1)"
+        grep -q '"first_difference"' "$(manifest $fork)"
         rewind prune a --identical --dry-run --json | tee planned
         grep -q "$same1" planned
         grep -q "$same2" planned
@@ -424,7 +427,7 @@ in
         # Running the fork's inputs again as a plain run leaves the fork
         # with no parent, still reading a's keyframes, so a stays.
         rewind run -q --schedule 3 --schedule-from 400 --root ${busyboxRoot} -- sh -c '${workload}'
-        ! manifest $fork | grep -q '"parent": \['
+        ! grep -q '"parent": \[' "$(manifest $fork)"
         ! rewind remove a 2> refused
         cat refused
         grep -q "run $fork reads its keyframes up to step 399 from " refused
@@ -553,7 +556,7 @@ in
         # rewind gdb at a step inside the job: it names the process that
         # was running and loads its program, which in an image job comes
         # from the VM.
-        write=$(rewind events w | grep 'notes.txt' | head -1)
+        write=$(rewind events w | grep 'notes.txt' | sed -n 1p)
         step=$(echo "$write" | awk '{print $1}')
         pid=$(echo "$write" | awk '{print $2}' | cut -d/ -f1)
         rewind gdb w "$step" --listen 127.0.0.1:12346 2> serve &
@@ -567,7 +570,7 @@ in
         # exit is the idle task's, and the process named is still the
         # writer.
         rewind run -q --name block --root ${gdbRoot} -- /bin/block
-        write=$(rewind events block | grep 'write(1, "wait' | head -1)
+        write=$(rewind events block | grep 'write(1, "wait' | sed -n 1p)
         step=$(echo "$write" | awk '{print $1}')
         pid=$(echo "$write" | awk '{print $2}' | cut -d/ -f1)
         rewind gdb block "$step" --listen 127.0.0.1:12347 2> serve &
@@ -638,8 +641,8 @@ in
 
         rewind run -q --clock exits --schedule 5 --name busy --root ${busyboxRoot} -- \
           sh -c 'for i in 1 2; do (n=0; while [ $n -lt 3000 ]; do n=$((n+1)); done; echo $i) & done; wait'
-        start=$(rewind events busy | grep 'rewind-start' | head -1 | awk '{print $1}')
-        end=$(rewind events busy | grep 'rewind-exit' | head -1 | awk '{print $1}')
+        start=$(rewind events busy | grep 'rewind-start' | sed -n 1p | awk '{print $1}')
+        end=$(rewind events busy | grep 'rewind-exit' | sed -n 1p | awk '{print $1}')
 
         for step in $(seq "$start" 4 "$end"); do
           rewind gdb busy "$step" -- -batch -ex 'stepi 3000' -ex continue > gdb 2>&1 || true
@@ -746,8 +749,8 @@ in
           touch $out
           exit 0
         fi
-        start=$(rewind events busy | grep 'rewind-start' | head -1 | awk '{print $1}')
-        end=$(rewind events busy | grep 'rewind-exit' | head -1 | awk '{print $1}')
+        start=$(rewind events busy | grep 'rewind-start' | sed -n 1p | awk '{print $1}')
+        end=$(rewind events busy | grep 'rewind-exit' | sed -n 1p | awk '{print $1}')
 
         sessions=0
         for step in $(seq "$start" 3 "$end"); do
@@ -779,7 +782,8 @@ in
       ''
         export REWIND_HOME=$TMPDIR/rewind
         rewind run -q --clock exits --name crash --root ${gdbRoot} -- /bin/crash || true
-        rewind events crash | grep -q 'SIGSEGV'
+        rewind events crash > events
+        grep -q 'SIGSEGV' events
         write=$(rewind events crash | grep 'write(1, "dying')
         step=$(echo "$write" | awk '{print $1}')
         pid=$(echo "$write" | awk '{print $2}' | cut -d/ -f1)

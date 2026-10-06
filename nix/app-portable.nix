@@ -98,8 +98,12 @@ rust.craneLib.mkCargoDerivation (
     # The system's loader and no RUNPATH: anything else would tie the
     # binary to this machine's store.
     postFixup = ''
-      readelf -l $out/libexec/rewind-app | grep -q "interpreter: /lib64/ld-linux-x86-64.so.2"
-      if readelf -d $out/libexec/rewind-app | grep -q "RUNPATH\|RPATH"; then
+      # Into files, not straight into grep -q, which exits at its first
+      # match and leaves readelf to die of SIGPIPE.
+      readelf -l $out/libexec/rewind-app > program-headers
+      grep -q "interpreter: /lib64/ld-linux-x86-64.so.2" program-headers
+      readelf -d $out/libexec/rewind-app > dynamic
+      if grep -q "RUNPATH\|RPATH" dynamic; then
         echo "the portable app has a RUNPATH" >&2
         exit 1
       fi
