@@ -67,7 +67,7 @@ deterministic virtual machine:
 $ rewind nix --epoch 1790985600 github:fzakaria/rewindvm#mylib
 rewind: packing 62 store paths for mylib-0.3.0
 ...
-rewind: run 6380bb57fcb451da exited:0 after 6169 steps, 0.216s virtual, 1.553s wall (poweroff)
+rewind: run 6380bb57fcb451da exited:0 after 6169 steps, 0.216s virtual, 1.265s wall (poweroff)
 /nix/store/f6a9gy362szw6nxx3ikrklr8glr6rdln-mylib-0.3.0 a9d703ba89774f3d  matches your store, rewindvm.cachix.org
 ```
 
@@ -211,19 +211,22 @@ $ rewind gdb 5c910df9 5150 -- -batch -ex 'break src/pool.c:77 if p->queue == 0' 
 rewind: step 5150 ran in process 166; loading symbols for 4 of its files
 rewind: fetched 3 source files from the VM
 rewind: gdb at step 5150 of 5c910df9774b38f2
+Downloading 4.35 M separate debug info for /nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6...
+Downloading 10.70 K separate debug info for /nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libpthread.so.0...
+Downloading 658.16 K separate debug info for /nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/ld-linux-x86-64.so.2...
 Downloading 3.12 K source file /build/linux-7.2.8/./arch/x86/include/asm/irqflags.h...
 arch_local_irq_restore (flags=518) at ./arch/x86/include/asm/irqflags.h:146
 146		return !(flags & X86_EFLAGS_IF);
 [Switching to thread 4 (Thread 1.174)]
-#0  0x00007feee6f154f2 in __syscall_cancel_arch ()
+#0  __syscall_cancel_arch () at ../sysdeps/unix/sysv/linux/x86_64/syscall_cancel.S:56
+warning: 56	../sysdeps/unix/sysv/linux/x86_64/syscall_cancel.S: No such file or directory
 Breakpoint 1 at 0x5556d620d433: file src/pool.c, line 77.
-[Switching to Thread 1.4194305]
 
-Thread 1 hit Breakpoint 1, worker (arg=0x5556f833c010) at src/pool.c:77
+Thread 4 hit Breakpoint 1, worker (arg=0x5556f833c010) at src/pool.c:77
 77				p->queue->completed++;
 #0  worker (arg=0x5556f833c010) at src/pool.c:77
-#1  0x00007feee6f0c7d1 in start_thread ()
-#2  0x00007feee6f98b1c in __clone3 ()
+#1  0x00007feee6f0c7d1 in start_thread (arg=<optimized out>) at pthread_create.c:454
+#2  0x00007feee6f98b1c in __GI___clone3 () at ../sysdeps/unix/sysv/linux/x86_64/clone3.S:78
 $1 = (struct queue *) 0x0
 72			 * the bug. */
 73			long result = run_job(job);
@@ -249,7 +252,7 @@ $ rewind replay 5c910df9
 identical: 1713 events over 5192 steps
 
 $ rewind replay 5c910df9 --from 3629
-identical from the keyframe at step 1699 to the end (0.42s)
+identical from the keyframe at step 1659 to the end (0.46s)
 ```
 
 `--from` starts at the nearest keyframe before the step. A run replays on any
@@ -261,22 +264,22 @@ A fork is its parent up to a step, then another schedule:
 
 ```console
 $ rewind fork 6380bb57 3629 --schedule 5 --quiet
-rewind: run 405c9c6df777a799 exited:0 after 6628 steps, 0.222s virtual, 0.329s wall (poweroff)
+rewind: run 405c9c6df777a799 exited:0 after 6628 steps, 0.222s virtual, 0.377s wall (poweroff)
 rewind: the fork first differs from its parent at step 3638
 rewind: open it beside its parent in the desktop app: rewind open 405c9c6df777a799 3638 --compare 6380bb57fcb451da
 
 $ rewind fork 6380bb57 3629 --schedule 6 --quiet
-rewind: run 8f024e4b0e651026 exited:2 after 5201 steps, 0.203s virtual, 0.289s wall (poweroff)
+rewind: run 8f024e4b0e651026 exited:2 after 5201 steps, 0.203s virtual, 0.334s wall (poweroff)
 rewind: the fork first differs from its parent at step 3638
 rewind: open it beside its parent in the desktop app: rewind open 8f024e4b0e651026 3638 --compare 6380bb57fcb451da
 
 $ rewind fork 6380bb57 3629 --schedule 7 --quiet
-rewind: run 4e5abadaa24c7bc5 exited:0 after 6634 steps, 0.222s virtual, 0.327s wall (poweroff)
+rewind: run 4e5abadaa24c7bc5 exited:0 after 6634 steps, 0.222s virtual, 0.371s wall (poweroff)
 rewind: the fork first differs from its parent at step 3662
 rewind: open it beside its parent in the desktop app: rewind open 4e5abadaa24c7bc5 3662 --compare 6380bb57fcb451da
 
 $ rewind fork 6380bb57 3629 --schedule 8 --quiet
-rewind: run 360e80c8b6a8c065 exited:2 after 4544 steps, 0.200s virtual, 0.282s wall (poweroff)
+rewind: run 360e80c8b6a8c065 exited:2 after 4544 steps, 0.200s virtual, 0.317s wall (poweroff)
 rewind: the fork first differs from its parent at step 3638
 rewind: open it beside its parent in the desktop app: rewind open 360e80c8b6a8c065 3638 --compare 6380bb57fcb451da
 ```
