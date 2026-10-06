@@ -8,8 +8,8 @@
 //! [`ZERO_PAGE`] and reading it back needs no I/O.
 //!
 //! On disk a store is a directory of pack files, each a run of compressed
-//! pages appended one after another, and an index that names every page's
-//! pack, offset and length. Both only ever grow, so a crash can at worst
+//! pages appended one after another, an index that names every page's
+//! pack, offset and length, and a file naming the store's format. Both only ever grow, so a crash can at worst
 //! leave a partial last entry, which [`Store::open`] drops.
 //!
 //! Any number of processes can have a store open at once. Each one that
@@ -56,6 +56,10 @@ const INDEX_ENTRY: usize = 32 + 4 + 8 + 4;
 /// The index, the directory of packs, and the file every open store holds
 /// a shared lock on.
 const INDEX: &str = "index";
+
+/// The file that names a store's format: the version as a decimal line.
+const FORMAT: &str = "format";
+pub const STORE_VERSION: u32 = 1;
 const PACKS: &str = "packs";
 const LOCK: &str = "lock";
 
@@ -318,9 +322,54 @@ pub struct Stats {
     pub stored_bytes: u64,
 }
 
+/// Makes sure the store in `dir` is in the format this build reads. A new
+/// store, with nothing in its index yet, has the format written; one that
+/// names another format, or has pages and names none, as a store written
+/// before rewind 1.0 has, is refused.
+fn check_format(dir: &Path) -> Result<()> {
+    let path = dir.join(FORMAT);
+    match fs::read_to_string(&path) {
+        Ok(text) => {
+            let version: u32 = text
+                .trim()
+                .parse()
+                .with_context(|| format!("reading {}", path.display()))?;
+            if version != STORE_VERSION {
+                bail!(
+                    "{} is a page store of format {version}; this build of rewind reads \
+                     format {STORE_VERSION}",
+                    dir.display()
+                );
+            }
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let indexed = fs::metadata(dir.join(INDEX)).map_or(0, |m| m.len());
+            if indexed > 0 {
+                bail!(
+                    "{} is a page store from before rewind 1.0, which names no format, and \
+                     this build cannot read it. Move it aside or remove it: the runs \
+                     recorded before 1.0 that use it do not replay with this build either",
+                    dir.display()
+                );
+            }
+
+            // A new store's format, under a name of its own until whole.
+            static WRITTEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let n = WRITTEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let tmp = dir.join(format!("{FORMAT}.{}.{n}", std::process::id()));
+            fs::write(&tmp, format!("{STORE_VERSION}\n"))?;
+            fs::rename(&tmp, &path)?;
+            Ok(())
+        }
+        Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+    }
+}
+
 impl Store {
     pub fn open(dir: &Path) -> Result<Store> {
         fs::create_dir_all(dir.join(PACKS))?;
+        check_format(dir)?;
         let index_path = dir.join(INDEX);
         let open_index = || {
             OpenOptions::new()
@@ -712,6 +761,7 @@ impl Collector {
     /// name one in a new keyframe.
     pub fn lock(dir: &Path) -> Result<Option<Collector>> {
         fs::create_dir_all(dir.join(PACKS))?;
+        check_format(dir)?;
         let lock = File::create(dir.join(LOCK))?;
         match lock.try_lock() {
             Ok(()) => Ok(Some(Collector {
@@ -988,6 +1038,37 @@ mod tests {
         let mut p = vec![0u8; PAGE];
         p[..64].fill(fill);
         p
+    }
+
+    /// A store names its format in a file of its own, written when the
+    /// store is new and read at every open. A store of another format is
+    /// refused, naming it, and so is one with pages but no format named,
+    /// as a store written before rewind 1.0 is; a collector refuses both
+    /// too, since it rewrites the index.
+    #[test]
+    fn a_store_names_its_format() {
+        let dir = tmp("format");
+        let hash = Store::open(&dir).unwrap().put(&page(1)).unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.join(FORMAT)).unwrap(),
+            format!("{STORE_VERSION}\n")
+        );
+        let mut out = vec![0u8; PAGE];
+        Store::open(&dir).unwrap().get(&hash, &mut out).unwrap();
+
+        fs::write(dir.join(FORMAT), format!("{}\n", STORE_VERSION + 1)).unwrap();
+        let err = format!("{:#}", Store::open(&dir).err().unwrap());
+        assert!(
+            err.contains(&format!("format {}", STORE_VERSION + 1)),
+            "{err}"
+        );
+        assert!(Collector::lock(&dir).is_err());
+
+        fs::remove_file(dir.join(FORMAT)).unwrap();
+        let err = format!("{:#}", Store::open(&dir).err().unwrap());
+        assert!(err.contains("before rewind 1.0"), "{err}");
+        assert!(Collector::lock(&dir).is_err());
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
