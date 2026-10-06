@@ -393,7 +393,7 @@ $ rewind ls --status timed-out
 
 ## Keep the run directory tidy
 
-<!-- run: for s in 1 2; do REWIND_HOME=elsewhere rewind fork {{failing}} {{fork_from}} --schedule $s --quiet; done -->
+<!-- run: for s in 1 2; do REWIND_HOME=elsewhere rewind fork {{failing}} {{fork_from}} --schedule $s --quiet || true; done -->
 <!-- set removed: REWIND_HOME=elsewhere rewind ls | head -1 | awk '{print $1}' -->
 
 Runs live under `~/.local/share/rewind`, or `REWIND_HOME`:
