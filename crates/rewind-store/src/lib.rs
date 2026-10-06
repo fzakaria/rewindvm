@@ -76,10 +76,8 @@ const COLLECT_BUFFER: usize = 1 << 20;
 /// The sorted copy of the index's first entries: a header of a magic
 /// value, how many index entries it covers and how many it holds, then
 /// those it holds, in the index's format, sorted by hash with each hash
-/// once. A copy whose length disagrees with its header is not used. The
-/// first format had no count, so a copy cut short read as whole; its
-/// magic is no longer accepted, and a store with one sorts again from the
-/// index, which has every entry.
+/// once. A copy whose magic or length disagrees with its header is not
+/// used, and the store sorts again from the index, which has every entry.
 const SORTED: &str = "index.sorted";
 const SORTED_MAGIC: &[u8; 8] = b"rwsort02";
 const SORTED_HEADER: usize = 24;
@@ -1226,10 +1224,9 @@ mod tests {
 
     #[test]
     fn a_sorted_copy_cut_short_is_ignored() {
-        // A sorted copy missing its last entry, as two writers sharing one
-        // file left them before each had its own, names fewer pages than
-        // its header says. It is passed over for the log, which has every
-        // page, so the page it lost is found.
+        // A sorted copy missing its last entry names fewer pages than its
+        // header says. It is passed over for the log, which has every page,
+        // so the page it lost is found.
         let dir = tmp("short");
         let hashes = {
             let mut store = Store::open(&dir).unwrap();
