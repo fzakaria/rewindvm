@@ -76,7 +76,8 @@ In the app, Show source under Inspect, or the s key, opens the source panel
 in a tab beside At this step. It names the line `rewind where` would for the
 thread of the playhead's event and shows that line's whole source file,
 syntax colored, scrolled so the line, marked, sits in the middle. The thread's frames are
-listed in a short list pinned below the file, with the chosen one marked.
+listed below the file, with the chosen one marked; dragging the list's top
+edge makes it taller for a deep stack.
 Clicking another frame shows its file instead, scrolled to its line and
 marked; a frame without source shows its address and program. A file over a
 mebibyte comes as the lines around its frames' lines, and the panel says
@@ -200,6 +201,16 @@ build, with forks under the run and step they branched from:
 <!-- screenshot site/img/app-runs: {{home}}/runs/{{failing}} --compare {{home}}/runs/{{passing}} --step {{crash_step}} ;; click 785 27 ;; wait 3 -->
 
 ![The app's Runs panel: check's schedules, and the forks of the failing run, failing and passing](../site/img/app-runs.png)
+
+The Fork from here button forks the run at the playhead with the next
+schedule. A fork of a long run takes about as long as the run did: while forks
+made from the window run, the button's icon turns, and the Runs panel lists
+each fork as running, in a pulsing pill, until it ends and the panel shows
+how. Clicking a run opens it compared with the run it hangs under.
+Right-clicking one offers to compare every run with it instead, to copy its id
+or to delete it with its forks; Ctrl and Shift pick several. Forks that ran
+exactly as an older one did go in one click, with remove identical in the
+panel's header.
 
 ## Find a run again
 
