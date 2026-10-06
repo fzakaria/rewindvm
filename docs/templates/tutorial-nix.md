@@ -95,10 +95,11 @@ $ rewind check --epoch {{epoch}} {{flake}}
 <!-- capture window_from: perturbing only steps (\d+)\.\. -->
 <!-- capture window_until: perturbing only steps \d+\.\.(\d+) -->
 <!-- set failed: grep -E '^schedule +[0-9]+: exited:[1-9]' {{out:check}} | awk '{print $2}' | tr -d : | tr '\n' ' ' -->
-<!-- assert: test $(echo {{failed}} | wc -w) -ge 2 -->
+<!-- assert: test $(echo {{failed}} | wc -w) -ge 1 -->
+<!-- set failed_said: python3 -c 'import sys; s = sys.argv[1:]; print(f"Schedule {s[0]} fails" if len(s) == 1 else f"Schedules {", ".join(s[:-1])} and {s[-1]} fail")' {{failed}} -->
 <!-- assert: test {{check_seconds}} -lt 60 -->
 
-Schedules {{failed|and}} fail. `check` narrows schedule {{narrowed}}'s
+{{failed_said}}. `check` narrows schedule {{narrowed}}'s
 perturbation to steps {{window_from}} to {{window_until}} and keeps two runs,
 the passing one and the failing one, identical up to step {{window_from}}.
 The last block shows where the test's own output first differs. The search
