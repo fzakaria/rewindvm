@@ -28,19 +28,32 @@ const REMINDER_BODY: &str =
     "It works fully while you evaluate it; a license is $49 personal or $99 per seat.";
 const UPDATES_ENDED_TITLE: &str = "Your license's updates have ended";
 const UPDATES_ENDED_PILL: &str = "Updates ended \u{b7} Renew";
+const REFUSED_PILL: &str = "License not accepted";
 
 /// The dialog's backdrop: the window behind it, dimmed.
 const BACKDROP_A: u32 = 0x0000_00a0;
 const DIALOG_WIDTH: f32 = 600.0;
 const PASTE_FIELD_HEIGHT: f32 = 220.0;
 
-/// The dialog's title and what it asks for.
+/// The dialog's titles and what the paste view asks for.
 const DIALOG_TITLE: &str = "Enter license";
+const DETAILS_TITLE: &str = "License";
 const DIALOG_HELP: &str = "Paste the whole block from your email, from the BEGIN line to the END line; a block that checks out registers at once. It is checked on this machine, and nothing is sent anywhere.";
 
-/// The license dialog's state: what was pasted and what checking it said.
+/// What the license dialog shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DialogView {
+    /// The license the app is registered with.
+    Details,
+    /// The paste field, for a license to register with.
+    Paste,
+}
+
+/// The license dialog's state: what it shows, what was pasted and what
+/// checking it said.
 pub struct LicenseDialog {
     pub focus: FocusHandle,
+    pub view: DialogView,
     pub text: String,
     pub result: Option<Result<License, LicenseError>>,
 }
@@ -70,13 +83,9 @@ impl Licensing {
 }
 
 impl Scrubber {
-    /// Starts the reminder's clock, and says so when a stored license
-    /// did not check out.
+    /// Starts the reminder's clock. A stored license that did not check
+    /// out says so in the header's pill, and its dialog says why.
     pub(super) fn start_licensing(&mut self, cx: &mut Context<Self>) {
-        if let Registration::Invalid(reason) = &self.licensing.registration {
-            let reason = reason.clone();
-            self.notify_user(NoticeTone::Error, "License not accepted", reason, cx);
-        }
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(REMINDER_CHECK).await;
@@ -137,14 +146,29 @@ impl Scrubber {
         );
     }
 
+    /// Opens the license dialog: the license's details when the app has
+    /// one, else the paste field.
     pub(super) fn open_license_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
+        let view = match self.licensing.registration {
+            Registration::Registered(_) => DialogView::Details,
+            Registration::Unregistered | Registration::Invalid(_) => DialogView::Paste,
+        };
         self.licensing.dialog = Some(LicenseDialog {
             focus,
+            view,
             text: String::new(),
             result: None,
         });
+        cx.notify();
+    }
+
+    /// Turns the details into the paste field, for another license.
+    fn enter_another_license(&mut self, cx: &mut Context<Self>) {
+        if let Some(dialog) = &mut self.licensing.dialog {
+            dialog.view = DialogView::Paste;
+        }
         cx.notify();
     }
 
@@ -214,24 +238,25 @@ impl Scrubber {
         cx.notify();
     }
 
-    /// The header's license pill: "Unregistered", which opens the dialog,
-    /// the licensee, or that the license's updates ended before this
-    /// version.
+    /// The header's license pill, which opens the dialog: "Unregistered",
+    /// the licensee, that the license's updates ended before this version,
+    /// or that the stored license was refused.
     pub(super) fn render_license_pill(&self, cx: &mut Context<Self>) -> Div {
         let fonts = &self.fonts;
-        let label = match &self.licensing.registration {
+        let (label, tone) = match &self.licensing.registration {
             Registration::Registered(license) => match license.coverage() {
-                Coverage::Current => license.name.clone(),
-                Coverage::EndedBefore(_) => UPDATES_ENDED_PILL.to_string(),
+                Coverage::Current => (license.name.clone(), PillTone::Quiet),
+                Coverage::EndedBefore(_) => (UPDATES_ENDED_PILL.to_string(), PillTone::Quiet),
             },
-            Registration::Unregistered | Registration::Invalid(_) => "Unregistered".to_string(),
+            Registration::Unregistered => ("Unregistered".to_string(), PillTone::Quiet),
+            Registration::Invalid(_) => (REFUSED_PILL.to_string(), PillTone::Failed),
         };
         div().child(
             div()
                 .id("license-pill")
                 .cursor_pointer()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .child(pill(label, PillTone::Quiet, fonts))
+                .child(pill(label, tone, fonts))
                 .on_click(cx.listener(|this, _, window, cx| this.open_license_dialog(window, cx))),
         )
     }
@@ -242,13 +267,17 @@ impl Scrubber {
         let mono = self.fonts.mono.clone();
         let registry = self.selecting.registry.clone();
         let range = self.selected_range(Surface::LicenseDialog);
-        let line = |i: usize, text: String| {
+        let lines = dialog_lines(dialog.view, &self.licensing.registration, &dialog.result);
+        let line = |i: usize, (color, text): (u32, String)| {
             let part = range.as_ref().and_then(|r| part_of_line(r, i, text.len()));
-            selectable(Surface::LicenseDialog, i, text, part, &registry)
+            div()
+                .text_color(rgb(color))
+                .cursor(CursorStyle::IBeam)
+                .child(selectable(Surface::LicenseDialog, i, text, part, &registry))
         };
 
-        // The paste field: what was pasted, or how to paste.
-        let focused_border = rgba(theme::FOCUS_RING_A);
+        // The paste field: what was pasted, or how to paste, ringed as the
+        // place a paste goes while the dialog has the keyboard.
         let field_text: SharedString = if dialog.text.is_empty() {
             "Press Ctrl+v to paste the license block from your email.".into()
         } else {
@@ -261,6 +290,67 @@ impl Scrubber {
         };
         let field = div()
             .id("license-field")
+            .h(px(PASTE_FIELD_HEIGHT))
+            .overflow_y_scroll()
+            .p(px(size::NOTICE_PAD))
+            .rounded(px(size::RADIUS_BUTTON))
+            .bg(rgb(theme::BG))
+            .border_1()
+            .border_color(rgba(theme::FOCUS_RING_A))
+            .font_family(mono)
+            .text_size(px(size::TEXT_MONO))
+            .text_color(rgb(field_color))
+            .child(field_text);
+
+        // Buy on the left, for someone without a license or whose updates
+        // ended; on the right, pasting, which registers, or entering
+        // another license, and closing.
+        let covered = self.licensing.is_registered();
+        let buy = (!covered).then(|| {
+            button("license-buy", ButtonStyle::Neutral, Availability::Enabled)
+                .child("Buy a license")
+                .on_click(|_, _, cx| cx.open_url(BUY_URL))
+        });
+        let close = button(
+            "license-cancel",
+            ButtonStyle::Neutral,
+            Availability::Enabled,
+        )
+        .child(match dialog.view {
+            DialogView::Details => "Close",
+            DialogView::Paste => "Cancel",
+        })
+        .on_click(cx.listener(|this, _, window, cx| this.close_license_dialog(window, cx)));
+        let act = match dialog.view {
+            DialogView::Paste => {
+                button("license-paste", ButtonStyle::Primary, Availability::Enabled)
+                    .child("Paste")
+                    .on_click(cx.listener(|this, _, window, cx| this.paste_license(window, cx)))
+            }
+            DialogView::Details => button(
+                "license-another",
+                ButtonStyle::Neutral,
+                Availability::Enabled,
+            )
+            .child("Enter another license")
+            .on_click(cx.listener(|this, _, _, cx| this.enter_another_license(cx))),
+        };
+        let buttons = div()
+            .flex()
+            .justify_between()
+            .child(div().children(buy))
+            .child(
+                div()
+                    .flex()
+                    .gap(px(size::CONTROL_GAP))
+                    .child(close)
+                    .child(act),
+            );
+
+        // The title, then the text, with the paste field after the help.
+        let mut lines = lines.into_iter().enumerate();
+        let mut card = div()
+            .id("license-card")
             .track_focus(&dialog.focus)
             .key_context(LICENSE_CONTEXT)
             .on_action(
@@ -273,52 +363,6 @@ impl Scrubber {
             .on_action(cx.listener(|this, _: &CloseDialog, window, cx| {
                 this.close_license_dialog(window, cx)
             }))
-            .h(px(PASTE_FIELD_HEIGHT))
-            .overflow_y_scroll()
-            .p(px(size::NOTICE_PAD))
-            .rounded(px(size::RADIUS_BUTTON))
-            .bg(rgb(theme::BG))
-            .border_1()
-            .border_color(rgb(theme::LINE_2))
-            .focus(move |s| s.border_color(focused_border))
-            .font_family(mono)
-            .text_size(px(size::TEXT_MONO))
-            .text_color(rgb(field_color))
-            .child(field_text);
-
-        // What checking the pasted text said.
-        let verdict = verdict(&dialog.result);
-
-        // Buy on the left, for someone who has no license yet; pasting,
-        // which registers, and closing on the right.
-        let buy = button("license-buy", ButtonStyle::Neutral, Availability::Enabled)
-            .child("Buy a license")
-            .on_click(|_, _, cx| cx.open_url(BUY_URL));
-        let buttons = div().flex().justify_between().child(buy).child(
-            div()
-                .flex()
-                .gap(px(size::CONTROL_GAP))
-                .child(
-                    button(
-                        "license-cancel",
-                        ButtonStyle::Neutral,
-                        Availability::Enabled,
-                    )
-                    .child("Cancel")
-                    .on_click(
-                        cx.listener(|this, _, window, cx| this.close_license_dialog(window, cx)),
-                    ),
-                )
-                .child(
-                    button("license-paste", ButtonStyle::Primary, Availability::Enabled)
-                        .child("Paste")
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.paste_license(window, cx)),
-                        ),
-                ),
-        );
-
-        let mut card = div()
             .w(px(DIALOG_WIDTH))
             .flex()
             .flex_col()
@@ -328,28 +372,26 @@ impl Scrubber {
             .bg(rgb(theme::PANEL))
             .border_1()
             .border_color(rgb(theme::LINE_2))
-            .shadow_lg()
-            .child(
-                div()
-                    .text_size(px(size::TEXT_BRAND))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .cursor(CursorStyle::IBeam)
-                    .child(line(0, DIALOG_TITLE.to_string())),
-            )
-            .child(
-                div()
-                    .text_color(rgb(theme::SOFT))
-                    .cursor(CursorStyle::IBeam)
-                    .child(line(1, DIALOG_HELP.to_string())),
-            )
-            .child(field);
-        if let Some((color, text)) = verdict {
+            .shadow_lg();
+        if let Some((i, title)) = lines.next() {
             card = card.child(
-                div()
-                    .text_color(rgb(color))
-                    .cursor(CursorStyle::IBeam)
-                    .child(line(2, text)),
+                line(i, title)
+                    .text_size(px(size::TEXT_BRAND))
+                    .font_weight(FontWeight::SEMIBOLD),
             );
+        }
+        let body_before_field = match dialog.view {
+            DialogView::Paste => 1,
+            DialogView::Details => usize::MAX,
+        };
+        for (i, text) in lines.by_ref().take(body_before_field) {
+            card = card.child(line(i, text));
+        }
+        if dialog.view == DialogView::Paste {
+            card = card.child(field);
+        }
+        for (i, text) in lines {
+            card = card.child(line(i, text));
         }
         card = card.child(buttons);
         let card = selects(card, Surface::LicenseDialog, cx);
@@ -381,18 +423,74 @@ impl Scrubber {
 }
 
 impl Scrubber {
-    /// The dialog's text lines: its title, its help, and the verdict on
-    /// what was pasted.
+    /// The dialog's text lines, as the selection sees them.
     pub(super) fn license_dialog_lines(&self) -> Vec<Mapped> {
         let Some(dialog) = &self.licensing.dialog else {
             return Vec::new();
         };
-        let mut lines = vec![Mapped::plain(DIALOG_TITLE), Mapped::plain(DIALOG_HELP)];
-        if let Some((_, text)) = verdict(&dialog.result) {
-            lines.push(Mapped::plain(text));
-        }
-        lines
+        dialog_lines(dialog.view, &self.licensing.registration, &dialog.result)
+            .into_iter()
+            .map(|(_, text)| Mapped::plain(text))
+            .collect()
     }
+}
+
+/// The dialog's text, each line in its color: the title, then for the
+/// details the license's fields and whether it covers this version, or
+/// for pasting the help, why a stored license was refused, and the
+/// verdict on what was pasted.
+fn dialog_lines(
+    view: DialogView,
+    registration: &Registration,
+    result: &Option<Result<License, LicenseError>>,
+) -> Vec<(u32, String)> {
+    if let (DialogView::Details, Registration::Registered(license)) = (view, registration) {
+        let seats = if license.seats == 1 { "seat" } else { "seats" };
+        let covers = match license.coverage() {
+            Coverage::Current => format!(
+                "It covers this version, released {}.",
+                license::RELEASE_DATE
+            ),
+            Coverage::EndedBefore(until) => updates_ended_body(until),
+        };
+        return vec![
+            (theme::TEXT, DETAILS_TITLE.to_string()),
+            (
+                theme::SOFT,
+                format!("Registered to {} <{}>", license.name, license.email),
+            ),
+            (
+                theme::SOFT,
+                format!(
+                    "{}, {} {seats} \u{b7} id {}",
+                    license.edition.as_str(),
+                    license.seats,
+                    license.id
+                ),
+            ),
+            (
+                theme::SOFT,
+                format!(
+                    "Issued {} \u{b7} updates until {}",
+                    license.issued, license.updates_until
+                ),
+            ),
+            (theme::SOFT, covers),
+        ];
+    }
+
+    let mut lines = vec![
+        (theme::TEXT, DIALOG_TITLE.to_string()),
+        (theme::SOFT, DIALOG_HELP.to_string()),
+    ];
+    if let Registration::Invalid(reason) = registration {
+        lines.push((
+            theme::RED_SOFT,
+            format!("The stored license was not accepted: {reason}"),
+        ));
+    }
+    lines.extend(verdict(result));
+    lines
 }
 
 /// What a license whose updates ended before this version means.
@@ -425,5 +523,77 @@ fn verdict(result: &Option<Result<License, LicenseError>>) -> Option<(u32, Strin
             ))
         }
         Some(Err(e)) => Some((theme::RED_SOFT, e.to_string())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // The license dialog's text, from the registration alone: what a
+    // registered user is shown about their license, and what a user whose
+    // stored license was refused is told before pasting another.
+    use super::*;
+
+    fn licensed(until: &str) -> License {
+        License {
+            name: "Ada Lovelace".into(),
+            email: "ada@example.com".into(),
+            edition: license::Edition::Commercial,
+            seats: 3,
+            id: "0123456789abcdef".into(),
+            issued: license::Date::parse("2026-09-30").unwrap(),
+            updates_until: license::Date::parse(until).unwrap(),
+        }
+    }
+
+    fn texts(lines: Vec<(u32, String)>) -> Vec<String> {
+        lines.into_iter().map(|(_, text)| text).collect()
+    }
+
+    #[test]
+    fn a_registered_user_sees_their_license() {
+        // The license's fields, and that it covers this version.
+        let registered = Registration::Registered(licensed("2099-01-01"));
+        let lines = texts(dialog_lines(DialogView::Details, &registered, &None));
+        assert_eq!(
+            lines,
+            [
+                "License".to_string(),
+                "Registered to Ada Lovelace <ada@example.com>".to_string(),
+                "Commercial, 3 seats \u{b7} id 0123456789abcdef".to_string(),
+                "Issued 2026-09-30 \u{b7} updates until 2099-01-01".to_string(),
+                format!(
+                    "It covers this version, released {}.",
+                    license::RELEASE_DATE
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_license_whose_updates_ended_says_so_in_the_details() {
+        // The last line says this version runs as an evaluation.
+        let registered = Registration::Registered(licensed("2020-01-01"));
+        let lines = texts(dialog_lines(DialogView::Details, &registered, &None));
+        let until = license::Date::parse("2020-01-01").unwrap();
+        assert_eq!(lines.last(), Some(&updates_ended_body(until)));
+    }
+
+    #[test]
+    fn a_refused_stored_license_is_explained_before_pasting() {
+        // The paste view leads with why the stored license was refused,
+        // then the verdict on what was pasted, if anything was.
+        let refused = Registration::Invalid("License 0123 has been revoked.".into());
+        let lines = texts(dialog_lines(DialogView::Paste, &refused, &None));
+        assert_eq!(
+            lines,
+            [
+                DIALOG_TITLE.to_string(),
+                DIALOG_HELP.to_string(),
+                "The stored license was not accepted: License 0123 has been revoked.".to_string(),
+            ]
+        );
+        let pasted = Some(Err(LicenseError::NoBlock));
+        let lines = texts(dialog_lines(DialogView::Paste, &refused, &pasted));
+        assert_eq!(lines.last(), Some(&LicenseError::NoBlock.to_string()));
     }
 }
