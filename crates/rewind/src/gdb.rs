@@ -59,6 +59,11 @@ const DEBUG_RELEASE: &str = "rewind-debug-x86_64-linux.tar.gz";
 const AUTO_LOAD_OFF: &str = "set auto-load python-scripts off";
 const AUTO_LOAD_ON: &str = "set auto-load python-scripts on";
 
+/// Turning gdb's debuginfod client off and on again around a file no
+/// server has debug info for.
+const DEBUGINFOD_OFF: &str = "set debuginfod enabled off";
+const DEBUGINFOD_ON: &str = "set debuginfod enabled on";
+
 /// In the `debug` output, the files the Rewind patch adds or changes, in
 /// a directory named for the source tree. nixseparatedebuginfod2 serves
 /// the source tarball's files, but takes a patched file only in place of
@@ -537,7 +542,7 @@ fn arguments(
     };
 
     if !urls.is_empty() {
-        ex("-iex", "set debuginfod enabled on".into());
+        ex("-iex", DEBUGINFOD_ON.into());
         ex("-iex", format!("set debuginfod urls {}", urls.join(" ")));
     }
 
@@ -578,7 +583,14 @@ fn arguments(
     // add-symbol-file's line about the file and its offset to itself and
     // passes on gdb's line about downloading the file's debug info, which
     // can take a minute the first time.
+    // The vDSO, read out of the VM's memory, has debug info on no server,
+    // so it loads with debuginfod off: asked, the client would announce a
+    // download that never comes.
     for file in &process.files {
+        let quiet = file.origin == Origin::Memory && !urls.is_empty();
+        if quiet {
+            ex("-ex", DEBUGINFOD_OFF.into());
+        }
         ex(
             "-ex",
             format!(
@@ -587,6 +599,9 @@ fn arguments(
                 file.offset
             ),
         );
+        if quiet {
+            ex("-ex", DEBUGINFOD_ON.into());
+        }
     }
 
     if let Some(address) = target {
@@ -1577,6 +1592,43 @@ mod tests {
             "pipe with confirm off -- add-symbol-file /nix/store/abc-glibc/lib/libc.so.6 -o 0x7f0000000000 | {DOWNLOADS_ONLY}"
         );
         assert!(args.contains(&expected), "{args:?}");
+    }
+
+    /// The vDSO, read out of the VM's memory, has debug info on no server,
+    /// so gdb loads it with debuginfod off and asks for none, and says
+    /// nothing of a download that would never come; a library loads with
+    /// debuginfod on.
+    #[test]
+    fn the_vdso_is_loaded_without_asking_debuginfod() {
+        let file = |path: &str, origin| SymbolFile {
+            path: PathBuf::from(path),
+            offset: 0x7f00_0000_0000,
+            origin,
+        };
+        let process = Process {
+            files: vec![
+                file("/nix/store/abc-glibc/lib/libc.so.6", Origin::Store),
+                file("/session/[vdso]", Origin::Memory),
+            ],
+            ..Process::default()
+        };
+        let urls = ["http://127.0.0.1:1"];
+        let args = arguments(&KernelSymbols::none(), &process, &urls, None);
+        let at = |needle: &str| {
+            args.iter()
+                .position(|a| a.contains(needle))
+                .unwrap_or_else(|| panic!("{needle} in {args:?}"))
+        };
+        let on = args.iter().rposition(|a| a == DEBUGINFOD_ON).unwrap();
+        let (off, vdso) = (at(DEBUGINFOD_OFF), at("[vdso]"));
+        assert!(off < vdso && vdso < on, "{args:?}");
+        assert!(at("libc.so.6") < off, "{args:?}");
+
+        let quiet = arguments(&KernelSymbols::none(), &process, &[], None);
+        assert!(
+            !quiet.iter().any(|a| a.contains(DEBUGINFOD_OFF)),
+            "{quiet:?}"
+        );
     }
 
     /// A gdb that exits without connecting, as `gdb --version` does, is
