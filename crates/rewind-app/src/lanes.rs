@@ -161,7 +161,58 @@ impl Window {
     pub fn step_at(&self, offset: i64) -> Option<u64> {
         self.center.checked_add_signed(offset)
     }
+
+    /// The window `factor` times as wide, above 1 to zoom out, keeping the
+    /// step `fraction` of the way across where it is, and its half between
+    /// MIN_HALF and MAX_HALF.
+    pub fn zoomed(&self, fraction: f32, factor: f64) -> Window {
+        let along = |half: u64| (fraction as f64 * (2 * half + 1) as f64).floor() as i64;
+        let pointer = self.center as i64 - self.half as i64 + along(self.half);
+        let half = ((self.half as f64 * factor).round() as u64).clamp(MIN_HALF, MAX_HALF);
+        let center = pointer - along(half) + half as i64;
+        Window {
+            center: center.max(0) as u64,
+            half,
+        }
+    }
+
+    /// The window moved by `fraction` of its width, never to a center
+    /// before step 0.
+    pub fn panned(&self, fraction: f32) -> Window {
+        let by = (fraction as f64 * (2 * self.half + 1) as f64).round() as i64;
+        self.shifted(by)
+    }
+
+    /// The same width `by` steps along: the compared run's window, whose
+    /// center is this one's plus the offset between the two runs.
+    pub fn shifted(&self, by: i64) -> Window {
+        Window {
+            center: self.center.saturating_add_signed(by),
+            half: self.half,
+        }
+    }
+
+    /// The steps to replay for this window: half a window more on each
+    /// side, so a small pan or zoom out needs no replay of its own.
+    pub fn fetch_range(&self) -> (u64, u64) {
+        (
+            self.center.saturating_sub(2 * self.half),
+            self.center + 2 * self.half,
+        )
+    }
+
+    /// Whether the steps replayed, `fetched`, cover this window, up to the
+    /// run's last step, `last`.
+    pub fn covered_by(&self, fetched: Option<(u64, u64)>, last: u64) -> bool {
+        fetched.is_some_and(|(from, to)| self.from() >= from && self.to().min(last) <= to)
+    }
 }
+
+/// The narrowest and widest a window is, in steps either side of its
+/// center: a few steps make a readable bar, and about 8,000 steps replay
+/// in a few seconds.
+pub const MIN_HALF: u64 = 8;
+pub const MAX_HALF: u64 = 4096;
 
 /// The lane holding the CPU at `step`, among `slices`.
 pub fn lane_at(slices: &[Slice], step: u64) -> Option<Lane> {
@@ -297,6 +348,83 @@ mod tests {
         assert_eq!(early.at(0), Some(0.2));
         assert_eq!(early.step_at(-2), None);
         assert_eq!(early.step_at(1), Some(2));
+    }
+
+    /// Zooming keeps the step under the pointer where it is: in at the
+    /// middle keeps the center, in at the left edge keeps the first step,
+    /// and the half stays between MIN_HALF and MAX_HALF.
+    #[test]
+    fn zooming_keeps_the_step_under_the_pointer() {
+        let w = Window {
+            center: 1000,
+            half: 100,
+        };
+        assert_eq!(
+            w.zoomed(0.5, 0.5),
+            Window {
+                center: 1000,
+                half: 50
+            }
+        );
+        assert_eq!(w.zoomed(0.0, 0.5).from(), 900);
+        assert_eq!(
+            w.zoomed(0.5, 2.0),
+            Window {
+                center: 1000,
+                half: 200
+            }
+        );
+        let narrow = Window {
+            center: 1000,
+            half: MIN_HALF,
+        };
+        assert_eq!(narrow.zoomed(0.5, 0.5).half, MIN_HALF);
+        let wide = Window {
+            center: 9000,
+            half: MAX_HALF,
+        };
+        assert_eq!(wide.zoomed(0.5, 2.0).half, MAX_HALF);
+        let early = Window { center: 5, half: 8 };
+        assert_eq!(early.zoomed(1.0, 2.0).center, 0);
+    }
+
+    /// Panning moves the center by a share of the window's width, and
+    /// stops at step 0; shifting moves it by steps, for the compared run.
+    #[test]
+    fn panning_moves_the_center_by_a_share_of_the_width() {
+        let w = Window {
+            center: 1000,
+            half: 100,
+        };
+        assert_eq!(w.panned(0.1).center, 1020);
+        assert_eq!(w.panned(-0.1).center, 980);
+        assert_eq!(w.panned(-10.0).center, 0);
+        assert_eq!(w.shifted(-4).center, 996);
+        assert_eq!(w.shifted(-2000).center, 0);
+    }
+
+    /// A window replays half a window more on each side, and needs a
+    /// replay only once it reaches past what was replayed, up to the run's
+    /// last step.
+    #[test]
+    fn a_window_replays_only_what_it_has_not() {
+        let w = Window {
+            center: 1000,
+            half: 100,
+        };
+        assert_eq!(w.fetch_range(), (800, 1200));
+        assert_eq!(
+            Window {
+                center: 50,
+                half: 100
+            }
+            .fetch_range(),
+            (0, 250)
+        );
+        assert!(w.covered_by(Some((800, 1200)), 5000));
+        assert!(!w.covered_by(Some((950, 1200)), 5000));
+        assert!(!w.covered_by(None, 5000));
+        assert!(w.covered_by(Some((800, 1050)), 1050));
     }
 
     /// The first switch is the first offset where the two runs had
