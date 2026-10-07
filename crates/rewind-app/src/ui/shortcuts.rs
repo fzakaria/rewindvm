@@ -55,6 +55,7 @@ pub const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("Ctrl+f  /", "search the log, files and events"),
             ("b", "bookmark the playhead's step"),
             ("s", "show or hide the source panel"),
+            ("t", "show or hide the threads"),
             ("Escape", "close the tab, menu or terminal pane"),
             ("Ctrl+c  Ctrl+a", "copy, select all"),
             ("Ctrl+Shift+c  v", "copy and paste in the terminal pane"),

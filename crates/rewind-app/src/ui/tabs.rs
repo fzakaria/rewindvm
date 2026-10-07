@@ -1,5 +1,5 @@
 //! The tabs over the right column: "At this step", the Runs panel, the
-//! bookmarks, the file viewer and the source panel. Each shows in the column's whole
+//! bookmarks, the file viewer, the source panel and the threads. Each shows in the column's whole
 //! height when chosen, so none takes another's place or squeezes a fourth
 //! column into the window. The file, the source and the runs close back to
 //! "At this step", by their x or Escape, and the runs pill opens the runs
@@ -36,6 +36,8 @@ pub enum RightTab {
     Bookmarks,
     File,
     Source,
+    /// A lane per thread over a window of steps.
+    Threads,
 }
 
 impl Scrubber {
@@ -50,7 +52,11 @@ impl Scrubber {
         match tab {
             RightTab::File => self.playhead_moved(cx),
             RightTab::Source => self.source_playhead_moved(cx),
-            RightTab::AtStep | RightTab::Compare | RightTab::Runs | RightTab::Bookmarks => {}
+            RightTab::AtStep
+            | RightTab::Compare
+            | RightTab::Runs
+            | RightTab::Bookmarks
+            | RightTab::Threads => {}
         }
         cx.notify();
     }
@@ -61,6 +67,7 @@ impl Scrubber {
         match tab {
             RightTab::File => self.close_viewer(cx),
             RightTab::Source => self.close_source(cx),
+            RightTab::Threads => self.close_lanes(cx),
             RightTab::Runs => {
                 self.runs_tab = false;
                 if self.right_tab == RightTab::Runs {
@@ -98,6 +105,9 @@ impl Scrubber {
         if self.source.is_some() {
             tabs.push(RightTab::Source);
         }
+        if self.lanes.is_some() {
+            tabs.push(RightTab::Threads);
+        }
         tabs
     }
 
@@ -118,6 +128,7 @@ impl Scrubber {
                 format!("File \u{b7} {}", clip(&name, MAX_FILE_CHARS))
             }
             RightTab::Source => "Source".to_string(),
+            RightTab::Threads => "Threads".to_string(),
             RightTab::Bookmarks => format!("Bookmarks \u{b7} {}", self.bookmarks.len()),
         }
     }

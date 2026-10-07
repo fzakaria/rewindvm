@@ -36,7 +36,7 @@ use crate::ui::{
     AddBookmark, CloseNearest, CopySelection, EnterLicense, ForkHere, GoBack, GoForward, GoToEnd,
     GoToStart, GoToStep, JumpToDivergence, JumpToFailure, KEY_CONTEXT, NextEvent, NextPhase,
     OpenRun, OpenSearch, PreviousEvent, PreviousPhase, SelectAll, ShowOtherRun, ShowShortcuts,
-    StartTour, StepBack, StepForward, ToggleSource, ZoomIn, ZoomOut, ZoomReset,
+    StartTour, StepBack, StepForward, ToggleSource, ToggleThreads, ZoomIn, ZoomOut, ZoomReset,
 };
 
 /// Header labels are cut to this many characters.
@@ -107,6 +107,7 @@ impl Render for Scrubber {
             )
             .on_action(cx.listener(|this, _: &ForkHere, _, cx| this.fork_here(cx)))
             .on_action(cx.listener(|this, _: &ToggleSource, _, cx| this.toggle_source(cx)))
+            .on_action(cx.listener(|this, _: &ToggleThreads, _, cx| this.toggle_lanes(cx)))
             .on_action(cx.listener(|this, _: &OpenRun, _, cx| this.prompt_open(cx)))
             .on_action(cx.listener(|this, _: &EnterLicense, window, cx| {
                 this.open_license_dialog(window, cx)
@@ -199,6 +200,7 @@ impl Scrubber {
         let chosen = match self.right_tab {
             RightTab::File => self.render_viewer(cx),
             RightTab::Source => self.render_source(cx),
+            RightTab::Threads => self.render_lanes(cx),
             RightTab::Runs => self.runs.family.as_ref().map(|f| self.render_runs(f, cx)),
             RightTab::Bookmarks => Some(self.render_bookmarks_panel(cx)),
             RightTab::Compare => Some(self.render_compare(cx)),
@@ -1428,6 +1430,11 @@ impl Scrubber {
             column = column.child(selects(fork, Surface::ForkCard, cx));
         }
 
+        // The latest check from a step of this run.
+        if let Some(sweep) = self.render_sweep(cx) {
+            column = column.child(sweep);
+        }
+
         // The run's bookmarks.
         column = column.child(self.render_bookmark_here(cx));
 
@@ -1475,6 +1482,21 @@ impl Scrubber {
                         inspect("export", "Export run".into(), Availability::Enabled)
                             .tooltip(tooltip(EXPORT_NOTE))
                             .on_click(cx.listener(|this, _, _, cx| this.export(cx))),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap(px(size::CARD_GAP))
+                    .child(
+                        inspect("threads", "Show threads".into(), Availability::Enabled)
+                            .tooltip(tooltip(THREADS_NOTE))
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_lanes(cx))),
+                    )
+                    .child(
+                        inspect("check", "Check from here".into(), Availability::Enabled)
+                            .tooltip(tooltip(CHECK_NOTE))
+                            .on_click(cx.listener(|this, _, _, cx| this.check_here(cx))),
                     ),
             );
         // The buttons stay at the foot of the column however long the
@@ -2039,6 +2061,8 @@ const BACK_NOTE: &str = "Back to where the playhead was before its last jump: to
 const FORWARD_NOTE: &str =
     "Forward again, after Back. Key: Alt+Right, or the mouse's forward button.";
 const EXPORT_NOTE: &str = "Writes this run to one .rwd file, with its keyframes and inputs, that another machine can open, replay and fork.";
+const THREADS_NOTE: &str = "A lane per thread over a window of steps, a bar where the thread held the CPU, beside the compared run's. Rewind replays the window one step at a time in each run to find them. Key: t.";
+const CHECK_NOTE: &str = "Runs 16 other schedules from this step, each a fork of this run, and counts how many end differently. The forks stay among this run's forks.";
 
 /// The fork button's note while forks made from this window run.
 fn forking_note(forking: usize) -> String {
@@ -2215,7 +2239,7 @@ fn ending_tone(run: &RunEntry) -> PillTone {
 }
 
 /// A rounded card with a border.
-fn card(bg: u32, border: u32) -> Div {
+pub(super) fn card(bg: u32, border: u32) -> Div {
     div()
         .flex()
         .flex_col()
@@ -2228,7 +2252,7 @@ fn card(bg: u32, border: u32) -> Div {
 }
 
 /// A card's title line; the caller adds its text.
-fn card_title(color: u32) -> Div {
+pub(super) fn card_title(color: u32) -> Div {
     div()
         .text_size(px(size::TEXT_CARD_TITLE))
         .font_weight(FontWeight::SEMIBOLD)

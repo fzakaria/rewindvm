@@ -69,8 +69,8 @@ const EXPORT_FALLBACK_NAME: &str = "run";
 /// The extension of Rewind's export files.
 const EXPORT_EXTENSION: &str = "rwd";
 
-/// Why an example run cannot be forked.
-const EXAMPLE_FORK: &str = "Forking runs the build again from the playhead, which needs the engine and KVM on this machine. The example's inputs, its kernel, initramfs and Nix store paths, belong to the machine that recorded it. Record a run of your own with rewind nix to fork it.";
+/// Why an example run cannot be forked, or checked from a step.
+pub(super) const EXAMPLE_FORK: &str = "Forking runs the build again from the playhead, which needs the engine and KVM on this machine. The example's inputs, its kernel, initramfs and Nix store paths, belong to the machine that recorded it. Record a run of your own with rewind nix to fork it.";
 
 /// Why a run the engine is still executing does not open.
 const STILL_RUNNING: &str = "Its trace is written when it finishes, which for a fork takes about as long as the run it was forked from did.";
@@ -181,6 +181,8 @@ pub enum Replay {
     Gdb,
     Fork,
     Where,
+    Threads,
+    Check,
 }
 
 impl Replay {
@@ -190,6 +192,8 @@ impl Replay {
             Replay::Gdb => "Attaching gdb",
             Replay::Fork => "Forking",
             Replay::Where => "Showing the source",
+            Replay::Threads => "Showing the threads",
+            Replay::Check => "Checking from here",
         }
     }
 
@@ -199,6 +203,8 @@ impl Replay {
             Replay::Gdb => "attach gdb",
             Replay::Fork => "fork it",
             Replay::Where => "see its source",
+            Replay::Threads => "see its threads",
+            Replay::Check => "check it from a step",
         }
     }
 }
@@ -344,6 +350,10 @@ pub struct Scrubber {
     /// The source panel, while it is open; it shares the file viewer's
     /// place.
     pub(super) source: Option<SourcePanel>,
+    /// The Threads tab, while it is open.
+    pub(super) lanes: Option<crate::ui::lanes::LanesPanel>,
+    /// The latest check from a step, running or done.
+    pub(super) sweep: Option<crate::ui::sweep::Sweep>,
     /// A press on the title bar that the next motion turns into a window
     /// move.
     pub(super) titlebar_armed: bool,
@@ -367,6 +377,8 @@ impl Scrubber {
         let on_quit = cx.on_app_quit(|this: &mut Scrubber, _| {
             this.viewer = None;
             this.source = None;
+            this.lanes = None;
+            this.sweep = None;
             async {}
         });
         let recent_filter = cx.new(|cx| {
@@ -432,6 +444,8 @@ impl Scrubber {
             exporting: None,
             viewer: None,
             source: None,
+            lanes: None,
+            sweep: None,
             title: None,
         };
         if let Some(session) = launch.session {
@@ -525,10 +539,18 @@ impl Scrubber {
         self.viewer = None;
         self.source = None;
         let keeps = match self.right_tab {
-            RightTab::Runs | RightTab::Bookmarks => true,
+            RightTab::Runs | RightTab::Bookmarks | RightTab::Threads => true,
             RightTab::Compare => session.other.is_some(),
             RightTab::AtStep | RightTab::File | RightTab::Source => false,
         };
+        // A check from a step stays with the run it forked.
+        if self
+            .sweep
+            .as_ref()
+            .is_some_and(|s| s.run != session.run.path)
+        {
+            self.sweep = None;
+        }
         if !keeps {
             self.right_tab = RightTab::AtStep;
         }
@@ -566,6 +588,7 @@ impl Scrubber {
         if let Some(file) = replayable {
             self.bring_in(file, cx);
         }
+        self.lanes_session_changed(cx);
         self.reload_runs(cx);
         cx.notify();
     }
@@ -1039,7 +1062,11 @@ impl Scrubber {
         match self.right_tab {
             RightTab::File => self.playhead_moved(cx),
             RightTab::Source => self.source_playhead_moved(cx),
-            RightTab::AtStep | RightTab::Compare | RightTab::Runs | RightTab::Bookmarks => {}
+            RightTab::AtStep
+            | RightTab::Compare
+            | RightTab::Runs
+            | RightTab::Bookmarks
+            | RightTab::Threads => {}
         }
         cx.notify();
     }
@@ -1395,9 +1422,10 @@ impl Scrubber {
                 });
                 (PaneKind::Gdb, None, self.engine.gdb_command(&run, step, at))
             }
-            // A fork makes a run and the source fills a panel rather than
-            // a pane; fork_here and open_source do them.
-            Replay::Fork | Replay::Where => return,
+            // A fork and a check make runs, and the source and the threads
+            // fill a tab rather than a pane; fork_here, check_here,
+            // open_source and open_lanes do them.
+            Replay::Fork | Replay::Where | Replay::Threads | Replay::Check => return,
         };
         self.open_terminal(kind, step, pid, command, window, cx);
     }

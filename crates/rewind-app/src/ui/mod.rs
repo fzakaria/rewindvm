@@ -7,6 +7,7 @@ mod bookmarks;
 mod chrome;
 mod compare;
 mod icons;
+mod lanes;
 mod licensing;
 mod link;
 mod notices;
@@ -21,6 +22,7 @@ mod source;
 mod splits;
 mod step_entry;
 mod stride;
+mod sweep;
 mod tabs;
 mod terminal;
 mod tour;
@@ -71,6 +73,7 @@ actions!(
         SearchPrevious,
         ForkHere,
         ToggleSource,
+        ToggleThreads,
         OpenRun,
         EnterLicense,
         PasteLicense,
@@ -267,6 +270,7 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("?", ShowShortcuts, Some(SHORTCUTS_CONTEXT)),
         KeyBinding::new("shift-/", ShowShortcuts, Some(SHORTCUTS_CONTEXT)),
         KeyBinding::new("s", ToggleSource, context),
+        KeyBinding::new("t", ToggleThreads, context),
         KeyBinding::new("ctrl-c", CopySelection, context),
         KeyBinding::new("ctrl-a", SelectAll, context),
         KeyBinding::new("ctrl-c", CopySelection, Some(LICENSE_CONTEXT)),
