@@ -659,6 +659,26 @@ Two examples, each under 64 schedules:
 A job that mounts its own `/proc` or sysfs sees the kernel's files again,
 which say one CPU, while the affinity calls still say N.
 
+`check --run RUN` checks a run already recorded instead of a job. Each
+schedule is a fork of the run at `--schedule-from`, made with the same
+`Spec::fork` as `rewind fork`, so the run stands for schedule 0 and any
+perturbation of its own before that step stays. Counting and narrowing are
+the same as for a job. `--no-narrow` stops at the count, which is what the
+app's Check from here asks for.
+
+Which thread held the CPU at a step is not in the trace. Events carry a pid
+and tid, but between two events nothing says who ran, and a race is an order
+of threads. `rewind threads` finds out without a change to the recording. The
+guest kernel publishes `current_task` and the task struct offsets in the
+shared page at boot, so once `machine_at` has brought a fork to the window's
+first step, the engine runs the machine one step at a time and reads the
+task on the CPU from guest memory at each, checking the replay against the
+run's records as every fork does. A step is an exit, so a thread that took
+the CPU and gave it back between two exits is not seen. 2,048 steps of an
+80,000 step Nix build take under a second, seek included. The app's Threads
+tab draws a window of both runs this way, lined up on the step where their
+schedules part, and asks again only when the window moves.
+
 Three earlier designs did not work, and why is worth keeping.
 
 - **Jittering every exit's time.** This found failures, but a single shift

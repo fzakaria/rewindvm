@@ -123,6 +123,10 @@ $ rewind check github:fzakaria/rewindvm#mylib
 # the same, with the line of code each thread involved was on
 $ rewind check --where github:fzakaria/rewindvm#mylib
 
+# how many of 16 schedules from a step of a recorded run end differently,
+# each a fork of the run
+$ rewind check --run <run> --schedule-from <step> --schedules 16 --all --no-narrow
+
 # any command in a root filesystem: a directory, an erofs image, or a docker export
 $ rewind run --root mylib.tar --cwd /src -- make check
 
@@ -154,6 +158,9 @@ $ rewind gdb <run> <step> --pid <pid> -- -batch -ex 'thread apply all bt'
 # default the thread of the step's event; --json for programs
 $ rewind where <run> <step>
 $ rewind where <run> <step> --tid <tid> --json
+
+# which thread held the CPU at each step of a window, replayed step by step
+$ rewind threads <run> --from <step> --to <step>
 
 # branch a run at a step under another schedule, or replay it exactly
 $ rewind fork <run> <step> --schedule 2
@@ -202,9 +209,13 @@ where the run parts from a passing one.
 - The Compare tab sets the two runs' events side by side from just before
   they part, in full, with what differs marked; `x` swaps to the compared
   run at the matching step.
+- Show threads (`t`) draws a lane per thread over a window of steps, a bar
+  where the thread held the CPU, this run above the compared run.
 - Previous and Next can stop at one thread, process, file or kind of event.
 - Open shell and Attach gdb work inside the VM at the playhead.
-- Fork from here branches the run under another schedule.
+- Fork from here branches the run under another schedule. Its menu turns it
+  into Check from here, which tries 8 to 64 schedules from the playhead and
+  counts how they ended, a cell per schedule.
 - The Runs panel draws a build's runs as a tree of schedules and forks.
 
 <p align="center">
