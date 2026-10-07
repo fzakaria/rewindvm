@@ -177,13 +177,16 @@ In the app, Show threads under Inspect, or the t key, opens the Threads tab:
 a lane per thread over a window of steps centered where the two runs part, a
 bar where the thread held the CPU, this run's lane above the compared run's,
 and a notch at each of the thread's events. Lines mark where the runs part,
-the first step a different thread held the CPU, and the playhead. The window
-stays where it is while the playhead moves, since each move would mean
-another replay; the presets widen it up to 4,096 steps either side, and
-Center on playhead moves it. Clicking a bar moves the playhead to its first
-step and lists the thread's events in it below the lanes:
+the first step a different thread held the CPU, and the playhead; hovering a
+bar or a line in the legend says what it is. The window stays where it is
+while the playhead moves. Ctrl and the wheel zoom it around the pointer, from
+8 to 4,096 steps either side, Shift and the wheel pan it, and the buttons
+beside its width zoom it around its center; each run replays only the steps
+it has not yet. Clicking a bar moves the playhead to its first step, or for
+the compared run's bar to the same place in this run, and lists the thread's
+events in it below the lanes:
 
-<!-- screenshot site/img/app-threads: {{home}}/runs/{{failing}} --compare {{home}}/runs/{{passing}} --step {{crash_step}} ;; key t ;; wait 6 ;; click 994 305 ;; wait 6 -->
+<!-- screenshot site/img/app-threads: {{home}}/runs/{{failing}} --compare {{home}}/runs/{{passing}} --step {{crash_step}} ;; key t ;; wait 8 -->
 
 ![The app's Threads tab around the crash: a lane per thread of test_pool_shutdown, the failing run's above the passing run's, with the worker that crashes taking the CPU in another order after the deciding step](../site/img/app-threads.png)
 
