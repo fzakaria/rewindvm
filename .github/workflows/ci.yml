@@ -9,7 +9,7 @@
 #     GitHub's Linux runners have but do not open to the build user.
 #
 # Then the packages build: the command, the desktop app, the three release
-# assets, the site and the patched debuginfod server `rewind gdb` fetches.
+# assets, the site and the debuginfod server `rewind gdb` fetches.
 # Everything built is pushed to rewindvm.cachix.org.
 name: ci
 
@@ -72,7 +72,7 @@ jobs:
 
       # The latest builds of main, pinned so they stay when the cache fills
       # and the dependency builds go: the last five of each, the kernel's
-      # debug output and the patched debuginfod server among them, for
+      # debug output and the debuginfod server among them, for
       # `rewind gdb` on runs made with them. Releases pin theirs for good
       # (release.yml).
       - name: Pin main's packages

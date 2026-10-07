@@ -63,9 +63,7 @@ let
   # package's closure stays without them: the kernel's DWARF, which runs
   # record the path of, and nixseparatedebuginfod2, the debuginfod server
   # that hands gdb DWARF and source files from the store and
-  # cache.nixos.org, patched (nix/debuginfod.nix), so it comes from
-  # Rewind's binary cache. `rewind gdb` fetches each the first time it
-  # runs.
+  # cache.nixos.org. `rewind gdb` fetches each the first time it runs.
   kernelDebug = builtins.unsafeDiscardStringContext "${kernel.debug}";
   debuginfod = builtins.unsafeDiscardStringContext (lib.getExe nixseparatedebuginfod2);
 

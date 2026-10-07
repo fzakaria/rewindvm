@@ -81,6 +81,10 @@ const DEBUGINFOD_PROGRAM: &str = "nixseparatedebuginfod2";
 const DEBUGINFOD_SUBSTITUTERS: &[&str] = &["local:", "https://cache.nixos.org"];
 const DEBUGINFOD_EXPIRATION: &str = "1 day";
 
+/// The extension of the file beside each debuginfod cache directory that
+/// the session using the directory holds a lock on.
+const CACHE_LOCK_EXTENSION: &str = "lock";
+
 /// The most bytes of vDSO read: a few pages in any kernel, so a map that
 /// says more is not believed.
 const MAX_VDSO: u64 = 1 << 20;
@@ -441,7 +445,7 @@ impl Symbols {
         };
         let session = Session::new(home)?;
         let process = debugged_process(home, run, step, pid, &session.dir, say);
-        let debuginfod = Debuginfod::start();
+        let debuginfod = Debuginfod::start(home);
         Ok(Symbols {
             session,
             kernel,
@@ -1297,6 +1301,47 @@ fn store_root(path: &Path) -> Option<PathBuf> {
 struct Debuginfod {
     child: Child,
     url: String,
+    _cache: CacheSlot,
+}
+
+/// A cache directory for one session's debuginfod server. The server
+/// keeps what it knows of its cache in memory and guards the directory
+/// with locks that are its own, so two servers on one directory break each
+/// other's entries; each session's takes a directory no running server
+/// has. A lock on the file beside the directory says it is taken, held
+/// until this is dropped and, through the descriptor the server inherits,
+/// until the server ends.
+struct CacheSlot {
+    dir: PathBuf,
+    lock: std::fs::File,
+}
+
+impl CacheSlot {
+    /// The first directory under `root` that no running session holds,
+    /// made if it is not there yet. A directory let go keeps what its
+    /// server fetched for the next session that takes it.
+    fn take(root: &Path) -> Result<CacheSlot> {
+        std::fs::create_dir_all(root).with_context(|| format!("creating {}", root.display()))?;
+        for slot in 0u32.. {
+            let dir = root.join(slot.to_string());
+            let path = dir.with_extension(CACHE_LOCK_EXTENSION);
+            let lock = std::fs::File::create(&path)
+                .with_context(|| format!("creating {}", path.display()))?;
+
+            // A slot another session holds is passed over.
+            match lock.try_lock() {
+                Ok(()) => {}
+                Err(std::fs::TryLockError::WouldBlock) => continue,
+                Err(std::fs::TryLockError::Error(e)) => {
+                    return Err(e).with_context(|| format!("locking {}", path.display()));
+                }
+            }
+
+            std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+            return Ok(CacheSlot { dir, lock });
+        }
+        bail!("every debuginfod cache under {} is in use", root.display())
+    }
 }
 
 impl Debuginfod {
@@ -1305,12 +1350,15 @@ impl Debuginfod {
     /// systemd's socket activation does, so gdb can connect before the
     /// server is ready and nothing races for the port. The server runs in
     /// a process group of its own, so the Ctrl-C meant for gdb does not
-    /// stop it.
-    fn start() -> Option<Debuginfod> {
+    /// stop it. Its cache is a directory under `home` that no other
+    /// session's server is using.
+    fn start(home: &Home) -> Option<Debuginfod> {
         let program = debuginfod_program()?;
+        let cache = CacheSlot::take(&home.debuginfod_cache()).ok()?;
         let listener = TcpListener::bind(GDB_LOCAL).ok()?;
         let url = format!("http://{}", listener.local_addr().ok()?);
         let fd = listener.as_raw_fd();
+        let lock_fd = cache.lock.as_raw_fd();
 
         // A shell sets LISTEN_PID to its own pid and execs the server,
         // which keeps the pid, as the protocol needs.
@@ -1321,7 +1369,9 @@ impl Debuginfod {
         for substituter in DEBUGINFOD_SUBSTITUTERS {
             cmd.args(["--substituter", substituter]);
         }
-        cmd.args(["--expiration", DEBUGINFOD_EXPIRATION])
+        cmd.arg("--cache-dir")
+            .arg(&cache.dir)
+            .args(["--expiration", DEBUGINFOD_EXPIRATION])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -1344,6 +1394,21 @@ impl Debuginfod {
                         "rewind ended before the server started",
                     ));
                 }
+
+                // The cache's lock goes to the server open, so the
+                // directory stays taken until the server ends. A lock on
+                // the listening socket's number is copied off it first.
+                let kept = if lock_fd == LISTEN_FD {
+                    libc::fcntl(lock_fd, libc::F_DUPFD, LISTEN_FD + 1)
+                } else {
+                    libc::fcntl(lock_fd, libc::F_SETFD, 0)
+                };
+                if kept < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+
+                // The listening socket goes to the descriptor socket
+                // activation names.
                 let moved = if fd == LISTEN_FD {
                     libc::fcntl(fd, libc::F_SETFD, 0)
                 } else {
@@ -1356,7 +1421,11 @@ impl Debuginfod {
             });
         }
         let child = cmd.spawn().ok()?;
-        Some(Debuginfod { child, url })
+        Some(Debuginfod {
+            child,
+            url,
+            _cache: cache,
+        })
     }
 }
 
@@ -1736,5 +1805,26 @@ mod tests {
         );
         assert_eq!(on_path("nix-store", None), None);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Two sessions at once get cache directories of their own, and a
+    /// directory let go is taken again. Takes two slots in a temporary
+    /// directory while both are held, then a third after the first is
+    /// dropped, and checks the third reuses the first one's directory.
+    #[test]
+    fn sessions_at_once_get_debuginfod_caches_of_their_own() {
+        let root = std::env::temp_dir().join(format!("rewind-cache-slots-{}", std::process::id()));
+        let first = CacheSlot::take(&root).unwrap();
+        let second = CacheSlot::take(&root).unwrap();
+        assert_ne!(first.dir, second.dir);
+        assert!(first.dir.is_dir() && second.dir.is_dir());
+
+        let freed = first.dir.clone();
+        drop(first);
+        let third = CacheSlot::take(&root).unwrap();
+        assert_eq!(third.dir, freed);
+
+        drop((second, third));
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

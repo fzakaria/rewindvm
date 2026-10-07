@@ -210,7 +210,9 @@ fn disk(home: &Home) -> Finding {
         runs: bytes_under(&home.runs()),
         images: bytes_under(&home.images()),
         pages: bytes_under(&home.store()),
-        other: bytes_under(&home.inputs()) + bytes_under(&home.source_cache()),
+        other: bytes_under(&home.inputs())
+            + bytes_under(&home.source_cache())
+            + bytes_under(&home.debuginfod_cache()),
         free: free_bytes(home.root()),
     };
     usage.finding(home.root())

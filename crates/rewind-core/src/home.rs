@@ -111,6 +111,12 @@ impl Home {
         self.root.join("cache").join("sources")
     }
 
+    /// The caches of the debuginfod servers `rewind gdb` starts, one
+    /// directory for each session running at once.
+    pub fn debuginfod_cache(&self) -> PathBuf {
+        self.root.join("cache").join("debuginfod")
+    }
+
     fn lock_file(&self) -> Result<File> {
         let path = self.root.join(LOCK);
         File::create(&path).with_context(|| format!("creating {}", path.display()))

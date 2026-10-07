@@ -75,7 +75,7 @@ jobs:
       # Cachix evicts the paths used least when the cache is full, and
       # never a pinned one. A release's packages are what its `nix run` and
       # its runs' `rewind gdb` fetch, the kernel's debug output and the
-      # patched debuginfod server among them, which nothing depends on, so
+      # debuginfod server among them, which nothing depends on, so
       # each needs a pin of its own; they are kept for good. The Rust
       # dependency builds are not pinned: evicted, they compile again once.
       - name: Pin the release in the cache
