@@ -1,7 +1,8 @@
 //! What the app asks of the engine: forking a run at a step, reading a
 //! file at a step, finding the line of the program's own code a thread
-//! was on at a step, exporting a run, and the command lines for a shell
-//! and for gdb at a step.
+//! was on at a step, the threads that held the CPU over a window of steps,
+//! trying schedules from a step, exporting a run, and the command lines
+//! for a shell and for gdb at a step.
 //!
 //! The app talks to the engine through the `Engine` trait, and `CliEngine`
 //! implements the trait by running the `rewind` command. Every call
@@ -269,6 +270,31 @@ pub trait Engine: Send + Sync {
         cancel: &Cancel,
         progress: &mut dyn FnMut(&str),
     ) -> EngineResult<Located>;
+
+    /// What held the CPU at each step of `from..=to` of `run`, a slice per
+    /// stretch one task held. The engine replays the window one step at a
+    /// time, which takes a second or so for a few thousand steps.
+    /// `cancel` stops it early.
+    fn threads(
+        &self,
+        run: &Path,
+        from: u64,
+        to: u64,
+        cancel: &Cancel,
+    ) -> EngineResult<Vec<crate::lanes::Slice>>;
+
+    /// Tries `schedules` schedules from `step` of `run`, each a fork of
+    /// it, and says how each ended against the run. The forks are kept
+    /// as runs. `progress` is handed each line the engine says, one per
+    /// schedule as it ends, and `cancel` stops it early.
+    fn check_from(
+        &self,
+        run: &Path,
+        step: u64,
+        schedules: u64,
+        cancel: &Cancel,
+        progress: &mut dyn FnMut(&str),
+    ) -> EngineResult<crate::sweep::Checked>;
 }
 
 /// A program and its arguments, for the terminal pane to run.
@@ -661,6 +687,90 @@ impl Engine for CliEngine {
     ) -> EngineResult<Located> {
         self.where_json(run, step, thread, cancel, progress)
     }
+
+    fn threads(
+        &self,
+        run: &Path,
+        from: u64,
+        to: u64,
+        cancel: &Cancel,
+    ) -> EngineResult<Vec<crate::lanes::Slice>> {
+        // rewind threads <run> --from A --to B --json, a slice a line.
+        let args: Vec<OsString> = vec![
+            "threads".into(),
+            run.into(),
+            "--from".into(),
+            from.to_string().into(),
+            "--to".into(),
+            to.to_string().into(),
+            "--json".into(),
+        ];
+        let out = self.streamed(&args, cancel, &mut |_| {})?;
+        if !out.status.success() {
+            return Err(out.refusal());
+        }
+        out.stdout
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str(line).map_err(|e| out.failed(e.to_string())))
+            .collect()
+    }
+
+    fn check_from(
+        &self,
+        run: &Path,
+        step: u64,
+        schedules: u64,
+        cancel: &Cancel,
+        progress: &mut dyn FnMut(&str),
+    ) -> EngineResult<crate::sweep::Checked> {
+        // rewind check --run <run> --schedule-from S --schedules N --all
+        // --no-narrow --json, which exits 1 when a schedule ended
+        // differently: the JSON is what says the check finished.
+        let args: Vec<OsString> = vec![
+            "check".into(),
+            "--run".into(),
+            run.into(),
+            "--schedule-from".into(),
+            step.to_string().into(),
+            "--schedules".into(),
+            schedules.to_string().into(),
+            "--all".into(),
+            "--no-narrow".into(),
+            "--json".into(),
+        ];
+        let out = self.streamed(&args, cancel, progress)?;
+        out.stdout
+            .lines()
+            .rev()
+            .find_map(|line| serde_json::from_str(line).ok())
+            .ok_or_else(|| out.refusal())
+    }
+}
+
+/// What an engine command printed, and how it exited.
+struct Streamed {
+    command: String,
+    status: std::process::ExitStatus,
+    stdout: String,
+    stderr: String,
+}
+
+impl Streamed {
+    /// The engine's reason for a refusal: its last line, or how it exited.
+    fn refusal(&self) -> EngineError {
+        let message = last_line(&self.stderr)
+            .map(str::to_string)
+            .unwrap_or_else(|| self.status.to_string());
+        self.failed(message)
+    }
+
+    fn failed(&self, message: String) -> EngineError {
+        EngineError::Failed {
+            command: self.command.clone(),
+            message,
+        }
+    }
 }
 
 impl CliEngine {
@@ -685,15 +795,35 @@ impl CliEngine {
             ]);
         }
         args.push("--json".into());
-        let command = self.command_line(&args);
+        let out = self.streamed(&args, cancel, progress)?;
+        let located = out
+            .stdout
+            .lines()
+            .rev()
+            .find_map(|line| serde_json::from_str::<rewind_trace::located::Located>(line).ok())
+            .map(Located::from);
+        match located {
+            Some(located) if out.status.success() => Ok(located),
+            _ => Err(out.refusal()),
+        }
+    }
 
-        // In a process group of its own, with the gdb it starts, which
-        // cancelling stops whole.
+    /// Runs the engine with `args` in a process group of its own, with
+    /// any gdb it starts, which cancelling stops whole. Each line it says
+    /// on standard error is handed to `progress` as it comes; standard
+    /// output is read beside them, so a full pipe cannot stop the engine.
+    fn streamed(
+        &self,
+        args: &[OsString],
+        cancel: &Cancel,
+        progress: &mut dyn FnMut(&str),
+    ) -> EngineResult<Streamed> {
+        let command = self.command_line(args);
         if cancel.cancelled() {
             return Err(EngineError::Cancelled);
         }
         let mut child = Command::new(&self.program)
-            .args(&args)
+            .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -705,8 +835,7 @@ impl CliEngine {
             return Err(EngineError::Cancelled);
         }
 
-        // The answer is read beside the engine's lines, so a full pipe
-        // cannot stop the engine.
+        // The answer, on a thread of its own.
         let mut stdout_pipe = child.stdout.take().expect("stdout is piped");
         let answer = std::thread::spawn(move || {
             let mut bytes = Vec::new();
@@ -732,22 +861,12 @@ impl CliEngine {
         if cancel.cancelled() {
             return Err(EngineError::Cancelled);
         }
-
-        let stdout = String::from_utf8_lossy(&stdout);
-        let located = stdout
-            .lines()
-            .rev()
-            .find_map(|line| serde_json::from_str::<rewind_trace::located::Located>(line).ok())
-            .map(Located::from);
-        match located {
-            Some(located) if status.success() => Ok(located),
-            _ => {
-                let message = last_line(&stderr)
-                    .map(str::to_string)
-                    .unwrap_or_else(|| status.to_string());
-                Err(EngineError::Failed { command, message })
-            }
-        }
+        Ok(Streamed {
+            command,
+            status,
+            stdout: String::from_utf8_lossy(&stdout).into_owned(),
+            stderr,
+        })
     }
 }
 
@@ -1297,6 +1416,83 @@ mod tests {
             said.into_inner(),
             vec!["rewind: downloading debug info for libc.so.6; first time only".to_string()]
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The stand-in prints what `rewind threads --json` does, a slice a
+    /// line; the app reads every slice, and the arguments name the run
+    /// and the window. A refusal reports the engine's reason.
+    #[test]
+    fn threads_reads_a_slice_a_line() {
+        let dir = temp_dir("threads");
+        let run = dir.join("run");
+        let json = concat!(
+            r#"{"from":308,"name":"race","on":"thread","pid":34,"tid":34,"to":314}\n"#,
+            r#"{"from":315,"name":"ksoftirqd/0","on":"kernel","pid":null,"tid":11,"to":315}\n"#,
+            r#"{"from":316,"name":"swapper/0","on":"idle","pid":null,"tid":null,"to":320}\n"#,
+        );
+        let engine = fake_engine(&dir, json, "", 0);
+        let slices = retrying(|| engine.threads(&run, 308, 320, &Cancel::default())).unwrap();
+        let ons: Vec<(u64, crate::lanes::On)> = slices.iter().map(|s| (s.from, s.on)).collect();
+        assert_eq!(
+            ons,
+            vec![
+                (308, crate::lanes::On::Thread),
+                (315, crate::lanes::On::Kernel),
+                (316, crate::lanes::On::Idle),
+            ]
+        );
+        let args = std::fs::read_to_string(dir.join("args")).unwrap();
+        assert_eq!(
+            args.trim(),
+            format!("threads {} --from 308 --to 320 --json", run.display())
+        );
+
+        let refusing = fake_engine(&dir, "", "rewind: the run has no keyframes\n", 1);
+        let err = retrying(|| refusing.threads(&run, 1, 2, &Cancel::default())).unwrap_err();
+        let EngineError::Failed { message, .. } = err else {
+            panic!("{err:?}");
+        };
+        assert_eq!(message, "rewind: the run has no keyframes");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The stand-in prints what `rewind check --run --json` does, and exits
+    /// 1 as check does when a schedule ended differently; the app reads
+    /// the schedules all the same, hands on check's lines as progress, and
+    /// the arguments name the run, the step and the count.
+    #[test]
+    fn check_from_reads_the_schedules_whatever_check_exits() {
+        let dir = temp_dir("check-from");
+        let run = dir.join("run");
+        let json = r#"{"schedules":[{"id":"base","dir":"/runs/base","schedule":0,"ending":"exited:2","differs":false},{"id":"a","dir":"/runs/a","schedule":1,"ending":"exited:0","differs":true}],"tried":1,"differing":1,"schedule_0_failed":true,"narrowed":null}\n"#;
+        let engine = fake_engine(&dir, json, "schedule   1: exited:0\n", 1);
+        let said = std::cell::RefCell::new(Vec::new());
+        let checked = retrying(|| {
+            engine.check_from(&run, 4_200, 1, &Cancel::default(), &mut |line| {
+                said.borrow_mut().push(line.to_string())
+            })
+        })
+        .unwrap();
+        assert_eq!(checked.differing, 1);
+        assert_eq!(checked.forks()[0].id, "a");
+        assert!(said.borrow().iter().any(|l| l == "schedule   1: exited:0"));
+        let args = std::fs::read_to_string(dir.join("args")).unwrap();
+        assert_eq!(
+            args.trim(),
+            format!(
+                "check --run {} --schedule-from 4200 --schedules 1 --all --no-narrow --json",
+                run.display()
+            )
+        );
+
+        let refusing = fake_engine(&dir, "", "rewind: run abc has not finished\n", 1);
+        let err = retrying(|| refusing.check_from(&run, 1, 1, &Cancel::default(), &mut |_| {}))
+            .unwrap_err();
+        let EngineError::Failed { message, .. } = err else {
+            panic!("{err:?}");
+        };
+        assert_eq!(message, "rewind: run abc has not finished");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
