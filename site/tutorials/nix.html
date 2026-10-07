@@ -194,7 +194,7 @@ where ./tests/test_pool_shutdown first behaves differently:
 
 open both in the desktop app: rewind open 3ed5e3f30d73bb41 5153 --compare 8c4bd4a91be9cbeb</code></pre>
         <p>
-          Schedule 6 fails, and <code>check</code> narrows the failure to one step, 5139. The
+          Schedule 6 fails. <code>check</code> narrows schedule 6's failure to one step, 5139. The
           passing run perturbs the same steps less that one, so the two runs are the same until
           5139, and only the failing one gets a reschedule there. The last block shows where the
           test's own output then differs. The search took 10 seconds.

@@ -104,12 +104,11 @@ $ rewind check --epoch {{epoch}} {{flake}}
 <!-- set failed_said: python3 -c 'import sys; s = sys.argv[1:]; print(f"Schedule {s[0]} fails" if len(s) == 1 else f"Schedules {", ".join(s[:-1])} and {s[-1]} fail")' {{failed}} -->
 <!-- assert: test {{check_seconds}} -lt 60 -->
 
-{{failed_said}}. `check` narrows schedule {{narrowed}}'s
-perturbation to steps {{window_from}} to {{window_until}}, and the last of
-them, step {{deciding}}, decides it. The passing run is the same window less
-that step, so the two runs are the same until step {{deciding}}, and only the
-failing one gets {{deciding_words}} there. The last block shows where the
-test's own output then differs. The search took {{check_seconds}} seconds.
+{{failed_said}}. `check` narrows schedule {{narrowed}}'s failure to one step,
+{{deciding}}. The passing run perturbs the same steps less that one, so the two
+runs are the same until {{deciding}}, and only the failing one gets
+{{deciding_words}} there. The last block shows where the test's own output then
+differs. The search took {{check_seconds}} seconds.
 
 `--all` tries every schedule, which measures how flaky a build is:
 
@@ -202,9 +201,8 @@ $ rewind fork {{base|short}} {{window_from}} --schedule {{f4}} --quiet
 <!-- set fork_crash: rewind events {{fork_run}} | grep -m1 SIGSEGV | awk '{print $1}' -->
 
 From step {{window_from}} of the schedule 0 build, schedules
-{{fork_failed|and}} crash and {{fork_passed|and}} pass. `rewind check --run
-{{base|short}} --schedule-from {{window_from}} --all --no-narrow` asks the
-same of many schedules at once and counts the ones that end differently; the
+{{fork_failed|and}} crash and {{fork_passed|and}} pass. `check --run` asks many
+schedules at once; the
 [advanced tutorial](tutorial-advanced.md#count-the-schedules-that-fail-from-a-step)
 shows it.
 
@@ -228,9 +226,8 @@ $ rewind-app ~/.local/share/rewind/runs/{{failing}} --compare ~/.local/share/rew
 Press f to jump to the failure at step {{crash_step}}, then s to open the
 source panel. After a few seconds it shows `worker` at `src/pool.c:77`, with
 `p->queue->completed++;` marked: the line that read the queue after
-`pool_shutdown` had set it to NULL. The t key opens the Threads tab, a lane
-per thread around where the two runs part, the failing run's above the
-passing run's, a bar wherever the thread held the CPU.
+`pool_shutdown` had set it to NULL. The t key shows which thread held the CPU
+around where the two runs part.
 
 ## Fix it and check the fix
 
@@ -266,7 +263,6 @@ are in reach. [Design](design.md#limits) has the full list.
 
 - [The container tutorial](tutorial-container.md): the same bug from a Docker
   image, with no Nix.
-- [The advanced tutorial](tutorial-advanced.md): which thread held the CPU,
-  watchpoints, the kernel's side of a crash, tools inside the VM, more CPUs,
-  counting the schedules that fail from a step, and sharing a run.
+- [The advanced tutorial](tutorial-advanced.md): threads, watchpoints, the
+  kernel's side of a crash, sharing a run and more.
 - [Counter time](pmu.md): how the VM's clock follows its work.

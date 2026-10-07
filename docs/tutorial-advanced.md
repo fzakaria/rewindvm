@@ -119,8 +119,9 @@ forks the run.
 
 `check` names step 5139 as the one that decides it. Its passing run is the
 same schedule without that step, so the two runs are the same machine until
-5139 and everything they do differently follows from the one reschedule
-there. `rewind where` names the thread that was on the CPU:
+5139, where only the failing run gets a reschedule, and everything
+they do differently follows from it. `rewind where` names the thread that was
+on the CPU there:
 
 ```console
 $ rewind where 3ed5e3f3 5139
@@ -192,7 +193,8 @@ thread that took the CPU and gave it back between two exits is not seen.
 
 In the app, the t key opens the Threads tab: a lane per thread around where
 the two runs part, this run's above the compared run's, with a bar wherever
-the thread held the CPU. Clicking a bar moves the playhead there:
+the thread held the CPU. Ctrl and the wheel zoom the lanes and Shift and the
+wheel pan them. Clicking a bar moves the playhead there:
 
 ![The app's Threads tab around the crash: a lane per thread of test_pool_shutdown, the failing run's above the passing run's, with the worker that crashes taking the CPU in another order after the deciding step](../site/img/app-threads.png)
 
