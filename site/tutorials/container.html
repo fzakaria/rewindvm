@@ -318,6 +318,13 @@ $1 = (struct queue *) 0x0
 81
 [Inferior 1 (process 1) detached]</code></pre>
         <p>
+          Debian's server has libc's symbols but none of its source files, so libc's frames show no
+          source. Debian's DWARF names libc's files relative to the build directory, as
+          <code>./io/../sysdeps/unix/sysv/linux/write.c</code>, and the debuginfod client asks a
+          server only for a path that starts with <code>/</code>; gdb says
+          <code>Download failed: Invalid argument</code> for each such path.
+        </p>
+        <p>
           Images built on Fedora, Ubuntu or Arch have debuginfod servers of their own, listed by
           <a href="https://sourceware.org/elfutils/Debuginfod.html">elfutils</a>.
         </p>
