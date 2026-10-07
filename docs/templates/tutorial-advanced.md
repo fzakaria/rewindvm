@@ -143,6 +143,50 @@ shorter, as `check` does. Zoomed in with + around the crash:
 
 ![The app zoomed in around the crash: a dashed blue mark at step {{deciding}} on the timeline, the crash just after it, and the divergence card saying the two runs are the same until step {{deciding}}, where only this run has {{deciding_words}}](../site/img/app-decides.png)
 
+## See which thread held the CPU
+
+The VM has one CPU, so at every step exactly one thread holds it, and a race
+is an order of threads. The trace records what threads did at their events,
+not who held the CPU between them. `rewind threads` replays a window of steps
+one step at a time and reads which task the VM's kernel had on the CPU at
+each, a line per stretch one task held it, with its pid/tid as `rewind
+events` prints them. Around the deciding step, in both runs:
+
+<!-- set threads_from: echo $(( {{deciding}} - 9 )) -->
+
+```console run name=threads_failing
+$ rewind threads {{failing|short}} --from {{threads_from}} --to {{crash_step}}
+```
+
+```console run name=threads_passing
+$ rewind threads {{passing|short}} --from {{threads_from}} --to {{crash_step}}
+```
+
+<!-- assert: head -1 {{out:threads_failing}} | grep -q . && test "$(head -1 {{out:threads_failing}})" = "$(head -1 {{out:threads_passing}})" -->
+<!-- assert: tail -1 {{out:threads_failing}} | grep -qE " {{crash_step}} +{{pid}}/{{crash_tid}} " -->
+<!-- assert: ! diff -q {{out:threads_failing}} {{out:threads_passing}} > /dev/null -->
+
+Up to step {{deciding}} the two runs are the same machine and their lines
+match. From there the threads take the CPU in another order, and in the
+failing run thread {{crash_tid}} holds it at the crash. `--json` prints a
+slice a line. A step is an exit, so a thread that took the CPU and gave it
+back between two exits is not seen, and a few thousand steps take about a
+second.
+
+In the app, Show threads under Inspect, or the t key, opens the Threads tab:
+a lane per thread over a window of steps centered where the two runs part, a
+bar where the thread held the CPU, this run's lane above the compared run's,
+and a notch at each of the thread's events. Lines mark where the runs part,
+the first step a different thread held the CPU, and the playhead. The window
+stays where it is while the playhead moves, since each move would mean
+another replay; the presets widen it up to 4,096 steps either side, and
+Center on playhead moves it. Clicking a bar moves the playhead to its first
+step and lists the thread's events in it below the lanes:
+
+<!-- screenshot site/img/app-threads: {{home}}/runs/{{failing}} --compare {{home}}/runs/{{passing}} --step {{crash_step}} ;; key t ;; wait 6 ;; click 994 305 ;; wait 6 -->
+
+![The app's Threads tab around the crash: a lane per thread of test_pool_shutdown, the failing run's above the passing run's, with the worker that crashes taking the CPU in another order after the deciding step](../site/img/app-threads.png)
+
 ## Watch both sides of the race
 
 A watchpoint finds who freed the queue the crash reads. Break in a worker so
@@ -161,7 +205,7 @@ runs at full speed until one fires. `watch` and `awatch` work; x86 has no
 
 In the app, Attach gdb opens the same session under the timeline:
 
-<!-- screenshot site/img/app-gdb-watch: {{home}}/runs/{{failing}} --compare {{home}}/runs/{{passing}} --step {{watch_from}} ;; click 1140 808 ;; wait 25 ;; type break src/pool.c:74 ;; wait 1 ;; type continue ;; wait 8 ;; type watch -l p->queue ;; wait 1 ;; type delete 1 ;; wait 1 ;; type continue ;; wait 8 -->
+<!-- screenshot site/img/app-gdb-watch: {{home}}/runs/{{failing}} --compare {{home}}/runs/{{passing}} --step {{watch_from}} ;; click 1140 756 ;; wait 25 ;; type break src/pool.c:74 ;; wait 1 ;; type continue ;; wait 8 ;; type watch -l p->queue ;; wait 1 ;; type delete 1 ;; wait 1 ;; type continue ;; wait 8 -->
 
 ![The app's gdb pane stopped at the watchpoint in pool_shutdown, with the old and new values of p->queue](../site/img/app-gdb-watch.png)
 
@@ -367,6 +411,37 @@ $ rewind diff {{passing|short}} {{failing|short}} --json | jq -c '.divergence | 
 ```
 
 <!-- assert: grep -q '"left_step":[0-9]*,"right_step":[0-9]*' {{out:json}} -->
+
+## Count the schedules that fail from a step
+
+`rewind fork` tries one schedule from a step. `check --run` tries many on a
+run already recorded, each a fork of it at `--schedule-from`, with the run
+standing for schedule 0, and `--no-narrow` stops at the count where `check`
+would go on to narrow the first schedule that ends differently. From the
+deciding step of the passing run:
+
+```console run name=sweep
+$ rewind check --run {{passing|short}} --schedule-from {{deciding}} --schedules 16 --all --no-narrow
+```
+
+<!-- assert: grep -qE '^[0-9]+ of 16 perturbed schedules ended differently$' {{out:sweep}} -->
+<!-- capture sweep_differing: ([0-9]+) of 16 perturbed schedules ended differently -->
+
+{{sweep_differing}} of the 16 crash. Without `--no-narrow`, `check --run`
+narrows the first of them to the step that decides it, as for a build. With
+`--json` it prints each schedule's run and whether it ended differently.
+
+In the app, the chevron beside Fork from here turns the button into Check
+from here, with 8, 16, 32 or 64 schedules, and back. It is amber because it
+runs the machine: pressed, it tries the schedules from the playhead and fills
+a card in At this step, a cell per schedule as each ends, grey for ended as
+this run did, blue for differently and a dashed outline for timed out. A cell
+picked names its run, with Compare, which compares this run with it, and
+Open. The forks stay among the run's forks in the Runs tab:
+
+<!-- screenshot site/img/app-check: {{home}}/runs/{{passing}} --step {{deciding}} ;; click 1408 168 ;; wait 1 ;; click 1296 261 ;; wait 1 ;; click 1300 168 ;; wait 40 ;; click 1075 492 ;; wait 1 -->
+
+![The app after Check from here at step {{deciding}} of the passing run: a card counting how the 16 schedules ended, a cell per schedule, the first picked with its run and Compare and Open](../site/img/app-check.png)
 
 ## Move around a long run
 

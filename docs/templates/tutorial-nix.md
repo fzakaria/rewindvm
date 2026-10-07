@@ -202,7 +202,11 @@ $ rewind fork {{base|short}} {{window_from}} --schedule {{f4}} --quiet
 <!-- set fork_crash: rewind events {{fork_run}} | grep -m1 SIGSEGV | awk '{print $1}' -->
 
 From step {{window_from}} of the schedule 0 build, schedules
-{{fork_failed|and}} crash and {{fork_passed|and}} pass.
+{{fork_failed|and}} crash and {{fork_passed|and}} pass. `rewind check --run
+{{base|short}} --schedule-from {{window_from}} --all --no-narrow` asks the
+same of many schedules at once and counts the ones that end differently; the
+[advanced tutorial](tutorial-advanced.md#count-the-schedules-that-fail-from-a-step)
+shows it.
 
 ## Scrub it in the app
 
@@ -224,7 +228,9 @@ $ rewind-app ~/.local/share/rewind/runs/{{failing}} --compare ~/.local/share/rew
 Press f to jump to the failure at step {{crash_step}}, then s to open the
 source panel. After a few seconds it shows `worker` at `src/pool.c:77`, with
 `p->queue->completed++;` marked: the line that read the queue after
-`pool_shutdown` had set it to NULL.
+`pool_shutdown` had set it to NULL. The t key opens the Threads tab, a lane
+per thread around where the two runs part, the failing run's above the
+passing run's, a bar wherever the thread held the CPU.
 
 ## Fix it and check the fix
 
@@ -260,6 +266,7 @@ are in reach. [Design](design.md#limits) has the full list.
 
 - [The container tutorial](tutorial-container.md): the same bug from a Docker
   image, with no Nix.
-- [The advanced tutorial](tutorial-advanced.md): watchpoints, the kernel's
-  side of a crash, tools inside the VM, more CPUs, and sharing a run.
+- [The advanced tutorial](tutorial-advanced.md): which thread held the CPU,
+  watchpoints, the kernel's side of a crash, tools inside the VM, more CPUs,
+  counting the schedules that fail from a step, and sharing a run.
 - [Counter time](pmu.md): how the VM's clock follows its work.

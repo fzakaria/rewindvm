@@ -67,7 +67,7 @@ deterministic virtual machine:
 $ rewind nix --epoch 1790985600 github:fzakaria/rewindvm#mylib
 rewind: packing 62 store paths for mylib-0.3.0
 ...
-rewind: run 5ebce859166b24ea exited:0 after 6169 steps, 0.216s virtual, 1.194s wall (poweroff)
+rewind: run 5ebce859166b24ea exited:0 after 6169 steps, 0.216s virtual, 1.451s wall (poweroff)
 /nix/store/f6a9gy362szw6nxx3ikrklr8glr6rdln-mylib-0.3.0 a9d703ba89774f3d  matches your store, rewindvm.cachix.org
 ```
 
@@ -130,7 +130,7 @@ perturbation to steps 3629 to 5140, and the last of
 them, step 5139, decides it. The passing run is the same window less
 that step, so the two runs are the same until step 5139, and only the
 failing one gets a reschedule there. The last block shows where the
-test's own output then differs. The search took 9 seconds.
+test's own output then differs. The search took 10 seconds.
 
 `--all` tries every schedule, which measures how flaky a build is:
 
@@ -256,7 +256,7 @@ $ rewind replay 3ed5e3f3
 identical: 1713 events over 5192 steps
 
 $ rewind replay 3ed5e3f3 --from 3629
-identical from the keyframe at step 1643 to the end (0.41s)
+identical from the keyframe at step 1649 to the end (0.41s)
 ```
 
 `--from` starts at the nearest keyframe before the step. A run replays on any
@@ -268,28 +268,32 @@ A fork is its parent up to a step, then another schedule:
 
 ```console
 $ rewind fork 5ebce859 3629 --schedule 5 --quiet
-rewind: run b759eecf9ba8b55e exited:0 after 6628 steps, 0.222s virtual, 0.415s wall (poweroff)
+rewind: run b759eecf9ba8b55e exited:0 after 6628 steps, 0.222s virtual, 0.322s wall (poweroff)
 rewind: the fork first differs from its parent at step 3638
 rewind: open it beside its parent in the desktop app: rewind open b759eecf9ba8b55e 3638 --compare 5ebce859166b24ea
 
 $ rewind fork 5ebce859 3629 --schedule 6 --quiet
-rewind: run 06c0082c248db32b exited:2 after 5201 steps, 0.203s virtual, 0.292s wall (poweroff)
+rewind: run 06c0082c248db32b exited:2 after 5201 steps, 0.203s virtual, 0.285s wall (poweroff)
 rewind: the fork first differs from its parent at step 3638
 rewind: open it beside its parent in the desktop app: rewind open 06c0082c248db32b 3638 --compare 5ebce859166b24ea
 
 $ rewind fork 5ebce859 3629 --schedule 7 --quiet
-rewind: run d0f1c7fc2af0949d exited:0 after 6634 steps, 0.222s virtual, 0.320s wall (poweroff)
+rewind: run d0f1c7fc2af0949d exited:0 after 6634 steps, 0.222s virtual, 0.326s wall (poweroff)
 rewind: the fork first differs from its parent at step 3662
 rewind: open it beside its parent in the desktop app: rewind open d0f1c7fc2af0949d 3662 --compare 5ebce859166b24ea
 
 $ rewind fork 5ebce859 3629 --schedule 8 --quiet
-rewind: run 8d47a829e5bd17df exited:2 after 4544 steps, 0.200s virtual, 0.273s wall (poweroff)
+rewind: run 8d47a829e5bd17df exited:2 after 4544 steps, 0.200s virtual, 0.272s wall (poweroff)
 rewind: the fork first differs from its parent at step 3638
 rewind: open it beside its parent in the desktop app: rewind open 8d47a829e5bd17df 3638 --compare 5ebce859166b24ea
 ```
 
 From step 3629 of the schedule 0 build, schedules
-6 and 8 crash and 5 and 7 pass.
+6 and 8 crash and 5 and 7 pass. `rewind check --run
+5ebce859 --schedule-from 3629 --all --no-narrow` asks the
+same of many schedules at once and counts the ones that end differently; the
+[advanced tutorial](tutorial-advanced.md#count-the-schedules-that-fail-from-a-step)
+shows it.
 
 ## Scrub it in the app
 
@@ -306,7 +310,9 @@ $ rewind-app ~/.local/share/rewind/runs/3ed5e3f30d73bb41 --compare ~/.local/shar
 Press f to jump to the failure at step 5153, then s to open the
 source panel. After a few seconds it shows `worker` at `src/pool.c:77`, with
 `p->queue->completed++;` marked: the line that read the queue after
-`pool_shutdown` had set it to NULL.
+`pool_shutdown` had set it to NULL. The t key opens the Threads tab, a lane
+per thread around where the two runs part, the failing run's above the
+passing run's, a bar wherever the thread held the CPU.
 
 ## Fix it and check the fix
 
@@ -374,6 +380,7 @@ are in reach. [Design](design.md#limits) has the full list.
 
 - [The container tutorial](tutorial-container.md): the same bug from a Docker
   image, with no Nix.
-- [The advanced tutorial](tutorial-advanced.md): watchpoints, the kernel's
-  side of a crash, tools inside the VM, more CPUs, and sharing a run.
+- [The advanced tutorial](tutorial-advanced.md): which thread held the CPU,
+  watchpoints, the kernel's side of a crash, tools inside the VM, more CPUs,
+  counting the schedules that fail from a step, and sharing a run.
 - [Counter time](pmu.md): how the VM's clock follows its work.

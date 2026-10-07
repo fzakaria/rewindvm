@@ -56,6 +56,7 @@
           <li><a href="#the-runs">The runs</a></li>
           <li><a href="#find-the-line-a-thread-was-on">Find the line a thread was on</a></li>
           <li><a href="#find-the-step-that-decides-it">Find the step that decides it</a></li>
+          <li><a href="#see-which-thread-held-the-cpu">See which thread held the CPU</a></li>
           <li><a href="#watch-both-sides-of-the-race">Watch both sides of the race</a></li>
           <li><a href="#follow-the-fault-into-the-kernel">Follow the fault into the kernel</a></li>
           <li><a href="#use-your-own-gdb">Use your own gdb</a></li>
@@ -66,6 +67,11 @@
           <li><a href="#rebuild-a-run-exactly">Rebuild a run exactly</a></li>
           <li><a href="#compare-any-two-runs">Compare any two runs</a></li>
           <li><a href="#script-it">Script it</a></li>
+          <li>
+            <a href="#count-the-schedules-that-fail-from-a-step"
+              >Count the schedules that fail from a step</a
+            >
+          </li>
           <li><a href="#move-around-a-long-run">Move around a long run</a></li>
           <li><a href="#hand-a-failure-to-someone-else">Hand a failure to someone else</a></li>
           <li><a href="#which-clock">Which clock</a></li>
@@ -110,7 +116,6 @@ rewind: walking thread 174's stack in gdb
 rewind: downloading debug info for libc.so.6; first time only
 rewind: downloading debug info for libpthread.so.0; first time only
 rewind: downloading debug info for ld-linux-x86-64.so.2; first time only
-rewind: downloading debug info for [vdso]; first time only
 rewind: downloading the sources of libc.so.6; first time only
 process 166 (test_pool_shutdown), thread 174, at step 5153
 #0 worker (src/pool.c:77)
@@ -291,6 +296,70 @@ where the threads were:
       </section>
 
       <section class="step">
+        <h2 id="see-which-thread-held-the-cpu">
+          <a class="anchor" href="#see-which-thread-held-the-cpu">See which thread held the CPU</a>
+        </h2>
+        <p>
+          The VM has one CPU, so at every step exactly one thread holds it, and a race is an order
+          of threads. The trace records what threads did at their events, not who held the CPU
+          between them. <code>rewind threads</code> replays a window of steps one step at a time and
+          reads which task the VM's kernel had on the CPU at each, a line per stretch one task held
+          it, with its pid/tid as <code>rewind events</code> prints them. Around the deciding step,
+          in both runs:
+        </p>
+        <pre
+          class="console"
+        ><code><span class="cmd"><span class="prompt">$</span> rewind threads 3ed5e3f3 --from 5130 --to 5153</span>
+      5130       5138          idle  swapper/0
+      5139       5141       166/166  test_pool_shutd
+      5142       5147       166/173  test_pool_shutd
+      5148       5148       166/166  test_pool_shutd
+      5149       5153       166/174  test_pool_shutd</code></pre>
+        <pre
+          class="console"
+        ><code><span class="cmd"><span class="prompt">$</span> rewind threads 8c4bd4a9 --from 5130 --to 5153</span>
+      5130       5138          idle  swapper/0
+      5139       5145       166/166  test_pool_shutd
+      5146       5148       166/173  test_pool_shutd
+      5149       5152       166/174  test_pool_shutd
+      5153       5153          idle  swapper/0</code></pre>
+        <p>
+          Up to step 5139 the two runs are the same machine and their lines match. From there the
+          threads take the CPU in another order, and in the failing run thread 174 holds it at the
+          crash. <code>--json</code> prints a slice a line. A step is an exit, so a thread that took
+          the CPU and gave it back between two exits is not seen, and a few thousand steps take
+          about a second.
+        </p>
+        <p>
+          In the app, Show threads under Inspect, or the t key, opens the Threads tab: a lane per
+          thread over a window of steps centered where the two runs part, a bar where the thread
+          held the CPU, this run's lane above the compared run's, and a notch at each of the
+          thread's events. Lines mark where the runs part, the first step a different thread held
+          the CPU, and the playhead. The window stays where it is while the playhead moves, since
+          each move would mean another replay; the presets widen it up to 4,096 steps either side,
+          and Center on playhead moves it. Clicking a bar moves the playhead to its first step and
+          lists the thread's events in it below the lanes:
+        </p>
+        <figure class="shot">
+          <picture>
+            <source srcset="../img/app-threads.webp" type="image/webp" />
+            <img
+              src="../img/app-threads.png"
+              width="1440"
+              height="900"
+              loading="lazy"
+              alt="The app&#x27;s Threads tab around the crash: a lane per thread of test_pool_shutdown, the failing run&#x27;s above the passing run&#x27;s, with the worker that crashes taking the CPU in another order after the deciding step"
+            />
+          </picture>
+          <figcaption>
+            The app&#x27;s Threads tab around the crash: a lane per thread of test_pool_shutdown,
+            the failing run&#x27;s above the passing run&#x27;s, with the worker that crashes taking
+            the CPU in another order after the deciding step
+          </figcaption>
+        </figure>
+      </section>
+
+      <section class="step">
         <h2 id="watch-both-sides-of-the-race">
           <a class="anchor" href="#watch-both-sides-of-the-race">Watch both sides of the race</a>
         </h2>
@@ -431,7 +500,7 @@ Thread 1 hit Breakpoint 1, force_sig_fault (sig=11, code=1, addr=0x108) at kerne
         ><code><span class="cmd"><span class="prompt">$</span> rewind gdb 3ed5e3f3 5153 --listen 127.0.0.1:1234</span>
 rewind: step 5153 ran in process 166; loading symbols for 4 of its files
 rewind: read 3 source files fetched from the VM earlier
-rewind: gdb at step 5153 of 3ed5e3f30d73bb41; connect with: gdb -q -iex 'set debuginfod enabled on' -iex 'set debuginfod urls http://127.0.0.1:43765' -ex 'file /nix/store/c9z53nkphz0zaan797qgmydxslw4l5bi-rewind-guest-kernel-7.2.8- ...</code></pre>
+rewind: gdb at step 5153 of 3ed5e3f30d73bb41; connect with: gdb -q -iex 'set debuginfod enabled on' -iex 'set debuginfod urls http://127.0.0.1:33797' -ex 'file /nix/store/c9z53nkphz0zaan797qgmydxslw4l5bi-rewind-guest-kernel-7.2.8- ...</code></pre>
       </section>
 
       <section class="step">
@@ -467,7 +536,7 @@ rewind: a shell at step 5153 of 3ed5e3f30d73bb41; exit it to leave
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind nix --cores 4 --epoch 1790985600 github:fzakaria/rewindvm#mylib</span>
 ...
-rewind: run c2dcda95802e9b88 exited:0 after 6174 steps, 0.216s virtual, 1.100s wall (poweroff)
+rewind: run c2dcda95802e9b88 exited:0 after 6174 steps, 0.216s virtual, 1.005s wall (poweroff)
 /nix/store/f6a9gy362szw6nxx3ikrklr8glr6rdln-mylib-0.3.0 a9d703ba89774f3d  matches your store, rewindvm.cachix.org</code></pre>
         <pre
           class="console"
@@ -493,22 +562,22 @@ rewind: a shell at step 2467 of c2dcda95802e9b88; exit it to leave
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind fork 3ed5e3f3 5123 --schedule 1 --quiet</span>
-rewind: run 0a18bfa4106b10ea exited:0 after 6766 steps, 0.226s virtual, 0.328s wall (poweroff)
+rewind: run 0a18bfa4106b10ea exited:0 after 6766 steps, 0.226s virtual, 0.320s wall (poweroff)
 rewind: the fork first differs from its parent at step 5151
 rewind: open it beside its parent in the desktop app: rewind open 0a18bfa4106b10ea 5151 --compare 3ed5e3f30d73bb41
 
 <span class="cmd"><span class="prompt">$</span> rewind fork 3ed5e3f3 5123 --schedule 2 --quiet</span>
-rewind: run 217f5d98224a4a60 exited:2 after 5204 steps, 0.203s virtual, 0.263s wall (poweroff)
+rewind: run 217f5d98224a4a60 exited:2 after 5204 steps, 0.203s virtual, 0.258s wall (poweroff)
 rewind: the fork first differs from its parent at step 5151
 rewind: open it beside its parent in the desktop app: rewind open 217f5d98224a4a60 5151 --compare 3ed5e3f30d73bb41
 
 <span class="cmd"><span class="prompt">$</span> rewind fork 3ed5e3f3 5123 --schedule 3 --quiet</span>
-rewind: run a62e1bc38700fde6 exited:2 after 5202 steps, 0.203s virtual, 0.266s wall (poweroff)
+rewind: run a62e1bc38700fde6 exited:2 after 5202 steps, 0.203s virtual, 0.253s wall (poweroff)
 rewind: the fork first differs from its parent at step 5142
 rewind: open it beside its parent in the desktop app: rewind open a62e1bc38700fde6 5142 --compare 3ed5e3f30d73bb41
 
 <span class="cmd"><span class="prompt">$</span> rewind fork 3ed5e3f3 5123 --schedule 4 --quiet</span>
-rewind: run 383acd539d9e1313 exited:2 after 5236 steps, 0.204s virtual, 0.262s wall (poweroff)
+rewind: run 383acd539d9e1313 exited:2 after 5236 steps, 0.204s virtual, 0.249s wall (poweroff)
 rewind: the fork first differs from its parent at step 5148
 rewind: open it beside its parent in the desktop app: rewind open 383acd539d9e1313 5148 --compare 3ed5e3f30d73bb41</code></pre>
         <p>
@@ -599,7 +668,7 @@ a62e1bc38700fde6  exited:2          5202 steps  mylib-0.3.0 (fork of 3ed5e3f30d7
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind show @</span>
 383acd539d9e1313  exited:2          5236 steps  mylib-0.3.0 (fork of 3ed5e3f30d73bb41 at 5123, schedule 4)
-recorded by rewind 0.5.0 (04e7139a26ff)
+recorded by rewind 0.5.0 (e916c6c831d5)
 rewind nix /nix/store/...-mylib-0.3.0.drv --epoch 1790985600 --schedule 6 --schedule-from 3629 --schedule-until 5140 --clock branches --name mylib-0.3.0  # 3ed5e3f30d73bb41
 rewind fork 3ed5e3f30d73bb41 5123 --schedule 4  # 383acd539d9e1313</code></pre>
         <p>The failing run's command makes it again, with the same id:</p>
@@ -607,7 +676,7 @@ rewind fork 3ed5e3f30d73bb41 5123 --schedule 4  # 383acd539d9e1313</code></pre>
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind show 3ed5e3f3 | tail -1 | sh</span>
 ...
-rewind: run 3ed5e3f30d73bb41 exited:2 after 5192 steps, 0.203s virtual, 0.580s wall (poweroff)</code></pre>
+rewind: run 3ed5e3f30d73bb41 exited:2 after 5192 steps, 0.203s virtual, 0.583s wall (poweroff)</code></pre>
       </section>
 
       <section class="step">
@@ -715,6 +784,72 @@ a62e1bc38700fde6
       </section>
 
       <section class="step">
+        <h2 id="count-the-schedules-that-fail-from-a-step">
+          <a class="anchor" href="#count-the-schedules-that-fail-from-a-step"
+            >Count the schedules that fail from a step</a
+          >
+        </h2>
+        <p>
+          <code>rewind fork</code> tries one schedule from a step. <code>check --run</code> tries
+          many on a run already recorded, each a fork of it at <code>--schedule-from</code>, with
+          the run standing for schedule 0, and <code>--no-narrow</code> stops at the count where
+          <code>check</code> would go on to narrow the first schedule that ends differently. From
+          the deciding step of the passing run:
+        </p>
+        <pre
+          class="console"
+        ><code><span class="cmd"><span class="prompt">$</span> rewind check --run 8c4bd4a9 --schedule-from 5139 --schedules 16 --all --no-narrow</span>
+schedule   0: exited:0       6427 steps  a9d703ba8977  run 8c4bd4a91be9cbeb
+schedule   1: exited:0       6771 steps  a9d703ba8977  run d6047f892a7d8f10
+schedule   2: exited:2       5204 steps    run 907eef5b6530c7da
+schedule   3: exited:2       5198 steps    run 319e1c755ba992fb
+schedule   4: exited:0       6672 steps  a9d703ba8977  run 921ac70988e1a57f
+schedule   5: exited:2       5200 steps    run 36dc6f53d93e2854
+schedule   6: exited:2       5201 steps    run 62a239dc75abff6d
+schedule   7: exited:2       5200 steps    run ad8f66fd8ec25721
+schedule   8: exited:2       5228 steps    run bce2ba2eff8c4a68
+schedule   9: exited:2       5200 steps    run 4ab9eacc1011fdeb
+schedule  10: exited:2       5200 steps    run c249be46b1b8f2af
+schedule  11: exited:0       6687 steps  a9d703ba8977  run 128c3ce1d96adbe8
+schedule  12: exited:2       5201 steps    run 626b4e9c5f35bb67
+schedule  13: exited:2       5225 steps    run 02ecac53f7d4747d
+schedule  14: exited:2       5225 steps    run ca6fe4416c621b7d
+schedule  15: exited:2       5199 steps    run 249e1414585af0bc
+schedule  16: exited:2       5196 steps    run a0cc66745ec99dbb
+13 of 16 perturbed schedules ended differently</code></pre>
+        <p>
+          13 of the 16 crash. Without <code>--no-narrow</code>, <code>check --run</code> narrows the
+          first of them to the step that decides it, as for a build. With <code>--json</code> it
+          prints each schedule's run and whether it ended differently.
+        </p>
+        <p>
+          In the app, the chevron beside Fork from here turns the button into Check from here, with
+          8, 16, 32 or 64 schedules, and back. It is amber because it runs the machine: pressed, it
+          tries the schedules from the playhead and fills a card in At this step, a cell per
+          schedule as each ends, grey for ended as this run did, blue for differently and a dashed
+          outline for timed out. A cell picked names its run, with Compare, which compares this run
+          with it, and Open. The forks stay among the run's forks in the Runs tab:
+        </p>
+        <figure class="shot">
+          <picture>
+            <source srcset="../img/app-check.webp" type="image/webp" />
+            <img
+              src="../img/app-check.png"
+              width="1440"
+              height="900"
+              loading="lazy"
+              alt="The app after Check from here at step 5139 of the passing run: a card counting how the 16 schedules ended, a cell per schedule, the first picked with its run and Compare and Open"
+            />
+          </picture>
+          <figcaption>
+            The app after Check from here at step 5139 of the passing run: a card counting how the
+            16 schedules ended, a cell per schedule, the first picked with its run and Compare and
+            Open
+          </figcaption>
+        </figure>
+      </section>
+
+      <section class="step">
         <h2 id="move-around-a-long-run">
           <a class="anchor" href="#move-around-a-long-run">Move around a long run</a>
         </h2>
@@ -819,7 +954,7 @@ runs will use counter time</code></pre>
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind run --root spin --timeout 5 --name spin -- /bin/spin</span>
-rewind: run adddf6a8e32d3b29 timed-out after 308 steps, 0.002s virtual, 5.008s wall (timed out computing without exits for 4.4s, in user space in main+15 (spin.c:2), process 34 (spin))</code></pre>
+rewind: run e4a2b114e2062616 timed-out after 308 steps, 0.002s virtual, 5.014s wall (timed out computing without exits for 4.4s, in user space in main+15 (spin.c:2), process 34 (spin))</code></pre>
         <p>
           The place is a function, offset and source line from the program's symbols, and the
           process the VM's kernel had on the CPU. A run that timed out while still making exits was
@@ -831,7 +966,7 @@ rewind: run adddf6a8e32d3b29 timed-out after 308 steps, 0.002s virtual, 5.008s w
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind ls --status timed-out</span>
-adddf6a8e32d3b29  timed-out          308 steps  spin</code></pre>
+e4a2b114e2062616  timed-out          308 steps  spin</code></pre>
       </section>
 
       <section class="step">

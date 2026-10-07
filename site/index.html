@@ -329,14 +329,17 @@
               <p>
                 The event at the step, here a SIGSEGV at 0x108, and where this run parted from a
                 passing run of the same build. From here, open a shell inside the VM or attach gdb,
-                both in a throwaway fork of the run.
+                both in a throwaway fork of the run, or show which thread held the CPU at each step,
+                beside the passing run.
               </p>
             </li>
             <li class="tour-card" id="tour-5" tabindex="0">
               <h3>Fork from here</h3>
               <p>
                 Branch at the playhead under a new schedule, reschedule requests, stalls and up to
-                50 &micro;s of timer slack, so the threads interleave differently from there on.
+                50 &micro;s of timer slack, so the threads interleave differently from there on. Its
+                menu turns it into Check from here: 8 to 64 schedules at once, counted by how they
+                ended.
               </p>
             </li>
             <li class="tour-card" id="tour-6" tabindex="0">
@@ -475,8 +478,9 @@
             <span class="eyebrow">Advanced</span>
             <h3>Advanced features</h3>
             <p>
-              Short recipes: watchpoints, the kernel's side of a crash, tools inside the VM, more
-              CPUs, steering the perturbation, and sharing a failing run.
+              Short recipes: which thread held the CPU, watchpoints, the kernel's side of a crash,
+              tools inside the VM, more CPUs, counting the schedules that fail from a step, and
+              sharing a failing run.
             </p>
             <span class="card-link">Read the tutorial &rarr;</span>
           </a>
