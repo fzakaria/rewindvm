@@ -74,11 +74,14 @@ jobs:
       # and the dependency builds go: the last five of each, the kernel's
       # debug output and the debuginfod server among them, for
       # `rewind gdb` on runs made with them. Releases pin theirs for good
-      # (release.yml).
+      # (release.yml). Each is pushed first: cachix-action pushes only
+      # what this run built, and a package substituted from cache.nixos.org,
+      # such as the stock debuginfod server, is not in the cache to pin.
       - name: Pin main's packages
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
           for attr in rewind app kernel kernel-debug debuginfod; do
-            cachix pin rewindvm "main-$attr" \
-              "$(nix build --no-link --print-out-paths ".#$attr")" --keep-revisions 5
+            path=$(nix build --no-link --print-out-paths ".#$attr")
+            cachix push rewindvm "$path"
+            cachix pin rewindvm "main-$attr" "$path" --keep-revisions 5
           done

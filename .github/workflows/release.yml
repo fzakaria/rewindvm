@@ -78,11 +78,14 @@ jobs:
       # debuginfod server among them, which nothing depends on, so
       # each needs a pin of its own; they are kept for good. The Rust
       # dependency builds are not pinned: evicted, they compile again once.
+      # Each is pushed first, as in ci.yml: a package substituted from
+      # cache.nixos.org is not in the cache to pin until it is.
       - name: Pin the release in the cache
         run: |
           for attr in rewind app kernel kernel-debug debuginfod; do
-            cachix pin rewindvm "$attr-$GITHUB_REF_NAME" \
-              "$(nix build --no-link --print-out-paths ".#$attr")" --keep-forever
+            path=$(nix build --no-link --print-out-paths ".#$attr")
+            cachix push rewindvm "$path"
+            cachix pin rewindvm "$attr-$GITHUB_REF_NAME" "$path" --keep-forever
           done
 
       - name: Publish the release
