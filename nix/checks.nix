@@ -1229,8 +1229,9 @@ in
   # checks.threads: `rewind threads` says what held the CPU at each step
   # of a window, one slice a line: the thread of every event in the window
   # held it at the event's step, both of race's workers show up, the
-  # slices cover the window without a gap, and a window past the run's end
-  # is cut there. Boots the VM, so it needs /dev/kvm.
+  # slices cover the window without a gap, a window past the run's end is
+  # cut there, and one from boot starts once the kernel lists its tasks.
+  # Boots the VM, so it needs /dev/kvm.
   threads =
     pkgs.runCommand "rewind-threads"
       {
@@ -1254,6 +1255,13 @@ in
           and ([range(1; length) as $i | .[$i].from == .[$i - 1].to + 1] | all)
         ' slices
         jq -se '[.[] | select(.on == "thread") | .tid] | unique | length >= 3' slices
+
+        # A window from boot starts where the kernel first says where its
+        # tasks are, before which there is no task to read.
+        rewind threads race --from 0 --to "$from" --json > booting
+        jq -se --argjson from "$from" '
+          length > 0 and .[0].from > 0 and .[-1].to == $from
+        ' booting
         jq -se --slurpfile events events '
           . as $slices
           | [$events[] | select(.pid != 0) as $e

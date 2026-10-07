@@ -844,6 +844,9 @@ impl Run {
     /// past the run's end stops there. The replay is checked against the
     /// run's records the whole way, as [`Run::machine_at`] checks it.
     ///
+    /// Early in boot the kernel has not yet said where its tasks are, so
+    /// a window that starts there starts at the first step it has.
+    ///
     /// A step is an exit, so a thread that took and gave back the CPU
     /// between two exits is not seen.
     pub fn threads_through(
@@ -857,18 +860,27 @@ impl Run {
         }
         let to = to.min(self.last_step()?);
         let mut machine = self.machine_at(home, from, Keep::Nothing, &mut rewind_vmm::Ignore)?;
-        let layout = machine.task_layout()?.with_context(|| {
-            format!(
-                "run {}'s kernel does not say where its tasks are",
-                self.manifest.id
-            )
-        })?;
 
         // One step at a time, each checked against the run's records.
         let mut ignore = rewind_vmm::Ignore;
         let mut checked = Checked::new(&mut ignore, self.records_after(from)?);
-        let mut held = Vec::new();
         let mut step = from;
+
+        // Through boot, until the kernel says where its tasks are.
+        let layout = loop {
+            if let Some(layout) = machine.task_layout()? {
+                break layout;
+            }
+            let outcome = machine.run(Some(step + 1), &mut checked)?;
+            if step == to || machine.step() != step + 1 || !matches!(outcome, Outcome::Paused) {
+                bail!(
+                    "run {}'s kernel does not say where its tasks are by step {step}",
+                    self.manifest.id
+                );
+            }
+            step += 1;
+        };
+        let mut held = Vec::new();
         loop {
             let (on, name) = crate::threads::Tasks::new(&machine, layout).held()?;
             held.push((step, on, name));
