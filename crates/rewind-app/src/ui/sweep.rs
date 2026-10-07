@@ -1,4 +1,5 @@
-//! Check from here: the Inspect action that tries schedules from the
+//! Check from here: what the amber button at the end of the controls does
+//! once its menu turns it from Fork from here, trying schedules from the
 //! playhead, each a fork of the run there, and the card in "At this step"
 //! that counts how they ended, a cell per schedule.
 //!
@@ -10,13 +11,15 @@
 use std::path::PathBuf;
 
 use futures::StreamExt;
-use gpui::{Context, Div, SharedString, div, prelude::*, px, rgb};
+use gpui::{
+    Context, Div, MouseButton, Pixels, Point, SharedString, anchored, div, prelude::*, px, rgb,
+};
 
 use crate::describe::thousands;
 use crate::engine::Cancel;
 use crate::request::Request;
 use crate::run::{Origin, short_id};
-use crate::sweep::{Checked, Outcome, SCHEDULES, schedule_said};
+use crate::sweep::{Checked, HereAction, Outcome, SIZES, schedule_said};
 use crate::theme::{self, size};
 use crate::ui::render::{card, card_title};
 use crate::ui::scrubber::{EXAMPLE_FORK, NoticeTone, Replay, Scrubber, replay_unavailable};
@@ -25,17 +28,23 @@ use crate::ui::widgets::{Availability, ButtonStyle, button};
 /// The height of a schedule's cell.
 const CELL_HEIGHT: f32 = 26.0;
 
-/// The gap between cells.
+/// The gap between cells, and how many cells make a row.
 const CELL_GAP: f32 = 3.0;
+const CELLS_PER_ROW: usize = 16;
 
 /// The legend's swatches.
 const SWATCH: f32 = 10.0;
 
+/// The width of the menu of what the amber button does.
+const HERE_MENU_WIDTH: f32 = 250.0;
+
 /// A check from here, running or done.
 pub struct Sweep {
-    /// The run it forks, and the step it forks at.
+    /// The run it forks, the step it forks at, and how many schedules it
+    /// tries.
     pub run: PathBuf,
     pub step: u64,
+    pub schedules: u64,
     pub state: SweepState,
     /// The schedule picked in the card, by its place among the forks.
     pub picked: Option<usize>,
@@ -63,7 +72,7 @@ impl Drop for Sweep {
 impl Scrubber {
     /// Tries schedules from the playhead, unless a check runs already or
     /// the run cannot be forked here.
-    pub(super) fn check_here(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn check_here(&mut self, schedules: u64, cx: &mut Context<Self>) {
         let Some(session) = &self.session else {
             return;
         };
@@ -85,11 +94,7 @@ impl Scrubber {
             );
             return;
         }
-        if self
-            .sweep
-            .as_ref()
-            .is_some_and(|s| matches!(s.state, SweepState::Running { .. }))
-        {
+        if self.checking() {
             return;
         }
         let run = session.run.path.clone();
@@ -99,6 +104,7 @@ impl Scrubber {
         self.sweep = Some(Sweep {
             run: run.clone(),
             step,
+            schedules,
             state: SweepState::Running { ended: Vec::new() },
             picked: None,
             request,
@@ -111,7 +117,7 @@ impl Scrubber {
         let engine = self.engine.clone();
         let (lines, mut said) = futures::channel::mpsc::unbounded::<String>();
         let task = crate::jobs::on_own_thread(move || {
-            engine.check_from(&run, step, SCHEDULES, &cancel, &mut |line| {
+            engine.check_from(&run, step, schedules, &cancel, &mut |line| {
                 let _ = lines.unbounded_send(line.to_string());
             })
         });
@@ -152,6 +158,113 @@ impl Scrubber {
         .detach();
     }
 
+    /// What the amber button does now: forks, or checks with the count
+    /// chosen last.
+    pub(super) fn act_here(&mut self, cx: &mut Context<Self>) {
+        match self.here_action {
+            HereAction::Fork => self.fork_here(cx),
+            HereAction::Check { schedules } => self.check_here(schedules, cx),
+        }
+    }
+
+    /// Opens the menu of what the amber button does, under the pointer.
+    pub(super) fn open_here_menu(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        self.here_menu = Some(position);
+        cx.notify();
+    }
+
+    pub(super) fn close_here_menu(&mut self, cx: &mut Context<Self>) {
+        if self.here_menu.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    fn choose_here_action(&mut self, action: HereAction, cx: &mut Context<Self>) {
+        self.here_action = action;
+        self.here_menu = None;
+        cx.notify();
+    }
+
+    /// The menu of what the amber button does, over a backdrop that closes
+    /// it, when it is open: fork once, or check with one of the counts.
+    pub(super) fn render_here_menu(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let position = self.here_menu?;
+        let actions = std::iter::once(HereAction::Fork)
+            .chain(SIZES.map(|schedules| HereAction::Check { schedules }));
+        let mut items = div()
+            .w(px(HERE_MENU_WIDTH))
+            .flex()
+            .flex_col()
+            .p(px(size::MENU_PAD))
+            .rounded(px(size::RADIUS_BUTTON))
+            .bg(rgb(theme::RAISED))
+            .border_1()
+            .border_color(rgb(theme::LINE_2))
+            .shadow_lg()
+            .text_size(px(size::TEXT_UI))
+            .text_color(rgb(theme::TEXT))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+        for (i, action) in actions.enumerate() {
+            let label = match action {
+                HereAction::Fork => "Fork from here, once".to_string(),
+                HereAction::Check { schedules } => {
+                    format!("Check from here, {schedules} schedules")
+                }
+            };
+            items = items.child(
+                div()
+                    .id(SharedString::from(format!("here-{i}")))
+                    .px(px(size::MENU_ITEM_PAD_X))
+                    .py(px(size::MENU_ITEM_PAD_Y))
+                    .rounded(px(size::RADIUS_MENU_ITEM))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgb(theme::RAISED_HOVER)))
+                    .when(action == self.here_action, |d| {
+                        d.text_color(rgb(theme::AMBER))
+                    })
+                    .child(label)
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.choose_here_action(action, cx)),
+                    ),
+            );
+        }
+        Some(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .child(
+                    // The press that closes the menu goes no further, so
+                    // it does not also press what is under it.
+                    div()
+                        .id("here-backdrop")
+                        .occlude()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| this.close_here_menu(cx)),
+                        ),
+                )
+                .child(
+                    anchored()
+                        .position(position)
+                        .snap_to_window_with_margin(px(size::MENU_EDGE_MARGIN))
+                        .child(items),
+                ),
+        )
+    }
+
+    /// Whether a check from here is running, for the amber button's icon.
+    pub(super) fn checking(&self) -> bool {
+        self.sweep
+            .as_ref()
+            .is_some_and(|s| matches!(s.state, SweepState::Running { .. }))
+    }
+
     /// Stops the check that runs; the forks that ended stay.
     fn cancel_check(&mut self, cx: &mut Context<Self>) {
         self.sweep = None;
@@ -180,8 +293,9 @@ impl Scrubber {
             SweepState::Running { ended } => {
                 card = card
                     .child(div().text_color(rgb(theme::TEXT)).child(format!(
-                        "{} of {SCHEDULES} schedules ended",
-                        ended.len()
+                        "{} of {} schedules ended",
+                        ended.len(),
+                        sweep.schedules
                     )))
                     .child(self.render_cells(sweep, cx))
                     .child(
@@ -221,11 +335,19 @@ impl Scrubber {
         Some(card)
     }
 
-    /// A cell per schedule: grey ended as this run did, blue differently,
-    /// outlined timed out; while the check runs, filled once ended.
+    /// A cell per schedule, CELLS_PER_ROW to a row: grey ended as this
+    /// run did, blue differently, outlined timed out; while the check
+    /// runs, filled once ended.
     fn render_cells(&self, sweep: &Sweep, cx: &mut Context<Self>) -> Div {
+        let mut rows = div().flex().flex_col().gap(px(CELL_GAP));
         let mut strip = div().flex().gap(px(CELL_GAP));
-        for (i, schedule) in (1..=SCHEDULES).enumerate() {
+        for (i, schedule) in (1..=sweep.schedules).enumerate() {
+            if i > 0 && i % CELLS_PER_ROW == 0 {
+                rows = rows.child(std::mem::replace(
+                    &mut strip,
+                    div().flex().gap(px(CELL_GAP)),
+                ));
+            }
             let cell = div()
                 .id(SharedString::from(format!("check-cell-{schedule}")))
                 .flex()
@@ -282,7 +404,7 @@ impl Scrubber {
             };
             strip = strip.child(cell);
         }
-        strip
+        rows.child(strip)
     }
 
     /// The picked schedule's run and how it ended, with Compare, which

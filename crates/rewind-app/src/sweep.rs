@@ -6,8 +6,21 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
-/// How many schedules a check from here tries.
-pub const SCHEDULES: u64 = 16;
+/// How many schedules a check from here can try, and how many it tries
+/// until another count is chosen.
+pub const SIZES: [u64; 4] = [8, 16, 32, 64];
+pub const DEFAULT_SCHEDULES: u64 = 16;
+
+/// What the amber button at the end of the controls does at the
+/// playhead: fork the run once, or check it with this many schedules.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HereAction {
+    #[default]
+    Fork,
+    Check {
+        schedules: u64,
+    },
+}
 
 /// What `rewind check --json` prints once it has tried every schedule.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]

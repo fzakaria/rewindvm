@@ -354,6 +354,10 @@ pub struct Scrubber {
     pub(super) lanes: Option<crate::ui::lanes::LanesPanel>,
     /// The latest check from a step, running or done.
     pub(super) sweep: Option<crate::ui::sweep::Sweep>,
+    /// What the amber button does at the playhead, and where its menu
+    /// opened, while it is open.
+    pub(super) here_action: crate::sweep::HereAction,
+    pub(super) here_menu: Option<gpui::Point<gpui::Pixels>>,
     /// A press on the title bar that the next motion turns into a window
     /// move.
     pub(super) titlebar_armed: bool,
@@ -446,6 +450,8 @@ impl Scrubber {
             source: None,
             lanes: None,
             sweep: None,
+            here_action: crate::sweep::HereAction::Fork,
+            here_menu: None,
             title: None,
         };
         if let Some(session) = launch.session {
@@ -1110,7 +1116,9 @@ impl Scrubber {
     /// or the terminal pane, and gives the keyboard back to the scrubber.
     pub(super) fn close_nearest(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let open = Open {
-            menu: self.selecting.menu.is_some() || self.stride_menu.is_some(),
+            menu: self.selecting.menu.is_some()
+                || self.stride_menu.is_some()
+                || self.here_menu.is_some(),
             tab: self.right_tab,
             terminal: self.terminal.is_some(),
         };
@@ -1118,6 +1126,7 @@ impl Scrubber {
             Some(Closable::Menu) => {
                 self.close_context_menu(cx);
                 self.close_stride_menu(cx);
+                self.close_here_menu(cx);
             }
             Some(Closable::Tab(tab)) => self.close_tab(tab, cx),
             Some(Closable::Terminal) => self.close_terminal(cx),

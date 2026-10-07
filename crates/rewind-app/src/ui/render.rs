@@ -18,6 +18,7 @@ use crate::family::{Family, Progress, Row, RowKind as RunsRowKind, RunEntry};
 use crate::model::{FileOp, FileTone, LogFilter, Motion, RowKind, Tone};
 use crate::run::{Agreement, Session, Verdict, short_id};
 use crate::selection::{Mapped, Surface, part_of_line};
+use crate::sweep::HereAction;
 use crate::theme::{self, layout, size};
 use crate::tour::Anchor;
 use crate::ui::ansi::penned;
@@ -154,6 +155,9 @@ impl Render for Scrubber {
             window_root = window_root.child(menu);
         }
         if let Some(menu) = self.render_stride_menu(cx) {
+            window_root = window_root.child(menu);
+        }
+        if let Some(menu) = self.render_here_menu(cx) {
             window_root = window_root.child(menu);
         }
         if let Some(search) = self.render_search(cx) {
@@ -899,17 +903,49 @@ impl Scrubber {
             .iter()
             .filter(|f| f.state == ForkState::Pending)
             .count();
-        let fork_icon = if forking == 0 {
-            icon(Icon::Fork, size::ICON_FORK, theme::AMBER_INK).into_any_element()
-        } else {
+        // The button forks, or checks from here once its menu says so;
+        // the menu opens from the chevron beside it.
+        let busy = forking > 0 || self.checking();
+        let fork_icon = if busy {
             spinner("fork-spinner", size::ICON_FORK, theme::AMBER_INK).into_any_element()
+        } else {
+            icon(Icon::Fork, size::ICON_FORK, theme::AMBER_INK).into_any_element()
+        };
+        let (label, note) = match self.here_action {
+            HereAction::Fork => ("Fork from here".to_string(), None),
+            HereAction::Check { schedules } => (
+                format!("Check from here \u{b7} {schedules}"),
+                Some(check_note(schedules)),
+            ),
+        };
+        let note = match (forking, note) {
+            (0, note) => note,
+            (forking, _) => Some(forking_note(forking)),
         };
         let fork = button("fork", ButtonStyle::Primary, Availability::Enabled)
+            .rounded_r(px(0.0))
             .child(fork_icon)
-            .child("Fork from here")
-            .when(forking > 0, |b| b.tooltip(tooltip(forking_note(forking))))
-            .on_click(cx.listener(|this, _, _, cx| this.fork_here(cx)));
-        let fork = self.with_callout(fork, Anchor::ForkButton, cx);
+            .child(label)
+            .when_some(note, |b, note| b.tooltip(tooltip(note)))
+            .on_click(cx.listener(|this, _, _, cx| this.act_here(cx)));
+        let chooser = button("fork-menu", ButtonStyle::Primary, Availability::Enabled)
+            .rounded_l(px(0.0))
+            .px(px(size::CONTROL_GAP))
+            .border_l_1()
+            .border_color(rgb(theme::AMBER_DEEP))
+            .child("\u{25be}")
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, e: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.open_here_menu(e.position, cx);
+                }),
+            );
+        let fork = self.with_callout(
+            div().flex().child(fork).child(chooser),
+            Anchor::ForkButton,
+            cx,
+        );
 
         div()
             .flex()
@@ -1485,19 +1521,11 @@ impl Scrubber {
                     ),
             )
             .child(
-                div()
-                    .flex()
-                    .gap(px(size::CARD_GAP))
-                    .child(
-                        inspect("threads", "Show threads".into(), Availability::Enabled)
-                            .tooltip(tooltip(THREADS_NOTE))
-                            .on_click(cx.listener(|this, _, _, cx| this.toggle_lanes(cx))),
-                    )
-                    .child(
-                        inspect("check", "Check from here".into(), Availability::Enabled)
-                            .tooltip(tooltip(CHECK_NOTE))
-                            .on_click(cx.listener(|this, _, _, cx| this.check_here(cx))),
-                    ),
+                div().flex().gap(px(size::CARD_GAP)).child(
+                    inspect("threads", "Show threads".into(), Availability::Enabled)
+                        .tooltip(tooltip(THREADS_NOTE))
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_lanes(cx))),
+                ),
             );
         // The buttons stay at the foot of the column however long the
         // cards above them grow, which scroll instead.
@@ -2062,7 +2090,13 @@ const FORWARD_NOTE: &str =
     "Forward again, after Back. Key: Alt+Right, or the mouse's forward button.";
 const EXPORT_NOTE: &str = "Writes this run to one .rwd file, with its keyframes and inputs, that another machine can open, replay and fork.";
 const THREADS_NOTE: &str = "A lane per thread over a window of steps, a bar where the thread held the CPU, beside the compared run's. Rewind replays the window one step at a time in each run to find them. Key: t.";
-const CHECK_NOTE: &str = "Runs 16 other schedules from this step, each a fork of this run, and counts how many end differently. The forks stay among this run's forks.";
+
+/// The amber button's note when it checks from here.
+fn check_note(schedules: u64) -> String {
+    format!(
+        "Runs {schedules} other schedules from this step, each a fork of this run, and counts how many end differently. The forks stay among this run's forks. The menu beside it turns it back to Fork from here."
+    )
+}
 
 /// The fork button's note while forks made from this window run.
 fn forking_note(forking: usize) -> String {
