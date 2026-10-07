@@ -31,7 +31,7 @@ const HALVES: [u64; 4] = [64, 256, 1024, 4096];
 const DEFAULT_HALF: u64 = 256;
 
 /// The width of the column of lane labels.
-const LABEL_WIDTH: f32 = 150.0;
+const LABEL_WIDTH: f32 = 170.0;
 
 /// The height of one run's lane in a row, and the bar inside it.
 const LANE_HEIGHT: f32 = 16.0;

@@ -96,7 +96,7 @@ pub fn rows(here: &[Slice], there: &[Slice]) -> Vec<Row> {
     // Each run's slices, into their lane's row; BTreeMap keeps the lanes
     // in Lane's order.
     let label = |lane: Lane| match lane {
-        Lane::Thread { pid, tid } => format!("{} {pid}/{tid}", threads[&tid].1),
+        Lane::Thread { pid, tid } => format!("{pid}/{tid} {}", threads[&tid].1),
         Lane::Kernel => KERNEL_LABEL.to_string(),
         Lane::Idle => IDLE_LABEL.to_string(),
     };
@@ -261,7 +261,7 @@ mod tests {
                 Lane::Idle,
             ]
         );
-        assert_eq!(rows[0].label, "pool 40/40");
+        assert_eq!(rows[0].label, "40/40 pool");
         assert_eq!(
             rows[0].here,
             vec![thread(11, 19, 40), kernel(20, 20, 40, "pool")]
