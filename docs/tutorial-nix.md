@@ -67,7 +67,7 @@ deterministic virtual machine:
 $ rewind nix --epoch 1790985600 github:fzakaria/rewindvm#mylib
 rewind: packing 62 store paths for mylib-0.3.0
 ...
-rewind: run 5ebce859166b24ea exited:0 after 6169 steps, 0.216s virtual, 1.451s wall (poweroff)
+rewind: run 5ebce859166b24ea exited:0 after 6169 steps, 0.216s virtual, 1.242s wall (poweroff)
 /nix/store/f6a9gy362szw6nxx3ikrklr8glr6rdln-mylib-0.3.0 a9d703ba89774f3d  matches your store, rewindvm.cachix.org
 ```
 
@@ -127,9 +127,8 @@ open both in the desktop app: rewind open 3ed5e3f30d73bb41 5153 --compare 8c4bd4
 
 Schedule 6 fails. `check` narrows schedule 6's failure to one step, 5139. The passing run perturbs the same steps less that one, so the two
 runs are the same until 5139, and only the failing one gets
-a reschedule there. The last
-block shows where the test's own output then differs. The search took 10
-seconds.
+a reschedule there. The last block shows where the test's own output then
+differs. The search took 10 seconds.
 
 `--all` tries every schedule, which measures how flaky a build is:
 
@@ -255,7 +254,7 @@ $ rewind replay 3ed5e3f3
 identical: 1713 events over 5192 steps
 
 $ rewind replay 3ed5e3f3 --from 3629
-identical from the keyframe at step 1649 to the end (0.41s)
+identical from the keyframe at step 1440 to the end (0.42s)
 ```
 
 `--from` starts at the nearest keyframe before the step. A run replays on any
@@ -267,28 +266,29 @@ A fork is its parent up to a step, then another schedule:
 
 ```console
 $ rewind fork 5ebce859 3629 --schedule 5 --quiet
-rewind: run b759eecf9ba8b55e exited:0 after 6628 steps, 0.222s virtual, 0.322s wall (poweroff)
+rewind: run b759eecf9ba8b55e exited:0 after 6628 steps, 0.222s virtual, 0.319s wall (poweroff)
 rewind: the fork first differs from its parent at step 3638
 rewind: open it beside its parent in the desktop app: rewind open b759eecf9ba8b55e 3638 --compare 5ebce859166b24ea
 
 $ rewind fork 5ebce859 3629 --schedule 6 --quiet
-rewind: run 06c0082c248db32b exited:2 after 5201 steps, 0.203s virtual, 0.285s wall (poweroff)
+rewind: run 06c0082c248db32b exited:2 after 5201 steps, 0.203s virtual, 0.290s wall (poweroff)
 rewind: the fork first differs from its parent at step 3638
 rewind: open it beside its parent in the desktop app: rewind open 06c0082c248db32b 3638 --compare 5ebce859166b24ea
 
 $ rewind fork 5ebce859 3629 --schedule 7 --quiet
-rewind: run d0f1c7fc2af0949d exited:0 after 6634 steps, 0.222s virtual, 0.326s wall (poweroff)
+rewind: run d0f1c7fc2af0949d exited:0 after 6634 steps, 0.222s virtual, 0.325s wall (poweroff)
 rewind: the fork first differs from its parent at step 3662
 rewind: open it beside its parent in the desktop app: rewind open d0f1c7fc2af0949d 3662 --compare 5ebce859166b24ea
 
 $ rewind fork 5ebce859 3629 --schedule 8 --quiet
-rewind: run 8d47a829e5bd17df exited:2 after 4544 steps, 0.200s virtual, 0.272s wall (poweroff)
+rewind: run 8d47a829e5bd17df exited:2 after 4544 steps, 0.200s virtual, 0.273s wall (poweroff)
 rewind: the fork first differs from its parent at step 3638
 rewind: open it beside its parent in the desktop app: rewind open 8d47a829e5bd17df 3638 --compare 5ebce859166b24ea
 ```
 
-From step 3629 of the schedule 0 build, schedules 6 and 8 crash and 5 and 7
-pass. `check --run` asks many schedules at once; the
+From step 3629 of the schedule 0 build, schedules
+6 and 8 crash and 5 and 7 pass. `check --run` asks many
+schedules at once; the
 [advanced tutorial](tutorial-advanced.md#count-the-schedules-that-fail-from-a-step)
 shows it.
 

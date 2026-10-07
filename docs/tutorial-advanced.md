@@ -188,8 +188,8 @@ $ rewind threads 8c4bd4a9 --from 5130 --to 5153
 ```
 
 The lines match up to step 5139. From there the threads take the CPU in
-another order, and in the failing run thread 174 holds it at the crash. A
-thread that took the CPU and gave it back between two exits is not seen.
+another order, and in the failing run thread 174 holds it at the crash.
+A thread that took the CPU and gave it back between two exits is not seen.
 
 In the app, the t key opens the Threads tab: a lane per thread around where
 the two runs part, this run's above the compared run's, with a bar wherever
@@ -295,7 +295,7 @@ prints the command line that loads the same symbols:
 $ rewind gdb 3ed5e3f3 5153 --listen 127.0.0.1:1234
 rewind: step 5153 ran in process 166; loading symbols for 4 of its files
 rewind: read 3 source files fetched from the VM earlier
-rewind: gdb at step 5153 of 3ed5e3f30d73bb41; connect with: gdb -q -iex 'set debuginfod enabled on' -iex 'set debuginfod urls http://127.0.0.1:33797' -ex 'file /nix/store/c9z53nkphz0zaan797qgmydxslw4l5bi-rewind-guest-kernel-7.2.8- ...
+rewind: gdb at step 5153 of 3ed5e3f30d73bb41; connect with: gdb -q -iex 'set debuginfod enabled on' -iex 'set debuginfod urls http://127.0.0.1:46671' -ex 'file /nix/store/c9z53nkphz0zaan797qgmydxslw4l5bi-rewind-guest-kernel-7.2.8- ...
 ```
 
 ## Bring tools into the VM
@@ -323,7 +323,7 @@ interleave on the one vCPU:
 ```console
 $ rewind nix --cores 4 --epoch 1790985600 github:fzakaria/rewindvm#mylib
 ...
-rewind: run c2dcda95802e9b88 exited:0 after 6174 steps, 0.216s virtual, 1.005s wall (poweroff)
+rewind: run c2dcda95802e9b88 exited:0 after 6174 steps, 0.216s virtual, 0.999s wall (poweroff)
 /nix/store/f6a9gy362szw6nxx3ikrklr8glr6rdln-mylib-0.3.0 a9d703ba89774f3d  matches your store, rewindvm.cachix.org
 ```
 
@@ -345,22 +345,22 @@ spins waiting for a thread that never runs.
 
 ```console
 $ rewind fork 3ed5e3f3 5123 --schedule 1 --quiet
-rewind: run 0a18bfa4106b10ea exited:0 after 6766 steps, 0.226s virtual, 0.320s wall (poweroff)
+rewind: run 0a18bfa4106b10ea exited:0 after 6766 steps, 0.226s virtual, 0.315s wall (poweroff)
 rewind: the fork first differs from its parent at step 5151
 rewind: open it beside its parent in the desktop app: rewind open 0a18bfa4106b10ea 5151 --compare 3ed5e3f30d73bb41
 
 $ rewind fork 3ed5e3f3 5123 --schedule 2 --quiet
-rewind: run 217f5d98224a4a60 exited:2 after 5204 steps, 0.203s virtual, 0.258s wall (poweroff)
+rewind: run 217f5d98224a4a60 exited:2 after 5204 steps, 0.203s virtual, 0.262s wall (poweroff)
 rewind: the fork first differs from its parent at step 5151
 rewind: open it beside its parent in the desktop app: rewind open 217f5d98224a4a60 5151 --compare 3ed5e3f30d73bb41
 
 $ rewind fork 3ed5e3f3 5123 --schedule 3 --quiet
-rewind: run a62e1bc38700fde6 exited:2 after 5202 steps, 0.203s virtual, 0.253s wall (poweroff)
+rewind: run a62e1bc38700fde6 exited:2 after 5202 steps, 0.203s virtual, 0.251s wall (poweroff)
 rewind: the fork first differs from its parent at step 5142
 rewind: open it beside its parent in the desktop app: rewind open a62e1bc38700fde6 5142 --compare 3ed5e3f30d73bb41
 
 $ rewind fork 3ed5e3f3 5123 --schedule 4 --quiet
-rewind: run 383acd539d9e1313 exited:2 after 5236 steps, 0.204s virtual, 0.249s wall (poweroff)
+rewind: run 383acd539d9e1313 exited:2 after 5236 steps, 0.204s virtual, 0.257s wall (poweroff)
 rewind: the fork first differs from its parent at step 5148
 rewind: open it beside its parent in the desktop app: rewind open 383acd539d9e1313 5148 --compare 3ed5e3f30d73bb41
 ```
@@ -413,7 +413,7 @@ schedule 4 fork:
 ```console
 $ rewind show @
 383acd539d9e1313  exited:2          5236 steps  mylib-0.3.0 (fork of 3ed5e3f30d73bb41 at 5123, schedule 4)
-recorded by rewind 0.5.0 (e916c6c831d5)
+recorded by rewind 0.5.0 (915f587dc446)
 rewind nix /nix/store/...-mylib-0.3.0.drv --epoch 1790985600 --schedule 6 --schedule-from 3629 --schedule-until 5140 --clock branches --name mylib-0.3.0  # 3ed5e3f30d73bb41
 rewind fork 3ed5e3f30d73bb41 5123 --schedule 4  # 383acd539d9e1313
 ```
@@ -423,7 +423,7 @@ The failing run's command makes it again, with the same id:
 ```console
 $ rewind show 3ed5e3f3 | tail -1 | sh
 ...
-rewind: run 3ed5e3f30d73bb41 exited:2 after 5192 steps, 0.203s virtual, 0.583s wall (poweroff)
+rewind: run 3ed5e3f30d73bb41 exited:2 after 5192 steps, 0.203s virtual, 0.582s wall (poweroff)
 ```
 
 ## Compare any two runs
@@ -541,7 +541,7 @@ zoom the timeline. The ? key lists them all:
 
 ```console
 $ rewind export 3ed5e3f3 --replayable -o crash.rwd
-rewind: wrote crash.rwd (201.3 MB)
+rewind: wrote crash.rwd (201.2 MB)
 
 $ REWIND_HOME=elsewhere rewind import crash.rwd
 3ed5e3f30d73bb41  exited:2          5192 steps  mylib-0.3.0
@@ -588,7 +588,7 @@ $ nix shell nixpkgs#pkgsStatic.stdenv.cc -c x86_64-unknown-linux-musl-cc -static
 
 ```console
 $ rewind run --root spin --timeout 5 --name spin -- /bin/spin
-rewind: run e4a2b114e2062616 timed-out after 308 steps, 0.002s virtual, 5.014s wall (timed out computing without exits for 4.4s, in user space in main+15 (spin.c:2), process 34 (spin))
+rewind: run e4a2b114e2062616 timed-out after 308 steps, 0.002s virtual, 5.015s wall (timed out computing without exits for 4.4s, in user space in main+15 (spin.c:2), process 34 (spin))
 ```
 
 A run that timed out while still making exits was slow rather than stuck, and
