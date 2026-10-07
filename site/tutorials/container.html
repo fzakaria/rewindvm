@@ -198,10 +198,10 @@ where ./tests/test_pool_shutdown first behaves differently:
 
 open both in the desktop app: rewind open a5e2dbdb1005a619 1387 --compare 20c97f77414f220e</code></pre>
         <p>
-          <code>check</code> narrows schedule 1's perturbation to steps 903 to 1375, and the last of
-          them, step 1374, decides it: the passing run is the same window less that step, and only
-          the failing run gets a timer 31.5 µs late there. The last block shows where the test's own
-          output then differs. The search took 29 seconds. <code>--all</code> tries every schedule:
+          <code>check</code> narrows schedule 1's failure to one step, 1374. The passing run
+          perturbs the same steps less that one, and only the failing run gets a timer 31.5 µs late
+          there. The last block shows where the test's own output then differs. The search took 29
+          seconds. <code>--all</code> tries every schedule:
         </p>
         <pre
           class="console"
@@ -318,11 +318,8 @@ $1 = (struct queue *) 0x0
 81
 [Inferior 1 (process 1) detached]</code></pre>
         <p>
-          Debian's server has libc's symbols but none of its source files, so libc's frames show no
-          source. Debian's DWARF names libc's files relative to the build directory, as
-          <code>./io/../sysdeps/unix/sysv/linux/write.c</code>, and the debuginfod client asks a
-          server only for a path that starts with <code>/</code>; gdb says
-          <code>Download failed: Invalid argument</code> for each such path.
+          Debian's server has libc's symbols but not its sources, so libc's frames show no source
+          and gdb prints <code>Download failed: Invalid argument</code> for each.
         </p>
         <p>
           Images built on Fedora, Ubuntu or Arch have debuginfod servers of their own, listed by
@@ -402,9 +399,8 @@ rewind: open it beside its parent in the desktop app: rewind open 3770bd6f2d3c4c
           Press f to jump to the failure at step 1390, then s to open the source panel. After a few
           seconds it shows <code>worker</code> at <code>src/pool.c:77</code>, with
           <code>p-&gt;queue-&gt;completed++;</code> marked: the line that read the queue after
-          <code>pool_shutdown</code> had set it to NULL. The t key opens the Threads tab, a lane per
-          thread around where the two runs part, the failing run's above the passing run's, a bar
-          wherever the thread held the CPU.
+          <code>pool_shutdown</code> had set it to NULL. The t key shows which thread held the CPU
+          around where the two runs part.
         </p>
       </section>
 
@@ -477,9 +473,8 @@ same result under all 65 schedules</code></pre>
         <ul>
           <li><a href="nix.html">The Nix tutorial</a>: the same bug as a Nix derivation.</li>
           <li>
-            <a href="advanced.html">The advanced tutorial</a>: which thread held the CPU,
-            watchpoints, the kernel's side of a crash, tools inside the VM, more CPUs, counting the
-            schedules that fail from a step, and sharing a run.
+            <a href="advanced.html">The advanced tutorial</a>: threads, watchpoints, the kernel's
+            side of a crash, sharing a run and more.
           </li>
           <li>
             <a href="../counter-time.html">Counter time</a>: how the VM's clock follows its work.

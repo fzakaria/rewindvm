@@ -126,12 +126,10 @@ where ./tests/test_pool_shutdown first behaves differently:
 open both in the desktop app: rewind open a5e2dbdb1005a619 1387 --compare 20c97f77414f220e
 ```
 
-`check` narrows schedule 1's perturbation to steps 903
-to 1375, and the last of them, step 1374, decides it: the
-passing run is the same window less that step, and only the failing run gets
-a timer 31.5 µs late there. The last block shows where the test's own output
-then differs. The search took
-29 seconds. `--all` tries every schedule:
+`check` narrows schedule 1's failure to one step, 1374. The passing run
+perturbs the same steps less that one, and only the failing run gets a timer
+31.5 µs late there. The last block shows where the test's own output then
+differs. The search took 29 seconds. `--all` tries every schedule:
 
 ```console
 $ rewind check --all --root mylib.tar --cwd /src -- make check | grep 'ended differently'
@@ -240,11 +238,8 @@ $1 = (struct queue *) 0x0
 [Inferior 1 (process 1) detached]
 ```
 
-Debian's server has libc's symbols but none of its source files, so libc's
-frames show no source. Debian's DWARF names libc's files relative to the build
-directory, as `./io/../sysdeps/unix/sysv/linux/write.c`, and the debuginfod
-client asks a server only for a path that starts with `/`; gdb says `Download
-failed: Invalid argument` for each such path.
+Debian's server has libc's symbols but not its sources, so libc's frames show
+no source and gdb prints `Download failed: Invalid argument` for each.
 
 Images built on Fedora, Ubuntu or Arch have debuginfod servers of their own,
 listed by [elfutils](https://sourceware.org/elfutils/Debuginfod.html).
@@ -302,9 +297,8 @@ $ rewind-app ~/.local/share/rewind/runs/a5e2dbdb1005a619 --compare ~/.local/shar
 Press f to jump to the failure at step 1390, then s to open the
 source panel. After a few seconds it shows `worker` at `src/pool.c:77`, with
 `p->queue->completed++;` marked: the line that read the queue after
-`pool_shutdown` had set it to NULL. The t key opens the Threads tab, a lane
-per thread around where the two runs part, the failing run's above the
-passing run's, a bar wherever the thread held the CPU.
+`pool_shutdown` had set it to NULL. The t key shows which thread held the CPU
+around where the two runs part.
 
 ## Fix it and check the fix
 
@@ -368,7 +362,6 @@ has the full list.
 ## What to read next
 
 - [The Nix tutorial](tutorial-nix.md): the same bug as a Nix derivation.
-- [The advanced tutorial](tutorial-advanced.md): which thread held the CPU,
-  watchpoints, the kernel's side of a crash, tools inside the VM, more CPUs,
-  counting the schedules that fail from a step, and sharing a run.
+- [The advanced tutorial](tutorial-advanced.md): threads, watchpoints, the
+  kernel's side of a crash, sharing a run and more.
 - [Counter time](pmu.md): how the VM's clock follows its work.

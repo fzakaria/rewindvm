@@ -103,9 +103,9 @@ open both in the desktop app: rewind open 3ed5e3f30d73bb41 5153 --compare 8c4bd4
         </h2>
         <p>
           <code>rewind where</code> names the line of the program's own code a thread was on at a
-          step, past the C library and, in Rust, the standard library and dependencies. By default
-          it looks at the thread of the step's own event, the pid/tid pair
-          <code>rewind events</code> prints; at 5153 that is the worker that segfaulted:
+          step, skipping the C library and, in Rust, the standard library and dependencies. By
+          default it picks the thread of the step's event; at 5153 that is the worker that
+          segfaulted:
         </p>
         <pre
           class="console"
@@ -188,19 +188,9 @@ $1 = (struct queue *) 0x0
           they work on runs recorded with a guest that lists its tasks, as these were.
         </p>
         <p>
-          In the app, Show source under Inspect, or the s key, opens the source panel in a tab
-          beside At this step. It names the line <code>rewind where</code> would for the thread of
-          the playhead's event and shows that line's whole source file, syntax colored, scrolled so
-          the line, marked, sits in the middle. The thread's frames are listed below the file, with
-          the chosen one marked; dragging the list's top edge makes it taller for a deep stack.
-          Clicking another frame shows its file instead, scrolled to its line and marked; a frame
-          without source shows its address and program. A file over a mebibyte comes as the lines
-          around its frames' lines, and the panel says which. Long lines scroll sideways with Shift
-          and the wheel, or a sideways swipe, while the line numbers stay put. When the playhead
-          rests on another step the panel asks again, back at the chosen frame, dimming the last
-          answer meanwhile; each answer forks the run, so it takes a few seconds. Runs the app
-          cannot fork say so instead: the bundled example and an export that holds only the trace.
-          So does a run recorded before the guest listed its tasks, which has to be recorded again.
+          In the app, the s key opens the source panel at the line <code>rewind where</code> names,
+          with the thread's frames below it; click a frame to see its line instead. The panel
+          follows the playhead, and each new step takes a few seconds since it forks the run.
         </p>
         <figure class="shot">
           <picture>
@@ -226,11 +216,10 @@ $1 = (struct queue *) 0x0
           <a class="anchor" href="#find-the-step-that-decides-it">Find the step that decides it</a>
         </h2>
         <p>
-          <code>check</code> narrows the failing schedule to the steps from 3629 to 5139, and names
-          the last of them. Its passing run is the same schedule without that one step, so the two
-          runs are the same machine until step 5139, where only the failing run gets a reschedule,
-          and everything they do differently follows from it. <code>rewind where</code> names the
-          thread that was on the CPU there:
+          <code>check</code> names step 5139 as the one that decides it. Its passing run is the same
+          schedule without that step, so the two runs are the same machine until 5139 and everything
+          they do differently follows from the one reschedule there. <code>rewind where</code> names
+          the thread that was on the CPU:
         </p>
         <pre
           class="console"
@@ -257,9 +246,9 @@ called from #7 __libc_start_main_impl (../csu/libc-start.c:372)</code></pre>
           first and the test passes.
         </p>
         <p>
-          <code>check --where</code> looks both threads up itself: the one on the CPU at the
-          deciding step, and the one of the failing run's first event that differs, each by the line
-          of the program's own code it was on. Each lookup takes a fork and gdb, so it is a flag:
+          <code>check --where</code> looks up both threads itself: the one on the CPU at the
+          deciding step, and the one at the failing run's first differing event. Each lookup forks
+          the run and starts gdb, so it is opt-in:
         </p>
         <pre
           class="console"
@@ -268,13 +257,8 @@ where the threads were:
         5139   166/166   main (tests/test_pool_shutdown.c:23), on the CPU at the deciding step
         5153   166/174   worker (src/pool.c:77), at the first event that differs</code></pre>
         <p>
-          In the app, two runs that differ only in their schedules show the step where the schedules
-          part as a dashed blue mark on the timeline, before the solid one where their events first
-          differ. Pointing at it says what only one of them got there, a click takes the playhead to
-          it, and the divergence card's first line says the same. Opening a window
-          <code>check</code> narrowed, from the Runs panel or from the list of builds, compares it
-          with the window one step shorter, as <code>check</code> does. Zoomed in with + around the
-          crash:
+          In the app, the deciding step is a dashed blue mark on the timeline, before the solid one
+          where the runs' events first differ. Zoomed in around the crash:
         </p>
         <figure class="shot">
           <picture>
@@ -300,12 +284,9 @@ where the threads were:
           <a class="anchor" href="#see-which-thread-held-the-cpu">See which thread held the CPU</a>
         </h2>
         <p>
-          The VM has one CPU, so at every step exactly one thread holds it, and a race is an order
-          of threads. The trace records what threads did at their events, not who held the CPU
-          between them. <code>rewind threads</code> replays a window of steps one step at a time and
-          reads which task the VM's kernel had on the CPU at each, a line per stretch one task held
-          it, with its pid/tid as <code>rewind events</code> prints them. Around the deciding step,
-          in both runs:
+          The VM has one CPU, so a race is an order of threads. <code>rewind threads</code> replays
+          a window of steps and prints which thread held the CPU, a line per stretch. Around the
+          deciding step, in both runs:
         </p>
         <pre
           class="console"
@@ -324,21 +305,14 @@ where the threads were:
       5149       5152       166/174  test_pool_shutd
       5153       5153          idle  swapper/0</code></pre>
         <p>
-          Up to step 5139 the two runs are the same machine and their lines match. From there the
-          threads take the CPU in another order, and in the failing run thread 174 holds it at the
-          crash. <code>--json</code> prints a slice a line. A step is an exit, so a thread that took
-          the CPU and gave it back between two exits is not seen, and a few thousand steps take
-          about a second.
+          The lines match up to step 5139. From there the threads take the CPU in another order, and
+          in the failing run thread 174 holds it at the crash. A thread that took the CPU and gave
+          it back between two exits is not seen.
         </p>
         <p>
-          In the app, Show threads under Inspect, or the t key, opens the Threads tab: a lane per
-          thread over a window of steps centered where the two runs part, a bar where the thread
-          held the CPU, this run's lane above the compared run's, and a notch at each of the
-          thread's events. Lines mark where the runs part, the first step a different thread held
-          the CPU, and the playhead. The window stays where it is while the playhead moves, since
-          each move would mean another replay; the presets widen it up to 4,096 steps either side,
-          and Center on playhead moves it. Clicking a bar moves the playhead to its first step and
-          lists the thread's events in it below the lanes:
+          In the app, the t key opens the Threads tab: a lane per thread around where the two runs
+          part, this run's above the compared run's, with a bar wherever the thread held the CPU.
+          Clicking a bar moves the playhead there:
         </p>
         <figure class="shot">
           <picture>
@@ -601,13 +575,8 @@ rewind: open it beside its parent in the desktop app: rewind open 383acd539d9e13
           </figcaption>
         </figure>
         <p>
-          The Fork from here button forks the run at the playhead with the next schedule. A fork of
-          a long run takes about as long as the run did: while forks made from the window run, the
-          button's icon turns, and the Runs panel lists each fork as running, in a pulsing pill,
-          until it ends and the panel shows how. Clicking a run opens it compared with the run it
-          hangs under. Right-clicking one offers to compare every run with it instead, to copy its
-          id or to delete it with its forks; Ctrl and Shift pick several. Forks that ran exactly as
-          an older one did go in one click, with remove identical in the panel's header.
+          Fork from here forks the run at the playhead with the next schedule. Clicking a run opens
+          it compared with the run it hangs under; right-clicking offers more.
         </p>
       </section>
 
@@ -616,10 +585,9 @@ rewind: open it beside its parent in the desktop app: rewind open 383acd539d9e13
           <a class="anchor" href="#find-a-run-again">Find a run again</a>
         </h2>
         <p>
-          A command takes a run by its id or the start of one, by <code>@</code> for the newest run
-          and <code>@2</code>, <code>@3</code> and on for the ones before it, by a name for the
-          newest run with that name, or by its directory. <code>rewind ls</code> lists runs newest
-          first, and filters them:
+          A command takes a run by its id or a prefix of it, by <code>@</code> for the newest run
+          and <code>@2</code>, <code>@3</code> and on for the ones before it, by name, or by
+          directory. <code>rewind ls</code> lists runs newest first, and filters them:
         </p>
         <pre
           class="console"
@@ -633,19 +601,12 @@ a62e1bc38700fde6  exited:2          5202 steps  mylib-0.3.0 (fork of 3ed5e3f30d7
 a62e1bc38700fde6  exited:2          5202 steps  mylib-0.3.0 (fork of 3ed5e3f30d73bb41 at 5123, schedule 3)
 217f5d98224a4a60  exited:2          5204 steps  mylib-0.3.0 (fork of 3ed5e3f30d73bb41 at 5123, schedule 2)</code></pre>
         <p>
-          <code>--name mylib</code> keeps the runs whose name contains <code>mylib</code>, and
-          <code>--since</code> the runs made in the last <code>30m</code>, <code>2h</code> or
-          <code>7d</code>, or since a day such as <code>2026-10-01</code>.
-          <code>--status</code> takes <code>passed</code>, <code>failed</code>,
-          <code>timed-out</code>, <code>running</code>, <code>interrupted</code> or
-          <code>unreadable</code>, and <code>failed</code> takes timed-out runs too. A Nix run is
-          named after its derivation, and <code>--name</code> names any run.
+          <code>--name</code> and <code>--since</code> (<code>30m</code>, <code>2h</code>,
+          <code>7d</code> or a date) filter too.
         </p>
         <p>
           <code>rewind open</code> starts the app on a run, at a step and beside another run.
-          <code>check</code> and <code>fork</code> print the command that opens what they made, as
-          the last line of <code>check</code> above shows. The failing run at the crash, beside the
-          passing one:
+          <code>check</code> and <code>fork</code> print the command that opens what they made:
         </p>
         <pre
           class="console"
@@ -659,10 +620,9 @@ a62e1bc38700fde6  exited:2          5202 steps  mylib-0.3.0 (fork of 3ed5e3f30d7
         <p>
           A run's id is the hash of its inputs, which its <code>manifest.json</code> lists, so the
           same command makes the same run on a machine with the same CPU vendor and guest.
-          <code>rewind show</code> prints that command with every input spelled out, the epoch above
-          all, which by default is the start of the day the run was made. For a fork it prints its
-          parents' commands first, each with the id it makes. <code>@</code>, the newest run, is the
-          schedule 4 fork:
+          <code>rewind show</code> prints that command with every input spelled out, including the
+          epoch, which defaults to the start of the day the run was made. For a fork it prints its
+          parents' commands first. <code>@</code>, the newest run, is the schedule 4 fork:
         </p>
         <pre
           class="console"
@@ -723,12 +683,9 @@ first difference at event 1688: step 5147 on the left, step 5143 on the right
           </figcaption>
         </figure>
         <p>
-          The card's link, Compare side by side, opens the Compare tab beside At this step. It lists
-          the last events both runs had, once each with both runs' steps, then each run's next
-          events side by side and in full, with the part of each pair that differs in amber. A click
-          on this run's event moves the playhead there. A click on the other run's, Show in the
-          other run, or the x key puts the compared run on screen in this one's place, at the
-          matching step and compared with this one, so x again comes back:
+          The card's Compare side by side link opens the Compare tab: the last events both runs
+          shared, then each run's next events side by side, with what differs in amber. The x key
+          swaps to the other run at the matching step, and x again comes back:
         </p>
         <figure class="shot">
           <picture>
@@ -791,10 +748,8 @@ a62e1bc38700fde6
         </h2>
         <p>
           <code>rewind fork</code> tries one schedule from a step. <code>check --run</code> tries
-          many on a run already recorded, each a fork of it at <code>--schedule-from</code>, with
-          the run standing for schedule 0, and <code>--no-narrow</code> stops at the count where
-          <code>check</code> would go on to narrow the first schedule that ends differently. From
-          the deciding step of the passing run:
+          many, each a fork at <code>--schedule-from</code>, with the run itself as schedule 0.
+          <code>--no-narrow</code> stops at the count. From the deciding step of the passing run:
         </p>
         <pre
           class="console"
@@ -819,16 +774,12 @@ schedule  16: exited:2       5196 steps    run a0cc66745ec99dbb
 13 of 16 perturbed schedules ended differently</code></pre>
         <p>
           13 of the 16 crash. Without <code>--no-narrow</code>, <code>check --run</code> narrows the
-          first of them to the step that decides it, as for a build. With <code>--json</code> it
-          prints each schedule's run and whether it ended differently.
+          first of them to the step that decides it, as for a build.
         </p>
         <p>
-          In the app, the chevron beside Fork from here turns the button into Check from here, with
-          8, 16, 32 or 64 schedules, and back. It is amber because it runs the machine: pressed, it
-          tries the schedules from the playhead and fills a card in At this step, a cell per
-          schedule as each ends, grey for ended as this run did, blue for differently and a dashed
-          outline for timed out. A cell picked names its run, with Compare, which compares this run
-          with it, and Open. The forks stay among the run's forks in the Runs tab:
+          In the app, the chevron beside Fork from here turns it into Check from here, which runs
+          the schedules from the playhead and fills a cell per schedule: grey for ended as this run
+          did, blue for differently. Pick a cell to compare with or open its run:
         </p>
         <figure class="shot">
           <picture>
@@ -854,26 +805,9 @@ schedule  16: exited:2       5196 steps    run a0cc66745ec99dbb
           <a class="anchor" href="#move-around-a-long-run">Move around a long run</a>
         </h2>
         <p>
-          Builds of larger projects run to hundreds of thousands of steps. In the app, the step
-          readout is a field: click it, or press g, and type a step such as 3,495, or +100 or -100
-          to move from the playhead. Previous and Next, and the Left and Right keys, stop where the
-          Stop at chooser beside them says: at every event, the build log's lines, processes
-          starting and exiting, the bookmarks, or the thread, process, kind of event or file of the
-          event at the playhead. A click on the step beside a log line or a file, or on a process,
-          goes to its step.
-        </p>
-        <p>
-          Alt+Left and Alt+Right, or the mouse's back and forward buttons, go back and forward
-          through jumps, so a press of f or d can be undone. The b key bookmarks the playhead's step
-          with a note: the timeline marks it, the Bookmarks tab lists every bookmark, and they are
-          kept with the run. Ctrl+F or / searches the build log, the kernel's console, file paths
-          and events, and lists the matches by step.
-        </p>
-        <p>
-          The wheel over the timeline zooms around the pointer, down to 16 steps across; Shift and
-          the wheel pan, + and - zoom around the playhead, and 0 shows the whole run. A label names
-          the step under the pointer. The ? key, or the ? button in the header, opens the sheet of
-          every key:
+          Builds of larger projects run to hundreds of thousands of steps. The app has keys to jump
+          to a step, step between events of one kind, bookmark, search and zoom the timeline. The ?
+          key lists them all:
         </p>
         <figure class="shot">
           <picture>
@@ -913,7 +847,7 @@ identical: 1713 events over 5192 steps</code></pre>
           A replayable export carries the keyframes, the image and the VM's kernel, and replays on
           any machine with the same CPU vendor. Without <code>--replayable</code> it is the events
           alone, 17.8 KB: enough to read and to scrub in the app, whose Export button writes the
-          replayable kind. Either kind carries the run's bookmarks from the app, notes included.
+          replayable kind. Both kinds carry the run's bookmarks.
         </p>
       </section>
 
@@ -956,12 +890,10 @@ runs will use counter time</code></pre>
         ><code><span class="cmd"><span class="prompt">$</span> rewind run --root spin --timeout 5 --name spin -- /bin/spin</span>
 rewind: run e4a2b114e2062616 timed-out after 308 steps, 0.002s virtual, 5.014s wall (timed out computing without exits for 4.4s, in user space in main+15 (spin.c:2), process 34 (spin))</code></pre>
         <p>
-          The place is a function, offset and source line from the program's symbols, and the
-          process the VM's kernel had on the CPU. A run that timed out while still making exits was
-          slow rather than stuck, and says so. <code>rewind check</code> gives each perturbed
-          schedule ten times as long as schedule 0 took, and at least a minute, and names the place
-          the same way for a schedule that hit its limit. <code>--status timed-out</code> lists such
-          runs:
+          A run that timed out while still making exits was slow rather than stuck, and says so.
+          <code>rewind check</code> gives each perturbed schedule ten times as long as schedule 0
+          took, at least a minute, and reports a stuck schedule the same way.
+          <code>--status timed-out</code> lists such runs:
         </p>
         <pre
           class="console"
@@ -985,8 +917,8 @@ e4a2b114e2062616  timed-out          308 steps  spin</code></pre>
 removed 217f5d98224a4a60
 rewind: `rewind gc` removes the pages no run uses any more</code></pre>
         <p>
-          <code>remove</code> takes a run with every run forked from it, and takes many runs in one
-          call. Every fork goes, and the runs they were forked from stay, with
+          <code>remove</code> takes a run with every run forked from it. To remove every fork and
+          keep the runs they came from, run
           <code>rewind ls | awk '/fork of/ {print $1}' | xargs rewind remove</code>.
           <code>prune --identical</code> removes forks that ran exactly as an older one did.
         </p>

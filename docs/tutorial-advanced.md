@@ -23,10 +23,9 @@ The failing run crashes at step 5153.
 ## Find the line a thread was on
 
 `rewind where` names the line of the program's own code a thread was on at a
-step, past the C library and, in Rust, the standard library and
-dependencies. By default it looks at the thread of the step's own event, the
-pid/tid pair `rewind events` prints; at 5153 that is the worker that
-segfaulted:
+step, skipping the C library and, in Rust, the standard library and
+dependencies. By default it picks the thread of the step's event; at 5153
+that is the worker that segfaulted:
 
 ```console
 $ rewind where 3ed5e3f3 5153
@@ -109,33 +108,19 @@ $1 = (struct queue *) 0x0
 so they work on runs recorded with a guest that lists its tasks, as these
 were.
 
-In the app, Show source under Inspect, or the s key, opens the source panel
-in a tab beside At this step. It names the line `rewind where` would for the
-thread of the playhead's event and shows that line's whole source file,
-syntax colored, scrolled so the line, marked, sits in the middle. The thread's frames are
-listed below the file, with the chosen one marked; dragging the list's top
-edge makes it taller for a deep stack.
-Clicking another frame shows its file instead, scrolled to its line and
-marked; a frame without source shows its address and program. A file over a
-mebibyte comes as the lines around its frames' lines, and the panel says
-which. Long lines scroll sideways with Shift and the wheel, or a sideways
-swipe, while the line numbers stay put. When the playhead rests on another step the panel
-asks again, back at the chosen frame, dimming the last answer meanwhile; each
-answer forks the run, so it takes a few seconds. Runs the app cannot fork
-say so instead: the bundled example and an export that holds only the trace.
-So does a run recorded before the guest listed its tasks, which has to be
-recorded again.
+In the app, the s key opens the source panel at the line `rewind where` names,
+with the thread's frames below it; click a frame to see its line instead. The
+panel follows the playhead, and each new step takes a few seconds since it
+forks the run.
 
 ![The app's source panel at step 5153 of the failing run: worker at src/pool.c:77 with p->queue->completed++ marked, and the frames worker, start_thread and clone3 below](../site/img/app-source.png)
 
 ## Find the step that decides it
 
-`check` narrows the failing schedule to the steps from 3629 to
-5139, and names the last of them. Its passing run is the same
-schedule without that one step, so the two runs are the same machine until
-step 5139, where only the failing run gets a reschedule, and
-everything they do differently follows from it. `rewind where` names the
-thread that was on the CPU there:
+`check` names step 5139 as the one that decides it. Its passing run is the
+same schedule without that step, so the two runs are the same machine until
+5139 and everything they do differently follows from the one reschedule
+there. `rewind where` names the thread that was on the CPU:
 
 ```console
 $ rewind where 3ed5e3f3 5139
@@ -161,10 +146,9 @@ reschedule at step 5139, the main thread sets the queue to NULL
 between a worker's check and its count, and the worker faults on it
 14 steps later. Without it, the worker counts first and the test passes.
 
-`check --where` looks both threads up itself: the one on the CPU at the
-deciding step, and the one of the failing run's first event that differs,
-each by the line of the program's own code it was on. Each lookup takes a fork
-and gdb, so it is a flag:
+`check --where` looks up both threads itself: the one on the CPU at the
+deciding step, and the one at the failing run's first differing event. Each
+lookup forks the run and starts gdb, so it is opt-in:
 
 ```console
 $ rewind check --where --epoch 1790985600 github:fzakaria/rewindvm#mylib 2>/dev/null | sed -n '/^where the threads were/,/first event that differs$/p'
@@ -173,24 +157,16 @@ where the threads were:
         5153   166/174   worker (src/pool.c:77), at the first event that differs
 ```
 
-In the app, two runs that differ only in their schedules show the step where
-the schedules part as a dashed blue mark on the timeline, before the solid
-one where their events first differ. Pointing at it says what only one of
-them got there, a click takes the playhead to it, and the divergence card's
-first line says the same. Opening a window `check` narrowed, from the Runs
-panel or from the list of builds, compares it with the window one step
-shorter, as `check` does. Zoomed in with + around the crash:
+In the app, the deciding step is a dashed blue mark on the timeline, before
+the solid one where the runs' events first differ. Zoomed in around the crash:
 
 ![The app zoomed in around the crash: a dashed blue mark at step 5139 on the timeline, the crash just after it, and the divergence card saying the two runs are the same until step 5139, where only this run has a reschedule](../site/img/app-decides.png)
 
 ## See which thread held the CPU
 
-The VM has one CPU, so at every step exactly one thread holds it, and a race
-is an order of threads. The trace records what threads did at their events,
-not who held the CPU between them. `rewind threads` replays a window of steps
-one step at a time and reads which task the VM's kernel had on the CPU at
-each, a line per stretch one task held it, with its pid/tid as `rewind
-events` prints them. Around the deciding step, in both runs:
+The VM has one CPU, so a race is an order of threads. `rewind threads` replays
+a window of steps and prints which thread held the CPU, a line per stretch.
+Around the deciding step, in both runs:
 
 ```console
 $ rewind threads 3ed5e3f3 --from 5130 --to 5153
@@ -210,22 +186,13 @@ $ rewind threads 8c4bd4a9 --from 5130 --to 5153
       5153       5153          idle  swapper/0
 ```
 
-Up to step 5139 the two runs are the same machine and their lines
-match. From there the threads take the CPU in another order, and in the
-failing run thread 174 holds it at the crash. `--json` prints a
-slice a line. A step is an exit, so a thread that took the CPU and gave it
-back between two exits is not seen, and a few thousand steps take about a
-second.
+The lines match up to step 5139. From there the threads take the CPU in
+another order, and in the failing run thread 174 holds it at the crash. A
+thread that took the CPU and gave it back between two exits is not seen.
 
-In the app, Show threads under Inspect, or the t key, opens the Threads tab:
-a lane per thread over a window of steps centered where the two runs part, a
-bar where the thread held the CPU, this run's lane above the compared run's,
-and a notch at each of the thread's events. Lines mark where the runs part,
-the first step a different thread held the CPU, and the playhead. The window
-stays where it is while the playhead moves, since each move would mean
-another replay; the presets widen it up to 4,096 steps either side, and
-Center on playhead moves it. Clicking a bar moves the playhead to its first
-step and lists the thread's events in it below the lanes:
+In the app, the t key opens the Threads tab: a lane per thread around where
+the two runs part, this run's above the compared run's, with a bar wherever
+the thread held the CPU. Clicking a bar moves the playhead there:
 
 ![The app's Threads tab around the crash: a lane per thread of test_pool_shutdown, the failing run's above the passing run's, with the worker that crashes taking the CPU in another order after the deciding step](../site/img/app-threads.png)
 
@@ -401,22 +368,15 @@ build, with forks under the run and step they branched from:
 
 ![The app's Runs panel: check's schedules, and the forks of the failing run, failing and passing](../site/img/app-runs.png)
 
-The Fork from here button forks the run at the playhead with the next
-schedule. A fork of a long run takes about as long as the run did: while forks
-made from the window run, the button's icon turns, and the Runs panel lists
-each fork as running, in a pulsing pill, until it ends and the panel shows
-how. Clicking a run opens it compared with the run it hangs under.
-Right-clicking one offers to compare every run with it instead, to copy its id
-or to delete it with its forks; Ctrl and Shift pick several. Forks that ran
-exactly as an older one did go in one click, with remove identical in the
-panel's header.
+Fork from here forks the run at the playhead with the next schedule. Clicking
+a run opens it compared with the run it hangs under; right-clicking offers
+more.
 
 ## Find a run again
 
-A command takes a run by its id or the start of one, by `@` for the newest
-run and `@2`, `@3` and on for the ones before it, by a name for the newest
-run with that name, or by its directory. `rewind ls` lists runs newest first,
-and filters them:
+A command takes a run by its id or a prefix of it, by `@` for the newest run
+and `@2`, `@3` and on for the ones before it, by name, or by directory.
+`rewind ls` lists runs newest first, and filters them:
 
 ```console
 $ rewind ls -n 3
@@ -430,17 +390,10 @@ a62e1bc38700fde6  exited:2          5202 steps  mylib-0.3.0 (fork of 3ed5e3f30d7
 217f5d98224a4a60  exited:2          5204 steps  mylib-0.3.0 (fork of 3ed5e3f30d73bb41 at 5123, schedule 2)
 ```
 
-`--name mylib` keeps the runs whose name contains `mylib`, and `--since` the
-runs made in the last `30m`, `2h` or `7d`, or since a day such as
-`2026-10-01`.
-`--status` takes `passed`, `failed`, `timed-out`, `running`, `interrupted` or
-`unreadable`, and `failed` takes timed-out runs too. A Nix run is named after
-its derivation, and `--name` names any run.
+`--name` and `--since` (`30m`, `2h`, `7d` or a date) filter too.
 
 `rewind open` starts the app on a run, at a step and beside another run.
-`check` and `fork` print the command that opens what they made, as the last
-line of `check` above shows. The failing run at the crash, beside the passing
-one:
+`check` and `fork` print the command that opens what they made:
 
 ```console
 $ rewind open 3ed5e3f3 5153 --compare 8c4bd4a9
@@ -450,10 +403,10 @@ $ rewind open 3ed5e3f3 5153 --compare 8c4bd4a9
 
 A run's id is the hash of its inputs, which its `manifest.json` lists, so the
 same command makes the same run on a machine with the same CPU vendor and
-guest. `rewind show` prints that command with every input spelled out, the
-epoch above all, which by default is the start of the day the run was made.
-For a fork it prints its parents' commands first, each with the id it makes.
-`@`, the newest run, is the schedule 4 fork:
+guest. `rewind show` prints that command with every input spelled out,
+including the epoch, which defaults to the start of the day the run was made.
+For a fork it prints its parents' commands first. `@`, the newest run, is the
+schedule 4 fork:
 
 ```console
 $ rewind show @
@@ -497,13 +450,10 @@ timeline and in the divergence card:
 
 ![The app at the step where the failing run leaves the passing one, with the divergence card naming both threads' writes](../site/img/app-compare.png)
 
-The card's link, Compare side by side, opens the Compare tab beside At this
-step. It lists the last events both runs had, once each with both runs'
-steps, then each run's next events side by side and in full, with the part of
-each pair that differs in amber. A click on this run's event moves the
-playhead there. A click on the other run's, Show in the other run, or the x
-key puts the compared run on screen in this one's place, at the matching step
-and compared with this one, so x again comes back:
+The card's Compare side by side link opens the Compare tab: the last events
+both runs shared, then each run's next events side by side, with what differs
+in amber. The x key swaps to the other run at the matching step, and x again
+comes back:
 
 ![The app's Compare tab: the writes both runs made before they part, then the failing run's SIGSEGV beside the passing run's write, each run's text in full with what differs in amber](../site/img/app-compare-tab.png)
 
@@ -541,11 +491,9 @@ $ rewind diff 8c4bd4a9 3ed5e3f3 --json | jq -c '.divergence | {left_step, right_
 
 ## Count the schedules that fail from a step
 
-`rewind fork` tries one schedule from a step. `check --run` tries many on a
-run already recorded, each a fork of it at `--schedule-from`, with the run
-standing for schedule 0, and `--no-narrow` stops at the count where `check`
-would go on to narrow the first schedule that ends differently. From the
-deciding step of the passing run:
+`rewind fork` tries one schedule from a step. `check --run` tries many, each a
+fork at `--schedule-from`, with the run itself as schedule 0. `--no-narrow`
+stops at the count. From the deciding step of the passing run:
 
 ```console
 $ rewind check --run 8c4bd4a9 --schedule-from 5139 --schedules 16 --all --no-narrow
@@ -569,42 +517,21 @@ schedule  16: exited:2       5196 steps    run a0cc66745ec99dbb
 13 of 16 perturbed schedules ended differently
 ```
 
-13 of the 16 crash. Without `--no-narrow`, `check --run`
-narrows the first of them to the step that decides it, as for a build. With
-`--json` it prints each schedule's run and whether it ended differently.
+13 of the 16 crash. Without `--no-narrow`, `check --run` narrows the first of
+them to the step that decides it, as for a build.
 
-In the app, the chevron beside Fork from here turns the button into Check
-from here, with 8, 16, 32 or 64 schedules, and back. It is amber because it
-runs the machine: pressed, it tries the schedules from the playhead and fills
-a card in At this step, a cell per schedule as each ends, grey for ended as
-this run did, blue for differently and a dashed outline for timed out. A cell
-picked names its run, with Compare, which compares this run with it, and
-Open. The forks stay among the run's forks in the Runs tab:
+In the app, the chevron beside Fork from here turns it into Check from here,
+which runs the schedules from the playhead and fills a cell per schedule:
+grey for ended as this run did, blue for differently. Pick a cell to compare
+with or open its run:
 
 ![The app after Check from here at step 5139 of the passing run: a card counting how the 16 schedules ended, a cell per schedule, the first picked with its run and Compare and Open](../site/img/app-check.png)
 
 ## Move around a long run
 
-Builds of larger projects run to hundreds of thousands of steps. In the app,
-the step readout is a field: click it, or press g, and type a step such as
-3,495, or +100 or -100 to move from the playhead. Previous and Next, and the
-Left and Right keys, stop where the Stop at chooser beside them says: at every
-event, the build log's lines, processes starting and exiting, the bookmarks,
-or the thread, process, kind of event or file of the event at the playhead. A
-click on the step beside a log line or a file, or on a process, goes to its
-step.
-
-Alt+Left and Alt+Right, or the mouse's back and forward buttons, go back and
-forward through jumps, so a press of f or d can be undone. The b key
-bookmarks the playhead's step with a note: the timeline marks it, the
-Bookmarks tab lists every bookmark, and they are kept with the run. Ctrl+F or
-/ searches the build log, the kernel's console, file paths and events, and
-lists the matches by step.
-
-The wheel over the timeline zooms around the pointer, down to 16 steps
-across; Shift and the wheel pan, + and - zoom around the playhead, and 0 shows
-the whole run. A label names the step under the pointer. The ? key, or the ?
-button in the header, opens the sheet of every key:
+Builds of larger projects run to hundreds of thousands of steps. The app has
+keys to jump to a step, step between events of one kind, bookmark, search and
+zoom the timeline. The ? key lists them all:
 
 ![The app's sheet of keys: moving the playhead, the timeline, looking around, and the app](../site/img/app-keys.png)
 
@@ -624,8 +551,8 @@ identical: 1713 events over 5192 steps
 A replayable export carries the keyframes, the image and the VM's kernel, and
 replays on any machine with the same CPU vendor. Without `--replayable` it is
 the events alone, 17.8 KB: enough to read and to scrub in the app, whose
-Export button writes the replayable kind. Either kind carries the run's
-bookmarks from the app, notes included.
+Export button writes the replayable kind. Both kinds carry the run's
+bookmarks.
 
 ## Which clock
 
@@ -662,12 +589,10 @@ $ rewind run --root spin --timeout 5 --name spin -- /bin/spin
 rewind: run e4a2b114e2062616 timed-out after 308 steps, 0.002s virtual, 5.014s wall (timed out computing without exits for 4.4s, in user space in main+15 (spin.c:2), process 34 (spin))
 ```
 
-The place is a function, offset and source line from the program's symbols,
-and the process the VM's kernel had on the CPU. A run that timed out while
-still making exits was slow rather than stuck, and says so. `rewind check`
-gives each perturbed schedule ten times as long as schedule 0 took, and at
-least a minute, and names the place the same way for a schedule that hit its
-limit. `--status timed-out` lists such runs:
+A run that timed out while still making exits was slow rather than stuck, and
+says so. `rewind check` gives each perturbed schedule ten times as long as
+schedule 0 took, at least a minute, and reports a stuck schedule the same
+way. `--status timed-out` lists such runs:
 
 ```console
 $ rewind ls --status timed-out
@@ -689,8 +614,8 @@ removed 217f5d98224a4a60
 rewind: `rewind gc` removes the pages no run uses any more
 ```
 
-`remove` takes a run with every run forked from it, and takes many runs in
-one call. Every fork goes, and the runs they were forked from stay, with
+`remove` takes a run with every run forked from it. To remove every fork and
+keep the runs they came from, run
 `rewind ls | awk '/fork of/ {print $1}' | xargs rewind remove`.
 `prune --identical` removes forks that ran exactly as an older one did.
 

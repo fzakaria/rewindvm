@@ -125,12 +125,11 @@ where ./tests/test_pool_shutdown first behaves differently:
 open both in the desktop app: rewind open 3ed5e3f30d73bb41 5153 --compare 8c4bd4a91be9cbeb
 ```
 
-Schedule 6 fails. `check` narrows schedule 6's
-perturbation to steps 3629 to 5140, and the last of
-them, step 5139, decides it. The passing run is the same window less
-that step, so the two runs are the same until step 5139, and only the
-failing one gets a reschedule there. The last block shows where the
-test's own output then differs. The search took 10 seconds.
+Schedule 6 fails, and `check` narrows the failure to one step, 5139. The
+passing run perturbs the same steps less that one, so the two runs are the
+same until 5139, and only the failing one gets a reschedule there. The last
+block shows where the test's own output then differs. The search took 10
+seconds.
 
 `--all` tries every schedule, which measures how flaky a build is:
 
@@ -288,10 +287,8 @@ rewind: the fork first differs from its parent at step 3638
 rewind: open it beside its parent in the desktop app: rewind open 8d47a829e5bd17df 3638 --compare 5ebce859166b24ea
 ```
 
-From step 3629 of the schedule 0 build, schedules
-6 and 8 crash and 5 and 7 pass. `rewind check --run
-5ebce859 --schedule-from 3629 --all --no-narrow` asks the
-same of many schedules at once and counts the ones that end differently; the
+From step 3629 of the schedule 0 build, schedules 6 and 8 crash and 5 and 7
+pass. `check --run` asks many schedules at once; the
 [advanced tutorial](tutorial-advanced.md#count-the-schedules-that-fail-from-a-step)
 shows it.
 
@@ -310,9 +307,8 @@ $ rewind-app ~/.local/share/rewind/runs/3ed5e3f30d73bb41 --compare ~/.local/shar
 Press f to jump to the failure at step 5153, then s to open the
 source panel. After a few seconds it shows `worker` at `src/pool.c:77`, with
 `p->queue->completed++;` marked: the line that read the queue after
-`pool_shutdown` had set it to NULL. The t key opens the Threads tab, a lane
-per thread around where the two runs part, the failing run's above the
-passing run's, a bar wherever the thread held the CPU.
+`pool_shutdown` had set it to NULL. The t key shows which thread held the CPU
+around where the two runs part.
 
 ## Fix it and check the fix
 
@@ -380,7 +376,6 @@ are in reach. [Design](design.md#limits) has the full list.
 
 - [The container tutorial](tutorial-container.md): the same bug from a Docker
   image, with no Nix.
-- [The advanced tutorial](tutorial-advanced.md): which thread held the CPU,
-  watchpoints, the kernel's side of a crash, tools inside the VM, more CPUs,
-  counting the schedules that fail from a step, and sharing a run.
+- [The advanced tutorial](tutorial-advanced.md): threads, watchpoints, the
+  kernel's side of a crash, sharing a run and more.
 - [Counter time](pmu.md): how the VM's clock follows its work.
