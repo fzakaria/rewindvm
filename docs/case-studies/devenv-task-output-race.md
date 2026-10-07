@@ -170,6 +170,62 @@ task's shell forks at step 1264 and exits at 1266, and only in the failing one
 does a SIGCHLD reach the test's thread 41, at step 1273, before the task is
 done.
 
+`rewind threads` replays a window of steps one at a time and prints which
+thread held the VM's CPU through each stretch of it. Over the same steps of
+the failing run and the passing one:
+
+```console
+$ rewind threads 1374febae23685d3 --from 1260 --to 1300
+      1260       1261         40/41  tests::test_fai
+      1262       1262     kernel 11  ksoftirqd/0
+      1263       1264         40/41  tests::test_fai
+      1265       1270         43/43  script4KXpsz.sh
+      1271       1271     kernel 11  ksoftirqd/0
+      1272       1297         40/41  tests::test_fai
+      1298       1299     kernel 11  ksoftirqd/0
+      1300       1300         40/40  devenv-tasks-te
+
+$ rewind threads c1819dea8a95110d --from 1260 --to 1300
+      1260       1261         40/41  tests::test_fai
+      1262       1262     kernel 11  ksoftirqd/0
+      1263       1264         40/41  tests::test_fai
+      1265       1270         43/43  script4KXpsz.sh
+      1271       1271     kernel 11  ksoftirqd/0
+      1272       1287         40/41  tests::test_fai
+      1288       1289     kernel 11  ksoftirqd/0
+      1290       1292         43/43  script4KXpsz.sh
+      1293       1293     kernel 11  ksoftirqd/0
+      1294       1300         40/41  tests::test_fai
+```
+
+Both give the CPU to the shell, 43, from step 1265 to 1270, and to thread 41
+at 1272. In the failing run the shell had finished exiting by then, and its
+SIGCHLD reaches thread 41 at step 1273. In the passing run, after the
+reschedule at step 1269, the shell gave up the CPU before its exit was done:
+thread 41 runs from 1272 to 1287 with no signal, and the shell gets the CPU
+back at 1290 to finish. The app's Threads tab draws the same thing, a lane per
+thread, the failing run above the passing one:
+
+![The Threads tab on the failing and passing runs: the task's shell, 43, on the CPU from step 1265 in both, and again at 1290 only in the passing run](../../site/img/devenv-threads.png)
+
+How much of the failure rate is decided after the task starts? `check
+--run` tries schedules as forks of a run already recorded, from a step of
+it. From step 1158, where schedule 0's run forks the task's shell:
+
+```console
+$ rewind check --run fc48fae0 --schedule-from 1158 --schedules 64 --all --no-narrow
+schedule   0: exited:101       1234 steps    run fc48fae072b4b043
+schedule   1: exited:101       1250 steps    run 2ecc8f95a48814bf
+schedule   2: exited:101       1255 steps    run f1e43e249240a3f4
+schedule   3: exited:101       1244 steps    run 51bf197451f76321
+...
+schedule  64: exited:0       1286 steps  77ac62e2629d  run 7398a3c158395210
+run fc48fae072b4b043 failed; 15 of 64 perturbed schedules ended differently
+```
+
+15 of 64 pass, about the share `check` found from the start of the test, 49
+of 256: perturbing the steps before the task starts adds little.
+
 ## Where the third line went
 
 The events of schedule 0's run, which fails, around the task:

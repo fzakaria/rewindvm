@@ -437,8 +437,9 @@ def table(rows, source, page):
 
 
 # A Markdown image of the site's, and its figure: a WebP with the PNG for
-# browsers without, at the PNG's size, captioned with the image's text.
-FIGURE = re.compile(r"!\[(.+)\]\(\.\./site/(img/[\w-]+)\.png\)")
+# browsers without, at the PNG's size, captioned with the image's text. The
+# path climbs out of docs/, or out of docs/case-studies/, to site/img.
+FIGURE = re.compile(r"!\[(.+)\]\((?:\.\./)+site/(img/[\w-]+)\.png\)")
 FIGURE_HTML = """<figure class="shot">
   <picture>
     <source srcset="../{name}.webp" type="image/webp" />
@@ -480,7 +481,8 @@ def parse(lines):
             continue
 
         # A screenshot on a line of its own: ![caption](../site/img/name.png),
-        # the path the Markdown works with on GitHub.
+        # or ../../site/img from a case study, the path the Markdown works
+        # with on GitHub.
         if m := FIGURE.fullmatch(line.strip()):
             blocks.append(("figure", (m.group(1), m.group(2))))
             i += 1

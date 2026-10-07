@@ -157,6 +157,32 @@ has to be blocked in `read` already, be woken by the first write, and get the
 CPU and run to `exit` before the writer gets it back. On one CPU the scheduler
 is free to run the woken reader first, and in this run the VM's scheduler did.
 
+`rewind threads` replays the steps around it one at a time and prints which
+process held the CPU through each stretch:
+
+```console
+$ rewind threads b34ebac2 --from 33420 --to 33456
+     33420      33420       358/358  meson
+     33421      33421       418/418  bash
+     33422      33437       418/418  head
+     33438      33442       417/417  bash
+     33443      33443     kernel 11  ksoftirqd/0
+     33444      33445       418/418  head
+     33446      33446     kernel 11  ksoftirqd/0
+     33447      33448       359/359  bash
+     33449      33449       416/416  bash
+     33450      33450     kernel 11  ksoftirqd/0
+     33451      33452       417/417  bash
+     33453      33453     kernel 11  ksoftirqd/0
+     33454      33455       416/416  bash
+     33456      33456     kernel 11  ksoftirqd/0
+```
+
+`head` (418) starts and blocks in `read` by step 33437. The `printf`
+subshell (417) gets the CPU at 33438 and makes its first write, which wakes
+`head`. `head` gets the CPU at 33444 and exits at 33445, and 417 gets it back
+only at 33451, for the second write and the SIGPIPE.
+
 ## How often it fails
 
 Under Rewind, on the build of Nix master:
@@ -194,7 +220,23 @@ open both in the desktop app: rewind open eba86a81a195ddc6 70885 --compare da7e3
 
 Only schedule 0 fails. All 256 perturbed schedules pass: the unperturbed
 schedule is the failing order here, and every perturbation the check tried
-moved the run off it. Schedule 1 passes, and narrowing it finds that
+moved the run off it.
+
+`check --run` tries schedules as forks of a run already recorded, from a step
+of it. Perturbing only from step 33389, where the pipeline forks the `printf`
+subshell, moves every one of 64 off it as well:
+
+```console
+$ rewind check --run b34ebac2 --schedule-from 33389 --schedules 64 --all --no-narrow
+schedule   0: exited:1      33640 steps    run b34ebac24f05c690
+schedule   1: exited:0      84339 steps  a50a5ab6d992  run 58d853b97eb0ee42
+schedule   2: exited:0      84090 steps  a50a5ab6d992  run 5a55f233de979448
+...
+schedule  64: exited:0      84240 steps  a50a5ab6d992  run 34ca3f905be9fa69
+run b34ebac24f05c690 failed; 64 of 64 perturbed schedules ended differently
+```
+
+In the first check, schedule 1 passes, and narrowing it finds that
 perturbing steps 31713..36075 is enough to make the pipeline pass. That window
 opens 1673 steps before schedule 0's pipeline first forks, while the `nix build`
 of line 14 (process 408) is still running. In the passing run the `printf`
