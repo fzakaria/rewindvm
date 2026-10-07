@@ -126,6 +126,14 @@ pub struct CheckArgs {
     pub(crate) installable: Option<String>,
     #[command(flatten)]
     pub(crate) image: ImageArgs,
+    /// Check a run recorded already instead of recording a job: each
+    /// schedule is a fork of the run at --schedule-from, as `rewind
+    /// fork` makes one, and the run stands for the unperturbed schedule.
+    ///
+    /// The run's own inputs and machine stand, so the options that
+    /// would make another run are refused with it.
+    #[arg(long, value_name = "RUN", help = RUN_HELP, conflicts_with_all = RUN_FIXES)]
+    pub(crate) run: Option<String>,
     /// How many perturbed schedules to try besides the unperturbed one.
     #[arg(long, default_value_t = 64)]
     pub(crate) schedules: u64,
@@ -133,6 +141,11 @@ pub struct CheckArgs {
     /// of stopping at the first.
     #[arg(long)]
     pub(crate) all: bool,
+    /// Stop once the schedules are tried, without narrowing the first
+    /// that ends differently to the step that decides it. With --all,
+    /// only the count.
+    #[arg(long)]
+    pub(crate) no_narrow: bool,
     /// How many machines to run at once; one per CPU by default.
     #[arg(long, short)]
     pub(crate) jobs: Option<usize>,
@@ -155,24 +168,142 @@ pub struct CheckArgs {
     pub(crate) machine: MachineArgs,
 }
 
+/// The options of `rewind check` that say what job to record and how,
+/// which a run recorded already has fixed: refused beside --run.
+const RUN_FIXES: [&str; 17] = [
+    "installable",
+    "root",
+    "env",
+    "cwd",
+    "tty",
+    "argv",
+    "seed",
+    "schedule",
+    "cpu",
+    "clock",
+    "experimental_preempt",
+    "mem",
+    "cores",
+    "epoch",
+    "name",
+    "no_keyframes",
+    "kernel_args",
+];
+
+/// What `rewind check` perturbs, and so how it makes each run it tries.
+enum Subject<'a> {
+    /// A job it records: each schedule is a run of the job, started at
+    /// the unperturbed run's latest keyframe before the schedule's window.
+    Job {
+        guest: &'a Guest,
+        prepared: &'a Prepared,
+        start: Start,
+    },
+    /// A run recorded already: each schedule is a fork of it at the
+    /// first step of the schedule's window.
+    Run(Box<Run>),
+}
+
+/// One run `rewind check` tries: a schedule seed over the steps
+/// `from..until`.
+#[derive(Clone, Copy, Debug)]
+struct Window {
+    seed: u64,
+    from: u64,
+    until: u64,
+}
+
+impl Subject<'_> {
+    /// Runs each window on its own VM, all at once, and returns the runs
+    /// in the order given. `machine` holds the time limit, and for a job
+    /// every other option of its runs.
+    fn try_all(&self, home: &Home, machine: &MachineArgs, windows: &[Window]) -> Result<Vec<Run>> {
+        match self {
+            // A job's runs, recorded as `rewind run` and `nix` record them.
+            Subject::Job {
+                guest,
+                prepared,
+                start,
+            } => {
+                let machines = windows
+                    .iter()
+                    .map(|w| MachineArgs {
+                        schedule: w.seed,
+                        schedule_from: w.from,
+                        schedule_until: w.until,
+                        ..machine.clone()
+                    })
+                    .collect();
+                execute_all(home, guest, prepared, machines, start.clone())
+            }
+
+            // A run's forks, each on a thread of its own.
+            Subject::Run(run) => std::thread::scope(|scope| {
+                let handles: Vec<_> = windows
+                    .iter()
+                    .map(|w| scope.spawn(move || fork_window(home, run, machine, *w)))
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|h| h.join().expect("a fork's thread panicked"))
+                    .collect()
+            }),
+        }
+    }
+}
+
+/// Forks `run` at the first step of `window`, perturbed by its seed until
+/// its last, without keyframes of its own, as `rewind check` tries it.
+fn fork_window(home: &Home, run: &Run, machine: &MachineArgs, window: Window) -> Result<Run> {
+    let Window { seed, from, until } = window;
+    let m = &run.manifest;
+    let mut spec = m.spec.fork(from, seed);
+    spec.schedule_until = until;
+    let mut name = format!("{} (fork of {} at {from}, schedule {seed}", m.name, m.id);
+    if until != u64::MAX {
+        name.push_str(&format!(" until {until}"));
+    }
+    name.push(')');
+    let how = Execution {
+        echo: Echo::Quiet,
+        keyframes: Keyframes::Skip,
+        limit: time_limit(machine.timeout),
+    };
+    Run::execute(
+        home,
+        name,
+        m.source.clone(),
+        spec,
+        Start::Fork {
+            parent: m.id.clone(),
+            step: from,
+        },
+        how,
+    )
+}
+
 pub fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
     let CheckArgs {
         installable,
         image,
+        run,
         schedules,
         all,
+        no_narrow,
         jobs,
         json,
         show_where,
         mut machine,
     } = args;
-    // Lines as the search goes, unless it ends in one JSON object.
+    // Lines as the search goes: on standard output, or with --json on
+    // standard error, which a program reads as progress.
     let say = |line: String| {
-        if !json {
+        if json {
+            eprintln!("{line}");
+        } else {
             println!("{line}");
         }
     };
-    let guest = Guest::from_env()?;
     let jobs = jobs
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
         .max(1);
@@ -180,46 +311,69 @@ pub fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
     // other run starts from, and the two reported get keyframes.
     machine.no_keyframes = true;
     machine.quiet = true;
-    // Every run in a search boots with the same wall clock, even one
-    // that crosses midnight.
-    machine.epoch = Some(machine.epoch.unwrap_or_else(default_epoch));
-    let workload = match installable {
-        Some(i) => Workload::Nix(i),
-        None => Workload::Image(image),
-    };
-    let prepared = prepare(home, &guest, &workload, &mut machine)?;
-
-    // The unperturbed run, and the step its job started on:
-    // everything before that is boot, and perturbing it would only
-    // make every run differ from the first kernel thread on. The
-    // window the user gave narrows that further.
     let (user_from, user_until) = (machine.schedule_from, machine.schedule_until);
-    machine.schedule = 0;
-    machine.schedule_from = 0;
-    let with_keyframes = MachineArgs {
-        no_keyframes: false,
-        progress: Progress::Shown,
-        ..machine.clone()
-    };
-    let base = execute(
-        home,
-        &guest,
-        &prepared,
-        &with_keyframes,
-        Start::Boot,
-        Announce::No,
-    )?;
 
-    // Every other run is the unperturbed run until its schedule
-    // starts, so it starts at the unperturbed run's latest keyframe
-    // before then instead of at boot: a narrowed window late in a
-    // long build runs only from near the window.
-    let from_base = Start::After(base.manifest.id.clone());
+    // The unperturbed run, and how every other run is made. A recorded
+    // run is the unperturbed run, and each schedule forks it.
+    let guest;
+    let prepared;
+    let (base, subject, base_words) = match run {
+        Some(what) => {
+            let base = Run::find(home, &what)?;
+            if base.manifest.outcome.is_none() {
+                bail!("run {} has not finished", base.manifest.id);
+            }
+            if user_from > 0 {
+                base.check_step(user_from)?;
+            }
+            let words = format!("run {}", base.manifest.id);
+            let subject = Subject::Run(Box::new(Run::open(&base.dir)?));
+            (base, subject, words)
+        }
+        None => {
+            guest = Guest::from_env()?;
+            // Every run in a search boots with the same wall clock, even
+            // one that crosses midnight.
+            machine.epoch = Some(machine.epoch.unwrap_or_else(default_epoch));
+            let workload = match installable {
+                Some(i) => Workload::Nix(i),
+                None => Workload::Image(image),
+            };
+            prepared = prepare(home, &guest, &workload, &mut machine)?;
+            machine.schedule = 0;
+            machine.schedule_from = 0;
+            let with_keyframes = MachineArgs {
+                no_keyframes: false,
+                progress: Progress::Shown,
+                ..machine.clone()
+            };
+            let base = execute(
+                home,
+                &guest,
+                &prepared,
+                &with_keyframes,
+                Start::Boot,
+                Announce::No,
+            )?;
+
+            // Every other run is the unperturbed run until its schedule
+            // starts, so it starts at the unperturbed run's latest keyframe
+            // before then instead of at boot: a narrowed window late in a
+            // long build runs only from near the window.
+            let subject = Subject::Job {
+                guest: &guest,
+                prepared: &prepared,
+                start: Start::After(base.manifest.id.clone()),
+            };
+            (base, subject, "schedule 0".to_string())
+        }
+    };
     say(format!("schedule   0: {}", show::outcome_line(&base)?));
     if !json {
         print_timeout(home, 0, &base);
     }
-    let mut tried_runs = vec![schedule_json(&base)?];
+    let base_key = show::outcome_key(&base)?;
+    let mut tried_runs = vec![schedule_json(&base, &base_key)?];
 
     // A schedule can make a program loop forever where schedule 0
     // did not, so unless told otherwise each other run gets a
@@ -230,9 +384,13 @@ pub fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
         let limit = Duration::from_millis(base_wall * CHECK_TIMEOUT_FACTOR).max(CHECK_TIMEOUT_MIN);
         machine.timeout = Some(limit.as_secs());
     }
+
+    // The step the job started on: everything before that is boot, and
+    // perturbing it would only make every run differ from the first
+    // kernel thread on. The window the user gave narrows that further.
     let base_trace = base.trace()?;
     let start = show::start_step(base_trace).max(user_from);
-    let base_key = show::outcome_key(&base)?;
+
     // When the unperturbed run is the one that fails, the schedules
     // that end differently are the ones that pass. A job that exits
     // 0 without creating every output fails, as under nix-daemon.
@@ -248,13 +406,12 @@ pub fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
     let mut tried = 0;
     let seeds: Vec<u64> = (1..=schedules).collect();
     for batch in seeds.chunks(jobs) {
-        let machines = batch
+        let windows: Vec<Window> = batch
             .iter()
-            .map(|&seed| MachineArgs {
-                schedule: seed,
-                schedule_from: start,
-                schedule_until: user_until,
-                ..machine.clone()
+            .map(|&seed| Window {
+                seed,
+                from: start,
+                until: user_until,
             })
             .collect();
         status(&format!(
@@ -262,7 +419,7 @@ pub fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
             batch[0],
             batch[batch.len() - 1]
         ));
-        let runs = execute_all(home, &guest, &prepared, machines, from_base.clone());
+        let runs = subject.try_all(home, &machine, &windows);
         clear_status();
         for run in runs? {
             say(format!(
@@ -270,7 +427,7 @@ pub fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
                 run.manifest.spec.schedule,
                 show::outcome_line(&run)?
             ));
-            tried_runs.push(schedule_json(&run)?);
+            tried_runs.push(schedule_json(&run, &base_key)?);
             tried += 1;
             if differs(&run)? {
                 differing += 1;
@@ -285,7 +442,7 @@ pub fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
     }
     if all && base_failed {
         say(format!(
-            "schedule 0 failed; {differing} of {tried} perturbed schedules ended differently"
+            "{base_words} failed; {differing} of {tried} perturbed schedules ended differently"
         ));
     } else if all {
         say(format!(
@@ -308,10 +465,16 @@ pub fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
         }
         return Ok(ExitCode::SUCCESS);
     };
+    if no_narrow {
+        if json {
+            println!("{}", search(serde_json::Value::Null));
+        }
+        return Ok(ExitCode::FAILURE);
+    }
 
     // Narrow it to the smallest window of steps its perturbation
     // still ends differently from (see rewind_core::check).
-    machine.schedule = worst.manifest.spec.schedule;
+    let seed = worst.manifest.spec.schedule;
     let end = worst
         .manifest
         .outcome
@@ -320,17 +483,15 @@ pub fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
         .min(user_until);
     if base_failed {
         say(format!(
-            "\nschedule {} passes where schedule 0 fails; narrowing the steps it perturbs",
-            machine.schedule
+            "\nschedule {seed} passes where {base_words} fails; narrowing the steps it perturbs"
         ));
     } else {
         say(format!(
-            "\nschedule {} ends differently; narrowing the steps it perturbs",
-            machine.schedule
+            "\nschedule {seed} ends differently; narrowing the steps it perturbs"
         ));
     }
     if !json {
-        print_timeout(home, machine.schedule, &worst);
+        print_timeout(home, seed, &worst);
     }
     let probe_all = |windows: Vec<(u64, u64)>| -> Result<Vec<Run>> {
         let lo = windows.iter().map(|w| w.0).min().unwrap_or(0);
@@ -339,15 +500,11 @@ pub fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
             "rewind: narrowing, {} windows within steps {lo}..{hi}",
             windows.len()
         ));
-        let machines = windows
+        let windows: Vec<Window> = windows
             .into_iter()
-            .map(|(from, until)| MachineArgs {
-                schedule_from: from,
-                schedule_until: until,
-                ..machine.clone()
-            })
+            .map(|(from, until)| Window { seed, from, until })
             .collect();
-        execute_all(home, &guest, &prepared, machines, from_base.clone())
+        subject.try_all(home, &machine, &windows)
     };
     let narrowed = rewind_core::check::narrow((start, end), jobs, worst, probe_all, differs)?;
     let (lo, until, worst) = (narrowed.from, narrowed.until, narrowed.run);
@@ -419,7 +576,7 @@ pub fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
     };
     if json {
         let narrowed = serde_json::json!({
-            "schedule": machine.schedule,
+            "schedule": seed,
             "from": lo,
             "until": until,
             "deciding_step": deciding,
@@ -1052,10 +1209,13 @@ fn execute_all(
     })
 }
 
-/// A run `rewind check` tried, for its JSON: the run, and its schedule.
-fn schedule_json(run: &Run) -> Result<serde_json::Value> {
+/// A run `rewind check` tried, for its JSON: the run, its schedule, and
+/// whether it ended differently from the unperturbed run, which ended as
+/// `base` says.
+fn schedule_json(run: &Run, base: &show::OutcomeKey) -> Result<serde_json::Value> {
     let mut value = json::run(run)?;
     value["schedule"] = run.manifest.spec.schedule.into();
+    value["differs"] = (show::outcome_key(run)? != *base).into();
     Ok(value)
 }
 

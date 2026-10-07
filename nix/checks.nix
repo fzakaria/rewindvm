@@ -1181,6 +1181,51 @@ in
         touch $out
       '';
 
+  # checks.check-run: `rewind check --run` tries schedules on a run already
+  # recorded, each a fork of it at --schedule-from, instead of recording
+  # the job again. With --all and --no-narrow it counts the forks that end
+  # differently and stops; without them it narrows the first such fork to
+  # the step that decides it, as for a job. Boots the VM, so it needs
+  # /dev/kvm.
+  check-run =
+    pkgs.runCommand "rewind-check-run"
+      {
+        nativeBuildInputs = [
+          rewind
+          pkgs.jq
+        ];
+        requiredSystemFeatures = [ "kvm" ];
+      }
+      ''
+        export REWIND_HOME=$TMPDIR/rewind
+        rewind run -q --clock exits --name race --root ${raceRoot} -- /bin/race
+        id=$(rewind ls --json -n 1 | jq -r .id)
+        # The step the second worker starts on: both threads exist after it.
+        from=$(rewind events race | grep 'clone(CLONE_THREAD)' | tail -1 | awk '{print $1}')
+
+        # The sweep: eight forks of the run at the step, counted. check
+        # exits 1 when any of them ends differently, and says how many.
+        rewind check --run race --schedule-from "$from" --schedules 8 --all \
+          --no-narrow --json > swept.json || true
+        jq -e '.tried == 8 and (.schedules | length) == 9 and .narrowed == null' swept.json
+        jq -e --arg id "$id" '.schedules[0].id == $id' swept.json
+        jq -e --arg id "$id" --argjson from "$from" \
+          '.schedules[1:] | all(.parent.run == $id and .parent.step == $from)' swept.json
+        jq -e '.differing == ([.schedules[1:][] | select(.differs)] | length)' swept.json
+        jq -e '.schedules[0].differs == false' swept.json
+        test "$(rewind ls --forks-of "$id" | wc -l)" = 8
+
+        # The search: the first fork that ends differently, narrowed.
+        ! rewind check --run race --schedule-from "$from" > found
+        cat found
+        grep -q ' decides it: ' found
+
+        # Options that make another run than the one named are refused.
+        ! rewind check --run race --mem 2048 2> refused
+        grep -q -- '--mem' refused
+        touch $out
+      '';
+
   # checks.search: `rewind check` starts each run it tries at the
   # unperturbed run's latest keyframe before the run's schedule starts,
   # not at boot. Every one of them still replays from boot to the same
