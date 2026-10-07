@@ -5,6 +5,7 @@ pub mod check;
 pub mod compare;
 pub mod cpio;
 pub mod debug;
+pub mod debuginfod_cache;
 pub mod export;
 pub mod gc;
 pub mod guest_path;

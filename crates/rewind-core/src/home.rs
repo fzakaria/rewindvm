@@ -154,6 +154,28 @@ impl Home {
     }
 }
 
+/// The disk space the files under `dir` take.
+pub fn bytes_under(dir: &Path) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    /// st_blocks counts 512-byte blocks whatever the file system's own.
+    const BLOCK: u64 = 512;
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut total = 0;
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if meta.is_dir() {
+            total += bytes_under(&entry.path());
+            continue;
+        }
+        total += meta.blocks() * BLOCK;
+    }
+    total
+}
+
 /// The guest pieces named by the environment.
 pub struct Guest {
     pub kernel: PathBuf,

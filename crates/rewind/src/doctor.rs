@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use rewind_core::home::bytes_under;
 use rewind_core::run::Unreadable;
 use rewind_core::{Guest, Home, Run};
 
@@ -257,28 +258,6 @@ impl Usage {
         }
         Finding::new(Level::Ok, "disk", text)
     }
-}
-
-/// The disk space the files under `dir` take.
-fn bytes_under(dir: &Path) -> u64 {
-    use std::os::unix::fs::MetadataExt;
-    /// st_blocks counts 512-byte blocks whatever the file system's own.
-    const BLOCK: u64 = 512;
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return 0;
-    };
-    let mut total = 0;
-    for entry in entries.flatten() {
-        let Ok(meta) = entry.metadata() else {
-            continue;
-        };
-        if meta.is_dir() {
-            total += bytes_under(&entry.path());
-            continue;
-        }
-        total += meta.blocks() * BLOCK;
-    }
-    total
 }
 
 /// The bytes an unprivileged user can still write on `path`'s file system.

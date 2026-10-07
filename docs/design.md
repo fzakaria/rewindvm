@@ -199,7 +199,14 @@ answer starts. `rewind where` runs gdb with `DEBUGINFOD_VERBOSE` set, so
 libdebuginfod logs each URL it asks on standard error before it waits, and
 says `rewind: downloading debug info for libc.so.6; first time only` as each
 download starts, and the same once for each library's sources. `rewind gdb`
-shows gdb's own lines about downloads. The kernel's `debug` output is nixpkgs'
+shows gdb's own lines about downloads. The server keeps what it knows of its
+cache in memory, so two servers on one directory break each other's entries:
+each session's server takes a numbered directory under `cache/debuginfod`
+that no other holds, marked by a lock on the file beside it that the server
+inherits. Taking one moves in, by renaming each entry, what the directories
+no session holds have and it lacks, so later sessions find what earlier ones
+fetched; it deletes nothing, so it never waits on a large tree. `rewind gc`
+removes the directories no session holds. The kernel's `debug` output is nixpkgs'
 separateDebugInfo layout with an overlay of the files the Rewind patch adds or
 changes. Rewind fetches the output itself the first time, because Cachix keeps
 no index by build ID, opens its vmlinux in gdb, and puts the overlay on gdb's
@@ -500,8 +507,9 @@ reads keyframes from.
 Both take the source files cached for the runs they remove. Neither command
 removes images or pages, which other runs may share. `rewind gc` removes the
 images in `images/` and its subdirectories that no run's manifest names, the
-pages that no keyframe in any run's directory names, and the source file
-caches of runs no longer in `runs/`.
+pages that no keyframe in any run's directory names, the source file
+caches of runs no longer in `runs/`, and the debuginfod caches under
+`cache/debuginfod` that no `rewind gdb` session holds.
 A fork reads keyframes from the directories of the runs it shares them with,
 so counting every directory's keyframes counts every keyframe a run reads.
 `--dry-run` reports the same figures and removes nothing. On a machine with

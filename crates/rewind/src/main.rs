@@ -96,9 +96,12 @@ enum Command {
     /// Remove the images, pages and source files no run uses any more.
     ///
     /// These are the cached images no run names and the pages in the page
-    /// store no keyframe names, which `remove` and `prune` leave behind, and
-    /// the source files cached for runs that are gone. Refused, removing nothing, while another rewind process is packing an
-    /// image, executing a run, has a shell open or has the page store open.
+    /// store no keyframe names, which `remove` and `prune` leave behind, the
+    /// source files cached for runs that are gone, and the debug info and
+    /// sources `rewind gdb` sessions downloaded, which the next session
+    /// fetches again as it needs. Refused, removing nothing, while another
+    /// rewind process is packing an image, executing a run, has a shell
+    /// open or has the page store open.
     Gc(cmd::remove::GcArgs),
     /// Print a file as it was at a step of a run.
     ///

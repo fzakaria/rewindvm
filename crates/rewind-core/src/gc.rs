@@ -1,6 +1,7 @@
 //! Removing what no run uses: cached images no run's manifest names,
-//! pages in the page store no keyframe names, and the source file caches
-//! of runs that are gone. `rewind remove` and `rewind prune` delete runs
+//! pages in the page store no keyframe names, the source file caches of
+//! runs that are gone, and the debuginfod servers' caches no `rewind gdb`
+//! session holds, which a later session fetches again as it needs. `rewind remove` and `rewind prune` delete runs
 //! and leave images and pages behind, since another run may still use
 //! them.
 //!
@@ -51,12 +52,18 @@ pub struct Garbage {
     pub unreadable_keyframes: usize,
     /// The source file caches of runs that are no longer in the home.
     pub source_caches: Vec<PathBuf>,
+    /// The debuginfod servers' caches no session holds.
+    pub debuginfod_caches: Vec<crate::debuginfod_cache::Unused>,
 }
 
 impl Garbage {
-    /// The bytes the images and pages take.
+    /// The bytes the images, pages and debuginfod caches take.
     pub fn bytes(&self) -> u64 {
-        self.image_bytes() + self.pages.bytes
+        self.image_bytes() + self.pages.bytes + self.debuginfod_bytes()
+    }
+
+    pub fn debuginfod_bytes(&self) -> u64 {
+        self.debuginfod_caches.iter().map(|c| c.bytes).sum()
     }
 
     pub fn image_bytes(&self) -> u64 {
@@ -128,7 +135,9 @@ pub fn collect(home: &Home, act: Act) -> Result<Garbage> {
     };
 
     // Every check has passed: find the garbage, then remove the pages,
-    // then the images and the source caches.
+    // then the images and the source caches, then the debuginfod caches,
+    // each of which a session may be holding until the moment it is
+    // locked.
     let images = unused_images(home)?;
     let source_caches = orphan_source_caches(home)?;
     let (live, unreadable_keyframes) = live_pages(home)?;
@@ -148,11 +157,13 @@ pub fn collect(home: &Home, act: Act) -> Result<Garbage> {
             fs::remove_dir_all(cache).with_context(|| format!("removing {}", cache.display()))?;
         }
     }
+    let debuginfod_caches = crate::debuginfod_cache::collect(&home.debuginfod_cache(), act)?;
     Ok(Garbage {
         images,
         pages,
         unreadable_keyframes,
         source_caches,
+        debuginfod_caches,
     })
 }
 
