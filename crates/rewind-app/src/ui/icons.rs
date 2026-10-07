@@ -25,10 +25,13 @@ pub enum Icon {
     Minimize,
     Maximize,
     Restore,
+    /// A magnifying glass with a plus, and with a minus.
+    ZoomIn,
+    ZoomOut,
 }
 
 impl Icon {
-    const ALL: [Icon; 12] = [
+    const ALL: [Icon; 14] = [
         Icon::Mark,
         Icon::GoToStart,
         Icon::ChevronLeft,
@@ -41,6 +44,8 @@ impl Icon {
         Icon::Minimize,
         Icon::Maximize,
         Icon::Restore,
+        Icon::ZoomIn,
+        Icon::ZoomOut,
     ];
 
     pub fn path(self) -> &'static str {
@@ -57,6 +62,8 @@ impl Icon {
             Icon::Minimize => "icons/minimize.svg",
             Icon::Maximize => "icons/maximize.svg",
             Icon::Restore => "icons/restore.svg",
+            Icon::ZoomIn => "icons/zoom-in.svg",
+            Icon::ZoomOut => "icons/zoom-out.svg",
         }
     }
 
@@ -81,6 +88,14 @@ impl Icon {
             Icon::Minimize => ("2", r#"<path d="M6 12h12"/>"#),
             Icon::Maximize => ("2", r#"<path d="M6 6h12v12H6z"/>"#),
             Icon::Restore => ("2", r#"<path d="M6 9h9v9H6z"/><path d="M9 9V6h9v9h-3"/>"#),
+            Icon::ZoomIn => (
+                "2",
+                r#"<circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/><path d="M11 8v6"/><path d="M8 11h6"/>"#,
+            ),
+            Icon::ZoomOut => (
+                "2",
+                r#"<circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/><path d="M8 11h6"/>"#,
+            ),
         }
     }
 

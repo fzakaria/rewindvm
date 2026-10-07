@@ -7,7 +7,7 @@
 //! window stays where it was put while the playhead moves: centered on
 //! where the two runs part, or on the playhead without a compared run.
 //! Ctrl and the wheel zoom it around the pointer, Shift and the wheel pan
-//! it, and − and + zoom it around its center. Each run replays only the
+//! it, and the zoom out and in buttons zoom it around its center. Each run replays only the
 //! steps it has not, half a window more on each side, once the window
 //! rests.
 //!
@@ -30,11 +30,12 @@ use crate::request::Request;
 use crate::run::Session;
 use crate::selection::{Mapped, Surface, part_of_line};
 use crate::theme::{self, layout, size};
+use crate::ui::icons::Icon;
 use crate::ui::scrubber::{Replay, Scrubber, replay_unavailable};
 use crate::ui::selectable::{mapped, selectable, selects};
 use crate::ui::splits::measure;
 use crate::ui::tabs::RightTab;
-use crate::ui::widgets::{Availability, ButtonStyle, button, panel_title, spinner, tooltip};
+use crate::ui::widgets::{Availability, ButtonStyle, button, icon, panel_title, spinner, tooltip};
 use crate::ui::zoom::{PAN_PER_NOTCH, wheel_notches};
 use crate::view::ZOOM_IN;
 
@@ -81,6 +82,10 @@ const SWITCH_OPACITY: f32 = 0.6;
 const ENDED_A: u32 = 0xffffff0f;
 
 const ZOOM_NOTE: &str = "The lanes show this many steps either side of the window's center. Ctrl and the wheel over the lanes zoom around the pointer, Shift and the wheel pan, and the wheel alone scrolls the threads. Steps not seen yet are replayed in each run once the window rests, about a second for a few thousand.";
+const ZOOM_IN_NOTE: &str =
+    "Zoom in: fewer steps, each wider. Ctrl and the wheel zoom around the pointer.";
+const ZOOM_OUT_NOTE: &str =
+    "Zoom out: more steps, each narrower. Ctrl and the wheel zoom around the pointer.";
 const NOTCH_NOTE: &str = "A notch at the top of a lane is one of the thread's events: a write, an open, a fork, an exit or a signal. A bar is the steps the thread held the CPU between them.";
 const SWITCH_NOTE: &str = "The first place in the two windows where a different thread held the CPU, which can come before the first event that differs.";
 const DIVERGENCE_NOTE: &str = "The first event where this run differs from the compared run, the solid blue mark on the timeline.";
@@ -524,12 +529,14 @@ impl Scrubber {
     /// The zoom out and in buttons around the window's width, and the link
     /// that centers the window on the playhead.
     fn render_lanes_controls(&self, lanes: &LanesPanel, cx: &mut Context<Self>) -> Div {
-        let zoom_button = |id: &'static str, label: &'static str, factor: f64| {
+        let zoom_button = |id: &'static str, glyph: Icon, note: &'static str, factor: f64| {
             button(id, ButtonStyle::Neutral, Availability::Enabled)
                 .h(px(size::NOTICE_BUTTON_HEIGHT))
                 .w(px(ZOOM_BUTTON_WIDTH))
                 .px_0()
-                .child(label)
+                .aria_label(note)
+                .tooltip(tooltip(note))
+                .child(icon(glyph, size::ICON_CHEVRON, theme::TEXT))
                 .on_click(cx.listener(move |this, _, _, cx| this.zoom_lanes(0.5, factor, cx)))
         };
         let readout = div()
@@ -575,9 +582,19 @@ impl Scrubber {
                     .flex()
                     .items_center()
                     .gap(px(size::CARD_GAP))
-                    .child(zoom_button("lanes-zoom-out", "\u{2212}", 1.0 / BUTTON_ZOOM))
+                    .child(zoom_button(
+                        "lanes-zoom-out",
+                        Icon::ZoomOut,
+                        ZOOM_OUT_NOTE,
+                        1.0 / BUTTON_ZOOM,
+                    ))
                     .child(readout)
-                    .child(zoom_button("lanes-zoom-in", "+", BUTTON_ZOOM))
+                    .child(zoom_button(
+                        "lanes-zoom-in",
+                        Icon::ZoomIn,
+                        ZOOM_IN_NOTE,
+                        BUTTON_ZOOM,
+                    ))
                     .children(replaying),
             )
             .child(recenter)
