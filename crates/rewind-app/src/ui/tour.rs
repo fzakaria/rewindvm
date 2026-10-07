@@ -107,10 +107,15 @@ impl Scrubber {
             &session.run.timeline,
             session.divergence_step(),
         );
-        // The stop about the Runs panel opens it.
-        if stop.anchor == tour::Anchor::RunsPill {
-            self.right_tab = crate::ui::tabs::RightTab::Runs;
-            self.runs_tab = true;
+        // A stop that points into the right column shows the tab it
+        // points into.
+        match stop.anchor.column() {
+            Some(tour::Column::AtStep) => self.right_tab = crate::ui::tabs::RightTab::AtStep,
+            Some(tour::Column::Runs) => {
+                self.right_tab = crate::ui::tabs::RightTab::Runs;
+                self.runs_tab = true;
+            }
+            None => {}
         }
         self.go_to(step, cx);
         cx.notify();

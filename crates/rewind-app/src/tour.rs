@@ -19,6 +19,27 @@ pub enum Anchor {
     RunsPill,
 }
 
+/// The tab of the right column a stop points into.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Column {
+    AtStep,
+    Runs,
+}
+
+impl Anchor {
+    /// The right column's tab this anchor is in, when it is in one.
+    pub fn column(self) -> Option<Column> {
+        match self {
+            Anchor::EventCard => Some(Column::AtStep),
+            Anchor::RunsPill => Some(Column::Runs),
+            Anchor::Timeline
+            | Anchor::FailureButton
+            | Anchor::DivergenceButton
+            | Anchor::ForkButton => None,
+        }
+    }
+}
+
 /// Where a stop puts the playhead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Playhead {
@@ -240,6 +261,23 @@ mod tests {
             out(100, "done\n"),
         ];
         Timeline::new(Trace { events }, None, None)
+    }
+
+    /// A stop that points into the right column opens the tab it points
+    /// into: the event card is in At this step, the runs in their own tab;
+    /// the rest point outside the column and leave it as it is.
+    #[test]
+    fn a_stop_in_the_right_column_opens_its_tab() {
+        assert_eq!(Anchor::EventCard.column(), Some(Column::AtStep));
+        assert_eq!(Anchor::RunsPill.column(), Some(Column::Runs));
+        for anchor in [
+            Anchor::Timeline,
+            Anchor::FailureButton,
+            Anchor::DivergenceButton,
+            Anchor::ForkButton,
+        ] {
+            assert_eq!(anchor.column(), None);
+        }
     }
 
     #[test]
