@@ -1226,6 +1226,44 @@ in
         touch $out
       '';
 
+  # checks.threads: `rewind threads` says what held the CPU at each step
+  # of a window, one slice a line: the thread of every event in the window
+  # held it at the event's step, both of race's workers show up, the
+  # slices cover the window without a gap, and a window past the run's end
+  # is cut there. Boots the VM, so it needs /dev/kvm.
+  threads =
+    pkgs.runCommand "rewind-threads"
+      {
+        nativeBuildInputs = [
+          rewind
+          pkgs.jq
+        ];
+        requiredSystemFeatures = [ "kvm" ];
+      }
+      ''
+        export REWIND_HOME=$TMPDIR/rewind
+        rewind run -q --clock exits --name race --root ${raceRoot} -- /bin/race
+        last=$(rewind ls --json -n 1 | jq .steps)
+        from=$(rewind events race | grep 'execve("/bin/race"' | awk '{print $1}')
+        rewind threads race --from "$from" --to "$((last + 50))" --json > slices
+        rewind events race --from "$from" --json > events
+        cat slices
+
+        jq -se --argjson from "$from" --argjson last "$last" '
+          .[0].from == $from and .[-1].to == $last
+          and ([range(1; length) as $i | .[$i].from == .[$i - 1].to + 1] | all)
+        ' slices
+        jq -se '[.[] | select(.on == "thread") | .tid] | unique | length >= 3' slices
+        jq -se --slurpfile events events '
+          . as $slices
+          | [$events[] | select(.pid != 0) as $e
+              | $slices[] | select(.from <= $e.step and $e.step <= .to)
+              | .on == "thread" and .pid == $e.pid and .tid == $e.tid]
+          | length > 20 and all
+        ' slices
+        touch $out
+      '';
+
   # checks.search: `rewind check` starts each run it tries at the
   # unperturbed run's latest keyframe before the run's schedule starts,
   # not at boot. Every one of them still replays from boot to the same

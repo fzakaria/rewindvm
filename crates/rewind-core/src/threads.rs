@@ -46,6 +46,39 @@ pub enum OnTheCpu {
     Idle,
 }
 
+/// What held the CPU over the steps `from..=to`, and the name the kernel
+/// gives that task.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Slice {
+    pub from: u64,
+    pub to: u64,
+    pub on: OnTheCpu,
+    pub name: String,
+}
+
+/// The slices `steps` make, each step given in order with what held the
+/// CPU at it and that task's name: steps the same task held one after
+/// another are one slice.
+pub fn slices(steps: impl IntoIterator<Item = (u64, OnTheCpu, String)>) -> Vec<Slice> {
+    let mut slices: Vec<Slice> = Vec::new();
+    for (step, on, name) in steps {
+        if let Some(last) = slices.last_mut()
+            && last.on == on
+            && last.name == name
+        {
+            last.to = step;
+            continue;
+        }
+        slices.push(Slice {
+            from: step,
+            to: step,
+            on,
+            name,
+        });
+    }
+    slices
+}
+
 /// The VM kernel's tasks, read through `mem`.
 pub struct Tasks<'a, M: Memory + ?Sized> {
     mem: &'a M,
@@ -76,20 +109,28 @@ impl<'a, M: Memory + ?Sized> Tasks<'a, M> {
     /// What the CPU is running: a process's thread, a thread without
     /// memory, or nothing.
     pub fn on_the_cpu(&self) -> Result<OnTheCpu> {
+        Ok(self.held()?.0)
+    }
+
+    /// What the CPU is running, as [`Tasks::on_the_cpu`] says, with the
+    /// name the kernel gives the task.
+    pub fn held(&self) -> Result<(OnTheCpu, String)> {
         let (pid, thread) = self.current_thread()?;
         if thread.tid == 0 {
-            return Ok(OnTheCpu::Idle);
+            return Ok((OnTheCpu::Idle, thread.name));
         }
         if self.page_table(thread.task)?.is_none() {
-            return Ok(OnTheCpu::WithoutMemory {
+            let on = OnTheCpu::WithoutMemory {
                 tid: thread.tid,
-                name: thread.name,
-            });
+                name: thread.name.clone(),
+            };
+            return Ok((on, thread.name));
         }
-        Ok(OnTheCpu::Thread {
+        let on = OnTheCpu::Thread {
             pid,
             tid: thread.tid,
-        })
+        };
+        Ok((on, thread.name))
     }
 
     /// A task's thread id: its pid, which is 0 for the idle task.
@@ -451,6 +492,44 @@ mod tests {
         let err = tasks.user_registers(t42).unwrap_err().to_string();
         assert!(err.contains("42") && err.contains("exited"), "{err}");
         assert!(tasks.user_registers(t41).is_ok());
+    }
+
+    /// Steps the same task held run together into one slice; a slice ends
+    /// where another thread, a kernel thread or the idle task takes the
+    /// CPU, and a thread that gets it back starts a new one.
+    #[test]
+    fn steps_the_same_task_held_are_one_slice() {
+        let worker = |tid| OnTheCpu::Thread { pid: 40, tid };
+        let kernel = OnTheCpu::WithoutMemory {
+            tid: 7,
+            name: "kworker/0:1".into(),
+        };
+        let steps = vec![
+            (10, worker(41), "phil".to_string()),
+            (11, worker(41), "phil".to_string()),
+            (12, worker(42), "phil".to_string()),
+            (13, kernel.clone(), "kworker/0:1".to_string()),
+            (14, OnTheCpu::Idle, "swapper/0".to_string()),
+            (15, OnTheCpu::Idle, "swapper/0".to_string()),
+            (16, worker(41), "phil".to_string()),
+        ];
+        let slice = |from, to, on: OnTheCpu, name: &str| Slice {
+            from,
+            to,
+            on,
+            name: name.to_string(),
+        };
+        assert_eq!(
+            slices(steps),
+            vec![
+                slice(10, 11, worker(41), "phil"),
+                slice(12, 12, worker(42), "phil"),
+                slice(13, 13, kernel, "kworker/0:1"),
+                slice(14, 15, OnTheCpu::Idle, "swapper/0"),
+                slice(16, 16, worker(41), "phil"),
+            ]
+        );
+        assert_eq!(slices(Vec::new()), Vec::new());
     }
 
     /// A list that never comes back to its head is refused, not followed

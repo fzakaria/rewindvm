@@ -1,10 +1,12 @@
 //! The `rewind` subcommands that look inside a run at a step: a file, a
-//! shell, gdb, and the line a thread was on.
+//! shell, gdb, the line a thread was on, and the threads that held the
+//! CPU over a window of steps.
 
 use std::process::ExitCode;
 
 use anyhow::{Result, bail};
 use rewind_core::inspect::Inspection;
+use rewind_core::threads::{OnTheCpu, Slice};
 use rewind_core::{Home, Run};
 
 use crate::{RUN_HELP, RUN_LONG_HELP, STEP_HELP, STEP_LONG_HELP, gdb, locate, terminal};
@@ -237,3 +239,61 @@ const CAT_NOT_FOUND: u8 = 3;
 
 /// How many callers of the chosen frame `rewind where` shows.
 const DEFAULT_CALLERS: usize = 2;
+
+/// The arguments of `rewind threads`.
+#[derive(clap::Args)]
+pub struct ThreadsArgs {
+    #[arg(help = RUN_HELP, long_help = RUN_LONG_HELP)]
+    pub(crate) run: String,
+    /// The first step to look at; by default the step the job started on.
+    #[arg(long)]
+    pub(crate) from: Option<u64>,
+    /// The last step to look at; by default the run's end.
+    #[arg(long)]
+    pub(crate) to: Option<u64>,
+    /// Print one JSON object a line per slice, for programs such as the
+    /// desktop app: its first and last step, what held the CPU (`thread`,
+    /// `kernel` or `idle`), its pid and tid, and its name.
+    #[arg(long)]
+    pub(crate) json: bool,
+}
+
+pub fn threads(home: &Home, args: ThreadsArgs) -> Result<ExitCode> {
+    let ThreadsArgs {
+        run,
+        from,
+        to,
+        json,
+    } = args;
+    let run = Run::find(home, &run)?;
+    let from = match from {
+        Some(step) => run.check_step(step)?,
+        None => crate::show::start_step(run.trace()?),
+    };
+    let to = to.unwrap_or(u64::MAX);
+    let slices = run.threads_through(home, from, to)?;
+
+    // One line a slice: as JSON for programs, or as a table.
+    for slice in &slices {
+        if json {
+            println!("{}", crate::json::slice(slice));
+            continue;
+        }
+        println!("{}", slice_line(slice));
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// A slice as `rewind threads` prints it: its steps, then pid/tid and the
+/// task's name, laid out as `rewind events` lays out an event's thread.
+fn slice_line(slice: &Slice) -> String {
+    let who = match &slice.on {
+        OnTheCpu::Thread { pid, tid } => format!("{pid}/{tid}"),
+        OnTheCpu::WithoutMemory { tid, .. } => format!("kernel {tid}"),
+        OnTheCpu::Idle => "idle".to_string(),
+    };
+    format!(
+        "{:>10} {:>10}  {who:>12}  {}",
+        slice.from, slice.to, slice.name
+    )
+}

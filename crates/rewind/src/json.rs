@@ -126,6 +126,25 @@ pub fn comparisons(comparisons: &[Comparison]) -> Value {
     Value::Array(each)
 }
 
+/// What held the CPU over a slice of steps, as `rewind threads --json`
+/// prints it.
+pub fn slice(slice: &rewind_core::threads::Slice) -> Value {
+    use rewind_core::threads::OnTheCpu;
+    let (on, pid, tid) = match &slice.on {
+        OnTheCpu::Thread { pid, tid } => ("thread", Some(*pid), Some(*tid)),
+        OnTheCpu::WithoutMemory { tid, .. } => ("kernel", None, Some(*tid)),
+        OnTheCpu::Idle => ("idle", None, None),
+    };
+    json!({
+        "from": slice.from,
+        "to": slice.to,
+        "on": on,
+        "pid": pid,
+        "tid": tid,
+        "name": slice.name,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     // The objects, from traces and comparisons built by hand.

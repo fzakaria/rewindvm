@@ -133,6 +133,15 @@ enum Command {
     /// as a console line, the thread on the CPU. Takes gdb with Python on
     /// PATH, and a run recorded with a kernel that lists its tasks.
     Where(cmd::inspect::WhereArgs),
+    /// Which thread held the CPU at each step of a window of a run.
+    ///
+    /// Prints a line per slice of steps one task held: a thread of a
+    /// process, a kernel thread, or the idle task. Rewind brings the run to
+    /// the window's first step and takes it one step at a time, reading the
+    /// task the VM's kernel has on the CPU, so a wide window takes a while.
+    /// A step is an exit, so a thread that ran between two exits and gave
+    /// the CPU back before the next is not seen.
+    Threads(cmd::inspect::ThreadsArgs),
     /// Open a run in the desktop app, at a step and beside another run.
     ///
     /// Starts rewind-app, from PATH or REWIND_APP, on the run's directory.
@@ -241,6 +250,7 @@ impl Command {
             | Command::Shell(_)
             | Command::Gdb(_)
             | Command::Where(_)
+            | Command::Threads(_)
             | Command::Replay(_)
             | Command::Export(_)
             | Command::Import(_) => HomeHold::InUse,
@@ -311,6 +321,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Shell(args) => cmd::inspect::shell(&home, args),
         Command::Gdb(args) => cmd::inspect::gdb(&home, args),
         Command::Where(args) => cmd::inspect::r#where(&home, args),
+        Command::Threads(args) => cmd::inspect::threads(&home, args),
         Command::Open(args) => cmd::view::open(&home, args),
         Command::Doctor => cmd::setup::doctor(&home),
         Command::Pmu(args) => cmd::setup::pmu(&home, args),

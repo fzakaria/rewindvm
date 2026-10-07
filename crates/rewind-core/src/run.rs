@@ -838,6 +838,77 @@ impl Run {
         })
     }
 
+    /// What held the CPU at each step of `from..=to`, as the VM kernel's
+    /// current_task names it, grouped into slices: the run is brought to
+    /// `from` as a fork would be, then taken one step at a time. A window
+    /// past the run's end stops there. The replay is checked against the
+    /// run's records the whole way, as [`Run::machine_at`] checks it.
+    ///
+    /// A step is an exit, so a thread that took and gave back the CPU
+    /// between two exits is not seen.
+    pub fn threads_through(
+        &self,
+        home: &Home,
+        from: u64,
+        to: u64,
+    ) -> Result<Vec<crate::threads::Slice>> {
+        if from > to {
+            bail!("the window starts at step {from}, after its end at step {to}");
+        }
+        let to = to.min(self.last_step()?);
+        let mut machine = self.machine_at(home, from, Keep::Nothing, &mut rewind_vmm::Ignore)?;
+        let layout = machine.task_layout()?.with_context(|| {
+            format!(
+                "run {}'s kernel does not say where its tasks are",
+                self.manifest.id
+            )
+        })?;
+
+        // One step at a time, each checked against the run's records.
+        let mut ignore = rewind_vmm::Ignore;
+        let mut checked = Checked::new(&mut ignore, self.records_after(from)?);
+        let mut held = Vec::new();
+        let mut step = from;
+        loop {
+            let (on, name) = crate::threads::Tasks::new(&machine, layout).held()?;
+            held.push((step, on, name));
+            if step == to {
+                break;
+            }
+
+            // The last step is the one the guest stopped on, and a machine
+            // that stopped short of the next step has none after it.
+            let outcome = machine.run(Some(step + 1), &mut checked)?;
+            if machine.step() != step + 1 {
+                break;
+            }
+            step += 1;
+            if !matches!(outcome, Outcome::Paused) {
+                let (on, name) = crate::threads::Tasks::new(&machine, layout).held()?;
+                held.push((step, on, name));
+                break;
+            }
+        }
+        if let Some(differs) = checked.differs_at {
+            return Err(self.went_another_way(differs));
+        }
+        Ok(crate::threads::slices(held))
+    }
+
+    /// The error for a replay of this run that made a record other than
+    /// the run's at step `differs`.
+    fn went_another_way(&self, differs: u64) -> anyhow::Error {
+        anyhow::anyhow!(
+            "replaying run {} {} {differs} than when it was recorded, so this build of \
+             rewind, {}, runs its inputs differently from rewind {}, which recorded it; use \
+             that build, or record the run again with this one",
+            self.manifest.id,
+            rewind_trace::WENT_ANOTHER_WAY,
+            crate::VERSION,
+            self.manifest.recorded_by
+        )
+    }
+
     /// A machine at `step` of this run: the latest keyframe at or before
     /// it, restored, and run forward to the step. Events on the way go to
     /// `obs`. With `Keep::Keyframe`, a keyframe at the step is kept when
@@ -882,15 +953,7 @@ impl Run {
         let mut checked = Checked::new(obs, made);
         let outcome = machine.run(Some(step), &mut checked)?;
         if let Some(differs) = checked.differs_at {
-            bail!(
-                "replaying run {} {} {differs} than when it was recorded, so this build of \
-                 rewind, {}, runs its inputs differently from rewind {}, which recorded it; use \
-                 that build, or record the run again with this one",
-                self.manifest.id,
-                rewind_trace::WENT_ANOTHER_WAY,
-                crate::VERSION,
-                self.manifest.recorded_by
-            );
+            return Err(self.went_another_way(differs));
         }
 
         // A keyframe at the step, when asked for, the machine got there,
