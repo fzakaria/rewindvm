@@ -461,6 +461,7 @@ impl Scrubber {
             Surface::LicenseDialog => self.license_dialog_lines(),
             Surface::Runs => self.runs_lines(),
             Surface::Compare => self.compare_lines(),
+            Surface::Lanes => self.lanes_lines(),
             Surface::Log | Surface::Viewer | Surface::Source | Surface::Terminal => Vec::new(),
         }
     }

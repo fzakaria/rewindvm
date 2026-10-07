@@ -156,6 +156,8 @@ pub struct Measured {
     pub session: Cell<Option<Bounds<Pixels>>>,
     /// The source panel, title to frame list.
     pub source: Cell<Option<Bounds<Pixels>>>,
+    /// The Threads tab's plot, the width its lanes span.
+    pub lanes_plot: Cell<Option<Bounds<Pixels>>>,
 }
 
 /// The narrowest a panel drags to, and the terminal's least and greatest

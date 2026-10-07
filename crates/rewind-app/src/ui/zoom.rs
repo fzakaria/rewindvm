@@ -17,7 +17,7 @@ const PIXELS_PER_NOTCH: f32 = 20.0;
 const LINES_PER_NOTCH: f32 = 3.0;
 
 /// How much of its width one notch of a sideways wheel pans the window.
-const PAN_PER_NOTCH: f32 = 0.1;
+pub(super) const PAN_PER_NOTCH: f32 = 0.1;
 
 /// How far above the track the labels sit.
 const LABEL_RISE: f32 = 20.0;
@@ -88,13 +88,7 @@ impl Scrubber {
         shift: bool,
         cx: &mut Context<Self>,
     ) {
-        let (dx, dy) = match delta {
-            ScrollDelta::Lines(lines) => (lines.x / LINES_PER_NOTCH, lines.y / LINES_PER_NOTCH),
-            ScrollDelta::Pixels(pixels) => (
-                f32::from(pixels.x) / PIXELS_PER_NOTCH,
-                f32::from(pixels.y) / PIXELS_PER_NOTCH,
-            ),
-        };
+        let (dx, dy) = wheel_notches(delta);
         if shift || dx.abs() > dy.abs() {
             let along = if dx.abs() > dy.abs() { dx } else { dy };
             self.pan(-along * PAN_PER_NOTCH, cx);
@@ -201,5 +195,17 @@ impl Scrubber {
                 .ml(px(size::SEGMENT_LABEL_PAD))
         });
         labels
+    }
+}
+
+/// A turn of the wheel in notches, sideways and up, from a touchpad's
+/// pixels or a wheel's lines.
+pub(super) fn wheel_notches(delta: ScrollDelta) -> (f32, f32) {
+    match delta {
+        ScrollDelta::Lines(lines) => (lines.x / LINES_PER_NOTCH, lines.y / LINES_PER_NOTCH),
+        ScrollDelta::Pixels(pixels) => (
+            f32::from(pixels.x) / PIXELS_PER_NOTCH,
+            f32::from(pixels.y) / PIXELS_PER_NOTCH,
+        ),
     }
 }

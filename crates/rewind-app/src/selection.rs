@@ -40,6 +40,8 @@ pub enum Surface {
     Runs,
     /// The Compare tab's events.
     Compare,
+    /// The Threads tab's message or picked bar's card.
+    Lanes,
 }
 
 /// A place in a surface's text: a line and a byte offset into it, always
