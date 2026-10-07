@@ -132,7 +132,7 @@ error: Cannot build '/nix/store/hvp2d0h9l97d19d3xp5k3vf6xwhg4axr-mylib-0.3.0.drv
         ><code><span class="cmd"><span class="prompt">$</span> rewind nix --epoch 1790985600 github:fzakaria/rewindvm#mylib</span>
 rewind: packing 62 store paths for mylib-0.3.0
 ...
-rewind: run 5ebce859166b24ea exited:0 after 6169 steps, 0.216s virtual, 1.242s wall (poweroff)
+rewind: run 5ebce859166b24ea exited:0 after 6169 steps, 0.216s virtual, 1.723s wall (poweroff)
 /nix/store/f6a9gy362szw6nxx3ikrklr8glr6rdln-mylib-0.3.0 a9d703ba89774f3d  matches your store, rewindvm.cachix.org</code></pre>
         <p>
           It passes, in the same 6169 steps every time. <code>--epoch</code> fixes the VM's clock at
@@ -197,7 +197,7 @@ open both in the desktop app: rewind open 3ed5e3f30d73bb41 5153 --compare 8c4bd4
           Schedule 6 fails. <code>check</code> narrows schedule 6's failure to one step, 5139. The
           passing run perturbs the same steps less that one, so the two runs are the same until
           5139, and only the failing one gets a reschedule there. The last block shows where the
-          test's own output then differs. The search took 10 seconds.
+          test's own output then differs. The search took 11 seconds.
         </p>
         <p><code>--all</code> tries every schedule, which measures how flaky a build is:</p>
         <pre
@@ -331,7 +331,7 @@ $1 = (struct queue *) 0x0
 identical: 1713 events over 5192 steps
 
 <span class="cmd"><span class="prompt">$</span> rewind replay 3ed5e3f3 --from 3629</span>
-identical from the keyframe at step 1440 to the end (0.42s)</code></pre>
+identical from the keyframe at step 1572 to the end (0.49s)</code></pre>
         <p>
           <code>--from</code> starts at the nearest keyframe before the step. A run replays on any
           machine with the same CPU vendor.
@@ -344,22 +344,22 @@ identical from the keyframe at step 1440 to the end (0.42s)</code></pre>
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind fork 5ebce859 3629 --schedule 5 --quiet</span>
-rewind: run b759eecf9ba8b55e exited:0 after 6628 steps, 0.222s virtual, 0.319s wall (poweroff)
+rewind: run b759eecf9ba8b55e exited:0 after 6628 steps, 0.222s virtual, 0.379s wall (poweroff)
 rewind: the fork first differs from its parent at step 3638
 rewind: open it beside its parent in the desktop app: rewind open b759eecf9ba8b55e 3638 --compare 5ebce859166b24ea
 
 <span class="cmd"><span class="prompt">$</span> rewind fork 5ebce859 3629 --schedule 6 --quiet</span>
-rewind: run 06c0082c248db32b exited:2 after 5201 steps, 0.203s virtual, 0.290s wall (poweroff)
+rewind: run 06c0082c248db32b exited:2 after 5201 steps, 0.203s virtual, 0.330s wall (poweroff)
 rewind: the fork first differs from its parent at step 3638
 rewind: open it beside its parent in the desktop app: rewind open 06c0082c248db32b 3638 --compare 5ebce859166b24ea
 
 <span class="cmd"><span class="prompt">$</span> rewind fork 5ebce859 3629 --schedule 7 --quiet</span>
-rewind: run d0f1c7fc2af0949d exited:0 after 6634 steps, 0.222s virtual, 0.325s wall (poweroff)
+rewind: run d0f1c7fc2af0949d exited:0 after 6634 steps, 0.222s virtual, 0.388s wall (poweroff)
 rewind: the fork first differs from its parent at step 3662
 rewind: open it beside its parent in the desktop app: rewind open d0f1c7fc2af0949d 3662 --compare 5ebce859166b24ea
 
 <span class="cmd"><span class="prompt">$</span> rewind fork 5ebce859 3629 --schedule 8 --quiet</span>
-rewind: run 8d47a829e5bd17df exited:2 after 4544 steps, 0.200s virtual, 0.273s wall (poweroff)
+rewind: run 8d47a829e5bd17df exited:2 after 4544 steps, 0.200s virtual, 0.322s wall (poweroff)
 rewind: the fork first differs from its parent at step 3638
 rewind: open it beside its parent in the desktop app: rewind open 8d47a829e5bd17df 3638 --compare 5ebce859166b24ea</code></pre>
         <p>

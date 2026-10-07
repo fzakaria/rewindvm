@@ -69,7 +69,7 @@ $ rewind run --root mylib.tar --cwd /src -- make check
 ...
 round 3: ok
 test_pool_shutdown: ok
-rewind: run 0a9cd2007f4d5cca exited:0 after 1321 steps, 0.019s virtual, 1.397s wall (poweroff)
+rewind: run 0a9cd2007f4d5cca exited:0 after 1321 steps, 0.019s virtual, 1.495s wall (poweroff)
 ```
 
 It passes, in the same 1321 steps every time. Nothing the command
@@ -129,7 +129,7 @@ open both in the desktop app: rewind open a5e2dbdb1005a619 1387 --compare 20c97f
 `check` narrows schedule 1's failure to one step, 1374. The
 passing run perturbs the same steps less that one, and only the failing run
 gets a timer 31.5 µs late there. The last block shows where the test's own output
-then differs. The search took 28 seconds. `--all` tries every
+then differs. The search took 34 seconds. `--all` tries every
 schedule:
 
 ```console
@@ -210,8 +210,8 @@ $ DEBUGINFOD_URLS=https://debuginfod.debian.net rewind gdb a5e2dbdb 1387 -- -bat
 rewind: step 1387 ran in process 39; loading symbols for 3 of its files
 rewind: fetched 12 source files from the VM
 rewind: gdb at step 1387 of a5e2dbdb1005a619
-Downloading 3.97 M separate debug info for /home/fmzakari/.cache/rewind-record/home/gdb/2608138/newroot/usr/lib/x86_64-linux-gnu/libc.so.6...
-Downloading 539.96 K separate debug info for /home/fmzakari/.cache/rewind-record/home/gdb/2608138/newroot/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2...
+Downloading 3.97 M separate debug info for /home/fmzakari/.cache/rewind-record/home/gdb/2679794/newroot/usr/lib/x86_64-linux-gnu/libc.so.6...
+Downloading 539.96 K separate debug info for /home/fmzakari/.cache/rewind-record/home/gdb/2679794/newroot/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2...
 arch_local_irq_restore (flags=514) at ./arch/x86/include/asm/irqflags.h:146
 146		return !(flags & X86_EFLAGS_IF);
 [Switching to thread 3 (Thread 1.46)]
@@ -252,7 +252,7 @@ $ rewind replay a5e2dbdb
 identical: 396 events over 1417 steps
 
 $ rewind replay a5e2dbdb --from 903
-identical from the keyframe at step 512 to the end (0.41s)
+identical from the keyframe at step 512 to the end (0.46s)
 ```
 
 `--from` starts at the nearest keyframe before the step. A run replays on any
@@ -262,22 +262,22 @@ machine with the same CPU vendor.
 
 ```console
 $ rewind fork 0a9cd200 903 --schedule 1 --quiet
-rewind: run 4f8584f3104a452b exited:2 after 1421 steps, 0.019s virtual, 0.381s wall (poweroff)
+rewind: run 4f8584f3104a452b exited:2 after 1421 steps, 0.019s virtual, 0.425s wall (poweroff)
 rewind: the fork first differs from its parent at step 910
 rewind: open it beside its parent in the desktop app: rewind open 4f8584f3104a452b 910 --compare 0a9cd2007f4d5cca
 
 $ rewind fork 0a9cd200 903 --schedule 2 --quiet
-rewind: run 0b69761d3c9f48a1 exited:2 after 1427 steps, 0.020s virtual, 0.393s wall (poweroff)
+rewind: run 0b69761d3c9f48a1 exited:2 after 1427 steps, 0.020s virtual, 0.431s wall (poweroff)
 rewind: the fork first differs from its parent at step 930
 rewind: open it beside its parent in the desktop app: rewind open 0b69761d3c9f48a1 930 --compare 0a9cd2007f4d5cca
 
 $ rewind fork 0a9cd200 903 --schedule 3 --quiet
-rewind: run d4dffb248107ce4a exited:0 after 1403 steps, 0.019s virtual, 0.374s wall (poweroff)
+rewind: run d4dffb248107ce4a exited:0 after 1403 steps, 0.019s virtual, 0.433s wall (poweroff)
 rewind: the fork first differs from its parent at step 910
 rewind: open it beside its parent in the desktop app: rewind open d4dffb248107ce4a 910 --compare 0a9cd2007f4d5cca
 
 $ rewind fork 0a9cd200 903 --schedule 4 --quiet
-rewind: run 3770bd6f2d3c4c2e exited:0 after 1412 steps, 0.019s virtual, 0.387s wall (poweroff)
+rewind: run 3770bd6f2d3c4c2e exited:0 after 1412 steps, 0.019s virtual, 0.413s wall (poweroff)
 rewind: the fork first differs from its parent at step 910
 rewind: open it beside its parent in the desktop app: rewind open 3770bd6f2d3c4c2e 910 --compare 0a9cd2007f4d5cca
 ```
@@ -342,7 +342,7 @@ Rebuild the image, export it, and check again:
 
 ```console
 $ docker build -q -t mylib -f Containerfile . && docker export $(docker create mylib) -o mylib.tar
-sha256:a832c36172fbd418dd4bf39fca43e735139ddfda0ef77710874325d420baeb15
+sha256:bdb3d2a2f7146ed60edd544539cf8e84689b28f056684626f68178a0a088852f
 
 $ rewind check --all --root mylib.tar --cwd /src -- make check
 ...
