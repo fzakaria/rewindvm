@@ -529,6 +529,9 @@ a:focus-visible {
   width: 14px;
   height: 14px;
 }
+.ctl .narrow {
+  display: none;
+}
 .ctl.blue {
   border-color: #25364d;
   background: #131b26;
@@ -565,25 +568,68 @@ a:focus-visible {
   height: 14px;
 }
 
-/* Panels: the log across the top, then processes and files beside the
-   step's detail. One pixel gaps over the line color draw the rules. The
-   log and processes sit in a wrapper that takes no part in the layout
-   until a phone makes it a row to swipe. */
+/* Panels: the log, or the processes and files, on the left under their
+   tabs, and the step's detail on the right. Both columns are one fixed
+   height, so switching tabs or scrubbing never moves the page. A one
+   pixel gap over the line color draws the rule between them. */
 .panels {
+  --tabs-h: 34px;
+  --panel-h: 400px;
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: 1px;
+  grid-template-rows: var(--tabs-h) var(--panel-h);
+  grid-template-areas:
+    "tabs step"
+    "body step";
+  column-gap: 1px;
   background: var(--line);
 }
 .panel {
   background: var(--panel-2);
   min-width: 0;
+  overflow: hidden;
 }
-.panel-swipe {
-  display: contents;
+.panel-tabs {
+  grid-area: tabs;
+  display: flex;
+  background: var(--panel-2);
+  border-bottom: 1px solid #1f2329;
 }
-.panel-log {
-  grid-column: 1 / -1;
+/* A tab reads like a panel heading, with an amber rule under the one shown. */
+.demo .panel-tabs button {
+  padding: 2px 12px 0;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--faint);
+  font: 500 11px var(--body);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.demo .panel-tabs button:hover {
+  color: var(--soft);
+}
+.demo .panel-tabs [aria-selected="true"] {
+  color: var(--text);
+  border-bottom-color: var(--amber);
+}
+/* The step's detail has a column of its own beside the tabs. */
+.panel-tabs .tab-step {
+  display: none;
+}
+.panel-log,
+.panel-procs {
+  grid-area: body;
+}
+.panel-step {
+  grid-area: step;
+  display: flex;
+  flex-direction: column;
+}
+.panels:not([data-show="log"]) .panel-log,
+.panels:not([data-show="procs"]) .panel-procs {
+  display: none;
 }
 .panel-head {
   margin: 0;
@@ -593,6 +639,14 @@ a:focus-visible {
   text-transform: uppercase;
   color: var(--muted);
   border-bottom: 1px solid #1f2329;
+}
+/* The step's heading lines up with the tabs beside it. */
+.panel-step .panel-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  height: var(--tabs-h);
+  padding-block: 0;
 }
 .panel-procs .panel-head + .rows + .panel-head {
   border-top: 1px solid #1f2329;
@@ -620,9 +674,10 @@ a:focus-visible {
   text-overflow: ellipsis;
   color: var(--soft);
 }
-/* The log holds its last lines against the bottom, like a terminal. */
+/* The log fills its panel and holds its last lines against the bottom,
+   like a terminal. */
 .log {
-  height: calc(9 * 1.8 * 12px + 16px);
+  height: 100%;
   display: flex;
   flex-direction: column;
   justify-content: flex-end;
@@ -631,9 +686,6 @@ a:focus-visible {
 .log li.now {
   background: #1c2026;
 }
-.procs {
-  min-height: calc(6 * 1.8 * 12px + 16px);
-}
 .procs .n {
   color: var(--blue);
   min-width: 30px;
@@ -641,9 +693,6 @@ a:focus-visible {
 }
 .procs .t {
   color: var(--text);
-}
-.files {
-  min-height: calc(5 * 1.8 * 12px + 16px);
 }
 .t.phase {
   color: var(--amber);
@@ -658,7 +707,12 @@ a:focus-visible {
   color: var(--muted);
 }
 
+/* The step's detail scrolls rather than stretch the panels, if a step
+   ever has more to say than they hold. */
 .step-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
   padding: 14px 16px 16px;
   display: flex;
   flex-direction: column;
@@ -712,15 +766,12 @@ a:focus-visible {
 }
 .inspect {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 6px;
 }
 .inspect .ctl {
+  padding: 0 6px;
   justify-content: center;
-}
-/* An odd button out takes the whole row, as Export run does in the app. */
-.inspect .ctl:last-child:nth-child(odd) {
-  grid-column: 1 / -1;
 }
 
 /* How it works */
@@ -1185,15 +1236,15 @@ a:focus-visible {
   margin-top: 18px;
 }
 
-/* A card and its pin light up together: hover or focus either one. A pin
-   is a button, so clicking it focuses it and lights its card without
-   scrolling the page away from the screenshot. */
-.tour:has(#tour-1:is(:hover, :focus-visible)) .pin-1,
-.tour:has(#tour-2:is(:hover, :focus-visible)) .pin-2,
-.tour:has(#tour-3:is(:hover, :focus-visible)) .pin-3,
-.tour:has(#tour-4:is(:hover, :focus-visible)) .pin-4,
-.tour:has(#tour-5:is(:hover, :focus-visible)) .pin-5,
-.tour:has(#tour-6:is(:hover, :focus-visible)) .pin-6,
+/* A card or legend item and its pin light up together: hover or focus
+   either one. A pin is a button, so clicking it focuses it and lights its
+   card without scrolling the page away from the screenshot. */
+:is(.tour, .shots):has(#tour-1:is(:hover, :focus-visible)) .pin-1,
+:is(.tour, .shots):has(#tour-2:is(:hover, :focus-visible)) .pin-2,
+:is(.tour, .shots):has(#tour-3:is(:hover, :focus-visible)) .pin-3,
+:is(.tour, .shots):has(#tour-4:is(:hover, :focus-visible)) .pin-4,
+:is(.tour, .shots):has(#tour-5:is(:hover, :focus-visible)) .pin-5,
+:is(.tour, .shots):has(#tour-6:is(:hover, :focus-visible)) .pin-6,
 .pin:hover,
 .pin:focus {
   transform: scale(1.25);
@@ -1210,6 +1261,121 @@ a:focus-visible {
 .tour-card:hover,
 .tour-card:focus-visible {
   border-color: var(--amber);
+}
+.shots:has(.pin-1:is(:hover, :focus)) #tour-1,
+.shots:has(.pin-2:is(:hover, :focus)) #tour-2,
+.shots:has(.pin-3:is(:hover, :focus)) #tour-3,
+.shots:has(.pin-4:is(:hover, :focus)) #tour-4,
+.shots:has(.pin-5:is(:hover, :focus)) #tour-5,
+.shots:has(.pin-6:is(:hover, :focus)) #tour-6,
+.shots-legend li:hover,
+.shots-legend li:focus-visible {
+  color: var(--text);
+  background: var(--raised);
+}
+
+/* The app's features on the home page: one screenshot at a time with its
+   text under it, and a tab per feature in a column beside it. Narrower
+   screens put the tabs above the shot as a row of pills. */
+.shots {
+  display: grid;
+  grid-template-columns: minmax(0, 800px) minmax(200px, 1fr);
+  grid-template-areas: "panel tabs";
+  gap: 32px;
+  align-items: start;
+  margin-top: 28px;
+}
+.shots-tabs {
+  grid-area: tabs;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.shots-tabs button {
+  display: flex;
+  flex-direction: column;
+  padding: 7px 14px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: none;
+  color: var(--muted);
+  font: 500 0.97rem var(--body);
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    color 0.15s ease,
+    border-color 0.15s ease;
+}
+.shots-tabs button:hover {
+  color: var(--text);
+}
+/* A few words on what the feature is, under its name. */
+.shots-hint {
+  color: var(--faint);
+  font-size: 0.8rem;
+  font-weight: 400;
+  line-height: 1.3;
+}
+.shots-tabs button[aria-selected="true"] .shots-hint {
+  color: var(--muted);
+}
+.shots-tabs button[aria-selected="true"] {
+  color: var(--text);
+  background: var(--bg);
+  border-color: var(--amber);
+}
+.shots-tabs button:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: 2px;
+}
+.shots-panel {
+  grid-area: panel;
+}
+.shots-panel[hidden] {
+  display: none;
+}
+.shots-panel p {
+  margin: 18px 0 0;
+  color: var(--soft);
+  font-size: 0.97rem;
+  max-width: 70ch;
+}
+
+/* The overview's legend: the pins' numbers with a few words each, in
+   three columns, or two on a phone. */
+.shots-legend {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 2px 16px;
+  counter-reset: pin;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+.shots-legend li {
+  counter-increment: pin;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 6px;
+  border-radius: 8px;
+}
+.shots-legend li::before {
+  content: counter(pin);
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--amber);
+  color: var(--amber-ink);
+  font: 700 11px/20px var(--mono);
+  text-align: center;
+}
+.shots-legend li:focus-visible {
+  outline: 2px solid var(--amber);
 }
 
 /* A feature on the roadmap rather than in the app today. */
@@ -1482,6 +1648,28 @@ a.card:hover {
   .tour {
     grid-template-columns: minmax(0, 1fr);
   }
+  .shots {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      "tabs"
+      "panel";
+    gap: 16px;
+  }
+  .shots-tabs {
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .shots-tabs button {
+    padding: 6px 14px;
+    border-color: var(--line);
+    border-radius: 999px;
+    font-size: 0.9rem;
+  }
+  /* A pill has room for the name only. */
+  .shots-hint {
+    display: none;
+  }
   .tour-shot {
     width: 100%;
     max-width: 800px;
@@ -1528,34 +1716,55 @@ a.card:hover {
   }
 }
 
-/* A phone: the scrubber's log and processes become a row to swipe, with
-   the next panel showing at the edge, above the step's detail; cards
-   tighten; definitions sit above their text. */
+/* A phone: the scrubber's panels become one column, with the step's
+   detail as the first tab, and its controls drop words to fit one row;
+   the app's feature tabs become a row to swipe; cards tighten;
+   definitions sit above their text. */
 @media (max-width: 600px) {
   .panels {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      "tabs"
+      "body";
+  }
+  .panel-tabs .tab-step {
+    display: block;
+  }
+  /* The tab names the step's detail, so its heading goes. */
+  .panel-step .panel-head {
+    display: none;
+  }
+  .panel-step {
+    grid-area: body;
+  }
+  .panels:not([data-show="step"]) .panel-step {
+    display: none;
+  }
+  .ctl .wide {
+    display: none;
+  }
+  .ctl .narrow {
+    display: inline;
   }
   .tour-article .tour-cards {
     grid-template-columns: minmax(0, 1fr);
   }
-  .panel-swipe {
-    display: flex;
-    gap: 1px;
+  .shots-tabs {
+    flex-wrap: nowrap;
     overflow-x: auto;
-    scroll-snap-type: x mandatory;
-    overscroll-behavior-x: contain;
+    margin-inline: -20px;
+    padding-inline: 20px;
     scrollbar-width: none;
   }
-  .panel-swipe::-webkit-scrollbar {
+  .shots-tabs::-webkit-scrollbar {
     display: none;
   }
-  .panel-swipe .panel {
-    flex: 0 0 88%;
-    scroll-snap-align: start;
+  .shots-panel p {
+    font-size: 0.93rem;
   }
-  .procs,
-  .files {
-    min-height: 0;
+  .shots-legend {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    font-size: 0.85rem;
   }
   .steps li {
     display: grid;
@@ -1620,14 +1829,15 @@ a.card:hover {
 }
 
 /* Reduced motion: the playhead jumps instead of gliding, the "Try me" arrow
-   holds still and vanishes without a fade, pins and tour cards light up
-   without easing, and demo.js skips its opening sweep. */
+   holds still and vanishes without a fade, pins, tour cards and feature
+   tabs light up without easing, and demo.js skips its opening sweep. */
 @media (prefers-reduced-motion: reduce) {
   .playhead,
   .try-me,
   .try-me.gone,
   .pin,
-  .tour-card {
+  .tour-card,
+  .shots-tabs button {
     transition: none;
   }
   .try-me svg {

@@ -17,8 +17,9 @@
   // Example virtual time per step, only to give the readout a clock.
   const MS_PER_STEP = 16.41;
 
-  // How many lines each list shows.
-  const LOG_LINES = 9;
+  // How many lines each list shows. The log's panel is a fixed height and
+  // clips its oldest lines, so this is enough to fill it.
+  const LOG_LINES = 18;
   const FILE_LINES = 5;
 
   // A file written this many steps ago or fewer is drawn as fresh.
@@ -442,11 +443,25 @@
     }
   }
 
-  // What the inspect buttons would do in the app, said in the note card.
-  function say(strong, rest) {
+  // What the inspect buttons would do in the app, said in the note card,
+  // with a link to the app's screenshot of it when there is one.
+  function say(strong, rest, shot) {
     const b = document.createElement("strong");
     b.textContent = strong;
     el.note.replaceChildren(b, document.createTextNode(` ${rest}`));
+    const tab = shot && document.getElementById(shot);
+    if (!tab) {
+      return;
+    }
+    const a = document.createElement("a");
+    a.href = "#features";
+    a.textContent = "See it in the app";
+    a.addEventListener("click", (e) => {
+      e.preventDefault();
+      showTab(tab);
+      tab.closest(".features").scrollIntoView({ behavior: "smooth" });
+    });
+    el.note.append(" ", a);
   }
 
   function resetNote() {
@@ -462,10 +477,12 @@
     gdb: (s, ev) => [
       "Attach gdb.",
       `gdb on a fork stopped at step ${fmt(s)}, with the symbols of pid ${ev.pid}, the process running there.`,
+      "tab-gdb",
     ],
     shell: (s) => [
       "Open shell.",
       `A shell inside the VM at step ${fmt(s)}, with the build's environment.`,
+      "tab-shell",
     ],
     export: () => [
       "Export.",
@@ -553,11 +570,11 @@
   for (const button of root.querySelectorAll("[data-inspect]")) {
     button.addEventListener("click", () => {
       stopSweep();
-      const [strong, rest] = INSPECT[button.dataset.inspect](
+      const [strong, rest, shot] = INSPECT[button.dataset.inspect](
         state.step,
         eventAt(state.step),
       );
-      say(strong, rest);
+      say(strong, rest, shot);
     });
   }
 
@@ -570,6 +587,28 @@
       "It is run #3 up to here, then runs under a new schedule, so the threads interleave differently.",
     );
     render();
+  });
+
+  // The panels' tabs. A phone opens on the step's detail; a wider screen
+  // shows the detail beside the tabs, so it opens on the log, and a tab
+  // that has no panel of its own there falls back to the log.
+  const panels = $("panels");
+  const panelTabs = [...panels.querySelectorAll("[role=tab]")];
+  const phone = window.matchMedia("(max-width: 600px)");
+  function showPanel(name) {
+    panels.dataset.show = name;
+    for (const tab of panelTabs) {
+      tab.setAttribute("aria-selected", String(tab.dataset.panel === name));
+    }
+  }
+  for (const tab of panelTabs) {
+    tab.addEventListener("click", () => showPanel(tab.dataset.panel));
+  }
+  showPanel(phone.matches ? "step" : "log");
+  phone.addEventListener("change", () => {
+    if (!phone.matches && panels.dataset.show === "step") {
+      showPanel("log");
+    }
   });
 
   // The "Try me" note goes away on the first pointer or key press anywhere in
@@ -601,6 +640,49 @@
       if (menu.open && !menu.contains(e.target)) {
         menu.open = false;
       }
+    });
+  }
+
+  // The app's features: a tab shows its panel and hides the others. The
+  // arrow keys move between tabs, as in any tab list.
+  const tabs = [...document.querySelectorAll(".shots-tabs [role=tab]")];
+  // The row's padding on a phone, which a tab scrolled into view keeps.
+  const TAB_ROW_PAD_PX = 20;
+  function showTab(tab) {
+    for (const other of tabs) {
+      const selected = other === tab;
+      other.setAttribute("aria-selected", String(selected));
+      other.tabIndex = selected ? 0 : -1;
+      document.getElementById(other.getAttribute("aria-controls")).hidden =
+        !selected;
+    }
+
+    // On a phone the tabs are a row to swipe: bring the chosen one into it.
+    const row = tab.parentElement;
+    const r = tab.getBoundingClientRect();
+    const box = row.getBoundingClientRect();
+    if (r.left < box.left || r.right > box.right) {
+      row.scrollBy({ left: r.left - box.left - TAB_ROW_PAD_PX });
+    }
+  }
+  const TAB_KEYS = Object.freeze({
+    ArrowRight: 1,
+    ArrowDown: 1,
+    ArrowLeft: -1,
+    ArrowUp: -1,
+  });
+  for (const [i, tab] of tabs.entries()) {
+    tab.tabIndex = i === 0 ? 0 : -1;
+    tab.addEventListener("click", () => showTab(tab));
+    tab.addEventListener("keydown", (e) => {
+      const delta = TAB_KEYS[e.key];
+      if (delta === undefined) {
+        return;
+      }
+      e.preventDefault();
+      const next = tabs[(i + delta + tabs.length) % tabs.length];
+      showTab(next);
+      next.focus();
     });
   }
 

@@ -131,18 +131,32 @@
                     <path d="M18 5l-9 7 9 7z" />
                   </svg>
                 </button>
-                <button type="button" class="ctl" data-go="prev">
+                <!-- A phone drops the words a control can do without, so the
+                     controls fit on one row. -->
+                <button type="button" class="ctl" data-go="prev" aria-label="Previous">
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 18l-6-6 6-6" /></svg>
-                  Previous
+                  <span class="wide">Previous</span>
                 </button>
-                <button type="button" class="ctl" data-go="next">
-                  Next
+                <button type="button" class="ctl" data-go="next" aria-label="Next">
+                  <span class="wide">Next</span>
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18l6-6-6-6" /></svg>
                 </button>
-                <button type="button" class="ctl blue" data-go="divergence">
-                  Jump to divergence
+                <button
+                  type="button"
+                  class="ctl blue"
+                  data-go="divergence"
+                  aria-label="Jump to divergence"
+                >
+                  <span class="wide">Jump to divergence</span><span class="narrow">Divergence</span>
                 </button>
-                <button type="button" class="ctl red" data-go="failure">Jump to failure</button>
+                <button
+                  type="button"
+                  class="ctl red"
+                  data-go="failure"
+                  aria-label="Jump to failure"
+                >
+                  <span class="wide">Jump to failure</span><span class="narrow">Failure</span>
+                </button>
               </div>
 
               <div class="readout">
@@ -162,24 +176,31 @@
               </div>
             </div>
 
-            <div class="panels">
-              <!-- The log and the processes: laid out in the panels' grid,
-                   and on a phone a row to swipe through. -->
-              <div class="panel-swipe">
-                <div class="panel panel-log" role="group" aria-label="Build log">
-                  <h3 class="panel-head">Build log &middot; up to this step</h3>
-                  <ol class="rows log" id="log"></ol>
-                </div>
-
-                <div class="panel panel-procs" role="group" aria-label="Processes and files">
-                  <h3 class="panel-head">Process tree &middot; alive</h3>
-                  <ul class="rows procs" id="procs"></ul>
-                  <h3 class="panel-head">Files &middot; newest first</h3>
-                  <ul class="rows files" id="files"></ul>
-                </div>
+            <!-- The panels: the log, and the processes with their files, are
+                 tabs on the left beside the step's detail. On a phone the
+                 step's detail is a tab too, and the first. demo.js switches
+                 them through data-show. -->
+            <div class="panels" id="panels" data-show="log">
+              <div class="panel-tabs" role="tablist" aria-label="Panels">
+                <button type="button" role="tab" class="tab-step" data-panel="step">
+                  At this step
+                </button>
+                <button type="button" role="tab" data-panel="log">Build log</button>
+                <button type="button" role="tab" data-panel="procs">Processes</button>
               </div>
 
-              <div class="panel panel-step" role="group" aria-label="At this step">
+              <div class="panel panel-log" role="tabpanel" aria-label="Build log up to this step">
+                <ol class="rows log" id="log"></ol>
+              </div>
+
+              <div class="panel panel-procs" role="tabpanel" aria-label="Processes and files">
+                <h3 class="panel-head">Process tree &middot; alive</h3>
+                <ul class="rows procs" id="procs"></ul>
+                <h3 class="panel-head">Files &middot; newest first</h3>
+                <ul class="rows files" id="files"></ul>
+              </div>
+
+              <div class="panel panel-step" role="tabpanel" aria-label="At this step">
                 <h3 class="panel-head">At this step</h3>
                 <div class="step-body">
                   <div class="card-ev">
@@ -248,14 +269,118 @@
         </ol>
       </section>
 
-      <section class="features">
+      <section class="features" id="features">
         <h2>In the desktop app</h2>
-        <!-- A tour of the real app: numbered pins over the screenshot, and one
-             card per pin. Hovering or focusing a card lights its pin and the
-             other way round (style.css, no script). The image links to the
+        <p class="lede">
+          The real app, on the shutdown race the tutorials follow. Pick a feature to see it.
+        </p>
+        <!-- One screenshot at a time: a tab per feature, beside the shot on a
+             wide screen and a row to swipe above it on a phone. demo.js swaps
+             the panels; without it the overview shows. Each image links to the
              full-size file, which is the readable version on a phone. -->
-        <div class="tour">
-          <figure class="tour-shot">
+        <div class="shots">
+          <div class="shots-tabs" role="tablist" aria-label="Features of the app">
+            <button
+              type="button"
+              role="tab"
+              id="tab-overview"
+              aria-controls="show-overview"
+              aria-selected="true"
+            >
+              <span class="shots-name">Overview</span>
+              <span class="shots-hint">The failing run at its crash</span>
+            </button>
+            <button
+              type="button"
+              role="tab"
+              id="tab-compare"
+              aria-controls="show-compare"
+              aria-selected="false"
+            >
+              <span class="shots-name">Compare</span>
+              <span class="shots-hint">Two runs side by side</span>
+            </button>
+            <button
+              type="button"
+              role="tab"
+              id="tab-threads"
+              aria-controls="show-threads"
+              aria-selected="false"
+            >
+              <span class="shots-name">Threads</span>
+              <span class="shots-hint">Which thread held the CPU</span>
+            </button>
+            <button
+              type="button"
+              role="tab"
+              id="tab-check"
+              aria-controls="show-check"
+              aria-selected="false"
+            >
+              <span class="shots-name">Check from here</span>
+              <span class="shots-hint">Many schedules from one step</span>
+            </button>
+            <button
+              type="button"
+              role="tab"
+              id="tab-gdb"
+              aria-controls="show-gdb"
+              aria-selected="false"
+            >
+              <span class="shots-name">gdb</span>
+              <span class="shots-hint">A debugger at any step</span>
+            </button>
+            <button
+              type="button"
+              role="tab"
+              id="tab-shell"
+              aria-controls="show-shell"
+              aria-selected="false"
+            >
+              <span class="shots-name">Shell</span>
+              <span class="shots-hint">A shell in the VM at any step</span>
+            </button>
+            <button
+              type="button"
+              role="tab"
+              id="tab-source"
+              aria-controls="show-source"
+              aria-selected="false"
+            >
+              <span class="shots-name">Source</span>
+              <span class="shots-hint">The line a thread is on</span>
+            </button>
+            <button
+              type="button"
+              role="tab"
+              id="tab-runs"
+              aria-controls="show-runs"
+              aria-selected="false"
+            >
+              <span class="shots-name">Runs</span>
+              <span class="shots-hint">Every fork, as a tree</span>
+            </button>
+            <button
+              type="button"
+              role="tab"
+              id="tab-kernel"
+              aria-controls="show-kernel"
+              aria-selected="false"
+            >
+              <span class="shots-name">Kernel console</span>
+              <span class="shots-hint">The VM kernel&#x27;s messages</span>
+            </button>
+          </div>
+
+          <!-- The overview: numbered pins over the shot and a legend under it.
+               Hovering or focusing a legend item lights its pin and the other
+               way round (style.css, no script). -->
+          <div
+            class="shots-panel"
+            id="show-overview"
+            role="tabpanel"
+            aria-labelledby="tab-overview"
+          >
             <div class="tour-frame">
               <a class="tour-link" href="img/app-failure.png">
                 <picture>
@@ -304,52 +429,230 @@
                 6
               </button>
             </div>
-            <figcaption>The real app, on a real failing run.</figcaption>
-          </figure>
+            <p>
+              A failing run, compared with a passing run of the same build. Drag the timeline to any
+              step: the log, the processes, the files and the step's event follow the playhead, and
+              Fork from here branches the run there under a new schedule.
+            </p>
+            <ol class="shots-legend">
+              <li id="tour-1" tabindex="0">The timeline</li>
+              <li id="tour-2" tabindex="0">Build log</li>
+              <li id="tour-3" tabindex="0">Processes and files</li>
+              <li id="tour-4" tabindex="0">The step's event</li>
+              <li id="tour-5" tabindex="0">Fork from here</li>
+              <li id="tour-6" tabindex="0">Every run</li>
+            </ol>
+          </div>
 
-          <ol class="tour-cards">
-            <li class="tour-card" id="tour-1" tabindex="0">
-              <h3>The timeline</h3>
-              <p>
-                The run's phases, the playhead, the step where the two runs' schedules part, dashed,
-                where the failing run then left the passing one, and the failure. Drag to any step,
-                or jump to the divergence or the failure.
-              </p>
-            </li>
-            <li class="tour-card" id="tour-2" tabindex="0">
-              <h3>Build log</h3>
-              <p>Everything the build printed, up to the step under the playhead.</p>
-            </li>
-            <li class="tour-card" id="tour-3" tabindex="0">
-              <h3>Processes and files</h3>
-              <p>The processes and threads alive at that step, and the files written so far.</p>
-            </li>
-            <li class="tour-card" id="tour-4" tabindex="0">
-              <h3>At this step</h3>
-              <p>
-                The event at the step, here a SIGSEGV at 0x108, and where this run parted from a
-                passing run of the same build. From here, open a shell inside the VM or attach gdb,
-                both in a throwaway fork of the run, or show which thread held the CPU at each step,
-                beside the passing run.
-              </p>
-            </li>
-            <li class="tour-card" id="tour-5" tabindex="0">
-              <h3>Fork from here</h3>
-              <p>
-                Branch at the playhead under a new schedule, reschedule requests, stalls and up to
-                50 &micro;s of timer slack, so the threads interleave differently from there on. Its
-                menu turns it into Check from here: 8 to 64 schedules at once, counted by how they
-                ended.
-              </p>
-            </li>
-            <li class="tour-card" id="tour-6" tabindex="0">
-              <h3>Every run of this build</h3>
-              <p>
-                The runs pill opens every run of the build as a tree of forks, red for failed and
-                green for passed. Click one to open it; right-click to compare or remove it.
-              </p>
-            </li>
-          </ol>
+          <div
+            class="shots-panel"
+            id="show-compare"
+            role="tabpanel"
+            aria-labelledby="tab-compare"
+            hidden
+          >
+            <div class="tour-frame">
+              <a class="tour-link" href="img/app-compare-tab.png">
+                <picture>
+                  <source srcset="img/app-compare-tab.webp" type="image/webp" />
+                  <img
+                    src="img/app-compare-tab.png"
+                    width="1440"
+                    height="900"
+                    loading="lazy"
+                    alt="The app's Compare tab: the writes both runs made before they part, then the failing run's SIGSEGV beside the passing run's write, each run's text in full with what differs in amber. Opens the full-size image."
+                  />
+                </picture>
+              </a>
+            </div>
+            <p>
+              The last events two runs shared, then each run's next events side by side, with what
+              differs in amber. Here the failing run's SIGSEGV sits beside the passing run's write.
+              The x key swaps to the other run at the matching step.
+            </p>
+          </div>
+
+          <div
+            class="shots-panel"
+            id="show-threads"
+            role="tabpanel"
+            aria-labelledby="tab-threads"
+            hidden
+          >
+            <div class="tour-frame">
+              <a class="tour-link" href="img/app-threads.png">
+                <picture>
+                  <source srcset="img/app-threads.webp" type="image/webp" />
+                  <img
+                    src="img/app-threads.png"
+                    width="1440"
+                    height="900"
+                    loading="lazy"
+                    alt="The app's Threads tab around the crash: a lane per thread of test_pool_shutdown, the failing run's above the passing run's, with the worker that crashes taking the CPU in another order after the deciding step. Opens the full-size image."
+                  />
+                </picture>
+              </a>
+            </div>
+            <p>
+              The VM has one CPU, so a race is an order of threads. A lane per thread around where
+              the two runs part, this run's above the compared run's, with a bar wherever the thread
+              held the CPU. Click a bar to move the playhead there.
+            </p>
+          </div>
+
+          <div
+            class="shots-panel"
+            id="show-check"
+            role="tabpanel"
+            aria-labelledby="tab-check"
+            hidden
+          >
+            <div class="tour-frame">
+              <a class="tour-link" href="img/app-check.png">
+                <picture>
+                  <source srcset="img/app-check.webp" type="image/webp" />
+                  <img
+                    src="img/app-check.png"
+                    width="1440"
+                    height="900"
+                    loading="lazy"
+                    alt="The app after Check from here on the passing run: a card counting how the 16 schedules ended, a cell per schedule, the first picked with its run and Compare and Open. Opens the full-size image."
+                  />
+                </picture>
+              </a>
+            </div>
+            <p>
+              Runs 8 to 64 schedules from the playhead at once and fills a cell per schedule: grey
+              for ended as this run did, blue for differently. Pick a cell to compare with its run
+              or open it.
+            </p>
+          </div>
+
+          <div class="shots-panel" id="show-gdb" role="tabpanel" aria-labelledby="tab-gdb" hidden>
+            <div class="tour-frame">
+              <a class="tour-link" href="img/app-gdb-watch.png">
+                <picture>
+                  <source srcset="img/app-gdb-watch.webp" type="image/webp" />
+                  <img
+                    src="img/app-gdb-watch.png"
+                    width="1440"
+                    height="900"
+                    loading="lazy"
+                    alt="The app's gdb pane stopped at the watchpoint in pool_shutdown, with the old and new values of p-&gt;queue. Opens the full-size image."
+                  />
+                </picture>
+              </a>
+            </div>
+            <p>
+              Attach gdb runs gdb on a fork of the run at the playhead, in a pane under the
+              timeline. Here a watchpoint on <code>p-&gt;queue</code> stops in
+              <code>pool_shutdown</code> as it sets the queue to NULL.
+            </p>
+          </div>
+
+          <div
+            class="shots-panel"
+            id="show-shell"
+            role="tabpanel"
+            aria-labelledby="tab-shell"
+            hidden
+          >
+            <div class="tour-frame">
+              <a class="tour-link" href="img/app-shell.png">
+                <picture>
+                  <source srcset="img/app-shell.webp" type="image/webp" />
+                  <img
+                    src="img/app-shell.png"
+                    width="1440"
+                    height="900"
+                    loading="lazy"
+                    alt="The app's shell pane at the crash, in /build/mylib, after pwd and ls tests. Opens the full-size image."
+                  />
+                </picture>
+              </a>
+            </div>
+            <p>
+              Open shell starts a shell inside a fork of the run at the playhead, with the root,
+              working directory and environment of the process there. Nothing typed in it changes
+              the run.
+            </p>
+          </div>
+
+          <div
+            class="shots-panel"
+            id="show-source"
+            role="tabpanel"
+            aria-labelledby="tab-source"
+            hidden
+          >
+            <div class="tour-frame">
+              <a class="tour-link" href="img/app-source.png">
+                <picture>
+                  <source srcset="img/app-source.webp" type="image/webp" />
+                  <img
+                    src="img/app-source.png"
+                    width="1440"
+                    height="900"
+                    loading="lazy"
+                    alt="The app's source panel at the crash: worker at src/pool.c:77 with p-&gt;queue-&gt;completed++ marked, and the frames worker, start_thread and clone3 below. Opens the full-size image."
+                  />
+                </picture>
+              </a>
+            </div>
+            <p>
+              The source line a thread is on at the playhead, with its frames below; click a frame
+              to see its line. The panel follows the playhead as you scrub.
+            </p>
+          </div>
+
+          <div class="shots-panel" id="show-runs" role="tabpanel" aria-labelledby="tab-runs" hidden>
+            <div class="tour-frame">
+              <a class="tour-link" href="img/app-runs.png">
+                <picture>
+                  <source srcset="img/app-runs.webp" type="image/webp" />
+                  <img
+                    src="img/app-runs.png"
+                    width="1440"
+                    height="900"
+                    loading="lazy"
+                    alt="The app's Runs panel: check's schedules, and the forks of the failing run, failing and passing. Opens the full-size image."
+                  />
+                </picture>
+              </a>
+            </div>
+            <p>
+              Every run of the build, with each fork under the run and step it branched from, red
+              for failed and green for passed. Click one to open it; right-click to compare or
+              remove it.
+            </p>
+          </div>
+
+          <div
+            class="shots-panel"
+            id="show-kernel"
+            role="tabpanel"
+            aria-labelledby="tab-kernel"
+            hidden
+          >
+            <div class="tour-frame">
+              <a class="tour-link" href="img/app-kernel.png">
+                <picture>
+                  <source srcset="img/app-kernel.webp" type="image/webp" />
+                  <img
+                    src="img/app-kernel.png"
+                    width="1440"
+                    height="900"
+                    loading="lazy"
+                    alt="The app's build log with the kernel console on, showing the segfault report under the test's output. Opens the full-size image."
+                  />
+                </picture>
+              </a>
+            </div>
+            <p>
+              With the kernel console on, the build log shows the VM kernel's messages among the
+              program's. Here the segfault report follows the test's last line.
+            </p>
+          </div>
         </div>
       </section>
 
