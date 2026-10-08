@@ -152,7 +152,10 @@ pub(crate) fn gdb(
         _ => thread.map(|(pid, _)| pid),
     };
     let mut symbols = Symbols::load(home, run, step, pid, Kernel::Load, Say::Aloud)?;
-    let mut debuggee = debuggee(run, step, machine, symbols.process.scope)?;
+    // gdb can run the fork backwards, by replaying the run.
+    let history = rewind_core::debug::RunHistory { home, run };
+    let mut debuggee =
+        debuggee(run, step, machine, symbols.process.scope)?.with_history(Box::new(history));
     symbols.add_vdso(&debuggee, Say::Aloud);
 
     // The library list is for a gdb that reads thread-local variables
@@ -275,7 +278,7 @@ pub(crate) fn debuggee(
     step: u64,
     machine: rewind_vmm::Machine,
     scope: rewind_core::debug::Scope,
-) -> Result<rewind_core::debug::Debuggee> {
+) -> Result<rewind_core::debug::Debuggee<'static>> {
     let made = run.records_after(step)?;
     rewind_core::debug::Debuggee::new(machine, made, scope)
 }
@@ -312,7 +315,7 @@ pub(crate) struct Printed {
 /// Returns how gdb exited and, when captured, what it printed.
 pub(crate) fn run_gdb(
     args: &[String],
-    fork: Option<(&mut rewind_core::debug::Debuggee, &TcpListener)>,
+    fork: Option<(&mut rewind_core::debug::Debuggee<'_>, &TcpListener)>,
     output: Output,
 ) -> Result<(std::process::ExitStatus, Printed)> {
     let mut command = Command::new(gdb_program());
@@ -523,7 +526,7 @@ impl Symbols {
     /// can neither name a frame in it nor unwind past one. A vDSO that does
     /// not read is said, and left out, as is one the process has not
     /// called into yet, which no frame can be in.
-    pub(crate) fn add_vdso(&mut self, debuggee: &rewind_core::debug::Debuggee, say: Say) {
+    pub(crate) fn add_vdso(&mut self, debuggee: &rewind_core::debug::Debuggee<'_>, say: Say) {
         let Some(range) = self.process.vdso.clone() else {
             return;
         };

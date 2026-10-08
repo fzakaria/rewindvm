@@ -212,16 +212,25 @@ fn db_exit(dr6: u64, traps: &[Trap], debugger: Stepping, machine: Stepping) -> D
 fn guest_debug(
     debugging: Option<&Debugging>,
     monitor: Stepping,
+    approach: Stepping,
+    user_return: Option<u64>,
     int3s: &Int3s,
 ) -> Result<kvm_guest_debug> {
     let mut debug = kvm_guest_debug::default();
-    if let Some(debugging) = debugging {
+    let mut traps = debugging.map_or_else(Vec::new, |d| d.traps.clone());
+    if let Some(debugging) = debugging
+        && debugging.stepping == Stepping::Yes
+    {
+        debug.control |= KVM_GUESTDBG_SINGLESTEP;
+    }
+    // The return to user space the machine steps toward takes the
+    // register after the debugger's, which a trap there is not the
+    // debugger's for.
+    traps.extend(user_return.map(Trap::Execute));
+    if debugging.is_some() || !traps.is_empty() {
         debug.control |= KVM_GUESTDBG_ENABLE | KVM_GUESTDBG_USE_HW_BP;
-        if debugging.stepping == Stepping::Yes {
-            debug.control |= KVM_GUESTDBG_SINGLESTEP;
-        }
-        debug.arch.debugreg[DR7_INDEX] = dr7(&debugging.traps)?;
-        for (i, trap) in debugging.traps.iter().enumerate() {
+        debug.arch.debugreg[DR7_INDEX] = dr7(&traps)?;
+        for (i, trap) in traps.iter().enumerate() {
             debug.arch.debugreg[i] = match trap {
                 Trap::Execute(address) | Trap::Watch { address, .. } => *address,
             };
@@ -232,6 +241,11 @@ fn guest_debug(
     }
     if monitor == Stepping::Yes || int3s.lifted.is_some() {
         debug.control |= KVM_GUESTDBG_ENABLE | KVM_GUESTDBG_SINGLESTEP | KVM_GUESTDBG_BLOCKIRQ;
+    }
+    // Closing in on a branch count steps as the debugger does, interrupts
+    // let through, so each lands where it would have without the steps.
+    if approach == Stepping::Yes {
+        debug.control |= KVM_GUESTDBG_ENABLE | KVM_GUESTDBG_SINGLESTEP;
     }
     Ok(debug)
 }
@@ -246,6 +260,44 @@ pub enum DebugStop {
     /// An instruction accessed the watched bytes at this address, and has
     /// run.
     Watchpoint(u64),
+    /// The guest has retired the branches [`Machine::set_branch_stop`]
+    /// asked for: the first instruction boundary at that count.
+    Branches,
+    /// The counter's interrupt came so late that the guest had retired
+    /// more branches than asked for when the machine looked; closing in
+    /// again with a wider margin can reach the count.
+    PassedBranches,
+}
+
+/// A debugger's stop at a branch count: the count, how many branches
+/// short of it the counter's interrupt is asked for, and how close the
+/// machine is.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct BranchStop {
+    target: u64,
+    margin: u64,
+    approach: Approach,
+}
+
+/// The kernel's returns to user space: `sysretq` goes to RCX, `iretq` to
+/// the frame on its stack, the address then the code segment.
+const SYSRETQ: [u8; 3] = [0x48, 0x0f, 0x07];
+const IRETQ: [u8; 2] = [0x48, 0xcf];
+const WORD: usize = 8;
+
+/// The privilege level in a code segment selector's low bits: 3 in user
+/// space.
+const SELECTOR_RPL: u16 = 0b11;
+const USER_RPL: u16 = 0b11;
+
+/// How a machine closes in on a branch count: far from it, running with
+/// the counter's interrupt armed a margin short of it, or single-stepping
+/// the rest of the way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Approach {
+    Far,
+    Armed,
+    Stepping,
 }
 
 impl Machine {
@@ -266,6 +318,12 @@ impl Machine {
         self.apply_guest_debug()
     }
 
+    /// Turns debugging off. int3s still written keep their #BPs trapped.
+    pub fn clear_debug(&mut self) -> Result<()> {
+        self.debugging = None;
+        self.apply_guest_debug()
+    }
+
     /// Tells KVM what to trap for the debugger, the monitor's steps toward
     /// a preemption point and the int3s together, after any of them
     /// changes.
@@ -274,8 +332,156 @@ impl Machine {
             Some(work) if work.stepping => Stepping::Yes,
             _ => Stepping::No,
         };
-        let debug = guest_debug(self.debugging.as_ref(), monitor, &self.int3s)?;
+        let debug = guest_debug(
+            self.debugging.as_ref(),
+            monitor,
+            self.approach_stepping(),
+            self.user_return,
+            &self.int3s,
+        )?;
         Ok(self.vcpu.set_guest_debug(&debug)?)
+    }
+
+    /// Whether the machine single-steps toward a debugger's branch count.
+    fn approach_stepping(&self) -> Stepping {
+        match self.branch_stop {
+            Some(BranchStop {
+                approach: Approach::Stepping,
+                ..
+            }) => Stepping::Yes,
+            _ => Stepping::No,
+        }
+    }
+
+    /// Guest branches retired so far, exactly, under counter time; None
+    /// under exit time, which counts none.
+    pub fn branch_count(&self) -> Result<Option<u64>> {
+        if !matches!(self.config.clock, crate::ClockSource::Branches(_)) {
+            return Ok(None);
+        }
+        Ok(Some(match &self.work {
+            Some(work) => work.count()?,
+            None => self.work_base,
+        }))
+    }
+
+    /// Stops `run` with [`DebugStop::Branches`] at the first instruction
+    /// boundary where the guest has retired `target` branches, or, with
+    /// None, no longer. The counter's interrupt is asked for `margin`
+    /// branches short of the count, and the machine single-steps the
+    /// rest; an interrupt later than that stops `run` with
+    /// [`DebugStop::PassedBranches`]. Only under counter time, and not
+    /// with preemption at branch counts, whose timer needs the interrupt.
+    pub fn set_branch_stop(&mut self, target: Option<u64>, margin: u64) -> Result<()> {
+        if target.is_some() {
+            if !matches!(self.config.clock, crate::ClockSource::Branches(_)) {
+                bail!("stopping at a branch count needs counter time");
+            }
+            if self.config.preemption == crate::Preemption::AtBranchCounts {
+                bail!(
+                    "stopping at a branch count needs the counter's interrupt, which preemption at branch counts takes"
+                );
+            }
+        }
+        self.branch_stop = target.map(|target| BranchStop {
+            target,
+            margin,
+            approach: Approach::Far,
+        });
+        self.apply_guest_debug()
+    }
+
+    /// Closes in on the debugger's branch count before the guest runs:
+    /// the stop once the count is reached or passed, else the counter's
+    /// interrupt armed a margin short of it, or single steps within the
+    /// margin.
+    pub(crate) fn close_in_on_branches(&mut self) -> Result<Option<DebugStop>> {
+        let (Some(stop), Some(work)) = (self.branch_stop, &self.work) else {
+            return Ok(None);
+        };
+        let count = work.count()?;
+        if count >= stop.target {
+            self.branch_stop = None;
+            self.apply_guest_debug()?;
+            return Ok(Some(if count == stop.target {
+                DebugStop::Branches
+            } else {
+                DebugStop::PassedBranches
+            }));
+        }
+        let left = stop.target - count;
+        let approach = match stop.approach {
+            Approach::Far if left > stop.margin => {
+                work.overflow.arm(left - stop.margin)?;
+                Approach::Armed
+            }
+            Approach::Far | Approach::Armed if left <= stop.margin => Approach::Stepping,
+            same => same,
+        };
+        if approach != stop.approach {
+            self.branch_stop = Some(BranchStop { approach, ..stop });
+            if approach == Approach::Stepping {
+                self.apply_guest_debug()?;
+            }
+        }
+        Ok(None)
+    }
+
+    /// Whether the machine single-steps, for the debugger or toward its
+    /// branch count.
+    fn single_stepping(&self) -> bool {
+        let debugger = self
+            .debugging
+            .as_ref()
+            .is_some_and(|d| d.stepping == Stepping::Yes);
+        debugger || self.approach_stepping() == Stepping::Yes
+    }
+
+    /// Keeps single steps going across the kernel's return to user space,
+    /// before the vCPU runs. The kernel returns there with the flags its
+    /// entry saved, which have no trap flag when the steps began in the
+    /// kernel, so the user's code would run on unstepped. So at a
+    /// `sysretq` or an `iretq` to user space, a debug register traps the
+    /// address it returns to, where the step ends. With every register the
+    /// debugger's, the user's code runs on as it did before.
+    pub(crate) fn step_into_user_space(&mut self) -> Result<()> {
+        let held = self.debugging.as_ref().map_or(0, |d| d.traps.len());
+        if !self.single_stepping() || held >= MAX_TRAPS {
+            return Ok(());
+        }
+        let regs = self.vcpu.get_regs()?;
+        let in_user_space = self.vcpu.get_sregs()?.cs.selector & SELECTOR_RPL == USER_RPL;
+        if in_user_space || self.user_return.is_some() {
+            return Ok(());
+        }
+        let mut code = [0u8; SYSRETQ.len()];
+        self.read_virtual(regs.rip, &mut code)?;
+        let user_return = if code == SYSRETQ {
+            Some(regs.rcx)
+        } else if code[..IRETQ.len()] == IRETQ {
+            let mut frame = [0u8; 2 * WORD];
+            self.read_virtual(regs.rsp, &mut frame)?;
+            let rip = u64::from_le_bytes(frame[..WORD].try_into().expect("one word"));
+            let cs = u64::from_le_bytes(frame[WORD..].try_into().expect("one word"));
+            (cs as u16 & SELECTOR_RPL == USER_RPL).then_some(rip)
+        } else {
+            None
+        };
+        if user_return.is_some() {
+            self.user_return = user_return;
+            self.apply_guest_debug()?;
+        }
+        Ok(())
+    }
+
+    /// The counter's interrupt was disarmed, at a step or as `run` returns:
+    /// closing in arms it again.
+    pub(crate) fn branch_interrupt_disarmed(&mut self) {
+        if let Some(stop) = &mut self.branch_stop
+            && stop.approach == Approach::Armed
+        {
+            stop.approach = Approach::Far;
+        }
     }
 
     /// What a debug exit means for the debugger, once the machine has done
@@ -305,9 +511,11 @@ impl Machine {
             return Ok(None);
         }
 
-        // A #DB: the machine's own steps first.
-        let mut machine = match &self.work {
-            Some(work) if work.stepping => Stepping::Yes,
+        // A #DB: the machine's own steps first, toward a preemption point
+        // or a debugger's branch count.
+        let mut machine = match (&self.work, self.approach_stepping()) {
+            (Some(work), _) if work.stepping => Stepping::Yes,
+            (_, Stepping::Yes) => Stepping::Yes,
             _ => Stepping::No,
         };
         if dr6 & DR6_SINGLE_STEP != 0
@@ -320,9 +528,22 @@ impl Machine {
             machine = Stepping::Yes;
         }
 
-        let (traps, debugger) = match &self.debugging {
-            Some(debugging) => (&debugging.traps[..], debugging.stepping),
-            None => (&[][..], Stepping::No),
+        // The return to user space a step went through, trapped in the
+        // register after the debugger's: the debugger's step ends there,
+        // and the machine's own steps go on.
+        let (held, debugger) = self
+            .debugging
+            .as_ref()
+            .map_or((0, Stepping::No), |d| (d.traps.len(), d.stepping));
+        if self.user_return.is_some() && dr6 & (1 << held) != 0 {
+            self.user_return = None;
+            self.apply_guest_debug()?;
+            return Ok((debugger == Stepping::Yes).then_some(DebugStop::Step));
+        }
+
+        let traps = match &self.debugging {
+            Some(debugging) => &debugging.traps[..],
+            None => &[][..],
         };
         match db_exit(dr6, traps, debugger, machine) {
             DbExit::Stop(stop) => Ok(Some(stop)),
@@ -389,8 +610,12 @@ impl Machine {
             self.int3s.lifted = Some(physical);
             return self.apply_guest_debug();
         }
+        // KVM hides the trap flag of its single steps from the flags read
+        // above and puts it back only where the steps were asked for, so
+        // the steps are asked for again here.
         regs.rflags |= RFLAGS_RF;
-        Ok(self.vcpu.set_regs(&regs)?)
+        self.vcpu.set_regs(&regs)?;
+        self.apply_guest_debug()
     }
 
     /// The general purpose registers, the instruction pointer and flags.
@@ -782,6 +1007,9 @@ mod tests {
     /// monitor's steps toward a preemption point and the int3s written, so
     /// neither the monitor's steps nor a lifted int3 drop the debugger's
     /// traps, and no int3's #BP reaches the guest while one is written.
+    /// Steps toward a debugger's branch count let interrupts through, and
+    /// the user address they step toward takes the register after the
+    /// debugger's.
     #[test]
     fn guest_debug_keeps_every_partys_traps() {
         use kvm_bindings::{
@@ -802,8 +1030,11 @@ mod tests {
         written.replaced.insert(0x5000, 0x55);
         let mut lifted = written.clone();
         lifted.lifted = Some(0x5000);
-        let control =
-            |d: Option<&Debugging>, monitor, int3s| guest_debug(d, monitor, int3s).unwrap().control;
+        let control = |d: Option<&Debugging>, monitor, int3s| {
+            guest_debug(d, monitor, Stepping::No, None, int3s)
+                .unwrap()
+                .control
+        };
 
         assert_eq!(control(None, Stepping::No, &none), 0);
         assert_eq!(
@@ -826,7 +1057,23 @@ mod tests {
             control(Some(&debugger), Stepping::No, &lifted),
             ENABLE | HW_BP | SW_BP | SINGLESTEP | BLOCKIRQ
         );
-        let d = guest_debug(Some(&debugger), Stepping::Yes, &written).unwrap();
+        assert_eq!(
+            guest_debug(Some(&debugger), Stepping::No, Stepping::Yes, None, &none)
+                .unwrap()
+                .control,
+            ENABLE | HW_BP | SINGLESTEP
+        );
+        let to_user = guest_debug(
+            Some(&debugger),
+            Stepping::No,
+            Stepping::Yes,
+            Some(0x2000),
+            &none,
+        )
+        .unwrap();
+        assert_eq!(to_user.arch.debugreg[1], 0x2000);
+        assert_eq!(to_user.arch.debugreg[DR7_INDEX], 0b101);
+        let d = guest_debug(Some(&debugger), Stepping::Yes, Stepping::No, None, &written).unwrap();
         assert_eq!(d.arch.debugreg[0], 0x1000);
         assert_eq!(d.arch.debugreg[DR7_INDEX], 1);
     }

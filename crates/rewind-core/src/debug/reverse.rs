@@ -1,0 +1,734 @@
+//! Running a fork backwards for gdb: `reverse-stepi` and `reverse-continue`,
+//! which gdb builds `reverse-next`, `reverse-finish` and the rest on.
+//!
+//! A run is deterministic, so going back is going forward again from
+//! earlier and stopping sooner. Where the fork is, its position, is the
+//! start of a step and what the fork did since: single steps, runs to the
+//! next hit of a breakpoint or watchpoint in the debugged process, and runs
+//! to a branch count. Replaying those from the step's start comes back to
+//! exactly the same instruction, with no guessing from registers.
+//!
+//! A step's start is reached from a checkpoint the fork kept in memory,
+//! rewound in place, which costs milliseconds, else from a fork of the run
+//! at the step, built from its keyframes. One instruction back is the
+//! instruction before the position: replayed from where the position's
+//! last move began, run fast to one branch short of the position under
+//! counter time, then single-stepped until the step that reaches it. Under
+//! exit time, which counts no branches, the whole way is single-stepped.
+//! Running back to a trap replays the run from keyframe to keyframe,
+//! newest first, and stops at the last hit before the position: at a
+//! breakpoint as it is reached, and before the instruction that wrote a
+//! watched value, as gdb expects of a watchpoint run backwards.
+
+use std::collections::BTreeMap;
+
+use anyhow::{Result, bail};
+use rewind_vmm::Machine;
+use rewind_vmm::checkpoint::CheckpointId;
+use rewind_vmm::debug::{DebugStop, Stepping, Trap};
+use rewind_vmm::snapshot::Pages;
+use rewind_vmm::{Ignore, Outcome};
+
+use super::{Debuggee, Follow, Watch};
+use crate::run::{Keep, Run};
+use crate::{Home, keyframes};
+
+/// The run a fork came from, which running the fork backwards replays.
+pub trait History: std::fmt::Debug {
+    /// A machine at the start of step `step` of the run.
+    fn machine_at(&self, step: u64) -> Result<Machine>;
+    /// The records the run made after step `step`.
+    fn records_after(&self, step: u64) -> Result<Vec<(u64, Vec<u8>)>>;
+    /// The steps of the run's keyframes, in order.
+    fn keyframes(&self) -> Result<Vec<u64>>;
+    /// The page store keyframes read their pages from.
+    fn store(&self) -> Result<rewind_store::Store>;
+}
+
+/// A run in a home, as a fork's history.
+#[derive(Debug)]
+pub struct RunHistory<'a> {
+    pub home: &'a Home,
+    pub run: &'a Run,
+}
+
+impl History for RunHistory<'_> {
+    fn machine_at(&self, step: u64) -> Result<Machine> {
+        self.run
+            .machine_at(self.home, step, Keep::Keyframe, &mut Ignore)
+    }
+
+    fn records_after(&self, step: u64) -> Result<Vec<(u64, Vec<u8>)>> {
+        self.run.records_after(step)
+    }
+
+    fn keyframes(&self) -> Result<Vec<u64>> {
+        Ok(self.run.keyframes()?.steps())
+    }
+
+    fn store(&self) -> Result<rewind_store::Store> {
+        rewind_store::Store::open(&self.home.store())
+    }
+}
+
+/// A page store's pages, for rewinding a machine restored from keyframes.
+struct StorePages(rewind_store::Store);
+
+impl Pages for StorePages {
+    fn put(&mut self, _page: &[u8]) -> Result<[u8; 32]> {
+        bail!("rewinding stores no pages")
+    }
+    fn get(&self, hash: &[u8; 32], out: &mut [u8]) -> Result<()> {
+        keyframes::ReadPages(&self.0).get(hash, out)
+    }
+}
+
+/// Where a fork is in its run: the start of a step, then what it did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Position {
+    pub(super) step: u64,
+    pub(super) moves: Vec<Move>,
+}
+
+impl Position {
+    /// The start of step `step`.
+    pub(super) fn start(step: u64) -> Position {
+        Position {
+            step,
+            moves: Vec::new(),
+        }
+    }
+
+    /// This position with `mv` after it: single steps after single steps
+    /// add up.
+    fn then(&self, mv: Move) -> Position {
+        let mut moves = self.moves.clone();
+        match (moves.last_mut(), mv) {
+            (Some(Move::Steps(n)), Move::Steps(more)) => *n += more,
+            _ => moves.push(mv),
+        }
+        Position {
+            step: self.step,
+            moves,
+        }
+    }
+}
+
+/// One thing a fork did from a step's start on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Move {
+    /// This many single steps.
+    Steps(u64),
+    /// A run to the next hit of a trap in the debugged process.
+    Hit(GdbTrap),
+    /// A run to the first instruction boundary at this branch count.
+    Branches(u64),
+}
+
+/// A trap gdb set, as a position's move names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum GdbTrap {
+    Breakpoint(u64),
+    Watch(Watch),
+}
+
+impl GdbTrap {
+    /// The debug registers the trap takes.
+    fn registers(self) -> Vec<Trap> {
+        match self {
+            GdbTrap::Breakpoint(address) => vec![Trap::Execute(address)],
+            GdbTrap::Watch(watch) => super::watch_registers(&watch),
+        }
+    }
+}
+
+/// How a step toward a position shows it has reached it.
+#[derive(Clone, Copy, Debug)]
+enum Arrival {
+    /// The step's instruction wrote what the watch watches.
+    Watch(Watch),
+    /// The step lands at the breakpoint's address in the debugged process.
+    Breakpoint(u64),
+    /// The step lands at this branch count.
+    Branches(u64),
+    /// The step's instruction made the exit that starts this step.
+    StepStart(u64),
+}
+
+/// How many branches short of a branch count the counter's interrupt is
+/// asked for: the first try, then wider ones for a counter whose interrupt
+/// came later than that. The counter's skid on a Zen 4 laptop was 9 to 73
+/// branches, with one outlier of 1269 (see rewind-vmm's PREEMPT_MARGIN).
+const MARGINS: [u64; 3] = [512, 8192, 1 << 17];
+
+/// A counter interrupt that came too late to stop at a branch count.
+#[derive(Debug)]
+struct Passed;
+
+impl std::fmt::Display for Passed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the branch counter's interrupt came past the branch count"
+        )
+    }
+}
+
+impl std::error::Error for Passed {}
+
+/// What running backwards came to.
+pub(super) enum Back {
+    /// One instruction back.
+    Stepped,
+    /// The last breakpoint hit before where the fork was.
+    Breakpoint,
+    /// Before the instruction that last wrote a watched value, and the
+    /// watch's address.
+    Watch(Watch),
+    /// The start of the run: nothing is before it.
+    Start,
+}
+
+/// The fork's checkpoints in memory, by the step whose start each keeps.
+pub(super) type Checkpoints = BTreeMap<u64, CheckpointId>;
+
+impl Debuggee<'_> {
+    /// Notes where a forward stop left the fork: at another step's start,
+    /// or `mv` further into the step it was in. A stop at a step's start
+    /// completes the step's pending exit, as a replay to it does.
+    pub(super) fn arrived(&mut self, mv: Option<Move>) -> Result<()> {
+        let step = self.machine.step();
+        if step != self.position.step {
+            self.position = Position::start(step);
+        }
+        match mv {
+            Some(mv) => self.position = self.position.then(mv),
+            None if self.position.moves.is_empty() => self.machine.complete_pending_exit()?,
+            None => {}
+        }
+        Ok(())
+    }
+
+    /// Why the fork cannot run backwards, when it cannot: gdb changed its
+    /// registers or memory, or it left the recording, so the run replayed
+    /// is not what the fork did.
+    pub(super) fn cannot_go_back(&self) -> Option<String> {
+        if self.altered {
+            return Some(
+                "gdb changed the fork's registers or memory, so replaying the run cannot \
+                 go back over what the fork did since"
+                    .into(),
+            );
+        }
+        self.follow.left_at.map(|step| {
+            format!(
+                "the fork left the recording at step {step}, so replaying the run cannot \
+                 go back over what the fork did since"
+            )
+        })
+    }
+
+    /// One instruction back, or the start of the run.
+    pub(super) fn step_back(&mut self) -> Result<Back> {
+        let here = self.position.clone();
+        let back = with_margins(|margin| self.before(&here, margin))?;
+        let Some(back) = back else {
+            self.go_to_or_retry(&Position::start(0))?;
+            return Ok(Back::Start);
+        };
+        self.go_to_or_retry(&back)?;
+        Ok(Back::Stepped)
+    }
+
+    /// The last hit of one of gdb's traps before here, or the start of the
+    /// run when there is none.
+    pub(super) fn continue_back(&mut self) -> Result<Back> {
+        let here = self.position.clone();
+        let Some((hit, target)) = with_margins(|margin| self.last_hit_before(&here, margin))?
+        else {
+            self.go_to_or_retry(&Position::start(0))?;
+            return Ok(Back::Start);
+        };
+        match target {
+            GdbTrap::Breakpoint(_) => {
+                self.go_to_or_retry(&hit)?;
+                Ok(Back::Breakpoint)
+            }
+            GdbTrap::Watch(watch) => {
+                let before = with_margins(|margin| self.before(&hit, margin))?;
+                self.go_to_or_retry(&before.unwrap_or_else(|| Position::start(0)))?;
+                Ok(Back::Watch(watch))
+            }
+        }
+    }
+
+    /// Brings the fork to `target`, with a wider margin each time the
+    /// counter's interrupt comes too late, and readies it for gdb again.
+    fn go_to_or_retry(&mut self, target: &Position) -> Result<()> {
+        with_margins(|margin| self.go_to(target, margin))?;
+        self.ready_for_gdb()
+    }
+
+    /// Brings the fork to `target`: the start of its step, then its moves.
+    fn go_to(&mut self, target: &Position, margin: u64) -> Result<()> {
+        self.at_step_start(target.step)?;
+        for &mv in &target.moves {
+            self.replay(mv, margin)?;
+        }
+        self.position = target.clone();
+        Ok(())
+    }
+
+    /// Brings the fork to the start of step `step`: rewound to its
+    /// checkpoint there, else rewound to the latest one before and run
+    /// forward, else a fork of the run there. The start is kept as a
+    /// checkpoint for next time.
+    fn at_step_start(&mut self, step: u64) -> Result<()> {
+        let history = self.history.as_ref().expect("going back takes a history");
+        match self.checkpoints.range(..=step).next_back() {
+            Some((&at, &id)) => {
+                let pages = StorePages(history.store()?);
+                self.machine.rewind(id, &pages)?;
+                if at == step {
+                    self.position = Position::start(step);
+                    return Ok(());
+                }
+                self.machine.clear_debug()?;
+                self.machine.run(Some(step), &mut Ignore)?;
+            }
+            None => {
+                self.machine = history.machine_at(step)?;
+                self.checkpoints.clear();
+            }
+        }
+        if self.machine.step() != step {
+            bail!(
+                "the run ended at step {} before step {step}",
+                self.machine.step()
+            );
+        }
+        let id = self.machine.checkpoint()?;
+        self.checkpoints.insert(step, id);
+        self.position = Position::start(step);
+        Ok(())
+    }
+
+    /// Does `mv` again from where the fork is, with none of gdb's traps.
+    fn replay(&mut self, mv: Move, margin: u64) -> Result<()> {
+        match mv {
+            Move::Steps(n) => {
+                self.machine.set_debug(Stepping::Yes, &[])?;
+                for _ in 0..n {
+                    match self.machine.run(None, &mut Ignore)? {
+                        Outcome::Debug(DebugStop::Step) => {}
+                        other => bail!("a single step replayed came to {other:?}"),
+                    }
+                }
+            }
+            Move::Hit(target) => {
+                self.machine.set_debug(Stepping::No, &target.registers())?;
+                loop {
+                    match self.machine.run(None, &mut Ignore)? {
+                        Outcome::Debug(DebugStop::Breakpoint(address)) => {
+                            if self.in_scope(address)? {
+                                break;
+                            }
+                            self.machine.pass_breakpoint()?;
+                        }
+                        Outcome::Debug(DebugStop::Watchpoint(address)) => {
+                            if self.in_scope(address)? {
+                                break;
+                            }
+                        }
+                        other => bail!("a run to a trap replayed came to {other:?}"),
+                    }
+                }
+            }
+            Move::Branches(count) => {
+                self.machine.set_debug(Stepping::No, &[])?;
+                self.machine.set_branch_stop(Some(count), margin)?;
+                match self.machine.run(None, &mut Ignore)? {
+                    Outcome::Debug(DebugStop::Branches) => {}
+                    Outcome::Debug(DebugStop::PassedBranches) => return Err(Passed.into()),
+                    other => bail!("a run to a branch count replayed came to {other:?}"),
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The instruction boundary before `here`, or None at the run's start.
+    /// One single step fewer when `here` ends in single steps; else found
+    /// from where `here`'s last move began, closing in on its branch count
+    /// when the run counts branches, then single-stepping until the step
+    /// that reaches `here`.
+    fn before(&mut self, here: &Position, margin: u64) -> Result<Option<Position>> {
+        if let Some(Move::Steps(n)) = here.moves.last() {
+            let mut moves = here.moves.clone();
+            match n {
+                1 => {
+                    moves.pop();
+                }
+                n => *moves.last_mut().expect("ends in single steps") = Move::Steps(n - 1),
+            }
+            return Ok(Some(Position {
+                step: here.step,
+                moves,
+            }));
+        }
+        let (anchor, arrival) = match here.moves.split_last() {
+            Some((last, rest)) => {
+                let arrival = match *last {
+                    Move::Hit(GdbTrap::Watch(watch)) => Arrival::Watch(watch),
+                    Move::Hit(GdbTrap::Breakpoint(address)) => Arrival::Breakpoint(address),
+                    Move::Branches(count) => Arrival::Branches(count),
+                    Move::Steps(_) => unreachable!("handled above"),
+                };
+                let anchor = Position {
+                    step: here.step,
+                    moves: rest.to_vec(),
+                };
+                (anchor, arrival)
+            }
+            None if here.step == 0 => return Ok(None),
+            None => (
+                Position::start(here.step - 1),
+                Arrival::StepStart(here.step),
+            ),
+        };
+
+        // The branch count at `here`, then from the anchor as close as one
+        // branch short of it.
+        if self.position != *here {
+            self.go_to(here, margin)?;
+        }
+        let count_here = self.machine.branch_count()?;
+        self.go_to(&anchor, margin)?;
+        let mut found = anchor.clone();
+        if let (Some(here_count), Some(anchor_count)) = (count_here, self.machine.branch_count()?)
+            && here_count > anchor_count + 1
+        {
+            self.replay(Move::Branches(here_count - 1), margin)?;
+            found = found.then(Move::Branches(here_count - 1));
+        }
+
+        // Single steps, each a boundary before `here`, until the one that
+        // reaches it.
+        let registers = match arrival {
+            Arrival::Watch(watch) => super::watch_registers(&watch),
+            _ => Vec::new(),
+        };
+        self.machine.set_debug(Stepping::Yes, &registers)?;
+        let mut steps = 0;
+        loop {
+            let outcome = self.machine.run(None, &mut Ignore)?;
+            let reached = match (arrival, outcome) {
+                (Arrival::Watch(_), Outcome::Debug(DebugStop::Watchpoint(address))) => {
+                    self.in_scope(address)?
+                }
+                (Arrival::Breakpoint(address), Outcome::Debug(DebugStop::Step)) => {
+                    self.machine.registers()?.rip == address && self.in_scope(address)?
+                }
+                (Arrival::Branches(count), Outcome::Debug(DebugStop::Step)) => {
+                    self.machine.branch_count()? == Some(count)
+                }
+                (Arrival::StepStart(step), Outcome::Debug(DebugStop::Step)) => {
+                    self.machine.step() == step
+                }
+                (_, Outcome::Debug(DebugStop::Step | DebugStop::Watchpoint(_))) => false,
+                (_, other) => bail!("stepping toward where gdb was came to {other:?}"),
+            };
+            if reached {
+                break;
+            }
+            steps += 1;
+        }
+        if steps > 0 {
+            found = found.then(Move::Steps(steps));
+        }
+        self.position = here.clone();
+        Ok(Some(found))
+    }
+
+    /// The last hit of one of gdb's traps in the debugged process before
+    /// `here`, and the trap: the run is replayed with gdb's traps set from
+    /// a window's start, the latest checkpoint or keyframe at or before
+    /// `here`, up to `here`; with no hit there, from the window before,
+    /// and so on back to the run's start.
+    fn last_hit_before(
+        &mut self,
+        here: &Position,
+        margin: u64,
+    ) -> Result<Option<(Position, GdbTrap)>> {
+        let keyframes = self
+            .history
+            .as_ref()
+            .expect("going back takes a history")
+            .keyframes()?;
+        let mut end = None;
+        let mut before = here.step;
+        loop {
+            let start = self
+                .checkpoints
+                .range(..=before)
+                .map(|(&step, _)| step)
+                .chain(keyframes.iter().copied().filter(|&s| s <= before))
+                .max()
+                .unwrap_or(0);
+            let found = self.scan(start, end, here, margin)?;
+            if found.is_some() || start == 0 {
+                return Ok(found);
+            }
+            end = Some(start);
+            before = start - 1;
+        }
+    }
+
+    /// Replays the run from the start of step `start` with gdb's traps
+    /// set, up to the start of step `end`, or with None up to `here`, and
+    /// returns the last hit in the debugged process on the way.
+    fn scan(
+        &mut self,
+        start: u64,
+        end: Option<u64>,
+        here: &Position,
+        margin: u64,
+    ) -> Result<Option<(Position, GdbTrap)>> {
+        self.go_to(&Position::start(start), margin)?;
+        self.set_traps_for_scan(None)?;
+        let mut scan = Scan::default();
+        let until = end.unwrap_or(here.step);
+
+        // Whole steps, up to `until`'s start.
+        loop {
+            let outcome = self.machine.run(Some(until), &mut Ignore)?;
+            let at = self.machine.step();
+            match outcome {
+                Outcome::Paused => break,
+                Outcome::Stopped(_) => return Ok(scan.last),
+                Outcome::Debug(stop) => self.note_hit(&mut scan, at, stop)?,
+            }
+        }
+        if end.is_some() {
+            return Ok(scan.last);
+        }
+
+        // Then `here`'s moves within its step, gdb's traps set alongside
+        // each move's own. A breakpoint where a move ended is a hit there,
+        // passed before the next move runs.
+        self.machine.complete_pending_exit()?;
+        let mut done = Position::start(here.step);
+        for &mv in &here.moves {
+            scan.since = done.clone();
+            match mv {
+                Move::Steps(n) => {
+                    self.set_traps_for_scan(None)?;
+                    let registers = self.traps.registers();
+                    self.machine.set_debug(Stepping::Yes, &registers)?;
+                    for j in 0..n {
+                        let boundary = match j {
+                            0 => done.clone(),
+                            j => done.then(Move::Steps(j)),
+                        };
+                        loop {
+                            match self.machine.run(None, &mut Ignore)? {
+                                Outcome::Debug(DebugStop::Step) => break,
+                                Outcome::Debug(DebugStop::Watchpoint(piece)) => {
+                                    let after = done.then(Move::Steps(j + 1));
+                                    self.note_watch(&mut scan, piece, after)?;
+                                    break;
+                                }
+                                Outcome::Debug(DebugStop::Breakpoint(address)) => {
+                                    self.note_breakpoint(&mut scan, address, boundary.clone())?;
+                                    self.machine.pass_breakpoint()?;
+                                }
+                                other => bail!("a single step replayed came to {other:?}"),
+                            }
+                        }
+                    }
+                }
+                Move::Hit(target) => {
+                    self.set_traps_for_scan(Some(target))?;
+                    self.pass_breakpoint_here(&mut scan, &done)?;
+                    loop {
+                        let outcome = self.machine.run(None, &mut Ignore)?;
+                        let Outcome::Debug(stop) = outcome else {
+                            bail!("a run to a trap replayed came to {outcome:?}");
+                        };
+                        if self.is_move_target(target, stop)? {
+                            break;
+                        }
+                        self.note_hit(&mut scan, here.step, stop)?;
+                    }
+                }
+                Move::Branches(count) => {
+                    self.set_traps_for_scan(None)?;
+                    self.pass_breakpoint_here(&mut scan, &done)?;
+                    self.machine.set_branch_stop(Some(count), margin)?;
+                    loop {
+                        match self.machine.run(None, &mut Ignore)? {
+                            Outcome::Debug(DebugStop::Branches) => break,
+                            Outcome::Debug(DebugStop::PassedBranches) => return Err(Passed.into()),
+                            Outcome::Debug(stop) => self.note_hit(&mut scan, here.step, stop)?,
+                            other => bail!("a run to a branch count replayed came to {other:?}"),
+                        }
+                    }
+                }
+            }
+            done = done.then(mv);
+        }
+        Ok(scan.last)
+    }
+}
+
+/// What a replay with gdb's traps set has seen: where the fork is, as a
+/// position, and the last hit of a trap in the debugged process.
+#[derive(Default)]
+struct Scan {
+    since: Position,
+    last: Option<(Position, GdbTrap)>,
+}
+
+impl Default for Position {
+    fn default() -> Position {
+        Position::start(0)
+    }
+}
+
+impl Debuggee<'_> {
+    /// Sets gdb's traps on the fork for a replay, as gdb set them, with
+    /// `target`'s register too when given: a breakpoint gdb holds in a
+    /// register moves into int3 to make room.
+    fn set_traps_for_scan(&mut self, target: Option<GdbTrap>) -> Result<()> {
+        self.place_traps()?;
+        let mut registers = self.traps.registers();
+        if let Some(target) = target {
+            let needed = target.registers();
+            let mut memory = super::Int3Writer {
+                machine: &mut self.machine,
+                space: self.space,
+            };
+            if !self.traps.free_registers(needed.len(), &mut memory)? {
+                bail!(
+                    "running backwards to here takes a debug register that gdb's \
+                     watchpoints and hardware breakpoints hold"
+                );
+            }
+            registers = self.traps.registers();
+            registers.extend(needed);
+        }
+        self.machine.set_debug(Stepping::No, &registers)?;
+        Ok(())
+    }
+
+    /// Whether `stop` is the hit `target`, a move of the position being
+    /// replayed, runs to.
+    fn is_move_target(&mut self, target: GdbTrap, stop: DebugStop) -> Result<bool> {
+        Ok(match (target, stop) {
+            (GdbTrap::Breakpoint(address), DebugStop::Breakpoint(at)) => {
+                at == address && self.in_scope(at)?
+            }
+            (GdbTrap::Watch(watch), DebugStop::Watchpoint(piece)) => {
+                (watch.address..watch.address + watch.len).contains(&piece)
+                    && self.in_scope(piece)?
+            }
+            _ => false,
+        })
+    }
+
+    /// Notes a stop of a replay with gdb's traps, in step `step`: a hit in
+    /// the debugged process becomes the last hit, and later positions
+    /// count from it. A breakpoint is passed for the replay to run on.
+    fn note_hit(&mut self, scan: &mut Scan, step: u64, stop: DebugStop) -> Result<()> {
+        if scan.since.step != step {
+            scan.since = Position::start(step);
+        }
+        match stop {
+            DebugStop::Breakpoint(address) => {
+                let hit = scan.since.then(Move::Hit(GdbTrap::Breakpoint(address)));
+                if self.note_breakpoint(scan, address, hit.clone())? {
+                    scan.since = hit;
+                }
+                self.machine.pass_breakpoint()?;
+            }
+            DebugStop::Watchpoint(piece) => {
+                let hit = scan
+                    .since
+                    .then(Move::Hit(GdbTrap::Watch(self.watch_of(piece)?)));
+                if self.note_watch(scan, piece, hit.clone())? {
+                    scan.since = hit;
+                }
+            }
+            other => bail!("a replay with gdb's traps came to {other:?}"),
+        }
+        Ok(())
+    }
+
+    /// The watch gdb set that the watched piece at `piece` belongs to.
+    fn watch_of(&self, piece: u64) -> Result<Watch> {
+        self.traps
+            .watch_containing(piece)
+            .ok_or_else(|| anyhow::anyhow!("no watch of gdb's covers {piece:#x}"))
+    }
+
+    /// Notes the breakpoint at `address` reached at `at`, when it is in the
+    /// debugged process. Returns whether it was.
+    fn note_breakpoint(&mut self, scan: &mut Scan, address: u64, at: Position) -> Result<bool> {
+        if !self.in_scope(address)? {
+            return Ok(false);
+        }
+        scan.last = Some((at, GdbTrap::Breakpoint(address)));
+        Ok(true)
+    }
+
+    /// Notes the watched write to the piece at `piece`, the fork at `at`
+    /// after it, when it is in the debugged process. Returns whether it
+    /// was.
+    fn note_watch(&mut self, scan: &mut Scan, piece: u64, at: Position) -> Result<bool> {
+        if !self.in_scope(piece)? {
+            return Ok(false);
+        }
+        let watch = self.watch_of(piece)?;
+        scan.last = Some((at, GdbTrap::Watch(watch)));
+        Ok(true)
+    }
+
+    /// A breakpoint of gdb's at the instruction the fork is at, `at`,
+    /// where a move ended, is a hit there; it is passed so the next move
+    /// runs on from it.
+    fn pass_breakpoint_here(&mut self, scan: &mut Scan, at: &Position) -> Result<()> {
+        let rip = self.machine.registers()?.rip;
+        if !self.traps.breakpoints.iter().any(|b| b.address == rip) {
+            return Ok(());
+        }
+        self.note_breakpoint(scan, rip, at.clone())?;
+        self.machine.pass_breakpoint()
+    }
+
+    /// Readies the fork for gdb after going back: gdb's breakpoints placed
+    /// again, int3 written into the memory as it is now, the threads read
+    /// again, where the kernel says they are by then, and the run's records
+    /// after the step to compare with.
+    fn ready_for_gdb(&mut self) -> Result<()> {
+        self.place_traps()?;
+        self.layout = self.machine.task_layout()?;
+        let history = self.history.as_ref().expect("going back takes a history");
+        self.follow = Follow::new(history.records_after(self.position.step)?);
+        self.told = false;
+        self.refresh_threads();
+        Ok(())
+    }
+}
+
+/// Runs `attempt` with each margin in turn until the counter's interrupt
+/// comes in time.
+fn with_margins<T>(mut attempt: impl FnMut(u64) -> Result<T>) -> Result<T> {
+    let mut last = None;
+    for margin in MARGINS {
+        match attempt(margin) {
+            Err(e) if e.is::<Passed>() => last = Some(e),
+            other => return other,
+        }
+    }
+    Err(last.expect("at least one margin"))
+}

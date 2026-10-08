@@ -12,6 +12,7 @@
 //! [`Observer`] along with the step it arrived on.
 
 pub mod boot;
+pub mod checkpoint;
 pub mod cpu;
 pub mod debug;
 pub mod kvm;
@@ -114,6 +115,13 @@ pub struct Config {
     pub preemption: Preemption,
     /// Whether the machine reserves the extras slot (layout::EXTRAS_START).
     pub extras: Extras,
+}
+
+/// Where boot's writes go: the machine's RAM, or memory of their own.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BootInto {
+    Ram,
+    Scratch,
 }
 
 /// Whether a step adds the per-exit quantum: an exit does, a step the
@@ -313,6 +321,26 @@ pub struct Machine {
     /// When the guest last exited, while a deadline is watched: how long it
     /// has gone without one says whether it is stuck computing.
     pub(crate) last_exit: std::time::Instant,
+    /// Where the machine's memory started: boot, or the keyframes it was
+    /// restored from, for rewinding to a checkpoint (checkpoint.rs).
+    pub(crate) origin: Origin,
+    /// The checkpoints a debugger keeps to rewind to (checkpoint.rs).
+    pub(crate) checkpoints: checkpoint::Checkpoints,
+    /// The branch count a debugger asked the machine to stop at, and how
+    /// close the machine is to it (debug.rs).
+    pub(crate) branch_stop: Option<debug::BranchStop>,
+    /// The user address a single step through the kernel's return to user
+    /// space ends at, trapped in a debug register (debug.rs).
+    pub(crate) user_return: Option<u64>,
+}
+
+/// Where a machine's memory started.
+pub(crate) enum Origin {
+    /// Boot wrote the kernel, its command line and page tables into it.
+    Boot,
+    /// Keyframes held its pages: each non-zero page's number and the hash
+    /// of its contents, in page order.
+    Restored(Vec<(u32, [u8; 32])>),
 }
 
 /// The machine's configuration and how far it has run; its devices and
@@ -430,24 +458,17 @@ impl Machine {
             int3s: debug::Int3s::default(),
             deadline: None,
             last_exit: std::time::Instant::now(),
+            origin: Origin::Boot,
+            checkpoints: checkpoint::Checkpoints::default(),
+            branch_stop: None,
+            user_return: None,
         })
     }
 
     /// A machine at step 0: the kernel loaded, the vCPU at its entry point.
     pub fn boot(config: &Config) -> Result<Machine> {
         let mut m = Self::create(config)?;
-        let kernel = std::fs::read(&config.kernel)
-            .with_context(|| format!("reading {}", config.kernel.display()))?;
-        let spec = boot::BootSpec {
-            kernel: &kernel,
-            initrd: &config.initrd,
-            cmdline: &config.cmdline,
-            seed: config.seed,
-            pmem_len: m.pmem.as_ref().map_or(0, |p| p.len() as u64),
-            extras_len: m.extras.as_ref().map_or(0, |e| e.len() as u64),
-        };
-        let entry = boot::load(&mut m.dev.ram, &spec)?;
-        boot::write_tables(&mut m.dev.ram)?;
+        let entry = m.write_boot(BootInto::Ram)?;
 
         cpu::setup_msrs(&m.vcpu)?;
         cpu::setup_sregs(&m.vcpu)?;
@@ -455,6 +476,37 @@ impl Machine {
         cpu::setup_fpu(&m.vcpu)?;
         cpu::setup_lapic(&m.vcpu)?;
         Ok(m)
+    }
+
+    /// Writes what boot puts in memory, the kernel, its command line and
+    /// page tables, into the machine's RAM, or into memory of its own that
+    /// a rewind reads the boot's pages from, which it returns. Returns the
+    /// kernel's entry point.
+    pub(crate) fn write_boot(&mut self, into: BootInto) -> Result<u64> {
+        let kernel = std::fs::read(&self.config.kernel)
+            .with_context(|| format!("reading {}", self.config.kernel.display()))?;
+        let spec = boot::BootSpec {
+            kernel: &kernel,
+            initrd: &self.config.initrd,
+            cmdline: &self.config.cmdline,
+            seed: self.config.seed,
+            pmem_len: self.pmem.as_ref().map_or(0, |p| p.len() as u64),
+            extras_len: self.extras.as_ref().map_or(0, |e| e.len() as u64),
+        };
+        let write = |ram: &mut Mapping| -> Result<u64> {
+            let entry = boot::load(ram, &spec)?;
+            boot::write_tables(ram)?;
+            Ok(entry)
+        };
+        match into {
+            BootInto::Ram => write(&mut self.dev.ram),
+            BootInto::Scratch => {
+                let mut ram = Mapping::anonymous(self.dev.ram.len())?;
+                let entry = write(&mut ram)?;
+                self.checkpoints.booted = Some(ram);
+                Ok(entry)
+            }
+        }
     }
 
     /// The number of exits so far.
@@ -551,6 +603,7 @@ impl Machine {
             work.counter.pause()?;
             work.overflow.disarm()?;
         }
+        self.branch_interrupt_disarmed();
         Ok(())
     }
 
@@ -585,6 +638,10 @@ impl Machine {
             if self.work.is_some() && self.config.preemption == Preemption::AtBranchCounts {
                 self.aim_preemption()?;
             }
+            if let Some(stop) = self.close_in_on_branches()? {
+                return Ok(Outcome::Debug(stop));
+            }
+            self.step_into_user_space()?;
 
             // The port of a counted exit; MMIO exits count under MMIO_PORT.
             const MMIO_PORT: u16 = 0xffff;
@@ -709,6 +766,7 @@ impl Machine {
             let stepped = std::mem::take(&mut work.stepping);
             work.target = None;
             work.overflow.disarm()?;
+            self.branch_interrupt_disarmed();
             if stepped {
                 self.apply_guest_debug()?;
             }

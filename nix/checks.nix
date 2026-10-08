@@ -274,6 +274,33 @@ let
         }
         EOF
         $CC -static -O1 -g -o $out/bin/int3 int3.c
+
+        # The source is in the root under /src, the directory its DWARF
+        # names, so gdb shows its lines.
+        mkdir -p $out/src
+        cat > $out/src/reverse.c <<'EOF'
+        #include <unistd.h>
+
+        volatile long total;
+
+        __attribute__((noinline)) void add(long n)
+        {
+          total += n; /* the add */
+        }
+
+        int main(void)
+        {
+          write(1, "start\n", 6);
+          for (long i = 1; i <= 5; i++) {
+            add(i); /* the call */
+            write(1, ".", 1); /* the dot */
+          }
+          write(1, "done\n", 5);
+          return 0;
+        }
+        EOF
+        $CC -static -O0 -g -fdebug-prefix-map=$out/src=/src \
+          -o $out/bin/reverse $out/src/reverse.c
       '';
 
   # A root with a static program in two files, like mylib: main hands a
@@ -1369,6 +1396,85 @@ in
         ! grep -q '^0x[0-9a-f]* <sixth>:.*0xcc' kernel
         grep -q 'exited normally' kernel
         ! grep -q 'left the recording' kernel
+        touch $out
+      '';
+
+  # checks.gdb-reverse: gdb runs a fork backwards, under exit time and,
+  # where the branch counter opens, counter time. From the program's last
+  # write, after five adds to a total, a watch on the total run backwards
+  # stops before each add, with the values swapped, the last add first.
+  # A breakpoint run backwards to stops in the fourth add, reverse-finish
+  # goes back to the line that called it, and reverse-next, with the
+  # breakpoint gone, through the lines before it into the round before. A reverse-stepi then a stepi land where they began.
+  # Run forwards again, the fork stops at the next add, the third, and
+  # ends as the run did, on its recording. With nothing to stop at, a run backwards
+  # reaches the start of the run. Boots the VM, so it needs /dev/kvm.
+  gdb-reverse =
+    pkgs.runCommand "rewind-gdb-reverse"
+      {
+        nativeBuildInputs = [
+          rewind
+          pkgs.gdb
+        ];
+        requiredSystemFeatures = [ "kvm" ];
+      }
+      ''
+        export REWIND_HOME=$TMPDIR/rewind
+        # No debuginfod server: without a network, each of gdb's questions
+        # to it waits out a timeout.
+        export REWIND_DEBUGINFOD=/nonexistent
+
+        for clock in exits branches; do
+          if ! rewind run -q --clock "$clock" --name "reverse-$clock" --root ${gdbRoot} \
+            -- /bin/reverse > run 2>&1; then
+            cat run
+            grep -q 'perf_event_open' run
+            echo "skipped counter time: this machine's branch counter cannot drive it"
+            continue
+          fi
+          done=$(rewind events "reverse-$clock" | grep 'write(1, "done' | awk '{print $1}')
+
+          rewind gdb "reverse-$clock" "$done" -- -batch \
+            -ex 'watch total' -ex reverse-continue -ex reverse-continue \
+            -ex delete -ex 'break add' -ex reverse-continue -ex 'print n' \
+            -ex reverse-finish -ex delete -ex reverse-next -ex reverse-next -ex reverse-next \
+            -ex 'print i' -ex 'print $pc' -ex reverse-stepi -ex stepi -ex 'print $pc' \
+            -ex 'break add' -ex continue -ex 'print n' -ex delete -ex continue > gdb 2>&1 || true
+          cat gdb
+
+          # The watch, backwards: before the fifth add, then the fourth.
+          test "$(grep -c 'hit Hardware watchpoint 1: total' gdb)" = 2
+          test "$(grep -A1 'Old value = 15' gdb | grep -c 'New value = 10')" = 1
+          test "$(grep -A1 'Old value = 10' gdb | grep -c 'New value = 6')" = 1
+          grep -q 'in add (n=5) at .*reverse.c:7' gdb
+          grep -q 'in add (n=4) at .*reverse.c:7' gdb
+
+          # The breakpoint backwards, out of add to its call, and back
+          # through the lines before into the third round.
+          grep -q 'hit Breakpoint 2, add (n=4)' gdb
+          grep -q '^\$1 = 4$' gdb
+          grep -q 'in main () at .*reverse.c:14' gdb
+          grep -q 'the call' gdb
+          grep -q 'the dot' gdb
+          grep -q '^\$2 = 3$' gdb
+
+          # A step back and forward lands where it began.
+          grep -E '^\$[34] = \(void' gdb > pcs
+          test "$(wc -l < pcs)" = 2
+          test "$(awk '{print $5}' pcs | sort -u | wc -l)" = 1
+
+          # Forwards again: the next add is the third, and the run ends.
+          grep -q 'hit Breakpoint 3, add (n=3)' gdb
+          grep -q '^\$5 = 3$' gdb
+          grep -q 'exited normally' gdb
+          ! grep -q 'left the recording\|SIGTRAP' gdb
+
+          # Nothing to stop at: back to the start of the run.
+          rewind gdb "reverse-$clock" "$done" -- -batch -ex reverse-continue > start 2>&1 || true
+          cat start
+          grep -q 'Reached end of recorded history' start
+          ! grep -q 'only the CPU' start
+        done
         touch $out
       '';
 

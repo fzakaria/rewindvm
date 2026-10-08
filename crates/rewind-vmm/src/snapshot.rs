@@ -135,31 +135,15 @@ impl Machine {
     /// pages written since the parent was captured are stored; without
     /// one, every non-zero page is.
     pub fn keyframe(&mut self, pages: &mut dyn Pages, parent: Option<u64>) -> Result<Keyframe> {
-        // KVM finishes a port or MMIO instruction only on the next
-        // KVM_RUN, so right after an exit the vCPU still points at it. A
-        // run with immediate_exit set completes it without entering the
-        // guest, and the state saved below is after the instruction.
-        self.vcpu.set_kvm_immediate_exit(1);
-        match self.vcpu.run() {
-            Err(e) if e.errno() == libc::EINTR => {}
-            Err(e) => return Err(e).context("completing the pending exit"),
-            Ok(exit) => bail!("the vCPU ran while completing an exit: {exit:?}"),
-        }
-        self.vcpu.set_kvm_immediate_exit(0);
-
+        self.complete_pending_exit()?;
         let ram_pages = self.dev.ram.len() / PAGE_SIZE;
 
         // The dirty log is read even for a full keyframe, to clear it, so
         // the next keyframe's delta starts here.
-        let dirty = self
-            .vm
-            .get_dirty_log(SLOT_RAM, self.dev.ram.len())
-            .context("reading the dirty log")?;
+        let dirty = self.dirty_pages()?;
         let mut indices: Vec<usize> = match parent {
             None => (0..ram_pages).collect(),
-            Some(_) => (0..ram_pages)
-                .filter(|&i| dirty[i / 64] & (1 << (i % 64)) != 0)
-                .collect(),
+            Some(_) => dirty,
         };
         // The monitor writes the shared page itself, and the dirty log only
         // sees the guest's writes.
@@ -184,6 +168,36 @@ impl Machine {
             }
         }
 
+        let (cpu, irqchips, devices) = self.state()?;
+        Ok(Keyframe {
+            step: self.dev.step,
+            parent,
+            cpu,
+            irqchips,
+            devices,
+            pages: stored,
+        })
+    }
+
+    /// Completes the port or MMIO instruction of the last exit. KVM
+    /// finishes one only on the next KVM_RUN, so right after an exit the
+    /// vCPU still points at it. A run with immediate_exit set completes it
+    /// without entering the guest, so the machine's state is after the
+    /// instruction, as a keyframe or a checkpoint keeps it. Does nothing
+    /// when no exit is pending.
+    pub fn complete_pending_exit(&mut self) -> Result<()> {
+        self.vcpu.set_kvm_immediate_exit(1);
+        match self.vcpu.run() {
+            Err(e) if e.errno() == libc::EINTR => {}
+            Err(e) => return Err(e).context("completing the pending exit"),
+            Ok(exit) => bail!("the vCPU ran while completing an exit: {exit:?}"),
+        }
+        self.vcpu.set_kvm_immediate_exit(0);
+        Ok(())
+    }
+
+    /// The vCPU's state, the interrupt controllers' and the monitor's.
+    pub(crate) fn state(&self) -> Result<(CpuState, Vec<Vec<u8>>, DeviceState)> {
         let mut irqchips = Vec::new();
         for id in IRQCHIPS {
             let mut chip = kvm_irqchip {
@@ -193,22 +207,15 @@ impl Machine {
             self.vm.get_irqchip(&mut chip)?;
             irqchips.push(pod(&chip));
         }
-
-        Ok(Keyframe {
+        let devices = DeviceState {
+            now: self.dev.clock.now,
+            deadline: self.dev.clock.deadline,
+            shared: self.dev.shared,
+            epoch: self.dev.epoch,
             step: self.dev.step,
-            parent,
-            cpu: self.cpu_state()?,
-            irqchips,
-            devices: DeviceState {
-                now: self.dev.clock.now,
-                deadline: self.dev.clock.deadline,
-                shared: self.dev.shared,
-                epoch: self.dev.epoch,
-                step: self.dev.step,
-                branches: self.branches(),
-            },
-            pages: stored,
-        })
+            branches: self.branches(),
+        };
+        Ok((self.cpu_state()?, irqchips, devices))
     }
 
     fn cpu_state(&self) -> Result<CpuState> {
@@ -266,19 +273,46 @@ impl Machine {
         let mut m = Self::create(config)?;
 
         // Memory: each page once, with the contents the last keyframe that
-        // lists it gives it.
+        // lists it gives it, which a rewind to a checkpoint reads again.
         let ram = m.dev.ram.as_mut_slice();
-        for (index, hash) in final_pages(chain, ram.len() / PAGE_SIZE)? {
+        let restored = final_pages(chain, ram.len() / PAGE_SIZE)?;
+        for &(index, hash) in &restored {
             let at = index as usize * PAGE_SIZE;
             pages.get(hash, &mut ram[at..at + PAGE_SIZE])?;
         }
+        m.origin = crate::Origin::Restored(restored.into_iter().map(|(i, h)| (i, *h)).collect());
         // Start the dirty log afresh from the restored memory.
         m.vm.get_dirty_log(SLOT_RAM, m.dev.ram.len())?;
 
+        m.apply_state(&last.cpu, &last.irqchips, &last.devices)?;
+
+        // A kernel that buffers read and write records has its records
+        // encoded against the ones the trace holds so far.
+        if let Some(shared) = m.dev.shared {
+            let io = crate::pv::check_interface(m.dev.guest_interface(shared)?)?;
+            if io == crate::pv::GuestIo::Buffered {
+                let encoder = rewind_trace::io_records::Encoder::resume(trace)
+                    .context("reading the read and write records up to the keyframe")?;
+                m.dev.io = Some(encoder);
+            }
+        }
+        Ok(m)
+    }
+
+    /// Sets the vCPU, the interrupt controllers and the monitor's state to
+    /// what a keyframe or checkpoint kept, on a machine that has not run
+    /// since or has its pending exit completed. The guest's branch counter
+    /// opens again from the kept count the next time the machine runs.
+    pub(crate) fn apply_state(
+        &mut self,
+        cpu: &CpuState,
+        irqchips: &[Vec<u8>],
+        devices: &DeviceState,
+    ) -> Result<()> {
         // The vCPU, in the order Firecracker restores it: the MSRs after
         // the local APIC, the pending events last.
-        let c = &last.cpu;
-        let v = &m.vcpu;
+        let c = cpu;
+        let v = &self.vcpu;
         v.set_mp_state(unpod::<kvm_mp_state>(&c.mp_state)?)?;
         v.set_regs(&unpod::<kvm_regs>(&c.regs)?)?;
         v.set_sregs(&unpod::<kvm_sregs>(&c.sregs)?)?;
@@ -307,33 +341,33 @@ impl Machine {
         }
         v.set_vcpu_events(&unpod::<kvm_vcpu_events>(&c.events)?)?;
 
-        for chip in &last.irqchips {
-            m.vm.set_irqchip(&unpod::<kvm_irqchip>(chip)?)?;
+        for chip in irqchips {
+            self.vm.set_irqchip(&unpod::<kvm_irqchip>(chip)?)?;
         }
 
-        let d = &last.devices;
-        m.dev.clock = Clock {
+        let d = devices;
+        self.dev.clock = Clock {
             now: d.now,
             deadline: d.deadline,
-            quantum: config.quantum,
+            quantum: self.config.quantum,
         };
-        m.dev.shared = d.shared;
+        self.dev.shared = d.shared;
         // A keyframe taken after setup restores the interface the guest
-        // kernel named then, which must be one this monitor speaks. A
-        // kernel that buffers read and write records has its records
-        // encoded against the ones the trace holds so far.
-        if let Some(shared) = m.dev.shared {
-            let io = crate::pv::check_interface(m.dev.guest_interface(shared)?)?;
-            if io == crate::pv::GuestIo::Buffered {
-                let encoder = rewind_trace::io_records::Encoder::resume(trace)
-                    .context("reading the read and write records up to the keyframe")?;
-                m.dev.io = Some(encoder);
-            }
+        // kernel named then, which must be one this monitor speaks.
+        if let Some(shared) = self.dev.shared {
+            crate::pv::check_interface(self.dev.guest_interface(shared)?)?;
         }
-        m.dev.epoch = d.epoch;
-        m.dev.step = d.step;
-        m.work_base = d.branches;
-        Ok(m)
+        self.dev.epoch = d.epoch;
+        self.dev.step = d.step;
+        self.dev.stop = None;
+        self.dev.inspect = false;
+        self.dev.input_sent = false;
+        self.dev.timer_armed_at = None;
+        self.work = None;
+        self.work_base = d.branches;
+        self.branch_stop = None;
+        self.user_return = None;
+        Ok(())
     }
 }
 

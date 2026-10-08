@@ -32,6 +32,9 @@ use gdbstub::target::ext::base::multithread::{
     MultiThreadBase, MultiThreadResume, MultiThreadResumeOps, MultiThreadSchedulerLocking,
     MultiThreadSchedulerLockingOps, MultiThreadSingleStep, MultiThreadSingleStepOps,
 };
+use gdbstub::target::ext::base::reverse_exec::{
+    ReplayLogPosition, ReverseCont, ReverseContOps, ReverseStep, ReverseStepOps,
+};
 use gdbstub::target::ext::breakpoints::{
     Breakpoints, BreakpointsOps, HwBreakpoint, HwBreakpointOps, HwWatchpoint, HwWatchpointOps,
     SwBreakpoint, SwBreakpointOps, WatchKind,
@@ -47,6 +50,10 @@ use rewind_vmm::{Machine, Observer, Outcome};
 use crate::gdb_regs::{RegsWithBases, X86_64WithBases};
 
 use crate::threads::{Memory, Tasks, Thread};
+
+mod reverse;
+use reverse::{Back, GdbTrap, Move, Position};
+pub use reverse::{History, RunHistory};
 
 /// How far the fork runs between looks at the connection, in steps, so a
 /// Ctrl-C in gdb stops a VM that is running free.
@@ -235,19 +242,21 @@ impl Memory for Machine {
 enum Mode {
     Continue,
     Step,
+    ContinueBack,
+    StepBack,
 }
 
 impl Mode {
     fn stepping(self) -> Stepping {
         match self {
-            Mode::Continue => Stepping::No,
-            Mode::Step => Stepping::Yes,
+            Mode::Continue | Mode::ContinueBack => Stepping::No,
+            Mode::Step | Mode::StepBack => Stepping::Yes,
         }
     }
 }
 
 /// A range gdb watches, as it asked for it.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Watch {
     address: u64,
     len: u64,
@@ -440,29 +449,37 @@ impl Traps {
             .iter()
             .filter(|b| b.place == Place::Register)
             .map(|b| Trap::Execute(b.address));
-        let watches = self.watches.iter().flat_map(|w| {
-            let access = match w.kind {
-                WatchKind::Write => Access::Write,
-                WatchKind::Read | WatchKind::ReadWrite => Access::ReadWrite,
-            };
-            pieces(w.address, w.len)
-                .into_iter()
-                .map(move |(address, len)| Trap::Watch {
-                    address,
-                    len,
-                    access,
-                })
-        });
+        let watches = self.watches.iter().flat_map(watch_registers);
         breakpoints.chain(watches).collect()
     }
 
     /// The watch, as gdb set it, that the piece at `address` belongs to.
     fn watch_at(&self, address: u64) -> Option<(u64, WatchKind)> {
+        self.watch_containing(address).map(|w| (w.address, w.kind))
+    }
+
+    fn watch_containing(&self, address: u64) -> Option<Watch> {
         self.watches
             .iter()
             .find(|w| (w.address..w.address + w.len).contains(&address))
-            .map(|w| (w.address, w.kind))
+            .copied()
     }
+}
+
+/// The debug registers a watch takes, one for each piece of it.
+fn watch_registers(w: &Watch) -> Vec<Trap> {
+    let access = match w.kind {
+        WatchKind::Write => Access::Write,
+        WatchKind::Read | WatchKind::ReadWrite => Access::ReadWrite,
+    };
+    pieces(w.address, w.len)
+        .into_iter()
+        .map(|(address, len)| Trap::Watch {
+            address,
+            len,
+            access,
+        })
+        .collect()
 }
 
 /// `len` bytes at `address` as the pieces a debug register can watch: at
@@ -499,7 +516,7 @@ fn in_scope(address: u64, space: Option<u64>, cr3: u64) -> bool {
 
 /// A forked machine under gdb.
 #[derive(Debug)]
-pub struct Debuggee {
+pub struct Debuggee<'h> {
     machine: Machine,
     traps: Traps,
     mode: Mode,
@@ -519,15 +536,31 @@ pub struct Debuggee {
     /// The debugged process's shared libraries, as gdb's SVR4 library
     /// list, when `rewind gdb` found them.
     libraries: Option<String>,
+    /// The run the fork came from, which running backwards replays; None
+    /// for a fork that only runs forwards.
+    history: Option<Box<dyn History + 'h>>,
+    /// Where the fork is in its run.
+    position: Position,
+    /// The fork's checkpoints, for running backwards.
+    checkpoints: reverse::Checkpoints,
+    /// Whether gdb changed the fork's registers or memory.
+    altered: bool,
 }
 
-impl Debuggee {
+impl<'h> Debuggee<'h> {
     /// A debuggee for `machine`, a fork of a run at a step, with `made`,
     /// the records the run made after that step. With [`Scope::Process`],
     /// that process's address space is the one gdb debugs, found in the
     /// kernel's tasks, or, from a kernel that publishes no task layout,
     /// the one the machine is in now.
-    pub fn new(machine: Machine, made: Vec<(u64, Vec<u8>)>, scope: Scope) -> Result<Debuggee> {
+    pub fn new(
+        mut machine: Machine,
+        made: Vec<(u64, Vec<u8>)>,
+        scope: Scope,
+    ) -> Result<Debuggee<'h>> {
+        // The fork starts at its step's start, the step's exit completed,
+        // as a replay to it is.
+        machine.complete_pending_exit()?;
         let layout = machine.task_layout()?;
         let process = match scope {
             Scope::Process(pid) => Some(pid),
@@ -544,6 +577,7 @@ impl Debuggee {
             (Some(_), None) => Some(page_table(machine.special_registers()?.cr3)),
             (None, _) => None,
         };
+        let position = Position::start(machine.step());
         let mut debuggee = Debuggee {
             machine,
             traps: Traps::default(),
@@ -556,9 +590,46 @@ impl Debuggee {
             follow: Follow::new(made),
             told: false,
             libraries: None,
+            history: None,
+            position,
+            checkpoints: reverse::Checkpoints::new(),
+            altered: false,
         };
         debuggee.refresh_threads();
         Ok(debuggee)
+    }
+
+    /// Lets gdb run the fork backwards, by replaying `history`, the run
+    /// it came from.
+    pub fn with_history(mut self, history: Box<dyn History + 'h>) -> Debuggee<'h> {
+        self.history = Some(history);
+        self
+    }
+
+    /// Places gdb's breakpoints again on the machine as it is now: in the
+    /// debug registers, and past them as int3 written where the debugged
+    /// process maps their addresses now.
+    fn place_traps(&mut self) -> Result<()> {
+        let breakpoints = std::mem::take(&mut self.traps.breakpoints);
+        let mut memory = Int3Writer {
+            machine: &mut self.machine,
+            space: self.space,
+        };
+        for b in &breakpoints {
+            if let Place::Int3(physical) = b.place {
+                memory.remove(physical)?;
+            }
+        }
+        for b in breakpoints {
+            if !self.traps.add_breakpoint(b.address, b.kind, &mut memory)? {
+                eprintln!(
+                    "rewind: the breakpoint at {:#x} has no debug register or memory to be \
+                     in at this step",
+                    b.address
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Reads the threads gdb sees again, after the machine has run. A task
@@ -695,12 +766,12 @@ impl Debuggee {
     /// Serves gdb on `conn` until it detaches or the connection closes.
     pub fn serve(&mut self, conn: TcpStream) -> Result<DisconnectReason> {
         let stub = GdbStub::new(conn);
-        stub.run_blocking::<EventLoop>(self)
+        stub.run_blocking::<EventLoop<'h>>(self)
             .map_err(|e| anyhow::anyhow!("gdb session: {e}"))
     }
 }
 
-impl Target for Debuggee {
+impl Target for Debuggee<'_> {
     type Arch = X86_64WithBases;
     type Error = String;
 
@@ -717,7 +788,7 @@ impl Target for Debuggee {
     }
 }
 
-impl LibrariesSvr4 for Debuggee {
+impl LibrariesSvr4 for Debuggee<'_> {
     fn get_libraries_svr4(
         &self,
         offset: u64,
@@ -767,7 +838,7 @@ fn fatal<E: std::fmt::Display>(e: E) -> TargetError<String> {
     TargetError::Fatal(e.to_string())
 }
 
-impl MultiThreadBase for Debuggee {
+impl MultiThreadBase for Debuggee<'_> {
     fn read_registers(&mut self, regs: &mut RegsWithBases, tid: Tid) -> TargetResult<(), Self> {
         // A thread off the CPU, or in the kernel on it: the user registers
         // it saved in its pt_regs. A thread whose registers do not read,
@@ -845,6 +916,7 @@ impl MultiThreadBase for Debuggee {
             (g[8], g[9], g[10], g[11], g[12], g[13], g[14], g[15]);
         r.rip = regs.rip;
         r.rflags = regs.eflags.into();
+        self.altered = true;
         self.machine.set_registers(&r).map_err(fatal)
     }
 
@@ -868,6 +940,7 @@ impl MultiThreadBase for Debuggee {
         {
             return Err(TargetError::NonFatal);
         }
+        self.altered = true;
         self.machine
             .write_virtual(start, data)
             .map_err(|_| TargetError::NonFatal)
@@ -889,7 +962,7 @@ impl MultiThreadBase for Debuggee {
     }
 }
 
-impl ThreadExtraInfo for Debuggee {
+impl ThreadExtraInfo for Debuggee<'_> {
     /// The CPU's task, or a thread's name and whether it is on the CPU.
     fn thread_extra_info(&self, tid: Tid, buf: &mut [u8]) -> Result<usize, String> {
         let Some(t) = self.threads.iter().find(|t| t.tid == tid) else {
@@ -909,7 +982,7 @@ impl ThreadExtraInfo for Debuggee {
 // resume actions come down to one: run the CPU, or step it. A step asked
 // of a thread off the CPU steps the CPU, and gdb then stops in whichever
 // thread that was.
-impl MultiThreadResume for Debuggee {
+impl MultiThreadResume for Debuggee<'_> {
     fn resume(&mut self) -> Result<(), Self::Error> {
         Ok(())
     }
@@ -938,18 +1011,46 @@ impl MultiThreadResume for Debuggee {
     fn support_scheduler_locking(&mut self) -> Option<MultiThreadSchedulerLockingOps<'_, Self>> {
         Some(self)
     }
+
+    fn support_reverse_step(&mut self) -> Option<ReverseStepOps<'_, Tid, Self>> {
+        self.history.is_some().then_some(self)
+    }
+
+    fn support_reverse_cont(&mut self) -> Option<ReverseContOps<'_, Tid, Self>> {
+        self.history.is_some().then_some(self)
+    }
+}
+
+// Running backwards replays the run the fork came from: a step back is the
+// instruction before the last, and a run back stops at the last of gdb's
+// traps hit before (reverse.rs). Like a step forwards, a step back stops
+// the thread gdb stepped.
+impl ReverseStep<Tid> for Debuggee<'_> {
+    fn reverse_step(&mut self, tid: Tid) -> Result<(), Self::Error> {
+        self.mode = Mode::StepBack;
+        self.stepped = Some(tid);
+        Ok(())
+    }
+}
+
+impl ReverseCont<Tid> for Debuggee<'_> {
+    fn reverse_cont(&mut self) -> Result<(), Self::Error> {
+        self.mode = Mode::ContinueBack;
+        self.stepped = None;
+        Ok(())
+    }
 }
 
 // gdb asks to run one thread alone when it steps past a breakpoint. The
 // CPU's thread is the only one that runs anyway: the other threads move
 // only when the guest's scheduler puts them on the CPU.
-impl MultiThreadSchedulerLocking for Debuggee {
+impl MultiThreadSchedulerLocking for Debuggee<'_> {
     fn set_resume_action_scheduler_lock(&mut self) -> Result<(), Self::Error> {
         Ok(())
     }
 }
 
-impl MultiThreadSingleStep for Debuggee {
+impl MultiThreadSingleStep for Debuggee<'_> {
     fn set_resume_action_step(
         &mut self,
         tid: Tid,
@@ -968,7 +1069,7 @@ impl MultiThreadSingleStep for Debuggee {
 // memory past them, `hbreak` takes a register or none, and `watch` and
 // `awatch` take one register for each piece of what they watch; a watch
 // moves breakpoints out of the registers into int3 when it needs them.
-impl Breakpoints for Debuggee {
+impl Breakpoints for Debuggee<'_> {
     fn support_sw_breakpoint(&mut self) -> Option<SwBreakpointOps<'_, Self>> {
         Some(self)
     }
@@ -1007,7 +1108,7 @@ impl Int3Memory for Int3Writer<'_> {
     }
 }
 
-impl Debuggee {
+impl Debuggee<'_> {
     /// Adds a breakpoint of `kind` at `address` for gdb, saying why when it
     /// cannot be had.
     fn add_breakpoint(&mut self, address: u64, kind: Kind) -> TargetResult<bool, Self> {
@@ -1033,7 +1134,7 @@ impl Debuggee {
     }
 }
 
-impl SwBreakpoint for Debuggee {
+impl SwBreakpoint for Debuggee<'_> {
     fn add_sw_breakpoint(&mut self, address: u64, _kind: usize) -> TargetResult<bool, Self> {
         self.add_breakpoint(address, Kind::Software)
     }
@@ -1043,7 +1144,7 @@ impl SwBreakpoint for Debuggee {
     }
 }
 
-impl HwBreakpoint for Debuggee {
+impl HwBreakpoint for Debuggee<'_> {
     fn add_hw_breakpoint(&mut self, address: u64, _kind: usize) -> TargetResult<bool, Self> {
         self.add_breakpoint(address, Kind::Hardware)
     }
@@ -1053,7 +1154,7 @@ impl HwBreakpoint for Debuggee {
     }
 }
 
-impl HwWatchpoint for Debuggee {
+impl HwWatchpoint for Debuggee<'_> {
     fn add_hw_watchpoint(
         &mut self,
         address: u64,
@@ -1079,20 +1180,83 @@ impl HwWatchpoint for Debuggee {
     }
 }
 
+impl Debuggee<'_> {
+    /// The stop gdb is told of after a step forwards: in the thread gdb
+    /// stepped, which gdb expects to stop; a stop in another
+    /// thread would read to gdb as a signal it never asked for. A stepped
+    /// thread that has exited cannot stop: the CPU's thread stops with no
+    /// signal, which ends gdb's stepping without one.
+    fn step_stop(&self) -> MultiThreadStopReason<u64> {
+        let (tid, signal) = match self.stepped {
+            Some(tid) if self.source(tid).is_none() => (cpu_tid(), Signal::SIGZERO),
+            Some(tid) => (tid, Signal::SIGTRAP),
+            None => (cpu_tid(), Signal::SIGTRAP),
+        };
+        MultiThreadStopReason::SignalWithThread { tid, signal }
+    }
+
+    /// The stop gdb is told of after a step back: in the process's thread
+    /// gdb stepped, as a step forwards is, else in the thread a stop there
+    /// names. gdb names the thread of a step back separately, and may name
+    /// the CPU's while it steps one of the process's.
+    fn step_back_stop(&self) -> Result<MultiThreadStopReason<u64>> {
+        let tid = match self.stepped {
+            Some(tid) if matches!(self.source(tid), Some(Source::Task(..))) => tid,
+            _ => self.stopped_thread()?,
+        };
+        Ok(MultiThreadStopReason::SignalWithThread {
+            tid,
+            signal: Signal::SIGTRAP,
+        })
+    }
+}
+
+/// Runs the fork backwards as gdb asked, and says where it stopped. A
+/// fork that cannot go back stays where it is, and gdb's user is told why.
+fn run_back(target: &mut Debuggee<'_>) -> Result<Event<MultiThreadStopReason<u64>>> {
+    let mode = std::mem::replace(&mut target.mode, Mode::Continue);
+    if let Some(why) = target.cannot_go_back() {
+        eprintln!("rewind: {why}");
+        target.refresh_threads();
+        return Ok(Event::TargetStopped(target.step_stop()));
+    }
+    let back = match mode {
+        Mode::StepBack => target.step_back()?,
+        _ => target.continue_back()?,
+    };
+    let tid = target.stopped_thread()?;
+    Ok(Event::TargetStopped(match back {
+        Back::Stepped => target.step_back_stop()?,
+        Back::Breakpoint => MultiThreadStopReason::SwBreak(tid),
+        Back::Watch(watch) => MultiThreadStopReason::Watch {
+            tid,
+            kind: watch.kind,
+            addr: watch.address,
+        },
+        Back::Start => MultiThreadStopReason::ReplayLog {
+            tid: Some(tid),
+            pos: ReplayLogPosition::Begin,
+        },
+    }))
+}
+
 /// Runs the fork for gdb in chunks, looking at the connection between
 /// them for a Ctrl-C.
-enum EventLoop {}
+struct EventLoop<'h>(std::marker::PhantomData<&'h ()>);
 
-impl BlockingEventLoop for EventLoop {
-    type Target = Debuggee;
+impl<'h> BlockingEventLoop for EventLoop<'h> {
+    type Target = Debuggee<'h>;
     type Connection = TcpStream;
     type StopReason = MultiThreadStopReason<u64>;
 
     fn wait_for_stop_reason(
-        target: &mut Debuggee,
+        target: &mut Debuggee<'h>,
         conn: &mut TcpStream,
     ) -> Result<Event<Self::StopReason>, WaitForStopReasonError<String, std::io::Error>> {
         let target_error = |e: anyhow::Error| WaitForStopReasonError::Target(e.to_string());
+        if matches!(target.mode, Mode::StepBack | Mode::ContinueBack) {
+            return run_back(target).map_err(target_error);
+        }
         let traps = target.traps.registers();
         target
             .machine
@@ -1101,7 +1265,7 @@ impl BlockingEventLoop for EventLoop {
 
         // Each stop reads the threads again, and names the thread it
         // happened in.
-        let stop = |target: &mut Debuggee, reason: fn(Tid) -> MultiThreadStopReason<u64>| {
+        let stop = |target: &mut Debuggee<'h>, reason: fn(Tid) -> MultiThreadStopReason<u64>| {
             target.refresh_threads();
             let tid = target.stopped_thread().map_err(target_error)?;
             Ok(Event::TargetStopped(reason(tid)))
@@ -1114,16 +1278,10 @@ impl BlockingEventLoop for EventLoop {
         // the kernel, so its pc moves once the kernel returns to it. A
         // stepped thread that has exited cannot stop: the CPU's thread
         // stops with no signal, which ends gdb's stepping without one.
-        let step_done = |target: &mut Debuggee| {
+        let step_done = |target: &mut Debuggee<'h>| {
+            target.arrived(Some(Move::Steps(1))).map_err(target_error)?;
             target.refresh_threads();
-            let (tid, signal) = match target.stepped {
-                Some(tid) if target.source(tid).is_none() => (cpu_tid(), Signal::SIGZERO),
-                Some(tid) => (tid, Signal::SIGTRAP),
-                None => (cpu_tid(), Signal::SIGTRAP),
-            };
-            Ok(Event::TargetStopped(
-                MultiThreadStopReason::SignalWithThread { tid, signal },
-            ))
+            Ok(Event::TargetStopped(target.step_stop()))
         };
 
         loop {
@@ -1163,10 +1321,14 @@ impl BlockingEventLoop for EventLoop {
                     }
                     continue;
                 }
-                Outcome::Debug(DebugStop::Breakpoint(_)) => {
+                Outcome::Debug(DebugStop::Breakpoint(address)) => {
+                    let hit = Move::Hit(GdbTrap::Breakpoint(address));
+                    target.arrived(Some(hit)).map_err(target_error)?;
                     return stop(target, MultiThreadStopReason::SwBreak);
                 }
                 Outcome::Debug(DebugStop::Watchpoint(piece)) => {
+                    let hit = target.traps.watch_containing(piece).map(GdbTrap::Watch);
+                    target.arrived(hit.map(Move::Hit)).map_err(target_error)?;
                     target.refresh_threads();
                     let tid = target.stopped_thread().map_err(target_error)?;
                     let reason = match target.traps.watch_at(piece) {
@@ -1178,10 +1340,15 @@ impl BlockingEventLoop for EventLoop {
                     };
                     return Ok(Event::TargetStopped(reason));
                 }
+                Outcome::Debug(stop @ (DebugStop::Branches | DebugStop::PassedBranches)) => {
+                    return Err(target_error(anyhow::anyhow!(
+                        "running forwards stopped at a branch count: {stop:?}"
+                    )));
+                }
                 Outcome::Stopped(_) => {
                     return Ok(Event::TargetStopped(MultiThreadStopReason::Exited(0)));
                 }
-                Outcome::Paused => {}
+                Outcome::Paused => target.arrived(None).map_err(target_error)?,
             }
 
             // Between chunks: anything from gdb, a Ctrl-C most likely.
@@ -1196,7 +1363,7 @@ impl BlockingEventLoop for EventLoop {
         }
     }
 
-    fn on_interrupt(target: &mut Debuggee) -> Result<Option<Self::StopReason>, String> {
+    fn on_interrupt(target: &mut Debuggee<'h>) -> Result<Option<Self::StopReason>, String> {
         target.refresh_threads();
         Ok(Some(MultiThreadStopReason::SignalWithThread {
             tid: target.stopped_thread().map_err(|e| e.to_string())?,
