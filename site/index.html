@@ -356,281 +356,289 @@
             </button>
           </div>
 
-          <!-- The overview: numbered pins over the shot and a legend under it.
+          <!-- The shots, one per tab. On a phone they are a row to swipe, and
+               the shot in view picks its tab. -->
+          <div class="shots-panels swipe">
+            <!-- The overview: numbered pins over the shot and a legend under it.
                Hovering or focusing a legend item lights its pin and the other
                way round (style.css, no script). -->
-          <div
-            class="shots-panel"
-            id="show-overview"
-            role="tabpanel"
-            aria-labelledby="tab-overview"
-          >
-            <div class="tour-frame">
-              <a class="tour-link" href="img/app-failure.png">
-                <picture>
-                  <source srcset="img/app-failure.webp" type="image/webp" />
-                  <img
-                    src="img/app-failure.png"
-                    width="1440"
-                    height="900"
-                    loading="lazy"
-                    alt="The Rewind desktop app on a failing mylib run: the timeline with the playhead in the check phase, the build log, the process tree, files written, the SIGSEGV at 0x108 above where the run parted from a passing run of the same build, and the runs pill that opens every run of the build as a tree of forks. Opens the full-size image."
-                  />
-                </picture>
-              </a>
-              <button
-                type="button"
-                class="pin pin-1"
-                aria-label="1: the timeline, with the run's phases, the divergence and the failure"
-              >
-                1
-              </button>
-              <button type="button" class="pin pin-2" aria-label="2: the build log up to the step">
-                2
-              </button>
-              <button
-                type="button"
-                class="pin pin-3"
-                aria-label="3: the process tree alive at the step, and files written"
-              >
-                3
-              </button>
-              <button
-                type="button"
-                class="pin pin-4"
-                aria-label="4: the step's event, a SIGSEGV, and where the run diverged"
-              >
-                4
-              </button>
-              <button type="button" class="pin pin-5" aria-label="5: the Fork from here button">
-                5
-              </button>
-              <button
-                type="button"
-                class="pin pin-6"
-                aria-label="6: the runs pill, which opens every run of the build as a tree of forks"
-              >
-                6
-              </button>
+            <div
+              class="shots-panel"
+              id="show-overview"
+              role="tabpanel"
+              aria-labelledby="tab-overview"
+            >
+              <div class="tour-frame">
+                <a class="tour-link" href="img/app-failure.png">
+                  <picture>
+                    <source srcset="img/app-failure.webp" type="image/webp" />
+                    <img
+                      src="img/app-failure.png"
+                      width="1440"
+                      height="900"
+                      loading="lazy"
+                      alt="The Rewind desktop app on a failing mylib run: the timeline with the playhead in the check phase, the build log, the process tree, files written, the SIGSEGV at 0x108 above where the run parted from a passing run of the same build, and the runs pill that opens every run of the build as a tree of forks. Opens the full-size image."
+                    />
+                  </picture>
+                </a>
+                <button
+                  type="button"
+                  class="pin pin-1"
+                  aria-label="1: the timeline, with the run's phases, the divergence and the failure"
+                >
+                  1
+                </button>
+                <button
+                  type="button"
+                  class="pin pin-2"
+                  aria-label="2: the build log up to the step"
+                >
+                  2
+                </button>
+                <button
+                  type="button"
+                  class="pin pin-3"
+                  aria-label="3: the process tree alive at the step, and files written"
+                >
+                  3
+                </button>
+                <button
+                  type="button"
+                  class="pin pin-4"
+                  aria-label="4: the step's event, a SIGSEGV, and where the run diverged"
+                >
+                  4
+                </button>
+                <button type="button" class="pin pin-5" aria-label="5: the Fork from here button">
+                  5
+                </button>
+                <button
+                  type="button"
+                  class="pin pin-6"
+                  aria-label="6: the runs pill, which opens every run of the build as a tree of forks"
+                >
+                  6
+                </button>
+              </div>
+              <ol class="shots-legend">
+                <li id="tour-1" tabindex="0">
+                  <b>The timeline</b>
+                  <span>The whole run, with where it parted from the passing one.</span>
+                </li>
+                <li id="tour-2" tabindex="0">
+                  <b>Build log</b>
+                  <span>What the build printed, up to the playhead.</span>
+                </li>
+                <li id="tour-3" tabindex="0">
+                  <b>Processes and files</b>
+                  <span>What was running, and what was written.</span>
+                </li>
+                <li id="tour-4" tabindex="0">
+                  <b>The step&#x27;s event</b>
+                  <span>Here the SIGSEGV, and where the runs parted.</span>
+                </li>
+                <li id="tour-5" tabindex="0">
+                  <b>Fork from here</b>
+                  <span>Reruns from this step under a new schedule.</span>
+                </li>
+                <li id="tour-6" tabindex="0">
+                  <b>Every run</b>
+                  <span>All runs and forks of the build, as a tree.</span>
+                </li>
+              </ol>
             </div>
-            <ol class="shots-legend">
-              <li id="tour-1" tabindex="0">
-                <b>The timeline</b>
-                <span>The whole run, with where it parted from the passing one.</span>
-              </li>
-              <li id="tour-2" tabindex="0">
-                <b>Build log</b>
-                <span>What the build printed, up to the playhead.</span>
-              </li>
-              <li id="tour-3" tabindex="0">
-                <b>Processes and files</b>
-                <span>What was running, and what was written.</span>
-              </li>
-              <li id="tour-4" tabindex="0">
-                <b>The step&#x27;s event</b>
-                <span>Here the SIGSEGV, and where the runs parted.</span>
-              </li>
-              <li id="tour-5" tabindex="0">
-                <b>Fork from here</b>
-                <span>Reruns from this step under a new schedule.</span>
-              </li>
-              <li id="tour-6" tabindex="0">
-                <b>Every run</b>
-                <span>All runs and forks of the build, as a tree.</span>
-              </li>
-            </ol>
-          </div>
 
-          <div
-            class="shots-panel zoomed"
-            id="show-compare"
-            role="tabpanel"
-            aria-labelledby="tab-compare"
-            hidden
-          >
-            <div class="tour-frame">
-              <a class="tour-link" href="img/app-compare-tab.png">
-                <picture>
-                  <source srcset="img/app-compare-tab.webp" type="image/webp" />
-                  <img
-                    src="img/app-compare-tab.png"
-                    width="1440"
-                    height="900"
-                    loading="lazy"
-                    alt="The app's Compare tab: the writes both runs made before they part, then the failing run's SIGSEGV beside the passing run's write, each run's text in full with what differs in amber. Opens the full-size image."
-                  />
-                </picture>
-              </a>
+            <div
+              class="shots-panel zoomed"
+              id="show-compare"
+              role="tabpanel"
+              aria-labelledby="tab-compare"
+              hidden
+            >
+              <div class="tour-frame">
+                <a class="tour-link" href="img/app-compare-tab.png">
+                  <picture>
+                    <source srcset="img/app-compare-tab.webp" type="image/webp" />
+                    <img
+                      src="img/app-compare-tab.png"
+                      width="1440"
+                      height="900"
+                      loading="lazy"
+                      alt="The app's Compare tab: the writes both runs made before they part, then the failing run's SIGSEGV beside the passing run's write, each run's text in full with what differs in amber. Opens the full-size image."
+                    />
+                  </picture>
+                </a>
+              </div>
+              <p>Two runs side by side from where they part, with the difference in amber.</p>
             </div>
-            <p>Two runs side by side from where they part, with the difference in amber.</p>
-          </div>
 
-          <div
-            class="shots-panel zoomed"
-            id="show-threads"
-            role="tabpanel"
-            aria-labelledby="tab-threads"
-            hidden
-          >
-            <div class="tour-frame">
-              <a class="tour-link" href="img/app-threads.png">
-                <picture>
-                  <source srcset="img/app-threads.webp" type="image/webp" />
-                  <img
-                    src="img/app-threads.png"
-                    width="1440"
-                    height="900"
-                    loading="lazy"
-                    alt="The app's Threads tab around the crash: a lane per thread of test_pool_shutdown, the failing run's above the passing run's, with the worker that crashes taking the CPU in another order after the deciding step. Opens the full-size image."
-                  />
-                </picture>
-              </a>
+            <div
+              class="shots-panel zoomed"
+              id="show-threads"
+              role="tabpanel"
+              aria-labelledby="tab-threads"
+              hidden
+            >
+              <div class="tour-frame">
+                <a class="tour-link" href="img/app-threads.png">
+                  <picture>
+                    <source srcset="img/app-threads.webp" type="image/webp" />
+                    <img
+                      src="img/app-threads.png"
+                      width="1440"
+                      height="900"
+                      loading="lazy"
+                      alt="The app's Threads tab around the crash: a lane per thread of test_pool_shutdown, the failing run's above the passing run's, with the worker that crashes taking the CPU in another order after the deciding step. Opens the full-size image."
+                    />
+                  </picture>
+                </a>
+              </div>
+              <p>Which thread held the CPU at each step, in both runs.</p>
             </div>
-            <p>Which thread held the CPU at each step, in both runs.</p>
-          </div>
 
-          <div
-            class="shots-panel zoomed"
-            id="show-check"
-            role="tabpanel"
-            aria-labelledby="tab-check"
-            hidden
-          >
-            <div class="tour-frame">
-              <a class="tour-link" href="img/app-check.png">
-                <picture>
-                  <source srcset="img/app-check.webp" type="image/webp" />
-                  <img
-                    src="img/app-check.png"
-                    width="1440"
-                    height="900"
-                    loading="lazy"
-                    alt="The app after Check from here on the passing run: a card counting how the 16 schedules ended, a cell per schedule, the first picked with its run and Compare and Open. Opens the full-size image."
-                  />
-                </picture>
-              </a>
+            <div
+              class="shots-panel zoomed"
+              id="show-check"
+              role="tabpanel"
+              aria-labelledby="tab-check"
+              hidden
+            >
+              <div class="tour-frame">
+                <a class="tour-link" href="img/app-check.png">
+                  <picture>
+                    <source srcset="img/app-check.webp" type="image/webp" />
+                    <img
+                      src="img/app-check.png"
+                      width="1440"
+                      height="900"
+                      loading="lazy"
+                      alt="The app after Check from here on the passing run: a card counting how the 16 schedules ended, a cell per schedule, the first picked with its run and Compare and Open. Opens the full-size image."
+                    />
+                  </picture>
+                </a>
+              </div>
+              <p>Runs 8 to 64 schedules from one step and counts how they end.</p>
             </div>
-            <p>Runs 8 to 64 schedules from one step and counts how they end.</p>
-          </div>
 
-          <div
-            class="shots-panel zoomed"
-            id="show-gdb"
-            role="tabpanel"
-            aria-labelledby="tab-gdb"
-            hidden
-          >
-            <div class="tour-frame">
-              <a class="tour-link" href="img/app-gdb-watch.png">
-                <picture>
-                  <source srcset="img/app-gdb-watch.webp" type="image/webp" />
-                  <img
-                    src="img/app-gdb-watch.png"
-                    width="1440"
-                    height="900"
-                    loading="lazy"
-                    alt="The app's gdb pane stopped at the watchpoint in pool_shutdown, with the old and new values of p-&gt;queue. Opens the full-size image."
-                  />
-                </picture>
-              </a>
+            <div
+              class="shots-panel zoomed"
+              id="show-gdb"
+              role="tabpanel"
+              aria-labelledby="tab-gdb"
+              hidden
+            >
+              <div class="tour-frame">
+                <a class="tour-link" href="img/app-gdb-watch.png">
+                  <picture>
+                    <source srcset="img/app-gdb-watch.webp" type="image/webp" />
+                    <img
+                      src="img/app-gdb-watch.png"
+                      width="1440"
+                      height="900"
+                      loading="lazy"
+                      alt="The app's gdb pane stopped at the watchpoint in pool_shutdown, with the old and new values of p-&gt;queue. Opens the full-size image."
+                    />
+                  </picture>
+                </a>
+              </div>
+              <p>gdb at any step of the run, here stopped on a watchpoint.</p>
             </div>
-            <p>gdb at any step of the run, here stopped on a watchpoint.</p>
-          </div>
 
-          <div
-            class="shots-panel zoomed"
-            id="show-shell"
-            role="tabpanel"
-            aria-labelledby="tab-shell"
-            hidden
-          >
-            <div class="tour-frame">
-              <a class="tour-link" href="img/app-shell.png">
-                <picture>
-                  <source srcset="img/app-shell.webp" type="image/webp" />
-                  <img
-                    src="img/app-shell.png"
-                    width="1440"
-                    height="900"
-                    loading="lazy"
-                    alt="The app's shell pane at the crash, in /build/mylib, after pwd and ls tests. Opens the full-size image."
-                  />
-                </picture>
-              </a>
+            <div
+              class="shots-panel zoomed"
+              id="show-shell"
+              role="tabpanel"
+              aria-labelledby="tab-shell"
+              hidden
+            >
+              <div class="tour-frame">
+                <a class="tour-link" href="img/app-shell.png">
+                  <picture>
+                    <source srcset="img/app-shell.webp" type="image/webp" />
+                    <img
+                      src="img/app-shell.png"
+                      width="1440"
+                      height="900"
+                      loading="lazy"
+                      alt="The app's shell pane at the crash, in /build/mylib, after pwd and ls tests. Opens the full-size image."
+                    />
+                  </picture>
+                </a>
+              </div>
+              <p>A shell inside the VM at any step.</p>
             </div>
-            <p>A shell inside the VM at any step.</p>
-          </div>
 
-          <div
-            class="shots-panel zoomed"
-            id="show-source"
-            role="tabpanel"
-            aria-labelledby="tab-source"
-            hidden
-          >
-            <div class="tour-frame">
-              <a class="tour-link" href="img/app-source.png">
-                <picture>
-                  <source srcset="img/app-source.webp" type="image/webp" />
-                  <img
-                    src="img/app-source.png"
-                    width="1440"
-                    height="900"
-                    loading="lazy"
-                    alt="The app's source panel at the crash: worker at src/pool.c:77 with p-&gt;queue-&gt;completed++ marked, and the frames worker, start_thread and clone3 below. Opens the full-size image."
-                  />
-                </picture>
-              </a>
+            <div
+              class="shots-panel zoomed"
+              id="show-source"
+              role="tabpanel"
+              aria-labelledby="tab-source"
+              hidden
+            >
+              <div class="tour-frame">
+                <a class="tour-link" href="img/app-source.png">
+                  <picture>
+                    <source srcset="img/app-source.webp" type="image/webp" />
+                    <img
+                      src="img/app-source.png"
+                      width="1440"
+                      height="900"
+                      loading="lazy"
+                      alt="The app's source panel at the crash: worker at src/pool.c:77 with p-&gt;queue-&gt;completed++ marked, and the frames worker, start_thread and clone3 below. Opens the full-size image."
+                    />
+                  </picture>
+                </a>
+              </div>
+              <p>The source line a thread is on at the playhead, with its stack.</p>
             </div>
-            <p>The source line a thread is on at the playhead, with its stack.</p>
-          </div>
 
-          <div
-            class="shots-panel zoomed"
-            id="show-runs"
-            role="tabpanel"
-            aria-labelledby="tab-runs"
-            hidden
-          >
-            <div class="tour-frame">
-              <a class="tour-link" href="img/app-runs.png">
-                <picture>
-                  <source srcset="img/app-runs.webp" type="image/webp" />
-                  <img
-                    src="img/app-runs.png"
-                    width="1440"
-                    height="900"
-                    loading="lazy"
-                    alt="The app's Runs panel: check's schedules, and the forks of the failing run, failing and passing. Opens the full-size image."
-                  />
-                </picture>
-              </a>
+            <div
+              class="shots-panel zoomed"
+              id="show-runs"
+              role="tabpanel"
+              aria-labelledby="tab-runs"
+              hidden
+            >
+              <div class="tour-frame">
+                <a class="tour-link" href="img/app-runs.png">
+                  <picture>
+                    <source srcset="img/app-runs.webp" type="image/webp" />
+                    <img
+                      src="img/app-runs.png"
+                      width="1440"
+                      height="900"
+                      loading="lazy"
+                      alt="The app's Runs panel: check's schedules, and the forks of the failing run, failing and passing. Opens the full-size image."
+                    />
+                  </picture>
+                </a>
+              </div>
+              <p>Every run and fork of the build, as a tree.</p>
             </div>
-            <p>Every run and fork of the build, as a tree.</p>
-          </div>
 
-          <div
-            class="shots-panel zoomed"
-            id="show-kernel"
-            role="tabpanel"
-            aria-labelledby="tab-kernel"
-            hidden
-          >
-            <div class="tour-frame">
-              <a class="tour-link" href="img/app-kernel.png">
-                <picture>
-                  <source srcset="img/app-kernel.webp" type="image/webp" />
-                  <img
-                    src="img/app-kernel.png"
-                    width="1440"
-                    height="900"
-                    loading="lazy"
-                    alt="The app's build log with the kernel console on, showing the segfault report under the test's output. Opens the full-size image."
-                  />
-                </picture>
-              </a>
+            <div
+              class="shots-panel zoomed"
+              id="show-kernel"
+              role="tabpanel"
+              aria-labelledby="tab-kernel"
+              hidden
+            >
+              <div class="tour-frame">
+                <a class="tour-link" href="img/app-kernel.png">
+                  <picture>
+                    <source srcset="img/app-kernel.webp" type="image/webp" />
+                    <img
+                      src="img/app-kernel.png"
+                      width="1440"
+                      height="900"
+                      loading="lazy"
+                      alt="The app's build log with the kernel console on, showing the segfault report under the test's output. Opens the full-size image."
+                    />
+                  </picture>
+                </a>
+              </div>
+              <p>The VM kernel's messages in the build log, here its segfault report.</p>
             </div>
-            <p>The VM kernel's messages in the build log, here its segfault report.</p>
           </div>
         </div>
       </section>

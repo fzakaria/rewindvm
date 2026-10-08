@@ -643,19 +643,101 @@
     });
   }
 
-  // The app's features: a tab shows its panel and hides the others. The
-  // arrow keys move between tabs, as in any tab list.
-  const tabs = [...document.querySelectorAll(".shots-tabs [role=tab]")];
   // The page's side gutter on a phone, which a row to swipe keeps when it
   // scrolls a tab or card into view.
   const GUTTER_PX = 20;
-  function showTab(tab) {
+
+  // A row of cards to swipe gets a dot per card under it, the card most in
+  // view lit; a dot scrolls to its card. style.css shows the dots, and lays
+  // the cards out as a row, only on a phone. `onCard` hears which card
+  // comes into view.
+  function swipeRow(row, onCard) {
+    const cards = [...row.children];
+    const dots = document.createElement("div");
+    dots.className = "swipe-dots";
+    const scrollToCard = (i) =>
+      row.scrollTo({
+        left: cards[i].offsetLeft - row.offsetLeft - GUTTER_PX,
+        behavior: "smooth",
+      });
+    const buttons = cards.map((card, i) => {
+      const dot = document.createElement("button");
+      dot.type = "button";
+      dot.setAttribute("aria-label", `Card ${i + 1} of ${cards.length}`);
+      dot.addEventListener("click", () => scrollToCard(i));
+      return dot;
+    });
+    dots.append(...buttons);
+    row.after(dots);
+
+    let current = -1;
+    const light = () => {
+      const box = row.getBoundingClientRect();
+      let best = 0;
+      let bestOverlap = -1;
+      for (const [i, card] of cards.entries()) {
+        const r = card.getBoundingClientRect();
+        const overlap =
+          Math.min(r.right, box.right) - Math.max(r.left, box.left);
+        if (overlap > bestOverlap) {
+          best = i;
+          bestOverlap = overlap;
+        }
+      }
+      buttons.forEach((dot, i) => dot.classList.toggle("on", i === best));
+      if (best === current) {
+        return;
+      }
+      current = best;
+      if (onCard) {
+        onCard(best);
+      }
+    };
+    row.addEventListener("scroll", light, { passive: true });
+    light();
+    return { scrollToCard, current: () => current };
+  }
+
+  for (const row of document.querySelectorAll(".swipe:not(.shots-panels)")) {
+    swipeRow(row);
+  }
+
+  // The app's features: a tab shows its shot and hides the others, and the
+  // arrow keys move between tabs, as in any tab list. On a phone the shots
+  // are a row to swipe too: the shot in view picks its tab, and a tab
+  // scrolls the row to its shot.
+  const tabs = [...document.querySelectorAll(".shots-tabs [role=tab]")];
+  const shotRow = document.querySelector(".shots-panels");
+  const shotOf = (tab) =>
+    document.getElementById(tab.getAttribute("aria-controls"));
+
+  // What moved the tour to a feature. A swipe has put the shot in view
+  // already; a tab still has to scroll the row to it on a phone.
+  const Via = Object.freeze({ TAB: "tab", SWIPE: "swipe" });
+
+  // The tab shown, and, while a tab scrolls the row to its shot, that
+  // shot: the shots passed on the way do not pick their tabs.
+  let shown = tabs[0];
+  let steering = null;
+
+  // On a phone the row of shots is as tall as the shot in view, rather
+  // than the tallest, which is the overview with its legend.
+  function fitShots() {
+    if (!shotRow) {
+      return;
+    }
+    shotRow.style.height = phone.matches
+      ? `${shotOf(shown).offsetHeight}px`
+      : "";
+  }
+
+  function showTab(tab, via = Via.TAB) {
+    shown = tab;
     for (const other of tabs) {
       const selected = other === tab;
       other.setAttribute("aria-selected", String(selected));
       other.tabIndex = selected ? 0 : -1;
-      document.getElementById(other.getAttribute("aria-controls")).hidden =
-        !selected;
+      shotOf(other).hidden = !selected;
     }
 
     // On a phone the tabs are a row to swipe: bring the chosen one into it.
@@ -665,7 +747,39 @@
     if (r.left < box.left || r.right > box.right) {
       row.scrollBy({ left: r.left - box.left - GUTTER_PX });
     }
+
+    // And the shots are a row to swipe: bring the tab's shot into it.
+    const i = tabs.indexOf(tab);
+    if (via === Via.TAB && phone.matches && shots && i !== shots.current()) {
+      steering = i;
+      shots.scrollToCard(i);
+    }
+    fitShots();
   }
+
+  const shots =
+    shotRow &&
+    swipeRow(shotRow, (i) => {
+      if (steering !== null) {
+        if (i === steering) {
+          steering = null;
+        }
+        return;
+      }
+      showTab(tabs[i], Via.SWIPE);
+    });
+  // A screen that narrows to a phone's lays the shots out as a row, which
+  // has to scroll to the tab already shown.
+  phone.addEventListener("change", () => {
+    if (phone.matches && shots) {
+      steering = tabs.indexOf(shown);
+      shots.scrollToCard(steering);
+    }
+    fitShots();
+  });
+  window.addEventListener("resize", fitShots);
+  document.fonts.ready.then(fitShots);
+
   const TAB_KEYS = Object.freeze({
     ArrowRight: 1,
     ArrowDown: 1,
@@ -685,47 +799,6 @@
       showTab(next);
       next.focus();
     });
-  }
-
-  // A row of cards to swipe gets a dot per card under it, the card most in
-  // view lit; a dot scrolls to its card. style.css shows the dots, and lays
-  // the cards out as a row, only on a phone.
-  for (const row of document.querySelectorAll(".swipe")) {
-    const cards = [...row.children];
-    const dots = document.createElement("div");
-    dots.className = "swipe-dots";
-    const buttons = cards.map((card, i) => {
-      const dot = document.createElement("button");
-      dot.type = "button";
-      dot.setAttribute("aria-label", `Card ${i + 1} of ${cards.length}`);
-      dot.addEventListener("click", () =>
-        row.scrollTo({
-          left: card.offsetLeft - row.offsetLeft - GUTTER_PX,
-          behavior: "smooth",
-        }),
-      );
-      return dot;
-    });
-    dots.append(...buttons);
-    row.after(dots);
-
-    const light = () => {
-      const box = row.getBoundingClientRect();
-      let best = 0;
-      let bestOverlap = -1;
-      for (const [i, card] of cards.entries()) {
-        const r = card.getBoundingClientRect();
-        const overlap =
-          Math.min(r.right, box.right) - Math.max(r.left, box.left);
-        if (overlap > bestOverlap) {
-          best = i;
-          bestOverlap = overlap;
-        }
-      }
-      buttons.forEach((dot, i) => dot.classList.toggle("on", i === best));
-    };
-    row.addEventListener("scroll", light, { passive: true });
-    light();
   }
 
   // The workloads' definitions fold under their terms on a phone, and a

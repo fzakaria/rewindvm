@@ -1322,8 +1322,9 @@ a:focus-visible {
   outline: 2px solid var(--amber);
   outline-offset: 2px;
 }
-.shots-panel {
+.shots-panels {
   grid-area: panel;
+  min-width: 0;
 }
 
 /* A feature's shot is zoomed on the part of the window the feature is in,
@@ -1826,8 +1827,18 @@ a.card:hover {
     mask-image: linear-gradient(to right, #000 calc(100% - 56px), transparent);
   }
 
-  /* How it works, the two workloads, the tutorials, the case studies and
-     the plans: a row of cards to swipe, the next one showing at the edge, with dots
+  /* The tour's shots: every one in the row, hidden or not, each at its
+     own height. demo.js sets the row to the height of the shot in view. */
+  .shots-panels {
+    align-items: flex-start;
+    overflow-y: hidden;
+  }
+  .shots-panels > .shots-panel[hidden] {
+    display: block;
+  }
+
+  /* How it works, the two workloads, the tutorials, the case studies, the
+     plans and the tour's shots: a row of cards to swipe, the next one showing at the edge, with dots
      under it. The row runs to the screen's edges and snaps to a card. */
   .swipe {
     display: flex;
