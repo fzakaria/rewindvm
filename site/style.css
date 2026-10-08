@@ -1311,16 +1311,6 @@ a:focus-visible {
 .shots-tabs button:hover {
   color: var(--text);
 }
-/* A few words on what the feature is, under its name. */
-.shots-hint {
-  color: var(--faint);
-  font-size: 0.8rem;
-  font-weight: 400;
-  line-height: 1.3;
-}
-.shots-tabs button[aria-selected="true"] .shots-hint {
-  color: var(--muted);
-}
 .shots-tabs button[aria-selected="true"] {
   color: var(--text);
   background: var(--bg);
@@ -1747,10 +1737,6 @@ a.card:hover {
     border-radius: 999px;
     font-size: 0.9rem;
   }
-  /* A pill has room for the name only. */
-  .shots-hint {
-    display: none;
-  }
   .tour-shot {
     width: 100%;
     max-width: 800px;
@@ -1912,6 +1898,26 @@ a.card:hover {
   .rows-def div {
     grid-template-columns: 1fr;
     gap: 4px;
+  }
+  /* A definition folds under its term, and a tap on the term opens it.
+     demo.js marks the lists that fold, so without it all stay open. */
+  .rows-def.folds div {
+    padding-block: 11px;
+  }
+  .rows-def.folds dt {
+    display: flex;
+    justify-content: space-between;
+    cursor: pointer;
+  }
+  .rows-def.folds dt::after {
+    content: "+";
+    color: var(--muted);
+  }
+  .rows-def.folds div.open dt::after {
+    content: "\2212";
+  }
+  .rows-def.folds div:not(.open) dd {
+    display: none;
   }
   .demo-bar {
     flex-wrap: wrap;

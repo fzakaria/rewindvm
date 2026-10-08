@@ -266,9 +266,7 @@
 
       <section class="features" id="features">
         <h2>In the desktop app</h2>
-        <p class="lede">
-          The real app, on the shutdown race the tutorials follow. Pick a feature to see it.
-        </p>
+        <p class="lede">The real app, on the bug the tutorials follow.</p>
         <!-- One screenshot at a time: a tab per feature, beside the shot on a
              wide screen and a row to swipe above it on a phone. demo.js swaps
              the panels; without it the overview shows. Each image links to the
@@ -283,7 +281,6 @@
               aria-selected="true"
             >
               <span class="shots-name">Overview</span>
-              <span class="shots-hint">The failing run at its crash</span>
             </button>
             <button
               type="button"
@@ -293,7 +290,6 @@
               aria-selected="false"
             >
               <span class="shots-name">Compare</span>
-              <span class="shots-hint">Two runs side by side</span>
             </button>
             <button
               type="button"
@@ -303,7 +299,6 @@
               aria-selected="false"
             >
               <span class="shots-name">Threads</span>
-              <span class="shots-hint">Which thread held the CPU</span>
             </button>
             <button
               type="button"
@@ -313,7 +308,6 @@
               aria-selected="false"
             >
               <span class="shots-name">Check from here</span>
-              <span class="shots-hint">Many schedules from one step</span>
             </button>
             <button
               type="button"
@@ -323,7 +317,6 @@
               aria-selected="false"
             >
               <span class="shots-name">gdb</span>
-              <span class="shots-hint">A debugger at any step</span>
             </button>
             <button
               type="button"
@@ -333,7 +326,6 @@
               aria-selected="false"
             >
               <span class="shots-name">Shell</span>
-              <span class="shots-hint">A shell in the VM at any step</span>
             </button>
             <button
               type="button"
@@ -343,7 +335,6 @@
               aria-selected="false"
             >
               <span class="shots-name">Source</span>
-              <span class="shots-hint">The line a thread is on</span>
             </button>
             <button
               type="button"
@@ -353,7 +344,6 @@
               aria-selected="false"
             >
               <span class="shots-name">Runs</span>
-              <span class="shots-hint">Every fork, as a tree</span>
             </button>
             <button
               type="button"
@@ -363,7 +353,6 @@
               aria-selected="false"
             >
               <span class="shots-name">Kernel console</span>
-              <span class="shots-hint">The VM kernel&#x27;s messages</span>
             </button>
           </div>
 
@@ -427,27 +416,27 @@
             <ol class="shots-legend">
               <li id="tour-1" tabindex="0">
                 <b>The timeline</b>
-                <span>Drag to any step, or jump to the divergence or the failure.</span>
+                <span>The whole run, with where it parted from the passing one.</span>
               </li>
               <li id="tour-2" tabindex="0">
                 <b>Build log</b>
-                <span>Everything the build printed, up to the playhead.</span>
+                <span>What the build printed, up to the playhead.</span>
               </li>
               <li id="tour-3" tabindex="0">
                 <b>Processes and files</b>
-                <span>The processes and threads alive at the step, and the files written.</span>
+                <span>What was running, and what was written.</span>
               </li>
               <li id="tour-4" tabindex="0">
                 <b>The step&#x27;s event</b>
-                <span>Here a SIGSEGV at 0x108, and where this run left the passing one.</span>
+                <span>Here the SIGSEGV, and where the runs parted.</span>
               </li>
               <li id="tour-5" tabindex="0">
                 <b>Fork from here</b>
-                <span>Branches the run at the playhead under a new schedule.</span>
+                <span>Reruns from this step under a new schedule.</span>
               </li>
               <li id="tour-6" tabindex="0">
                 <b>Every run</b>
-                <span>Every run of the build as a tree of forks.</span>
+                <span>All runs and forks of the build, as a tree.</span>
               </li>
             </ol>
           </div>
@@ -473,11 +462,7 @@
                 </picture>
               </a>
             </div>
-            <p>
-              The last events two runs shared, then each run's next events side by side, with what
-              differs in amber. Here the failing run's SIGSEGV sits beside the passing run's write.
-              The x key swaps to the other run at the matching step.
-            </p>
+            <p>Two runs side by side from where they part, with the difference in amber.</p>
           </div>
 
           <div
@@ -501,11 +486,7 @@
                 </picture>
               </a>
             </div>
-            <p>
-              The VM has one CPU, so a race is an order of threads. A lane per thread around where
-              the two runs part, this run's above the compared run's, with a bar wherever the thread
-              held the CPU. Click a bar to move the playhead there.
-            </p>
+            <p>Which thread held the CPU at each step, in both runs.</p>
           </div>
 
           <div
@@ -529,11 +510,7 @@
                 </picture>
               </a>
             </div>
-            <p>
-              Runs 8 to 64 schedules from the playhead at once and fills a cell per schedule: grey
-              for ended as this run did, blue for differently. Pick a cell to compare with its run
-              or open it.
-            </p>
+            <p>Runs 8 to 64 schedules from one step and counts how they end.</p>
           </div>
 
           <div
@@ -557,11 +534,7 @@
                 </picture>
               </a>
             </div>
-            <p>
-              Attach gdb runs gdb on a fork of the run at the playhead, in a pane under the
-              timeline. Here a watchpoint on <code>p-&gt;queue</code> stops in
-              <code>pool_shutdown</code> as it sets the queue to NULL.
-            </p>
+            <p>gdb at any step of the run, here stopped on a watchpoint.</p>
           </div>
 
           <div
@@ -585,11 +558,7 @@
                 </picture>
               </a>
             </div>
-            <p>
-              Open shell starts a shell inside a fork of the run at the playhead, with the root,
-              working directory and environment of the process there. Nothing typed in it changes
-              the run.
-            </p>
+            <p>A shell inside the VM at any step.</p>
           </div>
 
           <div
@@ -613,10 +582,7 @@
                 </picture>
               </a>
             </div>
-            <p>
-              The source line a thread is on at the playhead, with its frames below; click a frame
-              to see its line. The panel follows the playhead as you scrub.
-            </p>
+            <p>The source line a thread is on at the playhead, with its stack.</p>
           </div>
 
           <div
@@ -640,11 +606,7 @@
                 </picture>
               </a>
             </div>
-            <p>
-              Every run of the build, with each fork under the run and step it branched from, red
-              for failed and green for passed. Click one to open it; right-click to compare or
-              remove it.
-            </p>
+            <p>Every run and fork of the build, as a tree.</p>
           </div>
 
           <div
@@ -668,10 +630,7 @@
                 </picture>
               </a>
             </div>
-            <p>
-              With the kernel console on, the build log shows the VM kernel's messages among the
-              program's. Here the segfault report follows the test's last line.
-            </p>
+            <p>The VM kernel's messages in the build log, here its segfault report.</p>
           </div>
         </div>
       </section>

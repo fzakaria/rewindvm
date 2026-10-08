@@ -728,6 +728,16 @@
     light();
   }
 
+  // The workloads' definitions fold under their terms on a phone, and a
+  // term opens its own. style.css folds them only on a phone.
+  for (const list of document.querySelectorAll(".rows-def")) {
+    list.classList.add("folds");
+    for (const term of list.querySelectorAll("dt")) {
+      const toggle = () => term.parentElement.classList.toggle("open");
+      term.addEventListener("click", toggle);
+    }
+  }
+
   // The feature tabs' row loses its fade at the right edge once it is
   // scrolled to the end, where there is nothing more to swipe to.
   const tabRow = document.querySelector(".shots-tabs");
