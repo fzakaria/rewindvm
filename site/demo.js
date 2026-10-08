@@ -646,8 +646,9 @@
   // The app's features: a tab shows its panel and hides the others. The
   // arrow keys move between tabs, as in any tab list.
   const tabs = [...document.querySelectorAll(".shots-tabs [role=tab]")];
-  // The row's padding on a phone, which a tab scrolled into view keeps.
-  const TAB_ROW_PAD_PX = 20;
+  // The page's side gutter on a phone, which a row to swipe keeps when it
+  // scrolls a tab or card into view.
+  const GUTTER_PX = 20;
   function showTab(tab) {
     for (const other of tabs) {
       const selected = other === tab;
@@ -662,7 +663,7 @@
     const r = tab.getBoundingClientRect();
     const box = row.getBoundingClientRect();
     if (r.left < box.left || r.right > box.right) {
-      row.scrollBy({ left: r.left - box.left - TAB_ROW_PAD_PX });
+      row.scrollBy({ left: r.left - box.left - GUTTER_PX });
     }
   }
   const TAB_KEYS = Object.freeze({
@@ -684,6 +685,61 @@
       showTab(next);
       next.focus();
     });
+  }
+
+  // A row of cards to swipe gets a dot per card under it, the card most in
+  // view lit; a dot scrolls to its card. style.css shows the dots, and lays
+  // the cards out as a row, only on a phone.
+  for (const row of document.querySelectorAll(".swipe")) {
+    const cards = [...row.children];
+    const dots = document.createElement("div");
+    dots.className = "swipe-dots";
+    const buttons = cards.map((card, i) => {
+      const dot = document.createElement("button");
+      dot.type = "button";
+      dot.setAttribute("aria-label", `Card ${i + 1} of ${cards.length}`);
+      dot.addEventListener("click", () =>
+        row.scrollTo({
+          left: card.offsetLeft - row.offsetLeft - GUTTER_PX,
+          behavior: "smooth",
+        }),
+      );
+      return dot;
+    });
+    dots.append(...buttons);
+    row.after(dots);
+
+    const light = () => {
+      const box = row.getBoundingClientRect();
+      let best = 0;
+      let bestOverlap = -1;
+      for (const [i, card] of cards.entries()) {
+        const r = card.getBoundingClientRect();
+        const overlap =
+          Math.min(r.right, box.right) - Math.max(r.left, box.left);
+        if (overlap > bestOverlap) {
+          best = i;
+          bestOverlap = overlap;
+        }
+      }
+      buttons.forEach((dot, i) => dot.classList.toggle("on", i === best));
+    };
+    row.addEventListener("scroll", light, { passive: true });
+    light();
+  }
+
+  // The feature tabs' row loses its fade at the right edge once it is
+  // scrolled to the end, where there is nothing more to swipe to.
+  const tabRow = document.querySelector(".shots-tabs");
+  if (tabRow) {
+    const markEnd = () =>
+      tabRow.classList.toggle(
+        "at-end",
+        tabRow.scrollLeft + tabRow.clientWidth >= tabRow.scrollWidth - 1,
+      );
+    tabRow.addEventListener("scroll", markEnd, { passive: true });
+    window.addEventListener("resize", markEnd);
+    markEnd();
   }
 
   // The opening sweep: the playhead runs through checkPhase to the failure,

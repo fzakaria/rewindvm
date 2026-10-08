@@ -1429,6 +1429,36 @@ a:focus-visible {
   outline: 2px solid var(--amber);
 }
 
+/* The dots under a row to swipe, one per card, the current one amber.
+   demo.js adds them; only a phone shows them. */
+.swipe-dots {
+  display: none;
+  justify-content: center;
+  gap: 4px;
+  margin-top: 14px;
+}
+.swipe-dots button {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+}
+.swipe-dots button::before {
+  content: "";
+  display: block;
+  width: 8px;
+  height: 8px;
+  margin: auto;
+  border-radius: 50%;
+  background: var(--line-2);
+  transition: background 0.15s ease;
+}
+.swipe-dots button.on::before {
+  background: var(--amber);
+}
+
 /* A feature on the roadmap rather than in the app today. */
 /* It sits on its own line under the card's heading. */
 .tag {
@@ -1769,8 +1799,8 @@ a.card:hover {
 
 /* A phone: the scrubber's panels become one column, with the step's
    detail as the first tab, and its controls drop words to fit one row;
-   the app's feature tabs become a row to swipe; cards tighten;
-   definitions sit above their text. */
+   the app's feature tabs and the sections of cards become rows to swipe;
+   cards tighten; definitions sit above their text. */
 @media (max-width: 600px) {
   .panels {
     grid-template-columns: minmax(0, 1fr);
@@ -1810,6 +1840,36 @@ a.card:hover {
   .shots-tabs::-webkit-scrollbar {
     display: none;
   }
+  /* The tabs fade out at the right edge, so a cut tab reads as more to
+     swipe to; demo.js marks the row once it is scrolled to the end. */
+  .shots-tabs:not(.at-end) {
+    mask-image: linear-gradient(to right, #000 calc(100% - 56px), transparent);
+  }
+
+  /* How it works, the two workloads, the tutorials and the case studies:
+     a row of cards to swipe, the next one showing at the edge, with dots
+     under it. The row runs to the screen's edges and snaps to a card. */
+  .swipe {
+    display: flex;
+    gap: 12px;
+    overflow-x: auto;
+    scroll-snap-type: x mandatory;
+    overscroll-behavior-x: contain;
+    margin-inline: -20px;
+    padding-inline: 20px;
+    scroll-padding-inline: 20px;
+    scrollbar-width: none;
+  }
+  .swipe::-webkit-scrollbar {
+    display: none;
+  }
+  .swipe > * {
+    flex: 0 0 86%;
+    scroll-snap-align: start;
+  }
+  .swipe-dots {
+    display: flex;
+  }
   .shots-panel p {
     font-size: 0.93rem;
   }
@@ -1819,6 +1879,7 @@ a.card:hover {
   .steps li {
     display: grid;
     grid-template-columns: auto minmax(0, 1fr);
+    align-content: start;
     column-gap: 14px;
     padding: 18px;
   }
@@ -1889,7 +1950,8 @@ a.card:hover {
   .pin,
   .tour-card,
   .shots-tabs button,
-  .shots-panel .tour-link img {
+  .shots-panel .tour-link img,
+  .swipe-dots button::before {
     transition: none;
   }
   .try-me svg {
