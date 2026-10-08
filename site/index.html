@@ -218,12 +218,7 @@
               </div>
             </div>
           </div>
-          <figcaption class="demo-caption">
-            Example data: a failing build of mylib-0.3.0 where one test segfaults only on some runs.
-            Drag the slider, or focus it and use the arrow keys for one step, or Page Up and Page
-            Down for the next and previous event.
-            <noscript>The scrubber needs JavaScript to run.</noscript>
-          </figcaption>
+          <noscript><p class="demo-caption">The scrubber needs JavaScript to run.</p></noscript>
         </figure>
       </section>
 
@@ -429,23 +424,36 @@
                 6
               </button>
             </div>
-            <p>
-              A failing run, compared with a passing run of the same build. Drag the timeline to any
-              step: the log, the processes, the files and the step's event follow the playhead, and
-              Fork from here branches the run there under a new schedule.
-            </p>
             <ol class="shots-legend">
-              <li id="tour-1" tabindex="0">The timeline</li>
-              <li id="tour-2" tabindex="0">Build log</li>
-              <li id="tour-3" tabindex="0">Processes and files</li>
-              <li id="tour-4" tabindex="0">The step's event</li>
-              <li id="tour-5" tabindex="0">Fork from here</li>
-              <li id="tour-6" tabindex="0">Every run</li>
+              <li id="tour-1" tabindex="0">
+                <b>The timeline</b>
+                <span>Drag to any step, or jump to the divergence or the failure.</span>
+              </li>
+              <li id="tour-2" tabindex="0">
+                <b>Build log</b>
+                <span>Everything the build printed, up to the playhead.</span>
+              </li>
+              <li id="tour-3" tabindex="0">
+                <b>Processes and files</b>
+                <span>The processes and threads alive at the step, and the files written.</span>
+              </li>
+              <li id="tour-4" tabindex="0">
+                <b>The step&#x27;s event</b>
+                <span>Here a SIGSEGV at 0x108, and where this run left the passing one.</span>
+              </li>
+              <li id="tour-5" tabindex="0">
+                <b>Fork from here</b>
+                <span>Branches the run at the playhead under a new schedule.</span>
+              </li>
+              <li id="tour-6" tabindex="0">
+                <b>Every run</b>
+                <span>Every run of the build as a tree of forks.</span>
+              </li>
             </ol>
           </div>
 
           <div
-            class="shots-panel"
+            class="shots-panel zoomed"
             id="show-compare"
             role="tabpanel"
             aria-labelledby="tab-compare"
@@ -473,7 +481,7 @@
           </div>
 
           <div
-            class="shots-panel"
+            class="shots-panel zoomed"
             id="show-threads"
             role="tabpanel"
             aria-labelledby="tab-threads"
@@ -501,7 +509,7 @@
           </div>
 
           <div
-            class="shots-panel"
+            class="shots-panel zoomed"
             id="show-check"
             role="tabpanel"
             aria-labelledby="tab-check"
@@ -528,7 +536,13 @@
             </p>
           </div>
 
-          <div class="shots-panel" id="show-gdb" role="tabpanel" aria-labelledby="tab-gdb" hidden>
+          <div
+            class="shots-panel zoomed"
+            id="show-gdb"
+            role="tabpanel"
+            aria-labelledby="tab-gdb"
+            hidden
+          >
             <div class="tour-frame">
               <a class="tour-link" href="img/app-gdb-watch.png">
                 <picture>
@@ -551,7 +565,7 @@
           </div>
 
           <div
-            class="shots-panel"
+            class="shots-panel zoomed"
             id="show-shell"
             role="tabpanel"
             aria-labelledby="tab-shell"
@@ -579,7 +593,7 @@
           </div>
 
           <div
-            class="shots-panel"
+            class="shots-panel zoomed"
             id="show-source"
             role="tabpanel"
             aria-labelledby="tab-source"
@@ -605,7 +619,13 @@
             </p>
           </div>
 
-          <div class="shots-panel" id="show-runs" role="tabpanel" aria-labelledby="tab-runs" hidden>
+          <div
+            class="shots-panel zoomed"
+            id="show-runs"
+            role="tabpanel"
+            aria-labelledby="tab-runs"
+            hidden
+          >
             <div class="tour-frame">
               <a class="tour-link" href="img/app-runs.png">
                 <picture>
@@ -628,7 +648,7 @@
           </div>
 
           <div
-            class="shots-panel"
+            class="shots-panel zoomed"
             id="show-kernel"
             role="tabpanel"
             aria-labelledby="tab-kernel"

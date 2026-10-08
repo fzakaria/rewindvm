@@ -1278,6 +1278,7 @@ a:focus-visible {
    text under it, and a tab per feature in a column beside it. Narrower
    screens put the tabs above the shot as a row of pills. */
 .shots {
+  --zoom: 2;
   display: grid;
   grid-template-columns: minmax(0, 800px) minmax(200px, 1fr);
   grid-template-areas: "panel tabs";
@@ -1332,6 +1333,45 @@ a:focus-visible {
 .shots-panel {
   grid-area: panel;
 }
+
+/* A feature's shot is zoomed on the part of the window the feature is in,
+   so its text reads at about the app's own size on a laptop. --zoom-at
+   is the point that holds still, as percentages of the 1440x900 image:
+   the right edge for the tabbed panel, the bottom left for the terminal
+   pane and the log. The zoom eases in when the tab is picked. */
+.shots-panel .tour-link img {
+  transform-origin: var(--zoom-at, 50% 50%);
+  transition: transform 0.45s ease-out;
+}
+.shots-panel.zoomed .tour-link img {
+  transform: scale(var(--zoom));
+}
+@starting-style {
+  .shots-panel.zoomed .tour-link img {
+    transform: scale(1);
+  }
+}
+/* The panel beside the log: Compare, Source and Runs, from the top of
+   the panels down. */
+#show-compare,
+#show-source,
+#show-runs {
+  --zoom-at: 100% 45%;
+}
+/* Threads: lower, for every lane down to idle. */
+#show-threads {
+  --zoom-at: 100% 55%;
+}
+/* Check from here: its button in the toolbar and the card under it. */
+#show-check {
+  --zoom-at: 100% 30%;
+}
+/* The terminal pane under the panels, and the end of the build log. */
+#show-gdb,
+#show-shell,
+#show-kernel {
+  --zoom-at: 0% 100%;
+}
 .shots-panel[hidden] {
   display: none;
 }
@@ -1342,37 +1382,48 @@ a:focus-visible {
   max-width: 70ch;
 }
 
-/* The overview's legend: the pins' numbers with a few words each, in
-   three columns, or two on a phone. */
+/* The overview's legend: each pin's number, name and one sentence, in
+   three columns, or one on a phone. */
 .shots-legend {
   list-style: none;
-  margin: 12px 0 0;
+  margin: 16px 0 0;
   padding: 0;
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 2px 16px;
+  gap: 4px 12px;
   counter-reset: pin;
   color: var(--muted);
   font-size: 0.9rem;
 }
 .shots-legend li {
   counter-increment: pin;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 4px 6px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-content: start;
+  column-gap: 10px;
+  padding: 6px 8px;
   border-radius: 8px;
+  line-height: 1.4;
 }
+/* The number, drawn like its pin, beside the name and its sentence. */
 .shots-legend li::before {
   content: counter(pin);
-  flex: none;
+  grid-row: span 2;
   width: 20px;
   height: 20px;
+  margin-top: 1px;
   border-radius: 50%;
   background: var(--amber);
   color: var(--amber-ink);
   font: 700 11px/20px var(--mono);
   text-align: center;
+}
+.shots-legend b {
+  color: var(--text);
+  font-weight: 600;
+}
+.shots-legend span {
+  font-size: 0.85rem;
 }
 .shots-legend li:focus-visible {
   outline: 2px solid var(--amber);
@@ -1763,8 +1814,7 @@ a.card:hover {
     font-size: 0.93rem;
   }
   .shots-legend {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    font-size: 0.85rem;
+    grid-template-columns: minmax(0, 1fr);
   }
   .steps li {
     display: grid;
@@ -1830,14 +1880,16 @@ a.card:hover {
 
 /* Reduced motion: the playhead jumps instead of gliding, the "Try me" arrow
    holds still and vanishes without a fade, pins, tour cards and feature
-   tabs light up without easing, and demo.js skips its opening sweep. */
+   tabs light up without easing, a feature's shot is zoomed from the start,
+   and demo.js skips its opening sweep. */
 @media (prefers-reduced-motion: reduce) {
   .playhead,
   .try-me,
   .try-me.gone,
   .pin,
   .tour-card,
-  .shots-tabs button {
+  .shots-tabs button,
+  .shots-panel .tour-link img {
     transition: none;
   }
   .try-me svg {
