@@ -208,6 +208,9 @@ pub mod size {
     pub const LIST_COLUMN_GAP: f32 = 10.0;
     pub const PID_COLUMN_WIDTH: f32 = 44.0;
     pub const OP_COLUMN_WIDTH: f32 = 28.0;
+    /// The source panel's column that marks an argument among a frame's
+    /// variables, as wide as the files' operation column.
+    pub const ARGUMENT_MARKER_WIDTH: f32 = OP_COLUMN_WIDTH;
     pub const TREE_INDENT: f32 = 16.0;
     /// The width of one character of the monospace font at TEXT_MONO,
     /// for sizing the step column to the run's longest step number.
@@ -308,6 +311,9 @@ pub mod layout {
     /// The terminal pane's share of the window's height at first: room
     /// for a backtrace, leaving the panels most of the window.
     pub const TERMINAL_SHARE: f32 = 0.3;
+    /// The source panel's variables list's height at first: five
+    /// arguments and locals, with the frame list under it.
+    pub const VARIABLES_HEIGHT: f32 = 5.0 * super::size::LOG_ROW_HEIGHT;
     /// The source panel's frame list's height at first: four frames, so
     /// the file above keeps the rest of the panel however deep the stack.
     pub const FRAMES_HEIGHT: f32 = 4.0 * super::size::LOG_ROW_HEIGHT;

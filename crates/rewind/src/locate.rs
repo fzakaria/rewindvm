@@ -825,7 +825,8 @@ pub(crate) struct Whose<'a> {
 }
 
 /// `rewind where`'s answer in words: a header, the chosen frame with its
-/// source, and up to `callers` frames it was called from.
+/// source, arguments and locals, and up to `callers` frames it was called
+/// from.
 pub(crate) fn render(
     whose: &Whose,
     frames: &[Frame],
@@ -863,12 +864,31 @@ pub(crate) fn render(
         }
     }
 
+    // The frame's arguments and locals, under a heading each, as gdb's
+    // `info args` and `info locals` name them.
+    for (heading, variables) in [
+        (ARGUMENTS_HEADING, &frame.arguments),
+        (LOCALS_HEADING, &frame.locals),
+    ] {
+        if variables.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("{heading}:\n"));
+        for variable in variables {
+            out.push_str(&format!("  {} = {}\n", variable.name, variable.value));
+        }
+    }
+
     // The frames that called it.
     for caller in frames.iter().skip(at + 1).take(callers) {
         out.push_str(&format!("called from {}\n", frame_line(caller)));
     }
     out
 }
+
+/// The headings over the chosen frame's arguments and its locals.
+const ARGUMENTS_HEADING: &str = "arguments";
+const LOCALS_HEADING: &str = "locals";
 
 /// What marks the frame's line among its source lines, and the others.
 const LINE_MARKER: &str = ">";
@@ -896,6 +916,7 @@ mod tests {
     // prints them for a C program in glibc, a Rust program with its
     // dependencies, and a stack with nothing of the program's own.
     use super::*;
+    use rewind_trace::located::Variable;
 
     #[test]
     fn a_thread_line_names_its_function_line_and_why() {
@@ -911,9 +932,11 @@ mod tests {
             frames: frames(
                 r#"[
                 {"level": 0, "function": "__GI___clock_nanosleep", "file": "clock_nanosleep.c",
-                 "fullname": null, "line": 48, "pc": "0x7f0", "object": "/lib/libc.so.6"},
+                 "fullname": null, "line": 48, "pc": "0x7f0", "object": "/lib/libc.so.6",
+                 "arguments": [], "locals": []},
                 {"level": 5, "function": "main", "file": "tests/test_pool_shutdown.c",
-                 "fullname": null, "line": 23, "pc": "0x5a0", "object": "/build/t"}
+                 "fullname": null, "line": 23, "pc": "0x5a0", "object": "/build/t",
+                 "arguments": [], "locals": []}
             ]"#,
             ),
             chosen: Some(1),
@@ -940,11 +963,11 @@ mod tests {
     }
 
     const IN_GLIBC: &str = r#"[
-        {"level":0,"function":"__futex_abstimed_wait_common64","file":"./nptl/futex-internal.c","fullname":"/build/glibc-2.40/nptl/futex-internal.c","line":57,"pc":"0x7f61584f2b26","object":"/nix/store/bbb-glibc-2.40/lib/libc.so.6"},
-        {"level":1,"function":"pthread_cond_wait","file":"./nptl/pthread_cond_wait.c","fullname":null,"line":618,"pc":"0x7f61584f53d0","object":"/nix/store/bbb-glibc-2.40/lib/libc.so.6"},
-        {"level":2,"function":"worker","file":"src/pool.c","fullname":"/home/me/.local/share/rewind/gdb/42/build/mylib/src/pool.c","line":70,"pc":"0x55bfaf4373e1","object":"/build/mylib/tests/test_pool_shutdown"},
-        {"level":3,"function":"start_thread","file":"./nptl/pthread_create.c","fullname":null,"line":448,"pc":"0x7f61584f61d3","object":"/nix/store/bbb-glibc-2.40/lib/libc.so.6"},
-        {"level":4,"function":"__clone3","file":null,"fullname":null,"line":null,"pc":"0x7f615857e5bc","object":"/nix/store/bbb-glibc-2.40/lib/libc.so.6"}
+        {"level":0,"function":"__futex_abstimed_wait_common64","file":"./nptl/futex-internal.c","fullname":"/build/glibc-2.40/nptl/futex-internal.c","line":57,"pc":"0x7f61584f2b26","object":"/nix/store/bbb-glibc-2.40/lib/libc.so.6","arguments":[],"locals":[]},
+        {"level":1,"function":"pthread_cond_wait","file":"./nptl/pthread_cond_wait.c","fullname":null,"line":618,"pc":"0x7f61584f53d0","object":"/nix/store/bbb-glibc-2.40/lib/libc.so.6","arguments":[],"locals":[]},
+        {"level":2,"function":"worker","file":"src/pool.c","fullname":"/home/me/.local/share/rewind/gdb/42/build/mylib/src/pool.c","line":70,"pc":"0x55bfaf4373e1","object":"/build/mylib/tests/test_pool_shutdown","arguments":[],"locals":[]},
+        {"level":3,"function":"start_thread","file":"./nptl/pthread_create.c","fullname":null,"line":448,"pc":"0x7f61584f61d3","object":"/nix/store/bbb-glibc-2.40/lib/libc.so.6","arguments":[],"locals":[]},
+        {"level":4,"function":"__clone3","file":null,"fullname":null,"line":null,"pc":"0x7f615857e5bc","object":"/nix/store/bbb-glibc-2.40/lib/libc.so.6","arguments":[],"locals":[]}
     ]"#;
 
     /// In a C program, frames in glibc are passed over for the program's
@@ -960,10 +983,10 @@ mod tests {
     fn rust_s_library_and_dependencies_are_passed_over() {
         let stack = frames(
             r#"[
-            {"level":0,"function":"std::sys::pal::unix::futex::futex_wait","file":"/rustc/48a229ce/library/std/src/sys/pal/unix/futex.rs","fullname":null,"line":72,"pc":"0x55e0000010a0","object":"/build/source/target/release/casita"},
-            {"level":1,"function":"tokio::runtime::park::Inner::park","file":"/build/cargo-vendor-dir/tokio-1.47.0/src/runtime/park.rs","fullname":null,"line":120,"pc":"0x55e0000020b0","object":"/build/source/target/release/casita"},
-            {"level":2,"function":"serde_json::de::from_str","file":"/home/me/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde_json-1.0.140/src/de.rs","fullname":null,"line":2,"pc":"0x55e0000030c0","object":"/build/source/target/release/casita"},
-            {"level":3,"function":"casita::main","file":"src/main.rs","fullname":"/build/source/src/main.rs","line":31,"pc":"0x55e0000040d0","object":"/build/source/target/release/casita"}
+            {"level":0,"function":"std::sys::pal::unix::futex::futex_wait","file":"/rustc/48a229ce/library/std/src/sys/pal/unix/futex.rs","fullname":null,"line":72,"pc":"0x55e0000010a0","object":"/build/source/target/release/casita","arguments":[],"locals":[]},
+            {"level":1,"function":"tokio::runtime::park::Inner::park","file":"/build/cargo-vendor-dir/tokio-1.47.0/src/runtime/park.rs","fullname":null,"line":120,"pc":"0x55e0000020b0","object":"/build/source/target/release/casita","arguments":[],"locals":[]},
+            {"level":2,"function":"serde_json::de::from_str","file":"/home/me/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde_json-1.0.140/src/de.rs","fullname":null,"line":2,"pc":"0x55e0000030c0","object":"/build/source/target/release/casita","arguments":[],"locals":[]},
+            {"level":3,"function":"casita::main","file":"src/main.rs","fullname":"/build/source/src/main.rs","line":31,"pc":"0x55e0000040d0","object":"/build/source/target/release/casita","arguments":[],"locals":[]}
         ]"#,
         );
         assert_eq!(chosen(&stack), Some(3));
@@ -980,22 +1003,22 @@ mod tests {
     fn go_s_runtime_library_and_modules_are_passed_over() {
         let trimmed = frames(
             r#"[
-            {"level":0,"function":"internal/runtime/syscall/linux.Syscall6","file":"internal/runtime/syscall/linux/asm_linux_amd64.s","fullname":"./internal/runtime/syscall/linux/asm_linux_amd64.s","line":36,"pc":"0x40db2e","object":"/nix/store/aaa-direnv/bin/direnv"},
-            {"level":1,"function":"syscall.Close","file":"syscall/zsyscall_linux_amd64.go","fullname":"./syscall/zsyscall_linux_amd64.go","line":335,"pc":"0x40e000","object":"/nix/store/aaa-direnv/bin/direnv"},
-            {"level":2,"function":"os.WriteFile","file":"os/file.go","fullname":"./os/file.go","line":938,"pc":"0x40f000","object":"/nix/store/aaa-direnv/bin/direnv"},
-            {"level":3,"function":"github.com/BurntSushi/toml.Decode","file":"github.com/BurntSushi/toml@v1.5.0/decode.go","fullname":"./github.com/BurntSushi/toml@v1.5.0/decode.go","line":120,"pc":"0x410000","object":"/nix/store/aaa-direnv/bin/direnv"},
-            {"level":4,"function":"github.com/direnv/direnv/v2/internal/cmd.(*RC).Deny","file":"github.com/direnv/direnv/v2/internal/cmd/rc.go","fullname":"./github.com/direnv/direnv/v2/internal/cmd/rc.go","line":130,"pc":"0x411000","object":"/nix/store/aaa-direnv/bin/direnv"},
-            {"level":5,"function":"main.main","file":"github.com/direnv/direnv/v2/main.go","fullname":"./github.com/direnv/direnv/v2/main.go","line":25,"pc":"0x412000","object":"/nix/store/aaa-direnv/bin/direnv"},
-            {"level":6,"function":"runtime.main","file":"runtime/proc.go","fullname":"./runtime/proc.go","line":290,"pc":"0x413000","object":"/nix/store/aaa-direnv/bin/direnv"}
+            {"level":0,"function":"internal/runtime/syscall/linux.Syscall6","file":"internal/runtime/syscall/linux/asm_linux_amd64.s","fullname":"./internal/runtime/syscall/linux/asm_linux_amd64.s","line":36,"pc":"0x40db2e","object":"/nix/store/aaa-direnv/bin/direnv","arguments":[],"locals":[]},
+            {"level":1,"function":"syscall.Close","file":"syscall/zsyscall_linux_amd64.go","fullname":"./syscall/zsyscall_linux_amd64.go","line":335,"pc":"0x40e000","object":"/nix/store/aaa-direnv/bin/direnv","arguments":[],"locals":[]},
+            {"level":2,"function":"os.WriteFile","file":"os/file.go","fullname":"./os/file.go","line":938,"pc":"0x40f000","object":"/nix/store/aaa-direnv/bin/direnv","arguments":[],"locals":[]},
+            {"level":3,"function":"github.com/BurntSushi/toml.Decode","file":"github.com/BurntSushi/toml@v1.5.0/decode.go","fullname":"./github.com/BurntSushi/toml@v1.5.0/decode.go","line":120,"pc":"0x410000","object":"/nix/store/aaa-direnv/bin/direnv","arguments":[],"locals":[]},
+            {"level":4,"function":"github.com/direnv/direnv/v2/internal/cmd.(*RC).Deny","file":"github.com/direnv/direnv/v2/internal/cmd/rc.go","fullname":"./github.com/direnv/direnv/v2/internal/cmd/rc.go","line":130,"pc":"0x411000","object":"/nix/store/aaa-direnv/bin/direnv","arguments":[],"locals":[]},
+            {"level":5,"function":"main.main","file":"github.com/direnv/direnv/v2/main.go","fullname":"./github.com/direnv/direnv/v2/main.go","line":25,"pc":"0x412000","object":"/nix/store/aaa-direnv/bin/direnv","arguments":[],"locals":[]},
+            {"level":6,"function":"runtime.main","file":"runtime/proc.go","fullname":"./runtime/proc.go","line":290,"pc":"0x413000","object":"/nix/store/aaa-direnv/bin/direnv","arguments":[],"locals":[]}
         ]"#,
         );
         assert_eq!(chosen(&trimmed), Some(4));
         let untrimmed = frames(
             r#"[
-            {"level":0,"function":"runtime.usleep","file":"/nix/store/bbb-go-1.25.3/share/go/src/runtime/sys_linux_amd64.s","fullname":null,"line":135,"pc":"0x492b17","object":"/build/app"},
-            {"level":1,"function":"github.com/urfave/cli.(*App).Run","file":"/build/go/pkg/mod/github.com/urfave/cli@v1.22.5/app.go","fullname":null,"line":40,"pc":"0x493000","object":"/build/app"},
-            {"level":2,"function":"github.com/spf13/pflag.Parse","file":"/build/source/vendor/github.com/spf13/pflag/flag.go","fullname":null,"line":12,"pc":"0x494000","object":"/build/app"},
-            {"level":3,"function":"main.main","file":"/build/source/main.go","fullname":null,"line":9,"pc":"0x495000","object":"/build/app"}
+            {"level":0,"function":"runtime.usleep","file":"/nix/store/bbb-go-1.25.3/share/go/src/runtime/sys_linux_amd64.s","fullname":null,"line":135,"pc":"0x492b17","object":"/build/app","arguments":[],"locals":[]},
+            {"level":1,"function":"github.com/urfave/cli.(*App).Run","file":"/build/go/pkg/mod/github.com/urfave/cli@v1.22.5/app.go","fullname":null,"line":40,"pc":"0x493000","object":"/build/app","arguments":[],"locals":[]},
+            {"level":2,"function":"github.com/spf13/pflag.Parse","file":"/build/source/vendor/github.com/spf13/pflag/flag.go","fullname":null,"line":12,"pc":"0x494000","object":"/build/app","arguments":[],"locals":[]},
+            {"level":3,"function":"main.main","file":"/build/source/main.go","fullname":null,"line":9,"pc":"0x495000","object":"/build/app","arguments":[],"locals":[]}
         ]"#,
         );
         assert_eq!(chosen(&untrimmed), Some(3));
@@ -1003,8 +1026,8 @@ mod tests {
         // A module without a domain is still the program's own.
         let local = frames(
             r#"[
-            {"level":0,"function":"os.WriteFile","file":"os/file.go","fullname":null,"line":938,"pc":"0x40f000","object":"/bin/myapp"},
-            {"level":1,"function":"myapp/store.Save","file":"myapp/store/save.go","fullname":null,"line":17,"pc":"0x411000","object":"/bin/myapp"}
+            {"level":0,"function":"os.WriteFile","file":"os/file.go","fullname":null,"line":938,"pc":"0x40f000","object":"/bin/myapp","arguments":[],"locals":[]},
+            {"level":1,"function":"myapp/store.Save","file":"myapp/store/save.go","fullname":null,"line":17,"pc":"0x411000","object":"/bin/myapp","arguments":[],"locals":[]}
         ]"#,
         );
         assert_eq!(chosen(&local), Some(1));
@@ -1019,22 +1042,22 @@ mod tests {
     fn system_headers_inlined_into_the_program_are_passed_over() {
         let stack = frames(
             r#"[
-            {"level":0,"function":"__syscall_cp_c","file":null,"fullname":null,"line":null,"pc":"0x401920","object":"/newroot/bin/race"},
-            {"level":1,"function":"write","file":"/nix/store/gs38hik78n8wz9ylhhrbp7210zcr1dzp-fortify-headers-3.0.1/include/unistd.h","fullname":null,"line":185,"pc":"0x401155","object":"/newroot/bin/race"},
-            {"level":2,"function":"add","file":"race.c","fullname":"/newroot/src/race.c","line":15,"pc":"0x401155","object":"/newroot/bin/race"}
+            {"level":0,"function":"__syscall_cp_c","file":null,"fullname":null,"line":null,"pc":"0x401920","object":"/newroot/bin/race","arguments":[],"locals":[]},
+            {"level":1,"function":"write","file":"/nix/store/gs38hik78n8wz9ylhhrbp7210zcr1dzp-fortify-headers-3.0.1/include/unistd.h","fullname":null,"line":185,"pc":"0x401155","object":"/newroot/bin/race","arguments":[],"locals":[]},
+            {"level":2,"function":"add","file":"race.c","fullname":"/newroot/src/race.c","line":15,"pc":"0x401155","object":"/newroot/bin/race","arguments":[],"locals":[]}
         ]"#,
         );
         assert_eq!(chosen(&stack), Some(2));
         let glibc = frames(
             r#"[
-            {"level":0,"function":"strlen","file":"/usr/include/x86_64-linux-gnu/bits/string_fortified.h","fullname":null,"line":40,"pc":"0x401000","object":"/src/app"},
-            {"level":1,"function":"run","file":"app.c","fullname":null,"line":9,"pc":"0x401010","object":"/src/app"}
+            {"level":0,"function":"strlen","file":"/usr/include/x86_64-linux-gnu/bits/string_fortified.h","fullname":null,"line":40,"pc":"0x401000","object":"/src/app","arguments":[],"locals":[]},
+            {"level":1,"function":"run","file":"app.c","fullname":null,"line":9,"pc":"0x401010","object":"/src/app","arguments":[],"locals":[]}
         ]"#,
         );
         assert_eq!(chosen(&glibc), Some(1));
         let own_header = frames(
             r#"[
-            {"level":0,"function":"nix::Store::parseStorePath","file":"/nix/store/aaa-source/src/libstore/include/nix/store/store-api.hh","fullname":null,"line":300,"pc":"0x401000","object":"/bin/nix"}
+            {"level":0,"function":"nix::Store::parseStorePath","file":"/nix/store/aaa-source/src/libstore/include/nix/store/store-api.hh","fullname":null,"line":300,"pc":"0x401000","object":"/bin/nix","arguments":[],"locals":[]}
         ]"#,
         );
         assert_eq!(chosen(&own_header), Some(0));
@@ -1047,10 +1070,10 @@ mod tests {
     fn without_the_program_s_code_the_innermost_named_user_frame_is_chosen() {
         let stack = frames(
             r#"[
-            {"level":0,"function":"rewind_emit","file":"arch/x86/kernel/cpu/rewind.c","fullname":null,"line":230,"pc":"0xffffffff81285085","object":"/nix/store/aaa-kernel/vmlinux"},
-            {"level":1,"function":null,"file":null,"fullname":null,"line":null,"pc":"0x401913","object":null},
-            {"level":2,"function":"__syscall_cp_c","file":null,"fullname":null,"line":null,"pc":"0x401920","object":"/newroot/src/big"},
-            {"level":3,"function":"write","file":null,"fullname":null,"line":null,"pc":"0x40155c","object":"/newroot/src/big"}
+            {"level":0,"function":"rewind_emit","file":"arch/x86/kernel/cpu/rewind.c","fullname":null,"line":230,"pc":"0xffffffff81285085","object":"/nix/store/aaa-kernel/vmlinux","arguments":[],"locals":[]},
+            {"level":1,"function":null,"file":null,"fullname":null,"line":null,"pc":"0x401913","object":null,"arguments":[],"locals":[]},
+            {"level":2,"function":"__syscall_cp_c","file":null,"fullname":null,"line":null,"pc":"0x401920","object":"/newroot/src/big","arguments":[],"locals":[]},
+            {"level":3,"function":"write","file":null,"fullname":null,"line":null,"pc":"0x40155c","object":"/newroot/src/big","arguments":[],"locals":[]}
         ]"#,
         );
         assert_eq!(chosen(&stack), Some(2));
@@ -1066,11 +1089,11 @@ mod tests {
     fn without_the_program_s_code_a_library_line_beats_the_c_library() {
         let stack = frames(
             r#"[
-            {"level":0,"function":"__GI___clone3","file":"../sysdeps/unix/sysv/linux/x86_64/clone3.S","fullname":null,"line":62,"pc":"0x7f0000001000","object":"/nix/store/ccc-glibc-2.44/lib/libc.so.6"},
-            {"level":1,"function":"__pthread_create_2_1","file":"pthread_create.c","fullname":null,"line":858,"pc":"0x7f0000002000","object":"/nix/store/ccc-glibc-2.44/lib/libc.so.6"},
-            {"level":2,"function":"_cgo_try_pthread_create","file":null,"fullname":null,"line":null,"pc":"0x500000","object":"/nix/store/ddd-overmind/bin/overmind"},
-            {"level":3,"function":"runtime.asmcgocall","file":"runtime/asm_amd64.s","fullname":null,"line":995,"pc":"0x470000","object":"/nix/store/ddd-overmind/bin/overmind"},
-            {"level":4,"function":"runtime.newproc","file":"./<autogenerated>","fullname":null,"line":1,"pc":"0x440000","object":"/nix/store/ddd-overmind/bin/overmind"}
+            {"level":0,"function":"__GI___clone3","file":"../sysdeps/unix/sysv/linux/x86_64/clone3.S","fullname":null,"line":62,"pc":"0x7f0000001000","object":"/nix/store/ccc-glibc-2.44/lib/libc.so.6","arguments":[],"locals":[]},
+            {"level":1,"function":"__pthread_create_2_1","file":"pthread_create.c","fullname":null,"line":858,"pc":"0x7f0000002000","object":"/nix/store/ccc-glibc-2.44/lib/libc.so.6","arguments":[],"locals":[]},
+            {"level":2,"function":"_cgo_try_pthread_create","file":null,"fullname":null,"line":null,"pc":"0x500000","object":"/nix/store/ddd-overmind/bin/overmind","arguments":[],"locals":[]},
+            {"level":3,"function":"runtime.asmcgocall","file":"runtime/asm_amd64.s","fullname":null,"line":995,"pc":"0x470000","object":"/nix/store/ddd-overmind/bin/overmind","arguments":[],"locals":[]},
+            {"level":4,"function":"runtime.newproc","file":"./<autogenerated>","fullname":null,"line":1,"pc":"0x440000","object":"/nix/store/ddd-overmind/bin/overmind","arguments":[],"locals":[]}
         ]"#,
         );
         assert_eq!(chosen(&stack), Some(3));
@@ -1321,10 +1344,10 @@ mod tests {
     fn each_file_is_carried_once_and_whole() {
         let stack = frames(
             r#"[
-            {"level":0,"function":"run_job","file":"src/pool.c","fullname":"/s/pool.c","line":2,"pc":"0x1","object":null},
-            {"level":1,"function":"worker","file":"src/pool.c","fullname":"/s/pool.c","line":5,"pc":"0x2","object":null},
-            {"level":2,"function":"start_thread","file":"pthread_create.c","fullname":"/gone.c","line":9,"pc":"0x3","object":null},
-            {"level":3,"function":"__clone3","file":null,"fullname":null,"line":null,"pc":"0x4","object":"/lib/libc.so.6"}
+            {"level":0,"function":"run_job","file":"src/pool.c","fullname":"/s/pool.c","line":2,"pc":"0x1","object":null,"arguments":[],"locals":[]},
+            {"level":1,"function":"worker","file":"src/pool.c","fullname":"/s/pool.c","line":5,"pc":"0x2","object":null,"arguments":[],"locals":[]},
+            {"level":2,"function":"start_thread","file":"pthread_create.c","fullname":"/gone.c","line":9,"pc":"0x3","object":null,"arguments":[],"locals":[]},
+            {"level":3,"function":"__clone3","file":null,"fullname":null,"line":null,"pc":"0x4","object":"/lib/libc.so.6","arguments":[],"locals":[]}
         ]"#,
         );
         let mut reads = 0;
@@ -1352,10 +1375,10 @@ mod tests {
     fn a_large_file_is_carried_as_a_window_around_its_frames_lines() {
         let stack = frames(
             r#"[
-            {"level":0,"function":"inner","file":"big.c","fullname":"/s/big.c","line":10,"pc":"0x1","object":null},
-            {"level":1,"function":"outer","file":"big.c","fullname":"/s/big.c","line":8,"pc":"0x2","object":null},
-            {"level":2,"function":"main","file":"edge.c","fullname":"/s/edge.c","line":19,"pc":"0x3","object":null},
-            {"level":3,"function":"past","file":"short.c","fullname":"/s/short.c","line":40,"pc":"0x4","object":null}
+            {"level":0,"function":"inner","file":"big.c","fullname":"/s/big.c","line":10,"pc":"0x1","object":null,"arguments":[],"locals":[]},
+            {"level":1,"function":"outer","file":"big.c","fullname":"/s/big.c","line":8,"pc":"0x2","object":null,"arguments":[],"locals":[]},
+            {"level":2,"function":"main","file":"edge.c","fullname":"/s/edge.c","line":19,"pc":"0x3","object":null,"arguments":[],"locals":[]},
+            {"level":3,"function":"past","file":"short.c","fullname":"/s/short.c","line":40,"pc":"0x4","object":null,"arguments":[],"locals":[]}
         ]"#,
         );
         let numbered: String = (1..=20).map(|n| format!("{n}\n")).collect();
@@ -1430,6 +1453,56 @@ mod tests {
         );
     }
 
+    /// The chosen frame's arguments and locals follow its source, as gdb's
+    /// `info args` and `info locals` name them; a caller's are left out,
+    /// and a frame with neither shows no heading for them.
+    #[test]
+    fn the_answer_lists_the_frame_s_arguments_and_locals() {
+        let mut stack = frames(IN_GLIBC);
+        stack[2].arguments = vec![Variable {
+            name: "arg".into(),
+            value: "0x4c6a20".into(),
+        }];
+        stack[2].locals = vec![
+            Variable {
+                name: "p".into(),
+                value: "0x4c6a20".into(),
+            },
+            Variable {
+                name: "job".into(),
+                value: "<optimized out>".into(),
+            },
+        ];
+        stack[3].locals = vec![Variable {
+            name: "pd".into(),
+            value: "0x7f6158000b70".into(),
+        }];
+        let whose = Whose {
+            pid: 166,
+            process: "test_pool_shutdown",
+            tid: 168,
+            step: 5017,
+        };
+        assert_eq!(
+            render(&whose, &stack, Some(2), None, 1),
+            "process 166 (test_pool_shutdown), thread 168, at step 5017\n\
+             #2 worker (src/pool.c:70)\n\
+             arguments:\n\
+             \x20 arg = 0x4c6a20\n\
+             locals:\n\
+             \x20 p = 0x4c6a20\n\
+             \x20 job = <optimized out>\n\
+             called from #3 start_thread (./nptl/pthread_create.c:448)\n"
+        );
+
+        // Locals alone: no arguments heading.
+        stack[2].arguments.clear();
+        assert!(
+            !render(&whose, &stack, Some(2), None, 1).contains("arguments:"),
+            "a frame without arguments shows no heading for them"
+        );
+    }
+
     /// Without a chosen frame, the answer says so and lists the frames it
     /// had.
     #[test]
@@ -1441,7 +1514,7 @@ mod tests {
             step: 310,
         };
         let stack = frames(
-            r#"[{"level":0,"function":null,"file":null,"fullname":null,"line":null,"pc":"0x401913","object":null}]"#,
+            r#"[{"level":0,"function":null,"file":null,"fullname":null,"line":null,"pc":"0x401913","object":null,"arguments":[],"locals":[]}]"#,
         );
         assert_eq!(
             render(&whose, &stack, None, None, 2),

@@ -166,8 +166,8 @@ enum Command {
     /// Where in the program's own code a thread was at a step.
     ///
     /// Prints its innermost frame outside the kernel, the C library, Rust's
-    /// standard library and dependencies, with its source, and the frames
-    /// that called it. By default the thread of the step's own event, the pid and tid `rewind
+    /// standard library and dependencies, with its source, arguments and
+    /// locals, and the frames that called it. By default the thread of the step's own event, the pid and tid `rewind
     /// events` prints, and at a step with no event or the kernel's own, such
     /// as a console line, the thread on the CPU. Takes gdb with Python on
     /// PATH, and a run recorded with a kernel that lists its tasks.

@@ -562,6 +562,7 @@ impl Scrubber {
             Surface::Runs => self.runs_lines(),
             Surface::Compare => self.compare_lines(),
             Surface::Lanes => self.lanes_lines(),
+            Surface::Variables => self.variables_lines(),
             Surface::Log
             | Surface::Viewer
             | Surface::Source

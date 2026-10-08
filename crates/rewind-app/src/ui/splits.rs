@@ -1,8 +1,8 @@
 //! The edges between the scrubber's panels, which drag to resize them:
 //! the build log, the processes and files and the right column side by
 //! side, the process tree over the files, the terminal pane under all of
-//! them, and the source panel's frame list under its file. A double click
-//! on an edge puts it back.
+//! them, and the source panel's variables and frame lists under its file.
+//! A double click on an edge puts it back.
 //!
 //! Each edge is a thin grip on the left or top of the panel after it, drawn
 //! after the panel before it so it is on top of both. The panels keep their
@@ -24,8 +24,8 @@ use crate::ui::scrubber::Scrubber;
 
 /// How the panels share the window: the three columns' flex weights, the
 /// process tree's and the files' weights in their column, the terminal
-/// pane's share of the height, and the source panel's frame list's height
-/// in pixels.
+/// pane's share of the height, and the heights in pixels of the source
+/// panel's variables list and frame list.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Splits {
     pub log: f32,
@@ -34,6 +34,7 @@ pub struct Splits {
     pub procs: f32,
     pub files: f32,
     pub terminal: f32,
+    pub variables: f32,
     pub frames: f32,
 }
 
@@ -46,6 +47,7 @@ impl Default for Splits {
             procs: layout::FILL,
             files: layout::FILL,
             terminal: layout::TERMINAL_SHARE,
+            variables: layout::VARIABLES_HEIGHT,
             frames: layout::FRAMES_HEIGHT,
         }
     }
@@ -97,8 +99,13 @@ impl Splits {
             } else {
                 start.terminal
             },
+            variables: if saved.variables.is_finite() {
+                saved.variables.max(LIST_MIN)
+            } else {
+                start.variables
+            },
             frames: if saved.frames.is_finite() {
-                saved.frames.max(FRAMES_MIN)
+                saved.frames.max(LIST_MIN)
             } else {
                 start.frames
             },
@@ -128,6 +135,8 @@ pub enum Edge {
     /// The terminal pane's top edge, which the browser build never has.
     #[cfg_attr(target_family = "wasm", allow(dead_code))]
     Terminal,
+    /// The top edge of the source panel's variables list.
+    Variables,
     /// The top edge of the source panel's frame list.
     Frames,
 }
@@ -135,7 +144,9 @@ pub enum Edge {
 impl Edge {
     fn cursor(self) -> CursorStyle {
         match self {
-            Edge::ProcsFiles | Edge::Terminal | Edge::Frames => CursorStyle::ResizeUpDown,
+            Edge::ProcsFiles | Edge::Terminal | Edge::Variables | Edge::Frames => {
+                CursorStyle::ResizeUpDown
+            }
             _ => CursorStyle::ResizeLeftRight,
         }
     }
@@ -146,6 +157,7 @@ impl Edge {
             Edge::MiddleRight => "edge-middle-right",
             Edge::ProcsFiles => "edge-procs-files",
             Edge::Terminal => "edge-terminal",
+            Edge::Variables => "edge-variables",
             Edge::Frames => "edge-frames",
         }
     }
@@ -183,18 +195,19 @@ const MIN_LIST: f32 = 60.0;
 const TERMINAL_MIN: f32 = 0.15;
 const TERMINAL_MAX: f32 = 0.8;
 
-/// The frame list's least height, and the least of the source panel it
-/// leaves the file above it.
-const FRAMES_MIN: f32 = MIN_LIST;
+/// The least height of the source panel's variables and frame lists, and
+/// the least of the source panel they leave the file above them.
+const LIST_MIN: f32 = MIN_LIST;
 const SOURCE_FILE_MIN: f32 = MIN_PANEL;
 
-/// The frame list's height after its top edge moves `moved` pixels down
-/// from where it was `start` high, in a source panel `panel` pixels high
-/// when it has been painted.
-pub fn frames_height(start: f32, moved: f32, panel: Option<f32>) -> f32 {
-    let height = (start - moved).max(FRAMES_MIN);
-    match panel {
-        Some(panel) => height.min((panel - SOURCE_FILE_MIN).max(FRAMES_MIN)),
+/// The height of one of the source panel's lists after its top edge moves
+/// `moved` pixels down from where it was `start` high, when `room` pixels
+/// of the panel are left to it once the panel has been painted: the
+/// panel's height less the other list's.
+pub fn list_height(start: f32, moved: f32, room: Option<f32>) -> f32 {
+    let height = (start - moved).max(LIST_MIN);
+    match room {
+        Some(room) => height.min((room - SOURCE_FILE_MIN).max(LIST_MIN)),
         None => height,
     }
 }
@@ -227,7 +240,7 @@ pub fn grip(edge: Edge, cx: &mut Context<Scrubber>) -> Stateful<Div> {
     let half = px(size::EDGE_GRIP / 2.0);
     let along = div().id(edge.id()).absolute().cursor(edge.cursor());
     let along = match edge {
-        Edge::ProcsFiles | Edge::Terminal | Edge::Frames => {
+        Edge::ProcsFiles | Edge::Terminal | Edge::Variables | Edge::Frames => {
             along.left_0().right_0().top(-half).h(px(size::EDGE_GRIP))
         }
         _ => along.top_0().bottom_0().left(-half).w(px(size::EDGE_GRIP)),
@@ -327,9 +340,17 @@ impl Scrubber {
                     self.splits.terminal = share.clamp(TERMINAL_MIN, TERMINAL_MAX);
                 }
             }
+            // Each of the source panel's lists leaves the file its least
+            // height past the other list.
+            Edge::Variables => {
+                let panel = self.measured.source.get().map(|b| f32::from(b.size.height));
+                let room = panel.map(|p| p - start.frames);
+                self.splits.variables = list_height(start.variables, dy, room);
+            }
             Edge::Frames => {
                 let panel = self.measured.source.get().map(|b| f32::from(b.size.height));
-                self.splits.frames = frames_height(start.frames, dy, panel);
+                let room = panel.map(|p| p - start.variables);
+                self.splits.frames = list_height(start.frames, dy, room);
             }
         }
         cx.notify();
@@ -361,6 +382,7 @@ impl Scrubber {
                 (self.splits.procs, self.splits.files) = (start.procs, start.files);
             }
             Edge::Terminal => self.splits.terminal = start.terminal,
+            Edge::Variables => self.splits.variables = start.variables,
             Edge::Frames => self.splits.frames = start.frames,
         }
         self.keep_splits();
@@ -424,18 +446,18 @@ mod tests {
     }
 
     #[test]
-    fn the_frame_list_follows_its_edge_and_leaves_the_file_room() {
+    fn a_source_list_follows_its_edge_and_leaves_the_file_room() {
         // Dragged up 50 pixels from 88 high it is 138; down past its least
         // height it stops there; up past what leaves the file its least
-        // in a source panel 500 high it stops short; with the panel not
+        // in the 500 pixels left to it it stops short; with the panel not
         // yet painted only the least height holds.
-        assert_eq!(frames_height(88.0, -50.0, Some(500.0)), 138.0);
-        assert_eq!(frames_height(88.0, 200.0, Some(500.0)), FRAMES_MIN);
+        assert_eq!(list_height(88.0, -50.0, Some(500.0)), 138.0);
+        assert_eq!(list_height(88.0, 200.0, Some(500.0)), LIST_MIN);
         assert_eq!(
-            frames_height(88.0, -900.0, Some(500.0)),
+            list_height(88.0, -900.0, Some(500.0)),
             500.0 - SOURCE_FILE_MIN
         );
-        assert_eq!(frames_height(88.0, -900.0, None), 988.0);
+        assert_eq!(list_height(88.0, -900.0, None), 988.0);
     }
 
     #[test]

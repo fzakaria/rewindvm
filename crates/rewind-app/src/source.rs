@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use crate::engine::EngineError;
 use crate::sideways::widest_line;
 
-pub use rewind_trace::located::{Extent, Frame};
+pub use rewind_trace::located::{Extent, Frame, Variable};
 
 /// What the panel shows in place of the source of a frame without any:
 /// the frame's address and program, and a line saying so.
@@ -28,6 +28,25 @@ pub fn without_source(frame: &Frame) -> Vec<String> {
 
 /// What the panel says of a frame the engine found no source for.
 const NO_SOURCE: &str = "no source";
+
+/// Which of a frame's variables a row of the variables list is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    Argument,
+    Local,
+}
+
+/// The variables list's rows for `frame`: each argument, then each local,
+/// as `name = value`.
+pub fn variable_lines(frame: &Frame) -> Vec<(Kind, String)> {
+    let line = |kind: Kind| move |v: &Variable| (kind, format!("{} = {}", v.name, v.value));
+    frame
+        .arguments
+        .iter()
+        .map(line(Kind::Argument))
+        .chain(frame.locals.iter().map(line(Kind::Local)))
+        .collect()
+}
 
 /// A source file as the answer carries it, split into lines once.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -346,7 +365,7 @@ mod tests {
     fn at_the_crash() -> String {
         let clone3: Vec<String> = (70..=86).map(|n| format!("asm {n}")).collect();
         format!(
-            r#"{{"run":"8fd5378ddf70075e","step":5060,"pid":166,"tid":174,"process":"test_pool_shutdown","frames":[{{"level":0,"function":"worker","file":"src/pool.c","fullname":"/build/mylib/src/pool.c","line":77,"pc":"0x55bfaf437437","object":"/build/mylib/tests/test_pool_shutdown"}},{{"level":1,"function":"start_thread","file":"pthread_create.c","fullname":null,"line":454,"pc":"0x7f615854d7d1","object":"/nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6"}},{{"level":2,"function":"__GI___clone3","file":"../sysdeps/unix/sysv/linux/x86_64/clone3.S","fullname":"/glibc/clone3.S","line":78,"pc":"0x7f61585d9b1c","object":"/nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6"}}],"chosen":0,"files":{{"/build/mylib/src/pool.c":{{"extent":"whole","first":1,"text":{pool}}},"/glibc/clone3.S":{{"extent":"window","first":70,"text":{clone3}}}}}}}"#,
+            r#"{{"run":"8fd5378ddf70075e","step":5060,"pid":166,"tid":174,"process":"test_pool_shutdown","frames":[{{"level":0,"function":"worker","file":"src/pool.c","fullname":"/build/mylib/src/pool.c","line":77,"pc":"0x55bfaf437437","object":"/build/mylib/tests/test_pool_shutdown","arguments":[],"locals":[]}},{{"level":1,"function":"start_thread","file":"pthread_create.c","fullname":null,"line":454,"pc":"0x7f615854d7d1","object":"/nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6","arguments":[],"locals":[]}},{{"level":2,"function":"__GI___clone3","file":"../sysdeps/unix/sysv/linux/x86_64/clone3.S","fullname":"/glibc/clone3.S","line":78,"pc":"0x7f61585d9b1c","object":"/nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6","arguments":[],"locals":[]}}],"chosen":0,"files":{{"/build/mylib/src/pool.c":{{"extent":"whole","first":1,"text":{pool}}},"/glibc/clone3.S":{{"extent":"window","first":70,"text":{clone3}}}}}}}"#,
             pool = serde_json::to_string(&pool_c()).unwrap(),
             clone3 = serde_json::to_string(&clone3.join("\n")).unwrap(),
         )
@@ -478,6 +497,31 @@ mod tests {
         );
     }
 
+    /// A frame's variables list its arguments, then its locals, each as
+    /// `name = value` with which it is; a frame with neither lists none.
+    #[test]
+    fn a_frame_s_variables_are_its_arguments_then_its_locals() {
+        let mut located = located();
+        let variable = |name: &str, value: &str| Variable {
+            name: name.into(),
+            value: value.into(),
+        };
+        located.frames[0].arguments = vec![variable("arg", "0x4c6a20")];
+        located.frames[0].locals = vec![
+            variable("p", "0x4c6a20"),
+            variable("job", "<optimized out>"),
+        ];
+        assert_eq!(
+            variable_lines(&located.frames[0]),
+            vec![
+                (Kind::Argument, "arg = 0x4c6a20".to_string()),
+                (Kind::Local, "p = 0x4c6a20".to_string()),
+                (Kind::Local, "job = <optimized out>".to_string()),
+            ]
+        );
+        assert_eq!(variable_lines(&located.frames[1]), Vec::new());
+    }
+
     /// A frame without a source line is placed by its program's file
     /// name, and one without a name by its address.
     #[test]
@@ -490,6 +534,8 @@ mod tests {
             line: None,
             pc: "0x401913".into(),
             object: Some("/newroot/src/big".into()),
+            arguments: Vec::new(),
+            locals: Vec::new(),
         };
         assert_eq!(frame.function_label(), "0x401913");
         assert_eq!(frame.place_label(), "big");

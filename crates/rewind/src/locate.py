@@ -2,7 +2,8 @@
 #
 # Prints one line, MARKER and then a JSON object, for rewind to read out of
 # whatever else gdb prints. With $rewind_tid set, gdb is connected to a fork
-# of the run, and the object lists that thread's frames, innermost first.
+# of the run, and the object lists that thread's frames, innermost first,
+# each with its arguments and locals.
 # With $rewind_address set, gdb has only the symbol files, and the object
 # names the function or variable, source line and file the address is in.
 
@@ -16,6 +17,15 @@ MARKER = "rewind-where: "
 # The most frames listed: an unwinder that has lost its way can go on far
 # past the program's real stack.
 MAX_FRAMES = 64
+
+# The most variables listed for a frame, and how a value prints: no deeper
+# than two levels of structs, the first elements of an array or string,
+# and no longer than a line a person reads, cut short past that.
+MAX_VARIABLES = 64
+MAX_DEPTH = 2
+MAX_ELEMENTS = 32
+MAX_VALUE = 400
+CUT = "..."
 
 # `info symbol` names the function an address is in, its offset into it
 # when not 0, and, with several files loaded, the file.
@@ -55,6 +65,51 @@ def source_of(sal):
     return sal.symtab.filename, sal.symtab.fullname(), sal.line
 
 
+def value_text(symbol, frame):
+    """symbol's value in frame on one line, as gdb prints it, or why gdb
+    cannot read it."""
+    try:
+        text = symbol.value(frame).format_string(
+            max_depth=MAX_DEPTH,
+            max_elements=MAX_ELEMENTS,
+            pretty_structs=False,
+            pretty_arrays=False,
+            styling=False,
+        )
+    except gdb.error as e:
+        text = "<error: {}>".format(e)
+    if len(text) > MAX_VALUE:
+        text = text[: MAX_VALUE - len(CUT)] + CUT
+    return text
+
+
+def variables_of(frame):
+    """frame's arguments and locals, as `info args` and `info locals` list
+    them: the blocks from the one around the frame's instruction out to
+    the function's own, innermost first. A frame without DWARF has none."""
+    try:
+        block = frame.block()
+    except (RuntimeError, gdb.error):
+        return [], []
+    arguments, locals_ = [], []
+    while block is not None:
+        for symbol in block:
+            if len(arguments) + len(locals_) >= MAX_VARIABLES:
+                break
+            if symbol.is_argument:
+                arguments.append(symbol)
+            elif symbol.is_variable:
+                locals_.append(symbol)
+        if block.function is not None:
+            break
+        block = block.superblock
+
+    def entries(symbols):
+        return [{"name": s.name, "value": value_text(s, frame)} for s in symbols]
+
+    return entries(arguments), entries(locals_)
+
+
 def frame_entry(frame):
     pc = frame.pc()
     filename, fullname, line = source_of(frame.find_sal())
@@ -62,6 +117,7 @@ def frame_entry(frame):
     if function is None:
         symbol = info_symbol(pc)
         function = symbol.group("name") if symbol is not None else None
+    arguments, locals_ = variables_of(frame)
     return {
         "level": frame.level(),
         "function": function,
@@ -70,6 +126,8 @@ def frame_entry(frame):
         "line": line,
         "pc": "{:#x}".format(pc),
         "object": object_of(pc),
+        "arguments": arguments,
+        "locals": locals_,
     }
 
 

@@ -39,6 +39,20 @@ pub struct Frame {
     pub pc: String,
     /// The program or library the instruction is in, by its path in the VM.
     pub object: Option<String>,
+    /// The function's arguments, in the order it declares them, as gdb's
+    /// `info args` lists them; empty without the function's DWARF.
+    pub arguments: Vec<Variable>,
+    /// The locals in scope at the frame's instruction, the innermost
+    /// block's first, as gdb's `info locals` lists them.
+    pub locals: Vec<Variable>,
+}
+
+/// An argument or local of a frame, with its value as gdb prints it on one
+/// line, cut short when long.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Variable {
+    pub name: String,
+    pub value: String,
 }
 
 impl Frame {

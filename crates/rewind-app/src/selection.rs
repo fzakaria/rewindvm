@@ -28,6 +28,8 @@ pub enum Surface {
     Viewer,
     /// The source panel's lines.
     Source,
+    /// The source panel's arguments and locals of the frame it shows.
+    Variables,
     /// The last event at the playhead.
     EventCard,
     /// Where the run parts from the one it is compared with.

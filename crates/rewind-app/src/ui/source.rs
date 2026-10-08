@@ -11,9 +11,10 @@
 //! the engine cannot fork say so instead.
 //!
 //! The panel shows the whole source file of the frame it shows, scrolled
-//! so the frame's line is in the middle, with the frame list pinned below
-//! it. Clicking a frame in the list shows that frame's file, from the same
-//! answer, until the next answer shows its chosen frame again.
+//! so the frame's line is in the middle, with that frame's arguments and
+//! locals and then the frame list pinned below it. Clicking a frame in the
+//! list shows that frame's file and variables, from the same answer, until
+//! the next answer shows its chosen frame again.
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -33,7 +34,8 @@ use crate::run::Replays;
 use crate::selection::{Mapped, Pos, Surface, part_of_line};
 use crate::sideways::{Sideways, line_width, text_column};
 use crate::source::{
-    Frame, Located, Progress, Shown, SourceFile, Thread, shown, target, without_source,
+    Frame, Kind, Located, Progress, Shown, SourceFile, Thread, shown, target, variable_lines,
+    without_source,
 };
 use crate::syntax::{Highlighter, Language};
 use crate::theme::{self, layout, size};
@@ -61,6 +63,13 @@ const DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(400);
 
 /// The opacity of the last answer while a new one loads.
 const STALE_OPACITY: f32 = 0.45;
+
+/// What a variable's line has between its name and its value, what marks
+/// an argument in the variables list, and what the list says of a frame
+/// without any.
+const VALUE_AFTER: &str = " = ";
+const ARGUMENT_MARKER: &str = "arg";
+const NO_VARIABLES: &str = "no arguments or locals";
 
 /// What marks the frame whose source is shown in the frame list.
 const SHOWN_MARKER: &str = "\u{25b8}";
@@ -133,7 +142,7 @@ impl Scrubber {
             highlighters: HashMap::new(),
             sideways: Sideways::default(),
         });
-        self.clear_selection_in(&[Surface::Viewer, Surface::Source]);
+        self.clear_selection_in(&[Surface::Viewer, Surface::Source, Surface::Variables]);
         if readable {
             self.fetch_source(cx);
         }
@@ -145,7 +154,7 @@ impl Scrubber {
         if self.right_tab == RightTab::Source {
             self.right_tab = RightTab::AtStep;
         }
-        self.clear_selection_in(&[Surface::Source]);
+        self.clear_selection_in(&[Surface::Source, Surface::Variables]);
         cx.notify();
     }
 
@@ -327,7 +336,7 @@ impl Scrubber {
         panel.shown = Some(shown(step, result));
         panel.highlighters.clear();
         panel.sideways = Sideways::default();
-        self.clear_selection_in(&[Surface::Source]);
+        self.clear_selection_in(&[Surface::Source, Surface::Variables]);
         self.centre_shown_line();
         cx.notify();
     }
@@ -351,7 +360,7 @@ impl Scrubber {
             return;
         }
         panel.sideways = Sideways::default();
-        self.clear_selection_in(&[Surface::Source]);
+        self.clear_selection_in(&[Surface::Source, Surface::Variables]);
         self.centre_shown_line();
         cx.notify();
     }
@@ -564,8 +573,10 @@ impl Scrubber {
             1.0
         };
 
-        // The frame list, pinned under the file area so it stays in reach
-        // however small the window, as high as its top edge was dragged.
+        // The shown frame's variables, then the frame list, pinned under
+        // the file area so they stay in reach however small the window,
+        // each as high as its top edge was dragged.
+        let variables = located.map(|_| self.render_variables(frame_shown, cx).opacity(dim));
         let frames = located.map(|located| self.render_frames(located, at, cx).opacity(dim));
 
         Some(
@@ -599,6 +610,7 @@ impl Scrubber {
                     Surface::Source,
                     cx,
                 ))
+                .children(variables)
                 .children(frames),
         )
     }
@@ -706,6 +718,112 @@ impl Scrubber {
         .min_h_0()
         .py(px(size::LIST_PAD_Y))
         .into_any_element()
+    }
+
+    /// The selectable lines of the variables list: the shown frame's
+    /// arguments, then its locals, each as `name = value`.
+    pub(super) fn variables_lines(&self) -> Vec<Mapped> {
+        let Some((located, Some(at))) = self.located() else {
+            return Vec::new();
+        };
+        let Some(frame) = located.frames.get(at) else {
+            return Vec::new();
+        };
+        variable_lines(frame)
+            .into_iter()
+            .map(|(_, text)| Mapped::plain(text))
+            .collect()
+    }
+
+    /// `frame`'s arguments, then its locals, each `name = value` with its
+    /// name colored and each argument marked as one, in a list of its own
+    /// that scrolls, as high as its top edge was dragged. A frame gdb
+    /// named no variables in, as a frame without DWARF, says so.
+    fn render_variables(&self, frame: Option<&Frame>, cx: &mut Context<Self>) -> Div {
+        let registry = self.selecting.registry.clone();
+        let selected = self.selected_range(Surface::Variables);
+        let lines = frame.map(variable_lines).unwrap_or_default();
+        let empty = lines.is_empty();
+        let rows = lines.into_iter().enumerate().map(|(i, (kind, text))| {
+            let name_end = text.find(VALUE_AFTER).unwrap_or(text.len());
+            let (marker, name_color) = match kind {
+                Kind::Argument => (ARGUMENT_MARKER, theme::AMBER_PALE),
+                Kind::Local => ("", theme::SOFT),
+            };
+            let colors = colored(
+                &Mapped::plain(text.clone()),
+                [
+                    (0..name_end, name_color),
+                    (name_end..text.len(), theme::TEXT),
+                ],
+            );
+            let part = selected
+                .as_ref()
+                .and_then(|r| part_of_line(r, i, text.len()));
+            div()
+                .w_full()
+                .flex()
+                .flex_none()
+                .gap(px(size::CARD_GAP))
+                .px(px(size::PANEL_PAD_X))
+                .h(px(size::LOG_ROW_HEIGHT))
+                .items_center()
+                .whitespace_nowrap()
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(size::ARGUMENT_MARKER_WIDTH))
+                        .text_color(rgb(theme::FAINT))
+                        .child(marker),
+                )
+                .child(
+                    div().min_w_0().overflow_hidden().text_ellipsis().child(
+                        selectable(Surface::Variables, i, text, part, &registry)
+                            .with_highlights(colors),
+                    ),
+                )
+        });
+        let list = div()
+            .id("source-variables")
+            .flex()
+            .flex_col()
+            .h(px(self.splits.variables))
+            .overflow_y_scroll()
+            .cursor(CursorStyle::IBeam)
+            .when(empty, |list| {
+                list.child(
+                    div()
+                        .px(px(size::PANEL_PAD_X))
+                        .h(px(size::LOG_ROW_HEIGHT))
+                        .flex()
+                        .items_center()
+                        .text_color(rgb(theme::MUTED))
+                        .child(NO_VARIABLES),
+                )
+            })
+            .children(rows);
+        div()
+            .relative()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .pt(px(size::CARD_GAP))
+            .pb(px(size::LIST_PAD_Y))
+            .border_t_1()
+            .border_color(rgb(theme::LINE_SOFT))
+            .font_family(self.fonts.mono.clone())
+            .text_size(px(size::TEXT_MONO))
+            .child(
+                div()
+                    .px(px(size::PANEL_PAD_X))
+                    .pb(px(size::CARD_GAP))
+                    .font_family(self.fonts.ui.clone())
+                    .text_size(px(size::TEXT_SMALL))
+                    .text_color(rgb(theme::MUTED))
+                    .child("VARIABLES"),
+            )
+            .child(selects(list, Surface::Variables, cx))
+            .child(grip(Edge::Variables, cx))
     }
 
     /// The thread's frames, innermost first, the one whose source is
