@@ -291,6 +291,41 @@ has its FS base in the vCPU, since the kernel leaves it as it is on the way in;
 one off the CPU saved it in its `task_struct`, at an offset the kernel also
 writes into the shared page, after the interface number so that never moves.
 
+gdb can run the fork backwards. A run is deterministic, so going back is going
+forward again from earlier and stopping sooner. Rewind keeps where the fork is
+as a position: the start of a step, then what the fork did since, as single
+steps, runs to the next hit of a trap in the debugged process, and runs to a
+branch count. Replaying those from the step's start reaches the same
+instruction exactly, with no guessing from registers. `reverse-stepi` goes to
+the instruction boundary before the position: replayed from where the
+position's last move began, run to one branch short of the position under
+counter time, with the counter's interrupt armed a margin short of that and
+the rest single-stepped, then stepped until the step that reaches it. Under
+exit time, which counts no branches, the whole way is single-stepped, which is
+slow in a long step. `reverse-continue` replays the run with gdb's traps set
+from the latest keyframe or checkpoint at or before the position, then from
+the one before that, newest first, and stops at the last hit: at a
+breakpoint as it was reached, and before the instruction that wrote a watched
+value, so gdb sees the value change. gdb builds `reverse-next`,
+`reverse-finish` and the rest on those two.
+
+A step's start comes from a checkpoint the fork keeps in memory: the vCPU,
+the interrupt controllers and the monitor's state, and the pages written
+since the checkpoint before it. Rewinding to one writes back only the pages
+that can differ, which the dirty log and the checkpoints name, and the shared
+page, which the monitor writes itself, so it takes milliseconds where a fork
+from keyframes takes a good part of a second. A step before any checkpoint
+comes from a fork of the run at its keyframes.
+
+Only user space counts branches, and a step's start is in the kernel, right
+after its exit. Single steps begun there go through the kernel's return to
+user space, `sysretq` or `iretq`, which loads flags saved before the steps
+began and so drops the trap flag. At such an instruction a debug register
+traps the user address it returns to, and the steps go on from there; gdb's
+own `stepi` in the kernel does the same. A fork whose registers or memory gdb
+changed, or that left its recording, cannot go back, since the run replayed
+is not what the fork did.
+
 What gdb knows about the code comes from two more inspections, each on a fork
 of its own, before the fork gdb debugs is made. The kernel hands every
 inspection the thread group id of the task that was running when the request

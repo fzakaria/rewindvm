@@ -160,6 +160,9 @@ $ rewind gdb <run> <step> -- -batch -ex 'break pool.c:77' -ex continue -ex bt
 # every thread of a process, even with the CPU idle, as at a deadlock
 $ rewind gdb <run> <step> --pid <pid> -- -batch -ex 'thread apply all bt'
 
+# gdb backwards: where a pointer was last written before the step
+$ rewind gdb <run> <step> -- -batch -ex 'watch -l p->queue' -ex reverse-continue
+
 # the line of the program's own code a thread was on, with its arguments,
 # locals and callers: by default the thread of the step's event; --json for
 # programs

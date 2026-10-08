@@ -190,6 +190,24 @@ In the app, Attach gdb opens the same session under the timeline:
 
 ![The app's gdb pane stopped at the watchpoint in pool_shutdown, with the old and new values of p->queue](../site/img/app-gdb-watch.png)
 
+## Run backwards to the write
+
+gdb can also run the fork backwards. From the crash itself, watch the pointer
+the worker read and run back to the last write to it:
+
+```console run name=reverse
+$ rewind gdb {{failing|short}} {{crash_step}} -- -batch -ex 'watch -l p->queue' -ex reverse-continue -ex 'bt 2'
+```
+
+<!-- assert: grep -q 'Old value = (struct queue \*) 0x0' {{out:reverse}} && grep -q 'pool_shutdown (p=.*) at src/pool.c:125' {{out:reverse}} && grep -q 'in main ()' {{out:reverse}} -->
+
+The fork stops before `main` nulls the queue in `pool_shutdown`. Going back,
+gdb shows the values swapped: the old value is the one after the write.
+`reverse-stepi`, `reverse-next`, `reverse-finish` and `reverse-continue` to a
+breakpoint work too. Rewind replays the run from the step's start to go back,
+so a step back takes a moment, and longer under exit time, which single-steps
+the way. A fork whose memory or registers gdb changed cannot go back.
+
 ## Follow the fault into the kernel
 
 `rewind gdb` has the VM kernel's symbols too. Stop where the kernel sends the
