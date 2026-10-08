@@ -219,6 +219,13 @@ $ printf 'objdump -d --no-show-raw-insn --start-address=0x142c --stop-address=0x
 
 <!-- assert: grep -q 'addl   $0x1,0x108(%rax)' {{out:objdump}} -->
 
+In the app, Open shell starts a shell at the playhead in the terminal pane,
+in the crashing process's working directory:
+
+<!-- screenshot site/img/app-shell: {{home}}/runs/{{failing}} --compare {{home}}/runs/{{passing}} --step {{crash_step}} ;; click 1330 756 ;; wait 25 ;; type pwd ;; wait 1 ;; type ls tests ;; wait 2 -->
+
+![The app's shell pane at step {{crash_step}} of the failing run, in /build/mylib, after pwd and ls tests](../site/img/app-shell.png)
+
 ## Give programs more CPUs
 
 The VM has one vCPU, so by default programs see one CPU and Nix builds run
