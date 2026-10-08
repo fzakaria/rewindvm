@@ -1846,8 +1846,8 @@ a.card:hover {
     mask-image: linear-gradient(to right, #000 calc(100% - 56px), transparent);
   }
 
-  /* How it works, the two workloads, the tutorials and the case studies:
-     a row of cards to swipe, the next one showing at the edge, with dots
+  /* How it works, the two workloads, the tutorials, the case studies and
+     the plans: a row of cards to swipe, the next one showing at the edge, with dots
      under it. The row runs to the screen's edges and snaps to a card. */
   .swipe {
     display: flex;
