@@ -51,12 +51,17 @@ pub struct Process {
     pub pid: u32,
     /// The process that forked it; 0 for the first process.
     pub parent: u32,
-    /// The command line of its most recent exec, or, if it never exec'd,
-    /// its parent's: a forked child runs its parent's program. Empty for
-    /// processes nothing exec'd before them, such as kernel threads.
+    /// The command line of its last exec in the run, or, if it never
+    /// exec'd, its parent's: a forked child runs its parent's program. Empty
+    /// for processes nothing exec'd before them, such as kernel threads.
+    /// [Process::as_of] gives the command line at a step instead.
     pub argv: Vec<String>,
     /// Whether `argv` is from its own exec rather than its parent's.
     pub execd: bool,
+    /// The command line it was forked with: its parent's at the fork.
+    pub forked_argv: Vec<String>,
+    /// Each of its execs, with the step it happened on, in order.
+    pub execs: Vec<(u64, Vec<String>)>,
     /// The steps it was forked and exited on; `end` is None while it runs.
     pub start: u64,
     pub end: Option<u64>,
@@ -71,6 +76,24 @@ pub struct Process {
 impl Process {
     pub fn alive_at(&self, step: u64) -> bool {
         self.start <= step && self.end.is_none_or(|end| step < end)
+    }
+
+    /// The process as it was at `step`: `argv` and `execd` describe its
+    /// last exec on or before `step`, or the command line it was forked
+    /// with if it had not exec'd yet.
+    pub fn as_of(&self, step: u64) -> Process {
+        let mut process = self.clone();
+        match self.execs.iter().rev().find(|(at, _)| *at <= step) {
+            Some((_, argv)) => {
+                process.argv = argv.clone();
+                process.execd = true;
+            }
+            None => {
+                process.argv = self.forked_argv.clone();
+                process.execd = false;
+            }
+        }
+        process
     }
 
     /// A short name for display: the command, or the pid if it never
@@ -201,6 +224,8 @@ impl Trace {
                         parent,
                         argv: Vec::new(),
                         execd: false,
+                        forked_argv: Vec::new(),
+                        execs: Vec::new(),
                         start: step,
                         end: None,
                         status: None,
@@ -241,6 +266,7 @@ impl Trace {
                         if let (Some(argv), Some(c)) = (parent_argv, procs.get_mut(child))
                             && c.argv.is_empty()
                         {
+                            c.forked_argv = argv.clone();
                             c.argv = argv;
                         }
                     }
@@ -250,6 +276,7 @@ impl Trace {
                     let p = procs.get_mut(&e.pid).unwrap();
                     p.argv = argv.clone();
                     p.execd = true;
+                    p.execs.push((e.step, argv.clone()));
                 }
                 EventKind::Exit { status, thread, .. } => {
                     if let Some(p) = procs.get_mut(&e.pid) {
@@ -275,9 +302,10 @@ impl Trace {
     /// The process that had id `pid` at `step`: the one alive then, else
     /// the nearest before it, else the first after it. A pid is given out
     /// again once its process has exited, so the newest process with an id
-    /// is not always the one a step means.
+    /// is not always the one a step means. It is returned as it was at the
+    /// step ([Process::as_of]), running the program it had exec'd by then.
     pub fn process_at(&self, pid: u32, step: u64) -> Option<Process> {
-        process_in(&self.processes(), pid, step).cloned()
+        process_in(&self.processes(), pid, step).map(|p| p.as_of(step))
     }
 
     /// Output lines completed by `step`, both streams interleaved in the
@@ -750,47 +778,53 @@ mod tests {
         )
     }
 
+    /// Process 1 forks `child` at `step`.
+    fn fork_of(step: u64, child: u32) -> Event {
+        ev(
+            step,
+            1,
+            1,
+            EventKind::Fork {
+                child,
+                thread: false,
+            },
+        )
+    }
+
+    /// Process `pid` execs the program `name`, with it as its only argument.
+    fn exec_of(step: u64, pid: u32, name: &str) -> Event {
+        ev(
+            step,
+            pid,
+            pid,
+            EventKind::Exec {
+                filename: name.into(),
+                argv: vec![name.into()],
+                old_pid: pid,
+            },
+        )
+    }
+
+    /// Process `pid` exits.
+    fn exit_of(step: u64, pid: u32) -> Event {
+        ev(
+            step,
+            pid,
+            pid,
+            EventKind::Exit {
+                status: 0,
+                comm: String::new(),
+                thread: false,
+            },
+        )
+    }
+
     #[test]
     fn a_reused_pid_names_the_process_alive_at_the_step() {
         // Process 5 runs "first" from step 1 to 3, then a second process 5
         // runs "second" from step 6: each step names the one alive then,
         // or the nearest before it, and a pid the run never had is none.
-        use EventKind::*;
-        let fork = |step, child| {
-            ev(
-                step,
-                1,
-                1,
-                Fork {
-                    child,
-                    thread: false,
-                },
-            )
-        };
-        let exec = |step, pid, name: &str| {
-            ev(
-                step,
-                pid,
-                pid,
-                Exec {
-                    filename: name.into(),
-                    argv: vec![name.into()],
-                    old_pid: pid,
-                },
-            )
-        };
-        let exit = |step, pid| {
-            ev(
-                step,
-                pid,
-                pid,
-                Exit {
-                    status: 0,
-                    comm: String::new(),
-                    thread: false,
-                },
-            )
-        };
+        let (fork, exec, exit) = (fork_of, exec_of, exit_of);
         let trace = Trace {
             events: vec![
                 fork(1, 5),
@@ -807,6 +841,36 @@ mod tests {
         assert!(trace.process_at(5, 2).unwrap().alive_at(2));
         assert!(!trace.process_at(5, 4).unwrap().alive_at(4));
         assert_eq!(trace.process_at(9, 2), None);
+    }
+
+    /// A process that execs more than once runs a different program at
+    /// different steps, so asking about a step must give the command line
+    /// in effect then, not the run's last one. Process 5 is forked from
+    /// process 1 while it runs "shell", then execs "flox", "flox-activations"
+    /// and "bash"; each step between the execs checks the name and whether
+    /// the command line is its own or its parent's.
+    #[test]
+    fn a_process_that_execs_again_names_the_program_it_ran_then() {
+        let trace = Trace {
+            events: vec![
+                exec_of(0, 1, "shell"),
+                fork_of(1, 5),
+                exec_of(2, 5, "flox"),
+                exec_of(4, 5, "flox-activations"),
+                exec_of(6, 5, "bash"),
+            ],
+        };
+        let at = |step| trace.process_at(5, step).unwrap();
+
+        assert_eq!(at(1).argv, vec!["shell".to_string()]);
+        assert!(
+            !at(1).execd,
+            "before its first exec it runs its parent's program"
+        );
+        assert_eq!(at(3).name(), "flox");
+        assert!(at(3).execd);
+        assert_eq!(at(5).name(), "flox-activations");
+        assert_eq!(at(7).name(), "bash");
     }
 
     #[test]
