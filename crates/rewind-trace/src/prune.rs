@@ -64,10 +64,12 @@ pub fn identical(root: &str, runs: &[Member]) -> Vec<Removal> {
     let family: BTreeSet<&str> = Forks::of(runs).descendants(root).into_iter().collect();
 
     // The member each trace keeps: the root if it has that trace, else
-    // the oldest, ties broken by id so the choice is stable.
+    // the oldest, ties broken by id so the choice is stable. A finished
+    // run another process is executing again is neither removed nor kept
+    // for, as an unfinished one is not.
     let mut members: Vec<&Member> = runs
         .iter()
-        .filter(|r| family.contains(r.id.as_str()) && r.finished)
+        .filter(|r| family.contains(r.id.as_str()) && r.finished && !r.executing)
         .collect();
     members.sort_by_key(|r| (r.id != root, r.created, r.id.clone()));
     let mut keepers: BTreeMap<&str, &str> = BTreeMap::new();

@@ -27,7 +27,10 @@ fn member(run: &Run) -> Member {
         created: m.created,
         trace_hash: m.trace_hash.clone(),
         finished,
-        executing: !finished && run.executing(),
+        // Executing a finished run again leaves its finished manifest in
+        // place until the new execution finishes, so a finished run can be
+        // executing too.
+        executing: run.executing(),
     }
 }
 
@@ -212,6 +215,65 @@ mod tests {
         assert!(!home.runs().join(u).exists());
         assert!(!home.runs().join(&fork.id).exists());
         assert!(home.runs().join(&other.id).exists());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_finished_run_executing_again_is_neither_removed_nor_pruned() {
+        // r finished, and its fork f finished with the same trace; then
+        // another process started executing f again, which holds f's
+        // executing lock while f's finished manifest stays. Removing f is
+        // refused, a dry run too, and pruning r's family keeps f until
+        // the execution lets the lock go (see crate::settle).
+        use crate::run::tests::manifest;
+        use crate::run::{EXECUTING_LOCK, MANIFEST, Parent, RunId, RunOutcome};
+        let root =
+            std::env::temp_dir().join(format!("rewind-remove-executing-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let home = Home::at(root.clone()).unwrap();
+        let finish = |m: &mut crate::run::Manifest| {
+            m.outcome = Some(RunOutcome {
+                stop: rewind_trace::stop::Stop::PoweredOff,
+                step: 12,
+                virtual_ns: 0,
+                status: Some(0),
+                wall_ms: 0,
+            });
+            m.trace_hash = Some("same".into());
+        };
+        let mut r = manifest("0000000000000001", "r", 1);
+        finish(&mut r);
+        let mut f = manifest("0000000000000002", "f", 2);
+        finish(&mut f);
+        f.parent = Some(Parent {
+            run: RunId::parse(&r.id).unwrap(),
+            step: 7,
+        });
+        for m in [&r, &f] {
+            let dir = home.runs().join(&m.id);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join(MANIFEST), serde_json::to_vec(m).unwrap()).unwrap();
+        }
+        let held = fs::File::create(home.runs().join(&f.id).join(EXECUTING_LOCK)).unwrap();
+        held.lock().unwrap();
+
+        let err = remove_with_forks(&home, &[f.id.to_string()], Act::DryRun).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!("run {} is executing; remove it once it has finished", f.id)
+        );
+        let r = Run::open(&home.runs().join(&r.id)).unwrap();
+        assert_eq!(plan_identical(&home, &r).unwrap(), vec![]);
+
+        drop(held);
+        let idle = crate::settle::settle("f to stop executing", || {
+            let idle = plan_identical(&home, &r).unwrap();
+            (!idle.is_empty()).then_some(idle)
+        });
+        assert_eq!(
+            idle.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(),
+            [f.id.as_str()]
+        );
         fs::remove_dir_all(&root).unwrap();
     }
 
