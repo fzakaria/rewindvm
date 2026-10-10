@@ -88,7 +88,7 @@ DEVENV_FIGURE = """<div class="tour tour-article">
             width="1440"
             height="672"
             loading="lazy"
-            alt="The Rewind desktop app on the failing devenv run at step 1,166, compared with the passing run c1819dea: the build log stops at running 1 test, SIGCHLD has reached thread 41, and the run diverged at step 1,162. Opens the full-size image."
+            alt="The Rewind desktop app on the failing devenv run at step 1,166, compared with the passing run ce9c7563: the build log stops at running 1 test, SIGCHLD has reached thread 41, and the run diverged at step 1,162. Opens the full-size image."
           />
         </picture>
       </a>
@@ -98,7 +98,7 @@ DEVENV_FIGURE = """<div class="tour tour-article">
       <button type="button" class="pin pin-4" style="left: 97.2%; top: 59.7%" aria-label="4: where the run diverged">4</button>
     </div>
     <figcaption>
-      The app on the failing run fc48fae0 at step 1,166, compared with the passing run c1819dea.
+      The app on the failing run 81b5bb74 at step 1,166, compared with the passing run ce9c7563.
     </figcaption>
   </figure>
   <ol class="tour-cards">
@@ -116,7 +116,7 @@ DEVENV_FIGURE = """<div class="tour tour-article">
     </li>
     <li class="tour-card" id="tour-4" tabindex="0">
       <h3>Divergence</h3>
-      <p>The run left c1819dea at step 1,162, where the shell starts the task's script.</p>
+      <p>The run left ce9c7563 at step 1,162, where the shell starts the task's script.</p>
     </li>
   </ol>
 </div>

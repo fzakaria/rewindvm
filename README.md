@@ -255,7 +255,7 @@ licenses.
 - [Lost task output in devenv](docs/case-studies/devenv-task-output-race.md):
   a known, fixed bug, [cachix/devenv#2281](https://github.com/cachix/devenv/issues/2281),
   where a task's last lines went missing. A test that passed 2000 times on the
-  host failed under 216 of 257 schedules, and `rewind gdb` shows the last line
+  host failed under 207 of 257 schedules, and `rewind gdb` shows the last line
   still in the reader's buffer when `tokio::select!` took the child's exit.
   The fix passes every schedule.
 
