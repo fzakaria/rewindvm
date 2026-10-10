@@ -281,7 +281,15 @@ impl Trace {
                 EventKind::Exit { status, thread, .. } => {
                     if let Some(p) = procs.get_mut(&e.pid) {
                         if *thread {
-                            if let Some(t) = p.threads.iter_mut().find(|t| t.0 == e.tid) {
+                            // Linux hands a thread id out again once its
+                            // thread has exited, so the exit ends the
+                            // newest lifetime with the id still live.
+                            if let Some(t) = p
+                                .threads
+                                .iter_mut()
+                                .rev()
+                                .find(|t| t.0 == e.tid && t.2.is_none())
+                            {
                                 t.2 = Some(e.step);
                             }
                         } else {
@@ -1025,6 +1033,42 @@ mod tests {
         assert_eq!(make.threads, vec![(4, 9, Some(10))]);
         assert!(procs[2].alive_at(7));
         assert!(!procs[2].alive_at(8));
+    }
+
+    #[test]
+    fn a_reused_thread_id_ends_its_own_lifetime() {
+        // make's thread 4 exits at 10, then make starts a new thread that
+        // Linux gives the same id 4 at 11 and that exits at 12. Each exit
+        // ends the lifetime that was live, so the first stays (9, 10).
+        use EventKind::*;
+        let mut t = sample();
+        let after_first_exit = t.events.iter().position(|e| e.step == 11).unwrap();
+        t.events.splice(
+            after_first_exit..after_first_exit,
+            [
+                ev(
+                    11,
+                    2,
+                    2,
+                    Fork {
+                        child: 4,
+                        thread: true,
+                    },
+                ),
+                ev(
+                    12,
+                    2,
+                    4,
+                    Exit {
+                        status: 0,
+                        comm: "make".into(),
+                        thread: true,
+                    },
+                ),
+            ],
+        );
+        let make = &t.processes()[1];
+        assert_eq!(make.threads, vec![(4, 9, Some(10)), (4, 11, Some(12))]);
     }
 
     #[test]
