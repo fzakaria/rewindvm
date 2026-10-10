@@ -6,6 +6,7 @@
 //! step can serve every step with the same last such event: the engine's
 //! cache of source files out of the VM, and the desktop app's file viewer.
 
+use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 
 use crate::{EventKind, Trace};
@@ -16,9 +17,9 @@ pub enum Version {
     /// No event wrote, renamed or unlinked the path, or a directory above
     /// it, up to the step: it holds what the run started with.
     Original,
-    /// The last such event was at this step, and nothing writes the file
-    /// since: a rename or an unlink, or an open for writing by a process
-    /// that had exited by the step.
+    /// The last such event was at this step, a rename, an unlink or an
+    /// open for writing, and nothing writes the file since: every process
+    /// that opened it for writing had exited by the step.
     Since(u64),
     /// A process that opened the file for writing was still running at the
     /// step, and may write more. Not kept.
@@ -28,10 +29,10 @@ pub enum Version {
 /// The version of `path` at `step` of the run `trace` is of.
 ///
 /// An open for writing marks only the start of the writes, which the
-/// trace does not record one by one, so its version is finished once the
-/// process that opened the file has exited. A process it forked after
-/// opening could hold the file open longer; builds do not write source
-/// files that way.
+/// trace does not record one by one, so its version is finished once
+/// every process that opened the file has exited. A process one of them
+/// forked after opening could hold the file open longer; builds do not
+/// write source files that way.
 pub fn version(trace: &Trace, path: &str, step: u64) -> Version {
     // Events name absolute paths without `.` or `..`.
     let Some(path) = normal(path) else {
@@ -39,24 +40,32 @@ pub fn version(trace: &Trace, path: &str, step: u64) -> Version {
     };
     let path = path.as_str();
 
-    // The last event up to the step that changed the path.
-    let events = trace.until(step);
-    let Some(last) = events.iter().rposition(|e| changes(&e.kind, path)) else {
-        return Version::Original;
-    };
-    let event = &events[last];
-    let EventKind::Open { .. } = event.kind else {
-        return Version::Since(event.step);
-    };
+    // The last event up to the step that changed the path, and the
+    // processes that opened it for writing and had not exited by the
+    // step. An earlier opener than the last may still hold the file and
+    // write it after a later open, rename or unlink, so every opener
+    // counts, and an open is finished once its process has exited.
+    let mut last = None;
+    let mut writers: HashSet<u32> = HashSet::new();
+    for e in trace.until(step) {
+        if changes(&e.kind, path) {
+            last = Some(e.step);
+            if let EventKind::Open { .. } = e.kind {
+                writers.insert(e.pid);
+            }
+            continue;
+        }
+        if let EventKind::Exit { thread: false, .. } = e.kind
+            && !writers.is_empty()
+        {
+            writers.remove(&e.pid);
+        }
+    }
 
-    // An open is finished once its process has exited.
-    let exited = events[last..]
-        .iter()
-        .any(|e| e.pid == event.pid && matches!(e.kind, EventKind::Exit { thread: false, .. }));
-    if exited {
-        Version::Since(event.step)
-    } else {
-        Version::Changing
+    match last {
+        None => Version::Original,
+        Some(_) if !writers.is_empty() => Version::Changing,
+        Some(at) => Version::Since(at),
     }
 }
 
@@ -201,5 +210,39 @@ mod tests {
             Version::Since(10)
         );
         assert_eq!(version(&trace, "src/pool.c", 5), Version::Changing);
+    }
+
+    #[test]
+    fn a_path_is_changing_while_any_process_that_opened_it_runs() {
+        // Process 100 opens out.c at 10, process 200 opens it again at 20
+        // and exits at 30, and process 100 exits at 50. Between 30 and 50
+        // process 100 may still write the file, so it is changing; once
+        // both have exited it is the version of the last open. Process
+        // 100 holding the file open across an unlink at 40 keeps it
+        // changing too.
+        let trace = Trace {
+            events: vec![
+                open(10, 100, "/build/out.c"),
+                open(20, 200, "/build/out.c"),
+                exit(30, 200),
+                exit(50, 100),
+            ],
+        };
+        assert_eq!(version(&trace, "/build/out.c", 40), Version::Changing);
+        assert_eq!(version(&trace, "/build/out.c", 55), Version::Since(20));
+
+        let mut unlinked = trace.clone();
+        unlinked.events.insert(
+            3,
+            event(
+                40,
+                300,
+                EventKind::Unlink {
+                    path: "/build/out.c".into(),
+                },
+            ),
+        );
+        assert_eq!(version(&unlinked, "/build/out.c", 45), Version::Changing);
+        assert_eq!(version(&unlinked, "/build/out.c", 55), Version::Since(40));
     }
 }
