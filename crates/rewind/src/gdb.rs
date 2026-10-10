@@ -653,6 +653,14 @@ fn arguments(
         args.push(command);
     };
 
+    // Before any file loads, where its scripts may auto-load from.
+    for path in &process.auto_load {
+        ex(
+            "-iex",
+            format!("add-auto-load-safe-path {}", path.display()),
+        );
+    }
+
     if !urls.is_empty() {
         ex("-iex", DEBUGINFOD_ON.into());
         ex("-iex", format!("set debuginfod urls {}", urls.join(" ")));
@@ -909,6 +917,9 @@ struct Process {
     /// gdb support for the languages it runs that its toolchain ships but
     /// gdb does not load itself.
     helpers: Vec<Helper>,
+    /// The store paths gdb may auto-load scripts from: those of the
+    /// process's files, and those of the scripts the files name.
+    auto_load: Vec<PathBuf>,
 }
 
 /// A language's gdb support, shipped by the toolchain or interpreter a
@@ -1089,6 +1100,7 @@ fn debugged_process(
     }
 
     let helpers = helpers(&files, dir, say);
+    let auto_load = auto_load(&files, dir);
     Process {
         scope: rewind_core::debug::Scope::Process(running.pid),
         files,
@@ -1096,7 +1108,34 @@ fn debugged_process(
         vdso: running.vdso,
         listed: None,
         helpers,
+        auto_load,
     }
+}
+
+/// The store paths gdb may auto-load scripts from for `files`: each store
+/// file's own, where libstdc++ keeps its printers beside it, and each
+/// store path a file's .debug_gdb_scripts names a script in, as a Go
+/// program names its runtime's. gdb trusts none of them by default, and
+/// the store holds only what builds put there.
+fn auto_load(files: &[SymbolFile], dir: &Path) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for file in files {
+        if file.origin != Origin::Store {
+            continue;
+        }
+        let named = std::fs::File::open(&file.path)
+            .map(|mut f| rewind_core::maps::gdb_scripts(&mut f))
+            .unwrap_or_default();
+        let roots = std::iter::once(path_in_vm(&file.path, dir))
+            .chain(named.into_iter().map(PathBuf::from))
+            .filter_map(|p| store_root(&p));
+        for root in roots {
+            if !paths.contains(&root) {
+                paths.push(root);
+            }
+        }
+    }
+    paths
 }
 
 /// The language helpers gdb needs for `files` that their toolchains ship
@@ -1925,6 +1964,33 @@ mod tests {
         let older = br#"{"/nix/store/yfd-polyglot-rust.drv":{"inputDrvs":{"/nix/store/f6q-rustc-wrapper-1.91.1.drv":["out"]}}}"#;
         assert_eq!(derivation_inputs(older), [wrapper]);
         assert!(derivation_inputs(b"{}").is_empty());
+    }
+
+    /// gdb auto-loads the scripts a process's own store paths ship, such
+    /// as libstdc++'s printers beside it and the Go runtime's that a Go
+    /// program names, only from directories it was told are safe: those
+    /// are named before any file loads. Builds the arguments for two.
+    #[test]
+    fn the_process_s_store_paths_are_safe_to_auto_load_from() {
+        let safe = [
+            PathBuf::from("/nix/store/abc-gcc-14.3.0-lib"),
+            PathBuf::from("/nix/store/def-go-1.25.10"),
+        ];
+        let process = Process {
+            files: vec![SymbolFile {
+                path: PathBuf::from("/nix/store/abc-gcc-14.3.0-lib/lib/libstdc++.so.6"),
+                offset: 0x7f00_0000_0000,
+                origin: Origin::Store,
+            }],
+            auto_load: safe.to_vec(),
+            ..Process::default()
+        };
+        let args = arguments(&KernelSymbols::none(), &process, &[], None);
+        for dir in &safe {
+            let named = format!("add-auto-load-safe-path {}", dir.display());
+            let at = args.iter().position(|a| *a == named).expect(&named);
+            assert_eq!(args[at - 1], "-iex", "{args:?}");
+        }
     }
 
     /// A process's language helpers are sourced before gdb connects, each
