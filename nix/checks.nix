@@ -3,6 +3,7 @@
   pkgs,
   rewind,
   kernel,
+  gdb,
   module,
 }:
 let
@@ -393,6 +394,8 @@ let
     sleep 1
     echo "uptime $(cat /proc/uptime)"
   '';
+  # Programs in five languages for checks.gdb-languages.
+  languagesRoot = import ./gdb-languages { inherit pkgs; };
 in
 {
   # House style, checked rather than remembered: no em dashes and none of
@@ -635,7 +638,7 @@ in
       {
         nativeBuildInputs = [
           rewind
-          pkgs.gdb
+          gdb
         ];
         requiredSystemFeatures = [ "kvm" ];
       }
@@ -738,7 +741,7 @@ in
       {
         nativeBuildInputs = [
           rewind
-          pkgs.gdb
+          gdb
         ];
         requiredSystemFeatures = [ "kvm" ];
       }
@@ -787,7 +790,7 @@ in
       {
         nativeBuildInputs = [
           rewind
-          pkgs.gdb
+          gdb
         ];
         requiredSystemFeatures = [ "kvm" ];
       }
@@ -839,7 +842,7 @@ in
       {
         nativeBuildInputs = [
           rewind
-          pkgs.gdb
+          gdb
         ];
         requiredSystemFeatures = [ "kvm" ];
       }
@@ -921,7 +924,7 @@ in
       {
         nativeBuildInputs = [
           rewind
-          pkgs.gdb
+          gdb
         ];
         requiredSystemFeatures = [ "kvm" ];
       }
@@ -991,7 +994,7 @@ in
       {
         nativeBuildInputs = [
           rewind
-          pkgs.gdb
+          gdb
         ];
         requiredSystemFeatures = [ "kvm" ];
       }
@@ -1057,7 +1060,7 @@ in
       {
         nativeBuildInputs = [
           rewind
-          pkgs.gdb
+          gdb
         ];
         requiredSystemFeatures = [ "kvm" ];
       }
@@ -1093,7 +1096,7 @@ in
       {
         nativeBuildInputs = [
           rewind
-          pkgs.gdb
+          gdb
           pkgs.jq
         ];
         requiredSystemFeatures = [ "kvm" ];
@@ -1152,7 +1155,7 @@ in
       {
         nativeBuildInputs = [
           rewind
-          pkgs.gdb
+          gdb
           pkgs.jq
         ];
         requiredSystemFeatures = [ "kvm" ];
@@ -1384,6 +1387,86 @@ in
     ! grep -q 'HOME' out
     touch $out
   '';
+
+  # checks.gdb-languages: `rewind gdb` at a print of a program in each of
+  # C++, Rust, Go, Python and Ruby, run from the store as a Nix build's
+  # programs are, shows what gdb shows a live process of each: C++'s
+  # standard library printers, a thread-local of the main thread and of a
+  # worker blocked off the CPU, and errno, through the shared libraries the
+  # loader listed; Rust's printers; the Go runtime's goroutines; CPython's
+  # py-bt; and Ruby's interpreter by its symbols. Boots the VM, so it needs
+  # /dev/kvm.
+  gdb-languages =
+    pkgs.runCommand "rewind-gdb-languages"
+      {
+        nativeBuildInputs = [
+          rewind
+          gdb
+          # Rust's printers, from the rustc on PATH as rust-gdb finds them:
+          # the sandbox has no Nix database to name the one that built it.
+          pkgs.rustc
+        ];
+        requiredSystemFeatures = [ "kvm" ];
+      }
+      ''
+        export REWIND_HOME=$TMPDIR/rewind
+        # No debuginfod server: without a network, each of gdb's questions
+        # to it waits out a timeout. libpython's and libc's DWARF come from
+        # their debug outputs instead.
+        export REWIND_DEBUGINFOD=/nonexistent
+        debug='set debug-file-directory ${pkgs.python3.debug}/lib/debug:${pkgs.glibc.debug}/lib/debug'
+
+        rewind run -q --clock exits --name languages --root ${languagesRoot} -- /bin/languages
+
+        # gdb at the step of a language's first print, with these commands.
+        at() {
+          language=$1
+          shift
+          step=$(rewind log --steps languages | grep "hello from $language, alice" | awk '{print $1}')
+          rewind gdb languages "$step" -- -batch -iex "$debug" "$@" > gdb 2>&1 || true
+        }
+
+        # What gdb must have printed, and must not have.
+        has() {
+          if ! grep -qF -- "$2" gdb; then
+            echo "$1: no '$2' in:"
+            cat gdb
+            exit 1
+          fi
+        }
+        lacks() {
+          if grep -qF -- "$2" gdb; then
+            echo "$1: '$2' in:"
+            cat gdb
+            exit 1
+          fi
+        }
+
+        at c++ -ex 'frame function Greeter::greet' -ex 'p *this' \
+          -ex 'printf "main calls %d\n", calls' -ex 'printf "errno %d\n", errno' \
+          -ex 'thread 3' -ex 'printf "worker calls %d\n", calls'
+        has c++ 'std::vector of length 4'
+        has c++ 'main calls 1'
+        has c++ 'errno 0'
+        has c++ 'worker calls 7'
+
+        at rust -ex 'frame function greet::Greeter::greet' -ex 'p *self'
+        has rust 'counts: Vec(size=4) = {1, 2, 3, 5}'
+        lacks rust 'Python Exception'
+
+        at go -ex 'info goroutines' -ex 'frame function main.(*Greeter).Greet' -ex 'p *g' \
+          -ex 'thread 3' -ex 'p/x $fs_base'
+        has go 'runtime.gopark'
+        has go 'Counts = []int = {1, 2, 3, 5}'
+        lacks go '<unavailable>'
+
+        at python -ex py-bt
+        has python 'line 9, in greet'
+
+        at ruby -ex bt
+        has ruby 'ruby_run_node'
+        touch $out
+      '';
 
   # checks.version: VERSION is the release's version, and Cargo cannot read
   # it, so the two Cargo.toml files that name it must agree with it;

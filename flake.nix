@@ -7,6 +7,9 @@
     # (nix/crane.nix). It takes nixpkgs from its caller, so it has no
     # nixpkgs input to follow.
     crane.url = "github:ipetkov/crane";
+    # Any version of any nixpkgs package from one input, fetched only when
+    # used: `rewind gdb` needs a newer gdb than nixpkgs above ships.
+    multiverse.url = "github:fzakaria/nixpkgs-multiverse";
   };
 
   # CI pushes every build to this cache, so `nix run github:fzakaria/rewindvm`
@@ -27,6 +30,7 @@
       self,
       nixpkgs,
       crane,
+      multiverse,
     }:
     let
       # x86_64-linux only: the engine is a KVM virtual machine monitor, and
@@ -62,6 +66,10 @@
           kernel = import ./nix/kernel.nix { inherit pkgs; };
           guest = import ./nix/guest.nix { inherit pkgs; };
           nixseparatedebuginfod2 = pkgs.nixseparatedebuginfod2;
+          # gdb 17 or later, which finds thread-local variables itself
+          # where `rewind gdb`'s stub lists the libraries: Hydra's build,
+          # substituted without evaluating the nixpkgs it came from.
+          gdb = multiverse.multiverse.${system}.fast.version "gdb" "17.2";
           rewind = import ./nix/rewind.nix {
             inherit
               pkgs
@@ -69,6 +77,7 @@
               kernel
               guest
               nixseparatedebuginfod2
+              gdb
               commit
               ;
           };
@@ -87,6 +96,7 @@
             kernel
             guest
             nixseparatedebuginfod2
+            gdb
             rewind
             app
             ;
@@ -217,7 +227,12 @@
           p = per system;
         in
         import ./nix/checks.nix {
-          inherit (p) pkgs rewind kernel;
+          inherit (p)
+            pkgs
+            rewind
+            kernel
+            gdb
+            ;
           module = self.nixosModules.default;
         }
       );
@@ -233,6 +248,7 @@
             kernel
             guest
             nixseparatedebuginfod2
+            gdb
             app
             ;
         }

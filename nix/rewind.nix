@@ -8,6 +8,7 @@
   kernel,
   guest,
   nixseparatedebuginfod2,
+  gdb,
   commit,
 }:
 let
@@ -67,8 +68,6 @@ let
   kernelDebug = builtins.unsafeDiscardStringContext "${kernel.debug}";
   debuginfod = builtins.unsafeDiscardStringContext (lib.getExe nixseparatedebuginfod2);
 
-  # gdb comes after the user's own PATH, for `rewind gdb`, so a gdb the
-  # user prefers wins.
   runtimeTools = [
     pkgs.erofs-utils
     pkgs.gnutar
@@ -88,9 +87,9 @@ pkgs.runCommand "rewind"
     lndir -silent ${unwrapped}/share $out/share
     makeWrapper ${unwrapped}/bin/rewind $out/bin/rewind \
       --prefix PATH : ${lib.makeBinPath runtimeTools} \
-      --suffix PATH : ${lib.makeBinPath [ pkgs.gdb ]} \
       --set-default REWIND_KERNEL ${kernel}/bzImage \
       --set-default REWIND_INITRD ${guest.initrd}/initrd \
       --set-default REWIND_KERNEL_DEBUG ${kernelDebug} \
-      --set-default REWIND_DEBUGINFOD ${debuginfod}
+      --set-default REWIND_DEBUGINFOD ${debuginfod} \
+      --set-default REWIND_GDB ${gdb}/bin/gdb
   ''
