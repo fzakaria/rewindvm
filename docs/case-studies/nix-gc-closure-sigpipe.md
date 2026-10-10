@@ -233,14 +233,14 @@ schedule 930: exited:1      77942 steps    run 2f337a4cd5ab9669
 On the host it fails only when the writer is made the low-priority task on its
 CPU:
 
-| What ran on the host                                         | Failed       |
-| ------------------------------------------------------------ | ------------ |
-| `gc-closure` from Nix master, 200 times in one build         | 0 of 200     |
-| line 15 in a loop, 16 CPUs                                   | 0 of 5000    |
-| line 15 in a loop, pinned to one CPU                         | 0 of 5000    |
-| the same, with a busy loop sharing that CPU                  | 0 of 20000   |
-| the same, with the `printf` subshell reniced to 19, pinned   | 1802 of 2000 |
-| the same, reniced, not pinned                                | 1 of 2000    |
+| What ran on the host                                       | Failed       |
+| ---------------------------------------------------------- | ------------ |
+| `gc-closure` from Nix master, 200 times in one build       | 0 of 200     |
+| line 15 in a loop, 16 CPUs                                 | 0 of 5000    |
+| line 15 in a loop, pinned to one CPU                       | 0 of 5000    |
+| the same, with a busy loop sharing that CPU                | 0 of 20000   |
+| the same, with the `printf` subshell reniced to 19, pinned | 1802 of 2000 |
+| the same, reniced, not pinned                              | 1 of 2000    |
 
 ## The fix
 
