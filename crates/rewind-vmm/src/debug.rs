@@ -487,15 +487,19 @@ impl Machine {
         let Some(shared) = self.dev.shared else {
             return Ok(None);
         };
+        let read = |at: u64, fields: &mut [u64]| -> Result<()> {
+            for (i, field) in fields.iter_mut().enumerate() {
+                let mut bytes = [0u8; 8];
+                self.dev.ram.read(shared + at + 8 * i as u64, &mut bytes)?;
+                *field = u64::from_le_bytes(bytes);
+            }
+            Ok(())
+        };
         let mut fields = [0u64; crate::pv::TASK_LAYOUT_FIELDS];
-        for (i, field) in fields.iter_mut().enumerate() {
-            let mut bytes = [0u8; 8];
-            self.dev
-                .ram
-                .read(shared + crate::pv::SHARED_TASKS + 8 * i as u64, &mut bytes)?;
-            *field = u64::from_le_bytes(bytes);
-        }
-        Ok(crate::pv::TaskLayout::from_fields(fields))
+        read(crate::pv::SHARED_TASKS, &mut fields)?;
+        let mut bases = [0u64; crate::pv::TASK_BASES_FIELDS];
+        read(crate::pv::SHARED_TASK_BASES, &mut bases)?;
+        Ok(crate::pv::TaskLayout::from_fields(fields, bases))
     }
 
     /// Writes the VM's memory at a virtual address, all or nothing per page.

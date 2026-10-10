@@ -118,7 +118,7 @@ diff -ruN a/arch/x86/kernel/cpu/Makefile b/arch/x86/kernel/cpu/Makefile
 diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 --- a/arch/x86/kernel/cpu/rewind.c	1969-12-31 16:00:00.000000000 -0800
 +++ b/arch/x86/kernel/cpu/rewind.c	1969-12-31 16:00:00.000000000 -0800
-@@ -0,0 +1,1316 @@
+@@ -0,0 +1,1326 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Rewind VM guest platform.
@@ -218,7 +218,7 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 + * rewind_shared.interface before setup, and a monitor that speaks another
 + * stops rather than run it.
 + */
-+#define REWIND_INTERFACE	1
++#define REWIND_INTERFACE	2
 +
 +/* Values written to REWIND_PORT_EXIT. */
 +enum rewind_exit {
@@ -315,6 +315,14 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +	u32 stall_ns;
 +	struct rewind_tasks tasks;
 +	u32 interface;		/* REWIND_INTERFACE, written by the kernel */
++	/*
++	 * Where a task that is off the CPU saved its user FS and GS bases,
++	 * in struct task_struct, which gdb reads thread-local variables
++	 * through. After interface, so that stays where every monitor
++	 * reads it.
++	 */
++	u64 fsbase;
++	u64 gsbase;
 +};
 +
 +/* Reasons for an interrupt, in rewind_shared.pending. */
@@ -818,6 +826,8 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +	t->pgd = offsetof(struct mm_struct, pgd);
 +	t->pt_regs = THREAD_SIZE - TOP_OF_KERNEL_STACK_PADDING -
 +		     sizeof(struct pt_regs);
++	rewind_shared.fsbase = offsetof(struct task_struct, thread.fsbase);
++	rewind_shared.gsbase = offsetof(struct task_struct, thread.gsbase);
 +}
 +
 +static void __init rewind_init_platform(void)

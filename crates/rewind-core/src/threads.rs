@@ -218,6 +218,15 @@ impl<'a, M: Memory + ?Sized> Tasks<'a, M> {
         Ok(words)
     }
 
+    /// The user FS and GS bases a task saved when it last left the CPU, in
+    /// its struct thread_struct. A task on the CPU has its live bases in
+    /// the CPU's registers instead.
+    pub fn user_bases(&self, task: u64) -> Result<(u64, u64)> {
+        let fs = self.pointer(task + self.layout.fsbase)?;
+        let gs = self.pointer(task + self.layout.gsbase)?;
+        Ok((fs, gs))
+    }
+
     /// The structs on the list whose head is at `head`, each linked through
     /// the list_head `link` bytes into it.
     fn entries(&self, head: u64, link: u64) -> Result<Vec<u64>> {
@@ -312,6 +321,8 @@ mod tests {
             thread_head: 0x8,
             pgd: 0x18,
             pt_regs: 0x800,
+            fsbase: 0x70,
+            gsbase: 0x78,
         }
     }
 
@@ -475,6 +486,18 @@ mod tests {
         assert_eq!(regs[pt_regs::R15], 100);
         assert_eq!(regs[pt_regs::RIP], 100 + pt_regs::RIP as u64);
         assert_eq!(regs[pt_regs::SS], 100 + pt_regs::SS as u64);
+    }
+
+    /// A thread's FS and GS bases are the ones its task saved when it last
+    /// left the CPU, at the layout's offsets into the task.
+    #[test]
+    fn user_bases_come_from_the_task() {
+        let (fake, [_, t41, _]) = kernel();
+        let l = layout();
+        fake.put_u64(t41 + l.fsbase, 0x7f00_0000_1000);
+        fake.put_u64(t41 + l.gsbase, 0x7f00_0000_2000);
+        let bases = Tasks::new(&fake, l).user_bases(t41).unwrap();
+        assert_eq!(bases, (0x7f00_0000_1000, 0x7f00_0000_2000));
     }
 
     /// A thread that has exited and given its stack back, as the kernel

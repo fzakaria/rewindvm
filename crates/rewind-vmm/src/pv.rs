@@ -143,8 +143,14 @@ pub const SHARED_TASKS: u64 = (SHARED_STALL_NS + 4).next_multiple_of(8);
 /// the ports, the records and the shared page. The kernel writes it into
 /// the shared page, after the task layout, before it sends setup; a kernel
 /// from before rewind 1.0 wrote none, and the field reads 0.
-pub const INTERFACE_VERSION: u32 = 1;
+pub const INTERFACE_VERSION: u32 = 2;
 pub const SHARED_INTERFACE: u64 = SHARED_TASKS + 8 * TASK_LAYOUT_FIELDS as u64;
+
+/// Where a task off the CPU saved its user FS and GS bases, as offsets in
+/// struct task_struct ([`TaskLayout::fsbase`] and [`TaskLayout::gsbase`]),
+/// after the interface version and aligned to 8 bytes, so the version
+/// stays where every monitor reads it.
+pub const SHARED_TASK_BASES: u64 = (SHARED_INTERFACE + 4).next_multiple_of(8);
 
 /// Whether a guest kernel that names interface `version` is one this
 /// monitor runs.
@@ -191,15 +197,25 @@ pub struct TaskLayout {
     pub pgd: u64,
     /// From a task's stack to its struct pt_regs.
     pub pt_regs: u64,
+    /// In struct task_struct: where a task off the CPU saved its user FS
+    /// and GS bases, which thread-local variables are found through.
+    pub fsbase: u64,
+    pub gsbase: u64,
 }
 
-/// How many u64 fields [`TaskLayout`] has.
+/// How many u64 fields of [`TaskLayout`] are at [`SHARED_TASKS`], and how
+/// many at [`SHARED_TASK_BASES`].
 pub const TASK_LAYOUT_FIELDS: usize = 14;
+pub const TASK_BASES_FIELDS: usize = 2;
 
 impl TaskLayout {
-    /// The layout from its fields in the shared page's order, or None when
+    /// The layout from its fields in the shared page's order, `f` at
+    /// [`SHARED_TASKS`] and `bases` at [`SHARED_TASK_BASES`], or None when
     /// the kernel wrote none.
-    pub fn from_fields(f: [u64; TASK_LAYOUT_FIELDS]) -> Option<TaskLayout> {
+    pub fn from_fields(
+        f: [u64; TASK_LAYOUT_FIELDS],
+        bases: [u64; TASK_BASES_FIELDS],
+    ) -> Option<TaskLayout> {
         if f[0] == 0 {
             return None;
         }
@@ -218,6 +234,8 @@ impl TaskLayout {
             thread_head: f[11],
             pgd: f[12],
             pt_regs: f[13],
+            fsbase: bases[0],
+            gsbase: bases[1],
         })
     }
 }
@@ -241,6 +259,7 @@ pub mod pt_regs {
     pub const RDX: usize = 12;
     pub const RSI: usize = 13;
     pub const RDI: usize = 14;
+    pub const ORIG_RAX: usize = 15;
     pub const RIP: usize = 16;
     pub const CS: usize = 17;
     pub const RFLAGS: usize = 18;
