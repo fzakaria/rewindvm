@@ -4832,6 +4832,7 @@ dependencies = [
  "rewind-trace",
  "serde",
  "serde_json",
+ "sha2",
  "syntect",
  "tar",
  "ureq",

@@ -92,10 +92,15 @@ pub fn is_url(path: &Path) -> bool {
 }
 
 /// Downloads an export from `url` into the downloads directory and
-/// returns the file. A file of the same name and length already there is
-/// taken as that download, so opening a URL twice fetches it once.
+/// returns the file. A file of the same length already downloaded from
+/// the same URL is taken as that download, so opening a URL twice
+/// fetches it once.
 pub fn download(url: &str) -> Result<PathBuf> {
-    let dir = downloads_dir().context("no HOME to download the run into")?;
+    // Each URL gets a directory of its own, so two URLs whose files share
+    // a name never pass for each other.
+    let dir = downloads_dir()
+        .context("no HOME to download the run into")?
+        .join(url_key(url));
     fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let name = download_name(url);
     let file = dir.join(name);
@@ -232,6 +237,18 @@ fn is_complete(dir: &Path) -> bool {
     dir.join(MANIFEST).is_file() && dir.join(TRACE).is_file()
 }
 
+/// How many hex digits of a URL's SHA-256 name its downloads directory.
+const URL_KEY_DIGITS: usize = 16;
+
+/// The name of the directory downloads of `url` are kept in: the start
+/// of the URL's SHA-256, in hex.
+fn url_key(url: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(url.as_bytes());
+    let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    hex[..URL_KEY_DIGITS].to_string()
+}
+
 /// The file name a download of `url` is kept under: the URL's last path
 /// segment, without a query or fragment, when it is a plain file name.
 fn download_name(url: &str) -> &str {
@@ -278,6 +295,40 @@ mod tests {
         assert_eq!(download_name(&format!("{base}/")), DOWNLOAD_NAME);
         assert_eq!(download_name(&format!("{base}/..")), DOWNLOAD_NAME);
         assert_eq!(download_name(&format!("{base}/a%2Fb.rwd")), DOWNLOAD_NAME);
+    }
+
+    #[test]
+    fn downloads_of_one_file_name_from_two_urls_are_kept_apart() {
+        // A local server answers /a/run.rwd and /b/run.rwd with different
+        // bytes of the same length. Each download returns the bytes its
+        // own URL served, though the second finds a file of the first's
+        // name and length already downloaded.
+        use std::io::{BufRead, BufReader, Write};
+        const BODIES: [(&str, &[u8]); 2] = [("/a/run.rwd", b"AAAA"), ("/b/run.rwd", b"BBBB")];
+        super::test_cache();
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = server.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in server.incoming() {
+                let mut stream = stream.unwrap();
+                let mut request = String::new();
+                BufReader::new(&stream).read_line(&mut request).unwrap();
+                let path = request.split(' ').nth(1).unwrap_or_default();
+                let (_, body) = BODIES.iter().find(|(p, _)| *p == path).unwrap();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(body).unwrap();
+            }
+        });
+
+        for (path, body) in BODIES {
+            let file = download(&format!("http://127.0.0.1:{port}{path}")).unwrap();
+            assert_eq!(fs::read(&file).unwrap(), body);
+        }
     }
 
     #[test]

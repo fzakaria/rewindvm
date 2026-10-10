@@ -32,6 +32,8 @@ zstd = "0.13"
 # .rwd exports from https URLs, with rustls and compiled-in root
 # certificates, as the engine fetches them.
 ureq = { version = "3", default-features = false, features = ["rustls"] }
+# Downloads are kept under a hash of their URL.
+sha2 = "0.10"
 # GPUI, Zed's UI framework, as published from zed@1a28cff under the gpui-pre
 # name. The crates.io `gpui` release is a year behind and renders through
 # blade on Linux; gpui-pre renders through wgpu on Wayland and X11.
