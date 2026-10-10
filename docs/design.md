@@ -603,9 +603,11 @@ nothing.
    them at the run's last step, by function, offset and source line, with
    the process the VM's kernel had on the CPU: "in user space in spin+11
    (spin.c:5), process 38 (spin)". The manifest keeps the bare address.
-3. Narrows the window, first its start and then its end, to the smallest
-   window that still makes that schedule end differently. A smaller window
-   perturbs a subset of the same steps, so the search is well defined.
+3. Narrows the window by bisection, first its start and then its end, to
+   a window that still makes that schedule end differently and stops
+   doing so if its start moves one step later or its end one step
+   earlier. Perturbing more steps can hide a failure as well as cause
+   one, so this is not always the smallest such window in the run.
 4. Names the window's last step, which decides how the run ends. Narrowing
    has already run the window one step shorter, which ends like schedule 0,
    so that run and the window's are the same run until the last step and

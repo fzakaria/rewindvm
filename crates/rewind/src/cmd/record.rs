@@ -472,8 +472,8 @@ pub fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
         return Ok(ExitCode::FAILURE);
     }
 
-    // Narrow it to the smallest window of steps its perturbation
-    // still ends differently from (see rewind_core::check).
+    // Narrow it to a short window of steps its perturbation still ends
+    // differently from (see rewind_core::check).
     let seed = worst.manifest.spec.schedule;
     let end = worst
         .manifest
