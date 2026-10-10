@@ -191,7 +191,8 @@ main program's `DT_DEBUG` points at the loader's `r_debug`, whose link maps
 name every loaded object with its load offset, matched to the files Rewind
 has by their dynamic sections. gdb then knows each library's link map, which
 it finds a library's thread-local variables through; gdb 17 does that itself,
-and the Nix package ships it, while `rewind gdb` warns about an older gdb.
+and the Nix package ships it. An older gdb gains nothing from the list, so
+`rewind gdb` says what it cannot do and loads every file one by one for it.
 The interpreters' and compilers' own gdb support comes in too when it is here:
 CPython's `libpython.py` beside a store libpython, and the pretty printers of
 the rustc that built a Rust program, found among its derivation's inputs or

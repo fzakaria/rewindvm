@@ -149,7 +149,15 @@ pub fn gdb(
     let mut symbols = Symbols::load(home, run, step, pid, Kernel::Load, Say::Aloud)?;
     let mut debuggee = debuggee(run, step, machine, symbols.process.scope)?;
     symbols.add_vdso(&debuggee, Say::Aloud);
-    symbols.add_libraries(&mut debuggee, Say::Aloud);
+
+    // The library list is for a gdb that reads thread-local variables
+    // through it. An older one gains nothing from it, and cannot find a
+    // container program's loader with it, so it loads every file itself,
+    // and is told what it cannot do.
+    match gdb_major() {
+        Some(old) if old < GDB_THREAD_LOCALS => Say::Aloud.line(too_old(old)),
+        _ => symbols.add_libraries(&mut debuggee, Say::Aloud),
+    }
     let listener = TcpListener::bind(listen.unwrap_or(GDB_LOCAL)).context("listening for gdb")?;
     let mut args = symbols.arguments(Some(listener.local_addr()?));
 
@@ -182,7 +190,6 @@ pub fn gdb(
     // terminal.
     // SAFETY: ignoring SIGINT has no preconditions; gdb installs its own.
     unsafe { libc::signal(libc::SIGINT, libc::SIG_IGN) };
-    warn_if_too_old(Say::Aloud);
     eprintln!("rewind: gdb at step {step} of {}", run.manifest.id);
     let (status, _) = run_gdb(&args, Some((&mut debuggee, &listener)), Output::Terminal)?;
     Ok(if status.success() {
@@ -398,19 +405,12 @@ pub fn too_old(major: u32) -> String {
     )
 }
 
-/// Says when the gdb `rewind gdb` starts is too old to read thread-local
-/// variables. A gdb that does not run is left to fail when started.
-fn warn_if_too_old(say: Say) {
-    let Ok(output) = Command::new(gdb_program()).arg("--version").output() else {
-        return;
-    };
+/// The major version of the gdb `rewind gdb` starts, or None when it does
+/// not run or names none.
+fn gdb_major() -> Option<u32> {
+    let output = Command::new(gdb_program()).arg("--version").output().ok()?;
     let banner = String::from_utf8_lossy(&output.stdout);
-    let Some(major) = banner.lines().next().and_then(major_version) else {
-        return;
-    };
-    if major < GDB_THREAD_LOCALS {
-        say.line(too_old(major));
-    }
+    banner.lines().next().and_then(major_version)
 }
 
 /// How often a wait for gdb to connect looks whether gdb has exited.
