@@ -175,6 +175,18 @@ impl Running {
     /// has that, else under `dir` when it was read out of the run's image.
     fn local(&self, path: &str, dir: &Path) -> Option<(PathBuf, Origin)> {
         let copy = crate::guest_path::under(dir, path)?;
+
+        // A root filesystem's store paths, as a Nix-built container image
+        // or a copied closure holds them, are the store's own, so this
+        // machine's copy is the same file, with the scripts gdb loads
+        // beside it. The VM sends them all the same, since they are
+        // outside its /nix/store, where a build in the VM writes.
+        if let Some(store) = path.strip_prefix(IMAGE_ROOT)
+            && store.starts_with(NIX_STORE)
+            && Path::new(store).exists()
+        {
+            return Some((PathBuf::from(store), Origin::Store));
+        }
         if self.sent.iter().any(|(p, _)| p == path) {
             return Some((copy, Origin::Sent));
         }
@@ -772,6 +784,41 @@ mod tests {
             origin: Origin::Sent,
         }));
         assert!(!running.missing(&dir).contains(&"/build/source/test-helper"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A root filesystem's store path that this machine has is read from
+    /// this machine's store, though the VM sent it, as a Nix-built
+    /// container image or a copied closure holds the store's own files;
+    /// a store path the VM sent from its own /nix/store, which a build in
+    /// the VM may have written, stays the VM's. Uses a store file this
+    /// process has mapped, which exists wherever the test runs.
+    #[test]
+    fn a_root_s_store_file_this_machine_has_is_read_from_the_store() {
+        let maps = std::fs::read_to_string("/proc/self/maps").unwrap();
+        let store_file = maps
+            .lines()
+            .filter_map(|line| line.split_whitespace().nth(5))
+            .find(|path| path.starts_with(NIX_STORE))
+            .expect("a store file is mapped")
+            .to_string();
+        let in_root = format!("{}{store_file}", rewind_init::IMAGE_ROOT);
+        let map = |path: &str| format!("7f0000000000-7f0000001000 r--p 00000000 00:1a 77 {path}\n");
+        let dir =
+            std::env::temp_dir().join(format!("rewind-maps-root-store-{}", std::process::id()));
+
+        let from_root = map(&in_root);
+        let running =
+            Running::parse(&answer_with(&from_root, &[(in_root.as_str(), &elf(0))])).unwrap();
+        let files = running.symbol_files(&dir, None).unwrap();
+        assert_eq!(files[0].path, PathBuf::from(&store_file));
+        assert_eq!(files[0].origin, Origin::Store);
+
+        let from_vm = map(&store_file);
+        let running =
+            Running::parse(&answer_with(&from_vm, &[(store_file.as_str(), &elf(0))])).unwrap();
+        let files = running.symbol_files(&dir, None).unwrap();
+        assert_eq!(files[0].origin, Origin::Sent);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
