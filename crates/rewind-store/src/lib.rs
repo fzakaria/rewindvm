@@ -303,6 +303,25 @@ struct Pack {
     len: u64,
 }
 
+impl Pack {
+    /// Pack `id`, opened as `file`, if no other writer holds it and it
+    /// has room. The length is read once the lock is held: a writer that
+    /// held the pack after `file` was opened may have appended to it
+    /// before letting it go, and pages go in at the end it left.
+    fn take(file: File, id: u32) -> Result<Option<Pack>> {
+        if file.try_lock().is_err() {
+            return Ok(None);
+        }
+
+        // Dropping the file lets a full pack go again.
+        let len = file.metadata()?.len();
+        if len >= PACK_MAX {
+            return Ok(None);
+        }
+        Ok(Some(Pack { file, id, len }))
+    }
+}
+
 pub struct Store {
     dir: PathBuf,
     index: Mutex<Index>,
@@ -547,13 +566,15 @@ impl Store {
             let file = OpenOptions::new()
                 .append(true)
                 .open(Self::pack_path(&self.dir, id))?;
-            let len = file.metadata()?.len();
-            if len < PACK_MAX && file.try_lock().is_ok() {
-                return Ok(Pack { file, id, len });
+            #[cfg(test)]
+            tests::append_before_lock(&Self::pack_path(&self.dir, id));
+            if let Some(pack) = Pack::take(file, id)? {
+                return Ok(pack);
             }
         }
 
-        // Another writer may create the same new pack first, so each tries
+        // Another writer may create the same new pack first, or take the
+        // one this store created before this store locks it, so each tries
         // the next number until one is its own.
         let mut id = ids.last().map_or(0, |last| last + 1);
         loop {
@@ -563,8 +584,12 @@ impl Store {
                 .open(Self::pack_path(&self.dir, id))
             {
                 Ok(file) => {
-                    file.lock()?;
-                    return Ok(Pack { file, id, len: 0 });
+                    #[cfg(test)]
+                    tests::append_before_lock(&Self::pack_path(&self.dir, id));
+                    if let Some(pack) = Pack::take(file, id)? {
+                        return Ok(pack);
+                    }
+                    id += 1;
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => id += 1,
                 Err(e) => return Err(e.into()),
@@ -1005,6 +1030,28 @@ mod tests {
     /// test of this process.
     pub(super) static SORTED_WRITES: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
+    /// Every store directory where the next pack a store claims gets
+    /// bytes from another writer, once per entry, by any test of this
+    /// process.
+    static APPEND_BEFORE_LOCK: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+    /// Bytes the writer that `APPEND_BEFORE_LOCK` stands in for appends.
+    const OTHER_WRITERS_BYTES: &[u8] = b"another writer's page";
+
+    /// Appends another writer's bytes to `pack` if a test asked for that
+    /// in the pack's store: a writer that held the pack, and let it go
+    /// after this store opened it and before this store locked it.
+    pub(super) fn append_before_lock(pack: &Path) {
+        let dir = pack.parent().and_then(Path::parent).unwrap();
+        let mut asked = APPEND_BEFORE_LOCK.lock().unwrap();
+        let Some(i) = asked.iter().position(|d| d == dir) else {
+            return;
+        };
+        asked.remove(i);
+        let mut other = OpenOptions::new().append(true).open(pack).unwrap();
+        other.write_all(OTHER_WRITERS_BYTES).unwrap();
+    }
+
     /// How many sorted copies were written in `dir`.
     fn sorted_copies_written(dir: &Path) -> usize {
         SORTED_WRITES
@@ -1154,6 +1201,35 @@ mod tests {
             later.get(&hash, &mut out).unwrap();
             assert_eq!(out, page(fill));
         }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_pack_another_writer_appended_to_before_the_lock_keeps_its_pages() {
+        // Another writer appends to a pack after this store opened it and
+        // before this store locks it: to an existing pack let go by the
+        // store that wrote it, and to a new pack this store just created.
+        // The pages this store puts after those bytes read back as they
+        // went in from a store opened after.
+        let dir = tmp("append-before-lock");
+        let first = Store::open(&dir).unwrap().put(&page(1)).unwrap();
+        APPEND_BEFORE_LOCK.lock().unwrap().push(dir.clone());
+        let second = Store::open(&dir).unwrap().put(&page(2)).unwrap();
+
+        let mut out = vec![0u8; PAGE];
+        let store = Store::open(&dir).unwrap();
+        for (hash, fill) in [(first, 1), (second, 2)] {
+            store.get(&hash, &mut out).unwrap();
+            assert_eq!(out, page(fill));
+        }
+        drop(store);
+        fs::remove_dir_all(&dir).unwrap();
+
+        let dir = tmp("append-before-lock-new");
+        APPEND_BEFORE_LOCK.lock().unwrap().push(dir.clone());
+        let only = Store::open(&dir).unwrap().put(&page(3)).unwrap();
+        Store::open(&dir).unwrap().get(&only, &mut out).unwrap();
+        assert_eq!(out, page(3));
         fs::remove_dir_all(&dir).unwrap();
     }
 
