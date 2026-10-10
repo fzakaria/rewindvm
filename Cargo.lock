@@ -662,7 +662,7 @@ dependencies = [
 
 [[package]]
 name = "rewind"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -680,7 +680,7 @@ dependencies = [
 
 [[package]]
 name = "rewind-core"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -714,7 +714,7 @@ dependencies = [
 
 [[package]]
 name = "rewind-store"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -723,7 +723,7 @@ dependencies = [
 
 [[package]]
 name = "rewind-trace"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "rewind-init",
  "serde",
@@ -733,7 +733,7 @@ dependencies = [
 
 [[package]]
 name = "rewind-vmm"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "kvm-bindings",
