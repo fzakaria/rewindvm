@@ -169,7 +169,7 @@ PAGES = [
     dict(
         source="docs/case-studies/nix-gc-closure-sigpipe.md",
         eyebrow="Case study",
-        description="Rewind VM's first run of Nix's functional tests hit a SIGPIPE in gc-closure.sh that no one had reported: a pipe into head -n1 under pipefail, and bash writing a two-line printf in two writes.",
+        description="Rewind VM's first run of Nix's functional tests hit a SIGPIPE in gc-closure.sh: a pipe into head -n1 under pipefail, and bash writing a two-line printf in two writes. Reported and fixed upstream.",
         toc="Sections",
         figure=None,
         next=(
