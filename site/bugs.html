@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <title>Bugs found with Rewind VM</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="Bugs in open source projects that Rewind VM found, each linked to its upstream report."
+    />
+    <link rel="canonical" href="https://rewindvm.dev/bugs.html" />
+    <link rel="icon" href="img/mark.svg" type="image/svg+xml" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="style.css" />
+    <!-- Google Analytics, with consent defaults set before gtag.js runs. -->
+    <script src="analytics.js"></script>
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-L0515BFLG0"></script>
+  </head>
+  <body>
+    <header class="wrap nav">
+      <a class="brand" href="./">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M11 19l-7-7 7-7" />
+          <path d="M20 19l-7-7 7-7" />
+        </svg>
+        <span>Rewind VM</span>
+      </a>
+    </header>
+    <main class="wrap prose">
+      <h1>Bugs found with Rewind VM</h1>
+      <p>Bugs in open source projects that Rewind VM found, each linked to its upstream report.</p>
+
+      <nav class="toc" aria-label="Projects">
+        <p class="toc-head">Projects</p>
+        <ol>
+          <li><a href="#nix">Nix</a></li>
+          <li><a href="#flox">Flox</a></li>
+          <li><a href="#nixd">nixd</a></li>
+          <li><a href="#jj">Jujutsu</a></li>
+        </ol>
+      </nav>
+
+      <h2 id="nix">Nix</h2>
+      <ul>
+        <li>
+          <a href="https://github.com/NixOS/nix/issues/15987"
+            >A new store's database is busy when several processes open it at once</a
+          >
+        </li>
+        <li>
+          <a href="https://github.com/NixOS/nix/issues/16546"
+            >The gc-closure test can fail with SIGPIPE</a
+          >
+        </li>
+      </ul>
+
+      <h2 id="flox">Flox</h2>
+      <ul>
+        <li>
+          <a href="https://github.com/flox/flox/issues/4777"
+            >Activations that start and exit together corrupt each other's state</a
+          >
+        </li>
+        <li>
+          <a href="https://github.com/flox/flox/issues/4791"
+            >Two concurrent <code>flox activate -s</code> restart each other's services</a
+          >
+        </li>
+        <li>
+          <a href="https://github.com/flox/flox/issues/4781"
+            >A finished activation's on-deactivate hook runs alongside the next on-activate</a
+          >
+        </li>
+        <li>
+          <a href="https://github.com/flox/flox/issues/4779"
+            >The on-deactivate hook runs after on-activate failed</a
+          >
+        </li>
+        <li>
+          <a href="https://github.com/flox/flox/issues/1065"
+            ><code>flox install</code> and <code>flox edit</code> fail in containers</a
+          >
+        </li>
+      </ul>
+
+      <h2 id="nixd">nixd</h2>
+      <ul>
+        <li>
+          <a href="https://github.com/nix-community/nixd/issues/899"
+            >Formatting hangs on large files, can kill nixd with SIGPIPE, and leaks fds</a
+          >
+        </li>
+      </ul>
+
+      <h2 id="jj">Jujutsu</h2>
+      <ul>
+        <li>
+          <a href="https://github.com/jj-vcs/jj/issues/10306"
+            >Three test_converge tests fail when operations end in the same millisecond</a
+          >
+        </li>
+      </ul>
+    </main>
+    <footer class="wrap footer">
+      <p>
+        &copy; 2026 <a href="https://lunchtimesurf.com/">Lunch Time Surf LLC</a> &middot; Santa
+        Cruz, California &middot;
+        <a href="mailto:tacos@lunchtimesurf.com">tacos@lunchtimesurf.com</a> &middot;
+        <a href="privacy.html">Privacy</a> &middot; <a href="refunds.html">Refunds</a> &middot;
+        <a href="bugs.html">Bugs found</a> &middot;
+        <a href="https://github.com/fzakaria/rewindvm">GitHub</a>
+      </p>
+    </footer>
+  </body>
+</html>

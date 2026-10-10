@@ -265,6 +265,7 @@ FOOT = """    </main>
         <a href="mailto:tacos@lunchtimesurf.com">tacos@lunchtimesurf.com</a> &middot;
         <a href="{up}privacy.html">Privacy</a> &middot;
         <a href="{up}refunds.html">Refunds</a> &middot;
+        <a href="{up}bugs.html">Bugs found</a> &middot;
         <a href="https://github.com/fzakaria/rewindvm">GitHub</a>
       </p>
     </footer>
