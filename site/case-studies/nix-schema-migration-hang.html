@@ -45,41 +45,38 @@
       <p class="eyebrow">Case study</p>
       <h1>Case study: a hang in Nix's store schema migration</h1>
       <p>
-        In April 2026 a Nix master build could hang forever when several <code>nix</code> commands
-        opened a store at once, printing <code>SQLite database ... is busy</code> every ten seconds.
-        This is a known bug, reported as
-        <a href="https://github.com/NixOS/nix/issues/15693">NixOS/nix#15693</a> and fixed in two
-        steps. Rewind VM reproduced it on the exact version in the report, pinned the hang to one
-        SQLite error code with gdb inside the VM, and showed why the first fix did not stop the hang
-        while the second did. None of the bug is a discovery; the diagnosis of the hang is more
-        specific than the one in the issue.
+        A Nix master build from April 2026 could hang when several <code>nix</code> commands opened
+        a new store at once, printing <code>SQLite database ... is busy</code> every ten seconds. It
+        was reported as <a href="https://github.com/NixOS/nix/issues/15693">NixOS/nix#15693</a> and
+        fixed upstream in two steps, not by us. Rewind VM reproduced it, gdb in the VM pinned the
+        hang to <code>SQLITE_BUSY_SNAPSHOT</code>, and checks showed why the first fix,
+        <a href="https://github.com/NixOS/nix/pull/15694">#15694</a>, left the hang in place and the
+        second, <a href="https://github.com/NixOS/nix/pull/15967">#15967</a>, removed it.
       </p>
 
       <nav class="toc" aria-label="Sections">
         <p class="toc-head">Sections</p>
         <ol>
-          <li><a href="#the-software">The software</a></li>
-          <li><a href="#reproducing-it">Reproducing it</a></li>
+          <li><a href="#the-code">The code</a></li>
+          <li><a href="#run-it">Run it</a></li>
+          <li><a href="#what-the-failing-run-shows">What the failing run shows</a></li>
           <li><a href="#where-the-hung-process-is">Where the hung process is</a></li>
+          <li><a href="#ask-gdb">Ask gdb</a></li>
           <li><a href="#root-cause">Root cause</a></li>
-          <li><a href="#the-two-fixes-checked">The two fixes, checked</a></li>
-          <li><a href="#making-it-fail-more-often">Making it fail more often</a></li>
+          <li><a href="#check-the-two-fixes">Check the two fixes</a></li>
           <li><a href="#the-recording">The recording</a></li>
         </ol>
       </nav>
 
       <section class="step">
-        <h2 id="the-software"><a class="anchor" href="#the-software">The software</a></h2>
+        <h2 id="the-code"><a class="anchor" href="#the-code">The code</a></h2>
         <p>
-          <code>LocalStore::LocalStore</code> opens the store's SQLite database (in WAL mode) and
-          runs schema migrations. Since Nix 2.26 a migration is a named SQL script recorded in a
-          <code>SchemaMigrations</code> table, and on 2026-03-09 master added one that every store
-          runs, dropping the <code>IndexReferrer</code> index. At
+          On a new store, every <code>nix</code> process runs the schema migrations while holding
+          the store's big lock in shared mode only, so several can migrate at once. At
           <a
             href="https://github.com/NixOS/nix/blob/a94dee99e1805b1df24daefcdfa86a3d50c63685/src/libstore/local-store.cc#L566-L601"
             >a94dee99e</a
-          >, the version the issue names, <code>upgradeDBSchema</code> reads the table, then runs
-          each missing migration in its own transaction:
+          >, the version the issue names, each migration runs in its own transaction:
         </p>
         <pre
           class="console"
@@ -96,42 +93,26 @@
         schemaMigrations.insert(migrationName);
     };</code></pre>
         <p>
-          Every process does this while holding the store's big lock in shared mode only, so several
-          can migrate at once. <code>SQLiteTxn</code> is a plain <code>begin;</code>, and
-          <code>SQLite::exec</code> retries its statement for as long as SQLite says the database is
-          busy (<a
+          <code>SQLite::exec</code> (<a
             href="https://github.com/NixOS/nix/blob/a94dee99e1805b1df24daefcdfa86a3d50c63685/src/libstore/sqlite.cc#L130-L136"
             >sqlite.cc</a
-          >):
-        </p>
-        <pre class="console"><code>void SQLite::exec(const std::string &amp; stmt)
-{
-    retrySQLite&lt;void&gt;([&amp;]() {
-        if (sqlite3_exec(db, stmt.c_str(), 0, 0, 0) != SQLITE_OK)
-            SQLiteError::throw_(db, "executing SQLite statement '%s'", stmt);
-    });
-}</code></pre>
-        <p>
-          <code>retrySQLite</code> catches <code>SQLiteBusy</code>, sleeps up to 100 ms, prints a
-          warning at most every 10 seconds, and tries again, with no limit.
-        </p>
-        <p>
-          The test that shows it is
-          <a
-            href="https://github.com/NixOS/nix/blob/a94dee99e1805b1df24daefcdfa86a3d50c63685/tests/functional/ca/concurrent-builds.sh"
-            >tests/functional/ca/concurrent-builds.sh</a
-          >: six <code>nix build</code> processes started at once on an empty store, with
-          content-addressed derivations on, so there are two migrations to run.
+          >) retries its statement with no limit for as long as SQLite says the database is busy.
         </p>
       </section>
 
       <section class="step">
-        <h2 id="reproducing-it"><a class="anchor" href="#reproducing-it">Reproducing it</a></h2>
+        <h2 id="run-it"><a class="anchor" href="#run-it">Run it</a></h2>
         <p>
-          The derivation is Nix's own <code>nix-functional-tests</code> from its flake at a94dee99e,
-          which cache.nixos.org has, with the check phase cut down to
-          <code>meson test --no-rebuild concurrent-builds</code> and gdb added to the inputs so a
-          <code>rewind shell</code> can use it later. Under 256 perturbed schedules:
+          The test is
+          <a
+            href="https://github.com/NixOS/nix/blob/a94dee99e1805b1df24daefcdfa86a3d50c63685/tests/functional/ca/concurrent-builds.sh"
+            >ca/concurrent-builds.sh</a
+          >: six <code>nix build</code> processes on an empty store. The derivation is Nix's
+          <code>nix-functional-tests</code> at a94dee99e, narrowed to this test, with gdb in its
+          inputs (<a
+            href="https://github.com/fzakaria/rewindvm/blob/main/examples/case-studies/flake.nix"
+            >flake</a
+          >):
         </p>
         <pre
           class="console"
@@ -168,22 +149,19 @@ where /nix/store/...-bash-5.3p3/bin/bash -x -e -u -o pipefail concurrent-builds.
 
 open both in the desktop app: rewind open 648131f3fcad32f8 264391 --compare 4c812cef02c9b11d</code></pre>
         <p>
-          Narrowing keeps a wide window here, from early in boot to a few thousand steps after the
-          six <code>nix</code> processes start at step 19699: they race from the moment they start,
-          and the steps that matter are spread over all of them. The window's last step, 22981,
-          decides it: without its reschedule the same window passes, and that run, 4c812cef, is the
-          one <code>check</code> compares the failing run with. The two are the same run until step
-          22981, 3282 steps after the <code>nix</code> processes start. <code>check</code> names the
-          test script as the first process to behave differently, since in the failing run meson's
-          SIGTERM ends it where in the passing run it exits 0. The same derivation without gdb in
-          its inputs failed under 5 of 256 schedules. On the host, the test passed 51 runs out of
-          51.
+          Three schedules fail. The narrowed window stays wide because the six
+          <code>nix</code> processes race from the moment they start. On the host the test passed 51
+          of 51 runs.
         </p>
+      </section>
+
+      <section class="step">
+        <h2 id="what-the-failing-run-shows">
+          <a class="anchor" href="#what-the-failing-run-shows">What the failing run shows</a>
+        </h2>
         <p>
-          Of the three failing schedules, 210 hangs one <code>nix</code> process; 121 and 163 hang
-          two and three the same way. Schedule 210's run ends with meson's 300 second timeout, which
-          the VM reaches in seconds of wall time since a sleeping machine skips ahead to its next
-          timer:
+          Schedule 210 ends with meson's 300 second timeout, reached in seconds of wall time since
+          the VM skips ahead while it sleeps:
         </p>
         <pre
           class="console"
@@ -202,19 +180,9 @@ open both in the desktop app: rewind open 648131f3fcad32f8 264391 --compare 4c81
      44766   221/221   exit_group(nix) exited:0
     408279   223/223   exit_group(nix) exited:1</code></pre>
         <p>
-          The TIMEOUT line is there twice: meson prints it as the test ends and again in its
-          summary. A Nix build writes to a terminal, where meson pads the first copy, so
-          <code>uniq</code> counts the two apart.
-        </p>
-        <p>
-          Both failure modes from the issue are in this one run. Processes 225 and 222 lost the race
-          to record the <code>20251017-ca-derivations</code> migration and exited with the UNIQUE
-          constraint error. Process 223 never got past opening the store; it exited only after meson
-          killed the test at step 408279. (Process 238 is <code>nix __build-remote</code>, the build
-          hook. It ends with SIGTERM here, as it does in 231 of the 254 passing runs; in the other
-          23 it exits 0.) The events also show all six processes writing
-          <code>var/nix/db/schema</code>, so each of them took the new store branch of the
-          constructor.
+          Both failures from the issue are in this run. 225 and 222 lost the race to record a
+          migration and exited with the UNIQUE error. 223 hung until meson killed the test at step
+          408279. (238 is the build hook, which often ends with SIGTERM in passing runs too.)
         </p>
       </section>
 
@@ -222,7 +190,7 @@ open both in the desktop app: rewind open 648131f3fcad32f8 264391 --compare 4c81
         <h2 id="where-the-hung-process-is">
           <a class="anchor" href="#where-the-hung-process-is">Where the hung process is</a>
         </h2>
-        <p>At step 200000, in the middle of the hang, only 223 is left:</p>
+        <p>At step 200000 only 223 is left, and it holds every lock:</p>
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind ps 1063803a 200000</span>
@@ -239,16 +207,17 @@ open both in the desktop app: rewind open 648131f3fcad32f8 264391 --compare 4c81
 3: POSIX  ADVISORY  READ 223 00:03:1809 1073741826 1073742335
 4: FLOCK  ADVISORY  READ 223 00:03:1808 0 EOF</code></pre>
         <p>
-          No other process holds a lock. 223 holds the big lock shared (inode 1808), SQLite's shared
-          lock on the database (1809), and in the WAL index (1812) the read lock at offset 124,
-          which is SQLite's read mark 1. That read lock means 223's connection is inside a read
-          transaction, and nothing else is in its way.
+          223 holds the big lock shared (inode 1808), SQLite's lock on the database (1809) and a
+          read mark in the WAL index (1812). It is inside a read transaction, and nothing else is in
+          its way.
         </p>
+      </section>
+
+      <section class="step">
+        <h2 id="ask-gdb"><a class="anchor" href="#ask-gdb">Ask gdb</a></h2>
         <p>
-          <code>rewind shell</code> opens a shell in a throwaway fork of the run at a step, with
-          everything else stopped. gdb is in the closure, so it can attach to 223 there and let it
-          run until the next retry. The inspection leaves a SIGSTOP pending on every thread, which
-          gdb has to be told to swallow:
+          <code>rewind shell</code> opens a shell in a throwaway fork of the run at a step. gdb
+          attaches to 223 there and catches its next retry:
         </p>
         <pre
           class="console"
@@ -292,50 +261,42 @@ errmsg database is locked
 autocommit 0
 [Inferior 1 (process 223) detached]</code></pre>
         <p>
-          The command file was written with a heredoc earlier in the same session, cut here. 223 is
-          in <code>doUpgrade</code>, retrying the second migration. SQLite returns
-          <code>SQLITE_BUSY</code> (5) with the extended code 517,
-          <code>SQLITE_BUSY_SNAPSHOT</code>, and <code>autocommit 0</code> says the connection is
-          inside the transaction that <code>SQLiteTxn</code> began.
+          223 is retrying the second migration. SQLite returns <code>SQLITE_BUSY</code> (5) with the
+          extended code 517, <code>SQLITE_BUSY_SNAPSHOT</code>, and <code>autocommit 0</code> says
+          the connection is still inside the migration's transaction.
         </p>
       </section>
 
       <section class="step">
         <h2 id="root-cause"><a class="anchor" href="#root-cause">Root cause</a></h2>
         <p>
-          <a href="https://www.sqlite.org/rescode.html#busy_snapshot"
-            >SQLite's result code documentation</a
-          >
-          describes <code>SQLITE_BUSY_SNAPSHOT</code> as what a WAL connection gets when it tries to
-          turn a read transaction into a write transaction after another connection has already
-          written to the database. The connection's view of the database is obsolete, and it stays
-          obsolete until the transaction ends.
+          <code>SQLITE_BUSY_SNAPSHOT</code> (<a
+            href="https://www.sqlite.org/rescode.html#busy_snapshot"
+            >SQLite docs</a
+          >) is what a WAL connection gets when it tries to write after another connection has
+          committed since its read. Its snapshot stays stale until the transaction ends.
         </p>
         <p>
-          So the hang is this interleaving. 223 begins the migration's transaction and reads (the
-          <code>drop index if exists</code> reads the schema), which fixes its snapshot. Another
-          <code>nix</code> process commits a migration. 223's write is refused with
-          <code>SQLITE_BUSY_SNAPSHOT</code>. Nix maps every <code>SQLITE_BUSY</code> to
-          <code>SQLiteBusy</code>, and <code>SQLite::exec</code> retries the statement inside the
-          same open transaction, on the same stale snapshot, which SQLite refuses every time. The
-          retry loop has no limit: 28 warnings, ten seconds apart, until meson kills the test.
-        </p>
-        <p>
-          The UNIQUE failure is the other outcome of the same race: a process that reads
-          <code>SchemaMigrations</code> before another commits, and writes after it, with a snapshot
-          that is still current, runs the migration again and fails on the insert.
+          223 began the migration and read the schema, which fixed its snapshot. Another
+          <code>nix</code> process committed a migration. 223's write was refused, and
+          <code>SQLite::exec</code> retried the statement inside the same transaction, on the same
+          stale snapshot, forever: 28 warnings, ten seconds apart. A process whose read came before
+          the other commit but whose snapshot was still current ran the migration again and failed
+          with the UNIQUE error instead.
         </p>
       </section>
 
       <section class="step">
-        <h2 id="the-two-fixes-checked">
-          <a class="anchor" href="#the-two-fixes-checked">The two fixes, checked</a>
+        <h2 id="check-the-two-fixes">
+          <a class="anchor" href="#check-the-two-fixes">Check the two fixes</a>
         </h2>
         <p>
-          <a href="https://github.com/NixOS/nix/pull/15694">NixOS/nix#15694</a>, merged on
-          2026-04-16, changed the insert to <code>insert or ignore</code>. That removes the UNIQUE
-          error but not the stale snapshot. The issue stayed open with the comment "Not fixed, we
-          are still observing this issue." The same check at the merge commit c390460cd:
+          <a href="https://github.com/NixOS/nix/pull/15694">#15694</a> changed the insert to
+          <code>insert or ignore</code>. That removes the UNIQUE error, but not the stale snapshot.
+          At its merge commit
+          <a href="https://github.com/NixOS/nix/commit/c390460cdf7ee8b3208d982e09f91555f980759e"
+            >c390460cd</a
+          >:
         </p>
         <pre
           class="console"
@@ -353,14 +314,10 @@ schedule 226: exited:1     412237 steps    run e510d823c26f361e
       1 1/1 nix-functional-tests:ca / concurrent-builds        TIMEOUT        300.04s   killed by signal 15 SIGTERM
      28 warning: SQLite database '/build/nix-test/ca/concurrent-builds/var/nix/db/db.sqlite' is busy</code></pre>
         <p>
-          None of the ten failing runs has a UNIQUE error. All ten hang one <code>nix</code> process
-          the same way, each with 28 warnings.
-          <a href="https://github.com/NixOS/nix/pull/15967">NixOS/nix#15967</a>, merged on
-          2026-06-08, checks whether a migration is needed while holding the big lock shared, and if
-          one is, takes the lock exclusively to run it, then drops back to shared and keeps holding
-          it for the life of the store. With that, no other Nix process can commit while a
-          migration's transaction is open, so its snapshot cannot go stale. Nix 2.35.2 has both
-          fixes, and the same test from nixpkgs' build of it passed every schedule:
+          All ten failing runs hang the same way, with no UNIQUE error.
+          <a href="https://github.com/NixOS/nix/pull/15967">#15967</a> takes the big lock
+          exclusively while a migration runs, so no other process can commit during its transaction.
+          Nix 2.35.2 from nixpkgs has both fixes and passes every schedule:
         </p>
         <pre
           class="console"
@@ -369,63 +326,6 @@ schedule   0: exited:0      34789 steps  a50a5ab6d992  run 1a8988bba5b1d519
 ...
 0 of 256 perturbed schedules ended differently
 same result under all 257 schedules</code></pre>
-        <p>
-          <code>SQLite::exec</code> still retries inside whatever transaction it is called in. On
-          master the migrations are its only callers inside a <code>SQLiteTxn</code> in
-          <code>local-store.cc</code>, and they now run under the exclusive lock.
-        </p>
-      </section>
-
-      <section class="step">
-        <h2 id="making-it-fail-more-often">
-          <a class="anchor" href="#making-it-fail-more-often">Making it fail more often</a>
-        </h2>
-        <p>
-          Rewind's schedules now include stalls: at one exit in 128 the running task sleeps for 10
-          µs to 1.28 ms when it next returns to user space. The rates above were measured with them.
-          With the previous version of Rewind, which only reordered, the same derivation at
-          a94dee99e failed under 3 of 256 schedules and the first fix under 2 of 256. With stalls
-          they fail under 3 and 10 of 256: as often as before for the reported bug, and five times
-          as often for the first fix. The guest kernel also changed twice between the two
-          measurements, to give a Nix build a terminal and to publish where tasks save their FS and
-          GS bases, so not all of the difference is the stalls'.
-        </p>
-        <p>
-          Earlier, to get more failing runs to study, an <code>LD_PRELOAD</code> library that sleeps
-          up to 5 ms at one call in 16 to <code>fcntl</code>, <code>flock</code>,
-          <code>rename</code>, <code>unlink</code>, <code>connect</code>, <code>pread64</code>,
-          <code>pwrite64</code> and <code>fsync</code>, chosen by a hash of a seed, the thread id
-          and the call count, was preloaded into the test, under the previous version of Rewind
-          without stalls. It is not part of Rewind. With it:
-        </p>
-        <div class="table">
-          <table>
-            <thead>
-              <tr>
-                <th>Nix</th>
-                <th>Schedules that hang</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td>a94dee99e, the reported bug</td>
-                <td>15 of 65</td>
-              </tr>
-              <tr>
-                <td>c390460cd, the first fix</td>
-                <td>16 of 65</td>
-              </tr>
-              <tr>
-                <td>2.35.2, both fixes</td>
-                <td>0 of 65</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-        <p>
-          The shim's stalls are longer and fall on the calls around SQLite's locks, which is where
-          this race lives; Rewind's land on any exit.
-        </p>
       </section>
 
       <section class="step">
@@ -434,8 +334,7 @@ same result under all 257 schedules</code></pre>
           Both files are in the
           <a href="https://github.com/fzakaria/rewindvm/releases/tag/case-studies"
             >case-studies release</a
-          >. <code>rewind import</code> and the desktop app (<code>rewind-app</code>) take either
-          one, by path or URL, and unpack it as it downloads:
+          >:
         </p>
         <ul>
           <li>
@@ -443,16 +342,16 @@ same result under all 257 schedules</code></pre>
               href="https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-schema-migration-hang.rwd"
               >nix-schema-migration-hang.rwd</a
             >
-            (42.5 KB) is the trace alone, enough for <code>rewind events</code>,
-            <code>rewind log</code> and the app.
+            (42.5 KB), the trace, for <code>rewind events</code>, <code>rewind log</code> and the
+            app.
           </li>
           <li>
             <a
               href="https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-schema-migration-hang-replayable.rwd"
               >nix-schema-migration-hang-replayable.rwd</a
             >
-            (542.9 MB) adds the kernel, the input image and the keyframes, so another AMD machine
-            from Zen 2 on can <code>rewind replay</code> and <code>rewind shell</code> it.
+            (542.9 MB), with the kernel, input image and keyframes, for
+            <code>rewind replay</code> and <code>rewind shell</code> on an AMD Zen 2 or later.
           </li>
         </ul>
         <pre
@@ -461,15 +360,6 @@ same result under all 257 schedules</code></pre>
 <span class="cmd"><span class="prompt">$</span> rewind replay 1063803a</span>
 <span class="cmd"><span class="prompt">$</span> rewind shell 1063803a &lt;step&gt;</span>
 <span class="cmd"><span class="prompt">$</span> rewind-app https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-schema-migration-hang.rwd</span></code></pre>
-        <p>How they were made:</p>
-        <pre
-          class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind replay 1063803a</span>
-identical: 3480 events over 408456 steps
-<span class="cmd"><span class="prompt">$</span> rewind export 1063803a --replayable -o nix-schema-migration-hang-replayable.rwd</span>
-rewind: wrote nix-schema-migration-hang-replayable.rwd (542.9 MB)
-<span class="cmd"><span class="prompt">$</span> rewind export 1063803a -o nix-schema-migration-hang.rwd</span>
-rewind: wrote nix-schema-migration-hang.rwd (42.5 KB)</code></pre>
       </section>
 
       <a class="card next" href="devenv-task-output-race.html">
