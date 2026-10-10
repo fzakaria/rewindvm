@@ -783,26 +783,8 @@ fn arguments(
     // The listed libraries' paths are this machine's, so gdb reads them
     // here rather than asking the stub for them, and loads them once it
     // has the list from the stub.
-    if let Some(listed) = &process.listed {
+    if process.listed.is_some() {
         ex("-ex", SYSROOT_HERE.into());
-
-        // gdb opens the program's loader, for the breakpoint it learns of
-        // libraries loaded later through, at the path the program names,
-        // which in a container's root is not this machine's: failing that,
-        // it looks for the loader's file name in these directories, where
-        // the listed libraries, the loader among them, are here.
-        let mut dirs: Vec<&Path> = Vec::new();
-        for &i in &listed.libraries {
-            if let Some(dir) = process.files[i].path.parent()
-                && !dirs.contains(&dir)
-            {
-                dirs.push(dir);
-            }
-        }
-        if !dirs.is_empty() {
-            let joined: Vec<String> = dirs.iter().map(|d| d.display().to_string()).collect();
-            ex("-ex", format!("set solib-search-path {}", joined.join(":")));
-        }
     }
     if let Some(address) = target {
         ex("-ex", format!("target remote {address}"));
@@ -2216,10 +2198,6 @@ mod tests {
         at("add-symbol-file /session/[vdso]");
         assert!(at("set sysroot /") < at("target remote"));
         assert!(at("target remote") < at("sharedlibrary"));
-        assert!(
-            at("set solib-search-path /nix/store/abc-glibc/lib") < at("target remote"),
-            "{args:?}"
-        );
     }
 
     /// The vDSO, read out of the VM's memory, has debug info on no server,
