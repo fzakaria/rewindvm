@@ -132,7 +132,7 @@ error: Cannot build '/nix/store/hvp2d0h9l97d19d3xp5k3vf6xwhg4axr-mylib-0.3.0.drv
         ><code><span class="cmd"><span class="prompt">$</span> rewind nix --epoch 1790985600 github:fzakaria/rewindvm#mylib</span>
 rewind: packing 62 store paths for mylib-0.3.0
 ...
-rewind: run 5ebce859166b24ea exited:0 after 6169 steps, 0.216s virtual, 1.723s wall (poweroff)
+rewind: run 9d8e31cea1c3cbad exited:0 after 6169 steps, 0.216s virtual, 1.602s wall (poweroff)
 /nix/store/f6a9gy362szw6nxx3ikrklr8glr6rdln-mylib-0.3.0 a9d703ba89774f3d  matches your store, rewindvm.cachix.org</code></pre>
         <p>
           It passes, in the same 6169 steps every time. <code>--epoch</code> fixes the VM's clock at
@@ -153,30 +153,30 @@ rewind: run 5ebce859166b24ea exited:0 after 6169 steps, 0.216s virtual, 1.723s w
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind check --epoch 1790985600 github:fzakaria/rewindvm#mylib</span>
-schedule   0: exited:0       6169 steps  a9d703ba8977  run 5ebce859166b24ea
-schedule   1: exited:0       7202 steps  a9d703ba8977  run 248e29097ee57384
-schedule   2: exited:0       7233 steps  a9d703ba8977  run 546b8983110e863d
-schedule   3: exited:0       7376 steps  a9d703ba8977  run 3237fc4b68190e7a
-schedule   4: exited:0       7320 steps  a9d703ba8977  run 704ef464632c29de
-schedule   5: exited:0       7161 steps  a9d703ba8977  run 5f14d3a8ee0009ef
-schedule   6: exited:2       5468 steps    run 7be632a41e205e05
-schedule   7: exited:0       7118 steps  a9d703ba8977  run e9884a0250c7078f
-schedule   8: exited:0       7244 steps  a9d703ba8977  run 25a5156f801e0261
-schedule   9: exited:0       7249 steps  a9d703ba8977  run 785faee35518d03f
-schedule  10: exited:0       7254 steps  a9d703ba8977  run 930edc4706c88a18
-schedule  11: exited:0       7413 steps  a9d703ba8977  run e19f47b52bbde4a6
-schedule  12: exited:0       7340 steps  a9d703ba8977  run 430822ca0a06e6f7
-schedule  13: exited:0       7228 steps  a9d703ba8977  run e218cdf01c380c66
-schedule  14: exited:0       7355 steps  a9d703ba8977  run 5e551c46baffe43b
-schedule  15: exited:0       7230 steps  a9d703ba8977  run 0ffab1aa1967e91e
-schedule  16: exited:0       7170 steps  a9d703ba8977  run 476081cead214ce5
+schedule   0: exited:0       6169 steps  a9d703ba8977  run 9d8e31cea1c3cbad
+schedule   1: exited:0       7202 steps  a9d703ba8977  run c516402fb9c845fd
+schedule   2: exited:0       7233 steps  a9d703ba8977  run 7e34e15d4ba5190c
+schedule   3: exited:0       7376 steps  a9d703ba8977  run 65940b8f3fb2d7c7
+schedule   4: exited:0       7320 steps  a9d703ba8977  run b7cd2c4cfca648d6
+schedule   5: exited:0       7161 steps  a9d703ba8977  run 34592c4e8bff7e1d
+schedule   6: exited:2       5468 steps    run 1467393db7e66eeb
+schedule   7: exited:0       7118 steps  a9d703ba8977  run bddacc48a61315fe
+schedule   8: exited:0       7244 steps  a9d703ba8977  run e61c4670a3f10a3e
+schedule   9: exited:0       7249 steps  a9d703ba8977  run 8a03d4cf0dd47f6e
+schedule  10: exited:0       7254 steps  a9d703ba8977  run 6bcb71e0e4d015e7
+schedule  11: exited:0       7413 steps  a9d703ba8977  run 5cb1e07c42f163eb
+schedule  12: exited:0       7340 steps  a9d703ba8977  run cf0ccf331989adaa
+schedule  13: exited:0       7228 steps  a9d703ba8977  run 80ec366818f0b717
+schedule  14: exited:0       7355 steps  a9d703ba8977  run 050b5e33435d0585
+schedule  15: exited:0       7230 steps  a9d703ba8977  run 76464985149798a4
+schedule  16: exited:0       7170 steps  a9d703ba8977  run 704a6f63207c4f46
 
 schedule 6 ends differently; narrowing the steps it perturbs
 perturbing only steps 3629..5140 still ends differently
 step 5139 decides it: a reschedule there makes the run fail
 
-passing: run 8c4bd4a91be9cbeb, schedule 6 over steps 3629..5139
-failing: run 3ed5e3f30d73bb41, schedule 6 over steps 3629..5140
+passing: run 9a2637968e7a4cf3, schedule 6 over steps 3629..5139
+failing: run 8ff873d250eafc8c, schedule 6 over steps 3629..5140
 the two are the same run until step 5139
 
 where ./tests/test_pool_shutdown first behaves differently:
@@ -192,7 +192,7 @@ where ./tests/test_pool_shutdown first behaves differently:
   passing        5163   166/173   write(1, "worker picked job 19\n")
   passing        5170   166/174   write(1, "job 18 done: 26744\n")
 
-open both in the desktop app: rewind open 3ed5e3f30d73bb41 5153 --compare 8c4bd4a91be9cbeb</code></pre>
+open both in the desktop app: rewind open 8ff873d250eafc8c 5153 --compare 9a2637968e7a4cf3</code></pre>
         <p>
           Schedule 6 fails. <code>check</code> narrows schedule 6's failure to one step, 5139. The
           passing run perturbs the same steps less that one, so the two runs are the same until
@@ -213,13 +213,13 @@ open both in the desktop app: rewind open 3ed5e3f30d73bb41 5153 --compare 8c4bd4
         <p>The failing run keeps every event with its step:</p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind log 3ed5e3f3 --steps | tail -4</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind log 8ff873d2 --steps | tail -4</span>
       5143   166  worker picked job 17
       5150   166  job 15 done: 42559
       5170   162  /nix/store/...-bash-5.3p15/bin/bash: line 1:   166 Segmentation fault         ./$t
       5174   161  make: *** [Makefile:18: check] Error 1
 
-<span class="cmd"><span class="prompt">$</span> rewind events 3ed5e3f3 --from 5150 --to 5155</span>
+<span class="cmd"><span class="prompt">$</span> rewind events 8ff873d2 --from 5150 --to 5155</span>
       5150   166/174   write(1, "job 15 done: 42559\n")
       5151     0/0     console "[    0.202816] test_pool_shutd[174]: segfault at 108 ip 00005556d620d437 sp 00007feee6e68e10 error 6 in test_pool_shutdown[1437,5556d620d000+1000] likely on CPU 0 (core 0, socket 0)"
       5152     0/0     console "[    0.202821] Code: fa 48 8d 35 2a 0c 00 00 bf 02 00 00 00 b8 00 00 00 00 e8 ac fc ff ff 48 8b 05 b5 2b 00 00 48 8b 38 e8 8d fc ff ff 49 8b 46 58 &lt;83&gt; 80 08 01 00 00 01 e9 b5 fe ff ff 55 48 89 e5 41 54 53 be 78 00"
@@ -233,7 +233,7 @@ open both in the desktop app: rewind open 3ed5e3f30d73bb41 5153 --compare 8c4bd4
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind ps 3ed5e3f3 5153</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind ps 8ff873d2 5153</span>
      1 /init
     34   bash -e /nix/store/...-source-stdenv.sh /nix/store/...-default-builder.sh
    161     make SHELL=/nix/store/...-bash-5.3p15/bin/bash PREFIX=$(out) VERBOSE=y check
@@ -253,7 +253,7 @@ open both in the desktop app: rewind open 3ed5e3f30d73bb41 5153 --compare 8c4bd4
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind cat 3ed5e3f3 5153 src/pool.c --pid 166 | sed -n '/^void pool_shutdown/,/^}/p'</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind cat 8ff873d2 5153 src/pool.c --pid 166 | sed -n '/^void pool_shutdown/,/^}/p'</span>
 void pool_shutdown(struct pool *p)
 {
 	pthread_mutex_lock(&amp;p-&gt;lock);
@@ -272,8 +272,8 @@ void pool_shutdown(struct pool *p)
 	free(p);
 }
 
-<span class="cmd"><span class="prompt">$</span> printf 'pwd; ls; exit\n' | rewind shell 3ed5e3f3 5153 --pid 166</span>
-rewind: a shell at step 5153 of 3ed5e3f30d73bb41; exit it to leave
+<span class="cmd"><span class="prompt">$</span> printf 'pwd; ls; exit\n' | rewind shell 8ff873d2 5153 --pid 166</span>
+rewind: a shell at step 5153 of 8ff873d250eafc8c; exit it to leave
 [rewind] /build/mylib # pwd; ls; exit
 /build/mylib
 Containerfile  Makefile  libmylib.a  src  tests</code></pre>
@@ -283,12 +283,12 @@ Containerfile  Makefile  libmylib.a  src  tests</code></pre>
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind gdb 3ed5e3f3 5150 -- -batch -ex 'break src/pool.c:77 if p-&gt;queue == 0' -ex continue -ex 'bt 3' -ex 'p p-&gt;queue' -ex list</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind gdb 8ff873d2 5150 -- -batch -ex 'break src/pool.c:77 if p-&gt;queue == 0' -ex continue -ex 'bt 3' -ex 'p p-&gt;queue' -ex list</span>
 rewind: step 5150 ran in process 166; loading symbols for 4 of its files
 rewind: fetched 3 source files from the VM
-rewind: gdb at step 5150 of 3ed5e3f30d73bb41
-Downloading 4.35 M separate debug info for /nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6...
+rewind: gdb at step 5150 of 8ff873d250eafc8c
 Downloading 10.70 K separate debug info for /nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libpthread.so.0...
+Downloading 4.35 M separate debug info for /nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6...
 Downloading 658.16 K separate debug info for /nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/ld-linux-x86-64.so.2...
 Downloading 3.12 K source file /build/linux-7.2.8/./arch/x86/include/asm/irqflags.h...
 arch_local_irq_restore (flags=518) at ./arch/x86/include/asm/irqflags.h:146
@@ -327,11 +327,11 @@ $1 = (struct queue *) 0x0
         <h2 id="replay-it"><a class="anchor" href="#replay-it">Replay it</a></h2>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind replay 3ed5e3f3</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind replay 8ff873d2</span>
 identical: 1713 events over 5192 steps
 
-<span class="cmd"><span class="prompt">$</span> rewind replay 3ed5e3f3 --from 3629</span>
-identical from the keyframe at step 1572 to the end (0.49s)</code></pre>
+<span class="cmd"><span class="prompt">$</span> rewind replay 8ff873d2 --from 3629</span>
+identical from the keyframe at step 1549 to the end (0.47s)</code></pre>
         <p>
           <code>--from</code> starts at the nearest keyframe before the step. A run replays on any
           machine with the same CPU vendor.
@@ -343,25 +343,25 @@ identical from the keyframe at step 1572 to the end (0.49s)</code></pre>
         <p>A fork is its parent up to a step, then another schedule:</p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind fork 5ebce859 3629 --schedule 5 --quiet</span>
-rewind: run b759eecf9ba8b55e exited:0 after 6628 steps, 0.222s virtual, 0.379s wall (poweroff)
+        ><code><span class="cmd"><span class="prompt">$</span> rewind fork 9d8e31ce 3629 --schedule 5 --quiet</span>
+rewind: run ca13d284d1bf6cb4 exited:0 after 6628 steps, 0.222s virtual, 0.360s wall (poweroff)
 rewind: the fork first differs from its parent at step 3638
-rewind: open it beside its parent in the desktop app: rewind open b759eecf9ba8b55e 3638 --compare 5ebce859166b24ea
+rewind: open it beside its parent in the desktop app: rewind open ca13d284d1bf6cb4 3638 --compare 9d8e31cea1c3cbad
 
-<span class="cmd"><span class="prompt">$</span> rewind fork 5ebce859 3629 --schedule 6 --quiet</span>
-rewind: run 06c0082c248db32b exited:2 after 5201 steps, 0.203s virtual, 0.330s wall (poweroff)
+<span class="cmd"><span class="prompt">$</span> rewind fork 9d8e31ce 3629 --schedule 6 --quiet</span>
+rewind: run 853c2fbfef5d391b exited:2 after 5201 steps, 0.203s virtual, 0.317s wall (poweroff)
 rewind: the fork first differs from its parent at step 3638
-rewind: open it beside its parent in the desktop app: rewind open 06c0082c248db32b 3638 --compare 5ebce859166b24ea
+rewind: open it beside its parent in the desktop app: rewind open 853c2fbfef5d391b 3638 --compare 9d8e31cea1c3cbad
 
-<span class="cmd"><span class="prompt">$</span> rewind fork 5ebce859 3629 --schedule 7 --quiet</span>
-rewind: run d0f1c7fc2af0949d exited:0 after 6634 steps, 0.222s virtual, 0.388s wall (poweroff)
+<span class="cmd"><span class="prompt">$</span> rewind fork 9d8e31ce 3629 --schedule 7 --quiet</span>
+rewind: run 0d1c168d5ebc2387 exited:0 after 6634 steps, 0.222s virtual, 0.361s wall (poweroff)
 rewind: the fork first differs from its parent at step 3662
-rewind: open it beside its parent in the desktop app: rewind open d0f1c7fc2af0949d 3662 --compare 5ebce859166b24ea
+rewind: open it beside its parent in the desktop app: rewind open 0d1c168d5ebc2387 3662 --compare 9d8e31cea1c3cbad
 
-<span class="cmd"><span class="prompt">$</span> rewind fork 5ebce859 3629 --schedule 8 --quiet</span>
-rewind: run 8d47a829e5bd17df exited:2 after 4544 steps, 0.200s virtual, 0.322s wall (poweroff)
+<span class="cmd"><span class="prompt">$</span> rewind fork 9d8e31ce 3629 --schedule 8 --quiet</span>
+rewind: run c8de36b402e0e344 exited:2 after 4544 steps, 0.200s virtual, 0.308s wall (poweroff)
 rewind: the fork first differs from its parent at step 3638
-rewind: open it beside its parent in the desktop app: rewind open 8d47a829e5bd17df 3638 --compare 5ebce859166b24ea</code></pre>
+rewind: open it beside its parent in the desktop app: rewind open c8de36b402e0e344 3638 --compare 9d8e31cea1c3cbad</code></pre>
         <p>
           From step 3629 of the schedule 0 build, schedules 6 and 8 crash and 5 and 7 pass.
           <code>check --run</code> asks many schedules at once; the
@@ -397,7 +397,7 @@ rewind: open it beside its parent in the desktop app: rewind open 8d47a829e5bd17
         </figure>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind-app ~/.local/share/rewind/runs/3ed5e3f30d73bb41 --compare ~/.local/share/rewind/runs/8c4bd4a91be9cbeb</span></code></pre>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind-app ~/.local/share/rewind/runs/8ff873d250eafc8c --compare ~/.local/share/rewind/runs/9a2637968e7a4cf3</span></code></pre>
         <p>
           Press f to jump to the failure at step 5153, then s to open the source panel. After a few
           seconds it shows <code>worker</code> at <code>src/pool.c:77</code>, with
