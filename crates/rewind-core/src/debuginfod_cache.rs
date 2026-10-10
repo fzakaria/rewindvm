@@ -209,7 +209,8 @@ mod tests {
     /// Two sessions at once get directories of their own, and a directory
     /// let go is taken again. Takes two while both are held, then a third
     /// after the first is dropped, and checks the third reuses the first
-    /// one's directory.
+    /// one's directory once the first one's lock is free (see
+    /// crate::settle).
     #[test]
     fn sessions_at_once_get_directories_of_their_own() {
         let root = scratch("slots");
@@ -220,8 +221,10 @@ mod tests {
 
         let freed = first.dir().to_path_buf();
         drop(first);
-        let third = take(&root).unwrap();
-        assert_eq!(third.dir(), freed);
+        let third = crate::settle::settle("the freed directory to be taken", || {
+            let taken = take(&root).unwrap();
+            (taken.dir() == freed).then_some(taken)
+        });
 
         drop((second, third));
         fs::remove_dir_all(&root).unwrap();
@@ -257,7 +260,9 @@ mod tests {
 
     /// `rewind gc` removes the directories no session holds, with their
     /// sizes, and keeps one a session holds; a dry run removes nothing.
-    /// Writes an entry into directories 0 and 1, holds 1, and collects.
+    /// Writes an entry into directories 0 and 1, holds 1, and collects,
+    /// the second time once the dry run's lock on 0 is free (see
+    /// crate::settle).
     #[test]
     fn gc_removes_the_directories_no_session_holds() {
         let root = scratch("gc");
@@ -271,8 +276,10 @@ mod tests {
         assert!(planned[0].bytes > 0);
         assert!(root.join("0").exists());
 
-        let removed = collect(&root, Act::Remove).unwrap();
-        assert_eq!(removed, planned);
+        crate::settle::settle("the planned directories to be collected", || {
+            let removed = collect(&root, Act::Remove).unwrap();
+            (removed == planned).then_some(())
+        });
         assert!(!root.join("0").exists());
         assert!(root.join("1").exists());
 
