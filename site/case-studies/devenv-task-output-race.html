@@ -45,39 +45,38 @@
       <p class="eyebrow">Case study</p>
       <h1>Case study: lost task output in devenv</h1>
       <p>
-        In November 2025 <a href="https://devenv.sh/">devenv</a> could drop the last lines a task
-        printed: a task with <code>showOutput = true</code> showed its output two lines short (<a
-          href="https://github.com/cachix/devenv/issues/2281"
-          >cachix/devenv#2281</a
-        >).
+        <a href="https://devenv.sh/">devenv</a> could drop the last lines a task printed. This is a
+        known bug, reported in
+        <a href="https://github.com/cachix/devenv/issues/2281">cachix/devenv#2281</a> and fixed by
+        the maintainer in
+        <a href="https://github.com/cachix/devenv/pull/2296">cachix/devenv#2296</a>. Rewind VM
+        reproduced it, gdb in the VM shows <code>tokio::select!</code> taking the child's exit with
+        a line still buffered, and the fix passes every schedule.
       </p>
 
       <nav class="toc" aria-label="Sections">
         <p class="toc-head">Sections</p>
         <ol>
-          <li><a href="#the-software">The software</a></li>
+          <li><a href="#the-code">The code</a></li>
           <li><a href="#the-test">The test</a></li>
-          <li><a href="#how-rewind-found-it">How Rewind found it</a></li>
+          <li><a href="#run-it">Run it</a></li>
+          <li><a href="#how-often-it-fails">How often it fails</a></li>
+          <li><a href="#who-had-the-cpu">Who had the CPU</a></li>
           <li><a href="#where-the-third-line-went">Where the third line went</a></li>
           <li><a href="#root-cause">Root cause</a></li>
           <li><a href="#the-fix-checked">The fix, checked</a></li>
-          <li><a href="#on-the-host">On the host</a></li>
           <li><a href="#the-recording">The recording</a></li>
         </ol>
       </nav>
 
       <section class="step">
-        <h2 id="the-software"><a class="anchor" href="#the-software">The software</a></h2>
+        <h2 id="the-code"><a class="anchor" href="#the-code">The code</a></h2>
         <p>
-          devenv builds developer environments with Nix and runs tasks in them: commands with
-          dependencies between them, such as a database migration before a test suite. The
-          <code>devenv-tasks</code> crate runs each task's command as a child process on tokio and
-          collects what it prints. At
-          <a
+          <code>devenv-tasks</code> runs each task as a child process and reads its output a line at
+          a time in one <code>tokio::select!</code> loop (<a
             href="https://github.com/cachix/devenv/blob/cecb0452cacd9c524ccfc973d5caffff834cbf02/devenv-tasks/src/task_state.rs#L365-L431"
-            >cecb0452</a
-          >, <code>TaskState</code> reads the child's standard output and standard error a line at a
-          time and waits for it to exit, all in one <code>tokio::select!</code> loop:
+            >task_state.rs at 1.10.1</a
+          >):
         </p>
         <pre class="console rust"><code>        <span class="keyword">loop</span> {
             tokio::<span class="macro">select!</span> {
@@ -114,16 +113,19 @@
                             }
                         },</code></pre>
         <p>
-          When the <code>child.wait()</code> branch runs, the function returns with whatever lines
-          it has collected so far.
+          When the <code>child.wait()</code> branch runs, the function returns with the lines it has
+          so far.
         </p>
       </section>
 
       <section class="step">
         <h2 id="the-test"><a class="anchor" href="#the-test">The test</a></h2>
         <p>
-          The derivation builds <code>devenv-tasks</code>' unit tests at cecb0452, in release mode
-          with debug info, and adds one test to them:
+          The derivation adds one test to <code>devenv-tasks</code>' unit tests and runs only that
+          test (<a
+            href="https://github.com/fzakaria/rewindvm/blob/main/examples/case-studies/flake.nix"
+            >flake</a
+          >):
         </p>
         <pre class="console rust"><code><span class="attr">#[tokio::test]</span>
 <span class="keyword">async</span> <span class="keyword">fn</span> test_failed_task_keeps_last_lines() -&gt; <span class="type">Result</span>&lt;(), <span class="type">Error</span>&gt; {
@@ -153,21 +155,13 @@
     }
     <span class="type">Ok</span>(())
 }</code></pre>
-        <p>
-          <code>create_script</code>, <code>inspect_tasks</code> and the builder are the test
-          module's own helpers, used the same way by the tests around it. The derivation runs the
-          test binary with this one test selected.
-        </p>
       </section>
 
       <section class="step">
-        <h2 id="how-rewind-found-it">
-          <a class="anchor" href="#how-rewind-found-it">How Rewind found it</a>
-        </h2>
+        <h2 id="run-it"><a class="anchor" href="#run-it">Run it</a></h2>
         <p>
           <code>tokio::select!</code> takes its branch order from the VM's randomness, which
-          <code>--seed</code> sets. With this kernel seed 0 draws the order that drains the pipe, so
-          the page uses seed 2, where the build fails. The first run in the VM failed:
+          <code>--seed</code> sets. Seed 2 fails on the first run:
         </p>
         <pre
           class="console"
@@ -193,11 +187,13 @@ rewind: run 81b5bb745c2ef3e6 exited:101 after 1234 steps, 0.034s virtual, 0.346s
 
 <span class="cmd"><span class="prompt">$</span> rewind replay 81b5bb74</span>
 identical: 767 events over 1234 steps</code></pre>
-        <p>
-          The task printed three lines and devenv reported two, short at the end as in the issue.
-          The issue was filed against devenv 1.10.0, and cecb0452 is 1.10.1. Most of 256 perturbed
-          schedules lose the line as well:
-        </p>
+        <p>The task printed three lines and devenv kept two, as in the issue.</p>
+      </section>
+
+      <section class="step">
+        <h2 id="how-often-it-fails">
+          <a class="anchor" href="#how-often-it-fails">How often it fails</a>
+        </h2>
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind check --seed 2 --all --schedules 256 'github:fzakaria/rewindvm?dir=examples/case-studies#devenv-last-lines-before-2296'</span>
@@ -231,18 +227,18 @@ where /nix/store/195dbbvj5h0yq9f4vnp833dsbgxpp8w0-devenv-tasks-tests-1.10.1/bin/
   passing        1306    40/41    unlink("/build/.tmpJp3M0f/tasks.db-wal")
 
 open both in the desktop app: rewind open f800da6bd5088cca 1273 --compare ce9c756366a37c55</code></pre>
-        <p>207 of the 257 runs fail, all with <code>["line1", "line2"]</code>; 50 pass.</p>
         <p>
-          <code>check</code> narrows schedule 12, which passes, to steps 518 to 1270, and names the
-          last of them: without the reschedule at step 1269, the same window fails like schedule 0.
-          Its two runs are the same until that step. In both, the task's shell forks at step 1264
-          and exits at 1266, and only in the failing one does a SIGCHLD reach the test's thread 41,
-          at step 1273, before the task is done.
+          207 of 257 runs fail, all with <code>["line1", "line2"]</code>. In the failing run of the
+          narrowed pair, the shell's SIGCHLD reaches the test's thread 41 at step 1273, before the
+          task is done; in the passing run it does not.
         </p>
+      </section>
+
+      <section class="step">
+        <h2 id="who-had-the-cpu"><a class="anchor" href="#who-had-the-cpu">Who had the CPU</a></h2>
         <p>
-          <code>rewind threads</code> replays a window of steps one at a time and prints which
-          thread held the VM's CPU through each stretch of it. Over the same steps of the failing
-          run and the passing one:
+          <code>rewind threads</code> prints which thread held the CPU through each stretch of
+          steps, here for the failing run and then the passing one:
         </p>
         <pre
           class="console"
@@ -268,12 +264,9 @@ open both in the desktop app: rewind open f800da6bd5088cca 1273 --compare ce9c75
       1293       1293     kernel 11  ksoftirqd/0
       1294       1300         40/41  tests::test_fai</code></pre>
         <p>
-          Both give the CPU to the shell, 43, from step 1265 to 1270, and to thread 41 at 1272. In
-          the failing run the shell had finished exiting by then, and its SIGCHLD reaches thread 41
-          at step 1273. In the passing run, after the reschedule at step 1269, the shell gave up the
-          CPU before its exit was done: thread 41 runs from 1272 to 1287 with no signal, and the
-          shell gets the CPU back at 1290 to finish. The app's Threads tab draws the same thing, a
-          lane per thread, the failing run above the passing one:
+          In the failing run the shell (43) finishes exiting before thread 41 runs. In the passing
+          run the reschedule at step 1269 sends the shell off the CPU before its exit is done, and
+          it finishes only at 1290. The app's Threads tab shows the same:
         </p>
         <figure class="shot">
           <picture>
@@ -292,9 +285,8 @@ open both in the desktop app: rewind open f800da6bd5088cca 1273 --compare ce9c75
           </figcaption>
         </figure>
         <p>
-          How much of the failure rate is decided after the task starts?
-          <code>check --run</code> tries schedules as forks of a run already recorded, from a step
-          of it. From step 1158, where schedule 0's run forks the task's shell:
+          Perturbing only from step 1158, where the run forks the task's shell, gives about the same
+          pass rate, so the outcome is decided after the task starts:
         </p>
         <pre
           class="console"
@@ -306,17 +298,13 @@ schedule   3: exited:101       1244 steps    run 6a936f2e9f842af7
 ...
 schedule  64: exited:0       1286 steps  77ac62e2629d  run c8fbd031eb1c0604
 run 81b5bb745c2ef3e6 failed; 15 of 64 perturbed schedules ended differently</code></pre>
-        <p>
-          15 of 64 pass, about the share <code>check</code> found from the start of the test, 50 of
-          256: perturbing the steps before the task starts adds little.
-        </p>
       </section>
 
       <section class="step">
         <h2 id="where-the-third-line-went">
           <a class="anchor" href="#where-the-third-line-went">Where the third line went</a>
         </h2>
-        <p>The events of schedule 0's run, which fails, around the task:</p>
+        <p>The events of schedule 0's run around the task:</p>
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind events 81b5bb74 --from 1150 --to 1170</span>
@@ -326,10 +314,9 @@ run 81b5bb745c2ef3e6 failed; 15 of 64 perturbed schedules ended differently</cod
       1163    43/43    exit_group(script08XGOT.sh) exited:1
       1166    40/41    SIGCHLD code=1 addr=0x0</code></pre>
         <p>
-          Thread 41 of the test process (40) forks the task's shell (43). The shell runs all three
-          <code>echo</code>s and exits at step 1163, and the SIGCHLD that tells tokio the child is
-          done reaches thread 41 at step 1166. Everything the loop will see is there before it reads
-          anything.
+          The shell prints all three lines and exits before the loop reads anything.
+          <code>rewind gdb</code> opens gdb on a fork of the run at a step. Break on
+          <code>read</code> of the stdout pipe (fd 13) and on the <code>child.wait()</code> branch:
         </p>
         <div class="tour tour-article">
           <figure class="tour-shot">
@@ -406,12 +393,6 @@ run 81b5bb745c2ef3e6 failed; 15 of 64 perturbed schedules ended differently</cod
             </li>
           </ol>
         </div>
-        <p>
-          <code>rewind gdb</code> opens gdb on a fork of the run at a step, with the symbols of the
-          process running there, loaded from the VM. A breakpoint on <code>read</code> for the
-          stdout pipe (descriptor 13) and one on the <code>child.wait()</code> branch show what the
-          loop did, from step 1155 on:
-        </p>
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind gdb 81b5bb74 1155 -- -batch -ex 'break read if $rdi == 13' -ex 'break task_state.rs:409' -ex continue -ex 'set $buf = $rsi' -ex finish -ex 'x/s $buf' -ex 'delete 1' -ex continue</span>
@@ -438,56 +419,35 @@ Thread 3 hit Breakpoint 2.1, devenv_tasks::task_state::{impl#1}::run::{async_fn#
 415	                            let expanded_paths = expand_glob_patterns(&amp;self.task.exec_if_modified);
 [Inferior 1 (process 1) detached]</code></pre>
         <p>
-          There is one read of the pipe, and it returns all 18 bytes:
-          <code>line1\nline2\nline3\n</code>, into the <code>BufReader</code> that
-          <code>next_line</code> takes lines from. The loop then took two lines from that buffer,
-          which the log shows it printing, and the next time round ran the
-          <code>child.wait()</code> branch with <code>line3</code> still in the buffer. The function
-          returned, and the buffer was dropped with it.
-        </p>
-        <p>
-          The same breakpoints on the passing run ce9c7563, from the step where it opens the task's
-          output file, hit <code>read</code> on standard output once before the
-          <code>child.wait()</code> branch. That read also returns all 18 bytes, but the loop took
-          all three lines before it took the exit.
+          One read returns all three lines into the <code>BufReader</code>. The loop takes two of
+          them, then takes the <code>child.wait()</code> branch with <code>line3</code> still
+          buffered, and returns.
         </p>
       </section>
 
       <section class="step">
         <h2 id="root-cause"><a class="anchor" href="#root-cause">Root cause</a></h2>
         <p>
-          <code>tokio::select!</code> polls its branches in a random order each time it is
-          evaluated, unless it is told <code>biased;</code>; tokio does that so a loop with one
-          branch that is always ready does not starve the others. Once the child has exited and
-          tokio has reaped it, <code>child.wait()</code> is ready on every pass. Lines already in
-          the <code>BufReader</code> are ready too. So each pass round the loop is a draw between
-          "take the next line" and "return now", and every line still buffered when the draw goes to
-          <code>child.wait()</code> is lost. The more output a task prints just before exiting, the
-          more draws, and the more lines it can lose.
+          Without <code>biased;</code>, <code>tokio::select!</code> polls its branches in a random
+          order on each pass. Once the child has exited, <code>child.wait()</code> is ready on every
+          pass, and so is each buffered line. Each pass is a draw between "take the next line" and
+          "return now", and any line still buffered when <code>child.wait()</code> wins is lost.
         </p>
         <p>
-          The window is open only when the exit is visible before the output is read. On the host
-          the test process is usually reading the pipe while the shell is still writing to it, so it
-          reaches the end of the pipe first. In the VM, with one CPU, the shell often runs from
-          <code>execve</code> to <code>exit</code> without giving up the CPU, and both the output
-          and the exit are waiting together when the loop starts. Perturbing the schedule changes
-          who runs when. In the passing run the shell also finishes before the loop reads, but no
-          SIGCHLD for the test process appears among its events, and the loop takes all three lines
-          before it takes the exit. In 207 of the 257 schedules the loop takes the exit with a line
-          still buffered.
+          The window opens when the exit is visible before the output is read. On one CPU the shell
+          often runs from <code>execve</code> to <code>exit</code> without giving up the CPU, so the
+          output and the exit are waiting together when the loop starts.
         </p>
       </section>
 
       <section class="step">
         <h2 id="the-fix-checked"><a class="anchor" href="#the-fix-checked">The fix, checked</a></h2>
         <p>
-          <a href="https://github.com/cachix/devenv/commit/ef7fb6972ac033b7aa191345b93f77251ffadfb2"
-            >ef7fb697</a
-          >, merged as
-          <a href="https://github.com/cachix/devenv/commit/de0dc6a85ae88eb8194c2f7e053f3e933b77c2ac"
+          The fix (<a
+            href="https://github.com/cachix/devenv/commit/de0dc6a85ae88eb8194c2f7e053f3e933b77c2ac"
             >de0dc6a8</a
-          >, stops returning from the <code>child.wait()</code> branch. It stores the exit status,
-          turns that branch off, and keeps reading until both pipes are closed:
+          >) stores the exit status, turns the <code>child.wait()</code> branch off, and keeps
+          reading until both pipes are closed:
         </p>
         <pre class="console diff"><code><span class="ctx">         loop {</span>
 <span class="add">+            // If child has exited and both pipes are closed, we're done</span>
@@ -519,36 +479,9 @@ schedule   2: exited:0       1355 steps  77ac62e2629d  run 467780b75b06c24a
 0 of 256 perturbed schedules ended differently
 same result under all 257 schedules</code></pre>
         <p>
-          All 44 of <code>devenv-tasks</code>' tests at the merge commit, the added one included,
-          also passed under 65 schedules
-          (<code>github:fzakaria/rewindvm?dir=examples/case-studies#devenv-tasks-2296</code>).
+          On the host the unfixed test passed 1000 of 1000 runs on 16 CPUs, and 1000 of 1000 pinned
+          to one CPU.
         </p>
-      </section>
-
-      <section class="step">
-        <h2 id="on-the-host"><a class="anchor" href="#on-the-host">On the host</a></h2>
-        <p>The same test binary on the host:</p>
-        <div class="table">
-          <table>
-            <thead>
-              <tr>
-                <th>What ran on the host</th>
-                <th>Failed</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td>the test, 16 CPUs</td>
-                <td>0 of 1000</td>
-              </tr>
-              <tr>
-                <td>the test, pinned to one CPU with <code>taskset</code></td>
-                <td>0 of 1000</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-        <p>The issue's reporter saw it in real use, on an aarch64 Linux machine.</p>
       </section>
 
       <section class="step">
@@ -557,8 +490,7 @@ same result under all 257 schedules</code></pre>
           Both files are in the
           <a href="https://github.com/fzakaria/rewindvm/releases/tag/case-studies"
             >case-studies release</a
-          >. <code>rewind import</code> and the desktop app (<code>rewind-app</code>) take either
-          one, by path or URL, and unpack it as it downloads:
+          >:
         </p>
         <ul>
           <li>
@@ -566,17 +498,16 @@ same result under all 257 schedules</code></pre>
               href="https://github.com/fzakaria/rewindvm/releases/download/case-studies/devenv-task-output-race.rwd"
               >devenv-task-output-race.rwd</a
             >
-            (10.0 KB) is the trace alone, enough for <code>rewind events</code>,
-            <code>rewind log</code> and the app.
+            (10.0 KB), the trace, for <code>rewind events</code>, <code>rewind log</code> and the
+            app.
           </li>
           <li>
             <a
               href="https://github.com/fzakaria/rewindvm/releases/download/case-studies/devenv-task-output-race-replayable.rwd"
               >devenv-task-output-race-replayable.rwd</a
             >
-            (185.1 MB) adds the kernel, the input image and the keyframes, so
-            <code>rewind replay</code>, <code>rewind gdb</code> and <code>rewind shell</code> work
-            on it.
+            (185.1 MB), with the kernel, input image and keyframes, for <code>rewind replay</code>,
+            <code>rewind gdb</code> and <code>rewind shell</code>.
           </li>
         </ul>
         <pre
@@ -585,15 +516,6 @@ same result under all 257 schedules</code></pre>
 <span class="cmd"><span class="prompt">$</span> rewind replay 81b5bb74</span>
 <span class="cmd"><span class="prompt">$</span> rewind gdb 81b5bb74 1155</span>
 <span class="cmd"><span class="prompt">$</span> rewind-app https://github.com/fzakaria/rewindvm/releases/download/case-studies/devenv-task-output-race.rwd</span></code></pre>
-        <p>How they were made:</p>
-        <pre
-          class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind replay 81b5bb74 --from 1150</span>
-identical from the keyframe at step 512 to the end (0.32s)
-<span class="cmd"><span class="prompt">$</span> rewind export 81b5bb74 --replayable -o devenv-task-output-race-replayable.rwd</span>
-rewind: wrote devenv-task-output-race-replayable.rwd (185.1 MB)
-<span class="cmd"><span class="prompt">$</span> rewind export 81b5bb74 -o devenv-task-output-race.rwd</span>
-rewind: wrote devenv-task-output-race.rwd (10.0 KB)</code></pre>
       </section>
 
       <a class="card next" href="nix-gc-closure-sigpipe.html">

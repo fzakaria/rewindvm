@@ -1,18 +1,17 @@
 # Case study: lost task output in devenv
 
-In November 2025 [devenv](https://devenv.sh/) could drop the last lines a
-task printed: a task with `showOutput = true` showed its output two lines
-short ([cachix/devenv#2281](https://github.com/cachix/devenv/issues/2281)).
+[devenv](https://devenv.sh/) could drop the last lines a task printed. This is
+a known bug, reported in
+[cachix/devenv#2281](https://github.com/cachix/devenv/issues/2281) and fixed
+by the maintainer in [cachix/devenv#2296](https://github.com/cachix/devenv/pull/2296).
+Rewind VM reproduced it, gdb in the VM shows `tokio::select!` taking the
+child's exit with a line still buffered, and the fix passes every schedule.
 
-## The software
+## The code
 
-devenv builds developer environments with Nix and runs
-tasks in them: commands with dependencies between them, such as a database
-migration before a test suite. The `devenv-tasks` crate runs each task's
-command as a child process on tokio and collects what it prints. At
-[cecb0452](https://github.com/cachix/devenv/blob/cecb0452cacd9c524ccfc973d5caffff834cbf02/devenv-tasks/src/task_state.rs#L365-L431),
-`TaskState` reads the child's standard output and standard error a line at a
-time and waits for it to exit, all in one `tokio::select!` loop:
+`devenv-tasks` runs each task as a child process and reads its output a line
+at a time in one `tokio::select!` loop
+([task_state.rs at 1.10.1](https://github.com/cachix/devenv/blob/cecb0452cacd9c524ccfc973d5caffff834cbf02/devenv-tasks/src/task_state.rs#L365-L431)):
 
 ```rust {18}
         loop {
@@ -51,13 +50,13 @@ time and waits for it to exit, all in one `tokio::select!` loop:
                         },
 ```
 
-When the `child.wait()` branch runs, the function returns with whatever lines
-it has collected so far.
+When the `child.wait()` branch runs, the function returns with the lines it
+has so far.
 
 ## The test
 
-The derivation builds `devenv-tasks`' unit tests at cecb0452, in release mode
-with debug info, and adds one test to them:
+The derivation adds one test to `devenv-tasks`' unit tests and runs only that
+test ([flake](../../examples/case-studies/flake.nix)):
 
 ```rust
 #[tokio::test]
@@ -90,16 +89,10 @@ async fn test_failed_task_keeps_last_lines() -> Result<(), Error> {
 }
 ```
 
-`create_script`, `inspect_tasks` and the builder are the test module's own
-helpers, used the same way by the tests around it. The derivation runs the
-test binary with this one test selected.
-
-## How Rewind found it
+## Run it
 
 `tokio::select!` takes its branch order from the VM's randomness, which
-`--seed` sets. With this kernel seed 0 draws the order that drains the pipe,
-so the page uses seed 2, where the build fails. The first run in the VM
-failed:
+`--seed` sets. Seed 2 fails on the first run:
 
 ```console
 $ rewind nix --seed 2 'github:fzakaria/rewindvm?dir=examples/case-studies#devenv-last-lines-before-2296'
@@ -126,9 +119,9 @@ $ rewind replay 81b5bb74
 identical: 767 events over 1234 steps
 ```
 
-The task printed three lines and devenv reported two, short at the end as
-in the issue. The issue was filed against devenv 1.10.0, and cecb0452 is
-1.10.1. Most of 256 perturbed schedules lose the line as well:
+The task printed three lines and devenv kept two, as in the issue.
+
+## How often it fails
 
 ```console
 $ rewind check --seed 2 --all --schedules 256 'github:fzakaria/rewindvm?dir=examples/case-studies#devenv-last-lines-before-2296'
@@ -164,18 +157,14 @@ where /nix/store/195dbbvj5h0yq9f4vnp833dsbgxpp8w0-devenv-tasks-tests-1.10.1/bin/
 open both in the desktop app: rewind open f800da6bd5088cca 1273 --compare ce9c756366a37c55
 ```
 
-207 of the 257 runs fail, all with `["line1", "line2"]`; 50 pass.
+207 of 257 runs fail, all with `["line1", "line2"]`. In the failing run of
+the narrowed pair, the shell's SIGCHLD reaches the test's thread 41 at step
+1273, before the task is done; in the passing run it does not.
 
-`check` narrows schedule 12, which passes, to steps 518 to 1270, and names
-the last of them: without the reschedule at step 1269, the same window fails
-like schedule 0. Its two runs are the same until that step. In both, the
-task's shell forks at step 1264 and exits at 1266, and only in the failing one
-does a SIGCHLD reach the test's thread 41, at step 1273, before the task is
-done.
+## Who had the CPU
 
-`rewind threads` replays a window of steps one at a time and prints which
-thread held the VM's CPU through each stretch of it. Over the same steps of
-the failing run and the passing one:
+`rewind threads` prints which thread held the CPU through each stretch of
+steps, here for the failing run and then the passing one:
 
 ```console
 $ rewind threads f800da6bd5088cca --from 1260 --to 1300
@@ -201,19 +190,15 @@ $ rewind threads ce9c756366a37c55 --from 1260 --to 1300
       1294       1300         40/41  tests::test_fai
 ```
 
-Both give the CPU to the shell, 43, from step 1265 to 1270, and to thread 41
-at 1272. In the failing run the shell had finished exiting by then, and its
-SIGCHLD reaches thread 41 at step 1273. In the passing run, after the
-reschedule at step 1269, the shell gave up the CPU before its exit was done:
-thread 41 runs from 1272 to 1287 with no signal, and the shell gets the CPU
-back at 1290 to finish. The app's Threads tab draws the same thing, a lane per
-thread, the failing run above the passing one:
+In the failing run the shell (43) finishes exiting before thread 41 runs. In
+the passing run the reschedule at step 1269 sends the shell off the CPU before
+its exit is done, and it finishes only at 1290. The app's Threads tab shows
+the same:
 
 ![The Threads tab on the failing and passing runs: the task's shell, 43, on the CPU from step 1265 in both, and again at 1290 only in the passing run](../../site/img/devenv-threads.png)
 
-How much of the failure rate is decided after the task starts? `check
---run` tries schedules as forks of a run already recorded, from a step of
-it. From step 1158, where schedule 0's run forks the task's shell:
+Perturbing only from step 1158, where the run forks the task's shell, gives
+about the same pass rate, so the outcome is decided after the task starts:
 
 ```console
 $ rewind check --run 81b5bb74 --schedule-from 1158 --schedules 64 --all --no-narrow
@@ -226,12 +211,9 @@ schedule  64: exited:0       1286 steps  77ac62e2629d  run c8fbd031eb1c0604
 run 81b5bb745c2ef3e6 failed; 15 of 64 perturbed schedules ended differently
 ```
 
-15 of 64 pass, about the share `check` found from the start of the test, 50
-of 256: perturbing the steps before the task starts adds little.
-
 ## Where the third line went
 
-The events of schedule 0's run, which fails, around the task:
+The events of schedule 0's run around the task:
 
 ```console
 $ rewind events 81b5bb74 --from 1150 --to 1170
@@ -242,15 +224,9 @@ $ rewind events 81b5bb74 --from 1150 --to 1170
       1166    40/41    SIGCHLD code=1 addr=0x0
 ```
 
-Thread 41 of the test process (40) forks the task's shell (43). The shell runs
-all three `echo`s and exits at step 1163, and the SIGCHLD that tells tokio
-the child is done reaches thread 41 at step 1166. Everything the loop will
-see is there before it reads anything.
-
-`rewind gdb` opens gdb on a fork of the run at a step, with the symbols of
-the process running there, loaded from the VM. A breakpoint on `read` for
-the stdout pipe (descriptor 13) and one on the `child.wait()` branch show
-what the loop did, from step 1155 on:
+The shell prints all three lines and exits before the loop reads anything.
+`rewind gdb` opens gdb on a fork of the run at a step. Break on `read` of the
+stdout pipe (fd 13) and on the `child.wait()` branch:
 
 ```console
 $ rewind gdb 81b5bb74 1155 -- -batch -ex 'break read if $rdi == 13' -ex 'break task_state.rs:409' -ex continue -ex 'set $buf = $rsi' -ex finish -ex 'x/s $buf' -ex 'delete 1' -ex continue
@@ -278,48 +254,28 @@ Thread 3 hit Breakpoint 2.1, devenv_tasks::task_state::{impl#1}::run::{async_fn#
 [Inferior 1 (process 1) detached]
 ```
 
-There is one read of the pipe, and it returns all 18 bytes:
-`line1\nline2\nline3\n`, into the `BufReader` that `next_line` takes lines
-from. The loop then took two lines from that buffer, which the log shows it
-printing, and the next time round ran the `child.wait()` branch with `line3`
-still in the buffer. The function returned, and the buffer was dropped with
-it.
-
-The same breakpoints on the passing run ce9c7563, from the step where it
-opens the task's output file, hit `read` on standard output once before the
-`child.wait()` branch. That read also returns all 18 bytes, but the loop took
-all three lines before it took the exit.
+One read returns all three lines into the `BufReader`. The loop takes two of
+them, then takes the `child.wait()` branch with `line3` still buffered, and
+returns.
 
 ## Root cause
 
-`tokio::select!` polls its branches in a random order each time it is
-evaluated, unless it is told `biased;`; tokio does that so a loop with one
-branch that is always ready does not starve the others. Once the child has
-exited and tokio has reaped it, `child.wait()` is ready on every pass. Lines
-already in the `BufReader` are ready too. So each pass round the loop is a
-draw between "take the next line" and "return now", and every line still
-buffered when the draw goes to `child.wait()` is lost. The more output a
-task prints just before exiting, the more draws, and the more lines it can
-lose.
+Without `biased;`, `tokio::select!` polls its branches in a random order on
+each pass. Once the child has exited, `child.wait()` is ready on every pass,
+and so is each buffered line. Each pass is a draw between "take the next line"
+and "return now", and any line still buffered when `child.wait()` wins is
+lost.
 
-The window is open only when the exit is visible before the output is read.
-On the host the test process is usually reading the pipe while the shell is
-still writing to it, so it reaches the end of the pipe first. In the VM, with
-one CPU, the shell often runs from `execve` to `exit` without giving up the
-CPU, and both the output and the exit are waiting together when the loop
-starts. Perturbing the schedule changes who runs when. In the passing run
-the shell also finishes before the loop reads, but no SIGCHLD for the test
-process appears among its events, and the loop takes all three lines before
-it takes the exit. In 207 of the 257 schedules the loop takes the exit with a
-line still buffered.
+The window opens when the exit is visible before the output is read. On one
+CPU the shell often runs from `execve` to `exit` without giving up the CPU, so
+the output and the exit are waiting together when the loop starts.
 
 ## The fix, checked
 
-[ef7fb697](https://github.com/cachix/devenv/commit/ef7fb6972ac033b7aa191345b93f77251ffadfb2),
-merged as
-[de0dc6a8](https://github.com/cachix/devenv/commit/de0dc6a85ae88eb8194c2f7e053f3e933b77c2ac),
-stops returning from the `child.wait()` branch. It stores the exit status,
-turns that branch off, and keeps reading until both pipes are closed:
+The fix
+([de0dc6a8](https://github.com/cachix/devenv/commit/de0dc6a85ae88eb8194c2f7e053f3e933b77c2ac))
+stores the exit status, turns the `child.wait()` branch off, and keeps
+reading until both pipes are closed:
 
 ```diff
          loop {
@@ -355,49 +311,23 @@ schedule   2: exited:0       1355 steps  77ac62e2629d  run 467780b75b06c24a
 same result under all 257 schedules
 ```
 
-All 44 of `devenv-tasks`' tests at the merge commit, the added one included,
-also passed under 65 schedules
-(`github:fzakaria/rewindvm?dir=examples/case-studies#devenv-tasks-2296`).
-
-## On the host
-
-The same test binary on the host:
-
-| What ran on the host                       | Failed    |
-| ------------------------------------------ | --------- |
-| the test, 16 CPUs                          | 0 of 1000 |
-| the test, pinned to one CPU with `taskset` | 0 of 1000 |
-
-The issue's reporter saw it in real use, on an aarch64 Linux machine.
+On the host the unfixed test passed 1000 of 1000 runs on 16 CPUs, and 1000 of
+1000 pinned to one CPU.
 
 ## The recording
 
 Both files are in the
-[case-studies release](https://github.com/fzakaria/rewindvm/releases/tag/case-studies). `rewind import` and the
-desktop app (`rewind-app`) take either one, by path or URL, and unpack it as
-it downloads:
+[case-studies release](https://github.com/fzakaria/rewindvm/releases/tag/case-studies):
 
 - [devenv-task-output-race.rwd](https://github.com/fzakaria/rewindvm/releases/download/case-studies/devenv-task-output-race.rwd)
-  (10.0 KB) is the trace alone, enough for `rewind events`, `rewind log` and
-  the app.
+  (10.0 KB), the trace, for `rewind events`, `rewind log` and the app.
 - [devenv-task-output-race-replayable.rwd](https://github.com/fzakaria/rewindvm/releases/download/case-studies/devenv-task-output-race-replayable.rwd)
-  (185.1 MB) adds the kernel, the input image and the keyframes, so
-  `rewind replay`, `rewind gdb` and `rewind shell` work on it.
+  (185.1 MB), with the kernel, input image and keyframes, for `rewind replay`,
+  `rewind gdb` and `rewind shell`.
 
 ```console
 $ rewind import https://github.com/fzakaria/rewindvm/releases/download/case-studies/devenv-task-output-race-replayable.rwd
 $ rewind replay 81b5bb74
 $ rewind gdb 81b5bb74 1155
 $ rewind-app https://github.com/fzakaria/rewindvm/releases/download/case-studies/devenv-task-output-race.rwd
-```
-
-How they were made:
-
-```console
-$ rewind replay 81b5bb74 --from 1150
-identical from the keyframe at step 512 to the end (0.32s)
-$ rewind export 81b5bb74 --replayable -o devenv-task-output-race-replayable.rwd
-rewind: wrote devenv-task-output-race-replayable.rwd (185.1 MB)
-$ rewind export 81b5bb74 -o devenv-task-output-race.rwd
-rewind: wrote devenv-task-output-race.rwd (10.0 KB)
 ```
