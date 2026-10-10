@@ -379,6 +379,40 @@ impl Drop for NewTrace {
     }
 }
 
+/// What a replay's trace is named after in the run's directory, before
+/// `temp_beside` makes the name its own.
+const REPLAY_TRACE: &str = "replay.bin";
+
+/// A trace a replay writes to compare with the recording. Each replay
+/// gets its own file, so replays of one run can run at once, and the
+/// file is removed when the replay drops it, whether it finished or
+/// failed.
+struct ReplayTrace {
+    path: PathBuf,
+}
+
+impl ReplayTrace {
+    /// A new replay trace in the run directory `dir`, and the file to
+    /// write it to.
+    fn create(dir: &Path) -> Result<(ReplayTrace, fs::File)> {
+        let path = crate::image::temp_beside(&dir.join(REPLAY_TRACE));
+        let file =
+            fs::File::create(&path).with_context(|| format!("creating {}", path.display()))?;
+        Ok((ReplayTrace { path }, file))
+    }
+
+    /// Where the replay's trace is.
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for ReplayTrace {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
 /// Whether a new execution's trace, hashed `new`, may replace the run's
 /// recording. An execution that kept an earlier one's keyframes, whose
 /// trace hashed `kept`, may replace it only with the same trace: those
@@ -767,9 +801,9 @@ impl Run {
     /// trace is identical, which is the claim every run makes.
     pub fn replay(&self) -> Result<Option<rewind_trace::Divergence>> {
         let original = self.trace()?;
-        let tmp = self.dir.join("replay.bin.tmp");
+        let (tmp, file) = ReplayTrace::create(&self.dir)?;
         let mut recorder = Recorder {
-            trace: TraceWriter::new(fs::File::create(&tmp)?),
+            trace: TraceWriter::new(file),
             echo: Echo::Quiet,
             progress: ProgressLine::new(Instant::now()),
             status: None,
@@ -778,8 +812,7 @@ impl Run {
         let mut machine = Machine::boot(&self.manifest.spec.config()?)?;
         machine.run(None, &mut recorder)?;
         recorder.trace.finish()?;
-        let again = Trace::read(&tmp)?;
-        fs::remove_file(&tmp)?;
+        let again = Trace::read(tmp.path())?;
         Ok(original.divergence(&again))
     }
 
@@ -1059,9 +1092,9 @@ impl Run {
             .into_iter()
             .rfind(|s| *s <= step)
             .context("the run has no keyframe at or before that step")?;
-        let tmp = self.dir.join("replay-from.bin.tmp");
+        let (tmp, file) = ReplayTrace::create(&self.dir)?;
         let mut recorder = Recorder {
-            trace: TraceWriter::new(fs::File::create(&tmp)?),
+            trace: TraceWriter::new(file),
             echo: Echo::Quiet,
             progress: ProgressLine::new(Instant::now()),
             status: None,
@@ -1070,8 +1103,7 @@ impl Run {
         let mut machine = self.machine_at(home, kf, Keep::Nothing, &mut recorder)?;
         machine.run(None, &mut recorder)?;
         recorder.trace.finish()?;
-        let again = Trace::read(&tmp)?;
-        fs::remove_file(&tmp)?;
+        let again = Trace::read(tmp.path())?;
         let suffix = Trace {
             events: original.events[original.index_after(kf)..].to_vec(),
         };
@@ -1555,6 +1587,28 @@ pub(crate) mod tests {
         new.keep().unwrap();
         assert_eq!(fs::read(dir.join(TRACE)).unwrap(), b"whole");
         assert_eq!(names(), [TRACE]);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn replays_of_one_run_write_their_own_traces() {
+        // Two replays of a run at once each get their own trace file, so
+        // neither truncates or removes the other's, and each file goes
+        // when its replay is done with it.
+        let dir = std::env::temp_dir().join(format!("rewind-replay-trace-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let (first, _) = ReplayTrace::create(&dir).unwrap();
+        let (second, _) = ReplayTrace::create(&dir).unwrap();
+        assert_ne!(first.path(), second.path());
+
+        let (first_path, second_path) = (first.path().to_owned(), second.path().to_owned());
+        drop(first);
+        assert!(!first_path.exists());
+        assert!(second_path.exists());
+        drop(second);
+        assert!(!second_path.exists());
         fs::remove_dir_all(&dir).unwrap();
     }
 
