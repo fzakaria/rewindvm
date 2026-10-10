@@ -166,6 +166,13 @@ thread asleep and the CPU idle, `thread apply all bt` shows where each one
 waits. The threads move only when the CPU runs them: a step steps the CPU,
 whichever thread is on it.
 
+gdb finds a thread's thread-local variables, errno among them, through its FS
+base, so the stub describes its registers to gdb with gdb's own x86-64 Linux
+feature set, `orig_rax` and the FS and GS bases included. A thread on the CPU
+has its FS base in the vCPU, since the kernel leaves it as it is on the way in;
+one off the CPU saved it in its `task_struct`, at an offset the kernel also
+writes into the shared page, after the interface number so that never moves.
+
 What gdb knows about the code comes from two more inspections, each on a fork
 of its own, before the fork gdb debugs is made. The kernel hands every
 inspection the thread group id of the task that was running when the request
@@ -177,16 +184,29 @@ writable layer has it, and everything else, such as a test program the build
 compiled, only the VM has. Rewind writes those files to a directory for the
 session and gives gdb every program and library at its load offset, the
 mapping of the file's start less the address its first loadable segment was
-linked at. For the files only the VM had, gdb lists the source files their
+linked at. A dynamically linked process's main program instead becomes gdb's
+symbol file, with the kernel added beside it, and its libraries reach gdb as
+gdb's SVR4 library list, which the stub builds the way gdbserver does: the
+main program's `DT_DEBUG` points at the loader's `r_debug`, whose link maps
+name every loaded object with its load offset, matched to the files Rewind
+has by their dynamic sections. gdb then knows each library's link map, which
+it finds a library's thread-local variables through; gdb 17 does that itself,
+and the Nix package ships it, while `rewind gdb` warns about an older gdb.
+The interpreters' and compilers' own gdb support comes in too when it is here:
+CPython's `libpython.py` beside a store libpython, and the pretty printers of
+the rustc that built a Rust program, found among its derivation's inputs or
+else from the rustc on PATH, as rust-gdb finds them. For the files only the
+VM had, gdb lists the source files their
 DWARF names, and a `files` inspection reads them in the process's view; the
 list goes in as console input, since a request has room for few arguments.
 Rewind keeps what the inspection read in `cache/sources/<run>`, by the step of
 the last event that wrote, renamed or unlinked each path, or as original when
 none did, and keeps the paths the VM did not have as absent. A later lookup
 whose step has the same last event for a path reads it from there, and makes
-no `files` fork when every path is there. An open for writing counts once the
-process that opened the file has exited, since the trace does not record the
-writes themselves; until then the file is read from the VM each time.
+no `files` fork when every path is there. An open for writing counts once
+every process that opened the file has exited, since the trace does not
+record the writes themselves; until then the file is read from the VM each
+time.
 
 DWARF and sources for everything in the store come by build ID from
 nixseparatedebuginfod2, which Rewind starts for the session on a socket it

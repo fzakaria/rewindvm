@@ -28,6 +28,7 @@ use std::process::{Child, Command, ExitCode, Stdio};
 use anyhow::{Context, Result, bail};
 use rewind_core::debuginfod_cache;
 use rewind_core::inspect::Inspection;
+use rewind_core::link_map;
 use rewind_core::maps::{ImageMount, Origin, Running, SymbolFile};
 use rewind_core::source_cache::{self, Entry, SourceCache, Version};
 use rewind_core::threads::{OnTheCpu, Tasks};
@@ -148,6 +149,7 @@ pub fn gdb(
     let mut symbols = Symbols::load(home, run, step, pid, Kernel::Load, Say::Aloud)?;
     let mut debuggee = debuggee(run, step, machine, symbols.process.scope)?;
     symbols.add_vdso(&debuggee, Say::Aloud);
+    symbols.add_libraries(&mut debuggee, Say::Aloud);
     let listener = TcpListener::bind(listen.unwrap_or(GDB_LOCAL)).context("listening for gdb")?;
     let mut args = symbols.arguments(Some(listener.local_addr()?));
 
@@ -180,6 +182,7 @@ pub fn gdb(
     // terminal.
     // SAFETY: ignoring SIGINT has no preconditions; gdb installs its own.
     unsafe { libc::signal(libc::SIGINT, libc::SIG_IGN) };
+    warn_if_too_old(Say::Aloud);
     eprintln!("rewind: gdb at step {step} of {}", run.manifest.id);
     let (status, _) = run_gdb(&args, Some((&mut debuggee, &listener)), Output::Terminal)?;
     Ok(if status.success() {
@@ -292,7 +295,7 @@ pub fn run_gdb(
     fork: Option<(&mut rewind_core::debug::Debuggee, &TcpListener)>,
     output: Output,
 ) -> Result<(std::process::ExitStatus, Printed)> {
-    let mut command = Command::new(GDB_PROGRAM);
+    let mut command = Command::new(gdb_program());
     command.args(args);
     if output != Output::Terminal {
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -357,8 +360,58 @@ pub fn run_gdb(
     Ok((status, printed))
 }
 
-/// The host's gdb.
+/// The host's gdb, unless the variable names one, as the Nix package's
+/// wrapper names the gdb it ships.
 const GDB_PROGRAM: &str = "gdb";
+const ENV_GDB: &str = "REWIND_GDB";
+
+/// The first gdb version that finds thread-local variables, such as
+/// errno, itself, from the FS base and the shared library list the stub
+/// gives it: earlier ones ask the stub, which cannot say.
+pub const GDB_THREAD_LOCALS: u32 = 17;
+
+/// The gdb `rewind gdb` starts.
+pub fn gdb_program() -> std::ffi::OsString {
+    std::env::var_os(ENV_GDB)
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| GDB_PROGRAM.into())
+}
+
+/// gdb's major version, from the last word of `banner`, the first line
+/// `gdb --version` prints, such as "GNU gdb (GDB) 17.2".
+pub fn major_version(banner: &str) -> Option<u32> {
+    banner
+        .split_whitespace()
+        .last()?
+        .split('.')
+        .next()?
+        .parse()
+        .ok()
+}
+
+/// What a gdb older than [`GDB_THREAD_LOCALS`] cannot do, said by
+/// `rewind gdb` and `rewind doctor`.
+pub fn too_old(major: u32) -> String {
+    format!(
+        "gdb {major} cannot read thread-local variables, such as errno, at a step; \
+         gdb {GDB_THREAD_LOCALS} or later can"
+    )
+}
+
+/// Says when the gdb `rewind gdb` starts is too old to read thread-local
+/// variables. A gdb that does not run is left to fail when started.
+fn warn_if_too_old(say: Say) {
+    let Ok(output) = Command::new(gdb_program()).arg("--version").output() else {
+        return;
+    };
+    let banner = String::from_utf8_lossy(&output.stdout);
+    let Some(major) = banner.lines().next().and_then(major_version) else {
+        return;
+    };
+    if major < GDB_THREAD_LOCALS {
+        say.line(too_old(major));
+    }
+}
 
 /// How often a wait for gdb to connect looks whether gdb has exited.
 const CONNECT_POLL: std::time::Duration = std::time::Duration::from_millis(20);
@@ -483,6 +536,64 @@ impl Symbols {
         }
     }
 
+    /// Tells gdb, through `debuggee`, of the shared libraries the process's
+    /// dynamic loader listed in its memory, so gdb loads them as shared
+    /// libraries and knows each one's link map, which it finds their
+    /// thread-local variables through. Each link map is matched to the
+    /// file whose dynamic section is where the link map says. A static
+    /// program, a process whose loader has not run yet, or a list whose
+    /// main program is not among the files leaves every file loaded one by
+    /// one, as before.
+    pub fn add_libraries(&mut self, debuggee: &mut rewind_core::debug::Debuggee, say: Say) {
+        // Where each file's dynamic section is in the process. The vDSO,
+        // which no file here holds, stays loaded on its own.
+        let dynamics: Vec<Option<u64>> = self
+            .process
+            .files
+            .iter()
+            .map(|f| {
+                if f.origin == Origin::Memory {
+                    return None;
+                }
+                let mut file = std::fs::File::open(&f.path).ok()?;
+                let linked = rewind_core::maps::dynamic_vaddr(&mut file)?;
+                Some(f.offset.wrapping_add(linked))
+            })
+            .collect();
+        let read = |at: u64, buf: &mut [u8]| debuggee.read_process(at, buf);
+        let found: Vec<u64> = dynamics.iter().flatten().copied().collect();
+        let Some(r_debug) = link_map::find_r_debug(&read, &found) else {
+            return;
+        };
+        let maps = match link_map::entries(&read, r_debug) {
+            Ok(maps) => maps,
+            Err(e) => {
+                say.line(format_args!("no shared library list: {e:#}"));
+                return;
+            }
+        };
+
+        // The main program first, then each library a file here holds.
+        let file_of = |map: &link_map::LinkMap| dynamics.iter().position(|d| *d == Some(map.l_ld));
+        let Some((first, rest)) = maps.split_first() else {
+            return;
+        };
+        let Some(main) = file_of(first) else {
+            return;
+        };
+        let mut libraries = Vec::new();
+        let mut named = Vec::new();
+        for map in rest {
+            let Some(i) = file_of(map).filter(|i| *i != main) else {
+                continue;
+            };
+            libraries.push(i);
+            named.push((map, self.process.files[i].path.as_path()));
+        }
+        debuggee.set_libraries(link_map::svr4_xml(first.lm, &named));
+        self.process.listed = Some(Listed { main, libraries });
+    }
+
     /// The directory the session's files are written to, which goes when
     /// the symbols do.
     pub fn dir(&self) -> &Path {
@@ -547,6 +658,23 @@ fn arguments(
         ex("-iex", format!("set debuginfod urls {}", urls.join(" ")));
     }
 
+    // A program whose loader listed its libraries is gdb's executable and
+    // symbol file, at its load offset, so the list's first link map is the
+    // program's, as gdb assumes when it finds thread-local variables. The
+    // kernel is then added beside it rather than taking its place.
+    let main = process.listed.as_ref().map(|l| &process.files[l.main]);
+    if let Some(main) = main {
+        ex("-ex", format!("exec-file {}", main.path.display()));
+        ex(
+            "-ex",
+            format!(
+                "pipe with confirm off -- symbol-file -o {:#x} {} | {DOWNLOADS_ONLY}",
+                main.offset,
+                main.path.display()
+            ),
+        );
+    }
+
     // The kernel: its DWARF when it is here, else its symbol table. The
     // scripts need the DWARF, which no debuginfod server has: the session's
     // serves only what is in the store, and the kernel's is not until
@@ -557,7 +685,16 @@ fn arguments(
         if !kernel.dwarf {
             ex("-ex", AUTO_LOAD_OFF.into());
         }
-        ex("-ex", format!("file {}", file.display()));
+        match main {
+            Some(_) => ex(
+                "-ex",
+                format!(
+                    "pipe with confirm off -- add-symbol-file {} | {DOWNLOADS_ONLY}",
+                    file.display()
+                ),
+            ),
+            None => ex("-ex", format!("file {}", file.display())),
+        }
         if !kernel.dwarf {
             ex("-ex", AUTO_LOAD_ON.into());
         }
@@ -567,7 +704,13 @@ fn arguments(
         if let Some(scripts) = &kernel.scripts
             && kernel.dwarf
         {
-            ex("-ex", format!("source {}", scripts.display()));
+            // The scripts evaluate C as they load, which the program's own
+            // language, gdb's choice once the program is its symbol file,
+            // may not parse.
+            ex(
+                "-ex",
+                format!("with language c -- source {}", scripts.display()),
+            );
         }
     }
 
@@ -587,7 +730,17 @@ fn arguments(
     // The vDSO, read out of the VM's memory, has debug info on no server,
     // so it loads with debuginfod off: asked, the client would announce a
     // download that never comes.
-    for file in &process.files {
+    // The files the loader listed are left to gdb's shared library list.
+    let listed = |i: usize| {
+        process
+            .listed
+            .as_ref()
+            .is_some_and(|l| l.main == i || l.libraries.contains(&i))
+    };
+    for (i, file) in process.files.iter().enumerate() {
+        if listed(i) {
+            continue;
+        }
         let quiet = file.origin == Origin::Memory && !urls.is_empty();
         if quiet {
             ex("-ex", DEBUGINFOD_OFF.into());
@@ -605,11 +758,41 @@ fn arguments(
         }
     }
 
+    // The languages' helpers, each after the directory its modules are in.
+    for helper in &process.helpers {
+        if let Some(dir) = &helper.import_from {
+            ex(
+                "-ex",
+                format!(
+                    "python import sys; sys.path.insert(0, {:?})",
+                    dir.display().to_string()
+                ),
+            );
+        }
+        ex("-ex", format!("source {}", helper.script.display()));
+    }
+
+    // The listed libraries' paths are this machine's, so gdb reads them
+    // here rather than asking the stub for them, and loads them once it
+    // has the list from the stub.
+    if process.listed.is_some() {
+        ex("-ex", SYSROOT_HERE.into());
+    }
     if let Some(address) = target {
         ex("-ex", format!("target remote {address}"));
+        if process.listed.is_some() {
+            ex(
+                "-ex",
+                format!("pipe with confirm off -- sharedlibrary | {DOWNLOADS_ONLY}"),
+            );
+        }
     }
     args
 }
+
+/// Where gdb finds the files a shared library list names: here, under the
+/// root, since the stub names this machine's copies.
+const SYSROOT_HERE: &str = "set sysroot /";
 
 /// The kernel's symbol file for gdb, the gdb scripts to load with it, and
 /// the patched source files.
@@ -720,6 +903,43 @@ struct Process {
     source_dirs: Vec<(PathBuf, PathBuf)>,
     /// Where its vDSO is mapped, which [`Symbols::add_vdso`] reads.
     vdso: Option<std::ops::Range<u64>>,
+    /// Which of `files` its loader listed, when [`Symbols::add_libraries`]
+    /// found the list.
+    listed: Option<Listed>,
+    /// gdb support for the languages it runs that its toolchain ships but
+    /// gdb does not load itself.
+    helpers: Vec<Helper>,
+}
+
+/// A language's gdb support, shipped by the toolchain or interpreter a
+/// program came from: a script to source, and a directory gdb's Python
+/// imports the script's own modules from when it has some.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Helper {
+    import_from: Option<PathBuf>,
+    script: PathBuf,
+}
+
+/// Rust's pretty printers, which a Rust program's .debug_gdb_scripts names
+/// without a directory, and where a rustc keeps them.
+const RUST_PRINTERS: &str = "gdb_load_rust_pretty_printers.py";
+const RUSTLIB_ETC: &str = "lib/rustlib/etc";
+
+/// CPython's gdb commands, py-bt and the like, which nixpkgs' python ships
+/// beside its libpython rather than where gdb would load them itself.
+const LIBPYTHON: &str = "libpython";
+const LIBPYTHON_GDB: &str = "share/gdb/libpython.py";
+
+/// The files of a process its dynamic loader listed: gdb is told of them
+/// through the stub's shared library list rather than loaded one by one,
+/// so it knows each one's link map, which it finds thread-local variables
+/// through. Each is an index into [`Process::files`].
+struct Listed {
+    /// The main program, which gdb takes as its symbol file, so the
+    /// list's first link map is this program's.
+    main: usize,
+    /// The shared libraries.
+    libraries: Vec<usize>,
 }
 
 /// The step of process `pid`'s latest event before `step`, if it made one.
@@ -868,13 +1088,161 @@ fn debugged_process(
         source_dirs.extend(derivation_sources(store_path, &unmapped, say));
     }
 
+    let helpers = helpers(&files, dir, say);
     Process {
         scope: rewind_core::debug::Scope::Process(running.pid),
         files,
         source_dirs,
         vdso: running.vdso,
+        listed: None,
+        helpers,
     }
 }
+
+/// The language helpers gdb needs for `files` that their toolchains ship
+/// on this machine: CPython's commands beside a store libpython, and the
+/// pretty printers of the rustc that built a store program that asks for
+/// them, each once.
+fn helpers(files: &[SymbolFile], dir: &Path, say: Say) -> Vec<Helper> {
+    let mut helpers: Vec<Helper> = Vec::new();
+    for file in files {
+        if file.origin != Origin::Store {
+            continue;
+        }
+        let store_path = path_in_vm(&file.path, dir);
+        let Some(root) = store_root(&store_path) else {
+            continue;
+        };
+
+        // CPython's commands, beside the libpython the process has.
+        let is_libpython = file
+            .path
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().starts_with(LIBPYTHON));
+        let libpython_gdb = root.join(LIBPYTHON_GDB);
+        if is_libpython && libpython_gdb.exists() {
+            let helper = Helper {
+                import_from: None,
+                script: libpython_gdb,
+            };
+            if !helpers.contains(&helper) {
+                helpers.push(helper);
+            }
+        }
+
+        // Rust's printers, which the program names without a directory.
+        let wants_rust = std::fs::File::open(&file.path)
+            .map(|mut f| rewind_core::maps::gdb_scripts(&mut f))
+            .is_ok_and(|names| names.iter().any(|n| n == RUST_PRINTERS));
+        if !wants_rust {
+            continue;
+        }
+        let Some(etc) = rust_printers(&root, say) else {
+            continue;
+        };
+        let helper = Helper {
+            import_from: Some(etc.clone()),
+            script: etc.join(RUST_PRINTERS),
+        };
+        if !helpers.contains(&helper) {
+            helpers.push(helper);
+        }
+    }
+    helpers
+}
+
+/// The directory of Rust's pretty printers for the store path `root`:
+/// the ones of the rustc that built it, from its derivation, else those of
+/// the rustc on PATH, as rust-gdb finds them. Says why there are none.
+fn rust_printers(root: &Path, say: Say) -> Option<PathBuf> {
+    let found = derivation_rust_printers(root).or_else(path_rust_printers);
+    if found.is_none() {
+        say.line(format_args!(
+            "no Rust pretty printers for {}: neither the rustc that built it nor one on PATH is here",
+            root.display()
+        ));
+    }
+    found
+}
+
+/// The printers of the rustc on PATH, in its sysroot.
+fn path_rust_printers() -> Option<PathBuf> {
+    let output = Command::new(RUSTC_PROGRAM)
+        .args(["--print", "sysroot"])
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    let sysroot = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let etc = Path::new(&sysroot).join(RUSTLIB_ETC);
+    etc.join(RUST_PRINTERS).exists().then_some(etc)
+}
+
+/// The rustc rust-gdb asks for its sysroot.
+const RUSTC_PROGRAM: &str = "rustc";
+
+/// The printers of the rustc that built the store path `root`: among its
+/// derivation's inputs, a Rust toolchain's output, or a path that output
+/// refers to, as nixpkgs' rustc wrapper refers to the rustc it wraps.
+/// None when the derivation or its rustc is not on this machine.
+fn derivation_rust_printers(root: &Path) -> Option<PathBuf> {
+    let nix_store = on_path(NIX_STORE_PROGRAM, std::env::var_os("PATH").as_deref())?;
+    let query = |args: &[&str], path: &Path| -> Vec<PathBuf> {
+        Command::new(&nix_store)
+            .args(args)
+            .arg(path)
+            .stderr(Stdio::null())
+            .output()
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .map(PathBuf::from)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    // The derivation, which must be on this machine.
+    let drv = query(&["--query", "--deriver"], root)
+        .into_iter()
+        .next()
+        .filter(|d| d.exists())?;
+    let show = Command::new(NIX_PROGRAM)
+        .args(NIX_COMMAND)
+        .args(["derivation", "show"])
+        .arg(&drv)
+        .stderr(Stdio::null())
+        .output()
+        .map(|o| o.stdout)
+        .unwrap_or_default();
+
+    // Each Rust input's outputs, and what each refers to.
+    for input in derivation_inputs(&show) {
+        let is_rust = input
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().contains(RUST));
+        if !is_rust {
+            continue;
+        }
+        for output in query(&["--query", "--outputs"], &input) {
+            let mut candidates = vec![output.clone()];
+            if output.exists() {
+                candidates.extend(query(&["--query", "--references"], &output));
+            }
+            let found = candidates
+                .into_iter()
+                .map(|c| c.join(RUSTLIB_ETC))
+                .find(|etc| etc.join(RUST_PRINTERS).exists());
+            if found.is_some() {
+                return found;
+            }
+        }
+    }
+    None
+}
+
+/// How a Rust toolchain's derivations are named, among a derivation's
+/// inputs: rustc, rustc-wrapper, rust-default and the like.
+const RUST: &str = "rust";
 
 /// Fetches the source files at `paths`, named by programs the VM built,
 /// and writes them under `dir`: from the run's source cache when it holds
@@ -1067,7 +1435,7 @@ fn sources_outside_store(files: &[SymbolFile]) -> Vec<Vec<String>> {
     if files.is_empty() {
         return Vec::new();
     }
-    let mut command = Command::new(GDB_PROGRAM);
+    let mut command = Command::new(gdb_program());
     command.args(["-batch", "-nx"]);
     for (i, file) in files.iter().enumerate() {
         command
@@ -1195,6 +1563,32 @@ const SRC: &str = "src";
 /// under `derivations` by name in recent versions of Nix, by path at the
 /// top in older ones, and in its environment or, with structured
 /// attributes, among those.
+/// The input derivations of the derivation `nix derivation show` printed
+/// as `show`: by name under `inputs.drvs` in recent versions of Nix, by
+/// path under `inputDrvs` in older ones.
+fn derivation_inputs(show: &[u8]) -> Vec<PathBuf> {
+    let Ok(json) = serde_json::from_slice::<serde_json::Value>(show) else {
+        return Vec::new();
+    };
+    let derivations = json.get(DERIVATIONS).unwrap_or(&json);
+    let Some(derivation) = derivations.as_object().and_then(|d| d.values().next()) else {
+        return Vec::new();
+    };
+    let newer = derivation.get(INPUTS).and_then(|i| i.get(INPUT_DRVS_NEWER));
+    let older = derivation.get(INPUT_DRVS_OLDER);
+    let Some(drvs) = newer.or(older).and_then(|d| d.as_object()) else {
+        return Vec::new();
+    };
+    drvs.keys()
+        .map(|key| Path::new(NIX_STORE).join(key))
+        .collect()
+}
+
+/// Where `nix derivation show` lists a derivation's input derivations.
+const INPUTS: &str = "inputs";
+const INPUT_DRVS_NEWER: &str = "drvs";
+const INPUT_DRVS_OLDER: &str = "inputDrvs";
+
 fn derivation_src(show: &[u8]) -> Option<PathBuf> {
     let json: serde_json::Value = serde_json::from_slice(show).ok()?;
     let derivations = json.get(DERIVATIONS).unwrap_or(&json);
@@ -1519,6 +1913,55 @@ mod tests {
         assert_eq!(derivation_src(none), None);
     }
 
+    /// A derivation's input derivations, from `nix derivation show` as
+    /// recent Nix prints them, by name under `inputs.drvs`, and as older
+    /// versions print them, by path under `inputDrvs`; none from output
+    /// that is neither.
+    #[test]
+    fn a_derivation_s_inputs_are_read_from_either_shape() {
+        let wrapper = PathBuf::from("/nix/store/f6q-rustc-wrapper-1.91.1.drv");
+        let newer = br#"{"derivations":{"yfd-polyglot-rust.drv":{"inputs":{"drvs":{"f6q-rustc-wrapper-1.91.1.drv":{"outputs":["out"]}},"srcs":[]}}},"version":4}"#;
+        assert_eq!(derivation_inputs(newer), std::slice::from_ref(&wrapper));
+        let older = br#"{"/nix/store/yfd-polyglot-rust.drv":{"inputDrvs":{"/nix/store/f6q-rustc-wrapper-1.91.1.drv":["out"]}}}"#;
+        assert_eq!(derivation_inputs(older), [wrapper]);
+        assert!(derivation_inputs(b"{}").is_empty());
+    }
+
+    /// A process's language helpers are sourced before gdb connects, each
+    /// after its directory is put where gdb's Python imports from when it
+    /// has one. Builds the arguments for Rust's printers and CPython's
+    /// commands.
+    #[test]
+    fn helpers_are_sourced_with_their_imports() {
+        let etc = PathBuf::from("/nix/store/abc-rustc/lib/rustlib/etc");
+        let process = Process {
+            helpers: vec![
+                Helper {
+                    import_from: Some(etc.clone()),
+                    script: etc.join(RUST_PRINTERS),
+                },
+                Helper {
+                    import_from: None,
+                    script: PathBuf::from("/nix/store/def-python3/share/gdb/libpython.py"),
+                },
+            ],
+            ..Process::default()
+        };
+        let address = "127.0.0.1:1234".parse().unwrap();
+        let args = arguments(&KernelSymbols::none(), &process, &[], Some(address));
+        let at = |needle: &str| {
+            args.iter()
+                .position(|a| a == needle)
+                .unwrap_or_else(|| panic!("{needle} in {args:?}"))
+        };
+        let import =
+            at("python import sys; sys.path.insert(0, \"/nix/store/abc-rustc/lib/rustlib/etc\")");
+        let rust =
+            at("source /nix/store/abc-rustc/lib/rustlib/etc/gdb_load_rust_pretty_printers.py");
+        let python = at("source /nix/store/def-python3/share/gdb/libpython.py");
+        assert!(import < rust && python < at("target remote 127.0.0.1:1234"));
+    }
+
     /// A derivation with `__structuredAttrs = true` keeps src among its
     /// structured attributes, not in env. Reads src from `nix derivation
     /// show` of one such derivation as three versions print it, cut to a
@@ -1621,6 +2064,76 @@ mod tests {
         assert!(args.contains(&expected), "{args:?}");
     }
 
+    /// A process whose loader listed its libraries has the main program as
+    /// gdb's symbol file and executable, at its load offset, the kernel
+    /// added beside it, and the listed libraries left to gdb's shared
+    /// library list, read once gdb connects and with the root as the
+    /// place their paths are found. A file the list lacks, such as the
+    /// vDSO, is still added. Builds the arguments for a program, libc and
+    /// the vDSO, the first two listed.
+    #[test]
+    fn listed_libraries_are_left_to_gdb_s_shared_library_list() {
+        let file = |path: &str, offset, origin| SymbolFile {
+            path: PathBuf::from(path),
+            offset,
+            origin,
+        };
+        let process = Process {
+            files: vec![
+                file(
+                    "/nix/store/abc-python3/bin/python3",
+                    0x5555_0000_0000,
+                    Origin::Store,
+                ),
+                file(
+                    "/nix/store/abc-glibc/lib/libc.so.6",
+                    0x7f00_0000_0000,
+                    Origin::Store,
+                ),
+                file("/session/[vdso]", 0x7ffd_0000_0000, Origin::Memory),
+            ],
+            listed: Some(Listed {
+                main: 0,
+                libraries: vec![1],
+            }),
+            ..Process::default()
+        };
+        let kernel = KernelSymbols {
+            file: Some(PathBuf::from("/opt/rewind/vmlinux")),
+            scripts: None,
+            sources: None,
+            dwarf: true,
+        };
+        let address = "127.0.0.1:1234".parse().unwrap();
+        let args = arguments(&kernel, &process, &[], Some(address));
+        let at = |needle: &str| {
+            args.iter()
+                .position(|a| a.contains(needle))
+                .unwrap_or_else(|| panic!("{needle} in {args:?}"))
+        };
+
+        let main = "/nix/store/abc-python3/bin/python3";
+        assert!(at(&format!("exec-file {main}")) < at("symbol-file -o 0x555500000000"));
+        assert!(at("symbol-file -o") < at("add-symbol-file /opt/rewind/vmlinux"));
+        assert!(
+            !args.iter().any(|a| a == "file /opt/rewind/vmlinux"),
+            "{args:?}"
+        );
+        assert!(
+            !args
+                .iter()
+                .any(|a| a.contains("add-symbol-file /nix/store/abc-glibc"))
+        );
+        assert!(
+            !args
+                .iter()
+                .any(|a| a.contains(&format!("add-symbol-file {main}")))
+        );
+        at("add-symbol-file /session/[vdso]");
+        assert!(at("set sysroot /") < at("target remote"));
+        assert!(at("target remote") < at("sharedlibrary"));
+    }
+
     /// The vDSO, read out of the VM's memory, has debug info on no server,
     /// so gdb loads it with debuginfod off and asks for none, and says
     /// nothing of a download that would never come; a library loads with
@@ -1658,6 +2171,23 @@ mod tests {
         );
     }
 
+    /// gdb's major version is the start of the last word of the first
+    /// line `gdb --version` prints, as upstream, Ubuntu and Fedora builds
+    /// print it; a line without one has none.
+    #[test]
+    fn gdb_s_major_version_is_read_from_its_banner() {
+        assert_eq!(major_version("GNU gdb (GDB) 17.2"), Some(17));
+        assert_eq!(
+            major_version("GNU gdb (Ubuntu 15.0.50.20240403-0ubuntu1) 15.0.50.20240403-git"),
+            Some(15)
+        );
+        assert_eq!(
+            major_version("GNU gdb (Fedora Linux) 16.3-1.fc42"),
+            Some(16)
+        );
+        assert_eq!(major_version("not gdb"), None);
+    }
+
     /// A gdb that exits without connecting, as `gdb --version` does, is
     /// not waited for; one that connects is served. `true` stands in for
     /// the first, a thread connecting while `sleep` runs for the second.
@@ -1691,7 +2221,10 @@ mod tests {
         };
         let urls = ["https://debuginfod.debian.net"];
         let address = "127.0.0.1:1234".parse().unwrap();
-        let sourced = |args: &[String]| args.iter().any(|a| a.starts_with("source "));
+        let sourced = |args: &[String]| {
+            args.iter()
+                .any(|a| a.ends_with("source /opt/rewind/vmlinux-gdb.py"))
+        };
 
         let without = arguments(&kernel(false), &Process::default(), &urls, Some(address));
         assert!(!sourced(&without));

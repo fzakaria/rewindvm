@@ -36,13 +36,15 @@ use gdbstub::target::ext::breakpoints::{
     Breakpoints, BreakpointsOps, HwBreakpoint, HwBreakpointOps, HwWatchpoint, HwWatchpointOps,
     SwBreakpoint, SwBreakpointOps, WatchKind,
 };
+use gdbstub::target::ext::libraries::{LibrariesSvr4, LibrariesSvr4Ops};
 use gdbstub::target::ext::thread_extra_info::{ThreadExtraInfo, ThreadExtraInfoOps};
 use gdbstub::target::{Target, TargetError, TargetResult};
-use gdbstub_arch::x86::X86_64_SSE;
 use gdbstub_arch::x86::reg::X86_64CoreRegs;
 use rewind_vmm::debug::{Access, DebugStop, MAX_TRAPS, Stepping, Trap};
 use rewind_vmm::pv::{TaskLayout, pt_regs};
 use rewind_vmm::{Machine, Observer, Outcome};
+
+use crate::gdb_regs::{RegsWithBases, X86_64WithBases};
 
 use crate::threads::{Memory, Tasks, Thread};
 
@@ -513,6 +515,9 @@ pub struct Debuggee {
     follow: Follow,
     /// Whether gdb's user has been told the fork left the recording.
     told: bool,
+    /// The debugged process's shared libraries, as gdb's SVR4 library
+    /// list, when `rewind gdb` found them.
+    libraries: Option<String>,
 }
 
 impl Debuggee {
@@ -549,6 +554,7 @@ impl Debuggee {
             threads: Vec::new(),
             follow: Follow::new(made),
             told: false,
+            libraries: None,
         };
         debuggee.refresh_threads();
         Ok(debuggee)
@@ -597,6 +603,28 @@ impl Debuggee {
     /// such thread at this stop.
     pub fn thread_number(&self, tid: u32) -> Option<usize> {
         thread_number(&self.threads, tid)
+    }
+
+    /// Reads the debugged process's memory at `address`, as its page tables
+    /// map it, or the CPU's when gdb debugs no process. Memory the process
+    /// has not mapped is an error.
+    pub fn read_process(&self, address: u64, buf: &mut [u8]) -> Result<()> {
+        let space = match self.space {
+            Some(space) => space,
+            None => page_table(self.machine.special_registers()?.cr3),
+        };
+        let read = self.machine.read_virtual_in(space, address, buf)?;
+        if read < buf.len() {
+            anyhow::bail!("the process has no memory at {:#x}", address + read as u64);
+        }
+        Ok(())
+    }
+
+    /// Gives gdb the debugged process's shared libraries, as gdb's SVR4
+    /// library list ([`crate::link_map::svr4_xml`]), so it loads them as
+    /// shared libraries and finds their thread-local variables.
+    pub fn set_libraries(&mut self, xml: String) {
+        self.libraries = Some(xml);
     }
 
     /// The vDSO the debugged process, or with none the process on the CPU,
@@ -672,7 +700,7 @@ impl Debuggee {
 }
 
 impl Target for Debuggee {
-    type Arch = X86_64_SSE;
+    type Arch = X86_64WithBases;
     type Error = String;
 
     fn base_ops(&mut self) -> BaseOps<'_, Self::Arch, Self::Error> {
@@ -681,6 +709,25 @@ impl Target for Debuggee {
 
     fn support_breakpoints(&mut self) -> Option<BreakpointsOps<'_, Self>> {
         Some(self)
+    }
+
+    fn support_libraries_svr4(&mut self) -> Option<LibrariesSvr4Ops<'_, Self>> {
+        self.libraries.is_some().then_some(self)
+    }
+}
+
+impl LibrariesSvr4 for Debuggee {
+    fn get_libraries_svr4(
+        &self,
+        offset: u64,
+        length: usize,
+        buf: &mut [u8],
+    ) -> TargetResult<usize, Self> {
+        let xml = self.libraries.as_deref().unwrap_or_default().as_bytes();
+        let start = (offset as usize).min(xml.len());
+        let n = length.min(buf.len()).min(xml.len() - start);
+        buf[..n].copy_from_slice(&xml[start..start + n]);
+        Ok(n)
     }
 }
 
@@ -719,7 +766,7 @@ fn fatal<E: std::fmt::Display>(e: E) -> TargetError<String> {
 }
 
 impl MultiThreadBase for Debuggee {
-    fn read_registers(&mut self, regs: &mut X86_64CoreRegs, tid: Tid) -> TargetResult<(), Self> {
+    fn read_registers(&mut self, regs: &mut RegsWithBases, tid: Tid) -> TargetResult<(), Self> {
         // A thread off the CPU, or in the kernel on it: the user registers
         // it saved in its pt_regs. A thread whose registers do not read,
         // such as one that exited since the last stop, is an error gdb
@@ -728,13 +775,29 @@ impl MultiThreadBase for Debuggee {
             && !(on == OnCpu::Yes && self.running().map_err(fatal)? == Running::UserSpace)
         {
             let layout = self.layout.ok_or(TargetError::NonFatal)?;
-            let words = Tasks::new(&self.machine, layout)
-                .user_registers(task)
-                .map_err(|e| {
-                    eprintln!("rewind: {e:#}");
-                    TargetError::NonFatal
-                })?;
-            *regs = saved_registers(&words);
+            let tasks = Tasks::new(&self.machine, layout);
+            let not_read = |e: anyhow::Error| {
+                eprintln!("rewind: {e:#}");
+                TargetError::NonFatal
+            };
+            let words = tasks.user_registers(task).map_err(not_read)?;
+            regs.core = saved_registers(&words);
+            regs.orig_rax = Some(words[pt_regs::ORIG_RAX]);
+
+            // A thread off the CPU saved its bases in its task. The kernel
+            // leaves the FS base as it is on the way in, so the CPU still
+            // holds the user one of the thread on it; the user GS base is
+            // in an MSR the kernel swapped it into, and is not read.
+            (regs.fs_base, regs.gs_base) = match on {
+                OnCpu::No => {
+                    let (fs, gs) = tasks.user_bases(task).map_err(not_read)?;
+                    (Some(fs), Some(gs))
+                }
+                OnCpu::Yes => {
+                    let s = self.machine.special_registers().map_err(fatal)?;
+                    (Some(s.fs.base), None)
+                }
+            };
             return Ok(());
         }
 
@@ -745,23 +808,33 @@ impl MultiThreadBase for Debuggee {
             r.rax, r.rbx, r.rcx, r.rdx, r.rsi, r.rdi, r.rbp, r.rsp, r.r8, r.r9, r.r10, r.r11,
             r.r12, r.r13, r.r14, r.r15,
         ];
-        regs.regs = gprs;
-        regs.rip = r.rip;
-        regs.eflags = r.rflags as u32;
-        regs.segments.cs = s.cs.selector.into();
-        regs.segments.ss = s.ss.selector.into();
-        regs.segments.ds = s.ds.selector.into();
-        regs.segments.es = s.es.selector.into();
-        regs.segments.fs = s.fs.selector.into();
-        regs.segments.gs = s.gs.selector.into();
+        let core = &mut regs.core;
+        core.regs = gprs;
+        core.rip = r.rip;
+        core.eflags = r.rflags as u32;
+        core.segments.cs = s.cs.selector.into();
+        core.segments.ss = s.ss.selector.into();
+        core.segments.ds = s.ds.selector.into();
+        core.segments.es = s.es.selector.into();
+        core.segments.fs = s.fs.selector.into();
+        core.segments.gs = s.gs.selector.into();
+
+        // The CPU's own bases: a thread's in user space, the kernel's per-CPU
+        // GS base in the kernel. The CPU has no orig_rax; only a thread
+        // that entered the kernel saved one.
+        regs.orig_rax = None;
+        regs.fs_base = Some(s.fs.base);
+        regs.gs_base = Some(s.gs.base);
         Ok(())
     }
 
-    fn write_registers(&mut self, regs: &X86_64CoreRegs, tid: Tid) -> TargetResult<(), Self> {
+    fn write_registers(&mut self, regs: &RegsWithBases, tid: Tid) -> TargetResult<(), Self> {
         // Only the CPU's registers can be changed.
         if let Some(Source::Task(..)) = self.source(tid) {
             return Err(TargetError::NonFatal);
         }
+        // The general purpose registers only; the bases stay as they are.
+        let regs = &regs.core;
         let mut r = self.machine.registers().map_err(fatal)?;
         let g = regs.regs;
         (r.rax, r.rbx, r.rcx, r.rdx, r.rsi, r.rdi, r.rbp, r.rsp) =

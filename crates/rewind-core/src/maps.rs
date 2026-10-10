@@ -389,6 +389,7 @@ fn vdso_range(line: &str) -> Option<std::ops::Range<u64>> {
 const ELF_MAGIC: &[u8; 4] = b"\x7fELF";
 const ELF_CLASS_64: u8 = 2;
 const PT_LOAD: u32 = 1;
+const PT_DYNAMIC: u32 = 2;
 const PT_NOTE: u32 = 4;
 
 /// A note's owner and type when it is a build ID, and the alignment of
@@ -407,6 +408,24 @@ const P_OFFSET: usize = 8;
 const P_VADDR: usize = 16;
 const P_FILESZ: usize = 32;
 const PHDR_LEN: usize = 56;
+
+/// Offsets into a 64-bit ELF header and section header, for the section
+/// header table and the names in it.
+const E_SHOFF: usize = 40;
+const E_SHENTSIZE: usize = 58;
+const E_SHNUM: usize = 60;
+const E_SHSTRNDX: usize = 62;
+const SH_OFFSET: usize = 24;
+const SH_SIZE: usize = 32;
+const SHDR_LEN: usize = 64;
+
+/// The section a program asks gdb to load scripts through, and the kind
+/// of its entries that name a Python file rather than hold a script.
+const DEBUG_GDB_SCRIPTS: &[u8] = b".debug_gdb_scripts";
+const SCRIPT_PYTHON_FILE: u8 = 1;
+
+/// The most bytes of .debug_gdb_scripts read; a real one is a few names.
+const MAX_GDB_SCRIPTS: u64 = 1 << 16;
 
 /// How far an ELF file's addresses moved when it was loaded with its
 /// start at `base`: the first loadable segment says which address the
@@ -437,6 +456,101 @@ pub fn load_offset(file: &mut (impl Read + Seek), base: u64) -> Option<u64> {
         .find(|p| u32::from_le_bytes(p[..4].try_into().unwrap()) == PT_LOAD)?;
     let linked = (u64_at(first, P_VADDR) - u64_at(first, P_OFFSET)) & PAGE_MASK;
     Some(base.wrapping_sub(linked))
+}
+
+/// Where an ELF file's dynamic section is linked at, from its PT_DYNAMIC
+/// segment: the run-time address less the file's load offset. None for a
+/// file without one, such as a static program, or that is not a 64-bit
+/// ELF file.
+pub fn dynamic_vaddr(file: &mut (impl Read + Seek)) -> Option<u64> {
+    let mut header = [0u8; ELF_HEADER_LEN];
+    file.read_exact(&mut header).ok()?;
+    if &header[..4] != ELF_MAGIC || header[4] != ELF_CLASS_64 {
+        return None;
+    }
+    let u16_at = |b: &[u8], at: usize| u16::from_le_bytes([b[at], b[at + 1]]) as usize;
+    let u64_at = |b: &[u8], at: usize| u64::from_le_bytes(b[at..at + 8].try_into().unwrap());
+    let phentsize = u16_at(&header, E_PHENTSIZE);
+    let phnum = u16_at(&header, E_PHNUM);
+    if phentsize < PHDR_LEN {
+        return None;
+    }
+    let mut phdrs = vec![0u8; phentsize * phnum];
+    file.seek(SeekFrom::Start(u64_at(&header, E_PHOFF))).ok()?;
+    file.read_exact(&mut phdrs).ok()?;
+    let dynamic = phdrs
+        .chunks_exact(phentsize)
+        .find(|p| u32::from_le_bytes(p[..4].try_into().unwrap()) == PT_DYNAMIC)?;
+    Some(u64_at(dynamic, P_VADDR))
+}
+
+/// The Python script files an ELF file's .debug_gdb_scripts section asks
+/// gdb to load, as it names them: an absolute path, or a bare name gdb
+/// looks for on its script path, as Rust's pretty printers are named.
+/// Empty for a file without the section.
+pub fn gdb_scripts(file: &mut (impl Read + Seek)) -> Vec<String> {
+    let Some(contents) = section(file, DEBUG_GDB_SCRIPTS) else {
+        return Vec::new();
+    };
+
+    // Each entry is its kind's byte and then text up to a NUL: a file's
+    // name, or a script inline.
+    let mut names = Vec::new();
+    for entry in contents.split(|b| *b == 0) {
+        let Some((&kind, text)) = entry.split_first() else {
+            continue;
+        };
+        if kind == SCRIPT_PYTHON_FILE {
+            names.push(String::from_utf8_lossy(text).into_owned());
+        }
+    }
+    names
+}
+
+/// The contents of the section named `name` in a 64-bit ELF file, read
+/// through its section header table, or None when it has no such section.
+fn section(file: &mut (impl Read + Seek), name: &[u8]) -> Option<Vec<u8>> {
+    let mut header = [0u8; ELF_HEADER_LEN];
+    file.read_exact(&mut header).ok()?;
+    if &header[..4] != ELF_MAGIC || header[4] != ELF_CLASS_64 {
+        return None;
+    }
+    let u16_at = |b: &[u8], at: usize| u16::from_le_bytes([b[at], b[at + 1]]) as usize;
+    let u32_at = |b: &[u8], at: usize| u32::from_le_bytes(b[at..at + 4].try_into().unwrap());
+    let u64_at = |b: &[u8], at: usize| u64::from_le_bytes(b[at..at + 8].try_into().unwrap());
+    let shentsize = u16_at(&header, E_SHENTSIZE);
+    let shnum = u16_at(&header, E_SHNUM);
+    if shentsize < SHDR_LEN {
+        return None;
+    }
+    let mut shdrs = vec![0u8; shentsize * shnum];
+    file.seek(SeekFrom::Start(u64_at(&header, E_SHOFF))).ok()?;
+    file.read_exact(&mut shdrs).ok()?;
+    let headers: Vec<&[u8]> = shdrs.chunks_exact(shentsize).collect();
+
+    // The section names, then the section whose name is `name`.
+    let mut read = |shdr: &[u8], limit: u64| -> Option<Vec<u8>> {
+        let size = u64_at(shdr, SH_SIZE);
+        if size > limit {
+            return None;
+        }
+        let mut bytes = vec![0u8; usize::try_from(size).ok()?];
+        file.seek(SeekFrom::Start(u64_at(shdr, SH_OFFSET))).ok()?;
+        file.read_exact(&mut bytes).ok()?;
+        Some(bytes)
+    };
+    let names = read(
+        headers.get(u16_at(&header, E_SHSTRNDX))?,
+        u64::from(u32::MAX),
+    )?;
+    let wanted = headers.iter().find(|shdr| {
+        let start = u32_at(shdr, 0) as usize;
+        names
+            .get(start..)
+            .and_then(|rest| rest.split(|b| *b == 0).next())
+            .is_some_and(|n| n == name)
+    })?;
+    read(wanted, MAX_GDB_SCRIPTS)
 }
 
 /// An ELF file's GNU build ID, in hex, from its note segments: the name
@@ -539,6 +653,60 @@ mod tests {
         b[p..p + 4].copy_from_slice(&PT_LOAD.to_le_bytes());
         b[p + P_VADDR..p + P_VADDR + 8].copy_from_slice(&vaddr.to_le_bytes());
         b
+    }
+
+    /// An ELF file with a .debug_gdb_scripts section of `contents`, the
+    /// section header string table its only other section.
+    fn with_scripts(contents: &[u8]) -> Vec<u8> {
+        let names = b"\0.shstrtab\0.debug_gdb_scripts\0";
+        let mut b = vec![0u8; ELF_HEADER_LEN];
+        b[..4].copy_from_slice(ELF_MAGIC);
+        b[4] = ELF_CLASS_64;
+        let names_at = b.len() as u64;
+        b.extend_from_slice(names);
+        let contents_at = b.len() as u64;
+        b.extend_from_slice(contents);
+        let shoff = b.len() as u64;
+        b[E_SHOFF..E_SHOFF + 8].copy_from_slice(&shoff.to_le_bytes());
+        b[E_SHENTSIZE..E_SHENTSIZE + 2].copy_from_slice(&(SHDR_LEN as u16).to_le_bytes());
+        b[E_SHNUM..E_SHNUM + 2].copy_from_slice(&3u16.to_le_bytes());
+        b[E_SHSTRNDX..E_SHSTRNDX + 2].copy_from_slice(&1u16.to_le_bytes());
+        let header = |name: u32, offset: u64, size: u64| {
+            let mut h = vec![0u8; SHDR_LEN];
+            h[..4].copy_from_slice(&name.to_le_bytes());
+            h[SH_OFFSET..SH_OFFSET + 8].copy_from_slice(&offset.to_le_bytes());
+            h[SH_SIZE..SH_SIZE + 8].copy_from_slice(&size.to_le_bytes());
+            h
+        };
+        b.extend(header(0, 0, 0));
+        b.extend(header(1, names_at, names.len() as u64));
+        b.extend(header(11, contents_at, contents.len() as u64));
+        b
+    }
+
+    /// The scripts a .debug_gdb_scripts section names are its Python file
+    /// entries, in order; an inline script is no file, and a file without
+    /// the section names none.
+    #[test]
+    fn the_gdb_scripts_a_program_asks_for_are_read() {
+        let contents = b"\x01gdb_load_rust_pretty_printers.py\0\x04print(1)\n\0\x01/a/b.py\0";
+        let names = gdb_scripts(&mut Cursor::new(with_scripts(contents)));
+        assert_eq!(names, ["gdb_load_rust_pretty_printers.py", "/a/b.py"]);
+        assert!(gdb_scripts(&mut Cursor::new(elf(0))).is_empty());
+    }
+
+    /// A file's dynamic section is where its PT_DYNAMIC segment is linked
+    /// at; a file without one, such as a static program, has none.
+    #[test]
+    fn the_dynamic_section_is_the_dynamic_segment() {
+        let mut with = elf(0);
+        with[E_PHNUM..E_PHNUM + 2].copy_from_slice(&2u16.to_le_bytes());
+        let mut dynamic = vec![0u8; PHDR_LEN];
+        dynamic[..4].copy_from_slice(&PT_DYNAMIC.to_le_bytes());
+        dynamic[P_VADDR..P_VADDR + 8].copy_from_slice(&0x3d68u64.to_le_bytes());
+        with.extend(dynamic);
+        assert_eq!(dynamic_vaddr(&mut Cursor::new(with)), Some(0x3d68));
+        assert_eq!(dynamic_vaddr(&mut Cursor::new(elf(0))), None);
     }
 
     #[test]

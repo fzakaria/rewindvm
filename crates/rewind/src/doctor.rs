@@ -107,7 +107,6 @@ pub fn findings(home: &Home) -> Vec<Finding> {
 /// The programs doctor looks for on PATH.
 const NIX_PROGRAM: &str = "nix";
 const MKFS_EROFS: &str = "mkfs.erofs";
-const GDB_PROGRAM: &str = "gdb";
 
 /// The debuginfod server `rewind gdb` starts, as gdb.rs finds it.
 const ENV_DEBUGINFOD: &str = "REWIND_DEBUGINFOD";
@@ -136,10 +135,11 @@ fn clock(home: &Home, guest: &Guest) -> Finding {
     Finding::new(Level::Warn, "clock", pmu::exit_time_warning(&vendor))
 }
 
-/// gdb, for `rewind gdb`, and its Python, for `rewind where` and the
-/// desktop app's source panel.
+/// gdb, for `rewind gdb`, new enough to read thread-local variables, and
+/// its Python, for `rewind where` and the desktop app's source panel.
 fn gdb() -> Finding {
-    let Ok(version) = Command::new(GDB_PROGRAM).arg("--version").output() else {
+    let program = crate::gdb::gdb_program();
+    let Ok(version) = Command::new(&program).arg("--version").output() else {
         return Finding::new(
             Level::Warn,
             "gdb",
@@ -151,10 +151,19 @@ fn gdb() -> Finding {
         .next()
         .unwrap_or("gdb")
         .to_string();
-    let python = Command::new(GDB_PROGRAM)
+    let python = Command::new(&program)
         .args(["-nx", "-batch", "-ex", "python print(1)"])
         .output()
         .is_ok_and(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "1");
+    if let Some(major) = crate::gdb::major_version(&name)
+        && major < crate::gdb::GDB_THREAD_LOCALS
+    {
+        return Finding::new(
+            Level::Warn,
+            "gdb",
+            format!("{name}: {}", crate::gdb::too_old(major)),
+        );
+    }
     if python {
         return Finding::new(Level::Ok, "gdb", format!("{name}, with Python"));
     }
