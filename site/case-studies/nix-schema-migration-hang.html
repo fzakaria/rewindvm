@@ -136,82 +136,85 @@
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind check --all --schedules 256 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-concurrent-builds-15693-gdb'</span>
-schedule   0: exited:0      33456 steps  a50a5ab6d992  run e262757d97de859c
-schedule   1: exited:0      44441 steps  a50a5ab6d992  run 154889d891d40ce6
+schedule   0: exited:0      33966 steps  a50a5ab6d992  run 868c0ad6692065d7
+schedule   1: exited:0      43038 steps  a50a5ab6d992  run ff8ea7e0ebc8a93d
 ...
-schedule  81: exited:1     409405 steps    run d2836518b6663558
+schedule 121: exited:1     550028 steps    run 43364cd29a04b3dc
 ...
-schedule 108: exited:1     411001 steps    run 75647cfd4e5f0397
+schedule 163: exited:1     687372 steps    run b9322148a9731e46
 ...
-schedule 137: exited:1     409510 steps    run 36345548e48f26bc
+schedule 210: exited:1     408456 steps    run 1063803ac745253d
 ...
-schedule 243: exited:1     406408 steps    run b220275a4437155e
-...
-schedule 256: exited:1     680682 steps    run f107b67c001069e1
-5 of 256 perturbed schedules ended differently
+3 of 256 perturbed schedules ended differently
 
-schedule 81 ends differently; narrowing the steps it perturbs
-perturbing only steps 318..25010 still ends differently
-step 25009 decides it: a reschedule there makes the run fail
+schedule 121 ends differently; narrowing the steps it perturbs
+perturbing only steps 3799..22982 still ends differently
+step 22981 decides it: a reschedule there makes the run fail
 
-passing: run 080aeb48c9d945bb, schedule 81 over steps 318..25009
-failing: run 2b985e2716306fa6, schedule 81 over steps 318..25010
-the two are the same run until step 25009
+passing: run 4c812cef02c9b11d, schedule 121 over steps 3799..22981
+failing: run 648131f3fcad32f8, schedule 121 over steps 3799..22982
+the two are the same run until step 22981
 
 where /nix/store/...-bash-5.3p3/bin/bash -x -e -u -o pipefail concurrent-builds.sh first behaves differently:
-  both          35044   188/188   SIGCHLD code=1 addr=0x0
-  both          37005   188/188   SIGCHLD code=1 addr=0x0
-  both          42508   188/188   SIGCHLD code=1 addr=0x0
-  failing      266982   188/188   SIGTERM code=0 addr=0x0
-  failing      266983   188/188   exit_group(bash) killed:SIGTERM
-  passing       36524   188/188   exit_group(bash) exited:0
+  both          19775   188/188   fork() = 225
+  both          23793   188/188   SIGCHLD code=1 addr=0x0
+  both          32767   188/188   SIGCHLD code=1 addr=0x0
+  failing      264391   188/188   SIGTERM code=0 addr=0x0
+  failing      264392   188/188   exit_group(bash) killed:SIGTERM
+  passing       32366   188/188   SIGCHLD code=1 addr=0x0
+  passing       33314   188/188   SIGCHLD code=1 addr=0x0
+  passing       34359   188/188   SIGCHLD code=1 addr=0x0
+  passing       34360   188/188   exit_group(bash) exited:0
 
-open both in the desktop app: rewind open 2b985e2716306fa6 266982 --compare 080aeb48c9d945bb</code></pre>
+open both in the desktop app: rewind open 648131f3fcad32f8 264391 --compare 4c812cef02c9b11d</code></pre>
         <p>
           Narrowing keeps a wide window here, from early in boot to a few thousand steps after the
-          six <code>nix</code> processes start at step 20551: they race from the moment they start,
-          and the steps that matter are spread over all of them. The window's last step, 25009,
-          decides it: without its reschedule the same window passes, and that run, 080aeb48, is the
+          six <code>nix</code> processes start at step 19699: they race from the moment they start,
+          and the steps that matter are spread over all of them. The window's last step, 22981,
+          decides it: without its reschedule the same window passes, and that run, 4c812cef, is the
           one <code>check</code> compares the failing run with. The two are the same run until step
-          25009, 4458 steps after the <code>nix</code> processes start. <code>check</code> names the
+          22981, 3282 steps after the <code>nix</code> processes start. <code>check</code> names the
           test script as the first process to behave differently, since in the failing run meson's
           SIGTERM ends it where in the passing run it exits 0. The same derivation without gdb in
-          its inputs failed under 7 of 256 schedules. On the host, the test passed 51 runs out of
+          its inputs failed under 5 of 256 schedules. On the host, the test passed 51 runs out of
           51.
         </p>
         <p>
-          The failing run ends with meson's 300 second timeout, which the VM reaches in seconds of
-          wall time since a sleeping machine skips ahead to its next timer:
+          Of the three failing schedules, 210 hangs one <code>nix</code> process; 121 and 163 hang
+          two and three the same way. Schedule 210's run ends with meson's 300 second timeout, which
+          the VM reaches in seconds of wall time since a sleeping machine skips ahead to its next
+          timer:
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind log d2836518 | grep -E 'UNIQUE|is busy|TIMEOUT' | sort | uniq -c</span>
-      1 1/1 nix-functional-tests:ca / concurrent-builds TIMEOUT        300.01s   killed by signal 15 SIGTERM
-      1 1/1 nix-functional-tests:ca / concurrent-builds        TIMEOUT        300.01s   killed by signal 15 SIGTERM
-      1        insert into SchemaMigrations values('20251017-ca-derivations')': constraint failed, UNIQUE constraint failed: SchemaMigrations.migration (in '/build/nix-test/ca/concurrent-builds/var/nix/db/db.sqlite')
+        ><code><span class="cmd"><span class="prompt">$</span> rewind log 1063803a | grep -E 'UNIQUE|is busy|TIMEOUT' | sort | uniq -c</span>
+      1 1/1 nix-functional-tests:ca / concurrent-builds TIMEOUT        300.02s   killed by signal 15 SIGTERM
+      1 1/1 nix-functional-tests:ca / concurrent-builds        TIMEOUT        300.02s   killed by signal 15 SIGTERM
+      2        insert into SchemaMigrations values('20251017-ca-derivations')': constraint failed, UNIQUE constraint failed: SchemaMigrations.migration (in '/build/nix-test/ca/concurrent-builds/var/nix/db/db.sqlite')
      28 warning: SQLite database '/build/nix-test/ca/concurrent-builds/var/nix/db/db.sqlite' is busy
 
-<span class="cmd"><span class="prompt">$</span> rewind events d2836518 | grep -E 'exit_group\(nix\)'</span>
-     25761   225/225   exit_group(nix) exited:1
-     30286   238/238   exit_group(nix) exited:0
-     37077   222/222   exit_group(nix) exited:0
-     39954   223/223   exit_group(nix) exited:0
-     47067   224/224   exit_group(nix) exited:0
-     53939   221/221   exit_group(nix) exited:0
-    409218   220/220   exit_group(nix) exited:1</code></pre>
+<span class="cmd"><span class="prompt">$</span> rewind events 1063803a | grep -E 'exit_group\(nix\)'</span>
+     25142   225/225   exit_group(nix) exited:1
+     25989   222/222   exit_group(nix) exited:1
+     30460   238/238   exit_group(nix) killed:SIGTERM
+     35043   224/224   exit_group(nix) exited:0
+     38044   220/220   exit_group(nix) exited:0
+     44766   221/221   exit_group(nix) exited:0
+    408279   223/223   exit_group(nix) exited:1</code></pre>
         <p>
           The TIMEOUT line is there twice: meson prints it as the test ends and again in its
           summary. A Nix build writes to a terminal, where meson pads the first copy, so
           <code>uniq</code> counts the two apart.
         </p>
         <p>
-          Both failure modes from the issue are in this one run. Process 225 lost the race to record
-          the <code>20251017-ca-derivations</code> migration and exited with the UNIQUE constraint
-          error. Process 220 never got past opening the store; it exited only after meson killed the
-          test at step 409218. (Process 238 is <code>nix __build-remote</code>, the build hook. It
-          exits 0 here, as it does in 18 of the 252 passing runs; in most of the others it ends with
-          SIGTERM.) The events also show all six processes writing <code>var/nix/db/schema</code>,
-          so each of them took the new store branch of the constructor.
+          Both failure modes from the issue are in this one run. Processes 225 and 222 lost the race
+          to record the <code>20251017-ca-derivations</code> migration and exited with the UNIQUE
+          constraint error. Process 223 never got past opening the store; it exited only after meson
+          killed the test at step 408279. (Process 238 is <code>nix __build-remote</code>, the build
+          hook. It ends with SIGTERM here, as it does in 231 of the 254 passing runs; in the other
+          23 it exits 0.) The events also show all six processes writing
+          <code>var/nix/db/schema</code>, so each of them took the new store branch of the
+          constructor.
         </p>
       </section>
 
@@ -219,38 +222,38 @@ open both in the desktop app: rewind open 2b985e2716306fa6 266982 --compare 080a
         <h2 id="where-the-hung-process-is">
           <a class="anchor" href="#where-the-hung-process-is">Where the hung process is</a>
         </h2>
-        <p>At step 200000, in the middle of the hang, only 220 is left:</p>
+        <p>At step 200000, in the middle of the hang, only 223 is left:</p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind ps d2836518 200000</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind ps 1063803a 200000</span>
      1 /init
     34   bash -e /nix/store/...-source-stdenv.sh /nix/store/...-default-builder.sh
    187     /nix/store/...-python3-3.13.11/bin/python3.13 /nix/store/...-meson-1.9.1/bin/meson test --no-rebuild --print-errorlogs concurrent-builds
    188       /nix/store/...-bash-5.3p3/bin/bash -x -e -u -o pipefail concurrent-builds.sh
-   220         nix build --no-link --file ./racy.nix
-   226           (thread)
+   223         nix build --no-link --file ./racy.nix
+   230           (thread)
 
-<span class="cmd"><span class="prompt">$</span> rewind cat d2836518 200000 /proc/locks</span>
-1: POSIX  ADVISORY  READ 220 00:03:1812 124 124
-2: POSIX  ADVISORY  READ 220 00:03:1812 128 128
-3: POSIX  ADVISORY  READ 220 00:03:1809 1073741826 1073742335
-4: FLOCK  ADVISORY  READ 220 00:03:1808 0 EOF</code></pre>
+<span class="cmd"><span class="prompt">$</span> rewind cat 1063803a 200000 /proc/locks</span>
+1: POSIX  ADVISORY  READ 223 00:03:1812 124 124
+2: POSIX  ADVISORY  READ 223 00:03:1812 128 128
+3: POSIX  ADVISORY  READ 223 00:03:1809 1073741826 1073742335
+4: FLOCK  ADVISORY  READ 223 00:03:1808 0 EOF</code></pre>
         <p>
-          No other process holds a lock. 220 holds the big lock shared (inode 1808), SQLite's shared
+          No other process holds a lock. 223 holds the big lock shared (inode 1808), SQLite's shared
           lock on the database (1809), and in the WAL index (1812) the read lock at offset 124,
-          which is SQLite's read mark 1. That read lock means 220's connection is inside a read
+          which is SQLite's read mark 1. That read lock means 223's connection is inside a read
           transaction, and nothing else is in its way.
         </p>
         <p>
           <code>rewind shell</code> opens a shell in a throwaway fork of the run at a step, with
-          everything else stopped. gdb is in the closure, so it can attach to 220 there and let it
+          everything else stopped. gdb is in the closure, so it can attach to 223 there and let it
           run until the next retry. The inspection leaves a SIGSTOP pending on every thread, which
           gdb has to be told to swallow:
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind shell d2836518 200000 --pid 220</span>
-rewind: a shell at step 200000 of d2836518b6663558; exit it to leave
+        ><code><span class="cmd"><span class="prompt">$</span> rewind shell 1063803a 200000 --pid 223</span>
+rewind: a shell at step 200000 of 1063803ac745253d; exit it to leave
 [rewind] /build/source/tests/functional/ca # cat /tmp/g.cmd
 set pagination off
 handle SIGSTOP nostop noprint nopass
@@ -266,20 +269,20 @@ printf "extended error code %d\n", (int) sqlite3_extended_errcode($db)
 printf "errmsg %s\n", (char *) sqlite3_errmsg($db)
 printf "autocommit %d\n", (int) sqlite3_get_autocommit($db)
 detach
-[rewind] /build/source/tests/functional/ca # gdb -p 220 -batch -x /tmp/g.cmd 2&gt;&amp;1 | grep -vE "^warning|auto-load|add-auto-load|line to your|To (enable|completely)|set auto-load|For more information|info .\(gdb\)|^$"
-[New LWP 226]
+[rewind] /build/source/tests/functional/ca # gdb -p 223 -batch -x /tmp/g.cmd 2&gt;&amp;1 | grep -vE "^warning|auto-load|add-auto-load|line to your|To (enable|completely)|set auto-load|For more information|info .\(gdb\)|^$"
+[New LWP 230]
 ...
-#0  0x00007fbfbf826223 in clock_nanosleep@GLIBC_2.2.5 () from /nix/store/...-glibc-2.40-218/lib/libc.so.6
-#1  0x00007fbfbf8328e7 in nanosleep () from /nix/store/...-glibc-2.40-218/lib/libc.so.6
-#2  0x00007fbfc057dc1a in nix::handleSQLiteBusy(nix::SQLiteBusy const&amp;, long&amp;) () from /nix/store/...-nix-store-2.35.0pre/lib/libnixstore.so.2.35.0
-#3  0x00007fbfc04268d5 in void nix::retrySQLite&lt;void, nix::SQLite::exec(...)::{lambda()#1}&gt;(...) ...
-#4  0x00007fbfc052437e in nix::LocalStore::upgradeDBSchema(nix::LocalStore::State&amp;)::{lambda(...)#1}::operator()(...) ...
-#5  0x00007fbfc05268a9 in nix::LocalStore::upgradeDBSchema(nix::LocalStore::State&amp;) () from /nix/store/...-nix-store-2.35.0pre/lib/libnixstore.so.2.35.0
-#6  0x00007fbfc0527605 in nix::LocalStore::LocalStore(nix::ref&lt;nix::LocalStoreConfig const&gt;) () from /nix/store/...-nix-store-2.35.0pre/lib/libnixstore.so.2.35.0
-#7  0x00007fbfc0521046 in nix::LocalStoreConfig::openStore() const () from /nix/store/...-nix-store-2.35.0pre/lib/libnixstore.so.2.35.0
+#0  0x00007fe6c9568223 in clock_nanosleep@GLIBC_2.2.5 () from /nix/store/...-glibc-2.40-218/lib/libc.so.6
+#1  0x00007fe6c95748e7 in nanosleep () from /nix/store/...-glibc-2.40-218/lib/libc.so.6
+#2  0x00007fe6ca2bfc1a in nix::handleSQLiteBusy(nix::SQLiteBusy const&amp;, long&amp;) () from /nix/store/...-nix-store-2.35.0pre/lib/libnixstore.so.2.35.0
+#3  0x00007fe6ca1688d5 in void nix::retrySQLite&lt;void, nix::SQLite::exec(...)::{lambda()#1}&gt;(...) ...
+#4  0x00007fe6ca26637e in nix::LocalStore::upgradeDBSchema(nix::LocalStore::State&amp;)::{lambda(...)#1}::operator()(...) ...
+#5  0x00007fe6ca2688a9 in nix::LocalStore::upgradeDBSchema(nix::LocalStore::State&amp;) () from /nix/store/...-nix-store-2.35.0pre/lib/libnixstore.so.2.35.0
+#6  0x00007fe6ca269605 in nix::LocalStore::LocalStore(nix::ref&lt;nix::LocalStoreConfig const&gt;) () from /nix/store/...-nix-store-2.35.0pre/lib/libnixstore.so.2.35.0
+#7  0x00007fe6ca263046 in nix::LocalStoreConfig::openStore() const () from /nix/store/...-nix-store-2.35.0pre/lib/libnixstore.so.2.35.0
 ...
-Breakpoint 1 at 0x7fbfbea3da68
-Thread 1 "nix" hit Breakpoint 1, 0x00007fbfbea3da68 in sqlite3_exec () from /nix/store/...-sqlite-3.50.4/lib/libsqlite3.so
+Breakpoint 1 at 0x7fe6c877fa68
+Thread 1 "nix" hit Breakpoint 1, 0x00007fe6c877fa68 in sqlite3_exec () from /nix/store/...-sqlite-3.50.4/lib/libsqlite3.so
 statement: drop index if exists IndexReferrer;
 insert into SchemaMigrations values('20260309-drop-redundant-indexreferrer')
 ...
@@ -287,9 +290,9 @@ sqlite3_exec returned 5
 extended error code 517
 errmsg database is locked
 autocommit 0
-[Inferior 1 (process 220) detached]</code></pre>
+[Inferior 1 (process 223) detached]</code></pre>
         <p>
-          The command file was written with a heredoc earlier in the same session, cut here. 220 is
+          The command file was written with a heredoc earlier in the same session, cut here. 223 is
           in <code>doUpgrade</code>, retrying the second migration. SQLite returns
           <code>SQLITE_BUSY</code> (5) with the extended code 517,
           <code>SQLITE_BUSY_SNAPSHOT</code>, and <code>autocommit 0</code> says the connection is
@@ -309,9 +312,9 @@ autocommit 0
           obsolete until the transaction ends.
         </p>
         <p>
-          So the hang is this interleaving. 220 begins the migration's transaction and reads (the
+          So the hang is this interleaving. 223 begins the migration's transaction and reads (the
           <code>drop index if exists</code> reads the schema), which fixes its snapshot. Another
-          <code>nix</code> process commits a migration. 220's write is refused with
+          <code>nix</code> process commits a migration. 223's write is refused with
           <code>SQLITE_BUSY_SNAPSHOT</code>. Nix maps every <code>SQLITE_BUSY</code> to
           <code>SQLiteBusy</code>, and <code>SQLite::exec</code> retries the statement inside the
           same open transaction, on the same stale snapshot, which SQLite refuses every time. The
@@ -337,22 +340,22 @@ autocommit 0
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind check --all --schedules 256 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-concurrent-builds-15694'</span>
-schedule   0: exited:0      36351 steps  a50a5ab6d992  run 3237e6cda5ec1904
+schedule   0: exited:0      33970 steps  a50a5ab6d992  run 1c0443af558efc52
 ...
-schedule   8: exited:1     414562 steps    run c42a767edfa279f2
+schedule  18: exited:1     413315 steps    run 0b3129c82e970c91
 ...
-schedule 212: exited:1     551096 steps    run eb6069df96f25b09
+schedule 226: exited:1     412237 steps    run e510d823c26f361e
 ...
 10 of 256 perturbed schedules ended differently
 
-<span class="cmd"><span class="prompt">$</span> rewind log c42a767e | grep -E 'UNIQUE|is busy|TIMEOUT' | sort | uniq -c</span>
-      1 1/1 nix-functional-tests:ca / concurrent-builds TIMEOUT        300.01s   killed by signal 15 SIGTERM
-      1 1/1 nix-functional-tests:ca / concurrent-builds        TIMEOUT        300.01s   killed by signal 15 SIGTERM
+<span class="cmd"><span class="prompt">$</span> rewind log 0b3129c8 | grep -E 'UNIQUE|is busy|TIMEOUT' | sort | uniq -c</span>
+      1 1/1 nix-functional-tests:ca / concurrent-builds TIMEOUT        300.04s   killed by signal 15 SIGTERM
+      1 1/1 nix-functional-tests:ca / concurrent-builds        TIMEOUT        300.04s   killed by signal 15 SIGTERM
      28 warning: SQLite database '/build/nix-test/ca/concurrent-builds/var/nix/db/db.sqlite' is busy</code></pre>
         <p>
-          None of the ten failing runs has a UNIQUE error. Nine of them hang one
-          <code>nix</code> process the same way, each with 28 warnings; under schedule 212 two hang,
-          with 56. <a href="https://github.com/NixOS/nix/pull/15967">NixOS/nix#15967</a>, merged on
+          None of the ten failing runs has a UNIQUE error. All ten hang one <code>nix</code> process
+          the same way, each with 28 warnings.
+          <a href="https://github.com/NixOS/nix/pull/15967">NixOS/nix#15967</a>, merged on
           2026-06-08, checks whether a migration is needed while holding the big lock shared, and if
           one is, takes the lock exclusively to run it, then drops back to shared and keeps holding
           it for the life of the store. With that, no other Nix process can commit while a
@@ -362,7 +365,7 @@ schedule 212: exited:1     551096 steps    run eb6069df96f25b09
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind check --all --schedules 256 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-concurrent-builds'</span>
-schedule   0: exited:0      34833 steps  a50a5ab6d992  run 41515d08c46681f5
+schedule   0: exited:0      34789 steps  a50a5ab6d992  run 1a8988bba5b1d519
 ...
 0 of 256 perturbed schedules ended differently
 same result under all 257 schedules</code></pre>
@@ -382,9 +385,10 @@ same result under all 257 schedules</code></pre>
           µs to 1.28 ms when it next returns to user space. The rates above were measured with them.
           With the previous version of Rewind, which only reordered, the same derivation at
           a94dee99e failed under 3 of 256 schedules and the first fix under 2 of 256. With stalls
-          they fail under 5 and 10 of 256: a little more often for the reported bug, and five times
-          as often for the first fix. The guest kernel also changed between the two measurements, to
-          give a Nix build a terminal, so not all of the difference is the stalls'.
+          they fail under 3 and 10 of 256: as often as before for the reported bug, and five times
+          as often for the first fix. The guest kernel also changed twice between the two
+          measurements, to give a Nix build a terminal and to publish where tasks save their FS and
+          GS bases, so not all of the difference is the stalls'.
         </p>
         <p>
           Earlier, to get more failing runs to study, an <code>LD_PRELOAD</code> library that sleeps
@@ -439,7 +443,7 @@ same result under all 257 schedules</code></pre>
               href="https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-schema-migration-hang.rwd"
               >nix-schema-migration-hang.rwd</a
             >
-            (42.9 KB) is the trace alone, enough for <code>rewind events</code>,
+            (42.5 KB) is the trace alone, enough for <code>rewind events</code>,
             <code>rewind log</code> and the app.
           </li>
           <li>
@@ -447,25 +451,25 @@ same result under all 257 schedules</code></pre>
               href="https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-schema-migration-hang-replayable.rwd"
               >nix-schema-migration-hang-replayable.rwd</a
             >
-            (544.5 MB) adds the kernel, the input image and the keyframes, so another AMD machine
+            (542.9 MB) adds the kernel, the input image and the keyframes, so another AMD machine
             from Zen 2 on can <code>rewind replay</code> and <code>rewind shell</code> it.
           </li>
         </ul>
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind import https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-schema-migration-hang-replayable.rwd</span>
-<span class="cmd"><span class="prompt">$</span> rewind replay d2836518</span>
-<span class="cmd"><span class="prompt">$</span> rewind shell d2836518 &lt;step&gt;</span>
+<span class="cmd"><span class="prompt">$</span> rewind replay 1063803a</span>
+<span class="cmd"><span class="prompt">$</span> rewind shell 1063803a &lt;step&gt;</span>
 <span class="cmd"><span class="prompt">$</span> rewind-app https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-schema-migration-hang.rwd</span></code></pre>
         <p>How they were made:</p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind replay d2836518</span>
-identical: 3483 events over 409405 steps
-<span class="cmd"><span class="prompt">$</span> rewind export d2836518 --replayable -o nix-schema-migration-hang-replayable.rwd</span>
-rewind: wrote nix-schema-migration-hang-replayable.rwd (544.5 MB)
-<span class="cmd"><span class="prompt">$</span> rewind export d2836518 -o nix-schema-migration-hang.rwd</span>
-rewind: wrote nix-schema-migration-hang.rwd (42.9 KB)</code></pre>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind replay 1063803a</span>
+identical: 3480 events over 408456 steps
+<span class="cmd"><span class="prompt">$</span> rewind export 1063803a --replayable -o nix-schema-migration-hang-replayable.rwd</span>
+rewind: wrote nix-schema-migration-hang-replayable.rwd (542.9 MB)
+<span class="cmd"><span class="prompt">$</span> rewind export 1063803a -o nix-schema-migration-hang.rwd</span>
+rewind: wrote nix-schema-migration-hang.rwd (42.5 KB)</code></pre>
       </section>
 
       <a class="card next" href="devenv-task-output-race.html">
