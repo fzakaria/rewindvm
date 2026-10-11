@@ -80,11 +80,15 @@ jobs:
       # dependency builds are not pinned: evicted, they compile again once.
       # The debuginfod server is nixpkgs' own, which cache.nixos.org keeps,
       # and Cachix pins only what its own cache holds (ci.yml).
+      # cachix-action pushes only after the job ends, and CI on main may
+      # not have pushed a package yet, so each one is pushed before its
+      # pin.
       - name: Pin the release in the cache
         run: |
           for attr in rewind app kernel kernel-debug; do
-            cachix pin rewindvm "$attr-$GITHUB_REF_NAME" \
-              "$(nix build --no-link --print-out-paths ".#$attr")" --keep-forever
+            path=$(nix build --no-link --print-out-paths ".#$attr")
+            cachix push rewindvm "$path"
+            cachix pin rewindvm "$attr-$GITHUB_REF_NAME" "$path" --keep-forever
           done
 
       - name: Publish the release
