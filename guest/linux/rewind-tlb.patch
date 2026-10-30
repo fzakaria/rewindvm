@@ -1,0 +1,20 @@
+--- a/arch/x86/mm/pgtable.c
++++ b/arch/x86/mm/pgtable.c
+@@ -383,8 +383,16 @@
+ {
+ 	int changed = !pte_same(*ptep, entry);
+ 
+-	if (changed && dirty)
++	if (changed && dirty) {
+ 		set_pte(ptep, entry);
++		/*
++		 * Rewind: the fault that got here dropped this address's TLB
++		 * entry, but an Intel efficient core may fault again on the
++		 * retry as if it still held the old one, at a point that
++		 * depends on timing. Flush it, so every core retries alike.
++		 */
++		flush_tlb_page(vma, address);
++	}
+ 
+ 	return changed;
+ }

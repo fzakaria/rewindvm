@@ -38,6 +38,7 @@ pkgs.stdenv.mkDerivation {
     # x87 and SSE marked in use in the init state and in every save, so
     # every kind of core saves the same bytes
     ../guest/linux/rewind-xstate.patch
+    ../guest/linux/rewind-tlb.patch
   ];
 
   depsBuildBuild = [ pkgs.buildPackages.stdenv.cc ];
