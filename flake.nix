@@ -307,5 +307,11 @@
       formatter = forAllSystems (
         system: import ./nix/formatter.nix { pkgs = nixpkgs.legacyPackages.${system}; }
       );
+
+      # nixbot's effects (nix/effects.nix)
+      herculesCI = import ./nix/effects.nix {
+        pkgs = nixpkgs.legacyPackages.x86_64-linux;
+        packages = self.packages.x86_64-linux;
+      };
     };
 }
