@@ -38,6 +38,8 @@ pkgs.stdenv.mkDerivation {
     # x87 and SSE marked in use in the init state and in every save, so
     # every kind of core saves the same bytes
     ../guest/linux/rewind-xstate.patch
+    # A TLB flush where a write fault makes a page writable, so every kind
+    # of core takes the same page faults
     ../guest/linux/rewind-tlb.patch
   ];
 

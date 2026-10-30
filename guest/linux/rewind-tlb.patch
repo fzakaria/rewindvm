@@ -1,6 +1,6 @@
 --- a/arch/x86/mm/pgtable.c
 +++ b/arch/x86/mm/pgtable.c
-@@ -383,8 +383,16 @@
+@@ -383,8 +383,26 @@
  {
  	int changed = !pte_same(*ptep, entry);
  
@@ -8,10 +8,20 @@
 +	if (changed && dirty) {
  		set_pte(ptep, entry);
 +		/*
-+		 * Rewind: the fault that got here dropped this address's TLB
-+		 * entry, but an Intel efficient core may fault again on the
-+		 * retry as if it still held the old one, at a point that
-+		 * depends on timing. Flush it, so every core retries alike.
++		 * Rewind: flush this address's TLB entry. The fault that got
++		 * here dropped it, but the CPU may cache the old read-only
++		 * entry again before the store above lands, and the retried
++		 * write then faults a second time. Intel's SDM allows that
++		 * spurious fault (Vol. 3, 4.10.4.3) and Linux handles it, but
++		 * whether it happens depends on the core and on timing, and
++		 * programs read the page fault counts it raises. Under KVM it
++		 * takes an Intel efficient core, a guest CPU model without
++		 * SMAP, as Rewind's v3 is, and guest memory on 4 KB host
++		 * pages. With the flush, every core takes the same faults.
++		 *
++		 * pmdp_set_access_flags() and pudp_set_access_flags() below
++		 * skip the flush the same way, and need it too if the guest
++		 * ever gets transparent huge pages.
 +		 */
 +		flush_tlb_page(vma, address);
 +	}
