@@ -1,5 +1,10 @@
-# On every push to main: `nix flake check`, which runs the checks in
-# nix/checks.nix and flake.nix:
+# Disabled: nixbot (nixbot.decio.us) builds pull requests and main, and
+# its effect pushes main's packages to rewindvm.cachix.org and pins them
+# (nix/effects.nix). This workflow runs only when started by hand, as a
+# fallback for when nixbot is down.
+#
+# A run: `nix flake check`, which runs the checks in nix/checks.nix and
+# flake.nix:
 #
 #   checks.prose: no em dashes and none of the banned vocabulary, in docs,
 #     site copy and code comments alike (tools/check-prose.py)
@@ -13,14 +18,12 @@
 #     gdb` fetches. The command's and the app's builds run clippy as they
 #     compile and fail on any warning (nix/crane.nix).
 #
-# Everything built is pushed to rewindvm.cachix.org, and main's packages
-# are pinned there. Pull requests are nixbot's (nixbot.decio.us), which
-# builds the same checks and has no Cachix token.
+# Everything built is pushed to rewindvm.cachix.org, and on main the
+# packages are pinned there. To turn the workflow back on, restore the
+# push trigger below.
 name: ci
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
