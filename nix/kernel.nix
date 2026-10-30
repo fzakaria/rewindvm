@@ -35,6 +35,9 @@ pkgs.stdenv.mkDerivation {
     # Read and write records, appended to a buffer the monitor drains at
     # steps it takes anyway
     ../guest/linux/rewind-io.patch
+    # x87 and SSE state restored as in use, so every kind of core writes
+    # the same XSAVE header
+    ../guest/linux/rewind-xstate.patch
   ];
 
   depsBuildBuild = [ pkgs.buildPackages.stdenv.cc ];

@@ -1,0 +1,20 @@
+--- a/arch/x86/kernel/fpu/xstate.c
++++ b/arch/x86/kernel/fpu/xstate.c
+@@ -416,6 +416,17 @@
+ 	 * here.
+ 	 */
+ 	fxsave(&init_fpstate.regs.fxsave);
++
++	/*
++	 * Rewind: restore the legacy state as in use, with the init values
++	 * just saved. A core may count x87 or SSE state in its init values as
++	 * in use or not: Intel's efficient cores always save both, and its
++	 * performance cores leave either out of an XSAVE until it is used
++	 * again after a restore that initialized it. Restoring them as in use
++	 * keeps them in use on every core, so every XSAVE in the guest, the
++	 * kernel's and user space's, writes the same header on every core.
++	 */
++	init_fpstate.regs.xsave.header.xfeatures |= XFEATURE_MASK_FPSSE;
+ }
+ 
+ int xfeature_size(int xfeature_nr)
