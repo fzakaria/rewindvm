@@ -1194,6 +1194,25 @@ runs as the user. A self-test that provokes the overcount can pass by chance
 without the workaround, so on AMD counter time also needs the workaround to be
 known to be set. [pmu.md](pmu.md) is the user's side of this.
 
+A hybrid Intel CPU has a PMU for each kind of core: `cpu_core` for its
+performance cores, `cpu_atom` for its efficient ones, and on some parts
+`cpu_lowpower`. A counter on a thread counts only while the thread is on a
+core of its own PMU, so the vCPU's thread has one counter per kind of core,
+and a read adds them up. The sum is exact wherever the host runs the thread
+only if every kind of core counts the event alike, which the self-test checks
+by running on each kind in turn. On a Core Ultra X7 358H the same encoding
+counts 20001750 branches of its workload on all three kinds of core. Each
+counter runs only while the thread is on its kind of core, so the check that
+a counter ran the whole time it was enabled becomes a check that the
+counters' running times add up to the time they were all enabled. No one
+counter can overflow at the point their sum reaches, so each kind's overflow
+is armed with a share of the branches to go: the kind the thread is on with
+nearly all of them, the others with a few. Each counter has counted less than
+its share until it overflows, so shares adding up to the branches to go plus
+one less than the number of kinds make one of them overflow by then, wherever
+the thread runs, and one that fires early, when the thread moved, is armed
+again.
+
 ## Why not QEMU, and why not bhyve
 
 The first prototype used QEMU's record and replay, with a small TCG plugin

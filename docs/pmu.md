@@ -9,7 +9,10 @@ site publishes it at <https://rewindvm.dev/counter-time.html>, the link
 
 ## The short version
 
-- **Intel:** nothing to do. Rewind uses counter time.
+- **Intel:** nothing to do. Rewind uses counter time. On a hybrid Intel CPU,
+  with performance and efficient cores, it counts on every kind of core and
+  adds the counts up, and the self-test runs on each kind: they must all
+  count the same for runs to use counter time.
 - **AMD Ryzen or EPYC:** run `sudo rewind pmu enable` once after each boot,
   or turn on the NixOS setting below. Until then Rewind records with exit
   time and prints:

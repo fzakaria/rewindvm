@@ -56,16 +56,32 @@ pub(crate) fn pmu(home: &Home, args: PmuArgs) -> Result<ExitCode> {
             let t = rewind_core::pmu::selftest(&guest)?;
             rewind_core::pmu::remember(home, known, t.exact)?;
             let usable = rewind_core::pmu::counter_usable(needs, known, t.exact);
-            println!(
-                "self-test: {} and {} branches, {}",
-                t.counts[0],
-                t.counts[1],
-                if t.exact {
-                    "exact at every exit"
-                } else {
-                    "NOT exact"
+            let verdict = if t.exact {
+                "exact at every exit"
+            } else {
+                "NOT exact"
+            };
+            match t.runs.as_slice() {
+                [one] if one.kind.is_none() => println!(
+                    "self-test: {} and {} branches, {verdict}",
+                    one.counts[0], one.counts[1]
+                ),
+                runs => {
+                    for run in runs {
+                        println!(
+                            "self-test on {}: {} and {} branches",
+                            run.kind.as_deref().unwrap_or("this CPU"),
+                            run.counts[0],
+                            run.counts[1]
+                        );
+                    }
+                    if t.exact {
+                        println!("self-test: {verdict}, alike on every kind of core");
+                    } else {
+                        println!("self-test: {verdict}, or not alike on every kind of core");
+                    }
                 }
-            );
+            }
             // On AMD an exact self-test without the workaround is
             // luck, and says so.
             if t.exact && !usable {

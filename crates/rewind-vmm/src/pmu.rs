@@ -8,8 +8,17 @@
 //! instruction stream, the count read there is the same on every run, as
 //! long as the counter itself is exact. rr relies on the same property of
 //! the same counter.
+//!
+//! A hybrid Intel CPU has more than one kind of core, and Linux registers a
+//! PMU for each (see [`kinds_of_core`]). A counter on a thread counts only
+//! while the thread is on a core of its own PMU, so on such a host there is
+//! one counter per kind of core and a read adds them up. The sum is exact
+//! wherever the host runs the thread only if every kind of core counts the
+//! event alike, which the PMU self-test checks on each kind before runs use
+//! counter time.
 
 use std::io;
+use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 
@@ -97,40 +106,62 @@ pub enum Modes {
 
 #[derive(Debug)]
 pub struct Counter {
-    fd: i32,
+    /// One per kind of core, enabled in this order, and disabled and read
+    /// in the reverse, which [`total`] relies on.
+    fds: Vec<i32>,
 }
 
 impl Counter {
     /// A counter of guest-mode events on the calling thread, which must be
-    /// the vCPU's.
+    /// the vCPU's: one per kind of core on a hybrid host, added up when
+    /// read.
     pub fn open(event: CounterEvent, modes: Modes) -> Result<Counter> {
-        let fd = open_event(event, modes, 0)?;
-        // SAFETY: a counter fd we own.
-        if unsafe { libc::ioctl(fd, PERF_EVENT_IOC_ENABLE as _, 0) } != 0 {
-            bail!("enabling the counter: {}", io::Error::last_os_error());
+        let mut counter = Counter { fds: Vec::new() };
+        for kind in each_kind()? {
+            counter
+                .fds
+                .push(open_event(event, kind.as_ref(), modes, 0)?);
         }
-        Ok(Counter { fd })
+        counter
+            .enable()
+            .map_err(|e| anyhow::anyhow!("enabling the counter: {e}"))?;
+        Ok(counter)
     }
 
     pub fn read(&self) -> Result<u64> {
-        read_count(self.fd)
+        let readings = self
+            .fds
+            .iter()
+            .rev()
+            .map(|&fd| read_reading(fd))
+            .collect::<Result<Vec<_>>>()?;
+        total(&readings)
     }
 
     /// Stops counting until `resume`. The counter counts the thread's
     /// guest, whichever machine's that is, so a machine that is not
     /// running pauses its counter while another runs on the thread.
     pub fn pause(&self) -> Result<()> {
-        // SAFETY: an ioctl on an fd we own.
-        if unsafe { libc::ioctl(self.fd, PERF_EVENT_IOC_DISABLE as _, 0) } != 0 {
-            bail!("pausing the counter: {}", io::Error::last_os_error());
+        for &fd in self.fds.iter().rev() {
+            // SAFETY: an ioctl on an fd we own.
+            if unsafe { libc::ioctl(fd, PERF_EVENT_IOC_DISABLE as _, 0) } != 0 {
+                bail!("pausing the counter: {}", io::Error::last_os_error());
+            }
         }
         Ok(())
     }
 
     pub fn resume(&self) -> Result<()> {
-        // SAFETY: an ioctl on an fd we own.
-        if unsafe { libc::ioctl(self.fd, PERF_EVENT_IOC_ENABLE as _, 0) } != 0 {
-            bail!("resuming the counter: {}", io::Error::last_os_error());
+        self.enable()
+            .map_err(|e| anyhow::anyhow!("resuming the counter: {e}"))
+    }
+
+    fn enable(&self) -> io::Result<()> {
+        for &fd in &self.fds {
+            // SAFETY: an ioctl on an fd we own.
+            if unsafe { libc::ioctl(fd, PERF_EVENT_IOC_ENABLE as _, 0) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
         }
         Ok(())
     }
@@ -138,70 +169,124 @@ impl Counter {
 
 impl Drop for Counter {
     fn drop(&mut self) {
-        // SAFETY: closing an fd we own.
-        unsafe { libc::close(self.fd) };
+        for &fd in &self.fds {
+            // SAFETY: closing an fd we own.
+            unsafe { libc::close(fd) };
+        }
     }
 }
 
 /// A second counter of the same event, used only for its overflow: armed
 /// to overflow after a number of events, it signals the vCPU thread, which
 /// pulls the vCPU out of KVM_RUN a little after that point.
+///
+/// On a hybrid host there is one per kind of core, and each is armed with a
+/// share of the events (see [`shares`]), so that one of them overflows by
+/// the time the kinds between them have counted all of them.
 #[derive(Debug)]
 pub struct Overflow {
-    fd: i32,
+    /// One per kind of core, with the kind, which a host with one kind of
+    /// core has none of.
+    fds: Vec<(i32, Option<KindOfCore>)>,
 }
 
 impl Overflow {
     /// Must be called on the vCPU's thread, which the signal is sent to.
     pub fn open(event: CounterEvent, modes: Modes) -> Result<Overflow> {
         install_signal_handler();
-        // A period so large it never fires until armed.
-        let fd = open_event(event, modes, 1 << 62)?;
-        // SAFETY: fcntl on an fd we own, with the calling thread's id.
-        unsafe {
-            let owner = FOwnerEx {
-                type_: F_OWNER_TID,
-                pid: libc::gettid(),
-            };
-            if libc::fcntl(fd, F_SETOWN_EX, &owner) != 0
-                || libc::fcntl(fd, F_SETSIG, overflow_signal()) != 0
-                || libc::fcntl(fd, libc::F_SETFL, libc::O_ASYNC) != 0
-            {
-                bail!("routing counter overflows: {}", io::Error::last_os_error());
+        let mut overflow = Overflow { fds: Vec::new() };
+        for kind in each_kind()? {
+            // A period so large it never fires until armed.
+            let fd = open_event(event, kind.as_ref(), modes, 1 << 62)?;
+            overflow.fds.push((fd, kind));
+            // SAFETY: fcntl on an fd we own, with the calling thread's id.
+            unsafe {
+                let owner = FOwnerEx {
+                    type_: F_OWNER_TID,
+                    pid: libc::gettid(),
+                };
+                if libc::fcntl(fd, F_SETOWN_EX, &owner) != 0
+                    || libc::fcntl(fd, F_SETSIG, overflow_signal()) != 0
+                    || libc::fcntl(fd, libc::F_SETFL, libc::O_ASYNC) != 0
+                {
+                    bail!("routing counter overflows: {}", io::Error::last_os_error());
+                }
             }
         }
-        Ok(Overflow { fd })
+        Ok(overflow)
     }
 
-    /// Signals the thread after `events` more events, once.
+    /// Signals the thread after `events` more events, once: on a hybrid
+    /// host, after at most that many between the kinds of core, and sooner
+    /// when the thread moves to another kind, to be armed again there.
     pub fn arm(&self, events: u64) -> Result<()> {
-        let events = events.max(1);
-        // SAFETY: ioctls on an fd we own.
-        unsafe {
-            if libc::ioctl(self.fd, PERF_EVENT_IOC_DISABLE as _, 0) != 0
-                || libc::ioctl(self.fd, PERF_EVENT_IOC_RESET as _, 0) != 0
-                || libc::ioctl(self.fd, PERF_EVENT_IOC_PERIOD as _, &events) != 0
-                || libc::ioctl(self.fd, PERF_EVENT_IOC_REFRESH as _, 1) != 0
-            {
-                bail!("arming the overflow: {}", io::Error::last_os_error());
+        // SAFETY: no arguments, no memory.
+        let cpu = usize::try_from(unsafe { libc::sched_getcpu() }).ok();
+        let here = self
+            .fds
+            .iter()
+            .position(|(_, kind)| {
+                kind.as_ref()
+                    .is_some_and(|k| cpu.is_some_and(|cpu| k.cpus.contains(&cpu)))
+            })
+            .unwrap_or(0);
+        for ((fd, _), share) in self.fds.iter().zip(shares(events, self.fds.len(), here)) {
+            // SAFETY: ioctls on an fd we own.
+            unsafe {
+                if libc::ioctl(*fd, PERF_EVENT_IOC_DISABLE as _, 0) != 0
+                    || libc::ioctl(*fd, PERF_EVENT_IOC_RESET as _, 0) != 0
+                    || libc::ioctl(*fd, PERF_EVENT_IOC_PERIOD as _, &share) != 0
+                    || libc::ioctl(*fd, PERF_EVENT_IOC_REFRESH as _, 1) != 0
+                {
+                    bail!("arming the overflow: {}", io::Error::last_os_error());
+                }
             }
         }
         Ok(())
     }
 
     pub fn disarm(&self) -> Result<()> {
-        // SAFETY: an ioctl on an fd we own.
-        if unsafe { libc::ioctl(self.fd, PERF_EVENT_IOC_DISABLE as _, 0) } != 0 {
-            bail!("disarming the overflow: {}", io::Error::last_os_error());
+        for (fd, _) in &self.fds {
+            // SAFETY: an ioctl on an fd we own.
+            if unsafe { libc::ioctl(*fd, PERF_EVENT_IOC_DISABLE as _, 0) } != 0 {
+                bail!("disarming the overflow: {}", io::Error::last_os_error());
+            }
         }
         Ok(())
     }
 }
 
+/// How many events a kind of core's counter, other than the one the thread
+/// is on, counts before it signals that the thread moved there.
+const AWAY: u64 = 1024;
+
+/// The periods `kinds` counters are armed with to overflow after `events`
+/// between them, with the thread on kind `here`. Until one overflows, each
+/// has counted less than its period, so periods adding up to `events` plus
+/// one less than the number of kinds make one overflow by `events`. The
+/// kind the thread is on gets nearly all of them, so a thread that stays
+/// there is signalled once, as with one counter.
+fn shares(events: u64, kinds: usize, here: usize) -> Vec<u64> {
+    let events = events.max(1);
+    let others = kinds as u64 - 1;
+    let away = (events / kinds as u64).clamp(1, AWAY);
+    (0..kinds)
+        .map(|kind| {
+            if kind == here {
+                events - others * (away - 1)
+            } else {
+                away
+            }
+        })
+        .collect()
+}
+
 impl Drop for Overflow {
     fn drop(&mut self) {
-        // SAFETY: closing an fd we own.
-        unsafe { libc::close(self.fd) };
+        for (fd, _) in &self.fds {
+            // SAFETY: closing an fd we own.
+            unsafe { libc::close(*fd) };
+        }
     }
 }
 
@@ -221,6 +306,147 @@ pub(crate) fn install_signal_handler() {
     });
 }
 
+/// Where Linux lists its performance monitoring units.
+const EVENT_SOURCES: &str = "/sys/bus/event_source/devices";
+
+/// The PMUs Linux registers for the kinds of core of a hybrid Intel CPU:
+/// its performance cores, its efficient cores, and on some parts its
+/// low-power efficient cores. A CPU with one kind of core has none of the
+/// last two.
+const HYBRID_PMUS: [&str; 3] = ["cpu_core", "cpu_atom", "cpu_lowpower"];
+
+/// One kind of core of a hybrid host, and its PMU.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KindOfCore {
+    /// The PMU's name, such as `cpu_atom`.
+    pub pmu: String,
+    /// The perf type Linux gave the PMU.
+    type_: u32,
+    /// Its CPUs, as the kernel lists them, such as `4-15`.
+    pub cpu_list: String,
+    pub cpus: Vec<usize>,
+}
+
+/// This host's kinds of core, one per PMU; none on a host with one kind of
+/// core, where one counter counts on every CPU.
+pub fn kinds_of_core() -> Result<Vec<KindOfCore>> {
+    kinds_in(Path::new(EVENT_SOURCES))
+}
+
+fn kinds_in(sources: &Path) -> Result<Vec<KindOfCore>> {
+    let mut kinds = Vec::new();
+    for pmu in HYBRID_PMUS {
+        let dir = sources.join(pmu);
+        if !dir.exists() {
+            continue;
+        }
+        let read = |file: &str| -> Result<String> {
+            let path = dir.join(file);
+            Ok(std::fs::read_to_string(&path)
+                .with_context(|| format!("reading {}", path.display()))?
+                .trim()
+                .to_string())
+        };
+        let type_ = read("type")?
+            .parse()
+            .with_context(|| format!("{}/type", dir.display()))?;
+        let cpu_list = read("cpus")?;
+        let cpus = parse_cpu_list(&cpu_list)?;
+        kinds.push(KindOfCore {
+            pmu: pmu.to_string(),
+            type_,
+            cpu_list,
+            cpus,
+        });
+    }
+    if kinds.len() < 2 {
+        kinds.clear();
+    }
+    Ok(kinds)
+}
+
+/// What a counter is opened on, once per kind of core: each kind on a
+/// hybrid host, and once, on whatever PMU the event names, otherwise.
+fn each_kind() -> Result<Vec<Option<KindOfCore>>> {
+    let kinds = kinds_of_core()?;
+    if kinds.is_empty() {
+        return Ok(vec![None]);
+    }
+    Ok(kinds.into_iter().map(Some).collect())
+}
+
+/// A kernel CPU list, such as `0-3,8,10-11`.
+fn parse_cpu_list(list: &str) -> Result<Vec<usize>> {
+    let mut cpus = Vec::new();
+    for part in list.split(',').filter(|p| !p.is_empty()) {
+        let (first, last) = part.split_once('-').unwrap_or((part, part));
+        let parse = |n: &str| {
+            n.trim()
+                .parse::<usize>()
+                .with_context(|| format!("CPU list {list:?}"))
+        };
+        cpus.extend(parse(first)?..=parse(last)?);
+    }
+    Ok(cpus)
+}
+
+/// The calling thread kept to some of its CPUs, until this is dropped and
+/// it gets back the CPUs it had: for the self-test, to test one kind of
+/// core's counter alone.
+pub struct Pinned {
+    previous: libc::cpu_set_t,
+}
+
+// By hand: libc's cpu_set_t has Debug only with its extra_traits feature.
+impl std::fmt::Debug for Pinned {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Pinned")
+    }
+}
+
+impl Pinned {
+    /// Keeps the calling thread to those of `cpus` it may already use;
+    /// `None`, leaving the thread as it was, when it may use none of them.
+    pub fn to(cpus: &[usize]) -> Result<Option<Pinned>> {
+        // SAFETY: cpu_set_t is plain data; zeroed is the empty set.
+        let mut previous: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+        // SAFETY: the calling thread's mask, into a set of the size given.
+        if unsafe { libc::sched_getaffinity(0, size_of::<libc::cpu_set_t>(), &mut previous) } != 0 {
+            bail!("reading the thread's CPUs: {}", io::Error::last_os_error());
+        }
+        // SAFETY: as above.
+        let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+        let mut any = false;
+        for &cpu in cpus {
+            // SAFETY: `cpu` is below CPU_SETSIZE, so inside the set.
+            if cpu < libc::CPU_SETSIZE as usize && unsafe { libc::CPU_ISSET(cpu, &previous) } {
+                // SAFETY: as above.
+                unsafe { libc::CPU_SET(cpu, &mut set) };
+                any = true;
+            }
+        }
+        if !any {
+            return Ok(None);
+        }
+        // SAFETY: the calling thread, a set of the size given.
+        if unsafe { libc::sched_setaffinity(0, size_of::<libc::cpu_set_t>(), &set) } != 0 {
+            bail!(
+                "keeping the thread to CPUs {cpus:?}: {}",
+                io::Error::last_os_error()
+            );
+        }
+        Ok(Some(Pinned { previous }))
+    }
+}
+
+impl Drop for Pinned {
+    fn drop(&mut self) {
+        // SAFETY: the calling thread, a set of the size given. Failing
+        // leaves the thread on fewer CPUs, which is harmless.
+        unsafe { libc::sched_setaffinity(0, size_of::<libc::cpu_set_t>(), &self.previous) };
+    }
+}
+
 /// What a read of a counter opened with [`PERF_FORMAT_TOTAL_TIME_ENABLED`]
 /// and [`PERF_FORMAT_TOTAL_TIME_RUNNING`] gives.
 #[repr(C)]
@@ -231,26 +457,45 @@ struct Reading {
     running_ns: u64,
 }
 
-impl Reading {
-    /// The count, when the counter was on the hardware the whole time it
-    /// was enabled. The kernel takes a counter off the hardware to share
-    /// it among more events than fit, and a count from part of the time
-    /// is short by work the guest did, so a run read it would not replay.
-    fn count(&self) -> Result<u64> {
-        if self.running_ns != self.enabled_ns {
+/// The count of a counter's readings, one per kind of core, when between
+/// them they were on the hardware for all the time they were all enabled.
+///
+/// With one counter that is the whole time it was enabled. The kernel
+/// takes a counter off the hardware to share it among more events than
+/// fit, and a count from part of the time is short by work the guest did,
+/// so a run read it would not replay.
+///
+/// On a hybrid host each kind's counter runs only while the thread is on
+/// that kind of core, so each runs for less time than it is enabled and
+/// their running times add up instead. They are enabled in one order, and
+/// disabled and read in the reverse, so the one enabled last was enabled
+/// the least time, and for all of it, up to the moment it was read, the
+/// others were enabled too and still counting: wherever the thread ran
+/// then, one of them was running, unless it was taken off the hardware or
+/// the thread ran on a core no PMU covers. Read in the order they were
+/// enabled, the others would stop short of it by the time between reads.
+fn total(readings: &[Reading]) -> Result<u64> {
+    let running: u64 = readings.iter().map(|r| r.running_ns).sum();
+    let enabled = readings.iter().map(|r| r.enabled_ns).min().unwrap_or(0);
+    if running < enabled {
+        if readings.len() == 1 {
             bail!(
-                "the host took the guest's counter off the hardware: it counted for {} of {} ns, \
-                 so its count is short. Another program on the host is using the performance \
-                 counters, as perf does; stop it, or run on another host",
-                self.running_ns,
-                self.enabled_ns
+                "the host took the guest's counter off the hardware: it counted for {running} of \
+                 {enabled} ns, so its count is short. Another program on the host is using the \
+                 performance counters, as perf does; stop it, or run on another host"
             );
         }
-        Ok(self.value)
+        bail!(
+            "the guest's counters, one per kind of core, counted for {running} of {enabled} ns \
+             between them, so their count is short. Another program on the host is using the \
+             performance counters, as perf does, or the vCPU ran on a core none of them covers; \
+             stop the other program, or run on another host"
+        );
     }
+    Ok(readings.iter().map(|r| r.value).sum())
 }
 
-fn read_count(fd: i32) -> Result<u64> {
+fn read_reading(fd: i32) -> Result<Reading> {
     let mut reading = Reading::default();
     let len = size_of::<Reading>();
     // SAFETY: reading at most `len` bytes into a repr(C) struct of u64s.
@@ -267,18 +512,35 @@ fn read_count(fd: i32) -> Result<u64> {
     if n != len as isize {
         return Err(io::Error::last_os_error()).context("reading the counter");
     }
-    reading.count()
+    Ok(reading)
+}
+
+/// The perf type and config for `event`, on `kind`'s PMU on a hybrid host.
+/// A raw event is opened under the PMU's own type, with the encoding it
+/// has on every kind of core of the parts measured so far; a hardware
+/// event names the PMU in its config's upper half.
+fn event_attr(event: CounterEvent, kind: Option<&KindOfCore>) -> (u32, u64) {
+    let raw = kind.map_or(PERF_TYPE_RAW, |k| k.type_);
+    match event {
+        CounterEvent::AmdRetiredConditionalBranches => (raw, 0xd1),
+        CounterEvent::IntelRetiredConditionalBranches => (raw, 0x01c4),
+        CounterEvent::Instructions => (
+            PERF_TYPE_HARDWARE,
+            kind.map_or(0, |k| u64::from(k.type_) << 32) | PERF_COUNT_HW_INSTRUCTIONS,
+        ),
+    }
 }
 
 /// Opens a guest-mode counter on the calling thread, disabled; with a
 /// sample period, it overflows every that many events.
-fn open_event(event: CounterEvent, modes: Modes, sample_period: u64) -> Result<i32> {
+fn open_event(
+    event: CounterEvent,
+    kind: Option<&KindOfCore>,
+    modes: Modes,
+    sample_period: u64,
+) -> Result<i32> {
     {
-        let (type_, config) = match event {
-            CounterEvent::AmdRetiredConditionalBranches => (PERF_TYPE_RAW, 0xd1),
-            CounterEvent::IntelRetiredConditionalBranches => (PERF_TYPE_RAW, 0x01c4),
-            CounterEvent::Instructions => (PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS),
-        };
+        let (type_, config) = event_attr(event, kind);
         let mut flags = FLAG_DISABLED | FLAG_PINNED | FLAG_EXCLUDE_HV | FLAG_EXCLUDE_HOST;
         if modes == Modes::UserOnly {
             flags |= FLAG_EXCLUDE_KERNEL;
@@ -305,7 +567,10 @@ fn open_event(event: CounterEvent, modes: Modes, sample_period: u64) -> Result<i
         } as i32;
         if fd < 0 {
             let err = io::Error::last_os_error();
-            bail!("perf_event_open for {event:?}: {err}; see /proc/sys/kernel/perf_event_paranoid");
+            let on = kind.map(|k| format!(" on {}", k.pmu)).unwrap_or_default();
+            bail!(
+                "perf_event_open for {event:?}{on}: {err}; see /proc/sys/kernel/perf_event_paranoid"
+            );
         }
         Ok(fd)
     }
@@ -315,26 +580,104 @@ fn open_event(event: CounterEvent, modes: Modes, sample_period: u64) -> Result<i
 mod tests {
     use super::*;
 
+    fn reading(value: u64, enabled_ns: u64, running_ns: u64) -> Reading {
+        Reading {
+            value,
+            enabled_ns,
+            running_ns,
+        }
+    }
+
     #[test]
     fn a_count_off_the_hardware_part_of_the_time_is_refused() {
         // A reading whose counter ran the whole time it was enabled gives
         // its count, as does one never enabled. One the kernel took off
         // the hardware for part of that time, as it does to share the
         // counters among more events than fit, is short and is refused.
-        let whole = Reading {
-            value: 1234,
-            enabled_ns: 5000,
-            running_ns: 5000,
-        };
-        assert_eq!(whole.count().unwrap(), 1234);
-        assert_eq!(Reading::default().count().unwrap(), 0);
+        assert_eq!(total(&[reading(1234, 5000, 5000)]).unwrap(), 1234);
+        assert_eq!(total(&[Reading::default()]).unwrap(), 0);
 
-        let short = Reading {
-            value: 1000,
-            enabled_ns: 5000,
-            running_ns: 4000,
-        };
-        let err = short.count().unwrap_err().to_string();
+        let err = total(&[reading(1000, 5000, 4000)]).unwrap_err().to_string();
         assert!(err.contains("4000 of 5000 ns"), "{err}");
+    }
+
+    #[test]
+    fn counts_split_across_kinds_of_core_add_up_unless_short() {
+        // A thread that spent 600 ns on a performance core and 390 on an
+        // efficient one: the efficient cores' counter, enabled second, was
+        // enabled 10 ns less, and the two ran for all of that.
+        assert_eq!(
+            total(&[reading(60, 1000, 600), reading(39, 990, 390)]).unwrap(),
+            99
+        );
+        // Taken off the hardware for 90 ns while both were enabled.
+        let err = total(&[reading(60, 1000, 600), reading(30, 990, 300)])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("900 of 990 ns"), "{err}");
+    }
+
+    #[test]
+    fn one_of_the_shared_overflows_fires_by_the_count_wherever_the_thread_runs() {
+        // Each counter has counted less than its period until it
+        // overflows, so the periods may add up to one less than the
+        // number of kinds past the count, and no more.
+        for (events, kinds, here) in [(1, 2, 0), (3, 3, 2), (1_000_000, 2, 1), (5_000, 3, 0)] {
+            let shares = shares(events, kinds, here);
+            assert_eq!(shares.len(), kinds);
+            assert!(shares.iter().all(|&s| s >= 1), "{shares:?}");
+            assert_eq!(shares.iter().sum::<u64>(), events + kinds as u64 - 1);
+        }
+        // The kind the thread is on gets all but a little.
+        assert_eq!(shares(1_000_000, 2, 1), [AWAY, 1_000_000 - AWAY + 1]);
+        assert_eq!(shares(1_000_000, 1, 0), [1_000_000]);
+    }
+
+    #[test]
+    fn kernel_cpu_lists_parse() {
+        assert_eq!(parse_cpu_list("0-3").unwrap(), [0, 1, 2, 3]);
+        assert_eq!(
+            parse_cpu_list("0-3,8,10-11").unwrap(),
+            [0, 1, 2, 3, 8, 10, 11]
+        );
+        assert_eq!(parse_cpu_list("5").unwrap(), [5]);
+        assert!(parse_cpu_list("").unwrap().is_empty());
+        assert!(parse_cpu_list("0-x").is_err());
+    }
+
+    #[test]
+    fn only_a_host_with_two_kinds_of_core_counts_on_each() {
+        // As on an Intel Core Ultra: performance cores 0-3 under cpu_core,
+        // efficient cores 4-15 under cpu_atom, at perf types 4 and 10.
+        let sources = std::env::temp_dir().join(format!("rewind-pmu-{}", std::process::id()));
+        let pmu = |name: &str, type_: &str, cpus: &str| {
+            std::fs::create_dir_all(sources.join(name)).unwrap();
+            std::fs::write(sources.join(name).join("type"), format!("{type_}\n")).unwrap();
+            std::fs::write(sources.join(name).join("cpus"), format!("{cpus}\n")).unwrap();
+        };
+        pmu("cpu_core", "4", "0-3");
+        assert!(kinds_in(&sources).unwrap().is_empty());
+
+        pmu("cpu_atom", "10", "4-15");
+        let kinds = kinds_in(&sources).unwrap();
+        std::fs::remove_dir_all(&sources).unwrap();
+        assert_eq!(
+            kinds
+                .iter()
+                .map(|k| (k.pmu.as_str(), k.cpus.len()))
+                .collect::<Vec<_>>(),
+            [("cpu_core", 4), ("cpu_atom", 12)]
+        );
+
+        // Each kind's counter is opened on its own PMU.
+        let atom = Some(&kinds[1]);
+        assert_eq!(
+            event_attr(CounterEvent::IntelRetiredConditionalBranches, atom),
+            (10, 0x01c4)
+        );
+        assert_eq!(
+            event_attr(CounterEvent::Instructions, atom),
+            (PERF_TYPE_HARDWARE, (10 << 32) | PERF_COUNT_HW_INSTRUCTIONS)
+        );
     }
 }

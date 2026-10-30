@@ -906,7 +906,10 @@ impl Machine {
     }
 
     /// After an interruption or a single step: true once the count is
-    /// exactly on the target; single-stepping once it is within the margin.
+    /// exactly on the target; single-stepping once it is within the margin,
+    /// and the overflow armed again short of it before that, as an
+    /// interruption may come early: on a hybrid host, when the thread moved
+    /// to another kind of core.
     fn reached_preemption(&mut self) -> Result<bool> {
         let Some(work) = self.work.as_ref() else {
             return Ok(false);
@@ -926,8 +929,13 @@ impl Machine {
         if count == target {
             return Ok(true);
         }
-        if !work.stepping && target - count <= PREEMPT_MARGIN {
-            self.start_stepping()?;
+        if !work.stepping {
+            let left = target - count;
+            if left > PREEMPT_MARGIN {
+                work.overflow.arm(left - PREEMPT_MARGIN)?;
+            } else {
+                self.start_stepping()?;
+            }
         }
         Ok(false)
     }

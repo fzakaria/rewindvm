@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use rewind_init::{Job, Root};
 use rewind_vmm::CounterEvent as Event;
-use rewind_vmm::pmu::{Counter, Modes};
+use rewind_vmm::pmu::{Counter, Modes, Pinned};
 use rewind_vmm::{Ignore, Machine};
 
 use crate::home::Guest;
@@ -266,39 +266,84 @@ pub fn exit_time_warning(vendor: &Vendor) -> String {
     )
 }
 
-/// What two runs of the self-test's workload counted.
+/// What the self-test's workload counted, twice on each kind of core.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SelfTest {
-    /// Final counts of the two runs.
-    pub counts: [u64; 2],
-    /// Whether every exit saw the same count in both runs.
+    /// One per kind of core the test ran on: one, of no kind, on a host
+    /// with one kind of core.
+    pub runs: Vec<SelfTestRuns>,
+    /// Whether every exit saw the same count in every run.
     pub exact: bool,
 }
 
+/// The self-test's two runs on one kind of core.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SelfTestRuns {
+    /// The kind of core, as its PMU and CPUs, on a hybrid host.
+    pub kind: Option<String>,
+    /// Final counts of the two runs.
+    pub counts: [u64; 2],
+}
+
 /// Runs the self-test workload twice with the branch counter attached, and
-/// compares the count at every exit.
+/// compares the count at every exit. On a hybrid host it runs twice on each
+/// kind of core, kept there, since a run adds up one counter per kind and
+/// is exact only if every kind counts alike; the kinds this process may
+/// not run on are left out, as its runs never count there either.
 pub fn selftest(guest: &Guest) -> Result<SelfTest> {
     let event = Vendor::detect()?
         .event()
         .context("this CPU has no retired conditional branch counter rewind knows")?;
     let config = selftest_spec(guest).config()?;
-    let mut counts = [0u64; 2];
-    let mut hashes = [0u64; 2];
-    for i in 0..2 {
-        let mut machine = Machine::boot(&config)?;
-        machine.pmu = Some((
-            Counter::open(event, Modes::UserOnly)?,
-            0xcbf2_9ce4_8422_2325,
-        ));
-        machine.run(None, &mut Ignore)?;
-        let (counter, hash) = machine.pmu.as_ref().expect("set before the run");
-        counts[i] = counter.read()?;
-        hashes[i] = *hash;
+    let kinds = rewind_vmm::pmu::kinds_of_core()?;
+    let mut runs = Vec::new();
+    let mut counts = Vec::new();
+    let mut hashes = Vec::new();
+    let mut run_twice = |kind: Option<String>| -> Result<()> {
+        let mut these = [0u64; 2];
+        for count in &mut these {
+            let mut machine = Machine::boot(&config)?;
+            machine.pmu = Some((
+                Counter::open(event, Modes::UserOnly)?,
+                0xcbf2_9ce4_8422_2325,
+            ));
+            machine.run(None, &mut Ignore)?;
+            let (counter, hash) = machine.pmu.as_ref().expect("set before the run");
+            *count = counter.read()?;
+            hashes.push(*hash);
+        }
+        counts.extend(these);
+        runs.push(SelfTestRuns {
+            kind,
+            counts: these,
+        });
+        Ok(())
+    };
+    if kinds.is_empty() {
+        run_twice(None)?;
+    }
+    for kind in &kinds {
+        // This thread runs the vCPU, so kept to one kind of core it tests
+        // that kind's counter alone.
+        let Some(_kept) = Pinned::to(&kind.cpus)? else {
+            continue;
+        };
+        run_twice(Some(format!("{} (CPUs {})", kind.pmu, kind.cpu_list)))?;
     }
     Ok(SelfTest {
-        counts,
-        exact: hashes[0] == hashes[1],
+        runs,
+        exact: verdict(&counts, &hashes),
     })
+}
+
+/// Whether the self-test's runs show an exact counter: the same count at
+/// every exit in every run, on every kind of core, and a count at all. The
+/// workload certainly branches, so a counter that read 0 every time
+/// counted nothing, and agreeing on 0 says nothing about exactness.
+fn verdict(counts: &[u64], hashes: &[u64]) -> bool {
+    !hashes.is_empty()
+        && hashes.iter().all(|&hash| hash == hashes[0])
+        && counts.iter().all(|&count| count > 0)
 }
 
 /// The machine the self-test boots: the self-test's workload on the bare
@@ -375,5 +420,26 @@ mod tests {
         // No workaround exists, so the self-test decides.
         assert!(counter_usable(false, false, true));
         assert!(!counter_usable(false, false, false));
+    }
+
+    #[test]
+    fn a_self_test_that_counted_nothing_is_not_exact() {
+        // Seen with the counter of an Intel Core Ultra's performance cores
+        // on its efficient cores, where it does not count: 0 and 0
+        // branches, equal hashes.
+        assert!(!verdict(&[0, 0], &[7, 7]));
+        assert!(verdict(&[20_001_750, 20_001_750], &[7, 7]));
+        assert!(!verdict(&[20_001_750, 20_001_750], &[7, 8]));
+    }
+
+    #[test]
+    fn every_kind_of_core_must_count_alike() {
+        // Each kind exact on its own is not enough: a run that moves
+        // between kinds adds up their counts, so they must agree.
+        assert!(verdict(&[20_001_750; 4], &[7; 4]));
+        assert!(!verdict(
+            &[20_001_750, 20_001_750, 20_001_751, 20_001_751],
+            &[7, 7, 8, 8]
+        ));
     }
 }
