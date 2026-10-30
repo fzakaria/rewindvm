@@ -1,20 +1,87 @@
 --- a/arch/x86/kernel/fpu/xstate.c
 +++ b/arch/x86/kernel/fpu/xstate.c
-@@ -416,6 +416,17 @@
+@@ -416,6 +416,16 @@
  	 * here.
  	 */
  	fxsave(&init_fpstate.regs.fxsave);
 +
 +	/*
-+	 * Rewind: restore the legacy state as in use, with the init values
-+	 * just saved. A core may count x87 or SSE state in its init values as
-+	 * in use or not: Intel's efficient cores always save both, and its
-+	 * performance cores leave either out of an XSAVE until it is used
-+	 * again after a restore that initialized it. Restoring them as in use
-+	 * keeps them in use on every core, so every XSAVE in the guest, the
-+	 * kernel's and user space's, writes the same header on every core.
++	 * Rewind: mark x87 and SSE in use in the init state, which now holds
++	 * their init values. Every task starts from a restore of this state.
++	 * With the bits clear, an Intel performance core counts both as not
++	 * in use afterwards and an efficient core counts both as in use, so
++	 * the two save different headers. With the bits set, both cores count
++	 * them in use. See rewind_x87_sse_in_use() for the saves.
 +	 */
 +	init_fpstate.regs.xsave.header.xfeatures |= XFEATURE_MASK_FPSSE;
  }
  
  int xfeature_size(int xfeature_nr)
+--- a/arch/x86/kernel/fpu/xstate.h
++++ b/arch/x86/kernel/fpu/xstate.h
+@@ -208,6 +208,56 @@
+ #endif
+ 
+ /*
++ * Rewind: mark x87 and SSE in use in a saved area, filling in their init
++ * values where the save left them out.
++ *
++ * A save writes a header bit for each part of the register state, and may
++ * write 0 and skip the registers for a part that holds its init values.
++ * When it does that is up to the CPU (Intel SDM Vol. 1, 13.6, "Processor
++ * tracking of XSAVE-managed state",
++ * https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html).
++ * An Intel performance core skips x87 or SSE after a restore that set it
++ * to init, and SSE after vzeroall. An Intel efficient core never skips
++ * them. An AMD core skips whichever holds init values. A recording made on
++ * one core would then hold different bytes from its replay on another.
++ *
++ * With both bits set, every save holds the same bytes on every CPU, and a
++ * restore from it marks both parts in use again. AVX needs nothing: both
++ * kinds of Intel core track it the same way.
++ */
++static inline void rewind_x87_sse_in_use(struct xregs_state *xsave)
++{
++	struct fxregs_state *init = &init_fpstate.regs.fxsave;
++	u64 missing = XFEATURE_MASK_FPSSE & ~xsave->header.xfeatures;
++
++	if (likely(!missing))
++		return;
++
++	/* x87: the legacy area up to MXCSR, and ST0-ST7. */
++	if (missing & XFEATURE_MASK_FP) {
++		memcpy(&xsave->i387, init, offsetof(struct fxregs_state, mxcsr));
++		memcpy(xsave->i387.st_space, init->st_space,
++		       sizeof(init->st_space));
++	}
++
++	/*
++	 * SSE: XMM0-XMM15. XSAVE and XSAVEOPT always write MXCSR. XSAVEC and
++	 * XSAVES, which write the compacted format, skip it along with the
++	 * XMM registers, and only while it holds its default.
++	 */
++	if (missing & XFEATURE_MASK_SSE) {
++		memcpy(xsave->i387.xmm_space, init->xmm_space,
++		       sizeof(init->xmm_space));
++		if (xsave->header.xcomp_bv & XCOMP_BV_COMPACTED_FORMAT) {
++			xsave->i387.mxcsr = MXCSR_DEFAULT;
++			xsave->i387.mxcsr_mask = init->mxcsr_mask;
++		}
++	}
++
++	xsave->header.xfeatures |= missing;
++}
++
++/*
+  * Save processor xstate to xsave area.
+  *
+  * Uses either XSAVE or XSAVEOPT or XSAVES depending on the CPU features
+@@ -227,6 +277,8 @@
+ 
+ 	/* We should never fault when copying to a kernel buffer: */
+ 	WARN_ON_FPU(err);
++
++	rewind_x87_sse_in_use(&fpstate->regs.xsave);
+ }
+ 
+ /*

@@ -73,6 +73,28 @@ pub(crate) struct DeviceState {
     pub(crate) branches: u64,
 }
 
+/// XSTATE_BV, the XSAVE header's bitmap of the parts the area holds: the
+/// index of its low word in `kvm_xsave::region`, at byte 512.
+const XSTATE_BV_WORD: usize = 512 / size_of::<u32>();
+
+/// The XSTATE_BV bits of x87 and SSE.
+const X87_AND_SSE: u32 = 0b11;
+
+/// `xsave` with x87 and SSE marked in use in its header.
+///
+/// A CPU may clear a part's header bit while the part holds its init
+/// values, and kinds of core differ in when they do (see the guest's
+/// rewind-xstate.patch): the same machine read on an Intel performance
+/// core and on an efficient core would differ in XSTATE_BV alone. KVM
+/// writes the init values into the area for a part whose bit is clear, so
+/// setting the bits changes no register. Restoring the keyframe then marks
+/// both parts in use on every Intel core, as the guest kernel's own saves
+/// do.
+fn x87_and_sse_in_use(mut xsave: kvm_xsave) -> kvm_xsave {
+    xsave.region[XSTATE_BV_WORD] |= X87_AND_SSE;
+    xsave
+}
+
 /// The bytes of a plain KVM structure.
 pub(crate) fn pod<T>(value: &T) -> Vec<u8> {
     // SAFETY: the KVM structures saved here are plain C structs with no
@@ -194,7 +216,7 @@ impl Machine {
         Ok(CpuState {
             regs: pod(&v.get_regs()?),
             sregs: pod(&v.get_sregs()?),
-            xsave: pod(&v.get_xsave()?),
+            xsave: pod(&x87_and_sse_in_use(v.get_xsave()?)),
             xcrs: pod(&v.get_xcrs()?),
             lapic: pod(&v.get_lapic()?),
             msrs: self.read_msrs()?,
@@ -391,6 +413,21 @@ pub(crate) mod tests {
             .map(|(i, h)| (i, h[0]))
             .collect();
         assert_eq!(pages, [(0, 1), (1, 6), (3, 5)]);
+    }
+
+    #[test]
+    fn a_captured_xsave_area_marks_x87_and_sse_in_use() {
+        // XSTATE_BV as each kind of CPU may report it with x87 and SSE at
+        // their init values: a capture sets both bits whatever the header
+        // said, and leaves AVX's bit and the registers as they were.
+        for header in [0b000, 0b001, 0b010, 0b011, 0b100, 0b111] {
+            let mut xsave = kvm_xsave::default();
+            xsave.region[0] = 0x037f;
+            xsave.region[XSTATE_BV_WORD] = header;
+            let captured = x87_and_sse_in_use(xsave);
+            assert_eq!(captured.region[XSTATE_BV_WORD], header | X87_AND_SSE);
+            assert_eq!(captured.region[0], 0x037f);
+        }
     }
 
     #[test]

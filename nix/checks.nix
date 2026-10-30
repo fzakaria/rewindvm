@@ -830,6 +830,15 @@ in
         grep -qx 'cycles: none, .*' counters.out
         grep -qx 'instructions: none, .*' counters.out
 
+        # On Intel, a restore marks in use each part its header names, and
+        # the guest kernel's headers name x87 and SSE, so XINUSE reads 0x3
+        # at the start and after a vzeroall and a fork on every kind of
+        # core. AMD's CPUs report the registers' values instead.
+        if grep -q GenuineIntel /proc/cpuinfo; then
+          grep -qx 'xinuse at start: 0x3' xinuse.out
+          grep -qx 'xinuse after vzeroall and a fork: 0x3' xinuse.out
+        fi
+
         if grep -q AuthenticAMD /proc/cpuinfo; then
           rewind run -q --name rdrand --root ${determinismRoot} -- /bin/rdrand
           ! rewind replay rdrand > rdrand.replay

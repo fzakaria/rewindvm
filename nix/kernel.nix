@@ -35,8 +35,8 @@ pkgs.stdenv.mkDerivation {
     # Read and write records, appended to a buffer the monitor drains at
     # steps it takes anyway
     ../guest/linux/rewind-io.patch
-    # x87 and SSE state restored as in use, so every kind of core writes
-    # the same XSAVE header
+    # x87 and SSE marked in use in the init state and in every save, so
+    # every kind of core saves the same bytes
     ../guest/linux/rewind-xstate.patch
   ];
 
