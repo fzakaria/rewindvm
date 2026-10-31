@@ -10,6 +10,9 @@
     # Any version of any nixpkgs package from one input, fetched only when
     # used: `rewind gdb` needs a newer gdb than nixpkgs above ships.
     multiverse.url = "github:fzakaria/nixpkgs-multiverse";
+    # nixbot's effects library, for the Cachix effect (nix/effects.nix)
+    nixbot.url = "github:Mic92/nixbot";
+    nixbot.inputs.nixpkgs.follows = "nixpkgs";
   };
 
   # CI pushes every build to this cache, so `nix run github:fzakaria/rewindvm`
@@ -31,6 +34,7 @@
       nixpkgs,
       crane,
       multiverse,
+      nixbot,
     }:
     let
       # x86_64-linux only: the engine is a KVM virtual machine monitor, and
@@ -309,8 +313,9 @@
       );
 
       # nixbot's effects (nix/effects.nix)
-      herculesCI = import ./nix/effects.nix {
+      herculesCI = import ./nix/effects.nix rec {
         pkgs = nixpkgs.legacyPackages.x86_64-linux;
+        effects = nixbot.lib.effects { inherit pkgs; };
         packages = self.packages.x86_64-linux;
       };
     };

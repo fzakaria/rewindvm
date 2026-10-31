@@ -1,5 +1,12 @@
 # Pushes to rewindvm.cachix.org and pins main's builds after nixbot builds main.
-{ pkgs, packages }:
+# `effects` is nixbot's effects library (nixbot.lib.effects): mkEffect
+# gives the script CA certificates, and readSecretString reads the token
+# from the secrets nixbot holds for this repository.
+{
+  pkgs,
+  effects,
+  packages,
+}:
 args:
 let
   pushed = with packages; [
@@ -23,16 +30,12 @@ in
 {
   onPush.default.outputs.effects.cachix =
     if args.branch == "main" then
-      pkgs.stdenvNoCC.mkDerivation {
+      effects.mkEffect {
         name = "cachix-effect";
-        phases = [ "buildPhase" ];
-        nativeBuildInputs = [
-          pkgs.cachix
-          pkgs.jq
-        ];
-        buildPhase = ''
-          export HOME=/tmp
-          CACHIX_AUTH_TOKEN=$(jq -er .cachix.data.token "$HERCULES_CI_SECRETS_JSON")
+        inputs = [ pkgs.cachix ];
+        secretsMap.cachix = "cachix";
+        effectScript = ''
+          CACHIX_AUTH_TOKEN=$(readSecretString cachix .token)
           export CACHIX_AUTH_TOKEN
           cachix push rewindvm ${toString pushed}
           ${pkgs.lib.concatMapStrings (attr: ''
