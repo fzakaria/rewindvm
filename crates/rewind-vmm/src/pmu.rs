@@ -315,6 +315,9 @@ const EVENT_SOURCES: &str = "/sys/bus/event_source/devices";
 /// last two.
 const HYBRID_PMUS: [&str; 3] = ["cpu_core", "cpu_atom", "cpu_lowpower"];
 
+/// The PMU of a host with one kind of core.
+const ONLY_PMU: &str = "cpu";
+
 /// One kind of core of a hybrid host, and its PMU.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KindOfCore {
@@ -322,9 +325,300 @@ pub struct KindOfCore {
     pub pmu: String,
     /// The perf type Linux gave the PMU.
     type_: u32,
+    /// Where the PMU puts an event's fields in its config.
+    format: Format,
     /// Its CPUs, as the kernel lists them, such as `4-15`.
     pub cpu_list: String,
     pub cpus: Vec<usize>,
+}
+
+impl KindOfCore {
+    /// Whether the PMU counts performance or efficient cores. Some parts
+    /// have low-power efficient cores too, which count as efficient ones.
+    fn class(&self) -> CoreClass {
+        if self.pmu == "cpu_core" {
+            CoreClass::Performance
+        } else {
+            CoreClass::Efficient
+        }
+    }
+}
+
+/// Which cores a counter counts on: on a hybrid host its performance or
+/// its efficient cores, and otherwise the one kind of core there is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CoreClass {
+    Performance,
+    Efficient,
+    Only,
+}
+
+/// Where a PMU puts an event's code and umask in perf_event_attr.config,
+/// as its sysfs format directory says: `config:8-15,40-47` for the umask of
+/// a PMU whose umasks run past 8 bits.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Format {
+    event: String,
+    umask: String,
+}
+
+impl Format {
+    /// The format of the PMU at `dir`, or x86's classic one, an 8-bit event
+    /// code and an 8-bit umask, where it lists none.
+    fn read(dir: &Path) -> Format {
+        let field = |name: &str, classic: &str| {
+            std::fs::read_to_string(dir.join("format").join(name))
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|_| classic.to_string())
+        };
+        Format {
+            event: field("event", "config:0-7"),
+            umask: field("umask", "config:8-15"),
+        }
+    }
+
+    /// The config for `event` with `umask`.
+    fn config(&self, event: u64, umask: u64) -> Result<u64> {
+        Ok(place(event, &self.event)? | place(umask, &self.umask)?)
+    }
+}
+
+/// `value` laid out in a perf_event_attr.config by one field of a PMU's
+/// format, such as `config:8-15,40-47`: its low bits fill the first range,
+/// the bits after them the next.
+fn place(value: u64, format: &str) -> Result<u64> {
+    let ranges = format
+        .strip_prefix("config:")
+        .with_context(|| format!("PMU format {format:?} is not a field of config"))?;
+    let mut placed = 0u64;
+    let mut rest = value;
+    for range in ranges.split(',') {
+        let (first, last) = range.split_once('-').unwrap_or((range, range));
+        let bit = |n: &str| -> Result<u32> {
+            n.trim()
+                .parse()
+                .with_context(|| format!("PMU format {format:?}"))
+        };
+        let (first, last) = (bit(first)?, bit(last)?);
+        if last < first || last >= u64::BITS {
+            bail!("PMU format {format:?} has a range out of order or past bit 63");
+        }
+
+        // The range takes as many of the value's remaining low bits as it
+        // is wide.
+        let width = last - first + 1;
+        let mask = u64::MAX >> (u64::BITS - width);
+        placed |= (rest & mask) << first;
+        rest = rest.checked_shr(width).unwrap_or(0);
+    }
+    if rest != 0 {
+        bail!("{value:#x} is wider than PMU format {format:?}");
+    }
+    Ok(placed)
+}
+
+/// Intel's retired conditional branches, BR_INST_RETIRED.COND, are event
+/// 0xc4, with a umask that depends on the microarchitecture and the kind
+/// of core.
+const INTEL_BRANCHES_EVENT: u64 = 0xc4;
+
+/// BR_INST_RETIRED.COND's umask from Nehalem through Skylake and Cascade
+/// Lake, and on any Intel CPU [`INTEL_BRANCHES`] does not list.
+const INTEL_BRANCHES_UMASK: u64 = 0x01;
+
+/// The Intel microarchitectures whose BR_INST_RETIRED.COND has another
+/// umask than [`INTEL_BRANCHES_UMASK`], by CPUID family and model, for
+/// their performance cores and their efficient cores, as Linux's perf event
+/// tables give it (tools/perf/pmu-events/arch/x86, each one's
+/// pipeline.json, with mapfile.csv for the models). On these, umask 0x01
+/// counts only some conditional branches: the taken ones, or on Panther
+/// Lake the taken backward ones.
+struct IntelBranches {
+    name: &'static str,
+    family: u32,
+    models: &'static [u32],
+    performance: Option<u64>,
+    efficient: Option<u64>,
+}
+
+const INTEL_BRANCHES: &[IntelBranches] = &[
+    IntelBranches {
+        name: "icelake",
+        family: 6,
+        models: &[0x7d, 0x7e],
+        performance: Some(0x11),
+        efficient: None,
+    },
+    IntelBranches {
+        name: "icelakex",
+        family: 6,
+        models: &[0x6a, 0x6c],
+        performance: Some(0x11),
+        efficient: None,
+    },
+    IntelBranches {
+        name: "tigerlake",
+        family: 6,
+        models: &[0x8c, 0x8d],
+        performance: Some(0x11),
+        efficient: None,
+    },
+    IntelBranches {
+        name: "rocketlake",
+        family: 6,
+        models: &[0xa7],
+        performance: Some(0x11),
+        efficient: None,
+    },
+    IntelBranches {
+        name: "sapphirerapids",
+        family: 6,
+        models: &[0x8f],
+        performance: Some(0x11),
+        efficient: None,
+    },
+    IntelBranches {
+        name: "emeraldrapids",
+        family: 6,
+        models: &[0xcf],
+        performance: Some(0x11),
+        efficient: None,
+    },
+    IntelBranches {
+        name: "graniterapids",
+        family: 6,
+        models: &[0xad, 0xae],
+        performance: Some(0x11),
+        efficient: None,
+    },
+    IntelBranches {
+        name: "alderlake",
+        family: 6,
+        models: &[0x97, 0x9a, 0xb7, 0xba, 0xbf],
+        performance: Some(0x11),
+        efficient: Some(0x7e),
+    },
+    IntelBranches {
+        name: "meteorlake",
+        family: 6,
+        models: &[0xaa, 0xac, 0xb5],
+        performance: Some(0x11),
+        efficient: Some(0x7e),
+    },
+    IntelBranches {
+        name: "lunarlake",
+        family: 6,
+        models: &[0xbd],
+        performance: Some(0x111),
+        efficient: Some(0x7e),
+    },
+    IntelBranches {
+        name: "arrowlake",
+        family: 6,
+        models: &[0xc5, 0xc6],
+        performance: Some(0x111),
+        efficient: Some(0x7e),
+    },
+    IntelBranches {
+        name: "pantherlake",
+        family: 6,
+        models: &[0xcc, 0xd5, 0xe5],
+        performance: Some(0x07),
+        efficient: Some(0x07),
+    },
+    IntelBranches {
+        name: "alderlaken",
+        family: 6,
+        models: &[0xbe],
+        performance: None,
+        efficient: Some(0x7e),
+    },
+    IntelBranches {
+        name: "sierraforest",
+        family: 6,
+        models: &[0xaf],
+        performance: None,
+        efficient: Some(0x7e),
+    },
+    IntelBranches {
+        name: "grandridge",
+        family: 6,
+        models: &[0xb6],
+        performance: None,
+        efficient: Some(0x7e),
+    },
+    IntelBranches {
+        name: "clearwaterforest",
+        family: 6,
+        models: &[0xdd],
+        performance: None,
+        efficient: Some(0x07),
+    },
+    // Linux's table gives Nova Lake's performance cores only.
+    IntelBranches {
+        name: "novalake",
+        family: 18,
+        models: &[0x01, 0x03],
+        performance: Some(0x07),
+        efficient: None,
+    },
+];
+
+/// BR_INST_RETIRED.COND's umask on `class` cores of an Intel CPU of this
+/// family and model; an error where Linux's tables give none.
+fn intel_branches_umask(cpu: CpuModel, class: CoreClass) -> Result<u64> {
+    let Some(known) = INTEL_BRANCHES
+        .iter()
+        .find(|b| b.family == cpu.family && b.models.contains(&cpu.model))
+    else {
+        return Ok(INTEL_BRANCHES_UMASK);
+    };
+    let umask = match class {
+        CoreClass::Performance => known.performance,
+        CoreClass::Efficient => known.efficient,
+        // A part with one kind of core lists only that kind's umask.
+        CoreClass::Only => known.performance.or(known.efficient),
+    };
+    umask.with_context(|| {
+        format!(
+            "Linux's perf tables give no umask of Intel's retired conditional branches for \
+             {class:?} cores of {} (CPU family {} model {:#x})",
+            known.name, cpu.family, cpu.model
+        )
+    })
+}
+
+/// A CPU's family and model, with CPUID's extended fields folded in, as
+/// /proc/cpuinfo gives them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CpuModel {
+    family: u32,
+    model: u32,
+}
+
+impl CpuModel {
+    /// This host's.
+    fn host() -> Result<CpuModel> {
+        let cpuinfo = std::fs::read_to_string("/proc/cpuinfo").context("reading /proc/cpuinfo")?;
+        CpuModel::parse(&cpuinfo)
+    }
+
+    /// The first CPU's, from /proc/cpuinfo's text.
+    fn parse(cpuinfo: &str) -> Result<CpuModel> {
+        let field = |name: &str| -> Result<u32> {
+            cpuinfo
+                .lines()
+                .find_map(|line| {
+                    let (key, value) = line.split_once(':')?;
+                    (key.trim() == name).then(|| value.trim().parse().ok())?
+                })
+                .with_context(|| format!("/proc/cpuinfo gives no {name}"))
+        };
+        Ok(CpuModel {
+            family: field("cpu family")?,
+            model: field("model")?,
+        })
+    }
 }
 
 /// This host's kinds of core, one per PMU; none on a host with one kind of
@@ -355,6 +649,7 @@ fn kinds_in(sources: &Path) -> Result<Vec<KindOfCore>> {
         kinds.push(KindOfCore {
             pmu: pmu.to_string(),
             type_,
+            format: Format::read(&dir),
             cpu_list,
             cpus,
         });
@@ -515,20 +810,33 @@ fn read_reading(fd: i32) -> Result<Reading> {
     Ok(reading)
 }
 
-/// The perf type and config for `event`, on `kind`'s PMU on a hybrid host.
-/// A raw event is opened under the PMU's own type, with the encoding it
-/// has on every kind of core of the parts measured so far; a hardware
-/// event names the PMU in its config's upper half.
-fn event_attr(event: CounterEvent, kind: Option<&KindOfCore>) -> (u32, u64) {
+/// The perf type and config for `event` on a `cpu`, on `kind`'s PMU on a
+/// hybrid host and on the one PMU, laid out by `only`, otherwise. A raw
+/// event is opened under the PMU's own type, with the encoding it has on
+/// that microarchitecture and kind of core; a hardware event names the
+/// PMU in its config's upper half.
+fn event_attr(
+    event: CounterEvent,
+    kind: Option<&KindOfCore>,
+    cpu: CpuModel,
+    only: &Format,
+) -> Result<(u32, u64)> {
     let raw = kind.map_or(PERF_TYPE_RAW, |k| k.type_);
-    match event {
+    Ok(match event {
         CounterEvent::AmdRetiredConditionalBranches => (raw, 0xd1),
-        CounterEvent::IntelRetiredConditionalBranches => (raw, 0x01c4),
+        CounterEvent::IntelRetiredConditionalBranches => {
+            let (class, format) = match kind {
+                Some(k) => (k.class(), &k.format),
+                None => (CoreClass::Only, only),
+            };
+            let umask = intel_branches_umask(cpu, class)?;
+            (raw, format.config(INTEL_BRANCHES_EVENT, umask)?)
+        }
         CounterEvent::Instructions => (
             PERF_TYPE_HARDWARE,
             kind.map_or(0, |k| u64::from(k.type_) << 32) | PERF_COUNT_HW_INSTRUCTIONS,
         ),
-    }
+    })
 }
 
 /// Opens a guest-mode counter on the calling thread, disabled; with a
@@ -540,7 +848,8 @@ fn open_event(
     sample_period: u64,
 ) -> Result<i32> {
     {
-        let (type_, config) = event_attr(event, kind);
+        let only = Format::read(&Path::new(EVENT_SOURCES).join(ONLY_PMU));
+        let (type_, config) = event_attr(event, kind, CpuModel::host()?, &only)?;
         let mut flags = FLAG_DISABLED | FLAG_PINNED | FLAG_EXCLUDE_HV | FLAG_EXCLUDE_HOST;
         if modes == Modes::UserOnly {
             flags |= FLAG_EXCLUDE_KERNEL;
@@ -648,12 +957,16 @@ mod tests {
     #[test]
     fn only_a_host_with_two_kinds_of_core_counts_on_each() {
         // As on an Intel Core Ultra: performance cores 0-3 under cpu_core,
-        // efficient cores 4-15 under cpu_atom, at perf types 4 and 10.
+        // efficient cores 4-15 under cpu_atom, at perf types 4 and 10, each
+        // with the umask format of a PMU whose umasks run past 8 bits.
         let sources = std::env::temp_dir().join(format!("rewind-pmu-{}", std::process::id()));
         let pmu = |name: &str, type_: &str, cpus: &str| {
-            std::fs::create_dir_all(sources.join(name)).unwrap();
-            std::fs::write(sources.join(name).join("type"), format!("{type_}\n")).unwrap();
-            std::fs::write(sources.join(name).join("cpus"), format!("{cpus}\n")).unwrap();
+            let dir = sources.join(name);
+            std::fs::create_dir_all(dir.join("format")).unwrap();
+            std::fs::write(dir.join("type"), format!("{type_}\n")).unwrap();
+            std::fs::write(dir.join("cpus"), format!("{cpus}\n")).unwrap();
+            std::fs::write(dir.join("format/event"), "config:0-7\n").unwrap();
+            std::fs::write(dir.join("format/umask"), "config:8-15,40-47\n").unwrap();
         };
         pmu("cpu_core", "4", "0-3");
         assert!(kinds_in(&sources).unwrap().is_empty());
@@ -669,15 +982,95 @@ mod tests {
             [("cpu_core", 4), ("cpu_atom", 12)]
         );
 
-        // Each kind's counter is opened on its own PMU.
-        let atom = Some(&kinds[1]);
+        // Each kind's counter is opened on its own PMU, with that kind's
+        // umask: Panther Lake's 0x07 on both, Alder Lake's 0x11 and 0x7e,
+        // and Lunar Lake's 0x111 on its performance cores, whose ninth bit
+        // goes to config bit 40.
+        let (core, atom) = (Some(&kinds[0]), Some(&kinds[1]));
+        let only = Format::read(&sources);
+        let attr = |kind, family, model| {
+            event_attr(
+                CounterEvent::IntelRetiredConditionalBranches,
+                kind,
+                CpuModel { family, model },
+                &only,
+            )
+            .unwrap()
+        };
+        assert_eq!(attr(core, 6, 0xcc), (4, 0x07c4));
+        assert_eq!(attr(atom, 6, 0xcc), (10, 0x07c4));
+        assert_eq!(attr(core, 6, 0x97), (4, 0x11c4));
+        assert_eq!(attr(atom, 6, 0x97), (10, 0x7ec4));
+        assert_eq!(attr(core, 6, 0xbd), (4, (1 << 40) | 0x11c4));
         assert_eq!(
-            event_attr(CounterEvent::IntelRetiredConditionalBranches, atom),
-            (10, 0x01c4)
-        );
-        assert_eq!(
-            event_attr(CounterEvent::Instructions, atom),
+            event_attr(
+                CounterEvent::Instructions,
+                atom,
+                CpuModel {
+                    family: 6,
+                    model: 0xcc
+                },
+                &only
+            )
+            .unwrap(),
             (PERF_TYPE_HARDWARE, (10 << 32) | PERF_COUNT_HW_INSTRUCTIONS)
         );
+    }
+
+    #[test]
+    fn a_value_is_laid_out_by_the_pmus_format() {
+        // A format's ranges take the value's bits in order, low bits
+        // first; a value wider than them all is refused.
+        assert_eq!(place(0xc4, "config:0-7").unwrap(), 0xc4);
+        assert_eq!(place(0x11, "config:8-15").unwrap(), 0x1100);
+        assert_eq!(
+            place(0x111, "config:8-15,40-47").unwrap(),
+            (1 << 40) | 0x1100
+        );
+        assert_eq!(place(1, "config:21").unwrap(), 1 << 21);
+        assert!(place(0x111, "config:8-15").is_err());
+        assert!(place(1, "config1:0-7").is_err());
+    }
+
+    #[test]
+    fn intel_conditional_branches_take_each_microarchitectures_umask() {
+        // From Linux's perf tables: 0x01 up to Skylake and on any model
+        // they leave out, 0x11 from Ice Lake on, and the hybrid parts'
+        // performance and efficient cores apart. A part with one kind of
+        // core takes that kind's umask.
+        let umask =
+            |family, model, class| intel_branches_umask(CpuModel { family, model }, class).ok();
+        use CoreClass::{Efficient, Only, Performance};
+        assert_eq!(umask(6, 0x5e, Only), Some(0x01)); // Skylake
+        assert_eq!(umask(6, 0x55, Only), Some(0x01)); // Skylake-X, Cascade Lake
+        assert_eq!(umask(6, 0x7e, Only), Some(0x11)); // Ice Lake
+        assert_eq!(umask(6, 0x8f, Only), Some(0x11)); // Sapphire Rapids
+        assert_eq!(umask(6, 0x97, Performance), Some(0x11)); // Alder Lake
+        assert_eq!(umask(6, 0x97, Efficient), Some(0x7e));
+        assert_eq!(umask(6, 0xb7, Efficient), Some(0x7e)); // Raptor Lake
+        assert_eq!(umask(6, 0xbd, Performance), Some(0x111)); // Lunar Lake
+        assert_eq!(umask(6, 0xc6, Efficient), Some(0x7e)); // Arrow Lake
+        assert_eq!(umask(6, 0xcc, Performance), Some(0x07)); // Panther Lake
+        assert_eq!(umask(6, 0xcc, Efficient), Some(0x07));
+        assert_eq!(umask(6, 0xaf, Only), Some(0x7e)); // Sierra Forest
+        assert_eq!(umask(6, 0xdd, Only), Some(0x07)); // Clearwater Forest
+        assert_eq!(umask(18, 0x01, Performance), Some(0x07)); // Nova Lake
+        assert_eq!(umask(18, 0x01, Efficient), None);
+    }
+
+    #[test]
+    fn the_cpu_family_and_model_come_from_cpuinfo() {
+        // /proc/cpuinfo gives them in decimal with the extended fields
+        // folded in: a Core Ultra X9 388H is family 6, model 204, 0xcc.
+        let cpuinfo = "processor\t: 0\nvendor_id\t: GenuineIntel\ncpu family\t: 6\n\
+                       model\t\t: 204\nmodel name\t: Intel(R) Core(TM) Ultra X9 388H\n";
+        assert_eq!(
+            CpuModel::parse(cpuinfo).unwrap(),
+            CpuModel {
+                family: 6,
+                model: 0xcc
+            }
+        );
+        assert!(CpuModel::parse("vendor_id\t: GenuineIntel\n").is_err());
     }
 }

@@ -1213,6 +1213,22 @@ one less than the number of kinds make one of them overflow by then, wherever
 the thread runs, and one that fires early, when the thread moved, is armed
 again.
 
+Intel's event for every retired conditional branch, `BR_INST_RETIRED.COND`,
+is event 0xc4 with a umask that changed over the years and differs between
+the kinds of core of one part: 0x01 up to Skylake, 0x11 on the performance
+cores from Ice Lake to Meteor Lake, 0x111 on Lunar Lake's and Arrow Lake's,
+0x7e on the efficient cores until Panther Lake, and 0x07 on both kinds of
+Panther Lake's. On the newer parts umask 0x01 counts only some conditional
+branches: taken ones, or on Panther Lake taken backward ones, which counted
+15 times fewer of a branchy loop than umask 0x07. The two kinds of core of
+an Alder Lake would also count different events under 0x01, and their sum
+would not be exact. So the monitor takes each microarchitecture's umask,
+per kind of core, from Linux's perf tables (`tools/perf/pmu-events/arch/x86`),
+keyed by CPUID family and model, and lays it out in the config as each
+PMU's sysfs format says: a 9-bit umask such as 0x111 puts its top bit at
+config bit 40. A model the table does not list keeps 0x01, and the
+self-test still decides whether runs use counter time.
+
 ## Why not QEMU, and why not bhyve
 
 The first prototype used QEMU's record and replay, with a small TCG plugin

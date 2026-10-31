@@ -110,14 +110,17 @@ sources:
   on both, so the TF leak is the same.
 - rr's skid allowance is 100 up to Rocket Lake and 125 from Alder Lake, and
   the counter is exact in a guest with `exclude_host`.
-- Rewind counts event `0x01c4`, which rr uses only from Nehalem to Comet
-  Lake. From Ice Lake on, umask 0x01 counts taken conditional branches
-  only; rr uses umask 0x11 there, and 0x7e on E-cores. It touches counter
-  time in general as well as preemption, and should be checked on an Intel
-  host on its own.
+- Rewind counted event `0x01c4` everywhere, which rr uses only from
+  Nehalem to Comet Lake. From Ice Lake on, umask 0x01 counts taken
+  conditional branches only, and on Panther Lake taken backward ones; rr
+  uses umask 0x11 there, and 0x7e on E-cores. Rewind now takes the umask
+  of `BR_INST_RETIRED.COND` for each microarchitecture and kind of core
+  from Linux's perf tables, so it counts every conditional branch on each.
 
-Inferred, not verified: stepping is lost the same way on Intel, and on a
-hybrid part the event counts nothing if the vCPU thread moves to an E-core.
+Inferred, not verified: stepping is lost the same way on Intel. Measured
+on a Core Ultra: a counter on the P-cores' PMU counts nothing while the
+vCPU thread is on an E-core, so the monitor opens one counter per kind of
+core and adds them up (see design.md).
 
 ## Design
 

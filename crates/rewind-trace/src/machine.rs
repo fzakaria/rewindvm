@@ -58,8 +58,10 @@ pub enum CounterEvent {
     /// AMD Zen's retired conditional branches (PMCx0D1), what rr counts on
     /// AMD.
     AmdRetiredConditionalBranches,
-    /// Intel's retired conditional branches (BR_INST_RETIRED.CONDITIONAL,
-    /// event 0xc4 umask 0x01), what rr counts on Intel.
+    /// Intel's retired conditional branches (BR_INST_RETIRED.COND), what rr
+    /// counts on Intel: event 0xc4, with the umask of the host's
+    /// microarchitecture and kind of core, 0x01 up to Skylake and 0x11,
+    /// 0x111, 0x7e or 0x07 after it (rewind-vmm's pmu module).
     IntelRetiredConditionalBranches,
     /// Retired instructions, which some microarchitectures overcount.
     Instructions,
