@@ -15,7 +15,11 @@
 //! one counter per kind of core and a read adds them up. The sum is exact
 //! wherever the host runs the thread only if every kind of core counts the
 //! event alike, which the PMU self-test checks on each kind before runs use
-//! counter time.
+//! counter time. The kinds do not run every instruction alike: they can
+//! leave the flags Intel's manual calls undefined, as after `imul`, set
+//! differently, which reaches memory wherever RFLAGS is saved. A run that
+//! moves between kinds of core relies on no program and no saved RFLAGS
+//! depending on one; docs/design.md has what that leaves open.
 
 use std::io;
 use std::path::Path;

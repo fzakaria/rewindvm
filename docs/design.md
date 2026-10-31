@@ -1229,6 +1229,18 @@ PMU's sysfs format says: a 9-bit umask such as 0x111 puts its top bit at
 config bit 40. A model the table does not list keeps 0x01, and the
 self-test still decides whether runs use counter time.
 
+The kinds of core count alike, but they do not run every instruction alike.
+Where Intel's manual leaves a flag undefined, as SF, ZF, AF and PF after `mul`
+and `imul`, OF after a shift or rotate by more than one, and AF after any
+shift, a Core Ultra X7 358H's performance and efficient cores leave some of
+them set differently. A correct program never reads such a flag, but the
+flags reach memory whenever RFLAGS is saved: in R11 at a `syscall`, which the
+guest kernel keeps in `pt_regs`, in an interrupt's frame, and in a signal
+frame. A run whose vCPU moved between kinds of core can then differ from its
+replay in one saved RFLAGS, which the keyframe check reports. No replay of
+mylib or GNU hello across kinds of core has shown it. If one does, keeping
+each run on one kind of core, chosen per run and recorded with it, removes it.
+
 ## Why not QEMU, and why not bhyve
 
 The first prototype used QEMU's record and replay, with a small TCG plugin
