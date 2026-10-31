@@ -204,7 +204,9 @@ pub fn perf_event_paranoid() -> Option<i32> {
 /// Whether runs may use counter time this boot. On a CPU that needs the
 /// workaround and does not have it, no: the self-test is not run at all.
 /// Otherwise the self-test's verdict, cached in the home under the boot and
-/// whether the workaround is known, so setting it later tests again.
+/// whether the workaround is known, so setting it later tests again. A
+/// self-test that could not run on every kind of core is not cached, since
+/// a later process may run where this one could not.
 pub fn counter_usable_this_boot(
     home: &crate::Home,
     guest: &Guest,
@@ -223,8 +225,13 @@ pub fn counter_usable_this_boot(
     {
         return Ok(counter_usable(needs, known, verdict.trim() == EXACT));
     }
-    let exact = selftest(guest).map(|t| t.exact).unwrap_or(false);
-    remember(home, known, exact)?;
+    let (exact, cacheable) = match selftest(guest) {
+        Ok(t) => (t.exact, t.covers_every_kind()),
+        Err(_) => (false, true),
+    };
+    if cacheable {
+        remember(home, known, exact)?;
+    }
     Ok(counter_usable(needs, known, exact))
 }
 
@@ -274,6 +281,16 @@ pub struct SelfTest {
     pub runs: Vec<SelfTestRuns>,
     /// Whether every exit saw the same count in every run.
     pub exact: bool,
+    /// The kinds of core this process may not run on, which the test left
+    /// out, as their PMU and CPUs.
+    pub untested: Vec<String>,
+}
+
+impl SelfTest {
+    /// Whether the test ran on every kind of core.
+    pub fn covers_every_kind(&self) -> bool {
+        self.untested.is_empty()
+    }
 }
 
 /// The self-test's two runs on one kind of core.
@@ -288,8 +305,9 @@ pub struct SelfTestRuns {
 /// Runs the self-test workload twice with the branch counter attached, and
 /// compares the count at every exit. On a hybrid host it runs twice on each
 /// kind of core, kept there, since a run adds up one counter per kind and
-/// is exact only if every kind counts alike; the kinds this process may
-/// not run on are left out, as its runs never count there either.
+/// is exact only if every kind counts alike. The kinds this process may
+/// not run on are left out and named in `untested`: the verdict holds for
+/// this process's runs, which never count there, but not for the boot.
 pub fn selftest(guest: &Guest) -> Result<SelfTest> {
     let event = Vendor::detect()?
         .event()
@@ -322,17 +340,22 @@ pub fn selftest(guest: &Guest) -> Result<SelfTest> {
     if kinds.is_empty() {
         run_twice(None)?;
     }
+    let mut untested = Vec::new();
     for kind in &kinds {
+        let name = format!("{} (CPUs {})", kind.pmu, kind.cpu_list);
+
         // This thread runs the vCPU, so kept to one kind of core it tests
         // that kind's counter alone.
         let Some(_kept) = Pinned::to(&kind.cpus)? else {
+            untested.push(name);
             continue;
         };
-        run_twice(Some(format!("{} (CPUs {})", kind.pmu, kind.cpu_list)))?;
+        run_twice(Some(name))?;
     }
     Ok(SelfTest {
         runs,
         exact: verdict(&counts, &hashes),
+        untested,
     })
 }
 
@@ -441,5 +464,24 @@ mod tests {
             &[20_001_750, 20_001_750, 20_001_751, 20_001_751],
             &[7, 7, 8, 8]
         ));
+    }
+
+    #[test]
+    fn a_self_test_that_left_out_a_kind_of_core_does_not_cover_every_kind() {
+        // A process kept to the performance cores, as with `taskset -c
+        // 0-3`, tests only their counter. Its verdict holds for its own
+        // runs, which never reach the other cores, but not for a later
+        // process that may run anywhere.
+        let partial = SelfTest {
+            runs: Vec::new(),
+            exact: true,
+            untested: vec!["cpu_atom (CPUs 4-15)".to_string()],
+        };
+        assert!(!partial.covers_every_kind());
+        let whole = SelfTest {
+            untested: Vec::new(),
+            ..partial
+        };
+        assert!(whole.covers_every_kind());
     }
 }

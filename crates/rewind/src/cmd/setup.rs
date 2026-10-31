@@ -54,7 +54,12 @@ pub(crate) fn pmu(home: &Home, args: PmuArgs) -> Result<ExitCode> {
             }
             let guest = Guest::from_env()?;
             let t = rewind_core::pmu::selftest(&guest)?;
-            rewind_core::pmu::remember(home, known, t.exact)?;
+
+            // A verdict from only some kinds of core holds for this
+            // process, not for the boot, so it is not cached.
+            if t.covers_every_kind() {
+                rewind_core::pmu::remember(home, known, t.exact)?;
+            }
             let usable = rewind_core::pmu::counter_usable(needs, known, t.exact);
             let verdict = if t.exact {
                 "exact at every exit"
@@ -75,7 +80,15 @@ pub(crate) fn pmu(home: &Home, args: PmuArgs) -> Result<ExitCode> {
                             run.counts[1]
                         );
                     }
-                    if t.exact {
+                    for kind in &t.untested {
+                        println!("self-test on {kind}: not run, this process may not run there");
+                    }
+                    if !t.covers_every_kind() {
+                        println!(
+                            "self-test: {verdict} on the kinds of core it ran on; not kept \
+                             for this boot, as later runs may use the others"
+                        );
+                    } else if t.exact {
                         println!("self-test: {verdict}, alike on every kind of core");
                     } else {
                         println!("self-test: {verdict}, or not alike on every kind of core");
