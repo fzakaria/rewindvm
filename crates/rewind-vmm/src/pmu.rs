@@ -628,7 +628,34 @@ impl CpuModel {
 /// This host's kinds of core, one per PMU; none on a host with one kind of
 /// core, where one counter counts on every CPU.
 pub fn kinds_of_core() -> Result<Vec<KindOfCore>> {
-    kinds_in(Path::new(EVENT_SOURCES))
+    Ok(host()?.kinds.clone())
+}
+
+/// What opening a counter needs to know of the host: its kinds of core,
+/// its CPU's family and model, and the format of its one PMU on a host
+/// with one kind of core.
+struct Host {
+    kinds: Vec<KindOfCore>,
+    cpu: CpuModel,
+    only: Format,
+}
+
+/// This host's, read once: a machine opens its counters every time it
+/// boots, and the host does not change under it.
+fn host() -> Result<&'static Host> {
+    static HOST: std::sync::OnceLock<std::result::Result<Host, String>> =
+        std::sync::OnceLock::new();
+    let read = || -> Result<Host> {
+        let sources = Path::new(EVENT_SOURCES);
+        Ok(Host {
+            kinds: kinds_in(sources)?,
+            cpu: CpuModel::host()?,
+            only: Format::read(&sources.join(ONLY_PMU)),
+        })
+    };
+    HOST.get_or_init(|| read().map_err(|e| format!("{e:#}")))
+        .as_ref()
+        .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 fn kinds_in(sources: &Path) -> Result<Vec<KindOfCore>> {
@@ -852,8 +879,8 @@ fn open_event(
     sample_period: u64,
 ) -> Result<i32> {
     {
-        let only = Format::read(&Path::new(EVENT_SOURCES).join(ONLY_PMU));
-        let (type_, config) = event_attr(event, kind, CpuModel::host()?, &only)?;
+        let host = host()?;
+        let (type_, config) = event_attr(event, kind, host.cpu, &host.only)?;
         let mut flags = FLAG_DISABLED | FLAG_PINNED | FLAG_EXCLUDE_HV | FLAG_EXCLUDE_HOST;
         if modes == Modes::UserOnly {
             flags |= FLAG_EXCLUDE_KERNEL;

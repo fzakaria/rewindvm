@@ -1200,8 +1200,9 @@ performance cores, `cpu_atom` for its efficient ones, and on some parts
 core of its own PMU, so the vCPU's thread has one counter per kind of core,
 and a read adds them up. The sum is exact wherever the host runs the thread
 only if every kind of core counts the event alike, which the self-test checks
-by running on each kind in turn. On a Core Ultra X7 358H the same encoding
-counts 20001750 branches of its workload on all three kinds of core. Each
+by running on each kind in turn. On a Core Ultra X7 358H and a Core Ultra X9
+388H, both Panther Lake, every kind of core counts 40046477 branches of its
+workload. Each
 counter runs only while the thread is on its kind of core, so the check that
 a counter ran the whole time it was enabled becomes a check that the
 counters' running times add up to the time they were all enabled. No one
