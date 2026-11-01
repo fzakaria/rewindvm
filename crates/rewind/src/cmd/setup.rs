@@ -67,17 +67,28 @@ pub(crate) fn pmu(home: &Home, args: PmuArgs) -> Result<ExitCode> {
                 "NOT exact"
             };
             match t.runs.as_slice() {
-                [one] if one.kind.is_none() => println!(
-                    "self-test: {} and {} branches, {verdict}",
-                    one.counts[0], one.counts[1]
-                ),
+                [one] if one.kind.is_none() => {
+                    for count in &one.probes {
+                        println!("probe {}: {}", count.probe.name(), probe_result(count));
+                    }
+                    println!(
+                        "self-test: {} and {} branches, {verdict}",
+                        one.counts[0], one.counts[1]
+                    );
+                }
                 runs => {
                     for run in runs {
+                        let kind = run.kind.as_deref().unwrap_or("this CPU");
+                        for count in &run.probes {
+                            println!(
+                                "probe {} on {kind}: {}",
+                                count.probe.name(),
+                                probe_result(count)
+                            );
+                        }
                         println!(
-                            "self-test on {}: {} and {} branches",
-                            run.kind.as_deref().unwrap_or("this CPU"),
-                            run.counts[0],
-                            run.counts[1]
+                            "self-test on {kind}: {} and {} branches",
+                            run.counts[0], run.counts[1]
                         );
                     }
                     for kind in &t.untested {
@@ -117,6 +128,15 @@ pub(crate) fn pmu(home: &Home, args: PmuArgs) -> Result<ExitCode> {
                 ExitCode::FAILURE
             })
         }
+    }
+}
+
+/// What the counter made of a probe's known answer.
+fn probe_result(count: &rewind_core::pmu::ProbeCount) -> String {
+    match count.counted {
+        Some(counted) if count.matches() => format!("{counted} branches, as built"),
+        Some(counted) => format!("{counted} branches, built with {}", count.expected),
+        None => format!("no count, built with {} branches", count.expected),
     }
 }
 

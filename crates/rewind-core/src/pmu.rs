@@ -6,7 +6,8 @@
 //! instructions unless a bit in a model-specific register is set, the
 //! workaround rr documents; setting it needs root and lasts until reboot.
 //! [`selftest`] runs a workload that provokes the overcount twice and
-//! compares every count. On AMD that is not enough: without the workaround
+//! compares every count, and checks probes whose counts are known by
+//! construction. On AMD that is not enough: without the workaround
 //! the two runs sometimes agree by chance, so counter time there also needs
 //! the workaround to be known to be set, from the MSR itself or from the
 //! marker `rewind pmu enable` leaves under /run.
@@ -18,10 +19,11 @@ use std::os::unix::fs::FileExt;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
-use rewind_init::{Job, Root};
+use rewind_init::{Job, Mark, Probe, Root, SELFTEST_ARG};
+use rewind_trace::EventKind;
 use rewind_vmm::CounterEvent as Event;
 use rewind_vmm::pmu::{Counter, Modes, Pinned};
-use rewind_vmm::{Ignore, Machine};
+use rewind_vmm::{Machine, Observer, Outcome};
 
 use crate::home::Guest;
 use crate::run::{BASE_CMDLINE, DEFAULT_CORES, DEFAULT_QUANTUM, Spec, SpecExt};
@@ -279,7 +281,8 @@ pub struct SelfTest {
     /// One per kind of core the test ran on: one, of no kind, on a host
     /// with one kind of core.
     pub runs: Vec<SelfTestRuns>,
-    /// Whether every exit saw the same count in every run.
+    /// Whether every exit saw the same count in every run, and every probe
+    /// counted its known answer.
     pub exact: bool,
     /// The kinds of core this process may not run on, which the test left
     /// out, as their PMU and CPUs.
@@ -300,6 +303,78 @@ pub struct SelfTestRuns {
     pub kind: Option<String>,
     /// Final counts of the two runs.
     pub counts: [u64; 2],
+    /// The first run's probe counts.
+    pub probes: Vec<ProbeCount>,
+}
+
+/// A probe's known answer, and what the counter made of it in one run:
+/// None when the run did not write all four of the probe's marks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProbeCount {
+    pub probe: Probe,
+    pub expected: u64,
+    pub counted: Option<u64>,
+}
+
+impl ProbeCount {
+    pub fn matches(&self) -> bool {
+        self.counted == Some(self.expected)
+    }
+}
+
+/// Every probe's count, from the counter's value at each probe mark in the
+/// order the run wrote them: four a probe, around its short run and its
+/// long one. The long run's count less the short run's is the branches of
+/// the extra iterations, since all else between the marks is the same.
+fn probe_counts(marks: &[(Probe, u64)]) -> Vec<ProbeCount> {
+    Probe::ALL
+        .into_iter()
+        .map(|probe| {
+            let at: Vec<u64> = marks
+                .iter()
+                .filter(|(p, _)| *p == probe)
+                .map(|(_, count)| *count)
+                .collect();
+            let counted = match at.as_slice() {
+                [s1, e1, s2, e2] => e2
+                    .checked_sub(*s2)
+                    .zip(e1.checked_sub(*s1))
+                    .and_then(|(long, short)| long.checked_sub(short)),
+                _ => None,
+            };
+            ProbeCount {
+                probe,
+                expected: probe.branches_per_iteration() * probe.iterations(),
+                counted,
+            }
+        })
+        .collect()
+}
+
+/// Pauses the self-test's machine at each probe mark, where the counter
+/// has counted everything the guest did before the mark's write. The
+/// self-test is the job, not init, so its marks are not init's.
+#[derive(Default)]
+struct ProbeMarks {
+    seen: Option<Probe>,
+}
+
+impl Observer for ProbeMarks {
+    fn record(&mut self, step: u64, record: &[u8]) {
+        let Ok(event) = rewind_trace::Event::decode(step, record) else {
+            return;
+        };
+        let EventKind::Mark { text } = &event.kind else {
+            return;
+        };
+        if let Some(Mark::Probe(probe)) = Mark::parse(text) {
+            self.seen = Some(probe);
+        }
+    }
+
+    fn stop(&self) -> bool {
+        self.seen.is_some()
+    }
 }
 
 /// Runs the self-test workload twice with the branch counter attached, and
@@ -317,23 +392,39 @@ pub fn selftest(guest: &Guest) -> Result<SelfTest> {
     let mut runs = Vec::new();
     let mut counts = Vec::new();
     let mut hashes = Vec::new();
+    let mut probes = Vec::new();
     let mut run_twice = |kind: Option<String>| -> Result<()> {
         let mut these = [0u64; 2];
+        let mut first = None;
         for count in &mut these {
             let mut machine = Machine::boot(&config)?;
             machine.pmu = Some((
                 Counter::open(event, Modes::UserOnly)?,
                 0xcbf2_9ce4_8422_2325,
             ));
-            machine.run(None, &mut Ignore)?;
+
+            // Run from one probe mark to the next, reading the counter at
+            // each, until the guest stops.
+            let mut observer = ProbeMarks::default();
+            let mut marks = Vec::new();
+            while let Outcome::Paused = machine.run(None, &mut observer)? {
+                let (counter, _) = machine.pmu.as_ref().expect("set before the run");
+                let probe = observer.seen.take().expect("paused only at a probe mark");
+                marks.push((probe, counter.read()?));
+            }
+
             let (counter, hash) = machine.pmu.as_ref().expect("set before the run");
             *count = counter.read()?;
             hashes.push(*hash);
+            let these_probes = probe_counts(&marks);
+            probes.extend(these_probes.iter().cloned());
+            first.get_or_insert(these_probes);
         }
         counts.extend(these);
         runs.push(SelfTestRuns {
             kind,
             counts: these,
+            probes: first.unwrap_or_default(),
         });
         Ok(())
     };
@@ -354,7 +445,7 @@ pub fn selftest(guest: &Guest) -> Result<SelfTest> {
     }
     Ok(SelfTest {
         runs,
-        exact: verdict(&counts, &hashes),
+        exact: verdict(&counts, &hashes, &probes),
         untested,
     })
 }
@@ -362,11 +453,14 @@ pub fn selftest(guest: &Guest) -> Result<SelfTest> {
 /// Whether the self-test's runs show an exact counter: the same count at
 /// every exit in every run, on every kind of core, and a count at all. The
 /// workload certainly branches, so a counter that read 0 every time
-/// counted nothing, and agreeing on 0 says nothing about exactness.
-fn verdict(counts: &[u64], hashes: &[u64]) -> bool {
+/// counted nothing, and agreeing on 0 says nothing about exactness. A
+/// counter can also agree with itself and be wrong, as one that counts only
+/// taken branches is, so every probe must count its known answer too.
+fn verdict(counts: &[u64], hashes: &[u64], probes: &[ProbeCount]) -> bool {
     !hashes.is_empty()
         && hashes.iter().all(|&hash| hash == hashes[0])
         && counts.iter().all(|&count| count > 0)
+        && probes.iter().all(ProbeCount::matches)
 }
 
 /// The machine the self-test boots: the self-test's workload on the bare
@@ -398,7 +492,7 @@ fn selftest_spec(guest: &Guest) -> Spec {
         cmdline: BASE_CMDLINE.to_string(),
         job: Job {
             program: None,
-            argv: vec!["/init".into(), "--selftest".into()],
+            argv: vec!["/init".into(), SELFTEST_ARG.into()],
             env: Vec::new(),
             cwd: "/".into(),
             uid: 0,
@@ -445,24 +539,93 @@ mod tests {
         assert!(!counter_usable(false, false, false));
     }
 
+    /// The counter's value at each probe mark of a run whose counter counts
+    /// `per_iteration(probe)` branches an iteration, with 500 branches of
+    /// the run between each pair of marks besides the probe's loop.
+    fn marks_counting(per_iteration: impl Fn(Probe) -> u64) -> Vec<(Probe, u64)> {
+        let mut count = 1_000;
+        let mut marks = Vec::new();
+        for probe in Probe::ALL {
+            for iterations in [probe.iterations(), 2 * probe.iterations()] {
+                marks.push((probe, count));
+                count += 500 + per_iteration(probe) * iterations;
+                marks.push((probe, count));
+                count += 70;
+            }
+        }
+        marks
+    }
+
+    /// Every probe's known answer, as an exact counter counts it.
+    fn known_answers() -> Vec<ProbeCount> {
+        probe_counts(&marks_counting(Probe::branches_per_iteration))
+    }
+
+    #[test]
+    fn a_probe_counts_its_loop_alone() {
+        // The branches around a probe's loop are the same at both lengths,
+        // so the difference of its two runs is the loop's extra iterations
+        // alone, which an exact counter counts as the known answer.
+        let counts = known_answers();
+        assert_eq!(counts.len(), Probe::ALL.len());
+        for count in &counts {
+            assert_eq!(
+                count.counted,
+                Some(count.probe.branches_per_iteration() * count.probe.iterations())
+            );
+            assert!(count.matches(), "{count:?}");
+        }
+    }
+
+    #[test]
+    fn a_counter_that_counts_only_taken_branches_misses_the_known_answer() {
+        // Intel's umask 0x01 on newer cores counts only taken branches,
+        // the same short count every run: deterministic, so the hashes
+        // agree, but wrong, which the branches probe sees.
+        let taken_only = |probe| match probe {
+            Probe::Branches => 2,
+            probe => Probe::branches_per_iteration(probe),
+        };
+        let counts = probe_counts(&marks_counting(taken_only));
+        assert!(!counts.iter().all(ProbeCount::matches));
+        assert!(!verdict(&[20_001_750, 20_001_750], &[7, 7], &counts));
+    }
+
+    #[test]
+    fn a_run_without_every_probe_mark_is_not_exact() {
+        // A guest that wrote no marks, or stopped partway, leaves probes
+        // with no count, and an unknown answer is not a right one.
+        let counts = probe_counts(&[]);
+        assert_eq!(counts.len(), Probe::ALL.len());
+        assert!(counts.iter().all(|c| c.counted.is_none()));
+        assert!(!verdict(&[20_001_750, 20_001_750], &[7, 7], &counts));
+
+        let mut marks = marks_counting(Probe::branches_per_iteration);
+        marks.pop();
+        assert!(!probe_counts(&marks).iter().all(ProbeCount::matches));
+    }
+
     #[test]
     fn a_self_test_that_counted_nothing_is_not_exact() {
         // Seen with the counter of an Intel Core Ultra's performance cores
         // on its efficient cores, where it does not count: 0 and 0
         // branches, equal hashes.
-        assert!(!verdict(&[0, 0], &[7, 7]));
-        assert!(verdict(&[20_001_750, 20_001_750], &[7, 7]));
-        assert!(!verdict(&[20_001_750, 20_001_750], &[7, 8]));
+        let known = known_answers();
+        assert!(!verdict(&[0, 0], &[7, 7], &known));
+        assert!(verdict(&[20_001_750, 20_001_750], &[7, 7], &known));
+        assert!(!verdict(&[20_001_750, 20_001_750], &[7, 8], &known));
     }
 
     #[test]
     fn every_kind_of_core_must_count_alike() {
         // Each kind exact on its own is not enough: a run that moves
         // between kinds adds up their counts, so they must agree.
-        assert!(verdict(&[20_001_750; 4], &[7; 4]));
+        let known = known_answers();
+        assert!(verdict(&[20_001_750; 4], &[7; 4], &known));
         assert!(!verdict(
             &[20_001_750, 20_001_750, 20_001_751, 20_001_751],
-            &[7, 7, 8, 8]
+            &[7, 7, 8, 8],
+            &known
         ));
     }
 

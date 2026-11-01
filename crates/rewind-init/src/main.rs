@@ -15,9 +15,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use rewind_init::{
-    IMAGE_ROOT, INSPECT_ARG, InspectRequest, InspectStatus, JOB_PATH, Job, Mark, Output,
-    RESIZE_ESCAPE, RESIZE_LEN, RESIZE_TAG, RUNNING_ENV, Root, SECTION_MAPS, SECTION_PID, nar_hash,
-    section_header,
+    IMAGE_ROOT, INSPECT_ARG, InspectRequest, InspectStatus, JOB_PATH, Job, Mark, Output, Probe,
+    RESIZE_ESCAPE, RESIZE_LEN, RESIZE_TAG, RUNNING_ENV, Root, SECTION_MAPS, SECTION_PID,
+    SELFTEST_ARG, nar_hash, section_header,
 };
 
 /// The image the monitor maps as persistent memory.
@@ -41,10 +41,6 @@ const STDERR_TERMINAL: &str = "/dev/rewind-tty1";
 const MARK_DEVICE: &str = "/dev/rewind";
 
 type Result<T> = std::result::Result<T, String>;
-
-/// The argument that turns this binary into the counter self-test's
-/// workload instead of PID 1.
-const SELFTEST_ARG: &str = "--selftest";
 
 /// Threads and atomic additions per thread in the self-test.
 const SELFTEST_THREADS: usize = 4;
@@ -362,7 +358,7 @@ fn spawn_and_reap(job: &Job, root: &str) -> Result<i32> {
 /// The counter self-test's workload: threads adding to one atomic with
 /// lock-prefixed instructions, the pattern AMD's branch counter overcounts
 /// on, interleaved with futex handoffs. It prints the total so a broken
-/// run shows.
+/// run shows. Then each probe, whose count the host knows in advance.
 fn selftest() {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
@@ -389,6 +385,178 @@ fn selftest() {
         let _ = t.join();
     }
     println!("selftest {}", total.load(Ordering::SeqCst));
+    probes();
+}
+
+/// Bytes in a page, which the exits probe touches one of an iteration.
+const PAGE_SIZE: usize = 4096;
+
+/// Runs each probe's loop for its iterations and for twice as many, between
+/// two of its marks each time. Without /dev/rewind there are no marks, and
+/// the host finds every probe's count missing.
+fn probes() {
+    use std::os::fd::AsRawFd;
+
+    let Ok(device) = open_device(MARK_DEVICE) else {
+        return;
+    };
+    let fd = device.as_raw_fd();
+
+    // Pages no iteration of the exits probe has touched, three times its
+    // iterations for its two runs.
+    let len = 3 * Probe::Exits.iterations() as usize * PAGE_SIZE;
+    // SAFETY: a new private mapping, which nothing else uses.
+    let pages = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            len,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+            -1,
+            0,
+        )
+    };
+    if pages == libc::MAP_FAILED {
+        return;
+    }
+    let mut fresh = pages.cast::<u8>();
+
+    for probe in Probe::ALL {
+        let mark = Mark::Probe(probe).to_string();
+        for iterations in [probe.iterations(), 2 * probe.iterations()] {
+            measure(fd, mark.as_bytes(), probe, iterations, fresh);
+            if probe == Probe::Exits {
+                // SAFETY: within the mapping, which holds both runs' pages.
+                fresh = unsafe { fresh.add(iterations as usize * PAGE_SIZE) };
+            }
+        }
+    }
+}
+
+/// One run of a probe's loop between two of its marks. Not inlined, so
+/// both runs of a probe take the same branches around the loop.
+#[inline(never)]
+fn measure(fd: i32, mark: &[u8], probe: Probe, iterations: u64, pages: *mut u8) {
+    // SAFETY: a valid buffer and its length.
+    unsafe { libc::write(fd, mark.as_ptr().cast(), mark.len()) };
+    probe_loop(probe, iterations, fd, pages);
+    // SAFETY: as above.
+    unsafe { libc::write(fd, mark.as_ptr().cast(), mark.len()) };
+}
+
+/// Runs `probe`'s loop `iterations` times, at least once. Each loop counts
+/// down a register and ends in `dec; jnz`, its backward branch. The
+/// conditional branches an iteration retires must match
+/// [`Probe::branches_per_iteration`].
+fn probe_loop(probe: Probe, iterations: u64, fd: i32, pages: *mut u8) {
+    use std::arch::asm;
+
+    match probe {
+        // Not taken, taken forward, and the backward branch: 3.
+        // SAFETY: registers only.
+        Probe::Branches => unsafe {
+            asm!(
+                "2:",
+                "xor {t:e}, {t:e}",
+                "jnz 3f",
+                "3:",
+                "jz 4f",
+                "ud2",
+                "4:",
+                "dec {n}",
+                "jnz 2b",
+                n = inout(reg) iterations => _,
+                t = out(reg) _,
+                options(nostack, nomem),
+            )
+        },
+
+        // A branch the locked add's result decides, never taken, since
+        // the word only grows, and the backward branch: 2.
+        Probe::Locked => {
+            let mut word = 0u64;
+            // SAFETY: `word` is a local the loop alone writes.
+            unsafe {
+                asm!(
+                    "2:",
+                    "lock inc qword ptr [{p}]",
+                    "jz 3f",
+                    "3:",
+                    "dec {n}",
+                    "jnz 2b",
+                    n = inout(reg) iterations => _,
+                    p = in(reg) &raw mut word,
+                    options(nostack),
+                )
+            }
+        }
+
+        // SSE, cmov, setcc, movzx, imul and bt all start with 0x0F, and
+        // only the backward branch is one: 1.
+        // SAFETY: registers only.
+        Probe::NotBranches => unsafe {
+            asm!(
+                "2:",
+                "pxor xmm0, xmm0",
+                "paddq xmm0, xmm1",
+                "cmp {n}, 1",
+                "cmovz {t}, {n}",
+                "setz {t:l}",
+                "movzx {t:e}, {t:l}",
+                "imul {t}, {n}",
+                "bt {t}, 0",
+                "dec {n}",
+                "jnz 2b",
+                n = inout(reg) iterations => _,
+                t = out(reg) _,
+                out("xmm0") _,
+                out("xmm1") _,
+                options(nostack, nomem),
+            )
+        },
+
+        // An empty write to /dev/rewind, which exits to the monitor, where
+        // the timer's interrupts come from: the two runs take 2 and 4.
+        // Then a branch on its result, never taken; a first touch of a
+        // page, which faults; and cpuid, an exit KVM handles. Then the
+        // backward branch: 2.
+        // SAFETY: `pages` has a fresh page for each iteration, and cpuid's
+        // rbx, which asm! cannot name, is saved around it.
+        Probe::Exits => unsafe {
+            asm!(
+                "2:",
+                "mov eax, {write}",
+                "mov edi, {fd:e}",
+                "xor esi, esi",
+                "xor edx, edx",
+                "syscall",
+                "test rax, rax",
+                "jnz 3f",
+                "3:",
+                "mov byte ptr [{page}], 1",
+                "add {page}, {page_size}",
+                "mov {save}, rbx",
+                "xor eax, eax",
+                "cpuid",
+                "mov rbx, {save}",
+                "dec {n}",
+                "jnz 2b",
+                n = inout(reg) iterations => _,
+                page = inout(reg) pages => _,
+                fd = in(reg) fd,
+                save = out(reg) _,
+                write = const libc::SYS_write,
+                page_size = const PAGE_SIZE,
+                out("rax") _,
+                out("rcx") _,
+                out("rdx") _,
+                out("rdi") _,
+                out("rsi") _,
+                out("r11") _,
+                options(nostack),
+            )
+        },
+    }
 }
 
 /// An inspection, started by the kernel in a forked run at Rewind's

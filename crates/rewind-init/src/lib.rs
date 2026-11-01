@@ -39,6 +39,8 @@ pub enum Mark {
     InspectBegin,
     /// The inspection is over, and how it ended.
     InspectEnd(InspectStatus),
+    /// Around each run of a counter self-test probe's loop.
+    Probe(Probe),
 }
 
 /// How each mark starts. A mark with more to say has it after a space.
@@ -47,6 +49,7 @@ const EXIT_MARK: &str = "rewind-exit";
 const OUTPUT_MARK: &str = "rewind-output";
 const INSPECT_BEGIN_MARK: &str = "rewind-inspect-begin";
 const INSPECT_END_MARK: &str = "rewind-inspect-end";
+const PROBE_MARK: &str = "rewind-probe";
 
 impl Mark {
     /// The mark a write to /dev/rewind holds, if it is one of these.
@@ -71,6 +74,7 @@ impl Mark {
             (INSPECT_END_MARK, Some(code)) => Some(Mark::InspectEnd(InspectStatus::from_code(
                 code.parse().ok()?,
             ))),
+            (PROBE_MARK, Some(name)) => Some(Mark::Probe(Probe::from_name(name)?)),
             _ => None,
         }
     }
@@ -84,6 +88,78 @@ impl std::fmt::Display for Mark {
             Mark::Output { path, hash } => write!(f, "{OUTPUT_MARK} {path} {hash}"),
             Mark::InspectBegin => write!(f, "{INSPECT_BEGIN_MARK}"),
             Mark::InspectEnd(status) => write!(f, "{INSPECT_END_MARK} {}", status.code()),
+            Mark::Probe(probe) => write!(f, "{PROBE_MARK} {}", probe.name()),
+        }
+    }
+}
+
+/// The argument that turns this binary into the counter self-test's
+/// workload instead of PID 1.
+pub const SELFTEST_ARG: &str = "--selftest";
+
+/// A loop in the counter self-test with a known count of conditional
+/// branches, each one built around a way counters have miscounted. The
+/// self-test runs each for [`Probe::iterations`] and twice that, with a
+/// [`Mark::Probe`] before and after each run: the branches around the loop
+/// are the same both times, so the difference of the two runs' counts is
+/// the loop's alone. The loops themselves are in init's `probe_loop`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Probe {
+    /// Taken and not-taken branches, forward and backward: a counter of
+    /// only some kinds of conditional branch reads short.
+    Branches,
+    /// A branch after a lock-prefixed add. Alone in one thread it counts
+    /// exactly on AMD Zen even without rr's workaround; the overcount needs
+    /// the threads of the self-test's workload.
+    Locked,
+    /// Instructions that start with 0x0F, as conditional jumps do, but do
+    /// not branch, which Nehalem counted as branches (Weaver et al.,
+    /// ISPASS 2013).
+    NotBranches,
+    /// A branch after a VM exit, a system call and a page fault, which
+    /// return to the loop through the kernel.
+    Exits,
+}
+
+impl Probe {
+    pub const ALL: [Probe; 4] = [
+        Probe::Branches,
+        Probe::Locked,
+        Probe::NotBranches,
+        Probe::Exits,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Probe::Branches => "branches",
+            Probe::Locked => "locked",
+            Probe::NotBranches => "not-branches",
+            Probe::Exits => "exits",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Probe> {
+        Probe::ALL.into_iter().find(|p| p.name() == name)
+    }
+
+    /// The conditional branches one iteration of the loop retires, its
+    /// own backward jump included.
+    pub fn branches_per_iteration(self) -> u64 {
+        match self {
+            Probe::Branches => 3,
+            Probe::Locked => 2,
+            Probe::NotBranches => 1,
+            Probe::Exits => 2,
+        }
+    }
+
+    /// Iterations in the shorter run of the loop. Each iteration of the
+    /// exits loop takes an exit and touches a page no iteration touched
+    /// before, so it runs fewer.
+    pub fn iterations(self) -> u64 {
+        match self {
+            Probe::Exits => 4_096,
+            _ => 1_000_000,
         }
     }
 }
@@ -424,7 +500,9 @@ mod tests {
             },
             Mark::InspectBegin,
             Mark::InspectEnd(InspectStatus::NotFound),
-        ];
+        ]
+        .into_iter()
+        .chain(Probe::ALL.map(Mark::Probe));
         for mark in marks {
             assert_eq!(Mark::parse(&mark.to_string()), Some(mark));
         }
@@ -437,6 +515,8 @@ mod tests {
             "rewind-exit x",
             "rewind-start now",
             "rewind-started",
+            "rewind-probe",
+            "rewind-probe loads",
             "build",
             "",
         ] {

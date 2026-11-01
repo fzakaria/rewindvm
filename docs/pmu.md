@@ -95,13 +95,21 @@ $ rewind pmu status
 cpu: AMD Zen (family 25)
 amd workaround (MSR 0xc0011020 bit 54): set by `rewind pmu enable` this boot
 perf_event_paranoid: 2
-self-test: 40045844 and 40045844 branches, exact at every exit
+probe branches: 3000000 branches, as built
+probe locked: 2000000 branches, as built
+probe not-branches: 1000000 branches, as built
+probe exits: 8192 branches, as built
+self-test: 58071879 and 58071879 branches, exact at every exit
 runs will use counter time
 ```
 
 The self-test runs a small program twice in the VM, threads adding to one
 shared number, which is the pattern the miscount comes from, and compares the
-branch count at every step. Rewind uses counter time when the self-test
+branch count at every step. It also runs four probes, loops whose branch
+counts are known from how they are written, and the counter must read
+exactly those counts. A counter can agree with itself and still count the
+wrong branches; a run recorded with it would replay differently on another
+machine. Rewind uses counter time when the self-test
 passes and, on AMD, the setting is on. On AMD the self-test alone is not
 enough: without the setting, its two runs sometimes agree by chance. Rewind
 remembers the verdict until the next boot, and `rewind pmu status` runs the

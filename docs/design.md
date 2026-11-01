@@ -1194,6 +1194,29 @@ runs as the user. A self-test that provokes the overcount can pass by chance
 without the workaround, so on AMD counter time also needs the workaround to be
 known to be set. [pmu.md](pmu.md) is the user's side of this.
 
+Agreeing with itself shows a counter is deterministic, not that it counts
+the right branches. One that counts only taken branches, as Intel's umask
+0x01 does on newer cores, agrees on every run of one machine, and a run
+recorded there replays differently on a machine that counts them all.
+Weaver, Terpstra and Moore call this overcount, as against nondeterminism,
+and find it with assembly whose counts are known by construction
+([Non-Determinism and Overcount on Modern Hardware Performance Counter
+Implementations](https://web.eece.maine.edu/~vweaver/projects/deterministic/deterministic_counters.pdf),
+ISPASS 2013). The self-test does the same with four probes in init: branches
+taken forward, taken backward and not taken; a branch after a locked add;
+instructions that start with 0x0F as conditional jumps do, which Nehalem
+counted; and a branch after a system call, a page fault and a VM exit. Each
+loop runs N and then 2N iterations, each run between two marks, and the
+monitor reads the counter at every mark. All else between a run's marks is
+the same both times, so the second run's count less the first's is the
+loop's N extra iterations alone, and must equal their known count. On an AMD
+family 25 laptop with the workaround set, all four match; with the
+taken-branch event 0xc4 in place of 0xd1, all four miss. With the workaround
+off, the locked probe still matched in 20 runs, while the threaded workload's
+two runs disagreed in 1 of 10: the overcount needs contention, and even then
+shows only sometimes, which is why AMD also needs the workaround known to be
+set.
+
 A hybrid Intel CPU has a PMU for each kind of core: `cpu_core` for its
 performance cores, `cpu_atom` for its efficient ones, and on some parts
 `cpu_lowpower`. A counter on a thread counts only while the thread is on a
