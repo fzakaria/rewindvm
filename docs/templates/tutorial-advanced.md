@@ -38,6 +38,11 @@ $ rewind where {{failing|short}} {{crash_step}}
 ```
 
 <!-- assert: grep -q '^#0 worker (src/pool.c:77)' {{out:where}} && grep -q '^> *77 .*p->queue->completed++;' {{out:where}} && grep -q 'start_thread' {{out:where}} && grep -q 'clone3' {{out:where}} -->
+<!-- assert: grep -q '^  p = 0x' {{out:where}} -->
+<!-- capture crash_job: (?m)^  job = (\d+)$ -->
+
+Under the source come the frame's arguments and locals, as gdb's `info args`
+and `info locals` print them: the worker had just reported job {{crash_job}}.
 
 `--tid` picks another thread, on the CPU or not. At step {{crash_step}}, where
 the worker faults, the main thread is waiting to join the workers:
@@ -48,8 +53,9 @@ $ rewind where {{failing|short}} {{crash_step}} --tid {{pid}}
 
 <!-- assert: grep -q 'pool_shutdown (src/pool.c:128)' {{out:where_main}} && grep -q 'pthread_join' {{out:where_main}} -->
 
-`--json` prints every frame and which one was chosen. For every frame of
-every thread, ask gdb for all the stacks of the process:
+`--json` prints every frame, with its arguments and locals, where each is
+and which one was chosen. For every frame of every thread, ask gdb for all
+the stacks of the process:
 
 ```console run name=all_bt
 $ rewind gdb {{failing|short}} {{crash_step}} --pid {{pid}} -- -batch -ex 'thread apply all bt' 2>/dev/null | grep -E '^Thread|src/|tests/'
@@ -75,13 +81,66 @@ so they work on runs recorded with a guest that lists its tasks, as these
 were.
 
 In the app, the s key opens the source panel at the line `rewind where` names,
-with the thread's frames below it; click a frame to see its line instead. The
-panel follows the playhead, and each new step takes a few seconds since it
-forks the run.
+with the frame's variables and the thread's frames below it; click a frame to
+see its line and variables instead. The panel follows the playhead, and each
+new step takes a few seconds since it forks the run.
 
 <!-- screenshot site/img/app-source: {{home}}/runs/{{failing}} --compare {{home}}/runs/{{passing}} --step {{crash_step}} --source ;; wait 20 -->
 
-![The app's source panel at step {{crash_step}} of the failing run: worker at src/pool.c:77 with p->queue->completed++ marked, and the frames worker, start_thread and clone3 below](../site/img/app-source.png)
+![The app's source panel at step {{crash_step}} of the failing run: worker at src/pool.c:77 with p->queue->completed++ marked and the values that can be blamed underlined, the worker's arguments and locals, and the frames worker, start_thread and clone3 below](../site/img/app-source.png)
+
+## Find who wrote a value
+
+The worker faulted reading through `p->queue`, which was NULL. `rewind blame`
+asks who wrote a value in memory at a step: it evaluates the expression in the
+thread's frame, as `where` picks it, and replays the run back from the step, a
+stretch at a time, with the value in the CPU's debug registers:
+
+```console run name=blame
+$ rewind blame {{failing|short}} --at {{crash_step}} 'p->queue'
+```
+
+<!-- assert: grep -q '^p->queue = 0x0 ' {{out:blame}} && grep -q 'pool.c:125  pool_shutdown  p->queue = NULL;' {{out:blame}} && grep -qE "^  thread {{crash_tid}}  pool.c:75  worker" {{out:blame}} -->
+<!-- capture blame_step: last written at step (\d+) -->
+<!-- set blame_gap: echo $(( {{crash_step}} - {{blame_step}} )) -->
+
+The main thread nulled it in `pool_shutdown`, {{blame_gap}} steps before the
+crash. The line is the store's own: a watch traps after the instruction that
+wrote, and blame names the instruction before. At that step the worker that
+crashes, thread {{crash_tid}}, was already at line 75, past its check of
+`p->stopping` on line 74 and printing. `--writes 2` goes one write further back,
+to the `calloc` in `pool_create`. A value gdb keeps in a register, such as
+`job` here, cannot be watched, and blame says so and names the values on the
+line that can.
+
+`--reads` lists every read as well as every write, of several values at once,
+since the process began or since `--since`. Over the last few dozen steps, the
+lines of the check, the count and the shutdown tell the race:
+
+<!-- set blame_since: echo $(( {{crash_step}} - 40 )) -->
+
+```console run name=blame_reads keep=step\s\sthread|pool\.c:(74|77|119|125)\s|^searched
+$ rewind blame {{failing|short}} --at {{crash_step}} 'p->stopping' 'p->queue' --reads --since {{blame_since}}
+```
+
+<!-- assert: awk '/ {{crash_tid}} [^ ]+ +read +0 +pool.c:74 / && !r {r=NR} / write +1 +pool.c:119 / {w=NR} / {{crash_tid}} [^ ]+ +read +0x0 +pool.c:77 / {c=NR} END {exit !(r && w && c && r < w && w < c)}' {{out:blame_reads}} -->
+
+Thread {{crash_tid}} read `p->stopping` as 0 on line 74, then main set it to 1
+and nulled the queue, then the worker counted its job through the NULL on line
+77. The check and the count are not under the lock.
+
+In the app, the values in the source panel that blame can watch are underlined.
+Hover one to see where it is, or why it cannot be blamed; click it to search.
+The search runs while the app stays live: the popover counts the steps it has
+searched, the timeline shows the stretch, and the answer names the write, the
+value before it and where the other threads were, with buttons to go to the
+write, show the reads as a lane per thread, or go one write further back. At
+the step the run failed at, the panel searches for the values on the failing
+line before you click.
+
+<!-- screenshot site/img/app-blame: {{home}}/runs/{{failing}} --compare {{home}}/runs/{{passing}} --step {{crash_step}} --source ;; wait 20 ;; click 1090 477 ;; wait 6 -->
+
+![The app's source panel at step {{crash_step}} with the answer for p->queue: it became 0x0 at step {{blame_step}}, written by the main thread in pool_shutdown at pool.c:125, p->queue = NULL, with the value before it, buttons to go to the write, show the reads and blame the earlier value, and where the other threads were](../site/img/app-blame.png)
 
 ## Find the step that decides it
 
@@ -192,8 +251,9 @@ In the app, Attach gdb opens the same session under the timeline:
 
 ## Run backwards to the write
 
-gdb can also run the fork backwards. From the crash itself, watch the pointer
-the worker read and run back to the last write to it:
+gdb gives the same answer as blame and can go on from there: it can run the
+fork backwards. From the crash itself, watch the pointer the worker read and
+run back to the last write to it:
 
 ```console run name=reverse
 $ rewind gdb {{failing|short}} {{crash_step}} -- -batch -ex 'watch -l p->queue' -ex reverse-continue -ex 'bt 2'
