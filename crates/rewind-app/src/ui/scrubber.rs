@@ -425,6 +425,7 @@ impl Scrubber {
         // Lookups still running when the app quits are stopped, as
         // dropping the viewer and the source panel stops them.
         let on_quit = cx.on_app_quit(|this: &mut Scrubber, _| {
+            this.blames.stop_all();
             this.viewer = None;
             this.file_diff = None;
             this.source = None;
@@ -590,6 +591,7 @@ impl Scrubber {
             .as_ref()
             .is_some_and(|shown| shown.run.id().is_some() && shown.run.id() == session.run.id());
         if !same_run {
+            self.blames.leave_run();
             self.history = History::default();
             self.stride = Stride::Every;
             self.view = None;

@@ -8,9 +8,8 @@
 //! and a second value can be clicked while the first is searched. Escape
 //! stops a search and closes its popover.
 
-use std::collections::HashMap;
 use std::ops::Range;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use futures::StreamExt;
 use gpui::{
@@ -20,12 +19,11 @@ use gpui::{
 };
 
 use crate::blame::{
-    AccessKind, Ask, Blame, Blamed, BlamedAccess, Expression, Searching, Target, access_place,
+    AccessKind, Ask, Blamed, BlamedAccess, Expression, Searching, Target, access_place,
     blameable_on, counted, file_line, lanes, look_after, overlay, thread_place,
 };
-use crate::clock::Instant;
+use crate::blame_jobs::{BlameEntry, BlameKey, Jobs, Start, Why};
 use crate::describe::thousands;
-use crate::engine::Cancel;
 use crate::source::Frame;
 use crate::theme::{self, layout, size};
 use crate::ui::icons::Icon;
@@ -33,31 +31,11 @@ use crate::ui::scrubber::Scrubber;
 use crate::ui::widgets::{Availability, ButtonStyle, button, icon, spinner, tooltip};
 use crate::view::View;
 
-/// What keys a search: the run, the step, the value's address and size,
-/// and what is asked.
-pub(crate) type BlameKey = (PathBuf, u64, u64, u64, Ask);
-
-/// A search, its answer once it comes, and what stops it.
-pub(crate) struct BlameEntry {
-    pub(crate) blame: Blame,
-    started: Instant,
-    /// The time it took, once it is done.
-    took_ms: Option<u64>,
-    cancel: Option<Cancel>,
-}
-
-impl BlameEntry {
-    /// How long the search has taken so far, or took.
-    fn elapsed_ms(&self) -> u64 {
-        self.took_ms
-            .unwrap_or_else(|| self.started.elapsed().as_millis() as u64)
-    }
-}
-
-/// Every search the app has made in this window, and the one on screen.
+/// Every search the app has made in this window, the one on screen, and
+/// the popover's place.
 #[derive(Default)]
 pub(crate) struct Blames {
-    entries: HashMap<BlameKey, BlameEntry>,
+    jobs: Jobs,
     /// The search the chip and the popover show.
     shown: Option<BlameKey>,
     /// Where the popover opens, while it is open.
@@ -91,21 +69,32 @@ impl Blames {
         self.popover.is_some() && self.shown.is_some()
     }
 
-    /// The search on screen.
-    fn shown(&self) -> Option<&BlameEntry> {
-        self.entries.get(self.shown.as_ref()?)
+    /// The search on screen, while it is of `run`: a search of another
+    /// run's steps and threads means nothing in this one.
+    fn shown_in(&self, run: &Path) -> Option<&BlameEntry> {
+        let key = self.shown.as_ref().filter(|k| k.run == run)?;
+        self.jobs.get(key)
     }
 
-    /// The search for `target`'s last write, when one was made.
+    /// The search for `target`'s last write in `run`, when one was made.
     fn last_write_search(&self, run: &Path, target: &Target) -> Option<&BlameEntry> {
-        let key = (
-            run.to_path_buf(),
-            target.step,
-            target.address,
-            target.size,
-            Ask::Writes(1),
-        );
-        self.entries.get(&key)
+        self.jobs.get(&BlameKey::of(run, target, Ask::Writes(1)))
+    }
+
+    /// Another run is on screen: the popover and the note close, and the
+    /// searches made ahead for this one's frame stop. Searches clicked
+    /// keep their answers for when this run is shown again.
+    pub(crate) fn leave_run(&mut self) {
+        self.shown = None;
+        self.popover = None;
+        self.drag = None;
+        self.hover = None;
+        self.jobs.ahead_only(&[], None);
+    }
+
+    /// Stops every search, as quitting does.
+    pub(crate) fn stop_all(&mut self) {
+        self.jobs.stop_all();
     }
 }
 
@@ -141,7 +130,8 @@ impl Scrubber {
     /// Searches for who wrote `target`, as `ask` asks, unless that search
     /// was made already, and shows it in the popover at `popover` when one
     /// is given. A search with no popover runs unseen, as the ones the
-    /// panel makes ahead of a click at a failure.
+    /// panel makes ahead of a click at a failure; one with a popover is a
+    /// click's.
     pub(super) fn blame(
         &mut self,
         target: Target,
@@ -152,35 +142,41 @@ impl Scrubber {
         let Some(session) = &self.session else {
             return;
         };
-        let run = session.run.path.clone();
-        let key: BlameKey = (run.clone(), target.step, target.address, target.size, ask);
-        if let Some(at) = popover {
-            self.blames.shown = Some(key.clone());
-            self.blames.popover = Some(at);
-        }
-        let failed = self
-            .blames
-            .entries
-            .get(&key)
-            .is_some_and(|e| matches!(e.blame.answer, Some(Err(_))));
-        if self.blames.entries.contains_key(&key) && !failed {
-            cx.notify();
-            return;
-        }
+        let key = BlameKey::of(&session.run.path, &target, ask);
+        let why = match popover {
+            Some(at) => {
+                self.blames.shown = Some(key.clone());
+                self.blames.popover = Some(at);
+                Why::Clicked
+            }
+            None => Why::Ahead,
+        };
+        self.blames.jobs.ask(key, target, why);
+        self.start_blames(cx);
+        cx.notify();
+    }
 
-        // The engine's lines come through a channel as it says them, and
-        // the channel closes when it is done.
-        let cancel = Cancel::default();
-        self.blames.entries.insert(
-            key.clone(),
-            BlameEntry {
-                blame: Blame::new(target.clone(), ask),
-                started: Instant::now(),
-                took_ms: None,
-                cancel: Some(cancel.clone()),
-            },
-        );
+    /// Runs the searches whose turn it is, each on a thread of its own.
+    fn start_blames(&mut self, cx: &mut Context<Self>) {
+        for start in self.blames.jobs.start() {
+            self.run_blame(start, cx);
+        }
+    }
+
+    /// Runs one search in the engine. Its lines come through a channel as
+    /// the engine says them, and the channel closes when it is done; each
+    /// carries the search's request, so a search stopped and asked for
+    /// again is not written into by the one stopped.
+    fn run_blame(&mut self, start: Start, cx: &mut Context<Self>) {
+        let Start {
+            key,
+            request,
+            target,
+            ask,
+            cancel,
+        } = start;
         let engine = self.engine.clone();
+        let run = key.run.clone();
         let (lines, mut said) = futures::channel::mpsc::unbounded::<String>();
         let task = crate::jobs::on_own_thread(move || {
             engine.blame(&run, &target, ask, &cancel, &mut |line| {
@@ -193,8 +189,7 @@ impl Scrubber {
                     continue;
                 };
                 let alive = this.update(cx, |this, cx| {
-                    if let Some(entry) = this.blames.entries.get_mut(&key) {
-                        entry.blame.progress = Some(progress);
+                    if this.blames.jobs.progress(&key, request, progress) {
                         cx.notify();
                     }
                 });
@@ -204,30 +199,28 @@ impl Scrubber {
             }
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
-                if let Some(entry) = this.blames.entries.get_mut(&key) {
-                    entry.took_ms = Some(entry.elapsed_ms());
-                    entry.blame.answer = Some(result);
-                    entry.cancel = None;
-                }
+                let shown = this.blames.shown.clone();
+                this.blames.jobs.finish(&key, request, result, shown.as_ref());
+                this.start_blames(cx);
                 cx.notify();
             });
         })
         .detach();
-        cx.notify();
     }
 
     /// Closes the popover; Escape on a search still going stops it too.
     pub(super) fn close_blame(&mut self, stop: bool, cx: &mut Context<Self>) {
         if stop
             && let Some(key) = self.blames.shown.clone()
-            && let Some(entry) = self.blames.entries.get(&key)
-            && entry.blame.searching()
+            && self
+                .blames
+                .jobs
+                .get(&key)
+                .is_some_and(|e| e.blame.searching())
         {
-            if let Some(cancel) = &entry.cancel {
-                cancel.cancel();
-            }
-            self.blames.entries.remove(&key);
+            self.blames.jobs.stop(&key);
             self.blames.shown = None;
+            self.start_blames(cx);
         }
         self.blames.popover = None;
         self.blames.drag = None;
@@ -276,12 +269,24 @@ impl Scrubber {
         let Some(line) = frame.line else {
             return;
         };
+        let Some(session) = &self.session else {
+            return;
+        };
+        let run = session.run.path.clone();
         let targets: Vec<Target> = frame
             .expressions
             .iter()
             .filter(|e| e.line == line)
             .filter_map(|e| crate::blame::target(e, pid, tid, step))
             .collect();
+
+        // Searches made ahead for another frame's values are not wanted.
+        let wanted: Vec<BlameKey> = targets
+            .iter()
+            .map(|t| BlameKey::of(&run, t, Ask::Writes(1)))
+            .collect();
+        let shown = self.blames.shown.clone();
+        self.blames.jobs.ahead_only(&wanted, shown.as_ref());
         for target in targets {
             self.blame(target, Ask::Writes(1), None, cx);
         }
@@ -389,7 +394,7 @@ impl Scrubber {
     /// clicked, the search's counts and then its answer.
     pub(super) fn render_blame_popover(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let at = self.blames.popover?;
-        let entry = self.blames.shown()?;
+        let entry = self.blames.shown_in(&self.session.as_ref()?.run.path)?;
         let card = self.blame_card(entry, cx);
         let position = gpui::point(at.x, at.y + px(POPOVER_DROP));
         Some(
@@ -763,7 +768,7 @@ impl Scrubber {
     /// the time while it searches, then the write's step. A click opens
     /// its popover again.
     pub(super) fn blame_chip(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
-        let entry = self.blames.shown()?;
+        let entry = self.blames.shown_in(&self.session.as_ref()?.run.path)?;
         let searching = entry.blame.searching();
         let (border, color) = match (&entry.blame.answer, searching) {
             (_, true) => (theme::BLUE_BORDER, theme::BLUE_SOFT),
@@ -804,7 +809,11 @@ impl Scrubber {
     /// a band back from the value's step, its edge while it goes, and the
     /// write it found as a mark that goes to it.
     pub(super) fn blame_marks(&self, view: View, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let Some(entry) = self.blames.shown() else {
+        let Some(entry) = self
+            .session
+            .as_ref()
+            .and_then(|s| self.blames.shown_in(&s.run.path))
+        else {
             return Vec::new();
         };
         let blame = &entry.blame;

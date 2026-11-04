@@ -100,7 +100,8 @@ impl Cancel {
         }
     }
 
-    fn cancelled(&self) -> bool {
+    /// Whether the command was stopped, or is to be as it starts.
+    pub fn is_cancelled(&self) -> bool {
         self.0.lock().unwrap().cancelled
     }
 
@@ -707,7 +708,7 @@ impl Engine for CliEngine {
         };
 
         // In a process group of its own, which cancelling stops whole.
-        if cancel.cancelled() {
+        if cancel.is_cancelled() {
             return Err(EngineError::Cancelled);
         }
         let mut child = Command::new(&self.program)
@@ -762,7 +763,7 @@ impl Engine for CliEngine {
             .join()
             .unwrap_or_else(|_| Ok(Vec::new()))
             .map_err(|e| failed(e.to_string()))?;
-        if cancel.cancelled() {
+        if cancel.is_cancelled() {
             return Err(EngineError::Cancelled);
         }
         if bytes.len() > viewer::MAX_SHOWN {
@@ -1021,7 +1022,7 @@ impl CliEngine {
         progress: &mut dyn FnMut(&str),
     ) -> EngineResult<Streamed> {
         let command = self.command_line(args);
-        if cancel.cancelled() {
+        if cancel.is_cancelled() {
             return Err(EngineError::Cancelled);
         }
         let mut child = Command::new(&self.program)
@@ -1061,7 +1062,7 @@ impl CliEngine {
         let status = child.wait().map_err(|e| self.spawn_error(e, &command))?;
         cancel.finished();
         let stdout = answer.join().unwrap_or_default();
-        if cancel.cancelled() {
+        if cancel.is_cancelled() {
             return Err(EngineError::Cancelled);
         }
         Ok(Streamed {

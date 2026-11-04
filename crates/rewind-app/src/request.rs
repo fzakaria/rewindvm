@@ -7,8 +7,8 @@
 //! request in the window has had, and an answer is applied only while the
 //! number it carries is still the one its asker waits on.
 
-/// One request's number.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// One request's number: a later request's is greater.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Request(u64);
 
 /// Where a window's requests get their numbers. It is never reset, so a

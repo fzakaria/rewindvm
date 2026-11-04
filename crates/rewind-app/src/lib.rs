@@ -13,6 +13,7 @@ pub mod address;
 pub mod answers;
 pub mod archive;
 pub mod blame;
+pub mod blame_jobs;
 pub mod bookmarks;
 pub mod clock;
 pub mod compare;

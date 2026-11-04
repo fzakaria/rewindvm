@@ -120,7 +120,7 @@ pub enum Location {
 }
 
 /// How a value's bytes print.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ValueClass {
     Pointer,
