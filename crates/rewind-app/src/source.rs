@@ -365,7 +365,7 @@ mod tests {
     fn at_the_crash() -> String {
         let clone3: Vec<String> = (70..=86).map(|n| format!("asm {n}")).collect();
         format!(
-            r#"{{"run":"8fd5378ddf70075e","step":5060,"pid":166,"tid":174,"process":"test_pool_shutdown","frames":[{{"level":0,"function":"worker","file":"src/pool.c","fullname":"/build/mylib/src/pool.c","line":77,"pc":"0x55bfaf437437","object":"/build/mylib/tests/test_pool_shutdown","arguments":[],"locals":[]}},{{"level":1,"function":"start_thread","file":"pthread_create.c","fullname":null,"line":454,"pc":"0x7f615854d7d1","object":"/nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6","arguments":[],"locals":[]}},{{"level":2,"function":"__GI___clone3","file":"../sysdeps/unix/sysv/linux/x86_64/clone3.S","fullname":"/glibc/clone3.S","line":78,"pc":"0x7f61585d9b1c","object":"/nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6","arguments":[],"locals":[]}}],"chosen":0,"files":{{"/build/mylib/src/pool.c":{{"extent":"whole","first":1,"text":{pool}}},"/glibc/clone3.S":{{"extent":"window","first":70,"text":{clone3}}}}}}}"#,
+            r#"{{"run":"8fd5378ddf70075e","step":5060,"pid":166,"tid":174,"process":"test_pool_shutdown","frames":[{{"level":0,"function":"worker","file":"src/pool.c","fullname":"/build/mylib/src/pool.c","line":77,"pc":"0x55bfaf437437","object":"/build/mylib/tests/test_pool_shutdown","arguments":[],"locals":[],"expressions":[],"evaluated":[]}},{{"level":1,"function":"start_thread","file":"pthread_create.c","fullname":null,"line":454,"pc":"0x7f615854d7d1","object":"/nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6","arguments":[],"locals":[],"expressions":[],"evaluated":[]}},{{"level":2,"function":"__GI___clone3","file":"../sysdeps/unix/sysv/linux/x86_64/clone3.S","fullname":"/glibc/clone3.S","line":78,"pc":"0x7f61585d9b1c","object":"/nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6","arguments":[],"locals":[],"expressions":[],"evaluated":[]}}],"chosen":0,"files":{{"/build/mylib/src/pool.c":{{"extent":"whole","first":1,"text":{pool}}},"/glibc/clone3.S":{{"extent":"window","first":70,"text":{clone3}}}}}}}"#,
             pool = serde_json::to_string(&pool_c()).unwrap(),
             clone3 = serde_json::to_string(&clone3.join("\n")).unwrap(),
         )
@@ -505,6 +505,7 @@ mod tests {
         let variable = |name: &str, value: &str| Variable {
             name: name.into(),
             value: value.into(),
+            location: rewind_trace::located::Location::OptimizedOut,
         };
         located.frames[0].arguments = vec![variable("arg", "0x4c6a20")];
         located.frames[0].locals = vec![
@@ -536,6 +537,8 @@ mod tests {
             object: Some("/newroot/src/big".into()),
             arguments: Vec::new(),
             locals: Vec::new(),
+            expressions: Vec::new(),
+            evaluated: Vec::new(),
         };
         assert_eq!(frame.function_label(), "0x401913");
         assert_eq!(frame.place_label(), "big");

@@ -1470,7 +1470,7 @@ mod tests {
     fn locate_returns_the_chosen_frame_or_the_engines_reason() {
         let dir = temp_dir("where");
         let run = dir.join("run");
-        let json = r#"{"run":"r","step":5060,"pid":166,"tid":174,"process":"test_pool_shutdown","frames":[{"level":0,"function":"worker","file":"src/pool.c","fullname":null,"line":77,"pc":"0x55bfaf437437","object":"/build/mylib/tests/test_pool_shutdown","arguments":[],"locals":[]}],"chosen":0,"files":{}}\n"#;
+        let json = r#"{"run":"r","step":5060,"pid":166,"tid":174,"process":"test_pool_shutdown","frames":[{"level":0,"function":"worker","file":"src/pool.c","fullname":null,"line":77,"pc":"0x55bfaf437437","object":"/build/mylib/tests/test_pool_shutdown","arguments":[],"locals":[],"expressions":[],"evaluated":[]}],"chosen":0,"files":{}}\n"#;
         let engine = fake_engine(&dir, json, "rewind: walking the stack in gdb\n", 0);
         let thread = Thread::Of { pid: 166, tid: 174 };
         let located =

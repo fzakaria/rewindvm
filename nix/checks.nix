@@ -1518,9 +1518,11 @@ in
   # in pool.c, with its source from the VM and the line marked, and two
   # frames that called it. --json lists the same frame as the chosen one,
   # and carries pool.c whole with the write on that line. Both list the
-  # worker's argument and local. The main thread, off the CPU then, waits
-  # in pool_run's join, called from main, whose struct reads as main set
-  # it. Boots the VM, so it needs /dev/kvm.
+  # worker's argument and local. The JSON names stdout, on the line after
+  # the write, as in memory and small enough to watch, and leaves the
+  # words of the write's comment out. The main thread, off the CPU then, waits in
+  # pool_run's join, called from main, whose struct reads as main set it
+  # and is in memory. Boots the VM, so it needs /dev/kvm.
   where =
     pkgs.runCommand "rewind-where"
       {
@@ -1568,6 +1570,14 @@ in
         jq -e '.frames[.chosen] | (.arguments | map(.name)) == ["arg"]
           and (.locals | map(.name)) == ["p"]' where.json
 
+        # The line after the write names stdout, a pointer in memory,
+        # small enough to watch; the words of the write's comment are no
+        # expression.
+        jq -e --argjson line "$(line 'the write')" '.frames[.chosen].expressions
+          | (map(select(.line == $line + 1 and .text == "stdout"))[0].location
+              | .kind == "memory" and .size == 8 and .class == "pointer")
+            and (map(select(.line == $line)) | all(.text != "write" and .text != "the"))' where.json
+
         rewind where pool "$step" --tid "$pid" > main
         cat main
         grep -q "^#[1-9][0-9]* pool_run (pool.c:$(line 'the wait'))$" main
@@ -1576,6 +1586,8 @@ in
         rewind where pool "$step" --tid "$pid" --json > main.json
         jq -e '.frames[] | select(.function == "main") | .locals[]
           | select(.name == "p") | .value == "{job = 1}"' main.json
+        jq -e '.frames[] | select(.function == "main") | .locals[]
+          | select(.name == "p") | .location.kind == "memory"' main.json
 
         # Removing the run takes its source cache with it.
         id=$(basename "$(dirname "$(grep -l '"name": "pool"' $REWIND_HOME/runs/*/manifest.json)")")
