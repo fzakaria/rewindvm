@@ -130,6 +130,8 @@ pub struct Found {
     /// How many accesses the search saw past the ones it kept, when it
     /// stopped because of `cap`.
     pub dropped: u64,
+    /// How long the search took, in milliseconds.
+    pub elapsed_ms: u64,
 }
 
 /// What a search says as it goes.
@@ -289,6 +291,7 @@ pub fn search_keeping(
         now: now.unwrap_or_default(),
         windows: progress.windows,
         dropped,
+        elapsed_ms: progress.elapsed_ms,
     };
     Ok((found, machine))
 }

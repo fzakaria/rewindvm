@@ -474,28 +474,31 @@ impl Saying {
     /// Says the search is done and its accesses are being named.
     fn naming(&mut self, found: &accesses::Found, before: u64) {
         match self.format {
-            Format::Json => {
-                let writes = found
-                    .accesses
-                    .iter()
-                    .filter(|a| a.kind == Kind::Write)
-                    .count();
-                let naming = Searching {
-                    phase: Phase::Naming,
-                    before,
-                    window: (found.searched_from, before),
-                    reached: before,
-                    steps: before - found.searched_from,
-                    windows: found.windows,
-                    writes: writes as u64,
-                    reads: (found.accesses.len() - writes) as u64,
-                    elapsed_ms: 0,
-                };
-                eprintln!("{}", naming.line());
-            }
+            Format::Json => eprintln!("{}", naming_line(found, before).line()),
             Format::Auto => crate::clear_status(),
             Format::Off => {}
         }
+    }
+}
+
+/// The progress line that says a search before step `before` is done
+/// and its accesses are being named.
+fn naming_line(found: &accesses::Found, before: u64) -> Searching {
+    let writes = found
+        .accesses
+        .iter()
+        .filter(|a| a.kind == Kind::Write)
+        .count();
+    Searching {
+        phase: Phase::Naming,
+        before,
+        window: (found.searched_from, before),
+        reached: before,
+        steps: before - found.searched_from,
+        windows: found.windows,
+        writes: writes as u64,
+        reads: (found.accesses.len() - writes) as u64,
+        elapsed_ms: found.elapsed_ms,
     }
 }
 
@@ -713,6 +716,26 @@ mod tests {
             .map(|a| (a.step, a.value))
             .collect();
         assert_eq!(kept, [(2, 1), (3, 0), (5, 0)]);
+    }
+
+    /// The line that says naming has begun carries how long the search
+    /// took, from a made-up search of one write and one read.
+    #[test]
+    fn the_naming_line_says_how_long_the_search_took() {
+        let found = accesses::Found {
+            accesses: vec![access(10, 0, Kind::Write), access(11, 0, Kind::Read)],
+            searched_from: 4,
+            initial: Vec::new(),
+            now: Vec::new(),
+            windows: 2,
+            dropped: 0,
+            elapsed_ms: 1234,
+        };
+        let line = naming_line(&found, 20);
+        assert_eq!(line.phase, Phase::Naming);
+        assert_eq!(line.window, (4, 20));
+        assert_eq!((line.writes, line.reads), (1, 1));
+        assert_eq!(line.elapsed_ms, 1234);
     }
 
     /// Counts read as words: one write, two reads.
