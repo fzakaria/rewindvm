@@ -35,8 +35,11 @@
 //! is renamed over the old, the old one still names every page where it
 //! was; after, the new one names every page where it is now.
 
-// Only rewind-vmm and the command touch memory and the kernel directly.
-#![forbid(unsafe_code)]
+// Only rewind-vmm and the command touch memory and the kernel directly;
+// the store's one exception, mapping its sorted copy, is in mapping.rs.
+#![deny(unsafe_code)]
+
+mod mapping;
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
@@ -179,7 +182,7 @@ impl Sorted {
             return None;
         }
         let len = usize::try_from(body).ok()? + SORTED_HEADER;
-        let map = rewind_mapped::Mapped::file(&file, len).ok()?;
+        let map = mapping::sorted(&file, len).ok()?;
         Some(Sorted {
             map,
             entries,

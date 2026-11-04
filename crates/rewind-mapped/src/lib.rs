@@ -7,10 +7,12 @@
 //! mapping lives here, on its own.
 //!
 //! A mapping is sound only while nothing writes the file or cuts it
-//! short: a read past a shortened file's end raises SIGBUS. The store
-//! writes each sorted copy under a name of its own and renames it into
-//! place, so a copy is never changed once it has its name, and a mapping
-//! of the one replaced keeps its contents.
+//! short: a read past a shortened file's end raises SIGBUS. Nothing in a
+//! process can check that of a file, so making a mapping is unsafe, and
+//! its caller says why the file stays as it is. The store writes each
+//! sorted copy under a name of its own and renames it into place, so a
+//! copy is never changed once it has its name, and a mapping of the one
+//! replaced keeps its contents.
 
 use std::fs::File;
 use std::os::fd::AsRawFd;
@@ -34,11 +36,24 @@ impl std::fmt::Debug for Mapped {
 }
 
 impl Mapped {
-    /// The first `len` bytes of `file`, mapped read-only. The file must
-    /// be at least `len` bytes long and, while the mapping is kept, never
-    /// written or cut short; one that is replaced is renamed over. Fails
-    /// for `len` 0, which mmap refuses.
-    pub fn file(file: &File, len: usize) -> std::io::Result<Mapped> {
+    /// The first `len` bytes of `file`, mapped read-only. Fails for
+    /// `len` 0, which mmap refuses, or a file shorter than `len`.
+    ///
+    /// # Safety
+    ///
+    /// While the mapping is kept, nothing may write the file's first
+    /// `len` bytes or cut it short, in this process or any other: a write
+    /// changes bytes a slice from [`Mapped::bytes`] has handed out, and a
+    /// read past a shortened file's end raises SIGBUS. A file replaced
+    /// by renaming another over its name, or removed, stays as it was.
+    ///
+    /// A safe caller cannot make one:
+    ///
+    /// ```compile_fail,E0133
+    /// let file = std::fs::File::open("/dev/null").unwrap();
+    /// let mapped = rewind_mapped::Mapped::file(&file, 1);
+    /// ```
+    pub unsafe fn file(file: &File, len: usize) -> std::io::Result<Mapped> {
         if len == 0 {
             return Err(std::io::Error::other("an empty file cannot be mapped"));
         }
@@ -48,8 +63,8 @@ impl Mapped {
             ));
         }
         // SAFETY: a fresh read-only mapping of a file this process holds
-        // open, no longer than the file; the caller keeps the file as it is
-        // while the mapping lives.
+        // open, no longer than the file; the caller promises the file stays
+        // as it is while the mapping lives.
         let ptr = unsafe {
             libc::mmap(
                 std::ptr::null_mut(),
@@ -105,7 +120,8 @@ mod tests {
         let dir = dir("keeps");
         let path = dir.join("sorted");
         std::fs::write(&path, b"abcdef").unwrap();
-        let mapped = Mapped::file(&File::open(&path).unwrap(), 4).unwrap();
+        // SAFETY: the test alone has the file, and renames over it.
+        let mapped = unsafe { Mapped::file(&File::open(&path).unwrap(), 4) }.unwrap();
         assert_eq!(mapped.bytes(), b"abcd");
 
         let new = dir.join("sorted.new");
@@ -123,9 +139,11 @@ mod tests {
         let path = dir.join("short");
         std::fs::write(&path, b"ab").unwrap();
         let file = File::open(&path).unwrap();
-        assert!(Mapped::file(&file, 0).is_err());
-        assert!(Mapped::file(&file, 3).is_err());
-        assert!(Mapped::file(&file, 2).is_ok());
+        // SAFETY: the test alone has the file, and never changes it.
+        let map = |len| unsafe { Mapped::file(&file, len) };
+        assert!(map(0).is_err());
+        assert!(map(3).is_err());
+        assert!(map(2).is_ok());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
