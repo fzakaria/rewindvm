@@ -130,10 +130,11 @@ new step takes a few seconds since it forks the run.
 
 ## Find who wrote a value
 
-The worker faulted reading through `p->queue`, which was NULL. `rewind blame`
-asks who wrote a value in memory at a step: it evaluates the expression in the
-thread's frame, as `where` picks it, and replays the run back from the step, a
-stretch at a time, with the value in the CPU's debug registers:
+The worker crashed because `p->queue` was NULL. `rewind blame` finds the
+write that put a value there. Give it a step and an expression. It works out
+the expression's address in the thread that `where` picks. Then it replays the
+stretch of the run before the step, with that address in the CPU's debug
+registers. If the stretch holds no write, it tries the stretch before that:
 
 ```console
 $ rewind blame 4736382d --at 4782 'p->queue'
@@ -155,18 +156,25 @@ other threads at step 4768:
 searched back to step 4768, 1 keyframe window, 1 write, 1.4s
 ```
 
-The main thread nulled it in `pool_shutdown`, 14 steps before the
-crash. The line is the store's own: a watch traps after the instruction that
-wrote, and blame names the instruction before. At that step the worker that
-crashes, thread 171, was already at line 75, past its check of
-`p->stopping` on line 74 and printing. `--writes 2` goes one write further back,
-to the `calloc` in `pool_create`. A value gdb keeps in a register, such as
-`job` here, cannot be watched, and blame says so and names the values on the
-line that can.
+The main thread set `p->queue` to NULL on line 125, in `pool_shutdown`. It did
+so at step 4768, 14 steps before the crash. blame also
+prints the value before the write.
 
-`--reads` lists every read as well as every write, of several values at once,
-since the process began or since `--since`. Over the last few dozen steps, the
-lines of the check, the count and the shutdown tell the race:
+The last part shows where the other threads were at step 4768. Thread
+171 is the worker that crashes later. It was on line 75, printing. It
+had already passed the check of `p->stopping` on line 74.
+
+`--writes 2` goes back one more write. Here that is the `calloc` in
+`pool_create`.
+
+blame can only watch values in memory. gdb keeps some values in registers, such
+as `job` here. For those, blame says it cannot watch them and lists the values
+on the same line that it can watch.
+
+`--reads` lists the reads as well as the writes. It takes several expressions
+at once. It searches back to the start of the process, or to the step given
+with `--since`. Here it searches the last 40 steps. The output below keeps only
+lines 74 and 77 of the worker and lines 119 and 125 of `pool_shutdown`:
 
 ```console
 $ rewind blame 4736382d --at 4782 'p->stopping' 'p->queue' --reads --since 4742
@@ -187,17 +195,26 @@ $ rewind blame 4736382d --at 4782 'p->stopping' 'p->queue' --reads --since 4742
 searched back to step 4742, 2 keyframe windows, 2 writes, 11 reads, 1.6s
 ```
 
-Thread 171 read `p->stopping` as 0 on line 74, then main set it to 1
-and nulled the queue, then the worker counted its job through the NULL on line 77. The check and the count are not under the lock.
+Read in order, the rows show the race:
 
-In the app, the values in the source panel that blame can watch are underlined.
-Hover one to see where it is, or why it cannot be blamed; click it to search.
-The search runs while the app stays live: the popover counts the steps it has
-searched, the timeline shows the stretch, and the answer names the write, the
-value before it and where the other threads were, with buttons to go to the
-write, show the reads as a lane per thread, or go one write further back. At
-the step the run failed at, the panel searches for the values on the failing
-line before you click.
+1. Thread 171 reads `p->stopping` as 0 on line 74. So it goes on to
+   count its job.
+2. The main thread sets `p->stopping` to 1, then sets `p->queue` to NULL.
+3. Thread 171 reads `p->queue` on line 77 and gets NULL.
+
+The worker does not hold the lock between line 74 and line 77. Nothing stops
+the main thread from running in between.
+
+In the app, the source panel underlines each value that blame can watch.
+Hover over a value to see where it is kept, or why blame cannot watch it. Click
+it to search. You can keep using the app while the search runs. The popover
+counts the steps searched so far, and the timeline marks the stretch being
+searched.
+
+The answer names the write, the value before it, and where the other threads
+were. Its buttons go to the write, show the reads with one lane per thread, or
+blame the write before this one. At the step where the run failed, the panel
+starts searching for the failing line's values before you click.
 
 ![The app's source panel at step 4782 with the answer for p->queue: it became 0x0 at step 4768, written by the main thread in pool_shutdown at pool.c:125, p->queue = NULL, with the value before it, buttons to go to the write, show the reads and blame the earlier value, and where the other threads were](../site/img/app-blame.png)
 
