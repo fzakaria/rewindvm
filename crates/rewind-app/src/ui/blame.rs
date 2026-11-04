@@ -488,6 +488,10 @@ impl Scrubber {
 
         // What to do next.
         let step = last.step;
+        let writer = crate::source::Thread::Of {
+            pid: blamed.pid,
+            tid: last.tid,
+        };
         let reads_target = target.clone();
         let earlier_target = target.clone();
         let at = self.blames.popover;
@@ -498,10 +502,14 @@ impl Scrubber {
             .child(
                 small_button("blame-go", ButtonStyle::Primary, "Go to the write")
                     .tooltip(tooltip(format!(
-                        "Move the playhead to step {}: a fork there is just before the write.",
-                        thousands(step)
+                        "Move the playhead to step {}, with the source of thread {}, the writer: \
+                         a fork there is just before the write, which comes later in the step.",
+                        thousands(step),
+                        last.tid
                     )))
-                    .on_click(cx.listener(move |this, _, _, cx| this.jump_to(step, cx))),
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.show_thread_at(step, writer, cx)),
+                    ),
             )
             .child(
                 small_button("blame-reads", ButtonStyle::Neutral, "Show reads too").on_click(

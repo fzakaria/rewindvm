@@ -58,6 +58,15 @@ fn thread_at(timeline: &Timeline, step: u64) -> Thread {
         .map_or(Thread::OnTheCpu, |e| target(e.pid, e.tid))
 }
 
+/// Whose stack `panel` shows at `step`: the thread pinned there, else as
+/// [`thread_at`] picks it.
+fn panel_thread(panel: &SourcePanel, timeline: &Timeline, step: u64) -> Thread {
+    match panel.pinned {
+        Some((at, thread)) if at == step => thread,
+        _ => thread_at(timeline, step),
+    }
+}
+
 /// How long the playhead must rest before the panel asks again.
 const DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(400);
 
@@ -96,6 +105,9 @@ pub struct SourcePanel {
     highlighters: HashMap<String, Highlighter>,
     /// How far the shown file's lines are scrolled sideways.
     sideways: Sideways,
+    /// A thread the panel shows at a step in place of the step's event's,
+    /// as going to a write shows the writer's.
+    pinned: Option<(u64, Thread)>,
 }
 
 impl SourcePanel {
@@ -141,12 +153,26 @@ impl Scrubber {
             scroll: UniformListScrollHandle::new(),
             highlighters: HashMap::new(),
             sideways: Sideways::default(),
+            pinned: None,
         });
         self.clear_selection_in(&[Surface::Viewer, Surface::Source, Surface::Variables]);
         if readable {
             self.fetch_source(cx);
         }
         cx.notify();
+    }
+
+    /// Moves the playhead to `step` with the source panel open on
+    /// `thread` there, in place of the step's event's thread.
+    pub(super) fn show_thread_at(&mut self, step: u64, thread: Thread, cx: &mut Context<Self>) {
+        if self.source.is_none() {
+            self.open_source(cx);
+        }
+        self.right_tab = RightTab::Source;
+        if let Some(panel) = &mut self.source {
+            panel.pinned = Some((step, thread));
+        }
+        self.jump_to(step, cx);
     }
 
     pub(super) fn close_source(&mut self, cx: &mut Context<Self>) {
@@ -223,7 +249,7 @@ impl Scrubber {
             cx.notify();
             return;
         }
-        let thread = thread_at(timeline, step);
+        let thread = panel_thread(panel, timeline, step);
         let run = session.run.path.clone();
         if let Some(answer) = self.known_place() {
             self.show_place(step, Ok(answer), cx);
@@ -292,7 +318,7 @@ impl Scrubber {
         if panel.step < timeline.job_start.unwrap_or(0) {
             return None;
         }
-        let thread = thread_at(timeline, panel.step);
+        let thread = panel_thread(panel, timeline, panel.step);
         let key: PlaceKey = (session.run.path.clone(), thread, panel.step);
         self.place_answers.get(&key)
     }
