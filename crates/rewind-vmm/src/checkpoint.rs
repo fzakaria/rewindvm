@@ -185,6 +185,16 @@ impl Machine {
         Ok(id)
     }
 
+    /// The non-zero pages of the keyframes the machine was restored from,
+    /// each with the hash of its contents, in page order; None for a
+    /// machine that booted.
+    pub fn restored_pages(&self) -> Option<&[(u32, [u8; 32])]> {
+        match &self.origin {
+            Origin::Restored(pages) => Some(pages),
+            Origin::Boot => None,
+        }
+    }
+
     /// The step checkpoint `id` was taken at.
     pub fn checkpoint_step(&self, id: CheckpointId) -> u64 {
         self.checkpoints.taken[id.0].step

@@ -554,7 +554,10 @@ pub enum Keep {
 /// or the first keyframe kept until the replay is done.
 struct Base {
     step: Option<u64>,
-    memory: crate::keyframes::Memory,
+    /// Memory as of that keyframe, built from the machine's restored
+    /// pages the first time a keyframe is kept: a map of every page,
+    /// 0.36 s for a 3 GB guest, which most forks never need.
+    memory: Option<crate::keyframes::Memory>,
     store: Option<rewind_store::Store>,
 }
 
@@ -1181,7 +1184,7 @@ impl Run {
                 )?;
                 let base = Base {
                     step: Some(kf),
-                    memory: crate::keyframes::Memory::of(&chain),
+                    memory: None,
                     store: Some(store),
                 };
                 (machine, base)
@@ -1189,7 +1192,7 @@ impl Run {
             None => {
                 let base = Base {
                     step: None,
-                    memory: crate::keyframes::Memory::default(),
+                    memory: Some(crate::keyframes::Memory::default()),
                     store: None,
                 };
                 (Machine::boot(&config)?, base)
@@ -1300,8 +1303,14 @@ impl Run {
             Some(store) => store,
             None => base.store.insert(rewind_store::Store::open(&home.store())?),
         };
+        let memory = base.memory.get_or_insert_with(|| {
+            machine
+                .restored_pages()
+                .map(crate::keyframes::Memory::from_pages)
+                .unwrap_or_default()
+        });
         let mut kf = machine.keyframe(&mut crate::keyframes::StorePages(store), base.step)?;
-        base.memory.trim(kf.parent, &mut kf.pages);
+        memory.trim(kf.parent, &mut kf.pages);
         store.sync()?;
         crate::keyframes::save(&owner, &kf)
             .with_context(|| format!("keeping a keyframe at step {step} in {}", owner.display()))?;

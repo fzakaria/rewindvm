@@ -413,6 +413,14 @@ impl Memory {
         memory
     }
 
+    /// Memory whose non-zero pages are `pages`, as a machine restored
+    /// from keyframes lists them.
+    pub fn from_pages(pages: &[(u32, [u8; 32])]) -> Memory {
+        Memory {
+            pages: pages.iter().copied().collect(),
+        }
+    }
+
     /// Leaves out of a new keyframe's `pages` the ones whose contents are
     /// what memory already holds: pages the guest wrote back to the same
     /// bytes, often zero, since the keyframe at `parent`. Restoring sets
@@ -660,6 +668,34 @@ mod format_tests {
         kf.pages = vec![(1, [1; 32]), (2, [2; 32])];
         let bytes = encode(&kf).unwrap();
         assert!(decode(&bytes[..bytes.len() - 1]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod memory_tests {
+    // Memory as a chain of keyframes leaves it, built two ways.
+    use super::*;
+
+    /// Memory built from the non-zero pages a restore leaves, in page
+    /// order, is memory built from the chain: a full keyframe of pages 1
+    /// and 2, then a delta that rewrites 2, zeroes 1 and adds 3.
+    #[test]
+    fn memory_from_restored_pages_is_memory_from_the_chain() {
+        let mut full = Keyframe::default();
+        full.pages = vec![(1, [1; 32]), (2, [2; 32])];
+        let mut delta = Keyframe::default();
+        delta.parent = Some(0);
+        delta.pages = vec![(1, ZERO_PAGE), (2, [5; 32]), (3, [3; 32])];
+        let of_chain = Memory::of(&[full, delta]);
+        let restored = Memory::from_pages(&[(2, [5; 32]), (3, [3; 32])]);
+        for page in 0..5 {
+            assert_eq!(
+                restored.hash_of(page),
+                of_chain.hash_of(page),
+                "page {page}"
+            );
+        }
+        assert!(restored.differing(&of_chain).is_empty());
     }
 }
 
