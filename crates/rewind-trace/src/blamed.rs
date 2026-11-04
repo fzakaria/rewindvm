@@ -50,7 +50,7 @@ pub struct Watched {
 }
 
 /// Whether an access read the value or wrote it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AccessKind {
     Read,

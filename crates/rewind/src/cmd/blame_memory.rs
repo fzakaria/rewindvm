@@ -103,8 +103,9 @@ pub(crate) fn blame(home: &Home, asked: Asked<'_>) -> Result<ExitCode> {
         kept = last_writes(kept, asked.writes, named.values.len());
     }
 
-    // Each access's source line and the other threads at the last write,
-    // from one gdb session on a fork at that write's step.
+    // Each access's source line and the other threads just after the
+    // last write, from one gdb session on a fork run into that write's
+    // step to the write.
     let last_write = kept.iter().rev().find(|a| a.kind == Kind::Write).cloned();
     let user_pcs: Vec<u64> = kept
         .iter()
@@ -116,14 +117,14 @@ pub(crate) fn blame(home: &Home, asked: Asked<'_>) -> Result<ExitCode> {
             home,
             &run,
             named.pid,
-            (write, at_write),
+            (write, search.values[write.value], at_write),
             &user_pcs,
         )?),
         None if !user_pcs.is_empty() => Some(context_at_step(
             home,
             &run,
             (named.pid, named.step),
-            (&[], None),
+            (&[], None, None),
             &user_pcs,
         )?),
         None => None,
@@ -362,20 +363,32 @@ fn context_at(
     home: &Home,
     run: &Run,
     pid: u32,
-    (write, machine): (&accesses::Access, Option<rewind_vmm::Machine>),
+    (write, value, machine): (&accesses::Access, Value, Option<rewind_vmm::Machine>),
     pcs: &[u64],
 ) -> Result<Surroundings> {
-    context_at_step(home, run, (pid, write.step), (&[write.tid], machine), pcs)
+    let after = accesses::Sought {
+        value,
+        kind: Kind::Write,
+        hit: write.hit,
+    };
+    context_at_step(
+        home,
+        run,
+        (pid, write.step),
+        (&[write.tid], Some(after), machine),
+        pcs,
+    )
 }
 
 /// The places of `pcs`, and where process `pid`'s threads, but those in
-/// `leave_out`, were at `step`: on `machine`, the search's at the step,
-/// when it kept one, else on forks made there.
+/// `leave_out`, were in `step`: at its start, or just after the access
+/// `after` names; on `machine`, the search's at the step, when it kept
+/// one, else on forks made there.
 fn context_at_step(
     home: &Home,
     run: &Run,
     (pid, step): (u32, u64),
-    (leave_out, machine): (&[u32], Option<rewind_vmm::Machine>),
+    (leave_out, after, machine): (&[u32], Option<accesses::Sought>, Option<rewind_vmm::Machine>),
     pcs: &[u64],
 ) -> Result<Surroundings> {
     let needs = Needs::Tasks("`rewind blame --at` cannot find the threads".into());
@@ -389,6 +402,10 @@ fn context_at_step(
         }
         _ => locate::fork_and_symbols(home, run, step, needs, pid)?,
     };
+    let mut machine = machine;
+    if let Some(sought) = after {
+        accesses::run_to_access(&mut machine, pid, step, sought)?;
+    }
     let tids: Vec<u32> = match machine.task_layout()? {
         Some(layout) if !leave_out.is_empty() => {
             let tasks = rewind_core::threads::Tasks::new(&machine, layout);
@@ -632,7 +649,10 @@ pub(crate) fn render(blamed: &Blamed) -> String {
     if let Some(write) = blamed.last_write()
         && !blamed.threads.is_empty()
     {
-        out.push_str(&format!("\nother threads at step {}:\n", write.step));
+        out.push_str(&format!(
+            "\nother threads just after the write, in step {}:\n",
+            write.step
+        ));
         for t in &blamed.threads {
             let place = t.place.as_ref();
             let line = place.and_then(file_line).unwrap_or_default();
