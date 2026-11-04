@@ -184,12 +184,20 @@ fn db_exit(dr6: u64, traps: &[Trap], debugger: Stepping, machine: Stepping) -> D
     let hits = (0..MAX_TRAPS)
         .filter(|i| dr6 & DR6_HIT_MASK & (1 << i) != 0)
         .filter_map(|i| traps.get(i));
+
+    // Every watch the access matched, the first by its address: one
+    // instruction can touch the bytes of several.
+    let mut first = None;
     let mut breakpoint = None;
     for trap in hits {
         match *trap {
-            Trap::Watch { address, .. } => return DbExit::Stop(DebugStop::Watchpoint(address)),
+            Trap::Watch { address, .. } => first = first.or(Some(address)),
             Trap::Execute(address) => breakpoint = breakpoint.or(Some(address)),
         }
+    }
+    if let Some(address) = first {
+        let traps = trap_set(dr6, traps);
+        return DbExit::Stop(DebugStop::Watchpoint { address, traps });
     }
     if dr6 & DR6_SINGLE_STEP != 0 {
         return match (debugger, machine) {
@@ -257,9 +265,9 @@ pub enum DebugStop {
     Step,
     /// Execution reached the breakpoint at this address.
     Breakpoint(u64),
-    /// An instruction accessed the watched bytes at this address, and has
-    /// run.
-    Watchpoint(u64),
+    /// An instruction accessed watched bytes, and has run: the bytes the
+    /// first of its watches is at, and every watch it matched.
+    Watchpoint { address: u64, traps: TrapSet },
     /// The guest has retired the branches [`Machine::set_branch_stop`]
     /// asked for: the first instruction boundary at that count.
     Branches,
@@ -267,6 +275,28 @@ pub enum DebugStop {
     /// more branches than asked for when the machine looked; closing in
     /// again with a wider margin can reach the count.
     PassedBranches,
+}
+
+/// Some of a debugger's traps, by their place in the list it set.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TrapSet(u8);
+
+impl TrapSet {
+    /// Whether the trap at `index` is in the set.
+    pub fn contains(self, index: usize) -> bool {
+        index < MAX_TRAPS && self.0 & (1 << index) != 0
+    }
+}
+
+/// The watches among `traps` whose bits DR6 has set.
+pub fn trap_set(dr6: u64, traps: &[Trap]) -> TrapSet {
+    let mut set = TrapSet::default();
+    for (i, trap) in traps.iter().enumerate().take(MAX_TRAPS) {
+        if dr6 & DR6_HIT_MASK & (1 << i) != 0 && matches!(trap, Trap::Watch { .. }) {
+            set.0 |= 1 << i;
+        }
+    }
+    set
 }
 
 /// A debugger's stop at a branch count: the count, how many branches
@@ -981,7 +1011,10 @@ mod tests {
             },
         ];
         let step = DR6_SINGLE_STEP;
-        let watchpoint = DbExit::Stop(DebugStop::Watchpoint(0x2000));
+        let watchpoint = DbExit::Stop(DebugStop::Watchpoint {
+            address: 0x2000,
+            traps: TrapSet(0b10),
+        });
         assert_eq!(db_exit(0b10, &traps, No, No), watchpoint);
         assert_eq!(db_exit(0b10 | step, &traps, No, Yes), watchpoint);
         let breakpoint = DbExit::Stop(DebugStop::Breakpoint(0x1000));
@@ -1001,6 +1034,27 @@ mod tests {
         assert_eq!(db_exit(step | 0b01, &traps, No, Yes), DbExit::Machine);
         assert_eq!(db_exit(step, &traps, No, Yes), DbExit::Machine);
         assert_eq!(db_exit(step, &traps, No, No), DbExit::Stray);
+    }
+
+    /// One instruction that writes the bytes of two watches stops once
+    /// and names both, by their place in the traps: a 64-bit store over
+    /// two 32-bit watches sets both of their DR6 bits.
+    #[test]
+    fn a_stop_names_every_watch_one_access_matched() {
+        let watch = |address| Trap::Watch {
+            address,
+            len: 4,
+            access: Access::Write,
+        };
+        let traps = [Trap::Execute(0x1000), watch(0x2000), watch(0x2004)];
+        let DbExit::Stop(DebugStop::Watchpoint { address, traps: hit }) =
+            db_exit(0b110, &traps, Stepping::No, Stepping::No)
+        else {
+            panic!("no watchpoint stop");
+        };
+        assert_eq!(address, 0x2000);
+        let hit: Vec<usize> = (0..MAX_TRAPS).filter(|&i| hit.contains(i)).collect();
+        assert_eq!(hit, [1, 2]);
     }
 
     /// KVM's debug settings combine the debugger's traps and steps, the

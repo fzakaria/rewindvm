@@ -335,7 +335,7 @@ impl Debuggee<'_> {
                             }
                             self.machine.pass_breakpoint()?;
                         }
-                        Outcome::Debug(DebugStop::Watchpoint(address)) => {
+                        Outcome::Debug(DebugStop::Watchpoint { address, .. }) => {
                             if self.in_scope(address)? {
                                 break;
                             }
@@ -423,7 +423,7 @@ impl Debuggee<'_> {
         loop {
             let outcome = self.machine.run(None, &mut Ignore)?;
             let reached = match (arrival, outcome) {
-                (Arrival::Watch(_), Outcome::Debug(DebugStop::Watchpoint(address))) => {
+                (Arrival::Watch(_), Outcome::Debug(DebugStop::Watchpoint { address, .. })) => {
                     self.in_scope(address)?
                 }
                 (Arrival::Breakpoint(address), Outcome::Debug(DebugStop::Step)) => {
@@ -435,7 +435,7 @@ impl Debuggee<'_> {
                 (Arrival::StepStart(step), Outcome::Debug(DebugStop::Step)) => {
                     self.machine.step() == step
                 }
-                (_, Outcome::Debug(DebugStop::Step | DebugStop::Watchpoint(_))) => false,
+                (_, Outcome::Debug(DebugStop::Step | DebugStop::Watchpoint { .. })) => false,
                 (_, other) => bail!("stepping toward where gdb was came to {other:?}"),
             };
             if reached {
@@ -533,7 +533,7 @@ impl Debuggee<'_> {
                         loop {
                             match self.machine.run(None, &mut Ignore)? {
                                 Outcome::Debug(DebugStop::Step) => break,
-                                Outcome::Debug(DebugStop::Watchpoint(piece)) => {
+                                Outcome::Debug(DebugStop::Watchpoint { address: piece, .. }) => {
                                     let after = done.then(Move::Steps(j + 1));
                                     self.note_watch(&mut scan, piece, after)?;
                                     break;
@@ -628,7 +628,7 @@ impl Debuggee<'_> {
             (GdbTrap::Breakpoint(address), DebugStop::Breakpoint(at)) => {
                 at == address && self.in_scope(at)?
             }
-            (GdbTrap::Watch(watch), DebugStop::Watchpoint(piece)) => {
+            (GdbTrap::Watch(watch), DebugStop::Watchpoint { address: piece, .. }) => {
                 (watch.address..watch.address + watch.len).contains(&piece)
                     && self.in_scope(piece)?
             }
@@ -651,7 +651,7 @@ impl Debuggee<'_> {
                 }
                 self.machine.pass_breakpoint()?;
             }
-            DebugStop::Watchpoint(piece) => {
+            DebugStop::Watchpoint { address: piece, .. } => {
                 let hit = scan
                     .since
                     .then(Move::Hit(GdbTrap::Watch(self.watch_of(piece)?)));

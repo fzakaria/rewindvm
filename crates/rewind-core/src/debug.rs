@@ -1314,7 +1314,7 @@ impl<'h> BlockingEventLoop for EventLoop<'h> {
                 }
                 // A watched write in another process's address space has
                 // happened: the fork runs on, or a step is done.
-                Outcome::Debug(DebugStop::Watchpoint(address))
+                Outcome::Debug(DebugStop::Watchpoint { address, .. })
                     if !target.in_scope(address).map_err(target_error)? =>
                 {
                     if target.mode == Mode::Step {
@@ -1327,7 +1327,7 @@ impl<'h> BlockingEventLoop for EventLoop<'h> {
                     target.arrived(Some(hit)).map_err(target_error)?;
                     return stop(target, MultiThreadStopReason::SwBreak);
                 }
-                Outcome::Debug(DebugStop::Watchpoint(piece)) => {
+                Outcome::Debug(DebugStop::Watchpoint { address: piece, .. }) => {
                     let hit = target.traps.watch_containing(piece).map(GdbTrap::Watch);
                     target.arrived(hit.map(Move::Hit)).map_err(target_error)?;
                     target.refresh_threads();
