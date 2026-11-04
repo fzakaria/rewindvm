@@ -370,7 +370,9 @@ impl Machine {
         kvm::turn_off_counters(&vm)?;
 
         let ram = Mapping::anonymous(config.mem_bytes as usize)?;
-        ram.prefer_huge_pages()?;
+        // Huge pages make restores faster where the host has them; RAM
+        // works the same without, so a refusal is no error.
+        let _advice = ram.prefer_huge_pages();
         // SAFETY: the mapping outlives the VM (both live in Machine, and the
         // VM is dropped first), and nothing else maps this range.
         unsafe {

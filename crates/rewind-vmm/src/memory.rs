@@ -9,6 +9,23 @@ use anyhow::{Context, Result, bail};
 
 use crate::layout::PAGE_SIZE;
 
+/// Whether the host took the advice to back a mapping with huge pages.
+#[derive(Debug)]
+pub enum HugePages {
+    Advised,
+    /// The host refused it, for this reason; the mapping works as before.
+    Refused(std::io::Error),
+}
+
+/// What madvise's return `advised`, with `error` the errno it left, says
+/// of the advice.
+fn huge_pages(advised: libc::c_int, error: std::io::Error) -> HugePages {
+    match advised {
+        0 => HugePages::Advised,
+        _ => HugePages::Refused(error),
+    }
+}
+
 /// A host mapping that backs a range of guest physical memory.
 #[derive(Debug)]
 pub struct Mapping {
@@ -88,19 +105,14 @@ impl Mapping {
 
     /// Asks the host to back the mapping with 2 MiB pages where it can,
     /// so filling or freeing it takes one page fault or free per 2 MiB
-    /// rather than per 4 KiB page.
-    pub fn prefer_huge_pages(&self) -> Result<()> {
+    /// rather than per 4 KiB page. The advice is optional: a host without
+    /// transparent huge pages, or a sandbox that refuses the advice,
+    /// leaves the mapping as it was, in 4 KiB pages.
+    pub fn prefer_huge_pages(&self) -> HugePages {
         // SAFETY: advice on our own live mapping changes no contents.
         let advised =
             unsafe { libc::madvise(self.ptr.as_ptr().cast(), self.len, libc::MADV_HUGEPAGE) };
-        if advised != 0 {
-            bail!(
-                "madvise of {} bytes failed: {}",
-                self.len,
-                std::io::Error::last_os_error()
-            );
-        }
-        Ok(())
+        huge_pages(advised, std::io::Error::last_os_error())
     }
 
     pub fn len(&self) -> usize {
@@ -156,5 +168,30 @@ impl Drop for Mapping {
         unsafe {
             libc::munmap(self.ptr.as_ptr().cast(), self.len);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Huge pages are advice: a host that refuses MADV_HUGEPAGE, as one
+    /// without transparent huge pages does with EINVAL, leaves a mapping
+    /// that reads and writes as one that took it.
+    #[test]
+    fn refused_huge_page_advice_leaves_a_working_mapping() {
+        let refused = huge_pages(-1, std::io::Error::from_raw_os_error(libc::EINVAL));
+        assert!(matches!(refused, HugePages::Refused(_)));
+        assert!(matches!(
+            huge_pages(0, std::io::Error::from_raw_os_error(0)),
+            HugePages::Advised
+        ));
+
+        let mut ram = Mapping::anonymous(2 * PAGE_SIZE).unwrap();
+        let _advice = ram.prefer_huge_pages();
+        ram.write(PAGE_SIZE as u64, &[7]).unwrap();
+        let mut byte = [0];
+        ram.read(PAGE_SIZE as u64, &mut byte).unwrap();
+        assert_eq!(byte, [7]);
     }
 }
