@@ -139,9 +139,12 @@ impl Location {
     }
 }
 
-/// The sorted copy of the index's first entries, read where it lies.
+/// The sorted copy of the index's first entries, mapped into memory where
+/// it lies (see [`rewind_mapped`]): a search reads several entries for
+/// each page, and a system call for each was 3.3 million of them to
+/// restore 721,100 pages.
 struct Sorted {
-    file: File,
+    map: rewind_mapped::Mapped,
     /// How many entries it holds.
     entries: u64,
     /// How many index entries it covers, duplicates included.
@@ -172,18 +175,21 @@ impl Sorted {
         if body != entries.checked_mul(INDEX_ENTRY as u64)? {
             return None;
         }
-        (entries <= covers).then_some(Sorted {
-            file,
+        if entries > covers {
+            return None;
+        }
+        let len = usize::try_from(body).ok()? + SORTED_HEADER;
+        let map = rewind_mapped::Mapped::file(&file, len).ok()?;
+        Some(Sorted {
+            map,
             entries,
             covers,
         })
     }
 
     fn entry(&self, i: u64) -> Option<[u8; INDEX_ENTRY]> {
-        let mut entry = [0u8; INDEX_ENTRY];
-        let at = SORTED_HEADER as u64 + i * INDEX_ENTRY as u64;
-        self.file.read_exact_at(&mut entry, at).ok()?;
-        Some(entry)
+        let at = SORTED_HEADER + usize::try_from(i).ok()? * INDEX_ENTRY;
+        self.map.bytes().get(at..at + INDEX_ENTRY)?.try_into().ok()
     }
 
     /// Where a page is, if the sorted copy names it. The hashes are
@@ -222,8 +228,7 @@ impl Sorted {
 
     /// Every entry, in order.
     fn all(&self) -> Result<Vec<[u8; INDEX_ENTRY]>> {
-        let mut body = vec![0u8; (self.entries * INDEX_ENTRY as u64) as usize];
-        self.file.read_exact_at(&mut body, SORTED_HEADER as u64)?;
+        let body = &self.map.bytes()[SORTED_HEADER..];
         Ok(body.as_chunks::<INDEX_ENTRY>().0.to_vec())
     }
 }

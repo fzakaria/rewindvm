@@ -13,3 +13,5 @@ anyhow = "1"
 blake3 = "1"
 # Per-page compression; guest pages are mostly sparse.
 zstd = "0.13"
+# The sorted copy of the index, mapped into memory.
+rewind-mapped = { path = "../rewind-mapped" }
