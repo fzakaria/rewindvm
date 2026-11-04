@@ -313,6 +313,23 @@ pub trait Engine: Send + Sync {
         progress: &mut dyn FnMut(&str),
     ) -> EngineResult<Located>;
 
+    /// Who wrote `target`, a value in a process's memory, before its step
+    /// of `run`: its last writes, or with `Ask::Reads` every access since
+    /// the process began, each with its thread and source line, and where
+    /// the other threads were at the last write. The engine replays the
+    /// run back from the step a keyframe window at a time, which takes
+    /// under a second near a keyframe and longer far from one; `progress`
+    /// is handed each line it says, how far the search got among them
+    /// (see [`crate::blame`]), and `cancel` stops it.
+    fn blame(
+        &self,
+        run: &Path,
+        target: &crate::blame::Target,
+        ask: crate::blame::Ask,
+        cancel: &Cancel,
+        progress: &mut dyn FnMut(&str),
+    ) -> EngineResult<crate::blame::Blamed>;
+
     /// What held the CPU at each step of `from..=to` of `run`, a slice per
     /// stretch one task held. The engine replays the window one step at a
     /// time, which takes a second or so for a few thousand steps.
@@ -800,6 +817,55 @@ impl Engine for CliEngine {
         progress: &mut dyn FnMut(&str),
     ) -> EngineResult<Located> {
         self.where_json(run, step, thread, cancel, progress)
+    }
+
+    fn blame(
+        &self,
+        run: &Path,
+        target: &crate::blame::Target,
+        ask: crate::blame::Ask,
+        cancel: &Cancel,
+        progress: &mut dyn FnMut(&str),
+    ) -> EngineResult<crate::blame::Blamed> {
+        // rewind blame <run> --at S --address A --size N --class C --pid P
+        // --tid T [--writes N | --reads] --json
+        let class = serde_json::to_value(target.class)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_else(|| "bytes".to_string());
+        let mut args: Vec<OsString> = vec![
+            "blame".into(),
+            run.into(),
+            "--at".into(),
+            target.step.to_string().into(),
+            "--address".into(),
+            format!("{:#x}", target.address).into(),
+            "--size".into(),
+            target.size.to_string().into(),
+            "--class".into(),
+            class.into(),
+            "--pid".into(),
+            target.pid.to_string().into(),
+            "--tid".into(),
+            target.tid.to_string().into(),
+        ];
+        match ask {
+            crate::blame::Ask::Writes(n) => {
+                args.extend(["--writes".into(), n.to_string().into()]);
+            }
+            crate::blame::Ask::Reads => args.push("--reads".into()),
+        }
+        args.push("--json".into());
+        let out = self.streamed(&args, cancel, progress)?;
+        let blamed = out
+            .stdout
+            .lines()
+            .rev()
+            .find_map(|line| serde_json::from_str::<crate::blame::Blamed>(line).ok());
+        match blamed {
+            Some(blamed) if out.status.success() => Ok(blamed),
+            _ => Err(out.refusal()),
+        }
     }
 
     fn threads(
