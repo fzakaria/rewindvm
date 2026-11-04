@@ -86,6 +86,23 @@ impl Mapping {
         Ok(region)
     }
 
+    /// Asks the host to back the mapping with 2 MiB pages where it can,
+    /// so filling or freeing it takes one page fault or free per 2 MiB
+    /// rather than per 4 KiB page.
+    pub fn prefer_huge_pages(&self) -> Result<()> {
+        // SAFETY: advice on our own live mapping changes no contents.
+        let advised =
+            unsafe { libc::madvise(self.ptr.as_ptr().cast(), self.len, libc::MADV_HUGEPAGE) };
+        if advised != 0 {
+            bail!(
+                "madvise of {} bytes failed: {}",
+                self.len,
+                std::io::Error::last_os_error()
+            );
+        }
+        Ok(())
+    }
+
     pub fn len(&self) -> usize {
         self.len
     }
