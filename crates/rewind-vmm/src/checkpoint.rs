@@ -101,6 +101,42 @@ impl Tree {
     }
 }
 
+/// Pages' contents by page number, kept in one buffer: a checkpoint's
+/// or the origin's. A checkpoint of a large guest keeps thousands of
+/// pages, and freeing them one allocation each took 0.13 s at the end of
+/// a command.
+#[derive(Debug, Default)]
+struct KeptPages {
+    /// Where each page's contents start in `bytes`.
+    at: HashMap<Page, usize>,
+    bytes: Vec<u8>,
+}
+
+impl KeptPages {
+    /// Room for `pages` pages without growing.
+    fn with_capacity(pages: usize) -> KeptPages {
+        KeptPages {
+            at: HashMap::with_capacity(pages),
+            bytes: Vec::with_capacity(pages * PAGE_SIZE),
+        }
+    }
+
+    /// Keeps `contents` as page `page`'s, unless the page has some.
+    fn insert(&mut self, page: Page, contents: &[u8]) {
+        if self.at.contains_key(&page) {
+            return;
+        }
+        self.at.insert(page, self.bytes.len());
+        self.bytes.extend_from_slice(contents);
+    }
+
+    /// Page `page`'s contents, if kept.
+    fn get(&self, page: Page) -> Option<&[u8]> {
+        let at = *self.at.get(&page)?;
+        Some(&self.bytes[at..at + PAGE_SIZE])
+    }
+}
+
 /// One checkpoint's state, and the contents of the pages it wrote.
 struct Checkpoint {
     step: u64,
@@ -110,7 +146,7 @@ struct Checkpoint {
     /// The read and write records' encoder, which goes on from the
     /// records made up to the checkpoint.
     io: Option<rewind_trace::io_records::Encoder>,
-    pages: HashMap<Page, Box<[u8]>>,
+    pages: KeptPages,
 }
 
 /// A machine's checkpoints, and where its memory is relative to them.
@@ -125,7 +161,7 @@ pub(crate) struct Checkpoints {
     /// names them, or by the monitor.
     pub(crate) since: BTreeSet<Page>,
     /// The origin's pages read so far, each once.
-    origin_pages: HashMap<Page, Box<[u8]>>,
+    origin_pages: KeptPages,
     /// Boot's writes, made again into memory of their own, for a machine
     /// that booted.
     pub(crate) booted: Option<crate::memory::Mapping>,
@@ -163,12 +199,12 @@ impl Machine {
         let mut written = std::mem::take(&mut self.checkpoints.since);
         written.extend(self.shared_page());
 
-        let mut pages = HashMap::with_capacity(written.len());
+        let mut pages = KeptPages::with_capacity(written.len());
+        let mut bytes = [0u8; PAGE_SIZE];
         for &page in &written {
             let at = page as u64 * PAGE_SIZE as u64;
-            let mut bytes = vec![0u8; PAGE_SIZE].into_boxed_slice();
             self.read_physical(at, &mut bytes)?;
-            pages.insert(page, bytes);
+            pages.insert(page, &bytes);
         }
         let (cpu, irqchips, devices) = self.state()?;
         let parent = self.checkpoints.anchor;
@@ -224,12 +260,19 @@ impl Machine {
         let target_shared = self.checkpoints.taken[id.0].devices.shared;
         back.extend(target_shared.map(|s| (s as usize / PAGE_SIZE) as Page));
         for page in back {
-            let contents = match self.checkpoints.tree.source(id, page) {
-                Source::Checkpoint(from) => self.checkpoints.taken[from.0].pages[&page].clone(),
-                Source::Origin => self.origin_page(page, pages)?,
+            let source = self.checkpoints.tree.source(id, page);
+            if source == Source::Origin {
+                self.read_origin_page(page, pages)?;
+            }
+            let kept = match source {
+                Source::Checkpoint(from) => &self.checkpoints.taken[from.0].pages,
+                Source::Origin => &self.checkpoints.origin_pages,
             };
+            let contents = kept
+                .get(page)
+                .expect("the page is kept where its source says");
             let at = page as usize * PAGE_SIZE;
-            self.dev.ram.as_mut_slice()[at..at + PAGE_SIZE].copy_from_slice(&contents);
+            self.dev.ram.as_mut_slice()[at..at + PAGE_SIZE].copy_from_slice(contents);
         }
 
         // The vCPU, the interrupt controllers and the monitor's state, and
@@ -325,13 +368,14 @@ impl Machine {
         Ok(())
     }
 
-    /// Page `page` as the machine's origin had it: from the keyframes it
-    /// was restored from, read through `pages`, or as boot wrote it.
-    fn origin_page(&mut self, page: Page, pages: &dyn Pages) -> Result<Box<[u8]>> {
-        if let Some(contents) = self.checkpoints.origin_pages.get(&page) {
-            return Ok(contents.clone());
+    /// Keeps page `page` as the machine's origin had it, once: from the
+    /// keyframes it was restored from, read through `pages`, or as boot
+    /// wrote it.
+    fn read_origin_page(&mut self, page: Page, pages: &dyn Pages) -> Result<()> {
+        if self.checkpoints.origin_pages.get(page).is_some() {
+            return Ok(());
         }
-        let mut contents = vec![0u8; PAGE_SIZE].into_boxed_slice();
+        let mut contents = [0u8; PAGE_SIZE];
         if let Origin::Restored(hashes) = &self.origin {
             if let Ok(i) = hashes.binary_search_by_key(&page, |(p, _)| *p) {
                 pages.get(&hashes[i].1, &mut contents)?;
@@ -348,8 +392,8 @@ impl Machine {
             let at = page as usize * PAGE_SIZE;
             contents.copy_from_slice(&booted.as_slice()[at..at + PAGE_SIZE]);
         }
-        self.checkpoints.origin_pages.insert(page, contents.clone());
-        Ok(contents)
+        self.checkpoints.origin_pages.insert(page, &contents);
+        Ok(())
     }
 }
 
@@ -468,6 +512,20 @@ mod tests {
                 (5, None)
             ]
         );
+    }
+
+    /// Pages kept in one buffer read back by number: two pages kept, one
+    /// asked for that was not, and a page kept again keeps its first
+    /// contents, as a page read once from the origin does.
+    #[test]
+    fn kept_pages_read_back_by_number() {
+        let mut kept = KeptPages::with_capacity(2);
+        kept.insert(7, &[7; PAGE_SIZE]);
+        kept.insert(3, &[3; PAGE_SIZE]);
+        kept.insert(7, &[9; PAGE_SIZE]);
+        assert_eq!(kept.get(7), Some(&[7; PAGE_SIZE][..]));
+        assert_eq!(kept.get(3), Some(&[3; PAGE_SIZE][..]));
+        assert_eq!(kept.get(4), None);
     }
 
     /// A page's contents come from the nearest checkpoint up the target's
