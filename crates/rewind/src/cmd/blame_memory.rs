@@ -21,7 +21,7 @@ use rewind_trace::blamed::{AccessKind, Blamed, BlamedAccess, SourcePlace, Thread
 use rewind_trace::located::{Frame, ValueClass};
 use rewind_trace::searching::{Phase, Searching};
 
-use crate::gdb::{self, Needs};
+use crate::gdb::{Needs, Say, Symbols};
 use crate::locate::{self, Pick, PlaceAt};
 use crate::progress::Format;
 
@@ -93,7 +93,7 @@ pub(crate) fn blame(home: &Home, asked: Asked<'_>) -> Result<ExitCode> {
         cap: asked.max,
     };
     let mut say = Saying::new(asked.progress);
-    let found = accesses::search(home, &run, &search, &mut |s| say.heard(s))?;
+    let (found, at_write) = accesses::search_keeping(home, &run, &search, &mut |s| say.heard(s))?;
     say.naming(&found, named.step);
 
     // The accesses to list: with writes alone, each value's last
@@ -112,13 +112,18 @@ pub(crate) fn blame(home: &Home, asked: Asked<'_>) -> Result<ExitCode> {
         .map(|a| a.after_pc - 1)
         .collect();
     let context = match &last_write {
-        Some(write) => Some(context_at(home, &run, named.pid, write, &user_pcs)?),
-        None if !user_pcs.is_empty() => Some(context_at_step(
+        Some(write) => Some(context_at(
             home,
             &run,
             named.pid,
-            named.step,
-            &[],
+            (write, at_write),
+            &user_pcs,
+        )?),
+        None if !user_pcs.is_empty() => Some(context_at_step(
+            home,
+            &run,
+            (named.pid, named.step),
+            (&[], None),
             &user_pcs,
         )?),
         None => None,
@@ -356,24 +361,33 @@ fn context_at(
     home: &Home,
     run: &Run,
     pid: u32,
-    write: &accesses::Access,
+    (write, machine): (&accesses::Access, Option<rewind_vmm::Machine>),
     pcs: &[u64],
 ) -> Result<Surroundings> {
-    context_at_step(home, run, pid, write.step, &[write.tid], pcs)
+    context_at_step(home, run, (pid, write.step), (&[write.tid], machine), pcs)
 }
 
 /// The places of `pcs`, and where process `pid`'s threads, but those in
-/// `leave_out`, were at `step`.
+/// `leave_out`, were at `step`: on `machine`, the search's at the step,
+/// when it kept one, else on forks made there.
 fn context_at_step(
     home: &Home,
     run: &Run,
-    pid: u32,
-    step: u64,
-    leave_out: &[u32],
+    (pid, step): (u32, u64),
+    (leave_out, machine): (&[u32], Option<rewind_vmm::Machine>),
     pcs: &[u64],
 ) -> Result<Surroundings> {
     let needs = Needs::Tasks("`rewind blame --at` cannot find the threads".into());
-    let machine = gdb::fork(home, run, step, needs)?;
+    let (machine, symbols) = match machine {
+        // The search's machine is at the step already: the symbols'
+        // inspection runs on it and it is put back for gdb, so neither
+        // restores a keyframe.
+        Some(mut machine) if machine.step() == step && machine.task_layout()?.is_some() => {
+            let symbols = Symbols::load_on(home, run, (step, &mut machine), pid, Say::Aloud)?;
+            (machine, symbols)
+        }
+        _ => locate::fork_and_symbols(home, run, step, needs, pid)?,
+    };
     let tids: Vec<u32> = match machine.task_layout()? {
         Some(layout) if !leave_out.is_empty() => {
             let tasks = rewind_core::threads::Tasks::new(&machine, layout);
@@ -389,7 +403,7 @@ fn context_at_step(
         }
         _ => Vec::new(),
     };
-    let at = locate::threads_at(home, run, step, machine, pid, (&tids, pcs))?;
+    let at = locate::threads_at(run, step, (machine, symbols), pid, (&tids, pcs))?;
     let threads = at
         .threads
         .into_iter()

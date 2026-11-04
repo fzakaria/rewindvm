@@ -131,6 +131,28 @@ pub fn running(home: &Home, run: &Run, step: u64, pid: Option<u32>) -> Result<In
     Ok(answer.into_inspection(status))
 }
 
+/// What [`running`] answers, read on `machine`, already at `step` of a
+/// run, instead of on a fork of its own: the machine is kept as it is,
+/// the inspection runs on it, and the machine is put back, so a caller
+/// that has a machine at the step for something else saves bringing a
+/// second one there. Pages the machine was restored with come from
+/// `home`'s page store.
+pub fn running_on(
+    home: &Home,
+    machine: &mut Machine,
+    step: u64,
+    pid: Option<u32>,
+) -> Result<Inspection> {
+    let kept = machine.checkpoint()?;
+    let asked = machine.request_inspection(&InspectRequest::Running { pid }.args());
+    let mut answer = Answer::default();
+    let status =
+        asked.and_then(|()| finish(machine, step, &mut answer, "the memory map could be read"));
+    let pages = crate::debug::StorePages(rewind_store::Store::open(&home.store())?);
+    machine.rewind(kept, &pages)?;
+    Ok(answer.into_inspection(status?))
+}
+
 /// Several files' contents at `step`, as process `pid` would have opened
 /// them, in sections named by their paths (see
 /// [`rewind_init::sections`]). Files that are not there are left out.

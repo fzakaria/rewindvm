@@ -143,6 +143,10 @@ pub(crate) fn located_asking(
         Pick::OnTheCpu => step,
     };
     let needs = Needs::Tasks("`rewind where` cannot find threads".into());
+    if let Pick::Thread { pid, tid } = pick {
+        let (machine, symbols) = fork_and_symbols(home, run, step, needs, pid)?;
+        return walk(run, step, machine, symbols, (pid, tid), asked);
+    }
     let machine = gdb::fork(home, run, step, needs)?;
     let (pid, tid) = match pick {
         Pick::Thread { pid, tid } => (pid, tid),
@@ -157,7 +161,28 @@ pub(crate) fn located_asking(
             }
         },
     };
-    walk(home, run, step, machine, (pid, tid), asked)
+    let symbols = Symbols::load(home, run, step, Some(pid), Kernel::Skip, Say::Aloud)?;
+    walk(run, step, machine, symbols, (pid, tid), asked)
+}
+
+/// A fork of `run` at `step` for gdb, and process `pid`'s symbols there.
+/// The symbols take an inspection on a fork of its own, so the two forks
+/// are made side by side: each restores a keyframe and replays to the
+/// step, which on a long run takes seconds.
+pub(crate) fn fork_and_symbols(
+    home: &Home,
+    run: &Run,
+    step: u64,
+    needs: Needs,
+    pid: u32,
+) -> Result<(rewind_vmm::Machine, Symbols)> {
+    std::thread::scope(|scope| {
+        let symbols =
+            scope.spawn(|| Symbols::load(home, run, step, Some(pid), Kernel::Skip, Say::Aloud));
+        let machine = gdb::fork(home, run, step, needs);
+        let symbols = symbols.join().expect("loading the symbols panicked");
+        Ok((machine?, symbols?))
+    })
 }
 
 /// Which thread of a failure `rewind check --where` names.
@@ -196,18 +221,16 @@ pub(crate) fn thread_line(answer: &Located, involved: Involved) -> String {
 /// process `pid`'s symbols, and the one in the program's own code with its
 /// source.
 fn walk(
-    home: &Home,
     run: &Run,
     step: u64,
     machine: rewind_vmm::Machine,
+    mut symbols: Symbols,
     (pid, tid): (u32, u32),
     asked: &[String],
 ) -> Result<Located> {
-    // The fork as gdb sees it, then the symbols, which take inspections on
-    // forks of their own.
+    // The fork as gdb sees it, with the process's symbols there.
     let scope = rewind_core::debug::Scope::Process(pid);
     let mut debuggee = gdb::debuggee(run, step, machine, scope)?;
-    let mut symbols = Symbols::load(home, run, step, Some(pid), Kernel::Skip, Say::Aloud)?;
     symbols.add_vdso(&debuggee, Say::Aloud);
 
     // gdb with the script, against the fork.
@@ -327,18 +350,17 @@ pub(crate) struct PlaceAt {
 
 /// Threads `tids` of process `pid` at `step` of `run`, and the places of
 /// `addresses` in its code, from one gdb session on `machine`, a fork at
-/// the step. Paths are as the VM had them.
+/// the step, with `symbols`, the process's there. Paths are as the VM had
+/// them.
 pub(crate) fn threads_at(
-    home: &Home,
     run: &Run,
     step: u64,
-    machine: rewind_vmm::Machine,
+    (machine, mut symbols): (rewind_vmm::Machine, Symbols),
     pid: u32,
     (tids, addresses): (&[u32], &[u64]),
 ) -> Result<ThreadsAt> {
     let scope = rewind_core::debug::Scope::Process(pid);
     let mut debuggee = gdb::debuggee(run, step, machine, scope)?;
-    let mut symbols = Symbols::load(home, run, step, Some(pid), Kernel::Skip, Say::Aloud)?;
     symbols.add_vdso(&debuggee, Say::Aloud);
 
     // gdb with the script and what it is asked, against the fork.

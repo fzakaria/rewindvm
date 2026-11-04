@@ -510,11 +510,34 @@ impl Symbols {
             Kernel::Skip => KernelSymbols::none(),
         };
         let session = Session::new(home)?;
-        let process = debugged_process(home, run, step, pid, &session.dir, say);
+        let answer = rewind_core::inspect::running(home, run, step, pid);
+        let process = debugged_process(answer, home, run, step, pid, &session.dir, say);
         let debuginfod = Debuginfod::start(home);
         Ok(Symbols {
             session,
             kernel,
+            process,
+            debuginfod,
+        })
+    }
+
+    /// The symbols [`Symbols::load`] loads, with the process's files read
+    /// by an inspection on `machine`, already at `step`, which is put back
+    /// as it was, rather than on a fork of its own.
+    pub(crate) fn load_on(
+        home: &Home,
+        run: &Run,
+        (step, machine): (u64, &mut rewind_vmm::Machine),
+        pid: u32,
+        say: Say,
+    ) -> Result<Symbols> {
+        let session = Session::new(home)?;
+        let answer = rewind_core::inspect::running_on(home, machine, step, Some(pid));
+        let process = debugged_process(answer, home, run, step, Some(pid), &session.dir, say);
+        let debuginfod = Debuginfod::start(home);
+        Ok(Symbols {
+            session,
+            kernel: KernelSymbols::none(),
             process,
             debuginfod,
         })
@@ -996,6 +1019,7 @@ fn last_event_before(trace: &rewind_trace::Trace, pid: u32, step: u64) -> Option
 /// those name. Empty when the kernel was running, there was no such
 /// process, or the map could not be read.
 fn debugged_process(
+    answer: Result<Inspection>,
     home: &Home,
     run: &Run,
     step: u64,
@@ -1003,7 +1027,7 @@ fn debugged_process(
     dir: &Path,
     say: Say,
 ) -> Process {
-    let answer = match rewind_core::inspect::running(home, run, step, pid) {
+    let answer = match answer {
         Ok(Inspection::Contents(bytes)) => bytes,
         Ok(Inspection::NotFound(message)) if pid.is_some() => {
             say.line(message.trim());
@@ -1047,7 +1071,8 @@ fn debugged_process(
              reading its files at step {earlier}, its last event before",
             running.pid
         ));
-        return debugged_process(home, run, earlier, Some(running.pid), dir, say);
+        let answer = rewind_core::inspect::running(home, run, earlier, Some(running.pid));
+        return debugged_process(answer, home, run, earlier, Some(running.pid), dir, say);
     }
     // A Nix run's store, or a run's root filesystem, was mounted from its
     // input image, so a file this machine lacks is read from there.

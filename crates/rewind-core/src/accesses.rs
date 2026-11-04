@@ -137,6 +137,19 @@ pub type Report<'a> = &'a mut dyn FnMut(&Searching);
 
 /// Searches `run` as `search` asks, telling `report` how far it has got.
 pub fn search(home: &Home, run: &Run, search: &Search, report: Report<'_>) -> Result<Found> {
+    Ok(search_keeping(home, run, search, report)?.0)
+}
+
+/// Searches `run` as [`search`] does, and keeps the machine of the window
+/// the latest write was found in, brought to the start of that write's
+/// step: a fork there, for a caller that looks at the write next, without
+/// restoring a keyframe again. None when no write was found.
+pub fn search_keeping(
+    home: &Home,
+    run: &Run,
+    search: &Search,
+    report: Report<'_>,
+) -> Result<(Found, Option<Machine>)> {
     let total: u64 = search.values.iter().map(|v| v.len).sum();
     if search.values.is_empty() {
         bail!("nothing to watch");
@@ -176,6 +189,7 @@ pub fn search(home: &Home, run: &Run, search: &Search, report: Report<'_>) -> Re
     // Windows newest first, each from the latest keyframe before where
     // the last one began, and no earlier than `since`.
     let mut kept: VecDeque<Access> = VecDeque::new();
+    let mut writer: Option<(Window<'_>, u64)> = None;
     let mut dropped = 0;
     let mut end = search.before;
     let mut initial = Vec::new();
@@ -228,6 +242,13 @@ pub fn search(home: &Home, run: &Run, search: &Search, report: Report<'_>) -> Re
         progress.writes = count(&kept, Kind::Write) + count(&accesses, Kind::Write);
         progress.reads = count(&kept, Kind::Read) + count(&accesses, Kind::Read);
 
+        // The newest window with a write holds the latest write.
+        let latest = accesses
+            .iter()
+            .rev()
+            .find(|a| a.kind == Kind::Write)
+            .map(|a| a.step);
+
         // The window's accesses go before the later windows'.
         for access in accesses.into_iter().rev() {
             if kept.len() >= search.cap {
@@ -235,6 +256,11 @@ pub fn search(home: &Home, run: &Run, search: &Search, report: Report<'_>) -> Re
                 continue;
             }
             kept.push_front(access);
+        }
+        if writer.is_none()
+            && let Some(step) = latest
+        {
+            writer = Some((window, step));
         }
         if dropped > 0 || done(search, &kept) {
             break;
@@ -244,14 +270,27 @@ pub fn search(home: &Home, run: &Run, search: &Search, report: Report<'_>) -> Re
     progress.elapsed_ms = started.elapsed().as_millis() as u64;
     report(&progress);
 
-    Ok(Found {
+    // The latest write's window, replayed again from its start to the
+    // write's step, with nothing watched.
+    let machine = match writer {
+        Some((mut window, step)) => {
+            window.rewind()?;
+            if window.machine.step() < step {
+                window.machine.run(Some(step), &mut Ignore)?;
+            }
+            Some(window.machine)
+        }
+        None => None,
+    };
+    let found = Found {
         accesses: kept.into(),
         searched_from: start,
         initial,
         now: now.unwrap_or_default(),
         windows: progress.windows,
         dropped,
-    })
+    };
+    Ok((found, machine))
 }
 
 /// Whether a search has found what it goes back for.
