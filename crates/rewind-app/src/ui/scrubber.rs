@@ -382,6 +382,9 @@ pub struct Scrubber {
     /// The source panel, while it is open; it shares the file viewer's
     /// place.
     pub(super) source: Option<SourcePanel>,
+    /// The searches for who wrote values the source panel shows, and the
+    /// one on screen.
+    pub(super) blames: crate::ui::blame::Blames,
     /// The two-run file view, while it is open.
     pub(super) file_diff: Option<crate::ui::file_diff::FileDiffPanel>,
     /// The Threads tab, while it is open.
@@ -494,6 +497,7 @@ impl Scrubber {
             viewer: None,
             file_diff: None,
             source: None,
+            blames: Default::default(),
             lanes: None,
             sweep: None,
             here_action: crate::sweep::HereAction::Fork,
@@ -1181,6 +1185,7 @@ impl Scrubber {
             menu: self.selecting.menu.is_some()
                 || self.stride_menu.is_some()
                 || self.here_menu.is_some(),
+            blame: self.blames.popover_open(),
             tab: self.right_tab,
             picked: self.picked_row.is_some(),
             terminal: self.terminal.is_some(),
@@ -1191,6 +1196,7 @@ impl Scrubber {
                 self.close_stride_menu(cx);
                 self.close_here_menu(cx);
             }
+            Some(Closable::Blame) => self.close_blame(true, cx),
             Some(Closable::Tab(tab)) => self.close_tab(tab, cx),
             Some(Closable::Pick) => self.pick_row(None, cx),
             Some(Closable::Terminal) => self.close_terminal(cx),
@@ -1826,6 +1832,8 @@ fn export_directory() -> PathBuf {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Open {
     menu: bool,
+    /// Whether the blame popover is open.
+    blame: bool,
     /// The tab the right column shows.
     tab: RightTab,
     /// Whether a row of the process tree is picked, its card showing.
@@ -1837,6 +1845,8 @@ struct Open {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Closable {
     Menu,
+    /// The blame popover, which stops its search if it still runs.
+    Blame,
     Tab(RightTab),
     /// The picked row's card, which gives way to the last event's.
     Pick,
@@ -1844,11 +1854,15 @@ enum Closable {
 }
 
 /// What one press of Escape closes: the nearest thing open, from the
-/// menu over everything, through the file, source or runs tab on screen
+/// menu over everything and the blame popover, through the file, source
+/// or runs tab on screen
 /// and the picked process's card, to the terminal pane under the panels.
 fn escape_closes(open: Open) -> Option<Closable> {
     if open.menu {
         return Some(Closable::Menu);
+    }
+    if open.blame {
+        return Some(Closable::Blame);
     }
     if open.tab != RightTab::AtStep {
         return Some(Closable::Tab(open.tab));
@@ -1882,18 +1896,24 @@ mod tests {
 
     #[test]
     fn escape_closes_the_nearest_thing_first() {
-        // With everything open, Escape takes the menu first, then the tab
-        // on screen unless it is "At this step", then the picked process's
-        // card, then the terminal pane; with nothing open it closes
-        // nothing.
+        // With everything open, Escape takes the menu first, then the
+        // blame popover, then the tab on screen unless it is "At this
+        // step", then the picked process's card, then the terminal pane;
+        // with nothing open it closes nothing.
         let all = Open {
             menu: true,
+            blame: true,
             tab: RightTab::File,
             picked: true,
             terminal: true,
         };
         assert_eq!(escape_closes(all), Some(Closable::Menu));
-        let tabs = Open { menu: false, ..all };
+        let blame = Open { menu: false, ..all };
+        assert_eq!(escape_closes(blame), Some(Closable::Blame));
+        let tabs = Open {
+            blame: false,
+            ..blame
+        };
         assert_eq!(escape_closes(tabs), Some(Closable::Tab(RightTab::File)));
         let runs = Open {
             tab: RightTab::Runs,

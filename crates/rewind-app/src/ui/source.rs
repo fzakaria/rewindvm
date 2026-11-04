@@ -338,6 +338,21 @@ impl Scrubber {
         panel.sideways = Sideways::default();
         self.clear_selection_in(&[Surface::Source, Surface::Variables]);
         self.centre_shown_line();
+
+        // At the step the run failed at, the values on the failing line
+        // are searched for ahead of a click on one.
+        let failed_here = self
+            .session
+            .as_ref()
+            .and_then(|s| s.run.timeline.failure.as_ref())
+            .is_some_and(|f| f.step == step);
+        if failed_here
+            && let Some((located, Some(at))) = self.located()
+            && let Some(frame) = located.frames.get(at)
+        {
+            let (frame, whose) = (frame.clone(), (located.pid, located.tid));
+            self.blame_ahead(&frame, whose, step, cx);
+        }
         cx.notify();
     }
 
@@ -606,7 +621,21 @@ impl Scrubber {
                         .child(file_area)
                         .when(shown_file.is_some(), |body| {
                             body.child(sideways_layer(Self::scroll_source_sideways, cx))
-                        }),
+                        })
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(|this, e: &gpui::MouseUpEvent, _, cx| {
+                                this.source_click(e.position, cx)
+                            }),
+                        )
+                        .on_mouse_move(cx.listener(|this, e: &gpui::MouseMoveEvent, _, cx| {
+                            this.source_hover(e.position, cx)
+                        }))
+                        .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                            if !hovered {
+                                this.leave_source(cx);
+                            }
+                        })),
                     Surface::Source,
                     cx,
                 ))
@@ -653,6 +682,15 @@ impl Scrubber {
                 let Some((file, key, highlighter)) = file_and_colors(shown, highlighters) else {
                     return Vec::new();
                 };
+
+                // The shown frame and whose it is, whose values can be
+                // blamed.
+                let step = shown.step();
+                let whose = shown
+                    .located()
+                    .and_then(|(l, at)| Some((l.pid, l.tid, l.frames.get(at?)?)));
+                let run = this.session.as_ref().map(|s| s.run.path.clone());
+                let blames = &this.blames;
                 let rows = range
                     .filter_map(|row| {
                         let line = file.lines.get(row)?;
@@ -664,6 +702,22 @@ impl Scrubber {
                             &mapped,
                             spans.iter().map(|s| (s.range.clone(), s.token.color())),
                         );
+                        let underlined = match (&whose, &run) {
+                            (Some((pid, tid, frame)), Some(run)) => crate::ui::blame::underlines(
+                                blames,
+                                run,
+                                frame,
+                                (number, line),
+                                &mapped,
+                                colors,
+                                (*pid, *tid, step),
+                            ),
+                            _ => crate::ui::blame::Underlined {
+                                highlights: colors,
+                                clicks: Vec::new(),
+                                notes: Vec::new(),
+                            },
+                        };
                         let text = mapped.shown;
                         let part = selected
                             .as_ref()
@@ -693,7 +747,7 @@ impl Scrubber {
                                     shifted(
                                         offset,
                                         selectable(Surface::Source, row, text, part, &registry)
-                                            .with_highlights(colors),
+                                            .with_highlights(underlined.highlights),
                                     )
                                     .text_color(rgb(
                                         if marked { theme::TEXT } else { theme::SOFT },
@@ -744,7 +798,23 @@ impl Scrubber {
         let selected = self.selected_range(Surface::Variables);
         let lines = frame.map(variable_lines).unwrap_or_default();
         let empty = lines.is_empty();
+
+        // Each variable, in the list's order, and whose they are: one in
+        // memory can be blamed with a click on its row.
+        let variables: Vec<&crate::source::Variable> = frame
+            .map(|f| f.arguments.iter().chain(&f.locals).collect())
+            .unwrap_or_default();
+        let whose = self.located().map(|(l, _)| (l.pid, l.tid));
+        let step = self
+            .source
+            .as_ref()
+            .map_or(self.step, |p| p.shown.as_ref().map_or(p.step, Shown::step));
         let rows = lines.into_iter().enumerate().map(|(i, (kind, text))| {
+            let variable = variables.get(i).copied();
+            let target = variable
+                .zip(whose)
+                .and_then(|(v, whose)| crate::blame::target_of(&v.name, &v.location, whose, step));
+            let place = variable.and_then(|v| where_it_is(&v.location));
             let name_end = text.find(VALUE_AFTER).unwrap_or(text.len());
             let (marker, name_color) = match kind {
                 Kind::Argument => (ARGUMENT_MARKER, theme::AMBER_PALE),
@@ -760,7 +830,7 @@ impl Scrubber {
             let part = selected
                 .as_ref()
                 .and_then(|r| part_of_line(r, i, text.len()));
-            div()
+            let row = div()
                 .w_full()
                 .flex()
                 .flex_none()
@@ -782,6 +852,30 @@ impl Scrubber {
                             .with_highlights(colors),
                     ),
                 )
+                .when_some(place, |row, place| {
+                    row.child(div().flex_none().text_color(rgb(theme::FAINT)).child(place))
+                });
+            let Some(target) = target else {
+                return row.into_any_element();
+            };
+            row.id(SharedString::from(format!("source-variable-{i}")))
+                .cursor_pointer()
+                .hover(|s| s.bg(rgb(theme::RAISED_HOVER)))
+                .tooltip(crate::ui::widgets::tooltip(format!(
+                    "{} is in memory: click to see who last wrote it.",
+                    target.text
+                )))
+                .on_click(cx.listener(move |this, e: &gpui::ClickEvent, _, cx| {
+                    if this.plain_click(e) {
+                        this.blame(
+                            target.clone(),
+                            crate::blame::Ask::Writes(1),
+                            Some(e.position()),
+                            cx,
+                        );
+                    }
+                }))
+                .into_any_element()
         });
         let list = div()
             .id("source-variables")
@@ -921,6 +1015,25 @@ impl Scrubber {
             .child(grip(Edge::Frames, cx))
     }
 }
+
+/// Where a variable is, as its row says it after the value: in which
+/// register, or in memory and blameable; nothing for one optimized out,
+/// whose value says so.
+fn where_it_is(location: &crate::blame::Location) -> Option<String> {
+    use crate::blame::Location;
+    match location {
+        Location::Memory { .. } => Some(BLAMEABLE.to_string()),
+        Location::TooLarge { size, .. } => Some(format!("{size} bytes")),
+        Location::Register {
+            register: Some(register),
+        } => Some(format!("in {register}")),
+        Location::Register { register: None } => Some("in a register".to_string()),
+        Location::OptimizedOut | Location::Unreadable => None,
+    }
+}
+
+/// What a variable in memory says after its value.
+const BLAMEABLE: &str = "blame";
 
 /// Colors the rest of the file the answer keys by `key` with `rest` on a
 /// background thread, and keeps the colors if the panel still shows the

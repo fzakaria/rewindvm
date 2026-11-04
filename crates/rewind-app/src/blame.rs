@@ -14,7 +14,7 @@
 use std::ops::Range;
 
 pub use rewind_trace::blamed::{AccessKind, Blamed, BlamedAccess, SourcePlace, ThreadAt};
-pub use rewind_trace::located::{Expression, ValueClass};
+pub use rewind_trace::located::{Expression, Location, ValueClass};
 pub use rewind_trace::searching::{Phase, Searching};
 
 use crate::describe::thousands;
@@ -94,8 +94,8 @@ impl Blame {
         Some(self.blamed()?.last_write()?.step)
     }
 
-    /// The chip's words in the app bar.
-    pub fn chip(&self) -> String {
+    /// The chip's words in the app bar, `elapsed_ms` into the search.
+    pub fn chip(&self, elapsed_ms: u64) -> String {
         let text = &self.target.text;
         match (&self.answer, &self.progress) {
             (Some(Ok(blamed)), _) => match blamed.last_write() {
@@ -104,7 +104,7 @@ impl Blame {
             },
             (Some(Err(_)), _) => format!("blame {text} \u{b7} failed"),
             (None, Some(p)) => {
-                let seconds = p.elapsed_ms / 1000;
+                let seconds = elapsed_ms / 1000;
                 let doing = match p.phase {
                     Phase::Restoring => "restoring keyframe",
                     Phase::Searching => "searching",
@@ -116,13 +116,13 @@ impl Blame {
         }
     }
 
-    /// The popover's lines while the engine searches: what it is doing,
-    /// then its counts.
-    pub fn progress_lines(&self) -> Vec<String> {
+    /// The popover's lines while the engine searches, `elapsed_ms` into
+    /// it: what it is doing, then its counts.
+    pub fn progress_lines(&self, elapsed_ms: u64) -> Vec<String> {
         let Some(p) = &self.progress else {
-            return vec!["forking the run".to_string()];
+            return vec!["starting the search".to_string()];
         };
-        let seconds = format!("{:.1} s", p.elapsed_ms as f64 / 1000.0);
+        let seconds = format!("{:.1} s", elapsed_ms as f64 / 1000.0);
         match p.phase {
             Phase::Restoring => vec![
                 format!(
@@ -199,15 +199,26 @@ fn byte_range(text: &str, start: u32, end: u32) -> Option<Range<usize>> {
     (!range.is_empty()).then_some(range)
 }
 
-/// The value a click on `expression` in `frame`'s thread at `step` asks
-/// about.
+/// The value a click on `expression` in thread `tid` of process `pid` at
+/// `step` asks about.
 pub fn target(expression: &Expression, pid: u32, tid: u32, step: u64) -> Option<Target> {
-    let (address, size) = expression.location.watchable()?;
-    let rewind_trace::located::Location::Memory { class, .. } = &expression.location else {
+    target_of(&expression.text, &expression.location, (pid, tid), step)
+}
+
+/// The value called `text`, at `location`, in thread `tid` of process
+/// `pid` at `step`, when it can be watched.
+pub fn target_of(
+    text: &str,
+    location: &Location,
+    (pid, tid): (u32, u32),
+    step: u64,
+) -> Option<Target> {
+    let (address, size) = location.watchable()?;
+    let Location::Memory { class, .. } = location else {
         return None;
     };
     Some(Target {
-        text: expression.text.clone(),
+        text: text.to_string(),
         address,
         size,
         class: *class,
@@ -262,6 +273,40 @@ pub fn thread_place(thread: &ThreadAt) -> String {
     format!("{line} {function}{innermost}").trim().to_string()
 }
 
+/// `over`'s styles laid over `base`'s on a line, as GPUI takes its
+/// highlights, in order and not overlapping: each stretch where either
+/// has a style gets `merge` of the two, or the one there is.
+pub fn overlay<S: Clone>(
+    base: &[(Range<usize>, S)],
+    over: &[(Range<usize>, S)],
+    merge: impl Fn(&S, &S) -> S,
+) -> Vec<(Range<usize>, S)> {
+    let mut edges: Vec<usize> = base
+        .iter()
+        .chain(over)
+        .flat_map(|(r, _)| [r.start, r.end])
+        .collect();
+    edges.sort_unstable();
+    edges.dedup();
+    let at = |list: &[(Range<usize>, S)], i: usize| {
+        list.iter()
+            .find(|(r, _)| r.start <= i && i < r.end)
+            .map(|(_, s)| s.clone())
+    };
+    edges
+        .windows(2)
+        .filter_map(|w| {
+            let style = match (at(base, w[0]), at(over, w[0])) {
+                (Some(b), Some(o)) => merge(&b, &o),
+                (Some(b), None) => b,
+                (None, Some(o)) => o,
+                (None, None) => return None,
+            };
+            Some((w[0]..w[1], style))
+        })
+        .collect()
+}
+
 /// The lanes of an answer with reads: each thread that accessed a value,
 /// in the order it first did, with its accesses as fractions of the steps
 /// from the first access to the last.
@@ -286,7 +331,6 @@ mod tests {
     // Which values a line underlines, and what a search says as it goes,
     // from expressions and progress as the engine prints them.
     use super::*;
-    use rewind_trace::located::Location;
 
     fn expression(text: &str, line: u32, name: (u32, u32), location: Location) -> Expression {
         Expression {
@@ -379,14 +423,14 @@ mod tests {
         };
         blame.progress = Some(p.clone());
         assert_eq!(
-            blame.progress_lines(),
+            blame.progress_lines(6200),
             [
                 "restoring keyframe at step 4,130 \u{b7} 6.2 s",
                 "nothing searched yet"
             ]
         );
         assert_eq!(
-            blame.chip(),
+            blame.chip(6200),
             "blame p->queue \u{b7} restoring keyframe \u{b7} 6 s"
         );
         assert_eq!(blame.searched(), Some((4782, 4782)));
@@ -395,9 +439,28 @@ mod tests {
         p.writes = 2;
         blame.progress = Some(p);
         assert_eq!(
-            blame.progress_lines()[1],
+            blame.progress_lines(6200)[1],
             "searched back 312 steps \u{b7} 1 window \u{b7} 2 writes seen \u{b7} 6.2 s"
         );
         assert_eq!(blame.searched(), Some((4130, 4782)));
+    }
+
+    /// An underline over part of a colored word splits the word's color
+    /// in three, the middle with both; one past the colors stands alone.
+    #[test]
+    fn an_underline_splits_the_colors_under_it() {
+        let base = [(0..6, "kw"), (8..10, "num")];
+        let over = [(2..4, "u"), (11..13, "u")];
+        let merged = overlay(&base, &over, |b, o| if *b == "kw" { "kw+u" } else { o });
+        assert_eq!(
+            merged,
+            [
+                (0..2, "kw"),
+                (2..4, "kw+u"),
+                (4..6, "kw"),
+                (8..10, "num"),
+                (11..13, "u"),
+            ]
+        );
     }
 }

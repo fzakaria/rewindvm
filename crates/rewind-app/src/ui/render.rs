@@ -155,6 +155,12 @@ impl Render for Scrubber {
         if let Some(dialog) = self.render_link_dialog(cx) {
             window_root = window_root.child(dialog);
         }
+        if let Some(note) = self.render_value_note() {
+            window_root = window_root.child(note);
+        }
+        if let Some(popover) = self.render_blame_popover(cx) {
+            window_root = window_root.child(popover);
+        }
         if let Some(menu) = self.render_context_menu(cx) {
             window_root = window_root.child(menu);
         }
@@ -394,6 +400,11 @@ impl Scrubber {
                     ))
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_runs(cx)));
             left = left.child(self.with_callout(toggle, Anchor::RunsPill, cx));
+        }
+
+        // The value blamed last, while its search runs and after.
+        if let Some(chip) = self.blame_chip(cx) {
+            left = left.child(chip);
         }
 
         // The run's size, or, while another run is read to take its place,
@@ -726,6 +737,7 @@ impl Scrubber {
         track = track.children(self.split_mark(view, cx));
         track = track.children(self.bookmark_marks(view, cx));
         track = track.children(self.assertion_marks(view, cx));
+        track = track.children(self.blame_marks(view, cx));
         if let Some(failure) = t.failure {
             track = track.children(marker(failure.step, size::FAILURE_WIDTH, theme::RED));
         }
