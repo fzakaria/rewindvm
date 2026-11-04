@@ -163,6 +163,11 @@ $ rewind gdb <run> <step> --pid <pid> -- -batch -ex 'thread apply all bt'
 # gdb backwards: where a pointer was last written before the step
 $ rewind gdb <run> <step> -- -batch -ex 'watch -l p->queue' -ex reverse-continue
 
+# blame a value in memory: the line, thread and step that last wrote it,
+# where the other threads were then; --reads for every access as well
+$ rewind blame <run> --at <step> 'p->queue'
+$ rewind blame <run> --at <step> 'p->stopping' 'p->queue' --reads
+
 # the line of the program's own code a thread was on, with its arguments,
 # locals and callers: by default the thread of the step's event; --json for
 # programs

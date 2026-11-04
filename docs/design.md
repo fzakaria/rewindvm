@@ -326,6 +326,26 @@ own `stepi` in the kernel does the same. A fork whose registers or memory gdb
 changed, or that left its recording, cannot go back, since the run replayed
 is not what the fork did.
 
+`rewind blame RUN --at STEP EXPR` asks the same question as a watchpoint
+run backwards, who last wrote this value, without a debugger session, and the
+desktop app asks it when a value in the source panel is clicked. gdb, on a fork
+at the step, evaluates the expression in the thread's frame and says where it
+is: in memory at an address, in a register, or optimized out. A value in memory
+and at most 32 bytes, the four debug address registers' 8 bytes each, is
+watched while the run is replayed a keyframe window at a time, newest first,
+from the latest keyframe before the step up to it, then the window before, back
+to the process's start or last exec. A hit counts when the CPU had the
+process's page table: one of its threads, or the kernel copying into the value
+for one of them. The trap comes after the store, so its line is the line of the
+address just before the trap's pc. Reads come from a second replay of each
+window, taken from a checkpoint at its start, that traps reads and writes
+together; matched in order against the first replay's writes, the accesses that
+are not writes are reads, since x86 cannot trap reads alone. A second gdb
+session, on a fork at the last write's step, names each access's line and where
+the process's other threads were. On the mylib shutdown race, the last write of
+`p->queue` before the crash is found 14 steps back, `pool_shutdown`'s
+`p->queue = NULL`, in about 2 s, most of it the two gdb sessions.
+
 What gdb knows about the code comes from two more inspections, each on a fork
 of its own, before the fork gdb debugs is made. The kernel hands every
 inspection the thread group id of the task that was running when the request
