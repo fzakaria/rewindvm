@@ -262,7 +262,8 @@ pub(crate) struct BlameArgs {
     #[arg(long, requires = "at")]
     pub(crate) frame: Option<u32>,
     /// List each value's last N writes, newest first.
-    #[arg(long, value_name = "N", default_value_t = 1, requires = "at")]
+    #[arg(long, value_name = "N", default_value_t = 1, requires = "at",
+          conflicts_with = "reads", value_parser = at_least_one)]
     pub(crate) writes: usize,
     /// List the reads as well as the writes, of every access since
     /// --since, oldest first.
@@ -272,8 +273,10 @@ pub(crate) struct BlameArgs {
     /// start, or its last exec before --at.
     #[arg(long, value_name = "STEP", requires = "at")]
     pub(crate) since: Option<u64>,
-    /// The most accesses --reads lists, the latest ones.
-    #[arg(long, value_name = "N", default_value_t = super::blame_memory::DEFAULT_MAX, requires = "at")]
+    /// The most accesses --reads lists, the latest ones; with more, the
+    /// search goes no further back and says how many it left out.
+    #[arg(long, value_name = "N", default_value_t = super::blame_memory::DEFAULT_MAX,
+          requires = "reads", value_parser = at_least_one)]
     pub(crate) max: usize,
     /// Blame the bytes at this address instead of an expression, for
     /// programs such as the desktop app that have the address from
@@ -291,6 +294,15 @@ pub(crate) struct BlameArgs {
     /// programs such as the desktop app.
     #[arg(long, requires = "at")]
     pub(crate) json: bool,
+}
+
+/// A count of 1 or more.
+fn at_least_one(text: &str) -> Result<usize, String> {
+    match text.parse::<usize>() {
+        Ok(0) => Err("give 1 or more".into()),
+        Ok(n) => Ok(n),
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 /// A value class by its name, as `rewind where --json` prints it.
@@ -331,14 +343,12 @@ fn blame_memory(
             thread: (args.pid, args.tid),
             frame: args.frame,
             address,
-            kinds: if args.reads {
-                rewind_core::accesses::Kinds::ReadsAndWrites
+            wanted: if args.reads {
+                rewind_core::accesses::Wanted::Accesses(args.max)
             } else {
-                rewind_core::accesses::Kinds::Writes
+                rewind_core::accesses::Wanted::LastWrites(args.writes)
             },
-            writes: args.writes,
             since: args.since,
-            max: args.max,
             json: args.json,
             progress,
         },

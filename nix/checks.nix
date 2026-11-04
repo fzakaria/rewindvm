@@ -113,6 +113,36 @@ let
         EOF
         $CC -static -O1 -g -o $out/bin/late late.c
 
+        cat > fields.c <<'EOF'
+        #include <stddef.h>
+        #include <stdint.h>
+        #include <unistd.h>
+
+        union pair {
+          uint64_t whole;
+          struct { uint32_t low, high; } fields;
+        };
+
+        volatile union pair pair;
+        volatile uint64_t counter;
+        unsigned char buffer[6] = { 1, 2, 3, 4, 5, 6 };
+
+        int main(void)
+        {
+          unsigned char *source = buffer + 1, *destination = buffer;
+          size_t count = 5;
+
+          pair.whole = 0x0000000200000001;
+          pair.fields.high = 5;
+          for (uint64_t i = 0; i < 20000; i++)
+            counter = i;
+          __asm__ volatile("rep movsb" : "+S"(source), "+D"(destination), "+c"(count) : : "memory");
+          write(1, "done\n", 5);
+          return 0;
+        }
+        EOF
+        $CC -static -O1 -g -o $out/bin/fields fields.c
+
         cat > block.c <<'EOF'
         #include <sys/wait.h>
         #include <unistd.h>
@@ -1202,8 +1232,11 @@ in
   # and its search says how far it got in JSON lines, one of them as it
   # goes on to name the lines. A write thousands of steps back is found
   # through windows restored in place, and `rewind where --after-write`
-  # just after each write names the write's line. Boots the VM, so it
-  # needs /dev/kvm.
+  # just after each write names the write's line. One store over two
+  # watched values writes both; a value's last write stays found behind
+  # 20,000 writes of another; and a REP MOVSB that reads a byte, then
+  # writes it, at one instruction, lists the read before the write. Boots
+  # the VM, so it needs /dev/kvm.
   blame-memory =
     pkgs.runCommand "rewind-blame-memory"
       {
@@ -1266,6 +1299,41 @@ in
         jq -c '{windows, searched_from, step: .accesses[-1].step}' late.json
         jq -e '.windows >= 3 and .accesses[-1].after == "7"
           and .accesses[-1].place.line == 7 and .values[0].initial == "0"' late.json
+
+        # One 64-bit store writes both halves of the pair at line 19, and
+        # line 20 writes the high half again: each half has its own
+        # writes, with the bytes on both sides of each.
+        rewind run -q --clock exits --name fields --root ${gdbRoot} -- /bin/fields > /dev/null
+        done=$(rewind events fields | grep 'write(1, "done' | awk '{print $1}')
+        rewind blame fields --at "$done" pair.fields.low pair.fields.high --writes 2 \
+          --json > fields.json
+        jq -c '.accesses | map([.value, .before, .after, .place.line])' fields.json
+        jq -e '.accesses | map([.value, .before, .after, .place.line])
+          == [[0, "0", "1", 19], [1, "0", "2", 19], [1, "2", "5", 20]]' fields.json
+
+        # 20,000 writes of the counter after the high half's last write
+        # leave each value's last write; a cap on --reads says what it
+        # left out.
+        rewind blame fields --at "$done" pair.fields.high counter > stress
+        cat stress
+        grep -q '^  fields.c:20  main' stress
+        grep -q '^  fields.c:22  main' stress
+        ! grep -q 'not written' stress
+        rewind blame fields --at "$done" counter --reads --max 1 --json > capped.json
+        jq -e '.listed == "accesses" and (.accesses | length) == 1 and .dropped > 0' capped.json
+
+        # REP MOVSB at line 23 reads buffer[2] in one iteration and writes
+        # it in the next, at the same instruction: a read of 3, then a
+        # write of 3 to 4. Just after the read, where names its line.
+        rewind blame fields --at "$done" 'buffer[2]' --reads --json > rep.json
+        jq -c '.accesses | map([.kind, .before, .after])' rep.json
+        jq -e '.accesses[-2:] | map([.kind, .before, .after, .place.line])
+          == [["read", "3", "3", 23], ["write", "3", "4", 23]]' rep.json
+        read=$(jq -c '.accesses[-2]' rep.json)
+        rewind where fields "$(jq -r .step <<< "$read")" --pid "$(jq -r .pid rep.json)" \
+          --tid "$(jq -r .tid <<< "$read")" --after-access "$(jq -r '.values[0].address' rep.json)" \
+          --size 1 --hit "$(jq -r .hit <<< "$read")" --json > after-read.json
+        jq -e '.frames[.chosen].line == 23' after-read.json
         touch $out
       '';
 

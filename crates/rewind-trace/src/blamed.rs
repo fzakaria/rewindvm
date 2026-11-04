@@ -29,8 +29,12 @@ pub struct Blamed {
     pub searched_from: u64,
     pub since: u64,
     pub windows: u32,
-    /// How many accesses past the ones listed the search saw, when it
-    /// stopped at its limit.
+    /// What the accesses are: each value's last writes, complete back to
+    /// `searched_from`, or every access, the latest of them when
+    /// `dropped` is past 0.
+    pub listed: Listed,
+    /// How many accesses before the ones listed the search saw and left
+    /// out, at its limit, going no further back.
     pub dropped: u64,
     pub elapsed_ms: u64,
 }
@@ -47,6 +51,16 @@ pub struct Watched {
     pub type_name: Option<String>,
     pub now: Option<String>,
     pub initial: Option<String>,
+}
+
+/// What a blame's accesses are.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Listed {
+    /// Each value's last writes, as many as asked for.
+    LastWrites,
+    /// Reads and writes, every one since the search began.
+    Accesses,
 }
 
 /// Whether an access read the value or wrote it.

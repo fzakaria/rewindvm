@@ -337,10 +337,18 @@ from the latest keyframe before the step up to it, then the window before, back
 to the process's start or last exec. A hit counts when the CPU had the
 process's page table: one of its threads, or the kernel copying into the value
 for one of them. The trap comes after the store, so its line is the line of the
-address just before the trap's pc. Reads come from a second replay of each
-window, taken from a checkpoint at its start, that traps reads and writes
-together; matched in order against the first replay's writes, the accesses that
-are not writes are reads, since x86 cannot trap reads alone. A second gdb
+address just before the trap's pc. One store can cover several values, such as
+a 64-bit store over two 32-bit fields, and DR6 sets a bit for each register it
+matched, so the store is a write of each. x86 cannot trap reads alone, so to
+find reads each piece of a value takes two registers, one trapping writes and
+one trapping reads and writes: a stop that set both bits wrote the value, one
+that set only the second read it. A search for reads therefore watches at most
+16 bytes, and one replay orders its reads and writes exactly, even a REP MOVSB
+that reads a byte in one iteration and writes it in the next at the same
+instruction. A search keeps each value's last writes, or with `--reads` the
+latest `--max` accesses, as it replays, so a loop of many writes costs replay
+time and not memory; a capped search says how many it left out and goes no
+further back. A second gdb
 session, on a fork run into the last write's step to just after the write,
 names each access's line and where the process's other threads were. A step
 runs from one VM exit to the next and can cover many lines, so the start of the

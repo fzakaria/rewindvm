@@ -385,7 +385,7 @@ mod tests {
                  "before": "0x1", "after": "0x0", "pc": "0x2", "kernel": null, "syscall": null,
                  "place": null, "hit": 1}
             ],
-            "threads": [], "searched_from": 4742, "since": 4742, "windows": 2, "dropped": 0,
+            "threads": [], "searched_from": 4742, "since": 4742, "windows": 2, "listed": "accesses", "dropped": 0,
             "elapsed_ms": 1600
         }))
         .unwrap();

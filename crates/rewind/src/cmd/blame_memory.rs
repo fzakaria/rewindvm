@@ -15,9 +15,11 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
-use rewind_core::accesses::{self, Kind, Kinds, Search, Until, Value};
+use rewind_core::accesses::{self, Kind, Search, Value, Wanted};
 use rewind_core::{Home, Run};
-use rewind_trace::blamed::{AccessKind, Blamed, BlamedAccess, SourcePlace, ThreadAt, Watched};
+use rewind_trace::blamed::{
+    AccessKind, Blamed, BlamedAccess, Listed, SourcePlace, ThreadAt, Watched,
+};
 use rewind_trace::located::{Frame, ValueClass};
 use rewind_trace::searching::{Phase, Searching};
 
@@ -42,10 +44,8 @@ pub(crate) struct Asked<'a> {
     /// A value by its address, size and class, instead of expressions,
     /// for a program that has already asked `rewind where` about it.
     pub(crate) address: Option<(u64, u64, ValueClass)>,
-    pub(crate) kinds: Kinds,
-    pub(crate) writes: usize,
+    pub(crate) wanted: Wanted,
     pub(crate) since: Option<u64>,
-    pub(crate) max: usize,
     pub(crate) json: bool,
     pub(crate) progress: Format,
 }
@@ -85,23 +85,13 @@ pub(crate) fn blame(home: &Home, asked: Asked<'_>) -> Result<ExitCode> {
             .collect(),
         before: named.step,
         since,
-        kinds: asked.kinds,
-        until: match asked.kinds {
-            Kinds::Writes => Until::Writes(asked.writes),
-            Kinds::ReadsAndWrites => Until::Since,
-        },
-        cap: asked.max,
+        wanted: asked.wanted,
     };
     let mut say = Saying::new(asked.progress);
     let (found, at_write) = accesses::search_keeping(home, &run, &search, &mut |s| say.heard(s))?;
     say.naming(&found, named.step);
 
-    // The accesses to list: with writes alone, each value's last
-    // `writes` of them.
-    let mut kept = found.accesses.clone();
-    if asked.kinds == Kinds::Writes {
-        kept = last_writes(kept, asked.writes, named.values.len());
-    }
+    let kept = &found.accesses;
 
     // Each access's source line and the other threads just after the
     // last write, from one gdb session on a fork run into that write's
@@ -187,6 +177,10 @@ pub(crate) fn blame(home: &Home, asked: Asked<'_>) -> Result<ExitCode> {
         searched_from: found.searched_from,
         since,
         windows: found.windows,
+        listed: match asked.wanted {
+            Wanted::LastWrites(_) => Listed::LastWrites,
+            Wanted::Accesses(_) => Listed::Accesses,
+        },
         dropped: found.dropped,
         elapsed_ms: started.elapsed().as_millis() as u64,
     };
@@ -331,24 +325,6 @@ fn process_began(run: &Run, pid: u32, step: u64) -> Result<u64> {
         .filter(|&at| at <= step)
         .max()
         .unwrap_or(process.start))
-}
-
-/// Each value's last `n` writes, among `accesses`, oldest first.
-fn last_writes(accesses: Vec<accesses::Access>, n: usize, values: usize) -> Vec<accesses::Access> {
-    let mut left = vec![n; values];
-    let mut kept: Vec<accesses::Access> = accesses
-        .into_iter()
-        .rev()
-        .filter(|a| {
-            let keep = a.kind == Kind::Write && left[a.value] > 0;
-            if keep {
-                left[a.value] -= 1;
-            }
-            keep
-        })
-        .collect();
-    kept.reverse();
-    kept
 }
 
 /// Places of addresses, and where the other threads were.
@@ -589,7 +565,7 @@ pub(crate) fn render(blamed: &Blamed) -> String {
         }
         out.push_str(&head);
         out.push('\n');
-        if blamed.accesses.iter().any(|a| a.kind == AccessKind::Read) {
+        if blamed.listed == Listed::Accesses {
             continue;
         }
 
@@ -627,7 +603,13 @@ pub(crate) fn render(blamed: &Blamed) -> String {
     }
 
     // Every access in order, when reads are listed.
-    if blamed.accesses.iter().any(|a| a.kind == AccessKind::Read) {
+    if blamed.listed == Listed::Accesses && blamed.accesses.is_empty() {
+        out.push_str(&format!(
+            "\nnot read or written since step {}, where the search began\n",
+            blamed.searched_from
+        ));
+    }
+    if blamed.listed == Listed::Accesses && !blamed.accesses.is_empty() {
         out.push_str("\n  step  thread           access  value               where\n");
         for a in &blamed.accesses {
             let kind = match a.kind {
@@ -693,9 +675,13 @@ pub(crate) fn render(blamed: &Blamed) -> String {
         blamed.elapsed_ms as f64 / 1000.0
     ));
     if blamed.dropped > 0 {
+        let latest = match blamed.accesses.len() {
+            1 => "only the latest access is listed".to_string(),
+            n => format!("only the latest {n} accesses are listed"),
+        };
         out.push_str(&format!(
-            "the search stopped after {} accesses; {} more were left out, give --since to search less\n",
-            blamed.accesses.len(),
+            "{latest}: {} before them were left out, and the search went no further back; \
+             give --max to list more or --since to search less\n",
             blamed.dropped
         ));
     }
@@ -720,24 +706,6 @@ mod tests {
             syscall: None,
             hit: 1,
         }
-    }
-
-    /// Each value keeps its own last writes, oldest first, and reads are
-    /// left out: a later window found more writes of one value than asked.
-    #[test]
-    fn each_value_keeps_its_last_writes() {
-        let all = vec![
-            access(1, 0, Kind::Write),
-            access(2, 1, Kind::Write),
-            access(3, 0, Kind::Write),
-            access(4, 0, Kind::Read),
-            access(5, 0, Kind::Write),
-        ];
-        let kept: Vec<(u64, usize)> = last_writes(all, 2, 2)
-            .iter()
-            .map(|a| (a.step, a.value))
-            .collect();
-        assert_eq!(kept, [(2, 1), (3, 0), (5, 0)]);
     }
 
     /// The line that says naming has begun carries how long the search
