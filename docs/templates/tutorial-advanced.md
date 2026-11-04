@@ -109,9 +109,22 @@ The main thread set `p->queue` to NULL on line 125, in `pool_shutdown`. It did
 so at step {{blame_step}}, {{blame_gap}} steps before the crash. blame also
 prints the value before the write.
 
-The last part shows where the other threads were at step {{blame_step}}. Thread
+The last part shows where the other threads were just after the write. Thread
 {{crash_tid}} is the worker that crashes later. It was on line 75, printing. It
 had already passed the check of `p->stopping` on line 74.
+
+A step runs from one exit of the VM to the next, so a step can cover many
+lines of the program. At the start of step {{blame_step}}, the main thread had
+not yet called `pool_shutdown`. `rewind where --after-write` looks just after
+the write itself, with the address and size blame printed:
+
+<!-- set queue_address: rewind blame {{failing}} --at {{crash_step}} 'p->queue' --json 2>/dev/null | jq -r '.values[0].address' -->
+
+```console run name=where_write
+$ rewind where {{failing|short}} {{blame_step}} --tid {{pid}} --after-write {{queue_address}} --size 8
+```
+
+<!-- assert: grep -q '^#0 pool_shutdown (src/pool.c:125)' {{out:where_write}} && grep -q '^> *125 .*p->queue = NULL;' {{out:where_write}} -->
 
 `--writes 2` goes back one more write. Here that is the `calloc` in
 `pool_create`.
@@ -150,8 +163,10 @@ counts the steps searched so far, and the timeline marks the stretch being
 searched.
 
 The answer names the write, the value before it, and where the other threads
-were. Its buttons go to the write, show the reads with one lane per thread, or
-blame the write before this one. At the step where the run failed, the panel
+were. Click the write, or the button, to see the writer just after the write;
+click another thread to see it at that moment. The other buttons show the reads
+with one lane per thread, or blame the write before this one. The popover moves
+by its top line. At the step where the run failed, the panel
 starts searching for the failing line's values before you click.
 
 <!-- screenshot site/img/app-blame: {{home}}/runs/{{failing}} --compare {{home}}/runs/{{passing}} --step {{crash_step}} --source ;; wait 20 ;; click 1090 477 ;; wait 6 -->

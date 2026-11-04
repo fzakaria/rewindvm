@@ -341,8 +341,11 @@ address just before the trap's pc. Reads come from a second replay of each
 window, taken from a checkpoint at its start, that traps reads and writes
 together; matched in order against the first replay's writes, the accesses that
 are not writes are reads, since x86 cannot trap reads alone. A second gdb
-session, on a fork at the last write's step, names each access's line and where
-the process's other threads were. On the mylib shutdown race, the last write of
+session, on a fork run into the last write's step to just after the write,
+names each access's line and where the process's other threads were. A step
+runs from one VM exit to the next and can cover many lines, so the start of the
+write's step can be well before the write; `rewind where --after-write` looks
+just after a write the same way. On the mylib shutdown race, the last write of
 `p->queue` before the crash is found 14 steps back, `pool_shutdown`'s
 `p->queue = NULL`, in about 2 s, most of it the two gdb sessions.
 
