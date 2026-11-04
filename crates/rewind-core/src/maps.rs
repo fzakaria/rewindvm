@@ -230,6 +230,7 @@ impl Running {
                 .map(|(path, _)| path)
                 .filter(|path| self.local(path, dir).is_none())
                 .collect();
+            let mut copies = Vec::new();
             for path in unread {
                 let Some(inside) = mount.inside(path) else {
                     continue;
@@ -240,10 +241,27 @@ impl Running {
                 if let Some(parent) = to.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
-                if extract_elf(mount.image, &inside, &to).is_err() {
-                    let _ = std::fs::remove_file(&to);
-                }
+                copies.push((inside, to));
             }
+
+            // The copies side by side: dump.erofs copies one file at a
+            // time, and a compiler's libraries take 0.16-0.19 s each.
+            let threads = std::thread::available_parallelism()
+                .map_or(1, |n| n.get())
+                .min(copies.len())
+                .max(1);
+            let share = copies.len().div_ceil(threads).max(1);
+            std::thread::scope(|scope| {
+                for part in copies.chunks(share) {
+                    scope.spawn(move || {
+                        for (inside, to) in part {
+                            if extract_elf(mount.image, inside, to).is_err() {
+                                let _ = std::fs::remove_file(to);
+                            }
+                        }
+                    });
+                }
+            });
         }
 
         Ok(self
