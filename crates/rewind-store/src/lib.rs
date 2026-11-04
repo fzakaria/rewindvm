@@ -97,6 +97,20 @@ const COMPACT_AT: usize = 1 << 20;
 #[cfg(test)]
 const COMPACT_AT: usize = 4;
 
+/// What each thread reading pages keeps between them: the compressed
+/// bytes' buffer and a decompression context. A context made for each
+/// page, as `zstd::bulk::decompress_to_buffer` makes one, was a good part
+/// of restoring 721,100 pages.
+#[derive(Default)]
+struct Reading {
+    compressed: Vec<u8>,
+    decompressor: Option<zstd::bulk::Decompressor<'static>>,
+}
+
+thread_local! {
+    static READING: std::cell::RefCell<Reading> = std::cell::RefCell::default();
+}
+
 /// How many guesses a search of the sorted copy makes from where a key
 /// should be, the hashes being uniform, before it halves the range instead.
 const INTERPOLATIONS: u32 = 16;
@@ -720,7 +734,6 @@ impl Store {
             .with_context(|| format!("page {} is not in the store", hex(hash)))?;
         // The pack's reader is shared, and read with the readers let go,
         // so threads restoring a machine read pages at once.
-        let mut compressed = vec![0u8; loc.len as usize];
         let reader = {
             let mut readers = self.readers();
             let reader = match readers.entry(loc.pack) {
@@ -731,8 +744,17 @@ impl Store {
             };
             Arc::clone(reader)
         };
-        reader.read_exact_at(&mut compressed, loc.offset)?;
-        let n = zstd::bulk::decompress_to_buffer(&compressed, out)?;
+        let n = READING.with_borrow_mut(|reading| -> Result<usize> {
+            reading.compressed.resize(loc.len as usize, 0);
+            reader.read_exact_at(&mut reading.compressed, loc.offset)?;
+            let decompressor = match &mut reading.decompressor {
+                Some(decompressor) => decompressor,
+                None => reading
+                    .decompressor
+                    .insert(zstd::bulk::Decompressor::new()?),
+            };
+            Ok(decompressor.decompress_to_buffer(&reading.compressed, out)?)
+        })?;
         if n != out.len() {
             bail!("page {} is {n} bytes, expected {}", hex(hash), out.len());
         }
