@@ -14,9 +14,9 @@ use std::path::{Path, PathBuf};
 
 use futures::StreamExt;
 use gpui::{
-    AnyElement, Context, Div, FontWeight, HighlightStyle, MouseButton, Pixels, Point, Role,
-    SharedString, Stateful, UnderlineStyle, anchored, deferred, div, prelude::*, px, relative, rgb,
-    rgba,
+    AnyElement, Context, CursorStyle, Div, FontWeight, HighlightStyle, MouseButton, Pixels, Point,
+    Role, SharedString, Stateful, UnderlineStyle, anchored, deferred, div, prelude::*, px,
+    relative, rgb, rgba,
 };
 
 use crate::blame::{
@@ -62,9 +62,27 @@ pub(crate) struct Blames {
     shown: Option<BlameKey>,
     /// Where the popover opens, while it is open.
     popover: Option<Point<Pixels>>,
+    /// The popover being moved by its head, while it is.
+    drag: Option<PopoverDrag>,
     /// The note of the value under the pointer in the source panel, and
     /// where the pointer is.
     hover: Option<(Point<Pixels>, String)>,
+}
+
+/// A drag of the popover by its head: where the pointer was pressed, and
+/// where the popover was then.
+#[derive(Clone, Copy, Debug)]
+struct PopoverDrag {
+    from: Point<Pixels>,
+    start: Point<Pixels>,
+}
+
+impl PopoverDrag {
+    /// Where the popover goes with the pointer at `pointer`: moved as far
+    /// as the pointer has moved since the press.
+    fn to(self, pointer: Point<Pixels>) -> Point<Pixels> {
+        self.start + (pointer - self.from)
+    }
 }
 
 impl Blames {
@@ -212,7 +230,31 @@ impl Scrubber {
             self.blames.shown = None;
         }
         self.blames.popover = None;
+        self.blames.drag = None;
         cx.notify();
+    }
+
+    /// Starts moving the popover with the pointer, pressed at `at`.
+    fn start_popover_drag(&mut self, at: Point<Pixels>) {
+        if let Some(start) = self.blames.popover {
+            self.blames.drag = Some(PopoverDrag { from: at, start });
+        }
+    }
+
+    /// Moves the popover being dragged to follow the pointer at `at`.
+    /// False when no popover is being dragged.
+    pub(super) fn drag_popover(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) -> bool {
+        let Some(drag) = self.blames.drag else {
+            return false;
+        };
+        self.blames.popover = Some(drag.to(at));
+        cx.notify();
+        true
+    }
+
+    /// Ends a drag of the popover, if one is under way.
+    pub(super) fn end_popover_drag(&mut self) {
+        self.blames.drag = None;
     }
 
     /// Opens the popover of the search on screen again, at `at`.
@@ -373,6 +415,9 @@ impl Scrubber {
             .aria_label("Close")
             .cursor_pointer()
             .child(icon(Icon::Close, size::ICON_CLOSE, theme::MUTED))
+            // A press on the close button closes the popover rather than
+            // starting to move it.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(|this, _, _, cx| this.close_blame(false, cx)));
         let title = match blame.ask {
             Ask::Reads => "ACCESSES",
@@ -381,10 +426,19 @@ impl Scrubber {
                 false => "LAST WRITE",
             },
         };
+        // The head moves the popover: pressed, the popover follows the
+        // pointer until the button comes up.
         let head = div()
             .flex()
             .items_center()
             .gap(px(size::CARD_GAP))
+            .cursor(CursorStyle::OpenHand)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, e: &gpui::MouseDownEvent, _, _| {
+                    this.start_popover_drag(e.position)
+                }),
+            )
             .child(
                 div()
                     .text_size(px(size::TEXT_SMALL))
@@ -1041,5 +1095,20 @@ mod tests {
             .contains("in register r15")
         );
         assert!(note_of(&e("p->queue", Location::Unreadable)).contains("cannot read"));
+    }
+
+    /// A dragged popover moves by as far as the pointer has from where
+    /// the drag began, either way.
+    #[test]
+    fn a_dragged_popover_follows_the_pointer() {
+        let drag = PopoverDrag {
+            from: gpui::point(px(100.0), px(200.0)),
+            start: gpui::point(px(40.0), px(60.0)),
+        };
+        assert_eq!(
+            drag.to(gpui::point(px(130.0), px(150.0))),
+            gpui::point(px(70.0), px(10.0))
+        );
+        assert_eq!(drag.to(drag.from), drag.start);
     }
 }
