@@ -4,6 +4,7 @@
 // Only rewind-vmm and the command touch memory and the kernel directly.
 #![forbid(unsafe_code)]
 
+pub mod accesses;
 pub mod bisect;
 pub mod check;
 pub mod compare;

@@ -31,6 +31,7 @@ pub mod prune;
 pub mod replaying;
 pub mod schedule;
 pub mod sdk;
+pub mod searching;
 pub mod stop;
 pub mod writes;
 

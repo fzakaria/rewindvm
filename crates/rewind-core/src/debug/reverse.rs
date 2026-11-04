@@ -72,7 +72,7 @@ impl History for RunHistory<'_> {
 }
 
 /// A page store's pages, for rewinding a machine restored from keyframes.
-struct StorePages(rewind_store::Store);
+pub(crate) struct StorePages(pub(crate) rewind_store::Store);
 
 impl Pages for StorePages {
     fn put(&mut self, _page: &[u8]) -> Result<[u8; 32]> {

@@ -52,6 +52,7 @@ use crate::gdb_regs::{RegsWithBases, X86_64WithBases};
 use crate::threads::{Memory, Tasks, Thread};
 
 mod reverse;
+pub(crate) use reverse::StorePages;
 use reverse::{Back, GdbTrap, Move, Position};
 pub use reverse::{History, RunHistory};
 
@@ -76,7 +77,7 @@ const CR3_PAGE_TABLE: u64 = 0x000f_ffff_ffff_f000;
 const PAGE_SIZE: u64 = 4096;
 
 /// Where x86-64's lower half, user space, ends.
-const USER_END: u64 = 0x0000_8000_0000_0000;
+pub(crate) const USER_END: u64 = 0x0000_8000_0000_0000;
 
 /// The CPU's thread id for gdb, the same at every stop whichever task is
 /// on it, so a step of the CPU stops the thread gdb stepped. One past
@@ -485,7 +486,7 @@ fn watch_registers(w: &Watch) -> Vec<Trap> {
 /// `len` bytes at `address` as the pieces a debug register can watch: at
 /// each address, the largest power of two up to 8 that it is aligned to
 /// and that does not run past the end.
-fn pieces(address: u64, len: u64) -> Vec<(u64, u64)> {
+pub(crate) fn pieces(address: u64, len: u64) -> Vec<(u64, u64)> {
     let end = address + len;
     let mut at = address;
     let mut out = Vec::new();
@@ -501,7 +502,7 @@ fn pieces(address: u64, len: u64) -> Vec<(u64, u64)> {
 }
 
 /// The page table base of a CR3 value.
-fn page_table(cr3: u64) -> u64 {
+pub(crate) fn page_table(cr3: u64) -> u64 {
     cr3 & CR3_PAGE_TABLE
 }
 
