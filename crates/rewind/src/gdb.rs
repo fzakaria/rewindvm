@@ -31,6 +31,7 @@ use rewind_core::inspect::Inspection;
 use rewind_core::link_map;
 use rewind_core::maps::{ImageMount, Origin, Running, SymbolFile};
 use rewind_core::source_cache::{self, Entry, SourceCache, Version};
+use rewind_core::source_lists::{Key, SourceLists};
 use rewind_core::threads::{OnTheCpu, Tasks};
 use rewind_core::{Home, Run};
 
@@ -1119,7 +1120,8 @@ fn debugged_process(
     let outputs = &run.manifest.spec.job.outputs;
     let mut from_vm: Vec<String> = Vec::new();
     let mut from_src: Vec<(PathBuf, Vec<String>)> = Vec::new();
-    for (file, sources) in files.iter().zip(sources_outside_store(&files)) {
+    let lists = SourceLists::of(home);
+    for (file, sources) in files.iter().zip(sources_outside_store(&files, dir, &lists)) {
         if sources.is_empty() {
             continue;
         }
@@ -1518,13 +1520,46 @@ fn gdb_word(path: &Path) -> String {
 }
 
 /// For each of `files`, the source files its DWARF names outside the
+/// store: the list `lists` keeps for the file, else the one gdb gives,
+/// which `lists` then keeps. Files the VM sent are under `dir`.
+fn sources_outside_store(
+    files: &[SymbolFile],
+    dir: &Path,
+    lists: &SourceLists,
+) -> Vec<Vec<String>> {
+    let keys: Vec<Option<Key>> = files
+        .iter()
+        .map(|f| Key::of(&f.path, &path_in_vm(&f.path, dir)))
+        .collect();
+    let mut sources: Vec<Option<Vec<String>>> = keys
+        .iter()
+        .map(|key| key.as_ref().and_then(|key| lists.get(key)))
+        .collect();
+
+    // The files no list is kept for, all listed by one gdb. A list gdb
+    // could not give, as when it cannot start, is not kept.
+    let unlisted: Vec<usize> = (0..files.len()).filter(|&i| sources[i].is_none()).collect();
+    let asked: Vec<&SymbolFile> = unlisted.iter().map(|&i| &files[i]).collect();
+    let Some(answers) = listed_by_gdb(&asked) else {
+        return sources.into_iter().map(Option::unwrap_or_default).collect();
+    };
+    for (i, answer) in unlisted.into_iter().zip(answers) {
+        if let Some(key) = &keys[i] {
+            let _ = lists.put(key, &answer);
+        }
+        sources[i] = Some(answer);
+    }
+    sources.into_iter().map(Option::unwrap_or_default).collect()
+}
+
+/// For each of `files`, the source files its DWARF names outside the
 /// store, all listed by one gdb. It loads each file's symbols in turn,
 /// after echoing the file's marker and clearing the last file's, so a
 /// file gdb cannot read lists nothing rather than the files of the one
-/// before it. Every list is empty when gdb cannot start.
-fn sources_outside_store(files: &[SymbolFile]) -> Vec<Vec<String>> {
+/// before it. None when gdb cannot start.
+fn listed_by_gdb(files: &[&SymbolFile]) -> Option<Vec<Vec<String>>> {
     if files.is_empty() {
-        return Vec::new();
+        return Some(Vec::new());
     }
     let mut command = Command::new(gdb_program());
     command.args(["-batch", "-nx"]);
@@ -1538,10 +1573,8 @@ fn sources_outside_store(files: &[SymbolFile]) -> Vec<Vec<String>> {
             .arg(format!("symbol-file {}", gdb_word(&file.path)));
         command.args(["-ex", "info sources"]);
     }
-    let Ok(output) = command.stderr(Stdio::null()).output() else {
-        return vec![Vec::new(); files.len()];
-    };
-    listed_sources(&String::from_utf8_lossy(&output.stdout), files.len())
+    let output = command.stderr(Stdio::null()).output().ok()?;
+    let listed = listed_sources(&String::from_utf8_lossy(&output.stdout), files.len())
         .into_iter()
         .map(|sources| {
             sources
@@ -1549,7 +1582,8 @@ fn sources_outside_store(files: &[SymbolFile]) -> Vec<Vec<String>> {
                 .filter(|p| !p.starts_with(NIX_STORE))
                 .collect()
         })
-        .collect()
+        .collect();
+    Some(listed)
 }
 
 /// The path a symbol file had in the VM: its path under `dir` when it was

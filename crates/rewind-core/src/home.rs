@@ -114,6 +114,12 @@ impl Home {
         self.root.join("cache").join("sources")
     }
 
+    /// The source files each program or library names, by build ID (see
+    /// [`crate::source_lists`]).
+    pub fn source_lists(&self) -> PathBuf {
+        self.root.join("cache").join("source-lists")
+    }
+
     /// The caches of the debuginfod servers `rewind gdb` starts, one
     /// directory for each session running at once.
     pub fn debuginfod_cache(&self) -> PathBuf {

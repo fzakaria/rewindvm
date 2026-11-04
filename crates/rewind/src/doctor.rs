@@ -282,6 +282,7 @@ fn disk(home: &Home) -> Finding {
         pages: bytes_under(&home.store()),
         other: bytes_under(&home.inputs())
             + bytes_under(&home.source_cache())
+            + bytes_under(&home.source_lists())
             + bytes_under(&home.debuginfod_cache()),
         free: free_bytes(home.root()),
     };
