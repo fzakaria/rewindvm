@@ -306,6 +306,18 @@ struct Index {
     /// How many bytes of the index file the sorted copy and `pages` cover
     /// between them, a whole number of entries.
     read: u64,
+    /// Whether `pages` holds the index past the sorted copy yet.
+    tail: Tail,
+}
+
+/// Whether a store has read the index past its sorted copy. Reading it
+/// puts every entry there in a map, up to COMPACT_AT of them: 70 ms for
+/// 880,000. A store that only reads pages the sorted copy names, as a
+/// fork of a run recorded before the last sort does, never needs it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Tail {
+    Unread,
+    Read,
 }
 
 impl Index {
@@ -517,6 +529,7 @@ impl Store {
                 sorted: sorted.map(Arc::new),
                 pages: HashMap::default(),
                 read,
+                tail: Tail::Unread,
             }),
             index_log,
             pack: None,
@@ -533,8 +546,19 @@ impl Store {
             store.compact()?;
         }
         drop(sorting);
-        store.refresh()?;
+
+        // The index past the sorted copy is read when a lookup misses the
+        // copy, or before a page is put, so a page already stored is not
+        // stored again.
         Ok(store)
+    }
+
+    /// Reads the index past the sorted copy, unless this store has.
+    fn read_tail(&self) -> Result<()> {
+        if self.index().tail == Tail::Unread {
+            self.refresh()?;
+        }
+        Ok(())
     }
 
     /// Writes a new sorted copy that covers the index up to where this store
@@ -583,6 +607,7 @@ impl Store {
             index.pages.insert(hash, Location::of(entry));
         }
         index.read += (entries.len() * INDEX_ENTRY) as u64;
+        index.tail = Tail::Read;
         Ok(())
     }
 
@@ -688,6 +713,7 @@ impl Store {
     /// and either copy serves.
     pub fn put(&mut self, data: &[u8]) -> Result<Hash> {
         let hash = Self::hash(data);
+        self.read_tail()?;
         if hash == ZERO_PAGE || self.index().known(&hash).is_some() {
             return Ok(hash);
         }
@@ -788,6 +814,9 @@ impl Store {
     /// How much the store holds, as far as this store has read the index.
     /// Reads the whole sorted copy.
     pub fn stats(&self) -> Stats {
+        // A store whose index cannot be read past the sorted copy counts
+        // what it has read.
+        let _ = self.read_tail();
         let index = self.index();
         let sorted = index
             .sorted
@@ -1324,6 +1353,26 @@ mod tests {
     }
 
     /// Puts pages `0..n` with fills from `first` on.
+    /// A store opened after another wrote pages finds them and stores
+    /// none of them again: its index has them past the sorted copy, which
+    /// it reads only when a lookup needs it.
+    #[test]
+    fn a_page_past_the_sorted_copy_is_found_and_not_stored_again() {
+        let dir = tmp("tail-dedupe");
+        let hashes = put_pages(&mut Store::open(&dir).unwrap(), 1, 3);
+        let index_len = || fs::metadata(dir.join(INDEX)).unwrap().len();
+        let before = index_len();
+
+        let mut store = Store::open(&dir).unwrap();
+        assert_eq!(store.put(&page(2)).unwrap(), hashes[1]);
+        assert_eq!(index_len(), before);
+        let mut out = vec![0u8; PAGE];
+        store.get(&hashes[2], &mut out).unwrap();
+        assert_eq!(out, page(3));
+        assert!(store.contains(&hashes[0]));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
     fn put_pages(store: &mut Store, first: u8, n: u8) -> Vec<Hash> {
         (first..first + n)
             .map(|f| store.put(&page(f)).unwrap())
@@ -1368,7 +1417,7 @@ mod tests {
             hashes.extend(put_pages(&mut store, 11, 2));
         }
         let store = Store::open(&dir).unwrap();
-        assert_eq!(store.index.lock().unwrap().pages.len(), 2);
+        assert!(store.index.lock().unwrap().pages.is_empty());
         let mut out = vec![0u8; PAGE];
         for (hash, fill) in hashes.iter().zip(1..) {
             store.get(hash, &mut out).unwrap();
@@ -1423,15 +1472,18 @@ mod tests {
 
     #[test]
     fn a_page_two_stores_wrote_is_sorted_once() {
-        // Two stores open side by side both put the same page, so the log
-        // names it twice; the sorted copy keeps one.
+        // Two stores open side by side, each having read the index as it
+        // put a page of its own, both put the same page, so the log names
+        // it twice; the sorted copy keeps one.
         let dir = tmp("twice");
         {
             let mut first = Store::open(&dir).unwrap();
             let mut second = Store::open(&dir).unwrap();
+            first.put(&page(2)).unwrap();
+            second.put(&page(3)).unwrap();
             first.put(&page(1)).unwrap();
             second.put(&page(1)).unwrap();
-            put_pages(&mut first, 2, 4);
+            put_pages(&mut first, 4, 2);
         }
         let store = Store::open(&dir).unwrap();
         let sorted = Sorted::open(&dir).unwrap();
