@@ -77,6 +77,11 @@ pub struct BlamedAccess {
     pub kernel: Option<String>,
     pub syscall: Option<u64>,
     pub place: Option<SourcePlace>,
+    /// Where it falls among the process's accesses to the value in its
+    /// step, from 1: among the writes for a write, among every access for
+    /// a read. `rewind where --after-write` or `--after-access` with it
+    /// looks at the program just after this access.
+    pub hit: u32,
 }
 
 /// A place in a program's source: its function, file and line, and the

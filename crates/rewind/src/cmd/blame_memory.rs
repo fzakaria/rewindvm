@@ -170,6 +170,7 @@ pub(crate) fn blame(home: &Home, asked: Asked<'_>) -> Result<ExitCode> {
                 } else {
                     None
                 },
+                hit: a.hit,
             }
         })
         .collect();
@@ -228,7 +229,7 @@ fn name_values(home: &Home, run: &Run, step: u64, asked: &Asked<'_>) -> Result<N
     if asked.expressions.is_empty() {
         bail!("name a value to blame, such as 'p->queue', or give --address");
     }
-    let answer = &locate::located_asking(home, run, step, asked.thread, asked.expressions)?;
+    let answer = &locate::located_asking(home, run, step, asked.thread, asked.expressions, None)?;
     let index = match asked.frame {
         Some(level) => answer
             .frames
@@ -697,6 +698,7 @@ mod tests {
             before: None,
             after: None,
             syscall: None,
+            hit: 1,
         }
     }
 

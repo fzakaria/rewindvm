@@ -113,6 +113,92 @@ pub struct Access {
     /// The system call the thread was in, by number, for an access the
     /// kernel made for it.
     pub syscall: Option<u64>,
+    /// Where it falls among the process's accesses to the value in its
+    /// step, from 1: among the writes for a write, among every access for
+    /// a read. [`run_to_access`] finds it again by this.
+    pub hit: u32,
+}
+
+/// How many accesses to each value a replay has seen in the step it is
+/// in, to give each its [`Access::hit`].
+#[derive(Debug, Default)]
+struct Hits {
+    /// For each value by index, the step counted and the count there.
+    by_value: std::collections::HashMap<usize, (u64, u32)>,
+}
+
+impl Hits {
+    /// The hit of the next access to value `value` in step `step`.
+    fn next(&mut self, value: usize, step: u64) -> u32 {
+        let counted = self.by_value.entry(value).or_insert((step, 0));
+        if counted.0 != step {
+            *counted = (step, 0);
+        }
+        counted.1 += 1;
+        counted.1
+    }
+}
+
+/// An access to find in a step: the process's `hit`-th write of `value`,
+/// or its `hit`-th access of any kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Sought {
+    pub value: Value,
+    pub kind: Kind,
+    pub hit: u32,
+}
+
+/// Runs `machine`, at the start of step `step`, to just after process
+/// `pid` makes the access `sought` names in that step, with the value's
+/// bytes watched as a search watches them: the machine a look at the
+/// access itself needs, where a fork at the step is at its start, which
+/// can be many lines of the program before. Fails when the step ends
+/// first.
+pub fn run_to_access(machine: &mut Machine, pid: u32, step: u64, sought: Sought) -> Result<()> {
+    let process = process_page_table(machine, pid, step)?;
+    let access = match sought.kind {
+        Kind::Write => TrapAccess::Write,
+        Kind::Read => TrapAccess::ReadWrite,
+    };
+    let traps: Vec<Trap> = pieces(sought.value.address, sought.value.len)
+        .into_iter()
+        .map(|(address, len)| Trap::Watch {
+            address,
+            len,
+            access,
+        })
+        .collect();
+    machine.set_debug(Stepping::No, &traps)?;
+
+    // Each trap with the process's page table is one of its accesses.
+    let mut seen = 0;
+    let found = loop {
+        match machine.run(Some(step + 1), &mut Ignore)? {
+            Outcome::Debug(DebugStop::Watchpoint(_)) => {
+                let cr3 = machine.special_registers()?.cr3;
+                if page_table(cr3) != process {
+                    continue;
+                }
+                seen += 1;
+                if seen == sought.hit {
+                    break true;
+                }
+            }
+            Outcome::Debug(other) => bail!("looking for an access came to {other:?}"),
+            Outcome::Paused | Outcome::Stopped(_) => break false,
+        }
+    };
+    machine.clear_debug()?;
+    if !found {
+        bail!(
+            "step {step} ended after {seen} of process {pid}'s accesses to the {} bytes at \
+             {:#x}, before access {}",
+            sought.value.len,
+            sought.value.address,
+            sought.hit
+        );
+    }
+    Ok(())
 }
 
 /// What a search found.
@@ -337,6 +423,7 @@ fn classify(all: Vec<Access>, writes: &[Access]) -> Vec<Access> {
                 access.before.clone_from(&write.before);
                 access.after.clone_from(&write.after);
                 access.kind = Kind::Write;
+                access.hit = write.hit;
             } else {
                 access.kind = Kind::Read;
                 access.before.clone_from(&access.after);
@@ -433,6 +520,7 @@ impl<'a> Window<'a> {
         self.machine.set_debug(Stepping::No, &traps)?;
         let mut now = self.values()?;
         let mut found = Vec::new();
+        let mut hits = Hits::default();
         let base = progress.steps;
         loop {
             let at = self.machine.step();
@@ -449,9 +537,10 @@ impl<'a> Window<'a> {
                 }
                 Outcome::Stopped(_) => break,
                 Outcome::Debug(DebugStop::Watchpoint(piece)) => {
-                    let Some(access) = self.hit(piece, &mut now)? else {
+                    let Some(mut access) = self.hit(piece, &mut now)? else {
                         continue;
                     };
+                    access.hit = hits.next(access.value, access.step);
                     // Live counts are of writes; reads are told apart
                     // once the window's second replay is done.
                     if access_kind == TrapAccess::Write {
@@ -508,6 +597,7 @@ impl<'a> Window<'a> {
             before,
             after,
             syscall,
+            hit: 0,
         }))
     }
 }
@@ -541,7 +631,35 @@ mod tests {
             before: None,
             after: Some(vec![byte]),
             syscall: None,
+            hit: 1,
         }
+    }
+
+    /// Each access counts where it falls among its value's accesses in
+    /// its step, the count starting again in each step and for each
+    /// value: steps 10, 10, 11 of value 0 and step 10 of value 1.
+    #[test]
+    fn hits_count_within_a_step_and_a_value() {
+        let mut counts = Hits::default();
+        assert_eq!(counts.next(0, 10), 1);
+        assert_eq!(counts.next(0, 10), 2);
+        assert_eq!(counts.next(1, 10), 1);
+        assert_eq!(counts.next(0, 11), 1);
+    }
+
+    /// A write keeps its place among the step's writes, which is how a
+    /// replay trapping writes alone finds it again; a read keeps its place
+    /// among all the step's accesses, as one trapping both does.
+    #[test]
+    fn a_write_keeps_its_place_among_writes() {
+        let mut write = access(10, 0x180, 1);
+        write.hit = 1;
+        let (mut read, mut both) = (access(10, 0x100, 0), access(10, 0x180, 1));
+        read.hit = 1;
+        both.hit = 2;
+        let classified = classify(vec![read, both], &[write]);
+        let hits: Vec<(Kind, u32)> = classified.iter().map(|a| (a.kind, a.hit)).collect();
+        assert_eq!(hits, [(Kind::Read, 1), (Kind::Write, 1)]);
     }
 
     /// The accesses of a replay trapping reads and writes are the writes

@@ -13,6 +13,7 @@ use std::net::TcpListener;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
+use rewind_core::accesses::Sought;
 use rewind_core::threads::OnTheCpu;
 use rewind_core::{Home, Run};
 use rewind_trace::Trace;
@@ -68,10 +69,11 @@ pub(crate) fn locate(
     run: &Run,
     step: u64,
     (pid, tid): (Option<u32>, Option<u32>),
+    after: Option<Sought>,
     callers: usize,
     format: Format,
 ) -> Result<ExitCode> {
-    let answer = located(home, run, step, (pid, tid))?;
+    let answer = located_asking(home, run, step, (pid, tid), &[], after)?;
     let (pid, tid, step) = (answer.pid, answer.tid, answer.step);
     match format {
         Format::Json => println!("{}", serde_json::to_string(&answer)?),
@@ -81,6 +83,7 @@ pub(crate) fn locate(
                 process: &answer.process,
                 tid,
                 step,
+                after,
             };
             let text_source = answer.chosen.and_then(|i| {
                 let frame = &answer.frames[i];
@@ -111,17 +114,19 @@ pub(crate) fn located(
     step: u64,
     (pid, tid): (Option<u32>, Option<u32>),
 ) -> Result<Located> {
-    located_asking(home, run, step, (pid, tid), &[])
+    located_asking(home, run, step, (pid, tid), &[], None)
 }
 
 /// Where a thread was, as [`located`] says, and what the expressions in
-/// `asked` evaluate to in each of its frames.
+/// `asked` evaluate to in each of its frames: at the step's start, or
+/// just after the access `after` names, made in the step.
 pub(crate) fn located_asking(
     home: &Home,
     run: &Run,
     step: u64,
     (pid, tid): (Option<u32>, Option<u32>),
     asked: &[String],
+    after: Option<Sought>,
 ) -> Result<Located> {
     let pick = thread_at(run.trace()?, step, pid, tid)?;
 
@@ -144,10 +149,11 @@ pub(crate) fn located_asking(
     };
     let needs = Needs::Tasks("`rewind where` cannot find threads".into());
     if let Pick::Thread { pid, tid } = pick {
-        let (machine, symbols) = fork_and_symbols(home, run, step, needs, pid)?;
-        return walk(run, step, machine, symbols, (pid, tid), asked);
+        let (mut machine, symbols) = fork_and_symbols(home, run, step, needs, pid)?;
+        let moment = run_to(&mut machine, pid, step, after)?;
+        return walk(run, step, machine, symbols, (pid, tid), (asked, moment));
     }
-    let machine = gdb::fork(home, run, step, needs)?;
+    let mut machine = gdb::fork(home, run, step, needs)?;
     let (pid, tid) = match pick {
         Pick::Thread { pid, tid } => (pid, tid),
         Pick::OnTheCpu => match gdb::on_the_cpu(&machine)? {
@@ -162,7 +168,33 @@ pub(crate) fn located_asking(
         },
     };
     let symbols = Symbols::load(home, run, step, Some(pid), Kernel::Skip, Say::Aloud)?;
-    walk(run, step, machine, symbols, (pid, tid), asked)
+    let moment = run_to(&mut machine, pid, step, after)?;
+    walk(run, step, machine, symbols, (pid, tid), (asked, moment))
+}
+
+/// When in a step a look is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Moment {
+    /// At the step's start, where a fork there is.
+    StepStart,
+    /// Just after an access the step makes, where the CPU trapped: the
+    /// innermost frame's line is the accessing instruction's.
+    AfterAccess,
+}
+
+/// Runs `machine`, at the start of `step`, to just after process `pid`
+/// makes the access `after` names, when one is named.
+fn run_to(
+    machine: &mut rewind_vmm::Machine,
+    pid: u32,
+    step: u64,
+    after: Option<Sought>,
+) -> Result<Moment> {
+    let Some(sought) = after else {
+        return Ok(Moment::StepStart);
+    };
+    rewind_core::accesses::run_to_access(machine, pid, step, sought)?;
+    Ok(Moment::AfterAccess)
 }
 
 /// A fork of `run` at `step` for gdb, and process `pid`'s symbols there.
@@ -226,7 +258,7 @@ fn walk(
     machine: rewind_vmm::Machine,
     mut symbols: Symbols,
     (pid, tid): (u32, u32),
-    asked: &[String],
+    (asked, moment): (&[String], Moment),
 ) -> Result<Located> {
     // The fork as gdb sees it, with the process's symbols there.
     let scope = rewind_core::debug::Scope::Process(pid);
@@ -243,6 +275,12 @@ fn walk(
         "-ex".to_string(),
         format!("set $rewind_tid = {tid}"),
     ]);
+    if moment == Moment::AfterAccess {
+        args.extend([
+            "-ex".to_string(),
+            "set $rewind_after_access = 1".to_string(),
+        ]);
+    }
     if !asked.is_empty() {
         let file = symbols.dir().join(EXPRESSIONS_NAME);
         std::fs::write(&file, serde_json::to_string(asked)?)
@@ -1012,6 +1050,42 @@ pub(crate) struct Whose<'a> {
     pub process: &'a str,
     pub tid: u32,
     pub step: u64,
+    /// The access in the step the look is just after, if any.
+    pub after: Option<Sought>,
+}
+
+/// What a header says of a look just after `after`, nothing for one at
+/// the step's start: ", just after its write of the 8 bytes at 0x…", with
+/// which of the step's when it is not the first.
+fn moment_words(after: Option<Sought>) -> String {
+    let Some(sought) = after else {
+        return String::new();
+    };
+    let which = match sought.hit {
+        1 => String::new(),
+        n => format!("{} ", ordinal(n)),
+    };
+    let (what, to) = match sought.kind {
+        rewind_core::accesses::Kind::Write => ("write", "of"),
+        rewind_core::accesses::Kind::Read => ("access", "to"),
+    };
+    let in_step = if sought.hit == 1 { "" } else { " in the step" };
+    format!(
+        ", just after its {which}{what} {to} the {} bytes at {:#x}{in_step}",
+        sought.value.len, sought.value.address
+    )
+}
+
+/// `n` as an English ordinal: 2nd, 3rd, 11th, 21st.
+fn ordinal(n: u32) -> String {
+    let suffix = match (n % 10, n % 100) {
+        (_, 11..=13) => "th",
+        (1, _) => "st",
+        (2, _) => "nd",
+        (3, _) => "rd",
+        _ => "th",
+    };
+    format!("{n}{suffix}")
 }
 
 /// `rewind where`'s answer in words: a header, the chosen frame with its
@@ -1025,8 +1099,12 @@ pub(crate) fn render(
     callers: usize,
 ) -> String {
     let mut out = format!(
-        "process {} ({}), thread {}, at step {}\n",
-        whose.pid, whose.process, whose.tid, whose.step
+        "process {} ({}), thread {}, at step {}{}\n",
+        whose.pid,
+        whose.process,
+        whose.tid,
+        whose.step,
+        moment_words(whose.after)
     );
 
     // Without a frame to show, every frame there was.
@@ -1604,6 +1682,29 @@ mod tests {
         );
     }
 
+    /// A look just after an access says so in its header: which access,
+    /// of how many bytes where, among the step's.
+    #[test]
+    fn a_look_after_an_access_says_which() {
+        let after = |kind, hit| Sought {
+            value: rewind_core::accesses::Value {
+                address: 0x5556f833c068,
+                len: 8,
+            },
+            kind,
+            hit,
+        };
+        assert_eq!(
+            moment_words(Some(after(rewind_core::accesses::Kind::Write, 1))),
+            ", just after its write of the 8 bytes at 0x5556f833c068"
+        );
+        assert_eq!(
+            moment_words(Some(after(rewind_core::accesses::Kind::Read, 3))),
+            ", just after its 3rd access to the 8 bytes at 0x5556f833c068 in the step"
+        );
+        assert_eq!(moment_words(None), "");
+    }
+
     /// The text answer: who and when, the chosen frame by its level with
     /// its source and the line marked, then its callers up to the limit,
     /// each by its source line or, without one, its program.
@@ -1615,6 +1716,7 @@ mod tests {
             process: "test_pool_shutdown",
             tid: 168,
             step: 5017,
+            after: None,
         };
         let source = Source {
             first: 68,
@@ -1676,6 +1778,7 @@ mod tests {
             process: "test_pool_shutdown",
             tid: 168,
             step: 5017,
+            after: None,
         };
         assert_eq!(
             render(&whose, &stack, Some(2), None, 1),
@@ -1706,6 +1809,7 @@ mod tests {
             process: "big",
             tid: 34,
             step: 310,
+            after: None,
         };
         let stack = frames(
             r#"[{"level":0,"function":null,"file":null,"fullname":null,"line":null,"pc":"0x401913","object":null,"arguments":[],"locals":[],"expressions":[],"evaluated":[]}]"#,

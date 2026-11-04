@@ -1201,8 +1201,9 @@ in
   # only the parent's two. --address names the same bytes for programs,
   # and its search says how far it got in JSON lines, one of them as it
   # goes on to name the lines. A write thousands of steps back is found
-  # through windows restored in place. Boots the VM, so it needs
-  # /dev/kvm.
+  # through windows restored in place, and `rewind where --after-write`
+  # just after each write names the write's line. Boots the VM, so it
+  # needs /dev/kvm.
   blame-memory =
     pkgs.runCommand "rewind-blame-memory"
       {
@@ -1244,6 +1245,17 @@ in
         jq -e '.accesses[-1] | .after == "3" and .place.line == 16' address.json
         grep -q '^{"searching":{"phase":"searching"' progress
         test "$(grep -c '"phase":"naming"' progress)" = 1
+
+        # Just after each write blame names, where names the write's line,
+        # where the step's start can be lines before it.
+        for i in 0 1; do
+          access=$(jq -c ".accesses[$i]" blame.json)
+          rewind where watch "$(jq -r .step <<< "$access")" --pid "$pid" \
+            --tid "$(jq -r .tid <<< "$access")" --after-write "$address" --size 4 \
+            --hit "$(jq -r .hit <<< "$access")" --json > after.json
+          jq -e --argjson line "$(jq .place.line <<< "$access")" \
+            '.frames[.chosen].line == $line' after.json
+        done
 
         # A write thousands of steps back: the windows after the first
         # hold no write, and each puts the machine at its own keyframe in

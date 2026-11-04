@@ -43,6 +43,10 @@ MAX_EXPRESSIONS = 64
 # registers, 8 bytes each (rewind-core's accesses::MAX_BYTES).
 MAX_WATCHED = 32
 
+# Whether the fork stopped just after an access the step made, where the
+# innermost frame's line is the accessing instruction's.
+AFTER_ACCESS = gdb.convenience_variable("rewind_after_access") is not None
+
 # A chain of names in source: a name, then fields through `.` or `->` and
 # subscripts by a name or a number. Each prefix that ends in a name is an
 # expression of its own, `p` and `p->queue` in `p->queue->completed`.
@@ -345,7 +349,12 @@ def frame_entry(frame, asked=(), bare=False):
     variables, the expressions on the lines around its line and those in
     asked, each with what it is there."""
     pc = frame.pc()
-    filename, fullname, line = source_of(frame.find_sal())
+    sal = frame.find_sal()
+    if AFTER_ACCESS and frame.level() == 0:
+        # The CPU trapped just after the instruction that made the access,
+        # whose line is the one an address inside it has.
+        sal = gdb.find_pc_line(pc - 1)
+    filename, fullname, line = source_of(sal)
     function = frame.name()
     if function is None:
         symbol = info_symbol(pc)

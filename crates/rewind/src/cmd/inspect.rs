@@ -216,6 +216,29 @@ pub(crate) struct WhereArgs {
     /// output, for programs such as the desktop app.
     #[arg(long)]
     pub(crate) json: bool,
+    /// Look just after the process writes the --size bytes at this
+    /// address in the step, its --hit'th write of them there, rather than
+    /// at the step's start, which can be lines of the program before: the
+    /// write `rewind blame --at` names. The chosen frame's line is the
+    /// writing instruction's.
+    #[arg(
+        long,
+        value_name = "ADDRESS",
+        requires = "size",
+        conflicts_with = "after_access"
+    )]
+    pub(crate) after_write: Option<String>,
+    /// As --after-write, after any access, read or write: the --hit'th
+    /// in the step.
+    #[arg(long, value_name = "ADDRESS", requires = "size")]
+    pub(crate) after_access: Option<String>,
+    /// How many bytes --after-write or --after-access names.
+    #[arg(long)]
+    pub(crate) size: Option<u64>,
+    /// Which of the step's writes, or accesses, to look after, from 1,
+    /// as `rewind blame --json` numbers them.
+    #[arg(long, default_value_t = 1)]
+    pub(crate) hit: u32,
 }
 
 pub(crate) fn r#where(home: &Home, args: WhereArgs) -> Result<ExitCode> {
@@ -226,7 +249,34 @@ pub(crate) fn r#where(home: &Home, args: WhereArgs) -> Result<ExitCode> {
         tid,
         frames,
         json,
+        after_write,
+        after_access,
+        size,
+        hit,
     } = args;
+
+    // The access to look just after, if one is named.
+    let after = match (after_write, after_access) {
+        (Some(address), _) => Some((address, rewind_core::accesses::Kind::Write)),
+        (None, Some(address)) => Some((address, rewind_core::accesses::Kind::Read)),
+        (None, None) => None,
+    };
+    let after = match after {
+        Some((address, kind)) => {
+            let Some(address) = super::blame_memory::parse_hex(&address) else {
+                anyhow::bail!("not an address in hex: {address}");
+            };
+            let Some(len) = size else {
+                anyhow::bail!("--size names how many bytes");
+            };
+            Some(rewind_core::accesses::Sought {
+                value: rewind_core::accesses::Value { address, len },
+                kind,
+                hit,
+            })
+        }
+        None => None,
+    };
     let run = Run::find(home, &run)?;
     let step = run.check_step(step)?;
     warn_of_machine(&run, step);
@@ -235,7 +285,7 @@ pub(crate) fn r#where(home: &Home, args: WhereArgs) -> Result<ExitCode> {
     } else {
         locate::Format::Text
     };
-    locate::locate(home, &run, step, (pid, tid), frames, format)
+    locate::locate(home, &run, step, (pid, tid), after, frames, format)
 }
 
 /// `rewind cat`'s exit status when the file did not exist at the step:
