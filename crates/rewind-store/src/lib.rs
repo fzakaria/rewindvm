@@ -44,7 +44,7 @@ use std::hash::{BuildHasherDefault, Hasher};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{Context, Result, bail};
 
@@ -281,7 +281,8 @@ pub type PageSet = HashSet<Hash, PageHashes>;
 /// The index as far as this store has read it: a sorted copy of its first
 /// entries, and the entries after those in memory.
 struct Index {
-    sorted: Option<Sorted>,
+    /// Shared, so a lookup searches it without holding the index.
+    sorted: Option<Arc<Sorted>>,
     pages: HashMap<Hash, Location, PageHashes>,
     /// How many bytes of the index file the sorted copy and `pages` cover
     /// between them, a whole number of entries.
@@ -331,7 +332,7 @@ pub struct Store {
     index_log: File,
     /// Claimed on the first page put, so a store only read takes none.
     pack: Option<Pack>,
-    readers: Mutex<HashMap<u32, File>>,
+    readers: Mutex<HashMap<u32, Arc<File>>>,
     /// Held shared for as long as the store is open, so an opener that
     /// gets it exclusively knows no one else has the store open.
     _lock: File,
@@ -408,7 +409,7 @@ impl Store {
     }
 
     /// The open pack files, locked, as `index`.
-    fn readers(&self) -> MutexGuard<'_, HashMap<u32, File>> {
+    fn readers(&self) -> MutexGuard<'_, HashMap<u32, Arc<File>>> {
         self.readers
             .lock()
             .expect("another thread panicked holding the store's readers")
@@ -494,7 +495,7 @@ impl Store {
         let store = Store {
             dir: dir.to_path_buf(),
             index: Mutex::new(Index {
-                sorted,
+                sorted: sorted.map(Arc::new),
                 pages: HashMap::default(),
                 read,
             }),
@@ -539,11 +540,11 @@ impl Store {
         entries.dedup_by(|a, b| a[..32] == b[..32]);
         // The copy this store wrote, which covers every entry it has read,
         // rather than whichever copy has the name by now.
-        index.sorted = Some(write_sorted(
+        index.sorted = Some(Arc::new(write_sorted(
             &self.dir,
             &entries,
             index.read / INDEX_ENTRY as u64,
-        )?);
+        )?));
         index.pages.clear();
         Ok(())
     }
@@ -639,12 +640,27 @@ impl Store {
     /// Where a page is, rereading the index once if this store has not
     /// seen it yet.
     fn location(&self, hash: &Hash) -> Option<Location> {
-        let known = self.index().known(hash);
+        let known = self.known(hash);
         if known.is_some() {
             return known;
         }
         self.refresh().ok()?;
-        self.index().known(hash)
+        self.known(hash)
+    }
+
+    /// Where a page is, as far as this store has read the index. The
+    /// sorted copy is searched with the index let go, since a search
+    /// reads its file and threads restoring a machine look pages up at
+    /// once.
+    fn known(&self, hash: &Hash) -> Option<Location> {
+        let sorted = {
+            let index = self.index();
+            if let Some(loc) = index.pages.get(hash) {
+                return Some(*loc);
+            }
+            index.sorted.clone()?
+        };
+        sorted.find(hash)
     }
 
     /// Stores a page if it is new, and returns its hash either way. New
@@ -702,17 +718,20 @@ impl Store {
         let loc = self
             .location(hash)
             .with_context(|| format!("page {} is not in the store", hex(hash)))?;
+        // The pack's reader is shared, and read with the readers let go,
+        // so threads restoring a machine read pages at once.
         let mut compressed = vec![0u8; loc.len as usize];
-        {
+        let reader = {
             let mut readers = self.readers();
             let reader = match readers.entry(loc.pack) {
                 std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
                 std::collections::hash_map::Entry::Vacant(e) => {
-                    e.insert(File::open(Self::pack_path(&self.dir, loc.pack))?)
+                    e.insert(Arc::new(File::open(Self::pack_path(&self.dir, loc.pack))?))
                 }
             };
-            reader.read_exact_at(&mut compressed, loc.offset)?;
-        }
+            Arc::clone(reader)
+        };
+        reader.read_exact_at(&mut compressed, loc.offset)?;
         let n = zstd::bulk::decompress_to_buffer(&compressed, out)?;
         if n != out.len() {
             bail!("page {} is {n} bytes, expected {}", hex(hash), out.len());
@@ -1348,7 +1367,7 @@ mod tests {
         for round in 0..ROUNDS {
             hashes.extend(put_pages(&mut writer, 1 + round * PER_ROUND, PER_ROUND));
             writer.sync().unwrap();
-            let start = std::sync::Arc::new(std::sync::Barrier::new(THREADS));
+            let start = Arc::new(std::sync::Barrier::new(THREADS));
             let opens: Vec<_> = (0..THREADS)
                 .map(|_| {
                     let (dir, start) = (dir.clone(), start.clone());
@@ -1406,7 +1425,7 @@ mod tests {
             let mut store = Store::open(&dir).unwrap();
             put_pages(&mut store, 1, 20);
         }
-        let start = std::sync::Arc::new(std::sync::Barrier::new(THREADS));
+        let start = Arc::new(std::sync::Barrier::new(THREADS));
         let opens: Vec<_> = (0..THREADS)
             .map(|_| {
                 let (dir, start) = (dir.clone(), start.clone());

@@ -263,7 +263,7 @@ impl Machine {
     pub fn restore(
         config: &Config,
         chain: &[Keyframe],
-        pages: &dyn Pages,
+        pages: &(dyn Pages + Sync),
         trace: &[(u64, Vec<u8>)],
     ) -> Result<Machine> {
         let last = chain.last().context("restoring from no keyframes")?;
@@ -276,10 +276,7 @@ impl Machine {
         // lists it gives it, which a rewind to a checkpoint reads again.
         let ram = m.dev.ram.as_mut_slice();
         let restored = final_pages(chain, ram.len() / PAGE_SIZE)?;
-        for &(index, hash) in &restored {
-            let at = index as usize * PAGE_SIZE;
-            pages.get(hash, &mut ram[at..at + PAGE_SIZE])?;
-        }
+        read_pages(ram, &restored, pages)?;
         m.origin = crate::Origin::Restored(restored.into_iter().map(|(i, h)| (i, *h)).collect());
         // Start the dirty log afresh from the restored memory.
         m.vm.get_dirty_log(SLOT_RAM, m.dev.ram.len())?;
@@ -369,6 +366,58 @@ impl Machine {
         self.user_return = None;
         Ok(())
     }
+}
+
+/// The most threads that read a restored machine's pages, and the fewest
+/// pages worth more than one. Each page costs a read, a decompression
+/// and a hash check, about 11 µs on one thread: a late keyframe of a
+/// long build restores some 700,000 pages, 8 s of it.
+const MAX_PAGE_READERS: usize = 16;
+const PAGES_PER_READER: usize = 4096;
+
+/// Reads each of `restored`, a page number and its hash, from `pages`
+/// into its page of `ram`, on as many threads as the host has, up to
+/// MAX_PAGE_READERS. Each page is written by one thread only, so the
+/// memory comes out the same however the reads are shared.
+fn read_pages(
+    ram: &mut [u8],
+    restored: &[(u32, &[u8; 32])],
+    pages: &(dyn Pages + Sync),
+) -> Result<()> {
+    let threads = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .min(MAX_PAGE_READERS)
+        .min(restored.len().div_ceil(PAGES_PER_READER))
+        .max(1);
+
+    // Each restored page's own slice of the memory, paired with its hash.
+    let mut slots: Vec<Option<&mut [u8]>> = ram.chunks_mut(PAGE_SIZE).map(Some).collect();
+    let mut work = Vec::with_capacity(restored.len());
+    for &(index, hash) in restored {
+        let slot = slots
+            .get_mut(index as usize)
+            .and_then(Option::take)
+            .with_context(|| format!("page {index} is restored twice or past the memory"))?;
+        work.push((slot, hash));
+    }
+    let share = work.len().div_ceil(threads).max(1);
+    std::thread::scope(|scope| {
+        let readers: Vec<_> = work
+            .chunks_mut(share)
+            .map(|part| {
+                scope.spawn(move || -> Result<()> {
+                    for (out, hash) in part.iter_mut() {
+                        pages.get(hash, out)?;
+                    }
+                    Ok(())
+                })
+            })
+            .collect();
+        for reader in readers {
+            reader.join().expect("a page reader panicked")?;
+        }
+        Ok(())
+    })
 }
 
 /// The pages restoring `chain` leaves non-zero, in page order, each once
