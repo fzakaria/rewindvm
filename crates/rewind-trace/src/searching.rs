@@ -14,6 +14,9 @@ pub enum Phase {
     Restoring,
     /// Replaying the window with the value watched.
     Searching,
+    /// Done searching; naming the accesses' source lines and where the
+    /// other threads were, which takes a gdb session of its own.
+    Naming,
 }
 
 /// A search back for the accesses to a value, as far as it has got.

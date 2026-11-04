@@ -26,6 +26,11 @@ use crate::gdb::{self, Kernel, Needs, Output, Say, Symbols};
 /// and the start of the line it answers on.
 const SCRIPT: &str = include_str!("locate.py");
 const SCRIPT_NAME: &str = "where.py";
+
+/// The files the script reads what it is asked from: expressions to
+/// evaluate in each frame, and threads to walk with addresses to place.
+const EXPRESSIONS_NAME: &str = "where-expressions.json";
+const THREADS_NAME: &str = "where-threads.json";
 const ANSWER_MARKER: &str = "rewind-where: ";
 
 /// The source lines around the chosen frame's line the text answer shows
@@ -106,6 +111,18 @@ pub(crate) fn located(
     step: u64,
     (pid, tid): (Option<u32>, Option<u32>),
 ) -> Result<Located> {
+    located_asking(home, run, step, (pid, tid), &[])
+}
+
+/// Where a thread was, as [`located`] says, and what the expressions in
+/// `asked` evaluate to in each of its frames.
+pub(crate) fn located_asking(
+    home: &Home,
+    run: &Run,
+    step: u64,
+    (pid, tid): (Option<u32>, Option<u32>),
+    asked: &[String],
+) -> Result<Located> {
     let pick = thread_at(run.trace()?, step, pid, tid)?;
 
     // A process at its own exit has no memory left to name its frames
@@ -140,7 +157,7 @@ pub(crate) fn located(
             }
         },
     };
-    walk(home, run, step, machine, pid, tid)
+    walk(home, run, step, machine, (pid, tid), asked)
 }
 
 /// Which thread of a failure `rewind check --where` names.
@@ -183,8 +200,8 @@ fn walk(
     run: &Run,
     step: u64,
     machine: rewind_vmm::Machine,
-    pid: u32,
-    tid: u32,
+    (pid, tid): (u32, u32),
+    asked: &[String],
 ) -> Result<Located> {
     // The fork as gdb sees it, then the symbols, which take inspections on
     // forks of their own.
@@ -202,9 +219,14 @@ fn walk(
         "-batch".to_string(),
         "-ex".to_string(),
         format!("set $rewind_tid = {tid}"),
-        "-x".to_string(),
-        script.display().to_string(),
     ]);
+    if !asked.is_empty() {
+        let file = symbols.dir().join(EXPRESSIONS_NAME);
+        std::fs::write(&file, serde_json::to_string(asked)?)
+            .context("writing the expressions for gdb")?;
+        args.extend(["-ex".to_string(), gdb_string("rewind_expressions", &file)]);
+    }
+    args.extend(["-x".to_string(), script.display().to_string()]);
     eprintln!(
         "{} walking thread {tid}'s stack in gdb",
         crate::color::stderr().prefix()
@@ -250,6 +272,151 @@ fn walk(
     })
 }
 
+/// gdb's command setting convenience variable `name` to `path`, as a
+/// string the script reads a file from.
+fn gdb_string(name: &str, path: &std::path::Path) -> String {
+    let quoted = path
+        .display()
+        .to_string()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    format!("set ${name} = \"{quoted}\"")
+}
+
+/// What the gdb script prints for threads and addresses asked about
+/// together.
+#[derive(Deserialize)]
+struct ThreadsAndPlaces {
+    threads: Option<Vec<WalkedThread>>,
+    places: Option<Vec<Place>>,
+    error: Option<String>,
+}
+
+/// One thread's frames, as the script walks it with others.
+#[derive(Deserialize)]
+struct WalkedThread {
+    tid: u32,
+    frames: Option<Vec<Frame>>,
+    error: Option<String>,
+}
+
+/// Where threads of a process were at a step, and where addresses are in
+/// its code, from one gdb session on a fork there.
+pub(crate) struct ThreadsAt {
+    /// Each thread's frames, innermost first, without their variables,
+    /// and the index of the one in the program's own code; an error for
+    /// one gdb could not walk.
+    pub(crate) threads: Vec<(u32, ThreadFrames)>,
+    /// Each address's place, with its source line's text when gdb found
+    /// the file.
+    pub(crate) places: Vec<PlaceAt>,
+}
+
+/// A thread's frames, innermost first, and the index of the one in the
+/// program's own code; or why gdb could not walk them.
+pub(crate) type ThreadFrames = Result<(Vec<Frame>, Option<usize>), String>;
+
+/// An address's function and source line, and the line's text.
+#[derive(Debug, Default)]
+pub(crate) struct PlaceAt {
+    pub(crate) function: Option<String>,
+    pub(crate) file: Option<String>,
+    pub(crate) line: Option<u32>,
+    pub(crate) text: Option<String>,
+}
+
+/// Threads `tids` of process `pid` at `step` of `run`, and the places of
+/// `addresses` in its code, from one gdb session on `machine`, a fork at
+/// the step. Paths are as the VM had them.
+pub(crate) fn threads_at(
+    home: &Home,
+    run: &Run,
+    step: u64,
+    machine: rewind_vmm::Machine,
+    pid: u32,
+    (tids, addresses): (&[u32], &[u64]),
+) -> Result<ThreadsAt> {
+    let scope = rewind_core::debug::Scope::Process(pid);
+    let mut debuggee = gdb::debuggee(run, step, machine, scope)?;
+    let mut symbols = Symbols::load(home, run, step, Some(pid), Kernel::Skip, Say::Aloud)?;
+    symbols.add_vdso(&debuggee, Say::Aloud);
+
+    // gdb with the script and what it is asked, against the fork.
+    let script = symbols.dir().join(SCRIPT_NAME);
+    std::fs::write(&script, SCRIPT).context("writing the gdb script")?;
+    let asked = symbols.dir().join(THREADS_NAME);
+    let addresses: Vec<String> = addresses.iter().map(|a| format!("{a:#x}")).collect();
+    std::fs::write(
+        &asked,
+        serde_json::to_string(&serde_json::json!({ "tids": tids, "addresses": addresses }))?,
+    )
+    .context("writing the threads for gdb")?;
+    let listener = TcpListener::bind(gdb::GDB_LOCAL).context("listening for gdb")?;
+    let mut args = symbols.arguments(Some(listener.local_addr()?));
+    args.extend([
+        "-batch".to_string(),
+        "-ex".to_string(),
+        gdb_string("rewind_threads", &asked),
+        "-x".to_string(),
+        script.display().to_string(),
+    ]);
+    let names = symbols.file_names();
+    let output = Output::CapturedSayingDownloads(&names);
+    let (_, printed) = gdb::run_gdb(&args, Some((&mut debuggee, &listener)), output)?;
+    let answer: ThreadsAndPlaces = script_answer(&printed)?;
+    if let Some(error) = answer.error {
+        bail!("gdb could not walk the threads: {error}");
+    }
+
+    // Each path as the VM had it, a line's text read while the session's
+    // copy of its file is here.
+    let in_vm = |path: &String| {
+        gdb::path_in_vm(std::path::Path::new(path), symbols.dir())
+            .display()
+            .to_string()
+    };
+    let threads = answer
+        .threads
+        .unwrap_or_default()
+        .into_iter()
+        .map(|t| {
+            let walked = match (t.frames, t.error) {
+                (_, Some(error)) => Err(error),
+                (frames, None) => {
+                    let mut frames = frames.unwrap_or_default();
+                    for frame in &mut frames {
+                        frame.fullname = frame.fullname.as_ref().map(in_vm);
+                        frame.object = frame.object.as_ref().map(in_vm);
+                    }
+                    let chosen = chosen(&frames);
+                    Ok((frames, chosen))
+                }
+            };
+            (t.tid, walked)
+        })
+        .collect();
+    let places = answer
+        .places
+        .unwrap_or_default()
+        .into_iter()
+        .map(|p| {
+            let text = match (&p.fullname, p.line) {
+                (Some(path), Some(line)) => std::fs::read_to_string(path)
+                    .ok()
+                    .and_then(|t| t.lines().nth(line as usize - 1).map(str::to_string)),
+                _ => None,
+            };
+            PlaceAt {
+                function: p.function,
+                file: p.file,
+                line: p.line,
+                text,
+            }
+        })
+        .collect();
+    Ok(ThreadsAt { threads, places })
+}
+
 /// What the gdb script prints for an address: the function it is in and
 /// how far into it, its source line, and its program.
 #[derive(Debug, Deserialize)]
@@ -257,6 +424,7 @@ struct Place {
     function: Option<String>,
     offset: Option<u64>,
     file: Option<String>,
+    fullname: Option<String>,
     line: Option<u32>,
     object: Option<String>,
     /// Whether the address is in a variable, `function` naming it and

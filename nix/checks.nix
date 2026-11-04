@@ -1177,6 +1177,58 @@ in
         touch $out
       '';
 
+  # checks.blame-memory: `rewind blame RUN --at STEP EXPR` names who last
+  # wrote a value in memory. At the program's last write, counter holds 3,
+  # last written by main at watch.c:16 (counter = 3), and 2 before that,
+  # at watch.c:15. The child's write of 1, at the same address in its own
+  # memory, is no write of the parent's: two writes back, the search finds
+  # only the parent's two. --address names the same bytes for programs,
+  # and its search says how far it got in JSON lines, one of them as it
+  # goes on to name the lines. Boots the VM, so it needs /dev/kvm.
+  blame-memory =
+    pkgs.runCommand "rewind-blame-memory"
+      {
+        nativeBuildInputs = [
+          rewind
+          gdb
+          pkgs.jq
+        ];
+        requiredSystemFeatures = [ "kvm" ];
+      }
+      ''
+        export REWIND_HOME=$TMPDIR/rewind
+        # No debuginfod server: without a network, each of gdb's questions
+        # to it waits out a timeout.
+        export REWIND_DEBUGINFOD=/nonexistent
+
+        rewind run -q --clock exits --name watch --root ${gdbRoot} -- /bin/watch
+        done=$(rewind events watch | grep 'write(1, "done' | awk '{print $1}')
+
+        rewind blame watch --at "$done" counter > blame
+        cat blame
+        grep -q '^counter = 3   4 bytes at 0x' blame
+        grep -q '^last written at step [0-9]* by thread [0-9]* (watch)$' blame
+        grep -q '^  watch.c:16  main$' blame
+        grep -q '^  was 2$' blame
+
+        # The parent's two writes, not the child's.
+        rewind blame watch --at "$done" counter --writes 3 --json > blame.json
+        jq -e '.accesses | map(.after) == ["2", "3"]
+          and map(.place.line) == [15, 16] and all(.kind == "write")' blame.json
+        jq -e '.values[0] | .size == 4 and .class == "signed" and .initial == "0"' blame.json
+
+        # The same bytes by address, with the search's progress.
+        address=$(jq -r '.values[0].address' blame.json)
+        pid=$(jq -r '.pid' blame.json)
+        rewind --progress json blame watch --at "$done" --address "$address" --size 4 \
+          --class signed --pid "$pid" --json > address.json 2> progress
+        cat progress
+        jq -e '.accesses[-1] | .after == "3" and .place.line == 16' address.json
+        grep -q '^{"searching":{"phase":"searching"' progress
+        test "$(grep -c '"phase":"naming"' progress)" = 1
+        touch $out
+      '';
+
   # checks.gdb-cold: a fork made for gdb at a step with no keyframe yet
   # stays on the recording under the branch clock. Such a fork replays to
   # the step, opening its branch counters, before gdb's symbols are looked

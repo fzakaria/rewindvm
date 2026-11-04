@@ -2,6 +2,7 @@
 //! arguments and the home, and returns the exit code.
 
 pub(crate) mod blame;
+pub(crate) mod blame_memory;
 pub(crate) mod bugreport;
 pub(crate) mod inspect;
 pub(crate) mod record;

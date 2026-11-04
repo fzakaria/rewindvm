@@ -307,7 +307,7 @@ fn slice_line(slice: &Slice) -> String {
 /// Says, before a look inside `run` at `step`, when a replay found the
 /// machine different from the recording at a keyframe after the step and
 /// the look replays the stretch where it changed.
-fn warn_of_machine(run: &Run, step: u64) {
+pub(crate) fn warn_of_machine(run: &Run, step: u64) {
     let Some(warning) = run.machine_warning(step) else {
         return;
     };

@@ -49,7 +49,6 @@ use rewind_trace::writes::{
 use rewind_trace::{EventKind, Process, Trace};
 
 use crate::color::{self, Same, Style};
-use crate::{RUN_HELP, RUN_LONG_HELP};
 
 /// How many bytes from the first differing offset are shown and bisected
 /// on.
@@ -232,18 +231,118 @@ fn grouped(n: u64) -> String {
     out
 }
 
-/// The arguments of `rewind blame`.
+/// The arguments of `rewind blame`, in two forms: a file and two runs,
+/// `LEFT RIGHT PATH`; or values in memory and one run, `RUN --at STEP
+/// EXPR...`.
 #[derive(clap::Args)]
 pub(crate) struct BlameArgs {
-    #[arg(help = RUN_HELP, long_help = RUN_LONG_HELP)]
-    pub(crate) left: String,
-    #[arg(help = RUN_HELP, long_help = RUN_LONG_HELP)]
-    pub(crate) right: String,
-    /// The file, by its absolute path in the VM.
-    pub(crate) path: String,
-    /// The byte to explain; by default the first that differs.
-    #[arg(long)]
+    /// LEFT RIGHT PATH: two runs, by id, the start of one, name or @, and
+    /// a file by its absolute path in the VM. With --at: RUN, then the
+    /// values in memory to blame, as expressions of the program's
+    /// language, such as 'p->queue'.
+    #[arg(required = true, value_name = "RUN")]
+    pub(crate) targets: Vec<String>,
+    /// The byte of the file to explain; by default the first that differs.
+    #[arg(long, conflicts_with = "at")]
     pub(crate) offset: Option<usize>,
+    /// Blame values in the memory of a process at this step: who last
+    /// wrote each, from which line and thread, and where the process's
+    /// other threads were then.
+    #[arg(long, value_name = "STEP")]
+    pub(crate) at: Option<u64>,
+    /// The process the values are in; by default the step's event's.
+    #[arg(long, requires = "at")]
+    pub(crate) pid: Option<u32>,
+    /// The thread whose frame names the values; by default the step's
+    /// event's, or the main thread of --pid.
+    #[arg(long, requires = "at")]
+    pub(crate) tid: Option<u32>,
+    /// The frame, by its number in `rewind where`, that names the values;
+    /// by default the one in the program's own code.
+    #[arg(long, requires = "at")]
+    pub(crate) frame: Option<u32>,
+    /// List each value's last N writes, newest first.
+    #[arg(long, value_name = "N", default_value_t = 1, requires = "at")]
+    pub(crate) writes: usize,
+    /// List the reads as well as the writes, of every access since
+    /// --since, oldest first.
+    #[arg(long, requires = "at")]
+    pub(crate) reads: bool,
+    /// Search no further back than this step; by default the process's
+    /// start, or its last exec before --at.
+    #[arg(long, value_name = "STEP", requires = "at")]
+    pub(crate) since: Option<u64>,
+    /// The most accesses --reads lists, the latest ones.
+    #[arg(long, value_name = "N", default_value_t = super::blame_memory::DEFAULT_MAX, requires = "at")]
+    pub(crate) max: usize,
+    /// Blame the bytes at this address instead of an expression, for
+    /// programs such as the desktop app that have the address from
+    /// `rewind where --json`.
+    #[arg(long, value_name = "ADDRESS", requires_all = ["at", "size"])]
+    pub(crate) address: Option<String>,
+    /// How many bytes --address names.
+    #[arg(long, requires = "address")]
+    pub(crate) size: Option<u64>,
+    /// How --address's bytes print: pointer, signed, unsigned, bool,
+    /// float or bytes.
+    #[arg(long, value_name = "CLASS", requires = "address", value_parser = value_class)]
+    pub(crate) class: Option<rewind_trace::located::ValueClass>,
+    /// Print the answer as one JSON object on standard output, for
+    /// programs such as the desktop app.
+    #[arg(long, requires = "at")]
+    pub(crate) json: bool,
+}
+
+/// A value class by its name, as `rewind where --json` prints it.
+fn value_class(text: &str) -> Result<rewind_trace::located::ValueClass, String> {
+    serde_json::from_value(serde_json::Value::String(text.to_string()))
+        .map_err(|_| format!("{text} is not one of pointer, signed, unsigned, bool, float, bytes"))
+}
+
+/// `rewind blame RUN --at STEP EXPR...`.
+fn blame_memory(
+    home: &Home,
+    args: &BlameArgs,
+    at: u64,
+    progress: crate::progress::Format,
+) -> Result<ExitCode> {
+    let (run, expressions) = args.targets.split_first().expect("clap requires a run");
+    let address = match (&args.address, args.size) {
+        (Some(address), Some(size)) => {
+            let Some(parsed) = super::blame_memory::parse_hex(address) else {
+                bail!("--address {address} is not an address in hex");
+            };
+            let class = args
+                .class
+                .unwrap_or(rewind_trace::located::ValueClass::Bytes);
+            Some((parsed, size, class))
+        }
+        _ => None,
+    };
+    if address.is_some() && !expressions.is_empty() {
+        bail!("give --address or expressions to blame, not both");
+    }
+    super::blame_memory::blame(
+        home,
+        super::blame_memory::Asked {
+            run,
+            step: at,
+            expressions,
+            thread: (args.pid, args.tid),
+            frame: args.frame,
+            address,
+            kinds: if args.reads {
+                rewind_core::accesses::Kinds::ReadsAndWrites
+            } else {
+                rewind_core::accesses::Kinds::Writes
+            },
+            writes: args.writes,
+            since: args.since,
+            max: args.max,
+            json: args.json,
+            progress,
+        },
+    )
 }
 
 /// What made a file's bytes in one run: the copies back to the process
@@ -385,13 +484,22 @@ enum Source {
     Made,
 }
 
-pub(crate) fn blame(home: &Home, args: BlameArgs) -> Result<ExitCode> {
-    let BlameArgs {
-        left,
-        right,
-        path,
-        offset,
-    } = args;
+pub(crate) fn blame(
+    home: &Home,
+    args: BlameArgs,
+    progress: crate::progress::Format,
+) -> Result<ExitCode> {
+    if let Some(at) = args.at {
+        return blame_memory(home, &args, at, progress);
+    }
+    let [left, right, path] = <[String; 3]>::try_from(args.targets).map_err(|targets| {
+        anyhow::anyhow!(
+            "blaming a file takes two runs and a path, not {} arguments; give --at STEP \
+             to blame values in memory",
+            targets.len()
+        )
+    })?;
+    let offset = args.offset;
     let runs = [Run::find(home, &left)?, Run::find(home, &right)?];
     let logs = [runs[0].io()?, runs[1].io()?];
 

@@ -241,13 +241,24 @@ enum Command {
     /// --file or --outputs, compares the files the runs left behind
     /// instead of their events.
     Diff(cmd::view::DiffArgs),
-    /// Why a file differs between two runs: which program wrote the first
-    /// differing byte and at which step, what that program read, and the
-    /// likely cause.
+    /// Why a file differs between two runs, or who wrote a value in
+    /// memory: the program, line and step that made it.
     ///
-    /// It reads files at steps by forking the runs, as `rewind cat` does.
-    /// Runs recorded before read and write records existed have to be
-    /// replayed many times, which takes longer.
+    /// `rewind blame LEFT RIGHT PATH` names which program wrote the first
+    /// byte of PATH that differs between the runs and at which step, what
+    /// that program read, and the likely cause. It reads files at steps by
+    /// forking the runs, as `rewind cat` does. Runs recorded before read
+    /// and write records existed have to be replayed many times, which
+    /// takes longer.
+    ///
+    /// `rewind blame RUN --at STEP EXPR...` names who last wrote each
+    /// value at STEP, from which line and thread, and where the process's
+    /// other threads were then. EXPR is evaluated in the thread's frame in
+    /// the program's own code, as `rewind where` picks it. A value can be
+    /// blamed when it is in memory and 32 bytes or less, the most the
+    /// CPU's debug registers watch: a field through a pointer, a global, a
+    /// local with a stack slot. --reads lists every read and write since
+    /// the process began.
     Blame(cmd::blame::BlameArgs),
 }
 
@@ -455,7 +466,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Bugreport(args) => cmd::bugreport::bugreport(&home, args),
         Command::Generate(args) => cmd::setup::generate(args),
         Command::Diff(args) => cmd::view::diff(&home, args),
-        Command::Blame(args) => cmd::blame::blame(&home, args),
+        Command::Blame(args) => cmd::blame::blame(&home, args, progress),
     }
 }
 
