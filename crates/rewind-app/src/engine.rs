@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
-use crate::source::{Located, Thread};
+use crate::source::{AfterAccess, Located, Thread};
 use crate::viewer::{self, FetchedAll};
 use rewind_trace::manifest::MANIFEST;
 use rewind_trace::replaying::{PROGRESS_ENV, PROGRESS_JSON};
@@ -297,9 +297,10 @@ pub trait Engine: Send + Sync {
         progress: &mut dyn FnMut(&str),
     ) -> EngineResult<Outputs>;
 
-    /// Where in the program's own code `thread` was at `step` of `run`:
-    /// the thread's frames, the innermost of them in the program's own
-    /// code, and its source. The engine forks the run at the step and
+    /// Where in the program's own code `thread` was at `step` of `run`,
+    /// at its start or just after the access `after` names: the thread's
+    /// frames, the innermost of them in the program's own code, and its
+    /// source. The engine forks the run at the step and
     /// walks the thread's stack in gdb, which takes seconds, or a minute
     /// the first time gdb downloads a library's debug info; `progress` is
     /// handed each line the engine says while it works, and `cancel` stops
@@ -309,6 +310,7 @@ pub trait Engine: Send + Sync {
         run: &Path,
         step: u64,
         thread: Thread,
+        after: Option<AfterAccess>,
         cancel: &Cancel,
         progress: &mut dyn FnMut(&str),
     ) -> EngineResult<Located>;
@@ -813,10 +815,11 @@ impl Engine for CliEngine {
         run: &Path,
         step: u64,
         thread: Thread,
+        after: Option<AfterAccess>,
         cancel: &Cancel,
         progress: &mut dyn FnMut(&str),
     ) -> EngineResult<Located> {
-        self.where_json(run, step, thread, cancel, progress)
+        self.where_json(run, step, (thread, after), cancel, progress)
     }
 
     fn blame(
@@ -962,12 +965,13 @@ impl CliEngine {
         &self,
         run: &Path,
         step: u64,
-        thread: Thread,
+        (thread, after): (Thread, Option<AfterAccess>),
         cancel: &Cancel,
         progress: &mut dyn FnMut(&str),
     ) -> EngineResult<Located> {
-        // rewind where <run> <step> [--pid P --tid T] --json; with no
-        // thread named, the engine takes the one on the CPU.
+        // rewind where <run> <step> [--pid P --tid T] [--after-write A
+        // --size N --hit K] --json; with no thread named, the engine takes
+        // the one on the CPU.
         let mut args: Vec<OsString> = vec!["where".into(), run.into(), step.to_string().into()];
         if let Thread::Of { pid, tid } = thread {
             args.extend([
@@ -975,6 +979,20 @@ impl CliEngine {
                 pid.to_string().into(),
                 "--tid".into(),
                 tid.to_string().into(),
+            ]);
+        }
+        if let Some(after) = after {
+            let flag = match after.kind {
+                crate::blame::AccessKind::Write => "--after-write",
+                crate::blame::AccessKind::Read => "--after-access",
+            };
+            args.extend([
+                flag.into(),
+                format!("{:#x}", after.address).into(),
+                "--size".into(),
+                after.size.to_string().into(),
+                "--hit".into(),
+                after.hit.to_string().into(),
             ]);
         }
         args.push("--json".into());
@@ -1529,6 +1547,49 @@ mod tests {
         );
     }
 
+    /// A look just after an access names it to the engine: a write by
+    /// --after-write, any other access by --after-access, each with its
+    /// size and which of the step's it is.
+    #[test]
+    fn locate_after_an_access_names_the_access() {
+        let dir = temp_dir("where-after");
+        let run = dir.join("run");
+        let json = r#"{"run":"r","step":4768,"pid":166,"tid":166,"process":"test_pool_shutdown","frames":[],"chosen":null,"files":{}}\n"#;
+        let engine = fake_engine(&dir, json, "", 0);
+        let thread = Thread::Of { pid: 166, tid: 166 };
+        let after = |kind, hit| AfterAccess {
+            address: 0x5556f833c068,
+            size: 8,
+            kind,
+            hit,
+        };
+        for (kind, hit, flag) in [
+            (crate::blame::AccessKind::Write, 1, "--after-write"),
+            (crate::blame::AccessKind::Read, 3, "--after-access"),
+        ] {
+            retrying(|| {
+                engine.locate(
+                    &run,
+                    4_768,
+                    thread,
+                    Some(after(kind, hit)),
+                    &Cancel::default(),
+                    &mut |_| {},
+                )
+            })
+            .unwrap();
+            let args = std::fs::read_to_string(dir.join("args")).unwrap();
+            assert_eq!(
+                args.trim(),
+                format!(
+                    "where {} 4768 --pid 166 --tid 166 {flag} 0x5556f833c068 --size 8 --hit {hit} \
+                     --json",
+                    run.display()
+                )
+            );
+        }
+    }
+
     /// The stand-in prints what `rewind where --json` does; the app reads
     /// the chosen frame from it, and the arguments name the step, the
     /// process and the thread. A refusal reports the engine's reason.
@@ -1540,7 +1601,7 @@ mod tests {
         let engine = fake_engine(&dir, json, "rewind: walking the stack in gdb\n", 0);
         let thread = Thread::Of { pid: 166, tid: 174 };
         let located =
-            retrying(|| engine.locate(&run, 5_060, thread, &Cancel::default(), &mut |_| {}))
+            retrying(|| engine.locate(&run, 5_060, thread, None, &Cancel::default(), &mut |_| {}))
                 .unwrap();
         assert_eq!(
             located.chosen_frame().unwrap().place_label(),
@@ -1559,6 +1620,7 @@ mod tests {
                 &run,
                 5_061,
                 Thread::OnTheCpu,
+                None,
                 &Cancel::default(),
                 &mut |_| {},
             )
@@ -1569,8 +1631,9 @@ mod tests {
 
         let refusing = fake_engine(&dir, "", "rewind: no process 166 at this step\n", 1);
         let thread = Thread::Of { pid: 166, tid: 166 };
-        let err = retrying(|| refusing.locate(&run, 10, thread, &Cancel::default(), &mut |_| {}))
-            .unwrap_err();
+        let err =
+            retrying(|| refusing.locate(&run, 10, thread, None, &Cancel::default(), &mut |_| {}))
+                .unwrap_err();
         let EngineError::Failed { message, .. } = err else {
             panic!("{err:?}");
         };
@@ -1606,7 +1669,7 @@ mod tests {
         let said = std::cell::RefCell::new(Vec::new());
         let located = retrying(|| {
             let thread = Thread::Of { pid: 2, tid: 2 };
-            engine.locate(&run, 1, thread, &Cancel::default(), &mut |line| {
+            engine.locate(&run, 1, thread, None, &Cancel::default(), &mut |line| {
                 said.borrow_mut().push(line.to_string());
                 std::fs::write(&go, "").unwrap();
             })

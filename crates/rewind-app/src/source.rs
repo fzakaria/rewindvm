@@ -161,6 +161,18 @@ impl Located {
     }
 }
 
+/// An access in a step to look just after, rather than at the step's
+/// start, which can be lines of the program before it: the thread's
+/// process's `hit`-th write of the `size` bytes at `address` in the step,
+/// or for a read its `hit`-th access of any kind, as blame numbers them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct AfterAccess {
+    pub address: u64,
+    pub size: u64,
+    pub kind: crate::blame::AccessKind,
+    pub hit: u32,
+}
+
 /// Whose stack the panel asks the engine for at a step.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Thread {

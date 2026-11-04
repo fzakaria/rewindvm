@@ -21,7 +21,7 @@ use gpui::{
 
 use crate::blame::{
     AccessKind, Ask, Blame, Blamed, BlamedAccess, Expression, Searching, Target, access_place,
-    blameable_on, counted, file_line, lanes, overlay, thread_place,
+    blameable_on, counted, file_line, lanes, look_after, overlay, thread_place,
 };
 use crate::clock::Instant;
 use crate::describe::thousands;
@@ -534,18 +534,28 @@ impl Scrubber {
                 )));
         };
 
-        // The last write, then the ones before it that were asked for.
-        let mut card = card.child(write_block(last, blamed.step, &mono, true));
-        for earlier in writes.iter().skip(1) {
-            card = card.child(write_block(earlier, blamed.step, &mono, false));
+        // The last write, then the ones before it that were asked for,
+        // each a way to the writer just after its write.
+        let mut card = card;
+        for (i, write) in writes.iter().enumerate() {
+            let (step, look) = (write.step, look_after(blamed, write));
+            card = card.child(
+                div()
+                    .id(SharedString::from(format!("blame-write-{i}")))
+                    .cursor_pointer()
+                    .rounded(px(size::RADIUS_CARD))
+                    .hover(|s| s.bg(rgb(theme::LINE_SOFT)))
+                    .tooltip(tooltip(go_note(write.step, write.tid)))
+                    .child(write_block(write, blamed.step, &mono, i == 0))
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.show_thread_at(step, look, cx)),
+                    ),
+            );
         }
 
         // What to do next.
         let step = last.step;
-        let writer = crate::source::Thread::Of {
-            pid: blamed.pid,
-            tid: last.tid,
-        };
+        let look = look_after(blamed, last);
         let reads_target = target.clone();
         let earlier_target = target.clone();
         let at = self.blames.popover;
@@ -555,14 +565,9 @@ impl Scrubber {
             .gap(px(size::CARD_GAP))
             .child(
                 small_button("blame-go", ButtonStyle::Primary, "Go to the write")
-                    .tooltip(tooltip(format!(
-                        "Move the playhead to step {}, with the source of thread {}, the writer: \
-                         a fork there is just before the write, which comes later in the step.",
-                        thousands(step),
-                        last.tid
-                    )))
+                    .tooltip(tooltip(go_note(step, last.tid)))
                     .on_click(
-                        cx.listener(move |this, _, _, cx| this.show_thread_at(step, writer, cx)),
+                        cx.listener(move |this, _, _, cx| this.show_thread_at(step, look, cx)),
                     ),
             )
             .child(
@@ -600,11 +605,28 @@ impl Scrubber {
                     div()
                         .text_size(px(size::TEXT_SMALL))
                         .text_color(rgb(theme::MUTED))
-                        .child(format!("OTHER THREADS AT STEP {}", thousands(last.step))),
+                        .child("OTHER THREADS AT THE WRITE"),
                 );
+            let after = look.1;
             for t in &blamed.threads {
+                let other = crate::source::Thread::Of {
+                    pid: blamed.pid,
+                    tid: t.tid,
+                };
                 threads = threads.child(
                     div()
+                        .id(SharedString::from(format!("blame-thread-{}", t.tid)))
+                        .cursor_pointer()
+                        .rounded(px(size::RADIUS_CARD))
+                        .hover(|s| s.bg(rgb(theme::LINE_SOFT)))
+                        .tooltip(tooltip(format!(
+                            "Show thread {} just after the write, in step {}.",
+                            t.tid,
+                            thousands(step)
+                        )))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.show_thread_at(step, (other, after), cx)
+                        }))
                         .flex()
                         .gap(px(size::CARD_GAP))
                         .font_family(mono.clone())
@@ -663,6 +685,7 @@ impl Scrubber {
                     AccessKind::Write => theme::AMBER,
                 };
                 let step = access.step;
+                let look = look_after(blamed, access);
                 let note = format!(
                     "Step {}: thread {} {} {} = {} \u{b7} {}",
                     thousands(step),
@@ -690,7 +713,9 @@ impl Scrubber {
                         .bg(rgb(color))
                         .cursor_pointer()
                         .tooltip(tooltip(note))
-                        .on_click(cx.listener(move |this, _, _, cx| this.jump_to(step, cx))),
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| this.show_thread_at(step, look, cx)),
+                        ),
                 );
             }
             rows = rows.child(
@@ -815,7 +840,7 @@ impl Scrubber {
                 );
             }
         }
-        if let Some(step) = blame.write_step()
+        if let Some((step, look)) = blame.last_write_look()
             && view.contains(step)
         {
             let note = format!(
@@ -838,7 +863,9 @@ impl Scrubber {
                     .cursor_pointer()
                     .tooltip(tooltip(note))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(cx.listener(move |this, _, _, cx| this.jump_to(step, cx)))
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.show_thread_at(step, look, cx)),
+                    )
                     .into_any_element(),
             );
         }
@@ -957,6 +984,15 @@ fn char_bytes(text: &str, start: u32, end: u32) -> Option<Range<usize>> {
 
 /// A write in the card: what the value became and when, by whom and on
 /// which line, and what it was. The last write is set larger.
+/// What going to a write in step `step` by thread `tid` does.
+fn go_note(step: u64, tid: u32) -> String {
+    format!(
+        "Move the playhead to step {} and show thread {}, the writer, just after the write.",
+        thousands(step),
+        tid
+    )
+}
+
 fn write_block(write: &BlamedAccess, asked: u64, mono: &SharedString, last: bool) -> Div {
     let became = write.after.clone().unwrap_or_else(|| "?".into());
     let before = asked.saturating_sub(write.step);

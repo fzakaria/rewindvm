@@ -34,8 +34,8 @@ use crate::run::Replays;
 use crate::selection::{Mapped, Pos, Surface, part_of_line};
 use crate::sideways::{Sideways, line_width, text_column};
 use crate::source::{
-    Frame, Kind, Located, Progress, Shown, SourceFile, Thread, shown, target, variable_lines,
-    without_source,
+    AfterAccess, Frame, Kind, Located, Progress, Shown, SourceFile, Thread, shown, target,
+    variable_lines, without_source,
 };
 use crate::syntax::{Highlighter, Language};
 use crate::theme::{self, layout, size};
@@ -58,12 +58,17 @@ fn thread_at(timeline: &Timeline, step: u64) -> Thread {
         .map_or(Thread::OnTheCpu, |e| target(e.pid, e.tid))
 }
 
-/// Whose stack `panel` shows at `step`: the thread pinned there, else as
-/// [`thread_at`] picks it.
-fn panel_thread(panel: &SourcePanel, timeline: &Timeline, step: u64) -> Thread {
+/// Whose stack `panel` shows at `step`, and the access in the step it
+/// shows it just after: as pinned there, else the thread [`thread_at`]
+/// picks at the step's start.
+fn panel_look(
+    panel: &SourcePanel,
+    timeline: &Timeline,
+    step: u64,
+) -> (Thread, Option<AfterAccess>) {
     match panel.pinned {
-        Some((at, thread)) if at == step => thread,
-        _ => thread_at(timeline, step),
+        Some((at, thread, after)) if at == step => (thread, after),
+        _ => (thread_at(timeline, step), None),
     }
 }
 
@@ -106,8 +111,9 @@ pub struct SourcePanel {
     /// How far the shown file's lines are scrolled sideways.
     sideways: Sideways,
     /// A thread the panel shows at a step in place of the step's event's,
-    /// as going to a write shows the writer's.
-    pinned: Option<(u64, Thread)>,
+    /// as going to a write shows the writer's, and the access in the step
+    /// it shows the thread just after.
+    pinned: Option<(u64, Thread, Option<AfterAccess>)>,
 }
 
 impl SourcePanel {
@@ -164,13 +170,18 @@ impl Scrubber {
 
     /// Moves the playhead to `step` with the source panel open on
     /// `thread` there, in place of the step's event's thread.
-    pub(super) fn show_thread_at(&mut self, step: u64, thread: Thread, cx: &mut Context<Self>) {
+    pub(super) fn show_thread_at(
+        &mut self,
+        step: u64,
+        (thread, after): (Thread, Option<AfterAccess>),
+        cx: &mut Context<Self>,
+    ) {
         if self.source.is_none() {
             self.open_source(cx);
         }
         self.right_tab = RightTab::Source;
         if let Some(panel) = &mut self.source {
-            panel.pinned = Some((step, thread));
+            panel.pinned = Some((step, thread, after));
         }
         self.jump_to(step, cx);
     }
@@ -249,7 +260,7 @@ impl Scrubber {
             cx.notify();
             return;
         }
-        let thread = panel_thread(panel, timeline, step);
+        let (thread, after) = panel_look(panel, timeline, step);
         let run = session.run.path.clone();
         if let Some(answer) = self.known_place() {
             self.show_place(step, Ok(answer), cx);
@@ -263,7 +274,7 @@ impl Scrubber {
         panel.loading = true;
         panel.progress = Progress::default();
         let request = panel.request;
-        let key: PlaceKey = (run.clone(), thread, step);
+        let key: PlaceKey = (run.clone(), thread, step, after);
         let engine = self.engine.clone();
 
         // The engine's lines come through a channel as it says them, and
@@ -272,7 +283,7 @@ impl Scrubber {
         let cancel = Cancel::default();
         panel.in_flight = Some(cancel.clone());
         let task = crate::jobs::on_own_thread(move || {
-            engine.locate(&run, step, thread, &cancel, &mut |line| {
+            engine.locate(&run, step, thread, after, &cancel, &mut |line| {
                 let _ = lines.unbounded_send(line.to_string());
             })
         });
@@ -318,8 +329,8 @@ impl Scrubber {
         if panel.step < timeline.job_start.unwrap_or(0) {
             return None;
         }
-        let thread = panel_thread(panel, timeline, panel.step);
-        let key: PlaceKey = (session.run.path.clone(), thread, panel.step);
+        let (thread, after) = panel_look(panel, timeline, panel.step);
+        let key: PlaceKey = (session.run.path.clone(), thread, panel.step, after);
         self.place_answers.get(&key)
     }
 
@@ -482,8 +493,15 @@ impl Scrubber {
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(icon(Icon::Close, size::ICON_CLOSE, theme::MUTED))
             .on_click(cx.listener(|this, _, _, cx| this.close_source(cx)));
+        let when = match panel.pinned {
+            Some((at, _, Some(after))) if at == shown_step => match after.kind {
+                crate::blame::AccessKind::Write => "just after the write in step",
+                crate::blame::AccessKind::Read => "just after the read in step",
+            },
+            _ => "as of step",
+        };
         let title = panel_title(
-            &format!("Source \u{b7} as of step {}", thousands(shown_step)),
+            &format!("Source \u{b7} {when} {}", thousands(shown_step)),
             Some(close.into_any_element()),
         );
 

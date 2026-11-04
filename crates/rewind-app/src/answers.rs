@@ -90,8 +90,13 @@ impl FileKey {
 }
 
 /// What a thread's place in its code is kept by: the run, the thread
-/// asked for, and the step.
-pub type PlaceKey = (PathBuf, crate::source::Thread, u64);
+/// asked for, the step, and the access in it looked just after, if any.
+pub type PlaceKey = (
+    PathBuf,
+    crate::source::Thread,
+    u64,
+    Option<crate::source::AfterAccess>,
+);
 
 #[cfg(test)]
 mod tests {

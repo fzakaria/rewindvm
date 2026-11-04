@@ -19,7 +19,7 @@ pub use rewind_trace::searching::{Phase, Searching};
 
 use crate::describe::thousands;
 use crate::engine::EngineError;
-use crate::source::Frame;
+use crate::source::{AfterAccess, Frame, Thread};
 
 /// A value to blame: the expression clicked, its bytes in the process's
 /// memory, and the thread, step and line it was clicked at.
@@ -92,6 +92,14 @@ impl Blame {
     /// mark: the latest write.
     pub fn write_step(&self) -> Option<u64> {
         Some(self.blamed()?.last_write()?.step)
+    }
+
+    /// Where going to the last write found looks: its step, and its
+    /// writer just after it.
+    pub fn last_write_look(&self) -> Option<(u64, (Thread, Option<AfterAccess>))> {
+        let blamed = self.blamed()?;
+        let write = blamed.last_write()?;
+        Some((write.step, look_after(blamed, write)))
     }
 
     /// The chip's words in the app bar, `elapsed_ms` into the search.
@@ -307,6 +315,30 @@ pub fn overlay<S: Clone>(
         .collect()
 }
 
+/// What going to `access`, one of `blamed`'s, looks just after: the
+/// bytes of the value it touched and its place in its step. None when the
+/// value's address does not read as hex.
+pub fn after_access(blamed: &Blamed, access: &BlamedAccess) -> Option<AfterAccess> {
+    let value = blamed.values.get(access.value)?;
+    let address = u64::from_str_radix(value.address.trim_start_matches("0x"), 16).ok()?;
+    Some(AfterAccess {
+        address,
+        size: value.size,
+        kind: access.kind,
+        hit: access.hit,
+    })
+}
+
+/// Whose stack going to `access` shows, and just after what: the thread
+/// that made it, just after it.
+pub fn look_after(blamed: &Blamed, access: &BlamedAccess) -> (Thread, Option<AfterAccess>) {
+    let thread = Thread::Of {
+        pid: blamed.pid,
+        tid: access.tid,
+    };
+    (thread, after_access(blamed, access))
+}
+
 /// The lanes of an answer with reads: each thread that accessed a value,
 /// in the order it first did, with its accesses as fractions of the steps
 /// from the first access to the last.
@@ -331,6 +363,51 @@ mod tests {
     // Which values a line underlines, and what a search says as it goes,
     // from expressions and progress as the engine prints them.
     use super::*;
+
+    /// Going to an access looks just after it: a write by its place among
+    /// the step's writes, a read by its place among all the step's
+    /// accesses, each at the bytes of the value it touched.
+    #[test]
+    fn going_to_an_access_looks_just_after_it() {
+        let blamed: Blamed = serde_json::from_value(serde_json::json!({
+            "run": "r", "step": 4782, "pid": 166, "tid": 171, "place": null,
+            "values": [
+                {"text": "p->stopping", "address": "0x5556f833c070", "size": 4,
+                 "class": "signed", "type": "int", "now": "1", "initial": "0"},
+                {"text": "p->queue", "address": "0x5556f833c068", "size": 8,
+                 "class": "pointer", "type": null, "now": "0x0", "initial": null}
+            ],
+            "accesses": [
+                {"step": 4756, "value": 0, "kind": "read", "tid": 171, "thread": "t",
+                 "before": "0", "after": "0", "pc": "0x1", "kernel": null, "syscall": null,
+                 "place": null, "hit": 2},
+                {"step": 4768, "value": 1, "kind": "write", "tid": 166, "thread": "t",
+                 "before": "0x1", "after": "0x0", "pc": "0x2", "kernel": null, "syscall": null,
+                 "place": null, "hit": 1}
+            ],
+            "threads": [], "searched_from": 4742, "since": 4742, "windows": 2, "dropped": 0,
+            "elapsed_ms": 1600
+        }))
+        .unwrap();
+        assert_eq!(
+            after_access(&blamed, &blamed.accesses[0]),
+            Some(AfterAccess {
+                address: 0x5556f833c070,
+                size: 4,
+                kind: AccessKind::Read,
+                hit: 2
+            })
+        );
+        assert_eq!(
+            after_access(&blamed, &blamed.accesses[1]),
+            Some(AfterAccess {
+                address: 0x5556f833c068,
+                size: 8,
+                kind: AccessKind::Write,
+                hit: 1
+            })
+        );
+    }
 
     fn expression(text: &str, line: u32, name: (u32, u32), location: Location) -> Expression {
         Expression {
