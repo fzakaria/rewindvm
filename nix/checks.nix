@@ -97,6 +97,22 @@ let
         EOF
         $CC -static -O1 -g -o $out/bin/watch watch.c
 
+        cat > late.c <<'EOF'
+        #include <unistd.h>
+
+        volatile int counter;
+
+        int main(void)
+        {
+          counter = 7;
+          for (int i = 0; i < 3000; i++)
+            write(1, ".", 1);
+          write(1, "done\n", 5);
+          return 0;
+        }
+        EOF
+        $CC -static -O1 -g -o $out/bin/late late.c
+
         cat > block.c <<'EOF'
         #include <sys/wait.h>
         #include <unistd.h>
@@ -1184,7 +1200,9 @@ in
   # memory, is no write of the parent's: two writes back, the search finds
   # only the parent's two. --address names the same bytes for programs,
   # and its search says how far it got in JSON lines, one of them as it
-  # goes on to name the lines. Boots the VM, so it needs /dev/kvm.
+  # goes on to name the lines. A write thousands of steps back is found
+  # through windows restored in place. Boots the VM, so it needs
+  # /dev/kvm.
   blame-memory =
     pkgs.runCommand "rewind-blame-memory"
       {
@@ -1226,6 +1244,16 @@ in
         jq -e '.accesses[-1] | .after == "3" and .place.line == 16' address.json
         grep -q '^{"searching":{"phase":"searching"' progress
         test "$(grep -c '"phase":"naming"' progress)" = 1
+
+        # A write thousands of steps back: the windows after the first
+        # hold no write, and each puts the machine at its own keyframe in
+        # place. The value is 0 where the search began, before the write.
+        rewind run -q --clock exits --name late --root ${gdbRoot} -- /bin/late > /dev/null
+        done=$(rewind events late | grep 'write(1, "done' | awk '{print $1}')
+        rewind blame late --at "$done" counter --json > late.json
+        jq -c '{windows, searched_from, step: .accesses[-1].step}' late.json
+        jq -e '.windows >= 3 and .accesses[-1].after == "7"
+          and .accesses[-1].place.line == 7 and .values[0].initial == "0"' late.json
         touch $out
       '';
 
