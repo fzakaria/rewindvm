@@ -183,7 +183,14 @@ impl Scrubber {
         if let Some(panel) = &mut self.source {
             panel.pinned = Some((step, thread, after));
         }
+
+        // At the step already, the playhead does not move, so the panel
+        // asks for the new thread or moment itself.
+        let stays = self.source.as_ref().is_some_and(|panel| panel.step == step);
         self.jump_to(step, cx);
+        if stays {
+            self.fetch_source(cx);
+        }
     }
 
     pub(super) fn close_source(&mut self, cx: &mut Context<Self>) {
