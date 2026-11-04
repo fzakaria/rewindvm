@@ -53,7 +53,7 @@ use crate::threads::{Memory, Tasks, Thread};
 
 mod reverse;
 pub(crate) use reverse::StorePages;
-use reverse::{Back, GdbTrap, Move, Position};
+use reverse::{Back, GdbTrap, Heard, Listener, Move, Position};
 pub use reverse::{History, RunHistory};
 
 /// How far the fork runs between looks at the connection, in steps, so a
@@ -546,6 +546,8 @@ pub struct Debuggee<'h> {
     checkpoints: reverse::Checkpoints,
     /// Whether gdb changed the fork's registers or memory.
     altered: bool,
+    /// gdb's connection, which running backwards looks at for Ctrl-C.
+    listener: Listener,
 }
 
 impl<'h> Debuggee<'h> {
@@ -595,6 +597,7 @@ impl<'h> Debuggee<'h> {
             position,
             checkpoints: reverse::Checkpoints::new(),
             altered: false,
+            listener: Listener::default(),
         };
         debuggee.refresh_threads();
         Ok(debuggee)
@@ -766,6 +769,7 @@ impl<'h> Debuggee<'h> {
 
     /// Serves gdb on `conn` until it detaches or the connection closes.
     pub fn serve(&mut self, conn: TcpStream) -> Result<DisconnectReason> {
+        self.listener = Listener::on(&conn);
         let stub = GdbStub::new(conn);
         stub.run_blocking::<EventLoop<'h>>(self)
             .map_err(|e| anyhow::anyhow!("gdb session: {e}"))
@@ -1212,21 +1216,49 @@ impl Debuggee<'_> {
     }
 }
 
-/// Runs the fork backwards as gdb asked, and says where it stopped. A
-/// fork that cannot go back stays where it is, and gdb's user is told why.
-fn run_back(target: &mut Debuggee<'_>) -> Result<Event<MultiThreadStopReason<u64>>> {
+/// Runs the fork backwards as gdb asked, and says where it stopped: a
+/// stop, or gdb's Ctrl-C handed on to gdbstub. A fork that cannot go back
+/// stays where it is, and gdb's user is told why.
+fn run_back(
+    target: &mut Debuggee<'_>,
+    conn: &mut TcpStream,
+) -> Result<Event<MultiThreadStopReason<u64>>, WaitForStopReasonError<String, std::io::Error>> {
+    let target_error = |e: anyhow::Error| WaitForStopReasonError::Target(e.to_string());
+    match run_back_to(target).map_err(target_error)? {
+        // gdb's Ctrl-C, still unread, goes to gdbstub, which asks
+        // `on_interrupt` for the stop where the fork is.
+        Ok(event) => Ok(event),
+        Err(Heard::Interrupt) => {
+            let byte = conn.read().map_err(WaitForStopReasonError::Connection)?;
+            Ok(Event::IncomingData(byte))
+        }
+        Err(_) => Err(WaitForStopReasonError::Connection(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "gdb closed the connection while the fork ran backwards",
+        ))),
+    }
+}
+
+/// Runs the fork backwards as gdb asked: the stop it came to, or what
+/// gdb sent that stopped it on the way.
+fn run_back_to(
+    target: &mut Debuggee<'_>,
+) -> Result<std::result::Result<Event<MultiThreadStopReason<u64>>, Heard>> {
     let mode = std::mem::replace(&mut target.mode, Mode::Continue);
     if let Some(why) = target.cannot_go_back() {
         eprintln!("rewind: {why}");
         target.refresh_threads();
-        return Ok(Event::TargetStopped(target.step_stop()));
+        return Ok(Ok(Event::TargetStopped(target.step_stop())));
     }
     let back = match mode {
         Mode::StepBack => target.step_back()?,
         _ => target.continue_back()?,
     };
+    if let Back::Interrupted(heard) = back {
+        return Ok(Err(heard));
+    }
     let tid = target.stopped_thread()?;
-    Ok(Event::TargetStopped(match back {
+    Ok(Ok(Event::TargetStopped(match back {
         Back::Stepped => target.step_back_stop()?,
         Back::Breakpoint => MultiThreadStopReason::SwBreak(tid),
         Back::Watch(watch) => MultiThreadStopReason::Watch {
@@ -1238,7 +1270,8 @@ fn run_back(target: &mut Debuggee<'_>) -> Result<Event<MultiThreadStopReason<u64
             tid: Some(tid),
             pos: ReplayLogPosition::Begin,
         },
-    }))
+        Back::Interrupted(_) => unreachable!("returned above"),
+    })))
 }
 
 /// Runs the fork for gdb in chunks, looking at the connection between
@@ -1256,7 +1289,7 @@ impl<'h> BlockingEventLoop for EventLoop<'h> {
     ) -> Result<Event<Self::StopReason>, WaitForStopReasonError<String, std::io::Error>> {
         let target_error = |e: anyhow::Error| WaitForStopReasonError::Target(e.to_string());
         if matches!(target.mode, Mode::StepBack | Mode::ContinueBack) {
-            return run_back(target).map_err(target_error);
+            return run_back(target, conn);
         }
         let traps = target.traps.registers();
         target

@@ -19,6 +19,13 @@
 //! newest first, and stops at the last hit before the position: at a
 //! breakpoint as it is reached, and before the instruction that wrote a
 //! watched value, as gdb expects of a watchpoint run backwards.
+//!
+//! Under exit time a step can be millions of instructions, each a VM exit
+//! to single-step, so going back can take minutes. Every so many single
+//! steps, and between chunks of whole steps, the fork looks at gdb's
+//! connection: a Ctrl-C stops it where it has got to, a position like any
+//! other, which gdb can inspect and run from; a closed connection ends
+//! the session.
 
 use std::collections::BTreeMap;
 
@@ -161,6 +168,74 @@ enum Arrival {
 /// branches, with one outlier of 1269 (see rewind-vmm's PREEMPT_MARGIN).
 const MARGINS: [u64; 3] = [512, 8192, 1 << 17];
 
+/// How many single steps a replay takes between looks at gdb's
+/// connection: a single step is a VM exit of a few microseconds, so this
+/// many take some milliseconds.
+const LISTEN_EVERY: u64 = 1024;
+
+/// How many whole steps a replay runs between looks at gdb's connection.
+const LISTEN_EVERY_STEPS: u64 = super::CHUNK_STEPS;
+
+/// The byte gdb sends for Ctrl-C.
+const INTERRUPT: u8 = 0x03;
+
+/// What gdb has sent while the fork runs backwards.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Heard {
+    Nothing,
+    /// Ctrl-C, not yet read.
+    Interrupt,
+    /// The connection closed.
+    Gone,
+}
+
+/// gdb's connection, looked at but not read while the fork runs
+/// backwards: a copy of it, whose peeks leave the bytes for gdbstub.
+#[derive(Debug, Default)]
+pub(super) struct Listener(Option<std::net::TcpStream>);
+
+impl Listener {
+    /// A listener on `conn`, gdb's connection, or on none when it cannot
+    /// be copied.
+    pub(super) fn on(conn: &std::net::TcpStream) -> Listener {
+        Listener(conn.try_clone().ok())
+    }
+
+    /// What gdb has sent, without reading it. Only Ctrl-C is something
+    /// to stop for: gdb sends nothing else while the fork runs.
+    pub(super) fn heard(&self) -> Heard {
+        let Some(conn) = &self.0 else {
+            return Heard::Nothing;
+        };
+        if conn.set_nonblocking(true).is_err() {
+            return Heard::Gone;
+        }
+        let mut byte = [0u8];
+        let peeked = conn.peek(&mut byte);
+        let _ = conn.set_nonblocking(false);
+        match peeked {
+            Ok(0) => Heard::Gone,
+            Ok(_) if byte[0] == INTERRUPT => Heard::Interrupt,
+            Ok(_) => Heard::Nothing,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Heard::Nothing,
+            Err(_) => Heard::Gone,
+        }
+    }
+}
+
+/// gdb's Ctrl-C, or its connection closing, while the fork ran
+/// backwards; the fork's position is where it stopped.
+#[derive(Debug)]
+pub(super) struct Interrupted(pub(super) Heard);
+
+impl std::fmt::Display for Interrupted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "gdb interrupted running backwards")
+    }
+}
+
+impl std::error::Error for Interrupted {}
+
 /// A counter interrupt that came too late to stop at a branch count.
 #[derive(Debug)]
 struct Passed;
@@ -187,6 +262,9 @@ pub(super) enum Back {
     Watch(Watch),
     /// The start of the run: nothing is before it.
     Start,
+    /// gdb's Ctrl-C, or its connection closing, before the fork got there:
+    /// it stopped on the way, at its position.
+    Interrupted(Heard),
 }
 
 /// The fork's checkpoints in memory, by the step whose start each keeps.
@@ -228,8 +306,49 @@ impl Debuggee<'_> {
         })
     }
 
-    /// One instruction back, or the start of the run.
+    /// One instruction back, or the start of the run; or where gdb's
+    /// Ctrl-C stopped the fork on the way.
     pub(super) fn step_back(&mut self) -> Result<Back> {
+        let back = self.step_back_unless_interrupted();
+        self.unless_interrupted(back)
+    }
+
+    /// The last hit of one of gdb's traps before here, or the start of the
+    /// run when there is none; or where gdb's Ctrl-C stopped the fork on
+    /// the way.
+    pub(super) fn continue_back(&mut self) -> Result<Back> {
+        let back = self.continue_back_unless_interrupted();
+        self.unless_interrupted(back)
+    }
+
+    /// `back`, or, when gdb interrupted it, the fork readied for gdb where
+    /// it stopped.
+    fn unless_interrupted(&mut self, back: Result<Back>) -> Result<Back> {
+        match back {
+            Err(e) if e.is::<Interrupted>() => {
+                let heard = e.downcast_ref::<Interrupted>().expect("checked").0;
+                if heard == Heard::Interrupt {
+                    self.ready_for_gdb()?;
+                }
+                Ok(Back::Interrupted(heard))
+            }
+            other => other,
+        }
+    }
+
+    /// Fails with [`Interrupted`], the fork's position set to `at`, where
+    /// it is, when gdb has sent Ctrl-C or gone.
+    fn listen(&mut self, at: impl FnOnce() -> Position) -> Result<()> {
+        match self.listener.heard() {
+            Heard::Nothing => Ok(()),
+            heard => {
+                self.position = at();
+                Err(Interrupted(heard).into())
+            }
+        }
+    }
+
+    fn step_back_unless_interrupted(&mut self) -> Result<Back> {
         let here = self.position.clone();
         let back = with_margins(|margin| self.before(&here, margin))?;
         let Some(back) = back else {
@@ -240,9 +359,7 @@ impl Debuggee<'_> {
         Ok(Back::Stepped)
     }
 
-    /// The last hit of one of gdb's traps before here, or the start of the
-    /// run when there is none.
-    pub(super) fn continue_back(&mut self) -> Result<Back> {
+    fn continue_back_unless_interrupted(&mut self) -> Result<Back> {
         let here = self.position.clone();
         let Some((hit, target)) = with_margins(|margin| self.last_hit_before(&here, margin))?
         else {
@@ -272,8 +389,12 @@ impl Debuggee<'_> {
     /// Brings the fork to `target`: the start of its step, then its moves.
     fn go_to(&mut self, target: &Position, margin: u64) -> Result<()> {
         self.at_step_start(target.step)?;
-        for &mv in &target.moves {
-            self.replay(mv, margin)?;
+        for (i, &mv) in target.moves.iter().enumerate() {
+            let from = Position {
+                step: target.step,
+                moves: target.moves[..i].to_vec(),
+            };
+            self.replay(mv, &from, margin)?;
         }
         self.position = target.clone();
         Ok(())
@@ -313,12 +434,16 @@ impl Debuggee<'_> {
         Ok(())
     }
 
-    /// Does `mv` again from where the fork is, with none of gdb's traps.
-    fn replay(&mut self, mv: Move, margin: u64) -> Result<()> {
+    /// Does `mv` again from where the fork is, `from`, with none of gdb's
+    /// traps.
+    fn replay(&mut self, mv: Move, from: &Position, margin: u64) -> Result<()> {
         match mv {
             Move::Steps(n) => {
                 self.machine.set_debug(Stepping::Yes, &[])?;
-                for _ in 0..n {
+                for i in 0..n {
+                    if i > 0 && i % LISTEN_EVERY == 0 {
+                        self.listen(|| from.then(Move::Steps(i)))?;
+                    }
                     match self.machine.run(None, &mut Ignore)? {
                         Outcome::Debug(DebugStop::Step) => {}
                         other => bail!("a single step replayed came to {other:?}"),
@@ -408,7 +533,7 @@ impl Debuggee<'_> {
         if let (Some(here_count), Some(anchor_count)) = (count_here, self.machine.branch_count()?)
             && here_count > anchor_count + 1
         {
-            self.replay(Move::Branches(here_count - 1), margin)?;
+            self.replay(Move::Branches(here_count - 1), &found, margin)?;
             found = found.then(Move::Branches(here_count - 1));
         }
 
@@ -421,6 +546,9 @@ impl Debuggee<'_> {
         self.machine.set_debug(Stepping::Yes, &registers)?;
         let mut steps = 0;
         loop {
+            if steps > 0 && steps % LISTEN_EVERY == 0 {
+                self.listen(|| found.then(Move::Steps(steps)))?;
+            }
             let outcome = self.machine.run(None, &mut Ignore)?;
             let reached = match (arrival, outcome) {
                 (Arrival::Watch(_), Outcome::Debug(DebugStop::Watchpoint { address, .. })) => {
@@ -499,12 +627,24 @@ impl Debuggee<'_> {
         let mut scan = Scan::default();
         let until = end.unwrap_or(here.step);
 
-        // Whole steps, up to `until`'s start.
+        // Whole steps, up to `until`'s start, in chunks with a look at
+        // gdb's connection between them.
         loop {
-            let outcome = self.machine.run(Some(until), &mut Ignore)?;
+            let pause = (self.machine.step() + LISTEN_EVERY_STEPS).min(until);
+            let outcome = self.machine.run(Some(pause), &mut Ignore)?;
             let at = self.machine.step();
             match outcome {
-                Outcome::Paused => break,
+                Outcome::Paused if at >= until => break,
+                // A step's start is a position once its exit is done,
+                // as a replay to it leaves it.
+                Outcome::Paused => {
+                    let heard = self.listener.heard();
+                    if heard != Heard::Nothing {
+                        self.machine.complete_pending_exit()?;
+                        self.position = Position::start(at);
+                        return Err(Interrupted(heard).into());
+                    }
+                }
                 Outcome::Stopped(_) => return Ok(scan.last),
                 Outcome::Debug(stop) => self.note_hit(&mut scan, at, stop)?,
             }
@@ -530,6 +670,9 @@ impl Debuggee<'_> {
                             0 => done.clone(),
                             j => done.then(Move::Steps(j)),
                         };
+                        if j > 0 && j % LISTEN_EVERY == 0 {
+                            self.listen(|| boundary.clone())?;
+                        }
                         loop {
                             match self.machine.run(None, &mut Ignore)? {
                                 Outcome::Debug(DebugStop::Step) => break,

@@ -347,6 +347,23 @@ let
         EOF
         $CC -static -O0 -g -fdebug-prefix-map=$out/src=/src \
           -o $out/bin/reverse $out/src/reverse.c
+
+        cat > $out/src/slow.c <<'EOF'
+        #include <unistd.h>
+
+        volatile unsigned long sum;
+
+        int main(void)
+        {
+          write(1, "begin\n", 6);
+          for (unsigned long i = 0; i < 10000000; i++)
+            sum += i;
+          write(1, "done\n", 5);
+          return 0;
+        }
+        EOF
+        $CC -static -O1 -g -fdebug-prefix-map=$out/src=/src \
+          -o $out/bin/slow $out/src/slow.c
       '';
 
   # A root with a static program in two files, like mylib: main hands a
@@ -1568,13 +1585,16 @@ in
   # breakpoint gone, through the lines before it into the round before. A reverse-stepi then a stepi land where they began.
   # Run forwards again, the fork stops at the next add, the third, and
   # ends as the run did, on its recording. With nothing to stop at, a run backwards
-  # reaches the start of the run. Boots the VM, so it needs /dev/kvm.
+  # reaches the start of the run. A Ctrl-C in a step back across 10 million
+  # rounds of a loop stops it there, where gdb goes on. Boots the VM, so it
+  # needs /dev/kvm.
   gdb-reverse =
     pkgs.runCommand "rewind-gdb-reverse"
       {
         nativeBuildInputs = [
           rewind
           pkgs.gdb
+          pkgs.procps
         ];
         requiredSystemFeatures = [ "kvm" ];
       }
@@ -1635,6 +1655,42 @@ in
           grep -q 'Reached end of recorded history' start
           ! grep -q 'only the CPU' start
         done
+
+        # Under exit time, a reverse-stepi from the last write single-steps
+        # the whole loop before it, 10 million rounds. Ctrl-C two seconds in
+        # stops it in the loop, where gdb can read the pc, step forwards
+        # and back again to the same pc. gdb killed in a step back ends the
+        # session at once.
+        rewind run -q --clock exits --name slow --root ${gdbRoot} -- /bin/slow > /dev/null
+        done=$(rewind events slow | grep 'write(1, "done' | awk '{print $1}')
+        interrupt() {
+          local signal=$1 out=$2
+          rewind gdb slow "$done" -- -batch -ex 'thread 2' -ex 'echo begin-reverse\n' \
+            -ex reverse-stepi -ex 'echo after-reverse\n' -ex 'print $pc' -ex stepi \
+            -ex reverse-stepi -ex 'print $pc' > "$out" 2>&1 &
+          local parent=$!
+          for _ in $(seq 1 600); do grep -q begin-reverse "$out" && break; sleep 0.1; done
+          sleep 2
+          kill "-$signal" "$(pgrep -P "$parent" -x gdb)"
+
+          # The stop, or the session's end, within 10 s of the signal.
+          for _ in $(seq 1 100); do
+            if grep -q 'received signal SIGINT' "$out" || ! kill -0 "$parent" 2> /dev/null; then
+              break
+            fi
+            sleep 0.1
+          done
+          grep -q 'received signal SIGINT' "$out" || ! kill -0 "$parent" 2> /dev/null
+          wait "$parent" || true
+          cat "$out"
+        }
+        interrupt INT interrupted
+        grep -q 'received signal SIGINT' interrupted
+        grep -A1 after-reverse interrupted > stopped
+        grep -q '^\$1 = .*<main+' stopped
+        test "$(grep -E '^\$[12] = ' interrupted | awk '{print $5}' | sort -u | wc -l)" = 1
+        interrupt KILL killed
+        grep -q 'gdb closed the connection while the fork ran backwards' killed
         touch $out
       '';
 
