@@ -189,9 +189,13 @@ pub fn search_keeping(
     };
 
     // Windows newest first, each from the latest keyframe before where
-    // the last one began, and no earlier than `since`.
+    // the last one began, and no earlier than `since`. A window that held
+    // no write hands its machine to the next, which puts it at its own
+    // keyframe in place rather than restoring a new one.
     let mut kept: VecDeque<Access> = VecDeque::new();
     let mut writer: Option<(Window<'_>, u64)> = None;
+    let mut spare: Option<Window<'_>> = None;
+    let mut loaded = crate::keyframes::Loaded::default();
     let mut dropped = 0;
     let mut end = search.before;
     let mut initial = Vec::new();
@@ -210,7 +214,11 @@ pub fn search_keeping(
         progress.elapsed_ms = started.elapsed().as_millis() as u64;
         report(&progress);
 
-        let mut window = Window::new(home, run, search, start)?;
+        let at_keyframe = keyframes.binary_search(&start).is_ok();
+        let mut window = match spare.take() {
+            Some(spare) if at_keyframe => spare.moved_to(run, start, &mut loaded)?,
+            _ => Window::new(home, run, search, start)?,
+        };
         initial = window.values()?;
         progress.phase = Phase::Searching;
         let writes = window.replay(
@@ -259,10 +267,9 @@ pub fn search_keeping(
             }
             kept.push_front(access);
         }
-        if writer.is_none()
-            && let Some(step) = latest
-        {
-            writer = Some((window, step));
+        match latest {
+            Some(step) if writer.is_none() => writer = Some((window, step)),
+            _ => spare = Some(window),
         }
         if dropped > 0 || done(search, &kept) {
             break;
@@ -367,6 +374,22 @@ impl<'a> Window<'a> {
             checkpoint,
             pages,
         })
+    }
+
+    /// This window's machine, put at the keyframe at `start` in place,
+    /// as the window from there.
+    fn moved_to(
+        mut self,
+        run: &Run,
+        start: u64,
+        loaded: &mut crate::keyframes::Loaded,
+    ) -> Result<Window<'a>> {
+        run.restore_in_place(&mut self.machine, start, &self.pages.0, loaded)?;
+        self.machine.complete_pending_exit()?;
+        self.page_table = process_page_table(&self.machine, self.search.pid, start)?;
+        self.checkpoint = self.machine.checkpoint()?;
+        self.start = start;
+        Ok(self)
     }
 
     /// The machine back at the window's start.

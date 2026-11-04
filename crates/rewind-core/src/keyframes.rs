@@ -357,6 +357,45 @@ impl Layers {
     }
 }
 
+/// Keyframes read from their files, by step, so restoring several from
+/// one run reads each file once.
+#[derive(Debug, Default)]
+pub struct Loaded {
+    by_step: HashMap<u64, Keyframe>,
+}
+
+impl Layers {
+    /// The chain of keyframes that rebuilds the one at `step`, full one
+    /// first, as [`Layers::chain`] reads it, reading only the keyframes
+    /// `loaded` lacks and keeping them there.
+    pub fn chain_loaded<'l>(&self, step: u64, loaded: &'l mut Loaded) -> Result<Vec<&'l Keyframe>> {
+        // The steps of the chain, newest first, each keyframe read once.
+        let mut steps = Vec::new();
+        let mut at = Some(step);
+        while let Some(this) = at {
+            let parent = match loaded.by_step.entry(this) {
+                std::collections::hash_map::Entry::Occupied(kf) => kf.get().parent,
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(self.load(this)?).parent
+                }
+            };
+            if let Some(parent) = parent
+                && parent >= this
+            {
+                bail!(
+                    "the keyframe at step {this} of run {} names step {parent} as its parent, \
+                     which is not before it",
+                    self.layers[0].dir.display()
+                );
+            }
+            steps.push(this);
+            at = parent;
+        }
+        steps.reverse();
+        Ok(steps.iter().map(|s| &loaded.by_step[s]).collect())
+    }
+}
+
 /// The page hashes a chain of keyframes has set guest memory to, where they
 /// are not zero.
 #[derive(Default, Debug)]
@@ -651,6 +690,49 @@ mod tests {
             serde_json::json!({ "id": crate::run::tests::id(id), "shared_keyframes": shared });
         fs::write(dir.join(crate::run::MANIFEST), manifest.to_string()).unwrap();
         dir
+    }
+
+    /// A chain read through a cache of loaded keyframes reads each file
+    /// once: a run with a full keyframe at 10 and deltas over it at 20 and
+    /// 30, whose chain to 30 is read, then the keyframe file at 10 removed,
+    /// still gives the chains to 20 and to a new 40 over 10, and the chain
+    /// to a keyframe over one never read, with no file, fails.
+    #[test]
+    fn a_cached_chain_reads_each_keyframe_once() {
+        let runs = runs("cached-chain");
+        let dir = run(&runs, "a", &[], None);
+        let keyframe = |step: u64, parent: Option<u64>| {
+            let mut kf = Keyframe::default();
+            kf.step = step;
+            kf.parent = parent;
+            kf.pages = vec![(step as u32, [step as u8; 32])];
+            save(&dir, &kf).unwrap();
+        };
+        keyframe(10, None);
+        keyframe(20, Some(10));
+        keyframe(30, Some(20));
+        let layers = Layers::open(&dir, None).unwrap();
+        let mut loaded = Loaded::default();
+
+        let steps = |chain: Vec<&Keyframe>| chain.iter().map(|k| k.step).collect::<Vec<_>>();
+        assert_eq!(
+            steps(layers.chain_loaded(30, &mut loaded).unwrap()),
+            [10, 20, 30]
+        );
+        fs::remove_file(path(&dir, 10)).unwrap();
+        assert_eq!(
+            steps(layers.chain_loaded(20, &mut loaded).unwrap()),
+            [10, 20]
+        );
+
+        keyframe(40, Some(10));
+        assert_eq!(
+            steps(layers.chain_loaded(40, &mut loaded).unwrap()),
+            [10, 40]
+        );
+        keyframe(50, Some(45));
+        assert!(layers.chain_loaded(50, &mut loaded).is_err());
+        fs::remove_dir_all(&runs).unwrap();
     }
 
     fn share(run: &str, through: u64) -> Option<Shared> {

@@ -1124,6 +1124,28 @@ impl Run {
         ))
     }
 
+    /// Puts `machine`, restored from this run's keyframes, at the run's
+    /// keyframe at `step`, in place (see [`Machine::restore_in_place`]),
+    /// with keyframes read through `loaded` and pages from `store`. Much
+    /// cheaper than a new machine there when the two keyframes are near.
+    pub fn restore_in_place(
+        &self,
+        machine: &mut Machine,
+        step: u64,
+        store: &rewind_store::Store,
+        loaded: &mut crate::keyframes::Loaded,
+    ) -> Result<()> {
+        let layers = self.keyframes()?;
+        let chain = layers.chain_loaded(step, loaded)?;
+        let records = self.records()?;
+        let through = records.partition_point(|(s, _)| *s <= step);
+        machine.restore_in_place(
+            &chain,
+            &crate::keyframes::ReadPages(store),
+            &records[..through],
+        )
+    }
+
     /// A machine at `step` of this run: the latest keyframe at or before
     /// it, restored, and run forward to the step. Events on the way go to
     /// `obs`. With `Keep::Keyframe`, keyframes are kept on the way, each
