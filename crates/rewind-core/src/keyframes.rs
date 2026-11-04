@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use rewind_store::Store;
-use rewind_vmm::snapshot::{Keyframe, Pages, ZERO_PAGE};
+use rewind_vmm::snapshot::{Keyframe, KeyframeHead, Pages, ZERO_PAGE};
 use rewind_vmm::{Machine, Observer, Outcome};
 use serde::Deserialize;
 
@@ -84,7 +84,49 @@ pub fn decode(bytes: &[u8]) -> Result<Keyframe> {
             "a keyframe of format {version}; this build of rewind reads format {KEYFRAME_VERSION}"
         );
     }
-    Ok(bincode::deserialize(&bytes[HEADER_LEN..])?)
+
+    // Everything before the pages through serde. The pages, most of the
+    // bytes, are read straight from them: serde reads a hash a byte at a
+    // time, which was half a second of each late restore.
+    let body = &bytes[HEADER_LEN..];
+    let mut rest = body;
+    let head: KeyframeHead = bincode::deserialize_from(&mut rest)?;
+    let pages = decode_pages(rest)?;
+    Ok(Keyframe::from_head(head, pages))
+}
+
+/// The bytes bincode writes for one page: its number, then its hash.
+const PAGE_ENTRY_LEN: usize = 4 + 32;
+
+/// The pages bincode wrote for a `Vec<(u32, [u8; 32])>`, from `bytes`
+/// that hold exactly them: a little-endian u64 count, then each page's
+/// number, little-endian, and hash.
+fn decode_pages(bytes: &[u8]) -> Result<Vec<(u32, [u8; 32])>> {
+    let Some((count, entries)) = bytes.split_first_chunk::<8>() else {
+        bail!("a keyframe cut short before its pages");
+    };
+    let count = usize::try_from(u64::from_le_bytes(*count))?;
+    if entries.len()
+        != count
+            .checked_mul(PAGE_ENTRY_LEN)
+            .context("too many pages")?
+    {
+        bail!(
+            "a keyframe of {count} pages holds {} bytes of them",
+            entries.len()
+        );
+    }
+    let (entries, _) = entries.as_chunks::<PAGE_ENTRY_LEN>();
+    Ok(entries
+        .iter()
+        .map(|entry| {
+            let (page, hash) = entry.split_at(4);
+            (
+                u32::from_le_bytes(page.try_into().expect("four bytes")),
+                hash.try_into().expect("32 bytes"),
+            )
+        })
+        .collect())
 }
 
 fn path(run_dir: &Path, step: u64) -> PathBuf {
@@ -552,6 +594,33 @@ mod format_tests {
         let before = bincode::serialize(&kf).unwrap();
         let err = format!("{:#}", decode(&before).unwrap_err());
         assert!(err.contains("before"), "{err}");
+    }
+
+    /// A keyframe's pages read back as bincode wrote them, from a keyframe
+    /// with a parent and three pages encoded and decoded again: the bytes
+    /// of the decoded keyframe are the bytes of the original.
+    #[test]
+    fn a_keyframe_s_pages_read_back() {
+        let mut kf = Keyframe::default();
+        kf.step = 9;
+        kf.parent = Some(3);
+        kf.pages = vec![(0, [1; 32]), (7, [2; 32]), (u32::MAX, [3; 32])];
+        let decoded = decode(&encode(&kf).unwrap()).unwrap();
+        assert_eq!(decoded.pages, kf.pages);
+        assert_eq!(
+            bincode::serialize(&decoded).unwrap(),
+            bincode::serialize(&kf).unwrap()
+        );
+    }
+
+    /// A keyframe cut short in its pages is refused rather than read as
+    /// fewer pages.
+    #[test]
+    fn a_keyframe_cut_short_is_refused() {
+        let mut kf = Keyframe::default();
+        kf.pages = vec![(1, [1; 32]), (2, [2; 32])];
+        let bytes = encode(&kf).unwrap();
+        assert!(decode(&bytes[..bytes.len() - 1]).is_err());
     }
 }
 

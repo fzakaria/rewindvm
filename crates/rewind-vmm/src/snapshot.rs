@@ -49,6 +49,32 @@ pub struct Keyframe {
     pub pages: Vec<(u32, [u8; 32])>,
 }
 
+/// A keyframe without its pages: the fields of [`Keyframe`] before
+/// `pages`, in its order, so a reader can decode them with serde and
+/// read the pages, most of a keyframe's bytes, straight from the bytes.
+#[derive(Debug, Deserialize)]
+pub struct KeyframeHead {
+    step: u64,
+    parent: Option<u64>,
+    cpu: CpuState,
+    irqchips: Vec<Vec<u8>>,
+    devices: DeviceState,
+}
+
+impl Keyframe {
+    /// The keyframe `head` begins, with `pages`.
+    pub fn from_head(head: KeyframeHead, pages: Vec<(u32, [u8; 32])>) -> Keyframe {
+        Keyframe {
+            step: head.step,
+            parent: head.parent,
+            cpu: head.cpu,
+            irqchips: head.irqchips,
+            devices: head.devices,
+            pages,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(crate) struct CpuState {
     pub(crate) regs: Vec<u8>,
