@@ -308,18 +308,25 @@ impl Machine {
         m.vm.get_dirty_log(SLOT_RAM, m.dev.ram.len())?;
 
         m.apply_state(&last.cpu, &last.irqchips, &last.devices)?;
-
-        // A kernel that buffers read and write records has its records
-        // encoded against the ones the trace holds so far.
-        if let Some(shared) = m.dev.shared {
-            let io = crate::pv::check_interface(m.dev.guest_interface(shared)?)?;
-            if io == crate::pv::GuestIo::Buffered {
-                let encoder = rewind_trace::io_records::Encoder::resume(trace)
-                    .context("reading the read and write records up to the keyframe")?;
-                m.dev.io = Some(encoder);
-            }
-        }
+        m.resume_io(trace)?;
         Ok(m)
+    }
+
+    /// Sets the read and write records' encoder for a machine just put at
+    /// a keyframe: a kernel that buffers its records has them encoded
+    /// against the ones `trace`, the run's up to the keyframe, holds.
+    pub(crate) fn resume_io(&mut self, trace: &[(u64, Vec<u8>)]) -> Result<()> {
+        self.dev.io = None;
+        let Some(shared) = self.dev.shared else {
+            return Ok(());
+        };
+        let io = crate::pv::check_interface(self.dev.guest_interface(shared)?)?;
+        if io == crate::pv::GuestIo::Buffered {
+            let encoder = rewind_trace::io_records::Encoder::resume(trace)
+                .context("reading the read and write records up to the keyframe")?;
+            self.dev.io = Some(encoder);
+        }
+        Ok(())
     }
 
     /// Sets the vCPU, the interrupt controllers and the monitor's state to
@@ -405,7 +412,7 @@ const PAGES_PER_READER: usize = 4096;
 /// into its page of `ram`, on as many threads as the host has, up to
 /// MAX_PAGE_READERS. Each page is written by one thread only, so the
 /// memory comes out the same however the reads are shared.
-fn read_pages(
+pub(crate) fn read_pages(
     ram: &mut [u8],
     restored: &[(u32, &[u8; 32])],
     pages: &(dyn Pages + Sync),
@@ -454,7 +461,10 @@ fn read_pages(
 /// build keeps rewriting many times over, so this reads each from the
 /// store once instead of once per keyframe. Fails when a page is past the
 /// machine's `ram_pages`.
-fn final_pages(chain: &[Keyframe], ram_pages: usize) -> Result<Vec<(u32, &[u8; 32])>> {
+pub(crate) fn final_pages<'k>(
+    chain: impl IntoIterator<Item = &'k Keyframe>,
+    ram_pages: usize,
+) -> Result<Vec<(u32, &'k [u8; 32])>> {
     let mut last: Vec<Option<&[u8; 32]>> = vec![None; ram_pages];
     for kf in chain {
         for (index, hash) in &kf.pages {

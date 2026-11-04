@@ -239,6 +239,82 @@ impl Machine {
         Ok(())
     }
 
+    /// Puts the machine at the keyframe `chain` ends with, in place: the
+    /// full keyframe first, as for [`Machine::restore`], and `trace` the
+    /// run's records up to the last one's step. A machine restored from
+    /// keyframes can differ from the last one only in the pages written
+    /// since it was restored and the pages the two keyframes hold
+    /// differently, so only those are written, from `pages`: about 3% of
+    /// a large guest's memory for keyframes a few hundred steps apart,
+    /// where a new machine reads every page. Checkpoints are dropped,
+    /// since their pages are over the old origin, and the debugger's int3s
+    /// taken out. Fails on a machine that booted, which has no keyframe
+    /// memory to compare.
+    pub fn restore_in_place(
+        &mut self,
+        chain: &[&crate::snapshot::Keyframe],
+        pages: &(dyn Pages + Sync),
+        trace: &[(u64, Vec<u8>)],
+    ) -> Result<()> {
+        let last = chain.last().context("restoring from no keyframes")?;
+        if chain[0].parent.is_some() {
+            anyhow::bail!("a keyframe chain must start with a full keyframe");
+        }
+        if !matches!(self.origin, Origin::Restored(_)) {
+            anyhow::bail!("a machine that booted cannot be restored in place");
+        }
+        self.complete_pending_exit()?;
+        let int3s: Vec<u64> = self.int3s.replaced.keys().copied().collect();
+        for physical in int3s {
+            self.remove_int3(physical)?;
+        }
+        self.dirty_pages()?;
+
+        // Every page written since the old origin: by each checkpoint's
+        // stretch, since the anchor, and by the monitor into the shared
+        // page, now's and the keyframe's.
+        let mut written = self.checkpoints.since.clone();
+        for stretch in &self.checkpoints.tree.written {
+            written.extend(stretch);
+        }
+        written.extend(self.shared_page());
+        written.extend(
+            last.devices
+                .shared
+                .map(|s| (s as usize / PAGE_SIZE) as Page),
+        );
+
+        // Those pages and the ones the keyframes hold differently, with
+        // the new keyframe's contents, read on several threads.
+        let ram_pages = self.dev.ram.len() / PAGE_SIZE;
+        let new = crate::snapshot::final_pages(chain.iter().copied(), ram_pages)?;
+        let Origin::Restored(old) = &self.origin else {
+            unreachable!("checked to be restored above");
+        };
+        let rewrite = to_rewrite(old, &new, &written);
+        let ram = self.dev.ram.as_mut_slice();
+        let mut read: Vec<(u32, &[u8; 32])> = Vec::new();
+        for (page, hash) in &rewrite {
+            match hash {
+                Some(hash) => read.push((*page, hash)),
+                None => {
+                    let at = *page as usize * PAGE_SIZE;
+                    ram[at..at + PAGE_SIZE].fill(0);
+                }
+            }
+        }
+        crate::snapshot::read_pages(ram, &read, pages)?;
+        self.origin = Origin::Restored(new.into_iter().map(|(i, h)| (i, *h)).collect());
+
+        // The checkpoints were over the old origin; the dirty log starts
+        // afresh from the keyframe's memory.
+        self.checkpoints = Checkpoints::default();
+        self.vm.get_dirty_log(crate::SLOT_RAM, self.dev.ram.len())?;
+        self.apply_state(&last.cpu, &last.irqchips, &last.devices)?;
+        self.resume_io(trace)?;
+        Ok(())
+    }
+
     /// Page `page` as the machine's origin had it: from the keyframes it
     /// was restored from, read through `pages`, or as boot wrote it.
     fn origin_page(&mut self, page: Page, pages: &dyn Pages) -> Result<Box<[u8]>> {
@@ -265,6 +341,54 @@ impl Machine {
         self.checkpoints.origin_pages.insert(page, contents.clone());
         Ok(contents)
     }
+}
+
+/// The pages restoring keyframe memory `new` over memory restored from
+/// `old`, with `written` written since, can change, in page order, each
+/// with its hash in `new`, None where `new` holds none and the page is
+/// zero: the pages written since, and those the two hold differently.
+/// Both lists are of non-zero pages in page order.
+fn to_rewrite(
+    old: &[(Page, [u8; 32])],
+    new: &[(Page, &[u8; 32])],
+    written: &BTreeSet<Page>,
+) -> Vec<(Page, Option<[u8; 32]>)> {
+    let mut pages: BTreeSet<Page> = written.clone();
+    let (mut i, mut j) = (0, 0);
+    while i < old.len() || j < new.len() {
+        match (old.get(i), new.get(j)) {
+            (Some((a, ha)), Some((b, hb))) if a == b => {
+                if ha != *hb {
+                    pages.insert(*a);
+                }
+                i += 1;
+                j += 1;
+            }
+            (Some((a, _)), Some((b, _))) if a < b => {
+                pages.insert(*a);
+                i += 1;
+            }
+            (Some((a, _)), None) => {
+                pages.insert(*a);
+                i += 1;
+            }
+            (_, Some((b, _))) => {
+                pages.insert(*b);
+                j += 1;
+            }
+            (None, None) => unreachable!("the loop ends when both are done"),
+        }
+    }
+    pages
+        .into_iter()
+        .map(|page| {
+            let hash = new
+                .binary_search_by_key(&page, |(p, _)| *p)
+                .ok()
+                .map(|k| *new[k].1);
+            (page, hash)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -310,6 +434,29 @@ mod tests {
         assert_eq!(
             tree.to_write_back(None, &pages(&[9]), left),
             pages(&[1, 2, 9])
+        );
+    }
+
+    /// Restoring a keyframe over memory restored from another rewrites
+    /// the pages the two keyframes hold differently and the pages written
+    /// since, each with the new keyframe's hash or zero where it holds
+    /// none: page 1 is the same in both but written since, 2 changed, 3
+    /// is only in the old keyframe, 4 only in the new, 5 written since
+    /// and in neither, and 6 the same in both and not written.
+    #[test]
+    fn restoring_over_rewrites_what_can_differ() {
+        let (a, b, c, d, x) = ([1; 32], [2; 32], [3; 32], [4; 32], [9; 32]);
+        let old = [(1, a), (2, b), (3, c), (6, a)];
+        let new = [(1, &a), (2, &x), (4, &d), (6, &a)];
+        assert_eq!(
+            to_rewrite(&old, &new, &pages(&[1, 5])),
+            [
+                (1, Some(a)),
+                (2, Some(x)),
+                (3, None),
+                (4, Some(d)),
+                (5, None)
+            ]
         );
     }
 
