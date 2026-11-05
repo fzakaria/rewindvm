@@ -328,12 +328,16 @@ is not what the fork did.
 
 Under exit time a step can be millions of instructions, and going back across
 one single-steps all of them, each a VM exit, which can take minutes; a run
-back to a watch on a value a loop writes stops at every write. Every 1,024
-single steps, every 64 hits of gdb's traps, and between chunks of whole steps,
-the fork peeks at gdb's connection. A Ctrl-C stops it where it has got to, which is a position like
-any other, so gdb reads registers there, steps forward and goes back again; a
-closed connection ends the session. On a loop of 10 million rounds the stop
-comes about 60 ms after the Ctrl-C. A position's moves are a list each position
+back to a watch on a value a loop writes stops at every write. Every 64 VM
+exits, single steps and trap hits alike, counted across the command's whole
+replay, and between chunks of whole steps, the fork peeks at gdb's connection.
+The count does not start over at each move, so a command that replays the hits
+an earlier search found listens as often as the search did. A Ctrl-C stops the
+fork at the next position it comes to, a position like any other, so gdb reads
+registers there, steps forward and goes back again. A hit in another process is
+between positions and waits for the next. A closed connection ends the session
+at once. On a loop of 10 million rounds the stop comes 10 to 60 ms after the
+Ctrl-C, in a first search or in a replay of one. A position's moves are a list each position
 shares with the one it was made from, so the position after each of many hits
 in one step costs the same to make however many came before.
 

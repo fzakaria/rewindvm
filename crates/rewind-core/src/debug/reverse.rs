@@ -21,12 +21,14 @@
 //! watched value, as gdb expects of a watchpoint run backwards.
 //!
 //! Under exit time a step can be millions of instructions, each a VM exit
-//! to single-step, so going back can take minutes. Every so many single
-//! steps, hits of gdb's traps, and chunks of whole steps, the fork looks
-//! at gdb's connection: a Ctrl-C stops it where it has got to, a position like any
-//! other, which gdb can inspect and run from; a closed connection ends
-//! the session.
+//! to single-step, so going back can take minutes. Every so many VM exits,
+//! counted across a command's whole replay, whether it finds new hits or
+//! replays moves found before, and every so many steps run whole, the fork
+//! looks at gdb's connection. A Ctrl-C stops it at the next position it
+//! comes to, which gdb can inspect and run from like any other; a closed
+//! connection ends the session at once.
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 
 use anyhow::{Result, bail};
@@ -34,7 +36,7 @@ use rewind_vmm::Machine;
 use rewind_vmm::checkpoint::CheckpointId;
 use rewind_vmm::debug::{DebugStop, Stepping, Trap};
 use rewind_vmm::snapshot::Pages;
-use rewind_vmm::{Ignore, Outcome};
+use rewind_vmm::{Ignore, Observer, Outcome};
 
 use super::{Debuggee, Follow, Watch};
 use crate::run::{Keep, Run};
@@ -42,8 +44,9 @@ use crate::{Home, keyframes};
 
 /// The run a fork came from, which running the fork backwards replays.
 pub trait History: std::fmt::Debug {
-    /// A machine at the start of step `step` of the run.
-    fn machine_at(&self, step: u64) -> Result<Machine>;
+    /// A machine at the start of step `step` of the run, or of an earlier
+    /// step when `obs` stops the replay there.
+    fn machine_at(&self, step: u64, obs: &mut dyn Observer) -> Result<Machine>;
     /// The records the run made after step `step`.
     fn records_after(&self, step: u64) -> Result<Vec<(u64, Vec<u8>)>>;
     /// The steps of the run's keyframes, in order.
@@ -60,9 +63,8 @@ pub struct RunHistory<'a> {
 }
 
 impl History for RunHistory<'_> {
-    fn machine_at(&self, step: u64) -> Result<Machine> {
-        self.run
-            .machine_at(self.home, step, Keep::Keyframe, &mut Ignore)
+    fn machine_at(&self, step: u64, obs: &mut dyn Observer) -> Result<Machine> {
+        self.run.machine_at(self.home, step, Keep::Keyframe, obs)
     }
 
     fn records_after(&self, step: u64) -> Result<Vec<(u64, Vec<u8>)>> {
@@ -265,14 +267,13 @@ enum Arrival {
 /// branches, with one outlier of 1269 (see rewind-vmm's PREEMPT_MARGIN).
 const MARGINS: [u64; 3] = [512, 8192, 1 << 17];
 
-/// How many single steps a replay takes between looks at gdb's
-/// connection: a single step is a VM exit of a few microseconds, so this
-/// many take some milliseconds.
-const LISTEN_EVERY: u64 = 1024;
-
-/// How many hits of gdb's traps in the debugged process a replay sees
-/// between looks at gdb's connection: each is a VM exit.
-const LISTEN_EVERY_HITS: u64 = 64;
+/// How many VM exits running backwards makes between looks at gdb's
+/// connection: single steps, hits of debug registers, and steps of a
+/// replay to a step's start alike. A single step or a hit in a busy loop
+/// is an exit of a few microseconds, so this many take well under a
+/// millisecond, and a look, a peek between two flag changes, costs about
+/// as much as one exit.
+const LISTEN_EVERY: u64 = 64;
 
 /// How many whole steps a replay runs between looks at gdb's connection.
 const LISTEN_EVERY_STEPS: u64 = super::CHUNK_STEPS;
@@ -281,8 +282,9 @@ const LISTEN_EVERY_STEPS: u64 = super::CHUNK_STEPS;
 const INTERRUPT: u8 = 0x03;
 
 /// What gdb has sent while the fork runs backwards.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum Heard {
+    #[default]
     Nothing,
     /// Ctrl-C, not yet read.
     Interrupt,
@@ -291,21 +293,60 @@ pub(super) enum Heard {
 }
 
 /// gdb's connection, looked at but not read while the fork runs
-/// backwards: a copy of it, whose peeks leave the bytes for gdbstub.
+/// backwards: a copy of it, whose peeks leave the bytes for gdbstub, and
+/// the count of VM exits since the backwards command began. A replay
+/// to a step's start looks through the run's observer, which sees the
+/// listener but cannot change it, so the count and what was heard are
+/// cells.
 #[derive(Debug, Default)]
-pub(super) struct Listener(Option<std::net::TcpStream>);
+pub(super) struct Listener {
+    conn: Option<std::net::TcpStream>,
+    exits: Cell<u64>,
+    /// What gdb sent that the fork has not stopped for yet: a Ctrl-C
+    /// heard between positions waits for the next one.
+    held: Cell<Heard>,
+}
 
 impl Listener {
     /// A listener on `conn`, gdb's connection, or on none when it cannot
     /// be copied.
     pub(super) fn on(conn: &std::net::TcpStream) -> Listener {
-        Listener(conn.try_clone().ok())
+        Listener {
+            conn: conn.try_clone().ok(),
+            ..Listener::default()
+        }
+    }
+
+    /// Starts a backwards command: no exits yet, nothing heard.
+    fn begin(&self) {
+        self.exits.set(0);
+        self.held.set(Heard::Nothing);
+    }
+
+    /// Counts a VM exit, and every [`LISTEN_EVERY`] of them looks at gdb's
+    /// connection. Returns what gdb has sent, heard now or before.
+    fn exited(&self) -> Heard {
+        let exits = self.exits.get() + 1;
+        self.exits.set(exits);
+        if !exits.is_multiple_of(LISTEN_EVERY) {
+            return self.held.get();
+        }
+        self.look()
+    }
+
+    /// Looks at gdb's connection now. Returns what gdb has sent, heard now
+    /// or before.
+    fn look(&self) -> Heard {
+        if self.held.get() == Heard::Nothing {
+            self.held.set(self.peek());
+        }
+        self.held.get()
     }
 
     /// What gdb has sent, without reading it. Only Ctrl-C is something
     /// to stop for: gdb sends nothing else while the fork runs.
-    pub(super) fn heard(&self) -> Heard {
-        let Some(conn) = &self.0 else {
+    fn peek(&self) -> Heard {
+        let Some(conn) = &self.conn else {
             return Heard::Nothing;
         };
         if conn.set_nonblocking(true).is_err() {
@@ -336,6 +377,17 @@ impl std::fmt::Display for Interrupted {
 }
 
 impl std::error::Error for Interrupted {}
+
+/// A replay to a step's start that stops short when gdb has sent Ctrl-C
+/// or gone, looking at gdb's connection every so many steps, each an
+/// exit.
+struct Listening<'a>(&'a Listener);
+
+impl Observer for Listening<'_> {
+    fn stop(&self) -> bool {
+        self.0.exited() != Heard::Nothing
+    }
+}
 
 /// A counter interrupt that came too late to stop at a branch count.
 #[derive(Debug)]
@@ -410,6 +462,7 @@ impl Debuggee<'_> {
     /// One instruction back, or the start of the run; or where gdb's
     /// Ctrl-C stopped the fork on the way.
     pub(super) fn step_back(&mut self) -> Result<Back> {
+        self.listener.begin();
         let back = self.step_back_unless_interrupted();
         self.unless_interrupted(back)
     }
@@ -418,6 +471,7 @@ impl Debuggee<'_> {
     /// run when there is none; or where gdb's Ctrl-C stopped the fork on
     /// the way.
     pub(super) fn continue_back(&mut self) -> Result<Back> {
+        self.listener.begin();
         let back = self.continue_back_unless_interrupted();
         self.unless_interrupted(back)
     }
@@ -437,16 +491,45 @@ impl Debuggee<'_> {
         }
     }
 
-    /// Fails with [`Interrupted`], the fork's position set to `at`, where
-    /// it is, when gdb has sent Ctrl-C or gone.
+    /// Counts a VM exit that left the fork at `at`, a position, and fails
+    /// there with [`Interrupted`] when gdb has sent Ctrl-C or gone, heard
+    /// now or at an exit before that left the fork between positions.
     fn listen(&mut self, at: impl FnOnce() -> Position) -> Result<()> {
-        match self.listener.heard() {
-            Heard::Nothing => Ok(()),
-            heard => {
-                self.position = at();
-                Err(Interrupted(heard).into())
-            }
+        let heard = self.listener.exited();
+        self.stop_for(heard, at)
+    }
+
+    /// Counts a VM exit that left the fork between positions, such as at
+    /// a trap's hit in another process, where it cannot stop: a closed
+    /// connection fails at once, with no gdb to show a position to, and a
+    /// Ctrl-C waits for the next position.
+    fn listen_between(&mut self) -> Result<()> {
+        match self.listener.exited() {
+            Heard::Gone => Err(Interrupted(Heard::Gone).into()),
+            _ => Ok(()),
         }
+    }
+
+    /// Fails with [`Interrupted`], the fork's position set to `at`, where
+    /// it is, for `heard`, when gdb sent anything.
+    fn stop_for(&mut self, heard: Heard, at: impl FnOnce() -> Position) -> Result<()> {
+        if heard == Heard::Nothing {
+            return Ok(());
+        }
+        self.position = at();
+        Err(Interrupted(heard).into())
+    }
+
+    /// Fails with [`Interrupted`] at the start of the step the fork is at,
+    /// its exit completed as a replay to a step's start leaves it, for
+    /// `heard`, when gdb sent anything.
+    fn stop_at_step_start(&mut self, heard: Heard) -> Result<()> {
+        if heard == Heard::Nothing {
+            return Ok(());
+        }
+        self.machine.complete_pending_exit()?;
+        let at = self.machine.step();
+        self.stop_for(heard, || Position::start(at))
     }
 
     fn step_back_unless_interrupted(&mut self) -> Result<Back> {
@@ -504,9 +587,11 @@ impl Debuggee<'_> {
     /// Brings the fork to the start of step `step`: rewound to its
     /// checkpoint there, else rewound to the latest one before and run
     /// forward, else a fork of the run there. The start is kept as a
-    /// checkpoint for next time.
+    /// checkpoint for next time. A Ctrl-C on the way stops the fork at
+    /// the start of the step it got to.
     fn at_step_start(&mut self, step: u64) -> Result<()> {
         let history = self.history.as_ref().expect("going back takes a history");
+        let mut listening = Listening(&self.listener);
         match self.checkpoints.range(..=step).next_back() {
             Some((&at, &id)) => {
                 let pages = StorePages(history.store()?);
@@ -516,13 +601,15 @@ impl Debuggee<'_> {
                     return Ok(());
                 }
                 self.machine.clear_debug()?;
-                self.machine.run(Some(step), &mut Ignore)?;
+                self.machine.run(Some(step), &mut listening)?;
             }
             None => {
-                self.machine = history.machine_at(step)?;
+                self.machine = history.machine_at(step, &mut listening)?;
                 self.checkpoints.clear();
             }
         }
+        let heard = self.listener.look();
+        self.stop_at_step_start(heard)?;
         if self.machine.step() != step {
             bail!(
                 "the run ended at step {} before step {step}",
@@ -541,16 +628,17 @@ impl Debuggee<'_> {
         match mv {
             Move::Steps(n) => {
                 self.machine.set_debug(Stepping::Yes, &[])?;
-                for i in 0..n {
-                    if i > 0 && i % LISTEN_EVERY == 0 {
-                        self.listen(|| from.then(Move::Steps(i)))?;
-                    }
+                for i in 1..=n {
                     match self.machine.run(None, &mut Ignore)? {
                         Outcome::Debug(DebugStop::Step) => {}
                         other => bail!("a single step replayed came to {other:?}"),
                     }
+                    self.listen(|| from.then(Move::Steps(i)))?;
                 }
             }
+
+            // A hit in another process leaves the fork between positions;
+            // the move's own hit is the next.
             Move::Hit(target) => {
                 self.machine.set_debug(Stepping::No, &target.registers())?;
                 loop {
@@ -559,16 +647,19 @@ impl Debuggee<'_> {
                             if self.in_scope(address)? {
                                 break;
                             }
+                            self.listen_between()?;
                             self.machine.pass_breakpoint()?;
                         }
                         Outcome::Debug(DebugStop::Watchpoint { address, .. }) => {
                             if self.in_scope(address)? {
                                 break;
                             }
+                            self.listen_between()?;
                         }
                         other => bail!("a run to a trap replayed came to {other:?}"),
                     }
                 }
+                self.listen(|| from.then(mv))?;
             }
             Move::Branches(count) => {
                 self.machine.set_debug(Stepping::No, &[])?;
@@ -578,6 +669,7 @@ impl Debuggee<'_> {
                     Outcome::Debug(DebugStop::PassedBranches) => return Err(Passed.into()),
                     other => bail!("a run to a branch count replayed came to {other:?}"),
                 }
+                self.listen(|| from.then(mv))?;
             }
         }
         Ok(())
@@ -644,9 +736,6 @@ impl Debuggee<'_> {
         self.machine.set_debug(Stepping::Yes, &registers)?;
         let mut steps = 0;
         loop {
-            if steps > 0 && steps % LISTEN_EVERY == 0 {
-                self.listen(|| found.then(Move::Steps(steps)))?;
-            }
             let outcome = self.machine.run(None, &mut Ignore)?;
             let reached = match (arrival, outcome) {
                 (Arrival::Watch(_), Outcome::Debug(DebugStop::Watchpoint { address, .. })) => {
@@ -668,6 +757,7 @@ impl Debuggee<'_> {
                 break;
             }
             steps += 1;
+            self.listen(|| found.then(Move::Steps(steps)))?;
         }
         if steps > 0 {
             found = found.then(Move::Steps(steps));
@@ -736,12 +826,8 @@ impl Debuggee<'_> {
                 // A step's start is a position once its exit is done,
                 // as a replay to it leaves it.
                 Outcome::Paused => {
-                    let heard = self.listener.heard();
-                    if heard != Heard::Nothing {
-                        self.machine.complete_pending_exit()?;
-                        self.position = Position::start(at);
-                        return Err(Interrupted(heard).into());
-                    }
+                    let heard = self.listener.look();
+                    self.stop_at_step_start(heard)?;
                 }
                 Outcome::Stopped(_) => return Ok(scan.last),
                 Outcome::Debug(stop) => self.note_hit(&mut scan, at, stop)?,
@@ -768,9 +854,6 @@ impl Debuggee<'_> {
                             0 => done.clone(),
                             j => done.then(Move::Steps(j)),
                         };
-                        if j > 0 && j % LISTEN_EVERY == 0 {
-                            self.listen(|| boundary.clone())?;
-                        }
                         loop {
                             match self.machine.run(None, &mut Ignore)? {
                                 Outcome::Debug(DebugStop::Step) => break,
@@ -788,21 +871,34 @@ impl Debuggee<'_> {
                                 other => bail!("a single step replayed came to {other:?}"),
                             }
                         }
+                        self.listen(|| done.then(Move::Steps(j + 1)))?;
                     }
                 }
+
+                // The move's own hit of a watch gdb still has is a write
+                // before where the move ends, so the last hit so far. A
+                // breakpoint the move ends at is not one yet: the fork is
+                // at it, and the next move passes it.
                 Move::Hit(target) => {
                     self.set_traps_for_scan(Some(target))?;
                     self.pass_breakpoint_here(&mut scan, &done)?;
-                    loop {
+                    let stop = loop {
                         let outcome = self.machine.run(None, &mut Ignore)?;
                         let Outcome::Debug(stop) = outcome else {
                             bail!("a run to a trap replayed came to {outcome:?}");
                         };
                         if self.is_move_target(target, stop)? {
-                            break;
+                            break stop;
                         }
                         self.note_hit(&mut scan, here.step, stop)?;
+                    };
+                    let reached = done.then(mv);
+                    if let DebugStop::Watchpoint { address: piece, .. } = stop
+                        && let Some(watch) = self.traps.watch_containing(piece)
+                    {
+                        scan.last = Some((reached.clone(), GdbTrap::Watch(watch)));
                     }
+                    self.listen(|| reached)?;
                 }
                 Move::Branches(count) => {
                     self.set_traps_for_scan(None)?;
@@ -816,6 +912,7 @@ impl Debuggee<'_> {
                             other => bail!("a run to a branch count replayed came to {other:?}"),
                         }
                     }
+                    self.listen(|| done.then(mv))?;
                 }
             }
             done = done.then(mv);
@@ -830,8 +927,6 @@ impl Debuggee<'_> {
 struct Scan {
     since: Position,
     last: Option<(Position, GdbTrap)>,
-    /// How many hits in the debugged process it has seen.
-    hits: u64,
 }
 
 impl Default for Position {
@@ -889,16 +984,19 @@ impl Debuggee<'_> {
             scan.since = Position::start(step);
         }
         // At a hit in the debugged process the fork is where `since` says,
-        // so every so many of them gdb's Ctrl-C can stop it there: a busy
-        // loop writing a watched value hits again and again without an
-        // exit in between. A breakpoint is listened for before it is
-        // passed, while the fork is still at it.
+        // so gdb's Ctrl-C can stop it there: a busy loop writing a watched
+        // value hits again and again without an exit in between. A hit in
+        // another process leaves the fork between positions. A breakpoint
+        // is listened for before it is passed, while the fork is still at
+        // it.
         match stop {
             DebugStop::Breakpoint(address) => {
                 let hit = scan.since.then(Move::Hit(GdbTrap::Breakpoint(address)));
                 if self.note_breakpoint(scan, address, hit.clone())? {
-                    scan.since = hit;
-                    self.listen_at_hit(scan)?;
+                    scan.since = hit.clone();
+                    self.listen(|| hit)?;
+                } else {
+                    self.listen_between()?;
                 }
                 self.machine.pass_breakpoint()?;
             }
@@ -907,24 +1005,15 @@ impl Debuggee<'_> {
                     .since
                     .then(Move::Hit(GdbTrap::Watch(self.watch_of(piece)?)));
                 if self.note_watch(scan, piece, hit.clone())? {
-                    scan.since = hit;
-                    self.listen_at_hit(scan)?;
+                    scan.since = hit.clone();
+                    self.listen(|| hit)?;
+                } else {
+                    self.listen_between()?;
                 }
             }
             other => bail!("a replay with gdb's traps came to {other:?}"),
         }
         Ok(())
-    }
-
-    /// Counts a hit in the debugged process, the fork at `scan.since`, and
-    /// every [`LISTEN_EVERY_HITS`] of them looks at gdb's connection.
-    fn listen_at_hit(&mut self, scan: &mut Scan) -> Result<()> {
-        scan.hits += 1;
-        if !scan.hits.is_multiple_of(LISTEN_EVERY_HITS) {
-            return Ok(());
-        }
-        let at = scan.since.clone();
-        self.listen(|| at)
     }
 
     /// The watch gdb set that the watched piece at `piece` belongs to.

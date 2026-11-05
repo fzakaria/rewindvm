@@ -348,6 +348,23 @@ let
         $CC -static -O0 -g -fdebug-prefix-map=$out/src=/src \
           -o $out/bin/reverse $out/src/reverse.c
 
+        cat > $out/src/burst.c <<'EOF'
+        #include <unistd.h>
+
+        volatile long total;
+
+        int main(void)
+        {
+          write(1, "start\n", 6);
+          for (long i = 1; i <= 5; i++)
+            total += i; /* the add */
+          write(1, "done\n", 5);
+          return 0;
+        }
+        EOF
+        $CC -static -O0 -g -fdebug-prefix-map=$out/src=/src \
+          -o $out/bin/burst $out/src/burst.c
+
         cat > $out/src/slow.c <<'EOF'
         #include <unistd.h>
 
@@ -1654,6 +1671,19 @@ in
           cat start
           grep -q 'Reached end of recorded history' start
           ! grep -q 'only the CPU' start
+
+          # Five writes to the watch in one step, with no exit between:
+          # each run back stops before the write before the last one.
+          rewind run -q --clock "$clock" --name "burst-$clock" --root ${gdbRoot} \
+            -- /bin/burst > /dev/null
+          done=$(rewind events "burst-$clock" | grep 'write(1, "done' | awk '{print $1}')
+          rewind gdb "burst-$clock" "$done" -- -batch -ex 'watch total' \
+            -ex reverse-continue -ex reverse-continue -ex reverse-continue > burst 2>&1 || true
+          cat burst
+          test "$(grep -c 'hit Hardware watchpoint 1: total' burst)" = 3
+          test "$(grep -A1 'Old value = 15' burst | grep -c 'New value = 10')" = 1
+          test "$(grep -A1 'Old value = 10' burst | grep -c 'New value = 6')" = 1
+          test "$(grep -A1 'Old value = 6' burst | grep -c 'New value = 3')" = 1
         done
 
         # Under exit time, a reverse-stepi from the last write single-steps
@@ -1696,6 +1726,53 @@ in
           interrupt KILL "killed-$back" -ex 'watch -l sum'
           grep -q 'gdb closed the connection while the fork ran backwards' "killed-$back"
         done
+
+        # A reverse-continue to the watch on the sum, stopped by Ctrl-C six
+        # seconds in, leaves the fork past the writes it went through. The
+        # next reverse-stepi or reverse-continue replays those writes; Ctrl-C
+        # half a second into it stops it within a second, in the loop, where
+        # gdb reads the sum and steps forwards and back to the same pc. gdb
+        # killed in it ends the session within a second.
+        again() {
+          local second=$1 signal=$2 out=$3
+          rewind gdb slow "$done" -- -batch -ex 'thread 2' -ex 'watch -l sum' \
+            -ex 'echo begin-reverse\n' -ex reverse-continue -ex 'echo begin-again\n' \
+            -ex "$second" -ex 'echo after-again\n' -ex 'print sum' -ex 'print $pc' \
+            -ex stepi -ex reverse-stepi -ex 'print $pc' > "$out" 2>&1 &
+          local parent=$!
+          local gdb
+          for _ in $(seq 1 600); do grep -q begin-reverse "$out" && break; sleep 0.1; done
+          gdb=$(pgrep -P "$parent" -x gdb)
+          sleep 6
+          kill -INT "$gdb"
+          for _ in $(seq 1 100); do grep -q begin-again "$out" && break; sleep 0.1; done
+          grep -q begin-again "$out"
+          sleep 0.5
+          kill "-$signal" "$gdb"
+
+          # The second stop, or the session's end, within 1 s of the signal.
+          for _ in $(seq 1 10); do
+            if [ "$(grep -c 'received signal SIGINT' "$out")" = 2 ] \
+              || ! kill -0 "$parent" 2> /dev/null; then
+              break
+            fi
+            sleep 0.1
+          done
+          [ "$(grep -c 'received signal SIGINT' "$out")" = 2 ] || ! kill -0 "$parent" 2> /dev/null
+          wait "$parent" || true
+          cat "$out"
+        }
+        for second in reverse-stepi reverse-continue; do
+          again "$second" INT "again-$second"
+          test "$(grep -c 'received signal SIGINT' "again-$second")" = 2
+          grep -A2 after-again "again-$second" > stopped
+          grep -q '^\$[0-9]* = [0-9]' stopped
+          grep -q '^\$[0-9]* = .*<main+' stopped
+          grep -E '^\$[0-9]+ = \(void' "again-$second" | tail -2 | awk '{print $5}' | sort -u > pcs
+          test "$(wc -l < pcs)" = 1
+        done
+        again reverse-stepi KILL killed-again
+        grep -q 'gdb closed the connection while the fork ran backwards' killed-again
         touch $out
       '';
 
