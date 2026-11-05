@@ -25,7 +25,8 @@ use crate::{Config, Machine, SLOT_RAM};
 
 /// Where keyframe pages go: a content-addressed page store.
 pub trait Pages {
-    /// Stores a page and returns its hash.
+    /// Stores a page and returns its hash: [`ZERO_PAGE`] for a page of
+    /// zeros, which needs storing nowhere.
     fn put(&mut self, page: &[u8]) -> Result<[u8; 32]>;
     /// Reads the page with this hash into `out`.
     fn get(&self, hash: &[u8; 32], out: &mut [u8]) -> Result<()>;
@@ -183,11 +184,7 @@ impl Machine {
         let mut stored = Vec::with_capacity(indices.len());
         for i in indices {
             let page = &ram[i * PAGE_SIZE..(i + 1) * PAGE_SIZE];
-            let hash = if page.iter().all(|b| *b == 0) {
-                ZERO_PAGE
-            } else {
-                pages.put(page)?
-            };
+            let hash = pages.put(page)?;
             // A full keyframe need not list pages that are zero anyway.
             if parent.is_some() || hash != ZERO_PAGE {
                 stored.push((i as u32, hash));
