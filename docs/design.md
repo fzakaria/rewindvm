@@ -327,12 +327,15 @@ changed, or that left its recording, cannot go back, since the run replayed
 is not what the fork did.
 
 Under exit time a step can be millions of instructions, and going back across
-one single-steps all of them, each a VM exit, which can take minutes. Every
-1,024 single steps, and between chunks of whole steps, the fork peeks at gdb's
-connection. A Ctrl-C stops it where it has got to, which is a position like
+one single-steps all of them, each a VM exit, which can take minutes; a run
+back to a watch on a value a loop writes stops at every write. Every 1,024
+single steps, every 64 hits of gdb's traps, and between chunks of whole steps,
+the fork peeks at gdb's connection. A Ctrl-C stops it where it has got to, which is a position like
 any other, so gdb reads registers there, steps forward and goes back again; a
 closed connection ends the session. On a loop of 10 million rounds the stop
-comes about 60 ms after the Ctrl-C.
+comes about 60 ms after the Ctrl-C. A position's moves are a list each position
+shares with the one it was made from, so the position after each of many hits
+in one step costs the same to make however many came before.
 
 `rewind blame RUN --at STEP EXPR` asks the same question as a watchpoint
 run backwards, who last wrote this value, without a debugger session, and the

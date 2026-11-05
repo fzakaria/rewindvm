@@ -22,8 +22,8 @@
 //!
 //! Under exit time a step can be millions of instructions, each a VM exit
 //! to single-step, so going back can take minutes. Every so many single
-//! steps, and between chunks of whole steps, the fork looks at gdb's
-//! connection: a Ctrl-C stops it where it has got to, a position like any
+//! steps, hits of gdb's traps, and chunks of whole steps, the fork looks
+//! at gdb's connection: a Ctrl-C stops it where it has got to, a position like any
 //! other, which gdb can inspect and run from; a closed connection ends
 //! the session.
 
@@ -94,7 +94,7 @@ impl Pages for StorePages {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Position {
     pub(super) step: u64,
-    pub(super) moves: Vec<Move>,
+    pub(super) moves: Moves,
 }
 
 impl Position {
@@ -102,21 +102,118 @@ impl Position {
     pub(super) fn start(step: u64) -> Position {
         Position {
             step,
-            moves: Vec::new(),
+            moves: Moves::default(),
         }
     }
 
     /// This position with `mv` after it: single steps after single steps
     /// add up.
     fn then(&self, mv: Move) -> Position {
-        let mut moves = self.moves.clone();
-        match (moves.last_mut(), mv) {
-            (Some(Move::Steps(n)), Move::Steps(more)) => *n += more,
-            _ => moves.push(mv),
-        }
         Position {
             step: self.step,
-            moves,
+            moves: self.moves.then(mv),
+        }
+    }
+}
+
+/// A position's moves: a list each position shares with the one it was
+/// made from, newest first. A search back over a step with many hits
+/// makes a position per hit, each one move past the last, so adding a
+/// move or copying a position takes the same time however many moves
+/// there are; a copy per hit of a list per position took time growing as
+/// the square of the hits.
+#[derive(Clone, Default)]
+pub(super) struct Moves(Option<std::sync::Arc<Link>>);
+
+/// One move of a list, the moves before it, and how many moves the list
+/// holds with it.
+struct Link {
+    mv: Move,
+    before: Moves,
+    len: usize,
+}
+
+impl Moves {
+    pub(super) fn is_empty(&self) -> bool {
+        self.0.is_none()
+    }
+
+    fn len(&self) -> usize {
+        self.0.as_ref().map_or(0, |link| link.len)
+    }
+
+    /// The last move and the moves before it.
+    fn split_last(&self) -> Option<(Move, Moves)> {
+        self.0.as_ref().map(|link| (link.mv, link.before.clone()))
+    }
+
+    /// These moves with `mv` after them: single steps after single steps
+    /// add up.
+    fn then(&self, mv: Move) -> Moves {
+        if let (Some((Move::Steps(n), before)), Move::Steps(more)) = (self.split_last(), mv) {
+            return before.then(Move::Steps(n + more));
+        }
+        Moves(Some(std::sync::Arc::new(Link {
+            mv,
+            before: self.clone(),
+            len: self.len() + 1,
+        })))
+    }
+
+    /// Each move, oldest first, with the moves before it.
+    fn in_order(&self) -> Vec<(Moves, Move)> {
+        let mut out = Vec::with_capacity(self.len());
+        let mut at = self.clone();
+        while let Some((mv, before)) = at.split_last() {
+            out.push((before.clone(), mv));
+            at = before;
+        }
+        out.reverse();
+        out
+    }
+}
+
+impl PartialEq for Moves {
+    fn eq(&self, other: &Moves) -> bool {
+        let (mut a, mut b) = (self.clone(), other.clone());
+        if a.len() != b.len() {
+            return false;
+        }
+        loop {
+            match (&a.0, &b.0) {
+                (None, None) => return true,
+                (Some(x), Some(y)) if std::sync::Arc::ptr_eq(x, y) => return true,
+                (Some(x), Some(y)) if x.mv == y.mv => {
+                    let (next_a, next_b) = (x.before.clone(), y.before.clone());
+                    (a, b) = (next_a, next_b);
+                }
+                _ => return false,
+            }
+        }
+    }
+}
+
+impl Eq for Moves {}
+
+impl std::fmt::Debug for Moves {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list()
+            .entries(self.in_order().into_iter().map(|(_, mv)| mv))
+            .finish()
+    }
+}
+
+impl Drop for Moves {
+    /// Drops the links no other list shares one at a time: dropping a
+    /// list of thousands of moves link by link from the newest would
+    /// recurse that deep.
+    fn drop(&mut self) {
+        let mut next = self.0.take();
+        while let Some(link) = next {
+            next = match std::sync::Arc::try_unwrap(link) {
+                Ok(mut link) => link.before.0.take(),
+                Err(_) => None,
+            };
         }
     }
 }
@@ -172,6 +269,10 @@ const MARGINS: [u64; 3] = [512, 8192, 1 << 17];
 /// connection: a single step is a VM exit of a few microseconds, so this
 /// many take some milliseconds.
 const LISTEN_EVERY: u64 = 1024;
+
+/// How many hits of gdb's traps in the debugged process a replay sees
+/// between looks at gdb's connection: each is a VM exit.
+const LISTEN_EVERY_HITS: u64 = 64;
 
 /// How many whole steps a replay runs between looks at gdb's connection.
 const LISTEN_EVERY_STEPS: u64 = super::CHUNK_STEPS;
@@ -389,10 +490,10 @@ impl Debuggee<'_> {
     /// Brings the fork to `target`: the start of its step, then its moves.
     fn go_to(&mut self, target: &Position, margin: u64) -> Result<()> {
         self.at_step_start(target.step)?;
-        for (i, &mv) in target.moves.iter().enumerate() {
+        for (before, mv) in target.moves.in_order() {
             let from = Position {
                 step: target.step,
-                moves: target.moves[..i].to_vec(),
+                moves: before,
             };
             self.replay(mv, &from, margin)?;
         }
@@ -488,14 +589,11 @@ impl Debuggee<'_> {
     /// when the run counts branches, then single-stepping until the step
     /// that reaches `here`.
     fn before(&mut self, here: &Position, margin: u64) -> Result<Option<Position>> {
-        if let Some(Move::Steps(n)) = here.moves.last() {
-            let mut moves = here.moves.clone();
-            match n {
-                1 => {
-                    moves.pop();
-                }
-                n => *moves.last_mut().expect("ends in single steps") = Move::Steps(n - 1),
-            }
+        if let Some((Move::Steps(n), before)) = here.moves.split_last() {
+            let moves = match n {
+                1 => before,
+                n => before.then(Move::Steps(n - 1)),
+            };
             return Ok(Some(Position {
                 step: here.step,
                 moves,
@@ -503,7 +601,7 @@ impl Debuggee<'_> {
         }
         let (anchor, arrival) = match here.moves.split_last() {
             Some((last, rest)) => {
-                let arrival = match *last {
+                let arrival = match last {
                     Move::Hit(GdbTrap::Watch(watch)) => Arrival::Watch(watch),
                     Move::Hit(GdbTrap::Breakpoint(address)) => Arrival::Breakpoint(address),
                     Move::Branches(count) => Arrival::Branches(count),
@@ -511,7 +609,7 @@ impl Debuggee<'_> {
                 };
                 let anchor = Position {
                     step: here.step,
-                    moves: rest.to_vec(),
+                    moves: rest,
                 };
                 (anchor, arrival)
             }
@@ -658,7 +756,7 @@ impl Debuggee<'_> {
         // passed before the next move runs.
         self.machine.complete_pending_exit()?;
         let mut done = Position::start(here.step);
-        for &mv in &here.moves {
+        for (_, mv) in here.moves.in_order() {
             scan.since = done.clone();
             match mv {
                 Move::Steps(n) => {
@@ -732,6 +830,8 @@ impl Debuggee<'_> {
 struct Scan {
     since: Position,
     last: Option<(Position, GdbTrap)>,
+    /// How many hits in the debugged process it has seen.
+    hits: u64,
 }
 
 impl Default for Position {
@@ -788,11 +888,17 @@ impl Debuggee<'_> {
         if scan.since.step != step {
             scan.since = Position::start(step);
         }
+        // At a hit in the debugged process the fork is where `since` says,
+        // so every so many of them gdb's Ctrl-C can stop it there: a busy
+        // loop writing a watched value hits again and again without an
+        // exit in between. A breakpoint is listened for before it is
+        // passed, while the fork is still at it.
         match stop {
             DebugStop::Breakpoint(address) => {
                 let hit = scan.since.then(Move::Hit(GdbTrap::Breakpoint(address)));
                 if self.note_breakpoint(scan, address, hit.clone())? {
                     scan.since = hit;
+                    self.listen_at_hit(scan)?;
                 }
                 self.machine.pass_breakpoint()?;
             }
@@ -802,11 +908,23 @@ impl Debuggee<'_> {
                     .then(Move::Hit(GdbTrap::Watch(self.watch_of(piece)?)));
                 if self.note_watch(scan, piece, hit.clone())? {
                     scan.since = hit;
+                    self.listen_at_hit(scan)?;
                 }
             }
             other => bail!("a replay with gdb's traps came to {other:?}"),
         }
         Ok(())
+    }
+
+    /// Counts a hit in the debugged process, the fork at `scan.since`, and
+    /// every [`LISTEN_EVERY_HITS`] of them looks at gdb's connection.
+    fn listen_at_hit(&mut self, scan: &mut Scan) -> Result<()> {
+        scan.hits += 1;
+        if !scan.hits.is_multiple_of(LISTEN_EVERY_HITS) {
+            return Ok(());
+        }
+        let at = scan.since.clone();
+        self.listen(|| at)
     }
 
     /// The watch gdb set that the watched piece at `piece` belongs to.
@@ -876,4 +994,43 @@ fn with_margins<T>(mut attempt: impl FnMut(u64) -> Result<T>) -> Result<T> {
         }
     }
     Err(last.expect("at least one margin"))
+}
+
+#[cfg(test)]
+mod tests {
+    // Positions' moves, built by hand as a search back builds them, with
+    // no machine.
+    use super::*;
+
+    /// A position's moves, built one at a time: single steps add up, the
+    /// moves come back oldest first each with the ones before it, and a
+    /// position and the one made from it share what they have in common.
+    #[test]
+    fn moves_are_shared_with_the_positions_they_came_from() {
+        let breakpoint = Move::Hit(GdbTrap::Breakpoint(0x401000));
+        let a = Position::start(7).then(Move::Steps(2)).then(Move::Steps(3));
+        let b = a.then(breakpoint);
+        let moves = |p: &Position| -> Vec<Move> {
+            p.moves.in_order().into_iter().map(|(_, m)| m).collect()
+        };
+        assert_eq!(moves(&a), [Move::Steps(5)]);
+        assert_eq!(moves(&b), [Move::Steps(5), breakpoint]);
+        assert_eq!(b.moves.in_order()[1].0, a.moves);
+        assert_eq!(b.moves.split_last(), Some((breakpoint, a.moves.clone())));
+        assert_ne!(a, b);
+        assert_eq!(b, Position::start(7).then(Move::Steps(5)).then(breakpoint));
+    }
+
+    /// A list of a million moves, as many hits in one step make, is made
+    /// and dropped without recursing a million deep.
+    #[test]
+    fn a_long_list_of_moves_drops() {
+        let hit = Move::Hit(GdbTrap::Breakpoint(0x401000));
+        let mut at = Position::start(1);
+        for _ in 0..1_000_000 {
+            at = at.then(hit);
+        }
+        assert_eq!(at.moves.len(), 1_000_000);
+        drop(at);
+    }
 }
