@@ -42,8 +42,8 @@ const MILESTONES = [
     html: `replay compares the whole machine at every keyframe of the run as well as its events (${commit("725de7f4")}), which catches a host that ran the guest another way without the guest noticing. It costs a third more wall time and half again the memory; <code>--machine last</code> or <code>none</code> compares less.`,
   },
   {
-    label: "main",
-    html: `Restores read pages on every core (${commit("f7fc2dbf")}) and straight from a keyframe's bytes (${commit("f8dbdad6")}), and guest memory is backed by 2 MiB pages where the host allows (${commit("151744b5")}). The late seek takes a fifth of its time, check of a short program is back where it was before 0.3.0, and a short run is 14% faster. Which commit gave how much is not measured.`,
+    label: "v0.11.0",
+    html: `Restores read pages on every core (${commit("f7fc2dbf")}) and straight from a keyframe's bytes (${commit("f8dbdad6")}), and guest memory is backed by 2 MiB pages where the host allows (${commit("151744b5")}). The late seek takes a fifth of its time, check of a short program is back where it was before 0.3.0, and a short run is 22% faster. Which commit gave how much is not measured.`,
   },
 ];
 
