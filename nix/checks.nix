@@ -1176,6 +1176,15 @@ in
         echo "keyframes: $(keyframes | tr '\n' ' ')"
         test "$(keyframes | wc -l)" -ge 3
 
+        # Recording the run again, in a home of its own where it keeps no
+        # keyframes from the first, takes its keyframes at the same steps:
+        # they follow the guest's progress, not the host's time for it.
+        REWIND_HOME=$TMPDIR/again rewind run -q --name a --root ${busyboxRoot} -- sh -c 'for i in $(seq 20000); do echo $i; done; head -c 64 /dev/urandom | od -An -tx1' > /dev/null
+        again=$TMPDIR/again/runs/$(basename "$a")
+        ls "$again/keyframes" | grep '\.kf$' | sed 's/\.kf$//; s/^0*//' > again-keyframes
+        echo "keyframes again: $(tr '\n' ' ' < again-keyframes)"
+        keyframes | diff - again-keyframes
+
         rewind replay a | tee from-boot
         grep -q "^identical to the recording: .*, and the whole machine at its $(keyframes | wc -l) keyframes$" from-boot
 
