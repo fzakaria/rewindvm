@@ -140,7 +140,7 @@ lines 74 and 77 of the worker and lines 119 and 125 of `pool_shutdown`:
 
 <!-- set blame_since: echo $(( {{crash_step}} - 40 )) -->
 
-```console run name=blame_reads keep=step\s\sthread|pool\.c:(74|77|119|125)\s|^searched
+```console run name=blame_reads keep=step\s\sthread|pool.c:(74|77|119|125)\s|^searched
 $ rewind blame {{failing|short}} --at {{crash_step}} 'p->stopping' 'p->queue' --reads --since {{blame_since}}
 ```
 

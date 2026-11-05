@@ -93,14 +93,14 @@
         ><code><span class="cmd"><span class="prompt">$</span> rewind check --epoch 1790985600 --seeds 8 --schedules 0 --all --no-narrow github:fzakaria/rewindvm#tiles</span>
 <span class="ansi-dim">rewind:</span> packing 75 store paths for tiles-0.2.0
 <span class="ansi-dim">rewind:</span> 8 random seeds, each run under schedule 0 and 0 other schedules: 8 runs
-seed  0 schedule   0: <span class="ansi-green">exited:0</span>             4027 steps  d20b5efd388d  run 56e7036bef2be348
-seed  1 schedule   0: <span class="ansi-green">exited:0</span>             4027 steps  <span class="ansi-red">b4501793e383</span>  run a49817d2dc937c04
-seed  2 schedule   0: <span class="ansi-green">exited:0</span>             4027 steps  <span class="ansi-red">0cd5db6c5c2c</span>  run 432d4935f39f9882
-seed  3 schedule   0: <span class="ansi-green">exited:0</span>             4027 steps  <span class="ansi-red">24f18f09c329</span>  run 1202f2af6ed7f1fa
-seed  4 schedule   0: <span class="ansi-green">exited:0</span>             4027 steps  <span class="ansi-red">b4501793e383</span>  run 65e3d5aa30d5b7b0
-seed  5 schedule   0: <span class="ansi-green">exited:0</span>             4027 steps  <span class="ansi-red">5e1f0a457cbe</span>  run cb252aae5875cebc
-seed  6 schedule   0: <span class="ansi-green">exited:0</span>             4027 steps  d20b5efd388d  run a35f07059805822e
-seed  7 schedule   0: <span class="ansi-green">exited:0</span>             4027 steps  <span class="ansi-red">b4501793e383</span>  run 9c1eedac589f0c0b
+seed  0 schedule   0: <span class="ansi-green">exited:0</span>             4027 steps  d20b5efd388d  run a88c945d0fbcddc4
+seed  1 schedule   0: <span class="ansi-green">exited:0</span>             4027 steps  <span class="ansi-red">b4501793e383</span>  run 206bd3571cca6d28
+seed  2 schedule   0: <span class="ansi-green">exited:0</span>             4027 steps  <span class="ansi-red">0cd5db6c5c2c</span>  run b6d040a5464f0507
+seed  3 schedule   0: <span class="ansi-green">exited:0</span>             4027 steps  <span class="ansi-red">24f18f09c329</span>  run 71e9ef2a95be248a
+seed  4 schedule   0: <span class="ansi-green">exited:0</span>             4027 steps  <span class="ansi-red">b4501793e383</span>  run b05317bb329c180d
+seed  5 schedule   0: <span class="ansi-green">exited:0</span>             4027 steps  <span class="ansi-red">5e1f0a457cbe</span>  run 2d1a22b25ef85e6c
+seed  6 schedule   0: <span class="ansi-green">exited:0</span>             4027 steps  d20b5efd388d  run 54508a7a74f50632
+seed  7 schedule   0: <span class="ansi-green">exited:0</span>             4027 steps  <span class="ansi-red">b4501793e383</span>  run 692321c735dc5784
 <span class="ansi-red">6 of 7 other runs ended differently</span></code></pre>
         <p>
           The third column from the end is the start of the output's hash, and the last is the run
@@ -113,12 +113,12 @@ seed  7 schedule   0: <span class="ansi-green">exited:0</span>             4027 
         <p>Compare seed 0's run with seed 1's:</p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind diff --outputs 56e7036b a49817d2</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind diff --outputs a88c945d 206bd357</span>
 <span class="ansi-red">2 of the 5 files the runs left behind differ</span>:
   /build/tiles/tiles.pc: 22 of 227 bytes differ, first at byte 178
   /nix/store/...-tiles-0.2.0/lib/pkgconfig/tiles.pc: 22 of 227 bytes differ, first at byte 178
 
-<span class="cmd"><span class="prompt">$</span> rewind diff --file /build/tiles/tiles.pc 56e7036b a49817d2</span>
+<span class="cmd"><span class="prompt">$</span> rewind diff --file /build/tiles/tiles.pc a88c945d 206bd357</span>
 <span class="ansi-red">tiles.pc differs, first at line 7.</span>
 Only in the left run: 1 line.
 Only in the right run: 1 line.
@@ -145,17 +145,17 @@ Lines marked <span class="ansi-yellow">-</span> are only in the left run. Lines 
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind blame 56e7036b a49817d2 /nix/store/ihhhzc5qphjjz5vgss7swki10dwkicsb-tiles-0.2.0/lib/pkgconfig/tiles.pc</span>
-tiles.pc <span class="ansi-red">differs at byte 178</span>. python3 (pid 112) wrote that byte at step 2,901 in run <span class="ansi-yellow">56e7036b</span> and at step 2,901 in run <span class="ansi-blue">a49817d2</span>.
+        ><code><span class="cmd"><span class="prompt">$</span> rewind blame a88c945d 206bd357 /nix/store/ihhhzc5qphjjz5vgss7swki10dwkicsb-tiles-0.2.0/lib/pkgconfig/tiles.pc</span>
+tiles.pc <span class="ansi-red">differs at byte 178</span>. python3 (pid 112) wrote that byte at step 2,901 in run <span class="ansi-yellow">a88c945d</span> and at step 2,901 in run <span class="ansi-blue">206bd357</span>.
 
 22 of 227 bytes differ. The bytes from byte 178:
-  <span class="ansi-yellow">56e7036b</span>  70 69 78 6d 61 6e 2d 31 2c 20 6c 69 62 70 6e 67  |pixman-1, libpng|
-  <span class="ansi-blue">a49817d2</span>  7a 6c 69 62 2c 20 70 69 78 6d 61 6e 2d 31 2c 20  |zlib, pixman-1, |
+  <span class="ansi-yellow">a88c945d</span>  70 69 78 6d 61 6e 2d 31 2c 20 6c 69 62 70 6e 67  |pixman-1, libpng|
+  <span class="ansi-blue">206bd357</span>  7a 6c 69 62 2c 20 70 69 78 6d 61 6e 2d 31 2c 20  |zlib, pixman-1, |
 
-Who wrote the file in run 56e7036b, from the last writer back:
+Who wrote the file in run a88c945d, from the last writer back:
   install (pid 122) copied it from /build/tiles/tiles.pc, starting at step 3,149. Its source already differs, so the copy did not cause the difference.
   bash (pid 112) wrote /build/tiles/tiles.pc, starting at step 2,788. It is the first writer, and the file already differs when it is done.
-Run a49817d2 made the file the same way, with the same programs.
+Run 206bd357 made the file the same way, with the same programs.
 
 In both runs, one write of 227 bytes, from byte 0, set byte 178.
 
@@ -265,7 +265,7 @@ Likely cause: something inside python3 (pid 112), such as randomness or the orde
         <p>Open the two runs side by side:</p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind open 56e7036b --compare a49817d2</span></code></pre>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind open a88c945d --compare 206bd357</span></code></pre>
         <p>The Compare tab's Files that differ link lists what <code>diff --outputs</code> does:</p>
         <figure class="shot">
           <picture>
@@ -351,15 +351,15 @@ Likely cause: something inside python3 (pid 112), such as randomness or the orde
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind check --epoch 1790985600 --seeds 1 --schedules 0 --all --no-narrow --dirents 3 .#plugins</span>
-dirents  0 schedule   0: <span class="ansi-green">exited:0</span>             3887 steps  77b96f07540a  run d9631407be54fc46
-dirents  1 schedule   0: <span class="ansi-green">exited:0</span>             3887 steps  <span class="ansi-red">3d555b541296</span>  run 78fdad37cbc99586
-dirents  2 schedule   0: <span class="ansi-green">exited:0</span>             3887 steps  <span class="ansi-red">925dde4ef23a</span>  run 26adc9540fd107c7
-dirents  3 schedule   0: <span class="ansi-green">exited:0</span>             3887 steps  <span class="ansi-red">abd7877043a8</span>  run b4fabcb208cd04ad
+dirents  0 schedule   0: <span class="ansi-green">exited:0</span>             3887 steps  77b96f07540a  run 130eba8588e5a0b0
+dirents  1 schedule   0: <span class="ansi-green">exited:0</span>             3887 steps  <span class="ansi-red">3d555b541296</span>  run dddd0c1fedf9b1e1
+dirents  2 schedule   0: <span class="ansi-green">exited:0</span>             3887 steps  <span class="ansi-red">925dde4ef23a</span>  run 371fc50a1604a75e
+dirents  3 schedule   0: <span class="ansi-green">exited:0</span>             3887 steps  <span class="ansi-red">abd7877043a8</span>  run 875809d42feba5fc
 <span class="ansi-red">3 of 3 other runs ended differently</span></code></pre>
         <p>Each key builds another output. The index is the file that changed:</p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind diff --file /build/plugins/plugins.txt 78fdad37 26adc954</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind diff --file /build/plugins/plugins.txt dddd0c1f 371fc50a</span>
 <span class="ansi-red">plugins.txt differs, first at line 3.</span>
 Only in the left run: 2 lines.
 Only in the right run: 2 lines.
@@ -606,10 +606,10 @@ Lines marked <span class="ansi-yellow">-</span> are only in the left run. Lines 
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind check --epoch 1790985600 --seeds 1 --schedules 0 --all --no-narrow --dirents 3 .#plugins</span>
 ...
-dirents  0 schedule   0: <span class="ansi-green">exited:0</span>             3887 steps  164f7a685a08  run f33b54b768d6600c
-dirents  1 schedule   0: <span class="ansi-green">exited:0</span>             3887 steps  164f7a685a08  run c99a668fc8928820
-dirents  2 schedule   0: <span class="ansi-green">exited:0</span>             3887 steps  164f7a685a08  run 04571eadc665dc44
-dirents  3 schedule   0: <span class="ansi-green">exited:0</span>             3887 steps  164f7a685a08  run 7dcc86078b483da9
+dirents  0 schedule   0: <span class="ansi-green">exited:0</span>             3887 steps  164f7a685a08  run 7018642f7d6d5131
+dirents  1 schedule   0: <span class="ansi-green">exited:0</span>             3887 steps  164f7a685a08  run fdf1ed7a02b3cf90
+dirents  2 schedule   0: <span class="ansi-green">exited:0</span>             3887 steps  164f7a685a08  run 59bea86e58045eea
+dirents  3 schedule   0: <span class="ansi-green">exited:0</span>             3887 steps  164f7a685a08  run c8aca2f77e46a1b8
 <span class="ansi-green">0 of 3 other runs ended differently</span>
 <span class="ansi-green">same result under all 4 runs</span></code></pre>
         <p>Every key now builds the same output, <code>164f7a685a08</code>.</p>

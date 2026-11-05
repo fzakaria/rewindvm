@@ -83,7 +83,7 @@
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind check --epoch 1790985600 github:fzakaria/rewindvm#counter</span>
 ...
-schedule  64: <span class="ansi-green">exited:0</span>             5293 steps  e3f96e451c97  run c4533360a1728e14  <span class="ansi-green">holds</span>
+schedule  64: <span class="ansi-green">exited:0</span>             5293 steps  e3f96e451c97  run 88685f0283a17ca8  <span class="ansi-green">holds</span>
 <span class="ansi-green">every property held under all 65 schedules</span></code></pre>
         <p>
           The threads do race. On a multicore host they run at the same instant, and one hit in a
@@ -195,8 +195,8 @@ schedule  64: <span class="ansi-green">exited:0</span>             5293 steps  e
 rewind: packing 62 store paths for counter-0.1.0
 schedule 1 violates same-outcome, sdk; finding the step that decides it
 step 3237 decides it: a request to switch threads there makes the run violate same-outcome, sdk
-passing: run 045b6fe5de20a435, schedule 0
-failing: run 808bfeda84557cb5, schedule 1 over steps 3237..3238
+passing: run b66c913d300d5ef7, schedule 0
+failing: run bdb538e102adc31a, schedule 1 over steps 3237..3238
 failing run violates sdk: step 3261: always "hits-add-up" failed: 10 hits, expected 20</code></pre>
         <p>
           The run violates <code>same-outcome</code> too, since the job's build fails where schedule
@@ -207,12 +207,12 @@ failing run violates sdk: step 3261: always "hits-add-up" failed: 10 hits, expec
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind threads 808bfeda --from 3235 --to 3239</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind threads bdb538e1 --from 3235 --to 3239</span>
       3235       3238       139/140  counter
       3239       3239       139/141  counter</code></pre>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind threads 045b6fe5 --from 3235 --to 3239</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind threads b66c913d --from 3235 --to 3239</span>
       3235       3239       139/140  counter</code></pre>
         <p>
           Thread 139/141 takes the CPU at step 3239 of the failing run, and not in the passing one.
@@ -221,7 +221,7 @@ failing run violates sdk: step 3261: always "hits-add-up" failed: 10 hits, expec
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind open 808bfeda 3237 --compare 045b6fe5</span></code></pre>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind open bdb538e1 3237 --compare b66c913d</span></code></pre>
         <figure class="shot">
           <picture>
             <source srcset="../img/app-point.webp" type="image/webp" />

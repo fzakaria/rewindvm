@@ -35,7 +35,6 @@ rewind: walking thread 171's stack in gdb
 rewind: downloading debug info for libc.so.6; first time only
 rewind: downloading debug info for libpthread.so.0; first time only
 rewind: downloading debug info for ld-linux-x86-64.so.2; first time only
-rewind: downloading the sources of libc.so.6; first time only
 process 166 (test_pool_shutdown), thread 171, at step 4782
 #0 worker (src/pool.c:77)
       75  			printf("job %d done: %ld\n", job, result & 0xffff);
@@ -50,8 +49,8 @@ locals:
   job = 16
   result = 4092430570737637218
   p = 0x5556f833c010
-called from #1 start_thread (pthread_create.c:454)
-called from #2 __GI___clone3 (../sysdeps/unix/sysv/linux/x86_64/clone3.S:78)
+called from #1 start_thread (/nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6)
+called from #2 __clone3 (/nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6)
 ```
 
 Under the source come the frame's arguments and locals, as gdb's `info args`
@@ -65,9 +64,11 @@ $ rewind where 4736382d 4782 --tid 166
 rewind: process 166 at step 4782; loading symbols for 4 of its files
 rewind: read 3 source files fetched from the VM earlier
 rewind: walking thread 166's stack in gdb
-rewind: downloading the sources of libc.so.6; first time only
+rewind: downloading debug info for libc.so.6; first time only
+rewind: downloading debug info for libpthread.so.0; first time only
+rewind: downloading debug info for ld-linux-x86-64.so.2; first time only
 process 166 (test_pool_shutdown), thread 166, at step 4782
-#7 pool_shutdown (src/pool.c:128)
+#3 pool_shutdown (src/pool.c:128)
      126
      127  	for (int i = 0; i < POOL_WORKERS; i++)
 >    128  		pthread_join(p->workers[i], NULL);
@@ -77,8 +78,8 @@ arguments:
   p = 0x5556f833c010
 locals:
   i = 0
-called from #8 main (tests/test_pool_shutdown.c:24)
-called from #9 __libc_start_call_main (../sysdeps/nptl/libc_start_call_main.h:59)
+called from #4 main (tests/test_pool_shutdown.c:24)
+called from #5 __libc_start_call_main (/nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6)
 ```
 
 `--json` prints every frame, with its arguments and locals, where each is
@@ -109,6 +110,7 @@ rewind: gdb at step 4782 of 4736382dc2ed9626
 arch_local_irq_restore (flags=6) at ./arch/x86/include/asm/irqflags.h:146
 146		return !(flags & X86_EFLAGS_IF);
 [Switching to thread 2 (Thread 1.166)]
+Downloading 1.79 K source file /build/glibc-2.44/nptl/../sysdeps/unix/sysv/linux/x86_64/syscall_cancel.S...
 #0  __syscall_cancel_arch () at ../sysdeps/unix/sysv/linux/x86_64/syscall_cancel.S:56
 56		ret
 #7  0x00005556d620d5b3 in pool_shutdown (p=p@entry=0x5556f833c010) at src/pool.c:128
@@ -149,20 +151,46 @@ last written at step 4768 by thread 166 (test_pool_shutd)
   pool.c:125  pool_shutdown  p->queue = NULL;
   was 0x5556f833c090
 
-other threads at step 4768:
+other threads just after the write, in step 4768:
   thread 171  pool.c:75  worker  futex_wait
   thread 172  pool.c:45  run_job  __syscall_cancel_arch
 
-searched back to step 4768, 1 keyframe window, 1 write, 1.4s
+searched back to step 4117, 1 keyframe window, 1 write, 1.2s
 ```
 
 The main thread set `p->queue` to NULL on line 125, in `pool_shutdown`. It did
 so at step 4768, 14 steps before the crash. blame also
 prints the value before the write.
 
-The last part shows where the other threads were at step 4768. Thread
+The last part shows where the other threads were just after the write. Thread
 171 is the worker that crashes later. It was on line 75, printing. It
 had already passed the check of `p->stopping` on line 74.
+
+A step runs from one exit of the VM to the next, so a step can cover many
+lines of the program. At the start of step 4768, the main thread had
+not yet called `pool_shutdown`. `rewind where --after-write` looks just after
+the write itself, with the address and size blame printed:
+
+```console
+$ rewind where 4736382d 4768 --tid 166 --after-write 0x5556f833c068 --size 8
+rewind: process 166 at step 4768; loading symbols for 4 of its files
+rewind: read 3 source files fetched from the VM earlier
+rewind: walking thread 166's stack in gdb
+rewind: downloading the sources of libc.so.6; first time only
+process 166 (test_pool_shutdown), thread 166, at step 4768, just after its write of the 8 bytes at 0x5556f833c068
+#0 pool_shutdown (src/pool.c:125)
+     123  	/* The bug: the queue goes before the workers are joined. */
+     124  	free(p->queue);
+>    125  	p->queue = NULL;
+     126
+     127  	for (int i = 0; i < POOL_WORKERS; i++)
+arguments:
+  p = 0x5556f833c010
+locals:
+  i = 0
+called from #1 main (tests/test_pool_shutdown.c:24)
+called from #2 __libc_start_call_main (../sysdeps/nptl/libc_start_call_main.h:59)
+```
 
 `--writes 2` goes back one more write. Here that is the `calloc` in
 `pool_create`.
@@ -192,7 +220,7 @@ $ rewind blame 4736382d --at 4782 'p->stopping' 'p->queue' --reads --since 4742
 ...
   4779  171 test_pool_shutd read    0x0                 pool.c:77  worker  p->queue->completed++;  p->queue
 ...
-searched back to step 4742, 2 keyframe windows, 2 writes, 11 reads, 1.6s
+searched back to step 4742, 2 keyframe windows, 2 writes, 11 reads, 1.2s
 ```
 
 Read in order, the rows show the race:
@@ -212,8 +240,10 @@ counts the steps searched so far, and the timeline marks the stretch being
 searched.
 
 The answer names the write, the value before it, and where the other threads
-were. Its buttons go to the write, show the reads with one lane per thread, or
-blame the write before this one. At the step where the run failed, the panel
+were. Click the write, or the button, to see the writer just after the write;
+click another thread to see it at that moment. The other buttons show the reads
+with one lane per thread, or blame the write before this one. The popover moves
+by its top line. At the step where the run failed, the panel
 starts searching for the failing line's values before you click.
 
 ![The app's source panel at step 4782 with the answer for p->queue: it became 0x0 at step 4768, written by the main thread in pool_shutdown at pool.c:125, p->queue = NULL, with the value before it, buttons to go to the write, show the reads and blame the earlier value, and where the other threads were](../site/img/app-blame.png)
@@ -499,7 +529,7 @@ interleave on the one vCPU:
 ```console
 $ rewind nix --cores 4 --epoch 1790985600 github:fzakaria/rewindvm#mylib
 ...
-rewind: run e32a716c74e474d9 exited:0 after 6202 steps, 0.217s virtual, 1.013s wall (poweroff)
+rewind: run e32a716c74e474d9 exited:0 after 6202 steps, 0.217s virtual, 0.982s wall (poweroff)
 /nix/store/f6a9gy362szw6nxx3ikrklr8glr6rdln-mylib-0.3.0 a9d703ba89774f3d  matches rewindvm.cachix.org
 ```
 
@@ -522,22 +552,22 @@ fit in the VM's memory.
 
 ```console
 $ rewind fork 4736382d 4682 --schedule 1 --quiet
-rewind: run 0bd9caa5552224c9 exited:2 after 4833 steps, 0.200s virtual, 0.100s wall (poweroff)
+rewind: run 0bd9caa5552224c9 exited:2 after 4833 steps, 0.200s virtual, 0.109s wall (poweroff)
 rewind: the fork first differs from its parent at step 4770
 rewind: open it beside its parent in the desktop app: rewind open 0bd9caa5552224c9 4770 --compare 4736382dc2ed9626
 
 $ rewind fork 4736382d 4682 --schedule 2 --quiet
-rewind: run 4fe1061ad78df32f exited:0 after 6502 steps, 0.219s virtual, 0.119s wall (poweroff)
+rewind: run 4fe1061ad78df32f exited:0 after 6502 steps, 0.219s virtual, 0.144s wall (poweroff)
 rewind: the fork first differs from its parent at step 4708
 rewind: open it beside its parent in the desktop app: rewind open 4fe1061ad78df32f 4708 --compare 4736382dc2ed9626
 
 $ rewind fork 4736382d 4682 --schedule 3 --quiet
-rewind: run 87f328742319f6a7 exited:0 after 6735 steps, 0.226s virtual, 0.113s wall (poweroff)
+rewind: run 87f328742319f6a7 exited:0 after 6735 steps, 0.226s virtual, 0.153s wall (poweroff)
 rewind: the fork first differs from its parent at step 4705
 rewind: open it beside its parent in the desktop app: rewind open 87f328742319f6a7 4705 --compare 4736382dc2ed9626
 
 $ rewind fork 4736382d 4682 --schedule 4 --quiet
-rewind: run 635fe8585a24d89f exited:0 after 6449 steps, 0.220s virtual, 0.110s wall (poweroff)
+rewind: run 635fe8585a24d89f exited:0 after 6449 steps, 0.220s virtual, 0.136s wall (poweroff)
 rewind: the fork first differs from its parent at step 4703
 rewind: open it beside its parent in the desktop app: rewind open 635fe8585a24d89f 4703 --compare 4736382dc2ed9626
 ```
@@ -598,7 +628,7 @@ The failing run's command makes it again, with the same id:
 ```console
 $ rewind show 4736382d | tail -1 | sh
 ...
-rewind: run 4736382dc2ed9626 exited:2 after 4821 steps, 0.200s virtual, 0.584s wall (poweroff)
+rewind: run 4736382dc2ed9626 exited:2 after 4821 steps, 0.200s virtual, 0.607s wall (poweroff)
 ```
 
 ## Compare any two runs
@@ -781,15 +811,15 @@ $ rewind check --root ready --stall-max 50ms -- /bin/ready | grep -E 'ends diffe
 schedule 37 ends differently from schedule 0; finding the step that decides it
 schedule 37 limited to steps 318..340 still ends differently
 step 339 decides it: a 40.96 ms pause of the running thread there makes the run fail
-passing: run aa526639f4af87ec, schedule 37 over steps 318..339, stalls up to 50 ms
-failing: run 9b2c85fd33ccd290, schedule 37 over steps 318..340, stalls up to 50 ms
+passing: run 25311d9f12c6f0e1, schedule 37 over steps 318..339, stalls up to 50 ms
+failing: run d2da2643c66d7c2a, schedule 37 over steps 318..340, stalls up to 50 ms
 ```
 
 The same steps stall, one exit in 128, but each stall picks one of the
 doublings of 10 µs up to the maximum, 14 of them for 50 ms, so fewer stalls
 are short. How often a race turns up then depends on how long it needs a
 thread held: 32 schedules of mylib crash 4 times by default and
-5 times with `--stall-max 100ms`, in 3.9 s and 4.0 s. A stall is virtual time, so the guest's clock
+5 times with `--stall-max 100ms`, in 6.7 s and 6.7 s. A stall is virtual time, so the guest's clock
 moves further, and a program's own timeouts see the extra time. The maximum is
 part of each run's spec, so `rewind show`, a replay and a fork of the run keep
 the maximum, and a run made without the flag keeps its id. A fork's own
@@ -850,7 +880,7 @@ zoom the timeline. The ? key lists them all:
 
 ```console
 $ rewind export 4736382d --replayable -o crash.rwd
-rewind: wrote crash.rwd (201.4 MB)
+rewind: wrote crash.rwd (201.5 MB)
 
 $ REWIND_HOME=elsewhere rewind import crash.rwd
 4736382dc2ed9626  exited:2          4821 steps  mylib-0.3.0
@@ -909,7 +939,7 @@ $ nix shell nixpkgs#pkgsStatic.stdenv.cc -c x86_64-unknown-linux-musl-cc -static
 
 ```console
 $ rewind run --root spin --timeout 5 --name spin -- /bin/spin
-rewind: run cd759ca34219eca1 timed-out after 301 steps, 0.002s virtual, 5.008s wall (timed out computing without exits for 4.4s, in user space in main+15 (spin.c:2), process 34 (spin))
+rewind: run 4175e7e086c0c6f4 timed-out after 301 steps, 0.002s virtual, 5.010s wall (timed out computing without exits for 4.3s, in user space in main+15 (spin.c:2), process 34 (spin))
 ```
 
 A run that timed out while still making exits was slow rather than stuck, and
@@ -922,7 +952,7 @@ included. `--status timed-out` lists the runs that timed out:
 
 ```console
 $ rewind ls --status timed-out
-cd759ca34219eca1  timed-out          301 steps  spin
+4175e7e086c0c6f4  timed-out          301 steps  spin
 ```
 
 ## Keep the run directory tidy
