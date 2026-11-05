@@ -1,0 +1,308 @@
+/* The benchmark page: small multiples over releases, drawn by bench.js. */
+.bench {
+  padding-top: 40px;
+  padding-bottom: 60px;
+}
+.bench h1 {
+  margin-bottom: 0.4em;
+}
+.bench > p,
+.bench .block > p {
+  max-width: 46em;
+  color: var(--soft);
+}
+.bench .machine {
+  color: var(--muted);
+  font: 13px/1.6 var(--mono);
+}
+.bench .block {
+  margin-top: 56px;
+  padding-block: 0;
+}
+.bench h2 {
+  font-size: 1.7rem;
+}
+.bench h3 {
+  font-size: 1.05rem;
+  font-family: var(--body);
+  font-weight: 600;
+  letter-spacing: 0;
+  margin: 0;
+}
+
+/* One row of controls above everything it scopes. */
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  align-items: center;
+  margin: 18px 0;
+}
+.controls label {
+  color: var(--muted);
+  font-size: 0.9rem;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.controls select {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--line-2);
+  border-radius: 6px;
+  padding: 5px 8px;
+  font: 14px var(--mono);
+}
+.controls button {
+  background: none;
+  color: var(--muted);
+  border: 1px solid var(--line-2);
+  border-radius: 999px;
+  padding: 5px 14px;
+  font: 500 14px var(--body);
+  cursor: pointer;
+}
+.controls button:hover {
+  color: var(--text);
+}
+.controls button[aria-selected="true"] {
+  color: var(--amber-ink);
+  background: var(--amber);
+  border-color: var(--amber);
+}
+.metric-note {
+  color: var(--muted);
+  font-size: 0.95rem;
+  min-height: 1.5em;
+}
+
+/* Small multiples: one chart per workload, grouped by the question. */
+.group {
+  margin-top: 28px;
+}
+.group > p {
+  color: var(--muted);
+  font-size: 0.95rem;
+  margin: 4px 0 0;
+  max-width: 46em;
+}
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 16px;
+  margin-top: 14px;
+}
+.chart {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 14px 14px 6px;
+  min-width: 0;
+}
+.chart .head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: baseline;
+}
+.chart .now {
+  font: 600 15px var(--mono);
+  color: var(--text);
+  white-space: nowrap;
+}
+.chart .sub {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin: 2px 0 6px;
+}
+.chart svg {
+  display: block;
+  width: 100%;
+  overflow: visible;
+}
+.chart .empty {
+  color: var(--faint);
+  font-size: 0.9rem;
+  padding: 40px 0;
+  text-align: center;
+}
+
+/* Chart marks. */
+.axis line,
+.grid-line {
+  stroke: var(--line);
+  stroke-width: 1;
+}
+.axis text,
+.tick {
+  fill: var(--muted);
+  font: 11px var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+.band {
+  fill: var(--amber);
+  opacity: 0.16;
+}
+.median {
+  fill: none;
+  stroke: var(--amber);
+  stroke-width: 2;
+  stroke-linejoin: round;
+}
+.dot {
+  fill: var(--amber);
+  stroke: var(--panel);
+  stroke-width: 2;
+}
+.dot.failed {
+  fill: var(--panel);
+  stroke: var(--red);
+}
+.native {
+  fill: none;
+  stroke: var(--muted);
+  stroke-width: 1.5;
+}
+.native-label {
+  fill: var(--muted);
+  font: 11px var(--body);
+}
+.milestone line {
+  stroke: var(--line-2);
+  stroke-width: 1;
+}
+.milestone text {
+  fill: var(--faint);
+  font: 600 10px var(--mono);
+}
+.crosshair {
+  stroke: var(--soft);
+  stroke-width: 1;
+  opacity: 0;
+}
+.hit {
+  fill: transparent;
+  cursor: crosshair;
+}
+.hit:focus {
+  outline: none;
+}
+
+/* The tooltip, positioned by bench.js. */
+.tip {
+  position: absolute;
+  z-index: 10;
+  pointer-events: none;
+  background: var(--raised);
+  border: 1px solid var(--line-2);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font: 12px/1.5 var(--mono);
+  color: var(--soft);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  max-width: 320px;
+}
+.tip b {
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* The verdicts: always an arrow and a word, never color alone. */
+.worse {
+  color: var(--red-soft);
+}
+.better {
+  color: var(--blue-soft);
+}
+.same {
+  color: var(--faint);
+}
+
+/* Tables. */
+.table-scroll {
+  overflow-x: auto;
+}
+.bench table {
+  border-collapse: collapse;
+  font-size: 0.92rem;
+  margin: 8px 0;
+}
+.bench th,
+.bench td {
+  padding: 7px 14px 7px 0;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  white-space: nowrap;
+}
+.bench th {
+  color: var(--muted);
+  font-weight: 500;
+}
+.bench td {
+  color: var(--soft);
+}
+.bench td.num {
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.bench th.num {
+  text-align: right;
+}
+.scorecard td .change {
+  display: block;
+  font-size: 0.8rem;
+}
+.scorecard tbody th {
+  color: var(--text);
+  font-weight: 500;
+}
+.scorecard tbody th small {
+  display: block;
+  color: var(--faint);
+  font: 12px var(--mono);
+}
+
+/* What moved the numbers. */
+.milestones {
+  padding-left: 1.4em;
+  max-width: 46em;
+}
+.milestones li {
+  margin: 0 0 12px;
+  color: var(--soft);
+}
+.milestones li::marker {
+  color: var(--amber);
+  font: 600 0.9rem var(--mono);
+}
+.milestones .rel {
+  font: 600 0.9rem var(--mono);
+  color: var(--text);
+}
+
+.workload-list {
+  max-width: 46em;
+}
+.workload-list dt {
+  font: 600 0.9rem var(--mono);
+  color: var(--text);
+  margin-top: 12px;
+}
+.workload-list dd {
+  margin: 2px 0 0;
+  color: var(--soft);
+}
+.bench .console {
+  white-space: pre;
+}
+
+@media (max-width: 600px) {
+  .bench h2 {
+    font-size: 1.4rem;
+  }
+  .grid {
+    grid-template-columns: 1fr;
+  }
+}

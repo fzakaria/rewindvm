@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <title>Benchmarks: Rewind VM</title>
+    <meta
+      name="description"
+      content="Wall time, CPU time, memory and disk of every Rewind release on the same workloads and the same machine, from a one-line run to a full Nix build."
+    />
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="canonical" href="https://rewindvm.dev/bench/" />
+    <link rel="icon" href="../img/mark.svg" type="image/svg+xml" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="../style.css" />
+    <link rel="stylesheet" href="bench.css" />
+    <!-- Google Analytics, with consent defaults set before gtag.js runs. -->
+    <script src="../analytics.js"></script>
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-L0515BFLG0"></script>
+    <script src="bench.js" defer></script>
+  </head>
+  <body>
+    <header class="wrap nav">
+      <a class="brand" href="../">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M11 19l-7-7 7-7" />
+          <path d="M20 19l-7-7 7-7" />
+        </svg>
+        <span>Rewind VM</span>
+      </a>
+      <nav class="page-links">
+        <a href="../#tutorials">Tutorials</a>
+        <a href="../#download">Download</a>
+      </nav>
+    </header>
+
+    <!-- Drawn by bench.js from history.json, which tools/bench.py writes.
+         The prose here names no numbers, so a new record needs no edit. -->
+    <main class="wrap bench">
+      <p class="eyebrow">Benchmarks</p>
+      <h1>Every release, timed</h1>
+      <p class="lede">
+        Each release runs the same workloads on the same machine: a one-line run, where boot is the
+        whole cost, programs that compute, start processes or write memory, GNU hello's full Nix
+        build, and the commands that replay, seek and explore a run afterwards. Every round measures
+        every release once, in a fresh <code>REWIND_HOME</code> and a shuffled order, and the charts
+        draw the median of the rounds with their range.
+      </p>
+      <p class="machine" id="machine"></p>
+
+      <section class="block">
+        <h2 id="compare"><a class="anchor" href="#compare">One release against another</a></h2>
+        <p>
+          A change is marked when the medians differ by more than 3% and the two releases' ranges do
+          not overlap. Anything inside the noise reads as the same.
+        </p>
+        <div class="controls">
+          <label
+            >Before
+            <select id="base"></select
+          ></label>
+          <label
+            >After
+            <select id="head"></select
+          ></label>
+        </div>
+        <div class="table-scroll"><table class="scorecard" id="scorecard"></table></div>
+      </section>
+
+      <section class="block">
+        <h2 id="history"><a class="anchor" href="#history">Over releases</a></h2>
+        <div class="controls" role="tablist" id="metrics"></div>
+        <p class="metric-note" id="metric-note"></p>
+        <div id="groups"></div>
+      </section>
+
+      <section class="block">
+        <h2 id="shapes"><a class="anchor" href="#shapes">Short runs and long runs</a></h2>
+        <p>
+          A short run pays for boot and teardown; a long one pays per step and per keyframe. These
+          are worked out round by round from the samples above, so each has a range of its own.
+        </p>
+        <div class="grid" id="derived"></div>
+      </section>
+
+      <section class="block">
+        <h2 id="moved"><a class="anchor" href="#moved">What moved the numbers</a></h2>
+        <ol class="milestones" id="milestones"></ol>
+      </section>
+
+      <section class="block">
+        <h2 id="records"><a class="anchor" href="#records">Every record</a></h2>
+        <p>The medians behind the charts, for the metric chosen above.</p>
+        <div class="table-scroll"><table class="records" id="records-table"></table></div>
+      </section>
+
+      <section class="block">
+        <h2 id="method"><a class="anchor" href="#method">How it is measured</a></h2>
+        <p>
+          <code>tools/bench.py</code> downloads each release's asset, the same tarball people
+          install, and runs it against inputs fixed by the benchmark rather than by the release:
+          static busybox, a ring of threads, the coreutils source and GNU hello's derivation,
+          <code>nix build .#bench-inputs</code>. Every run gets the options below, the only CPU
+          model every release accepts on a host without ERMS and the clock every release can be told
+          to use. Each round's commands are pinned to the idlest NUMA node, and GNU time reports
+          wall, user and system time and peak RSS. The workloads with no Rewind in them run natively
+          in the same round, for the slowdowns.
+        </p>
+        <pre class="console" id="options"></pre>
+        <p>To measure a build of your own against the newest release, on your machine:</p>
+        <pre class="console">
+nix build .#release
+nix run .#bench -- run --history /tmp/wip.json --release v0.10.0 \
+    --rewind wip=result/rewind-x86_64-linux.tar.gz --rounds 3
+nix run .#bench -- compare --history /tmp/wip.json v0.10.0 wip</pre>
+        <dl class="workload-list" id="workloads"></dl>
+      </section>
+    </main>
+
+    <div class="tip" id="tip" role="status" hidden></div>
+
+    <footer class="wrap footer">
+      <p>
+        &copy; 2026 <a href="https://lunchtimesurf.com/">Lunch Time Surf LLC</a> &middot; Santa
+        Cruz, California &middot;
+        <a href="mailto:tacos@lunchtimesurf.com">tacos@lunchtimesurf.com</a> &middot;
+        <a href="../privacy.html">Privacy</a> &middot;
+        <a href="../refunds.html">Refunds</a> &middot;
+        <a href="../bugs.html">Bugs found</a> &middot; <a href="./">Benchmarks</a> &middot;
+        <a href="https://github.com/fzakaria/rewindvm">GitHub</a>
+      </p>
+    </footer>
+  </body>
+</html>
