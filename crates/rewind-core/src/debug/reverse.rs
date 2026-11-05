@@ -18,7 +18,9 @@
 //! Running back to a trap replays the run from keyframe to keyframe,
 //! newest first, and stops at the last hit before the position: at a
 //! breakpoint as it is reached, and before the instruction that wrote a
-//! watched value, as gdb expects of a watchpoint run backwards.
+//! watched value, as gdb expects of a watchpoint run backwards. The
+//! kernel's write in a system call of the debugged process stops before
+//! the thread's syscall instruction, where the call began.
 //!
 //! Under exit time a step can be millions of instructions, each a VM exit
 //! to single-step, so going back can take minutes. Every so many VM exits,
@@ -417,8 +419,9 @@ pub(super) enum Back {
     Stepped,
     /// The last breakpoint hit before where the fork was.
     Breakpoint,
-    /// Before the instruction that last wrote a watched value, and the
-    /// watch's address.
+    /// Before the instruction that last wrote a watched value, or the
+    /// syscall instruction of the system call the kernel wrote it in, and
+    /// the watch's address.
     Watch(Watch),
     /// Where the debugged process's memory began, or with no process the
     /// start of the run: nothing gdb can see is before it.
@@ -563,13 +566,55 @@ impl Debuggee<'_> {
                 self.go_to_or_retry(&hit)?;
                 Ok(Back::Breakpoint)
             }
+            // A write by the kernel, in a system call of one of the
+            // process's threads, stops where the thread made the call;
+            // any other write stops at the instruction before it.
             GdbTrap::Watch(watch) => {
-                let before = with_margins(|margin| self.before(&hit, margin))?;
-                let began = Position::start(self.began);
-                self.go_to_or_retry(&before.unwrap_or(began))?;
+                let stop = match with_margins(|margin| self.system_call_before(&hit, margin))? {
+                    Some(call) => call,
+                    None => with_margins(|margin| self.before(&hit, margin))?
+                        .unwrap_or(Position::start(self.began)),
+                };
+                self.go_to_or_retry(&stop)?;
                 Ok(Back::Watch(watch))
             }
         }
+    }
+
+    /// Where the thread whose system call the kernel was in at `hit`, a
+    /// watched write, made the call: at its syscall instruction, before
+    /// the instruction runs, so gdb sees the value as it was before the
+    /// call and the thread's own frames. The search back is for the last
+    /// time that thread reached the instruction, the one breakpoint set.
+    /// None when the CPU ran user space at `hit`, so the process's own
+    /// instruction wrote, when the kernel was in no system call of the
+    /// process's threads, or when the thread never reached the
+    /// instruction since the process's memory began, as a new thread
+    /// whose first return the kernel writes its id for.
+    fn system_call_before(&mut self, hit: &Position, margin: u64) -> Result<Option<Position>> {
+        self.go_to(hit, margin)?;
+        if self.running()? == super::Running::UserSpace {
+            return Ok(None);
+        }
+        let Some(call) = self.system_call()? else {
+            return Ok(None);
+        };
+
+        // gdb's traps are set aside for the search, and put back after it
+        // however it ends. None of gdb's int3s is in memory: going to a
+        // position rewinds the fork, which takes them out.
+        let mut search = super::Traps::default();
+        let mut memory = super::Int3Writer {
+            machine: &mut self.machine,
+            space: self.space,
+        };
+        search.add_breakpoint(call.address, super::Kind::Software, &mut memory)?;
+        let gdbs = std::mem::replace(&mut self.traps, search);
+        self.hits_of = Some(call.task);
+        let found = self.last_hit_before(hit, margin);
+        self.traps = gdbs;
+        self.hits_of = None;
+        Ok(found?.map(|(position, _)| position))
     }
 
     /// Brings the fork to `target`, with a wider margin each time the
@@ -1029,12 +1074,17 @@ impl Debuggee<'_> {
     }
 
     /// Notes the breakpoint at `address` reached at `at`, when it is in the
-    /// debugged process. Returns whether it was.
+    /// debugged process and in a thread the search counts. Returns whether
+    /// it was in the process: a hit there is a position, counted or not,
+    /// since a replay of a run to the breakpoint stops at the next hit in
+    /// the process, whichever thread's.
     fn note_breakpoint(&mut self, scan: &mut Scan, address: u64, at: Position) -> Result<bool> {
         if !self.in_scope(address)? {
             return Ok(false);
         }
-        scan.last = Some((at, GdbTrap::Breakpoint(address)));
+        if self.counts_hit()? {
+            scan.last = Some((at, GdbTrap::Breakpoint(address)));
+        }
         Ok(true)
     }
 

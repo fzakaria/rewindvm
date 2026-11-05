@@ -307,8 +307,19 @@ from the latest keyframe or checkpoint at or before the position, then from
 the one before that, newest first, and stops at the last hit: at a
 breakpoint as it was reached, and before the instruction that wrote a watched
 value, so gdb sees the value change. A hit counts when the CPU had the
-process's page table, as in `rewind blame`. Both go back no further than the
-process's start or last exec as of the fork's step, where gdb is told it
+process's page table, as in `rewind blame`. That includes the kernel writing
+into the process's memory, as read() does filling a buffer, where the
+instruction before the write is the kernel's, and other processes may have run
+since the call. Such a write in a system call of one of the process's threads
+stops at the thread's syscall instruction instead, before it runs: gdb sees the
+thread's own frames and the value as it was before the call, and the kernel's
+writes in the call, byte by byte as it copies, are one stop. The thread saved
+the address after the instruction on its way into the kernel, and a run back to
+the last time that thread reached the instruction finds the call. A write by
+the kernel outside a system call, or by a thread that never made the call, as
+the id the kernel writes for a new thread before its first return, stops at the
+instruction before it, as any other write does. Both go back no further than
+the process's start or last exec as of the fork's step, where gdb is told it
 reached the end of the recorded history. Before then the memory was another
 program's, and the exec itself writes the new program's data and zeroes its
 bss with the new page table already loaded, so a watch on a global would

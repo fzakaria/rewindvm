@@ -89,6 +89,11 @@ const CPU_TID: usize = 4_194_305;
 const SELECTOR_RPL: u64 = 0b11;
 const USER_RPL: u64 = 0b11;
 
+/// x86-64's `syscall` instruction. It leaves the address after it in rcx,
+/// which the kernel's entry saves in the thread's struct pt_regs with the
+/// rest of its user registers.
+const SYSCALL: [u8; 2] = [0x0f, 0x05];
+
 /// Whose traps and threads gdb sees: the process with this id, which
 /// `rewind gdb` loads the symbols of, or any, when it debugs no process.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -515,6 +520,15 @@ fn in_scope(address: u64, space: Option<u64>, cr3: u64) -> bool {
     }
 }
 
+/// Whether a thread entered the kernel by a syscall instruction, from
+/// `saved`, the user registers it saved on the way in, and `code`, the
+/// two bytes before its saved pc when they could be read. The instruction
+/// leaves the address after it in rcx, so rcx and the pc agree; an
+/// interrupt or exception saves the thread's own rcx.
+fn entered_by_syscall(saved: &[u64; pt_regs::WORDS], code: Option<[u8; 2]>) -> bool {
+    saved[pt_regs::RCX] == saved[pt_regs::RIP] && code == Some(SYSCALL)
+}
+
 /// A forked machine under gdb.
 #[derive(Debug)]
 pub struct Debuggee<'h> {
@@ -552,6 +566,19 @@ pub struct Debuggee<'h> {
     /// memory began, its last exec or its fork by the fork's step, or with
     /// no process the run's start.
     began: u64,
+    /// The task whose breakpoint hits alone a search back counts as hits,
+    /// by its task struct's address, while it looks for where one thread
+    /// made a system call; None counts every thread's.
+    hits_of: Option<u64>,
+}
+
+/// A system call a thread of the debugged process is in: the thread's
+/// task struct's address, and the address of the syscall instruction it
+/// made the call with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SystemCall {
+    task: u64,
+    address: u64,
 }
 
 impl<'h> Debuggee<'h> {
@@ -603,6 +630,7 @@ impl<'h> Debuggee<'h> {
             altered: false,
             listener: Listener::default(),
             began: 0,
+            hits_of: None,
         };
         debuggee.refresh_threads();
         Ok(debuggee)
@@ -773,6 +801,42 @@ impl<'h> Debuggee<'h> {
     fn in_scope(&self, address: u64) -> Result<bool> {
         let cr3 = self.machine.special_registers()?.cr3;
         Ok(in_scope(address, self.space, cr3))
+    }
+
+    /// Whether a breakpoint hit in the debugged process, just taken,
+    /// counts for a search back: any thread's does, unless the search
+    /// counts only the thread [`Debuggee::hits_of`] names.
+    fn counts_hit(&self) -> Result<bool> {
+        let (Some(task), Some(layout)) = (self.hits_of, self.layout) else {
+            return Ok(true);
+        };
+        Ok(Tasks::new(&self.machine, layout).current()? == task)
+    }
+
+    /// The system call the task on the CPU is in, as the CPU runs the
+    /// kernel, when the task is a thread of the debugged process and
+    /// entered the kernel by a syscall instruction. None for another
+    /// task, such as a kernel thread working in the process's memory, or
+    /// for an entry by an interrupt or an exception.
+    fn system_call(&self) -> Result<Option<SystemCall>> {
+        let (Some(pid), Some(layout)) = (self.process, self.layout) else {
+            return Ok(None);
+        };
+        let tasks = Tasks::new(&self.machine, layout);
+        let task = tasks.current()?;
+        if tasks.tgid(task)? != pid {
+            return Ok(None);
+        }
+
+        // The instruction before the pc the thread saved, which a system
+        // call returns to.
+        let saved = tasks.user_registers(task)?;
+        let Some(address) = saved[pt_regs::RIP].checked_sub(SYSCALL.len() as u64) else {
+            return Ok(None);
+        };
+        let mut code = [0u8; SYSCALL.len()];
+        let code = self.read_process(address, &mut code).ok().map(|()| code);
+        Ok(entered_by_syscall(&saved, code).then_some(SystemCall { task, address }))
     }
 
     /// Serves gdb on `conn` until it detaches or the connection closes.
@@ -1435,6 +1499,24 @@ mod tests {
             0x0000_0001_2345_7000
         ));
         assert!(in_scope(0x55b3_8f77_c320, None, 0x0000_0001_2345_7000));
+    }
+
+    /// A thread entered the kernel by a syscall instruction when the two
+    /// bytes before its saved pc are one and its saved rcx is that pc, as
+    /// the instruction leaves it. Saved registers of a thread in read(),
+    /// with the bytes before its pc a syscall instruction, unread, or
+    /// other code, then of a thread an interrupt stopped there, whose rcx
+    /// is its own.
+    #[test]
+    fn a_system_call_is_told_from_other_kernel_entries() {
+        let mut saved = [0u64; pt_regs::WORDS];
+        saved[pt_regs::RIP] = 0x40_1936;
+        saved[pt_regs::RCX] = 0x40_1936;
+        assert!(entered_by_syscall(&saved, Some(SYSCALL)));
+        assert!(!entered_by_syscall(&saved, None));
+        assert!(!entered_by_syscall(&saved, Some([0x89, 0xc7])));
+        saved[pt_regs::RCX] = 7;
+        assert!(!entered_by_syscall(&saved, Some(SYSCALL)));
     }
 
     fn thread(tid: u32, task: u64) -> Thread {

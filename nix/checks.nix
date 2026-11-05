@@ -381,6 +381,33 @@ let
         EOF
         $CC -static -O1 -g -fdebug-prefix-map=$out/src=/src \
           -o $out/bin/slow $out/src/slow.c
+
+        cat > $out/src/piped.c <<'EOF'
+        #include <sys/wait.h>
+        #include <time.h>
+        #include <unistd.h>
+
+        char buffer[8];
+
+        int main(void)
+        {
+          int fds[2];
+          pipe(fds);
+          write(1, "start\n", 6);
+          if (fork() == 0) {
+            struct timespec pause = { 0, 20000000 };
+            nanosleep(&pause, 0);
+            write(fds[1], "hello", 5);
+            _exit(0);
+          }
+          read(fds[0], buffer, sizeof buffer); /* the read */
+          write(1, "done\n", 5);
+          wait(0);
+          return 0;
+        }
+        EOF
+        $CC -static -O0 -g -fdebug-prefix-map=$out/src=/src \
+          -o $out/bin/piped $out/src/piped.c
       '';
 
   # A root with a static program in two files, like mylib: main hands a
@@ -1602,7 +1629,9 @@ in
   # breakpoint gone, through the lines before it into the round before. A reverse-stepi then a stepi land where they began.
   # Run forwards again, the fork stops at the next add, the third, and
   # ends as the run did, on its recording. With nothing to stop at, a run backwards
-  # reaches the program's exec, where its memory began. A Ctrl-C in a step back across 10 million
+  # reaches the program's exec, where its memory began. A watch on a buffer
+  # the kernel fills in read() stops, run backwards, at the read's syscall
+  # instruction in the process's thread. A Ctrl-C in a step back across 10 million
   # rounds of a loop stops it there, where gdb goes on. Boots the VM, so it
   # needs /dev/kvm.
   gdb-reverse =
@@ -1693,6 +1722,28 @@ in
           grep -q 'Reached end of recorded history' burst
           grep -q '^\$1 = 0$' burst
           test "$(grep -c 'unreadable' burst)" = 0
+
+          # The kernel fills the buffer in read(), byte by byte, after the
+          # child that writes the pipe has slept, so other tasks ran
+          # between the call and the writes. A run back to a watch on the
+          # buffer stops once, in the process's thread at its syscall
+          # instruction, with the buffer as it was before the call, and
+          # not in the kernel's copy. The next run back reaches the
+          # program's exec.
+          rewind run -q --clock "$clock" --name "piped-$clock" --root ${gdbRoot} \
+            -- /bin/piped > /dev/null
+          done=$(rewind events "piped-$clock" | grep 'write(1, "done' | awk '{print $1}')
+          rewind gdb "piped-$clock" "$done" -- -batch -ex 'watch buffer' -ex reverse-continue \
+            -ex 'x/i $pc' -ex bt -ex reverse-continue -ex 'print buffer' > piped 2>&1 || true
+          cat piped
+          test "$(grep -c 'hit Hardware watchpoint 1: buffer' piped)" = 1
+          grep -q 'Thread 2 hit Hardware watchpoint 1: buffer' piped
+          test "$(grep -A1 'Old value = "hello' piped | grep -c 'New value = "\(.000\)\{7\}"$')" = 1
+          grep -q '^=> 0x[0-9a-f]* <[^>]*>:[[:space:]]*syscall' piped
+          grep -q 'in main () at .*piped.c:18' piped
+          test "$(grep -c 'rep_movs\|copy_user' piped)" = 0
+          grep -q 'Reached end of recorded history' piped
+          grep -q '^\$1 = "\(.000\)\{7\}"$' piped
         done
 
         # Under exit time, a reverse-stepi from the last write single-steps
