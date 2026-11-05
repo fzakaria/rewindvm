@@ -960,6 +960,21 @@ impl<'h> Debuggee<'h> {
         Ok(tasks.page_table(task)? == self.space)
     }
 
+    /// Whether an exec has switched the debugged process to another page
+    /// table than the one gdb debugs: the new program's, which the kernel
+    /// moves the process to before the exec's record. None of this when
+    /// the process is gone, or with no process or task layout.
+    fn exec_switched(&self) -> Result<bool> {
+        let (Some(pid), Some(layout)) = (self.process, self.layout) else {
+            return Ok(false);
+        };
+        let tasks = Tasks::new(&self.machine, layout);
+        let Some(task) = tasks.process(pid)? else {
+            return Ok(false);
+        };
+        Ok(tasks.page_table(task)? != self.space)
+    }
+
     /// Whether a trap at `address`, just taken, is the debugged process's.
     fn in_scope(&self, address: u64) -> Result<bool> {
         let cr3 = self.machine.special_registers()?.cr3;
@@ -1972,6 +1987,28 @@ impl<'h> BlockingEventLoop for EventLoop<'h> {
                     target.arrived(hit).map_err(target_error)?;
                     let reason = target.tell(&writes, None).map_err(target_error)?;
                     return Ok(Event::TargetStopped(reason));
+                }
+                // A hit or a step in the exec's tail, after the kernel moved
+                // the process to the new program's page table and before
+                // the exec's record, would show the new program. The fork
+                // runs on to the record, passing kernel breakpoints, and
+                // stops for the exec as it does with no trap set.
+                Outcome::Debug(
+                    stop @ (DebugStop::Step
+                    | DebugStop::Breakpoint(_)
+                    | DebugStop::Watchpoint { .. }),
+                ) if target.exec_switched().map_err(target_error)? => {
+                    if let DebugStop::Breakpoint(_) = stop {
+                        target.machine.pass_breakpoint().map_err(target_error)?;
+                    }
+                    if target.mode == Mode::Step {
+                        target.mode = Mode::Continue;
+                        target
+                            .machine
+                            .set_debug(Stepping::No, &traps)
+                            .map_err(target_error)?;
+                    }
+                    continue;
                 }
                 Outcome::Debug(DebugStop::Step) => return step_done(target),
                 // A breakpoint in another process's address space is

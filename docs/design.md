@@ -333,7 +333,9 @@ would never fire and memory reads would fail. The kernel makes a record for an
 exec once the new program's memory and page table are in place, and the fork
 looks through its own records as it runs, so a fork that left its recording
 sees the exec too. Breakpoints and watches in the old program still stop the
-fork on the way. At the exec's record, the fork goes back by replaying the run
+fork on the way. Between the kernel's switch to the new page table and the
+record, a kernel breakpoint or a single step would stop the fork in the new
+program's memory, so the fork passes them and runs on to the record. At the exec's record, the fork goes back by replaying the run
 to the latest step start at which the process still had its old page table,
 which is the start of the step that runs the exec, or to where the run forwards
 began when that is later. Rewind prints which program the process runs and at

@@ -1939,7 +1939,8 @@ in
   # entered the kernel by a syscall instruction. A run forwards stops before the
   # process's exec, whose new program it never runs into, says so, and
   # refuses to go on; a step back from there stops at the out before it,
-  # in the CPU's thread, and a session at the
+  # in the CPU's thread. A kernel breakpoint between the exec's switch to
+  # the new page table and its record does not stop it. A session at the
   # step the message names stops in the new program. A Ctrl-C in a step back across 10 million
   # rounds of a loop stops it there, where gdb goes on. Boots the VM, so it
   # needs /dev/kvm.
@@ -2322,6 +2323,19 @@ in
           test "$(sed -n 2p pcs)" != "$(sed -n 3p pcs)"
           test "$(sed -n 3p pcs | grep -c '^(void (\*)()) 0xffffffff[0-9a-f]* <rewind_emit+[0-9]*>$')" = 1
           test "$(grep -c 'Thread 2 received signal' exec)" = 0
+
+          # A kernel breakpoint in the exec's tail, after the kernel moved
+          # the process to the new program's page table and before the
+          # exec's record, does not stop the fork in the new program: the
+          # continue stops before the exec, where the first one did, and
+          # the loop's total still reads.
+          timeout 300 rewind gdb "exec-$clock" "$first" -- -batch -ex 'break rewind_probe_exec' \
+            -ex continue -ex 'print $pc' -ex 'print work' > tail 2>&1 || test $? -lt 124
+          cat tail
+          test "$(grep -c "$said" tail)" = 1
+          test "$(grep -c 'hit Breakpoint 1' tail)" = 0
+          test "$(sed -n 's/^\$1 = //p' tail)" = "$(sed -n 1p pcs)"
+          grep -q '^\$2 = 4950$' tail
           again=$(sed -n 's/.*; \(rewind gdb [^ ]* [0-9]*\) debugs the new one$/\1/p;T;q' exec)
           test "$again" != ""
           status=0
