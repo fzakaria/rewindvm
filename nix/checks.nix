@@ -1627,6 +1627,8 @@ in
   # A breakpoint run backwards to stops in the fourth add, reverse-finish
   # goes back to the line that called it, and reverse-next, with the
   # breakpoint gone, through the lines before it into the round before. A reverse-stepi then a stepi land where they began.
+  # With the watch and two breakpoints set, reverse-next goes back over
+  # the dot's write() to the line before, the four debug registers held.
   # Run forwards again, the fork stops at the next add, the third, and
   # ends as the run did, on its recording. With nothing to stop at, a run backwards
   # reaches the program's exec, where its memory began. A watch on a buffer
@@ -1694,6 +1696,24 @@ in
           grep -q '^\$5 = 3$' gdb
           grep -q 'exited normally' gdb
           ! grep -q 'left the recording\|SIGTRAP' gdb
+
+          # A reverse-next back over the dot's write(), with the watch and
+          # two breakpoints set: gdb's breakpoint at write's start takes
+          # the fourth debug register, and the single steps back from the
+          # kernel's return to user space still stop there. The line before
+          # is the dot, in the fourth round, and the watch does not stop,
+          # since nothing writes the total in between. A session that hangs
+          # is cut short, and fails.
+          timeout -k 5 300 rewind gdb "reverse-$clock" "$done" -- -batch \
+            -ex 'watch total' -ex 'break exit' -ex 'break __libc_start_main' -ex reverse-continue \
+            -ex reverse-finish -ex reverse-next -ex reverse-next -ex 'print i' \
+            > crossed 2>&1 || true
+          cat crossed
+          test "$(grep -c '^Breakpoint [23] at' crossed)" = 2
+          test "$(grep -c 'hit Hardware watchpoint 1: total' crossed)" = 1
+          grep -q '^15[[:space:]].*the dot' crossed
+          grep -q '^\$1 = 4$' crossed
+          test "$(grep -c 'fatal error\|Remote connection closed\|target is running' crossed)" = 0
 
           # Nothing to stop at: back to the program's exec.
           rewind gdb "reverse-$clock" "$done" -- -batch -ex reverse-continue > start 2>&1 || true
