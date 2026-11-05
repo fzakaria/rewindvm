@@ -840,11 +840,18 @@ impl<'h> Debuggee<'h> {
     }
 
     /// Serves gdb on `conn` until it detaches or the connection closes.
+    /// The connection is closed when serving ends, however it ends.
     pub fn serve(&mut self, conn: TcpStream) -> Result<DisconnectReason> {
         self.listener = Listener::on(&conn);
         let stub = GdbStub::new(conn);
-        stub.run_blocking::<EventLoop<'h>>(self)
-            .map_err(|e| anyhow::anyhow!("gdb session: {e}"))
+        let served = stub.run_blocking::<EventLoop<'h>>(self);
+
+        // gdbstub drops its connection as it returns, and the listener's
+        // copy goes too, so the socket closes. A copy left open after an
+        // error would leave gdb waiting for a reply that never comes,
+        // and `rewind gdb` waiting for gdb to exit.
+        self.listener = Listener::default();
+        served.map_err(|e| anyhow::anyhow!("gdb session: {e}"))
     }
 }
 
