@@ -55,7 +55,7 @@ use crate::threads::{Memory, Tasks, Thread};
 
 mod reverse;
 pub(crate) use reverse::StorePages;
-use reverse::{Back, GdbTrap, Heard, Listener, Move, Position};
+use reverse::{Back, GdbTrap, Heard, INTERRUPT, Listener, Move, Position};
 pub use reverse::{History, RunHistory};
 
 /// How far the fork runs between looks at the connection, in steps, so a
@@ -1938,9 +1938,15 @@ impl<'h> BlockingEventLoop for EventLoop<'h> {
                 );
             }
 
-            // An exec of the debugged process paused the fork, after it.
+            // An exec of the debugged process paused the fork, after it. A
+            // Ctrl-C gdb sent on the way, still unread, is answered by this
+            // stop: left for gdbstub, it would stop gdb's next command at
+            // once, where it began.
             if let Some(exec) = exec {
                 target.stop_at_exec(exec, &from).map_err(target_error)?;
+                if conn.peek().map_err(WaitForStopReasonError::Connection)? == Some(INTERRUPT) {
+                    conn.read().map_err(WaitForStopReasonError::Connection)?;
+                }
                 let reason = target.exec_stop_reason().map_err(target_error)?;
                 return Ok(Event::TargetStopped(reason));
             }

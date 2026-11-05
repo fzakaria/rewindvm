@@ -299,7 +299,7 @@ const LISTEN_EVERY: u64 = 64;
 const LISTEN_EVERY_STEPS: u64 = super::CHUNK_STEPS;
 
 /// The byte gdb sends for Ctrl-C.
-const INTERRUPT: u8 = 0x03;
+pub(super) const INTERRUPT: u8 = 0x03;
 
 /// What gdb has sent while the fork runs backwards.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -310,6 +310,25 @@ pub(super) enum Heard {
     Interrupt,
     /// The connection closed.
     Gone,
+}
+
+/// What gdb's Ctrl-C does while the fork runs backwards.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum OnInterrupt {
+    /// It stops the fork at the next position it comes to.
+    #[default]
+    Stop,
+    /// It waits for the stop the fork is on its way to, which answers it.
+    Wait,
+}
+
+/// What the fork stops for of `heard`, what gdb sent: a closed connection
+/// always, and a Ctrl-C unless it waits.
+fn heeded(heard: Heard, on: OnInterrupt) -> Heard {
+    match (heard, on) {
+        (Heard::Interrupt, OnInterrupt::Wait) => Heard::Nothing,
+        _ => heard,
+    }
 }
 
 /// gdb's connection, looked at but not read while the fork runs
@@ -325,6 +344,8 @@ pub(super) struct Listener {
     /// What gdb sent that the fork has not stopped for yet: a Ctrl-C
     /// heard between positions waits for the next one.
     held: Cell<Heard>,
+    /// What a Ctrl-C does in this backwards command.
+    on_interrupt: Cell<OnInterrupt>,
 }
 
 impl Listener {
@@ -337,30 +358,33 @@ impl Listener {
         }
     }
 
-    /// Starts a backwards command: no exits yet, nothing heard.
-    fn begin(&self) {
+    /// Starts a backwards command: no exits yet, nothing heard, and a
+    /// Ctrl-C that does `on_interrupt`.
+    fn begin(&self, on_interrupt: OnInterrupt) {
         self.exits.set(0);
         self.held.set(Heard::Nothing);
+        self.on_interrupt.set(on_interrupt);
     }
 
     /// Counts a VM exit, and every [`LISTEN_EVERY`] of them looks at gdb's
-    /// connection. Returns what gdb has sent, heard now or before.
+    /// connection. Returns what gdb has sent, heard now or before, that
+    /// the fork stops for.
     fn exited(&self) -> Heard {
         let exits = self.exits.get() + 1;
         self.exits.set(exits);
         if !exits.is_multiple_of(LISTEN_EVERY) {
-            return self.held.get();
+            return heeded(self.held.get(), self.on_interrupt.get());
         }
         self.look()
     }
 
     /// Looks at gdb's connection now. Returns what gdb has sent, heard now
-    /// or before.
+    /// or before, that the fork stops for.
     fn look(&self) -> Heard {
         if self.held.get() == Heard::Nothing {
             self.held.set(self.peek());
         }
-        self.held.get()
+        heeded(self.held.get(), self.on_interrupt.get())
     }
 
     /// What gdb has sent, without reading it. Only Ctrl-C is something
@@ -484,7 +508,7 @@ impl Debuggee<'_> {
     /// One instruction back, or where the debugged process's memory
     /// began; or where gdb's Ctrl-C stopped the fork on the way.
     pub(super) fn step_back(&mut self) -> Result<Back> {
-        self.listener.begin();
+        self.listener.begin(OnInterrupt::Stop);
         let back = self.step_back_unless_interrupted();
         self.unless_interrupted(back)
     }
@@ -493,7 +517,7 @@ impl Debuggee<'_> {
     /// debugged process's memory began when there is none; or where gdb's
     /// Ctrl-C stopped the fork on the way.
     pub(super) fn continue_back(&mut self) -> Result<Back> {
-        self.listener.begin();
+        self.listener.begin(OnInterrupt::Stop);
         let back = self.continue_back_unless_interrupted();
         self.unless_interrupted(back)
     }
@@ -1176,24 +1200,13 @@ impl Debuggee<'_> {
     /// of an exec of the debugged process, made at step `exec`, to the
     /// latest step start before it, and after `from`, where the fork ran
     /// forwards from, at which the process still has the page table gdb
-    /// debugs; else to `from`. A Ctrl-C on the way stops the fork at the
-    /// position it got to, and a closed connection fails.
+    /// debugs; else to `from`. A Ctrl-C on the way waits for the stop
+    /// there, which answers it: stopped short, the fork could be past the
+    /// exec's switch to the new page table, or before `from`, where a run
+    /// forwards never goes. The way back is at most [`EXEC_LOOK_BACK`]
+    /// step starts. A closed connection fails.
     pub(super) fn back_before_exec(&mut self, from: &Position, exec: u64) -> Result<()> {
-        self.listener.begin();
-        let back = self.back_before_exec_unless_interrupted(from, exec);
-        match back {
-            Err(e) if e.is::<Interrupted>() => {
-                let heard = e.downcast_ref::<Interrupted>().expect("checked").0;
-                if heard == Heard::Gone {
-                    return Err(e);
-                }
-                self.ready_for_gdb()
-            }
-            other => other,
-        }
-    }
-
-    fn back_before_exec_unless_interrupted(&mut self, from: &Position, exec: u64) -> Result<()> {
+        self.listener.begin(OnInterrupt::Wait);
         let earliest = (from.step + 1).max(exec.saturating_sub(EXEC_LOOK_BACK));
         for step in (earliest..exec).rev() {
             self.go_to_or_retry(&Position::start(step))?;
@@ -1241,6 +1254,21 @@ mod tests {
         }
         assert_eq!(at.moves.len(), 1_000_000);
         drop(at);
+    }
+
+    /// A Ctrl-C stops the fork where it is, unless it waits for the stop
+    /// the fork is on its way to, as on the way back to before an exec; a
+    /// closed connection stops it either way, and nothing heard is nothing
+    /// to stop for.
+    #[test]
+    fn a_ctrl_c_waits_only_when_asked_and_a_close_never_does() {
+        use Heard::{Gone, Interrupt, Nothing};
+        assert_eq!(heeded(Interrupt, OnInterrupt::Stop), Interrupt);
+        assert_eq!(heeded(Interrupt, OnInterrupt::Wait), Nothing);
+        assert_eq!(heeded(Gone, OnInterrupt::Stop), Gone);
+        assert_eq!(heeded(Gone, OnInterrupt::Wait), Gone);
+        assert_eq!(heeded(Nothing, OnInterrupt::Stop), Nothing);
+        assert_eq!(heeded(Nothing, OnInterrupt::Wait), Nothing);
     }
 
     /// A search back's window starts at the latest checkpoint or keyframe

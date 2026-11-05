@@ -552,6 +552,25 @@ let
         EOF
         $CC -static -O0 -g -fdebug-prefix-map=$out/src=/src \
           -o $out/bin/last $out/src/last.c
+
+        # One program writes a line, spins for a second or two in a loop
+        # with no exit, then execs the program that calls bump.
+        cat > $out/src/spin.c <<'EOF'
+        #include <unistd.h>
+
+        volatile unsigned long spun;
+
+        int main(void)
+        {
+          write(1, "spin\n", 5);
+          for (unsigned long i = 0; i < 6000000000UL; i++)
+            spun = i;
+          execl("/bin/after", "after", (char *)0);
+          return 1;
+        }
+        EOF
+        $CC -static -O1 -g -fdebug-prefix-map=$out/src=/src \
+          -o $out/bin/spin $out/src/spin.c
       '';
 
   # A root with a static program in two files, like mylib: main hands a
@@ -1942,8 +1961,10 @@ in
   # in the CPU's thread. A kernel breakpoint between the exec's switch to
   # the new page table and its record does not stop it. A session at the
   # step the message names stops in the new program. A Ctrl-C in a step back across 10 million
-  # rounds of a loop stops it there, where gdb goes on. Boots the VM, so it
-  # needs /dev/kvm.
+  # rounds of a loop stops it there, where gdb goes on. A Ctrl-C while a
+  # continue goes back to the stop before an exec is answered by that
+  # stop, and does not stop gdb's next command. Boots the VM, so it needs
+  # /dev/kvm.
   gdb-reverse =
     pkgs.runCommand "rewind-gdb-reverse"
       {
@@ -2432,6 +2453,35 @@ in
         done
         again reverse-stepi KILL killed-again
         grep -q 'gdb closed the connection while the fork ran backwards' killed-again
+
+        # A continue from the spin's write runs its loop, with no exit, to
+        # the exec, then goes back to the step's start, where it stops. A
+        # Ctrl-C half a second in reaches the fork as it goes back, and the
+        # stop before the exec answers it: the next continue is refused
+        # there, not stopped at once by the Ctrl-C, and a reverse-stepi
+        # moves. A session that hangs is cut short, and fails.
+        rewind run -q --clock exits --name spin --root ${gdbRoot} -- /bin/spin > /dev/null
+        spin=$(rewind events spin | grep 'write(1, "spin' | awk '{print $1}')
+        exec=$(rewind events spin | grep 'execve("/bin/after"' | awk '{print $1}')
+        rewind gdb spin "$spin" -- -batch -ex 'echo begin-forward\n' -ex continue \
+          -ex 'print $pc' -ex continue -ex 'print $pc' -ex reverse-stepi -ex 'print $pc' \
+          > spun 2>&1 &
+        parent=$!
+        for _ in $(seq 1 600); do grep -q begin-forward spun && break; sleep 0.1; done
+        grep -q begin-forward spun
+        sleep 0.5
+        kill -INT "$(pgrep -P "$parent" -x gdb)"
+        timeout 120 tail --pid="$parent" -f /dev/null
+        wait "$parent" || true
+        cat spun
+        said="process [0-9]* runs /bin/after at step $exec; this session debugs the program before it"
+        test "$(grep -c "$said" spun)" = 2
+        test "$(grep -c 'received signal SIGINT' spun)" = 0
+        test "$(grep -c 'fatal error\|Remote connection closed' spun)" = 0
+        grep '^\$[123] = ' spun | sed 's/^\$[0-9]* = //' > pcs
+        test "$(wc -l < pcs)" = 3
+        test "$(sed -n 1p pcs)" = "$(sed -n 2p pcs)"
+        test "$(sed -n 2p pcs)" != "$(sed -n 3p pcs)"
         touch $out
       '';
 

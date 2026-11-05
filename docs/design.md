@@ -338,7 +338,9 @@ record, a kernel breakpoint or a single step would stop the fork in the new
 program's memory, so the fork passes them and runs on to the record. At the exec's record, the fork goes back by replaying the run
 to the latest step start at which the process still had its old page table,
 which is the start of the step that runs the exec, or to where the run forwards
-began when that is later. Rewind prints which program the process runs and at
+began when that is later. A Ctrl-C on the way back waits for that stop, which
+answers it: stopped short, the fork could be past the switch to the new page
+table, or before where the run forwards began. Rewind prints which program the process runs and at
 which step, and that `rewind gdb RUN STEP` at that step debugs the new program,
 and gdb sees a SIGTRAP. A run forwards from there is refused with the same
 words. Going back works as before, since everything before the stop is the old
