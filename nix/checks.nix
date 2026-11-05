@@ -511,6 +511,73 @@ let
           -o $out/bin/pool main.c pool.c
       '';
 
+  # A root with a dynamic program and two shared libraries of the same
+  # shape, for checks.blame-memory: actual_writer in first.so writes the
+  # program's total, the program unloads first.so and loads second.so,
+  # which the loader maps where first.so was, never_called at the address
+  # actual_writer had. The program says whether the two functions shared
+  # an address, and writes a line after the write and after the reload.
+  # The programs and their sources are in the store, copied into the
+  # root's /nix/store with the C library, where the VM finds them at the
+  # same paths as this machine.
+  reloadRoot =
+    let
+      programs = pkgs.runCommandCC "rewind-reload-programs" { dontStrip = true; } ''
+        mkdir -p $out/bin $out/lib $out/src
+        cd $out/src
+        cat > first.c <<'EOF'
+        void actual_writer(int *value)
+        {
+          *value = 7;
+        }
+        EOF
+
+        cat > second.c <<'EOF'
+        void never_called(int *value)
+        {
+          *value = 9;
+        }
+        EOF
+
+        cat > reload.c <<'EOF'
+        #include <dlfcn.h>
+        #include <unistd.h>
+
+        typedef void (*writer)(int *);
+
+        int total;
+
+        int main(void)
+        {
+          void *first = dlopen(FIRST, RTLD_NOW);
+          writer actual = (writer)dlsym(first, "actual_writer");
+          actual(&total);
+          write(1, "written\n", 8);
+          dlclose(first);
+
+          void *second = dlopen(SECOND, RTLD_NOW);
+          writer other = (writer)dlsym(second, "never_called");
+          if (other == actual)
+            write(1, "same address\n", 13);
+          write(1, "reloaded\n", 9);
+          return 0;
+        }
+        EOF
+        $CC -shared -fPIC -O1 -g -o $out/lib/first.so first.c
+        $CC -shared -fPIC -O1 -g -o $out/lib/second.so second.c
+        $CC -O1 -g -DFIRST="\"$out/lib/first.so\"" -DSECOND="\"$out/lib/second.so\"" \
+          -o $out/bin/reload reload.c
+      '';
+      closure = pkgs.closureInfo { rootPaths = [ programs ]; };
+    in
+    pkgs.runCommand "rewind-reload-root" { } ''
+      mkdir -p $out/bin $out/nix/store
+      while read -r path; do
+        cp -a "$path" $out/nix/store/
+      done < ${closure}/store-paths
+      ln -s ${programs}/bin/reload $out/bin/reload
+    '';
+
   # A root with a static program whose two threads add to a total without
   # a lock: each reads it, writes a dot, which is an exit a schedule can
   # reschedule at, and stores what it read plus one. A reschedule between
@@ -1372,8 +1439,9 @@ in
   # just after each write names the write's line. One store over two
   # watched values writes both; a value's last write stays found behind
   # 20,000 writes of another; and a REP MOVSB that reads a byte, then
-  # writes it, at one instruction, lists the read before the write. Boots
-  # the VM, so it needs /dev/kvm.
+  # writes it, at one instruction, lists the read before the write. A
+  # write a library made in the step that loaded it is named by that
+  # library. Boots the VM, so it needs /dev/kvm.
   blame-memory =
     pkgs.runCommand "rewind-blame-memory"
       {
@@ -1474,6 +1542,28 @@ in
           --tid "$(jq -r .tid <<< "$read")" --after-access "$(jq -r '.values[0].address' rep.json)" \
           --size 1 --hit "$(jq -r .hit <<< "$read")" --json > after-read.json
         jq -e '.frames[.chosen].line == 23' after-read.json
+
+        # actual_writer in first.so wrote the total in the step that loaded
+        # first.so, so the files are read just after the write, where
+        # first.so is mapped, when blame names the bytes by address and
+        # when `rewind where --after-write` looks there.
+        rewind run -q --clock exits --name reload --root ${reloadRoot} -- /bin/reload
+        rewind events reload > reload
+        grep -q 'write(1, "same address' reload
+        written=$(grep 'write(1, "written' reload | awk '{print $1}')
+        reloaded=$(grep 'write(1, "reloaded' reload | awk '{print $1}')
+        rewind blame reload --at "$written" total --json > written.json
+        address=$(jq -r '.values[0].address' written.json)
+        pid=$(jq -r '.pid' written.json)
+        write=$(jq -c '.accesses[-1]' written.json)
+        rewind blame reload --at "$written" --address "$address" --size 4 --class signed \
+          --pid "$pid" > by-address
+        cat by-address
+        grep -q '^  first.c:3  actual_writer  \*value = 7;$' by-address
+        rewind where reload "$(jq -r .step <<< "$write")" --pid "$pid" \
+          --tid "$(jq -r .tid <<< "$write")" --after-write "$address" --size 4 \
+          --hit "$(jq -r .hit <<< "$write")" --json > after-load.json
+        jq -e '.frames[0] | .function == "actual_writer" and .line == 3' after-load.json
         touch $out
       '';
 

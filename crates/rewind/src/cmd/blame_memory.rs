@@ -398,27 +398,46 @@ fn context_at_step(
         .filter(|k| k.pid == pid && k.began == began)
         .map(|k| k.gdb);
 
-    // The search's machine is at the step already, when it kept one: the
-    // symbols' inspection, when there is one, runs on it and it is put
-    // back for gdb, so neither restores a keyframe.
+    // A machine at the step, run to the access: the search's, when it
+    // kept one there, else a fork. Without a kept gdb, the symbols'
+    // inspection runs on a fork of its own beside it.
     let at_step = |machine: &rewind_vmm::Machine| -> Result<bool> {
         Ok(machine.step() == step && machine.task_layout()?.is_some())
     };
-    let (mut machine, from) = match (machine, kept) {
-        (Some(machine), Some(gdb)) if at_step(&machine)? => (machine, GdbFrom::Kept(gdb)),
-        (Some(mut machine), None) if at_step(&machine)? => {
-            let symbols = Symbols::load_on(home, run, (step, &mut machine), pid, Say::Aloud)?;
-            (machine, GdbFrom::Loaded(symbols))
+    let (mut machine, loaded) = match machine {
+        Some(mut machine) if at_step(&machine)? => {
+            if let Some(sought) = after {
+                accesses::run_to_access(&mut machine, pid, step, sought)?;
+            }
+            (machine, None)
         }
-        (_, Some(gdb)) => (gdb::fork(home, run, step, needs)?, GdbFrom::Kept(gdb)),
-        (_, None) => {
-            let (machine, symbols) = locate::fork_and_symbols(home, run, step, needs, pid)?;
-            (machine, GdbFrom::Loaded(symbols))
+        _ if kept.is_some() => {
+            let mut machine = gdb::fork(home, run, step, needs)?;
+            if let Some(sought) = after {
+                accesses::run_to_access(&mut machine, pid, step, sought)?;
+            }
+            (machine, None)
+        }
+        _ => {
+            let (machine, symbols, _) =
+                locate::fork_and_symbols(home, run, (pid, step), needs, after)?;
+            (machine, Some(symbols))
         }
     };
-    if let Some(sought) = after {
-        accesses::run_to_access(&mut machine, pid, step, sought)?;
-    }
+
+    // gdb with the process's symbols as they were mapped at the access: a
+    // library loaded earlier in the step, such as the one that made the
+    // access, is mapped only by then. The naming's, else read on the
+    // machine, which the inspection puts back as it was, so no keyframe
+    // is restored.
+    let from = match (loaded, kept) {
+        (Some(symbols), _) => GdbFrom::Loaded(symbols),
+        (None, Some(gdb)) => GdbFrom::Kept(gdb),
+        (None, None) => {
+            let symbols = Symbols::load_on(home, run, (step, &mut machine), pid, Say::Aloud)?;
+            GdbFrom::Loaded(symbols)
+        }
+    };
     let tids: Vec<u32> = match machine.task_layout()? {
         Some(layout) if !leave_out.is_empty() => {
             let tasks = rewind_core::threads::Tasks::new(&machine, layout);

@@ -173,8 +173,7 @@ pub(crate) fn located_keeping(
     };
     let needs = Needs::Tasks("`rewind where` cannot find threads".into());
     if let Pick::Thread { pid, tid } = pick {
-        let (mut machine, symbols) = fork_and_symbols(home, run, step, needs, pid)?;
-        let moment = run_to(&mut machine, pid, step, after)?;
+        let (machine, symbols, moment) = fork_and_symbols(home, run, (pid, step), needs, after)?;
         return walk(run, step, machine, symbols, (pid, tid), (asked, moment));
     }
     let mut machine = gdb::fork(home, run, step, needs)?;
@@ -191,14 +190,16 @@ pub(crate) fn located_keeping(
             }
         },
     };
-    let symbols = Symbols::load(home, run, step, Some(pid), Kernel::Skip, Say::Aloud)?;
+    // The process's files as they were mapped where the thread is looked
+    // at: a library loaded earlier in the step is mapped by the access.
     let moment = run_to(&mut machine, pid, step, after)?;
+    let symbols = Symbols::load_on(home, run, (step, &mut machine), pid, Say::Aloud)?;
     walk(run, step, machine, symbols, (pid, tid), (asked, moment))
 }
 
 /// When in a step a look is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Moment {
+pub(crate) enum Moment {
     /// At the step's start, where a fork there is.
     StepStart,
     /// Just after an access the step makes, where the CPU trapped: the
@@ -221,23 +222,38 @@ fn run_to(
     Ok(Moment::AfterAccess)
 }
 
-/// A fork of `run` at `step` for gdb, and process `pid`'s symbols there.
-/// The symbols take an inspection on a fork of its own, so the two forks
-/// are made side by side: each restores a keyframe and replays to the
-/// step, which on a long run takes seconds.
+/// A fork of `run` at `step` for gdb, run to just after process `pid`
+/// makes the access `after` names when one is named, and the process's
+/// symbols there, with when in the step the fork is. The symbols take an
+/// inspection on a fork of its own, so the two forks are made side by
+/// side: each restores a keyframe and replays to the step, which on a
+/// long run takes seconds. The inspection's fork runs to the access too:
+/// a library the process loads earlier in the step, such as the one that
+/// makes the access, is mapped only by then.
 pub(crate) fn fork_and_symbols(
     home: &Home,
     run: &Run,
-    step: u64,
+    (pid, step): (u32, u64),
     needs: Needs,
-    pid: u32,
-) -> Result<(rewind_vmm::Machine, Symbols)> {
+    after: Option<Sought>,
+) -> Result<(rewind_vmm::Machine, Symbols, Moment)> {
     std::thread::scope(|scope| {
-        let symbols =
-            scope.spawn(|| Symbols::load(home, run, step, Some(pid), Kernel::Skip, Say::Aloud));
-        let machine = gdb::fork(home, run, step, needs);
+        let symbols = scope.spawn(|| match after {
+            None => Symbols::load(home, run, step, Some(pid), Kernel::Skip, Say::Aloud),
+            Some(_) => {
+                let keep = rewind_core::run::Keep::Keyframe;
+                let mut machine = run.machine_at(home, step, keep, &mut rewind_vmm::Ignore)?;
+                run_to(&mut machine, pid, step, after)?;
+                Symbols::load_on(home, run, (step, &mut machine), pid, Say::Aloud)
+            }
+        });
+        let machine = gdb::fork(home, run, step, needs).and_then(|mut machine| {
+            let moment = run_to(&mut machine, pid, step, after)?;
+            Ok((machine, moment))
+        });
         let symbols = symbols.join().expect("loading the symbols panicked");
-        Ok((machine?, symbols?))
+        let (machine, moment) = machine?;
+        Ok((machine, symbols?, moment))
     })
 }
 
