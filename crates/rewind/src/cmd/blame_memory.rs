@@ -69,7 +69,7 @@ pub(crate) fn blame(home: &Home, asked: Asked<'_>) -> Result<ExitCode> {
     let named = name_values(home, &run, step, &asked)?;
     let since = match asked.since {
         Some(since) => since,
-        None => process_began(&run, named.pid, named.step)?,
+        None => run.process_began(named.pid, named.step)?,
     };
 
     // The search, newest window first, saying how far it has got.
@@ -307,24 +307,6 @@ fn suggestion(frame: &Frame) -> String {
             many.join(", ")
         ),
     }
-}
-
-/// The step process `pid` last exec'd at by `step`, else the one it
-/// started at: before then its memory was another program's.
-fn process_began(run: &Run, pid: u32, step: u64) -> Result<u64> {
-    let process = run
-        .trace()?
-        .processes()
-        .into_iter()
-        .find(|p| p.pid == pid && p.start <= step)
-        .with_context(|| format!("the run has no process {pid} by step {step}"))?;
-    Ok(process
-        .execs
-        .iter()
-        .map(|(at, _)| *at)
-        .filter(|&at| at <= step)
-        .max()
-        .unwrap_or(process.start))
 }
 
 /// Places of addresses, and where the other threads were.

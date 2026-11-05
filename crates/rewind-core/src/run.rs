@@ -638,6 +638,18 @@ impl Run {
         Ok(self.trace.get_or_init(|| trace))
     }
 
+    /// The step process `pid`'s memory began at by `step`: its last exec
+    /// by then, else the step it was forked on. Before then its memory was
+    /// another program's, so a search back for who wrote it stops there.
+    pub fn process_began(&self, pid: u32, step: u64) -> Result<u64> {
+        let process = self
+            .trace()?
+            .process_at(pid, step)
+            .filter(|p| p.start <= step)
+            .with_context(|| format!("the run has no process {pid} by step {step}"))?;
+        Ok(process.memory_began(step))
+    }
+
     /// The run's read and write records, decoded from its trace. A run
     /// whose guest kernel buffered none, as every run recorded before
     /// rewind made them, has an empty log.

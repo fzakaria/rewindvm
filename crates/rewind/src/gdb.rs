@@ -156,7 +156,7 @@ pub(crate) fn gdb(
     // gdb can run the fork backwards, by replaying the run.
     let history = rewind_core::debug::RunHistory { home, run };
     let mut debuggee =
-        debuggee(run, step, machine, symbols.process.scope)?.with_history(Box::new(history));
+        debuggee(run, step, machine, symbols.process.scope)?.with_history(Box::new(history))?;
     symbols.add_vdso(&debuggee, Say::Aloud);
 
     // The library list is for a gdb that reads thread-local variables

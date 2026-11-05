@@ -306,8 +306,14 @@ slow in a long step. `reverse-continue` replays the run with gdb's traps set
 from the latest keyframe or checkpoint at or before the position, then from
 the one before that, newest first, and stops at the last hit: at a
 breakpoint as it was reached, and before the instruction that wrote a watched
-value, so gdb sees the value change. gdb builds `reverse-next`,
-`reverse-finish` and the rest on those two.
+value, so gdb sees the value change. A hit counts when the CPU had the
+process's page table, as in `rewind blame`. Both go back no further than the
+process's start or last exec as of the fork's step, where gdb is told it
+reached the end of the recorded history. Before then the memory was another
+program's, and the exec itself writes the new program's data and zeroes its
+bss with the new page table already loaded, so a watch on a global would
+otherwise stop in the exec. gdb builds `reverse-next`, `reverse-finish` and the
+rest on those two.
 
 A step's start comes from a checkpoint the fork keeps in memory: the vCPU,
 the interrupt controllers and the monitor's state, and the pages written

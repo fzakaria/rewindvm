@@ -90,6 +90,18 @@ impl Process {
         self.start <= step && self.end.is_none_or(|end| step < end)
     }
 
+    /// The step its memory began at, as of `step`: its last exec on or
+    /// before `step`, else the step it was forked on. Before then the
+    /// memory was another program's.
+    pub fn memory_began(&self, step: u64) -> u64 {
+        self.execs
+            .iter()
+            .rev()
+            .map(|(at, _)| *at)
+            .find(|&at| at <= step)
+            .unwrap_or(self.start)
+    }
+
     /// The process as it was at `step`: `argv` and `execd` describe its
     /// last exec on or before `step`, or the command line it was forked
     /// with if it had not exec'd yet.
@@ -926,6 +938,33 @@ mod tests {
         assert!(at(3).execd);
         assert_eq!(at(5).name(), "flox-activations");
         assert_eq!(at(7).name(), "bash");
+    }
+
+    /// A process's memory begins at its last exec by a step, else at its
+    /// fork: before then it was another program's. Process 5 is forked at
+    /// step 1 and execs at steps 2 and 4, and a second process 5 is forked
+    /// at step 8 and execs at step 9; each step checks where the memory of
+    /// the process alive then began.
+    #[test]
+    fn a_process_memory_begins_at_its_last_exec_else_its_fork() {
+        let trace = Trace {
+            events: vec![
+                fork_of(1, 5),
+                exec_of(2, 5, "first"),
+                exec_of(4, 5, "second"),
+                exit_of(6, 5),
+                fork_of(8, 5),
+                exec_of(9, 5, "third"),
+            ],
+        };
+        let began = |step| trace.process_at(5, step).unwrap().memory_began(step);
+
+        assert_eq!(began(1), 1, "forked, not exec'd yet");
+        assert_eq!(began(2), 2);
+        assert_eq!(began(3), 2, "the exec at step 4 is after the step");
+        assert_eq!(began(5), 4);
+        assert_eq!(began(8), 8, "the second process 5's fork");
+        assert_eq!(began(10), 9);
     }
 
     #[test]

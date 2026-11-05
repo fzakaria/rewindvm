@@ -53,6 +53,9 @@ pub trait History: std::fmt::Debug {
     fn keyframes(&self) -> Result<Vec<u64>>;
     /// The page store keyframes read their pages from.
     fn store(&self) -> Result<rewind_store::Store>;
+    /// The step process `pid`'s memory began at by step `step`: its last
+    /// exec by then, else its fork.
+    fn process_began(&self, pid: u32, step: u64) -> Result<u64>;
 }
 
 /// A run in a home, as a fork's history.
@@ -77,6 +80,10 @@ impl History for RunHistory<'_> {
 
     fn store(&self) -> Result<rewind_store::Store> {
         rewind_store::Store::open(&self.home.store())
+    }
+
+    fn process_began(&self, pid: u32, step: u64) -> Result<u64> {
+        self.run.process_began(pid, step)
     }
 }
 
@@ -413,7 +420,8 @@ pub(super) enum Back {
     /// Before the instruction that last wrote a watched value, and the
     /// watch's address.
     Watch(Watch),
-    /// The start of the run: nothing is before it.
+    /// Where the debugged process's memory began, or with no process the
+    /// start of the run: nothing gdb can see is before it.
     Start,
     /// gdb's Ctrl-C, or its connection closing, before the fork got there:
     /// it stopped on the way, at its position.
@@ -459,17 +467,17 @@ impl Debuggee<'_> {
         })
     }
 
-    /// One instruction back, or the start of the run; or where gdb's
-    /// Ctrl-C stopped the fork on the way.
+    /// One instruction back, or where the debugged process's memory
+    /// began; or where gdb's Ctrl-C stopped the fork on the way.
     pub(super) fn step_back(&mut self) -> Result<Back> {
         self.listener.begin();
         let back = self.step_back_unless_interrupted();
         self.unless_interrupted(back)
     }
 
-    /// The last hit of one of gdb's traps before here, or the start of the
-    /// run when there is none; or where gdb's Ctrl-C stopped the fork on
-    /// the way.
+    /// The last hit of one of gdb's traps before here, or where the
+    /// debugged process's memory began when there is none; or where gdb's
+    /// Ctrl-C stopped the fork on the way.
     pub(super) fn continue_back(&mut self) -> Result<Back> {
         self.listener.begin();
         let back = self.continue_back_unless_interrupted();
@@ -536,7 +544,7 @@ impl Debuggee<'_> {
         let here = self.position.clone();
         let back = with_margins(|margin| self.before(&here, margin))?;
         let Some(back) = back else {
-            self.go_to_or_retry(&Position::start(0))?;
+            self.go_to_or_retry(&Position::start(self.began))?;
             return Ok(Back::Start);
         };
         self.go_to_or_retry(&back)?;
@@ -547,7 +555,7 @@ impl Debuggee<'_> {
         let here = self.position.clone();
         let Some((hit, target)) = with_margins(|margin| self.last_hit_before(&here, margin))?
         else {
-            self.go_to_or_retry(&Position::start(0))?;
+            self.go_to_or_retry(&Position::start(self.began))?;
             return Ok(Back::Start);
         };
         match target {
@@ -557,7 +565,8 @@ impl Debuggee<'_> {
             }
             GdbTrap::Watch(watch) => {
                 let before = with_margins(|margin| self.before(&hit, margin))?;
-                self.go_to_or_retry(&before.unwrap_or_else(|| Position::start(0)))?;
+                let began = Position::start(self.began);
+                self.go_to_or_retry(&before.unwrap_or(began))?;
                 Ok(Back::Watch(watch))
             }
         }
@@ -675,7 +684,8 @@ impl Debuggee<'_> {
         Ok(())
     }
 
-    /// The instruction boundary before `here`, or None at the run's start.
+    /// The instruction boundary before `here`, or None at the start of the
+    /// step the debugged process's memory began at.
     /// One single step fewer when `here` ends in single steps; else found
     /// from where `here`'s last move began, closing in on its branch count
     /// when the run counts branches, then single-stepping until the step
@@ -705,7 +715,7 @@ impl Debuggee<'_> {
                 };
                 (anchor, arrival)
             }
-            None if here.step == 0 => return Ok(None),
+            None if here.step <= self.began => return Ok(None),
             None => (
                 Position::start(here.step - 1),
                 Arrival::StepStart(here.step),
@@ -770,7 +780,7 @@ impl Debuggee<'_> {
     /// `here`, and the trap: the run is replayed with gdb's traps set from
     /// a window's start, the latest checkpoint or keyframe at or before
     /// `here`, up to `here`; with no hit there, from the window before,
-    /// and so on back to the run's start.
+    /// and so on back to the step the process's memory began at.
     fn last_hit_before(
         &mut self,
         here: &Position,
@@ -784,15 +794,10 @@ impl Debuggee<'_> {
         let mut end = None;
         let mut before = here.step;
         loop {
-            let start = self
-                .checkpoints
-                .range(..=before)
-                .map(|(&step, _)| step)
-                .chain(keyframes.iter().copied().filter(|&s| s <= before))
-                .max()
-                .unwrap_or(0);
+            let kept = self.checkpoints.keys().chain(&keyframes).copied();
+            let start = window_start(kept, before, self.began);
             let found = self.scan(start, end, here, margin)?;
-            if found.is_some() || start == 0 {
+            if found.is_some() || start == self.began {
                 return Ok(found);
             }
             end = Some(start);
@@ -1072,6 +1077,20 @@ impl Debuggee<'_> {
     }
 }
 
+/// Where a search back's window ending at step `before` starts: the
+/// latest of `kept`, the steps of checkpoints and keyframes, at or before
+/// `before`, but no earlier than `began`, the step the debugged process's
+/// memory began at. The steps before `began` are another program's, or
+/// the exec that wrote the new program's memory under the process's new
+/// page table: its data, and the zeroed bss.
+fn window_start(kept: impl IntoIterator<Item = u64>, before: u64, began: u64) -> u64 {
+    kept.into_iter()
+        .filter(|&step| step <= before)
+        .max()
+        .unwrap_or(0)
+        .max(began)
+}
+
 /// Runs `attempt` with each margin in turn until the counter's interrupt
 /// comes in time.
 fn with_margins<T>(mut attempt: impl FnMut(u64) -> Result<T>) -> Result<T> {
@@ -1121,5 +1140,22 @@ mod tests {
         }
         assert_eq!(at.moves.len(), 1_000_000);
         drop(at);
+    }
+
+    /// A search back's window starts at the latest checkpoint or keyframe
+    /// at or before where it ends, but no earlier than the step the
+    /// debugged process's memory began at: the steps before are its exec
+    /// writing a new program's memory, or another program's. Keyframes at
+    /// steps 0 and 256, a checkpoint at 310, and a process exec'd at step
+    /// 301, as a static program's run has them.
+    #[test]
+    fn a_window_starts_no_earlier_than_the_process_began() {
+        let kept = [0, 256, 310];
+        assert_eq!(window_start(kept, 320, 301), 310);
+        assert_eq!(window_start(kept, 309, 301), 301);
+        assert_eq!(window_start(kept, 301, 301), 301);
+        assert_eq!(window_start(kept, 300, 0), 256);
+        assert_eq!(window_start(kept, 255, 0), 0);
+        assert_eq!(window_start([], 40, 0), 0);
     }
 }

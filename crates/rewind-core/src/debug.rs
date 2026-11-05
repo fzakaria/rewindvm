@@ -548,6 +548,10 @@ pub struct Debuggee<'h> {
     altered: bool,
     /// gdb's connection, which running backwards looks at for Ctrl-C.
     listener: Listener,
+    /// The step running backwards stops at: where the debugged process's
+    /// memory began, its last exec or its fork by the fork's step, or with
+    /// no process the run's start.
+    began: u64,
 }
 
 impl<'h> Debuggee<'h> {
@@ -598,16 +602,20 @@ impl<'h> Debuggee<'h> {
             checkpoints: reverse::Checkpoints::new(),
             altered: false,
             listener: Listener::default(),
+            began: 0,
         };
         debuggee.refresh_threads();
         Ok(debuggee)
     }
 
     /// Lets gdb run the fork backwards, by replaying `history`, the run
-    /// it came from.
-    pub fn with_history(mut self, history: Box<dyn History + 'h>) -> Debuggee<'h> {
+    /// it came from, back to where the debugged process's memory began.
+    pub fn with_history(mut self, history: Box<dyn History + 'h>) -> Result<Debuggee<'h>> {
+        if let Some(pid) = self.process {
+            self.began = history.process_began(pid, self.position.step)?;
+        }
         self.history = Some(history);
-        self
+        Ok(self)
     }
 
     /// Places gdb's breakpoints again on the machine as it is now: in the

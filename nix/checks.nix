@@ -1602,7 +1602,7 @@ in
   # breakpoint gone, through the lines before it into the round before. A reverse-stepi then a stepi land where they began.
   # Run forwards again, the fork stops at the next add, the third, and
   # ends as the run did, on its recording. With nothing to stop at, a run backwards
-  # reaches the start of the run. A Ctrl-C in a step back across 10 million
+  # reaches the program's exec, where its memory began. A Ctrl-C in a step back across 10 million
   # rounds of a loop stops it there, where gdb goes on. Boots the VM, so it
   # needs /dev/kvm.
   gdb-reverse =
@@ -1666,24 +1666,33 @@ in
           grep -q 'exited normally' gdb
           ! grep -q 'left the recording\|SIGTRAP' gdb
 
-          # Nothing to stop at: back to the start of the run.
+          # Nothing to stop at: back to the program's exec.
           rewind gdb "reverse-$clock" "$done" -- -batch -ex reverse-continue > start 2>&1 || true
           cat start
           grep -q 'Reached end of recorded history' start
           ! grep -q 'only the CPU' start
 
           # Five writes to the watch in one step, with no exit between:
-          # each run back stops before the write before the last one.
+          # each run back stops before the write before the last one. A
+          # sixth run back reaches the program's exec, where its memory
+          # began, and not the kernel's exec zeroing the total before it.
           rewind run -q --clock "$clock" --name "burst-$clock" --root ${gdbRoot} \
             -- /bin/burst > /dev/null
           done=$(rewind events "burst-$clock" | grep 'write(1, "done' | awk '{print $1}')
           rewind gdb "burst-$clock" "$done" -- -batch -ex 'watch total' \
-            -ex reverse-continue -ex reverse-continue -ex reverse-continue > burst 2>&1 || true
+            -ex reverse-continue -ex reverse-continue -ex reverse-continue \
+            -ex reverse-continue -ex reverse-continue -ex reverse-continue \
+            -ex 'print total' > burst 2>&1 || true
           cat burst
-          test "$(grep -c 'hit Hardware watchpoint 1: total' burst)" = 3
+          test "$(grep -c 'hit Hardware watchpoint 1: total' burst)" = 5
           test "$(grep -A1 'Old value = 15' burst | grep -c 'New value = 10')" = 1
           test "$(grep -A1 'Old value = 10' burst | grep -c 'New value = 6')" = 1
           test "$(grep -A1 'Old value = 6' burst | grep -c 'New value = 3')" = 1
+          test "$(grep -A1 'Old value = 3$' burst | grep -c 'New value = 1')" = 1
+          test "$(grep -A1 'Old value = 1$' burst | grep -c 'New value = 0')" = 1
+          grep -q 'Reached end of recorded history' burst
+          grep -q '^\$1 = 0$' burst
+          test "$(grep -c 'unreadable' burst)" = 0
         done
 
         # Under exit time, a reverse-stepi from the last write single-steps
