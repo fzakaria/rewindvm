@@ -258,40 +258,48 @@ impl Scrubber {
         cx.notify();
     }
 
-    /// Searches ahead for each value on the shown frame's line, when the
-    /// panel shows the step the run failed at: a click there is usually
-    /// answered by the time it comes.
-    pub(super) fn blame_ahead(
-        &mut self,
-        frame: &Frame,
-        (pid, tid): (u32, u32),
-        step: u64,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(line) = frame.line else {
-            return;
-        };
+    /// Searches ahead for each value on the line of the frame the source
+    /// panel shows, when it shows the step the run failed at, so a click
+    /// there is usually answered by the time it comes; and stops every
+    /// search made ahead for anything else. Called whenever what the panel
+    /// shows changes: an answer comes, a frame is picked, the playhead
+    /// moves, the panel closes. Searches clicked are kept.
+    pub(super) fn search_ahead(&mut self, cx: &mut Context<Self>) {
         let Some(session) = &self.session else {
             return;
         };
         let run = session.run.path.clone();
-        let targets: Vec<Target> = frame
-            .expressions
-            .iter()
-            .filter(|e| e.line == line)
-            .filter_map(|e| crate::blame::target(e, pid, tid, step))
-            .collect();
+        let failure = session.run.timeline.failure.as_ref().map(|f| f.step);
 
-        // Searches made ahead for another frame's values are not wanted.
+        // The frame on screen, while the panel's answer is for the step
+        // it is at rather than one it is leaving.
+        let shown = self.source.as_ref().and_then(|panel| {
+            let shown = panel.shown.as_ref()?;
+            let (located, at) = shown.located()?;
+            let frame = located.frames.get(at?)?;
+            (shown.step() == panel.step).then_some((
+                shown.step(),
+                frame,
+                (located.pid, located.tid),
+            ))
+        });
+        let targets = match shown {
+            Some((step, frame, whose)) => {
+                crate::blame::ahead_of_click(failure, step, Some((frame, whose)))
+            }
+            None => Vec::new(),
+        };
+
         let wanted: Vec<BlameKey> = targets
             .iter()
             .map(|t| BlameKey::of(&run, t, Ask::Writes(1)))
             .collect();
-        let shown = self.blames.shown.clone();
-        self.blames.jobs.ahead_only(&wanted, shown.as_ref());
+        let shown_key = self.blames.shown.clone();
+        self.blames.jobs.ahead_only(&wanted, shown_key.as_ref());
         for target in targets {
             self.blame(target, Ask::Writes(1), None, cx);
         }
+        self.start_blames(cx);
     }
 
     /// The values on the shown file's line under `at`, as that line

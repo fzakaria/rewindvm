@@ -461,6 +461,35 @@ mod tests {
         assert!(jobs.get(&key(&c)).is_some());
     }
 
+    /// What the source panel does when it closes, moves to another step or
+    /// frame: no search made ahead is wanted. The one running stops, the
+    /// ones waiting go, and the stopped one's answer, coming late, starts
+    /// none of them; a click's search keeps running.
+    #[test]
+    fn nothing_made_ahead_runs_once_its_frame_is_gone() {
+        let mut jobs = Jobs::default();
+        let clicked = target(0x9000, 10);
+        jobs.ask(key(&clicked), clicked.clone(), Why::Clicked);
+        let mut started = jobs.start();
+        for i in 1..=3 {
+            let t = target(0x1000 * i, 10);
+            jobs.ask(key(&t), t, Why::Ahead);
+            started.extend(jobs.start());
+        }
+        let ahead = started.iter().find(|s| s.key.address == 0x1000).unwrap();
+        assert_eq!(started.len(), 2);
+
+        jobs.ahead_only(&[], None);
+        assert!(ahead.cancel.is_cancelled());
+        assert!(jobs.waiting.is_empty());
+        assert!(!jobs.finish(&ahead.key, ahead.request, answer(), None));
+        assert!(jobs.start().is_empty());
+        assert!(
+            jobs.get(&key(&clicked))
+                .is_some_and(|e| e.blame.searching())
+        );
+    }
+
     /// Past the most kept, the oldest answers go, but never the one on
     /// screen; dropping the jobs stops what still runs.
     #[test]

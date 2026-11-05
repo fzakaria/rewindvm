@@ -199,6 +199,7 @@ impl Scrubber {
             self.right_tab = RightTab::AtStep;
         }
         self.clear_selection_in(&[Surface::Source, Surface::Variables]);
+        self.search_ahead(cx);
         cx.notify();
     }
 
@@ -251,12 +252,18 @@ impl Scrubber {
     /// thread. The thread is the one of the latest event at or before the
     /// panel's step.
     fn fetch_source(&mut self, cx: &mut Context<Self>) {
-        let (Some(panel), Some(session)) = (&mut self.source, &self.session) else {
+        let Some(panel) = &mut self.source else {
             return;
         };
         panel.supersede();
         panel.request = self.requests.issue();
         let step = panel.step;
+
+        // The searches made ahead for the step the panel leaves stop.
+        self.search_ahead(cx);
+        let (Some(panel), Some(session)) = (&mut self.source, &self.session) else {
+            return;
+        };
 
         // While the VM boots no thread of the job runs.
         let timeline = &session.run.timeline;
@@ -385,18 +392,7 @@ impl Scrubber {
 
         // At the step the run failed at, the values on the failing line
         // are searched for ahead of a click on one.
-        let failed_here = self
-            .session
-            .as_ref()
-            .and_then(|s| s.run.timeline.failure.as_ref())
-            .is_some_and(|f| f.step == step);
-        if failed_here
-            && let Some((located, Some(at))) = self.located()
-            && let Some(frame) = located.frames.get(at)
-        {
-            let (frame, whose) = (frame.clone(), (located.pid, located.tid));
-            self.blame_ahead(&frame, whose, step, cx);
-        }
+        self.search_ahead(cx);
         cx.notify();
     }
 
@@ -421,6 +417,7 @@ impl Scrubber {
         panel.sideways = Sideways::default();
         self.clear_selection_in(&[Surface::Source, Surface::Variables]);
         self.centre_shown_line();
+        self.search_ahead(cx);
         cx.notify();
     }
 

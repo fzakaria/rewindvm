@@ -236,6 +236,29 @@ pub fn target_of(
     })
 }
 
+/// The values to search for ahead of a click: those on the line of
+/// `frame`, the frame of thread `tid` of process `pid` the source panel
+/// shows at `step`, when `step` is `failure`, the step the run failed at.
+/// None anywhere else, nor for a frame with no line.
+pub fn ahead_of_click(
+    failure: Option<u64>,
+    step: u64,
+    shown: Option<(&Frame, (u32, u32))>,
+) -> Vec<Target> {
+    let Some((frame, (pid, tid))) = shown.filter(|_| failure == Some(step)) else {
+        return Vec::new();
+    };
+    let Some(line) = frame.line else {
+        return Vec::new();
+    };
+    frame
+        .expressions
+        .iter()
+        .filter(|e| e.line == line)
+        .filter_map(|e| target(e, pid, tid, step))
+        .collect()
+}
+
 /// A source place as `file:line`, by the file's last part.
 pub fn file_line(place: &SourcePlace) -> Option<String> {
     let file = place.file.as_ref()?;
@@ -363,6 +386,48 @@ mod tests {
     // Which values a line underlines, and what a search says as it goes,
     // from expressions and progress as the engine prints them.
     use super::*;
+
+    /// A frame at pool.c:77 with p->queue in memory on its line, a value
+    /// in a register on it, and p->stopping in memory on the line before.
+    fn frame_at_77() -> Frame {
+        serde_json::from_value(serde_json::json!({
+            "level": 0, "function": "worker", "file": "src/pool.c", "fullname": null,
+            "line": 77, "pc": "0x1", "object": null, "arguments": [], "locals": [],
+            "expressions": [
+                {"text": "p->queue", "value": "0x0", "line": 77, "start": 0, "name_start": 3,
+                 "end": 8, "location": {"kind": "memory", "address": "0x5556f833c068",
+                 "size": 8, "class": "pointer", "type": "struct queue *"}},
+                {"text": "job", "value": "16", "line": 77, "start": 0, "name_start": 0,
+                 "end": 3, "location": {"kind": "register", "register": "r15"}},
+                {"text": "p->stopping", "value": "0", "line": 74, "start": 0,
+                 "name_start": 3, "end": 11, "location": {"kind": "memory",
+                 "address": "0x5556f833c070", "size": 4, "class": "signed", "type": "int"}}
+            ],
+            "evaluated": []
+        }))
+        .unwrap()
+    }
+
+    /// Ahead of a click, only the values in memory on the frame's own
+    /// line are searched for, and only at the step the run failed at: at
+    /// another step, with no frame shown, or for a frame without a line,
+    /// none are.
+    #[test]
+    fn searches_ahead_are_for_the_failing_line_alone() {
+        let frame = frame_at_77();
+        let whose = Some((&frame, (166, 171)));
+        let at_failure = ahead_of_click(Some(4782), 4782, whose);
+        let texts: Vec<&str> = at_failure.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(texts, ["p->queue"]);
+        assert_eq!((at_failure[0].pid, at_failure[0].step), (166, 4782));
+
+        assert!(ahead_of_click(Some(4782), 4700, whose).is_empty());
+        assert!(ahead_of_click(None, 4782, whose).is_empty());
+        assert!(ahead_of_click(Some(4782), 4782, None).is_empty());
+        let mut no_line = frame_at_77();
+        no_line.line = None;
+        assert!(ahead_of_click(Some(4782), 4782, Some((&no_line, (166, 171)))).is_empty());
+    }
 
     /// Going to an access looks just after it: a write by its place among
     /// the step's writes, a read by its place among all the step's
