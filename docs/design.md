@@ -827,13 +827,21 @@ KVM completes a port instruction only on the next `KVM_RUN`. A keyframe taken
 right after an exit without this step captures the vCPU still on the
 instruction, and the restored guest executes it a second time.
 
-Runs take a keyframe every quarter second of wall time. Seeking to a step
-restores the latest keyframe at or before it and runs forward, so a seek costs
-at most about one interval. `rewind replay --from` restores a keyframe, runs
-to the end and compares the rest of the trace with the original, events and
-read and write records both. Every keyframe checked this way reproduces the
-rest of its run exactly. The record buffer is empty at every step, so a
-keyframe needs nothing of it beyond the shared page.
+Runs take a keyframe about every quarter second of the guest's work. The
+interval reads only how far the guest got: its steps, and the conditional
+branches it retired in user mode, weighed at 22 µs a step and 0.75 ns a branch,
+a fit of each stretch's wall time in GNU hello's nixpkgs build on a Zen 4
+laptop. A Zen 3 server took about twice each. So a run keyframes at the same
+steps on every host, and a slower host seeks for longer instead of taking more
+keyframes. Spaced by wall time, as they were before, the same build took about
+50 keyframes on the laptop and 280 on the server, where 200 ms of each 250 ms
+stretch was the keyframe. Seeking to a step restores the latest keyframe at or
+before it and runs forward, so a seek costs at most about one interval.
+`rewind replay --from` restores a keyframe, runs to the end and compares the
+rest of the trace with the original, events and read and write records both.
+Every keyframe checked this way reproduces the rest of its run exactly. The
+record buffer is empty at every step, so a keyframe needs nothing of it beyond
+the shared page.
 
 A fork that looks inside a run, for `rewind where`, `gdb`, `cat` or `shell`,
 also keeps a keyframe at its step when the latest one before it is more than

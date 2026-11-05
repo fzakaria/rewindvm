@@ -958,14 +958,11 @@ in
         # keyframe keeps one at its step. A second look there keeps none,
         # since it restores that keyframe and replays nothing, and the run
         # replays from the kept keyframe like from any other. Keyframes
-        # are spaced by wall time, so a slow machine takes one every 256
-        # steps of a run of thousands of writes; the keyframes between
-        # the second and the last are removed to make a stretch long
-        # enough on any machine.
+        # are spaced by the guest's work, about 11,400 steps of writes
+        # apart, so a run of 3,000 writes has one only at step 256.
         rewind run -q --name long --root ${busyboxRoot} -- sh -c 'for i in $(seq 3000); do echo $i; done'
         long=$(dirname "$(grep -l '"name": "long"' $REWIND_HOME/runs/*/manifest.json)")
         keyframes() { ls "$long/keyframes" | sed 's/\.kf$//; s/^0*//'; }
-        ls "$long/keyframes" | sort | sed '1,2d; $d' | while read -r kf; do rm "$long/keyframes/$kf"; done
         end=$(rewind events long | grep 'mark "rewind-exit ' | awk '{print $1}')
         far=$( (keyframes; echo "$end") | sort -n | awk -v end="$end" \
           'NR > 1 && $1 - last > 600 && last + 600 < end { print last + 600; exit } { last = $1 }')
@@ -1166,11 +1163,11 @@ in
       }
       ''
         export REWIND_HOME=$TMPDIR/rewind
-        # Keyframes are spaced by wall time, and the two at the shortest
-        # interval, at steps 256 and 512, are not enough: a host that ran
-        # 1,500 writes in 0.7 s took no third before the end. 20,000
-        # writes take a third on a host many times faster than that.
-        rewind run -q --name a --root ${busyboxRoot} -- sh -c 'for i in $(seq 20000); do echo $i; done; head -c 64 /dev/urandom | od -An -tx1'
+        # Keyframes are spaced by the guest's work, about 11,400 steps of
+        # writes apart after the first at step 256, so 40,000 writes take
+        # four.
+        writes='for i in $(seq 40000); do echo $i; done; head -c 64 /dev/urandom | od -An -tx1'
+        rewind run -q --name a --root ${busyboxRoot} -- sh -c "$writes"
         a=$(dirname "$(grep -l '"name": "a"' $REWIND_HOME/runs/*/manifest.json)")
         keyframes() { ls "$a/keyframes" | grep '\.kf$' | sed 's/\.kf$//; s/^0*//'; }
         echo "keyframes: $(keyframes | tr '\n' ' ')"
@@ -1179,7 +1176,7 @@ in
         # Recording the run again, in a home of its own where it keeps no
         # keyframes from the first, takes its keyframes at the same steps:
         # they follow the guest's progress, not the host's time for it.
-        REWIND_HOME=$TMPDIR/again rewind run -q --name a --root ${busyboxRoot} -- sh -c 'for i in $(seq 20000); do echo $i; done; head -c 64 /dev/urandom | od -An -tx1' > /dev/null
+        REWIND_HOME=$TMPDIR/again rewind run -q --name a --root ${busyboxRoot} -- sh -c "$writes" > /dev/null
         again=$TMPDIR/again/runs/$(basename "$a")
         ls "$again/keyframes" | grep '\.kf$' | sed 's/\.kf$//; s/^0*//' > again-keyframes
         echo "keyframes again: $(tr '\n' ' ' < again-keyframes)"

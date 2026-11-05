@@ -269,9 +269,9 @@
           <li>
             <h3>Keep keyframes</h3>
             <p>
-              Every quarter second of wall time, Rewind snapshots the machine using KVM's dirty-page
-              log. Pages go into a content-addressed store (BLAKE3, zstd), so a page shared by
-              keyframes, runs and forks is stored once.
+              Every quarter second of guest work, at the same steps on every host, Rewind snapshots
+              the machine using KVM's dirty-page log. Pages go into a content-addressed store
+              (BLAKE3, zstd), so a page shared by keyframes, runs and forks is stored once.
             </p>
           </li>
           <li>

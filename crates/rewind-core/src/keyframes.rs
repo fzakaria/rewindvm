@@ -1,14 +1,15 @@
 //! A run's keyframes, and bringing a machine to any step of a run.
 //!
 //! Keyframes are taken while a run executes, at an interval chosen so each
-//! stretch between two of them takes about [`TARGET`] of wall time to run.
-//! Seeking to a step restores the latest keyframe at or before it and runs
-//! forward from there, so no seek costs much more than one interval.
+//! stretch between two of them is about [`TARGET`] of the guest's work, as
+//! a reference host runs it. Seeking to a step restores the latest
+//! keyframe at or before it and runs forward from there, so no seek costs
+//! much more than one interval.
 
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use rewind_store::Store;
@@ -16,8 +17,20 @@ use rewind_vmm::snapshot::{Keyframe, KeyframeHead, Pages, ZERO_PAGE};
 use rewind_vmm::{Machine, Observer, Outcome};
 use serde::Deserialize;
 
-/// The wall time one stretch between keyframes aims for.
+/// The work one stretch between a recording's keyframes aims for, in the
+/// time the reference host takes for it (see [`Progress::work_to`]).
 pub const TARGET: Duration = Duration::from_millis(250);
+
+/// The reference host's time for one step, and for each conditional
+/// branch the guest retires in user mode: a least-squares fit of each
+/// stretch's wall time to its steps and branches, in recordings of GNU
+/// hello's nixpkgs build on a Zen 4 laptop, 49 stretches. The fit came
+/// within 10% of 80% of the stretches; steps alone, or virtual time,
+/// were off by more than 2x on a fifth of them. A Zen 3 host took
+/// 45.5 µs and 1.62 ns, about twice each, so the two weigh the same there.
+const NS_PER_STEP: u64 = 22_000;
+const PS_PER_BRANCH: u64 = 750;
+const PS_PER_NS: u64 = 1000;
 
 /// Bounds on the interval, in steps.
 const MIN_INTERVAL: u64 = 256;
@@ -577,6 +590,73 @@ impl Pace {
     }
 }
 
+/// How far a guest has run: its step, and the conditional branches it has
+/// retired in user mode. Both are the same wherever the run executes, so
+/// keyframes spaced by them fall at the same steps on every host.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Progress {
+    pub step: u64,
+    pub branches: u64,
+}
+
+impl Progress {
+    /// How far `machine` has run. Without a counter, under the exits
+    /// clock, the branches stay where they are and steps alone count.
+    pub fn of(machine: &Machine) -> Progress {
+        Progress {
+            step: machine.step(),
+            branches: machine.branches(),
+        }
+    }
+
+    /// The reference host's time, in nanoseconds, for the guest to run
+    /// from here to `later`.
+    pub fn work_to(self, later: Progress) -> u64 {
+        let steps = later.step.saturating_sub(self.step);
+        let branches = later.branches.saturating_sub(self.branches);
+        steps
+            .saturating_mul(NS_PER_STEP)
+            .saturating_add(branches.saturating_mul(PS_PER_BRANCH) / PS_PER_NS)
+    }
+}
+
+/// The steps from one of a recording's keyframes to the next, aimed at
+/// TARGET of the guest's work. It reads nothing of the host, not the time
+/// a stretch or a keyframe took, so a recording keyframes at the same
+/// steps however fast the host runs it.
+#[derive(Debug)]
+pub struct Interval {
+    steps: u64,
+}
+
+impl Default for Interval {
+    fn default() -> Interval {
+        Interval {
+            steps: MIN_INTERVAL,
+        }
+    }
+}
+
+impl Interval {
+    /// The step of the next keyframe after one at `at`.
+    pub fn next_stop(&self, at: u64) -> u64 {
+        at.saturating_add(self.steps)
+    }
+
+    /// Takes the stretch just run, from `from` to `to`, and aims the next
+    /// one at TARGET of work at the same work per step.
+    pub fn ran(&mut self, from: Progress, to: Progress) {
+        let steps = to.step.saturating_sub(from.step);
+        let work = from.work_to(to);
+        if work == 0 {
+            return;
+        }
+        let scaled = u128::from(steps) * TARGET.as_nanos() / u128::from(work);
+        let scaled = u64::try_from(scaled).unwrap_or(MAX_INTERVAL);
+        self.steps = scaled.clamp(MIN_INTERVAL, MAX_INTERVAL);
+    }
+}
+
 /// Runs a machine to the end, taking keyframes as it goes. The first one
 /// holds the pages written since the keyframe at `parent`, which the
 /// machine was restored from or last took, or every page without one.
@@ -588,13 +668,17 @@ pub fn run_with_keyframes(
     mut parent: Option<u64>,
     memory: &mut Memory,
 ) -> Result<Outcome> {
-    let mut interval = MIN_INTERVAL;
+    let mut interval = Interval::default();
     loop {
-        let started = Instant::now();
-        let outcome = machine.run(Some(machine.step() + interval), obs)?;
+        // A stretch, and the next one's length from how far it got.
+        let from = Progress::of(machine);
+        let outcome = machine.run(Some(interval.next_stop(from.step)), obs)?;
         if let Outcome::Stopped(_) = outcome {
             return Ok(outcome);
         }
+        interval.ran(from, Progress::of(machine));
+
+        // The keyframe, holding only the pages whose contents changed.
         let mut kf = machine.keyframe(&mut StorePages(store), parent)?;
         memory.trim(kf.parent, &mut kf.pages);
 
@@ -602,11 +686,6 @@ pub fn run_with_keyframes(
         store.sync()?;
         save(run_dir, &kf)?;
         parent = Some(kf.step);
-
-        // Aim the next stretch at the target wall time.
-        let took = started.elapsed().max(Duration::from_micros(1));
-        let scaled = interval as f64 * TARGET.as_secs_f64() / took.as_secs_f64();
-        interval = (scaled as u64).clamp(MIN_INTERVAL, MAX_INTERVAL);
     }
 }
 
@@ -955,6 +1034,87 @@ mod tests {
         let mut short = Pace::default();
         short.ran(KEEP_AFTER, KEEP_EVERY * 2);
         assert!(!short.keep_at(KEEP_AFTER, KEEP_AFTER * 2));
+    }
+
+    /// A made-up guest's progress at `step`: GUEST_SYSCALLS steps of
+    /// few branches each, as a build's many small processes make, then
+    /// computation of many branches a step.
+    fn guest(step: u64) -> Progress {
+        let calls = step.min(GUEST_SYSCALLS);
+        let computing = step - calls;
+        Progress {
+            step,
+            branches: calls * GUEST_SYSCALL_BRANCHES + computing * GUEST_COMPUTE_BRANCHES,
+        }
+    }
+    const GUEST_SYSCALLS: u64 = 200_000;
+    const GUEST_SYSCALL_BRANCHES: u64 = 2_000;
+    const GUEST_COMPUTE_BRANCHES: u64 = 300_000;
+    const GUEST_STEPS: u64 = 300_000;
+
+    /// The steps a recording of [`guest`] takes its keyframes at.
+    fn keyframe_steps() -> Vec<u64> {
+        let mut interval = Interval::default();
+        let mut at = guest(0);
+        let mut steps = Vec::new();
+        while at.step < GUEST_STEPS {
+            let stop = guest(interval.next_stop(at.step).min(GUEST_STEPS));
+            interval.ran(at, stop);
+            steps.push(stop.step);
+            at = stop;
+        }
+        steps
+    }
+
+    #[test]
+    fn keyframes_are_a_target_of_the_guests_work_apart() {
+        // A recording of a made-up guest, in two phases of steps that
+        // each do the same work. Past the stretch where a phase starts,
+        // where the interval adapts, each stretch is as many steps as the
+        // reference host runs in TARGET, a different number in each
+        // phase. The guest's progress is all the interval reads, so a
+        // host of any speed keyframes the guest at these same steps.
+        let steps = keyframe_steps();
+        assert_eq!(steps, keyframe_steps());
+        let target = TARGET.as_nanos() as u64;
+        let syscall_steps = target / guest(0).work_to(guest(1));
+        let compute_steps = target / guest(GUEST_SYSCALLS).work_to(guest(GUEST_SYSCALLS + 1));
+        assert_eq!((syscall_steps, compute_steps), (10_638, 1_012));
+
+        // Each stretch whose phase the stretch before it was all in.
+        let mut checked = 0;
+        let stops: Vec<u64> = std::iter::once(0).chain(steps.iter().copied()).collect();
+        for w in stops.windows(3) {
+            let (before, from, to) = (w[0], w[1], w[2]);
+            if to == GUEST_STEPS {
+                continue;
+            }
+            if to <= GUEST_SYSCALLS {
+                assert_eq!(to - from, syscall_steps, "{from}..{to}");
+                checked += 1;
+            } else if before >= GUEST_SYSCALLS {
+                assert_eq!(to - from, compute_steps, "{from}..{to}");
+                checked += 1;
+            }
+        }
+        assert!(checked > 100, "{steps:?}");
+    }
+
+    #[test]
+    fn a_keyframe_interval_is_never_under_its_minimum() {
+        // Steps of a second of work each would put keyframes every step;
+        // the interval stays at MIN_INTERVAL. A stretch with no progress
+        // at all, as a run that stopped where it started, leaves it there
+        // too rather than dividing by zero.
+        let mut interval = Interval::default();
+        let slow = Progress {
+            step: 10,
+            branches: 10_000_000_000_000,
+        };
+        interval.ran(Progress::default(), slow);
+        assert_eq!(interval.next_stop(10), 10 + MIN_INTERVAL);
+        interval.ran(slow, slow);
+        assert_eq!(interval.next_stop(10), 10 + MIN_INTERVAL);
     }
 
     #[test]
