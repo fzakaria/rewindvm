@@ -105,7 +105,7 @@ let
         int main(void)
         {
           counter = 7;
-          for (int i = 0; i < 3000; i++)
+          for (int i = 0; i < 25000; i++)
             write(1, ".", 1);
           write(1, "done\n", 5);
           return 0;
@@ -1660,9 +1660,10 @@ in
             '.frames[.chosen].line == $line' after.json
         done
 
-        # A write thousands of steps back: the windows after the first
-        # hold no write, and each puts the machine at its own keyframe in
-        # place. The value is 0 where the search began, before the write.
+        # A write 25,000 steps back, past two keyframes about 11,400
+        # steps apart: the windows after the first hold no write, and
+        # each puts the machine at its own keyframe in place. The value is
+        # 0 where the search began, before the write.
         rewind run -q --clock exits --name late --root ${gdbRoot} -- /bin/late > /dev/null
         done=$(rewind events late | grep 'write(1, "done' | awk '{print $1}')
         rewind blame late --at "$done" counter --json > late.json

@@ -1,7 +1,10 @@
 /* Draws a hardware random number with rdrand and keeps it in a global,
- * sleeps 200 times, and prints a fixed word: nothing the program does
+ * sleeps 1500 times, and prints a fixed word: nothing the program does
  * after the draw depends on the number, so only the machine's memory
- * differs between two runs. */
+ * differs between two runs. A sleep is about 11 steps, and keyframes come
+ * about 11,400 steps of them apart after the first at step 256, so the
+ * sleeps reach a keyframe after the draw, where a replay sees the
+ * difference. */
 #include <immintrin.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -13,7 +16,7 @@ int main(void)
   unsigned long long v = 0;
   _rdrand64_step(&v);
   secret = v;
-  for (int i = 0; i < 200; i++) {
+  for (int i = 0; i < 1500; i++) {
     usleep(1000);
   }
   printf("done\n");
