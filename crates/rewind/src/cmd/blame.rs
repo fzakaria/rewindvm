@@ -266,7 +266,9 @@ pub(crate) struct BlameArgs {
           conflicts_with = "reads", value_parser = at_least_one)]
     pub(crate) writes: usize,
     /// List the reads as well as the writes, of every access since
-    /// --since, oldest first.
+    /// --since, oldest first. Telling reads from writes takes two of the
+    /// CPU's debug registers for each 8 bytes, so the values can take 16
+    /// bytes at most, where writes alone can take 32.
     #[arg(long, requires = "at")]
     pub(crate) reads: bool,
     /// Search no further back than this step; by default the process's
