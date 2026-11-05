@@ -1990,7 +1990,9 @@ in
   # entered the kernel by a syscall instruction, by a page fault in user
   # space, or by an invalid opcode or a privileged instruction there;
   # steps back from the kernel's exception entry go through the invalid
-  # opcode's IDT stub, one instruction at a time, to the ud2.
+  # opcode's IDT stub, one instruction at a time, to the ud2, and the
+  # process's thread shows the registers it faulted with while the kernel
+  # saves them.
   # Stepped through write()'s system call, the process's thread shows the
   # pc and sp it made the call with until the call returns. A run
   # forwards stops before the
@@ -2432,6 +2434,24 @@ in
             | sed 's/^$/0/' > offsets
           sort -n -r -u offsets | cmp - offsets
           test "$(wc -l < offsets)" = 5
+
+          # Stepped from the ud2 into the kernel, 200 steps through the stub,
+          # error_entry and on into C, the process's thread shows the pc,
+          # sp and rdi it faulted with: the CPU pushes them on its entry
+          # stack, error_entry copies them to the task's, and the stub's
+          # call leaves its return address where rdi's word is for a few
+          # instructions.
+          printf '%s\n' "break *$ud2" continue delete 'set $urdi = $rdi' 'set $upc = $pc' \
+            'set $usp = $sp' 'set $i = 0' 'set $wrong = 0' 'while $i < 200' stepi \
+            'if $rdi != $urdi || $pc != $upc || $sp != $usp' 'set $wrong = $wrong + 1' end \
+            'set $i = $i + 1' end 'printf "stepped %d, wrong %d\n", $i, $wrong' > faulted.gdb
+          status=0
+          timeout -k 5 300 rewind gdb "ill-$clock" "$start" -- -batch -x faulted.gdb > faulted 2>&1 \
+            || status=$?
+          cat faulted
+          test "$status" != $timeout_term
+          test "$status" != $timeout_kill
+          grep -q '^stepped 200, wrong 0$' faulted
 
           # From the first program's first write, a continue stops before
           # the exec, at the start of the step that runs it, where the

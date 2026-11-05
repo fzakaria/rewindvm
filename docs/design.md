@@ -427,7 +427,11 @@ the struct is not complete. Before the syscall entry's switch to the task's
 stack, or after the exit's switch back, the CPU's rsp is the user one, and the
 user pc and flags are in rcx and r11; with rsp inside the struct, the words below
 it are not yet pushed, or already popped, and are the CPU's own, the user rsp in
-the TSS word where the entry keeps it.
+the TSS word where the entry keeps it. An exception or interrupt from user space
+pushes the registers on the CPU's entry stack, at the TSS's sp0, and error_entry
+builds the struct there before copying it to the task's stack; while rsp is on
+the entry stack, the frame at its top holds them. Until error_entry stores rdi
+over the return address the stub's call pushed in rdi's word, rdi is the CPU's.
 
 Under exit time a step can be millions of instructions, and going back across
 one single-steps all of them, each a VM exit, which can take minutes; a run
