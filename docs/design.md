@@ -391,7 +391,13 @@ after its exit. Single steps begun there go through the kernel's return to
 user space, `sysretq` or `iretq`, which loads flags saved before the steps
 began and so drops the trap flag. At such an instruction a debug register
 traps the user address it returns to, and the steps go on from there; gdb's
-own `stepi` in the kernel does the same. A fork whose registers or memory gdb
+own `stepi` in the kernel does the same. A `syscall` from user space drops the
+flag the other way: it enters the kernel with the flags FMASK leaves, which
+Linux sets to clear it, so the kernel would run on unstepped past the exits it
+makes. At a `syscall` a debug register traps the kernel's entry, the address in
+LSTAR, so one instruction back from a step's start is the `out` or `in` that
+made the step's exit, even when the step before entered the kernel from user
+space. A fork whose registers or memory gdb
 changed, or that left its recording, cannot go back, since the run replayed
 is not what the fork did.
 

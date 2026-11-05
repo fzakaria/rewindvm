@@ -329,9 +329,10 @@ pub struct Machine {
     /// The branch count a debugger asked the machine to stop at, and how
     /// close the machine is to it (debug.rs).
     pub(crate) branch_stop: Option<debug::BranchStop>,
-    /// The user address a single step through the kernel's return to user
-    /// space ends at, trapped in a debug register (debug.rs).
-    pub(crate) user_return: Option<u64>,
+    /// Where a single step across the kernel's boundary ends, into it at a
+    /// `syscall` or out of it at its return to user space, trapped in a
+    /// debug register (debug.rs).
+    pub(crate) crossing: Option<debug::Crossing>,
 }
 
 /// Where a machine's memory started.
@@ -464,7 +465,7 @@ impl Machine {
             origin: Origin::Boot,
             checkpoints: checkpoint::Checkpoints::default(),
             branch_stop: None,
-            user_return: None,
+            crossing: None,
         })
     }
 
@@ -644,7 +645,7 @@ impl Machine {
             if let Some(stop) = self.close_in_on_branches()? {
                 return Ok(Outcome::Debug(stop));
             }
-            self.step_into_user_space()?;
+            self.step_across_the_boundary()?;
 
             // The port of a counted exit; MMIO exits count under MMIO_PORT.
             const MMIO_PORT: u16 = 0xffff;

@@ -538,6 +538,20 @@ let
         EOF
         $CC -static -O0 -g -fdebug-prefix-map=$out/src=/src \
           -o $out/bin/after $out/src/after.c
+
+        # One program writes a line and exits: the step before each of
+        # its two records runs the system call's syscall instruction.
+        cat > $out/src/last.c <<'EOF'
+        #include <unistd.h>
+
+        int main(void)
+        {
+          write(1, "last\n", 5);
+          return 0;
+        }
+        EOF
+        $CC -static -O0 -g -fdebug-prefix-map=$out/src=/src \
+          -o $out/bin/last $out/src/last.c
       '';
 
   # A root with a static program in two files, like mylib: main hands a
@@ -1919,9 +1933,13 @@ in
   # the same each time. So does another thread's write to a second watch,
   # after the kernel's. Two watches the call writes stop once each, and a
   # thread a signal kills in the call stops as it exits. A watch on a 1 MiB
-  # read() stops in seconds. A run forwards stops before the
+  # read() stops in seconds. A reverse-stepi from the start of the step
+  # of a record the kernel made in write() or exit_group() stops in the
+  # kernel, at the out that made the record, though the step before
+  # entered the kernel by a syscall instruction. A run forwards stops before the
   # process's exec, whose new program it never runs into, says so, and
-  # refuses to go on; a step back from there works, and a session at the
+  # refuses to go on; a step back from there stops at the out before it,
+  # in the CPU's thread, and a session at the
   # step the message names stops in the new program. A Ctrl-C in a step back across 10 million
   # rounds of a loop stops it there, where gdb goes on. Boots the VM, so it
   # needs /dev/kvm.
@@ -2252,11 +2270,35 @@ in
           grep -q '^0x[0-9a-f]* <[^>]*>:[[:space:]]*0x0f[[:space:]]*0x05$' large
           test "$took" -lt 5000
 
+          # The kernel makes each record with an out, in a step that began
+          # in user space and entered the kernel by a syscall instruction,
+          # which clears the trap flag single steps run on. A reverse-stepi
+          # from the step of the write's record, then of the exit_group's,
+          # stops at that out, in the CPU's thread, and not at the syscall
+          # instruction or past the end of the run. A session that hangs
+          # is cut short, and fails.
+          rewind run -q --clock "$clock" --name "last-$clock" --root ${gdbRoot} \
+            -- /bin/last > /dev/null
+          rewind events "last-$clock" > events
+          for record in 'write(1, "last' 'exit_group(last)'; do
+            step=$(grep -F "$record" events | awk '{print $1}')
+            status=0
+            timeout -k 5 300 rewind gdb "last-$clock" "$step" -- -batch -ex reverse-stepi \
+              -ex 'thread 1' -ex 'x/i $pc' > last 2>&1 || status=$?
+            cat last
+            test "$status" != $timeout_term
+            test "$status" != $timeout_kill
+            test "$(grep -c 'fatal error\|Remote connection closed' last)" = 0
+            grep -q '^=> 0xffffffff[0-9a-f]* <rewind_emit+[0-9]*>:[[:space:]]*out ' last
+          done
+
           # From the first program's first write, a continue stops before
           # the exec, at the start of the step that runs it, where the
           # loop's total still reads, and does not run into the second
           # program, whose function's address has a breakpoint. A second
-          # continue is refused, and stays; a reverse-stepi moves. The
+          # continue is refused, and stays; a reverse-stepi moves back to
+          # the out that made the step's exit, in the CPU's thread, and not
+          # to the write's syscall instruction in the process's. The
           # session the message names stops in the second program.
           rewind run -q --clock "$clock" --name "exec-$clock" --root ${gdbRoot} \
             -- /bin/before > /dev/null
@@ -2278,6 +2320,8 @@ in
           test "$(wc -l < pcs)" = 3
           test "$(sed -n 1p pcs)" = "$(sed -n 2p pcs)"
           test "$(sed -n 2p pcs)" != "$(sed -n 3p pcs)"
+          test "$(sed -n 3p pcs | grep -c '^(void (\*)()) 0xffffffff[0-9a-f]* <rewind_emit+[0-9]*>$')" = 1
+          test "$(grep -c 'Thread 2 received signal' exec)" = 0
           again=$(sed -n 's/.*; \(rewind gdb [^ ]* [0-9]*\) debugs the new one$/\1/p;T;q' exec)
           test "$again" != ""
           status=0

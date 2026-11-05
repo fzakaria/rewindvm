@@ -18,7 +18,7 @@
 use anyhow::{Context, Result, bail};
 use kvm_bindings::{
     KVM_GUESTDBG_BLOCKIRQ, KVM_GUESTDBG_ENABLE, KVM_GUESTDBG_SINGLESTEP, KVM_GUESTDBG_USE_HW_BP,
-    KVM_GUESTDBG_USE_SW_BP, kvm_guest_debug, kvm_regs, kvm_sregs,
+    KVM_GUESTDBG_USE_SW_BP, Msrs, kvm_guest_debug, kvm_msr_entry, kvm_regs, kvm_sregs,
 };
 
 use crate::Machine;
@@ -212,6 +212,14 @@ fn db_exit(dr6: u64, traps: &[Trap], debugger: Stepping, machine: Stepping) -> D
     }
 }
 
+/// Where a single step across the kernel's boundary ends, and the debug
+/// register that traps the address.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Crossing {
+    address: u64,
+    register: usize,
+}
+
 /// The debug register the trap at the kernel's return to user space
 /// takes, among the debugger's `traps`: the one after them, else, with all
 /// four theirs, the last that is not a read-write watch, borrowed until
@@ -235,6 +243,20 @@ fn return_register(traps: &[Trap]) -> Option<usize> {
     })
 }
 
+/// The debug register the trap at the kernel's entry for a `syscall` at
+/// `at` takes, among the debugger's `traps`: the one after them, else,
+/// with all four theirs, the last that is not a breakpoint at `at`,
+/// borrowed until the kernel's entry. `syscall` reads and writes no
+/// memory, so no watch misses a hit while it runs; a breakpoint at the
+/// instruction itself traps before it runs, and keeps its register. None
+/// when every register is one.
+fn entry_register(traps: &[Trap], at: u64) -> Option<usize> {
+    if traps.len() < MAX_TRAPS {
+        return Some(traps.len());
+    }
+    traps.iter().rposition(|trap| *trap != Trap::Execute(at))
+}
+
 /// What KVM traps for the debugger, the monitor and the int3s together:
 /// the debugger's debug registers and steps; with int3 written anywhere,
 /// every #BP, so none reaches the guest unseen; and while the monitor
@@ -244,7 +266,7 @@ fn guest_debug(
     debugging: Option<&Debugging>,
     monitor: Stepping,
     approach: Stepping,
-    user_return: Option<u64>,
+    crossing: Option<Crossing>,
     int3s: &Int3s,
 ) -> Result<kvm_guest_debug> {
     let mut debug = kvm_guest_debug::default();
@@ -254,14 +276,12 @@ fn guest_debug(
     {
         debug.control |= KVM_GUESTDBG_SINGLESTEP;
     }
-    // The return to user space the machine steps toward takes the
-    // register after the debugger's, or one of theirs it borrows, which a
-    // trap there is not the debugger's for.
-    if let Some(address) = user_return
-        && let Some(register) = return_register(&traps)
-    {
-        let trap = Trap::Execute(address);
-        match traps.get_mut(register) {
+    // The kernel's entry or return to user space the machine steps toward
+    // takes the register after the debugger's, or one of theirs it
+    // borrows, which a trap there is not the debugger's for.
+    if let Some(crossing) = crossing {
+        let trap = Trap::Execute(crossing.address);
+        match traps.get_mut(crossing.register) {
             Some(borrowed) => *borrowed = trap,
             None => traps.push(trap),
         }
@@ -346,6 +366,13 @@ const SYSRETQ: [u8; 3] = [0x48, 0x0f, 0x07];
 const IRETQ: [u8; 2] = [0x48, 0xcf];
 const WORD: usize = 8;
 
+/// The way user space enters the kernel for a system call: `syscall`
+/// jumps to LSTAR from 64-bit code and to CSTAR from 32-bit code, with the
+/// flags FMASK leaves, which Linux sets to clear the trap flag.
+const SYSCALL: [u8; 2] = [0x0f, 0x05];
+const MSR_LSTAR: u32 = 0xc000_0082;
+const MSR_CSTAR: u32 = 0xc000_0083;
+
 /// The privilege level in a code segment selector's low bits: 3 in user
 /// space.
 const SELECTOR_RPL: u16 = 0b11;
@@ -397,7 +424,7 @@ impl Machine {
             self.debugging.as_ref(),
             monitor,
             self.approach_stepping(),
-            self.user_return,
+            self.crossing,
             &self.int3s,
         )?;
         Ok(self.vcpu.set_guest_debug(&debug)?)
@@ -503,27 +530,67 @@ impl Machine {
         debugger || self.approach_stepping() == Stepping::Yes
     }
 
-    /// Keeps single steps going across the kernel's return to user space,
-    /// before the vCPU runs. The kernel returns there with the flags its
-    /// entry saved, which have no trap flag when the steps began in the
-    /// kernel, so the user's code would run on unstepped. So at a
-    /// `sysretq` or an `iretq` to user space, a debug register traps the
-    /// address it returns to, where the step ends: the one after the
-    /// debugger's, or one of theirs borrowed until then
-    /// ([`return_register`]). With every register a read-write watch of
-    /// the debugger's, the user's code runs on as it did before.
-    pub(crate) fn step_into_user_space(&mut self) -> Result<()> {
-        if !self.single_stepping() || return_register(self.debugger_traps()).is_none() {
+    /// Keeps single steps going across the kernel's boundary, before the
+    /// vCPU runs. A `syscall` enters the kernel with the trap flag cleared,
+    /// so the kernel would run on unstepped, across exits and the steps
+    /// they end, until something set the flag again. The kernel returns to
+    /// user space with the flags its entry saved, which have no trap flag
+    /// when the steps began in the kernel, so the user's code would run on
+    /// unstepped. So at a `syscall` in user space a debug register traps
+    /// the kernel's entry, and at a `sysretq` or an `iretq` to user space
+    /// the address it returns to, where the step ends: the register after
+    /// the debugger's, or one of theirs borrowed until then
+    /// ([`entry_register`], [`return_register`]). With every register one
+    /// the debugger cannot lend, the step runs on as it did before.
+    pub(crate) fn step_across_the_boundary(&mut self) -> Result<()> {
+        if !self.single_stepping() || self.crossing.is_some() {
             return Ok(());
         }
         let regs = self.vcpu.get_regs()?;
-        let in_user_space = self.vcpu.get_sregs()?.cs.selector & SELECTOR_RPL == USER_RPL;
-        if in_user_space || self.user_return.is_some() {
-            return Ok(());
+        let sregs = self.vcpu.get_sregs()?;
+        let crossing = if sregs.cs.selector & SELECTOR_RPL == USER_RPL {
+            self.kernel_entry(&regs, &sregs)?
+        } else {
+            self.user_return(&regs)?
+        };
+        if crossing.is_some() {
+            self.crossing = crossing;
+            self.apply_guest_debug()?;
         }
+        Ok(())
+    }
+
+    /// Where a single step from user space at `regs`' pc enters the kernel,
+    /// when the instruction there is `syscall`: the address in LSTAR from
+    /// 64-bit code, in CSTAR from 32-bit code.
+    fn kernel_entry(&self, regs: &kvm_regs, sregs: &kvm_sregs) -> Result<Option<Crossing>> {
+        let mut code = [0u8; SYSCALL.len()];
+        self.read_virtual(regs.rip, &mut code)?;
+        if code != SYSCALL {
+            return Ok(None);
+        }
+        let Some(register) = entry_register(self.debugger_traps(), regs.rip) else {
+            return Ok(None);
+        };
+        let msr = if sregs.cs.l != 0 {
+            MSR_LSTAR
+        } else {
+            MSR_CSTAR
+        };
+        let address = self.read_msr(msr)?;
+        Ok(Some(Crossing { address, register }))
+    }
+
+    /// Where a single step from the kernel at `regs`' pc returns to user
+    /// space, when the instruction there is `sysretq`, which returns to
+    /// RCX, or an `iretq` whose frame returns to user space.
+    fn user_return(&self, regs: &kvm_regs) -> Result<Option<Crossing>> {
+        let Some(register) = return_register(self.debugger_traps()) else {
+            return Ok(None);
+        };
         let mut code = [0u8; SYSRETQ.len()];
         self.read_virtual(regs.rip, &mut code)?;
-        let user_return = if code == SYSRETQ {
+        let address = if code == SYSRETQ {
             Some(regs.rcx)
         } else if code[..IRETQ.len()] == IRETQ {
             let mut frame = [0u8; 2 * WORD];
@@ -534,11 +601,20 @@ impl Machine {
         } else {
             None
         };
-        if user_return.is_some() {
-            self.user_return = user_return;
-            self.apply_guest_debug()?;
+        Ok(address.map(|address| Crossing { address, register }))
+    }
+
+    /// The vCPU's model-specific register `index`.
+    fn read_msr(&self, index: u32) -> Result<u64> {
+        let entry = kvm_msr_entry {
+            index,
+            ..Default::default()
+        };
+        let mut msrs = Msrs::from_entries(&[entry])?;
+        if self.vcpu.get_msrs(&mut msrs)? != 1 {
+            bail!("KVM did not read MSR {index:#x}");
         }
-        Ok(())
+        Ok(msrs.as_slice()[0].data)
     }
 
     /// The counter's interrupt was disarmed, at a step or as `run` returns:
@@ -595,15 +671,16 @@ impl Machine {
             machine = Stepping::Yes;
         }
 
-        // The return to user space a step went through, trapped in the
-        // register after the debugger's or one borrowed from them: the
-        // debugger's step ends there, the register is theirs again, and
-        // the machine's own steps go on.
+        // The kernel's entry or return to user space a step went through,
+        // trapped in the register after the debugger's or one borrowed from
+        // them: the debugger's step ends there, the register is theirs
+        // again, and the machine's own steps go on.
         let debugger = self.debugging.as_ref().map_or(Stepping::No, |d| d.stepping);
-        let returned = return_register(self.debugger_traps())
-            .is_some_and(|register| dr6 & (1 << register) != 0);
-        if self.user_return.is_some() && returned {
-            self.user_return = None;
+        let crossed = self
+            .crossing
+            .is_some_and(|crossing| dr6 & (1 << crossing.register) != 0);
+        if crossed {
+            self.crossing = None;
             self.apply_guest_debug()?;
             return Ok((debugger == Stepping::Yes).then_some(DebugStop::Step));
         }
@@ -1041,15 +1118,20 @@ mod tests {
                 stepping: Stepping::No,
                 traps: traps.to_vec(),
             };
+            let register = return_register(traps);
+            let crossing = register.map(|register| Crossing {
+                address: RETURN,
+                register,
+            });
             let debug = guest_debug(
                 Some(&debugging),
                 Stepping::No,
                 Stepping::Yes,
-                Some(RETURN),
+                crossing,
                 &Int3s::default(),
             )
             .unwrap();
-            (debug.arch.debugreg, return_register(traps))
+            (debug.arch.debugreg, register)
         };
 
         // A free register: the one after the debugger's.
@@ -1068,6 +1150,37 @@ mod tests {
         let (debugreg, register) = registers(&[watch(Access::ReadWrite); MAX_TRAPS]);
         assert_eq!(register, None);
         assert_eq!(debugreg[..MAX_TRAPS], [0x40_2000; MAX_TRAPS]);
+    }
+
+    /// The trap at the kernel's entry, which single steps across a
+    /// `syscall` need, takes the register after the debugger's, and with
+    /// all four the debugger's, the last that is not a breakpoint at the
+    /// `syscall` itself, which still traps before the instruction runs. A
+    /// watch of any kind is borrowed, since `syscall` touches no memory.
+    /// Checked for a breakpoint, for three breakpoints and a watch, for
+    /// four read-write watches, and for four registers whose last is a
+    /// breakpoint at the `syscall`.
+    #[test]
+    fn the_kernel_entry_takes_a_register_from_a_full_set() {
+        const SYSCALL_AT: u64 = 0x40_1893;
+        let breakpoint = Trap::Execute(0x40_1000);
+        let watch = |access| Trap::Watch {
+            address: 0x40_2000,
+            len: 8,
+            access,
+        };
+        assert_eq!(entry_register(&[breakpoint], SYSCALL_AT), Some(1));
+        let full = [breakpoint, breakpoint, breakpoint, watch(Access::Write)];
+        assert_eq!(entry_register(&full, SYSCALL_AT), Some(3));
+        let watches = [watch(Access::ReadWrite); MAX_TRAPS];
+        assert_eq!(entry_register(&watches, SYSCALL_AT), Some(3));
+        let here = [
+            watch(Access::ReadWrite),
+            breakpoint,
+            watch(Access::Write),
+            Trap::Execute(SYSCALL_AT),
+        ];
+        assert_eq!(entry_register(&here, SYSCALL_AT), Some(2));
     }
 
     /// The CPU watches a power of two up to 8 bytes, aligned to itself,
@@ -1217,7 +1330,10 @@ mod tests {
             Some(&debugger),
             Stepping::No,
             Stepping::Yes,
-            Some(0x2000),
+            Some(Crossing {
+                address: 0x2000,
+                register: 1,
+            }),
             &none,
         )
         .unwrap();
