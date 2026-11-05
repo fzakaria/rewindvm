@@ -56,6 +56,12 @@ const CLIENT_LOG_PREFIXES: &[&str] = &[
     "Content-Length too large",
 ];
 
+/// How often a download is said to happen: a program's DWARF the first
+/// time it is asked for, and each of its source files the first time that
+/// file is.
+const ONCE: &str = "first time only";
+const EACH_ONCE: &str = "each one only once";
+
 /// What a query asks the server for: a program's DWARF, or one of its
 /// source files by the path its DWARF names.
 enum Asked<'l> {
@@ -112,17 +118,25 @@ impl<'a> Downloads<'a> {
             return None;
         }
 
-        // The program's name, else what the query names.
-        let what = match (asked, self.names.get(build_id)) {
-            (Asked::DebugInfo, Some(name)) => format!("debug info for {name}"),
-            (Asked::DebugInfo, None) => format!("debug info for build ID {build_id}"),
-            (Asked::Source(_), Some(name)) => format!("the sources of {name}"),
+        // The program's name, else what the query names. The client keeps
+        // a program's DWARF once fetched, but each source file on its own,
+        // so a later command that reads other files downloads again.
+        let message = match (asked, self.names.get(build_id)) {
+            (Asked::DebugInfo, Some(name)) => {
+                format!("downloading debug info for {name}; {ONCE}")
+            }
+            (Asked::DebugInfo, None) => {
+                format!("downloading debug info for build ID {build_id}; {ONCE}")
+            }
+            (Asked::Source(_), Some(name)) => {
+                format!("downloading source files of {name}; {EACH_ONCE}")
+            }
             (Asked::Source(path), None) => {
                 let file = Path::new(path).file_name()?.to_string_lossy();
-                format!("the sources of {file}")
+                format!("downloading source files, {file} first; {EACH_ONCE}")
             }
         };
-        Some(format!("downloading {what}; first time only"))
+        Some(message)
     }
 }
 
@@ -180,13 +194,13 @@ mod tests {
             said,
             vec![
                 "downloading debug info for libc.so.6; first time only".to_string(),
-                "downloading the sources of libc.so.6; first time only".to_string(),
+                "downloading source files of libc.so.6; each one only once".to_string(),
             ]
         );
     }
 
     /// Without a name for the build ID, the DWARF is named by the build
-    /// ID, and the sources by the first source file asked for.
+    /// ID, and the source files by the first one asked for.
     #[test]
     fn a_file_with_no_name_is_said_by_its_build_id_or_source() {
         let names = FileNames::new();
@@ -196,7 +210,7 @@ mod tests {
             said,
             vec![
                 format!("downloading debug info for build ID {LIBC_ID}; first time only"),
-                "downloading the sources of write.c; first time only".to_string(),
+                "downloading source files, write.c first; each one only once".to_string(),
             ]
         );
     }

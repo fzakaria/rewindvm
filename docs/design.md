@@ -531,7 +531,10 @@ which can take a minute, and gdb says nothing about a download until the
 answer starts. `rewind where` runs gdb with `DEBUGINFOD_VERBOSE` set, so
 libdebuginfod logs each URL it asks on standard error before it waits, and
 says `rewind: downloading debug info for libc.so.6; first time only` as each
-download starts, and the same once for each library's sources. `rewind gdb`
+download starts. A library's sources are said once per command, as
+`downloading source files of libc.so.6; each one only once`: the client
+keeps each source file on its own, so a later command that reads other
+files of the library downloads again. `rewind gdb`
 shows gdb's own lines about downloads. The server keeps what it knows of its
 cache in memory, so two servers on one directory break each other's entries:
 each session's server takes a numbered directory under `cache/debuginfod`
