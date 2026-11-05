@@ -1728,6 +1728,12 @@ in
         # to it waits out a timeout.
         export REWIND_DEBUGINFOD=/nonexistent
 
+        # timeout's exit status for a session it stopped with TERM, and
+        # for one it then had to KILL. gdb -batch exits nonzero on its
+        # own when its last command fails, which the sessions below allow.
+        timeout_term=124
+        timeout_kill=137
+
         for clock in exits branches; do
           if ! rewind run -q --clock "$clock" --name "reverse-$clock" --root ${gdbRoot} \
             -- /bin/reverse > run 2>&1; then
@@ -1780,11 +1786,14 @@ in
           # is the dot, in the fourth round, and the watch does not stop,
           # since nothing writes the total in between. A session that hangs
           # is cut short, and fails.
+          status=0
           timeout -k 5 300 rewind gdb "reverse-$clock" "$done" -- -batch \
             -ex 'watch total' -ex 'break exit' -ex 'break __libc_start_main' -ex reverse-continue \
             -ex reverse-finish -ex reverse-next -ex reverse-next -ex 'print i' \
-            > crossed 2>&1 || true
+            > crossed 2>&1 || status=$?
           cat crossed
+          test "$status" != $timeout_term
+          test "$status" != $timeout_kill
           test "$(grep -c '^Breakpoint [23] at' crossed)" = 2
           test "$(grep -c 'hit Hardware watchpoint 1: total' crossed)" = 1
           grep -q '^15[[:space:]].*the dot' crossed
@@ -1852,10 +1861,12 @@ in
           first=$(rewind events "exec-$clock" | grep 'write(1, "before' | awk '{print $1}')
           exec=$(rewind events "exec-$clock" | grep 'execve("/bin/after"' | awk '{print $1}')
           bump=$(gdb -batch -ex 'print/x (long) &bump' ${gdbRoot}/bin/after | awk '{print $NF}')
+          status=0
           timeout 300 rewind gdb "exec-$clock" "$first" -- -batch -ex "break *$bump" -ex continue \
             -ex 'print work' -ex 'print $pc' -ex continue -ex 'print $pc' -ex reverse-stepi \
-            -ex 'print $pc' > exec 2>&1 || true
+            -ex 'print $pc' > exec 2>&1 || status=$?
           cat exec
+          test "$status" != $timeout_term
           said="process [0-9]* runs /bin/after at step $exec; this session debugs the program before it"
           test "$(grep -c "$said" exec)" = 2
           test "$(grep -c 'hit Breakpoint 1' exec)" = 0
@@ -1867,8 +1878,10 @@ in
           test "$(sed -n 2p pcs)" != "$(sed -n 3p pcs)"
           again=$(sed -n 's/.*; \(rewind gdb [^ ]* [0-9]*\) debugs the new one$/\1/p;T;q' exec)
           test "$again" != ""
-          timeout 300 $again -- -batch -ex 'break bump' -ex continue > after 2>&1 || true
+          status=0
+          timeout 300 $again -- -batch -ex 'break bump' -ex continue > after 2>&1 || status=$?
           cat after
+          test "$status" != $timeout_term
           grep -q 'hit Breakpoint 1, bump (.*after.c' after
         done
 
