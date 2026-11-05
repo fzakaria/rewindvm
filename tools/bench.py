@@ -104,6 +104,8 @@ PINGPONG_THREADS = 4
 PINGPONG_PASSES = 2000
 # How far into the unpacking run `cat` reads, as a share of its steps.
 CAT_AT = 0.95
+# A keyframe's file name ends in this; the directory also holds a marker.
+KEYFRAME_SUFFIX = ".kf"
 
 # GNU time's fields: wall, user and system seconds, peak RSS in KiB.
 TIME_FORMAT = "%e %U %S %M"
@@ -547,6 +549,14 @@ def tree_bytes(path):
     return total
 
 
+def count_keyframes(directory):
+    """The keyframes in a run's keyframe directory: its .kf files, not
+    the marker saying the run took them as it executed."""
+    if not os.path.isdir(directory):
+        return 0
+    return sum(1 for name in os.listdir(directory) if name.endswith(KEYFRAME_SUFFIX))
+
+
 def mib(n):
     return round(n / BYTES_PER_MIB, 1)
 
@@ -593,9 +603,7 @@ def run_round(build, workloads, inputs, worker, log):
                     steps=steps,
                     virtual=virtual,
                     run_mb=mib(tree_bytes(run_dir)),
-                    keyframes=(
-                        len(os.listdir(keyframes)) if os.path.isdir(keyframes) else 0
-                    ),
+                    keyframes=count_keyframes(keyframes),
                 )
                 ctx.runs[workload.name] = {"run": run, "steps": steps}
             samples[workload.name] = sample
