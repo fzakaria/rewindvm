@@ -631,6 +631,31 @@ let
     sleep 1
     echo "uptime $(cat /proc/uptime)"
   '';
+
+  # Shell for a check that serves a fork to gdb in the background, as
+  # `rewind gdb RUN STEP --listen ADDRESS 2> serve &`: `listening PID`
+  # returns once the server with that PID says where to connect, and
+  # fails the check, printing what the server said, when the server
+  # exits first or says nothing within a minute.
+  listening = ''
+    listening() {
+      local server=$1
+      local limit_seconds=60
+      local deadline=$((SECONDS + limit_seconds))
+      while [ "$SECONDS" -lt "$deadline" ]; do
+        if grep -qs 'connect with' serve; then
+          return 0
+        fi
+        if ! kill -0 "$server" 2> /dev/null; then
+          break
+        fi
+        sleep 0.1
+      done
+      echo "rewind gdb --listen did not start listening:"
+      cat serve
+      return 1
+    }
+  '';
   # Probes for sources of difference past the monitor, for
   # checks.determinism-sources.
   determinismRoot = import ./determinism { inherit pkgs; };
@@ -755,8 +780,8 @@ in
         # The step a run ended at, the run named by its id or its name.
         end() { rewind ls --json | sed -n "s/.*\"\(id\|name\)\":\"$1\",.*\"steps\":\([0-9]*\).*/\2/p"; }
         fork=$(rewind fork a 400 --schedule 3 --json | id)
-        grep -q '"shared_keyframes"' "$(manifest $fork)"
-        grep -q '"trace_hash"' "$(manifest $fork)"
+        grep -q '"shared_keyframes": {' "$(manifest $fork)"
+        grep -q '"trace_hash": "' "$(manifest $fork)"
         rewind replay $fork | grep '^identical'
         rewind replay $fork --from 300 | grep '^identical'
         rewind replay $fork --from "$(end $fork)" | grep '^identical'
@@ -796,7 +821,7 @@ in
         same1=$(rewind fork a "$(end a)" --schedule 7 --json | id)
         same2=$(rewind fork a "$(end a)" --schedule 8 --json | id)
         grep -q '"first_difference": null' "$(manifest $same1)"
-        grep -q '"first_difference"' "$(manifest $fork)"
+        grep -q '"first_difference": [0-9]' "$(manifest $fork)"
         rewind prune a --identical --dry-run --json | tee planned
         grep -q "$same1" planned
         grep -q "$same2" planned
@@ -1143,6 +1168,7 @@ in
       }
       ''
         export REWIND_HOME=$TMPDIR/rewind
+        ${listening}
         rewind run -q --name w --root ${busyboxRoot} -- \
           sh -c 'echo first > /notes.txt; sleep 1; echo second >> /notes.txt'
         rewind events w > events
@@ -1165,12 +1191,13 @@ in
         grep -q second shell
 
         # rewind gdb: a breakpoint where every event is reported.
-        rewind gdb w "$start" --listen 127.0.0.1:12345 &
-        sleep 1
+        rewind gdb w "$start" --listen 127.0.0.1:12345 2> serve &
+        server=$!
+        listening $server
         gdb -q -batch -ex 'target remote 127.0.0.1:12345' \
           -ex 'break rewind_emit' -ex continue -ex detach \
           ${kernel}/vmlinux | tee gdb
-        wait
+        wait $server
         grep -q 'in rewind_emit' gdb
 
         # rewind gdb at a step inside the job: it names the process that
@@ -1180,9 +1207,10 @@ in
         step=$(echo "$write" | awk '{print $1}')
         pid=$(echo "$write" | awk '{print $2}' | cut -d/ -f1)
         rewind gdb w "$step" --listen 127.0.0.1:12346 2> serve &
-        while ! grep -q 'connect with' serve; do sleep 0.1; done
+        server=$!
+        listening $server
         gdb -q -batch -ex 'target remote 127.0.0.1:12346' -ex detach
-        wait
+        wait $server
         cat serve
         grep -q "ran in process $pid; loading symbols for 1 of its files" serve
 
@@ -1194,9 +1222,10 @@ in
         step=$(echo "$write" | awk '{print $1}')
         pid=$(echo "$write" | awk '{print $2}' | cut -d/ -f1)
         rewind gdb block "$step" --listen 127.0.0.1:12347 2> serve &
-        while ! grep -q 'connect with' serve; do sleep 0.1; done
+        server=$!
+        listening $server
         gdb -q -batch -ex 'target remote 127.0.0.1:12347' -ex detach
-        wait
+        wait $server
         echo "$write"
         cat serve
         grep -q "ran in process $pid;" serve
@@ -1546,6 +1575,7 @@ in
         # No debuginfod server: without a network, each of gdb's questions
         # to it waits out a timeout.
         export REWIND_DEBUGINFOD=/nonexistent
+        ${listening}
 
         rewind run -q --clock exits --name threads --root ${gdbRoot} -- /bin/threads
         write=$(rewind events threads | grep 'write(1, "open')
@@ -1569,9 +1599,10 @@ in
         idle=
         for step in $(seq $((open - 1)) -1 $((open - 40))); do
           rewind gdb threads "$step" --listen 127.0.0.1:12350 2> serve &
-          while ! grep -q 'connect with' serve; do sleep 0.1; done
+          server=$!
+          listening $server
           gdb -q -batch -ex 'target remote 127.0.0.1:12350' -ex detach > /dev/null 2>&1
-          wait
+          wait $server
           if grep -q 'in no process' serve; then
             idle=$step
             break
@@ -2254,7 +2285,11 @@ in
         points_steps=$(rewind ls --json -n 1 | jq -r .steps)
         echo "steps: $plain_steps plain, $points_steps with points"
         test "$points_steps" -ge $((plain_steps + 20))
-        test "$(marks "$plain_id")" = "$(marks "$points_id")"
+        plain_marks=$(marks "$plain_id")
+        points_marks=$(marks "$points_id")
+        echo "marks: $plain_marks plain, $points_marks with points"
+        test "$plain_marks" -gt 0
+        test "$plain_marks" = "$points_marks"
         touch $out
       '';
 
