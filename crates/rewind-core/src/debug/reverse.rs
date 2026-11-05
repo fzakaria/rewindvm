@@ -887,6 +887,16 @@ impl Debuggee<'_> {
         }))
     }
 
+    /// Brings the fork back to `first`, the first instruction of the IDT
+    /// stub a single step forwards from `from` ran unstepped, by replaying
+    /// the run from `from` to a breakpoint there. A Ctrl-C on the way waits
+    /// for the stop; a closed connection fails.
+    pub(super) fn back_to_the_stub(&mut self, from: &Position, first: u64) -> Result<()> {
+        self.listener.begin(OnInterrupt::Wait);
+        let target = from.then(Move::Hit(GdbTrap::Breakpoint(first)));
+        self.go_to_or_retry(&target)
+    }
+
     /// The boundary before `here`, a position that ends in single steps,
     /// given `back`, the one a single step fewer. The step from `back` may
     /// have gone through an IDT stub unstepped, into the kernel's common

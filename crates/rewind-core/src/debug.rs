@@ -2035,9 +2035,21 @@ impl<'h> BlockingEventLoop for EventLoop<'h> {
         // thread on the CPU shows its user registers while the vCPU runs
         // the kernel, so its pc moves once the kernel returns to it. A
         // stepped thread that has exited cannot stop: the CPU's thread
-        // stops with no signal, which ends gdb's stepping without one.
+        // stops with no signal, which ends gdb's stepping without one. A
+        // step that ran an IDT stub unstepped, into the kernel's common
+        // exception entry, goes back to the stub's first instruction, so
+        // steps forwards visit the stub as steps back do; a fork that
+        // cannot replay its run stays at the entry.
         let step_done = |target: &mut Debuggee<'h>| {
-            target.arrived(Some(Move::Steps(1))).map_err(target_error)?;
+            let first = target.machine.skipped().first().copied();
+            match first {
+                Some(first) if target.history.is_some() && target.cannot_go_back().is_none() => {
+                    target
+                        .back_to_the_stub(&from, first)
+                        .map_err(target_error)?;
+                }
+                _ => target.arrived(Some(Move::Steps(1))).map_err(target_error)?,
+            }
             target.refresh_threads();
             Ok(Event::TargetStopped(target.step_stop()))
         };

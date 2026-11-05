@@ -414,7 +414,10 @@ step unstepped; the VMM finds them from the return address the stub's call left
 and says which they were. One instruction back from the entry is the stub's
 call, reached from the boundary before the step by a run to a breakpoint there,
 and back from each stub instruction is the one before it, then the instruction
-that faulted, so reverse-stepi visits each once. The `iretq` back from a fault
+that faulted, so reverse-stepi visits each once. A step forwards that ran a stub
+unstepped goes back, by the same kind of run, to the stub's first instruction,
+so stepi visits them too, in the other order; a fork that cannot replay its run
+stays at the entry. The `iretq` back from a fault
 loads the resume flag, which would let the faulting instruction run past the
 trap at its address, so the flag is cleared in the frame for the step and put
 back after it. A fork whose registers or memory

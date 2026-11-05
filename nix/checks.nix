@@ -1990,7 +1990,8 @@ in
   # entered the kernel by a syscall instruction, by a page fault in user
   # space, or by an invalid opcode or a privileged instruction there;
   # steps back from the kernel's exception entry go through the invalid
-  # opcode's IDT stub, one instruction at a time, to the ud2, and the
+  # opcode's IDT stub, one instruction at a time, to the ud2, steps
+  # forwards from it the same way back, and the
   # process's thread shows the registers it faulted with while the kernel
   # saves them.
   # Stepped through write()'s system call, the process's thread shows the
@@ -2423,13 +2424,15 @@ in
             grep -q '^=> 0xffffffff[0-9a-f]* <rewind_probe_signal+[0-9]*>:[[:space:]]*out ' ill
           done
 
-          # Stepped from the ud2, the CPU runs the invalid opcode's IDT stub
-          # with the trap flag cleared and stops at the entry the stubs
-          # call. Steps back from there visit the stub's instructions, its
-          # call first and its first last, then the ud2, each once.
+          # The invalid opcode's IDT stub runs with the trap flag cleared,
+          # up to the entry the stubs call. Six steps from the ud2 reach
+          # that entry; steps back from there visit the stub's
+          # instructions, its call first and its first last, then the ud2,
+          # each once.
           ud2=$(gdb -batch -ex 'disassemble main' ${gdbRoot}/bin/ill | awk '/ud2/ {print $1}')
           start=$(grep -F 'write(1, "start' events | awk '{print $1}')
-          printf '%s\n' "break *$ud2" continue delete stepi 'thread 1' 'x/i $pc' > stub.gdb
+          printf '%s\n' "break *$ud2" continue delete stepi stepi stepi stepi stepi stepi \
+            'thread 1' 'x/i $pc' > stub.gdb
           for _ in 1 2 3 4 5 6; do
             printf '%s\n' reverse-stepi 'thread 1' 'x/i $pc' >> stub.gdb
           done
@@ -2449,6 +2452,30 @@ in
           sed -n '2,6p' visited | cut -d' ' -f1 | sed 's/^asm_exc_invalid_op+\{0,1\}//' \
             | sed 's/^$/0/' > offsets
           sort -n -r -u offsets | cmp - offsets
+          test "$(wc -l < offsets)" = 5
+
+          # Forwards from the ud2 the steps visit the same instructions in
+          # the other order: the stub's first to its call, then the entry.
+          printf '%s\n' "break *$ud2" continue delete > forward.gdb
+          for _ in 1 2 3 4 5 6; do
+            printf '%s\n' stepi 'thread 1' 'x/i $pc' >> forward.gdb
+          done
+          status=0
+          timeout -k 5 300 rewind gdb "ill-$clock" "$start" -- -batch -x forward.gdb > forward 2>&1 \
+            || status=$?
+          cat forward
+          test "$status" != $timeout_term
+          test "$status" != $timeout_kill
+          sed -n 's/^=> 0x[0-9a-f]* <\([^>]*\)>:[[:space:]]*\([a-z0-9]*\).*/\1 \2/p' forward \
+            > forwards
+          cat forwards
+          test "$(wc -l < forwards)" = 6
+          test "$(sed -n 1p forwards | cut -d' ' -f1)" = asm_exc_invalid_op
+          test "$(sed -n 5p forwards | cut -d' ' -f2)" = call
+          test "$(sed -n 6p forwards | cut -d' ' -f1)" = error_entry
+          sed -n '1,5p' forwards | cut -d' ' -f1 | sed 's/^asm_exc_invalid_op+\{0,1\}//' \
+            | sed 's/^$/0/' > offsets
+          sort -n -u offsets | cmp - offsets
           test "$(wc -l < offsets)" = 5
 
           # Stepped from the ud2 into the kernel, 200 steps through the stub,
