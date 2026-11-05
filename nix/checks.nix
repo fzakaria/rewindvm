@@ -1991,7 +1991,8 @@ in
   # space, or by an invalid opcode or a privileged instruction there. A
   # run forwards stops before the
   # process's exec, whose new program it never runs into, says so, and
-  # refuses to go on; a step back from there stops at the out before it,
+  # refuses to go on, a stepi 100 once; a step back from there stops at
+  # the out before it,
   # in the CPU's thread. A kernel breakpoint between the exec's switch to
   # the new page table and its record does not stop it. A session at the
   # step the message names stops in the new program. A Ctrl-C in a step back across 10 million
@@ -2409,6 +2410,17 @@ in
           test "$(sed -n 2p pcs)" != "$(sed -n 3p pcs)"
           test "$(sed -n 3p pcs | grep -c '^(void (\*)()) 0xffffffff[0-9a-f]* <rewind_emit+[0-9]*>$')" = 1
           test "$(grep -c 'Thread 2 received signal' exec)" = 0
+
+          # A stepi 100 at the stop before the exec is refused once, as the
+          # end of the fork's history, which ends gdb's stepping: a SIGTRAP
+          # in the stepped thread would read to gdb as a step done, and it
+          # would ask 99 times more. The fork stays where it stopped.
+          timeout 300 rewind gdb "exec-$clock" "$first" -- -batch -ex continue \
+            -ex 'stepi 100' -ex 'print $pc' > stepped 2>&1
+          cat stepped
+          test "$(grep -c "$said" stepped)" = 2
+          test "$(grep -c 'Reached end of recorded history' stepped)" = 1
+          test "$(sed -n 's/^\$1 = //p' stepped)" = "$(sed -n 1p pcs)"
 
           # A kernel breakpoint in the exec's tail, after the kernel moved
           # the process to the new program's page table and before the

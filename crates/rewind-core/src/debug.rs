@@ -1659,15 +1659,26 @@ impl Debuggee<'_> {
     }
 
     /// The stop gdb is told of where the fork stopped for an exec of the
-    /// debugged process: a SIGTRAP, as at a refused run backwards, in the
-    /// process's thread gdb stepped, else in the thread a stop there
-    /// names. gdb's own words for the end of a replay log say forward
-    /// execution goes on into new history, which it does not here.
-    fn exec_stop_reason(&self) -> Result<MultiThreadStopReason<u64>> {
+    /// debugged process, or refused to run on from there, after gdb asked
+    /// for `mode`: in the process's thread gdb stepped, else in the thread
+    /// a stop there names. A continue gets a SIGTRAP, as at a refused run
+    /// backwards; gdb's own words for the end of a replay log say forward
+    /// execution goes on into new history, which it does not here. A step
+    /// gets the end of the replay log all the same: gdb takes a SIGTRAP in
+    /// the thread it steps for a step done and asks for the next, so
+    /// `stepi 100` was refused a hundred times, while the log's end ends
+    /// any command.
+    fn exec_stop_reason(&self, mode: Mode) -> Result<MultiThreadStopReason<u64>> {
         let tid = match self.stepped {
             Some(tid) if matches!(self.source(tid), Some(Source::Task(..))) => tid,
             _ => self.stopped_thread()?,
         };
+        if mode == Mode::Step {
+            return Ok(MultiThreadStopReason::ReplayLog {
+                tid: Some(tid),
+                pos: ReplayLogPosition::End,
+            });
+        }
         Ok(MultiThreadStopReason::SignalWithThread {
             tid,
             signal: Signal::SIGTRAP,
@@ -1839,10 +1850,11 @@ impl<'h> BlockingEventLoop for EventLoop<'h> {
         {
             eprintln!("rewind: {}", stop.said);
             target.refresh_threads();
-            let reason = target.exec_stop_reason().map_err(target_error)?;
+            let reason = target.exec_stop_reason(target.mode).map_err(target_error)?;
             return Ok(Event::TargetStopped(reason));
         }
         let from = target.position.clone();
+        let asked = target.mode;
         let traps = target.traps.registers();
         target
             .machine
@@ -1947,7 +1959,7 @@ impl<'h> BlockingEventLoop for EventLoop<'h> {
                 if conn.peek().map_err(WaitForStopReasonError::Connection)? == Some(INTERRUPT) {
                     conn.read().map_err(WaitForStopReasonError::Connection)?;
                 }
-                let reason = target.exec_stop_reason().map_err(target_error)?;
+                let reason = target.exec_stop_reason(asked).map_err(target_error)?;
                 return Ok(Event::TargetStopped(reason));
             }
             match outcome {

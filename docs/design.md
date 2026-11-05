@@ -343,7 +343,9 @@ answers it: stopped short, the fork could be past the switch to the new page
 table, or before where the run forwards began. Rewind prints which program the process runs and at
 which step, and that `rewind gdb RUN STEP` at that step debugs the new program,
 and gdb sees a SIGTRAP. A run forwards from there is refused with the same
-words. Going back works as before, since everything before the stop is the old
+words. A step gets the end of the replay log instead, at the stop and at a
+refusal: gdb takes a SIGTRAP in the thread it steps for a step done, so `stepi
+100` would be refused a hundred times, and the log's end ends the command. Going back works as before, since everything before the stop is the old
 program's. A fork that cannot go back, because gdb changed it or it left its
 recording, stops at the exec's record, after the exec, and says why.
 
