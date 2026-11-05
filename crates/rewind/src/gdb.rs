@@ -1836,7 +1836,13 @@ impl Debuginfod {
     /// session's server is using.
     fn start(home: &Home) -> Option<Debuginfod> {
         let program = debuginfod_program()?;
-        let cache = debuginfod_cache::take(&home.debuginfod_cache()).ok()?;
+        Debuginfod::start_program(&program, &home.debuginfod_cache())
+    }
+
+    /// Starts `program` as [`Debuginfod::start`] starts the server, with
+    /// its cache in a directory under `caches`.
+    fn start_program(program: &Path, caches: &Path) -> Option<Debuginfod> {
+        let cache = debuginfod_cache::take(caches).ok()?;
         let listener = TcpListener::bind(GDB_LOCAL).ok()?;
         let url = format!("http://{}", listener.local_addr().ok()?);
         let fd = listener.as_raw_fd();
@@ -1847,7 +1853,7 @@ impl Debuginfod {
         let mut cmd = Command::new("/bin/sh");
         cmd.arg("-c")
             .arg(r#"export LISTEN_PID=$$ LISTEN_FDS=1; exec "$0" "$@""#)
-            .arg(&program);
+            .arg(program);
         for substituter in DEBUGINFOD_SUBSTITUTERS {
             cmd.args(["--substituter", substituter]);
         }
@@ -1861,9 +1867,11 @@ impl Debuginfod {
 
         // The server ends with rewind however rewind ends, even by a signal
         // that skips Drop, as when the app cancels a lookup by stopping
-        // its process group, which the server is not in. Starting it on a
-        // thread that ends sooner would end it then too; `Symbols::load`
-        // runs on the thread the command runs on.
+        // its process group, which the server is not in. The kernel ties
+        // that death signal to the thread that forks, so the server is
+        // forked by `spawn_lasting`'s thread, which lasts as long as
+        // rewind does, and not by this one, which may be a scoped thread
+        // that ends as soon as the symbols are loaded.
         let parent = std::process::id();
         // SAFETY: prctl, getppid, dup2 and fcntl are async-signal-safe.
         unsafe {
@@ -1902,7 +1910,7 @@ impl Debuginfod {
                 Ok(())
             });
         }
-        let child = cmd.spawn().ok()?;
+        let child = spawn_lasting(cmd).ok()?;
         Some(Debuginfod {
             child,
             url,
@@ -1916,6 +1924,46 @@ impl Drop for Debuginfod {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+/// A command for [`spawn_lasting`]'s thread to spawn, and where it sends
+/// the child back.
+type SpawnRequest = (Command, std::sync::mpsc::Sender<std::io::Result<Child>>);
+
+/// Spawns `command` from a thread that runs until rewind exits, so a child
+/// that asks with PR_SET_PDEATHSIG to die with its parent dies with rewind
+/// and not with the thread that called this. The thread is started on the
+/// first call.
+fn spawn_lasting(command: Command) -> std::io::Result<Child> {
+    static SPAWNER: std::sync::OnceLock<Option<std::sync::mpsc::Sender<SpawnRequest>>> =
+        std::sync::OnceLock::new();
+
+    // The spawning thread, which waits for commands for as long as rewind
+    // runs, since the sender it waits on is never dropped.
+    let spawner = SPAWNER.get_or_init(|| {
+        let (requests, waiting) = std::sync::mpsc::channel::<SpawnRequest>();
+        std::thread::Builder::new()
+            .name("spawner".into())
+            .spawn(move || {
+                for (mut command, reply) in waiting {
+                    let _ = reply.send(command.spawn());
+                }
+            })
+            .ok()?;
+        Some(requests)
+    });
+    let Some(spawner) = spawner else {
+        return Err(std::io::Error::other("no thread to start the server on"));
+    };
+
+    // The command goes to the thread, and the child comes back.
+    let (reply, child) = std::sync::mpsc::channel();
+    spawner
+        .send((command, reply))
+        .map_err(|_| std::io::Error::other("the spawning thread ended"))?;
+    child
+        .recv()
+        .map_err(|_| std::io::Error::other("the spawning thread ended"))?
 }
 
 /// The server's program: the one the Nix package names, fetched the first
@@ -2447,6 +2495,45 @@ mod tests {
             Some(new)
         );
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Starts a stand-in server, a script that sleeps, on a thread that
+    /// then ends, as `rewind blame` loads its symbols beside its fork, and
+    /// checks the server still runs once the thread is gone. The kernel
+    /// kills a child that asked to die with its parent when the thread
+    /// that forked it exits, so a short wait after the join sees it.
+    #[test]
+    fn the_server_outlives_the_thread_that_started_it() {
+        const SETTLE: std::time::Duration = std::time::Duration::from_millis(300);
+        const SERVER: &str = "#!/bin/sh\nexec sleep 60\n";
+        const EXECUTABLE: u32 = 0o755;
+
+        // The stand-in server and the directory its caches go under.
+        let dir = std::env::temp_dir().join(format!("rewind-server-thread-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let program = dir.join("server");
+        std::fs::write(&program, SERVER).unwrap();
+        std::fs::set_permissions(
+            &program,
+            std::os::unix::fs::PermissionsExt::from_mode(EXECUTABLE),
+        )
+        .unwrap();
+
+        // The server started on a thread of its own, which ends.
+        let caches = dir.join("caches");
+        let server = std::thread::scope(|scope| {
+            scope
+                .spawn(|| Debuginfod::start_program(&program, &caches))
+                .join()
+                .unwrap()
+        });
+        let mut server = server.expect("the stand-in server starts");
+
+        // The server is still running after the thread ended.
+        std::thread::sleep(SETTLE);
+        assert_eq!(server.child.try_wait().unwrap(), None);
+        drop(server);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// Looks for a program in a PATH-like list of directories: a temporary
