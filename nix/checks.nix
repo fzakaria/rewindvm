@@ -410,11 +410,12 @@ let
           -o $out/bin/piped $out/src/piped.c
 
         # The main thread waits in recv() for 16 bytes of a socket while a
-        # second thread sends 5, sleeps, and signals it. The kernel copies
-        # the 5 bytes into the buffer, waits on, and returns them once the
-        # signal comes, into the handler. The first argument picks what the
-        # handler does: write() and return (r), _exit (e), or siglongjmp
-        # back into main (j).
+        # second thread sends 5, sleeps, writes a global, and signals it.
+        # The kernel copies the 5 bytes into the buffer, waits on, and
+        # returns them once the signal comes, into the handler. The first
+        # argument picks what the handler does: write() and return (r),
+        # _exit (e), or siglongjmp back into main (j); or with k, there is
+        # no handler, and the signal kills the process in the recv.
         cat > $out/src/handled.c <<'EOF'
         #include <pthread.h>
         #include <setjmp.h>
@@ -427,6 +428,7 @@ let
         int fds[2];
         pthread_t reader;
         char mode;
+        int other;
         sigjmp_buf back;
 
         void handler(int sig)
@@ -449,6 +451,7 @@ let
           nanosleep(&pause, 0);
           send(fds[1], "hello", 5, 0);
           nanosleep(&pause, 0);
+          other = 1;
           signal_reader();
           return 0;
         }
@@ -458,7 +461,8 @@ let
           struct sigaction action = { .sa_handler = handler };
           pthread_t thread;
           mode = argv[1][0];
-          sigaction(SIGUSR1, &action, 0);
+          if (mode != 'k')
+            sigaction(SIGUSR1, &action, 0);
           socketpair(AF_UNIX, SOCK_STREAM, 0, fds);
           reader = pthread_self();
           write(1, "start\n", 6);
@@ -472,6 +476,26 @@ let
         EOF
         $CC -static -O0 -g -pthread -fdebug-prefix-map=$out/src=/src \
           -o $out/bin/handled $out/src/handled.c
+
+        # One read() of a 1 MiB file, of x's, into a buffer as large.
+        head -c 1048576 /dev/zero | tr '\0' x > $out/large
+        cat > $out/src/large.c <<'EOF'
+        #include <fcntl.h>
+        #include <unistd.h>
+
+        char buffer[1 << 20];
+
+        int main(void)
+        {
+          int fd = open("/large", O_RDONLY);
+          write(1, "start\n", 6);
+          read(fd, buffer, sizeof buffer); /* the read */
+          write(1, "done\n", 5);
+          return 0;
+        }
+        EOF
+        $CC -static -O0 -g -fdebug-prefix-map=$out/src=/src \
+          -o $out/bin/large $out/src/large.c
 
         # One program adds to a global in a loop, then execs the other,
         # which calls a function three times.
@@ -1892,7 +1916,10 @@ in
   # after the kernel's copy, a signal handler's, whether the handler
   # returns, exits or jumps out; a breakpoint another thread hits on the
   # way stops after the watch, and runs forwards and back from there stop
-  # the same each time. A run forwards stops before the
+  # the same each time. So does another thread's write to a second watch,
+  # after the kernel's. Two watches the call writes stop once each, and a
+  # thread a signal kills in the call stops as it exits. A watch on a 1 MiB
+  # read() stops in seconds. A run forwards stops before the
   # process's exec, whose new program it never runs into, says so, and
   # refuses to go on; a step back from there works, and a session at the
   # step the message names stops in the new program. A Ctrl-C in a step back across 10 million
@@ -2081,7 +2108,7 @@ in
             test "$(grep -c 'hit Hardware watchpoint 1: buffer' "handled-$mode")" = 1
             grep -A4 'Thread 2 hit Hardware watchpoint 1: buffer' "handled-$mode" > stop
             grep -q 'New value = "hello' stop
-            grep -q '^handler (sig=[0-9]*) at .*handled.c:15$' stop
+            grep -q '^handler (sig=[0-9]*) at .*handled.c:16$' stop
             grep -q '<signal handler called>' "handled-$mode"
             grep -q 'Thread 2 hit Breakpoint 2, handler (sig=10)' "handled-$mode"
             test "$(grep -c 'in write ()\|rep_movs\|copy_user' "handled-$mode")" = 0
@@ -2122,6 +2149,108 @@ in
           grep -q '^=> 0x[0-9a-f]* <[^>]*>:[[:space:]]*syscall' handled-other
           test "$(grep -A1 'Old value = "hello' handled-other | grep -c 'New value = .\\000. <repeats 15 times>$')" = 1
           test "$(grep -c 'rep_movs\|copy_user' handled-other)" = 0
+
+          # A watch on the buffer's first byte, and one on the global the
+          # second thread writes while the main thread waits in the
+          # kernel: the kernel's write is told of first, when the second
+          # thread writes, in the main thread, then the second thread's
+          # write, then the handler's breakpoint. Run back, the second
+          # thread's write stops, then the kernel's, at the recv's syscall
+          # instruction, and forwards again, the two in the same order.
+          status=0
+          timeout -k 5 300 rewind gdb "handled-r-$clock" "$start" -- -batch \
+            -ex 'watch buffer[0]' -ex 'watch other' -ex 'break handler' -ex continue \
+            -ex continue -ex continue -ex reverse-continue -ex reverse-continue -ex 'x/i $pc' \
+            -ex continue -ex continue > handled-second 2>&1 || status=$?
+          cat handled-second
+          test "$status" != $timeout_term
+          test "$status" != $timeout_kill
+          grep 'hit ' handled-second | sed 's/,.*//' > hits
+          {
+            echo 'Thread 2 hit Hardware watchpoint 1: buffer[0]'
+            echo 'Thread 3 hit Hardware watchpoint 2: other'
+            echo 'Thread 2 hit Breakpoint 3'
+            echo 'Thread 3 hit Hardware watchpoint 2: other'
+            echo 'Thread 2 hit Hardware watchpoint 1: buffer[0]'
+            echo 'Thread 2 hit Hardware watchpoint 1: buffer[0]'
+            echo 'Thread 3 hit Hardware watchpoint 2: other'
+          } > expected
+          diff expected hits
+          grep -q '^=> 0x[0-9a-f]* <[^>]*>:[[:space:]]*syscall' handled-second
+          test "$(grep -A1 'Old value = 0$' handled-second | grep -c 'New value = 1$')" = 2
+          test "$(grep -A1 'Old value = 1$' handled-second | grep -c 'New value = 0$')" = 1
+
+          # Watches on two bytes the one recv() writes: each is told of,
+          # one stop each, at the handler's first instruction, and the
+          # handler's breakpoint stops after them. Run back, the two stop
+          # again, one stop each, at the recv's syscall instruction, and
+          # forwards again, at the handler's first instruction.
+          status=0
+          timeout -k 5 300 rewind gdb "handled-r-$clock" "$start" -- -batch \
+            -ex 'watch buffer[0]' -ex 'watch buffer[4]' -ex 'break handler' -ex continue \
+            -ex continue -ex continue -ex reverse-continue -ex reverse-continue -ex 'x/i $pc' \
+            -ex continue -ex continue > handled-two 2>&1 || status=$?
+          cat handled-two
+          test "$status" != $timeout_term
+          test "$status" != $timeout_kill
+          grep 'hit ' handled-two | sed 's/,.*//' > hits
+          {
+            echo 'Thread 2 hit Hardware watchpoint 1: buffer[0]'
+            echo 'Thread 2 hit Hardware watchpoint 2: buffer[4]'
+            echo 'Thread 2 hit Breakpoint 3'
+            echo 'Thread 2 hit Hardware watchpoint 2: buffer[4]'
+            echo 'Thread 2 hit Hardware watchpoint 1: buffer[0]'
+            echo 'Thread 2 hit Hardware watchpoint 1: buffer[0]'
+            echo 'Thread 2 hit Hardware watchpoint 2: buffer[4]'
+          } > expected
+          diff expected hits
+          test "$(grep -c '^handler (sig=[0-9]*) at .*handled.c:16$' handled-two)" = 4
+          grep -q '^=> 0x[0-9a-f]* <[^>]*>:[[:space:]]*syscall' handled-two
+          test "$(grep -c "New value = 104 'h'" handled-two)" = 2
+          test "$(grep -c "New value = 111 'o'" handled-two)" = 2
+          test "$(grep -A1 "Old value = 104 'h'" handled-two | grep -c "New value = 0 ")" = 1
+          test "$(grep -A1 "Old value = 111 'o'" handled-two | grep -c "New value = 0 ")" = 1
+
+          # With no handler, the signal kills the process in recv(), whose
+          # call never returns: the watch is told of as the main thread
+          # exits, in that thread, with "hello" in the buffer, and the run
+          # goes on to its end.
+          status=0
+          rewind run -q --clock "$clock" --name "handled-k-$clock" --root ${gdbRoot} \
+            -- /bin/handled k > /dev/null || status=$?
+          test "$status" = 138
+          start=$(rewind events "handled-k-$clock" | grep 'write(1, "start' | awk '{print $1}')
+          status=0
+          timeout -k 5 300 rewind gdb "handled-k-$clock" "$start" -- -batch -ex 'watch buffer' \
+            -ex continue -ex bt -ex continue > handled-k 2>&1 || status=$?
+          cat handled-k
+          test "$status" != $timeout_term
+          test "$status" != $timeout_kill
+          test "$(grep -c 'hit Hardware watchpoint 1: buffer' handled-k)" = 1
+          grep -A3 'Thread 2 hit Hardware watchpoint 1: buffer' handled-k > stop
+          grep -q 'New value = "hello' stop
+          grep -q 'in main (.*) at .*handled.c' handled-k
+
+          # A watch on the first byte of a 1 MiB read() stops once, after
+          # the read returns, at the instruction after its syscall
+          # instruction, in under 5 seconds: the kernel copies the rest at
+          # full speed, not a single step at a time, which took 14.
+          rewind run -q --clock "$clock" --name "large-$clock" --root ${gdbRoot} \
+            -- /bin/large > /dev/null
+          start=$(rewind events "large-$clock" | grep 'write(1, "start' | awk '{print $1}')
+          status=0
+          began=$(date +%s%N)
+          timeout -k 5 300 rewind gdb "large-$clock" "$start" -- -batch -ex 'watch buffer[0]' \
+            -ex continue -ex 'x/2xb $pc-2' -ex continue > large 2>&1 || status=$?
+          took=$(( ($(date +%s%N) - began) / 1000000 ))
+          cat large
+          echo "the large read's session took $took ms"
+          test "$status" != $timeout_term
+          test "$status" != $timeout_kill
+          test "$(grep -c 'hit Hardware watchpoint 1: buffer\[0\]' large)" = 1
+          grep -q "New value = 120 'x'" large
+          grep -q '^0x[0-9a-f]* <[^>]*>:[[:space:]]*0x0f[[:space:]]*0x05$' large
+          test "$took" -lt 5000
 
           # From the first program's first write, a continue stops before
           # the exec, at the start of the step that runs it, where the

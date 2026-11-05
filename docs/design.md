@@ -350,23 +350,33 @@ returns, or a signal handler's first when the kernel delivers a signal on the
 way out. gdb sees the value as the call left it, as with rr. No address is
 matched, since a handler can make a call from the same instruction, and a
 handler that never returns, by `_exit` or `siglongjmp`, still starts in user
-space. From the write on, the fork runs with gdb's traps set. While the thread
-is on the CPU in the kernel it is single-stepped, and the trap the VMM sets at
-the kernel's `sysretq` or `iretq` ends the step that returns to user space.
-While the thread is off the CPU, a write watch on the kernel's variable for the
-running task stops the fork at each task switch, to see when the thread is
-back. Each single step and switch is a move of the fork's position, so a replay
-comes to the same stop. A breakpoint of gdb's hit on the way, in another
-thread or in the kernel, or a Ctrl-C, stops with the write reported first, in
-its thread, which gdb shows at the instruction after its syscall instruction;
-the breakpoint, hit again at once, stops the next `continue`. gdb reads a
-watch's value only at a stop it is told is the watch's, so with the write
-reported before any later stop, gdb holds the value the kernel wrote wherever
-the fork stops past it, and a run backwards over the write sees the value
-change. Another watched write on the way, by another thread, stops there in
-place of the kernel's. A write by the kernel outside a system call, in an exit
-or an exec, or with every debug register a read-write watch, which leaves none
-for the trap at the kernel's return, stops at the write, in the CPU's thread.
+space. From the write on, the fork runs with gdb's traps set and two watches on
+the thread: a read-write watch on the pc it saved, which the kernel reads to
+return it to user space, by `sysretq` or `iretq`, and a write watch on its
+task's pointer to its memory, which the kernel clears as the thread exits.
+Neither is hit by the copy, so a 1 MiB `read()` runs at full speed. At the read
+on the thread's way out, the fork single-steps the rest of the way, about 50
+instructions after a system call and 330 after the kernel sets up a signal's
+frame, and the trap the VMM sets at `sysretq` ends the step that returns to user
+space; after `iretq` the read's trap is already in user space. Each hit and
+single step is a move of the fork's position, so a replay comes to the same
+stop. A thread killed in the call, which never returns, has its write reported
+as it exits, while its memory is still there to read.
+
+gdb reads a watch's value only at a stop it is told is that watch's, so every
+event past a kernel write is reported after the write, and an event that is
+several stops is reported one stop at a time. A breakpoint, a Ctrl-C, the end
+of the run, or another thread's watched write on the way stops with the
+waiting write reported first, in its thread, which gdb shows at the instruction
+after its syscall instruction. The rest are queued at the fork's position: the
+next `continue`, `stepi` or reverse command from there reports the next one
+without running, and a fork that moved drops them. A call that writes two
+watches is two stops, one for each watch. A run backwards to a watched write
+queues a stop for each other watch whose value it changed, such as both of a
+call's. A kernel write in a second thread's call while one waits, a write
+outside a system call or in an exit or an exec, or one with gdb's watches and
+hardware breakpoints holding more than two debug registers, stops at the write,
+in the CPU's thread.
 
 A step's start comes from a checkpoint the fork keeps in memory: the vCPU,
 the interrupt controllers and the monitor's state, and the pages written

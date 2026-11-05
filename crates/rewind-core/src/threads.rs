@@ -225,6 +225,21 @@ impl<'a, M: Memory + ?Sized> Tasks<'a, M> {
         Ok(words)
     }
 
+    /// The address of word `word` of the user registers a task saved, in
+    /// struct pt_regs at the top of its stack, by [`pt_regs`]'s indexes.
+    pub fn user_register_address(&self, task: u64, word: usize) -> Result<u64> {
+        let Some(stack) = self.stack(task)? else {
+            bail!("thread {} has exited", self.tid(task)?);
+        };
+        Ok(stack + self.layout.pt_regs + (word * POINTER_LEN) as u64)
+    }
+
+    /// The address of a task struct's pointer to its memory, which the
+    /// kernel clears as the task exits.
+    pub fn mm_address(&self, task: u64) -> u64 {
+        task + self.layout.mm
+    }
+
     /// The user FS and GS bases a task saved when it last left the CPU, in
     /// its struct thread_struct. A task on the CPU has its live bases in
     /// the CPU's registers instead.
@@ -493,6 +508,19 @@ mod tests {
         assert_eq!(regs[pt_regs::R15], 100);
         assert_eq!(regs[pt_regs::RIP], 100 + pt_regs::RIP as u64);
         assert_eq!(regs[pt_regs::SS], 100 + pt_regs::SS as u64);
+    }
+
+    /// The address of a word of a thread's saved user registers is the
+    /// one user_registers reads it from, at the top of its stack.
+    #[test]
+    fn a_saved_register_is_at_the_top_of_the_stack() {
+        let (fake, [_, t41, _]) = kernel();
+        let l = layout();
+        let tasks = Tasks::new(&fake, l);
+        let address = tasks.user_register_address(t41, pt_regs::RIP).unwrap();
+        fake.put_u64(address, 0x40_1936);
+        assert_eq!(tasks.user_registers(t41).unwrap()[pt_regs::RIP], 0x40_1936);
+        assert_eq!(tasks.mm_address(t41), t41 + l.mm);
     }
 
     /// A thread's FS and GS bases are the ones its task saved when it last
