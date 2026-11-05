@@ -472,11 +472,17 @@ pub(super) type Checkpoints = BTreeMap<u64, CheckpointId>;
 impl Debuggee<'_> {
     /// Notes where a forward stop left the fork: at another step's start,
     /// or `mv` further into the step it was in. A stop at a step's start
-    /// completes the step's pending exit, as a replay to it does.
+    /// completes the step's pending exit, as a replay to it does. A single
+    /// step into another step ran the instruction that made the exit
+    /// starting it, and stops where the step starts, as a replay to the
+    /// start leaves the fork, with no step after it.
     pub(super) fn arrived(&mut self, mv: Option<Move>) -> Result<()> {
         let step = self.machine.step();
         if step != self.position.step {
             self.position = Position::start(step);
+            if mv == Some(Move::Steps(1)) {
+                return Ok(());
+            }
         }
         match mv {
             Some(mv) => self.position = self.position.then(mv),

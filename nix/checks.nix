@@ -2355,6 +2355,22 @@ in
             grep -q '^=> 0xffffffff[0-9a-f]* <rewind_emit+[0-9]*>:[[:space:]]*out ' last
           done
 
+          # A stepi over the out that made the write's record lands where
+          # that step starts, and a reverse-stepi from there goes back to
+          # the out: the stop is the step's start, with no step after it.
+          step=$(grep -F 'write(1, "last' events | awk '{print $1}')
+          status=0
+          timeout -k 5 300 rewind gdb "last-$clock" "$step" -- -batch -ex 'thread 1' \
+            -ex reverse-stepi -ex 'print $pc' -ex stepi -ex 'print $pc' -ex reverse-stepi \
+            -ex 'print $pc' > over 2>&1 || status=$?
+          cat over
+          test "$status" != $timeout_term
+          test "$status" != $timeout_kill
+          grep '^\$[123] = ' over | sed 's/^\$[0-9]* = //' > pcs
+          test "$(wc -l < pcs)" = 3
+          test "$(sed -n 1p pcs)" = "$(sed -n 3p pcs)"
+          test "$(sed -n 1p pcs)" != "$(sed -n 2p pcs)"
+
           # gdb steps the process's thread from write()'s syscall
           # instruction through the kernel until it returns. Until then the
           # thread shows the user pc and sp the call entered with, also in
