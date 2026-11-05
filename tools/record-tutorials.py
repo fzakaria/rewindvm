@@ -98,6 +98,21 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 TEMPLATES = REPO / "docs" / "templates"
 
+
+def git_repo() -> Path:
+    """The git repository holding the recorded commit. A jj workspace
+    other than the first has no .git of its own; jj names the repository
+    its commits are in."""
+    if (REPO / ".git").exists():
+        return REPO
+    git_dir = subprocess.run(
+        ["jj", "git", "root"], cwd=REPO, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    return Path(git_dir).parent
+
+
+GIT_REPO = git_repo()
+
 # The repository as the pages name it.
 GITHUB_FLAKE = re.compile(r"github:fzakaria/rewindvm(\?[^#\s'\"]*)?")
 
@@ -323,12 +338,12 @@ def build(rev):
     """The store paths of OUTPUTS at `rev`, from the repository as git has
     it, so neither uncommitted files nor build products go into the store."""
     commit = subprocess.run(
-        ["git", "-C", str(REPO), "rev-parse", rev],
+        ["git", "-C", str(GIT_REPO), "rev-parse", rev],
         capture_output=True,
         text=True,
         check=True,
     ).stdout.strip()
-    refs = [f"git+file://{REPO}?rev={commit}#{o}" for o in OUTPUTS]
+    refs = [f"git+file://{GIT_REPO}?rev={commit}#{o}" for o in OUTPUTS]
     paths = subprocess.run(
         ["nix", "build", "--no-link", "--print-out-paths", *refs],
         capture_output=True,
@@ -415,9 +430,9 @@ class Recording:
         # main, and the quiet checkout after it prints nothing.
         if m := GITHUB_CLONE.fullmatch(command):
             into = shlex.quote(m.group(1) or "rewindvm")
-            return f"git clone -q --no-checkout {shlex.quote(str(REPO))} {into} && git -C {into} checkout -q {self.commit}"
+            return f"git clone -q --no-checkout {shlex.quote(str(GIT_REPO))} {into} && git -C {into} checkout -q {self.commit}"
 
-        local = f"git+file://{REPO}?rev={self.commit}"
+        local = f"git+file://{GIT_REPO}?rev={self.commit}"
 
         def one(m):
             query = m.group(1)
