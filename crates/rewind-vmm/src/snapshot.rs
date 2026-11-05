@@ -397,6 +397,7 @@ impl Machine {
         self.work_base = d.branches;
         self.branch_stop = None;
         self.crossing = None;
+        self.exception_trap = None;
         Ok(())
     }
 }

@@ -333,6 +333,10 @@ pub struct Machine {
     /// `syscall` or out of it at its return to user space, trapped in a
     /// debug register (debug.rs).
     pub(crate) crossing: Option<debug::Crossing>,
+    /// The kernel's exception entry, trapped in a free debug register for
+    /// a single step whose instruction may fault or meet an interrupt
+    /// (debug.rs).
+    pub(crate) exception_trap: Option<debug::Crossing>,
 }
 
 /// Where a machine's memory started.
@@ -466,6 +470,7 @@ impl Machine {
             checkpoints: checkpoint::Checkpoints::default(),
             branch_stop: None,
             crossing: None,
+            exception_trap: None,
         })
     }
 

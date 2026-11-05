@@ -571,6 +571,38 @@ let
         EOF
         $CC -static -O1 -g -fdebug-prefix-map=$out/src=/src \
           -o $out/bin/spin $out/src/spin.c
+
+        # One program runs ud2, an invalid opcode, whose SIGILL handler runs
+        # hlt, which user space may not, and whose SIGSEGV handler exits.
+        cat > $out/src/ill.c <<'EOF'
+        #include <signal.h>
+        #include <unistd.h>
+
+        static void on_segv(int sig)
+        {
+          (void)sig;
+          write(1, "segv\n", 5);
+          _exit(0);
+        }
+
+        static void on_ill(int sig)
+        {
+          (void)sig;
+          write(1, "ill\n", 4);
+          __asm__ volatile("hlt");
+        }
+
+        int main(void)
+        {
+          signal(SIGILL, on_ill);
+          signal(SIGSEGV, on_segv);
+          write(1, "start\n", 6);
+          __asm__ volatile("ud2");
+          return 1;
+        }
+        EOF
+        $CC -static -O1 -g -fdebug-prefix-map=$out/src=/src \
+          -o $out/bin/ill $out/src/ill.c
       '';
 
   # A root with a static program in two files, like mylib: main hands a
@@ -1955,8 +1987,9 @@ in
   # read() stops in seconds. A reverse-stepi from the start of the step
   # of a record the kernel made in write() or exit_group() stops in the
   # kernel, at the out that made the record, though the step before
-  # entered the kernel by a syscall instruction, or by a page fault in
-  # user space. A run forwards stops before the
+  # entered the kernel by a syscall instruction, by a page fault in user
+  # space, or by an invalid opcode or a privileged instruction there. A
+  # run forwards stops before the
   # process's exec, whose new program it never runs into, says so, and
   # refuses to go on; a step back from there stops at the out before it,
   # in the CPU's thread. A kernel breakpoint between the exec's switch to
@@ -2328,6 +2361,23 @@ in
           cat fault
           test "$(grep -c 'fatal error\|Remote connection closed' fault)" = 0
           grep -q '^=> 0xffffffff[0-9a-f]* <rewind_console_write+[0-9]*>:[[:space:]]*out ' fault
+
+          # An invalid opcode and a privileged instruction in user space,
+          # #UD then #GP, enter the kernel's exception entry with the trap
+          # flag cleared, and each handler records its signal. A
+          # reverse-stepi from the step of each signal's record stops at
+          # the out that made it, not at the faulting instruction.
+          rewind run -q --clock "$clock" --name "ill-$clock" --root ${gdbRoot} \
+            -- /bin/ill > /dev/null
+          rewind events "ill-$clock" > events
+          for signal in SIGILL SIGSEGV; do
+            step=$(grep "$signal code=" events | awk '{print $1}')
+            timeout -k 5 300 rewind gdb "ill-$clock" "$step" -- -batch -ex reverse-stepi \
+              -ex 'thread 1' -ex 'x/i $pc' > ill 2>&1 || test $? -lt 124
+            cat ill
+            test "$(grep -c 'fatal error\|Remote connection closed' ill)" = 0
+            grep -q '^=> 0xffffffff[0-9a-f]* <rewind_probe_signal+[0-9]*>:[[:space:]]*out ' ill
+          done
 
           # From the first program's first write, a continue stops before
           # the exec, at the start of the step that runs it, where the

@@ -213,13 +213,12 @@ fn db_exit(dr6: u64, traps: &[Trap], debugger: Stepping, machine: Stepping) -> D
 }
 
 /// Where a single step across the kernel's boundary ends, the debug
-/// register that traps the address, whether the step surely crosses, and
-/// the flags of an `iretq` frame to put back once it has.
+/// register that traps the address, and the flags of an `iretq` frame to
+/// put back once it has.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Crossing {
     address: u64,
     register: usize,
-    across: Across,
     restore: Option<SavedFlags>,
 }
 
@@ -231,18 +230,8 @@ struct SavedFlags {
     flags: u64,
 }
 
-/// Whether a single step crosses the kernel's boundary.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Across {
-    /// Always: the instruction enters the kernel or returns from it.
-    Always,
-    /// When the instruction faults into the kernel's handler; else the
-    /// step ends at its own trap, as any other does.
-    OnFault,
-}
-
 /// The exception a page fault raises. The CPU enters its handler, as any
-/// exception's, with the trap flag cleared.
+/// exception's or interrupt's, with the trap flag cleared.
 const PF_VECTOR: u64 = 14;
 
 /// The size of a gate in the 64-bit IDT.
@@ -255,6 +244,42 @@ fn gate_address(gate: &[u8; GATE_SIZE]) -> u64 {
     let middle = u64::from(u16::from_le_bytes([gate[6], gate[7]]));
     let high = u64::from(u32::from_le_bytes([gate[8], gate[9], gate[10], gate[11]]));
     low | middle << 16 | high << 32
+}
+
+/// The bytes of an IDT stub's prologue before its call to the common
+/// entry: endbr64, clac or the nop it is patched to when SMAP is off,
+/// cld, and the push of -1 an exception with no error code makes.
+const ENDBR64: [u8; 4] = [0xf3, 0x0f, 0x1e, 0xfa];
+const CLAC: [u8; 3] = [0x0f, 0x01, 0xca];
+const NOP3: [u8; 3] = [0x0f, 0x1f, 0x00];
+const CLD: [u8; 1] = [0xfc];
+const PUSH_MINUS_ONE: [u8; 2] = [0x6a, 0xff];
+
+/// x86's call with a 32-bit displacement from the next instruction.
+const CALL_REL32: u8 = 0xe8;
+const CALL_LEN: usize = 5;
+
+/// How many bytes of a stub are read for its prologue and call.
+const STUB_BYTES: usize = 16;
+
+/// The address the IDT stub at `stub`, whose first bytes are `code`, calls
+/// after its prologue: in Linux, error_entry, which every exception's and
+/// interrupt's stub calls but those of the exceptions with stacks of their
+/// own, #DB, NMI, #DF and #MC. None when the stub calls nothing there.
+fn common_entry(stub: u64, code: &[u8]) -> Option<u64> {
+    let mut at = 0;
+    for prologue in [&ENDBR64[..], &CLAC, &NOP3, &CLD, &PUSH_MINUS_ONE] {
+        if code[at..].starts_with(prologue) {
+            at += prologue.len();
+        }
+    }
+    let call = code.get(at..at + CALL_LEN)?;
+    if call[0] != CALL_REL32 {
+        return None;
+    }
+    let displacement = i32::from_le_bytes([call[1], call[2], call[3], call[4]]);
+    let next = stub + (at + CALL_LEN) as u64;
+    Some(next.wrapping_add_signed(i64::from(displacement)))
 }
 
 /// The debug register the trap at the kernel's return to user space
@@ -303,7 +328,7 @@ fn guest_debug(
     debugging: Option<&Debugging>,
     monitor: Stepping,
     approach: Stepping,
-    crossing: Option<Crossing>,
+    crossings: &[Crossing],
     int3s: &Int3s,
 ) -> Result<kvm_guest_debug> {
     let mut debug = kvm_guest_debug::default();
@@ -313,10 +338,13 @@ fn guest_debug(
     {
         debug.control |= KVM_GUESTDBG_SINGLESTEP;
     }
-    // The kernel's entry or return to user space the machine steps toward
-    // takes the register after the debugger's, or one of theirs it
-    // borrows, which a trap there is not the debugger's for.
-    if let Some(crossing) = crossing {
+    // The kernel's entry or return to user space the machine steps toward,
+    // and the kernel's exception entry, take registers after the
+    // debugger's, or one of theirs borrowed, which a trap there is not
+    // the debugger's for.
+    let mut crossings = crossings.to_vec();
+    crossings.sort_by_key(|crossing| crossing.register);
+    for crossing in crossings {
         let trap = Trap::Execute(crossing.address);
         match traps.get_mut(crossing.register) {
             Some(borrowed) => *borrowed = trap,
@@ -444,27 +472,18 @@ impl Machine {
             stepping,
             traps: traps.to_vec(),
         });
-        self.drop_fault_trap();
+        self.exception_trap = None;
         self.apply_guest_debug()
     }
 
     /// Turns debugging off. int3s still written keep their #BPs trapped.
+    /// The trap at the kernel's exception entry, whose register came after
+    /// the debugger's traps as they were, goes too, as with new traps: the
+    /// next single step chooses it again.
     pub fn clear_debug(&mut self) -> Result<()> {
         self.debugging = None;
-        self.drop_fault_trap();
+        self.exception_trap = None;
         self.apply_guest_debug()
-    }
-
-    /// Takes out the trap at the page fault handler, whose register came
-    /// after the debugger's traps as they were: the next single step
-    /// chooses it again, after the new ones.
-    fn drop_fault_trap(&mut self) {
-        if self
-            .crossing
-            .is_some_and(|crossing| crossing.across == Across::OnFault)
-        {
-            self.crossing = None;
-        }
     }
 
     /// Tells KVM what to trap for the debugger, the monitor's steps toward
@@ -479,7 +498,10 @@ impl Machine {
             self.debugging.as_ref(),
             monitor,
             self.approach_stepping(),
-            self.crossing,
+            &[self.crossing, self.exception_trap]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>(),
             &self.int3s,
         )?;
         Ok(self.vcpu.set_guest_debug(&debug)?)
@@ -587,37 +609,47 @@ impl Machine {
 
     /// Keeps single steps going across the kernel's boundary, before the
     /// vCPU runs. A `syscall` enters the kernel with the trap flag cleared,
-    /// and so does a page fault, in user space or the kernel, so the
-    /// kernel would run on unstepped, across exits and the steps they end,
-    /// until something set the flag again. The kernel returns to
-    /// user space with the flags its entry saved, which have no trap flag
-    /// when the steps began in the kernel, so the user's code would run on
-    /// unstepped. So at a `syscall` in user space a debug register traps
-    /// the kernel's entry, and at a `sysretq` or an `iretq` to user space
-    /// the address it returns to, where the step ends: the register after
-    /// the debugger's, or one of theirs borrowed until then
-    /// ([`entry_register`], [`return_register`]). Any other instruction
-    /// may fault, so the page fault handler's entry is trapped while a
-    /// register is free; no debugger's is borrowed for it, since every
-    /// step would take it. With every register one the debugger cannot
-    /// lend, the step runs on as it did before.
+    /// and so does every exception and interrupt, in user space or the
+    /// kernel, so the kernel would run on unstepped, across exits and the
+    /// steps they end, until something set the flag again. The kernel
+    /// returns to user space with the flags its entry saved, which have no
+    /// trap flag when the steps began in the kernel, so the user's code
+    /// would run on unstepped. So at a `syscall` in user space a debug
+    /// register traps the kernel's entry, and at a `sysretq` or an `iretq`
+    /// to user space the address it returns to, where the step ends: the
+    /// register after the debugger's, or one of theirs borrowed until then
+    /// ([`entry_register`], [`return_register`]). Any instruction may fault
+    /// or meet an interrupt, so the kernel's exception entry is trapped too
+    /// while a register is free ([`Machine::exception_entry`]); no
+    /// debugger's is borrowed for it, since every step would take it. With
+    /// every register one the debugger cannot lend, the step runs on as it
+    /// did before.
     pub(crate) fn step_across_the_boundary(&mut self) -> Result<()> {
-        if !self.single_stepping() || self.crossing.is_some() {
+        if !self.single_stepping() {
             return Ok(());
         }
         let regs = self.vcpu.get_regs()?;
         let sregs = self.vcpu.get_sregs()?;
-        let crossing = if sregs.cs.selector & SELECTOR_RPL == USER_RPL {
-            self.kernel_entry(&regs, &sregs)?
-        } else {
-            self.user_return(&regs)?
-        };
-        let crossing = match crossing {
-            Some(crossing) => Some(crossing),
-            None => self.fault_entry(&regs, &sregs)?,
-        };
-        if crossing.is_some() {
-            self.crossing = crossing;
+        let mut changed = false;
+        // A crossing takes the register after the debugger's, so the trap
+        // at the exception entry, if one is left from a step that ended
+        // without a #DB, is chosen again after it.
+        if self.crossing.is_none() {
+            self.crossing = if sregs.cs.selector & SELECTOR_RPL == USER_RPL {
+                self.kernel_entry(&regs, &sregs)?
+            } else {
+                self.user_return(&regs)?
+            };
+            if self.crossing.is_some() {
+                self.exception_trap = None;
+                changed = true;
+            }
+        }
+        if self.exception_trap.is_none() {
+            self.exception_trap = self.exception_entry(&regs, &sregs)?;
+            changed |= self.exception_trap.is_some();
+        }
+        if changed {
             self.apply_guest_debug()?;
         }
         Ok(())
@@ -644,20 +676,26 @@ impl Machine {
         Ok(Some(Crossing {
             address,
             register,
-            across: Across::Always,
             restore: None,
         }))
     }
 
-    /// Where a single step enters the kernel if its instruction faults on
-    /// a page: the page fault handler, from the IDT, in the register after
-    /// the debugger's. None with no register free, before the kernel has
-    /// set up its IDT, or at the handler's first instruction, where the
-    /// trap would come before the instruction runs, again and again.
-    fn fault_entry(&self, regs: &kvm_regs, sregs: &kvm_sregs) -> Result<Option<Crossing>> {
-        let register = self.debugger_traps().len();
+    /// Where a single step enters the kernel when its instruction faults
+    /// or an interrupt comes first: the entry the IDT's stubs share, found
+    /// from the page fault's stub ([`common_entry`]), else that stub, in
+    /// the first register past the debugger's and the crossing's. None
+    /// with no register free, before the kernel has set up its IDT, or at
+    /// the entry's first instruction, where the trap would come before the
+    /// instruction runs, again and again.
+    fn exception_entry(&self, regs: &kvm_regs, sregs: &kvm_sregs) -> Result<Option<Crossing>> {
+        let crossing = self.crossing.map(|crossing| crossing.register);
+        let Some(register) =
+            (self.debugger_traps().len()..MAX_TRAPS).find(|&register| Some(register) != crossing)
+        else {
+            return Ok(None);
+        };
         let end = (PF_VECTOR + 1) * GATE_SIZE as u64;
-        if register >= MAX_TRAPS || u64::from(sregs.idt.limit) < end - 1 {
+        if u64::from(sregs.idt.limit) < end - 1 {
             return Ok(None);
         }
         let mut gate = [0u8; GATE_SIZE];
@@ -665,14 +703,16 @@ impl Machine {
         if self.read_virtual(at, &mut gate)? < GATE_SIZE {
             return Ok(None);
         }
-        let address = gate_address(&gate);
+        let stub = gate_address(&gate);
+        let mut code = [0u8; STUB_BYTES];
+        let read = self.read_virtual(stub, &mut code)?;
+        let address = common_entry(stub, &code[..read]).unwrap_or(stub);
         if address == regs.rip {
             return Ok(None);
         }
         Ok(Some(Crossing {
             address,
             register,
-            across: Across::OnFault,
             restore: None,
         }))
     }
@@ -695,7 +735,6 @@ impl Machine {
             return Ok(Some(Crossing {
                 address: regs.rcx,
                 register,
-                across: Across::Always,
                 restore: None,
             }));
         }
@@ -728,19 +767,25 @@ impl Machine {
         Ok(Some(Crossing {
             address,
             register,
-            across: Across::Always,
             restore,
         }))
     }
 
     /// Ends the crossing a single step went through, or no longer needs:
     /// its register is the debugger's again, and an `iretq` frame's flags
-    /// are as the guest left them.
+    /// are as the guest left them. A trap at the exception entry in the
+    /// register after it moves down into its place: KVM is handed the
+    /// traps in a row, so it would be there anyway, and a hit would set
+    /// that register's bit of DR6, not the one after.
     fn end_crossing(&mut self) -> Result<()> {
         if let Some(SavedFlags { at, flags }) = self.crossing.take().and_then(|c| c.restore) {
             self.write_virtual(at, &flags.to_le_bytes())?;
         }
-        self.apply_guest_debug()
+        let first_free = self.debugger_traps().len();
+        if let Some(trap) = &mut self.exception_trap {
+            trap.register = trap.register.min(first_free);
+        }
+        Ok(())
     }
 
     /// The vCPU's model-specific register `index`.
@@ -810,30 +855,35 @@ impl Machine {
             machine = Stepping::Yes;
         }
 
-        // The kernel's entry or return to user space a step went through,
-        // trapped in the register after the debugger's or one borrowed from
-        // them: the debugger's step ends there, the register is theirs
-        // again, and the machine's own steps go on.
+        // The kernel's entry, its exception entry or its return to user
+        // space a step went through, trapped in a register after the
+        // debugger's or one borrowed from them: the debugger's step ends
+        // there, the registers are theirs again, and the machine's own
+        // steps go on.
         let debugger = self.debugging.as_ref().map_or(Stepping::No, |d| d.stepping);
-        let crossed = self
-            .crossing
-            .is_some_and(|crossing| dr6 & (1 << crossing.register) != 0);
-        if crossed {
+        let hit = |crossing: Option<Crossing>| {
+            crossing.is_some_and(|crossing| dr6 & (1 << crossing.register) != 0)
+        };
+        if hit(self.crossing) || hit(self.exception_trap) {
             self.end_crossing()?;
+            self.exception_trap = None;
+            self.apply_guest_debug()?;
             return Ok((debugger == Stepping::Yes).then_some(DebugStop::Step));
         }
 
         // A single step that ends a crossing it did not need: an
-        // instruction that stepped without a fault leaves the trap at the
-        // page fault handler unused, and an `iretq` whose frame has the
-        // trap flag steps to where it returns before the trap there can
-        // fire, which would then stop the next step at the same place.
-        if dr6 & DR6_SINGLE_STEP != 0
-            && self.crossing.is_some_and(|crossing| {
-                crossing.across == Across::OnFault || crossing.address == pc
-            })
-        {
-            self.end_crossing()?;
+        // instruction that stepped with no exception or interrupt leaves
+        // the trap at the exception entry unused, and an `iretq` whose frame
+        // has the trap flag steps to where it returns before the trap there
+        // can fire, which would then stop the next step at the same place.
+        if dr6 & DR6_SINGLE_STEP != 0 {
+            let returned = self.crossing.is_some_and(|crossing| crossing.address == pc);
+            if returned {
+                self.end_crossing()?;
+            }
+            if returned || self.exception_trap.take().is_some() {
+                self.apply_guest_debug()?;
+            }
         }
 
         // An instruction that loads RFLAGS, `iretq` back into the kernel
@@ -1273,14 +1323,13 @@ mod tests {
             let crossing = register.map(|register| Crossing {
                 address: RETURN,
                 register,
-                across: Across::Always,
                 restore: None,
             });
             let debug = guest_debug(
                 Some(&debugging),
                 Stepping::No,
                 Stepping::Yes,
-                crossing,
+                &crossing.into_iter().collect::<Vec<_>>(),
                 &Int3s::default(),
             )
             .unwrap();
@@ -1349,6 +1398,41 @@ mod tests {
             0x00, 0x00,
         ];
         assert_eq!(gate_address(&gate), 0xffff_ffff_8100_1280);
+    }
+
+    /// Linux's IDT entry stubs share one entry, error_entry, which each
+    /// calls after a short prologue: endbr64, a three-byte clac or nop, cld,
+    /// and for an exception with no error code a push of -1. The call's
+    /// target is found past the prologue from the stubs' bytes as the guest
+    /// kernel has them, for a page fault, an invalid opcode and a common
+    /// interrupt; a stub that calls nothing there is not decoded.
+    #[test]
+    fn the_stubs_share_their_call_to_the_common_entry() {
+        const ERROR_ENTRY: u64 = 0xffff_ffff_8100_1810;
+        let page_fault: [u8; 13] = [
+            0xf3, 0x0f, 0x1e, 0xfa, 0x0f, 0x1f, 0x00, 0xfc, 0xe8, 0x83, 0x05, 0x00, 0x00,
+        ];
+        assert_eq!(
+            common_entry(0xffff_ffff_8100_1280, &page_fault),
+            Some(ERROR_ENTRY)
+        );
+        let invalid_op: [u8; 15] = [
+            0xf3, 0x0f, 0x1e, 0xfa, 0x0f, 0x1f, 0x00, 0xfc, 0x6a, 0xff, 0xe8, 0xe1, 0x05, 0x00,
+            0x00,
+        ];
+        assert_eq!(
+            common_entry(0xffff_ffff_8100_1220, &invalid_op),
+            Some(ERROR_ENTRY)
+        );
+        let clac: [u8; 13] = [
+            0xf3, 0x0f, 0x1e, 0xfa, 0x0f, 0x01, 0xca, 0xfc, 0xe8, 0x83, 0x04, 0x00, 0x00,
+        ];
+        assert_eq!(
+            common_entry(0xffff_ffff_8100_1380, &clac),
+            Some(ERROR_ENTRY)
+        );
+        let other: [u8; 6] = [0xf3, 0x0f, 0x1e, 0xfa, 0x90, 0xc3];
+        assert_eq!(common_entry(0xffff_ffff_8100_1380, &other), None);
     }
 
     /// The CPU watches a power of two up to 8 bytes, aligned to itself,
@@ -1462,7 +1546,7 @@ mod tests {
         let mut lifted = written.clone();
         lifted.lifted = Some(0x5000);
         let control = |d: Option<&Debugging>, monitor, int3s| {
-            guest_debug(d, monitor, Stepping::No, None, int3s)
+            guest_debug(d, monitor, Stepping::No, &[], int3s)
                 .unwrap()
                 .control
         };
@@ -1489,7 +1573,7 @@ mod tests {
             ENABLE | HW_BP | SW_BP | SINGLESTEP | BLOCKIRQ
         );
         assert_eq!(
-            guest_debug(Some(&debugger), Stepping::No, Stepping::Yes, None, &none)
+            guest_debug(Some(&debugger), Stepping::No, Stepping::Yes, &[], &none)
                 .unwrap()
                 .control,
             ENABLE | HW_BP | SINGLESTEP
@@ -1498,18 +1582,17 @@ mod tests {
             Some(&debugger),
             Stepping::No,
             Stepping::Yes,
-            Some(Crossing {
+            &[Crossing {
                 address: 0x2000,
                 register: 1,
-                across: Across::Always,
                 restore: None,
-            }),
+            }],
             &none,
         )
         .unwrap();
         assert_eq!(to_user.arch.debugreg[1], 0x2000);
         assert_eq!(to_user.arch.debugreg[DR7_INDEX], 0b101);
-        let d = guest_debug(Some(&debugger), Stepping::Yes, Stepping::No, None, &written).unwrap();
+        let d = guest_debug(Some(&debugger), Stepping::Yes, Stepping::No, &[], &written).unwrap();
         assert_eq!(d.arch.debugreg[0], 0x1000);
         assert_eq!(d.arch.debugreg[DR7_INDEX], 1);
     }

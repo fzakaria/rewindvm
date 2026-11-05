@@ -401,11 +401,13 @@ Linux sets to clear it, so the kernel would run on unstepped past the exits it
 makes. At a `syscall` a debug register traps the kernel's entry, the address in
 LSTAR, so one instruction back from a step's start is the `out` or `in` that
 made the step's exit, even when the step before entered the kernel from user
-space. An exception clears the flag on its way in too, and a page fault's
-handler can make exits, as one that prints a segfault to the console does.
-While a debug register is free, every single step traps the page fault
-handler's entry, read from the IDT; other exceptions and interrupts still run
-their handlers unstepped up to the next trap. The `iretq` back from a fault
+space. Exceptions and interrupts clear the flag on their way in too, and their
+handlers can make exits, as a fault's does when it records the signal or prints
+a segfault to the console. Every IDT stub but those of #DB, NMI, #DF and #MC
+calls one entry, Linux's error_entry, after a few instructions; the VMM finds it
+by decoding the page fault's stub, read from the IDT, and while a debug register
+is free, every single step traps it, so a fault or an interrupt, in user space
+or the kernel, stops the step there. The `iretq` back from a fault
 loads the resume flag, which would let the faulting instruction run past the
 trap at its address, so the flag is cleared in the frame for the step and put
 back after it. A fork whose registers or memory
