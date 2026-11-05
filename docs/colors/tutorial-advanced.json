@@ -1,6 +1,6 @@
 [
  {
-  "text": "$ rewind where 4736382d 4782\nrewind: process 166 at step 4782; loading symbols for 4 of its files\nrewind: fetched 3 source files from the VM\nrewind: walking thread 171's stack in gdb\nrewind: downloading debug info for libc.so.6; first time only\nrewind: downloading debug info for libpthread.so.0; first time only\nrewind: downloading debug info for ld-linux-x86-64.so.2; first time only\nprocess 166 (test_pool_shutdown), thread 171, at step 4782\n#0 worker (src/pool.c:77)\n      75  \t\t\tprintf(\"job %d done: %ld\\n\", job, result & 0xffff);\n      76  \t\t\tfflush(stdout);\n>     77  \t\t\tp->queue->completed++;\n      78  \t\t}\n      79  \t}\narguments:\n  arg = 0x5556f833c010\nlocals:\n  q = <optimized out>\n  job = 16\n  result = 4092430570737637218\n  p = 0x5556f833c010\ncalled from #1 start_thread (/nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6)\ncalled from #2 __clone3 (/nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6)",
+  "text": "$ rewind where 4736382d 4782\nrewind: process 166 at step 4782; loading symbols for 4 of its files\nrewind: fetched 3 source files from the VM\nrewind: walking thread 171's stack in gdb\nrewind: downloading debug info for libc.so.6; first time only\nrewind: downloading debug info for libpthread.so.0; first time only\nrewind: downloading debug info for ld-linux-x86-64.so.2; first time only\nrewind: downloading source files of libc.so.6; each one only once\nprocess 166 (test_pool_shutdown), thread 171, at step 4782\n#0 worker (src/pool.c:77)\n      75  \t\t\tprintf(\"job %d done: %ld\\n\", job, result & 0xffff);\n      76  \t\t\tfflush(stdout);\n>     77  \t\t\tp->queue->completed++;\n      78  \t\t}\n      79  \t}\narguments:\n  arg = 0x5556f833c010\nlocals:\n  q = <optimized out>\n  job = 16\n  result = 4092430570737637218\n  p = 0x5556f833c010\ncalled from #1 start_thread (pthread_create.c:454)\ncalled from #2 __GI___clone3 (../sysdeps/unix/sysv/linux/x86_64/clone3.S:78)",
   "spans": [
    [
     1,
@@ -37,11 +37,17 @@
     0,
     7,
     "dim"
+   ],
+   [
+    7,
+    0,
+    7,
+    "dim"
    ]
   ]
  },
  {
-  "text": "$ rewind where 4736382d 4782 --tid 166\nrewind: process 166 at step 4782; loading symbols for 4 of its files\nrewind: read 3 source files fetched from the VM earlier\nrewind: walking thread 166's stack in gdb\nrewind: downloading debug info for libc.so.6; first time only\nrewind: downloading debug info for libpthread.so.0; first time only\nrewind: downloading debug info for ld-linux-x86-64.so.2; first time only\nprocess 166 (test_pool_shutdown), thread 166, at step 4782\n#3 pool_shutdown (src/pool.c:128)\n     126\n     127  \tfor (int i = 0; i < POOL_WORKERS; i++)\n>    128  \t\tpthread_join(p->workers[i], NULL);\n     129  \tpthread_cond_destroy(&p->ready);\n     130  \tpthread_mutex_destroy(&p->lock);\narguments:\n  p = 0x5556f833c010\nlocals:\n  i = 0\ncalled from #4 main (tests/test_pool_shutdown.c:24)\ncalled from #5 __libc_start_call_main (/nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6)",
+  "text": "$ rewind where 4736382d 4782 --tid 166\nrewind: process 166 at step 4782; loading symbols for 4 of its files\nrewind: read 3 source files fetched from the VM earlier\nrewind: walking thread 166's stack in gdb\nrewind: downloading source files of libc.so.6; each one only once\nprocess 166 (test_pool_shutdown), thread 166, at step 4782\n#7 pool_shutdown (src/pool.c:128)\n     126\n     127  \tfor (int i = 0; i < POOL_WORKERS; i++)\n>    128  \t\tpthread_join(p->workers[i], NULL);\n     129  \tpthread_cond_destroy(&p->ready);\n     130  \tpthread_mutex_destroy(&p->lock);\narguments:\n  p = 0x5556f833c010\nlocals:\n  i = 0\ncalled from #8 main (tests/test_pool_shutdown.c:24)\ncalled from #9 __libc_start_call_main (../sysdeps/nptl/libc_start_call_main.h:59)",
   "spans": [
    [
     1,
@@ -66,23 +72,11 @@
     0,
     7,
     "dim"
-   ],
-   [
-    5,
-    0,
-    7,
-    "dim"
-   ],
-   [
-    6,
-    0,
-    7,
-    "dim"
    ]
   ]
  },
  {
-  "text": "$ rewind gdb 4736382d 4782 --tid 166 --frame 7 -- -batch -ex 'p p->queue'\nrewind: process 166 at step 4782; loading symbols for 4 of its files\nrewind: read 3 source files fetched from the VM earlier\nrewind: gdb at step 4782 of 4736382dc2ed9626\narch_local_irq_restore (flags=6) at ./arch/x86/include/asm/irqflags.h:146\n146\t\treturn !(flags & X86_EFLAGS_IF);\n[Switching to thread 2 (Thread 1.166)]\nDownloading 1.79 K source file /build/glibc-2.44/nptl/../sysdeps/unix/sysv/linux/x86_64/syscall_cancel.S...\n#0  __syscall_cancel_arch () at ../sysdeps/unix/sysv/linux/x86_64/syscall_cancel.S:56\n56\t\tret\n#7  0x00005556d620d5b3 in pool_shutdown (p=p@entry=0x5556f833c010) at src/pool.c:128\n128\t\t\tpthread_join(p->workers[i], NULL);\n$1 = (struct queue *) 0x0\n[Inferior 1 (process 1) detached]",
+  "text": "$ rewind gdb 4736382d 4782 --tid 166 --frame 7 -- -batch -ex 'p p->queue'\nrewind: process 166 at step 4782; loading symbols for 4 of its files\nrewind: read 3 source files fetched from the VM earlier\nrewind: gdb at step 4782 of 4736382dc2ed9626\narch_local_irq_restore (flags=6) at ./arch/x86/include/asm/irqflags.h:146\n146\t\treturn !(flags & X86_EFLAGS_IF);\n[Switching to thread 2 (Thread 1.166)]\n#0  __syscall_cancel_arch () at ../sysdeps/unix/sysv/linux/x86_64/syscall_cancel.S:56\n56\t\tret\n#7  0x00005556d620d5b3 in pool_shutdown (p=p@entry=0x5556f833c010) at src/pool.c:128\n128\t\t\tpthread_join(p->workers[i], NULL);\n$1 = (struct queue *) 0x0\n[Inferior 1 (process 1) detached]",
   "spans": [
    [
     1,
@@ -105,7 +99,7 @@
   ]
  },
  {
-  "text": "$ rewind blame 4736382d --at 4782 'p->queue'\nrewind: process 166 at step 4782; loading symbols for 4 of its files\nrewind: read 3 source files fetched from the VM earlier\nrewind: walking thread 171's stack in gdb\nrewind: process 166 at step 4768; loading symbols for 4 of its files\nrewind: read 3 source files fetched from the VM earlier\np->queue = 0x0   8 bytes at 0x5556f833c068, thread 171, pool.c:77\n\nlast written at step 4768 by thread 166 (test_pool_shutd)\n  pool.c:125  pool_shutdown  p->queue = NULL;\n  was 0x5556f833c090\n\nother threads just after the write, in step 4768:\n  thread 171  pool.c:75  worker  futex_wait\n  thread 172  pool.c:45  run_job  __syscall_cancel_arch\n\nsearched back to step 4117, 1 keyframe window, 1 write, 1.2s",
+  "text": "$ rewind blame 4736382d --at 4782 'p->queue'\nrewind: process 166 at step 4782; loading symbols for 4 of its files\nrewind: read 3 source files fetched from the VM earlier\nrewind: walking thread 171's stack in gdb\np->queue = 0x0   8 bytes at 0x5556f833c068, thread 171, pool.c:77\n\nlast written at step 4768 by thread 166 (test_pool_shutd)\n  pool.c:125  pool_shutdown  p->queue = NULL;\n  was 0x5556f833c090\n\nother threads just after the write, in step 4768:\n  thread 171  pool.c:75  worker  futex_wait\n  thread 172  pool.c:45  run_job  __syscall_cancel_arch\n\nsearched back to step 4117, 1 keyframe window, 1 write, 0.7s",
   "spans": [
    [
     1,
@@ -121,18 +115,6 @@
    ],
    [
     3,
-    0,
-    7,
-    "dim"
-   ],
-   [
-    4,
-    0,
-    7,
-    "dim"
-   ],
-   [
-    5,
     0,
     7,
     "dim"
@@ -140,7 +122,7 @@
   ]
  },
  {
-  "text": "$ rewind where 4736382d 4768 --tid 166 --after-write 0x5556f833c068 --size 8\nrewind: process 166 at step 4768; loading symbols for 4 of its files\nrewind: read 3 source files fetched from the VM earlier\nrewind: walking thread 166's stack in gdb\nrewind: downloading the sources of libc.so.6; first time only\nprocess 166 (test_pool_shutdown), thread 166, at step 4768, just after its write of the 8 bytes at 0x5556f833c068\n#0 pool_shutdown (src/pool.c:125)\n     123  \t/* The bug: the queue goes before the workers are joined. */\n     124  \tfree(p->queue);\n>    125  \tp->queue = NULL;\n     126\n     127  \tfor (int i = 0; i < POOL_WORKERS; i++)\narguments:\n  p = 0x5556f833c010\nlocals:\n  i = 0\ncalled from #1 main (tests/test_pool_shutdown.c:24)\ncalled from #2 __libc_start_call_main (../sysdeps/nptl/libc_start_call_main.h:59)",
+  "text": "$ rewind where 4736382d 4768 --tid 166 --after-write 0x5556f833c068 --size 8\nrewind: process 166 at step 4768; loading symbols for 4 of its files\nrewind: read 3 source files fetched from the VM earlier\nrewind: walking thread 166's stack in gdb\nprocess 166 (test_pool_shutdown), thread 166, at step 4768, just after its write of the 8 bytes at 0x5556f833c068\n#0 pool_shutdown (src/pool.c:125)\n     123  \t/* The bug: the queue goes before the workers are joined. */\n     124  \tfree(p->queue);\n>    125  \tp->queue = NULL;\n     126\n     127  \tfor (int i = 0; i < POOL_WORKERS; i++)\narguments:\n  p = 0x5556f833c010\nlocals:\n  i = 0\ncalled from #1 main (tests/test_pool_shutdown.c:24)\ncalled from #2 __libc_start_call_main (../sysdeps/nptl/libc_start_call_main.h:59)",
   "spans": [
    [
     1,
@@ -156,12 +138,6 @@
    ],
    [
     3,
-    0,
-    7,
-    "dim"
-   ],
-   [
-    4,
     0,
     7,
     "dim"
@@ -295,7 +271,7 @@
   ]
  },
  {
-  "text": "$ rewind nix --cores 4 --epoch 1790985600 github:fzakaria/rewindvm#mylib\n...\nrewind: run e32a716c74e474d9 exited:0 after 6202 steps, 0.217s virtual, 0.982s wall (poweroff)\n/nix/store/f6a9gy362szw6nxx3ikrklr8glr6rdln-mylib-0.3.0 a9d703ba89774f3d  matches rewindvm.cachix.org",
+  "text": "$ rewind nix --cores 4 --epoch 1790985600 github:fzakaria/rewindvm#mylib\n...\nrewind: run e32a716c74e474d9 exited:0 after 6202 steps, 0.217s virtual, 0.865s wall (poweroff)\n/nix/store/f6a9gy362szw6nxx3ikrklr8glr6rdln-mylib-0.3.0 a9d703ba89774f3d  matches your store, rewindvm.cachix.org",
   "spans": [
    [
     2,
@@ -312,7 +288,7 @@
    [
     3,
     74,
-    101,
+    113,
     "green"
    ]
   ]
@@ -329,7 +305,7 @@
   ]
  },
  {
-  "text": "$ rewind fork 4736382d 4682 --schedule 1 --quiet\nrewind: run 0bd9caa5552224c9 exited:2 after 4833 steps, 0.200s virtual, 0.109s wall (poweroff)\nrewind: the fork first differs from its parent at step 4770\nrewind: open it beside its parent in the desktop app: rewind open 0bd9caa5552224c9 4770 --compare 4736382dc2ed9626\n\n$ rewind fork 4736382d 4682 --schedule 2 --quiet\nrewind: run 4fe1061ad78df32f exited:0 after 6502 steps, 0.219s virtual, 0.144s wall (poweroff)\nrewind: the fork first differs from its parent at step 4708\nrewind: open it beside its parent in the desktop app: rewind open 4fe1061ad78df32f 4708 --compare 4736382dc2ed9626\n\n$ rewind fork 4736382d 4682 --schedule 3 --quiet\nrewind: run 87f328742319f6a7 exited:0 after 6735 steps, 0.226s virtual, 0.153s wall (poweroff)\nrewind: the fork first differs from its parent at step 4705\nrewind: open it beside its parent in the desktop app: rewind open 87f328742319f6a7 4705 --compare 4736382dc2ed9626\n\n$ rewind fork 4736382d 4682 --schedule 4 --quiet\nrewind: run 635fe8585a24d89f exited:0 after 6449 steps, 0.220s virtual, 0.136s wall (poweroff)\nrewind: the fork first differs from its parent at step 4703\nrewind: open it beside its parent in the desktop app: rewind open 635fe8585a24d89f 4703 --compare 4736382dc2ed9626",
+  "text": "$ rewind fork 4736382d 4682 --schedule 1 --quiet\nrewind: run 0bd9caa5552224c9 exited:2 after 4833 steps, 0.200s virtual, 0.109s wall (poweroff)\nrewind: the fork first differs from its parent at step 4770\nrewind: open it beside its parent in the desktop app: rewind open 0bd9caa5552224c9 4770 --compare 4736382dc2ed9626\n\n$ rewind fork 4736382d 4682 --schedule 2 --quiet\nrewind: run 4fe1061ad78df32f exited:0 after 6502 steps, 0.219s virtual, 0.133s wall (poweroff)\nrewind: the fork first differs from its parent at step 4708\nrewind: open it beside its parent in the desktop app: rewind open 4fe1061ad78df32f 4708 --compare 4736382dc2ed9626\n\n$ rewind fork 4736382d 4682 --schedule 3 --quiet\nrewind: run 87f328742319f6a7 exited:0 after 6735 steps, 0.226s virtual, 0.121s wall (poweroff)\nrewind: the fork first differs from its parent at step 4705\nrewind: open it beside its parent in the desktop app: rewind open 87f328742319f6a7 4705 --compare 4736382dc2ed9626\n\n$ rewind fork 4736382d 4682 --schedule 4 --quiet\nrewind: run 635fe8585a24d89f exited:0 after 6449 steps, 0.220s virtual, 0.136s wall (poweroff)\nrewind: the fork first differs from its parent at step 4703\nrewind: open it beside its parent in the desktop app: rewind open 635fe8585a24d89f 4703 --compare 4736382dc2ed9626",
   "spans": [
    [
     1,
@@ -700,7 +676,7 @@
   ]
  },
  {
-  "text": "$ rewind run --root spin --timeout 5 --name spin -- /bin/spin\nrewind: run 4175e7e086c0c6f4 timed-out after 301 steps, 0.002s virtual, 5.010s wall (timed out computing without exits for 4.3s, in user space in main+15 (spin.c:2), process 34 (spin))",
+  "text": "$ rewind run --root spin --timeout 5 --name spin -- /bin/spin\nrewind: run 4175e7e086c0c6f4 timed-out after 301 steps, 0.002s virtual, 5.008s wall (timed out computing without exits for 4.5s, in user space in main+11 (spin.c:2), process 34 (spin))",
   "spans": [
    [
     1,

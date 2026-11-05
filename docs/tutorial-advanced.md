@@ -35,6 +35,7 @@ rewind: walking thread 171's stack in gdb
 rewind: downloading debug info for libc.so.6; first time only
 rewind: downloading debug info for libpthread.so.0; first time only
 rewind: downloading debug info for ld-linux-x86-64.so.2; first time only
+rewind: downloading source files of libc.so.6; each one only once
 process 166 (test_pool_shutdown), thread 171, at step 4782
 #0 worker (src/pool.c:77)
       75  			printf("job %d done: %ld\n", job, result & 0xffff);
@@ -49,8 +50,8 @@ locals:
   job = 16
   result = 4092430570737637218
   p = 0x5556f833c010
-called from #1 start_thread (/nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6)
-called from #2 __clone3 (/nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6)
+called from #1 start_thread (pthread_create.c:454)
+called from #2 __GI___clone3 (../sysdeps/unix/sysv/linux/x86_64/clone3.S:78)
 ```
 
 Under the source come the frame's arguments and locals, as gdb's `info args`
@@ -64,11 +65,9 @@ $ rewind where 4736382d 4782 --tid 166
 rewind: process 166 at step 4782; loading symbols for 4 of its files
 rewind: read 3 source files fetched from the VM earlier
 rewind: walking thread 166's stack in gdb
-rewind: downloading debug info for libc.so.6; first time only
-rewind: downloading debug info for libpthread.so.0; first time only
-rewind: downloading debug info for ld-linux-x86-64.so.2; first time only
+rewind: downloading source files of libc.so.6; each one only once
 process 166 (test_pool_shutdown), thread 166, at step 4782
-#3 pool_shutdown (src/pool.c:128)
+#7 pool_shutdown (src/pool.c:128)
      126
      127  	for (int i = 0; i < POOL_WORKERS; i++)
 >    128  		pthread_join(p->workers[i], NULL);
@@ -78,8 +77,8 @@ arguments:
   p = 0x5556f833c010
 locals:
   i = 0
-called from #4 main (tests/test_pool_shutdown.c:24)
-called from #5 __libc_start_call_main (/nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6)
+called from #8 main (tests/test_pool_shutdown.c:24)
+called from #9 __libc_start_call_main (../sysdeps/nptl/libc_start_call_main.h:59)
 ```
 
 `--json` prints every frame, with its arguments and locals, where each is
@@ -110,7 +109,6 @@ rewind: gdb at step 4782 of 4736382dc2ed9626
 arch_local_irq_restore (flags=6) at ./arch/x86/include/asm/irqflags.h:146
 146		return !(flags & X86_EFLAGS_IF);
 [Switching to thread 2 (Thread 1.166)]
-Downloading 1.79 K source file /build/glibc-2.44/nptl/../sysdeps/unix/sysv/linux/x86_64/syscall_cancel.S...
 #0  __syscall_cancel_arch () at ../sysdeps/unix/sysv/linux/x86_64/syscall_cancel.S:56
 56		ret
 #7  0x00005556d620d5b3 in pool_shutdown (p=p@entry=0x5556f833c010) at src/pool.c:128
@@ -143,8 +141,6 @@ $ rewind blame 4736382d --at 4782 'p->queue'
 rewind: process 166 at step 4782; loading symbols for 4 of its files
 rewind: read 3 source files fetched from the VM earlier
 rewind: walking thread 171's stack in gdb
-rewind: process 166 at step 4768; loading symbols for 4 of its files
-rewind: read 3 source files fetched from the VM earlier
 p->queue = 0x0   8 bytes at 0x5556f833c068, thread 171, pool.c:77
 
 last written at step 4768 by thread 166 (test_pool_shutd)
@@ -155,7 +151,7 @@ other threads just after the write, in step 4768:
   thread 171  pool.c:75  worker  futex_wait
   thread 172  pool.c:45  run_job  __syscall_cancel_arch
 
-searched back to step 4117, 1 keyframe window, 1 write, 1.2s
+searched back to step 4117, 1 keyframe window, 1 write, 0.7s
 ```
 
 The main thread set `p->queue` to NULL on line 125, in `pool_shutdown`. It did
@@ -176,7 +172,6 @@ $ rewind where 4736382d 4768 --tid 166 --after-write 0x5556f833c068 --size 8
 rewind: process 166 at step 4768; loading symbols for 4 of its files
 rewind: read 3 source files fetched from the VM earlier
 rewind: walking thread 166's stack in gdb
-rewind: downloading the sources of libc.so.6; first time only
 process 166 (test_pool_shutdown), thread 166, at step 4768, just after its write of the 8 bytes at 0x5556f833c068
 #0 pool_shutdown (src/pool.c:125)
      123  	/* The bug: the queue goes before the workers are joined. */
@@ -220,7 +215,7 @@ $ rewind blame 4736382d --at 4782 'p->stopping' 'p->queue' --reads --since 4742
 ...
   4779  171 test_pool_shutd read    0x0                 pool.c:77  worker  p->queue->completed++;  p->queue
 ...
-searched back to step 4742, 2 keyframe windows, 2 writes, 11 reads, 1.2s
+searched back to step 4742, 2 keyframe windows, 2 writes, 11 reads, 0.8s
 ```
 
 Read in order, the rows show the race:
@@ -529,8 +524,8 @@ interleave on the one vCPU:
 ```console
 $ rewind nix --cores 4 --epoch 1790985600 github:fzakaria/rewindvm#mylib
 ...
-rewind: run e32a716c74e474d9 exited:0 after 6202 steps, 0.217s virtual, 0.982s wall (poweroff)
-/nix/store/f6a9gy362szw6nxx3ikrklr8glr6rdln-mylib-0.3.0 a9d703ba89774f3d  matches rewindvm.cachix.org
+rewind: run e32a716c74e474d9 exited:0 after 6202 steps, 0.217s virtual, 0.865s wall (poweroff)
+/nix/store/f6a9gy362szw6nxx3ikrklr8glr6rdln-mylib-0.3.0 a9d703ba89774f3d  matches your store, rewindvm.cachix.org
 ```
 
 ```console
@@ -557,12 +552,12 @@ rewind: the fork first differs from its parent at step 4770
 rewind: open it beside its parent in the desktop app: rewind open 0bd9caa5552224c9 4770 --compare 4736382dc2ed9626
 
 $ rewind fork 4736382d 4682 --schedule 2 --quiet
-rewind: run 4fe1061ad78df32f exited:0 after 6502 steps, 0.219s virtual, 0.144s wall (poweroff)
+rewind: run 4fe1061ad78df32f exited:0 after 6502 steps, 0.219s virtual, 0.133s wall (poweroff)
 rewind: the fork first differs from its parent at step 4708
 rewind: open it beside its parent in the desktop app: rewind open 4fe1061ad78df32f 4708 --compare 4736382dc2ed9626
 
 $ rewind fork 4736382d 4682 --schedule 3 --quiet
-rewind: run 87f328742319f6a7 exited:0 after 6735 steps, 0.226s virtual, 0.153s wall (poweroff)
+rewind: run 87f328742319f6a7 exited:0 after 6735 steps, 0.226s virtual, 0.121s wall (poweroff)
 rewind: the fork first differs from its parent at step 4705
 rewind: open it beside its parent in the desktop app: rewind open 87f328742319f6a7 4705 --compare 4736382dc2ed9626
 
@@ -628,7 +623,7 @@ The failing run's command makes it again, with the same id:
 ```console
 $ rewind show 4736382d | tail -1 | sh
 ...
-rewind: run 4736382dc2ed9626 exited:2 after 4821 steps, 0.200s virtual, 0.607s wall (poweroff)
+rewind: run 4736382dc2ed9626 exited:2 after 4821 steps, 0.200s virtual, 0.528s wall (poweroff)
 ```
 
 ## Compare any two runs
@@ -819,7 +814,7 @@ The same steps stall, one exit in 128, but each stall picks one of the
 doublings of 10 µs up to the maximum, 14 of them for 50 ms, so fewer stalls
 are short. How often a race turns up then depends on how long it needs a
 thread held: 32 schedules of mylib crash 4 times by default and
-5 times with `--stall-max 100ms`, in 6.7 s and 6.7 s. A stall is virtual time, so the guest's clock
+5 times with `--stall-max 100ms`, in 5.8 s and 4.4 s. A stall is virtual time, so the guest's clock
 moves further, and a program's own timeouts see the extra time. The maximum is
 part of each run's spec, so `rewind show`, a replay and a fork of the run keep
 the maximum, and a run made without the flag keeps its id. A fork's own
@@ -939,7 +934,7 @@ $ nix shell nixpkgs#pkgsStatic.stdenv.cc -c x86_64-unknown-linux-musl-cc -static
 
 ```console
 $ rewind run --root spin --timeout 5 --name spin -- /bin/spin
-rewind: run 4175e7e086c0c6f4 timed-out after 301 steps, 0.002s virtual, 5.010s wall (timed out computing without exits for 4.3s, in user space in main+15 (spin.c:2), process 34 (spin))
+rewind: run 4175e7e086c0c6f4 timed-out after 301 steps, 0.002s virtual, 5.008s wall (timed out computing without exits for 4.5s, in user space in main+11 (spin.c:2), process 34 (spin))
 ```
 
 A run that timed out while still making exits was slow rather than stuck, and
