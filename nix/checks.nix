@@ -409,6 +409,70 @@ let
         $CC -static -O0 -g -fdebug-prefix-map=$out/src=/src \
           -o $out/bin/piped $out/src/piped.c
 
+        # The main thread waits in recv() for 16 bytes of a socket while a
+        # second thread sends 5, sleeps, and signals it. The kernel copies
+        # the 5 bytes into the buffer, waits on, and returns them once the
+        # signal comes, into the handler. The first argument picks what the
+        # handler does: write() and return (r), _exit (e), or siglongjmp
+        # back into main (j).
+        cat > $out/src/handled.c <<'EOF'
+        #include <pthread.h>
+        #include <setjmp.h>
+        #include <signal.h>
+        #include <sys/socket.h>
+        #include <time.h>
+        #include <unistd.h>
+
+        char buffer[16];
+        int fds[2];
+        pthread_t reader;
+        char mode;
+        sigjmp_buf back;
+
+        void handler(int sig)
+        {
+          if (mode == 'e')
+            _exit(0);
+          if (mode == 'j')
+            siglongjmp(back, 1);
+          write(1, "handler\n", 8); /* the handler's write */
+        }
+
+        void signal_reader(void)
+        {
+          pthread_kill(reader, SIGUSR1);
+        }
+
+        void *sender(void *unused)
+        {
+          struct timespec pause = { 0, 20000000 };
+          nanosleep(&pause, 0);
+          send(fds[1], "hello", 5, 0);
+          nanosleep(&pause, 0);
+          signal_reader();
+          return 0;
+        }
+
+        int main(int argc, char **argv)
+        {
+          struct sigaction action = { .sa_handler = handler };
+          pthread_t thread;
+          mode = argv[1][0];
+          sigaction(SIGUSR1, &action, 0);
+          socketpair(AF_UNIX, SOCK_STREAM, 0, fds);
+          reader = pthread_self();
+          write(1, "start\n", 6);
+          pthread_create(&thread, 0, sender, 0);
+          if (sigsetjmp(back, 1) == 0)
+            recv(fds[0], buffer, sizeof buffer, MSG_WAITALL); /* the recv */
+          write(1, "done\n", 5);
+          pthread_join(thread, 0);
+          return 0;
+        }
+        EOF
+        $CC -static -O0 -g -pthread -fdebug-prefix-map=$out/src=/src \
+          -o $out/bin/handled $out/src/handled.c
+
         # One program adds to a global in a loop, then execs the other,
         # which calls a function three times.
         cat > $out/src/before.c <<'EOF'
@@ -1823,7 +1887,12 @@ in
   # reaches the program's exec, where its memory began. A watch on a buffer
   # the kernel fills in read() stops, run backwards, at the read's syscall
   # instruction in the process's thread, and run forwards, once, after the
-  # read returns, in the same thread. A run forwards stops before the
+  # read returns, in the same thread. A watch on a buffer recv() fills
+  # stops forwards at the first instruction the thread runs in user space
+  # after the kernel's copy, a signal handler's, whether the handler
+  # returns, exits or jumps out; a breakpoint another thread hits on the
+  # way stops after the watch, and runs forwards and back from there stop
+  # the same each time. A run forwards stops before the
   # process's exec, whose new program it never runs into, says so, and
   # refuses to go on; a step back from there works, and a session at the
   # step the message names stops in the new program. A Ctrl-C in a step back across 10 million
@@ -1986,6 +2055,73 @@ in
           grep -q 'in main () at .*piped.c:18' piped-forward
           test "$(grep -c 'rep_movs\|copy_user' piped-forward)" = 0
           grep -q '^\$1 = "hello' piped-forward
+
+          # A watch on the buffer recv() fills, run forwards from before
+          # the call: the kernel copies 5 bytes, waits on for the rest, and
+          # returns them into the signal handler once the second thread
+          # signals. The watch stops once, in the main thread at the
+          # handler's first instruction, the first it runs in user space
+          # after the copy, with "hello" in the buffer, and the breakpoint
+          # in the handler stops next. The handler's own write() returns
+          # from the instruction the recv would, and is not the stop. A
+          # handler that _exits, or siglongjmps back into main, and never
+          # returns, stops the same. A session that hangs is cut short, and
+          # fails.
+          for mode in r e j; do
+            rewind run -q --clock "$clock" --name "handled-$mode-$clock" --root ${gdbRoot} \
+              -- /bin/handled "$mode" > /dev/null
+            start=$(rewind events "handled-$mode-$clock" | grep 'write(1, "start' | awk '{print $1}')
+            status=0
+            timeout -k 5 300 rewind gdb "handled-$mode-$clock" "$start" -- -batch \
+              -ex 'watch buffer' -ex 'break handler' -ex continue -ex bt -ex continue \
+              -ex continue > "handled-$mode" 2>&1 || status=$?
+            cat "handled-$mode"
+            test "$status" != $timeout_term
+            test "$status" != $timeout_kill
+            test "$(grep -c 'hit Hardware watchpoint 1: buffer' "handled-$mode")" = 1
+            grep -A4 'Thread 2 hit Hardware watchpoint 1: buffer' "handled-$mode" > stop
+            grep -q 'New value = "hello' stop
+            grep -q '^handler (sig=[0-9]*) at .*handled.c:15$' stop
+            grep -q '<signal handler called>' "handled-$mode"
+            grep -q 'Thread 2 hit Breakpoint 2, handler (sig=10)' "handled-$mode"
+            test "$(grep -c 'in write ()\|rep_movs\|copy_user' "handled-$mode")" = 0
+          done
+
+          # With a breakpoint in the second thread, at the call that
+          # signals, the watch is told of when the second thread reaches
+          # it, first, in the main thread at the instruction after its
+          # syscall instruction, where it waits in the kernel; the
+          # breakpoint stops next, at once, then the handler's. Run back,
+          # forwards and back again, the same stops come in the same order,
+          # and two runs back from the second thread's breakpoint reach the
+          # recv's syscall instruction, with the buffer as before the call.
+          start=$(rewind events "handled-r-$clock" | grep 'write(1, "start' | awk '{print $1}')
+          status=0
+          timeout -k 5 300 rewind gdb "handled-r-$clock" "$start" -- -batch -ex 'watch buffer' \
+            -ex 'break signal_reader' -ex 'break handler' -ex continue -ex 'x/2xb $pc-2' \
+            -ex continue -ex continue -ex reverse-continue -ex continue -ex reverse-continue \
+            -ex reverse-continue -ex 'x/i $pc' -ex continue -ex continue \
+            > handled-other 2>&1 || status=$?
+          cat handled-other
+          test "$status" != $timeout_term
+          test "$status" != $timeout_kill
+          grep 'hit ' handled-other | sed 's/,.*//' > hits
+          {
+            echo 'Thread 2 hit Hardware watchpoint 1: buffer'
+            echo 'Thread 3 hit Breakpoint 2'
+            echo 'Thread 2 hit Breakpoint 3'
+            echo 'Thread 3 hit Breakpoint 2'
+            echo 'Thread 2 hit Breakpoint 3'
+            echo 'Thread 3 hit Breakpoint 2'
+            echo 'Thread 2 hit Hardware watchpoint 1: buffer'
+            echo 'Thread 2 hit Hardware watchpoint 1: buffer'
+            echo 'Thread 3 hit Breakpoint 2'
+          } > expected
+          diff expected hits
+          grep -q '^0x[0-9a-f]* <[^>]*>:[[:space:]]*0x0f[[:space:]]*0x05$' handled-other
+          grep -q '^=> 0x[0-9a-f]* <[^>]*>:[[:space:]]*syscall' handled-other
+          test "$(grep -A1 'Old value = "hello' handled-other | grep -c 'New value = .\\000. <repeats 15 times>$')" = 1
+          test "$(grep -c 'rep_movs\|copy_user' handled-other)" = 0
 
           # From the first program's first write, a continue stops before
           # the exec, at the start of the step that runs it, where the

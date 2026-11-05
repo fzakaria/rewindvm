@@ -45,7 +45,7 @@ use gdbstub::target::ext::libraries::{LibrariesSvr4, LibrariesSvr4Ops};
 use gdbstub::target::ext::thread_extra_info::{ThreadExtraInfo, ThreadExtraInfoOps};
 use gdbstub::target::{Target, TargetError, TargetResult};
 use gdbstub_arch::x86::reg::X86_64CoreRegs;
-use rewind_vmm::debug::{Access, DebugStop, MAX_TRAPS, Stepping, Trap};
+use rewind_vmm::debug::{Access, DebugStop, MAX_TRAPS, Stepping, Trap, return_register};
 use rewind_vmm::pv::{TaskLayout, pt_regs};
 use rewind_vmm::{Machine, Observer, Outcome};
 
@@ -96,21 +96,16 @@ const USER_RPL: u64 = 0b11;
 /// rest of its user registers.
 const SYSCALL: [u8; 2] = [0x0f, 0x05];
 
-/// x86-64 system calls that never come back to the instruction after the
-/// syscall instruction: rt_sigreturn returns to the code a signal
-/// interrupted, exec to the new program's entry, and exit not at all.
-const SYS_RT_SIGRETURN: u64 = 15;
+/// x86-64 system calls after which the thread never runs the debugged
+/// program's user space again: exec runs another program, and exit none.
 const SYS_EXECVE: u64 = 59;
 const SYS_EXIT: u64 = 60;
 const SYS_EXIT_GROUP: u64 = 231;
 const SYS_EXECVEAT: u64 = 322;
-const RETURN_ELSEWHERE: [u64; 5] = [
-    SYS_RT_SIGRETURN,
-    SYS_EXECVE,
-    SYS_EXIT,
-    SYS_EXIT_GROUP,
-    SYS_EXECVEAT,
-];
+const NO_RETURN: [u64; 4] = [SYS_EXECVE, SYS_EXIT, SYS_EXIT_GROUP, SYS_EXECVEAT];
+
+/// How long the kernel's variable for the running task is, a pointer.
+const POINTER_LEN: u64 = 8;
 
 /// Whose traps and threads gdb sees: the process with this id, which
 /// `rewind gdb` loads the symbols of, or any, when it debugs no process.
@@ -202,6 +197,15 @@ fn stopped_thread(threads: &[Seen], running: Running) -> Tid {
         .iter()
         .find(|t| matches!(t.source, Source::Task(_, OnCpu::Yes)))
         .map_or_else(cpu_tid, |t| t.tid)
+}
+
+/// The thread id gdb knows the debugged process's thread with its task
+/// struct at `task` by, among `threads`; None once it has exited.
+fn thread_of(threads: &[Seen], task: u64) -> Option<Tid> {
+    threads
+        .iter()
+        .find(|t| matches!(t.source, Source::Task(at, _) if at == task))
+        .map(|t| t.tid)
 }
 
 /// The number gdb gives thread `tid` of the debugged process among
@@ -621,26 +625,59 @@ struct SystemCall {
 }
 
 impl SystemCall {
-    /// The instruction after the call's syscall instruction, which the
-    /// thread comes back to once the call returns; None for a call that
-    /// returns elsewhere or never, such as exit or exec.
-    fn returns_to(self) -> Option<u64> {
-        if RETURN_ELSEWHERE.contains(&self.number) {
-            return None;
-        }
-        Some(self.address + SYSCALL.len() as u64)
+    /// Whether the thread runs the debugged program's user space again
+    /// after the call: not after an exit or an exec.
+    fn returns(self) -> bool {
+        !NO_RETURN.contains(&self.number)
     }
 }
 
-/// Where a run forwards goes after the kernel wrote a watched value in a
-/// system call of the debugged process: on to the instruction after the
-/// call's syscall instruction, in the thread that made the call, where gdb
-/// is told of the watch, `watch`, as gdb set it.
-#[derive(Clone, Copy, Debug)]
-struct Returning {
+/// A watched write the kernel made in a system call of one of the
+/// debugged process's threads, which a run forwards tells gdb of at the
+/// first instruction the thread runs in user space after it: the thread's
+/// task struct's address, and the watch, as gdb set it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct KernelWrite {
     task: u64,
-    address: u64,
     watch: (u64, WatchKind),
+}
+
+/// Where a run forwards is in waiting for the threads of kernel writes to
+/// run user space again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Wait {
+    /// This write's thread runs user space: gdb is told of the write now.
+    Returned(KernelWrite),
+    /// A thread a write waits for is on the CPU, in the kernel.
+    OnTheCpu,
+    /// No thread a write waits for is on the CPU.
+    OffTheCpu,
+}
+
+/// Where a run forwards is in waiting for the threads of `writes`, with
+/// the task struct at `current` on the CPU, running `running`. A thread
+/// runs user space once the CPU does with that thread on it, wherever the
+/// kernel returned it to.
+fn wait(writes: &[KernelWrite], current: u64, running: Running) -> Wait {
+    let Some(write) = writes.iter().find(|w| w.task == current) else {
+        return Wait::OffTheCpu;
+    };
+    match running {
+        Running::UserSpace => Wait::Returned(*write),
+        Running::Kernel => Wait::OnTheCpu,
+    }
+}
+
+/// How the fork runs on while kernel writes wait for their threads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Waiting {
+    /// One single step, gdb's traps set: a thread a write waits for is on
+    /// the CPU in the kernel, or no debug register is left to see a task
+    /// switch.
+    Step,
+    /// Free, gdb's traps set, with this write watch on the kernel's
+    /// variable for the running task, which each task switch writes.
+    Switches(Watch),
 }
 
 impl<'h> Debuggee<'h> {
@@ -899,25 +936,77 @@ impl<'h> Debuggee<'h> {
         Ok(Tasks::new(&self.machine, layout).current()? == task)
     }
 
-    /// Where a run forwards, at a watched write the CPU made in the kernel,
-    /// goes on to before gdb is told of the write: the return of the
-    /// system call the kernel wrote it in. The call's writes, byte by byte
-    /// as the kernel copies, are then one stop, in the thread that made
-    /// the call, with the value as the call left it. None for a write in
-    /// user space, outside a system call of the debugged process, or in a
-    /// call that returns elsewhere, which stops where it is, as before.
-    fn returning(&self, watch: (u64, WatchKind)) -> Result<Option<Returning>> {
+    /// The kernel write a run forwards tells gdb of later, for `watch`, a
+    /// watched write the CPU just made in the kernel: at the first
+    /// instruction the thread whose system call it is runs in user space
+    /// after it. The call's writes, byte by byte as the kernel copies, are
+    /// then one stop, in that thread, with the value as the call left it.
+    /// None for a write in user space, outside a system call of the
+    /// debugged process, or in an exit or an exec, and when gdb's traps
+    /// leave no debug register for the trap that ends a single step at the
+    /// kernel's return to user space; those stop at the write, as before.
+    fn kernel_write(&self, watch: (u64, WatchKind)) -> Result<Option<KernelWrite>> {
         if self.running()? == Running::UserSpace {
+            return Ok(None);
+        }
+        if return_register(&self.traps.registers()).is_none() {
             return Ok(None);
         }
         let Some(call) = self.system_call()? else {
             return Ok(None);
         };
-        Ok(call.returns_to().map(|address| Returning {
+        Ok(call.returns().then_some(KernelWrite {
             task: call.task,
-            address,
             watch,
         }))
+    }
+
+    /// Where a run forwards is in waiting for the threads of `writes`, as
+    /// [`wait`] says, from the task on the CPU.
+    fn wait(&self, writes: &[KernelWrite]) -> Result<Wait> {
+        let layout = self
+            .layout
+            .context("a kernel write waits for its thread with no task layout")?;
+        let current = Tasks::new(&self.machine, layout).current()?;
+        Ok(wait(writes, current, self.running()?))
+    }
+
+    /// Sets the traps a run forwards waits for the threads of kernel
+    /// writes with, at `wait`: gdb's, with single steps, or with a write
+    /// watch on the kernel's variable for the running task, which takes a
+    /// debug register. A `break` breakpoint in a register moves into int3
+    /// to make room; with none to move, the fork single-steps.
+    fn set_waiting_traps(&mut self, wait: Wait) -> Result<Waiting> {
+        let layout = self
+            .layout
+            .context("a kernel write waits for its thread with no task layout")?;
+        let mut memory = Int3Writer {
+            machine: &mut self.machine,
+            space: self.space,
+        };
+        let switches = Watch {
+            address: layout.current_task,
+            len: POINTER_LEN,
+            kind: WatchKind::Write,
+        };
+        let waiting = match wait {
+            Wait::OffTheCpu if self.traps.free_registers(1, &mut memory)? => {
+                Waiting::Switches(switches)
+            }
+            _ => Waiting::Step,
+        };
+
+        // gdb's traps, and the watch on task switches when there is one.
+        let mut registers = self.traps.registers();
+        let stepping = match waiting {
+            Waiting::Step => Stepping::Yes,
+            Waiting::Switches(watch) => {
+                registers.extend(watch_registers(&watch));
+                Stepping::No
+            }
+        };
+        self.machine.set_debug(stepping, &registers)?;
+        Ok(waiting)
     }
 
     /// The system call the task on the CPU is in, as the CPU runs the
@@ -1438,21 +1527,6 @@ impl HwWatchpoint for Debuggee<'_> {
 }
 
 impl Debuggee<'_> {
-    /// Runs the instruction at `address`, the return of a system call a
-    /// run forwards waits for, once in a thread other than the one that
-    /// made the call, as one single step, then sets that breakpoint again
-    /// as the run's only trap.
-    fn step_past_return(&mut self, address: u64) -> Result<()> {
-        self.machine.set_debug(Stepping::Yes, &[])?;
-        match self.machine.run(None, &mut self.follow)? {
-            Outcome::Debug(DebugStop::Step) => {}
-            other => anyhow::bail!("a single step past a system call's return came to {other:?}"),
-        }
-        self.arrived(Some(Move::Steps(1)))?;
-        self.machine
-            .set_debug(Stepping::No, &[Trap::Execute(address)])
-    }
-
     /// The stop gdb is told of after a step forwards: in the thread gdb
     /// stepped, which gdb expects to stop; a stop in another
     /// thread would read to gdb as a signal it never asked for. A stepped
@@ -1652,14 +1726,49 @@ impl<'h> BlockingEventLoop for EventLoop<'h> {
             Ok(Event::TargetStopped(target.step_stop()))
         };
 
-        // A watched write the kernel made in a system call of the debugged
-        // process is told of once the call returns: until then, the fork
-        // runs to the instruction after the call's syscall instruction,
-        // with that breakpoint as its only trap.
-        let mut returning: Option<Returning> = None;
+        // A watched write the kernel made in a system call of one of the
+        // process's threads is told of at the first instruction that
+        // thread runs in user space after it. Until then the fork runs on
+        // with gdb's traps set: single-stepped while the thread is on the
+        // CPU in the kernel, and stopped at each task switch while it is
+        // off, to see when it is back. A breakpoint or a Ctrl-C on the
+        // way stops after the write is told of, so gdb holds the value the
+        // kernel wrote wherever the fork stops past the write.
+        let mut writes: Vec<KernelWrite> = Vec::new();
+
+        // A write is told of in its thread, which gdb shows at the user
+        // registers it runs with or last saved. A thread that has exited
+        // has no registers, and the stop is in the thread a stop names.
+        let told = |target: &mut Debuggee<'h>, write: KernelWrite| {
+            target.refresh_threads();
+            let tid = match thread_of(&target.threads, write.task) {
+                Some(tid) => tid,
+                None => target.stopped_thread().map_err(target_error)?,
+            };
+            let (addr, kind) = write.watch;
+            Ok(Event::TargetStopped(MultiThreadStopReason::Watch {
+                tid,
+                kind,
+                addr,
+            }))
+        };
 
         loop {
-            let until = target.machine.step() + CHUNK_STEPS;
+            // Where the threads of the writes are decides how the fork runs.
+            let mut until = Some(target.machine.step() + CHUNK_STEPS);
+            let mut waiting = None;
+            if !writes.is_empty() {
+                let wait = target.wait(&writes).map_err(target_error)?;
+                if let Wait::Returned(write) = wait {
+                    return told(target, write);
+                }
+                let set = target.set_waiting_traps(wait).map_err(target_error)?;
+                if set == Waiting::Step {
+                    until = None;
+                }
+                waiting = Some(set);
+            }
+
             let mut forward = Forward {
                 follow: &mut target.follow,
                 process: target.process,
@@ -1667,9 +1776,13 @@ impl<'h> BlockingEventLoop for EventLoop<'h> {
             };
             let outcome = target
                 .machine
-                .run(Some(until), &mut forward)
+                .run(until, &mut forward)
                 .map_err(target_error)?;
             let exec = forward.exec;
+            let switches = match waiting {
+                Some(Waiting::Switches(watch)) => Some(watch),
+                _ => None,
+            };
 
             // Said once, when it happens, so gdb's user knows what follows
             // is not what the run did.
@@ -1688,6 +1801,28 @@ impl<'h> BlockingEventLoop for EventLoop<'h> {
                 return Ok(Event::TargetStopped(reason));
             }
             match outcome {
+                // A single step while a kernel write waits ran one
+                // instruction, and the fork runs on. So did one whose
+                // instruction wrote a watched value of another process's,
+                // a step its position records, since a replayed run to a
+                // trap passes hits in other processes.
+                Outcome::Debug(DebugStop::Step) if waiting == Some(Waiting::Step) => {
+                    target.arrived(Some(Move::Steps(1))).map_err(target_error)?;
+                }
+                Outcome::Debug(DebugStop::Watchpoint { address, .. })
+                    if waiting == Some(Waiting::Step)
+                        && !target.in_scope(address).map_err(target_error)? =>
+                {
+                    target.arrived(Some(Move::Steps(1))).map_err(target_error)?;
+                }
+                // A task switch while a kernel write waits: the fork runs
+                // on, the switch a move of its position.
+                Outcome::Debug(DebugStop::Watchpoint { address, .. })
+                    if switches.is_some_and(|w| w.address == address) =>
+                {
+                    let hit = switches.map(|w| Move::Hit(GdbTrap::Watch(w)));
+                    target.arrived(hit).map_err(target_error)?;
+                }
                 Outcome::Debug(DebugStop::Step) => return step_done(target),
                 // A breakpoint in another process's address space is
                 // passed: that process runs the instruction there, which
@@ -1708,49 +1843,42 @@ impl<'h> BlockingEventLoop for EventLoop<'h> {
                     }
                     continue;
                 }
-                // A breakpoint of gdb's stops the fork. The return of the
-                // system call a watched write was in stops it in the thread
-                // that made the call, where gdb is told of the watch;
-                // another of the process's threads there is stepped past
-                // it, a single step its position records, so a replay of
-                // the position comes to the same hits.
+                // A breakpoint of gdb's stops the fork. Hit again at once
+                // where the fork stopped at it, in a thread gdb did not
+                // step past it, the fork has not moved, and its position
+                // stays. A kernel write still waiting is told of first, in
+                // its thread, and the breakpoint, hit again at once, at
+                // the next run forwards.
                 Outcome::Debug(DebugStop::Breakpoint(address)) => {
                     let hit = Move::Hit(GdbTrap::Breakpoint(address));
-                    target.arrived(Some(hit)).map_err(target_error)?;
-                    let Some(call) = returning.filter(|r| r.address == address) else {
-                        return stop(target, MultiThreadStopReason::SwBreak);
-                    };
-                    if !target.is_on_the_cpu(call.task).map_err(target_error)? {
-                        target.step_past_return(address).map_err(target_error)?;
-                        continue;
+                    if target.position != from || !from.ends_with(hit) {
+                        target.arrived(Some(hit)).map_err(target_error)?;
                     }
-                    target.refresh_threads();
-                    let tid = target.stopped_thread().map_err(target_error)?;
-                    let (addr, kind) = call.watch;
-                    return Ok(Event::TargetStopped(MultiThreadStopReason::Watch {
-                        tid,
-                        kind,
-                        addr,
-                    }));
+                    if let Some(&write) = writes.first() {
+                        return told(target, write);
+                    }
+                    return stop(target, MultiThreadStopReason::SwBreak);
                 }
                 Outcome::Debug(DebugStop::Watchpoint { address: piece, .. }) => {
                     let hit = target.traps.watch_containing(piece).map(GdbTrap::Watch);
                     target.arrived(hit.map(Move::Hit)).map_err(target_error)?;
 
-                    // A run forwards goes on to the return of the system
-                    // call the kernel wrote the value in.
-                    let call = match (target.mode, target.traps.watch_at(piece)) {
+                    // A run forwards tells of a write the kernel made in a
+                    // system call once the call's thread runs user space
+                    // again; a thread already waited for waits on. Any
+                    // other watched write stops the fork, in place of the
+                    // writes still waiting: gdb reads that watch's value
+                    // there, the kernel's writes to it included.
+                    let write = match (target.mode, target.traps.watch_at(piece)) {
                         (Mode::Continue, Some(watch)) => {
-                            target.returning(watch).map_err(target_error)?
+                            target.kernel_write(watch).map_err(target_error)?
                         }
                         _ => None,
                     };
-                    if let Some(call) = call {
-                        target
-                            .machine
-                            .set_debug(Stepping::No, &[Trap::Execute(call.address)])
-                            .map_err(target_error)?;
-                        returning = Some(call);
+                    if let Some(write) = write {
+                        if !writes.iter().any(|w| w.task == write.task) {
+                            writes.push(write);
+                        }
                         continue;
                     }
                     target.refresh_threads();
@@ -1781,7 +1909,12 @@ impl<'h> BlockingEventLoop for EventLoop<'h> {
                 .map_err(WaitForStopReasonError::Connection)?
                 .is_some()
             {
+                // A Ctrl-C while a kernel write waits stops with the
+                // write told of, in its thread.
                 let byte = conn.read().map_err(WaitForStopReasonError::Connection)?;
+                if let Some(&write) = writes.first() {
+                    return told(target, write);
+                }
                 return Ok(Event::IncomingData(byte));
             }
         }
@@ -1837,29 +1970,52 @@ mod tests {
         assert!(!entered_by_syscall(&saved, Some(SYSCALL)));
     }
 
-    /// A system call returns to the instruction after its syscall
-    /// instruction, which a run forwards stops at, unless it is one that
-    /// returns elsewhere or never. read() at 0x401934 returns to 0x401936;
-    /// exit, exit_group, execve, execveat and rt_sigreturn return nowhere
-    /// the thread made them from.
+    /// A thread runs user space again after a system call, wherever the
+    /// kernel returns it to, unless the call is an exit or an exec. read()
+    /// and rt_sigreturn, which returns to the code a signal interrupted,
+    /// do; exit, exit_group, execve and execveat do not.
     #[test]
-    fn a_system_call_returns_after_its_instruction_unless_it_leaves() {
+    fn a_system_call_returns_to_user_space_unless_it_leaves() {
         const READ: u64 = 0;
+        const RT_SIGRETURN: u64 = 15;
         let call = |number| SystemCall {
             task: 0xffff_8880_0394_0000,
             address: 0x40_1934,
             number,
         };
-        assert_eq!(call(READ).returns_to(), Some(0x40_1936));
-        for number in [
-            SYS_EXIT,
-            SYS_EXIT_GROUP,
-            SYS_EXECVE,
-            SYS_EXECVEAT,
-            SYS_RT_SIGRETURN,
-        ] {
-            assert_eq!(call(number).returns_to(), None, "{number}");
+        assert!(call(READ).returns());
+        assert!(call(RT_SIGRETURN).returns());
+        for number in [SYS_EXIT, SYS_EXIT_GROUP, SYS_EXECVE, SYS_EXECVEAT] {
+            assert!(!call(number).returns(), "{number}");
         }
+    }
+
+    /// A kernel write is told of once its thread is on the CPU in user
+    /// space, at any address: a signal handler's first instruction counts
+    /// as much as the one after the syscall instruction. The thread on the
+    /// CPU in the kernel is stepped on, and another thread on the CPU, in
+    /// either half, is waited out. Two threads wait, task structs A and B.
+    #[test]
+    fn a_kernel_write_waits_for_its_thread_in_user_space() {
+        const A: u64 = 0xffff_8880_0394_0000;
+        const B: u64 = 0xffff_8880_0395_8000;
+        const OTHER: u64 = 0xffff_8880_0397_0000;
+        let write = |task| KernelWrite {
+            task,
+            watch: (0x4c_8f00, WatchKind::Write),
+        };
+        let writes = [write(A), write(B)];
+        assert_eq!(wait(&writes, A, Running::Kernel), Wait::OnTheCpu);
+        assert_eq!(
+            wait(&writes, A, Running::UserSpace),
+            Wait::Returned(write(A))
+        );
+        assert_eq!(
+            wait(&writes, B, Running::UserSpace),
+            Wait::Returned(write(B))
+        );
+        assert_eq!(wait(&writes, OTHER, Running::UserSpace), Wait::OffTheCpu);
+        assert_eq!(wait(&writes, OTHER, Running::Kernel), Wait::OffTheCpu);
     }
 
     fn thread(tid: u32, task: u64) -> Thread {

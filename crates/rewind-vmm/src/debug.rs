@@ -220,7 +220,7 @@ fn db_exit(dr6: u64, traps: &[Trap], debugger: Stepping, machine: Stepping) -> D
 /// address and writes no memory, so neither a breakpoint in user space nor
 /// a write watch misses a hit; `iretq` reads its frame, which a read-write
 /// watch could see. None when every register is one.
-fn return_register(traps: &[Trap]) -> Option<usize> {
+pub fn return_register(traps: &[Trap]) -> Option<usize> {
     if traps.len() < MAX_TRAPS {
         return Some(traps.len());
     }

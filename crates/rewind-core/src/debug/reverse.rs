@@ -131,6 +131,11 @@ impl Position {
             moves: self.moves.then(mv),
         }
     }
+
+    /// Whether this position's last move is `mv`.
+    pub(super) fn ends_with(&self, mv: Move) -> bool {
+        self.moves.split_last().is_some_and(|(last, _)| last == mv)
+    }
 }
 
 /// A position's moves: a list each position shares with the one it was

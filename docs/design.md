@@ -344,14 +344,29 @@ program's. A fork that cannot go back, because gdb changed it or it left its
 recording, stops at the exec's record, after the exec, and says why.
 
 Run forwards, `continue` to the kernel's write in a system call of one of the
-process's threads stops once, after the call. At the first write the fork runs
-on, with a breakpoint at the instruction after the thread's syscall instruction
-as its only trap, until that thread reaches it, and stops there in that thread,
-with the value as the call left it, as rr does. Another of the process's
-threads that reaches the same instruction first is single-stepped past it, a
-step its position records, so a replay of the position stops at the same hits.
-A call that returns elsewhere or never, rt_sigreturn, exec or exit, and a write
-by the kernel outside a system call, stop at the write, in the CPU's thread.
+process's threads stops once, at the first instruction that thread runs in user
+space after the write: the one after its syscall instruction when the call
+returns, or a signal handler's first when the kernel delivers a signal on the
+way out. gdb sees the value as the call left it, as with rr. No address is
+matched, since a handler can make a call from the same instruction, and a
+handler that never returns, by `_exit` or `siglongjmp`, still starts in user
+space. From the write on, the fork runs with gdb's traps set. While the thread
+is on the CPU in the kernel it is single-stepped, and the trap the VMM sets at
+the kernel's `sysretq` or `iretq` ends the step that returns to user space.
+While the thread is off the CPU, a write watch on the kernel's variable for the
+running task stops the fork at each task switch, to see when the thread is
+back. Each single step and switch is a move of the fork's position, so a replay
+comes to the same stop. A breakpoint of gdb's hit on the way, in another
+thread or in the kernel, or a Ctrl-C, stops with the write reported first, in
+its thread, which gdb shows at the instruction after its syscall instruction;
+the breakpoint, hit again at once, stops the next `continue`. gdb reads a
+watch's value only at a stop it is told is the watch's, so with the write
+reported before any later stop, gdb holds the value the kernel wrote wherever
+the fork stops past it, and a run backwards over the write sees the value
+change. Another watched write on the way, by another thread, stops there in
+place of the kernel's. A write by the kernel outside a system call, in an exit
+or an exec, or with every debug register a read-write watch, which leaves none
+for the trap at the kernel's return, stops at the write, in the CPU's thread.
 
 A step's start comes from a checkpoint the fork keeps in memory: the vCPU,
 the interrupt controllers and the monitor's state, and the pages written
