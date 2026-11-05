@@ -401,8 +401,15 @@ Linux sets to clear it, so the kernel would run on unstepped past the exits it
 makes. At a `syscall` a debug register traps the kernel's entry, the address in
 LSTAR, so one instruction back from a step's start is the `out` or `in` that
 made the step's exit, even when the step before entered the kernel from user
-space. A fork whose registers or memory gdb
-changed, or that left its recording, cannot go back, since the run replayed
+space. An exception clears the flag on its way in too, and a page fault's
+handler can make exits, as one that prints a segfault to the console does.
+While a debug register is free, every single step traps the page fault
+handler's entry, read from the IDT; other exceptions and interrupts still run
+their handlers unstepped up to the next trap. The `iretq` back from a fault
+loads the resume flag, which would let the faulting instruction run past the
+trap at its address, so the flag is cleared in the frame for the step and put
+back after it. A fork whose registers or memory
+gdb changed, or that left its recording, cannot go back, since the run replayed
 is not what the fork did.
 
 Under exit time a step can be millions of instructions, and going back across

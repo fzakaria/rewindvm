@@ -212,12 +212,49 @@ fn db_exit(dr6: u64, traps: &[Trap], debugger: Stepping, machine: Stepping) -> D
     }
 }
 
-/// Where a single step across the kernel's boundary ends, and the debug
-/// register that traps the address.
+/// Where a single step across the kernel's boundary ends, the debug
+/// register that traps the address, whether the step surely crosses, and
+/// the flags of an `iretq` frame to put back once it has.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Crossing {
     address: u64,
     register: usize,
+    across: Across,
+    restore: Option<SavedFlags>,
+}
+
+/// The flags an `iretq` frame held at `at`, a kernel stack address, before
+/// their resume flag was cleared.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SavedFlags {
+    at: u64,
+    flags: u64,
+}
+
+/// Whether a single step crosses the kernel's boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Across {
+    /// Always: the instruction enters the kernel or returns from it.
+    Always,
+    /// When the instruction faults into the kernel's handler; else the
+    /// step ends at its own trap, as any other does.
+    OnFault,
+}
+
+/// The exception a page fault raises. The CPU enters its handler, as any
+/// exception's, with the trap flag cleared.
+const PF_VECTOR: u64 = 14;
+
+/// The size of a gate in the 64-bit IDT.
+const GATE_SIZE: usize = 16;
+
+/// The handler address an IDT gate holds: bits 0 to 15 in its bytes 0
+/// and 1, 16 to 31 in bytes 6 and 7, and 32 to 63 in bytes 8 to 11.
+fn gate_address(gate: &[u8; GATE_SIZE]) -> u64 {
+    let low = u64::from(u16::from_le_bytes([gate[0], gate[1]]));
+    let middle = u64::from(u16::from_le_bytes([gate[6], gate[7]]));
+    let high = u64::from(u32::from_le_bytes([gate[8], gate[9], gate[10], gate[11]]));
+    low | middle << 16 | high << 32
 }
 
 /// The debug register the trap at the kernel's return to user space
@@ -366,6 +403,10 @@ const SYSRETQ: [u8; 3] = [0x48, 0x0f, 0x07];
 const IRETQ: [u8; 2] = [0x48, 0xcf];
 const WORD: usize = 8;
 
+/// The words of an `iretq` frame read: the address, the code segment and
+/// the flags.
+const IRET_FRAME_WORDS: usize = 3;
+
 /// The way user space enters the kernel for a system call: `syscall`
 /// jumps to LSTAR from 64-bit code and to CSTAR from 32-bit code, with the
 /// flags FMASK leaves, which Linux sets to clear the trap flag.
@@ -403,13 +444,27 @@ impl Machine {
             stepping,
             traps: traps.to_vec(),
         });
+        self.drop_fault_trap();
         self.apply_guest_debug()
     }
 
     /// Turns debugging off. int3s still written keep their #BPs trapped.
     pub fn clear_debug(&mut self) -> Result<()> {
         self.debugging = None;
+        self.drop_fault_trap();
         self.apply_guest_debug()
+    }
+
+    /// Takes out the trap at the page fault handler, whose register came
+    /// after the debugger's traps as they were: the next single step
+    /// chooses it again, after the new ones.
+    fn drop_fault_trap(&mut self) {
+        if self
+            .crossing
+            .is_some_and(|crossing| crossing.across == Across::OnFault)
+        {
+            self.crossing = None;
+        }
     }
 
     /// Tells KVM what to trap for the debugger, the monitor's steps toward
@@ -532,16 +587,20 @@ impl Machine {
 
     /// Keeps single steps going across the kernel's boundary, before the
     /// vCPU runs. A `syscall` enters the kernel with the trap flag cleared,
-    /// so the kernel would run on unstepped, across exits and the steps
-    /// they end, until something set the flag again. The kernel returns to
+    /// and so does a page fault, in user space or the kernel, so the
+    /// kernel would run on unstepped, across exits and the steps they end,
+    /// until something set the flag again. The kernel returns to
     /// user space with the flags its entry saved, which have no trap flag
     /// when the steps began in the kernel, so the user's code would run on
     /// unstepped. So at a `syscall` in user space a debug register traps
     /// the kernel's entry, and at a `sysretq` or an `iretq` to user space
     /// the address it returns to, where the step ends: the register after
     /// the debugger's, or one of theirs borrowed until then
-    /// ([`entry_register`], [`return_register`]). With every register one
-    /// the debugger cannot lend, the step runs on as it did before.
+    /// ([`entry_register`], [`return_register`]). Any other instruction
+    /// may fault, so the page fault handler's entry is trapped while a
+    /// register is free; no debugger's is borrowed for it, since every
+    /// step would take it. With every register one the debugger cannot
+    /// lend, the step runs on as it did before.
     pub(crate) fn step_across_the_boundary(&mut self) -> Result<()> {
         if !self.single_stepping() || self.crossing.is_some() {
             return Ok(());
@@ -552,6 +611,10 @@ impl Machine {
             self.kernel_entry(&regs, &sregs)?
         } else {
             self.user_return(&regs)?
+        };
+        let crossing = match crossing {
+            Some(crossing) => Some(crossing),
+            None => self.fault_entry(&regs, &sregs)?,
         };
         if crossing.is_some() {
             self.crossing = crossing;
@@ -578,30 +641,106 @@ impl Machine {
             MSR_CSTAR
         };
         let address = self.read_msr(msr)?;
-        Ok(Some(Crossing { address, register }))
+        Ok(Some(Crossing {
+            address,
+            register,
+            across: Across::Always,
+            restore: None,
+        }))
+    }
+
+    /// Where a single step enters the kernel if its instruction faults on
+    /// a page: the page fault handler, from the IDT, in the register after
+    /// the debugger's. None with no register free, before the kernel has
+    /// set up its IDT, or at the handler's first instruction, where the
+    /// trap would come before the instruction runs, again and again.
+    fn fault_entry(&self, regs: &kvm_regs, sregs: &kvm_sregs) -> Result<Option<Crossing>> {
+        let register = self.debugger_traps().len();
+        let end = (PF_VECTOR + 1) * GATE_SIZE as u64;
+        if register >= MAX_TRAPS || u64::from(sregs.idt.limit) < end - 1 {
+            return Ok(None);
+        }
+        let mut gate = [0u8; GATE_SIZE];
+        let at = sregs.idt.base + PF_VECTOR * GATE_SIZE as u64;
+        if self.read_virtual(at, &mut gate)? < GATE_SIZE {
+            return Ok(None);
+        }
+        let address = gate_address(&gate);
+        if address == regs.rip {
+            return Ok(None);
+        }
+        Ok(Some(Crossing {
+            address,
+            register,
+            across: Across::OnFault,
+            restore: None,
+        }))
     }
 
     /// Where a single step from the kernel at `regs`' pc returns to user
     /// space, when the instruction there is `sysretq`, which returns to
-    /// RCX, or an `iretq` whose frame returns to user space.
-    fn user_return(&self, regs: &kvm_regs) -> Result<Option<Crossing>> {
+    /// RCX, or an `iretq` whose frame returns to user space. A fault's
+    /// frame has the resume flag set, which would let the instruction it
+    /// returns to run past the trap there; the flag is cleared in the
+    /// frame, and put back once the step is done ([`Machine::end_crossing`]).
+    /// The flag does nothing else: the guest's own debug registers are not
+    /// in use while the debugger's are, and `pushf` never saves it.
+    fn user_return(&mut self, regs: &kvm_regs) -> Result<Option<Crossing>> {
         let Some(register) = return_register(self.debugger_traps()) else {
             return Ok(None);
         };
         let mut code = [0u8; SYSRETQ.len()];
         self.read_virtual(regs.rip, &mut code)?;
-        let address = if code == SYSRETQ {
-            Some(regs.rcx)
-        } else if code[..IRETQ.len()] == IRETQ {
-            let mut frame = [0u8; 2 * WORD];
-            self.read_virtual(regs.rsp, &mut frame)?;
-            let rip = u64::from_le_bytes(frame[..WORD].try_into().expect("one word"));
-            let cs = u64::from_le_bytes(frame[WORD..].try_into().expect("one word"));
-            (cs as u16 & SELECTOR_RPL == USER_RPL).then_some(rip)
-        } else {
-            None
+        if code == SYSRETQ {
+            return Ok(Some(Crossing {
+                address: regs.rcx,
+                register,
+                across: Across::Always,
+                restore: None,
+            }));
+        }
+        if code[..IRETQ.len()] != IRETQ {
+            return Ok(None);
+        }
+
+        // The frame: the address, the code segment, then the flags.
+        let mut frame = [0u8; IRET_FRAME_WORDS * WORD];
+        if self.read_virtual(regs.rsp, &mut frame)? < frame.len() {
+            return Ok(None);
+        }
+        let word = |i: usize| {
+            u64::from_le_bytes(
+                frame[i * WORD..(i + 1) * WORD]
+                    .try_into()
+                    .expect("one word"),
+            )
         };
-        Ok(address.map(|address| Crossing { address, register }))
+        let (address, cs, flags) = (word(0), word(1), word(2));
+        if cs as u16 & SELECTOR_RPL != USER_RPL {
+            return Ok(None);
+        }
+        let mut restore = None;
+        if flags & RFLAGS_RF != 0 {
+            let at = regs.rsp + (2 * WORD) as u64;
+            self.write_virtual(at, &(flags & !RFLAGS_RF).to_le_bytes())?;
+            restore = Some(SavedFlags { at, flags });
+        }
+        Ok(Some(Crossing {
+            address,
+            register,
+            across: Across::Always,
+            restore,
+        }))
+    }
+
+    /// Ends the crossing a single step went through, or no longer needs:
+    /// its register is the debugger's again, and an `iretq` frame's flags
+    /// are as the guest left them.
+    fn end_crossing(&mut self) -> Result<()> {
+        if let Some(SavedFlags { at, flags }) = self.crossing.take().and_then(|c| c.restore) {
+            self.write_virtual(at, &flags.to_le_bytes())?;
+        }
+        self.apply_guest_debug()
     }
 
     /// The vCPU's model-specific register `index`.
@@ -680,9 +819,21 @@ impl Machine {
             .crossing
             .is_some_and(|crossing| dr6 & (1 << crossing.register) != 0);
         if crossed {
-            self.crossing = None;
-            self.apply_guest_debug()?;
+            self.end_crossing()?;
             return Ok((debugger == Stepping::Yes).then_some(DebugStop::Step));
+        }
+
+        // A single step that ends a crossing it did not need: an
+        // instruction that stepped without a fault leaves the trap at the
+        // page fault handler unused, and an `iretq` whose frame has the
+        // trap flag steps to where it returns before the trap there can
+        // fire, which would then stop the next step at the same place.
+        if dr6 & DR6_SINGLE_STEP != 0
+            && self.crossing.is_some_and(|crossing| {
+                crossing.across == Across::OnFault || crossing.address == pc
+            })
+        {
+            self.end_crossing()?;
         }
 
         // An instruction that loads RFLAGS, `iretq` back into the kernel
@@ -1122,6 +1273,8 @@ mod tests {
             let crossing = register.map(|register| Crossing {
                 address: RETURN,
                 register,
+                across: Across::Always,
+                restore: None,
             });
             let debug = guest_debug(
                 Some(&debugging),
@@ -1181,6 +1334,21 @@ mod tests {
             Trap::Execute(SYSCALL_AT),
         ];
         assert_eq!(entry_register(&here, SYSCALL_AT), Some(2));
+    }
+
+    /// An IDT gate's handler address is split in three: bits 0 to 15 in
+    /// its first two bytes, 16 to 31 in bytes 6 and 7, and 32 to 63 in
+    /// bytes 8 to 11; the selector, the gate's type and the reserved bytes
+    /// between and after are not part of it. Checked on the gate Linux
+    /// builds for asm_exc_page_fault at 0xffffffff81001280, with kernel
+    /// code's selector 0x10 and an interrupt gate's type byte 0x8e.
+    #[test]
+    fn a_gate_holds_its_handler_in_three_pieces() {
+        let gate = [
+            0x80, 0x12, 0x10, 0x00, 0x00, 0x8e, 0x00, 0x81, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00,
+            0x00, 0x00,
+        ];
+        assert_eq!(gate_address(&gate), 0xffff_ffff_8100_1280);
     }
 
     /// The CPU watches a power of two up to 8 bytes, aligned to itself,
@@ -1333,6 +1501,8 @@ mod tests {
             Some(Crossing {
                 address: 0x2000,
                 register: 1,
+                across: Across::Always,
+                restore: None,
             }),
             &none,
         )

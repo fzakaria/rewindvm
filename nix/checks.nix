@@ -1955,7 +1955,8 @@ in
   # read() stops in seconds. A reverse-stepi from the start of the step
   # of a record the kernel made in write() or exit_group() stops in the
   # kernel, at the out that made the record, though the step before
-  # entered the kernel by a syscall instruction. A run forwards stops before the
+  # entered the kernel by a syscall instruction, or by a page fault in
+  # user space. A run forwards stops before the
   # process's exec, whose new program it never runs into, says so, and
   # refuses to go on; a step back from there stops at the out before it,
   # in the CPU's thread. A kernel breakpoint between the exec's switch to
@@ -2313,6 +2314,20 @@ in
             test "$(grep -c 'fatal error\|Remote connection closed' last)" = 0
             grep -q '^=> 0xffffffff[0-9a-f]* <rewind_emit+[0-9]*>:[[:space:]]*out ' last
           done
+
+          # A page fault enters the kernel with the trap flag cleared too.
+          # The crash's worker faults in user space, and the kernel's
+          # handler prints the segfault to the console. A reverse-stepi
+          # from the step of that line stops at the out that wrote it.
+          rewind run -q --clock "$clock" --name "crash-$clock" --root ${gdbRoot} \
+            -- /bin/crash > /dev/null || true
+          step=$(rewind events "crash-$clock" | grep 'console ".*crash\[[0-9]*\]: segfault' \
+            | awk '{print $1}')
+          timeout -k 5 300 rewind gdb "crash-$clock" "$step" -- -batch -ex reverse-stepi \
+            -ex 'thread 1' -ex 'x/i $pc' > fault 2>&1 || test $? -lt 124
+          cat fault
+          test "$(grep -c 'fatal error\|Remote connection closed' fault)" = 0
+          grep -q '^=> 0xffffffff[0-9a-f]* <rewind_console_write+[0-9]*>:[[:space:]]*out ' fault
 
           # From the first program's first write, a continue stops before
           # the exec, at the start of the step that runs it, where the
