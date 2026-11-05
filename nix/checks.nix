@@ -1182,6 +1182,18 @@ in
         echo "keyframes again: $(tr '\n' ' ' < again-keyframes)"
         keyframes | diff - again-keyframes
 
+        # A job too short for a second keyframe by its work still gets one
+        # where init reports its exit, so a replay compares the whole
+        # machine after the job ran as well as after boot.
+        rewind run -q --name short --root ${busyboxRoot} -- sh -c true
+        short=$(dirname "$(grep -l '"name": "short"' $REWIND_HOME/runs/*/manifest.json)")
+        exited=$(rewind events short --json | sed -n 's/^{"step":\([0-9]*\),.*"text":"rewind-exit .*/\1/p')
+        ls "$short/keyframes" | grep '\.kf$' | sed 's/\.kf$//; s/^0*//' > short-keyframes
+        echo "short keyframes: $(tr '\n' ' ' < short-keyframes), job exit at step $exited"
+        test "$(tail -1 short-keyframes)" = "$exited"
+        rewind replay short | tee short-replay
+        grep -q '^identical to the recording: .*, and the whole machine at its 2 keyframes$' short-replay
+
         rewind replay a | tee from-boot
         grep -q "^identical to the recording: .*, and the whole machine at its $(keyframes | wc -l) keyframes$" from-boot
 

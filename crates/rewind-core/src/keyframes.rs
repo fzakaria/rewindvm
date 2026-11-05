@@ -712,18 +712,21 @@ impl Spacing {
     }
 }
 
-/// Runs a machine to the end, taking keyframes as it goes. The first one
-/// holds the pages written since the keyframe at `parent`, which the
-/// machine was restored from or last took, or every page without one.
+/// Runs a machine to the end, taking keyframes as it goes, or until the
+/// observer asks it to stop short of a stop, where it returns
+/// [`Outcome::Paused`] and can be called again to run on. `parent` names
+/// the keyframe the machine was restored from or last took, or none
+/// before the first, which then holds every page; `spacing` says when the
+/// next one is due. Both carry over from one call to the next.
 pub fn run_with_keyframes(
     machine: &mut Machine,
     obs: &mut dyn Observer,
     run_dir: &Path,
     store: &mut Store,
-    mut parent: Option<u64>,
+    parent: &mut Option<u64>,
+    spacing: &mut Spacing,
     memory: &mut Memory,
 ) -> Result<Outcome> {
-    let mut spacing = Spacing::default();
     loop {
         // A stretch to the next stop, which takes a keyframe only once
         // one is due.
@@ -733,20 +736,35 @@ pub fn run_with_keyframes(
             return Ok(outcome);
         }
         spacing.ran(from, Progress::of(machine));
+        if obs.stop() {
+            return Ok(outcome);
+        }
         if !spacing.due() {
             continue;
         }
         spacing.kept();
-
-        // The keyframe, holding only the pages whose contents changed.
-        let mut kf = machine.keyframe(&mut StorePages(store), parent)?;
-        memory.trim(kf.parent, &mut kf.pages);
-
-        // The pages first, durably, then the keyframe naming them.
-        store.sync()?;
-        save(run_dir, &kf)?;
-        parent = Some(kf.step);
+        take(machine, run_dir, store, parent, memory)?;
     }
+}
+
+/// Takes a keyframe of the machine where it is, holding only the pages
+/// whose contents changed since the keyframe at `parent`, saves it in
+/// `run_dir` and names it the next keyframe's parent.
+pub fn take(
+    machine: &mut Machine,
+    run_dir: &Path,
+    store: &mut Store,
+    parent: &mut Option<u64>,
+    memory: &mut Memory,
+) -> Result<()> {
+    let mut kf = machine.keyframe(&mut StorePages(store), *parent)?;
+    memory.trim(kf.parent, &mut kf.pages);
+
+    // The pages first, durably, then the keyframe naming them.
+    store.sync()?;
+    save(run_dir, &kf)?;
+    *parent = Some(kf.step);
+    Ok(())
 }
 
 #[cfg(test)]

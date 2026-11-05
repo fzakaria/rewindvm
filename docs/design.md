@@ -839,7 +839,10 @@ doing more, as when a build turns from starting processes to compiling, a
 keyframe comes at most an eighth of an interval of the old steps late. Spaced by
 wall time, as they were before, the same build took about 50 keyframes on the
 laptop and 280 on the server, where 200 ms of each 250 ms stretch was the
-keyframe. Seeking to a step restores the latest keyframe at or before it and
+keyframe. A run also takes one where init reports the job's exit, so a job too
+short for a second keyframe by its work, as most one-line commands are, still
+has the whole machine compared after it ran rather than only after boot.
+Seeking to a step restores the latest keyframe at or before it and
 runs forward, so a seek costs at most about one interval. `rewind replay --from`
 restores a keyframe, runs to the end and compares the rest of the trace with the
 original, events and read and write records both. Every keyframe checked this

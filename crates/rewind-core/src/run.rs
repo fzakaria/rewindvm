@@ -869,14 +869,44 @@ impl Run {
                     }
                     parent = Some(kf.step);
                 }
-                let outcome = crate::keyframes::run_with_keyframes(
+                // Keyframes spaced by the guest's work, and one more where
+                // init reports the job's exit, so a replay compares the
+                // whole machine after the job ran even when the job was too
+                // short for a second keyframe by its work. A run whose job
+                // exited before the shared step has passed its exit.
+                let mut spacing = crate::keyframes::Spacing::default();
+                recorder.pause_at_exit = recorder.status.is_none();
+                let mut outcome = crate::keyframes::run_with_keyframes(
                     &mut machine,
                     &mut recorder,
                     &dir,
                     store,
-                    parent,
+                    &mut parent,
+                    &mut spacing,
                     &mut memory,
                 )?;
+                if let Outcome::Paused = outcome {
+                    recorder.pause_at_exit = false;
+                    if parent != Some(machine.step()) {
+                        crate::keyframes::take(
+                            &mut machine,
+                            &dir,
+                            store,
+                            &mut parent,
+                            &mut memory,
+                        )?;
+                        spacing.kept();
+                    }
+                    outcome = crate::keyframes::run_with_keyframes(
+                        &mut machine,
+                        &mut recorder,
+                        &dir,
+                        store,
+                        &mut parent,
+                        &mut spacing,
+                        &mut memory,
+                    )?;
+                }
                 store.sync()?;
                 crate::keyframes::mark_taken(&dir)?;
                 outcome
