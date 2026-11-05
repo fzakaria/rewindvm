@@ -271,9 +271,18 @@ const STUB_BYTES: usize = 16;
 /// interrupt's stub calls but those of the exceptions with stacks of their
 /// own, #DB, NMI, #DF and #MC. None when the stub calls nothing there.
 fn common_entry(stub: u64, code: &[u8]) -> Option<u64> {
+    stub_instructions(stub, code).map(|(_, target)| target)
+}
+
+/// The instructions of the IDT stub at `stub`, whose first bytes are
+/// `code`, each where it starts, through its call, and the call's target.
+/// None when the bytes are no stub's prologue and call.
+fn stub_instructions(stub: u64, code: &[u8]) -> Option<(Vec<u64>, u64)> {
     let mut at = 0;
+    let mut instructions = Vec::new();
     for prologue in [&ENDBR64[..], &CLAC, &NOP3, &CLD, &PUSH_MINUS_ONE] {
         if code[at..].starts_with(prologue) {
+            instructions.push(stub + at as u64);
             at += prologue.len();
         }
     }
@@ -281,9 +290,58 @@ fn common_entry(stub: u64, code: &[u8]) -> Option<u64> {
     if call[0] != CALL_REL32 {
         return None;
     }
+    instructions.push(stub + at as u64);
     let displacement = i32::from_le_bytes([call[1], call[2], call[3], call[4]]);
     let next = stub + (at + CALL_LEN) as u64;
-    Some(next.wrapping_add_signed(i64::from(displacement)))
+    Some((
+        instructions,
+        next.wrapping_add_signed(i64::from(displacement)),
+    ))
+}
+
+/// The stub whose call returns to `returns_to`, from `before`, the bytes
+/// just before that address: the longest run of them, up to
+/// [`STUB_BYTES`], that decodes as a stub's prologue and a call ending
+/// there. Its instructions and the call's target, as
+/// [`stub_instructions`] gives them.
+fn stub_ending_at(returns_to: u64, before: &[u8]) -> Option<(Vec<u64>, u64)> {
+    (CALL_LEN..=STUB_BYTES.min(before.len()))
+        .rev()
+        .find_map(|len| {
+            let start = returns_to - len as u64;
+            let (instructions, target) = stub_instructions(start, &before[before.len() - len..])?;
+            let ends = *instructions.last()? + CALL_LEN as u64;
+            (ends == returns_to).then_some((instructions, target))
+        })
+}
+
+/// error_entry's first instructions, which trade the stub's return
+/// address, pushed where pt_regs keeps rdi, for rdi: push rsi, load the
+/// return address from above it into rsi, store rdi over it.
+const PUSH_RSI: [u8; 1] = [0x56];
+const LOAD_RSI: [u8; 5] = [0x48, 0x8b, 0x74, 0x24, 0x08];
+const STORE_RDI: [u8; 5] = [0x48, 0x89, 0x7c, 0x24, 0x08];
+
+/// Where in error_entry at `entry`, whose first bytes are `code`, rdi's
+/// word of pt_regs holds rdi again: after the store over the return
+/// address. None for other code.
+fn rdi_saved_at(entry: u64, code: &[u8]) -> Option<u64> {
+    let mut at = 0;
+    for instruction in [&PUSH_RSI[..], &LOAD_RSI, &STORE_RDI] {
+        if !code[at..].starts_with(instruction) {
+            return None;
+        }
+        at += instruction.len();
+    }
+    Some(entry + at as u64)
+}
+
+/// The kernel's common exception entry, and where in it the word of
+/// pt_regs that keeps rdi holds rdi again, when it decodes as Linux's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExceptionEntry {
+    pub address: u64,
+    pub rdi_saved_at: Option<u64>,
 }
 
 /// The debug register the trap at the kernel's return to user space
@@ -634,6 +692,7 @@ impl Machine {
         }
         let regs = self.vcpu.get_regs()?;
         let sregs = self.vcpu.get_sregs()?;
+        self.stepped_from = regs.rip;
         let mut changed = false;
         // A crossing takes the register after the debugger's, so the trap
         // at the exception entry, if one is left from a step that ended
@@ -698,6 +757,23 @@ impl Machine {
         else {
             return Ok(None);
         };
+        let Some(address) = self.common_entry_address(sregs)? else {
+            return Ok(None);
+        };
+        if address == regs.rip {
+            return Ok(None);
+        }
+        Ok(Some(Crossing {
+            address,
+            register,
+            restore: None,
+        }))
+    }
+
+    /// The entry the IDT's stubs share, found from the page fault's stub
+    /// ([`common_entry`]), else that stub. None before the kernel has set
+    /// up its IDT.
+    fn common_entry_address(&self, sregs: &kvm_sregs) -> Result<Option<u64>> {
         let end = (PF_VECTOR + 1) * GATE_SIZE as u64;
         if u64::from(sregs.idt.limit) < end - 1 {
             return Ok(None);
@@ -710,15 +786,56 @@ impl Machine {
         let stub = gate_address(&gate);
         let mut code = [0u8; STUB_BYTES];
         let read = self.read_virtual(stub, &mut code)?;
-        let address = common_entry(stub, &code[..read]).unwrap_or(stub);
-        if address == regs.rip {
+        Ok(Some(common_entry(stub, &code[..read]).unwrap_or(stub)))
+    }
+
+    /// The kernel's common exception entry, as a debugger reading a
+    /// thread's saved registers needs it, or None before the kernel has
+    /// set up its IDT.
+    pub fn exception_entry_point(&self) -> Result<Option<ExceptionEntry>> {
+        let Some(address) = self.common_entry_address(&self.vcpu.get_sregs()?)? else {
             return Ok(None);
-        }
-        Ok(Some(Crossing {
+        };
+        let mut code = [0u8; STUB_BYTES];
+        let read = self.read_virtual(address, &mut code)?;
+        Ok(Some(ExceptionEntry {
             address,
-            register,
-            restore: None,
+            rdi_saved_at: rdi_saved_at(address, &code[..read]),
         }))
+    }
+
+    /// The instructions the last single step ran without a trap of their
+    /// own, in order: those of the IDT stub between an instruction that
+    /// faulted or met an interrupt and the trap at the common entry,
+    /// which the CPU ran with the trap flag it cleared. Empty for any
+    /// other step.
+    pub fn skipped(&self) -> &[u64] {
+        &self.skipped
+    }
+
+    /// The stub instructions a step that the trap at the common entry
+    /// ended ran unstepped: the stub's, found from the return address its
+    /// call left on the stack, unless the step began in the stub, at its
+    /// call.
+    fn stub_skipped(&self) -> Result<Vec<u64>> {
+        let regs = self.vcpu.get_regs()?;
+        let mut word = [0u8; WORD];
+        if self.read_virtual(regs.rsp, &mut word)? < WORD {
+            return Ok(Vec::new());
+        }
+        let returns_to = u64::from_le_bytes(word);
+        let mut before = [0u8; STUB_BYTES];
+        let start = returns_to - STUB_BYTES as u64;
+        if self.read_virtual(start, &mut before)? < STUB_BYTES {
+            return Ok(Vec::new());
+        }
+        let Some((instructions, target)) = stub_ending_at(returns_to, &before) else {
+            return Ok(Vec::new());
+        };
+        if target != regs.rip || instructions.contains(&self.stepped_from) {
+            return Ok(Vec::new());
+        }
+        Ok(instructions)
     }
 
     /// Where a single step from the kernel at `regs`' pc returns to user
@@ -869,6 +986,9 @@ impl Machine {
             crossing.is_some_and(|crossing| dr6 & (1 << crossing.register) != 0)
         };
         if hit(self.crossing) || hit(self.exception_trap) {
+            if hit(self.exception_trap) {
+                self.skipped = self.stub_skipped()?;
+            }
             self.end_crossing()?;
             self.exception_trap = None;
             self.apply_guest_debug()?;
@@ -1437,6 +1557,50 @@ mod tests {
         );
         let other: [u8; 6] = [0xf3, 0x0f, 0x1e, 0xfa, 0x90, 0xc3];
         assert_eq!(common_entry(0xffff_ffff_8100_1380, &other), None);
+    }
+
+    /// A stub's instructions, each where it starts, come back in order
+    /// with its call's target: the invalid opcode's has five, its push
+    /// of -1 among them, and a stub that calls nothing has none. Ending at
+    /// the call's return address, the stub is found from the bytes before
+    /// it, the longest run of them that decodes as a stub; bytes of the
+    /// stub before ending in its call decode as none.
+    #[test]
+    fn a_stub_is_its_instructions_in_order() {
+        const STUB: u64 = 0xffff_ffff_8100_1220;
+        let invalid_op: [u8; 15] = [
+            0xf3, 0x0f, 0x1e, 0xfa, 0x0f, 0x1f, 0x00, 0xfc, 0x6a, 0xff, 0xe8, 0xe1, 0x05, 0x00,
+            0x00,
+        ];
+        let (instructions, target) = stub_instructions(STUB, &invalid_op).unwrap();
+        assert_eq!(
+            instructions,
+            [STUB, STUB + 4, STUB + 7, STUB + 8, STUB + 10]
+        );
+        assert_eq!(target, 0xffff_ffff_8100_1810);
+        assert_eq!(stub_instructions(STUB, &[0x90, 0xc3]), None);
+
+        let mut before = vec![0xe9, 0x00, 0x00, 0x00, 0x00, 0xcc];
+        before.extend(invalid_op);
+        let returns_to = STUB + invalid_op.len() as u64;
+        let found = stub_ending_at(returns_to, &before);
+        assert_eq!(found.map(|(i, _)| i[0]), Some(STUB));
+        assert_eq!(stub_ending_at(returns_to, &invalid_op[..10]), None);
+    }
+
+    /// error_entry begins by trading the stub's return address, which the
+    /// call pushed where pt_regs keeps rdi, for rdi: push rsi, load the
+    /// return address into rsi, store rdi over it. The store's end is
+    /// where rdi's word in pt_regs is right again; other code is not
+    /// decoded.
+    #[test]
+    fn error_entry_saves_rdi_three_instructions_in() {
+        const ENTRY: u64 = 0xffff_ffff_8100_1810;
+        let code = [
+            0x56, 0x48, 0x8b, 0x74, 0x24, 0x08, 0x48, 0x89, 0x7c, 0x24, 0x08, 0x52,
+        ];
+        assert_eq!(rdi_saved_at(ENTRY, &code), Some(ENTRY + 11));
+        assert_eq!(rdi_saved_at(ENTRY, &[0x90; 12]), None);
     }
 
     /// The CPU watches a power of two up to 8 bytes, aligned to itself,

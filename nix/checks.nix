@@ -1988,7 +1988,9 @@ in
   # of a record the kernel made in write() or exit_group() stops in the
   # kernel, at the out that made the record, though the step before
   # entered the kernel by a syscall instruction, by a page fault in user
-  # space, or by an invalid opcode or a privileged instruction there.
+  # space, or by an invalid opcode or a privileged instruction there;
+  # steps back from the kernel's exception entry go through the invalid
+  # opcode's IDT stub, one instruction at a time, to the ud2.
   # Stepped through write()'s system call, the process's thread shows the
   # pc and sp it made the call with until the call returns. A run
   # forwards stops before the
@@ -2402,6 +2404,34 @@ in
             test "$(grep -c 'fatal error\|Remote connection closed' ill)" = 0
             grep -q '^=> 0xffffffff[0-9a-f]* <rewind_probe_signal+[0-9]*>:[[:space:]]*out ' ill
           done
+
+          # Stepped from the ud2, the CPU runs the invalid opcode's IDT stub
+          # with the trap flag cleared and stops at the entry the stubs
+          # call. Steps back from there visit the stub's instructions, its
+          # call first and its first last, then the ud2, each once.
+          ud2=$(gdb -batch -ex 'disassemble main' ${gdbRoot}/bin/ill | awk '/ud2/ {print $1}')
+          start=$(grep -F 'write(1, "start' events | awk '{print $1}')
+          printf '%s\n' "break *$ud2" continue delete stepi 'thread 1' 'x/i $pc' > stub.gdb
+          for _ in 1 2 3 4 5 6; do
+            printf '%s\n' reverse-stepi 'thread 1' 'x/i $pc' >> stub.gdb
+          done
+          status=0
+          timeout -k 5 300 rewind gdb "ill-$clock" "$start" -- -batch -x stub.gdb > stub 2>&1 \
+            || status=$?
+          cat stub
+          test "$status" != $timeout_term
+          test "$status" != $timeout_kill
+          sed -n 's/^=> 0x[0-9a-f]* <\([^>]*\)>:[[:space:]]*\([a-z0-9]*\).*/\1 \2/p' stub > visited
+          cat visited
+          test "$(wc -l < visited)" = 7
+          test "$(sed -n 1p visited | cut -d' ' -f1)" = error_entry
+          test "$(sed -n 2p visited | cut -d' ' -f2)" = call
+          test "$(sed -n 6p visited | cut -d' ' -f1)" = asm_exc_invalid_op
+          test "$(sed -n 7p visited | cut -d' ' -f2)" = ud2
+          sed -n '2,6p' visited | cut -d' ' -f1 | sed 's/^asm_exc_invalid_op+\{0,1\}//' \
+            | sed 's/^$/0/' > offsets
+          sort -n -r -u offsets | cmp - offsets
+          test "$(wc -l < offsets)" = 5
 
           # From the first program's first write, a continue stops before
           # the exec, at the start of the step that runs it, where the

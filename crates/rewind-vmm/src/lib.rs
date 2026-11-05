@@ -337,6 +337,11 @@ pub struct Machine {
     /// a single step whose instruction may fault or meet an interrupt
     /// (debug.rs).
     pub(crate) exception_trap: Option<debug::Crossing>,
+    /// The pc the last single step began at (debug.rs).
+    pub(crate) stepped_from: u64,
+    /// The stub instructions the last single step ran unstepped
+    /// (debug.rs).
+    pub(crate) skipped: Vec<u64>,
 }
 
 /// Where a machine's memory started.
@@ -471,6 +476,8 @@ impl Machine {
             branch_stop: None,
             crossing: None,
             exception_trap: None,
+            stepped_from: 0,
+            skipped: Vec::new(),
         })
     }
 
@@ -617,6 +624,7 @@ impl Machine {
     }
 
     fn run_counted(&mut self, until: Option<u64>, obs: &mut dyn Observer) -> Result<Outcome> {
+        self.skipped.clear();
         if let Some(stop) = self.dev.stop {
             return Ok(Outcome::Stopped(stop));
         }

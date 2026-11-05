@@ -776,10 +776,11 @@ impl Debuggee<'_> {
                 1 => before,
                 n => before.then(Move::Steps(n - 1)),
             };
-            return Ok(Some(Position {
+            let back = Position {
                 step: here.step,
                 moves,
-            }));
+            };
+            return self.back_through_the_stub(here, back, margin).map(Some);
         }
         let (anchor, arrival) = match here.moves.split_last() {
             Some((last, rest)) => {
@@ -832,7 +833,9 @@ impl Debuggee<'_> {
                     self.in_scope(address)?
                 }
                 (Arrival::Breakpoint(address), Outcome::Debug(DebugStop::Step)) => {
-                    self.machine.registers()?.rip == address && self.in_scope(address)?
+                    let at = self.machine.registers()?.rip == address
+                        || self.machine.skipped().contains(&address);
+                    at && self.in_scope(address)?
                 }
                 (Arrival::Branches(count), Outcome::Debug(DebugStop::Step)) => {
                     self.machine.branch_count()? == Some(count)
@@ -852,8 +855,65 @@ impl Debuggee<'_> {
         if steps > 0 {
             found = found.then(Move::Steps(steps));
         }
+
+        // A step that went through an IDT stub unstepped reached `here` at
+        // one of the stub's instructions or past them, at the common
+        // entry: the boundary before is the stub instruction before, and
+        // the fork is past `here`, where the step landed.
+        let skipped = self.machine.skipped().to_vec();
+        if skipped.is_empty() {
+            self.position = here.clone();
+            return Ok(Some(found));
+        }
+        self.position = found.then(Move::Steps(1));
+        let within = match arrival {
+            Arrival::Breakpoint(address) => skipped.iter().position(|&at| at == address),
+            _ => None,
+        };
+        let previous = match within {
+            Some(0) => None,
+            Some(i) => Some(skipped[i - 1]),
+            None => skipped.last().copied(),
+        };
+        Ok(Some(match previous {
+            Some(address) => found.then(Move::Hit(GdbTrap::Breakpoint(address))),
+            None => found,
+        }))
+    }
+
+    /// The boundary before `here`, a position that ends in single steps,
+    /// given `back`, the one a single step fewer. The step from `back` may
+    /// have gone through an IDT stub unstepped, into the kernel's common
+    /// exception entry, with the stub's instructions between: the last of
+    /// them, reached from `back` by a run to it, is the boundary before.
+    /// Only a step that lands at the entry can, so only then is the step
+    /// done again from `back` to see.
+    fn back_through_the_stub(
+        &mut self,
+        here: &Position,
+        back: Position,
+        margin: u64,
+    ) -> Result<Position> {
+        if self.position != *here {
+            self.go_to(here, margin)?;
+        }
+        let Some(entry) = self.machine.exception_entry_point()? else {
+            return Ok(back);
+        };
+        if self.machine.registers()?.rip != entry.address {
+            return Ok(back);
+        }
+        self.go_to(&back, margin)?;
+        self.machine.set_debug(Stepping::Yes, &[])?;
+        match self.machine.run(None, &mut Ignore)? {
+            Outcome::Debug(DebugStop::Step) => {}
+            other => bail!("a single step replayed came to {other:?}"),
+        }
         self.position = here.clone();
-        Ok(Some(found))
+        Ok(match self.machine.skipped().last() {
+            Some(&call) => back.then(Move::Hit(GdbTrap::Breakpoint(call))),
+            None => back,
+        })
     }
 
     /// The last hit of one of gdb's traps in the debugged process before
