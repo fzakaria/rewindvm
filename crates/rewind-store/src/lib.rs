@@ -110,6 +110,16 @@ struct Reading {
     decompressor: Option<zstd::bulk::Decompressor<'static>>,
 }
 
+/// What a store putting pages keeps between them: a compression context
+/// and the compressed bytes' buffer. In the static musl build on a Zen 3
+/// host, a context made for each page, as `zstd::bulk::compress` makes
+/// one, took 80 µs a page and most of a keyframe's 200 ms; one context
+/// kept takes 18 µs.
+struct Writing {
+    compressor: zstd::bulk::Compressor<'static>,
+    compressed: Vec<u8>,
+}
+
 thread_local! {
     static READING: std::cell::RefCell<Reading> = std::cell::RefCell::default();
 }
@@ -367,6 +377,8 @@ pub struct Store {
     /// Claimed on the first page put, so a store only read takes none.
     pack: Option<Pack>,
     readers: Mutex<HashMap<u32, Arc<File>>>,
+    /// Made on the first page put, as the pack is.
+    writing: Option<Writing>,
     /// Held shared for as long as the store is open, so an opener that
     /// gets it exclusively knows no one else has the store open.
     _lock: File,
@@ -537,6 +549,7 @@ impl Store {
             index_log,
             pack: None,
             readers: Mutex::new(HashMap::new()),
+            writing: None,
             _lock: lock,
         };
 
@@ -720,7 +733,26 @@ impl Store {
         if hash == ZERO_PAGE || self.index().known(&hash).is_some() {
             return Ok(hash);
         }
-        let compressed = zstd::bulk::compress(data, COMPRESSION_LEVEL)?;
+        // The context is taken out while the page goes into a pack, which
+        // claiming a new pack needs the store for, and put back after. A
+        // put that fails makes a new one next time.
+        let mut writing = match self.writing.take() {
+            Some(writing) => writing,
+            None => Writing {
+                compressor: zstd::bulk::Compressor::new(COMPRESSION_LEVEL)?,
+                compressed: Vec::new(),
+            },
+        };
+
+        // The buffer holds the worst case, which compressing needs.
+        writing.compressed.clear();
+        writing
+            .compressed
+            .reserve(zstd::zstd_safe::compress_bound(data.len()));
+        writing
+            .compressor
+            .compress_to_buffer(data, &mut writing.compressed)?;
+        let compressed = &writing.compressed;
         let full = self
             .pack
             .as_ref()
@@ -739,7 +771,7 @@ impl Store {
             offset: pack.len,
             len: compressed.len() as u32,
         };
-        pack.file.write_all(&compressed)?;
+        pack.file.write_all(compressed)?;
         pack.len += compressed.len() as u64;
 
         // The page is in its pack before the entry naming it is written,
@@ -754,6 +786,7 @@ impl Store {
             bail!("wrote {written} of an index entry's {INDEX_ENTRY} bytes");
         }
         self.index().pages.insert(hash, loc);
+        self.writing = Some(writing);
         Ok(hash)
     }
 
