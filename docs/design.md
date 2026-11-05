@@ -417,7 +417,10 @@ and back from each stub instruction is the one before it, then the instruction
 that faulted, so reverse-stepi visits each once. A step forwards that ran a stub
 unstepped goes back, by the same kind of run, to the stub's first instruction,
 so stepi visits them too, in the other order; a fork that cannot replay its run
-stays at the entry. The `iretq` back from a fault
+stays at the entry. An external interrupt runs its vector's stub first, which
+pushes the vector and jumps to the common interrupt stub; the VMM finds that
+stub from the vector, through its gate, and counts its instructions among the
+stub's. The `iretq` back from a fault
 loads the resume flag, which would let the faulting instruction run past the
 trap at its address, so the flag is cleared in the frame for the step and put
 back after it. A fork whose registers or memory

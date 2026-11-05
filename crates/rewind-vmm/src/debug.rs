@@ -315,6 +315,45 @@ fn stub_ending_at(returns_to: u64, before: &[u8]) -> Option<(Vec<u64>, u64)> {
         })
 }
 
+/// An external interrupt's vector stub: endbr64, a push of the vector as
+/// an 8-bit immediate, and a jump to the common interrupt stub, by a 32-
+/// or an 8-bit displacement.
+const PUSH_IMM8: u8 = 0x6a;
+const PUSH_IMM8_LEN: usize = 2;
+const JMP_REL32: u8 = 0xe9;
+const JMP_REL32_LEN: usize = 5;
+const JMP_REL8: u8 = 0xeb;
+const JMP_REL8_LEN: usize = 2;
+
+/// The instructions of the vector stub at `stub`, whose first bytes are
+/// `code`, each where it starts, when it jumps to `common`, the common
+/// interrupt stub; None for other code.
+fn vector_stub(stub: u64, code: &[u8], common: u64) -> Option<Vec<u64>> {
+    let mut instructions = Vec::new();
+    let mut at = 0;
+    if code.starts_with(&ENDBR64) {
+        instructions.push(stub);
+        at += ENDBR64.len();
+    }
+    if *code.get(at)? != PUSH_IMM8 {
+        return None;
+    }
+    instructions.push(stub + at as u64);
+    at += PUSH_IMM8_LEN;
+    instructions.push(stub + at as u64);
+    let (len, displacement) = match *code.get(at)? {
+        JMP_REL32 => {
+            let bytes = code.get(at + 1..at + JMP_REL32_LEN)?;
+            let displacement = i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+            (JMP_REL32_LEN, i64::from(displacement))
+        }
+        JMP_REL8 => (JMP_REL8_LEN, i64::from(*code.get(at + 1)? as i8)),
+        _ => return None,
+    };
+    let next = stub + (at + len) as u64;
+    (next.wrapping_add_signed(displacement) == common).then_some(instructions)
+}
+
 /// error_entry's first instructions, which trade the stub's return
 /// address, pushed where pt_regs keeps rdi, for rdi: push rsi, load the
 /// return address from above it into rsi, store rdi over it.
@@ -816,7 +855,9 @@ impl Machine {
     /// The stub instructions a step that the trap at the common entry
     /// ended ran unstepped: the stub's, found from the return address its
     /// call left on the stack, unless the step began in the stub, at its
-    /// call.
+    /// call. An external interrupt's vector stub runs first, pushing its
+    /// vector where pt_regs keeps orig_rax and jumping to the common
+    /// interrupt stub; the vector's gate in the IDT names it.
     fn stub_skipped(&self) -> Result<Vec<u64>> {
         let regs = self.vcpu.get_regs()?;
         let mut word = [0u8; WORD];
@@ -832,10 +873,42 @@ impl Machine {
         let Some((instructions, target)) = stub_ending_at(returns_to, &before) else {
             return Ok(Vec::new());
         };
+        let mut instructions = match self.vector_stub_before(regs.rsp, instructions[0])? {
+            Some(mut vector) => {
+                vector.extend(instructions);
+                vector
+            }
+            None => instructions,
+        };
         if target != regs.rip || instructions.contains(&self.stepped_from) {
-            return Ok(Vec::new());
+            instructions.clear();
         }
         Ok(instructions)
+    }
+
+    /// The instructions of the vector stub that jumped to `common`, a stub
+    /// that calls the common entry, from the vector it pushed, the word
+    /// above the return address at `rsp`: the stub its gate in the IDT
+    /// names, when that stub jumps to `common`.
+    fn vector_stub_before(&self, rsp: u64, common: u64) -> Result<Option<Vec<u64>>> {
+        let mut word = [0u8; WORD];
+        if self.read_virtual(rsp + WORD as u64, &mut word)? < WORD {
+            return Ok(None);
+        }
+        let vector = u64::from(u64::from_le_bytes(word) as u8);
+        let sregs = self.vcpu.get_sregs()?;
+        let end = (vector + 1) * GATE_SIZE as u64;
+        if u64::from(sregs.idt.limit) < end - 1 {
+            return Ok(None);
+        }
+        let mut gate = [0u8; GATE_SIZE];
+        if self.read_virtual(sregs.idt.base + vector * GATE_SIZE as u64, &mut gate)? < GATE_SIZE {
+            return Ok(None);
+        }
+        let stub = gate_address(&gate);
+        let mut code = [0u8; STUB_BYTES];
+        let read = self.read_virtual(stub, &mut code)?;
+        Ok(vector_stub(stub, &code[..read], common))
     }
 
     /// Where a single step from the kernel at `regs`' pc returns to user
@@ -1586,6 +1659,31 @@ mod tests {
         let found = stub_ending_at(returns_to, &before);
         assert_eq!(found.map(|(i, _)| i[0]), Some(STUB));
         assert_eq!(stub_ending_at(returns_to, &invalid_op[..10]), None);
+    }
+
+    /// An external interrupt's vector stub pushes its vector and jumps to
+    /// the common interrupt stub: its instructions, each where it starts,
+    /// come back when the jump's target is that stub, by a 32-bit or an
+    /// 8-bit displacement, and none when it jumps elsewhere or is no such
+    /// stub. Checked on the guest kernel's stub for vector 0x20.
+    #[test]
+    fn a_vector_stub_jumps_to_the_common_interrupt() {
+        const STUB: u64 = 0xffff_ffff_8100_0230;
+        const COMMON: u64 = 0xffff_ffff_8100_1380;
+        let vector: [u8; 11] = [
+            0xf3, 0x0f, 0x1e, 0xfa, 0x6a, 0x20, 0xe9, 0x45, 0x11, 0x00, 0x00,
+        ];
+        assert_eq!(
+            vector_stub(STUB, &vector, COMMON),
+            Some(vec![STUB, STUB + 4, STUB + 6])
+        );
+        assert_eq!(vector_stub(STUB, &vector, COMMON + 16), None);
+        let short: [u8; 4] = [0x6a, 0x20, 0xeb, 0x10];
+        assert_eq!(
+            vector_stub(STUB, &short, STUB + 4 + 0x10),
+            Some(vec![STUB, STUB + 2])
+        );
+        assert_eq!(vector_stub(STUB, &[0x90, 0xc3], COMMON), None);
     }
 
     /// error_entry begins by trading the stub's return address, which the
