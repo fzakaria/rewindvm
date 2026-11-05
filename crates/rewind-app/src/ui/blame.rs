@@ -19,8 +19,8 @@ use gpui::{
 };
 
 use crate::blame::{
-    AccessKind, Ask, Blamed, BlamedAccess, Expression, Searching, Target, access_place,
-    blameable_on, counted, file_line, lanes, look_after, overlay, thread_place,
+    AccessKind, Ask, Blamed, BlamedAccess, Expression, LaneRow, Searching, Target, access_place,
+    blameable_on, counted, file_line, lanes, look_after, overlay, row_of, thread_place,
 };
 use crate::blame_jobs::{BlameEntry, BlameKey, Jobs, Start, Why};
 use crate::describe::thousands;
@@ -119,9 +119,12 @@ const FRONTIER_WIDTH: f32 = 2.0;
 const WRITE_MARK_SIZE: f32 = 9.0;
 
 /// The height of a lane in the reads view, and the width of its labels.
-const LANE_HEIGHT: f32 = 20.0;
+/// A lane has two rows of marks, writes above reads, each this far from
+/// its edge.
+const LANE_HEIGHT: f32 = 24.0;
 const LANE_LABEL_WIDTH: f32 = 110.0;
 const LANE_MARK_SIZE: f32 = 8.0;
+const LANE_ROW_INSET: f32 = 3.0;
 
 /// What a click on a value's popover says, after the search.
 const KEEP_WORKING: &str = "Esc to stop \u{b7} keep working, the answer lands here";
@@ -667,7 +670,7 @@ impl Scrubber {
     }
 
     /// The answer of a search with reads: each thread that touched the
-    /// value in a lane, its reads and writes along the steps.
+    /// value in a lane, its writes along the steps above its reads.
     fn reads_view(
         &self,
         card: Stateful<Div>,
@@ -699,6 +702,10 @@ impl Scrubber {
                     AccessKind::Read => theme::BLUE,
                     AccessKind::Write => theme::AMBER,
                 };
+                let top = match row_of(access.kind) {
+                    LaneRow::Writes => LANE_ROW_INSET,
+                    LaneRow::Reads => LANE_HEIGHT - LANE_ROW_INSET - LANE_MARK_SIZE,
+                };
                 let step = access.step;
                 let look = look_after(blamed, access);
                 let note = format!(
@@ -720,7 +727,7 @@ impl Scrubber {
                     div()
                         .id(SharedString::from(format!("blame-lane-{lane}-{i}")))
                         .absolute()
-                        .top(px((LANE_HEIGHT - LANE_MARK_SIZE) / 2.0))
+                        .top(px(top))
                         .left(relative(at))
                         .ml(px(-LANE_MARK_SIZE / 2.0))
                         .size(px(LANE_MARK_SIZE))

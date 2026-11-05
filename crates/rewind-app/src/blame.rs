@@ -362,6 +362,24 @@ pub fn look_after(blamed: &Blamed, access: &BlamedAccess) -> (Thread, Option<Aft
     (thread, after_access(blamed, access))
 }
 
+/// Which row of its thread's lane an access sits on: a thread often
+/// writes a value and reads it again in the same step, which puts both
+/// at the same place along the lane, and a read drawn over a write would
+/// hide it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LaneRow {
+    Writes,
+    Reads,
+}
+
+/// The row of a lane that an access of `kind` sits on.
+pub fn row_of(kind: AccessKind) -> LaneRow {
+    match kind {
+        AccessKind::Write => LaneRow::Writes,
+        AccessKind::Read => LaneRow::Reads,
+    }
+}
+
 /// The lanes of an answer with reads: each thread that accessed a value,
 /// in the order it first did, with its accesses as fractions of the steps
 /// from the first access to the last.
@@ -472,6 +490,45 @@ mod tests {
                 hit: 1
             })
         );
+    }
+
+    /// A thread that writes a value and reads it again in one step, as
+    /// each deposit of the bank example does, shows both: the write and
+    /// the read land at the same place along the lane, on rows of their
+    /// own.
+    #[test]
+    fn a_write_and_a_read_in_one_step_are_on_rows_of_their_own() {
+        let blamed: Blamed = serde_json::from_value(serde_json::json!({
+            "run": "r", "step": 3291, "pid": 139, "tid": 139, "place": null,
+            "values": [
+                {"text": "balance", "address": "0x56055a0ef030", "size": 8,
+                 "class": "signed", "type": "long", "now": "310", "initial": "0"}
+            ],
+            "accesses": [
+                {"step": 3233, "value": 0, "kind": "read", "tid": 140, "thread": "bank",
+                 "before": "0", "after": "0", "pc": "0x1", "kernel": null, "syscall": null,
+                 "place": null, "hit": 1},
+                {"step": 3234, "value": 0, "kind": "write", "tid": 140, "thread": "bank",
+                 "before": "0", "after": "10", "pc": "0x2", "kernel": null, "syscall": null,
+                 "place": null, "hit": 1},
+                {"step": 3234, "value": 0, "kind": "read", "tid": 140, "thread": "bank",
+                 "before": "10", "after": "10", "pc": "0x1", "kernel": null, "syscall": null,
+                 "place": null, "hit": 2}
+            ],
+            "threads": [], "searched_from": 3210, "since": 3210, "windows": 1, "listed": "accesses", "dropped": 0,
+            "elapsed_ms": 900
+        }))
+        .unwrap();
+        let lanes = lanes(&blamed);
+        let [(140, marks)] = lanes.as_slice() else {
+            panic!("one lane, thread 140's: {lanes:?}");
+        };
+        let [_, (write_at, write), (read_at, read)] = marks.as_slice() else {
+            panic!("three marks: {marks:?}");
+        };
+        assert_eq!(write_at, read_at);
+        assert_eq!(row_of(write.kind), LaneRow::Writes);
+        assert_eq!(row_of(read.kind), LaneRow::Reads);
     }
 
     fn expression(text: &str, line: u32, name: (u32, u32), location: Location) -> Expression {
