@@ -121,6 +121,7 @@
           appRelease = import ./nix/app-release.nix { inherit pkgs rust releaseDate; };
           site = import ./nix/site.nix { inherit pkgs web; };
           examples = import ./nix/examples.nix { inherit pkgs; };
+          benchInputs = import ./nix/bench { inherit pkgs; };
           license = import ./nix/license.nix {
             inherit
               pkgs
@@ -180,6 +181,10 @@
           # the license issuer, kept out of the app's package
           # (nix/license.nix)
           license = p.license;
+
+          # the programs and data tools/bench.py measures every build
+          # against (nix/bench)
+          bench-inputs = p.benchInputs;
 
           # the tutorials' flaky thread pool (nix/examples.nix)
           mylib = p.examples.mylib;
@@ -242,6 +247,18 @@
           app = {
             type = "app";
             program = "${p.app}/bin/rewind-app";
+          };
+
+          # `nix run .#bench -- ...`: tools/bench.py with its tools on
+          # PATH and the inputs built (nix/bench/app.nix)
+          bench = {
+            type = "app";
+            program = "${
+              import ./nix/bench/app.nix {
+                inherit (p) pkgs;
+                inputs = p.benchInputs;
+              }
+            }/bin/rewind-bench";
           };
 
           # `nix run .#serve [port]`: the built site on a local port
