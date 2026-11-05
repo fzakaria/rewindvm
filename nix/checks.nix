@@ -105,7 +105,7 @@ let
         int main(void)
         {
           counter = 7;
-          for (int i = 0; i < 25000; i++)
+          for (int i = 0; i < 30000; i++)
             write(1, ".", 1);
           write(1, "done\n", 5);
           return 0;
@@ -958,8 +958,8 @@ in
         # keyframe keeps one at its step. A second look there keeps none,
         # since it restores that keyframe and replays nothing, and the run
         # replays from the kept keyframe like from any other. Keyframes
-        # are spaced by the guest's work, about 11,400 steps of writes
-        # apart, so a run of 3,000 writes has one only at step 256.
+        # are spaced by the guest's work, 10,000 to 13,000 steps of
+        # writes apart, so a run of 3,000 writes has one only at step 256.
         rewind run -q --name long --root ${busyboxRoot} -- sh -c 'for i in $(seq 3000); do echo $i; done'
         long=$(dirname "$(grep -l '"name": "long"' $REWIND_HOME/runs/*/manifest.json)")
         keyframes() { ls "$long/keyframes" | sed 's/\.kf$//; s/^0*//'; }
@@ -1163,9 +1163,9 @@ in
       }
       ''
         export REWIND_HOME=$TMPDIR/rewind
-        # Keyframes are spaced by the guest's work, about 11,400 steps of
-        # writes apart after the first at step 256, so 40,000 writes take
-        # four.
+        # Keyframes are spaced by the guest's work, 10,000 to 13,000
+        # steps of writes apart after the first at step 256, so 40,000
+        # writes take four.
         writes='for i in $(seq 40000); do echo $i; done; head -c 64 /dev/urandom | od -An -tx1'
         rewind run -q --name a --root ${busyboxRoot} -- sh -c "$writes"
         a=$(dirname "$(grep -l '"name": "a"' $REWIND_HOME/runs/*/manifest.json)")
@@ -1660,7 +1660,7 @@ in
             '.frames[.chosen].line == $line' after.json
         done
 
-        # A write 25,000 steps back, past two keyframes about 11,400
+        # A write 30,000 steps back, past two keyframes about 12,800
         # steps apart: the windows after the first hold no write, and
         # each puts the machine at its own keyframe in place. The value is
         # 0 where the search began, before the write.

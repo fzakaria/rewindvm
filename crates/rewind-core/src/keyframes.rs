@@ -32,7 +32,8 @@ const NS_PER_STEP: u64 = 22_000;
 const PS_PER_BRANCH: u64 = 750;
 const PS_PER_NS: u64 = 1000;
 
-/// Bounds on the interval, in steps.
+/// Bounds on the steps between two stops: of a replay toward a step, and
+/// of a recording's at its first.
 const MIN_INTERVAL: u64 = 256;
 const MAX_INTERVAL: u64 = 1 << 20;
 
@@ -639,40 +640,75 @@ impl Progress {
     }
 }
 
-/// The steps from one of a recording's keyframes to the next, aimed at
-/// TARGET of the guest's work. It reads nothing of the host, not the time
-/// a stretch or a keyframe took, so a recording keyframes at the same
-/// steps however fast the host runs it.
+/// How many times a recording stops between two keyframes to see whether
+/// the next is due. A stretch between stops is sized from the one before,
+/// so where the guest's steps start doing more work, as when a build turns
+/// from starting processes to compiling, a keyframe comes at most one
+/// stretch of the old steps late, an eighth of TARGET at their cost,
+/// rather than a whole interval of them.
+const STOPS_PER_KEYFRAME: u64 = 8;
+
+/// The fewest steps between two stops: a step that alone is more work
+/// than a stretch, as a compiler's can be, gets a stop of its own.
+const MIN_STRIDE: u64 = 1;
+
+/// Where a recording takes its keyframes: the first at the first stop,
+/// MIN_INTERVAL steps in, then at the first stop TARGET of the guest's
+/// work past the last. It reads nothing of the host, not the time a
+/// stretch or a keyframe took, so a recording keyframes at the same steps
+/// however fast the host runs it.
 #[derive(Debug)]
-pub struct Interval {
-    steps: u64,
+pub struct Spacing {
+    /// Steps from one stop to the next, aimed at TARGET / STOPS_PER_KEYFRAME
+    /// of work.
+    stride: u64,
+    /// The work since the last keyframe, in the reference host's
+    /// nanoseconds.
+    since: u64,
+    /// Whether the recording has taken a keyframe yet.
+    kept_one: bool,
 }
 
-impl Default for Interval {
-    fn default() -> Interval {
-        Interval {
-            steps: MIN_INTERVAL,
+impl Default for Spacing {
+    fn default() -> Spacing {
+        Spacing {
+            stride: MIN_INTERVAL,
+            since: 0,
+            kept_one: false,
         }
     }
 }
 
-impl Interval {
-    /// The step of the next keyframe after one at `at`.
+impl Spacing {
+    /// The step of the next stop after `at`.
     pub fn next_stop(&self, at: u64) -> u64 {
-        at.saturating_add(self.steps)
+        at.saturating_add(self.stride)
     }
 
     /// Takes the stretch just run, from `from` to `to`, and aims the next
-    /// one at TARGET of work at the same work per step.
+    /// one at the same work per step.
     pub fn ran(&mut self, from: Progress, to: Progress) {
         let steps = to.step.saturating_sub(from.step);
         let work = from.work_to(to);
+        self.since = self.since.saturating_add(work);
         if work == 0 {
             return;
         }
-        let scaled = u128::from(steps) * TARGET.as_nanos() / u128::from(work);
+        let aim = TARGET.as_nanos() / u128::from(STOPS_PER_KEYFRAME);
+        let scaled = u128::from(steps) * aim / u128::from(work);
         let scaled = u64::try_from(scaled).unwrap_or(MAX_INTERVAL);
-        self.steps = scaled.clamp(MIN_INTERVAL, MAX_INTERVAL);
+        self.stride = scaled.clamp(MIN_STRIDE, MAX_INTERVAL);
+    }
+
+    /// Whether the recording takes a keyframe at this stop.
+    pub fn due(&self) -> bool {
+        !self.kept_one || u128::from(self.since) >= TARGET.as_nanos()
+    }
+
+    /// Notes that a keyframe was taken at this stop.
+    pub fn kept(&mut self) {
+        self.since = 0;
+        self.kept_one = true;
     }
 }
 
@@ -687,15 +723,20 @@ pub fn run_with_keyframes(
     mut parent: Option<u64>,
     memory: &mut Memory,
 ) -> Result<Outcome> {
-    let mut interval = Interval::default();
+    let mut spacing = Spacing::default();
     loop {
-        // A stretch, and the next one's length from how far it got.
+        // A stretch to the next stop, which takes a keyframe only once
+        // one is due.
         let from = Progress::of(machine);
-        let outcome = machine.run(Some(interval.next_stop(from.step)), obs)?;
+        let outcome = machine.run(Some(spacing.next_stop(from.step)), obs)?;
         if let Outcome::Stopped(_) = outcome {
             return Ok(outcome);
         }
-        interval.ran(from, Progress::of(machine));
+        spacing.ran(from, Progress::of(machine));
+        if !spacing.due() {
+            continue;
+        }
+        spacing.kept();
 
         // The keyframe, holding only the pages whose contents changed.
         let mut kf = machine.keyframe(&mut StorePages(store), parent)?;
@@ -1073,67 +1114,81 @@ mod tests {
 
     /// The steps a recording of [`guest`] takes its keyframes at.
     fn keyframe_steps() -> Vec<u64> {
-        let mut interval = Interval::default();
+        let mut spacing = Spacing::default();
         let mut at = guest(0);
         let mut steps = Vec::new();
         while at.step < GUEST_STEPS {
-            let stop = guest(interval.next_stop(at.step).min(GUEST_STEPS));
-            interval.ran(at, stop);
-            steps.push(stop.step);
+            let stop = guest(spacing.next_stop(at.step).min(GUEST_STEPS));
+            spacing.ran(at, stop);
             at = stop;
+            if spacing.due() {
+                steps.push(at.step);
+                spacing.kept();
+            }
         }
         steps
     }
 
     #[test]
     fn keyframes_are_a_target_of_the_guests_work_apart() {
-        // A recording of a made-up guest, in two phases of steps that
-        // each do the same work. Past the stretch where a phase starts,
-        // where the interval adapts, each stretch is as many steps as the
-        // reference host runs in TARGET, a different number in each
-        // phase. The guest's progress is all the interval reads, so a
-        // host of any speed keyframes the guest at these same steps.
+        // A recording of a made-up guest, in two phases whose steps each
+        // do the same work, the second's ten times the first's. The first
+        // keyframe is at MIN_INTERVAL, and each later one at least TARGET
+        // of work past the one before. Within a phase each is at most one
+        // stop's stretch, TARGET / STOPS_PER_KEYFRAME, past TARGET, and
+        // where the phases meet, at most one stretch of the first phase's
+        // steps at the second's cost. The guest's progress is all the
+        // spacing reads, so a host of any speed keyframes the guest at
+        // these same steps.
         let steps = keyframe_steps();
         assert_eq!(steps, keyframe_steps());
+        assert_eq!(steps[0], MIN_INTERVAL);
         let target = TARGET.as_nanos() as u64;
-        let syscall_steps = target / guest(0).work_to(guest(1));
-        let compute_steps = target / guest(GUEST_SYSCALLS).work_to(guest(GUEST_SYSCALLS + 1));
-        assert_eq!((syscall_steps, compute_steps), (10_638, 1_012));
+        let stretch = target / STOPS_PER_KEYFRAME;
+        let syscall = guest(0).work_to(guest(1));
+        let compute = guest(GUEST_SYSCALLS).work_to(guest(GUEST_SYSCALLS + 1));
+        assert_eq!((syscall, compute), (23_500, 247_000));
 
-        // Each stretch whose phase the stretch before it was all in.
         let mut checked = 0;
-        let stops: Vec<u64> = std::iter::once(0).chain(steps.iter().copied()).collect();
-        for w in stops.windows(3) {
-            let (before, from, to) = (w[0], w[1], w[2]);
-            if to == GUEST_STEPS {
-                continue;
-            }
-            if to <= GUEST_SYSCALLS {
-                assert_eq!(to - from, syscall_steps, "{from}..{to}");
-                checked += 1;
-            } else if before >= GUEST_SYSCALLS {
-                assert_eq!(to - from, compute_steps, "{from}..{to}");
-                checked += 1;
-            }
+        for pair in steps.windows(2) {
+            let (from, to) = (pair[0], pair[1]);
+            let work = guest(from).work_to(guest(to));
+            assert!(work >= target, "{from}..{to}: {work} ns");
+            let most = match (to <= GUEST_SYSCALLS, from >= GUEST_SYSCALLS) {
+                (true, _) => target + stretch + syscall,
+                (_, true) => target + stretch + compute,
+                _ => target + stretch / syscall * compute + compute,
+            };
+            assert!(work <= most, "{from}..{to}: {work} ns, more than {most}");
+            checked += 1;
         }
         assert!(checked > 100, "{steps:?}");
     }
 
     #[test]
-    fn a_keyframe_interval_is_never_under_its_minimum() {
-        // Steps of a second of work each would put keyframes every step;
-        // the interval stays at MIN_INTERVAL. A stretch with no progress
-        // at all, as a run that stopped where it started, leaves it there
-        // too rather than dividing by zero.
-        let mut interval = Interval::default();
-        let slow = Progress {
-            step: 10,
-            branches: 10_000_000_000_000,
+    fn a_step_of_more_work_than_a_keyframe_is_due_keyframes_each_stop() {
+        // Steps of a second of work each: a stop after every step, and
+        // each a keyframe. A stretch with no progress at all, as a run
+        // that stopped where it started, leaves the stride as it was
+        // rather than dividing by zero.
+        let mut spacing = Spacing::default();
+        spacing.kept();
+        let slow = |step| Progress {
+            step,
+            branches: step * 1_400_000_000,
         };
-        interval.ran(Progress::default(), slow);
-        assert_eq!(interval.next_stop(10), 10 + MIN_INTERVAL);
-        interval.ran(slow, slow);
-        assert_eq!(interval.next_stop(10), 10 + MIN_INTERVAL);
+        let mut at = 0;
+        for _ in 0..4 {
+            let stop = spacing.next_stop(at);
+            spacing.ran(slow(at), slow(stop));
+            assert!(spacing.due(), "at {stop}");
+            spacing.kept();
+            at = stop;
+        }
+        assert_eq!(spacing.next_stop(at), at + MIN_STRIDE);
+        spacing.ran(slow(at), slow(at));
+        assert_eq!(spacing.next_stop(at), at + MIN_STRIDE);
+        assert!(!spacing.due());
     }
 
     #[test]

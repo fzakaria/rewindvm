@@ -2,8 +2,8 @@
  * sleeps 1500 times, and prints a fixed word: nothing the program does
  * after the draw depends on the number, so only the machine's memory
  * differs between two runs. A sleep is about 11 steps, and keyframes come
- * about 11,400 steps of them apart after the first at step 256, so the
- * sleeps reach a keyframe after the draw, where a replay sees the
+ * 10,000 to 13,000 steps of them apart after the first at step 256, so
+ * the sleeps reach a keyframe after the draw, where a replay sees the
  * difference. */
 #include <immintrin.h>
 #include <stdio.h>
