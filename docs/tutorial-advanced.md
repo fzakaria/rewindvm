@@ -524,7 +524,7 @@ interleave on the one vCPU:
 ```console
 $ rewind nix --cores 4 --epoch 1790985600 github:fzakaria/rewindvm#mylib
 ...
-rewind: run e32a716c74e474d9 exited:0 after 6202 steps, 0.217s virtual, 0.865s wall (poweroff)
+rewind: run e32a716c74e474d9 exited:0 after 6202 steps, 0.217s virtual, 0.708s wall (poweroff)
 /nix/store/f6a9gy362szw6nxx3ikrklr8glr6rdln-mylib-0.3.0 a9d703ba89774f3d  matches your store, rewindvm.cachix.org
 ```
 
@@ -547,22 +547,22 @@ fit in the VM's memory.
 
 ```console
 $ rewind fork 4736382d 4682 --schedule 1 --quiet
-rewind: run 0bd9caa5552224c9 exited:2 after 4833 steps, 0.200s virtual, 0.109s wall (poweroff)
+rewind: run 0bd9caa5552224c9 exited:2 after 4833 steps, 0.200s virtual, 0.110s wall (poweroff)
 rewind: the fork first differs from its parent at step 4770
 rewind: open it beside its parent in the desktop app: rewind open 0bd9caa5552224c9 4770 --compare 4736382dc2ed9626
 
 $ rewind fork 4736382d 4682 --schedule 2 --quiet
-rewind: run 4fe1061ad78df32f exited:0 after 6502 steps, 0.219s virtual, 0.133s wall (poweroff)
+rewind: run 4fe1061ad78df32f exited:0 after 6502 steps, 0.219s virtual, 0.124s wall (poweroff)
 rewind: the fork first differs from its parent at step 4708
 rewind: open it beside its parent in the desktop app: rewind open 4fe1061ad78df32f 4708 --compare 4736382dc2ed9626
 
 $ rewind fork 4736382d 4682 --schedule 3 --quiet
-rewind: run 87f328742319f6a7 exited:0 after 6735 steps, 0.226s virtual, 0.121s wall (poweroff)
+rewind: run 87f328742319f6a7 exited:0 after 6735 steps, 0.226s virtual, 0.119s wall (poweroff)
 rewind: the fork first differs from its parent at step 4705
 rewind: open it beside its parent in the desktop app: rewind open 87f328742319f6a7 4705 --compare 4736382dc2ed9626
 
 $ rewind fork 4736382d 4682 --schedule 4 --quiet
-rewind: run 635fe8585a24d89f exited:0 after 6449 steps, 0.220s virtual, 0.136s wall (poweroff)
+rewind: run 635fe8585a24d89f exited:0 after 6449 steps, 0.220s virtual, 0.110s wall (poweroff)
 rewind: the fork first differs from its parent at step 4703
 rewind: open it beside its parent in the desktop app: rewind open 635fe8585a24d89f 4703 --compare 4736382dc2ed9626
 ```
@@ -623,7 +623,7 @@ The failing run's command makes it again, with the same id:
 ```console
 $ rewind show 4736382d | tail -1 | sh
 ...
-rewind: run 4736382dc2ed9626 exited:2 after 4821 steps, 0.200s virtual, 0.528s wall (poweroff)
+rewind: run 4736382dc2ed9626 exited:2 after 4821 steps, 0.200s virtual, 0.534s wall (poweroff)
 ```
 
 ## Compare any two runs
@@ -814,7 +814,7 @@ The same steps stall, one exit in 128, but each stall picks one of the
 doublings of 10 µs up to the maximum, 14 of them for 50 ms, so fewer stalls
 are short. How often a race turns up then depends on how long it needs a
 thread held: 32 schedules of mylib crash 4 times by default and
-5 times with `--stall-max 100ms`, in 5.8 s and 4.4 s. A stall is virtual time, so the guest's clock
+5 times with `--stall-max 100ms`, in 3.7 s and 3.7 s. A stall is virtual time, so the guest's clock
 moves further, and a program's own timeouts see the extra time. The maximum is
 part of each run's spec, so `rewind show`, a replay and a fork of the run keep
 the maximum, and a run made without the flag keeps its id. A fork's own
@@ -875,13 +875,13 @@ zoom the timeline. The ? key lists them all:
 
 ```console
 $ rewind export 4736382d --replayable -o crash.rwd
-rewind: wrote crash.rwd (201.5 MB)
+rewind: wrote crash.rwd (200.9 MB)
 
 $ REWIND_HOME=elsewhere rewind import crash.rwd
 4736382dc2ed9626  exited:2          4821 steps  mylib-0.3.0
 
 $ REWIND_HOME=elsewhere rewind replay 4736382d
-identical to the recording: 1687 events and 1476 read and write records over 4821 steps, and the whole machine at its 9 keyframes
+identical to the recording: 1687 events and 1476 read and write records over 4821 steps, and the whole machine at its 8 keyframes
 ```
 
 A replayable export carries the keyframes, the image and the VM's kernel, and
@@ -934,7 +934,7 @@ $ nix shell nixpkgs#pkgsStatic.stdenv.cc -c x86_64-unknown-linux-musl-cc -static
 
 ```console
 $ rewind run --root spin --timeout 5 --name spin -- /bin/spin
-rewind: run 4175e7e086c0c6f4 timed-out after 301 steps, 0.002s virtual, 5.008s wall (timed out computing without exits for 4.5s, in user space in main+11 (spin.c:2), process 34 (spin))
+rewind: run 4175e7e086c0c6f4 timed-out after 301 steps, 0.002s virtual, 5.015s wall (timed out computing without exits for 4.7s, in user space in main+15 (spin.c:2), process 34 (spin))
 ```
 
 A run that timed out while still making exits was slow rather than stuck, and

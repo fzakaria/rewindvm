@@ -67,7 +67,7 @@ deterministic virtual machine:
 $ rewind nix --epoch 1790985600 github:fzakaria/rewindvm#mylib
 rewind: packing 62 store paths for mylib-0.3.0
 ...
-rewind: run cc2b986165da8b5e exited:0 after 6196 steps, 0.217s virtual, 1.326s wall (poweroff)
+rewind: run cc2b986165da8b5e exited:0 after 6196 steps, 0.217s virtual, 1.100s wall (poweroff)
 /nix/store/f6a9gy362szw6nxx3ikrklr8glr6rdln-mylib-0.3.0 a9d703ba89774f3d  matches your store, rewindvm.cachix.org
 ```
 
@@ -254,10 +254,10 @@ type into.
 
 ```console
 $ rewind replay 4736382d
-identical to the recording: 1687 events and 1476 read and write records over 4821 steps, and the whole machine at its 5 keyframes
+identical to the recording: 1687 events and 1476 read and write records over 4821 steps, and the whole machine at its 4 keyframes
 
 $ rewind replay 4736382d --from 4456
-identical to the recording from the snapshot at step 1655 to the end, and the whole machine at its 2 keyframes (0.36s)
+identical to the recording from the snapshot at step 256 to the end, and the whole machine at its 3 keyframes (0.43s)
 ```
 
 `--from` starts at the nearest keyframe before the step. A run replays on any
@@ -269,22 +269,22 @@ A fork is its parent up to a step, then another schedule:
 
 ```console
 $ rewind fork cc2b9861 4456 --schedule 1 --quiet
-rewind: run 91d1e54f70186dff exited:2 after 4833 steps, 0.200s virtual, 0.064s wall (poweroff)
+rewind: run 91d1e54f70186dff exited:2 after 4833 steps, 0.200s virtual, 0.054s wall (poweroff)
 rewind: the fork first differs from its parent at step 4477
 rewind: open it beside its parent in the desktop app: rewind open 91d1e54f70186dff 4477 --compare cc2b986165da8b5e
 
 $ rewind fork cc2b9861 4456 --schedule 2 --quiet
-rewind: run 2a49b5ec4069a273 exited:0 after 6487 steps, 0.219s virtual, 0.118s wall (poweroff)
+rewind: run 2a49b5ec4069a273 exited:0 after 6487 steps, 0.219s virtual, 0.107s wall (poweroff)
 rewind: the fork first differs from its parent at step 4471
 rewind: open it beside its parent in the desktop app: rewind open 2a49b5ec4069a273 4471 --compare cc2b986165da8b5e
 
 $ rewind fork cc2b9861 4456 --schedule 3 --quiet
-rewind: run 5f6afd2efeb639d9 exited:0 after 6594 steps, 0.225s virtual, 0.115s wall (poweroff)
+rewind: run 5f6afd2efeb639d9 exited:0 after 6594 steps, 0.225s virtual, 0.103s wall (poweroff)
 rewind: the fork first differs from its parent at step 4471
 rewind: open it beside its parent in the desktop app: rewind open 5f6afd2efeb639d9 4471 --compare cc2b986165da8b5e
 
 $ rewind fork cc2b9861 4456 --schedule 4 --quiet
-rewind: run cb6bd4c404d0b077 exited:0 after 6570 steps, 0.221s virtual, 0.112s wall (poweroff)
+rewind: run cb6bd4c404d0b077 exited:0 after 6570 steps, 0.221s virtual, 0.108s wall (poweroff)
 rewind: the fork first differs from its parent at step 4472
 rewind: open it beside its parent in the desktop app: rewind open cb6bd4c404d0b077 4472 --compare cc2b986165da8b5e
 ```

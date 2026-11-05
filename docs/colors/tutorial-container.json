@@ -1,6 +1,6 @@
 [
  {
-  "text": "$ docker export $(docker create mylib) -o mylib.tar\n$ rewind run --root mylib.tar --cwd /src -- make check\n...\nround 3: ok\ntest_pool_shutdown: ok\nrewind: run 7e557bae837829b4 exited:0 after 1314 steps, 0.019s virtual, 1.348s wall (poweroff)",
+  "text": "$ docker export $(docker create mylib) -o mylib.tar\n$ rewind run --root mylib.tar --cwd /src -- make check\n...\nround 3: ok\ntest_pool_shutdown: ok\nrewind: run 7e557bae837829b4 exited:0 after 1314 steps, 0.019s virtual, 0.508s wall (poweroff)",
   "spans": [
    [
     5,
@@ -195,7 +195,7 @@
   ]
  },
  {
-  "text": "$ DEBUGINFOD_URLS=https://debuginfod.debian.net rewind gdb 57afca1d 1107 -- -batch -ex 'break src/pool.c:77 if p->queue == 0' -ex continue -ex 'bt 3' -ex 'p p->queue' -ex list\nrewind: step 1107 ran in process 39; loading symbols for 3 of its files\nrewind: fetched 12 source files from the VM\nrewind: gdb 16 cannot read thread-local variables, such as errno, at a step; gdb 17 or later can\nrewind: gdb at step 1107 of 57afca1d39a40d58\nDownloading 3.97 M separate debug info for /home/fmzakari/.cache/rewind-record/home/gdb/1992315-0/newroot/usr/lib/x86_64-linux-gnu/libc.so.6...\nDownloading 539.96 K separate debug info for /home/fmzakari/.cache/rewind-record/home/gdb/1992315-0/newroot/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2...\narch_local_irq_restore (flags=514) at ./arch/x86/include/asm/irqflags.h:146\n146\t\treturn !(flags & X86_EFLAGS_IF);\n[Switching to thread 4 (Thread 1.43)]\nDownload failed: Invalid argument.  Continuing without source file ./io/../sysdeps/unix/sysv/linux/write.c.\n#0  __GI___libc_write (nbytes=19, buf=0x7fc2c8000b70, fd=1) at ../sysdeps/unix/sysv/linux/write.c:26\nwarning: 26\t../sysdeps/unix/sysv/linux/write.c: No such file or directory\nBreakpoint 1 at 0x5585a239640d: file src/pool.c, line 77.\n\nThread 4 hit Breakpoint 1, worker (arg=0x5585ac7c0680) at src/pool.c:77\n77\t\t\t\tp->queue->completed++;\n#0  worker (arg=0x5585ac7c0680) at src/pool.c:77\n#1  0x00007fc2d05871f5 in start_thread (arg=<optimized out>) at ./nptl/pthread_create.c:442\n#2  0x00007fc2d06078ec in clone3 () at ../sysdeps/unix/sysv/linux/x86_64/clone3.S:81\n$1 = (struct queue *) 0x0\n72\t\t\t * the bug. */\n73\t\t\tlong result = run_job(job);\n74\t\t\tif (!p->stopping) {\n75\t\t\t\tprintf(\"job %d done: %ld\\n\", job, result & 0xffff);\n76\t\t\t\tfflush(stdout);\n77\t\t\t\tp->queue->completed++;\n78\t\t\t}\n79\t\t}\n80\t}\n81\n[Inferior 1 (process 1) detached]",
+  "text": "$ DEBUGINFOD_URLS=https://debuginfod.debian.net rewind gdb 57afca1d 1107 -- -batch -ex 'break src/pool.c:77 if p->queue == 0' -ex continue -ex 'bt 3' -ex 'p p->queue' -ex list\nrewind: step 1107 ran in process 39; loading symbols for 3 of its files\nrewind: fetched 12 source files from the VM\nrewind: gdb 16 cannot read thread-local variables, such as errno, at a step; gdb 17 or later can\nrewind: gdb at step 1107 of 57afca1d39a40d58\nDownloading 3.97 M separate debug info for /home/fmzakari/.cache/rewind-record/home/gdb/2448622-0/newroot/usr/lib/x86_64-linux-gnu/libc.so.6...\nDownloading 539.96 K separate debug info for /home/fmzakari/.cache/rewind-record/home/gdb/2448622-0/newroot/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2...\narch_local_irq_restore (flags=514) at ./arch/x86/include/asm/irqflags.h:146\n146\t\treturn !(flags & X86_EFLAGS_IF);\n[Switching to thread 4 (Thread 1.43)]\nDownload failed: Invalid argument.  Continuing without source file ./io/../sysdeps/unix/sysv/linux/write.c.\n#0  __GI___libc_write (nbytes=19, buf=0x7fc2c8000b70, fd=1) at ../sysdeps/unix/sysv/linux/write.c:26\nwarning: 26\t../sysdeps/unix/sysv/linux/write.c: No such file or directory\nBreakpoint 1 at 0x5585a239640d: file src/pool.c, line 77.\n\nThread 4 hit Breakpoint 1, worker (arg=0x5585ac7c0680) at src/pool.c:77\n77\t\t\t\tp->queue->completed++;\n#0  worker (arg=0x5585ac7c0680) at src/pool.c:77\n#1  0x00007fc2d05871f5 in start_thread (arg=<optimized out>) at ./nptl/pthread_create.c:442\n#2  0x00007fc2d06078ec in clone3 () at ../sysdeps/unix/sysv/linux/x86_64/clone3.S:81\n$1 = (struct queue *) 0x0\n72\t\t\t * the bug. */\n73\t\t\tlong result = run_job(job);\n74\t\t\tif (!p->stopping) {\n75\t\t\t\tprintf(\"job %d done: %ld\\n\", job, result & 0xffff);\n76\t\t\t\tfflush(stdout);\n77\t\t\t\tp->queue->completed++;\n78\t\t\t}\n79\t\t}\n80\t}\n81\n[Inferior 1 (process 1) detached]",
   "spans": [
    [
     1,
@@ -224,7 +224,7 @@
   ]
  },
  {
-  "text": "$ rewind replay 57afca1d\nidentical to the recording: 324 events and 13 read and write records over 1141 steps, and the whole machine at its 4 keyframes\n\n$ rewind replay 57afca1d --from 297\nidentical to the recording from the snapshot at step 256 to the end, and the whole machine at its 3 keyframes (0.13s)",
+  "text": "$ rewind replay 57afca1d\nidentical to the recording: 324 events and 13 read and write records over 1141 steps, and the whole machine at its 4 keyframes\n\n$ rewind replay 57afca1d --from 297\nidentical to the recording from the snapshot at step 256 to the end, and the whole machine at its 3 keyframes (0.12s)",
   "spans": [
    [
     1,
@@ -241,7 +241,7 @@
   ]
  },
  {
-  "text": "$ rewind fork 7e557bae 297 --schedule 3 --quiet\nrewind: run c98cbb1396d7dc1d exited:0 after 1495 steps, 0.022s virtual, 0.062s wall (poweroff)\nrewind: the fork first differs from its parent at step 318\nrewind: open it beside its parent in the desktop app: rewind open c98cbb1396d7dc1d 318 --compare 7e557bae837829b4\n\n$ rewind fork 7e557bae 297 --schedule 4 --quiet\nrewind: run b41996a44bc09e4e exited:0 after 1544 steps, 0.021s virtual, 0.063s wall (poweroff)\nrewind: the fork first differs from its parent at step 316\nrewind: open it beside its parent in the desktop app: rewind open b41996a44bc09e4e 316 --compare 7e557bae837829b4\n\n$ rewind fork 7e557bae 297 --schedule 5 --quiet\nrewind: run ad6b2f6e3966322b exited:0 after 1661 steps, 0.022s virtual, 0.064s wall (poweroff)\nrewind: the fork first differs from its parent at step 316\nrewind: open it beside its parent in the desktop app: rewind open ad6b2f6e3966322b 316 --compare 7e557bae837829b4\n\n$ rewind fork 7e557bae 297 --schedule 6 --quiet\nrewind: run 9d0ca3240b2cf2d8 exited:2 after 1154 steps, 0.018s virtual, 0.069s wall (poweroff)\nrewind: the fork first differs from its parent at step 316\nrewind: open it beside its parent in the desktop app: rewind open 9d0ca3240b2cf2d8 316 --compare 7e557bae837829b4",
+  "text": "$ rewind fork 7e557bae 297 --schedule 3 --quiet\nrewind: run c98cbb1396d7dc1d exited:0 after 1495 steps, 0.022s virtual, 0.057s wall (poweroff)\nrewind: the fork first differs from its parent at step 318\nrewind: open it beside its parent in the desktop app: rewind open c98cbb1396d7dc1d 318 --compare 7e557bae837829b4\n\n$ rewind fork 7e557bae 297 --schedule 4 --quiet\nrewind: run b41996a44bc09e4e exited:0 after 1544 steps, 0.021s virtual, 0.057s wall (poweroff)\nrewind: the fork first differs from its parent at step 316\nrewind: open it beside its parent in the desktop app: rewind open b41996a44bc09e4e 316 --compare 7e557bae837829b4\n\n$ rewind fork 7e557bae 297 --schedule 5 --quiet\nrewind: run ad6b2f6e3966322b exited:0 after 1661 steps, 0.022s virtual, 0.057s wall (poweroff)\nrewind: the fork first differs from its parent at step 316\nrewind: open it beside its parent in the desktop app: rewind open ad6b2f6e3966322b 316 --compare 7e557bae837829b4\n\n$ rewind fork 7e557bae 297 --schedule 6 --quiet\nrewind: run 9d0ca3240b2cf2d8 exited:2 after 1154 steps, 0.018s virtual, 0.056s wall (poweroff)\nrewind: the fork first differs from its parent at step 316\nrewind: open it beside its parent in the desktop app: rewind open 9d0ca3240b2cf2d8 316 --compare 7e557bae837829b4",
   "spans": [
    [
     1,
@@ -366,7 +366,7 @@
   ]
  },
  {
-  "text": "$ docker build -q -t mylib -f Containerfile . && docker export $(docker create mylib) -o mylib.tar\nsha256:b87c382999091794d599532ab053d2bdfb071f32b6b97478c199a12f5d8f2f0c\n\n$ rewind check --all --root mylib.tar --cwd /src -- make check\n...\n0 of 64 other schedules ended differently\nsame result under all 65 schedules",
+  "text": "$ docker build -q -t mylib -f Containerfile . && docker export $(docker create mylib) -o mylib.tar\nsha256:d6e488719b0f2e47aa41c6f5bc15c3984e09f0d33e810a0df79d9fc2c964e369\n\n$ rewind check --all --root mylib.tar --cwd /src -- make check\n...\n0 of 64 other schedules ended differently\nsame result under all 65 schedules",
   "spans": [
    [
     5,

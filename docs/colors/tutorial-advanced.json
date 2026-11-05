@@ -271,7 +271,7 @@
   ]
  },
  {
-  "text": "$ rewind nix --cores 4 --epoch 1790985600 github:fzakaria/rewindvm#mylib\n...\nrewind: run e32a716c74e474d9 exited:0 after 6202 steps, 0.217s virtual, 0.865s wall (poweroff)\n/nix/store/f6a9gy362szw6nxx3ikrklr8glr6rdln-mylib-0.3.0 a9d703ba89774f3d  matches your store, rewindvm.cachix.org",
+  "text": "$ rewind nix --cores 4 --epoch 1790985600 github:fzakaria/rewindvm#mylib\n...\nrewind: run e32a716c74e474d9 exited:0 after 6202 steps, 0.217s virtual, 0.708s wall (poweroff)\n/nix/store/f6a9gy362szw6nxx3ikrklr8glr6rdln-mylib-0.3.0 a9d703ba89774f3d  matches your store, rewindvm.cachix.org",
   "spans": [
    [
     2,
@@ -305,7 +305,7 @@
   ]
  },
  {
-  "text": "$ rewind fork 4736382d 4682 --schedule 1 --quiet\nrewind: run 0bd9caa5552224c9 exited:2 after 4833 steps, 0.200s virtual, 0.109s wall (poweroff)\nrewind: the fork first differs from its parent at step 4770\nrewind: open it beside its parent in the desktop app: rewind open 0bd9caa5552224c9 4770 --compare 4736382dc2ed9626\n\n$ rewind fork 4736382d 4682 --schedule 2 --quiet\nrewind: run 4fe1061ad78df32f exited:0 after 6502 steps, 0.219s virtual, 0.133s wall (poweroff)\nrewind: the fork first differs from its parent at step 4708\nrewind: open it beside its parent in the desktop app: rewind open 4fe1061ad78df32f 4708 --compare 4736382dc2ed9626\n\n$ rewind fork 4736382d 4682 --schedule 3 --quiet\nrewind: run 87f328742319f6a7 exited:0 after 6735 steps, 0.226s virtual, 0.121s wall (poweroff)\nrewind: the fork first differs from its parent at step 4705\nrewind: open it beside its parent in the desktop app: rewind open 87f328742319f6a7 4705 --compare 4736382dc2ed9626\n\n$ rewind fork 4736382d 4682 --schedule 4 --quiet\nrewind: run 635fe8585a24d89f exited:0 after 6449 steps, 0.220s virtual, 0.136s wall (poweroff)\nrewind: the fork first differs from its parent at step 4703\nrewind: open it beside its parent in the desktop app: rewind open 635fe8585a24d89f 4703 --compare 4736382dc2ed9626",
+  "text": "$ rewind fork 4736382d 4682 --schedule 1 --quiet\nrewind: run 0bd9caa5552224c9 exited:2 after 4833 steps, 0.200s virtual, 0.110s wall (poweroff)\nrewind: the fork first differs from its parent at step 4770\nrewind: open it beside its parent in the desktop app: rewind open 0bd9caa5552224c9 4770 --compare 4736382dc2ed9626\n\n$ rewind fork 4736382d 4682 --schedule 2 --quiet\nrewind: run 4fe1061ad78df32f exited:0 after 6502 steps, 0.219s virtual, 0.124s wall (poweroff)\nrewind: the fork first differs from its parent at step 4708\nrewind: open it beside its parent in the desktop app: rewind open 4fe1061ad78df32f 4708 --compare 4736382dc2ed9626\n\n$ rewind fork 4736382d 4682 --schedule 3 --quiet\nrewind: run 87f328742319f6a7 exited:0 after 6735 steps, 0.226s virtual, 0.119s wall (poweroff)\nrewind: the fork first differs from its parent at step 4705\nrewind: open it beside its parent in the desktop app: rewind open 87f328742319f6a7 4705 --compare 4736382dc2ed9626\n\n$ rewind fork 4736382d 4682 --schedule 4 --quiet\nrewind: run 635fe8585a24d89f exited:0 after 6449 steps, 0.220s virtual, 0.110s wall (poweroff)\nrewind: the fork first differs from its parent at step 4703\nrewind: open it beside its parent in the desktop app: rewind open 635fe8585a24d89f 4703 --compare 4736382dc2ed9626",
   "spans": [
    [
     1,
@@ -653,7 +653,7 @@
   ]
  },
  {
-  "text": "$ rewind export 4736382d --replayable -o crash.rwd\nrewind: wrote crash.rwd (201.5 MB)\n\n$ REWIND_HOME=elsewhere rewind import crash.rwd\n4736382dc2ed9626  exited:2          4821 steps  mylib-0.3.0\n\n$ REWIND_HOME=elsewhere rewind replay 4736382d\nidentical to the recording: 1687 events and 1476 read and write records over 4821 steps, and the whole machine at its 9 keyframes",
+  "text": "$ rewind export 4736382d --replayable -o crash.rwd\nrewind: wrote crash.rwd (200.9 MB)\n\n$ REWIND_HOME=elsewhere rewind import crash.rwd\n4736382dc2ed9626  exited:2          4821 steps  mylib-0.3.0\n\n$ REWIND_HOME=elsewhere rewind replay 4736382d\nidentical to the recording: 1687 events and 1476 read and write records over 4821 steps, and the whole machine at its 8 keyframes",
   "spans": [
    [
     1,
@@ -676,7 +676,7 @@
   ]
  },
  {
-  "text": "$ rewind run --root spin --timeout 5 --name spin -- /bin/spin\nrewind: run 4175e7e086c0c6f4 timed-out after 301 steps, 0.002s virtual, 5.008s wall (timed out computing without exits for 4.5s, in user space in main+11 (spin.c:2), process 34 (spin))",
+  "text": "$ rewind run --root spin --timeout 5 --name spin -- /bin/spin\nrewind: run 4175e7e086c0c6f4 timed-out after 301 steps, 0.002s virtual, 5.015s wall (timed out computing without exits for 4.7s, in user space in main+15 (spin.c:2), process 34 (spin))",
   "spans": [
    [
     1,
