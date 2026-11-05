@@ -1710,7 +1710,8 @@ in
   # ends as the run did, on its recording. With nothing to stop at, a run backwards
   # reaches the program's exec, where its memory began. A watch on a buffer
   # the kernel fills in read() stops, run backwards, at the read's syscall
-  # instruction in the process's thread. A run forwards stops before the
+  # instruction in the process's thread, and run forwards, once, after the
+  # read returns, in the same thread. A run forwards stops before the
   # process's exec, whose new program it never runs into, says so, and
   # refuses to go on; a step back from there works, and a session at the
   # step the message names stops in the new program. A Ctrl-C in a step back across 10 million
@@ -1853,6 +1854,26 @@ in
           test "$(grep -c 'rep_movs\|copy_user' piped)" = 0
           grep -q 'Reached end of recorded history' piped
           grep -q '^\$1 = "\(.000\)\{7\}"$' piped
+
+          # Run forwards from before the read, the same watch stops once,
+          # in the process's thread at the instruction after its syscall
+          # instruction, once read() has returned, with the whole buffer
+          # written. The next continue runs to the run's end.
+          start=$(rewind events "piped-$clock" | grep 'write(1, "start' | awk '{print $1}')
+          status=0
+          timeout 300 rewind gdb "piped-$clock" "$start" -- -batch -ex 'watch buffer' \
+            -ex continue -ex 'x/2xb $pc-2' -ex bt -ex 'print buffer' -ex continue \
+            > piped-forward 2>&1 || status=$?
+          cat piped-forward
+          test "$status" != $timeout_term
+          test "$status" != $timeout_kill
+          test "$(grep -c 'hit Hardware watchpoint 1: buffer' piped-forward)" = 1
+          grep -q 'Thread 2 hit Hardware watchpoint 1: buffer' piped-forward
+          test "$(grep -A1 'Old value = "\(.000\)\{7\}"$' piped-forward | grep -c 'New value = "hello')" = 1
+          grep -q '^0x[0-9a-f]* <[^>]*>:[[:space:]]*0x0f[[:space:]]*0x05$' piped-forward
+          grep -q 'in main () at .*piped.c:18' piped-forward
+          test "$(grep -c 'rep_movs\|copy_user' piped-forward)" = 0
+          grep -q '^\$1 = "hello' piped-forward
 
           # From the first program's first write, a continue stops before
           # the exec, at the start of the step that runs it, where the

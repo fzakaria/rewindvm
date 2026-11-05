@@ -343,6 +343,16 @@ words. Going back works as before, since everything before the stop is the old
 program's. A fork that cannot go back, because gdb changed it or it left its
 recording, stops at the exec's record, after the exec, and says why.
 
+Run forwards, `continue` to the kernel's write in a system call of one of the
+process's threads stops once, after the call. At the first write the fork runs
+on, with a breakpoint at the instruction after the thread's syscall instruction
+as its only trap, until that thread reaches it, and stops there in that thread,
+with the value as the call left it, as rr does. Another of the process's
+threads that reaches the same instruction first is single-stepped past it, a
+step its position records, so a replay of the position stops at the same hits.
+A call that returns elsewhere or never, rt_sigreturn, exec or exit, and a write
+by the kernel outside a system call, stop at the write, in the CPU's thread.
+
 A step's start comes from a checkpoint the fork keeps in memory: the vCPU,
 the interrupt controllers and the monitor's state, and the pages written
 since the checkpoint before it. Rewinding to one writes back only the pages

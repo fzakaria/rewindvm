@@ -96,6 +96,22 @@ const USER_RPL: u64 = 0b11;
 /// rest of its user registers.
 const SYSCALL: [u8; 2] = [0x0f, 0x05];
 
+/// x86-64 system calls that never come back to the instruction after the
+/// syscall instruction: rt_sigreturn returns to the code a signal
+/// interrupted, exec to the new program's entry, and exit not at all.
+const SYS_RT_SIGRETURN: u64 = 15;
+const SYS_EXECVE: u64 = 59;
+const SYS_EXIT: u64 = 60;
+const SYS_EXIT_GROUP: u64 = 231;
+const SYS_EXECVEAT: u64 = 322;
+const RETURN_ELSEWHERE: [u64; 5] = [
+    SYS_RT_SIGRETURN,
+    SYS_EXECVE,
+    SYS_EXIT,
+    SYS_EXIT_GROUP,
+    SYS_EXECVEAT,
+];
+
 /// Whose traps and threads gdb sees: the process with this id, which
 /// `rewind gdb` loads the symbols of, or any, when it debugs no process.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -595,12 +611,36 @@ struct ExecStop {
 }
 
 /// A system call a thread of the debugged process is in: the thread's
-/// task struct's address, and the address of the syscall instruction it
-/// made the call with.
+/// task struct's address, the address of the syscall instruction it made
+/// the call with, and the call's number.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct SystemCall {
     task: u64,
     address: u64,
+    number: u64,
+}
+
+impl SystemCall {
+    /// The instruction after the call's syscall instruction, which the
+    /// thread comes back to once the call returns; None for a call that
+    /// returns elsewhere or never, such as exit or exec.
+    fn returns_to(self) -> Option<u64> {
+        if RETURN_ELSEWHERE.contains(&self.number) {
+            return None;
+        }
+        Some(self.address + SYSCALL.len() as u64)
+    }
+}
+
+/// Where a run forwards goes after the kernel wrote a watched value in a
+/// system call of the debugged process: on to the instruction after the
+/// call's syscall instruction, in the thread that made the call, where gdb
+/// is told of the watch, `watch`, as gdb set it.
+#[derive(Clone, Copy, Debug)]
+struct Returning {
+    task: u64,
+    address: u64,
+    watch: (u64, WatchKind),
 }
 
 impl<'h> Debuggee<'h> {
@@ -844,10 +884,40 @@ impl<'h> Debuggee<'h> {
     /// counts for a search back: any thread's does, unless the search
     /// counts only the thread [`Debuggee::hits_of`] names.
     fn counts_hit(&self) -> Result<bool> {
-        let (Some(task), Some(layout)) = (self.hits_of, self.layout) else {
+        let Some(task) = self.hits_of else {
+            return Ok(true);
+        };
+        self.is_on_the_cpu(task)
+    }
+
+    /// Whether the task with its task struct at `task` is the one on the
+    /// CPU; true from a kernel that does not say where its tasks are.
+    fn is_on_the_cpu(&self, task: u64) -> Result<bool> {
+        let Some(layout) = self.layout else {
             return Ok(true);
         };
         Ok(Tasks::new(&self.machine, layout).current()? == task)
+    }
+
+    /// Where a run forwards, at a watched write the CPU made in the kernel,
+    /// goes on to before gdb is told of the write: the return of the
+    /// system call the kernel wrote it in. The call's writes, byte by byte
+    /// as the kernel copies, are then one stop, in the thread that made
+    /// the call, with the value as the call left it. None for a write in
+    /// user space, outside a system call of the debugged process, or in a
+    /// call that returns elsewhere, which stops where it is, as before.
+    fn returning(&self, watch: (u64, WatchKind)) -> Result<Option<Returning>> {
+        if self.running()? == Running::UserSpace {
+            return Ok(None);
+        }
+        let Some(call) = self.system_call()? else {
+            return Ok(None);
+        };
+        Ok(call.returns_to().map(|address| Returning {
+            task: call.task,
+            address,
+            watch,
+        }))
     }
 
     /// The system call the task on the CPU is in, as the CPU runs the
@@ -873,7 +943,11 @@ impl<'h> Debuggee<'h> {
         };
         let mut code = [0u8; SYSCALL.len()];
         let code = self.read_process(address, &mut code).ok().map(|()| code);
-        Ok(entered_by_syscall(&saved, code).then_some(SystemCall { task, address }))
+        Ok(entered_by_syscall(&saved, code).then_some(SystemCall {
+            task,
+            address,
+            number: saved[pt_regs::ORIG_RAX],
+        }))
     }
 
     /// Serves gdb on `conn` until it detaches or the connection closes.
@@ -1364,6 +1438,21 @@ impl HwWatchpoint for Debuggee<'_> {
 }
 
 impl Debuggee<'_> {
+    /// Runs the instruction at `address`, the return of a system call a
+    /// run forwards waits for, once in a thread other than the one that
+    /// made the call, as one single step, then sets that breakpoint again
+    /// as the run's only trap.
+    fn step_past_return(&mut self, address: u64) -> Result<()> {
+        self.machine.set_debug(Stepping::Yes, &[])?;
+        match self.machine.run(None, &mut self.follow)? {
+            Outcome::Debug(DebugStop::Step) => {}
+            other => anyhow::bail!("a single step past a system call's return came to {other:?}"),
+        }
+        self.arrived(Some(Move::Steps(1)))?;
+        self.machine
+            .set_debug(Stepping::No, &[Trap::Execute(address)])
+    }
+
     /// The stop gdb is told of after a step forwards: in the thread gdb
     /// stepped, which gdb expects to stop; a stop in another
     /// thread would read to gdb as a signal it never asked for. A stepped
@@ -1563,6 +1652,12 @@ impl<'h> BlockingEventLoop for EventLoop<'h> {
             Ok(Event::TargetStopped(target.step_stop()))
         };
 
+        // A watched write the kernel made in a system call of the debugged
+        // process is told of once the call returns: until then, the fork
+        // runs to the instruction after the call's syscall instruction,
+        // with that breakpoint as its only trap.
+        let mut returning: Option<Returning> = None;
+
         loop {
             let until = target.machine.step() + CHUNK_STEPS;
             let mut forward = Forward {
@@ -1613,14 +1708,51 @@ impl<'h> BlockingEventLoop for EventLoop<'h> {
                     }
                     continue;
                 }
+                // A breakpoint of gdb's stops the fork. The return of the
+                // system call a watched write was in stops it in the thread
+                // that made the call, where gdb is told of the watch;
+                // another of the process's threads there is stepped past
+                // it, a single step its position records, so a replay of
+                // the position comes to the same hits.
                 Outcome::Debug(DebugStop::Breakpoint(address)) => {
                     let hit = Move::Hit(GdbTrap::Breakpoint(address));
                     target.arrived(Some(hit)).map_err(target_error)?;
-                    return stop(target, MultiThreadStopReason::SwBreak);
+                    let Some(call) = returning.filter(|r| r.address == address) else {
+                        return stop(target, MultiThreadStopReason::SwBreak);
+                    };
+                    if !target.is_on_the_cpu(call.task).map_err(target_error)? {
+                        target.step_past_return(address).map_err(target_error)?;
+                        continue;
+                    }
+                    target.refresh_threads();
+                    let tid = target.stopped_thread().map_err(target_error)?;
+                    let (addr, kind) = call.watch;
+                    return Ok(Event::TargetStopped(MultiThreadStopReason::Watch {
+                        tid,
+                        kind,
+                        addr,
+                    }));
                 }
                 Outcome::Debug(DebugStop::Watchpoint { address: piece, .. }) => {
                     let hit = target.traps.watch_containing(piece).map(GdbTrap::Watch);
                     target.arrived(hit.map(Move::Hit)).map_err(target_error)?;
+
+                    // A run forwards goes on to the return of the system
+                    // call the kernel wrote the value in.
+                    let call = match (target.mode, target.traps.watch_at(piece)) {
+                        (Mode::Continue, Some(watch)) => {
+                            target.returning(watch).map_err(target_error)?
+                        }
+                        _ => None,
+                    };
+                    if let Some(call) = call {
+                        target
+                            .machine
+                            .set_debug(Stepping::No, &[Trap::Execute(call.address)])
+                            .map_err(target_error)?;
+                        returning = Some(call);
+                        continue;
+                    }
                     target.refresh_threads();
                     let tid = target.stopped_thread().map_err(target_error)?;
                     let reason = match target.traps.watch_at(piece) {
@@ -1703,6 +1835,31 @@ mod tests {
         assert!(!entered_by_syscall(&saved, Some([0x89, 0xc7])));
         saved[pt_regs::RCX] = 7;
         assert!(!entered_by_syscall(&saved, Some(SYSCALL)));
+    }
+
+    /// A system call returns to the instruction after its syscall
+    /// instruction, which a run forwards stops at, unless it is one that
+    /// returns elsewhere or never. read() at 0x401934 returns to 0x401936;
+    /// exit, exit_group, execve, execveat and rt_sigreturn return nowhere
+    /// the thread made them from.
+    #[test]
+    fn a_system_call_returns_after_its_instruction_unless_it_leaves() {
+        const READ: u64 = 0;
+        let call = |number| SystemCall {
+            task: 0xffff_8880_0394_0000,
+            address: 0x40_1934,
+            number,
+        };
+        assert_eq!(call(READ).returns_to(), Some(0x40_1936));
+        for number in [
+            SYS_EXIT,
+            SYS_EXIT_GROUP,
+            SYS_EXECVE,
+            SYS_EXECVEAT,
+            SYS_RT_SIGRETURN,
+        ] {
+            assert_eq!(call(number).returns_to(), None, "{number}");
+        }
     }
 
     fn thread(tid: u32, task: u64) -> Thread {
