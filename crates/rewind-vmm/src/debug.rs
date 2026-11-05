@@ -608,6 +608,17 @@ impl Machine {
             return Ok((debugger == Stepping::Yes).then_some(DebugStop::Step));
         }
 
+        // An instruction that loads RFLAGS, `iretq` back into the kernel
+        // or `popf`, still traps once it has run, but leaves the flags it
+        // loaded: with no trap flag when they were saved before the steps
+        // began, as an interrupt's frame or irqsave's flags often are, the
+        // instructions after it would run unstepped. So each step asks KVM
+        // for steps again, which sets the flag where it is clear.
+        let stepping = debugger == Stepping::Yes || machine == Stepping::Yes;
+        if dr6 & DR6_SINGLE_STEP != 0 && stepping {
+            self.apply_guest_debug()?;
+        }
+
         match db_exit(dr6, self.debugger_traps(), debugger, machine) {
             DbExit::Stop(stop) => Ok(Some(stop)),
             DbExit::Machine => Ok(None),
