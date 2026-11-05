@@ -32,8 +32,8 @@ const NS_PER_STEP: u64 = 22_000;
 const PS_PER_BRANCH: u64 = 750;
 const PS_PER_NS: u64 = 1000;
 
-/// Bounds on the steps between two stops: of a replay toward a step, and
-/// of a recording's at its first.
+/// The steps to the first stop, of a replay toward a step and of a
+/// recording, and the most between any two stops.
 const MIN_INTERVAL: u64 = 256;
 const MAX_INTERVAL: u64 = 1 << 20;
 
@@ -535,11 +535,12 @@ pub fn worth_keeping(steps: &[u64], step: u64) -> bool {
     step - nearest > KEEP_AFTER
 }
 
-/// How much replay a look inside a run, on its way to its step, goes
-/// without keeping a keyframe: a later look anywhere on that stretch then
-/// replays at most about this long. Keyframes kept this way cost disk
-/// like any other, so the stretch is far longer than [`TARGET`], which
-/// recording aims for.
+/// How much of the guest's work a look inside a run, on its way to its
+/// step, replays without keeping a keyframe, in the reference host's time
+/// for it (see [`Progress::work_to`]): a later look anywhere on that
+/// stretch then replays at most about this much. Keyframes kept this way
+/// cost disk like any other, so the stretch is far longer than
+/// [`TARGET`], which recording aims for.
 ///
 /// A check run of a sagittarius build, 296,484 steps recorded without
 /// keyframes, was read at step 290,000 and then at steps 100,000,
@@ -558,25 +559,29 @@ pub fn worth_keeping(steps: &[u64], step: u64) -> bool {
 /// read's own keyframe: 287 MB against 646 MB.
 pub const KEEP_EVERY: Duration = Duration::from_secs(10);
 
-/// How much replay a replay toward a step goes between two stops on the
-/// way, where it says how far it got and sees whether a keyframe is due.
+/// How much of the guest's work a replay toward a step does between two
+/// stops on the way, where it says how far it got and sees whether a
+/// keyframe is due, in the reference host's time for it.
 pub const STOP_EVERY: Duration = Duration::from_millis(250);
 
 /// Paces a replay toward a step: where it stops on the way, and at which
-/// of those stops a look inside the run keeps a keyframe.
+/// of those stops a look inside the run keeps a keyframe. Like
+/// [`Spacing`], it reads only the guest's progress, so a look keeps its
+/// keyframes at the same steps on every host.
 #[derive(Debug)]
 pub struct Pace {
-    /// Steps from one stop to the next, aimed at STOP_EVERY of replay.
+    /// Steps from one stop to the next, aimed at STOP_EVERY of work.
     stride: u64,
-    /// Replay since the keyframe the machine started from or last kept.
-    since_kept: Duration,
+    /// The work since the keyframe the machine started from or last
+    /// kept, in the reference host's nanoseconds.
+    since: u64,
 }
 
 impl Default for Pace {
     fn default() -> Pace {
         Pace {
             stride: MIN_INTERVAL,
-            since_kept: Duration::ZERO,
+            since: 0,
         }
     }
 }
@@ -587,27 +592,42 @@ impl Pace {
         at.saturating_add(self.stride).min(to)
     }
 
-    /// Takes the stretch just replayed, `steps` long in `took`, and aims
-    /// the next one at STOP_EVERY.
-    pub fn ran(&mut self, steps: u64, took: Duration) {
-        self.since_kept += took;
-        let took = took.max(Duration::from_micros(1));
-        let scaled = steps as f64 * STOP_EVERY.as_secs_f64() / took.as_secs_f64();
-        self.stride = (scaled.round() as u64).clamp(MIN_INTERVAL, MAX_INTERVAL);
+    /// Takes the stretch just replayed, from `from` to `to`, and aims the
+    /// next one at STOP_EVERY of the same work per step.
+    pub fn ran(&mut self, from: Progress, to: Progress) {
+        let work = from.work_to(to);
+        self.since = self.since.saturating_add(work);
+        if let Some(stride) = stride(from, to, STOP_EVERY.as_nanos()) {
+            self.stride = stride;
+        }
     }
 
     /// Whether a look stopped at `at` on its way to `to` keeps a keyframe
-    /// there: once KEEP_EVERY of replay has passed since the last one,
-    /// and not within KEEP_AFTER of `to`, where the look keeps one of its
-    /// own (see [`worth_keeping`]).
+    /// there: once KEEP_EVERY of work has passed since the last one, and
+    /// not within KEEP_AFTER of `to`, where the look keeps one of its own
+    /// (see [`worth_keeping`]).
     pub fn keep_at(&self, at: u64, to: u64) -> bool {
-        self.since_kept >= KEEP_EVERY && to - at > KEEP_AFTER
+        u128::from(self.since) >= KEEP_EVERY.as_nanos() && to - at > KEEP_AFTER
     }
 
     /// Notes that a keyframe was kept at the last stop.
     pub fn kept(&mut self) {
-        self.since_kept = Duration::ZERO;
+        self.since = 0;
     }
+}
+
+/// The steps of a stretch aimed at `aim` nanoseconds of the reference
+/// host's work, at the work per step of the stretch from `from` to `to`,
+/// or None for a stretch with no progress to scale by.
+fn stride(from: Progress, to: Progress, aim: u128) -> Option<u64> {
+    let work = from.work_to(to);
+    if work == 0 {
+        return None;
+    }
+    let steps = to.step.saturating_sub(from.step);
+    let scaled = u128::from(steps) * aim / u128::from(work);
+    let scaled = u64::try_from(scaled).unwrap_or(MAX_INTERVAL);
+    Some(scaled.clamp(MIN_STRIDE, MAX_INTERVAL))
 }
 
 /// How far a guest has run: its step, and the conditional branches it has
@@ -688,16 +708,12 @@ impl Spacing {
     /// Takes the stretch just run, from `from` to `to`, and aims the next
     /// one at the same work per step.
     pub fn ran(&mut self, from: Progress, to: Progress) {
-        let steps = to.step.saturating_sub(from.step);
         let work = from.work_to(to);
         self.since = self.since.saturating_add(work);
-        if work == 0 {
-            return;
-        }
         let aim = TARGET.as_nanos() / u128::from(STOPS_PER_KEYFRAME);
-        let scaled = u128::from(steps) * aim / u128::from(work);
-        let scaled = u64::try_from(scaled).unwrap_or(MAX_INTERVAL);
-        self.stride = scaled.clamp(MIN_STRIDE, MAX_INTERVAL);
+        if let Some(stride) = stride(from, to, aim) {
+            self.stride = stride;
+        }
     }
 
     /// Whether the recording takes a keyframe at this stop.
@@ -1075,42 +1091,54 @@ mod tests {
 
     #[test]
     fn a_long_look_keeps_keyframes_along_the_way() {
-        // Pace over made-up stretches of a replay that takes 100 us a
-        // step: it stops about every STOP_EVERY of replay on the way,
-        // keeps a keyframe once KEEP_EVERY of replay has passed since the
-        // last, and keeps none within KEEP_AFTER of the step it goes to,
-        // where the look keeps its own.
-        let per_step = Duration::from_micros(100);
-        let every = (KEEP_EVERY.as_micros() / per_step.as_micros()) as u64;
-        let stride = (STOP_EVERY.as_micros() / per_step.as_micros()) as u64;
-        let to = 50 * every;
-        let mut pace = Pace::default();
-        let mut at = 0;
-        let mut kept = Vec::new();
-        while at < to {
-            let stop = pace.next_stop(at, to);
-            assert!(stop > at && stop <= to);
-            pace.ran(stop - at, per_step * (stop - at) as u32);
-            at = stop;
-            if pace.keep_at(at, to) {
-                kept.push(at);
-                pace.kept();
+        // Pace over the made-up guest of keyframes_are_a_target_of_the_
+        // guests_work_apart: a look stops about every STOP_EVERY of the
+        // guest's work on the way, keeps a keyframe at the first stop
+        // KEEP_EVERY of work past the last, and keeps none within
+        // KEEP_AFTER of the step it goes to, where the look keeps its own.
+        // It reads only the guest's progress, so a look on any host keeps
+        // them at the same steps.
+        let looks = || {
+            let mut pace = Pace::default();
+            let mut at = guest(0);
+            let mut kept = Vec::new();
+            while at.step < GUEST_STEPS {
+                let stop = pace.next_stop(at.step, GUEST_STEPS);
+                assert!(stop > at.step && stop <= GUEST_STEPS);
+                pace.ran(at, guest(stop));
+                at = guest(stop);
+                if pace.keep_at(at.step, GUEST_STEPS) {
+                    kept.push(at.step);
+                    pace.kept();
+                }
             }
-        }
-        assert!(kept.len() as u64 >= to / every - 2, "{kept:?}");
+            kept
+        };
+        let kept = looks();
+        assert_eq!(kept, looks());
+        let every = KEEP_EVERY.as_nanos() as u64;
+        let total = guest(0).work_to(guest(GUEST_STEPS));
+        assert!(kept.len() as u64 >= total / every - 2, "{kept:?}");
+        let compute = guest(GUEST_SYSCALLS).work_to(guest(GUEST_SYSCALLS + 1));
+        let stretch = STOP_EVERY.as_nanos() as u64;
         for (before, after) in std::iter::once(&0).chain(&kept).zip(&kept) {
-            let apart = after - before;
-            assert!(apart >= every && apart <= every + stride, "{kept:?}");
+            let work = guest(*before).work_to(guest(*after));
+            assert!(work >= every, "{before}..{after}: {work} ns");
+            assert!(
+                work <= every + stretch + 2 * compute,
+                "{before}..{after}: {work} ns"
+            );
         }
-        assert!(to - kept.last().unwrap() > KEEP_AFTER);
-
-        // After the first stretch the stops are STOP_EVERY of replay apart.
-        assert_eq!(pace.next_stop(0, to), stride);
+        assert!(GUEST_STEPS - kept.last().unwrap() > KEEP_AFTER);
 
         // A look a few hundred steps past its keyframe keeps none on the
-        // way, however slow the replay.
+        // way, however much work those steps are.
         let mut short = Pace::default();
-        short.ran(KEEP_AFTER, KEEP_EVERY * 2);
+        let heavy = Progress {
+            step: KEEP_AFTER,
+            branches: u64::MAX / 2,
+        };
+        short.ran(Progress::default(), heavy);
         assert!(!short.keep_at(KEEP_AFTER, KEEP_AFTER * 2));
     }
 

@@ -866,14 +866,15 @@ first `rewind cat` at step 5000 took 3.6 s instead of 3.0 s, and each later
 one there took 0.5 s instead of 3.0 s.
 
 A long look keeps keyframes on the way too. It replays toward its step in
-stretches of about a quarter second, and after ten seconds of replay since
-the keyframe it started from or last kept, it keeps another, written the
-same way, so a later look anywhere on the way replays at most about ten
-seconds. Each holds the pages written since the last, which costs disk, so
-the interval is forty times recording's. A check run of a sagittarius build,
-296,484 steps recorded without keyframes, was read at step 290,000 and then
-at steps 100,000, 175,000, 250,000 and 289,000, in a page store holding its
-schedule 0's pages:
+stretches of about a quarter second of the guest's work, weighed as a
+recording weighs it, and after ten seconds of that work since the keyframe it
+started from or last kept, it keeps another, written the same way, so a later
+look anywhere on the way replays at most about ten seconds of work, and looks
+on any host keep them at the same steps. Each holds the pages written since the
+last, which costs disk, so the interval is forty times recording's. A check run
+of a sagittarius build, 296,484 steps recorded without keyframes, was read at
+step 290,000 and then at steps 100,000, 175,000, 250,000 and 289,000, in a
+page store holding its schedule 0's pages:
 
 | Kept on the way    | First read | Keyframes | .kf files | Pages added | Later reads      |
 | ------------------ | ---------- | --------- | --------- | ----------- | ---------------- |

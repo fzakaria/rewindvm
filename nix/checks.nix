@@ -1107,12 +1107,11 @@ in
 
         # A look far into a run recorded without keyframes, as rewind
         # check records most of its runs, keeps a keyframe on the way
-        # after each ten seconds or so of replay, as well as one at its
-        # step. The run replays exactly from one kept on the way, and the
-        # kept keyframes are the run's like any other: removing the run
-        # and collecting takes their pages with it. Two million writes
-        # take about half a minute to replay here, long enough for at
-        # least one stretch on a machine twice as fast.
+        # after each ten seconds of the guest's work, as well as one at
+        # its step. The run replays exactly from one kept on the way, and
+        # the kept keyframes are the run's like any other: removing the
+        # run and collecting takes their pages with it. Two million writes
+        # are about two million steps, some 44 s of work at 22 us a step.
         bare_writes='for i in $(seq 2000000); do echo $i; done'
         rewind run -q --no-keyframes --name bare --root ${busyboxRoot} -- sh -c "$bare_writes"
         bare=$(dirname "$(grep -l '"name": "bare"' $REWIND_HOME/runs/*/manifest.json)")

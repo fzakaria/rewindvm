@@ -869,6 +869,7 @@ impl Run {
                     }
                     parent = Some(kf.step);
                 }
+
                 // Keyframes spaced by the guest's work, and one more where
                 // init reports the job's exit, so a replay compares the
                 // whole machine after the job ran even when the job was too
@@ -1194,9 +1195,9 @@ impl Run {
     /// A machine at `step` of this run: the latest keyframe at or before
     /// it, restored, and run forward to the step. Events on the way go to
     /// `obs`. With `Keep::Keyframe`, keyframes are kept on the way, each
-    /// after [`crate::keyframes::KEEP_EVERY`] of replay, so a later look
-    /// anywhere on the stretch replays little of it, and one at the step
-    /// when the last one is far enough back (see
+    /// after [`crate::keyframes::KEEP_EVERY`] of the guest's work, so a
+    /// later look anywhere on the stretch replays little of it, and one at
+    /// the step when the last one is far enough back (see
     /// [`crate::keyframes::worth_keeping`]), so the next fork there
     /// restores it instead of replaying.
     pub fn machine_at(
@@ -1264,11 +1265,10 @@ impl Run {
             Instant::now(),
         );
         let outcome = loop {
-            let at = machine.step();
-            let stop = pace.next_stop(at, step);
-            let started = Instant::now();
+            let at = crate::keyframes::Progress::of(&machine);
+            let stop = pace.next_stop(at.step, step);
             let outcome = machine.run(Some(stop), &mut checked)?;
-            pace.ran(machine.step() - at, started.elapsed());
+            pace.ran(at, crate::keyframes::Progress::of(&machine));
             if let Some(differs) = checked.differs_at {
                 return Err(self.went_another_way(differs));
             }
