@@ -212,6 +212,29 @@ fn db_exit(dr6: u64, traps: &[Trap], debugger: Stepping, machine: Stepping) -> D
     }
 }
 
+/// The debug register the trap at the kernel's return to user space
+/// takes, among the debugger's `traps`: the one after them, else, with all
+/// four theirs, the last that is not a read-write watch, borrowed until
+/// the return. Single steps lose the return without the trap. The one
+/// instruction it is borrowed for, `sysretq` or `iretq`, runs at a kernel
+/// address and writes no memory, so neither a breakpoint in user space nor
+/// a write watch misses a hit; `iretq` reads its frame, which a read-write
+/// watch could see. None when every register is one.
+fn return_register(traps: &[Trap]) -> Option<usize> {
+    if traps.len() < MAX_TRAPS {
+        return Some(traps.len());
+    }
+    traps.iter().rposition(|trap| {
+        !matches!(
+            trap,
+            Trap::Watch {
+                access: Access::ReadWrite,
+                ..
+            }
+        )
+    })
+}
+
 /// What KVM traps for the debugger, the monitor and the int3s together:
 /// the debugger's debug registers and steps; with int3 written anywhere,
 /// every #BP, so none reaches the guest unseen; and while the monitor
@@ -232,9 +255,17 @@ fn guest_debug(
         debug.control |= KVM_GUESTDBG_SINGLESTEP;
     }
     // The return to user space the machine steps toward takes the
-    // register after the debugger's, which a trap there is not the
-    // debugger's for.
-    traps.extend(user_return.map(Trap::Execute));
+    // register after the debugger's, or one of theirs it borrows, which a
+    // trap there is not the debugger's for.
+    if let Some(address) = user_return
+        && let Some(register) = return_register(&traps)
+    {
+        let trap = Trap::Execute(address);
+        match traps.get_mut(register) {
+            Some(borrowed) => *borrowed = trap,
+            None => traps.push(trap),
+        }
+    }
     if debugging.is_some() || !traps.is_empty() {
         debug.control |= KVM_GUESTDBG_ENABLE | KVM_GUESTDBG_USE_HW_BP;
         debug.arch.debugreg[DR7_INDEX] = dr7(&traps)?;
@@ -457,6 +488,11 @@ impl Machine {
         Ok(None)
     }
 
+    /// The debugger's traps, one per debug register, or none.
+    fn debugger_traps(&self) -> &[Trap] {
+        self.debugging.as_ref().map_or(&[], |d| &d.traps)
+    }
+
     /// Whether the machine single-steps, for the debugger or toward its
     /// branch count.
     fn single_stepping(&self) -> bool {
@@ -472,11 +508,12 @@ impl Machine {
     /// entry saved, which have no trap flag when the steps began in the
     /// kernel, so the user's code would run on unstepped. So at a
     /// `sysretq` or an `iretq` to user space, a debug register traps the
-    /// address it returns to, where the step ends. With every register the
-    /// debugger's, the user's code runs on as it did before.
+    /// address it returns to, where the step ends: the one after the
+    /// debugger's, or one of theirs borrowed until then
+    /// ([`return_register`]). With every register a read-write watch of
+    /// the debugger's, the user's code runs on as it did before.
     pub(crate) fn step_into_user_space(&mut self) -> Result<()> {
-        let held = self.debugging.as_ref().map_or(0, |d| d.traps.len());
-        if !self.single_stepping() || held >= MAX_TRAPS {
+        if !self.single_stepping() || return_register(self.debugger_traps()).is_none() {
             return Ok(());
         }
         let regs = self.vcpu.get_regs()?;
@@ -559,23 +596,19 @@ impl Machine {
         }
 
         // The return to user space a step went through, trapped in the
-        // register after the debugger's: the debugger's step ends there,
-        // and the machine's own steps go on.
-        let (held, debugger) = self
-            .debugging
-            .as_ref()
-            .map_or((0, Stepping::No), |d| (d.traps.len(), d.stepping));
-        if self.user_return.is_some() && dr6 & (1 << held) != 0 {
+        // register after the debugger's or one borrowed from them: the
+        // debugger's step ends there, the register is theirs again, and
+        // the machine's own steps go on.
+        let debugger = self.debugging.as_ref().map_or(Stepping::No, |d| d.stepping);
+        let returned = return_register(self.debugger_traps())
+            .is_some_and(|register| dr6 & (1 << register) != 0);
+        if self.user_return.is_some() && returned {
             self.user_return = None;
             self.apply_guest_debug()?;
             return Ok((debugger == Stepping::Yes).then_some(DebugStop::Step));
         }
 
-        let traps = match &self.debugging {
-            Some(debugging) => &debugging.traps[..],
-            None => &[][..],
-        };
-        match db_exit(dr6, traps, debugger, machine) {
+        match db_exit(dr6, self.debugger_traps(), debugger, machine) {
             DbExit::Stop(stop) => Ok(Some(stop)),
             DbExit::Machine => Ok(None),
             DbExit::Stray => {
@@ -974,6 +1007,56 @@ mod tests {
         // watches reads and writes of 2.
         let conditions = 0b1001 << 20 | 0b0111 << 24;
         assert_eq!(dr7(&traps).unwrap(), enable | conditions);
+    }
+
+    /// The trap at the kernel's return to user space, which single steps
+    /// across the return need, takes the register after the debugger's,
+    /// and with all four the debugger's, the last that is not a read-write
+    /// watch, whose trap is then off for the one instruction that returns.
+    /// Checked on the registers KVM is handed for a breakpoint, then for
+    /// three breakpoints and a watch, and four read-write watches, which
+    /// leave none.
+    #[test]
+    fn the_return_to_user_space_takes_a_register_from_a_full_set() {
+        const RETURN: u64 = 0x7f00_0000_1000;
+        let breakpoint = Trap::Execute(0x40_1000);
+        let watch = |access| Trap::Watch {
+            address: 0x40_2000,
+            len: 8,
+            access,
+        };
+        let registers = |traps: &[Trap]| {
+            let debugging = Debugging {
+                stepping: Stepping::No,
+                traps: traps.to_vec(),
+            };
+            let debug = guest_debug(
+                Some(&debugging),
+                Stepping::No,
+                Stepping::Yes,
+                Some(RETURN),
+                &Int3s::default(),
+            )
+            .unwrap();
+            (debug.arch.debugreg, return_register(traps))
+        };
+
+        // A free register: the one after the debugger's.
+        let (debugreg, register) = registers(&[breakpoint]);
+        assert_eq!(register, Some(1));
+        assert_eq!(debugreg[..2], [0x40_1000, RETURN]);
+
+        // Four held: the watch's, the last, until the return.
+        let full = [breakpoint, breakpoint, breakpoint, watch(Access::Write)];
+        let (debugreg, register) = registers(&full);
+        assert_eq!(register, Some(3));
+        assert_eq!(debugreg[3], RETURN);
+        assert_eq!(debugreg[DR7_INDEX], dr7(&[breakpoint; MAX_TRAPS]).unwrap());
+
+        // Four read-write watches: none, and the debugger keeps them all.
+        let (debugreg, register) = registers(&[watch(Access::ReadWrite); MAX_TRAPS]);
+        assert_eq!(register, None);
+        assert_eq!(debugreg[..MAX_TRAPS], [0x40_2000; MAX_TRAPS]);
     }
 
     /// The CPU watches a power of two up to 8 bytes, aligned to itself,
