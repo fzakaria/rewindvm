@@ -1047,8 +1047,10 @@ mod tests {
             access: Access::Write,
         };
         let traps = [Trap::Execute(0x1000), watch(0x2000), watch(0x2004)];
-        let DbExit::Stop(DebugStop::Watchpoint { address, traps: hit }) =
-            db_exit(0b110, &traps, Stepping::No, Stepping::No)
+        let DbExit::Stop(DebugStop::Watchpoint {
+            address,
+            traps: hit,
+        }) = db_exit(0b110, &traps, Stepping::No, Stepping::No)
         else {
             panic!("no watchpoint stop");
         };

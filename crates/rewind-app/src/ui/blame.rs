@@ -200,7 +200,9 @@ impl Scrubber {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
                 let shown = this.blames.shown.clone();
-                this.blames.jobs.finish(&key, request, result, shown.as_ref());
+                this.blames
+                    .jobs
+                    .finish(&key, request, result, shown.as_ref());
                 this.start_blames(cx);
                 cx.notify();
             });

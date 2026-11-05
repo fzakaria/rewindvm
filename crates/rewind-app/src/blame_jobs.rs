@@ -202,7 +202,10 @@ impl Jobs {
                 break;
             };
             let key = self.waiting.remove(at).expect("a position in the line");
-            let entry = self.entries.get_mut(&key).expect("a waiting search is kept");
+            let entry = self
+                .entries
+                .get_mut(&key)
+                .expect("a waiting search is kept");
             let cancel = Cancel::default();
             entry.started = Some(Instant::now());
             entry.cancel = Some(cancel.clone());

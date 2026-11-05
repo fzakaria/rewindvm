@@ -676,7 +676,9 @@ impl Debuggee<'_> {
                         loop {
                             match self.machine.run(None, &mut Ignore)? {
                                 Outcome::Debug(DebugStop::Step) => break,
-                                Outcome::Debug(DebugStop::Watchpoint { address: piece, .. }) => {
+                                Outcome::Debug(DebugStop::Watchpoint {
+                                    address: piece, ..
+                                }) => {
                                     let after = done.then(Move::Steps(j + 1));
                                     self.note_watch(&mut scan, piece, after)?;
                                     break;

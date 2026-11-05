@@ -364,7 +364,11 @@ fn context_at_step(
     home: &Home,
     run: &Run,
     (pid, step): (u32, u64),
-    (leave_out, after, machine): (&[u32], Option<accesses::Sought>, Option<rewind_vmm::Machine>),
+    (leave_out, after, machine): (
+        &[u32],
+        Option<accesses::Sought>,
+        Option<rewind_vmm::Machine>,
+    ),
     pcs: &[u64],
 ) -> Result<Surroundings> {
     let needs = Needs::Tasks("`rewind blame --at` cannot find the threads".into());

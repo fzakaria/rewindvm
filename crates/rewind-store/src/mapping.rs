@@ -1,7 +1,10 @@
 //! The store's one mapping of a file: the sorted copy of its index, read
 //! where it lies (see [`rewind_mapped`]).
 
-#![allow(unsafe_code, reason = "a file mapping's soundness rests on how the store names files")]
+#![allow(
+    unsafe_code,
+    reason = "a file mapping's soundness rests on how the store names files"
+)]
 
 use std::fs::File;
 

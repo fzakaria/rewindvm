@@ -840,7 +840,9 @@ mod tests {
             len: 24,
         }];
         assert!(watches(&three, Wanted::LastWrites(1)).is_ok());
-        let error = watches(&three, Wanted::Accesses(1)).unwrap_err().to_string();
+        let error = watches(&three, Wanted::Accesses(1))
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("2 of them for each"), "{error}");
         assert!(watches(&three, Wanted::LastWrites(0)).is_err());
     }
@@ -859,10 +861,7 @@ mod tests {
         assert_eq!(kept.dropped, 0);
         assert!(kept.done());
         let accesses = kept.into_accesses();
-        assert_eq!(
-            accesses.iter().map(|a| a.value).collect::<Vec<_>>(),
-            [0, 1]
-        );
+        assert_eq!(accesses.iter().map(|a| a.value).collect::<Vec<_>>(), [0, 1]);
 
         // An older window's writes come in after a newer one's and are
         // dropped for the value that has its writes.

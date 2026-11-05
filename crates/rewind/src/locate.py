@@ -244,7 +244,9 @@ def chains(text, blank):
         if start is None:
             return found
         at = start.end()
-        if start.group(0) in KEYWORDS or (start.start() > 0 and blank[start.start() - 1].isdigit()):
+        if start.group(0) in KEYWORDS or (
+            start.start() > 0 and blank[start.start() - 1].isdigit()
+        ):
             continue
         prefixes = [(start.start(), start.end())]
         end = start.end()
