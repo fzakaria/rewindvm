@@ -1441,7 +1441,10 @@ in
   # 20,000 writes of another; and a REP MOVSB that reads a byte, then
   # writes it, at one instruction, lists the read before the write. A
   # write a library made in the step that loaded it is named by that
-  # library. Boots the VM, so it needs /dev/kvm.
+  # library. So is one it made before it was unloaded, another library
+  # loaded at its addresses since; the files are loaded once only when the
+  # loader's list is the same at both steps. Boots the VM, so it needs
+  # /dev/kvm.
   blame-memory =
     pkgs.runCommand "rewind-blame-memory"
       {
@@ -1564,6 +1567,21 @@ in
           --tid "$(jq -r .tid <<< "$write")" --after-write "$address" --size 4 \
           --hit "$(jq -r .hit <<< "$write")" --json > after-load.json
         jq -e '.frames[0] | .function == "actual_writer" and .line == 3' after-load.json
+
+        # second.so took first.so's place after the write: blamed there,
+        # the write is still first.c's, placed with the files read again
+        # at its own step. Blamed before the unload, one load of the files
+        # serves both steps.
+        rewind blame reload --at "$reloaded" total > reloaded 2> reloaded.err
+        cat reloaded reloaded.err
+        grep -q '^total = 7   4 bytes at 0x' reloaded
+        grep -q '^  first.c:3  actual_writer  \*value = 7;$' reloaded
+        test "$(grep -c 'never_called\|second.c' reloaded)" = 0
+        test "$(grep -c 'loading symbols for' reloaded.err)" = 2
+        rewind blame reload --at "$written" total > written 2> written.err
+        cat written written.err
+        grep -q '^  first.c:3  actual_writer  \*value = 7;$' written
+        test "$(grep -c 'loading symbols for' written.err)" = 1
         touch $out
       '';
 

@@ -9,9 +9,9 @@
 //! for its last writes, or with `--reads` for every access since the
 //! process began. A second gdb session, on a fork at the last write's
 //! step, names each access's source line and where the process's other
-//! threads were then. The same gdb serves both sessions when the process
-//! made no exec between the two steps, so its files are read and loaded
-//! once.
+//! threads were then. The same gdb serves both sessions, its files read
+//! and loaded once, when the process made no exec between the two steps
+//! and its loader's list of objects is the same at both.
 
 use std::process::ExitCode;
 use std::time::Instant;
@@ -25,7 +25,7 @@ use rewind_trace::blamed::{
 use rewind_trace::located::{Frame, ValueClass};
 use rewind_trace::searching::{Phase, Searching};
 
-use crate::gdb::{self, KeptGdb, Needs, Say, Symbols};
+use crate::gdb::{self, KeptGdb, Loaded, Needs, Say, Symbols};
 use crate::locate::{self, Pick, PlaceAt};
 use crate::progress::Format;
 
@@ -63,12 +63,74 @@ struct Named {
 }
 
 /// The gdb that named the values, kept running with the symbols it
-/// loaded: those of process `pid` as its memory was from step `began`,
-/// its last exec or its fork, on.
+/// loaded at step `step`: those of process `pid`, whose memory began at
+/// step `began`, its last exec or its fork.
 struct Kept {
     gdb: KeptGdb,
     pid: u32,
     began: u64,
+    step: u64,
+}
+
+/// A process at a step, as gdb's symbols read at another are checked
+/// against it: where its memory began, its last exec or its fork, and the
+/// objects it had loaded, when its memory could vouch for them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ProcessAt {
+    pid: u32,
+    began: u64,
+    loaded: Option<Loaded>,
+}
+
+/// Whether symbols read for `kept` name the code of `now`, the process at
+/// another step: the same process, with no exec between, the loader's
+/// same objects at the same places at both steps, and none of their files
+/// written in `between`, the run's events from one step to the other.
+fn symbols_hold(kept: &ProcessAt, now: &ProcessAt, between: &[rewind_trace::Event]) -> bool {
+    if kept.pid != now.pid || kept.began != now.began {
+        return false;
+    }
+    let Some(loaded) = &kept.loaded else {
+        return false;
+    };
+    if now.loaded.as_ref() != Some(loaded) {
+        return false;
+    }
+    !loaded.written_in(between)
+}
+
+/// Whether `kept`'s symbols name process `pid`'s code on `machine`, at
+/// `step`, where its memory began at `began`: the naming's symbols, read
+/// at another step, hold only when the loader's list on the machine is
+/// the one they were read with. A library unloaded between the two
+/// steps, and another loaded where it was, would name the other's code.
+fn kept_holds(
+    run: &Run,
+    kept: &Kept,
+    (pid, began, step): (u32, u64, u64),
+    machine: &rewind_vmm::Machine,
+) -> Result<bool> {
+    let then = ProcessAt {
+        pid: kept.pid,
+        began: kept.began,
+        loaded: kept.gdb.loaded().cloned(),
+    };
+    let now = ProcessAt {
+        pid,
+        began,
+        loaded: kept.gdb.loaded_on(machine, pid),
+    };
+    let between = events_between(run.trace()?, kept.step, step);
+    Ok(symbols_hold(&then, &now, between))
+}
+
+/// The events of `trace` from step `one` to step `other`, both included,
+/// whichever comes first.
+fn events_between(trace: &rewind_trace::Trace, one: u64, other: u64) -> &[rewind_trace::Event] {
+    let (from, to) = (one.min(other), one.max(other));
+    let until = trace.until(to);
+    let start = until.partition_point(|e| e.step < from);
+    &until[start..]
 }
 
 /// Where a session at the last write's step gets gdb from: the one that
@@ -308,6 +370,7 @@ fn name_values(
         gdb,
         pid: answer.pid,
         began: run.process_began(answer.pid, answer.step)?,
+        step: answer.step,
     };
     Ok((named, Some(kept)))
 }
@@ -389,14 +452,10 @@ fn context_at_step(
 ) -> Result<Surroundings> {
     let needs = Needs::Tasks("`rewind blame --at` cannot find the threads".into());
 
-    // The naming's symbols hold at the step when the process's memory is
-    // the same program's there: the same process, with no exec between.
-    // A library loaded or unloaded between the two steps is not looked
-    // for.
+    // The naming's gdb, when the process can be the same program's at the
+    // step: the same process, with no exec between.
     let began = run.process_began(pid, step)?;
-    let kept = kept
-        .filter(|k| k.pid == pid && k.began == began)
-        .map(|k| k.gdb);
+    let kept = kept.filter(|k| k.pid == pid && k.began == began);
 
     // A machine at the step, run to the access: the search's, when it
     // kept one there, else a fork. Without a kept gdb, the symbols'
@@ -427,13 +486,15 @@ fn context_at_step(
 
     // gdb with the process's symbols as they were mapped at the access: a
     // library loaded earlier in the step, such as the one that made the
-    // access, is mapped only by then. The naming's, else read on the
-    // machine, which the inspection puts back as it was, so no keyframe
-    // is restored.
+    // access, is mapped only by then. The naming's, when they hold there,
+    // else read on the machine, which the inspection puts back as it was,
+    // so no keyframe is restored.
     let from = match (loaded, kept) {
         (Some(symbols), _) => GdbFrom::Loaded(symbols),
-        (None, Some(gdb)) => GdbFrom::Kept(gdb),
-        (None, None) => {
+        (None, Some(kept)) if kept_holds(run, &kept, (pid, began, step), &machine)? => {
+            GdbFrom::Kept(kept.gdb)
+        }
+        (None, _) => {
             let symbols = Symbols::load_on(home, run, (step, &mut machine), pid, Say::Aloud)?;
             GdbFrom::Loaded(symbols)
         }
@@ -790,6 +851,108 @@ mod tests {
         assert_eq!(line.window, (4, 20));
         assert_eq!((line.writes, line.reads), (1, 1));
         assert_eq!(line.elapsed_ms, 1234);
+    }
+
+    /// The made-up process the reuse tests below check: its pid, where its
+    /// memory began, and its main program's and libraries' load offsets
+    /// and dynamic sections.
+    const PID: u32 = 34;
+    const BEGAN: u64 = 301;
+    const MAIN_AT: u64 = 0x5000_0000;
+    const MAIN_DYNAMIC: u64 = 0x5000_3d68;
+    const LIBRARY_AT: u64 = 0x7f00_0000_0000;
+    const LIBRARY_DYNAMIC: u64 = 0x7f00_0000_3e00;
+    const OTHER_AT: u64 = 0x7f10_0000_0000;
+    const OTHER_DYNAMIC: u64 = 0x7f10_0000_3e00;
+
+    /// The process with the main program and the libraries `libraries`
+    /// loaded, each by its load offset, dynamic section and path.
+    fn with(libraries: &[(u64, u64, &str)]) -> ProcessAt {
+        let main = gdb::Object {
+            l_addr: MAIN_AT,
+            l_ld: MAIN_DYNAMIC,
+            name: String::new(),
+        };
+        let objects = libraries.iter().map(|&(l_addr, l_ld, name)| gdb::Object {
+            l_addr,
+            l_ld,
+            name: name.into(),
+        });
+        ProcessAt {
+            pid: PID,
+            began: BEGAN,
+            loaded: Some(Loaded::Listed(
+                std::iter::once(main).chain(objects).collect(),
+            )),
+        }
+    }
+
+    /// Whether the naming's symbols, read with first.so loaded, serve a
+    /// later step, from made-up processes there: only the same process,
+    /// with no exec between and the same loader's list, with no write of
+    /// its files between. A library unloaded, one loaded, and another
+    /// loaded where the first was, at the same address, each change the
+    /// list.
+    #[test]
+    fn kept_symbols_serve_a_step_only_with_the_same_loaded_objects() {
+        let first = (LIBRARY_AT, LIBRARY_DYNAMIC, "/lib/first.so");
+        let kept = with(&[first]);
+        assert!(symbols_hold(&kept, &with(&[first]), &[]));
+
+        let second_in_its_place = (LIBRARY_AT, LIBRARY_DYNAMIC, "/lib/second.so");
+        assert!(!symbols_hold(&kept, &with(&[second_in_its_place]), &[]));
+        assert!(!symbols_hold(&kept, &with(&[]), &[]));
+        let other = (OTHER_AT, OTHER_DYNAMIC, "/lib/other.so");
+        assert!(!symbols_hold(&kept, &with(&[first, other]), &[]));
+
+        // Another process, an exec between, and memory that could not
+        // vouch for what was loaded, at either step.
+        let other_process = ProcessAt {
+            pid: PID + 1,
+            ..with(&[first])
+        };
+        assert!(!symbols_hold(&kept, &other_process, &[]));
+        let execed = ProcessAt {
+            began: BEGAN + 1,
+            ..with(&[first])
+        };
+        assert!(!symbols_hold(&kept, &execed, &[]));
+        let unvouched = ProcessAt {
+            loaded: None,
+            ..with(&[first])
+        };
+        assert!(!symbols_hold(&kept, &unvouched, &[]));
+        assert!(!symbols_hold(&unvouched, &unvouched, &[]));
+
+        // first.so rebuilt where it was, between the two steps.
+        let rebuilt = rewind_trace::Event {
+            step: BEGAN + 2,
+            pid: PID + 1,
+            tid: PID + 1,
+            kind: rewind_trace::EventKind::Open {
+                path: "/lib/first.so".into(),
+                flags: 0,
+            },
+        };
+        assert!(!symbols_hold(&kept, &with(&[first]), &[rebuilt]));
+    }
+
+    /// The events between two steps include both ends, either way round.
+    #[test]
+    fn the_events_between_two_steps_include_both() {
+        let mark = |step: u64| rewind_trace::Event {
+            step,
+            pid: PID,
+            tid: PID,
+            kind: rewind_trace::EventKind::Mark { text: "m".into() },
+        };
+        let trace = rewind_trace::Trace {
+            events: (1..=5).map(mark).collect(),
+        };
+        let steps =
+            |events: &[rewind_trace::Event]| events.iter().map(|e| e.step).collect::<Vec<_>>();
+        assert_eq!(steps(events_between(&trace, 2, 4)), [2, 3, 4]);
+        assert_eq!(steps(events_between(&trace, 4, 2)), [2, 3, 4]);
     }
 
     /// Counts read as words: one write, two reads.

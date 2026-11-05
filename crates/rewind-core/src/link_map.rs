@@ -26,8 +26,12 @@ const DT_DEBUG: u64 = 21;
 /// be something else.
 const MAX_DYN: u64 = 1024;
 
-/// In struct r_debug: the first link map.
+/// In struct r_debug: the first link map, and the list's state, a 4-byte
+/// int the loader sets while it adds or deletes an object and puts back
+/// to RT_CONSISTENT once the list is whole again.
 const R_MAP: u64 = 8;
+const R_STATE: u64 = 24;
+const RT_CONSISTENT: u32 = 0;
 
 /// In struct link_map, the part the SVR4 ABI fixes: the object's load
 /// offset, its path, its dynamic section and the next link map.
@@ -102,6 +106,14 @@ pub fn entries(read: Read, r_debug: u64) -> Result<Vec<LinkMap>> {
         lm = word(read, lm + L_NEXT)?;
     }
     Ok(maps)
+}
+
+/// Whether the loader's list at `r_debug` is whole: no object is being
+/// added to it or deleted from it.
+pub fn consistent(read: Read, r_debug: u64) -> Result<bool> {
+    let mut bytes = [0u8; 4];
+    read(r_debug + R_STATE, &mut bytes)?;
+    Ok(u32::from_le_bytes(bytes) == RT_CONSISTENT)
 }
 
 /// The 8-byte little-endian word at `at`.
@@ -274,6 +286,19 @@ mod tests {
         assert_eq!(maps[1].lm, MAPS[1]);
         assert_eq!(maps[1].l_addr, 0x7f10_0000_0000);
         assert_eq!(maps[1].l_ld, 0x7f10_0000_3d68);
+    }
+
+    /// The list is whole while r_state is RT_CONSISTENT, and not while
+    /// the loader deletes an object, RT_DELETE.
+    #[test]
+    fn the_list_is_whole_only_between_changes() {
+        let fake = process();
+        let read = |at: u64, buf: &mut [u8]| fake.read(at, buf);
+        assert!(consistent(&read, R_DEBUG).unwrap());
+
+        let rt_delete: u32 = 2;
+        fake.put(R_DEBUG + R_STATE, &rt_delete.to_le_bytes());
+        assert!(!consistent(&read, R_DEBUG).unwrap());
     }
 
     /// A list that loops back on itself is refused rather than read

@@ -293,6 +293,19 @@ pub(crate) fn on_the_cpu(machine: &rewind_vmm::Machine) -> Result<Option<OnTheCp
     Ok(Some(Tasks::new(machine, layout).on_the_cpu()?))
 }
 
+/// The page table of process `pid` on `machine`, or None from a kernel
+/// that does not say where its tasks are, or with no such process.
+fn process_space(machine: &rewind_vmm::Machine, pid: u32) -> Result<Option<u64>> {
+    let Some(layout) = machine.task_layout()? else {
+        return Ok(None);
+    };
+    let tasks = Tasks::new(machine, layout);
+    let Some(task) = tasks.process(pid)? else {
+        return Ok(None);
+    };
+    tasks.page_table(task)
+}
+
 /// Where gdb's output goes: to the terminal, or back to the caller.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Output {
@@ -361,23 +374,29 @@ fn session_end(number: u64) -> String {
 /// there and detaches. The debuginfod client's downloads are said as they
 /// start, since a library's DWARF or sources can take a minute to
 /// download the first time, and its log is left out of what gdb said.
+/// What the process had loaded where the symbols were read is kept with
+/// them, for a caller to check another step against before it reuses
+/// them there.
 pub(crate) struct KeptGdb {
     child: Child,
     commands: std::process::ChildStdin,
     lines: std::sync::mpsc::Receiver<Line>,
     symbols: Symbols,
+    loaded: Option<Loaded>,
     sessions: u64,
 }
 
 impl KeptGdb {
     /// gdb started with `symbols`, the vDSO read out of `debuggee` added
-    /// to them first, as `say` says.
+    /// to them first, as `say` says, and what the process had loaded
+    /// there read from `debuggee`'s memory.
     pub(crate) fn start(
         mut symbols: Symbols,
         debuggee: &rewind_core::debug::Debuggee<'_>,
         say: Say,
     ) -> Result<KeptGdb> {
         symbols.add_vdso(debuggee, say);
+        let loaded = symbols.loaded(&|at, buf| debuggee.read_process(at, buf));
         let mut command = Command::new(gdb_program());
         for setting in KEPT_SETTINGS {
             command.args(["-iex", setting]);
@@ -422,6 +441,7 @@ impl KeptGdb {
             commands,
             lines,
             symbols,
+            loaded,
             sessions: 0,
         })
     }
@@ -429,6 +449,27 @@ impl KeptGdb {
     /// The symbols gdb loaded.
     pub(crate) fn symbols(&self) -> &Symbols {
         &self.symbols
+    }
+
+    /// What the process had loaded at the step gdb's symbols were read
+    /// at, or None when its memory there could not vouch for them.
+    pub(crate) fn loaded(&self) -> Option<&Loaded> {
+        self.loaded.as_ref()
+    }
+
+    /// What process `pid` had loaded on `machine`, a fork at another step,
+    /// told by the files of gdb's symbols as [`Symbols::loaded`] tells it;
+    /// None as there, or when the machine has no such process.
+    pub(crate) fn loaded_on(&self, machine: &rewind_vmm::Machine, pid: u32) -> Option<Loaded> {
+        let space = process_space(machine, pid).ok().flatten()?;
+        let read = |at: u64, buf: &mut [u8]| -> Result<()> {
+            let read = machine.read_virtual_in(space, at, buf)?;
+            if read < buf.len() {
+                bail!("process {pid} has no memory at {:#x}", at + read as u64);
+            }
+            Ok(())
+        };
+        self.symbols.loaded(&read)
     }
 
     /// Connects gdb to `debuggee`, served from this thread, runs
@@ -783,9 +824,7 @@ impl Symbols {
                 if f.origin == Origin::Memory {
                     return None;
                 }
-                let mut file = std::fs::File::open(&f.path).ok()?;
-                let linked = rewind_core::maps::dynamic_vaddr(&mut file)?;
-                Some(f.offset.wrapping_add(linked))
+                dynamic_of(f)
             })
             .collect();
         let read = |at: u64, buf: &mut [u8]| debuggee.read_process(at, buf);
@@ -820,6 +859,27 @@ impl Symbols {
         }
         debuggee.set_libraries(link_map::svr4_xml(first.lm, &named));
         self.process.listed = Some(Listed { main, libraries });
+    }
+
+    /// What the process had loaded, read through `read` from its memory
+    /// at a step: the loader's list, when it accounts for each of these
+    /// symbols' files but the vDSO, as [`loaded_objects`] tells it.
+    pub(crate) fn loaded(&self, read: link_map::Read) -> Option<Loaded> {
+        let dynamics: Vec<Option<u64>> = self
+            .process
+            .files
+            .iter()
+            .filter(|f| f.origin != Origin::Memory)
+            .map(dynamic_of)
+            .collect();
+        let found: Vec<u64> = dynamics.iter().flatten().copied().collect();
+        let list = link_map::find_r_debug(read, &found).map(|r_debug| {
+            Ok(LoaderList {
+                whole: link_map::consistent(read, r_debug)?,
+                maps: link_map::entries(read, r_debug)?,
+            })
+        });
+        loaded_objects(&dynamics, list)
     }
 
     /// The directory the session's files are written to, which goes when
@@ -1190,6 +1250,108 @@ struct Listed {
     main: usize,
     /// The shared libraries.
     libraries: Vec<usize>,
+}
+
+/// Where `file`'s dynamic section is in the process, from its load offset
+/// and where its program headers put the section; None for a file with
+/// none, such as a static program, or that does not read.
+fn dynamic_of(file: &SymbolFile) -> Option<u64> {
+    let mut opened = std::fs::File::open(&file.path).ok()?;
+    let linked = rewind_core::maps::dynamic_vaddr(&mut opened)?;
+    Some(file.offset.wrapping_add(linked))
+}
+
+/// The objects a process had loaded at a step, as its memory there tells
+/// them: what gdb's symbols, read at one step, are checked against at
+/// another before they name the code there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Loaded {
+    /// The dynamic loader's list, in its order, the main program first.
+    /// dlopen adds an object and dlclose takes one out, from any of the
+    /// process's threads, and a library loaded where an unloaded one was
+    /// has a path of its own.
+    Listed(Vec<Object>),
+    /// A program with no loader's list, such as a static one, and no file
+    /// but its own, which only an exec replaces.
+    Program,
+}
+
+/// One object of the loader's list: its load offset, its dynamic section,
+/// and its path as the loader opened it, empty for the main program.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Object {
+    pub(crate) l_addr: u64,
+    pub(crate) l_ld: u64,
+    pub(crate) name: String,
+}
+
+impl Loaded {
+    /// Whether one of `events` wrote, created or renamed onto a file of
+    /// the same name as a listed object's: a library rebuilt where it was
+    /// and loaded again keeps its path in the list, at the same address,
+    /// with other code. Events name a path as the process gave it, so a
+    /// file is matched by its name alone. A program's own file cannot be
+    /// written while it runs.
+    pub(crate) fn written_in(&self, events: &[rewind_trace::Event]) -> bool {
+        let Loaded::Listed(objects) = self else {
+            return false;
+        };
+        let names: Vec<&std::ffi::OsStr> = objects
+            .iter()
+            .filter_map(|o| Path::new(&o.name).file_name())
+            .collect();
+        events.iter().any(|event| {
+            let path = match &event.kind {
+                rewind_trace::EventKind::Open { path, .. } => path,
+                rewind_trace::EventKind::Rename { to, .. } => to,
+                _ => return false,
+            };
+            Path::new(path)
+                .file_name()
+                .is_some_and(|name| names.contains(&name))
+        })
+    }
+}
+
+/// The loader's list as read at a step: whether it was whole, no object
+/// being added or deleted, and its link maps.
+struct LoaderList {
+    whole: bool,
+    maps: Vec<link_map::LinkMap>,
+}
+
+/// What `list`, the loader's list read at a step, says the process had
+/// loaded, when it accounts for every file gdb was given but the vDSO,
+/// each told by where its dynamic section is, in `dynamics`. With no
+/// list, the program's own file must be the only one. None when the
+/// memory cannot vouch for the files: a list that did not read or was
+/// being changed, or a file it does not hold, such as one mapped by other
+/// means or loaded in another namespace.
+fn loaded_objects(dynamics: &[Option<u64>], list: Option<Result<LoaderList>>) -> Option<Loaded> {
+    let Some(list) = list else {
+        return (dynamics.len() == 1).then_some(Loaded::Program);
+    };
+    let list = list.ok()?;
+    if !list.whole {
+        return None;
+    }
+
+    // Each file, by its dynamic section, among the list's objects.
+    let listed =
+        |dynamic: &Option<u64>| dynamic.is_some_and(|d| list.maps.iter().any(|m| m.l_ld == d));
+    if !dynamics.iter().all(listed) {
+        return None;
+    }
+    let objects = list
+        .maps
+        .into_iter()
+        .map(|m| Object {
+            l_addr: m.l_addr,
+            l_ld: m.l_ld,
+            name: m.name,
+        })
+        .collect();
+    Some(Loaded::Listed(objects))
 }
 
 /// The step of process `pid`'s latest event before `step`, if it made one.
@@ -2690,6 +2852,112 @@ mod tests {
             Some(new)
         );
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A link map for the loader's list in the tests below.
+    fn link(l_addr: u64, l_ld: u64, name: &str) -> link_map::LinkMap {
+        link_map::LinkMap {
+            lm: 0,
+            l_addr,
+            l_ld,
+            name: name.into(),
+        }
+    }
+
+    /// Where the made-up main program's and library's dynamic sections
+    /// are, and the library's load offset.
+    const MAIN_AT: u64 = 0x5000_0000;
+    const MAIN_DYNAMIC: u64 = 0x5000_3d68;
+    const LIBRARY_AT: u64 = 0x7f00_0000_0000;
+    const LIBRARY_DYNAMIC: u64 = 0x7f00_0000_3e00;
+    const OUTSIDE_DYNAMIC: u64 = 0x7f10_0000_3e00;
+
+    /// The objects a list of a main program and one library tells, from
+    /// made-up lists: the files gdb was given must all be in a whole
+    /// list, and with no list the program's file must be the only one.
+    #[test]
+    fn the_loaded_objects_are_told_only_when_the_list_holds_every_file() {
+        let list = |whole: bool| {
+            Some(Ok(LoaderList {
+                whole,
+                maps: vec![
+                    link(MAIN_AT, MAIN_DYNAMIC, ""),
+                    link(LIBRARY_AT, LIBRARY_DYNAMIC, "/lib/first.so"),
+                ],
+            }))
+        };
+        let files = [Some(MAIN_DYNAMIC), Some(LIBRARY_DYNAMIC)];
+        let Some(Loaded::Listed(objects)) = loaded_objects(&files, list(true)) else {
+            panic!("a whole list holding both files tells its objects");
+        };
+        assert_eq!(objects.len(), 2);
+        assert_eq!(objects[1].name, "/lib/first.so");
+        assert_eq!(objects[1].l_addr, LIBRARY_AT);
+
+        // A list the loader was changing, one that did not read, and a
+        // file mapped outside the list cannot vouch for the files.
+        assert_eq!(loaded_objects(&files, list(false)), None);
+        let unread = Some(Err(anyhow::anyhow!("no memory")));
+        assert_eq!(loaded_objects(&files, unread), None);
+        let outside = [
+            Some(MAIN_DYNAMIC),
+            Some(LIBRARY_DYNAMIC),
+            Some(OUTSIDE_DYNAMIC),
+        ];
+        assert_eq!(loaded_objects(&outside, list(true)), None);
+        let without_dynamic = [Some(MAIN_DYNAMIC), None];
+        assert_eq!(loaded_objects(&without_dynamic, list(true)), None);
+
+        // A static program alone is its own file, and beside another file
+        // is not.
+        assert_eq!(loaded_objects(&[None], None), Some(Loaded::Program));
+        assert_eq!(loaded_objects(&[None, Some(LIBRARY_DYNAMIC)], None), None);
+        assert_eq!(loaded_objects(&[], None), None);
+    }
+
+    /// A listed library's file written, created or renamed onto, by any
+    /// path to it, is a write of the list's files; a write of another
+    /// file, or a read, is not, and a static program's list has no
+    /// files to write.
+    #[test]
+    fn a_listed_library_rebuilt_where_it_was_is_seen_in_the_events() {
+        let event = |kind: rewind_trace::EventKind| rewind_trace::Event {
+            step: 1,
+            pid: 2,
+            tid: 2,
+            kind,
+        };
+        let open = |path: &str| {
+            event(rewind_trace::EventKind::Open {
+                path: path.into(),
+                flags: 0,
+            })
+        };
+        let loaded = Loaded::Listed(vec![
+            Object {
+                l_addr: MAIN_AT,
+                l_ld: MAIN_DYNAMIC,
+                name: String::new(),
+            },
+            Object {
+                l_addr: LIBRARY_AT,
+                l_ld: LIBRARY_DYNAMIC,
+                name: "/plugins/first.so".into(),
+            },
+        ]);
+        assert!(loaded.written_in(&[open("./first.so")]));
+        let renamed = event(rewind_trace::EventKind::Rename {
+            from: "/plugins/.first.so.tmp".into(),
+            to: "/plugins/first.so".into(),
+        });
+        assert!(loaded.written_in(&[renamed]));
+
+        let read = event(rewind_trace::EventKind::ReadOpen {
+            path: "/plugins/first.so".into(),
+            flags: 0,
+        });
+        assert!(!loaded.written_in(&[open("/plugins/second.so"), read]));
+        assert!(!Loaded::Program.written_in(&[open("/bin/watch")]));
     }
 
     /// What a kept gdb printed in one session, read up to the line that
