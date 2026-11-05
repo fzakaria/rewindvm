@@ -946,7 +946,11 @@ in
       }
       ''
         export REWIND_HOME=$TMPDIR/rewind
-        rewind run -q --name a --root ${busyboxRoot} -- sh -c 'for i in $(seq 1500); do echo $i; done; head -c 64 /dev/urandom | od -An -tx1'
+        # Keyframes are spaced by wall time, and the two at the shortest
+        # interval, at steps 256 and 512, are not enough: a host that ran
+        # 1,500 writes in 0.7 s took no third before the end. 20,000
+        # writes take a third on a host many times faster than that.
+        rewind run -q --name a --root ${busyboxRoot} -- sh -c 'for i in $(seq 20000); do echo $i; done; head -c 64 /dev/urandom | od -An -tx1'
         a=$(dirname "$(grep -l '"name": "a"' $REWIND_HOME/runs/*/manifest.json)")
         keyframes() { ls "$a/keyframes" | grep '\.kf$' | sed 's/\.kf$//; s/^0*//'; }
         echo "keyframes: $(keyframes | tr '\n' ' ')"
