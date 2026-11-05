@@ -253,6 +253,81 @@ fn saved_registers(words: &[u64; pt_regs::WORDS]) -> X86_64CoreRegs {
     }
 }
 
+/// Where the kernel's syscall entry keeps the user rsp while it switches
+/// to the task's stack, before pushing it: the TSS's sp2 word, 20 bytes
+/// into the TSS that TR names.
+const TSS_SP2: u64 = 20;
+
+/// The user registers of the thread on the CPU, from `saved`, its struct
+/// pt_regs at `base`, and `cpu`, the vCPU's registers, while the kernel's
+/// entry is still saving them there, or its exit has begun to give them
+/// back. With the CPU's rsp a user address, before the entry's stack
+/// switch or after the exit's, the registers are the CPU's, with the user
+/// pc in rcx and the flags in r11, where `syscall` and `sysretq` keep
+/// them. With rsp within the struct, the words at and above it are pushed
+/// and the ones below are still the CPU's, the user rsp in `scratch` when
+/// the entry has stashed it. Anywhere else the struct holds them all.
+fn being_saved(
+    saved: [u64; pt_regs::WORDS],
+    base: u64,
+    cpu: &rewind_vmm::debug::kvm_regs,
+    scratch: Option<u64>,
+) -> [u64; pt_regs::WORDS] {
+    let top = base + (pt_regs::WORDS * size_of::<u64>()) as u64;
+    let before_switch = cpu.rsp < USER_END;
+    if !before_switch && !(base < cpu.rsp && cpu.rsp <= top) {
+        return saved;
+    }
+
+    // The CPU's registers in the struct's order.
+    let mut live = saved;
+    for (index, value) in [
+        (pt_regs::R15, cpu.r15),
+        (pt_regs::R14, cpu.r14),
+        (pt_regs::R13, cpu.r13),
+        (pt_regs::R12, cpu.r12),
+        (pt_regs::RBP, cpu.rbp),
+        (pt_regs::RBX, cpu.rbx),
+        (pt_regs::R11, cpu.r11),
+        (pt_regs::R10, cpu.r10),
+        (pt_regs::R9, cpu.r9),
+        (pt_regs::R8, cpu.r8),
+        (pt_regs::RAX, cpu.rax),
+        (pt_regs::RCX, cpu.rcx),
+        (pt_regs::RDX, cpu.rdx),
+        (pt_regs::RSI, cpu.rsi),
+        (pt_regs::RDI, cpu.rdi),
+        (pt_regs::RIP, cpu.rcx),
+        (pt_regs::RFLAGS, cpu.r11),
+    ] {
+        live[index] = value;
+    }
+    if before_switch {
+        live[pt_regs::RSP] = cpu.rsp;
+        return live;
+    }
+    // Above the pc's word only the entry runs, which pushes rax as
+    // orig_rax next; at it, the exit has popped orig_rax past and leaves
+    // it as saved.
+    let pc_word = base + (pt_regs::RIP * size_of::<u64>()) as u64;
+    if cpu.rsp > pc_word {
+        live[pt_regs::ORIG_RAX] = cpu.rax;
+    }
+    if let Some(sp) = scratch {
+        live[pt_regs::RSP] = sp;
+    }
+
+    // The pushed words from the struct, the rest from the CPU.
+    let mut words = saved;
+    for (index, word) in words.iter_mut().enumerate() {
+        let at = base + (index * size_of::<u64>()) as u64;
+        if at < cpu.rsp {
+            *word = live[index];
+        }
+    }
+    words
+}
+
 /// The VM kernel's memory, as the vCPU's page tables map it; the kernel's
 /// half is the same in every process's.
 impl Memory for Machine {
@@ -1316,7 +1391,24 @@ impl MultiThreadBase for Debuggee<'_> {
                 eprintln!("rewind: {e:#}");
                 TargetError::NonFatal
             };
-            let words = tasks.user_registers(task).map_err(not_read)?;
+            let mut words = tasks.user_registers(task).map_err(not_read)?;
+
+            // The thread on the CPU, in the kernel: its entry may not have
+            // saved its registers yet, or its exit may have begun to give
+            // them back.
+            if on == OnCpu::Yes {
+                let base = tasks.user_register_address(task, 0).map_err(not_read)?;
+                let cpu = self.machine.registers().map_err(fatal)?;
+                let tr = self.machine.special_registers().map_err(fatal)?.tr.base;
+                let mut sp = [0u8; size_of::<u64>()];
+                let scratch = (self
+                    .machine
+                    .read_virtual(tr + TSS_SP2, &mut sp)
+                    .map_err(fatal)?
+                    == sp.len())
+                .then(|| u64::from_le_bytes(sp));
+                words = being_saved(words, base, &cpu, scratch);
+            }
             regs.core = saved_registers(&words);
             regs.orig_rax = Some(words[pt_regs::ORIG_RAX]);
 
@@ -2331,6 +2423,66 @@ mod tests {
         assert_eq!(thread_number(&threads, 42), Some(4));
         assert_eq!(thread_number(&threads, 43), None);
         assert_eq!(thread_number(&threads, CPU_TID as u32), None);
+    }
+
+    /// While the kernel's entry saves the user registers of the thread on
+    /// the CPU, they are the CPU's own until pushed. Before the stack
+    /// switch the CPU's rsp is the user one, and `syscall` left the user pc
+    /// in rcx and the flags in r11; on the kernel stack, the words of the
+    /// struct pt_regs at and above rsp are pushed, the ones below not yet,
+    /// and the user rsp waits in the entry's scratch word. Below the struct
+    /// it is all saved. At the exit's iretq, the words below its frame are
+    /// popped and the CPU's, but orig_rax stays as saved. Checked with a stale struct of 1000s, a CPU of
+    /// 2000s, a struct on a kernel stack and the scratch word 0x7ff0.
+    #[test]
+    fn registers_being_saved_come_from_the_cpu() {
+        const BASE: u64 = 0xffff_c900_0013_7e00;
+        const USER_SP: u64 = 0x7ff0;
+        let stale: [u64; pt_regs::WORDS] = std::array::from_fn(|i| 1000 + i as u64);
+        let cpu = |rsp| rewind_vmm::debug::kvm_regs {
+            rax: 2010,
+            rcx: 0x40_1922,
+            rdi: 2014,
+            r11: 0x246,
+            r15: 2000,
+            rsp,
+            rip: 0xffff_ffff_8100_0084,
+            ..Default::default()
+        };
+
+        // At entry_SYSCALL_64, before the stack switch.
+        let words = being_saved(stale, BASE, &cpu(0x7fff_0000), Some(USER_SP));
+        assert_eq!(words[pt_regs::RIP], 0x40_1922);
+        assert_eq!(words[pt_regs::RFLAGS], 0x246);
+        assert_eq!(words[pt_regs::RSP], 0x7fff_0000);
+        assert_eq!(words[pt_regs::RDI], 2014);
+        assert_eq!(words[pt_regs::CS], stale[pt_regs::CS]);
+
+        // On the kernel stack, the stack segment pushed, nothing else.
+        let top = BASE + 8 * pt_regs::WORDS as u64;
+        let words = being_saved(stale, BASE, &cpu(top - 8), Some(USER_SP));
+        assert_eq!(words[pt_regs::SS], stale[pt_regs::SS]);
+        assert_eq!(words[pt_regs::RSP], USER_SP);
+        assert_eq!(words[pt_regs::RIP], 0x40_1922);
+        assert_eq!(words[pt_regs::ORIG_RAX], 2010);
+
+        // The exit's iretq, its frame's words left on the stack: orig_rax
+        // as saved, though popped past.
+        let frame = BASE + 8 * pt_regs::RIP as u64;
+        let words = being_saved(stale, BASE, &cpu(frame), None);
+        assert_eq!(words[pt_regs::ORIG_RAX], stale[pt_regs::ORIG_RAX]);
+        assert_eq!(words[pt_regs::RIP], stale[pt_regs::RIP]);
+        assert_eq!(words[pt_regs::RDI], 2014);
+
+        // Pushed down to rdi: those words are the struct's.
+        let words = being_saved(stale, BASE, &cpu(BASE + 8 * pt_regs::RDI as u64), None);
+        assert_eq!(words[pt_regs::RDI], stale[pt_regs::RDI]);
+        assert_eq!(words[pt_regs::RIP], stale[pt_regs::RIP]);
+        assert_eq!(words[pt_regs::R15], 2000);
+
+        // All pushed, and below: the struct.
+        assert_eq!(being_saved(stale, BASE, &cpu(BASE), None), stale);
+        assert_eq!(being_saved(stale, BASE, &cpu(BASE - 0x100), None), stale);
     }
 
     /// A saved thread's registers are its pt_regs words in gdb's order,

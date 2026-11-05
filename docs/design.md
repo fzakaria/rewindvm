@@ -416,6 +416,14 @@ back after it. A fork whose registers or memory
 gdb changed, or that left its recording, cannot go back, since the run replayed
 is not what the fork did.
 
+A process's thread on the CPU shows its user registers from its struct pt_regs
+while the CPU runs the kernel, but for a few instructions on the way in and out
+the struct is not complete. Before the syscall entry's switch to the task's
+stack, or after the exit's switch back, the CPU's rsp is the user one, and the
+user pc and flags are in rcx and r11; with rsp inside the struct, the words below
+it are not yet pushed, or already popped, and are the CPU's own, the user rsp in
+the TSS word where the entry keeps it.
+
 Under exit time a step can be millions of instructions, and going back across
 one single-steps all of them, each a VM exit, which can take minutes; a run
 back to a watch on a value a loop writes stops at every write. Every 64 VM

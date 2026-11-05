@@ -1988,8 +1988,10 @@ in
   # of a record the kernel made in write() or exit_group() stops in the
   # kernel, at the out that made the record, though the step before
   # entered the kernel by a syscall instruction, by a page fault in user
-  # space, or by an invalid opcode or a privileged instruction there. A
-  # run forwards stops before the
+  # space, or by an invalid opcode or a privileged instruction there.
+  # Stepped through write()'s system call, the process's thread shows the
+  # pc and sp it made the call with until the call returns. A run
+  # forwards stops before the
   # process's exec, whose new program it never runs into, says so, and
   # refuses to go on, a stepi 100 once; a step back from there stops at
   # the out before it,
@@ -2348,6 +2350,27 @@ in
             test "$(grep -c 'fatal error\|Remote connection closed' last)" = 0
             grep -q '^=> 0xffffffff[0-9a-f]* <rewind_emit+[0-9]*>:[[:space:]]*out ' last
           done
+
+          # gdb steps the process's thread from write()'s syscall
+          # instruction through the kernel until it returns. Until then the
+          # thread shows the user pc and sp the call entered with, also in
+          # the kernel's entry before it has saved them in pt_regs and in
+          # its exit after it has begun to give them back: a stale pc or sp
+          # ends the steps early, away from the instruction after the
+          # syscall.
+          syscall=$(gdb -batch -ex 'disassemble __syscall_cp_c' ${gdbRoot}/bin/last \
+            | awk '/syscall *$/ {print $1}')
+          start=$(grep -F 'execve("/bin/last"' events | awk '{print $1}')
+          printf '%s\n' 'break *$syscall' continue delete 'set $usp = $sp' \
+            'set $upc = $pc + 2' stepi 'set $i = 1' \
+            'while $i < 50000 && $pc == $upc && $sp == $usp' stepi 'set $i = $i + 1' end \
+            'printf "steps %d, returned %d\n", $i, $pc > $upc && $pc < $upc + 16' \
+            > through.gdb
+          timeout 600 rewind gdb "last-$clock" "$start" -- -batch -ex "set \$syscall = $syscall" \
+            -x through.gdb > through 2>&1
+          cat through
+          grep -q '^steps [0-9]*, returned 1$' through
+          test "$(sed -n 's/^steps \([0-9]*\),.*/\1/p' through)" -gt 100
 
           # A page fault enters the kernel with the trap flag cleared too.
           # The crash's worker faults in user space, and the kernel's

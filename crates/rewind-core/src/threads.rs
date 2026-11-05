@@ -213,11 +213,9 @@ impl<'a, M: Memory + ?Sized> Tasks<'a, M> {
     /// The user registers a task saved when it last entered the kernel, in
     /// struct pt_regs at the top of its stack.
     pub fn user_registers(&self, task: u64) -> Result<[u64; pt_regs::WORDS]> {
-        let Some(stack) = self.stack(task)? else {
-            bail!("thread {} has exited", self.tid(task)?);
-        };
         let mut bytes = [0u8; pt_regs::WORDS * POINTER_LEN];
-        self.mem.read(stack + self.layout.pt_regs, &mut bytes)?;
+        self.mem
+            .read(self.user_register_address(task, 0)?, &mut bytes)?;
         let mut words = [0u64; pt_regs::WORDS];
         for (word, chunk) in words.iter_mut().zip(bytes.as_chunks::<POINTER_LEN>().0) {
             *word = u64::from_le_bytes(*chunk);

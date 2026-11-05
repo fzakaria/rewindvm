@@ -18,10 +18,14 @@
 use anyhow::{Context, Result, bail};
 use kvm_bindings::{
     KVM_GUESTDBG_BLOCKIRQ, KVM_GUESTDBG_ENABLE, KVM_GUESTDBG_SINGLESTEP, KVM_GUESTDBG_USE_HW_BP,
-    KVM_GUESTDBG_USE_SW_BP, Msrs, kvm_guest_debug, kvm_msr_entry, kvm_regs, kvm_sregs,
+    KVM_GUESTDBG_USE_SW_BP, Msrs, kvm_guest_debug, kvm_msr_entry, kvm_sregs,
 };
 
 use crate::Machine;
+
+/// The vCPU's general purpose registers, pc and flags, as
+/// [`Machine::registers`] reads them.
+pub use kvm_bindings::kvm_regs;
 
 /// The CPU has four debug address registers, DR0 to DR3, shared by
 /// breakpoints and watchpoints.
