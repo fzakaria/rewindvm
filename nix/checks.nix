@@ -1362,7 +1362,8 @@ in
   # checks.blame-memory: `rewind blame RUN --at STEP EXPR` names who last
   # wrote a value in memory. At the program's last write, counter holds 3,
   # last written by main at watch.c:16 (counter = 3), and 2 before that,
-  # at watch.c:15. The child's write of 1, at the same address in its own
+  # at watch.c:15, with the process's files loaded into gdb once for both
+  # of its sessions. The child's write of 1, at the same address in its own
   # memory, is no write of the parent's: two writes back, the search finds
   # only the parent's two. --address names the same bytes for programs,
   # and its search says how far it got in JSON lines, one of them as it
@@ -1392,8 +1393,11 @@ in
         rewind run -q --clock exits --name watch --root ${gdbRoot} -- /bin/watch
         done=$(rewind events watch | grep 'write(1, "done' | awk '{print $1}')
 
-        rewind blame watch --at "$done" counter > blame
-        cat blame
+        # One gdb names the value at the step and places the write at its
+        # own step: the process's files are read and loaded once.
+        rewind blame watch --at "$done" counter > blame 2> blame.err
+        cat blame blame.err
+        test "$(grep -c 'loading symbols for' blame.err)" = 1
         grep -q '^counter = 3   4 bytes at 0x' blame
         grep -q '^last written at step [0-9]* by thread [0-9]* (watch)$' blame
         grep -q '^  watch.c:16  main$' blame

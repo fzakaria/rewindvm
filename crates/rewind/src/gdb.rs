@@ -295,13 +295,9 @@ pub(crate) fn on_the_cpu(machine: &rewind_vmm::Machine) -> Result<Option<OnTheCp
 
 /// Where gdb's output goes: to the terminal, or back to the caller.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Output<'a> {
+pub(crate) enum Output {
     Terminal,
     Captured,
-    /// Back to the caller, with each download gdb's debuginfod client
-    /// starts said as it starts, the programs and libraries named by their
-    /// build IDs here.
-    CapturedSayingDownloads(&'a FileNames),
 }
 
 /// What gdb printed when its output was captured.
@@ -309,6 +305,222 @@ pub(crate) enum Output<'a> {
 pub(crate) struct Printed {
     pub stdout: String,
     pub stderr: String,
+}
+
+impl Printed {
+    /// Adds `line`, which a [`KeptGdb`] printed, unless it is the line
+    /// `end` that ends the session or an earlier session's end. Returns
+    /// whether it was `end`.
+    fn take(&mut self, line: Line, end: &str) -> bool {
+        let (text, into) = match line {
+            Line::Out(text) => (text, &mut self.stdout),
+            Line::Err(text) => (text, &mut self.stderr),
+        };
+        if text == end {
+            return true;
+        }
+        if !text.starts_with(SESSION_END) {
+            into.push_str(&text);
+            into.push('\n');
+        }
+        false
+    }
+}
+
+/// A line a [`KeptGdb`] printed: on its standard output, or on its
+/// standard error, the debuginfod client's log left out.
+enum Line {
+    Out(String),
+    Err(String),
+}
+
+/// What a [`KeptGdb`] is told before it loads anything: no prompt, which
+/// would start the lines it prints, and, as `-batch` has it, no questions
+/// and no pages or wrapping for a terminal it does not have.
+const KEPT_SETTINGS: [&str; 4] = [
+    "set prompt",
+    "set confirm off",
+    "set pagination off",
+    "set width 0",
+];
+
+/// How the line a [`KeptGdb`] session ends with starts, the session's
+/// number after it.
+const SESSION_END: &str = "rewind-session-end ";
+
+/// The line session `number` of a [`KeptGdb`] ends with.
+fn session_end(number: u64) -> String {
+    format!("{SESSION_END}{number}")
+}
+
+/// gdb kept running with one process's symbols loaded, for sessions on
+/// one fork after another: `rewind blame` names its values on a fork at
+/// one step and places the accesses on a fork at another, and gdb reads
+/// and loads the process's files once for both. gdb reads its commands
+/// from a pipe, and each session connects it to a fork, runs commands
+/// there and detaches. The debuginfod client's downloads are said as they
+/// start, since a library's DWARF or sources can take a minute to
+/// download the first time, and its log is left out of what gdb said.
+pub(crate) struct KeptGdb {
+    child: Child,
+    commands: std::process::ChildStdin,
+    lines: std::sync::mpsc::Receiver<Line>,
+    symbols: Symbols,
+    sessions: u64,
+}
+
+impl KeptGdb {
+    /// gdb started with `symbols`, the vDSO read out of `debuggee` added
+    /// to them first, as `say` says.
+    pub(crate) fn start(
+        mut symbols: Symbols,
+        debuggee: &rewind_core::debug::Debuggee<'_>,
+        say: Say,
+    ) -> Result<KeptGdb> {
+        symbols.add_vdso(debuggee, say);
+        let mut command = Command::new(gdb_program());
+        for setting in KEPT_SETTINGS {
+            command.args(["-iex", setting]);
+        }
+        command
+            .args(symbols.arguments(None))
+            .env(downloads::VERBOSE_ENV, downloads::VERBOSE_ON)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().context(
+            "starting gdb; is it on PATH? `rewind gdb --listen 127.0.0.1:1234` serves without it",
+        )?;
+
+        // Both of gdb's outputs on one channel, read beside the sessions
+        // so a full pipe cannot stop gdb, with the client's downloads said
+        // as they start and its log left out.
+        let (sender, lines) = std::sync::mpsc::channel();
+        let stdout = child.stdout.take().context("gdb's standard output")?;
+        let stderr = child.stderr.take().context("gdb's standard error")?;
+        let out = sender.clone();
+        std::thread::spawn(move || {
+            read_lines(stdout, |line| {
+                let _ = out.send(Line::Out(line.to_string()));
+            });
+        });
+        let names = symbols.file_names();
+        std::thread::spawn(move || {
+            let mut downloads = Downloads::new(&names);
+            read_lines(stderr, |line| {
+                if let Some(message) = downloads.message(line) {
+                    Say::Aloud.line(message);
+                }
+                if !downloads::is_client_log(line) {
+                    let _ = sender.send(Line::Err(line.to_string()));
+                }
+            });
+        });
+        let commands = child.stdin.take().context("gdb's standard input")?;
+        Ok(KeptGdb {
+            child,
+            commands,
+            lines,
+            symbols,
+            sessions: 0,
+        })
+    }
+
+    /// The symbols gdb loaded.
+    pub(crate) fn symbols(&self) -> &Symbols {
+        &self.symbols
+    }
+
+    /// Connects gdb to `debuggee`, served from this thread, runs
+    /// `commands` there and detaches. Returns what gdb printed meanwhile.
+    pub(crate) fn session(
+        &mut self,
+        debuggee: &mut rewind_core::debug::Debuggee<'_>,
+        commands: &[String],
+    ) -> Result<Printed> {
+        use std::io::Write as _;
+
+        // The whole session at once: gdb runs one command after another,
+        // and says the session's end once the last has run.
+        let listener = TcpListener::bind(GDB_LOCAL).context("listening for gdb")?;
+        self.sessions += 1;
+        let end = session_end(self.sessions);
+        let mut script = format!("target remote {}\n", listener.local_addr()?);
+        for command in commands {
+            script.push_str(command);
+            script.push('\n');
+        }
+        script.push_str(&format!("detach\necho \\n{end}\\n\n"));
+        self.commands
+            .write_all(script.as_bytes())
+            .and_then(|()| self.commands.flush())
+            .context("telling gdb the session's commands")?;
+
+        // The fork is served once gdb connects, then gdb's lines are read
+        // to the session's end. A gdb that ends the session without
+        // connecting, or exits, says why on its standard error.
+        let mut printed = Printed::default();
+        let (conn, mut ended) = self.accept(&listener, &end, &mut printed)?;
+        let served = match conn {
+            Some(conn) => debuggee.serve(conn).map(|_| ()),
+            None => Ok(()),
+        };
+        while !ended {
+            let Ok(line) = self.lines.recv() else {
+                break;
+            };
+            ended = printed.take(line, &end);
+        }
+        served?;
+        if !ended {
+            bail!("gdb exited in a session: {}", printed.stderr.trim());
+        }
+        Ok(printed)
+    }
+
+    /// gdb's connection to `listener`, or None once gdb ends the session
+    /// without one or exits, with whether the session's end, `end`, came.
+    /// gdb loading large symbol files can take minutes to connect, so
+    /// there is no time limit.
+    fn accept(
+        &mut self,
+        listener: &TcpListener,
+        end: &str,
+        printed: &mut Printed,
+    ) -> Result<(Option<std::net::TcpStream>, bool)> {
+        listener.set_nonblocking(true)?;
+        loop {
+            match listener.accept() {
+                Ok((conn, _)) => {
+                    conn.set_nonblocking(false)?;
+                    return Ok((Some(conn), false));
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e) => return Err(e.into()),
+            }
+            loop {
+                let line = match self.lines.try_recv() {
+                    Ok(line) => line,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => return Ok((None, false)),
+                };
+                if printed.take(line, end) {
+                    return Ok((None, true));
+                }
+            }
+            std::thread::sleep(CONNECT_POLL);
+        }
+    }
+}
+
+impl Drop for KeptGdb {
+    /// Tells gdb to quit and waits for it to.
+    fn drop(&mut self) {
+        use std::io::Write as _;
+        let _ = self.commands.write_all(b"quit\n");
+        let _ = self.commands.flush();
+        let _ = self.child.wait();
+    }
 }
 
 /// Runs the host's gdb with `args` and waits for it, serving `fork` to it
@@ -325,44 +537,20 @@ pub(crate) fn run_gdb(
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
     }
 
-    // The debuginfod client's log on gdb's standard error, for the
-    // downloads to be said as they start.
-    let names = match output {
-        Output::CapturedSayingDownloads(names) => {
-            command.env(downloads::VERBOSE_ENV, downloads::VERBOSE_ON);
-            Some(names.clone())
-        }
-        Output::Terminal | Output::Captured => None,
-    };
     let mut child = command.spawn().context(
         "starting gdb; is it on PATH? `rewind gdb --listen 127.0.0.1:1234` serves without it",
     )?;
 
     // gdb's output is read beside the serving, so a full pipe cannot stop
-    // gdb while the fork waits for it. The client's downloads are said as
-    // they start, since a library's DWARF or sources can take a minute to
-    // download the first time, and its log is left out of what gdb said.
+    // gdb while the fork waits for it.
     let stdout = child
         .stdout
         .take()
         .map(|pipe| std::thread::spawn(move || read_lines(pipe, |_| {})));
-    let stderr = child.stderr.take().map(|pipe| {
-        std::thread::spawn(move || {
-            let Some(names) = names else {
-                return read_lines(pipe, |_| {});
-            };
-            let mut downloads = Downloads::new(&names);
-            let text = read_lines(pipe, |line| {
-                if let Some(message) = downloads.message(line) {
-                    Say::Aloud.line(message);
-                }
-            });
-            text.lines()
-                .filter(|line| !downloads::is_client_log(line))
-                .map(|line| format!("{line}\n"))
-                .collect()
-        })
-    });
+    let stderr = child
+        .stderr
+        .take()
+        .map(|pipe| std::thread::spawn(move || read_lines(pipe, |_| {})));
     let served = match fork {
         Some((debuggee, listener)) => match accept_while_running(listener, &mut child)? {
             Some(conn) => debuggee.serve(conn).map(|_| ()),
@@ -1759,12 +1947,19 @@ struct Session {
     dir: PathBuf,
 }
 
+/// How many sessions this process has made, which numbers the next one's
+/// directory: one `rewind blame` holds two sets of symbols at once.
+static SESSIONS_MADE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 impl Session {
+    /// A directory under `home` that is this session's alone, named by
+    /// rewind's process id and the session's number in the process.
     fn new(home: &Home) -> Result<Session> {
+        let number = SESSIONS_MADE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir = home
             .root()
             .join(SESSIONS_DIR)
-            .join(std::process::id().to_string());
+            .join(format!("{}-{number}", std::process::id()));
         std::fs::create_dir_all(&dir)?;
         Ok(Session { dir })
     }
@@ -2494,6 +2689,48 @@ mod tests {
             debug_dir(&[root.join("missing"), new.clone()], None),
             Some(new)
         );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// What a kept gdb printed in one session, read up to the line that
+    /// ends it: standard output and standard error apart, a later
+    /// session's line left unread, and an earlier session's end passed.
+    #[test]
+    fn a_session_s_lines_end_at_its_own_end() {
+        let end = session_end(2);
+        let lines = [
+            Line::Out(session_end(1)),
+            Line::Out("rewind-where: {}".into()),
+            Line::Err("warning: no source".into()),
+            Line::Out(String::new()),
+            Line::Out(end.clone()),
+            Line::Out("rewind-where: later".into()),
+        ];
+        let mut printed = Printed::default();
+        let mut lines = lines.into_iter();
+        let ended = lines.by_ref().any(|line| printed.take(line, &end));
+        assert!(ended);
+        assert_eq!(printed.stdout, "rewind-where: {}\n\n");
+        assert_eq!(printed.stderr, "warning: no source\n");
+        assert_eq!(lines.count(), 1);
+    }
+
+    /// Two sessions of one process, as one `rewind blame` has, each with a
+    /// file in its directory: the directories differ, and dropping one
+    /// leaves the other's file.
+    #[test]
+    fn each_session_has_a_directory_of_its_own() {
+        let root = std::env::temp_dir().join(format!("rewind-sessions-{}", std::process::id()));
+        let home = Home::at(root.clone()).unwrap();
+        let first = Session::new(&home).unwrap();
+        let second = Session::new(&home).unwrap();
+        assert_ne!(first.dir, second.dir);
+
+        let kept = second.dir.join("where.py");
+        std::fs::write(&kept, "").unwrap();
+        drop(first);
+        assert!(kept.exists());
+        drop(second);
         std::fs::remove_dir_all(&root).unwrap();
     }
 

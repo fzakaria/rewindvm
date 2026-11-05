@@ -9,7 +9,9 @@
 //! for its last writes, or with `--reads` for every access since the
 //! process began. A second gdb session, on a fork at the last write's
 //! step, names each access's source line and where the process's other
-//! threads were then.
+//! threads were then. The same gdb serves both sessions when the process
+//! made no exec between the two steps, so its files are read and loaded
+//! once.
 
 use std::process::ExitCode;
 use std::time::Instant;
@@ -23,7 +25,7 @@ use rewind_trace::blamed::{
 use rewind_trace::located::{Frame, ValueClass};
 use rewind_trace::searching::{Phase, Searching};
 
-use crate::gdb::{Needs, Say, Symbols};
+use crate::gdb::{self, KeptGdb, Needs, Say, Symbols};
 use crate::locate::{self, Pick, PlaceAt};
 use crate::progress::Format;
 
@@ -60,13 +62,29 @@ struct Named {
     place: Option<SourcePlace>,
 }
 
+/// The gdb that named the values, kept running with the symbols it
+/// loaded: those of process `pid` as its memory was from step `began`,
+/// its last exec or its fork, on.
+struct Kept {
+    gdb: KeptGdb,
+    pid: u32,
+    began: u64,
+}
+
+/// Where a session at the last write's step gets gdb from: the one that
+/// named the values, or one to start with symbols read there.
+enum GdbFrom {
+    Kept(KeptGdb),
+    Loaded(Symbols),
+}
+
 /// Runs `rewind blame --at`.
 pub(crate) fn blame(home: &Home, asked: Asked<'_>) -> Result<ExitCode> {
     let started = Instant::now();
     let run = Run::find(home, asked.run)?;
     let step = run.check_step(asked.step)?;
     super::inspect::warn_of_machine(&run, step);
-    let named = name_values(home, &run, step, &asked)?;
+    let (named, naming) = name_values(home, &run, step, &asked)?;
     let since = match asked.since {
         Some(since) => since,
         None => run.process_began(named.pid, named.step)?,
@@ -108,14 +126,14 @@ pub(crate) fn blame(home: &Home, asked: Asked<'_>) -> Result<ExitCode> {
             &run,
             named.pid,
             (write, search.values[write.value], at_write),
-            &user_pcs,
+            (&user_pcs, naming),
         )?),
         None if !user_pcs.is_empty() => Some(context_at_step(
             home,
             &run,
             (named.pid, named.step),
             (&[], None, None),
-            &user_pcs,
+            (&user_pcs, naming),
         )?),
         None => None,
     };
@@ -193,8 +211,13 @@ pub(crate) fn blame(home: &Home, asked: Asked<'_>) -> Result<ExitCode> {
 }
 
 /// The values `asked` names at `step`: by address, or each expression as
-/// gdb evaluates it in the thread's chosen frame.
-fn name_values(home: &Home, run: &Run, step: u64, asked: &Asked<'_>) -> Result<Named> {
+/// gdb evaluates it in the thread's chosen frame, with that gdb kept.
+fn name_values(
+    home: &Home,
+    run: &Run,
+    step: u64,
+    asked: &Asked<'_>,
+) -> Result<(Named, Option<Kept>)> {
     if let Some((address, size, class)) = asked.address {
         let (pid, tid) =
             match locate::thread_at(run.trace()?, step, asked.thread.0, asked.thread.1)? {
@@ -212,19 +235,22 @@ fn name_values(home: &Home, run: &Run, step: u64, asked: &Asked<'_>) -> Result<N
             now: None,
             initial: None,
         };
-        return Ok(Named {
+        let named = Named {
             values: vec![value],
             pid,
             tid,
             step,
             place: None,
-        });
+        };
+        return Ok((named, None));
     }
 
     if asked.expressions.is_empty() {
         bail!("name a value to blame, such as 'p->queue', or give --address");
     }
-    let answer = &locate::located_asking(home, run, step, asked.thread, asked.expressions, None)?;
+    let (answer, gdb) =
+        locate::located_keeping(home, run, step, asked.thread, asked.expressions, None)?;
+    let answer = &answer;
     let index = match asked.frame {
         Some(level) => answer
             .frames
@@ -266,7 +292,7 @@ fn name_values(home: &Home, run: &Run, step: u64, asked: &Asked<'_>) -> Result<N
             initial: None,
         });
     }
-    Ok(Named {
+    let named = Named {
         values,
         pid: answer.pid,
         tid: answer.tid,
@@ -277,7 +303,13 @@ fn name_values(home: &Home, run: &Run, step: u64, asked: &Asked<'_>) -> Result<N
             line: frame.line,
             text: None,
         }),
-    })
+    };
+    let kept = Kept {
+        gdb,
+        pid: answer.pid,
+        began: run.process_began(answer.pid, answer.step)?,
+    };
+    Ok((named, Some(kept)))
 }
 
 /// A hint, after a value that cannot be watched, at ones in the frame
@@ -316,13 +348,13 @@ struct Surroundings {
 }
 
 /// The places of `pcs`, and where process `pid`'s threads other than the
-/// writer's were at `write`'s step.
+/// writer's were at `write`'s step, with the gdb `kept` when it fits.
 fn context_at(
     home: &Home,
     run: &Run,
     pid: u32,
     (write, value, machine): (&accesses::Access, Value, Option<rewind_vmm::Machine>),
-    pcs: &[u64],
+    (pcs, kept): (&[u64], Option<Kept>),
 ) -> Result<Surroundings> {
     let after = accesses::Sought {
         value,
@@ -334,14 +366,16 @@ fn context_at(
         run,
         (pid, write.step),
         (&[write.tid], Some(after), machine),
-        pcs,
+        (pcs, kept),
     )
 }
 
 /// The places of `pcs`, and where process `pid`'s threads, but those in
 /// `leave_out`, were in `step`: at its start, or just after the access
 /// `after` names; on `machine`, the search's at the step, when it kept
-/// one, else on forks made there.
+/// one, else on a fork made there; with `kept`, the gdb that named the
+/// values, when its symbols hold at the step, else with symbols read
+/// there.
 fn context_at_step(
     home: &Home,
     run: &Run,
@@ -351,20 +385,37 @@ fn context_at_step(
         Option<accesses::Sought>,
         Option<rewind_vmm::Machine>,
     ),
-    pcs: &[u64],
+    (pcs, kept): (&[u64], Option<Kept>),
 ) -> Result<Surroundings> {
     let needs = Needs::Tasks("`rewind blame --at` cannot find the threads".into());
-    let (machine, symbols) = match machine {
-        // The search's machine is at the step already: the symbols'
-        // inspection runs on it and it is put back for gdb, so neither
-        // restores a keyframe.
-        Some(mut machine) if machine.step() == step && machine.task_layout()?.is_some() => {
-            let symbols = Symbols::load_on(home, run, (step, &mut machine), pid, Say::Aloud)?;
-            (machine, symbols)
-        }
-        _ => locate::fork_and_symbols(home, run, step, needs, pid)?,
+
+    // The naming's symbols hold at the step when the process's memory is
+    // the same program's there: the same process, with no exec between.
+    // A library loaded or unloaded between the two steps is not looked
+    // for.
+    let began = run.process_began(pid, step)?;
+    let kept = kept
+        .filter(|k| k.pid == pid && k.began == began)
+        .map(|k| k.gdb);
+
+    // The search's machine is at the step already, when it kept one: the
+    // symbols' inspection, when there is one, runs on it and it is put
+    // back for gdb, so neither restores a keyframe.
+    let at_step = |machine: &rewind_vmm::Machine| -> Result<bool> {
+        Ok(machine.step() == step && machine.task_layout()?.is_some())
     };
-    let mut machine = machine;
+    let (mut machine, from) = match (machine, kept) {
+        (Some(machine), Some(gdb)) if at_step(&machine)? => (machine, GdbFrom::Kept(gdb)),
+        (Some(mut machine), None) if at_step(&machine)? => {
+            let symbols = Symbols::load_on(home, run, (step, &mut machine), pid, Say::Aloud)?;
+            (machine, GdbFrom::Loaded(symbols))
+        }
+        (_, Some(gdb)) => (gdb::fork(home, run, step, needs)?, GdbFrom::Kept(gdb)),
+        (_, None) => {
+            let (machine, symbols) = locate::fork_and_symbols(home, run, step, needs, pid)?;
+            (machine, GdbFrom::Loaded(symbols))
+        }
+    };
     if let Some(sought) = after {
         accesses::run_to_access(&mut machine, pid, step, sought)?;
     }
@@ -383,7 +434,15 @@ fn context_at_step(
         }
         _ => Vec::new(),
     };
-    let at = locate::threads_at(run, step, (machine, symbols), pid, (&tids, pcs))?;
+
+    // The threads and places from a session on the fork.
+    let scope = rewind_core::debug::Scope::Process(pid);
+    let mut debuggee = gdb::debuggee(run, step, machine, scope)?;
+    let mut gdb = match from {
+        GdbFrom::Kept(gdb) => gdb,
+        GdbFrom::Loaded(symbols) => KeptGdb::start(symbols, &debuggee, Say::Aloud)?,
+    };
+    let at = locate::threads_at(&mut debuggee, &mut gdb, (&tids, pcs))?;
     let threads = at
         .threads
         .into_iter()

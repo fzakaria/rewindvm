@@ -9,7 +9,6 @@
 //! standard library's or a dependency's, is the answer.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::net::TcpListener;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
@@ -21,7 +20,7 @@ use rewind_trace::ending::ExitStatus;
 use rewind_trace::located::{Extent, Frame, Located, SourceFile};
 use serde::Deserialize;
 
-use crate::gdb::{self, Kernel, Needs, Output, Say, Symbols};
+use crate::gdb::{self, KeptGdb, Kernel, Needs, Output, Say, Symbols};
 
 /// The gdb script, written to the session's directory for gdb to source,
 /// and the start of the line it answers on.
@@ -33,6 +32,17 @@ const SCRIPT_NAME: &str = "where.py";
 const EXPRESSIONS_NAME: &str = "where-expressions.json";
 const THREADS_NAME: &str = "where-threads.json";
 const ANSWER_MARKER: &str = "rewind-where: ";
+
+/// The convenience variables the script reads what it is asked from,
+/// cleared at the start of each session so a kept gdb's last session's
+/// do not carry over.
+const SCRIPT_VARIABLES: [&str; 5] = [
+    "rewind_tid",
+    "rewind_after_access",
+    "rewind_expressions",
+    "rewind_threads",
+    "rewind_address",
+];
 
 /// The source lines around the chosen frame's line the text answer shows
 /// a person.
@@ -128,6 +138,20 @@ pub(crate) fn located_asking(
     asked: &[String],
     after: Option<Sought>,
 ) -> Result<Located> {
+    located_keeping(home, run, step, (pid, tid), asked, after).map(|(located, _)| located)
+}
+
+/// Where a thread was, as [`located_asking`] says, and the gdb that
+/// walked it, still running with the process's symbols, for another
+/// session at another step.
+pub(crate) fn located_keeping(
+    home: &Home,
+    run: &Run,
+    step: u64,
+    (pid, tid): (Option<u32>, Option<u32>),
+    asked: &[String],
+    after: Option<Sought>,
+) -> Result<(Located, KeptGdb)> {
     let pick = thread_at(run.trace()?, step, pid, tid)?;
 
     // A process at its own exit has no memory left to name its frames
@@ -251,50 +275,38 @@ pub(crate) fn thread_line(answer: &Located, involved: Involved) -> String {
 
 /// Thread `tid`'s frames on `machine`, a fork of `run` at `step`, with
 /// process `pid`'s symbols, and the one in the program's own code with its
-/// source.
+/// source; and the gdb that walked them, kept running.
 fn walk(
     run: &Run,
     step: u64,
     machine: rewind_vmm::Machine,
-    mut symbols: Symbols,
+    symbols: Symbols,
     (pid, tid): (u32, u32),
     (asked, moment): (&[String], Moment),
-) -> Result<Located> {
-    // The fork as gdb sees it, with the process's symbols there.
+) -> Result<(Located, KeptGdb)> {
+    // The fork as gdb sees it, and gdb with the process's symbols there.
     let scope = rewind_core::debug::Scope::Process(pid);
     let mut debuggee = gdb::debuggee(run, step, machine, scope)?;
-    symbols.add_vdso(&debuggee, Say::Aloud);
+    let mut gdb = KeptGdb::start(symbols, &debuggee, Say::Aloud)?;
+    let symbols = gdb.symbols();
 
-    // gdb with the script, against the fork.
-    let script = symbols.dir().join(SCRIPT_NAME);
-    std::fs::write(&script, SCRIPT).context("writing the gdb script")?;
-    let listener = TcpListener::bind(gdb::GDB_LOCAL).context("listening for gdb")?;
-    let mut args = symbols.arguments(Some(listener.local_addr()?));
-    args.extend([
-        "-batch".to_string(),
-        "-ex".to_string(),
-        format!("set $rewind_tid = {tid}"),
-    ]);
+    // What the script is asked: the thread, and the expressions.
+    let mut commands = vec![format!("set $rewind_tid = {tid}")];
     if moment == Moment::AfterAccess {
-        args.extend([
-            "-ex".to_string(),
-            "set $rewind_after_access = 1".to_string(),
-        ]);
+        commands.push("set $rewind_after_access = 1".to_string());
     }
     if !asked.is_empty() {
         let file = symbols.dir().join(EXPRESSIONS_NAME);
         std::fs::write(&file, serde_json::to_string(asked)?)
             .context("writing the expressions for gdb")?;
-        args.extend(["-ex".to_string(), gdb_string("rewind_expressions", &file)]);
+        commands.push(gdb_string("rewind_expressions", &file));
     }
-    args.extend(["-x".to_string(), script.display().to_string()]);
     eprintln!(
         "{} walking thread {tid}'s stack in gdb",
         crate::color::stderr().prefix()
     );
-    let names = symbols.file_names();
-    let output = Output::CapturedSayingDownloads(&names);
-    let (_, printed) = gdb::run_gdb(&args, Some((&mut debuggee, &listener)), output)?;
+    let printed = script_session(&mut gdb, &mut debuggee, commands)?;
+    let symbols = gdb.symbols();
     let walked: Walked = script_answer(&printed)?;
     if let Some(error) = walked.error {
         bail!("gdb could not walk thread {tid}'s stack: {error}");
@@ -321,7 +333,7 @@ fn walk(
         .map(|(path, file)| (in_vm(&path), file))
         .collect();
 
-    Ok(Located {
+    let located = Located {
         run: run.manifest.id.to_string(),
         step,
         pid,
@@ -330,7 +342,30 @@ fn walk(
         frames,
         chosen,
         files,
-    })
+    };
+    Ok((located, gdb))
+}
+
+/// What `gdb` printed in a session on `debuggee` that sources the script
+/// after `commands`, the variables it reads cleared before them.
+fn script_session(
+    gdb: &mut KeptGdb,
+    debuggee: &mut rewind_core::debug::Debuggee<'_>,
+    commands: Vec<String>,
+) -> Result<gdb::Printed> {
+    let script = gdb.symbols().dir().join(SCRIPT_NAME);
+    std::fs::write(&script, SCRIPT).context("writing the gdb script")?;
+    let cleared = SCRIPT_VARIABLES
+        .iter()
+        .map(|name| format!("'{name}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut session = vec![format!(
+        "python [gdb.set_convenience_variable(v, None) for v in ({cleared})]"
+    )];
+    session.extend(commands);
+    session.push(format!("source {}", script.display()));
+    gdb.session(debuggee, &session)
 }
 
 /// gdb's command setting convenience variable `name` to `path`, as a
@@ -386,43 +421,25 @@ pub(crate) struct PlaceAt {
     pub(crate) text: Option<String>,
 }
 
-/// Threads `tids` of process `pid` at `step` of `run`, and the places of
-/// `addresses` in its code, from one gdb session on `machine`, a fork at
-/// the step, with `symbols`, the process's there. Paths are as the VM had
-/// them.
+/// Threads `tids` of the debugged process, and the places of `addresses`
+/// in its code, from a session of `gdb`, which has the process's symbols,
+/// on `debuggee`, a fork at a step. Paths are as the VM had them.
 pub(crate) fn threads_at(
-    run: &Run,
-    step: u64,
-    (machine, mut symbols): (rewind_vmm::Machine, Symbols),
-    pid: u32,
+    debuggee: &mut rewind_core::debug::Debuggee<'_>,
+    gdb: &mut KeptGdb,
     (tids, addresses): (&[u32], &[u64]),
 ) -> Result<ThreadsAt> {
-    let scope = rewind_core::debug::Scope::Process(pid);
-    let mut debuggee = gdb::debuggee(run, step, machine, scope)?;
-    symbols.add_vdso(&debuggee, Say::Aloud);
-
-    // gdb with the script and what it is asked, against the fork.
-    let script = symbols.dir().join(SCRIPT_NAME);
-    std::fs::write(&script, SCRIPT).context("writing the gdb script")?;
-    let asked = symbols.dir().join(THREADS_NAME);
+    // What the script is asked, written for it to read.
+    let asked = gdb.symbols().dir().join(THREADS_NAME);
     let addresses: Vec<String> = addresses.iter().map(|a| format!("{a:#x}")).collect();
     std::fs::write(
         &asked,
         serde_json::to_string(&serde_json::json!({ "tids": tids, "addresses": addresses }))?,
     )
     .context("writing the threads for gdb")?;
-    let listener = TcpListener::bind(gdb::GDB_LOCAL).context("listening for gdb")?;
-    let mut args = symbols.arguments(Some(listener.local_addr()?));
-    args.extend([
-        "-batch".to_string(),
-        "-ex".to_string(),
-        gdb_string("rewind_threads", &asked),
-        "-x".to_string(),
-        script.display().to_string(),
-    ]);
-    let names = symbols.file_names();
-    let output = Output::CapturedSayingDownloads(&names);
-    let (_, printed) = gdb::run_gdb(&args, Some((&mut debuggee, &listener)), output)?;
+    let commands = vec![gdb_string("rewind_threads", &asked)];
+    let printed = script_session(gdb, debuggee, commands)?;
+    let symbols = gdb.symbols();
     let answer: ThreadsAndPlaces = script_answer(&printed)?;
     if let Some(error) = answer.error {
         bail!("gdb could not walk the threads: {error}");
