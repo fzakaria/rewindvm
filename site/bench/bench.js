@@ -31,7 +31,7 @@ const commit = (hash) =>
 const MILESTONES = [
   {
     label: "v0.3.0",
-    html: `rewind check starts each schedule from the unperturbed run's latest keyframe before the schedule begins, where it booted and ran from the start before (${commit("53cf7ac7")}). A window late in a long build is checked without running up to it again. A short program pays for restoring a keyframe, all of guest memory, where booting cost less, and the unperturbed run now records keyframes, which every other schedule waits for: check of the Nix build, which finds no difference, went from 47 s to 104 s here, where a keyframe costs about 200 ms. Nothing since has won it back.`,
+    html: `rewind check starts each schedule from the unperturbed run's latest keyframe before the schedule begins, where it booted and ran from the start before (${commit("53cf7ac7")}). A window late in a long build is checked without running up to it again. A short program pays for restoring a keyframe, all of guest memory, where booting cost less, and the unperturbed run now records keyframes, which every other schedule waits for: check of the Nix build, which finds no difference, went from 47 s to 104 s here, where a keyframe costs about 200 ms. 0.12.0 won most of it back.`,
   },
   {
     label: "v0.5.0",
@@ -44,6 +44,10 @@ const MILESTONES = [
   {
     label: "v0.11.0",
     html: `Restores read pages on every core (${commit("f7fc2dbf")}) and straight from a keyframe's bytes (${commit("f8dbdad6")}), and guest memory is backed by 2 MiB pages where the host allows (${commit("151744b5")}). The late seek takes a fifth of its time, check of a short program is back where it was before 0.3.0, and a short run is 22% faster. Which commit gave how much is not measured.`,
+  },
+  {
+    label: "v0.12.0",
+    html: `Keyframes are spaced by the guest's work instead of wall time (${commit("67dd7d7a")}), which counted each keyframe's own time and gave this machine about 300 for hello, and the page store keeps one compression context where the static build made one for every page (${commit("2c778eb4")}). hello records in 26.6 s against 81.3 s, with 39 keyframes against 291, and check of the Nix build takes 57 s, against 116 s. Hashing and compressing on several threads (${commit("8f714365")}) gave about a tenth more. A replay compares only the pages written since the last match (${commit("515bc488")}) and is back within a second of 0.9.0's. The late seek is a fifth slower, since a seek can now replay up to a quarter second of the reference laptop's work, which takes longer here.`,
   },
 ];
 
@@ -82,7 +86,7 @@ const METRICS = [
     label: "Keyframes",
     unit: "",
     get: (s) => s.keyframes,
-    note: "Keyframes the run kept. Recording takes one every quarter second of wall time, so a slower recording keeps more.",
+    note: "Keyframes the run kept. Through 0.11.0 recording took one every quarter second of wall time, so a slower recording kept more. From 0.12.0 it takes one every quarter second of the guest's work, at the same steps on every host, and one where the job exits.",
   },
   {
     key: "steps",
