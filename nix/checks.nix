@@ -408,6 +408,48 @@ let
         EOF
         $CC -static -O0 -g -fdebug-prefix-map=$out/src=/src \
           -o $out/bin/piped $out/src/piped.c
+
+        # One program adds to a global in a loop, then execs the other,
+        # which calls a function three times.
+        cat > $out/src/before.c <<'EOF'
+        #include <unistd.h>
+
+        volatile long work;
+
+        int main(void)
+        {
+          write(1, "before\n", 7);
+          for (long i = 0; i < 100; i++)
+            work += i; /* the work */
+          write(1, "exec\n", 5);
+          execl("/bin/after", "after", (char *)0);
+          return 1;
+        }
+        EOF
+        $CC -static -O0 -g -fdebug-prefix-map=$out/src=/src \
+          -o $out/bin/before $out/src/before.c
+
+        cat > $out/src/after.c <<'EOF'
+        #include <unistd.h>
+
+        volatile long counter;
+
+        __attribute__((noinline)) void bump(long n)
+        {
+          counter += n; /* the bump */
+        }
+
+        int main(void)
+        {
+          write(1, "after\n", 6);
+          for (long i = 1; i <= 3; i++)
+            bump(i);
+          write(1, "done\n", 5);
+          return 0;
+        }
+        EOF
+        $CC -static -O0 -g -fdebug-prefix-map=$out/src=/src \
+          -o $out/bin/after $out/src/after.c
       '';
 
   # A root with a static program in two files, like mylib: main hands a
@@ -1633,7 +1675,10 @@ in
   # ends as the run did, on its recording. With nothing to stop at, a run backwards
   # reaches the program's exec, where its memory began. A watch on a buffer
   # the kernel fills in read() stops, run backwards, at the read's syscall
-  # instruction in the process's thread. A Ctrl-C in a step back across 10 million
+  # instruction in the process's thread. A run forwards stops before the
+  # process's exec, whose new program it never runs into, says so, and
+  # refuses to go on; a step back from there works, and a session at the
+  # step the message names stops in the new program. A Ctrl-C in a step back across 10 million
   # rounds of a loop stops it there, where gdb goes on. Boots the VM, so it
   # needs /dev/kvm.
   gdb-reverse =
@@ -1764,6 +1809,36 @@ in
           test "$(grep -c 'rep_movs\|copy_user' piped)" = 0
           grep -q 'Reached end of recorded history' piped
           grep -q '^\$1 = "\(.000\)\{7\}"$' piped
+
+          # From the first program's first write, a continue stops before
+          # the exec, at the start of the step that runs it, where the
+          # loop's total still reads, and does not run into the second
+          # program, whose function's address has a breakpoint. A second
+          # continue is refused, and stays; a reverse-stepi moves. The
+          # session the message names stops in the second program.
+          rewind run -q --clock "$clock" --name "exec-$clock" --root ${gdbRoot} \
+            -- /bin/before > /dev/null
+          first=$(rewind events "exec-$clock" | grep 'write(1, "before' | awk '{print $1}')
+          exec=$(rewind events "exec-$clock" | grep 'execve("/bin/after"' | awk '{print $1}')
+          bump=$(gdb -batch -ex 'print/x (long) &bump' ${gdbRoot}/bin/after | awk '{print $NF}')
+          timeout 300 rewind gdb "exec-$clock" "$first" -- -batch -ex "break *$bump" -ex continue \
+            -ex 'print work' -ex 'print $pc' -ex continue -ex 'print $pc' -ex reverse-stepi \
+            -ex 'print $pc' > exec 2>&1 || true
+          cat exec
+          said="process [0-9]* runs /bin/after at step $exec; this session debugs the program before it"
+          test "$(grep -c "$said" exec)" = 2
+          test "$(grep -c 'hit Breakpoint 1' exec)" = 0
+          test "$(grep -c 'exited normally' exec)" = 0
+          grep -q '^\$1 = 4950$' exec
+          grep '^\$[234] = ' exec | sed 's/^\$[0-9]* = //' > pcs
+          test "$(wc -l < pcs)" = 3
+          test "$(sed -n 1p pcs)" = "$(sed -n 2p pcs)"
+          test "$(sed -n 2p pcs)" != "$(sed -n 3p pcs)"
+          again=$(sed -n 's/.*; \(rewind gdb [^ ]* [0-9]*\) debugs the new one$/\1/p;T;q' exec)
+          test "$again" != ""
+          timeout 300 $again -- -batch -ex 'break bump' -ex continue > after 2>&1 || true
+          cat after
+          grep -q 'hit Breakpoint 1, bump (.*after.c' after
         done
 
         # Under exit time, a reverse-stepi from the last write single-steps

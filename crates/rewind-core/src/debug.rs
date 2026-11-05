@@ -18,10 +18,12 @@
 //! records are compared with the run's as it goes, and gdb's user is told
 //! the step where the two first differ: from there on the fork is not the
 //! run, whether gdb changed its memory or the debugging itself moved it.
+//! A run forwards stops before an exec of the debugged process: past it is
+//! another program, in a page table gdb's traps and reads do not follow.
 
 use std::net::TcpStream;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use gdbstub::common::Signal;
 use gdbstub::common::Tid;
 use gdbstub::conn::ConnectionExt;
@@ -570,6 +572,26 @@ pub struct Debuggee<'h> {
     /// by its task struct's address, while it looks for where one thread
     /// made a system call; None counts every thread's.
     hits_of: Option<u64>,
+    /// Where the fork stopped for an exec of the debugged process, which
+    /// a run forwards from there is refused at.
+    exec_stop: Option<ExecStop>,
+}
+
+/// An exec of the debugged process that the fork made: the step of the
+/// record the kernel made for it, and the program it runs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Exec {
+    step: u64,
+    program: String,
+}
+
+/// Where the fork stopped for an exec of the debugged process, and what
+/// gdb's user was told there, which a run forwards from there is refused
+/// with.
+#[derive(Debug)]
+struct ExecStop {
+    at: Position,
+    said: String,
 }
 
 /// A system call a thread of the debugged process is in: the thread's
@@ -631,6 +653,7 @@ impl<'h> Debuggee<'h> {
             listener: Listener::default(),
             began: 0,
             hits_of: None,
+            exec_stop: None,
         };
         debuggee.refresh_threads();
         Ok(debuggee)
@@ -797,6 +820,20 @@ impl<'h> Debuggee<'h> {
         Ok(self.space.is_none_or(|space| page_table(cr3) == space))
     }
 
+    /// Whether the debugged process still has the page table gdb debugs,
+    /// as the kernel's tasks say. An exec replaces it. With no process, or
+    /// from a kernel that publishes no task layout, nothing says otherwise.
+    fn has_its_space(&self) -> Result<bool> {
+        let (Some(pid), Some(layout)) = (self.process, self.layout) else {
+            return Ok(true);
+        };
+        let tasks = Tasks::new(&self.machine, layout);
+        let Some(task) = tasks.process(pid)? else {
+            return Ok(false);
+        };
+        Ok(tasks.page_table(task)? == self.space)
+    }
+
     /// Whether a trap at `address`, just taken, is the debugged process's.
     fn in_scope(&self, address: u64) -> Result<bool> {
         let cr3 = self.machine.special_registers()?.cr3;
@@ -915,6 +952,68 @@ impl Observer for Follow {
             _ => self.left_at = Some(step),
         }
     }
+}
+
+/// The exec of process `pid` that `record`, made at `step`, says happened,
+/// when it is one.
+fn exec_of(pid: u32, step: u64, record: &[u8]) -> Option<Exec> {
+    if rewind_trace::io_records::is_io(record) {
+        return None;
+    }
+    let event = rewind_trace::Event::decode(step, record).ok()?;
+    if event.pid != pid {
+        return None;
+    }
+    let rewind_trace::EventKind::Exec { filename, .. } = event.kind else {
+        return None;
+    };
+    Some(Exec {
+        step,
+        program: filename,
+    })
+}
+
+/// The fork's records as gdb runs it forwards: compared with the run's,
+/// and looked through for an exec of `process`, the debugged process,
+/// which pauses the fork at the start of the step after the exec.
+struct Forward<'a> {
+    follow: &'a mut Follow,
+    process: Option<u32>,
+    exec: Option<Exec>,
+}
+
+impl Observer for Forward<'_> {
+    fn record(&mut self, step: u64, record: &[u8]) {
+        self.follow.record(step, record);
+        if let (None, Some(pid)) = (&self.exec, self.process) {
+            self.exec = exec_of(pid, step, record);
+        }
+    }
+
+    fn stop(&self) -> bool {
+        self.exec.is_some()
+    }
+}
+
+/// What gdb's user is told when the fork stops for `exec`, an exec of
+/// process `pid`: with `stays`, the reason the fork cannot go back to
+/// before the exec and stops after it, and with `run`, the id of the run
+/// a session at the exec's step debugs the new program of.
+fn exec_said(pid: u32, exec: &Exec, stays: Option<&str>, run: Option<&str>) -> String {
+    let mut said = format!(
+        "process {pid} runs {} at step {}; this session debugs the program before it",
+        exec.program, exec.step
+    );
+    if let Some(why) = stays {
+        said.push_str(&format!(", and the fork stops after the exec: {why}"));
+    }
+    if let Some(run) = run {
+        said.push_str(&format!(
+            "; rewind gdb {run} {} debugs the new one",
+            exec.step
+        ));
+    }
+    said
 }
 
 /// A VMM error as a fatal target error.
@@ -1279,6 +1378,61 @@ impl Debuggee<'_> {
         MultiThreadStopReason::SignalWithThread { tid, signal }
     }
 
+    /// The stop gdb is told of where the fork stopped for an exec of the
+    /// debugged process: a SIGTRAP, as at a refused run backwards, in the
+    /// process's thread gdb stepped, else in the thread a stop there
+    /// names. gdb's own words for the end of a replay log say forward
+    /// execution goes on into new history, which it does not here.
+    fn exec_stop_reason(&self) -> Result<MultiThreadStopReason<u64>> {
+        let tid = match self.stepped {
+            Some(tid) if matches!(self.source(tid), Some(Source::Task(..))) => tid,
+            _ => self.stopped_thread()?,
+        };
+        Ok(MultiThreadStopReason::SignalWithThread {
+            tid,
+            signal: Signal::SIGTRAP,
+        })
+    }
+
+    /// Stops the fork for `exec`, an exec of the debugged process whose
+    /// record the fork has just made, at the start of the step after it.
+    /// gdb debugs the program before the exec, whose memory and page
+    /// table the exec replaced, so the fork goes back from there, by
+    /// replaying the run, to the latest step start before the exec, and
+    /// after `from`, where it ran forwards from, at which the process still
+    /// has the page table gdb debugs; else to `from`. A fork that cannot
+    /// go back stays after the exec. gdb's user is told either way, and a
+    /// run forwards from the stop is refused.
+    fn stop_at_exec(&mut self, exec: Exec, from: &Position) -> Result<()> {
+        self.arrived(None)?;
+        let Some(pid) = self.process else {
+            bail!("an exec stopped a fork that debugs no process");
+        };
+
+        // A session at the exec's step debugs the new program, when the
+        // fork made the run's records up to it.
+        let run = match (&self.history, self.follow.left_at) {
+            (Some(history), None) => Some(history.run_id()),
+            _ => None,
+        };
+        let stays = match &self.history {
+            None => Some("the fork has no run to replay back to before it".to_string()),
+            Some(_) => self.cannot_go_back(),
+        };
+        if stays.is_none() {
+            self.back_before_exec(from, exec.step)?;
+        }
+
+        let said = exec_said(pid, &exec, stays.as_deref(), run.as_deref());
+        eprintln!("rewind: {said}");
+        self.exec_stop = Some(ExecStop {
+            at: self.position.clone(),
+            said,
+        });
+        self.refresh_threads();
+        Ok(())
+    }
+
     /// The stop gdb is told of after a step back: in the process's thread
     /// gdb stepped, as a step forwards is, else in the thread a stop there
     /// names. gdb names the thread of a step back separately, and may name
@@ -1370,6 +1524,18 @@ impl<'h> BlockingEventLoop for EventLoop<'h> {
         if matches!(target.mode, Mode::StepBack | Mode::ContinueBack) {
             return run_back(target, conn);
         }
+
+        // Where the fork stopped for an exec of the debugged process, a
+        // run forwards is refused: past it is another program.
+        if let Some(stop) = &target.exec_stop
+            && stop.at == target.position
+        {
+            eprintln!("rewind: {}", stop.said);
+            target.refresh_threads();
+            let reason = target.exec_stop_reason().map_err(target_error)?;
+            return Ok(Event::TargetStopped(reason));
+        }
+        let from = target.position.clone();
         let traps = target.traps.registers();
         target
             .machine
@@ -1399,10 +1565,16 @@ impl<'h> BlockingEventLoop for EventLoop<'h> {
 
         loop {
             let until = target.machine.step() + CHUNK_STEPS;
+            let mut forward = Forward {
+                follow: &mut target.follow,
+                process: target.process,
+                exec: None,
+            };
             let outcome = target
                 .machine
-                .run(Some(until), &mut target.follow)
+                .run(Some(until), &mut forward)
                 .map_err(target_error)?;
+            let exec = forward.exec;
 
             // Said once, when it happens, so gdb's user knows what follows
             // is not what the run did.
@@ -1412,6 +1584,13 @@ impl<'h> BlockingEventLoop for EventLoop<'h> {
                     "rewind: the fork left the recording at step {step}; \
                      from there on it is not the run"
                 );
+            }
+
+            // An exec of the debugged process paused the fork, after it.
+            if let Some(exec) = exec {
+                target.stop_at_exec(exec, &from).map_err(target_error)?;
+                let reason = target.exec_stop_reason().map_err(target_error)?;
+                return Ok(Event::TargetStopped(reason));
             }
             match outcome {
                 Outcome::Debug(DebugStop::Step) => return step_done(target),
@@ -1892,5 +2071,104 @@ mod tests {
             past_the_end.record(step, record);
         }
         assert_eq!(past_the_end.left_at, Some(20));
+    }
+
+    /// The kind of record the guest kernel makes for an exec, and for a
+    /// write to standard output.
+    const EXEC_RECORD: u16 = 3;
+    const OUTPUT_RECORD: u16 = 2;
+
+    /// A record laid out the way the guest kernel writes one.
+    fn guest_record(kind: u16, pid: u32, data: &[u8]) -> Vec<u8> {
+        let mut r = Vec::new();
+        let len = (rewind_trace::HEADER_LEN + data.len()) as u32;
+        r.extend_from_slice(&len.to_le_bytes());
+        r.extend_from_slice(&kind.to_le_bytes());
+        r.extend_from_slice(&0u16.to_le_bytes());
+        for word in [pid, pid, pid] {
+            r.extend_from_slice(&word.to_le_bytes());
+        }
+        r.extend_from_slice(data);
+        r
+    }
+
+    /// An exec is found in the debugged process's records alone, by the
+    /// file the kernel ran: an exec of another process, another kind of
+    /// record and bytes that are no record are not one.
+    #[test]
+    fn an_exec_of_the_debugged_process_is_found_in_its_records() {
+        let exec = guest_record(EXEC_RECORD, 34, b"/bin/after\0after\0");
+        assert_eq!(
+            exec_of(34, 304, &exec),
+            Some(Exec {
+                step: 304,
+                program: "/bin/after".into()
+            })
+        );
+        assert_eq!(exec_of(35, 304, &exec), None);
+        assert_eq!(
+            exec_of(34, 303, &guest_record(OUTPUT_RECORD, 34, b"exec\n")),
+            None
+        );
+        assert_eq!(exec_of(34, 303, b"short"), None);
+    }
+
+    /// The fork stopped at an exec looks through its records for no
+    /// other: the first exec of the debugged process pauses it, and every
+    /// record still goes on to be compared with the run's.
+    #[test]
+    fn the_first_exec_of_the_debugged_process_pauses_the_fork() {
+        let output = guest_record(OUTPUT_RECORD, 34, b"exec\n");
+        let first = guest_record(EXEC_RECORD, 34, b"/bin/after\0after\0");
+        let second = guest_record(EXEC_RECORD, 34, b"/bin/later\0later\0");
+        let mut follow = Follow::new(vec![(303, output.clone()), (304, first.clone())]);
+        let mut forward = Forward {
+            follow: &mut follow,
+            process: Some(34),
+            exec: None,
+        };
+
+        forward.record(303, &output);
+        assert!(!forward.stop());
+        forward.record(304, &first);
+        forward.record(305, &second);
+        assert!(forward.stop());
+        assert_eq!(forward.exec.as_ref().map(|e| e.step), Some(304));
+        assert_eq!(follow.left_at, Some(305));
+    }
+
+    /// A fork that debugs no process stops at no exec.
+    #[test]
+    fn a_fork_debugging_no_process_runs_through_execs() {
+        let exec = guest_record(EXEC_RECORD, 34, b"/bin/after\0after\0");
+        let mut follow = Follow::new(Vec::new());
+        let mut forward = Forward {
+            follow: &mut follow,
+            process: None,
+            exec: None,
+        };
+        forward.record(304, &exec);
+        assert!(!forward.stop());
+    }
+
+    /// gdb's user is told the program, the step, and the session that
+    /// debugs the new program, when there is one; a fork that stays after
+    /// the exec says why.
+    #[test]
+    fn an_exec_stop_names_the_session_for_the_new_program() {
+        let exec = Exec {
+            step: 304,
+            program: "/bin/after".into(),
+        };
+        assert_eq!(
+            exec_said(34, &exec, None, Some("e991b2daf43acf81")),
+            "process 34 runs /bin/after at step 304; this session debugs the program \
+             before it; rewind gdb e991b2daf43acf81 304 debugs the new one"
+        );
+        assert_eq!(
+            exec_said(34, &exec, Some("it left the recording"), None),
+            "process 34 runs /bin/after at step 304; this session debugs the program \
+             before it, and the fork stops after the exec: it left the recording"
+        );
     }
 }

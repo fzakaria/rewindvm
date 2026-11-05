@@ -326,6 +326,23 @@ bss with the new page table already loaded, so a watch on a global would
 otherwise stop in the exec. gdb builds `reverse-next`, `reverse-finish` and the
 rest on those two.
 
+Forwards, a session goes no further than the debugged process's next exec.
+Past it is another program, whose files and symbols the session never
+extracted, in a page table the session does not watch, so breakpoints there
+would never fire and memory reads would fail. The kernel makes a record for an
+exec once the new program's memory and page table are in place, and the fork
+looks through its own records as it runs, so a fork that left its recording
+sees the exec too. Breakpoints and watches in the old program still stop the
+fork on the way. At the exec's record, the fork goes back by replaying the run
+to the latest step start at which the process still had its old page table,
+which is the start of the step that runs the exec, or to where the run forwards
+began when that is later. Rewind prints which program the process runs and at
+which step, and that `rewind gdb RUN STEP` at that step debugs the new program,
+and gdb sees a SIGTRAP. A run forwards from there is refused with the same
+words. Going back works as before, since everything before the stop is the old
+program's. A fork that cannot go back, because gdb changed it or it left its
+recording, stops at the exec's record, after the exec, and says why.
+
 A step's start comes from a checkpoint the fork keeps in memory: the vCPU,
 the interrupt controllers and the monitor's state, and the pages written
 since the checkpoint before it. Rewinding to one writes back only the pages

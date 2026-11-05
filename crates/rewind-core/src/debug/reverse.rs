@@ -58,6 +58,8 @@ pub trait History: std::fmt::Debug {
     /// The step process `pid`'s memory began at by step `step`: its last
     /// exec by then, else its fork.
     fn process_began(&self, pid: u32, step: u64) -> Result<u64>;
+    /// The run's id, which `rewind gdb` takes to fork it again.
+    fn run_id(&self) -> String;
 }
 
 /// A run in a home, as a fork's history.
@@ -86,6 +88,10 @@ impl History for RunHistory<'_> {
 
     fn process_began(&self, pid: u32, step: u64) -> Result<u64> {
         self.run.process_began(pid, step)
+    }
+
+    fn run_id(&self) -> String {
+        self.run.manifest.id.to_string()
     }
 }
 
@@ -1152,6 +1158,46 @@ fn with_margins<T>(mut attempt: impl FnMut(u64) -> Result<T>) -> Result<T> {
         }
     }
     Err(last.expect("at least one margin"))
+}
+
+/// How many step starts before an exec's record a fork stopped for the
+/// exec looks back through for the process's old page table. The exec
+/// replaces the page table in the step before the record's, unless
+/// another exit, such as a timer's, came in between.
+const EXEC_LOOK_BACK: u64 = 8;
+
+impl Debuggee<'_> {
+    /// Brings the fork back from the start of the step after the record
+    /// of an exec of the debugged process, made at step `exec`, to the
+    /// latest step start before it, and after `from`, where the fork ran
+    /// forwards from, at which the process still has the page table gdb
+    /// debugs; else to `from`. A Ctrl-C on the way stops the fork at the
+    /// position it got to, and a closed connection fails.
+    pub(super) fn back_before_exec(&mut self, from: &Position, exec: u64) -> Result<()> {
+        self.listener.begin();
+        let back = self.back_before_exec_unless_interrupted(from, exec);
+        match back {
+            Err(e) if e.is::<Interrupted>() => {
+                let heard = e.downcast_ref::<Interrupted>().expect("checked").0;
+                if heard == Heard::Gone {
+                    return Err(e);
+                }
+                self.ready_for_gdb()
+            }
+            other => other,
+        }
+    }
+
+    fn back_before_exec_unless_interrupted(&mut self, from: &Position, exec: u64) -> Result<()> {
+        let earliest = (from.step + 1).max(exec.saturating_sub(EXEC_LOOK_BACK));
+        for step in (earliest..exec).rev() {
+            self.go_to_or_retry(&Position::start(step))?;
+            if self.has_its_space()? {
+                return Ok(());
+            }
+        }
+        self.go_to_or_retry(from)
+    }
 }
 
 #[cfg(test)]
