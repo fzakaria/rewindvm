@@ -784,23 +784,23 @@ in
 
         # Without its parent, a fork says which run it needs.
         mv $REWIND_HOME/runs/$fork $TMPDIR/away
-        ! rewind replay $fork2 --from 300 2> missing
+        if rewind replay $fork2 --from 300 2> missing; then exit 1; fi
         grep "$fork" missing
         mv $TMPDIR/away $REWIND_HOME/runs/$fork
 
         # A fork past the end of the run is refused. Forks at its end are
         # the run itself: prune removes them and keeps the run and the fork
         # that ran differently.
-        ! rewind fork a $(($(end a) + 1)) --schedule 7 2> past
+        if rewind fork a $(($(end a) + 1)) --schedule 7 2> past; then exit 1; fi
         grep -q 'past its end' past
         same1=$(rewind fork a "$(end a)" --schedule 7 --json | id)
         same2=$(rewind fork a "$(end a)" --schedule 8 --json | id)
-        ! grep -q '"first_difference"' "$(manifest $same1)"
+        grep -q '"first_difference": null' "$(manifest $same1)"
         grep -q '"first_difference"' "$(manifest $fork)"
         rewind prune a --identical --dry-run --json | tee planned
         grep -q "$same1" planned
         grep -q "$same2" planned
-        ! grep -q "$fork" planned
+        test "$(grep -c "$fork" planned)" = 0
         test -d $REWIND_HOME/runs/$same1
         rewind prune a --identical
         test ! -e $REWIND_HOME/runs/$same1
@@ -821,15 +821,15 @@ in
         # Running the fork's inputs again as a plain run leaves the fork
         # with no parent, still reading a's keyframes, so a stays.
         rewind run -q --schedule 3 --schedule-from 400 --root ${busyboxRoot} -- sh -c '${workload}'
-        ! grep -q '"parent": \[' "$(manifest $fork)"
-        ! rewind remove a 2> refused
+        grep -q '"parent": null' "$(manifest $fork)"
+        if rewind remove a 2> refused; then exit 1; fi
         cat refused
         grep -q "run $fork reads its keyframes up to step 399 from " refused
         rewind replay a --from 300 | grep '^identical'
 
         # Several runs go in one call, each once, and one refused among
         # them keeps them all.
-        ! rewind remove $leaf1 a 2> refused
+        if rewind remove $leaf1 a 2> refused; then exit 1; fi
         grep -q "run $fork reads its keyframes up to step 399 from " refused
         test -d $REWIND_HOME/runs/$leaf1
         rewind remove $leaf1 $leaf2 $leaf1 --json | tee removed
@@ -949,7 +949,7 @@ in
         size=$(stat -c %s "$a/keyframes/$last")
         head -c 32 /dev/zero | tr '\0' '\377' |
           dd of="$a/keyframes/$last" bs=1 seek=$((size - 32)) conv=notrunc 2> /dev/null
-        ! rewind replay a --machine last > tampered
+        if rewind replay a --machine last > tampered; then exit 1; fi
         cat tampered
         grep -q '^identical to the recording: ' tampered
         grep -q '^the machine is DIFFERENT from the recording at the keyframe at step ' tampered
@@ -962,13 +962,13 @@ in
         # reader to the one that recorded the run, not to --bisect, whose
         # two replays would both be by this build.
         sed -i 's/"recorded_by": "[^"]*"/"recorded_by": "0.8.0 (a211b3d6fefe)"/' "$a/manifest.json"
-        ! rewind replay a --machine last > other-build
+        if rewind replay a --machine last > other-build; then exit 1; fi
         cat other-build
         grep -q '^the machine is DIFFERENT from the recording at the keyframe at step ' other-build
         grep -q '^rewind 0.8.0 (a211b3d6fefe) recorded the run, and this is rewind ' other-build
         grep -q 'Replay the run with rewind 0.8.0 (a211b3d6fefe)' other-build
-        ! grep -q -e '--bisect' -e 'not deterministic' other-build
-        ! rewind replay a --machine last --json > other-build.json
+        test "$(grep -c -e '--bisect' -e 'not deterministic' other-build)" = 0
+        if rewind replay a --machine last --json > other-build.json; then exit 1; fi
         grep -q '"builds":"other"' other-build.json
         grep -q '"recorded_by":"0.8.0 (a211b3d6fefe)"' other-build.json
         touch $out
@@ -1017,7 +1017,7 @@ in
 
         if grep -q AuthenticAMD /proc/cpuinfo; then
           rewind run -q --name rdrand --root ${determinismRoot} -- /bin/rdrand
-          ! rewind replay rdrand > rdrand.replay
+          if rewind replay rdrand > rdrand.replay; then exit 1; fi
           cat rdrand.replay
           grep -q '^DIFFERENT' rdrand.replay
 
@@ -1027,7 +1027,7 @@ in
           # before that keyframe warns that it may show values the
           # recording never had.
           rewind run -q --name hidden --root ${determinismRoot} -- /bin/hidden
-          ! rewind replay hidden > hidden.replay
+          if rewind replay hidden > hidden.replay; then exit 1; fi
           cat hidden.replay
           grep -q '^identical to the recording: ' hidden.replay
           grep -q '^the machine is DIFFERENT from the recording at the keyframe at step ' hidden.replay
@@ -1038,7 +1038,7 @@ in
 
           # --bisect narrows it to the step and the instruction: rdrand in
           # hidden's main, with why and what the program can do instead.
-          ! rewind replay hidden --bisect > hidden.bisect
+          if rewind replay hidden --bisect > hidden.bisect; then exit 1; fi
           cat hidden.bisect
           grep -q '^the machine first differs at step ' hidden.bisect
           grep -q 'process [0-9]* (hidden) ran  rdrand r' hidden.bisect
@@ -1056,14 +1056,14 @@ in
           grep -q 'the machine is DIFFERENT' report/report.md
           grep -q '^- vendor_id: AuthenticAMD' report/report.md
           grep -q '^- clock: exit time$' report/report.md
-          ! grep -q "$REWIND_HOME" report/report.md
+          test "$(grep -c "$REWIND_HOME" report/report.md)" = 0
           test "$(stat -c %s report/*.rwd)" -lt 1000000
           rewind bugreport hidden --no-run -o bare > /dev/null
           test -z "$(find bare -name '*.rwd')"
 
           # Executing the run's inputs again keeps its keyframes, makes
           # another trace, and blames the host rather than the build.
-          ! rewind run --name rdrand --root ${determinismRoot} -- /bin/rdrand 2> again.err
+          if rewind run --name rdrand --root ${determinismRoot} -- /bin/rdrand 2> again.err; then exit 1; fi
           cat again.err
           grep -q 'not deterministic on this host' again.err
 
@@ -1071,13 +1071,13 @@ in
           # picks, end differently, and before it blames one it replays
           # both sides, which do not replay exactly: the check stops there
           # and blames the host.
-          ! rewind check --schedules 16 --root ${determinismRoot} -- /bin/draw > rdrand.check 2>&1
+          if rewind check --schedules 16 --root ${determinismRoot} -- /bin/draw > rdrand.check 2>&1; then exit 1; fi
           cat rdrand.check
           grep -q 'no schedule decides this' rdrand.check
           grep -q 'not deterministic on this host' rdrand.check
-          ! grep -q 'step .* decides it' rdrand.check
+          test "$(grep -c 'step .* decides it' rdrand.check)" = 0
         else
-          ! rewind run --name rdrand --root ${determinismRoot} -- /bin/rdrand 2> rdrand.err
+          if rewind run --name rdrand --root ${determinismRoot} -- /bin/rdrand 2> rdrand.err; then exit 1; fi
           cat rdrand.err
           grep -q 'killed:SIGILL' rdrand.err
         fi
@@ -1157,7 +1157,7 @@ in
         test "$status" = 3
         rewind cat w "$end" /notes.txt | tee cat
         grep -q second cat
-        ! rewind cat w $((end + 1)) /notes.txt 2> past
+        if rewind cat w $((end + 1)) /notes.txt 2> past; then exit 1; fi
         grep -q 'past its end' past
 
         # rewind shell, typed into from a pipe.
@@ -1308,9 +1308,9 @@ in
         grep -q 'Old value = 0' gdb
         grep -q 'New value = 2' gdb
         grep -q 'New value = 3' gdb
-        ! grep -q 'New value = 1' gdb
+        test "$(grep -c 'New value = 1' gdb)" = 0
         grep -q 'exited normally' gdb
-        ! grep -q 'left the recording\|SIGTRAP' gdb
+        test "$(grep -c 'left the recording\|SIGTRAP' gdb)" = 0
 
         # The child's write is passed, the parent's last one stops gdb.
         rewind gdb watch "$start" -- -batch \
@@ -1318,7 +1318,7 @@ in
         cat break
         grep -q '^\$1 = 3' break
         grep -q 'exited normally' break
-        ! grep -q 'left the recording\|SIGTRAP' break
+        test "$(grep -c 'left the recording\|SIGTRAP' break)" = 0
 
         rewind gdb watch "$start" -- -batch -ex 'rwatch counter' -ex continue > read 2>&1 || true
         cat read
@@ -1421,7 +1421,7 @@ in
         cat stress
         grep -q '^  fields.c:20  main' stress
         grep -q '^  fields.c:22  main' stress
-        ! grep -q 'not written' stress
+        test "$(grep -c 'not written' stress)" = 0
         rewind blame fields --at "$done" counter --reads --max 1 --json > capped.json
         jq -e '.listed == "accesses" and (.accesses | length) == 1 and .dropped > 0' capped.json
 
@@ -1517,7 +1517,7 @@ in
 
         rewind cat crash "$step" /proc/$pid/status > status
         cat status
-        ! grep -q '^State:.*zombie' status
+        test "$(grep -c '^State:.*zombie' status)" = 0
         rewind cat crash "$step" /proc/$pid/task/$tid/stat > stat
         cat stat
         test "$(awk '{print $3}' stat)" = T
@@ -1644,7 +1644,7 @@ in
           sed -n 7p hits > last
           grep -q 'Breakpoint 6, sixth' last
           grep -q 'exited normally' gdb
-          ! grep -q 'left the recording\|SIGTRAP\|no debug register' gdb
+          test "$(grep -c 'left the recording\|SIGTRAP\|no debug register' gdb)" = 0
         done
 
         # A kernel function past the registers, and gdb's reads with
@@ -1656,9 +1656,9 @@ in
         cat kernel
         grep -q 'hit Breakpoint 5, .*__x64_sys_wait4' kernel
         grep -q '^0x[0-9a-f]* <sixth>:' kernel
-        ! grep -q '^0x[0-9a-f]* <sixth>:.*0xcc' kernel
+        test "$(grep -c '^0x[0-9a-f]* <sixth>:.*0xcc' kernel)" = 0
         grep -q 'exited normally' kernel
-        ! grep -q 'left the recording' kernel
+        test "$(grep -c 'left the recording' kernel)" = 0
         touch $out
       '';
 
@@ -1740,7 +1740,7 @@ in
           grep -q 'hit Breakpoint 3, add (n=3)' gdb
           grep -q '^\$5 = 3$' gdb
           grep -q 'exited normally' gdb
-          ! grep -q 'left the recording\|SIGTRAP' gdb
+          test "$(grep -c 'left the recording\|SIGTRAP' gdb)" = 0
 
           # A reverse-next back over the dot's write(), with the watch and
           # two breakpoints set: gdb's breakpoint at write's start takes
@@ -1764,7 +1764,7 @@ in
           rewind gdb "reverse-$clock" "$done" -- -batch -ex reverse-continue > start 2>&1 || true
           cat start
           grep -q 'Reached end of recorded history' start
-          ! grep -q 'only the CPU' start
+          test "$(grep -c 'only the CPU' start)" = 0
 
           # Five writes to the watch in one step, with no exit between:
           # each run back stops before the write before the last one. A
@@ -1867,7 +1867,7 @@ in
             fi
             sleep 0.1
           done
-          grep -q 'received signal SIGINT' "$out" || ! kill -0 "$parent" 2> /dev/null
+          grep -q 'received signal SIGINT' "$out" || ! kill -0 "$parent" 2> /dev/null || exit 1
           wait "$parent" || true
           cat "$out"
         }
@@ -1913,7 +1913,7 @@ in
             fi
             sleep 0.1
           done
-          [ "$(grep -c 'received signal SIGINT' "$out")" = 2 ] || ! kill -0 "$parent" 2> /dev/null
+          [ "$(grep -c 'received signal SIGINT' "$out")" = 2 ] || ! kill -0 "$parent" 2> /dev/null || exit 1
           wait "$parent" || true
           cat "$out"
         }
@@ -2073,7 +2073,7 @@ in
 
         # check exits 1 when a schedule ends differently, which is what
         # this needs.
-        ! rewind check --where -j 4 --clock exits --root ${raceRoot} -- /bin/race > found
+        if rewind check --where -j 4 --clock exits --root ${raceRoot} -- /bin/race > found; then exit 1; fi
         cat found
         grep -q ' decides it: ' found
         # A reschedule decides it only where a thread is between its read
@@ -2084,7 +2084,7 @@ in
         grep -qE "$thread"'add \(race\.c:'"$exit_line"'\), on the CPU at the deciding step$' found
         grep -qE "$thread"'[a-z_]+ \(race\.c:[0-9]+\), at the first event that differs$' found
 
-        ! rewind check --where --json -j 4 --clock exits --root ${raceRoot} -- /bin/race > found.json
+        if rewind check --where --json -j 4 --clock exits --root ${raceRoot} -- /bin/race > found.json; then exit 1; fi
         jq -e '.narrowed.threads | length == 2 and all(.frame.file == "race.c")' found.json
         touch $out
       '';
@@ -2124,12 +2124,12 @@ in
         test "$(rewind ls --forks-of "$id" | wc -l)" = 8
 
         # The search: the first fork that ends differently, narrowed.
-        ! rewind check --run race --schedule-from "$from" > found
+        if rewind check --run race --schedule-from "$from" > found; then exit 1; fi
         cat found
         grep -q ' decides it: ' found
 
         # Options that make another run than the one named are refused.
-        ! rewind check --run race --mem 2048 2> refused
+        if rewind check --run race --mem 2048 2> refused; then exit 1; fi
         grep -q -- '--mem' refused
         touch $out
       '';
@@ -2164,14 +2164,14 @@ in
 
         # The search: the first key that ends differently, reported
         # against the stock order with no step to narrow to.
-        ! check --dirents 4 > found
+        if check --dirents 4 > found; then exit 1; fi
         cat found
         grep -q '^dirents  0 schedule   0: exited:0 ' found
         grep -qE '^dirents  [1-4] schedule   0: exited:1 ' found
         grep -qE '^dirents [1-4] decides it: under schedule 0, dirents 0 passes and dirents [1-4] fails$' found
         grep -qE '^passing: run [0-9a-f]+, dirents 0, schedule 0$' found
         grep -qE '^failing: run [0-9a-f]+, dirents [1-4], schedule 0$' found
-        ! grep -q 'finding the step' found
+        test "$(grep -c 'finding the step' found)" = 0
 
         # The two reported runs keep keyframes, the key's run taking them
         # once it is reported, and replay as recorded.
@@ -2183,16 +2183,16 @@ in
         done
 
         # Every key, counted, and named in the JSON.
-        ! check --dirents 4 --all --no-narrow > all
+        if check --dirents 4 --all --no-narrow > all; then exit 1; fi
         cat all
         test "$(grep -cE '^dirents  [1-4] schedule   0: ' all)" = 4
         grep -qE '^[1-4] of 4 other runs ended differently$' all
-        ! check --dirents 4 --all --no-narrow --json > all.json
+        if check --dirents 4 --all --no-narrow --json > all.json; then exit 1; fi
         jq -e '.dirents == 4 and .tried == 4 and [.schedules[].dirents] == [0, 1, 2, 3, 4]' all.json
         jq -e '.differing > 0 and ([.schedules[] | select(.differs)] | length) == .differing' all.json
 
         # With two seeds, only the first runs under the keys.
-        ! check --seeds 2 --dirents 2 --all --no-narrow > seeded
+        if check --seeds 2 --dirents 2 --all --no-narrow > seeded; then exit 1; fi
         cat seeded
         grep -q ': 4 runs$' seeded
         test "$(grep -cE '^seed  0 dirents  [12] schedule   0: ' seeded)" = 2
@@ -2206,9 +2206,9 @@ in
         grep -q '^same result under all 5 runs$' same
 
         # A recorded run's key stands, as does one --kernel-args gives.
-        ! rewind check --run abc --dirents 2 2> refused
+        if rewind check --run abc --dirents 2 2> refused; then exit 1; fi
         grep -q -- '--dirents' refused
-        ! check --dirents 2 --kernel-args rewind.dirents=1 2> refused
+        if check --dirents 2 --kernel-args rewind.dirents=1 2> refused; then exit 1; fi
         cat refused
         grep -q -- '--kernel-args sets rewind.dirents' refused
         touch $out
@@ -2239,7 +2239,7 @@ in
         grep -q '^every property held under all 33 schedules$' plain
 
         # With them, a schedule loses an add.
-        ! check -- /bin/point points > found
+        if check -- /bin/point points > found; then exit 1; fi
         cat found
         grep -qE '^schedule +[0-9]+ violates exit-zero; finding the step' found
         grep -q ' decides it: .* makes the run violate exit-zero$' found
@@ -2294,13 +2294,13 @@ in
         chmod +x total.sh
 
         # The search: a schedule that violates the property, narrowed.
-        ! check --property script=./total.sh > found
+        if check --property script=./total.sh > found; then exit 1; fi
         cat found
         grep -q '^schedule   0: .*  holds$' found
         grep -qE '^schedule +[0-9]+ violates total; finding the step' found
         grep -q ' decides it: .* makes the run violate total$' found
         grep -qE '^failing run violates total: total [0-9]+, expected 20$' found
-        ! check --property script=./total.sh --json > found.json
+        if check --property script=./total.sh --json > found.json; then exit 1; fi
         jq -e '.properties == ["script=./total.sh"]' found.json
         jq -e '.narrowed.violations | length == 1 and .[0].property == "total"' found.json
 
@@ -2323,7 +2323,7 @@ in
         # A property schedule 0 violates as well: the bug is at its step.
         printf '#!/bin/sh\necho "step 7: always wrong"\nexit 1\n' > wrong.sh
         chmod +x wrong.sh
-        ! check --property script=./wrong.sh --schedules 2 > wrong
+        if check --property script=./wrong.sh --schedules 2 > wrong; then exit 1; fi
         cat wrong
         grep -q '^  wrong: step 7: always wrong$' wrong
         grep -q '^every schedule violated a property, as schedule 0 did$' wrong
@@ -2332,7 +2332,7 @@ in
         # A script that fails stops the search and says why.
         printf '#!/bin/sh\necho broken >&2\nexit 3\n' > broken.sh
         chmod +x broken.sh
-        ! check --property script=./broken.sh --schedules 2 2> stderr
+        if check --property script=./broken.sh --schedules 2 2> stderr; then exit 1; fi
         cat stderr
         grep -q 'property script ./broken.sh failed on run .*: broken' stderr
 
@@ -2347,12 +2347,12 @@ in
         # kernel's randomness is odd. Some seed of six decides it with no
         # schedule perturbed, and every run says its seed.
         coin='b=$(od -An -tu1 -N1 /dev/urandom); test $((b % 2)) = 0'
-        ! rewind check -j 4 --clock exits --epoch $epoch --seeds 6 --schedules 1 --root ${busyboxRoot} -- sh -c "$coin" > seeds
+        if rewind check -j 4 --clock exits --epoch $epoch --seeds 6 --schedules 1 --root ${busyboxRoot} -- sh -c "$coin" > seeds; then exit 1; fi
         cat seeds
         grep -qE '^seed  0 schedule   0: ' seeds
         grep -qE '^seed [0-9]+ decides it: under schedule 0, seed [0-9]+ passes and seed [0-9]+ fails$' seeds
-        ! rewind check -j 4 --clock exits --epoch $epoch --seeds 6 --schedules 1 --all --no-narrow --json \
-          --root ${busyboxRoot} -- sh -c "$coin" > seeds.json
+        if rewind check -j 4 --clock exits --epoch $epoch --seeds 6 --schedules 1 --all --no-narrow --json \
+          --root ${busyboxRoot} -- sh -c "$coin" > seeds.json; then exit 1; fi
         jq -e '.seeds == 6 and ([.schedules[].seed] | unique) == [0, 1, 2, 3, 4, 5]' seeds.json
         jq -e '.differing > 0 and ([.schedules[] | select(.differs)] | length) == .differing' seeds.json
         # A recorded run tried under other seeds: each a fork of it at the
@@ -2361,7 +2361,7 @@ in
         status=0
         rewind run -q --clock exits --epoch $epoch --name coin --root ${busyboxRoot} -- sh -c "$coin" || status=$?
         [ "$status" -le 1 ]
-        ! rewind check --run coin --seeds 6 --schedules 0 > reseeded
+        if rewind check --run coin --seeds 6 --schedules 0 > reseeded; then exit 1; fi
         cat reseeded
         grep -qE '^seed [0-9]+ decides it: under schedule 0, seed [0-9]+ passes and seed [0-9]+ fails$' reseeded
         grep -qE '^failing: run [0-9a-f]+, seed [0-9]+ from step [0-9]+, schedule 0$|^passing: run [0-9a-f]+, seed [0-9]+ from step [0-9]+, schedule 0$' reseeded
@@ -2398,14 +2398,14 @@ in
         if [ $((b % 2)) = 0 ]; then sdk sometimes hit even-byte; else sdk sometimes miss even-byte; fi
         exit 0
         EOF
-        ! rewind check -j 4 --clock exits --epoch $epoch --seeds 6 --schedules 0 --root ${busyboxRoot} -- sh -c "$(cat coin.sh)" > sdk
+        if rewind check -j 4 --clock exits --epoch $epoch --seeds 6 --schedules 0 --root ${busyboxRoot} -- sh -c "$(cat coin.sh)" > sdk; then exit 1; fi
         cat sdk
         grep -q '^rewind: the job asserts with the Rewind SDK, so each run is judged by property sdk too$' sdk
         grep -qE '^failing run violates sdk: step [0-9]+: always "even" failed: byte [0-9]+ is odd$' sdk
         grep -q '^never true in any run: sometimes "huge-byte"$' sdk
         grep -qE '^true in [1-9][0-9]* of [0-9]+ runs that checked it: sometimes "even-byte"$' sdk
-        ! rewind check -j 4 --clock exits --epoch $epoch --seeds 6 --schedules 0 --all --no-narrow --json \
-          --root ${busyboxRoot} -- sh -c "$(cat coin.sh)" > sdk.json
+        if rewind check -j 4 --clock exits --epoch $epoch --seeds 6 --schedules 0 --all --no-narrow --json \
+          --root ${busyboxRoot} -- sh -c "$(cat coin.sh)" > sdk.json; then exit 1; fi
         jq -e '.properties == ["same-outcome", "sdk"] and .sometimes_never == ["huge-byte"]' sdk.json
         jq -e '.sometimes_true | length == 1 and .[0].id == "even-byte" and .[0].runs == 6 and .[0].true >= 1' sdk.json
         jq -e '[.schedules[].violations[] | select(.property == "sdk") | .why]
@@ -2426,8 +2426,8 @@ in
         EOF
         # The search has a home of its own, holding only its runs.
         junit_home=$TMPDIR/junit-home
-        ! REWIND_HOME=$junit_home rewind check -j 4 --clock exits --epoch $epoch --seeds 6 --schedules 0 \
-          --property 'junit=/run/reports/*.xml' --root ${busyboxRoot} -- sh -c "$(cat report.sh)" > junit
+        if REWIND_HOME=$junit_home rewind check -j 4 --clock exits --epoch $epoch --seeds 6 --schedules 0 \
+          --property 'junit=/run/reports/*.xml' --root ${busyboxRoot} -- sh -c "$(cat report.sh)" > junit; then exit 1; fi
         cat junit
         grep -qE '^failing run violates junit: step [0-9]+: test coin\.(flip|flop) passed in the unperturbed run and failed here$' junit
 
@@ -2449,13 +2449,13 @@ in
         # A junit pattern that matches no report schedule 0 wrote stops
         # the search, where it would hold on every run: * stays within one
         # directory, so */reports/*.xml misses /run/reports.
-        ! rewind check -j 4 --clock exits --schedules 0 --property 'junit=*/reports/*.xml' \
-          --root ${busyboxRoot} -- sh -c "$(cat report.sh)" 2> unmatched
+        if rewind check -j 4 --clock exits --schedules 0 --property 'junit=*/reports/*.xml' \
+          --root ${busyboxRoot} -- sh -c "$(cat report.sh)" 2> unmatched; then exit 1; fi
         cat unmatched
         grep -q 'junit=\*/reports/\*.xml matched no JUnit report schedule 0 wrote' unmatched
 
         # A misspelled property is refused before anything boots.
-        ! rewind check --property exit-0 --root ${raceRoot} -- /bin/race 2> refused
+        if rewind check --property exit-0 --root ${raceRoot} -- /bin/race 2> refused; then exit 1; fi
         grep -q 'no property exit-0' refused
         touch $out
       '';
@@ -2491,23 +2491,23 @@ in
           return $status
         }
 
-        ! prop no-crash 'sh -c "kill -SEGV \$\$"; exit 0'
+        if prop no-crash 'sh -c "kill -SEGV \$\$"; exit 0'; then exit 1; fi
         grep -qE '^  no-crash: step [0-9]+: process [0-9]+ \(sh\) died of SIGSEGV$' out
         prop no-crash 'sh -c "exit 3"; exit 0'
 
-        ! prop no-orphans 'sleep 100 & sleep 1; exit 0'
+        if prop no-orphans 'sleep 100 & sleep 1; exit 0'; then exit 1; fi
         grep -qE '^  no-orphans: step [0-9]+: process [0-9]+ \(sleep\), started at step [0-9]+, was still running when the job.s main process exited at step [0-9]+$' out
         prop no-orphans 'sleep 1 & wait'
 
-        ! prop 'single-writer=*.log' '(exec 3>> /run/w.log; echo a >&3; sleep 2) & (sleep 1; echo b >> /run/w.log) & wait'
+        if prop 'single-writer=*.log' '(exec 3>> /run/w.log; echo a >&3; sleep 2) & (sleep 1; echo b >> /run/w.log) & wait'; then exit 1; fi
         grep -qE '^  single-writer: step [0-9]+: process [0-9]+ \(sh\) opened /run/w.log for writing while process [0-9]+ \(sh\), which opened it at step [0-9]+, had not closed it$' out
         prop 'single-writer=*.log' '(echo a >> /run/w.log) & wait; (echo b >> /run/w.log) & wait'
 
-        ! prop 'atomic-replace=*.conf' 'echo a > /run/app.conf; echo b > /run/app.conf'
+        if prop 'atomic-replace=*.conf' 'echo a > /run/app.conf; echo b > /run/app.conf'; then exit 1; fi
         grep -qE '^  atomic-replace: step [0-9]+: process [0-9]+ \(sh\) truncated /run/app.conf in place, which the run wrote at step [0-9]+' out
         prop 'atomic-replace=*.conf' 'echo a > /run/app.conf; echo b > /run/new.conf; cat /run/new.conf > /dev/null'
 
-        ! prop writes-within=/run 'echo a > /run/ok; echo b > /stray'
+        if prop writes-within=/run 'echo a > /run/ok; echo b > /stray'; then exit 1; fi
         grep -qE '^  writes-within: step [0-9]+: process [0-9]+ \(sh\) opened /stray for writing, outside /run$' out
         prop writes-within=/run 'echo a > /run/ok; echo b > /dev/null'
 
@@ -2516,7 +2516,7 @@ in
         # once the writer has closed it, never recorded. Two writers one
         # after the other, the first closing before the second opens, are
         # not two at once.
-        ! prop 'no-read-while-written=*.conf' '(exec 3> /run/app.conf; echo a >&3; sleep 2) & sleep 1; cat /run/app.conf; wait'
+        if prop 'no-read-while-written=*.conf' '(exec 3> /run/app.conf; echo a >&3; sleep 2) & sleep 1; cat /run/app.conf; wait'; then exit 1; fi
         grep -qE '^  no-read-while-written: step [0-9]+: process [0-9]+ \(cat\) opened /run/app.conf for reading while process [0-9]+ \(sh\), which opened it for writing at step [0-9]+, had not closed it$' out
         prop 'no-read-while-written=*.conf' 'echo a > /run/app.conf; cat /run/app.conf'
         prop 'single-writer=*.log' '(echo a >> /run/w.log; sleep 2) & (sleep 1; echo b >> /run/w.log) & wait'
@@ -2527,8 +2527,8 @@ in
         printf '#!/bin/sh\nexit 0\n' > props/fine.sh
         chmod +x props/fine.sh
         printf '# what a correct run is\nno-orphans\n\nscript=fine.sh\n' > props/rewind.properties
-        ! rewind check -j 2 --clock exits --schedules 1 --all --no-narrow --json \
-          --properties props/rewind.properties --root ${busyboxRoot} -- sh -c 'sleep 100 & exit 0' > file.json
+        if rewind check -j 2 --clock exits --schedules 1 --all --no-narrow --json \
+          --properties props/rewind.properties --root ${busyboxRoot} -- sh -c 'sleep 100 & exit 0' > file.json; then exit 1; fi
         jq -e '.properties == ["no-orphans", "script=props/fine.sh"]' file.json
         jq -e '.schedules | all(.violations | map(.property) == ["no-orphans"])' file.json
         touch $out
@@ -2776,7 +2776,7 @@ in
   pmu-boot = pkgs.runCommand "rewind-pmu-boot" { nativeBuildInputs = [ rewind ]; } ''
     env -i ${pkgs.lib.getExe rewind} pmu enable > out 2>&1 || true
     cat out
-    ! grep -q 'HOME' out
+    test "$(grep -c 'HOME' out)" = 0
     touch $out
   '';
 
@@ -2842,8 +2842,8 @@ in
 
         # check judges the marks without being asked: the first failure
         # is C's, and no run made any sometimes true.
-        ! rewind check -j 2 --clock exits --mem 2048 --schedules 0 --json \
-          --root ${sdkLanguages.root} -- /bin/sdk-demos > checked.json
+        if rewind check -j 2 --clock exits --mem 2048 --schedules 0 --json \
+          --root ${sdkLanguages.root} -- /bin/sdk-demos > checked.json; then exit 1; fi
         jq -e '.properties == ["same-outcome", "sdk"]' checked.json
         jq -e '.schedules[0].violations[0].why == "always \"c-fails\" failed: c said so"' checked.json
         jq -e '.sometimes_never == ["c-sometimes", "go-sometimes", "java-sometimes", "python-sometimes", "rust-sometimes", "sh-sometimes"]' checked.json
