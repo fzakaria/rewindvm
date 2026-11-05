@@ -459,6 +459,16 @@ struct Pack {
 }
 
 impl Pack {
+    /// Appends `bytes`, and counts them in the pack's length once all of
+    /// them are written.
+    fn append(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        #[cfg(test)]
+        tests::cut_short(&mut self.file, bytes)?;
+        self.file.write_all(bytes)?;
+        self.len += bytes.len() as u64;
+        Ok(())
+    }
+
     /// Pack `id`, opened as `file`, if no other writer holds it and it
     /// has room. The length is read once the lock is held: a writer that
     /// held the pack after `file` was opened may have appended to it
@@ -924,8 +934,7 @@ impl Store {
                     // it is let go, since `sync` only reaches the pack
                     // this store is writing.
                     if let Some(mut old) = self.pack.take() {
-                        old.file.write_all(&w.compressed[start..end])?;
-                        old.len += pending;
+                        old.append(&w.compressed[start..end])?;
                         old.file.sync_data()?;
                     }
                     start = end;
@@ -944,9 +953,14 @@ impl Store {
                 entries.extend_from_slice(&loc.len.to_le_bytes());
                 locations.push((*hash, loc));
             }
+            // A pack that took only some of the bytes is let go, so the
+            // next put claims a pack and reads its length rather than
+            // name pages where the length before the failure says.
             let pack = self.pack.as_mut().expect("claimed for the first page");
-            pack.file.write_all(&w.compressed[start..end])?;
-            pack.len += (end - start) as u64;
+            if let Err(e) = pack.append(&w.compressed[start..end]) {
+                self.pack = None;
+                return Err(e.into());
+            }
         }
 
         // The pages are in their packs before the entries naming them are
@@ -1359,6 +1373,22 @@ mod tests {
     /// test of this process.
     pub(super) static SORTED_WRITES: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
+    thread_local! {
+        /// Whether the next append to a pack on this thread writes half of
+        /// its bytes and fails, as a disk that fills up does.
+        static CUT_SHORT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    /// Writes half of `bytes` to `file` and fails, if a test on this
+    /// thread asked for that.
+    pub(super) fn cut_short(file: &mut File, bytes: &[u8]) -> std::io::Result<()> {
+        if !CUT_SHORT.replace(false) {
+            return Ok(());
+        }
+        file.write_all(&bytes[..bytes.len() / 2])?;
+        Err(std::io::Error::other("the disk is full"))
+    }
+
     /// Every store directory where the next pack a store claims gets
     /// bytes from another writer, once per entry, by any test of this
     /// process.
@@ -1582,6 +1612,28 @@ mod tests {
         }
         fs::remove_dir_all(&one).unwrap();
         fs::remove_dir_all(&all).unwrap();
+    }
+
+    #[test]
+    fn pages_put_after_a_pack_took_only_some_read_back() {
+        // A put whose pack takes half of its pages' bytes fails. The same
+        // store then puts the pages again, and each reads back as it went
+        // in: the pages that follow the cut-short bytes are named where
+        // they are, not where the pack's length before the failure said.
+        let dir = tmp("cut-short");
+        let pages = a_keyframes_pages();
+        let mut store = Store::open(&dir).unwrap();
+        store.put(&noise(u64::MAX)).unwrap();
+
+        CUT_SHORT.set(true);
+        assert!(store.put_all(&slices(&pages)).is_err());
+        let hashes = store.put_all(&slices(&pages)).unwrap();
+        let mut out = vec![0u8; PAGE];
+        for (p, hash) in pages.iter().zip(&hashes) {
+            store.get(hash, &mut out).unwrap();
+            assert_eq!(&out, p);
+        }
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
