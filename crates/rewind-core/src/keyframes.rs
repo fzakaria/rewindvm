@@ -47,8 +47,8 @@ pub const EXTENSION: &str = "kf";
 pub struct StorePages<'a>(pub &'a mut Store);
 
 impl Pages for StorePages<'_> {
-    fn put(&mut self, page: &[u8]) -> Result<[u8; 32]> {
-        self.0.put(page)
+    fn put_all(&mut self, pages: &[&[u8]]) -> Result<Vec<[u8; 32]>> {
+        self.0.put_all(pages)
     }
     fn get(&self, hash: &[u8; 32], out: &mut [u8]) -> Result<()> {
         self.0.get(hash, out)
@@ -60,7 +60,7 @@ impl Pages for StorePages<'_> {
 pub struct ReadPages<'a>(pub &'a Store);
 
 impl Pages for ReadPages<'_> {
-    fn put(&mut self, _page: &[u8]) -> Result<[u8; 32]> {
+    fn put_all(&mut self, _pages: &[&[u8]]) -> Result<Vec<[u8; 32]>> {
         anyhow::bail!("restoring does not store pages")
     }
     fn get(&self, hash: &[u8; 32], out: &mut [u8]) -> Result<()> {

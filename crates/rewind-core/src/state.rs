@@ -31,8 +31,8 @@ use crate::keyframes::{Layers, Memory};
 pub struct HashPages;
 
 impl Pages for HashPages {
-    fn put(&mut self, page: &[u8]) -> Result<[u8; 32]> {
-        Ok(Store::hash(page))
+    fn put_all(&mut self, pages: &[&[u8]]) -> Result<Vec<[u8; 32]>> {
+        Ok(Store::hash_all(pages))
     }
     fn get(&self, _hash: &[u8; 32], _out: &mut [u8]) -> Result<()> {
         bail!("a replay's captured pages are hashes only")

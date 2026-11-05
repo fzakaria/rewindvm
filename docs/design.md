@@ -920,11 +920,13 @@ laptop.
 Consecutive keyframes of one run share most of their memory. So do keyframes
 of runs with the same inputs, and a fork and its parent. `rewind-store`
 therefore stores each 4 KiB page once, named by its BLAKE3 hash and compressed
-with zstd at its fastest level. The all-zero page is never stored. Pages go
-into append-only pack files with an append-only index. A crash can leave at
-most a torn last index entry, which is dropped when the store opens. Pages no
-keyframe names any more stay until `rewind gc` removes them (see [Removing
-runs](#removing-runs)).
+with zstd at its fastest level. The all-zero page is never stored. A keyframe
+hashes its pages, and compresses the new ones, on up to eight threads, then
+writes them in order on the monitor's thread, so the store's files hold what
+one thread would have written. Pages go into append-only pack files with an
+append-only index. A crash can leave at most a torn last index entry, which is
+dropped when the store opens. Pages no keyframe names any more stay until
+`rewind gc` removes them (see [Removing runs](#removing-runs)).
 
 [casita](https://casita.rs) was the other candidate. It is a content-addressed
 store from Cachix with BLAKE3 and FastCDC chunking. It fits disk images and

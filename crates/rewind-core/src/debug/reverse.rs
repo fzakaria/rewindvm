@@ -99,7 +99,7 @@ impl History for RunHistory<'_> {
 pub(crate) struct StorePages(pub(crate) rewind_store::Store);
 
 impl Pages for StorePages {
-    fn put(&mut self, _page: &[u8]) -> Result<[u8; 32]> {
+    fn put_all(&mut self, _pages: &[&[u8]]) -> Result<Vec<[u8; 32]>> {
         bail!("rewinding stores no pages")
     }
     fn get(&self, hash: &[u8; 32], out: &mut [u8]) -> Result<()> {

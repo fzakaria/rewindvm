@@ -25,9 +25,10 @@ use crate::{Config, Machine, SLOT_RAM};
 
 /// Where keyframe pages go: a content-addressed page store.
 pub trait Pages {
-    /// Stores a page and returns its hash: [`ZERO_PAGE`] for a page of
-    /// zeros, which needs storing nowhere.
-    fn put(&mut self, page: &[u8]) -> Result<[u8; 32]>;
+    /// Stores pages and returns their hashes, in order: [`ZERO_PAGE`] for
+    /// a page of zeros, which needs storing nowhere. A keyframe puts all
+    /// of its pages at once, so a store can spread them over threads.
+    fn put_all(&mut self, pages: &[&[u8]]) -> Result<Vec<[u8; 32]>>;
     /// Reads the page with this hash into `out`.
     fn get(&self, hash: &[u8; 32], out: &mut [u8]) -> Result<()>;
 }
@@ -180,11 +181,23 @@ impl Machine {
             indices.dedup();
         }
 
+        // Every page at once, so the store can hash and compress them on
+        // several threads.
         let ram = self.dev.ram.as_slice();
+        let contents: Vec<&[u8]> = indices
+            .iter()
+            .map(|&i| &ram[i * PAGE_SIZE..(i + 1) * PAGE_SIZE])
+            .collect();
+        let hashes = pages.put_all(&contents)?;
+        if hashes.len() != indices.len() {
+            bail!(
+                "{} pages were put and {} hashes came back",
+                indices.len(),
+                hashes.len()
+            );
+        }
         let mut stored = Vec::with_capacity(indices.len());
-        for i in indices {
-            let page = &ram[i * PAGE_SIZE..(i + 1) * PAGE_SIZE];
-            let hash = pages.put(page)?;
+        for (i, hash) in indices.into_iter().zip(hashes) {
             // A full keyframe need not list pages that are zero anyway.
             if parent.is_some() || hash != ZERO_PAGE {
                 stored.push((i as u32, hash));

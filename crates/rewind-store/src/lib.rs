@@ -110,14 +110,104 @@ struct Reading {
     decompressor: Option<zstd::bulk::Decompressor<'static>>,
 }
 
-/// What a store putting pages keeps between them: a compression context
-/// and the compressed bytes' buffer. In the static musl build on a Zen 3
+/// What each thread compressing a store's new pages keeps between batches:
+/// a compression context, and its share of a batch compressed, page after
+/// page, with each page's length. In the static musl build on a Zen 3
 /// host, a context made for each page, as `zstd::bulk::compress` makes
 /// one, took 80 µs a page and most of a keyframe's 200 ms; one context
 /// kept takes 18 µs.
 struct Writing {
     compressor: zstd::bulk::Compressor<'static>,
     compressed: Vec<u8>,
+    lens: Vec<u32>,
+}
+
+impl Writing {
+    fn new() -> Result<Writing> {
+        Ok(Writing {
+            compressor: zstd::bulk::Compressor::new(COMPRESSION_LEVEL)?,
+            compressed: Vec::new(),
+            lens: Vec::new(),
+        })
+    }
+
+    /// Compresses `pages`, in place of the pages it held before.
+    fn compress(&mut self, pages: &[(&[u8], Hash)]) -> Result<()> {
+        self.compressed.clear();
+        self.lens.clear();
+        for (page, _) in pages {
+            // The buffer holds the worst case past the pages before,
+            // which compressing needs.
+            let at = self.compressed.len();
+            let bound = zstd::zstd_safe::compress_bound(page.len());
+            self.compressed.resize(at + bound, 0);
+            let len = self
+                .compressor
+                .compress_to_buffer(page, &mut self.compressed[at..])?;
+            self.compressed.truncate(at + len);
+            self.lens.push(u32::try_from(len)?);
+        }
+        Ok(())
+    }
+}
+
+/// The most threads that hash or compress a store's pages at once, and
+/// the fewest pages worth a thread of their own, a few times what starting
+/// a thread costs. In GNU hello's nixpkgs build on a Zen 3 host, a
+/// keyframe compresses about 2,400 new pages, 46 ms on one thread, 12 ms
+/// on four and 7 ms on eight; sixteen saved about 2 ms more, and each
+/// thread is a core taken from the other machines a check runs at once.
+#[cfg(not(test))]
+const PAGES_PER_WRITER: usize = 64;
+#[cfg(test)]
+const PAGES_PER_WRITER: usize = 2;
+const MAX_PAGE_WRITERS: usize = 8;
+
+/// How many new pages are compressed before any is written. A batch's
+/// compressed pages are held in memory at once, a little over 4 KiB each
+/// at worst, so a full keyframe into a store that has none of a machine's
+/// pages holds 16 MiB of them at a time and not the machine's memory.
+#[cfg(not(test))]
+const COMPRESS_BATCH: usize = 4096;
+#[cfg(test)]
+const COMPRESS_BATCH: usize = 8;
+
+/// How many threads share `pages` pages: as many as this process may run
+/// at once, up to MAX_PAGE_WRITERS, and one for each PAGES_PER_WRITER.
+/// The host's count is read once, since reading it reads the process's
+/// CPU set and cgroup quota from /proc.
+fn writers(pages: usize) -> usize {
+    static CORES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    let cores = *CORES.get_or_init(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
+    cores
+        .min(MAX_PAGE_WRITERS)
+        .min(pages.div_ceil(PAGES_PER_WRITER))
+        .max(1)
+}
+
+/// Runs `work` on each of `parts` at once, the first on the calling
+/// thread and each other on a thread of its own, and returns the error of
+/// the first part, in the parts' order, that failed.
+fn at_once<P: Send>(
+    parts: impl IntoIterator<Item = P>,
+    work: impl Fn(P) -> Result<()> + Sync,
+) -> Result<()> {
+    let mut parts = parts.into_iter();
+    let Some(first) = parts.next() else {
+        return Ok(());
+    };
+    let work = &work;
+    std::thread::scope(|scope| {
+        let others: Vec<_> = parts.map(|part| scope.spawn(move || work(part))).collect();
+        let mut result = work(first);
+        for other in others {
+            let done = other.join().expect("a page writer panicked");
+            if result.is_ok() {
+                result = done;
+            }
+        }
+        result
+    })
 }
 
 thread_local! {
@@ -129,7 +219,10 @@ thread_local! {
 const INTERPOLATIONS: u32 = 16;
 
 /// Pack files roll over past this size.
+#[cfg(not(test))]
 const PACK_MAX: u64 = 1 << 30;
+#[cfg(test)]
+const PACK_MAX: u64 = 1 << 16;
 
 /// zstd's fastest level: a keyframe is written while the guest waits.
 const COMPRESSION_LEVEL: i32 = 1;
@@ -391,8 +484,9 @@ pub struct Store {
     /// Claimed on the first page put, so a store only read takes none.
     pack: Option<Pack>,
     readers: Mutex<HashMap<u32, Arc<File>>>,
-    /// Made on the first page put, as the pack is.
-    writing: Option<Writing>,
+    /// One for each thread that has compressed pages, made as the first
+    /// pages are put, as the pack is.
+    writing: Vec<Writing>,
     /// Held shared for as long as the store is open, so an opener that
     /// gets it exclusively knows no one else has the store open.
     _lock: File,
@@ -563,7 +657,7 @@ impl Store {
             index_log,
             pack: None,
             readers: Mutex::new(HashMap::new()),
-            writing: None,
+            writing: Vec::new(),
             _lock: lock,
         };
 
@@ -737,71 +831,137 @@ impl Store {
         sorted.find(hash)
     }
 
+    /// The hash of each of `pages`, as [`Store::hash`] names it, in order,
+    /// on up to MAX_PAGE_WRITERS threads: a full keyframe hashes every
+    /// page of the machine's memory.
+    pub fn hash_all(pages: &[&[u8]]) -> Vec<Hash> {
+        let mut hashes = vec![ZERO_PAGE; pages.len()];
+        let share = pages.len().div_ceil(writers(pages.len())).max(1);
+        let parts = pages.chunks(share).zip(hashes.chunks_mut(share));
+        at_once(parts, |(part, out)| {
+            for (page, hash) in part.iter().zip(out) {
+                *hash = Self::hash(page);
+            }
+            Ok(())
+        })
+        .expect("hashing a page cannot fail");
+        hashes
+    }
+
     /// Stores a page if it is new, and returns its hash either way. New
     /// means new to this store: it does not reread the index for every
     /// page, so two stores may both write a page another wrote meanwhile,
     /// and either copy serves.
     pub fn put(&mut self, data: &[u8]) -> Result<Hash> {
-        let hash = Self::hash(data);
+        Ok(self.put_all(&[data])?[0])
+    }
+
+    /// Stores each of `pages` that is new, as [`Store::put`] does, and
+    /// returns the hash of each, in order. The pages are hashed, and the
+    /// new ones compressed, on up to MAX_PAGE_WRITERS threads; then the
+    /// calling thread writes them to the pack and the index in the order
+    /// of `pages`, so the store's files hold the bytes a put of each page
+    /// in turn writes. COMPRESS_BATCH new pages at a time are compressed
+    /// and written.
+    pub fn put_all(&mut self, pages: &[&[u8]]) -> Result<Vec<Hash>> {
+        let hashes = Self::hash_all(pages);
+
+        // The new pages: not zero, not in the store, and not earlier in
+        // `pages`.
         self.read_tail()?;
-        if hash == ZERO_PAGE || self.index().known(&hash).is_some() {
-            return Ok(hash);
-        }
-        // The context is taken out while the page goes into a pack, which
-        // claiming a new pack needs the store for, and put back after. A
-        // put that fails makes a new one next time.
-        let mut writing = match self.writing.take() {
-            Some(writing) => writing,
-            None => Writing {
-                compressor: zstd::bulk::Compressor::new(COMPRESSION_LEVEL)?,
-                compressed: Vec::new(),
-            },
-        };
-
-        // The buffer holds the worst case, which compressing needs.
-        writing.compressed.clear();
-        writing
-            .compressed
-            .reserve(zstd::zstd_safe::compress_bound(data.len()));
-        writing
-            .compressor
-            .compress_to_buffer(data, &mut writing.compressed)?;
-        let compressed = &writing.compressed;
-        let full = self
-            .pack
-            .as_ref()
-            .is_none_or(|p| p.len + compressed.len() as u64 > PACK_MAX);
-        if full {
-            // A full pack is synced as it is let go, since `sync` only
-            // reaches the pack this store is writing.
-            if let Some(old) = self.pack.take() {
-                old.file.sync_data()?;
+        let mut fresh = Vec::new();
+        {
+            let index = self.index();
+            let mut queued = PageSet::default();
+            for (page, hash) in pages.iter().zip(&hashes) {
+                if *hash == ZERO_PAGE || index.known(hash).is_some() || !queued.insert(*hash) {
+                    continue;
+                }
+                fresh.push((*page, *hash));
             }
-            self.pack = Some(self.claim_pack()?);
         }
-        let pack = self.pack.as_mut().expect("claimed above");
-        let loc = Location {
-            pack: pack.id,
-            offset: pack.len,
-            len: compressed.len() as u32,
-        };
-        pack.file.write_all(compressed)?;
-        pack.len += compressed.len() as u64;
 
-        // The page is in its pack before the entry naming it is written,
-        // and the entry goes in one write, whole, after everyone else's.
-        let mut entry = Vec::with_capacity(INDEX_ENTRY);
-        entry.extend_from_slice(&hash);
-        entry.extend_from_slice(&loc.pack.to_le_bytes());
-        entry.extend_from_slice(&loc.offset.to_le_bytes());
-        entry.extend_from_slice(&loc.len.to_le_bytes());
-        let written = (&self.index_log).write(&entry)?;
-        if written != INDEX_ENTRY {
-            bail!("wrote {written} of an index entry's {INDEX_ENTRY} bytes");
+        // The contexts are taken out while pages go into a pack, which
+        // claiming a new pack needs the store for, and put back after. A
+        // put that fails makes new ones next time.
+        let mut writing = std::mem::take(&mut self.writing);
+        for batch in fresh.chunks(COMPRESS_BATCH) {
+            self.put_batch(batch, &mut writing)?;
         }
-        self.index().pages.insert(hash, loc);
-        self.writing = Some(writing);
-        Ok(hash)
+        self.writing = writing;
+        Ok(hashes)
+    }
+
+    /// Compresses `batch`, new pages and their hashes, on threads, one
+    /// context of `writing` each, then appends the pages to the pack in
+    /// order and their entries to the index.
+    fn put_batch(&mut self, batch: &[(&[u8], Hash)], writing: &mut Vec<Writing>) -> Result<()> {
+        let share = batch.len().div_ceil(writers(batch.len())).max(1);
+        let parts = batch.len().div_ceil(share);
+        while writing.len() < parts {
+            writing.push(Writing::new()?);
+        }
+        at_once(batch.chunks(share).zip(writing.iter_mut()), |(part, w)| {
+            w.compress(part)
+        })?;
+
+        // Each thread's pages go into the pack in one write, or in one
+        // for each pack they fill, the next claimed as one fills up.
+        let mut entries = Vec::with_capacity(batch.len() * INDEX_ENTRY);
+        let mut locations = Vec::with_capacity(batch.len());
+        for (part, w) in batch.chunks(share).zip(writing.iter()) {
+            // The bytes of `w.compressed` that go into the current pack.
+            let mut start = 0;
+            let mut end = 0;
+            for ((_, hash), &len) in part.iter().zip(&w.lens) {
+                let pending = (end - start) as u64;
+                let full = self
+                    .pack
+                    .as_ref()
+                    .is_none_or(|p| p.len + pending + u64::from(len) > PACK_MAX);
+                if full {
+                    // A full pack gets the pages that fit and is synced as
+                    // it is let go, since `sync` only reaches the pack
+                    // this store is writing.
+                    if let Some(mut old) = self.pack.take() {
+                        old.file.write_all(&w.compressed[start..end])?;
+                        old.len += pending;
+                        old.file.sync_data()?;
+                    }
+                    start = end;
+                    self.pack = Some(self.claim_pack()?);
+                }
+                let pack = self.pack.as_ref().expect("claimed above");
+                let loc = Location {
+                    pack: pack.id,
+                    offset: pack.len + (end - start) as u64,
+                    len,
+                };
+                end += len as usize;
+                entries.extend_from_slice(hash);
+                entries.extend_from_slice(&loc.pack.to_le_bytes());
+                entries.extend_from_slice(&loc.offset.to_le_bytes());
+                entries.extend_from_slice(&loc.len.to_le_bytes());
+                locations.push((*hash, loc));
+            }
+            let pack = self.pack.as_mut().expect("claimed for the first page");
+            pack.file.write_all(&w.compressed[start..end])?;
+            pack.len += (end - start) as u64;
+        }
+
+        // The pages are in their packs before the entries naming them are
+        // written, and the entries go in one write, whole, after everyone
+        // else's.
+        let written = (&self.index_log).write(&entries)?;
+        if written != entries.len() {
+            bail!(
+                "wrote {written} of {} index entries' {} bytes",
+                locations.len(),
+                entries.len()
+            );
+        }
+        self.index().pages.extend(locations);
+        Ok(())
     }
 
     /// Reads a page back into `out`, which must be the page's size.
@@ -1325,6 +1485,112 @@ mod tests {
         assert_eq!(store.put(&vec![0u8; PAGE]).unwrap(), ZERO_PAGE);
         assert_eq!(store.stats().pages, 2);
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A page of bytes from a xorshift generator seeded with `seed`, which
+    /// zstd cannot shrink, so a few of them fill a pack.
+    fn noise(seed: u64) -> Vec<u8> {
+        let mut state = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
+        let mut p = Vec::with_capacity(PAGE);
+        while p.len() < PAGE {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            p.extend_from_slice(&state.to_le_bytes());
+        }
+        p
+    }
+
+    /// How many pages `a_keyframes_pages` holds before the ones it
+    /// repeats: enough to fill several packs of the tests' PACK_MAX and
+    /// several batches of COMPRESS_BATCH.
+    const KEYFRAME_PAGES: u64 = 96;
+
+    /// The pages a keyframe might hold, in its order: zeros, pages that
+    /// compress well and pages that do not, some of them twice.
+    fn a_keyframes_pages() -> Vec<Vec<u8>> {
+        let mut pages = Vec::new();
+        for i in 0..KEYFRAME_PAGES {
+            match i % 4 {
+                0 => pages.push(vec![0u8; PAGE]),
+                1 => pages.push(page(i as u8)),
+                _ => pages.push(noise(i)),
+            }
+            if i % 5 == 0 {
+                pages.push(noise(i / 2));
+            }
+        }
+        pages
+    }
+
+    /// `pages` as the slices `put_all` takes.
+    fn slices(pages: &[Vec<u8>]) -> Vec<&[u8]> {
+        pages.iter().map(Vec::as_slice).collect()
+    }
+
+    /// Every file of the store in `dir` and its bytes, by path.
+    fn files(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        let mut files = Vec::new();
+        let mut dirs = vec![dir.to_path_buf()];
+        while let Some(d) = dirs.pop() {
+            for entry in fs::read_dir(&d).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    dirs.push(path);
+                    continue;
+                }
+                let bytes = fs::read(&path).unwrap();
+                files.push((path.strip_prefix(dir).unwrap().to_path_buf(), bytes));
+            }
+        }
+        files.sort();
+        files
+    }
+
+    #[test]
+    fn pages_put_at_once_are_stored_as_put_one_at_a_time() {
+        // The same pages, a third of them already stored, go into one
+        // store a page at a time and into another all at once, which
+        // hashes and compresses them on several threads. The hashes agree,
+        // and the two stores' packs and index hold the same bytes, so a
+        // keyframe writes what it wrote before its pages were spread over
+        // threads.
+        let one = tmp("batch-one");
+        let all = tmp("batch-all");
+        let pages = a_keyframes_pages();
+        let stored = &pages[..pages.len() / 3];
+
+        let mut by_one = Store::open(&one).unwrap();
+        let hashes_one: Vec<Hash> = pages.iter().map(|p| by_one.put(p).unwrap()).collect();
+        by_one.sync().unwrap();
+
+        let mut by_all = Store::open(&all).unwrap();
+        by_all.put_all(&slices(stored)).unwrap();
+        let hashes_all = by_all.put_all(&slices(&pages)).unwrap();
+        by_all.sync().unwrap();
+
+        assert_eq!(hashes_all, hashes_one);
+        let packs = fs::read_dir(all.join(PACKS)).unwrap().count();
+        assert!(packs > 2, "the pages fill only {packs} packs");
+        assert_eq!(files(&all), files(&one));
+
+        // Every page reads back from the store that took them at once.
+        let mut out = vec![0u8; PAGE];
+        for (p, hash) in pages.iter().zip(&hashes_all) {
+            by_all.get(hash, &mut out).unwrap();
+            assert_eq!(&out, p);
+        }
+        fs::remove_dir_all(&one).unwrap();
+        fs::remove_dir_all(&all).unwrap();
+    }
+
+    #[test]
+    fn pages_hashed_at_once_hash_as_one_at_a_time() {
+        // Hashing a keyframe's pages on several threads names each page
+        // as hashing it alone does, in the pages' order.
+        let pages = a_keyframes_pages();
+        let one: Vec<Hash> = pages.iter().map(|p| Store::hash(p)).collect();
+        assert_eq!(Store::hash_all(&slices(&pages)), one);
     }
 
     #[test]
