@@ -135,8 +135,30 @@ pub struct Watch<'a> {
     /// read so far, each read once.
     recorded: Memory,
     recorded_at: Option<u64>,
+    /// The pages either memory has written since the two were last
+    /// compared and found alike, the only ones that can differ now.
+    written: Written,
     loaded: HashMap<u64, Keyframe>,
     compared: Compared,
+}
+
+/// Which pages two memories compared at a keyframe can differ on.
+#[derive(Debug)]
+enum Written {
+    /// Any page: the two have not been compared yet, or one was rebuilt
+    /// from a full keyframe since.
+    Any,
+    /// Only these, the pages either wrote since they were last alike.
+    Pages(Vec<u32>),
+}
+
+impl Written {
+    /// Notes that a memory wrote `pages`.
+    fn add(&mut self, pages: &[(u32, [u8; 32])]) {
+        if let Written::Pages(written) = self {
+            written.extend(pages.iter().map(|(page, _)| *page));
+        }
+    }
 }
 
 impl<'a> Watch<'a> {
@@ -157,6 +179,7 @@ impl<'a> Watch<'a> {
             replayed: Memory::default(),
             recorded: Memory::default(),
             recorded_at: None,
+            written: Written::Any,
             loaded: HashMap::new(),
             compared: Compared::default(),
         };
@@ -181,17 +204,22 @@ impl<'a> Watch<'a> {
         let step = machine.step();
         let mut captured = machine.keyframe(&mut HashPages, self.parent)?;
         self.replayed.apply(captured.parent, &captured.pages);
-        captured.pages.clear();
         self.parent = Some(step);
         if self.compared.first.is_some() {
             return Ok(());
         }
+        self.written.add(&captured.pages);
+        captured.pages.clear();
 
-        // The recording's memory and keyframe at the same step.
+        // The recording's memory and keyframe at the same step, compared
+        // where either memory wrote since the two were last alike.
         self.recorded_memory(step)?;
         let recorded = &self.loaded[&step];
         let state = recorded.state_differences(&captured)?;
-        let pages = self.recorded.differing(&self.replayed);
+        let pages = match std::mem::replace(&mut self.written, Written::Pages(Vec::new())) {
+            Written::Any => self.recorded.differing(&self.replayed),
+            Written::Pages(written) => self.recorded.differing_among(&self.replayed, &written),
+        };
         let matched = self.compared.compared.last().copied();
         self.compared.compared.push(step);
         if pages.is_empty() && state.is_empty() {
@@ -292,12 +320,14 @@ impl<'a> Watch<'a> {
             (Some(p), Some(at)) if p == at => chain.len() - 1,
             _ => {
                 self.recorded = Memory::default();
+                self.written = Written::Any;
                 0
             }
         };
         for kf in &chain[from..] {
             let kf = &self.loaded[kf];
             self.recorded.apply(kf.parent, &kf.pages);
+            self.written.add(&kf.pages);
         }
         self.recorded_at = Some(step);
         Ok(())
@@ -415,6 +445,25 @@ mod tests {
             vec![(1, [1; 32], [9; 32]), (2, [2; 32], ZERO_PAGE)]
         );
         assert!(left.differing(&left).is_empty());
+    }
+
+    #[test]
+    fn memories_that_matched_differ_only_among_the_pages_written_since() {
+        // Two memories alike, then the left writes pages 5 and 7 and the
+        // right pages 6 and 7, both 7 with the same contents. Among the
+        // pages written, 5 and 6 differ, which is what comparing every page
+        // finds; among a list without them, none do; and the list may name
+        // a page twice and out of order.
+        let mut left = Memory::default();
+        left.apply(None, &[(1, [1; 32]), (2, [2; 32])]);
+        let mut right = Memory::default();
+        right.apply(None, &[(1, [1; 32]), (2, [2; 32])]);
+        left.apply(Some(1), &[(5, [5; 32]), (7, [7; 32])]);
+        right.apply(Some(1), &[(6, [6; 32]), (7, [7; 32])]);
+        let differing = vec![(5, [5; 32], ZERO_PAGE), (6, ZERO_PAGE, [6; 32])];
+        assert_eq!(left.differing_among(&right, &[7, 6, 5, 7]), differing);
+        assert_eq!(left.differing(&right), differing);
+        assert!(left.differing_among(&right, &[1, 2, 7]).is_empty());
     }
 
     #[test]

@@ -475,6 +475,25 @@ impl Memory {
             .collect()
     }
 
+    /// The pages among `pages` whose contents differ between this memory
+    /// and `other`, as [`Memory::differing`] gives them. Two memories that
+    /// were alike can differ since only at the pages either wrote, so a
+    /// list of those pages finds every difference without reading the
+    /// rest. `pages` may name a page twice and in any order.
+    pub fn differing_among(&self, other: &Memory, pages: &[u32]) -> Vec<(u32, [u8; 32], [u8; 32])> {
+        let mut pages = pages.to_vec();
+        pages.sort_unstable();
+        pages.dedup();
+        pages
+            .into_iter()
+            .filter_map(|page| {
+                let ours = self.hash_of(page);
+                let theirs = other.hash_of(page);
+                (ours != theirs).then_some((page, ours, theirs))
+            })
+            .collect()
+    }
+
     /// Writes a keyframe's `pages` over this memory, as restoring the
     /// keyframe, whose parent is `parent`, would.
     pub fn apply(&mut self, parent: Option<u64>, pages: &[(u32, [u8; 32])]) {
