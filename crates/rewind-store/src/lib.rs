@@ -164,11 +164,14 @@ const PAGES_PER_WRITER: usize = 2;
 const MAX_PAGE_WRITERS: usize = 8;
 
 /// How many new pages are compressed before any is written. A batch's
-/// compressed pages are held in memory at once, a little over 4 KiB each
-/// at worst, so a full keyframe into a store that has none of a machine's
-/// pages holds 16 MiB of them at a time and not the machine's memory.
+/// compressed pages are held in memory at once, each in room for the
+/// worst case, a little over 4 KiB, so a full keyframe into a store that
+/// has none of a machine's pages holds 4 MiB of them at a time and not
+/// the machine's memory. Batches of 4096 pages, 16 MiB, took a first run
+/// of echo to 93 MiB at its peak, against 85 MiB with one page at a time;
+/// 1024 still give each of MAX_PAGE_WRITERS threads 128 pages a batch.
 #[cfg(not(test))]
-const COMPRESS_BATCH: usize = 4096;
+const COMPRESS_BATCH: usize = 1024;
 #[cfg(test)]
 const COMPRESS_BATCH: usize = 8;
 
