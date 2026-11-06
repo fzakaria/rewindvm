@@ -124,6 +124,12 @@ pub const SHARED_INPUT_LEN: u64 = SHARED_REQUEST + REQUEST_MAX as u64;
 pub const SHARED_INPUT: u64 = SHARED_INPUT_LEN + 4;
 pub const INPUT_MAX: usize = 1024;
 
+/// How many typed bytes the kernel's console keeps until a reader takes
+/// them (rewind_input in the guest patch). The kernel takes each chunk the
+/// monitor leaves whether or not they fit, so typing beyond this before a
+/// read is lost.
+pub const CONSOLE_HOLDS: usize = 4096;
+
 /// Where a seed perturbs a run is part of the run's spec, so it lives with
 /// the spec, where the app reads it too.
 pub use rewind_trace::schedule::{

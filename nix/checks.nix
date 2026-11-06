@@ -664,6 +664,58 @@ let
           -o $out/bin/pool main.c pool.c
       '';
 
+  # A root for checks.where-idle: a program built from 200 source files
+  # under a long directory, whose 12 workers each open a file 600 times,
+  # each open and close a step, then sleep while main joins them, so the
+  # CPU sits idle with every thread alive. The sources are at /src in the
+  # VM only, so `rewind where` asks the VM for all 200 paths at once.
+  idleRoot =
+    pkgs.runCommand "rewind-idle-root"
+      {
+        nativeBuildInputs = [ pkgs.pkgsStatic.stdenv.cc ];
+        dontStrip = true;
+      }
+      ''
+        mkdir -p $out/bin $out/src/a-source-tree-with-a-long-name/units
+        cd $out/src
+        units=a-source-tree-with-a-long-name/units
+        for i in $(seq 1 200); do
+          echo "int unit_$i(int x) { return x + $i; }" > $units/unit_with_a_long_name_$i.c
+        done
+
+        cat > main.c <<'EOF'
+        #include <fcntl.h>
+        #include <pthread.h>
+        #include <unistd.h>
+
+        int unit_1(int x);
+
+        static void *worker(void *arg)
+        {
+          for (int i = 0; i < 600; i++) {
+            close(open("/tmp/opened", O_CREAT | O_RDONLY, 0600));
+          }
+          usleep(20000); /* the sleep */
+          return arg;
+        }
+
+        int main(void)
+        {
+          pthread_t t[12];
+
+          for (int i = 0; i < 12; i++) {
+            pthread_create(&t[i], 0, worker, 0);
+          }
+          for (int i = 0; i < 12; i++) {
+            pthread_join(t[i], 0); /* the wait */
+          }
+          return unit_1(0) == 1 ? 0 : 1;
+        }
+        EOF
+        $CC -static -O1 -g -pthread -fdebug-prefix-map=$out/src=/src \
+          -o $out/bin/idle main.c $units/*.c
+      '';
+
   # A root with a dynamic program and two shared libraries of the same
   # shape, for checks.blame-memory: actual_writer in first.so writes the
   # program's total, the program unloads first.so and loads second.so,
@@ -2812,6 +2864,45 @@ in
         test -d $REWIND_HOME/cache/sources/$id
         rewind remove pool
         test ! -e $REWIND_HOME/cache/sources/$id
+        touch $out
+      '';
+
+  # checks.where-idle: `rewind where` answers for a program whose 200
+  # source files the VM alone has. The first look at a run asks the VM for
+  # all of them, and the list of their paths, over 4 KiB, goes in as
+  # typing. When the typing went in before the inspection read any, which
+  # it did whenever the fork's step fell a few steps short of a multiple of
+  # 4096, where the monitor checks for typing, the VM's console dropped
+  # what did not fit, and the inspection waited for the rest forever. Each
+  # step from 4060 to 4094 is looked at first, its sources unread, with a
+  # timeout that turns a hang into a failure. Boots the VM, so it needs
+  # /dev/kvm.
+  where-idle =
+    pkgs.runCommand "rewind-where-idle"
+      {
+        nativeBuildInputs = [
+          rewind
+          gdb
+          pkgs.jq
+        ];
+        requiredSystemFeatures = [ "kvm" ];
+      }
+      ''
+        export REWIND_HOME=$TMPDIR/rewind
+        export REWIND_DEBUGINFOD=/nonexistent
+
+        rewind run -q --name idle --root ${idleRoot} -- /bin/idle
+        test "$(rewind ls --json | jq -s '.[0].steps')" -gt 4096
+        pid=$(rewind threads idle --json | jq -s -r 'map(select(.name == "idle"))[0].pid')
+        wait=$(grep -n 'the wait' ${idleRoot}/src/main.c | cut -d: -f1)
+
+        for step in $(seq 4060 2 4094); do
+          rm -rf $REWIND_HOME/cache/sources
+          timeout 120 rewind where idle "$step" --pid "$pid" --tid "$pid" > main \
+            || { echo "rewind where at step $step failed or hung"; exit 1; }
+          grep -q "^#[0-9]* main (main.c:$wait)$" main
+        done
+        cat main
         touch $out
       '';
 

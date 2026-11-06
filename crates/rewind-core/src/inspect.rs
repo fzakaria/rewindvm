@@ -18,7 +18,7 @@ use std::time::Duration;
 use anyhow::{Result, bail};
 use rewind_init::{CONSOLE_FD, InspectRequest, InspectStatus, Mark};
 use rewind_trace::{Event, EventKind};
-use rewind_vmm::pv::GuestExit;
+use rewind_vmm::pv::{CONSOLE_HOLDS, GuestExit};
 use rewind_vmm::{Ignore, Input, Machine, Observer, Outcome, Stop};
 
 use crate::home::Home;
@@ -164,16 +164,67 @@ pub fn files(
     paths: &[String],
 ) -> Result<Inspection> {
     let (mut machine, step) = fork_at(home, run, step)?;
-    machine.request_inspection(&InspectRequest::Files { pid }.args())?;
+    let pages = crate::debug::StorePages(rewind_store::Store::open(&home.store())?);
 
-    // The list goes in as typing: one path a line, then an empty line.
-    let mut list = paths.join("\n");
-    list.push_str("\n\n");
-    machine.set_input(Box::new(Typed(Some(list.into_bytes()))));
+    // The list goes in as typing, in parts the VM's console holds whole:
+    // typing can arrive before the inspection reads any, and the console
+    // drops what does not fit. Each part is an inspection of its own on
+    // the fork, put back to the step for the next.
+    let parts = list_parts(paths);
+    let last = parts.len() - 1;
+    let mut contents = Vec::new();
+    for (i, part) in parts.into_iter().enumerate() {
+        let kept = if i < last {
+            Some(machine.checkpoint()?)
+        } else {
+            None
+        };
+        machine.request_inspection(&InspectRequest::Files { pid }.args())?;
+        machine.set_input(Box::new(Typed(Some(part.into_bytes()))));
+        let mut answer = Answer::default();
+        let status = finish(&mut machine, step, &mut answer, "the files could be read")?;
+        match answer.into_inspection(status) {
+            Inspection::Contents(bytes) => contents.extend(bytes),
+            other => return Ok(other),
+        }
+        if let Some(kept) = kept {
+            machine.rewind(kept, &pages)?;
+        }
+    }
+    Ok(Inspection::Contents(contents))
+}
 
-    let mut answer = Answer::default();
-    let status = finish(&mut machine, step, &mut answer, "the files could be read")?;
-    Ok(answer.into_inspection(status))
+/// A files inspection's list, `paths` one a line, in parts of at most
+/// CONSOLE_HOLDS bytes, each ending with the empty line that ends a list.
+/// A path too long for any part is left out, as a file the VM does not
+/// have would be.
+fn list_parts(paths: &[String]) -> Vec<String> {
+    // The empty line that ends each part.
+    const END: usize = 1;
+
+    let mut parts = Vec::new();
+    let mut part = String::new();
+    for path in paths {
+        let line = path.len() + 1;
+        if line + END > CONSOLE_HOLDS {
+            continue;
+        }
+        if !part.is_empty() && part.len() + line + END > CONSOLE_HOLDS {
+            part.push('\n');
+            parts.push(std::mem::take(&mut part));
+        }
+        part.push_str(path);
+        part.push('\n');
+    }
+
+    // With no paths the part is two newlines, which the inspection reads
+    // as the end of an empty list.
+    if part.is_empty() {
+        part.push('\n');
+    }
+    part.push('\n');
+    parts.push(part);
+    parts
 }
 
 /// Input typed all at once.
@@ -403,6 +454,51 @@ mod tests {
             a.into_inspection(status),
             Inspection::Contents(b"hello world\n".to_vec())
         );
+    }
+
+    #[test]
+    fn a_short_list_goes_in_whole() {
+        // Two paths are one part, one a line and then the empty line.
+        let paths = vec!["/src/a.c".to_string(), "/src/b.c".to_string()];
+        assert_eq!(list_parts(&paths), vec!["/src/a.c\n/src/b.c\n\n"]);
+    }
+
+    #[test]
+    fn an_empty_list_is_the_empty_line() {
+        // No paths still ends the list, or the inspection waits for one.
+        assert_eq!(list_parts(&[]), vec!["\n\n"]);
+    }
+
+    #[test]
+    fn a_long_list_goes_in_parts_the_console_holds() {
+        // 200 paths of 70 bytes, 14 KiB: every part fits the console and
+        // ends the list, and the parts hold every path in order.
+        let paths: Vec<String> = (0..200)
+            .map(|i| format!("/src/{}{i:03}.c", "x".repeat(58)))
+            .collect();
+        let parts = list_parts(&paths);
+        assert!(parts.len() > 1);
+        for part in &parts {
+            assert!(
+                part.len() <= CONSOLE_HOLDS,
+                "a part of {} bytes",
+                part.len()
+            );
+            assert!(part.ends_with("\n\n"));
+        }
+        let lines: Vec<&str> = parts
+            .iter()
+            .flat_map(|p| p.lines())
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(lines, paths.iter().map(String::as_str).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn a_path_longer_than_the_console_holds_is_left_out() {
+        // As a file the VM does not have would be.
+        let paths = vec!["/".repeat(CONSOLE_HOLDS), "/src/a.c".to_string()];
+        assert_eq!(list_parts(&paths), vec!["/src/a.c\n\n"]);
     }
 
     #[test]
