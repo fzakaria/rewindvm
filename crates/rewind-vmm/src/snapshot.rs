@@ -26,8 +26,8 @@ use crate::{Config, Machine, SLOT_RAM};
 /// Where keyframe pages go: a content-addressed page store.
 pub trait Pages {
     /// Stores pages and returns their hashes, in order: [`ZERO_PAGE`] for
-    /// a page of zeros, which needs storing nowhere. A keyframe puts all
-    /// of its pages at once, so a store can spread them over threads.
+    /// a page of zeros, which needs storing nowhere. A keyframe puts many
+    /// pages at once, so a store can spread them over threads.
     fn put_all(&mut self, pages: &[&[u8]]) -> Result<Vec<[u8; 32]>>;
     /// Reads the page with this hash into `out`.
     fn get(&self, hash: &[u8; 32], out: &mut [u8]) -> Result<()>;
@@ -158,6 +158,51 @@ const IRQCHIPS: [u32; 3] = [
     KVM_IRQCHIP_IOAPIC,
 ];
 
+/// How many pages a keyframe hands the page store at once: enough for the
+/// store to share among its threads, and few enough that the list of them
+/// and their hashes stays small in a full keyframe, which puts every page
+/// of the machine. Put all at once, a 1 GiB machine's 262,144 pages took
+/// 12 MiB more at the peak of a run of echo.
+#[cfg(not(test))]
+const PUT_AT_ONCE: usize = 16_384;
+#[cfg(test)]
+const PUT_AT_ONCE: usize = 16;
+
+/// Puts the pages of `ram` at `indices` into `pages`, PUT_AT_ONCE at a
+/// time, and returns the ones a keyframe over `parent` lists, with their
+/// hashes: all of them for a delta, and for a full keyframe, without a
+/// parent, the ones that are not zero.
+fn put_pages(
+    pages: &mut dyn Pages,
+    ram: &[u8],
+    indices: &[usize],
+    parent: Option<u64>,
+) -> Result<Vec<(u32, [u8; 32])>> {
+    let mut stored = Vec::new();
+    for batch in indices.chunks(PUT_AT_ONCE) {
+        let contents: Vec<&[u8]> = batch
+            .iter()
+            .map(|&i| &ram[i * PAGE_SIZE..(i + 1) * PAGE_SIZE])
+            .collect();
+        let hashes = pages.put_all(&contents)?;
+        if hashes.len() != batch.len() {
+            bail!(
+                "{} pages were put and {} hashes came back",
+                batch.len(),
+                hashes.len()
+            );
+        }
+
+        // A full keyframe need not list pages that are zero anyway.
+        for (&i, hash) in batch.iter().zip(hashes) {
+            if parent.is_some() || hash != ZERO_PAGE {
+                stored.push((i as u32, hash));
+            }
+        }
+    }
+    Ok(stored)
+}
+
 impl Machine {
     /// Captures the machine at its current step. With a parent, only the
     /// pages written since the parent was captured are stored; without
@@ -181,28 +226,7 @@ impl Machine {
             indices.dedup();
         }
 
-        // Every page at once, so the store can hash and compress them on
-        // several threads.
-        let ram = self.dev.ram.as_slice();
-        let contents: Vec<&[u8]> = indices
-            .iter()
-            .map(|&i| &ram[i * PAGE_SIZE..(i + 1) * PAGE_SIZE])
-            .collect();
-        let hashes = pages.put_all(&contents)?;
-        if hashes.len() != indices.len() {
-            bail!(
-                "{} pages were put and {} hashes came back",
-                indices.len(),
-                hashes.len()
-            );
-        }
-        let mut stored = Vec::with_capacity(indices.len());
-        for (i, hash) in indices.into_iter().zip(hashes) {
-            // A full keyframe need not list pages that are zero anyway.
-            if parent.is_some() || hash != ZERO_PAGE {
-                stored.push((i as u32, hash));
-            }
-        }
+        let stored = put_pages(pages, self.dev.ram.as_slice(), &indices, parent)?;
 
         let (cpu, irqchips, devices) = self.state()?;
         Ok(Keyframe {
@@ -565,5 +589,54 @@ pub(crate) mod tests {
         // A keyframe naming page 8 of an eight-page machine does not restore.
         let chain = [kf(10, None, &[(8, 1)])];
         assert!(final_pages(&chain, 8).is_err());
+    }
+
+    /// A page store that names each page by its first byte and notes how
+    /// many pages each put held.
+    #[derive(Default)]
+    struct Batches(Vec<usize>);
+
+    impl Pages for Batches {
+        fn put_all(&mut self, pages: &[&[u8]]) -> Result<Vec<[u8; 32]>> {
+            self.0.push(pages.len());
+            Ok(pages
+                .iter()
+                .map(|page| match page[0] {
+                    0 => ZERO_PAGE,
+                    b => [b; 32],
+                })
+                .collect())
+        }
+        fn get(&self, _hash: &[u8; 32], _out: &mut [u8]) -> Result<()> {
+            bail!("only puts")
+        }
+    }
+
+    #[test]
+    fn a_keyframe_puts_its_pages_a_bounded_batch_at_a_time() {
+        // A full keyframe of a machine more than two batches large, every
+        // third page not zero: the store is handed at most PUT_AT_ONCE
+        // pages a time, so what a keyframe holds besides the pages stays
+        // small however large the machine, and the keyframe lists every
+        // page that is not zero, in order. A delta lists its zero pages
+        // too, since each overwrote a page that was not zero.
+        let count = 2 * PUT_AT_ONCE + 5;
+        let mut ram = vec![0u8; count * PAGE_SIZE];
+        for i in (0..count).step_by(3) {
+            ram[i * PAGE_SIZE] = 1 + (i % 250) as u8;
+        }
+        let indices: Vec<usize> = (0..count).collect();
+
+        let mut store = Batches::default();
+        let stored = put_pages(&mut store, &ram, &indices, None).unwrap();
+        assert_eq!(store.0, vec![PUT_AT_ONCE, PUT_AT_ONCE, 5]);
+        let expected: Vec<(u32, [u8; 32])> = (0..count)
+            .step_by(3)
+            .map(|i| (i as u32, [1 + (i % 250) as u8; 32]))
+            .collect();
+        assert_eq!(stored, expected);
+
+        let delta = put_pages(&mut Batches::default(), &ram, &[1, 3], Some(256)).unwrap();
+        assert_eq!(delta, vec![(1, ZERO_PAGE), (3, [4; 32])]);
     }
 }
