@@ -902,6 +902,15 @@ run above replayed from boot to step 100,000 in 10 s and then about 1,000
 steps a second, so at step 150,000 the speed so far would say about 56 s
 were left of a replay to step 290,000 that takes 140 s more.
 
+A command that fails says why after `rewind:`. With `--errors json`, or
+`REWIND_ERRORS=json`, it prints one line of JSON on standard error instead,
+`{"error":{"kind":…,"message":…}}`, whose `kind` names the failure with what a
+program needs to act on it and whose `message` holds the words. The desktop app
+asks for it, so it tells a replay that went another way than its recording
+(`went_another_way`, with the run and step) from other refusals by its kind,
+not by matching the words, and stops asking to bring that run to a step. Kinds
+the app does not know read as `other`.
+
 A delta lists the pages KVM's dirty log names, less the ones whose contents
 are what they were at the parent keyframe, often zero. About one entry in ten
 of the shared keyframe a fork takes (see [Forks](#forks)) is a page written
