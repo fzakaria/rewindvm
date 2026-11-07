@@ -1,6 +1,8 @@
 # The NixOS module, `programs.rewind`: installs rewind, adds the binary
-# cache Rewind's builds are in, and on AMD Zen can set the branch counter
-# workaround at every boot so runs use counter time (docs/pmu.md);
+# cache Rewind's builds are in, on AMD Zen can set the branch counter
+# workaround at every boot so runs use counter time (docs/pmu.md), and can
+# tell Nix the machine builds derivations that run Rewind on its CPU
+# vendor;
 # `programs.rewind.app` installs the desktop app. The flake passes its own
 # packages as the defaults.
 { rewind, app }:
@@ -12,6 +14,12 @@
 }:
 let
   cfg = config.programs.rewind;
+
+  # The system feature a derivation that runs Rewind in its build names in
+  # `requiredSystemFeatures`. It carries the CPU vendor because the guest's
+  # fixed CPU model keeps the host's: AMD and Intel make different runs of
+  # the same inputs.
+  feature = vendor: "rewind-${vendor}";
 
   # The cache CI pushes every build to, the same one the flake's nixConfig
   # names.
@@ -50,6 +58,25 @@ in
       '';
     };
 
+    systemFeature = lib.mkOption {
+      type = lib.types.nullOr (
+        lib.types.enum [
+          "amd"
+          "intel"
+        ]
+      );
+      default = null;
+      description = ''
+        This machine's CPU vendor, to add `rewind-amd` or `rewind-intel`
+        to Nix's system features, so derivations that run Rewind in their
+        build and name that feature in `requiredSystemFeatures` build
+        here. Runs of the same inputs are the same on every host of one
+        vendor, and differ between vendors. Set it only where
+        `rewind doctor` reports kvm, the CPU and counter time as ok. On
+        AMD Zen, counter time needs `amdBranchCounterWorkaround` as well.
+      '';
+    };
+
     app = {
       enable = lib.mkEnableOption "the Rewind VM desktop app, the scrubber over recorded runs";
 
@@ -69,6 +96,12 @@ in
     (lib.mkIf (cfg.enable && cfg.binaryCache) {
       nix.settings.extra-substituters = [ cache ];
       nix.settings.extra-trusted-public-keys = [ cacheKey ];
+    })
+
+    # extra-system-features adds to NixOS's own list (kvm, big-parallel,
+    # ...) where system-features would replace it.
+    (lib.mkIf (cfg.enable && cfg.systemFeature != null) {
+      nix.settings.extra-system-features = [ (feature cfg.systemFeature) ];
     })
 
     (lib.mkIf cfg.app.enable {

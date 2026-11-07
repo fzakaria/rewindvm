@@ -17,6 +17,7 @@ let
       {
         programs.rewind.enable = true;
         programs.rewind.amdBranchCounterWorkaround = true;
+        programs.rewind.systemFeature = "amd";
         programs.rewind.app.enable = true;
         boot.loader.grub.enable = false;
         fileSystems."/" = {
@@ -3807,8 +3808,9 @@ in
     pkgs.writeText "rewind-version" release;
 
   # checks.module: the NixOS module installs both packages, adds Rewind's
-  # binary cache and sets the AMD workaround at boot. Only evaluates, so
-  # it needs no KVM.
+  # binary cache, sets the AMD workaround at boot, and adds the
+  # `rewind-amd` system feature beside NixOS's own, which it must not
+  # replace. Only evaluates, so it needs no KVM.
   module =
     let
       config = moduleSystem.config;
@@ -3818,5 +3820,12 @@ in
     assert builtins.any (name: pkgs.lib.hasPrefix "rewind-app-" name) installed;
     assert builtins.elem "msr" config.boot.kernelModules;
     assert builtins.elem "https://rewindvm.cachix.org" config.nix.settings.extra-substituters;
-    pkgs.writeText "rewind-module" config.systemd.services.rewind-pmu.serviceConfig.ExecStart;
+    assert config.nix.settings.extra-system-features == [ "rewind-amd" ];
+    assert builtins.elem "kvm" config.nix.settings.system-features;
+    # The nix.conf the system would install, which NixOS checks with Nix
+    # itself when it builds the file.
+    pkgs.writeText "rewind-module" ''
+      ${config.systemd.services.rewind-pmu.serviceConfig.ExecStart}
+      ${config.environment.etc."nix/nix.conf".source}
+    '';
 }
