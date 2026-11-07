@@ -550,6 +550,11 @@ impl Machine {
         &self.config
     }
 
+    /// The number of pages in the VM's allocated RAM.
+    pub fn ram_pages(&self) -> usize {
+        self.dev.ram.len() / PAGE_SIZE
+    }
+
     /// Stops the machine at `deadline` with [`Stop::TimedOut`], wherever
     /// the guest is then, even computing without exits. The thread that
     /// calls [`Machine::run`] is the one stopped.

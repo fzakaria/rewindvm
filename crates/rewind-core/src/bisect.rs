@@ -148,9 +148,9 @@ impl Copy {
             Some(kf) => run.machine_at(home, kf, Keep::Nothing, &mut records)?,
             None => Machine::boot(&run.manifest.spec.config()?)?,
         };
-        let mut memory = Memory::default();
+        let mut memory = Memory::new(machine.ram_pages());
         if let Some(kf) = from {
-            memory = Memory::of(&run.keyframes()?.chain(kf)?);
+            memory = Memory::of(&run.keyframes()?.chain(kf)?, machine.ram_pages())?;
         }
         Ok(Copy {
             machine,
@@ -171,7 +171,7 @@ impl Copy {
     /// Captures the machine where it is, as a replay does at a keyframe.
     fn capture(&mut self) -> Result<()> {
         let mut kf = self.machine.keyframe(&mut HashPages, self.parent)?;
-        self.memory.apply(kf.parent, &kf.pages);
+        self.memory.apply(kf.parent, &kf.pages)?;
         self.written = kf.pages.iter().map(|(page, _)| *page).collect();
         kf.pages.clear();
         self.parent = Some(self.machine.step());

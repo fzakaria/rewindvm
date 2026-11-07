@@ -848,8 +848,9 @@ impl Run {
                 let mut parent = last_keyframe;
                 let mut memory = shortcut
                     .as_ref()
-                    .map(|s| crate::keyframes::Memory::of(&s.chain))
-                    .unwrap_or_default();
+                    .map(|s| crate::keyframes::Memory::of(&s.chain, machine.ram_pages()))
+                    .transpose()?
+                    .unwrap_or_else(|| crate::keyframes::Memory::new(machine.ram_pages()));
 
                 // A keyframe at the last shared step goes to the run that
                 // owns it, where every fork made at this step finds it, and
@@ -859,7 +860,7 @@ impl Run {
                 {
                     let mut kf =
                         machine.keyframe(&mut crate::keyframes::StorePages(store), parent)?;
-                    memory.trim(kf.parent, &mut kf.pages);
+                    memory.trim(kf.parent, &mut kf.pages)?;
 
                     // The pages first, durably, then the keyframe naming
                     // them.
@@ -1233,12 +1234,13 @@ impl Run {
                 (machine, base)
             }
             None => {
+                let machine = Machine::boot(&config)?;
                 let base = Base {
                     step: None,
-                    memory: Some(crate::keyframes::Memory::default()),
+                    memory: Some(crate::keyframes::Memory::new(machine.ram_pages())),
                     store: None,
                 };
-                (Machine::boot(&config)?, base)
+                (machine, base)
             }
         };
 
@@ -1345,14 +1347,15 @@ impl Run {
             Some(store) => store,
             None => base.store.insert(rewind_store::Store::open(&home.store())?),
         };
-        let memory = base.memory.get_or_insert_with(|| {
-            machine
-                .restored_pages()
-                .map(crate::keyframes::Memory::from_pages)
-                .unwrap_or_default()
-        });
+        let memory = match &mut base.memory {
+            Some(memory) => memory,
+            None => base.memory.insert(crate::keyframes::Memory::from_pages(
+                machine.restored_pages().unwrap_or(&[]),
+                machine.ram_pages(),
+            )?),
+        };
         let mut kf = machine.keyframe(&mut crate::keyframes::StorePages(store), base.step)?;
-        memory.trim(kf.parent, &mut kf.pages);
+        memory.trim(kf.parent, &mut kf.pages)?;
         store.sync()?;
         crate::keyframes::save(&owner, &kf)
             .with_context(|| format!("keeping a keyframe at step {step} in {}", owner.display()))?;
@@ -1413,7 +1416,13 @@ impl Run {
         let store = rewind_store::Store::open(&home.store()).ok();
         let system_map =
             fs::read_to_string(self.manifest.spec.kernel.with_file_name(SYSTEM_MAP)).ok();
-        let mut watch = crate::state::Watch::new(&layers, store.as_ref(), system_map, start)?;
+        let mut watch = crate::state::Watch::new(
+            &layers,
+            store.as_ref(),
+            system_map,
+            start,
+            machine.ram_pages(),
+        )?;
         let after: Vec<u64> = steps
             .iter()
             .copied()

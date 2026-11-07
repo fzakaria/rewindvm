@@ -420,11 +420,12 @@ impl Layers {
 /// pages took 41 and 87 ms (the memory_chain example). The table is 32
 /// bytes for every page up to the last that is not zero, 24 MiB for that
 /// guest, where the map was about 37 bytes for each page not zero.
-#[derive(Default)]
 pub struct Memory {
     /// Each page's hash, the zero page's for a zero page. Pages past the
     /// end are zero.
     pages: Vec<[u8; 32]>,
+    /// The VM's RAM size, supplied by the machine rather than a keyframe.
+    ram_pages: usize,
 }
 
 /// A memory's size, not its hundreds of thousands of hashes.
@@ -439,33 +440,45 @@ impl std::fmt::Debug for Memory {
 }
 
 impl Memory {
-    /// Memory as restoring `chain` leaves it.
-    pub fn of(chain: &[Keyframe]) -> Memory {
-        let mut memory = Memory::default();
-        for kf in chain {
-            memory.apply(kf.parent, &kf.pages);
+    /// Zeroed memory bounded by the VM's `ram_pages`. Keyframe page
+    /// numbers never determine the allocation limit.
+    pub fn new(ram_pages: usize) -> Memory {
+        Memory {
+            pages: Vec::new(),
+            ram_pages,
         }
-        memory
+    }
+
+    /// Memory as restoring `chain` leaves it.
+    pub fn of(chain: &[Keyframe], ram_pages: usize) -> Result<Memory> {
+        let mut memory = Memory::new(ram_pages);
+        for kf in chain {
+            memory.apply(kf.parent, &kf.pages)?;
+        }
+        Ok(memory)
     }
 
     /// Memory whose non-zero pages are `pages`, as a machine restored
     /// from keyframes lists them.
-    pub fn from_pages(pages: &[(u32, [u8; 32])]) -> Memory {
-        let mut memory = Memory::default();
-        memory.apply(None, pages);
-        memory
+    pub fn from_pages(pages: &[(u32, [u8; 32])], ram_pages: usize) -> Result<Memory> {
+        let mut memory = Memory::new(ram_pages);
+        memory.apply(None, pages)?;
+        Ok(memory)
     }
 
-    /// Sets a page's hash.
-    fn set(&mut self, page: u32, hash: [u8; 32]) {
-        let i = page as usize;
-        if i >= self.pages.len() {
-            if hash == ZERO_PAGE {
-                return;
-            }
-            self.pages.resize(i + 1, ZERO_PAGE);
+    /// Rejects page numbers outside the VM before changing memory or
+    /// filtering an unchanged zero page out of a delta.
+    fn check_pages(&self, pages: &[(u32, [u8; 32])]) -> Result<()> {
+        if let Some((page, _)) = pages
+            .iter()
+            .find(|(page, _)| *page as usize >= self.ram_pages)
+        {
+            bail!(
+                "keyframe page {page} is outside the VM's memory ({} pages)",
+                self.ram_pages
+            );
         }
-        self.pages[i] = hash;
+        Ok(())
     }
 
     /// Leaves out of a new keyframe's `pages` the ones whose contents are
@@ -474,11 +487,12 @@ impl Memory {
     /// only the pages a keyframe lists, so the rest keep the contents they
     /// had, which are these. A full keyframe, with no parent, is kept
     /// whole.
-    pub fn trim(&mut self, parent: Option<u64>, pages: &mut Vec<(u32, [u8; 32])>) {
+    pub fn trim(&mut self, parent: Option<u64>, pages: &mut Vec<(u32, [u8; 32])>) -> Result<()> {
+        self.check_pages(pages)?;
         if parent.is_some() {
             pages.retain(|(index, hash)| self.hash_of(*index) != *hash);
         }
-        self.apply(parent, pages);
+        self.apply(parent, pages)
     }
 
     /// The hash of a page's contents: the zero page's for a page this
@@ -523,21 +537,37 @@ impl Memory {
 
     /// Writes a keyframe's `pages` over this memory, as restoring the
     /// keyframe, whose parent is `parent`, would.
-    pub fn apply(&mut self, parent: Option<u64>, pages: &[(u32, [u8; 32])]) {
-        // A full keyframe starts from zeroed memory, as large as the
-        // pages it lists.
+    pub fn apply(&mut self, parent: Option<u64>, pages: &[(u32, [u8; 32])]) -> Result<()> {
+        // Validate the whole keyframe before allocating or changing any
+        // hashes. Zero pages beyond the table need no slots.
+        self.check_pages(pages)?;
+        let end = pages
+            .iter()
+            .filter(|(_, hash)| *hash != ZERO_PAGE)
+            .map(|(page, _)| *page as usize + 1)
+            .max()
+            .unwrap_or(0);
+        let len = if parent.is_none() {
+            end
+        } else {
+            end.max(self.pages.len())
+        };
+        self.pages
+            .try_reserve(len.saturating_sub(self.pages.len()))
+            .context("allocating the keyframe memory table")?;
+
+        // A full keyframe starts from zeroed memory. Deltas retain every
+        // slot the new keyframe does not name.
         if parent.is_none() {
-            let len = pages
-                .iter()
-                .map(|(i, _)| *i as usize + 1)
-                .max()
-                .unwrap_or(0);
             self.pages.clear();
-            self.pages.resize(len, ZERO_PAGE);
         }
+        self.pages.resize(len, ZERO_PAGE);
         for (index, hash) in pages {
-            self.set(*index, *hash);
+            if let Some(slot) = self.pages.get_mut(*index as usize) {
+                *slot = *hash;
+            }
         }
+        Ok(())
     }
 }
 
@@ -803,7 +833,7 @@ pub fn take(
     memory: &mut Memory,
 ) -> Result<()> {
     let mut kf = machine.keyframe(&mut StorePages(store), *parent)?;
-    memory.trim(kf.parent, &mut kf.pages);
+    memory.trim(kf.parent, &mut kf.pages)?;
 
     // The pages first, durably, then the keyframe naming them.
     store.sync()?;
@@ -878,6 +908,65 @@ mod memory_tests {
     // Memory as a chain of keyframes leaves it, built two ways.
     use super::*;
 
+    const RAM_PAGES: usize = 64;
+
+    #[test]
+    fn zero_pages_do_not_grow_the_memory_table() {
+        // A full keyframe listing only a zero page needs no hash slots.
+        let mut memory = Memory::new(RAM_PAGES);
+        memory
+            .apply(None, &[(RAM_PAGES as u32 - 1, ZERO_PAGE)])
+            .unwrap();
+        assert!(memory.pages.is_empty());
+    }
+
+    #[test]
+    fn pages_outside_ram_are_refused_before_memory_changes() {
+        // Full keyframes and deltas reject zero and nonzero pages at the
+        // RAM boundary or u32::MAX, without allocating or changing hashes.
+        const KEPT_PAGE: u32 = 1;
+        const KEPT_HASH: [u8; 32] = [7; 32];
+        for parent in [None, Some(0)] {
+            for page in [RAM_PAGES as u32, u32::MAX] {
+                for hash in [ZERO_PAGE, KEPT_HASH] {
+                    let mut memory = Memory::new(RAM_PAGES);
+                    memory.apply(None, &[(KEPT_PAGE, KEPT_HASH)]).unwrap();
+                    let before = memory.pages.clone();
+                    let error = memory.apply(parent, &[(page, hash)]).unwrap_err();
+                    assert!(error.to_string().contains("outside the VM's memory"));
+                    assert_eq!(memory.pages, before);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn trimming_cannot_hide_an_out_of_bounds_zero_page() {
+        // An invalid zero page must fail before trim removes unchanged
+        // pages, even though hash_of treats absent slots as zero.
+        let mut memory = Memory::new(RAM_PAGES);
+        let mut pages = vec![(RAM_PAGES as u32, ZERO_PAGE)];
+        assert!(memory.trim(Some(0), &mut pages).is_err());
+        assert_eq!(pages, [(RAM_PAGES as u32, ZERO_PAGE)]);
+        assert!(memory.pages.is_empty());
+    }
+
+    #[test]
+    fn the_last_ram_page_can_be_set_and_reset() {
+        // The last valid page is accepted, and a new full keyframe clears
+        // that hash while keeping the configured RAM bound.
+        let last = RAM_PAGES as u32 - 1;
+        let mut memory = Memory::from_pages(&[(last, [1; 32])], RAM_PAGES).unwrap();
+        assert_eq!(memory.hash_of(last), [1; 32]);
+        memory.apply(None, &[]).unwrap();
+        assert_eq!(memory.hash_of(last), ZERO_PAGE);
+        assert!(
+            memory
+                .apply(Some(0), &[(RAM_PAGES as u32, [1; 32])])
+                .is_err()
+        );
+    }
+
     /// Memory built from the non-zero pages a restore leaves, in page
     /// order, is memory built from the chain: a full keyframe of pages 1
     /// and 2, then a delta that rewrites 2, zeroes 1 and adds 3.
@@ -888,8 +977,8 @@ mod memory_tests {
         let mut delta = Keyframe::default();
         delta.parent = Some(0);
         delta.pages = vec![(1, ZERO_PAGE), (2, [5; 32]), (3, [3; 32])];
-        let of_chain = Memory::of(&[full, delta]);
-        let restored = Memory::from_pages(&[(2, [5; 32]), (3, [3; 32])]);
+        let of_chain = Memory::of(&[full, delta], RAM_PAGES).unwrap();
+        let restored = Memory::from_pages(&[(2, [5; 32]), (3, [3; 32])], RAM_PAGES).unwrap();
         for page in 0..5 {
             assert_eq!(
                 restored.hash_of(page),
@@ -986,17 +1075,18 @@ mod tests {
         // guest wrote back to what it was, zero included, is left out; a
         // changed one stays, and Memory learns it for the next delta.
         let (a, b) = ([1u8; 32], [2u8; 32]);
-        let mut memory = Memory::default();
+        const RAM_PAGES: usize = 5;
+        let mut memory = Memory::new(RAM_PAGES);
         let mut full = vec![(1, a), (2, b)];
-        memory.trim(None, &mut full);
+        memory.trim(None, &mut full).unwrap();
         assert_eq!(full, vec![(1, a), (2, b)]);
 
         let mut delta = vec![(1, a), (2, a), (3, ZERO_PAGE), (4, b)];
-        memory.trim(Some(256), &mut delta);
+        memory.trim(Some(256), &mut delta).unwrap();
         assert_eq!(delta, vec![(2, a), (4, b)]);
 
         let mut next = vec![(2, a), (4, ZERO_PAGE)];
-        memory.trim(Some(512), &mut next);
+        memory.trim(Some(512), &mut next).unwrap();
         assert_eq!(next, vec![(4, ZERO_PAGE)]);
     }
 
