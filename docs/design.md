@@ -937,6 +937,33 @@ append-only index. A crash can leave at most a torn last index entry, which is
 dropped when the store opens. Pages no keyframe names any more stay until
 `rewind gc` removes them (see [Removing runs](#removing-runs)).
 
+A store with many runs has millions of index entries, too many to read into
+memory every time it opens. The index's entries are also kept in a few sorted
+segments: files of entries sorted by hash, mapped into memory and searched with
+an interpolation search, each covering a stretch of the index from where the
+one before ends. An opener reads into memory only the entries after the last
+segment. Once a million have gathered there, it sorts them into a new segment,
+and the new segment takes in the segments before it, merged as it is written,
+while the newest of them covers at most twice what the new one does. So each
+segment covers more than twice the one after it, a store has about log2 of its
+millions of entries' segments, and an entry is rewritten about that many times.
+Before, a single sorted copy of the whole index was read into memory, sorted
+and rewritten for every million entries added. Growing an index to 16.8 million
+entries a million at a time, opening the store after each million (the
+`index_growth` example of `rewind-store`, on a 4-core cloud VM):
+
+| Index files              | Opening, all 16 | Slowest open | Written | Most memory | Lookup, found | Lookup, missing |
+| ------------------------ | --------------- | ------------ | ------- | ----------- | ------------- | --------------- |
+| One sorted copy (before) | 22.0 s          | 2.4 s        | 6.4 GiB | 864 MiB     | 710 ns        | 2.37 µs         |
+| Sorted segments          | 6.9 s           | 1.4 s        | 2.3 GiB | 72 MiB      | 860 ns        | 2.98 µs         |
+
+A lookup searches the segments oldest first, the oldest holding most pages, so
+it costs another search for each segment past the one that has the page, and a
+page not stored costs one in every segment; at 16.8 million entries there were
+one to three. A missing page also costs rereading the index past the segments,
+most of that column. A store that rewind 0.12 sorted is read with its sorted
+copy as the first segment, until a merge takes it in.
+
 [casita](https://casita.rs) was the other candidate. It is a content-addressed
 store from Cachix with BLAKE3 and FastCDC chunking. It fits disk images and
 build artifacts well, and its sync would suit sharing runs between machines.

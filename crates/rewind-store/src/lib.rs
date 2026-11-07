@@ -19,14 +19,24 @@
 //! the index for entries others added since.
 //!
 //! A store with many runs has millions of index entries, too many to read
-//! into memory every time a store opens. So the index's first entries are
-//! also kept sorted by hash, in a file searched where it lies, and an
-//! opener reads into memory only the entries after the ones it covers.
-//! The index only grows, so a sorted copy of its start never goes stale;
-//! an opener that finds many entries past it writes a new one, under a
-//! name no other writer has, and renames it over the old. Openers take
-//! turns at that, so a check's many threads sort the index once between
-//! them rather than each holding all of it in memory at once.
+//! into memory every time a store opens. So the index's entries are also
+//! kept sorted by hash, in a few sorted segments, files searched where
+//! they lie, each covering a stretch of the index: the first from its
+//! start, each other from where the one before ends. An opener reads into
+//! memory only the entries after the last segment. The index only grows,
+//! so a segment never goes stale; an opener that finds many entries past
+//! the last one sorts them into a new segment, under a name no other
+//! writer has, and renames it into place. Openers take turns at that, so a
+//! check's many threads sort the index once between them.
+//!
+//! A new segment takes the segments before it into itself, merging them as
+//! it is written, while the newest of them covers no more than twice what
+//! the merge covers after it. So each segment covers more than twice the
+//! one after it, there are about log2 of the index's millions of them, and
+//! an entry is rewritten only that many times, where one sorted copy of
+//! all the index was rewritten whole for every million entries added. The
+//! merge reads the segments where they lie and holds only the new entries
+//! in memory.
 //!
 //! Pages no keyframe names any more are removed by a [`Collector`], which
 //! needs the store to itself. It copies the pages that stay out of every
@@ -83,18 +93,42 @@ const COLLECTING: &str = "index.collecting";
 /// How much of the index or a pack a collector reads at a time.
 const COLLECT_BUFFER: usize = 1 << 20;
 
-/// The sorted copy of the index's first entries: a header of a magic
-/// value, how many index entries it covers and how many it holds, then
-/// those it holds, in the index's format, sorted by hash with each hash
-/// once. A copy whose magic or length disagrees with its header is not
-/// used, and the store sorts again from the index, which has every entry.
+/// The sorted copy of the index's first entries that rewind 0.12 and
+/// before wrote, read as a segment from the start of the index: a header of
+/// a magic value, how many index entries it covers and how many it holds,
+/// then those it holds, in the index's format, sorted by hash with each
+/// hash once. Its name, followed by a dot, is also where every segment is
+/// written before it is renamed into place, so an opener with the store
+/// to itself removes what a crash left there, as rewind 0.12 does too.
 const SORTED: &str = "index.sorted";
 const SORTED_MAGIC: &[u8; 8] = b"rwsort02";
 const SORTED_HEADER: usize = 24;
 
-/// How many index entries past the sorted copy an opener reads before it
-/// writes a new sorted copy that covers them too. Below this, reading them
-/// into memory costs less than rewriting the copy.
+/// A sorted segment of the index's entries from `from` to `to`, named
+/// `index.segment.<from>.<to>`: a header of a magic value, `from`, `to`,
+/// how many entries it holds, and the index's entries at `from` and at
+/// `to` less one as the index had them when the segment was written, then
+/// the entries it holds, as in [`SORTED`]. A segment whose two entries are
+/// not the index's at those places describes another index, as one a
+/// collector of rewind 0.12, which knows no segments, leaves beside the
+/// index it wrote, and is not used. Segments are written whole and never
+/// changed.
+const SEGMENT: &str = "index.segment.";
+const SEGMENT_MAGIC: &[u8; 8] = b"rwsort03";
+const SEGMENT_HEADER: usize = 32 + 2 * INDEX_ENTRY;
+
+/// A new segment takes in the newest segment before it while that segment
+/// covers at most this many times what the new one covers so far.
+const MERGE_FACTOR: u64 = 2;
+
+/// How many times an opener lists the segments again when one it listed was
+/// removed before it opened it, as a merge removes the segments it took in
+/// once the segment that holds them has its name.
+const LIST_ATTEMPTS: usize = 8;
+
+/// How many index entries past the last segment an opener reads before it
+/// writes a new segment that covers them too. Below this, reading them into
+/// memory costs less than writing a segment.
 #[cfg(not(test))]
 const COMPACT_AT: usize = 1 << 20;
 #[cfg(test)]
@@ -262,63 +296,104 @@ impl Location {
     }
 }
 
-/// The sorted copy of the index's first entries, mapped into memory where
-/// it lies (see [`rewind_mapped`]): a search reads several entries for
-/// each page, and a system call for each was 3.3 million of them to
-/// restore 721,100 pages.
+/// An index entry as the index file holds it.
+type Entry = [u8; INDEX_ENTRY];
+
+fn u64_at(bytes: &[u8], at: usize) -> u64 {
+    u64::from_le_bytes(bytes[at..at + 8].try_into().expect("eight bytes"))
+}
+
+/// A sorted segment of the index's entries, mapped into memory where it
+/// lies (see [`rewind_mapped`]): a search reads several entries for each
+/// page, and a system call for each was 3.3 million of them to restore
+/// 721,100 pages.
 struct Sorted {
     map: rewind_mapped::Mapped,
+    /// How many bytes come before its entries.
+    header: usize,
     /// How many entries it holds.
     entries: u64,
-    /// How many index entries it covers, duplicates included.
-    covers: u64,
+    /// The index entries it covers, from `from` up to `to`, duplicates
+    /// included.
+    from: u64,
+    to: u64,
+    /// Its file, which a merge that takes it in removes.
+    path: PathBuf,
 }
 
 impl Sorted {
-    /// The sorted copy in `dir`, or None when there is none or the file is
-    /// not one.
-    fn open(dir: &Path) -> Option<Sorted> {
-        Sorted::of(File::open(dir.join(SORTED)).ok()?)
+    /// The segment in the file at `path`, as a segment of the index `log`,
+    /// or None when the file is not one. Fails only when the file cannot
+    /// be opened, as when a merge has just removed it.
+    fn open(path: &Path, log: &File) -> std::io::Result<Option<Sorted>> {
+        let file = File::open(path)?;
+        Ok(Sorted::of(file, path, log))
     }
 
-    /// The sorted copy `file` holds, or None when it is not one.
-    fn of(file: File) -> Option<Sorted> {
-        let mut header = [0u8; SORTED_HEADER];
-        file.read_exact_at(&mut header, 0).ok()?;
-        if &header[..8] != SORTED_MAGIC {
+    /// The segment `file` holds, or None when it is not a segment of the
+    /// index `log`: not one at all, cut short, covering more than the
+    /// index holds, or describing another index.
+    fn of(file: File, path: &Path, log: &File) -> Option<Sorted> {
+        let log_entries = log.metadata().ok()?.len() / INDEX_ENTRY as u64;
+        let mut magic = [0u8; 8];
+        file.read_exact_at(&mut magic, 0).ok()?;
+        let (header, from, to, entries) = if &magic == SORTED_MAGIC {
+            let mut header = [0u8; SORTED_HEADER];
+            file.read_exact_at(&mut header, 0).ok()?;
+            (SORTED_HEADER, 0, u64_at(&header, 8), u64_at(&header, 16))
+        } else if &magic == SEGMENT_MAGIC {
+            let mut header = [0u8; SEGMENT_HEADER];
+            file.read_exact_at(&mut header, 0).ok()?;
+            let (from, to) = (u64_at(&header, 8), u64_at(&header, 16));
+            if from >= to || to > log_entries {
+                return None;
+            }
+            let ends = header[32..].as_chunks::<INDEX_ENTRY>().0;
+            let mut entry = [0u8; INDEX_ENTRY];
+            for (at, end) in [from, to - 1].into_iter().zip(ends) {
+                log.read_exact_at(&mut entry, at * INDEX_ENTRY as u64)
+                    .ok()?;
+                if entry != *end {
+                    return None;
+                }
+            }
+            (SEGMENT_HEADER, from, to, u64_at(&header, 24))
+        } else {
+            return None;
+        };
+        if to > log_entries || entries > to - from {
             return None;
         }
-        let covers = u64::from_le_bytes(header[8..16].try_into().expect("eight bytes"));
-        let entries = u64::from_le_bytes(header[16..].try_into().expect("eight bytes"));
-        let body = file
-            .metadata()
-            .ok()?
-            .len()
-            .checked_sub(SORTED_HEADER as u64)?;
+        let body = file.metadata().ok()?.len().checked_sub(header as u64)?;
         if body != entries.checked_mul(INDEX_ENTRY as u64)? {
             return None;
         }
-        if entries > covers {
-            return None;
-        }
-        let len = usize::try_from(body).ok()? + SORTED_HEADER;
+        let len = usize::try_from(body).ok()? + header;
         let map = mapping::sorted(&file, len).ok()?;
         Some(Sorted {
             map,
+            header,
             entries,
-            covers,
+            from,
+            to,
+            path: path.to_path_buf(),
         })
     }
 
-    fn entry(&self, i: u64) -> Option<[u8; INDEX_ENTRY]> {
-        let at = SORTED_HEADER + usize::try_from(i).ok()? * INDEX_ENTRY;
+    /// How many index entries it covers.
+    fn covers(&self) -> u64 {
+        self.to - self.from
+    }
+
+    fn entry(&self, i: u64) -> Option<Entry> {
+        let at = self.header + usize::try_from(i).ok()? * INDEX_ENTRY;
         self.map.bytes().get(at..at + INDEX_ENTRY)?.try_into().ok()
     }
 
-    /// Where a page is, if the sorted copy names it. The hashes are
-    /// uniform, so the search first guesses where in the range a key falls
-    /// from its leading bytes, which takes a few reads at any size, and
-    /// halves the range once guessing has not found it.
+    /// Where a page is, if the segment names it. The hashes are uniform, so
+    /// the search first guesses where in the range a key falls from its
+    /// leading bytes, which takes a few reads at any size, and halves the
+    /// range once guessing has not found it.
     fn find(&self, hash: &Hash) -> Option<Location> {
         let key = u64::from_be_bytes(hash[..8].try_into().expect("eight bytes"));
         let (mut lo, mut hi) = (0u64, self.entries);
@@ -349,25 +424,166 @@ impl Sorted {
         None
     }
 
-    /// Every entry, in order.
-    fn all(&self) -> Result<Vec<[u8; INDEX_ENTRY]>> {
-        let body = &self.map.bytes()[SORTED_HEADER..];
-        Ok(body.as_chunks::<INDEX_ENTRY>().0.to_vec())
+    /// Every entry, in order, where it lies.
+    fn all(&self) -> &[Entry] {
+        self.map.bytes()[self.header..].as_chunks::<INDEX_ENTRY>().0
     }
 }
 
-/// Writes `entries`, sorted and each hash once, as the sorted copy of the
-/// index's first `covers` entries: to a file of this writer's own, then
-/// renamed over the old, so a store reading the old one keeps reading it.
-/// Returns the copy written, which another writer's may already have
-/// replaced under the name.
+/// Where a store's segments end in its index: past the last of them.
+fn covered(segments: &[Arc<Sorted>]) -> u64 {
+    segments.last().map_or(0, |r| r.to)
+}
+
+/// The index entries from `from` to `to` a segment is named for, if `name`
+/// is a segment's.
+fn segment_range(name: &str) -> Option<(u64, u64)> {
+    let (from, to) = name.strip_prefix(SEGMENT)?.split_once('.')?;
+    Some((from.parse().ok()?, to.parse().ok()?))
+}
+
+/// The files in `dir` that hold or may hold segments: every segment's, and
+/// the sorted copy older builds wrote.
+fn segment_files(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let is_segment = name
+            .to_str()
+            .is_some_and(|n| n == SORTED || segment_range(n).is_some());
+        if is_segment {
+            files.push(entry.path());
+        }
+    }
+    Ok(files)
+}
+
+/// The segments in `dir` that cover the index `log` from its start, each
+/// from where the one before ends, oldest first, and the files there that
+/// hold no segment of them: a segment another covers, as a crash between a
+/// merge's rename and its removals leaves, or one that is not a segment of
+/// this index. Of two segments from the same entry, the one that covers
+/// more is taken.
+fn chain(dir: &Path, log: &File) -> Result<(Vec<Arc<Sorted>>, Vec<PathBuf>)> {
+    let mut attempt = 1;
+    loop {
+        let mut segments = Vec::new();
+        let mut unused = Vec::new();
+        let mut vanished = false;
+        for path in segment_files(dir)? {
+            match Sorted::open(&path, log) {
+                Ok(Some(segment)) => {
+                    // A segment of the new format holds the entries it is
+                    // named for; the sorted copy is named for none.
+                    let named = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .and_then(segment_range);
+                    if named.is_none_or(|range| range == (segment.from, segment.to)) {
+                        segments.push(segment);
+                    } else {
+                        unused.push(path);
+                    }
+                }
+                Ok(None) => unused.push(path),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => vanished = true,
+                Err(e) => return Err(e).with_context(|| format!("opening {}", path.display())),
+            }
+        }
+        // A merge renames its segment into place before it removes the
+        // segments it took in, so listing again finds the segment that
+        // holds them.
+        if vanished && attempt < LIST_ATTEMPTS {
+            attempt += 1;
+            continue;
+        }
+
+        segments.sort_by_key(|r| (r.from, std::cmp::Reverse(r.to)));
+        let mut chain = Vec::new();
+        let mut at = 0;
+        for segment in segments {
+            if segment.from == at {
+                at = segment.to;
+                chain.push(Arc::new(segment));
+            } else {
+                unused.push(segment.path);
+            }
+        }
+        return Ok((chain, unused));
+    }
+}
+
+/// Removes the file at `path`, if it is still there.
+fn remove_if_there(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("removing {}", path.display())),
+    }
+}
+
+/// Calls `each` with the entries of `inputs`, each sorted by hash with
+/// each hash once, merged in hash order with each hash once: for a hash
+/// more than one input has, the entry of the first that has it. Returns
+/// how many entries it called `each` with. The inputs are read where they
+/// lie, so a merge of segments holds none of them in memory.
+fn merge(
+    inputs: &[&[Entry]],
+    mut each: impl FnMut(&Entry) -> std::io::Result<()>,
+) -> std::io::Result<u64> {
+    let mut at = vec![0usize; inputs.len()];
+    let mut merged = 0u64;
+    loop {
+        let mut least: Option<(usize, &Entry)> = None;
+        let mut left = 0;
+        for (i, input) in inputs.iter().enumerate() {
+            let Some(entry) = input.get(at[i]) else {
+                continue;
+            };
+            left += 1;
+            if least.is_none_or(|(_, l)| entry[..32] < l[..32]) {
+                least = Some((i, entry));
+            }
+        }
+        let Some((first, entry)) = least else {
+            return Ok(merged);
+        };
+
+        // The last input with entries left has nothing to merge with.
+        if left == 1 {
+            for entry in &inputs[first][at[first]..] {
+                each(entry)?;
+            }
+            return Ok(merged + (inputs[first].len() - at[first]) as u64);
+        }
+        each(entry)?;
+        merged += 1;
+        for (i, input) in inputs.iter().enumerate() {
+            if input.get(at[i]).is_some_and(|e| e[..32] == entry[..32]) {
+                at[i] += 1;
+            }
+        }
+    }
+}
+
+/// Writes the entries of `inputs`, oldest first, merged as [`merge`]
+/// merges them, as the segment of the index `log`'s entries from `from` to
+/// `to`: to a file of this writer's own, then renamed into place. Returns
+/// the segment written.
 ///
 /// A process opens a store on each of its threads, as `rewind check`
-/// does, and any of them may write a sorted copy, so the file's name
-/// counts the copies this process has written as well as naming the
-/// process, and is created only if no file has it. A name two writers
-/// shared would be truncated under one by the other.
-fn write_sorted(dir: &Path, entries: &[[u8; INDEX_ENTRY]], covers: u64) -> Result<Sorted> {
+/// does, and any of them may write a segment, so the file's name counts the
+/// segments this process has written as well as naming the process, and is
+/// created only if no file has it. A name two writers shared would be
+/// truncated under one by the other.
+fn write_segment(
+    dir: &Path,
+    log: &File,
+    inputs: &[&[Entry]],
+    from: u64,
+    to: u64,
+) -> Result<Sorted> {
     #[cfg(test)]
     tests::SORTED_WRITES.lock().unwrap().push(dir.to_path_buf());
     static WRITTEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -379,17 +595,27 @@ fn write_sorted(dir: &Path, entries: &[[u8; INDEX_ENTRY]], covers: u64) -> Resul
         .create_new(true)
         .open(&tmp)
         .with_context(|| format!("creating {}", tmp.display()))?;
-    let mut out = BufWriter::new(file);
-    out.write_all(SORTED_MAGIC)?;
-    out.write_all(&covers.to_le_bytes())?;
-    out.write_all(&(entries.len() as u64).to_le_bytes())?;
-    for entry in entries {
-        out.write_all(entry)?;
-    }
+    let mut out = BufWriter::with_capacity(COLLECT_BUFFER, file);
+    out.write_all(&[0; SEGMENT_HEADER])?;
+    let entries = merge(inputs, |entry| out.write_all(entry))?;
     let file = out.into_inner()?;
+
+    // The header, now the count is known, with the index's entries at the
+    // segment's two ends.
+    let mut header = [0u8; SEGMENT_HEADER];
+    header[..8].copy_from_slice(SEGMENT_MAGIC);
+    header[8..16].copy_from_slice(&from.to_le_bytes());
+    header[16..24].copy_from_slice(&to.to_le_bytes());
+    header[24..32].copy_from_slice(&entries.to_le_bytes());
+    let ends = header[32..].as_chunks_mut::<INDEX_ENTRY>().0;
+    for (at, end) in [from, to - 1].into_iter().zip(ends) {
+        log.read_exact_at(end, at * INDEX_ENTRY as u64)?;
+    }
+    file.write_all_at(&header, 0)?;
     file.sync_all()?;
-    fs::rename(&tmp, dir.join(SORTED))?;
-    Sorted::of(file).context("the sorted copy just written does not read")
+    let path = dir.join(format!("{SEGMENT}{from}.{to}"));
+    fs::rename(&tmp, &path)?;
+    Sorted::of(file, &path, log).context("the segment just written does not read")
 }
 
 /// Hashes a page's key for the index's map by taking its first eight
@@ -420,23 +646,31 @@ pub type PageHashes = BuildHasherDefault<PageHasher>;
 /// A set of pages by hash, such as the ones a collection keeps.
 pub type PageSet = HashSet<Hash, PageHashes>;
 
-/// The index as far as this store has read it: a sorted copy of its first
-/// entries, and the entries after those in memory.
+/// The index as far as this store has read it: the sorted segments of its
+/// first entries, and the entries after those in memory.
 struct Index {
-    /// Shared, so a lookup searches it without holding the index.
-    sorted: Option<Arc<Sorted>>,
+    /// The segments, oldest first. Shared, so a lookup searches them
+    /// without holding the index.
+    segments: Arc<[Arc<Sorted>]>,
     pages: HashMap<Hash, Location, PageHashes>,
-    /// How many bytes of the index file the sorted copy and `pages` cover
+    /// How many bytes of the index file the segments and `pages` cover
     /// between them, a whole number of entries.
     read: u64,
-    /// Whether `pages` holds the index past the sorted copy yet.
+    /// Whether `pages` holds the index past the segments yet.
     tail: Tail,
 }
 
-/// Whether a store has read the index past its sorted copy. Reading it
-/// puts every entry there in a map, up to COMPACT_AT of them: 70 ms for
-/// 880,000. A store that only reads pages the sorted copy names, as a
-/// fork of a run recorded before the last sort does, never needs it.
+/// Where a page is in `segments`, the oldest first: the oldest, and
+/// largest, holds most pages, and of two entries for one page the older is
+/// the one a merge keeps.
+fn find_in(segments: &[Arc<Sorted>], hash: &Hash) -> Option<Location> {
+    segments.iter().find_map(|segment| segment.find(hash))
+}
+
+/// Whether a store has read the index past its segments. Reading it puts
+/// every entry there in a map, up to COMPACT_AT of them: 70 ms for
+/// 880,000. A store that only reads pages the segments name, as a fork of a
+/// run recorded before the last sort does, never needs it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Tail {
     Unread,
@@ -449,7 +683,7 @@ impl Index {
         self.pages
             .get(hash)
             .copied()
-            .or_else(|| self.sorted.as_ref()?.find(hash))
+            .or_else(|| find_in(&self.segments, hash))
     }
 }
 
@@ -597,7 +831,7 @@ impl Store {
         // A partial last index entry can only be a crash's, and only an
         // opener with the store to itself may cut it off: with others open
         // it could be an entry still being written. The same goes for a
-        // sorted copy still being written.
+        // segment still being written.
         let lock = open_lock(&dir.join(LOCK))?;
         if lock.try_lock().is_ok() {
             let index = open_index()?;
@@ -607,7 +841,7 @@ impl Store {
                 index.set_len(whole)?;
             }
 
-            // A sorted copy a crash left half written, under its writer's
+            // A segment a crash left half written, under its writer's
             // name, is no one's now.
             let prefix = format!("{SORTED}.");
             for entry in fs::read_dir(dir)? {
@@ -620,6 +854,13 @@ impl Store {
                     fs::remove_file(&path)?;
                 }
             }
+
+            // Nor are segments no store reads from: ones a merge took in
+            // and a crash kept it from removing, or ones of another index.
+            let (_, unused) = chain(dir, &index)?;
+            for path in unused {
+                remove_if_there(&path)?;
+            }
         }
         lock.lock_shared()
             .with_context(|| format!("locking {}", dir.display()))?;
@@ -628,41 +869,33 @@ impl Store {
         // lock: a collector that had the store to itself until now may have
         // renamed a new index over the one there was before.
         let index_log = open_index()?;
-
-        // The sorted copy, unless it covers more than the index holds, which
-        // only a hand could make.
-        let sorted_copy = || -> Result<Option<Sorted>> {
-            let len = index_log.metadata()?.len();
-            Ok(Sorted::open(dir).filter(|s| s.covers * INDEX_ENTRY as u64 <= len))
+        let past = |segments: &[Arc<Sorted>]| -> Result<u64> {
+            Ok(index_log.metadata()?.len() / INDEX_ENTRY as u64 - covered(segments))
         };
-        let past = |sorted: &Option<Sorted>| -> Result<u64> {
-            let covered = sorted.as_ref().map_or(0, |s| s.covers);
-            Ok(index_log.metadata()?.len() / INDEX_ENTRY as u64 - covered)
-        };
-        let mut sorted = sorted_copy()?;
+        let (mut segments, _) = chain(dir, &index_log)?;
 
-        // An index run long past its sorted copy is sorted again, which
-        // takes all of it in memory. Stores opened at once, as a check's
-        // threads open them, take turns: the first sorts it, and the others
-        // then find its copy and read only what came after.
+        // An index run long past its segments gets another, which takes the
+        // entries past them in memory. Stores opened at once, as a check's
+        // threads open them, take turns: the first sorts them, and the
+        // others then find its segment and read only what came after.
         let mut sorting = None;
-        if past(&sorted)? >= COMPACT_AT as u64 {
+        if past(&segments)? >= COMPACT_AT as u64 {
             let lock = open_lock(&dir.join(SORTING_LOCK))?;
             lock.lock()
                 .with_context(|| format!("waiting to sort {}", dir.display()))?;
 
             // Another opener may have sorted it while this one waited.
-            sorted = sorted_copy()?;
-            if past(&sorted)? >= COMPACT_AT as u64 {
+            segments = chain(dir, &index_log)?.0;
+            if past(&segments)? >= COMPACT_AT as u64 {
                 sorting = Some(lock);
             }
         }
-        let read = sorted.as_ref().map_or(0, |s| s.covers * INDEX_ENTRY as u64);
+        let read = covered(&segments) * INDEX_ENTRY as u64;
 
         let store = Store {
             dir: dir.to_path_buf(),
             index: Mutex::new(Index {
-                sorted: sorted.map(Arc::new),
+                segments: segments.into(),
                 pages: HashMap::default(),
                 read,
                 tail: Tail::Unread,
@@ -674,9 +907,9 @@ impl Store {
             _lock: lock,
         };
 
-        // The entries past the copy go straight from the index file into
-        // the new one, rather than through the map first, which would hold
-        // them all twice.
+        // The entries past the segments go straight from the index file
+        // into the new segment, rather than through the map first, which
+        // would hold them twice.
         if sorting.is_some() {
             let len = store.index_log.metadata()?.len();
             store.index().read = len / INDEX_ENTRY as u64 * INDEX_ENTRY as u64;
@@ -684,13 +917,13 @@ impl Store {
         }
         drop(sorting);
 
-        // The index past the sorted copy is read when a lookup misses the
-        // copy, or before a page is put, so a page already stored is not
-        // stored again.
+        // The index past the segments is read when a lookup misses them, or
+        // before a page is put, so a page already stored is not stored
+        // again.
         Ok(store)
     }
 
-    /// Reads the index past the sorted copy, unless this store has.
+    /// Reads the index past the segments, unless this store has.
     fn read_tail(&self) -> Result<()> {
         if self.index().tail == Tail::Unread {
             self.refresh()?;
@@ -698,34 +931,50 @@ impl Store {
         Ok(())
     }
 
-    /// Writes a new sorted copy that covers the index up to where this store
-    /// has read it, and reads from it from now on.
+    /// Writes a segment that covers the index from the last segment up to
+    /// where this store has read it, taking in as many segments before it
+    /// as [`MERGE_FACTOR`] says, and reads from the segments from now on.
     fn compact(&self) -> Result<()> {
         let mut index = self.index();
-        let covered = index.sorted.as_ref().map_or(0, |s| s.covers);
-        let mut entries = match &index.sorted {
-            Some(sorted) => sorted.all()?,
-            None => Vec::new(),
-        };
+        let covered = covered(&index.segments);
+        let read = index.read / INDEX_ENTRY as u64;
 
-        // The entries after the old copy, as the index file has them.
-        let tail = index.read - covered * INDEX_ENTRY as u64;
-        let mut bytes = vec![0u8; tail as usize];
-        File::open(self.dir.join(INDEX))?
-            .read_exact_at(&mut bytes, covered * INDEX_ENTRY as u64)?;
-        entries.extend_from_slice(bytes.as_chunks::<INDEX_ENTRY>().0);
+        // The entries after the last segment, as the index file has them,
+        // then sorted. Stable, so of two entries for one hash the earlier
+        // is kept.
+        let mut tail: Vec<Entry> = vec![[0; INDEX_ENTRY]; (read - covered) as usize];
+        self.index_log
+            .read_exact_at(tail.as_flattened_mut(), covered * INDEX_ENTRY as u64)?;
+        tail.sort_by(|a, b| a[..32].cmp(&b[..32]));
+        tail.dedup_by(|a, b| a[..32] == b[..32]);
 
-        // Stable, so of two entries for one hash the earlier is kept.
-        entries.sort_by(|a, b| a[..32].cmp(&b[..32]));
-        entries.dedup_by(|a, b| a[..32] == b[..32]);
-        // The copy this store wrote, which covers every entry it has read,
-        // rather than whichever copy has the name by now.
-        index.sorted = Some(Arc::new(write_sorted(
-            &self.dir,
-            &entries,
-            index.read / INDEX_ENTRY as u64,
-        )?));
+        // The segments the new one takes in: the newest while it covers at
+        // most MERGE_FACTOR times what the new one covers without it.
+        let mut take = index.segments.len();
+        let mut covers = read - covered;
+        while take > 0 && index.segments[take - 1].covers() <= MERGE_FACTOR * covers {
+            take -= 1;
+            covers += index.segments[take].covers();
+        }
+        let from = index.segments.get(take).map_or(covered, |r| r.from);
+        let mut inputs: Vec<&[Entry]> = index.segments[take..].iter().map(|r| r.all()).collect();
+        inputs.push(&tail);
+        let segment = write_segment(&self.dir, &self.index_log, &inputs, from, read)?;
+
+        // The segments taken in go once the new segment has its name; a
+        // store that has one mapped keeps reading it.
+        let merged: Vec<PathBuf> = index.segments[take..]
+            .iter()
+            .map(|r| r.path.clone())
+            .collect();
+        let mut segments: Vec<Arc<Sorted>> = index.segments[..take].to_vec();
+        segments.push(Arc::new(segment));
+        index.segments = segments.into();
         index.pages.clear();
+        drop(index);
+        for path in merged {
+            remove_if_there(&path)?;
+        }
         Ok(())
     }
 
@@ -830,18 +1079,17 @@ impl Store {
     }
 
     /// Where a page is, as far as this store has read the index. The
-    /// sorted copy is searched with the index let go, since a search
-    /// reads its file and threads restoring a machine look pages up at
-    /// once.
+    /// segments are searched with the index let go, since a search reads
+    /// their files and threads restoring a machine look pages up at once.
     fn known(&self, hash: &Hash) -> Option<Location> {
-        let sorted = {
+        let segments = {
             let index = self.index();
             if let Some(loc) = index.pages.get(hash) {
                 return Some(*loc);
             }
-            index.sorted.clone()?
+            index.segments.clone()
         };
-        sorted.find(hash)
+        find_in(&segments, hash)
     }
 
     /// The hash of each of `pages`, as [`Store::hash`] names it, in order,
@@ -1039,32 +1287,26 @@ impl Store {
     }
 
     /// How much the store holds, as far as this store has read the index.
-    /// Reads the whole sorted copy.
+    /// Reads every segment whole.
     pub fn stats(&self) -> Stats {
-        // A store whose index cannot be read past the sorted copy counts
-        // what it has read.
+        // A store whose index cannot be read past the segments counts what
+        // it has read.
         let _ = self.read_tail();
         let index = self.index();
-        let sorted = index
-            .sorted
-            .as_ref()
-            .and_then(|s| s.all().ok())
-            .unwrap_or_default();
-        let in_sorted = |hash: &Hash| index.sorted.as_ref().and_then(|s| s.find(hash)).is_some();
-        let after: Vec<&Location> = index
-            .pages
-            .iter()
-            .filter(|(hash, _)| !in_sorted(hash))
-            .map(|(_, loc)| loc)
-            .collect();
-        Stats {
-            pages: sorted.len() + after.len(),
-            stored_bytes: sorted
-                .iter()
-                .map(|e| Location::of(e).len as u64)
-                .sum::<u64>()
-                + after.iter().map(|l| l.len as u64).sum::<u64>(),
+        let mut stats = Stats::default();
+        let segments: Vec<&[Entry]> = index.segments.iter().map(|r| r.all()).collect();
+        let _ = merge(&segments, |entry| {
+            stats.pages += 1;
+            stats.stored_bytes += u64::from(Location::of(entry).len);
+            Ok(())
+        });
+        for (hash, loc) in &index.pages {
+            if find_in(&index.segments, hash).is_none() {
+                stats.pages += 1;
+                stats.stored_bytes += u64::from(loc.len);
+            }
         }
+        stats
     }
 }
 
@@ -1155,13 +1397,16 @@ impl Collector {
         let moves = rewritten.iter().any(|p| p.kept > 0);
 
         // The index is written again when it loses an entry or a kept page
-        // moves, along with a sorted copy of all of it when it is as long
-        // as an opener would sort.
+        // moves, along with one segment of all of it when it is as long as
+        // an opener would sort.
         let reindex = dropped > 0 || moves;
-        let index_now = file_len(&self.dir.join(INDEX))? + file_len(&self.dir.join(SORTED))?;
+        let mut index_now = file_len(&self.dir.join(INDEX))?;
+        for segment in segment_files(&self.dir)? {
+            index_now += file_len(&segment)?;
+        }
         let entries_len = (kept.len() * INDEX_ENTRY) as u64;
         let sorted_len = if kept.len() >= COMPACT_AT {
-            SORTED_HEADER as u64 + entries_len
+            SEGMENT_HEADER as u64 + entries_len
         } else {
             0
         };
@@ -1292,9 +1537,9 @@ impl Collector {
     }
 
     /// Replaces the index with one entry for each page in `kept`, sorted,
-    /// and a sorted copy covering all of it when it is as long as an opener
-    /// would sort. The old sorted copy goes first, so that no crash leaves
-    /// it beside an index it does not describe; until the rename the old
+    /// and one segment covering all of it when it is as long as an opener
+    /// would sort. The old segments go first, so that no crash leaves them
+    /// beside an index they do not describe; until the rename the old
     /// index stands, and after it the new one.
     fn write_index(&self, kept: &HashMap<Hash, Location, PageHashes>) -> Result<()> {
         let mut entries: Vec<[u8; INDEX_ENTRY]> = kept
@@ -1320,17 +1565,16 @@ impl Collector {
         }
         out.into_inner()?.sync_all()?;
 
-        match fs::remove_file(self.dir.join(SORTED)) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e.into()),
+        for segment in segment_files(&self.dir)? {
+            remove_if_there(&segment)?;
         }
         fs::rename(&tmp, self.dir.join(INDEX))?;
         File::open(&self.dir)?.sync_all()?;
         if entries.len() < COMPACT_AT {
             return Ok(());
         }
-        write_sorted(&self.dir, &entries, entries.len() as u64)?;
+        let log = File::open(self.dir.join(INDEX))?;
+        write_segment(&self.dir, &log, &[&entries], 0, entries.len() as u64)?;
         Ok(())
     }
 }
@@ -1414,7 +1658,26 @@ mod tests {
         other.write_all(OTHER_WRITERS_BYTES).unwrap();
     }
 
-    /// How many sorted copies were written in `dir`.
+    /// The segments a store opened in `dir` reads, oldest first, and the
+    /// files there that hold no segment of them.
+    fn listed(dir: &Path) -> (Vec<Arc<Sorted>>, Vec<PathBuf>) {
+        let log = File::open(dir.join(INDEX)).unwrap();
+        chain(dir, &log).unwrap()
+    }
+
+    /// The segments a store opened in `dir` reads, oldest first.
+    fn segments(dir: &Path) -> Vec<Arc<Sorted>> {
+        listed(dir).0
+    }
+
+    /// The one segment a store opened in `dir` reads.
+    fn only_segment(dir: &Path) -> Arc<Sorted> {
+        let mut segments = segments(dir);
+        assert_eq!(segments.len(), 1, "one segment");
+        segments.remove(0)
+    }
+
+    /// How many segments were written in `dir`.
     fn sorted_copies_written(dir: &Path) -> usize {
         SORTED_WRITES
             .lock()
@@ -1783,8 +2046,8 @@ mod tests {
             put_pages(&mut store, 1, 10)
         };
         let store = Store::open(&dir).unwrap();
-        let sorted = Sorted::open(&dir).expect("a sorted copy was written");
-        assert_eq!((sorted.entries, sorted.covers), (10, 10));
+        let segment = only_segment(&dir);
+        assert_eq!((segment.entries, segment.from, segment.to), (10, 0, 10));
         assert!(store.index.lock().unwrap().pages.is_empty());
         let mut out = vec![0u8; PAGE];
         for (hash, fill) in hashes.iter().zip(1..) {
@@ -1853,8 +2116,10 @@ mod tests {
         drop(writer);
 
         let store = Store::open(&dir).unwrap();
-        let sorted = Sorted::open(&dir).expect("a sorted copy was written");
-        assert_eq!(sorted.entries, hashes.len() as u64);
+        let segments = segments(&dir);
+        let held: u64 = segments.iter().map(|r| r.entries).sum();
+        assert_eq!(held, hashes.len() as u64);
+        assert_eq!(covered(&segments), hashes.len() as u64);
         let mut out = vec![0u8; PAGE];
         for (hash, fill) in hashes.iter().zip(1..) {
             store.get(hash, &mut out).unwrap();
@@ -1879,8 +2144,8 @@ mod tests {
             put_pages(&mut first, 4, 2);
         }
         let store = Store::open(&dir).unwrap();
-        let sorted = Sorted::open(&dir).unwrap();
-        assert_eq!((sorted.entries, sorted.covers), (5, 6));
+        let segment = only_segment(&dir);
+        assert_eq!((segment.entries, segment.to), (5, 6));
         assert_eq!(store.stats().pages, 5);
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -1925,12 +2190,11 @@ mod tests {
             put_pages(&mut store, 1, 10)
         };
         drop(Store::open(&dir).unwrap());
-        let sorted = OpenOptions::new()
-            .write(true)
-            .open(dir.join(SORTED))
-            .unwrap();
-        let len = sorted.metadata().unwrap().len();
-        sorted.set_len(len - INDEX_ENTRY as u64).unwrap();
+        let path = only_segment(&dir).path.clone();
+        let segment = OpenOptions::new().write(true).open(&path).unwrap();
+        let len = segment.metadata().unwrap().len();
+        segment.set_len(len - INDEX_ENTRY as u64).unwrap();
+        assert!(segments(&dir).is_empty());
 
         let store = Store::open(&dir).unwrap();
         let mut out = vec![0u8; PAGE];
@@ -1943,14 +2207,15 @@ mod tests {
 
     #[test]
     fn a_damaged_sorted_copy_is_ignored() {
-        // A sorted copy that is not one, as a crash mid-rename cannot make
-        // but a stray file could, is passed over for the log.
+        // A sorted copy or segment that is not one, as a crash mid-rename
+        // cannot make but a stray file could, is passed over for the log.
         let dir = tmp("damaged");
         let hash = {
             let mut store = Store::open(&dir).unwrap();
             store.put(&page(9)).unwrap()
         };
         fs::write(dir.join(SORTED), b"not a sorted index").unwrap();
+        fs::write(dir.join(format!("{SEGMENT}0.1")), b"not a segment either").unwrap();
         let store = Store::open(&dir).unwrap();
         let mut out = vec![0u8; PAGE];
         store.get(&hash, &mut out).unwrap();
@@ -1972,9 +2237,11 @@ mod tests {
                 e
             })
             .collect();
+        // The index has them in the order they were made.
+        fs::write(dir.join(INDEX), entries.as_flattened()).unwrap();
+        let log = File::open(dir.join(INDEX)).unwrap();
         entries.sort_unstable_by(|a, b| a[..32].cmp(&b[..32]));
-        write_sorted(&dir, &entries, 1000).unwrap();
-        let sorted = Sorted::open(&dir).unwrap();
+        let sorted = write_segment(&dir, &log, &[&entries], 0, 1000).unwrap();
         for i in 0u32..1000 {
             let key = *blake3::hash(&i.to_le_bytes()).as_bytes();
             assert_eq!(sorted.find(&key).map(|l| l.pack), Some(i));
@@ -1983,7 +2250,235 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// The set of `hashes`, as `Collector::collect` takes the pages to keep.
+    #[test]
+    fn a_new_segment_leaves_a_larger_one_as_it_is() {
+        // Twenty pages make one segment. Four more, COMPACT_AT of them,
+        // are sorted into a segment of their own on the next open, and the
+        // segment of twenty is neither rewritten nor read into memory;
+        // every page is still found, and counted once.
+        let dir = tmp("leave-larger");
+        let mut hashes = put_pages(&mut Store::open(&dir).unwrap(), 1, 20);
+        drop(Store::open(&dir).unwrap());
+        let first = only_segment(&dir);
+        let written = sorted_copies_written(&dir);
+
+        hashes.extend(put_pages(&mut Store::open(&dir).unwrap(), 21, 4));
+        let store = Store::open(&dir).unwrap();
+        assert_eq!(sorted_copies_written(&dir), written + 1);
+        let segments = segments(&dir);
+        let ranges: Vec<(u64, u64)> = segments.iter().map(|r| (r.from, r.to)).collect();
+        assert_eq!(ranges, vec![(0, 20), (20, 24)]);
+        assert_eq!(segments[0].path, first.path);
+        let mut out = vec![0u8; PAGE];
+        for (hash, fill) in hashes.iter().zip(1..) {
+            store.get(hash, &mut out).unwrap();
+            assert_eq!(out, page(fill));
+        }
+        assert_eq!(store.stats().pages, 24);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn segments_stay_few_as_the_index_grows() {
+        // Forty rounds of COMPACT_AT new pages, the store opened after
+        // each: each segment covers more than MERGE_FACTOR times the
+        // segment after it, so there are about log2 of the rounds of them,
+        // and every page is found through them.
+        let dir = tmp("grow");
+        let mut hashes = Vec::new();
+        for round in 0..40u8 {
+            hashes.extend(put_pages(&mut Store::open(&dir).unwrap(), 1 + round * 4, 4));
+            drop(Store::open(&dir).unwrap());
+            let segments = segments(&dir);
+            assert_eq!(covered(&segments), hashes.len() as u64);
+            for pair in segments.windows(2) {
+                assert!(pair[0].covers() > MERGE_FACTOR * pair[1].covers());
+            }
+            assert!(
+                segments.len() <= 4,
+                "{} segments after round {round}",
+                segments.len()
+            );
+        }
+        let store = Store::open(&dir).unwrap();
+        for hash in &hashes {
+            assert!(store.contains(hash));
+        }
+        assert_eq!(store.stats().pages, hashes.len());
+        assert!(listed(&dir).1.is_empty());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_page_two_segments_hold_is_counted_once() {
+        // A store that read the index before another stored a page stores
+        // it again, and here the two entries fall in segments a merge does
+        // not join: the page is counted once, and found.
+        let dir = tmp("two-segments");
+        put_pages(&mut Store::open(&dir).unwrap(), 1, 20);
+        drop(Store::open(&dir).unwrap());
+        let mut late = Store::open(&dir).unwrap();
+        late.put(&page(40)).unwrap();
+        put_pages(&mut Store::open(&dir).unwrap(), 60, 12);
+        drop(Store::open(&dir).unwrap());
+        put_pages(&mut late, 60, 1);
+        put_pages(&mut late, 50, 3);
+        drop(late);
+
+        let store = Store::open(&dir).unwrap();
+        let ranges: Vec<(u64, u64)> = segments(&dir).iter().map(|r| (r.from, r.to)).collect();
+        assert_eq!(ranges, vec![(0, 33), (33, 37)]);
+        assert_eq!(store.stats().pages, 36);
+        assert!(store.contains(&Store::hash(&page(60))));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Writes the sorted copy rewind 0.12 writes of the index in `dir`.
+    fn write_old_sorted_copy(dir: &Path) {
+        let log = fs::read(dir.join(INDEX)).unwrap();
+        let mut entries: Vec<Entry> = log.as_chunks::<INDEX_ENTRY>().0.to_vec();
+        let covers = entries.len() as u64;
+        entries.sort_by(|a, b| a[..32].cmp(&b[..32]));
+        entries.dedup_by(|a, b| a[..32] == b[..32]);
+        let mut bytes = SORTED_MAGIC.to_vec();
+        bytes.extend_from_slice(&covers.to_le_bytes());
+        bytes.extend_from_slice(&(entries.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(entries.as_flattened());
+        fs::write(dir.join(SORTED), bytes).unwrap();
+    }
+
+    #[test]
+    fn a_sorted_copy_from_an_older_build_is_read_as_a_segment() {
+        // A store rewind 0.12 sorted: its sorted copy is read as the first
+        // segment, not sorted again, until a merge takes it in and removes
+        // it.
+        let dir = tmp("older-copy");
+        let mut hashes = put_pages(&mut Store::open(&dir).unwrap(), 1, 10);
+        write_old_sorted_copy(&dir);
+        let store = Store::open(&dir).unwrap();
+        assert_eq!(sorted_copies_written(&dir), 0);
+        let segment = only_segment(&dir);
+        assert_eq!(
+            (segment.from, segment.to, segment.path.clone()),
+            (0, 10, dir.join(SORTED))
+        );
+        assert!(store.index.lock().unwrap().pages.is_empty());
+        drop((store, segment));
+
+        hashes.extend(put_pages(&mut Store::open(&dir).unwrap(), 11, 5));
+        let store = Store::open(&dir).unwrap();
+        let segment = only_segment(&dir);
+        assert_eq!((segment.from, segment.to), (0, 15));
+        assert!(!dir.join(SORTED).exists());
+        let mut out = vec![0u8; PAGE];
+        for (hash, fill) in hashes.iter().zip(1..) {
+            store.get(hash, &mut out).unwrap();
+            assert_eq!(out, page(fill));
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_segment_of_another_index_is_not_read() {
+        // A collector of rewind 0.12 rewrites the index and removes only
+        // the sorted copy it knows, leaving a segment beside an index it
+        // does not describe. The segment is passed over and removed, and
+        // the pages are found through the index.
+        let dir = tmp("other-index");
+        let hashes = put_pages(&mut Store::open(&dir).unwrap(), 1, 10);
+        drop(Store::open(&dir).unwrap());
+        let path = only_segment(&dir).path.clone();
+
+        let log = fs::read(dir.join(INDEX)).unwrap();
+        let mut entries: Vec<Entry> = log.as_chunks::<INDEX_ENTRY>().0.to_vec();
+        entries.reverse();
+        fs::write(dir.join(INDEX), entries.as_flattened()).unwrap();
+        let (segments, unused) = listed(&dir);
+        assert!(segments.is_empty());
+        assert_eq!(unused, vec![path.clone()]);
+
+        let store = Store::open(&dir).unwrap();
+        for hash in &hashes {
+            assert!(store.contains(hash));
+        }
+        assert_eq!(only_segment(&dir).to, 10);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn segments_a_merge_left_behind_are_removed() {
+        // A crash after a merge renamed its segment into place and before
+        // it removed the segments it took in leaves them beside it. Stores
+        // read the merged segment, and one with the store to itself
+        // removes them.
+        let dir = tmp("left-behind");
+        put_pages(&mut Store::open(&dir).unwrap(), 1, 10);
+        drop(Store::open(&dir).unwrap());
+        let taken = only_segment(&dir).path.clone();
+        let kept = fs::read(&taken).unwrap();
+        put_pages(&mut Store::open(&dir).unwrap(), 11, 10);
+        drop(Store::open(&dir).unwrap());
+        assert!(!taken.exists());
+        fs::write(&taken, kept).unwrap();
+
+        let (segments, unused) = listed(&dir);
+        assert_eq!(segments.len(), 1);
+        assert_eq!((segments[0].from, segments[0].to), (0, 20));
+        assert_eq!(unused, vec![taken.clone()]);
+        drop(segments);
+        drop(Store::open(&dir).unwrap());
+        assert!(!taken.exists());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_collection_leaves_one_segment() {
+        // Segments of the old index go with it: the collector writes one
+        // segment of the new index, which openers read.
+        let dir = tmp("collect-segments");
+        let mut hashes = put_pages(&mut Store::open(&dir).unwrap(), 1, 20);
+        drop(Store::open(&dir).unwrap());
+        hashes.extend(put_pages(&mut Store::open(&dir).unwrap(), 21, 4));
+        drop(Store::open(&dir).unwrap());
+        assert_eq!(segments(&dir).len(), 2);
+
+        let collector = Collector::lock(&dir).unwrap().unwrap();
+        collector.collect(&live(&hashes[2..]), Act::Remove).unwrap();
+        drop(collector);
+        assert_eq!(segment_files(&dir).unwrap().len(), 1);
+        let segment = only_segment(&dir);
+        assert_eq!((segment.from, segment.to, segment.entries), (0, 22, 22));
+        let store = Store::open(&dir).unwrap();
+        assert!(!store.contains(&hashes[0]));
+        for hash in &hashes[2..] {
+            assert!(store.contains(hash));
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_merge_keeps_each_hash_once_from_the_oldest_input() {
+        let entry = |key: u8, pack: u32| {
+            let mut e = [0u8; INDEX_ENTRY];
+            e[0] = key;
+            e[32..36].copy_from_slice(&pack.to_le_bytes());
+            e
+        };
+        let old = [entry(1, 0), entry(3, 0), entry(5, 0)];
+        let new = [entry(2, 1), entry(3, 1), entry(6, 1)];
+        let newest = [entry(5, 2), entry(7, 2)];
+        let mut out = Vec::new();
+        let n = merge(&[&old, &new, &newest], |e| {
+            out.push((e[0], Location::of(e).pack));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(n, 6);
+        assert_eq!(out, vec![(1, 0), (2, 1), (3, 0), (5, 0), (6, 1), (7, 2)]);
+    }
+
+    /// The set of `hashes`, as `Collector::collect` takes the pages to
+    /// keep.
     fn live(hashes: &[Hash]) -> PageSet {
         hashes.iter().copied().collect()
     }
@@ -1995,8 +2490,12 @@ mod tests {
             .map(|e| e.unwrap().metadata().unwrap().len())
             .sum();
         let index = fs::metadata(dir.join("index")).map_or(0, |m| m.len());
-        let sorted = fs::metadata(dir.join(SORTED)).map_or(0, |m| m.len());
-        packs + index + sorted
+        let segments: u64 = segment_files(dir)
+            .unwrap()
+            .iter()
+            .map(|r| fs::metadata(r).unwrap().len())
+            .sum();
+        packs + index + segments
     }
 
     #[test]
