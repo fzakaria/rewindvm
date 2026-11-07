@@ -37,6 +37,11 @@ const ROUND: u64 = 1 << 20;
 /// How many lookups each of the two lookup timings makes.
 const LOOKUPS: u64 = 1 << 20;
 
+/// Cache files counted by the benchmark, excluding the index's generation
+/// link, which shares the log's storage.
+const SORTED: &str = "index.sorted";
+const SEGMENT: &str = "index.segment.";
+
 /// splitmix64, so every run of the benchmark writes the same hashes.
 fn mix(mut x: u64) -> u64 {
     x = x.wrapping_add(0x9e37_79b9_7f4a_7c15);
@@ -106,7 +111,7 @@ fn sorted_files(dir: &Path) -> Result<(usize, u64)> {
         let entry = entry?;
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if name.starts_with("index.") && name != "index.collecting" {
+        if name == SORTED || name.starts_with(SEGMENT) {
             count += 1;
             bytes += entry.metadata()?.len();
         }

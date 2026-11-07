@@ -964,6 +964,22 @@ one to three. A missing page also costs rereading the index past the segments,
 most of that column. A store that rewind 0.12 sorted is read with its sorted
 copy as the first segment, until a merge takes it in.
 
+The segments also keep a hard link to the index they describe, named
+`index.segments`. A collector replaces the index by rename, so an opener
+rejects segments whose link names another file, even after a 0.12 collector
+that does not know about segments. Comparing only the entries at a segment's
+ends misses a collection that moves an interior page. The link prevents the
+old index's inode number from being reused; an exclusive opener removes a
+stale link, releasing the old index. Rebinding the cache removes stale
+segments durably before linking the new index. A copied store that loses the
+hard-link relationship rebuilds its segments from the index.
+
+Keyframe memory is a table of page hashes bounded by the VM's allocated RAM.
+Full keyframes and deltas reject out-of-range page numbers before allocating
+or changing the table, including zero pages that delta trimming would omit.
+The table allocates only through the highest nonzero page and reports an
+allocation failure as an error.
+
 [casita](https://casita.rs) was the other candidate. It is a content-addressed
 store from Cachix with BLAKE3 and FastCDC chunking. It fits disk images and
 build artifacts well, and its sync would suit sharing runs between machines.

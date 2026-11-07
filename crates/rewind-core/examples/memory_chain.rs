@@ -13,6 +13,7 @@
 
 use std::time::Instant;
 
+use anyhow::Result;
 use rewind_core::keyframes::Memory;
 
 const PAGES: u32 = 3 << 18;
@@ -48,7 +49,7 @@ fn time<T>(name: &str, times: usize, mut work: impl FnMut() -> T) -> T {
     out.expect("times is at least one")
 }
 
-fn main() {
+fn main() -> Result<()> {
     let full: Vec<(u32, [u8; 32])> = (0..PAGES)
         .filter(|p| mix(u64::from(*p)) % 10 < 6)
         .map(|p| (p, hash(u64::from(p))))
@@ -76,28 +77,32 @@ fn main() {
     );
 
     let base = time("from_pages (full keyframe)", 5, || {
-        Memory::from_pages(&full)
-    });
-    time("apply full + deltas (Memory::of a chain)", 5, || {
-        let mut memory = Memory::default();
-        memory.apply(None, &full);
-        for (d, delta) in deltas.iter().enumerate() {
-            memory.apply(Some(d as u64), delta);
-        }
-        memory
-    });
-    time("trim each delta against memory", 5, || {
-        let mut memory = Memory::from_pages(&full);
+        Memory::from_pages(&full, PAGES as usize)
+    })?;
+    time(
+        "apply full + deltas (Memory::of a chain)",
+        5,
+        || -> Result<_> {
+            let mut memory = Memory::new(PAGES as usize);
+            memory.apply(None, &full)?;
+            for (d, delta) in deltas.iter().enumerate() {
+                memory.apply(Some(d as u64), delta)?;
+            }
+            Ok(memory)
+        },
+    )?;
+    time("trim each delta against memory", 5, || -> Result<_> {
+        let mut memory = Memory::from_pages(&full, PAGES as usize)?;
         let mut kept = 0;
         for (d, delta) in deltas.iter().enumerate() {
             let mut pages = delta.clone();
-            memory.trim(Some(d as u64), &mut pages);
+            memory.trim(Some(d as u64), &mut pages)?;
             kept += pages.len();
         }
-        kept
-    });
-    let mut other = Memory::from_pages(&full);
-    other.apply(Some(0), &deltas[0]);
+        Ok(kept)
+    })?;
+    let mut other = Memory::from_pages(&full, PAGES as usize)?;
+    other.apply(Some(0), &deltas[0])?;
     let differing = time("differing (two whole memories)", 5, || {
         base.differing(&other)
     });
@@ -114,4 +119,5 @@ fn main() {
         }
         zero
     });
+    Ok(())
 }

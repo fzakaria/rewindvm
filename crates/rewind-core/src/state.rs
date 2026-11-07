@@ -170,14 +170,15 @@ impl<'a> Watch<'a> {
         store: Option<&'a Store>,
         system_map: Option<String>,
         start: Option<u64>,
+        ram_pages: usize,
     ) -> Result<Watch<'a>> {
         let mut watch = Watch {
             layers,
             store,
             system_map,
             parent: start,
-            replayed: Memory::default(),
-            recorded: Memory::default(),
+            replayed: Memory::new(ram_pages),
+            recorded: Memory::new(ram_pages),
             recorded_at: None,
             written: Written::Any,
             loaded: HashMap::new(),
@@ -190,7 +191,7 @@ impl<'a> Watch<'a> {
             watch.recorded_memory(step)?;
             for kf in watch.chain(step)? {
                 let kf = &watch.loaded[&kf];
-                watch.replayed.apply(kf.parent, &kf.pages);
+                watch.replayed.apply(kf.parent, &kf.pages)?;
             }
         }
         Ok(watch)
@@ -203,7 +204,7 @@ impl<'a> Watch<'a> {
     pub fn at_keyframe(&mut self, machine: &mut Machine) -> Result<()> {
         let step = machine.step();
         let mut captured = machine.keyframe(&mut HashPages, self.parent)?;
-        self.replayed.apply(captured.parent, &captured.pages);
+        self.replayed.apply(captured.parent, &captured.pages)?;
         self.parent = Some(step);
         if self.compared.first.is_some() {
             return Ok(());
@@ -319,14 +320,13 @@ impl<'a> Watch<'a> {
         let from = match (parent, self.recorded_at) {
             (Some(p), Some(at)) if p == at => chain.len() - 1,
             _ => {
-                self.recorded = Memory::default();
                 self.written = Written::Any;
                 0
             }
         };
         for kf in &chain[from..] {
             let kf = &self.loaded[kf];
-            self.recorded.apply(kf.parent, &kf.pages);
+            self.recorded.apply(kf.parent, &kf.pages)?;
             self.written.add(&kf.pages);
         }
         self.recorded_at = Some(step);
@@ -432,14 +432,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_recorded_keyframe_cannot_allocate_past_guest_ram() {
+        // Read a malformed keyframe through the replay watch, with a page
+        // number that formerly requested a 128 GiB table.
+        const RAM_PAGES: usize = 64;
+        const STEP: u64 = 1;
+        let dir =
+            std::env::temp_dir().join(format!("rewind-state-page-bound-{}", std::process::id()));
+        let mut keyframe = Keyframe::default();
+        keyframe.step = STEP;
+        keyframe.pages = vec![(u32::MAX, ZERO_PAGE)];
+        crate::keyframes::save(&dir, &keyframe).unwrap();
+        let layers = Layers::open(&dir, None).unwrap();
+        let result = Watch::new(&layers, None, None, Some(STEP), RAM_PAGES);
+        std::fs::remove_dir_all(dir).unwrap();
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("outside the VM's memory")
+        );
+    }
+
+    #[test]
     fn memories_differ_where_a_page_hash_differs_or_one_side_has_none() {
         // Page 1 has other contents on each side, page 2 only on the left,
         // and page 3 is the same on both: pages 1 and 2 differ, page 2
         // with the zero page's hash on the right.
-        let mut left = Memory::default();
-        left.apply(None, &[(1, [1; 32]), (2, [2; 32]), (3, [3; 32])]);
-        let mut right = Memory::default();
-        right.apply(None, &[(1, [9; 32]), (3, [3; 32])]);
+        const RAM_PAGES: usize = 4;
+        let mut left = Memory::new(RAM_PAGES);
+        left.apply(None, &[(1, [1; 32]), (2, [2; 32]), (3, [3; 32])])
+            .unwrap();
+        let mut right = Memory::new(RAM_PAGES);
+        right.apply(None, &[(1, [9; 32]), (3, [3; 32])]).unwrap();
         assert_eq!(
             left.differing(&right),
             vec![(1, [1; 32], [9; 32]), (2, [2; 32], ZERO_PAGE)]
@@ -454,12 +479,13 @@ mod tests {
         // pages written, 5 and 6 differ, which is what comparing every page
         // finds; among a list without them, none do; and the list may name
         // a page twice and out of order.
-        let mut left = Memory::default();
-        left.apply(None, &[(1, [1; 32]), (2, [2; 32])]);
-        let mut right = Memory::default();
-        right.apply(None, &[(1, [1; 32]), (2, [2; 32])]);
-        left.apply(Some(1), &[(5, [5; 32]), (7, [7; 32])]);
-        right.apply(Some(1), &[(6, [6; 32]), (7, [7; 32])]);
+        const RAM_PAGES: usize = 8;
+        let mut left = Memory::new(RAM_PAGES);
+        left.apply(None, &[(1, [1; 32]), (2, [2; 32])]).unwrap();
+        let mut right = Memory::new(RAM_PAGES);
+        right.apply(None, &[(1, [1; 32]), (2, [2; 32])]).unwrap();
+        left.apply(Some(1), &[(5, [5; 32]), (7, [7; 32])]).unwrap();
+        right.apply(Some(1), &[(6, [6; 32]), (7, [7; 32])]).unwrap();
         let differing = vec![(5, [5; 32], ZERO_PAGE), (6, ZERO_PAGE, [6; 32])];
         assert_eq!(left.differing_among(&right, &[7, 6, 5, 7]), differing);
         assert_eq!(left.differing(&right), differing);

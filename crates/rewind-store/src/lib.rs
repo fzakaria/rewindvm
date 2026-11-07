@@ -55,7 +55,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::hash::{BuildHasherDefault, Hasher};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
-use std::os::unix::fs::FileExt;
+use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -104,15 +104,20 @@ const SORTED: &str = "index.sorted";
 const SORTED_MAGIC: &[u8; 8] = b"rwsort02";
 const SORTED_HEADER: usize = 24;
 
+/// A hard link to the index the segments describe. A collector replaces
+/// the index by rename, even in older builds, so the link identifies that
+/// index until the segments go. Keeping the link also prevents the old
+/// inode number from being reused while stale segments still name it.
+const SEGMENT_INDEX: &str = "index.segments";
+
 /// A sorted segment of the index's entries from `from` to `to`, named
 /// `index.segment.<from>.<to>`: a header of a magic value, `from`, `to`,
 /// how many entries it holds, and the index's entries at `from` and at
 /// `to` less one as the index had them when the segment was written, then
 /// the entries it holds, as in [`SORTED`]. A segment whose two entries are
-/// not the index's at those places describes another index, as one a
-/// collector of rewind 0.12, which knows no segments, leaves beside the
-/// index it wrote, and is not used. Segments are written whole and never
-/// changed.
+/// not the index's at those places is not used. The endpoints alone cannot
+/// detect a collector moving an interior page, so SEGMENT_INDEX must also
+/// name the current index. Segments are written whole and never changed.
 const SEGMENT: &str = "index.segment.";
 const SEGMENT_MAGIC: &[u8; 8] = b"rwsort03";
 const SEGMENT_HEADER: usize = 32 + 2 * INDEX_ENTRY;
@@ -342,6 +347,9 @@ impl Sorted {
             file.read_exact_at(&mut header, 0).ok()?;
             (SORTED_HEADER, 0, u64_at(&header, 8), u64_at(&header, 16))
         } else if &magic == SEGMENT_MAGIC {
+            if !segments_match_index(path.parent()?, log).ok()? {
+                return None;
+            }
             let mut header = [0u8; SEGMENT_HEADER];
             file.read_exact_at(&mut header, 0).ok()?;
             let (from, to) = (u64_at(&header, 8), u64_at(&header, 16));
@@ -457,6 +465,40 @@ fn segment_files(dir: &Path) -> Result<Vec<PathBuf>> {
         }
     }
     Ok(files)
+}
+
+/// Whether the segment generation still names the open index. Appends
+/// keep the identity; a collector's replacement changes it.
+fn segments_match_index(dir: &Path, log: &File) -> Result<bool> {
+    let generation = match fs::metadata(dir.join(SEGMENT_INDEX)) {
+        Ok(metadata) => metadata,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e.into()),
+    };
+    let index = log.metadata()?;
+    Ok((generation.dev(), generation.ino()) == (index.dev(), index.ino()))
+}
+
+/// Binds new segments to the current index. The caller holds the sorting
+/// lock or the store exclusively, so no other segment writer can bind a
+/// generation meanwhile. Existing readers keep their mapped files.
+fn bind_segments(dir: &Path, log: &File) -> Result<()> {
+    if segments_match_index(dir, log)? {
+        return Ok(());
+    }
+
+    // Discard stale segments before the new generation can validate any
+    // segment name. The legacy sorted copy belongs to the current index.
+    for path in segment_files(dir)? {
+        if path.file_name().is_some_and(|name| name == SORTED) {
+            continue;
+        }
+        remove_if_there(&path)?;
+    }
+    File::open(dir)?.sync_all()?;
+    remove_if_there(&dir.join(SEGMENT_INDEX))?;
+    fs::hard_link(dir.join(INDEX), dir.join(SEGMENT_INDEX))?;
+    Ok(())
 }
 
 /// The segments in `dir` that cover the index `log` from its start, each
@@ -584,6 +626,7 @@ fn write_segment(
     from: u64,
     to: u64,
 ) -> Result<Sorted> {
+    bind_segments(dir, log)?;
     #[cfg(test)]
     tests::SORTED_WRITES.lock().unwrap().push(dir.to_path_buf());
     static WRITTEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -860,6 +903,9 @@ impl Store {
             let (_, unused) = chain(dir, &index)?;
             for path in unused {
                 remove_if_there(&path)?;
+            }
+            if !segments_match_index(dir, &index)? {
+                remove_if_there(&dir.join(SEGMENT_INDEX))?;
             }
         }
         lock.lock_shared()
@@ -1568,6 +1614,7 @@ impl Collector {
         for segment in segment_files(&self.dir)? {
             remove_if_there(&segment)?;
         }
+        remove_if_there(&self.dir.join(SEGMENT_INDEX))?;
         fs::rename(&tmp, self.dir.join(INDEX))?;
         File::open(&self.dir)?.sync_all()?;
         if entries.len() < COMPACT_AT {
@@ -2402,6 +2449,110 @@ mod tests {
             assert!(store.contains(hash));
         }
         assert_eq!(only_segment(&dir).to, 10);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_segment_with_unchanged_ends_does_not_survive_reindexing() {
+        // A legacy collector can move an interior page without changing
+        // either endpoint. Reject the old segment before choosing a chain.
+        const PAGES: u8 = 8;
+        const INTERIOR: usize = 3;
+        let dir = tmp("reindexed-middle");
+        let mut stores: Vec<_> = (0..PAGES).map(|_| Store::open(&dir).unwrap()).collect();
+        let hashes: Vec<_> = stores
+            .iter_mut()
+            .zip(1..=PAGES)
+            .map(|(store, fill)| store.put(&page(fill)).unwrap())
+            .collect();
+        drop(stores);
+        let collector = Collector::lock(&dir).unwrap().unwrap();
+        let (mut kept, _) = collector.kept_entries(&live(&hashes)).unwrap();
+        collector.write_index(&kept).unwrap();
+        let segment = only_segment(&dir).path.clone();
+        let bytes = fs::read(dir.join(INDEX)).unwrap();
+        let before = bytes.as_chunks::<INDEX_ENTRY>().0;
+        let mut entries = before.to_vec();
+        let hash: Hash = entries[INTERIOR][..32].try_into().unwrap();
+        let old = Location::of(&entries[INTERIOR]);
+
+        // Move one page as gc does for a pack with an unfinished append.
+        // Replace only the index, leaving the segment an old gc ignores.
+        let next = Store::pack_ids(&dir).unwrap().last().unwrap() + 1;
+        collector
+            .move_pages(&mut kept, &HashSet::from([old.pack]), next)
+            .unwrap();
+        let new = kept[&hash];
+        entries[INTERIOR][32..36].copy_from_slice(&new.pack.to_le_bytes());
+        entries[INTERIOR][36..44].copy_from_slice(&new.offset.to_le_bytes());
+        entries[INTERIOR][44..48].copy_from_slice(&new.len.to_le_bytes());
+        assert_eq!(entries.first(), before.first());
+        assert_eq!(entries.last(), before.last());
+        let replacement = dir.join(COLLECTING);
+        fs::write(&replacement, entries.as_flattened()).unwrap();
+        fs::rename(replacement, dir.join(INDEX)).unwrap();
+        fs::remove_file(Store::pack_path(&dir, old.pack)).unwrap();
+        drop(collector);
+        let log = File::open(dir.join(INDEX)).unwrap();
+        assert!(Sorted::open(&segment, &log).unwrap().is_none());
+
+        // A legacy sorted copy must win regardless of directory ordering,
+        // and the relocated page must be read from its new pack.
+        write_old_sorted_copy(&dir);
+        let store = Store::open(&dir).unwrap();
+        let mut out = vec![0; PAGE];
+        store.get(&hash, &mut out).unwrap();
+        assert_eq!(Store::hash(&out), hash);
+        assert!(!segment.exists());
+        assert!(!dir.join(SEGMENT_INDEX).exists());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_shared_opener_rebinds_segments_after_a_replacement() {
+        // A shared opener cannot clean the store exclusively. Sorting
+        // must discard the old generation before publishing new segments.
+        const PAGES: u8 = 8;
+        let dir = tmp("rebind-segments");
+        let hashes = put_pages(&mut Store::open(&dir).unwrap(), 1, PAGES);
+        drop(Store::open(&dir).unwrap());
+        let old = File::open(dir.join(INDEX)).unwrap();
+        let written = sorted_copies_written(&dir);
+        let replacement = dir.join(COLLECTING);
+        fs::copy(dir.join(INDEX), &replacement).unwrap();
+        fs::rename(replacement, dir.join(INDEX)).unwrap();
+
+        // Stand in for another reader holding the store after the old gc.
+        let reader = open_lock(&dir.join(LOCK)).unwrap();
+        reader.lock_shared().unwrap();
+        let store = Store::open(&dir).unwrap();
+        assert_eq!(sorted_copies_written(&dir), written + 1);
+        assert!(segments_match_index(&dir, &store.index_log).unwrap());
+        assert!(!segments_match_index(&dir, &old).unwrap());
+        let mut out = vec![0; PAGE];
+        for hash in hashes {
+            store.get(&hash, &mut out).unwrap();
+            assert_eq!(Store::hash(&out), hash);
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn segments_without_a_generation_are_rebuilt() {
+        // A copied store that lost hard links, or a crash before the link
+        // persisted, must rebuild its cache from the append-only index.
+        const PAGES: u8 = 8;
+        let dir = tmp("missing-generation");
+        let hashes = put_pages(&mut Store::open(&dir).unwrap(), 1, PAGES);
+        drop(Store::open(&dir).unwrap());
+        let written = sorted_copies_written(&dir);
+        fs::remove_file(dir.join(SEGMENT_INDEX)).unwrap();
+        let store = Store::open(&dir).unwrap();
+        assert_eq!(sorted_copies_written(&dir), written + 1);
+        assert!(segments_match_index(&dir, &store.index_log).unwrap());
+        for hash in hashes {
+            assert!(store.contains(&hash));
+        }
         fs::remove_dir_all(&dir).unwrap();
     }
 
