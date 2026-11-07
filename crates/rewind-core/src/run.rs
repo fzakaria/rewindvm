@@ -1162,12 +1162,7 @@ impl Run {
     /// The error for a replay of this run that made a record other than
     /// the run's at step `differs`.
     fn went_another_way(&self, differs: u64) -> anyhow::Error {
-        anyhow::anyhow!(went_another_way_words(
-            &self.manifest.id,
-            differs,
-            &self.manifest.recorded_by,
-            crate::VERSION
-        ))
+        WentAnotherWay::new(&self.manifest.id, differs, &self.manifest.recorded_by).into()
     }
 
     /// Puts `machine`, restored from this run's keyframes, at the run's
@@ -1961,6 +1956,37 @@ pub fn another_way_next(id: &RunId, recorded_by: &str, this_build: &str) -> Stri
         ),
     }
 }
+
+/// A replay of a run that made a record other than its recording's: the
+/// error the engine gives for it, which `rewind --errors json` reports by
+/// its kind, so a program need not read its words.
+#[derive(Debug)]
+pub struct WentAnotherWay {
+    pub run: RunId,
+    /// The step the replay first made another record at.
+    pub step: u64,
+    words: String,
+}
+
+impl WentAnotherWay {
+    /// The error for a replay by this build of run `run`, which
+    /// `recorded_by` recorded, that went another way at `step`.
+    pub fn new(run: &RunId, step: u64, recorded_by: &str) -> WentAnotherWay {
+        WentAnotherWay {
+            run: run.clone(),
+            step,
+            words: went_another_way_words(run, step, recorded_by, crate::VERSION),
+        }
+    }
+}
+
+impl std::fmt::Display for WentAnotherWay {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.words)
+    }
+}
+
+impl std::error::Error for WentAnotherWay {}
 
 /// Why a replay of run `id` made a record other than the run's at step
 /// `differs`, by the build `this_build`, of a run `recorded_by` recorded,

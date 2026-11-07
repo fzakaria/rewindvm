@@ -577,14 +577,16 @@ mod tests {
         };
         assert!(message.ends_with(": no process 7"));
 
-        // A replay that went another way than the recording, in the
-        // engine's words for it, is a fact about the run, not a failure.
-        let another_way = format!(
-            "rewind: replaying run 9d540a70 {} 506 than when it was recorded",
-            rewind_trace::WENT_ANOTHER_WAY
-        );
+        // A replay that went another way than the recording, as the
+        // engine names it, is a fact about the run, not a failure.
+        let another_way = EngineError::WentAnotherWay {
+            command: "rewind where".into(),
+            run: rewind_trace::manifest::RunId::parse("9d540a70aa11bb22").unwrap(),
+            step: 506,
+            message: "replaying run 9d540a70aa11bb22 went another way at step 506".into(),
+        };
         assert_eq!(
-            shown(10, Err(failed(&another_way))),
+            shown(10, Err(another_way)),
             Shown::Unreadable {
                 step: 10,
                 message: crate::engine::REPLAYS_ANOTHER_WAY

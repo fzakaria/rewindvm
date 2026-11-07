@@ -5,6 +5,7 @@ mod color;
 mod diff_files;
 mod doctor;
 mod downloads;
+mod failure;
 mod gdb;
 mod json;
 mod junit;
@@ -74,6 +75,20 @@ struct Cli {
         value_name = "WHEN"
     )]
     color: color::Choice,
+    /// How a command that fails says why, on standard error.
+    ///
+    /// Words after `rewind:` for a person (text), or one line of JSON that
+    /// names the kind of failure along with the words, for a program to
+    /// read without matching them (json).
+    #[arg(
+        long = rewind_trace::failure::ERRORS_OPTION,
+        global = true,
+        value_enum,
+        default_value_t,
+        env = rewind_trace::failure::ERRORS_ENV,
+        value_name = "HOW"
+    )]
+    errors: failure::Format,
 }
 
 #[derive(Subcommand)]
@@ -398,10 +413,11 @@ fn main() -> ExitCode {
     let matches = Cli::command().color(asked.clap()).get_matches();
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     color::init(cli.color);
+    let errors = cli.errors;
     match run(cli) {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("{} {e:#}", color::stderr().error_prefix());
+            failure::report(errors, &e);
             ExitCode::FAILURE
         }
     }

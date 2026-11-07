@@ -22,6 +22,7 @@ pub mod contents;
 pub mod ending;
 mod event;
 pub mod export;
+pub mod failure;
 pub mod file_diff;
 pub mod io_records;
 pub mod located;
