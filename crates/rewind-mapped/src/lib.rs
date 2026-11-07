@@ -1,7 +1,7 @@
 //! A file mapped read-only into memory.
 //!
-//! The page store searches the sorted copy of its index where the file
-//! lies, several entries for each page, and reading each with a system
+//! The page store searches the sorted segments of its index where the files
+//! lie, several entries for each page, and reading each with a system
 //! call was 3.3 million of them to restore a 3 GB guest. Mapping the file
 //! makes each read a memory read. The store forbids unsafe code, so the
 //! mapping lives here, on its own.
@@ -10,9 +10,9 @@
 //! short: a read past a shortened file's end raises SIGBUS. Nothing in a
 //! process can check that of a file, so making a mapping is unsafe, and
 //! its caller says why the file stays as it is. The store writes each
-//! sorted copy under a name of its own and renames it into place, so a
-//! copy is never changed once it has its name, and a mapping of the one
-//! replaced keeps its contents.
+//! sorted segment under a name of its own and renames it into place, so a
+//! segment is never changed once it has its name, and a mapping of one
+//! replaced or removed keeps its contents.
 
 use std::fs::File;
 use std::os::fd::AsRawFd;
@@ -102,7 +102,7 @@ impl Drop for Mapped {
 mod tests {
     // Mappings of temporary files: their bytes, refusals, and a mapping
     // kept across the file being replaced by a rename, as the store
-    // replaces its sorted copy.
+    // replaces its sorted segments.
     use super::*;
 
     /// A fresh directory for one test.
