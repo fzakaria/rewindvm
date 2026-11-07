@@ -21,7 +21,8 @@ use std::sync::{Arc, Mutex};
 
 use crate::source::{AfterAccess, Located, Thread};
 use crate::viewer::{self, FetchedAll};
-use rewind_trace::manifest::MANIFEST;
+use rewind_trace::failure::{ERRORS_ENV, ERRORS_JSON, Failure, Kind};
+use rewind_trace::manifest::{MANIFEST, RunId};
 use rewind_trace::replaying::{PROGRESS_ENV, PROGRESS_JSON};
 
 /// The engine's command, looked up on PATH.
@@ -50,6 +51,15 @@ pub enum EngineError {
     Missing { program: String },
     /// The engine ran and refused, with what it printed.
     Failed { command: String, message: String },
+    /// Replaying `run` went another way than its recording at `step`, so
+    /// this build of the engine cannot bring the run to a step: a later
+    /// request that needs it would only find the same again.
+    WentAnotherWay {
+        command: String,
+        run: RunId,
+        step: u64,
+        message: String,
+    },
     /// The engine made a run the app cannot find on disk.
     Lost { id: String },
     /// The request was cancelled, superseded by a newer one, before the
@@ -64,7 +74,10 @@ impl std::fmt::Display for EngineError {
                 f,
                 "The engine command {program} was not found on PATH. Install it, or set {PROGRAM_ENV} to its path."
             ),
-            EngineError::Failed { command, message } => write!(f, "{command} failed: {message}"),
+            EngineError::Failed { command, message }
+            | EngineError::WentAnotherWay {
+                command, message, ..
+            } => write!(f, "{command} failed: {message}"),
             EngineError::Lost { id } => write!(
                 f,
                 "The engine made run {id}, but it is not next to its parent or in the Rewind home."
@@ -167,7 +180,35 @@ pub const REPLAYS_ANOTHER_WAY: &str = "This build of rewind replays this run dif
 /// than its recording, which a later request for the same run would only
 /// find again.
 pub fn goes_another_way(error: &EngineError) -> bool {
-    matches!(error, EngineError::Failed { message, .. } if message.contains(rewind_trace::WENT_ANOTHER_WAY))
+    matches!(error, EngineError::WentAnotherWay { .. })
+}
+
+/// The engine's refusal of `command`, from what it printed on standard
+/// error: the failure its line of JSON names (see
+/// [`rewind_trace::failure`]), or, from an engine too old to print one,
+/// its last line, else how it exited.
+fn refused(command: String, stderr: &str, status: &std::process::ExitStatus) -> EngineError {
+    match Failure::last_in(stderr) {
+        Some(Failure {
+            kind: Kind::WentAnotherWay { run, step },
+            message,
+        }) => EngineError::WentAnotherWay {
+            command,
+            run,
+            step,
+            message,
+        },
+        Some(Failure {
+            kind: Kind::Other,
+            message,
+        }) => EngineError::Failed { command, message },
+        None => EngineError::Failed {
+            command,
+            message: last_line(stderr)
+                .map(str::to_string)
+                .unwrap_or_else(|| status.to_string()),
+        },
+    }
 }
 
 pub type EngineResult<T> = Result<T, EngineError>;
@@ -447,6 +488,15 @@ impl CliEngine {
         }
     }
 
+    /// The engine command, asked to say why it fails as a line of JSON.
+    /// Shells and gdb sessions run in the terminal pane instead, where a
+    /// person reads the words.
+    fn command(&self) -> Command {
+        let mut command = Command::new(&self.program);
+        command.env(ERRORS_ENV, ERRORS_JSON);
+        command
+    }
+
     fn command_line(&self, args: &[OsString]) -> String {
         let mut parts = vec![self.program.to_string_lossy().into_owned()];
         parts.extend(args.iter().map(|a| a.to_string_lossy().into_owned()));
@@ -465,7 +515,8 @@ impl Engine for CliEngine {
             "--json".into(),
         ];
         let command = self.command_line(&args);
-        let output = Command::new(&self.program)
+        let output = self
+            .command()
             .args(&args)
             .stdin(Stdio::null())
             .output()
@@ -489,10 +540,7 @@ impl Engine for CliEngine {
             .find_map(|line| serde_json::from_str::<ForkJson>(line).ok())
         else {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            let message = last_line(&stderr)
-                .map(str::to_string)
-                .unwrap_or_else(|| output.status.to_string());
-            return Err(EngineError::Failed { command, message });
+            return Err(refused(command, &stderr, &output.status));
         };
         let summary = result.summary();
         let dir = if result.dir.join(MANIFEST).is_file() {
@@ -514,7 +562,8 @@ impl Engine for CliEngine {
         // rewind import <file> --json
         let args: [OsString; 3] = ["import".into(), file.into(), "--json".into()];
         let command = self.command_line(&args);
-        let output = Command::new(&self.program)
+        let output = self
+            .command()
             .args(&args)
             .stdin(Stdio::null())
             .output()
@@ -528,10 +577,7 @@ impl Engine for CliEngine {
             Some(imported) if output.status.success() => Ok(imported),
             _ => {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                let message = last_line(&stderr)
-                    .map(str::to_string)
-                    .unwrap_or_else(|| output.status.to_string());
-                Err(EngineError::Failed { command, message })
+                Err(refused(command, &stderr, &output.status))
             }
         }
     }
@@ -545,7 +591,8 @@ impl Engine for CliEngine {
             "--json".into(),
         ];
         let command = self.command_line(&args);
-        let output = Command::new(&self.program)
+        let output = self
+            .command()
             .args(&args)
             .stdin(Stdio::null())
             .output()
@@ -559,10 +606,7 @@ impl Engine for CliEngine {
             Some(removed) if output.status.success() => Ok(removed),
             _ => {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                let message = last_line(&stderr)
-                    .map(str::to_string)
-                    .unwrap_or_else(|| output.status.to_string());
-                Err(EngineError::Failed { command, message })
+                Err(refused(command, &stderr, &output.status))
             }
         }
     }
@@ -571,7 +615,8 @@ impl Engine for CliEngine {
         // rewind remove <run> --json
         let args: [OsString; 3] = ["remove".into(), run.into(), "--json".into()];
         let command = self.command_line(&args);
-        let output = Command::new(&self.program)
+        let output = self
+            .command()
             .args(&args)
             .stdin(Stdio::null())
             .output()
@@ -585,10 +630,7 @@ impl Engine for CliEngine {
             Some(removed) if output.status.success() => Ok(removed.removed),
             _ => {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                let message = last_line(&stderr)
-                    .map(str::to_string)
-                    .unwrap_or_else(|| output.status.to_string());
-                Err(EngineError::Failed { command, message })
+                Err(refused(command, &stderr, &output.status))
             }
         }
     }
@@ -603,7 +645,8 @@ impl Engine for CliEngine {
             out.into(),
         ];
         let command = self.command_line(&args);
-        let output = Command::new(&self.program)
+        let output = self
+            .command()
             .args(&args)
             .stdin(Stdio::null())
             .output()
@@ -612,16 +655,14 @@ impl Engine for CliEngine {
             return Ok(());
         }
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let message = last_line(&stderr)
-            .map(str::to_string)
-            .unwrap_or_else(|| output.status.to_string());
-        Err(EngineError::Failed { command, message })
+        Err(refused(command, &stderr, &output.status))
     }
 
     fn version(&self) -> EngineResult<EngineVersion> {
         let args: [OsString; 1] = ["--version".into()];
         let command = self.command_line(&args);
-        let output = Command::new(&self.program)
+        let output = self
+            .command()
             .args(&args)
             .stdin(Stdio::null())
             .output()
@@ -711,7 +752,8 @@ impl Engine for CliEngine {
         if cancel.is_cancelled() {
             return Err(EngineError::Cancelled);
         }
-        let mut child = Command::new(&self.program)
+        let mut child = self
+            .command()
             .args(&args)
             .env(PROGRESS_ENV, PROGRESS_JSON)
             .stdin(Stdio::null())
@@ -779,11 +821,7 @@ impl Engine for CliEngine {
                 complete: FetchedAll::Yes,
             }),
             Some(MISSING_STATUS) => Ok(FileAtStep::Missing),
-            _ => Err(failed(
-                last_line(&stderr)
-                    .map(str::to_string)
-                    .unwrap_or_else(|| status.to_string()),
-            )),
+            _ => Err(refused(command, &stderr, &status)),
         }
     }
 
@@ -944,12 +982,9 @@ struct Streamed {
 }
 
 impl Streamed {
-    /// The engine's reason for a refusal: its last line, or how it exited.
+    /// The engine's refusal, as [`refused`] reads it.
     fn refusal(&self) -> EngineError {
-        let message = last_line(&self.stderr)
-            .map(str::to_string)
-            .unwrap_or_else(|| self.status.to_string());
-        self.failed(message)
+        refused(self.command.clone(), &self.stderr, &self.status)
     }
 
     fn failed(&self, message: String) -> EngineError {
@@ -1025,7 +1060,8 @@ impl CliEngine {
         if cancel.is_cancelled() {
             return Err(EngineError::Cancelled);
         }
-        let mut child = Command::new(&self.program)
+        let mut child = self
+            .command()
             .args(args)
             .env(PROGRESS_ENV, PROGRESS_JSON)
             .stdin(Stdio::null())
@@ -1227,21 +1263,63 @@ mod tests {
         assert_eq!(last_line("rewind: no run\n"), Some("rewind: no run"));
     }
 
+    /// How the engine exits when it refuses.
+    fn exit_1() -> std::process::ExitStatus {
+        use std::os::unix::process::ExitStatusExt;
+        std::process::ExitStatus::from_raw(1 << 8)
+    }
+
     #[test]
-    fn a_replay_that_went_another_way_is_told_apart() {
-        // The engine's refusal for a replay that went another way, in its
-        // words, is recognized; another refusal and a missing engine are
-        // not.
-        let failed = |message: String| EngineError::Failed {
-            command: "rewind cat".into(),
-            message,
-        };
+    fn a_replay_that_went_another_way_is_told_apart_by_its_kind() {
+        // The engine's line of JSON for a replay that went another way,
+        // after its progress, names the run and step; another kind is a
+        // plain refusal with its words, and so is any refusal from an
+        // engine too old to print the line, whatever its words say.
+        let run = RunId::parse("9d540a70aa11bb22").unwrap();
+        let stderr = format!(
+            "{}\n{}\n",
+            r#"{"replaying":{"run":"9d540a70aa11bb22","from":0,"at":10,"to":20,"elapsed_ms":9}}"#,
+            Failure {
+                kind: Kind::WentAnotherWay {
+                    run: run.clone(),
+                    step: 506
+                },
+                message: "replaying run 9d540a70aa11bb22 went another way at step 506".into(),
+            }
+            .line()
+        );
+        let refusal = refused("rewind cat".into(), &stderr, &exit_1());
+        assert!(goes_another_way(&refusal));
+        assert_eq!(
+            refusal,
+            EngineError::WentAnotherWay {
+                command: "rewind cat".into(),
+                run,
+                step: 506,
+                message: "replaying run 9d540a70aa11bb22 went another way at step 506".into(),
+            }
+        );
+
+        let other = r#"{"error":{"kind":"other","message":"no process 7"}}"#;
+        let refusal = refused("rewind cat".into(), other, &exit_1());
+        assert!(!goes_another_way(&refusal));
+        assert_eq!(
+            refusal,
+            EngineError::Failed {
+                command: "rewind cat".into(),
+                message: "no process 7".into(),
+            }
+        );
+
         let words = format!(
-            "rewind: replaying run 9d540a70 {} 506",
+            "rewind: replaying run 9d540a70 {} 506\n",
             rewind_trace::WENT_ANOTHER_WAY
         );
-        assert!(goes_another_way(&failed(words)));
-        assert!(!goes_another_way(&failed("rewind: no process 7".into())));
+        assert!(!goes_another_way(&refused(
+            "rewind cat".into(),
+            &words,
+            &exit_1()
+        )));
         assert!(!goes_another_way(&EngineError::Missing {
             program: "rewind".into()
         }));
@@ -1274,15 +1352,15 @@ mod tests {
         call()
     }
 
-    /// A stand-in engine: a script that writes its arguments to `args`
-    /// and how it was asked to say its progress to `progress`, prints
-    /// `stdout` and `stderr` and
-    /// exits `code`.
+    /// A stand-in engine: a script that writes its arguments to `args`,
+    /// how it was asked to say its progress to `progress` and how it was
+    /// asked to say its failures to `errors`, prints `stdout` and `stderr`
+    /// and exits `code`.
     fn fake_engine(dir: &Path, stdout: &str, stderr: &str, code: i32) -> CliEngine {
         let script = dir.join("rewind");
         std::fs::write(
             &script,
-            format!("#!/bin/sh\nprintf '%s\\n' \"$*\" > \"{dir}/args\"\nprintf '%s' \"${PROGRESS_ENV}\" > \"{dir}/progress\"\nprintf '{stdout}'\nprintf '{stderr}' >&2\nexit {code}\n", dir = dir.display()),
+            format!("#!/bin/sh\nprintf '%s\\n' \"$*\" > \"{dir}/args\"\nprintf '%s' \"${PROGRESS_ENV}\" > \"{dir}/progress\"\nprintf '%s' \"${ERRORS_ENV}\" > \"{dir}/errors\"\nprintf '{stdout}'\nprintf '{stderr}' >&2\nexit {code}\n", dir = dir.display()),
         )
         .unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -1944,6 +2022,34 @@ mod tests {
             panic!("{err:?}");
         };
         assert_eq!(message, "rewind: no keyframes for this run");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn cat_asks_for_failures_as_json_and_reads_their_kind() {
+        // The engine is asked to say its failures as JSON; the stand-in
+        // refuses with the line for a replay that went another way.
+        let dir = temp_dir("cat-went-another-way");
+        let line = r#"{"error":{"kind":"went_another_way","run":"9d540a70aa11bb22","step":506,"message":"replaying run 9d540a70aa11bb22 went another way at step 506"}}"#;
+        let engine = fake_engine(&dir, "", &format!("{line}\\n"), 1);
+        let err = retrying(|| {
+            engine.cat(
+                &dir.join("run"),
+                900,
+                None,
+                "/x",
+                &Cancel::default(),
+                &mut |_| {},
+            )
+        })
+        .unwrap_err();
+        assert!(goes_another_way(&err), "{err:?}");
+        let EngineError::WentAnotherWay { step, .. } = err else {
+            panic!("{err:?}");
+        };
+        assert_eq!(step, 506);
+        let asked = std::fs::read_to_string(dir.join("errors")).unwrap();
+        assert_eq!(asked, ERRORS_JSON);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

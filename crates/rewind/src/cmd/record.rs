@@ -1327,13 +1327,14 @@ fn replays_exactly(runs: &[(&str, &Run)]) -> Result<()> {
         let Some(d) = replayed? else {
             continue;
         };
-        let why = rewind_core::run::went_another_way_words(
+        let why = rewind_core::run::WentAnotherWay::new(
             &run.manifest.id,
             d.left_step.min(d.right_step),
             &run.manifest.recorded_by,
-            rewind_core::VERSION,
         );
-        bail!("no schedule decides this, since {words} does not replay exactly: {why}");
+        return Err(anyhow::Error::new(why).context(format!(
+            "no schedule decides this, since {words} does not replay exactly"
+        )));
     }
     Ok(())
 }
