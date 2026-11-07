@@ -555,8 +555,8 @@ pub enum Keep {
 struct Base {
     step: Option<u64>,
     /// Memory as of that keyframe, built from the machine's restored
-    /// pages the first time a keyframe is kept: a map of every page,
-    /// 0.36 s for a 3 GB guest, which most forks never need.
+    /// pages the first time a keyframe is kept: a table of every page,
+    /// which most forks never need.
     memory: Option<crate::keyframes::Memory>,
     store: Option<rewind_store::Store>,
 }

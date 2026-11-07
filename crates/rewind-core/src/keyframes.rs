@@ -410,11 +410,32 @@ impl Layers {
     }
 }
 
-/// The page hashes a chain of keyframes has set guest memory to, where they
-/// are not zero.
-#[derive(Default, Debug)]
+/// The page hashes a chain of keyframes has set guest memory to.
+///
+/// Guest pages are numbered from 0 to the end of the guest's memory, and a
+/// full keyframe names most of them, so the hashes are a table indexed by
+/// page number, with the zero page's hash for a page that is zero. For a
+/// 3 GiB guest with 60% of its pages not zero, building it from a full
+/// keyframe takes 7 ms and comparing two of them 2 ms, where a map of the
+/// pages took 41 and 87 ms (the memory_chain example). The table is 32
+/// bytes for every page up to the last that is not zero, 24 MiB for that
+/// guest, where the map was about 37 bytes for each page not zero.
+#[derive(Default)]
 pub struct Memory {
-    pages: HashMap<u32, [u8; 32]>,
+    /// Each page's hash, the zero page's for a zero page. Pages past the
+    /// end are zero.
+    pages: Vec<[u8; 32]>,
+}
+
+/// A memory's size, not its hundreds of thousands of hashes.
+impl std::fmt::Debug for Memory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let set = self.pages.iter().filter(|h| **h != ZERO_PAGE).count();
+        f.debug_struct("Memory")
+            .field("pages", &self.pages.len())
+            .field("not_zero", &set)
+            .finish()
+    }
 }
 
 impl Memory {
@@ -430,9 +451,21 @@ impl Memory {
     /// Memory whose non-zero pages are `pages`, as a machine restored
     /// from keyframes lists them.
     pub fn from_pages(pages: &[(u32, [u8; 32])]) -> Memory {
-        Memory {
-            pages: pages.iter().copied().collect(),
+        let mut memory = Memory::default();
+        memory.apply(None, pages);
+        memory
+    }
+
+    /// Sets a page's hash.
+    fn set(&mut self, page: u32, hash: [u8; 32]) {
+        let i = page as usize;
+        if i >= self.pages.len() {
+            if hash == ZERO_PAGE {
+                return;
+            }
+            self.pages.resize(i + 1, ZERO_PAGE);
         }
+        self.pages[i] = hash;
     }
 
     /// Leaves out of a new keyframe's `pages` the ones whose contents are
@@ -443,7 +476,7 @@ impl Memory {
     /// whole.
     pub fn trim(&mut self, parent: Option<u64>, pages: &mut Vec<(u32, [u8; 32])>) {
         if parent.is_some() {
-            pages.retain(|(index, hash)| self.pages.get(index).unwrap_or(&ZERO_PAGE) != hash);
+            pages.retain(|(index, hash)| self.hash_of(*index) != *hash);
         }
         self.apply(parent, pages);
     }
@@ -451,26 +484,19 @@ impl Memory {
     /// The hash of a page's contents: the zero page's for a page this
     /// memory does not hold.
     pub fn hash_of(&self, page: u32) -> [u8; 32] {
-        *self.pages.get(&page).unwrap_or(&ZERO_PAGE)
+        self.pages.get(page as usize).copied().unwrap_or(ZERO_PAGE)
     }
 
     /// The pages whose contents differ between this memory and `other`,
     /// in page order, with each side's hash: the zero page's where a
     /// side holds none.
     pub fn differing(&self, other: &Memory) -> Vec<(u32, [u8; 32], [u8; 32])> {
-        let mut pages: Vec<u32> = self
-            .pages
-            .keys()
-            .chain(other.pages.keys())
-            .copied()
-            .collect();
-        pages.sort_unstable();
-        pages.dedup();
-        pages
-            .into_iter()
+        let pages = self.pages.len().max(other.pages.len());
+        (0..pages)
             .filter_map(|page| {
-                let ours = *self.pages.get(&page).unwrap_or(&ZERO_PAGE);
-                let theirs = *other.pages.get(&page).unwrap_or(&ZERO_PAGE);
+                let page = u32::try_from(page).expect("pages are numbered by u32");
+                let ours = self.hash_of(page);
+                let theirs = other.hash_of(page);
                 (ours != theirs).then_some((page, ours, theirs))
             })
             .collect()
@@ -498,16 +524,19 @@ impl Memory {
     /// Writes a keyframe's `pages` over this memory, as restoring the
     /// keyframe, whose parent is `parent`, would.
     pub fn apply(&mut self, parent: Option<u64>, pages: &[(u32, [u8; 32])]) {
-        // A full keyframe starts from zeroed memory.
+        // A full keyframe starts from zeroed memory, as large as the
+        // pages it lists.
         if parent.is_none() {
+            let len = pages
+                .iter()
+                .map(|(i, _)| *i as usize + 1)
+                .max()
+                .unwrap_or(0);
             self.pages.clear();
+            self.pages.resize(len, ZERO_PAGE);
         }
         for (index, hash) in pages {
-            if *hash == ZERO_PAGE {
-                self.pages.remove(index);
-            } else {
-                self.pages.insert(*index, *hash);
-            }
+            self.set(*index, *hash);
         }
     }
 }
