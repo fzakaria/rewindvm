@@ -256,7 +256,10 @@ Every switch is a step, so no stretch is too short to appear.
 In the app, the t key opens the Threads tab: a lane per thread around where
 the two runs part, this run's above the compared run's, with a bar wherever
 the thread held the CPU. Ctrl and the wheel zoom the lanes and Shift and the
-wheel pan them. Clicking a bar moves the playhead there:
+wheel pan them. Clicking a bar moves the playhead there. The band under the
+timeline is darker where the switches are dense, which says where to look,
+and the Stop at menu offers the switches of the thread on the CPU at the
+playhead, so Next goes to where that thread took the CPU or lost it:
 
 <!-- screenshot site/img/app-threads: {{home}}/runs/{{failing}} --compare {{home}}/runs/{{passing}} --step {{crash_step}} ;; key t ;; wait 8 -->
 

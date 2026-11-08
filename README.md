@@ -232,7 +232,11 @@ where the run parts from a passing one.
   run at the matching step.
 - Show threads (`t`) draws a lane per thread over a window of steps, a bar
   where the thread held the CPU, this run above the compared run.
-- Previous and Next can stop at one thread, process, file or kind of event.
+- Previous and Next can stop at one thread, process, file or kind of event,
+  at every context switch, or at the switches that give the thread on the
+  CPU at the playhead the CPU and take it away; the menu counts each.
+- A band under the timeline is darker where the guest switched tasks more
+  often, so contention shows at a glance.
 - Open shell and Attach gdb work inside the VM at the playhead.
 - Fork from here branches the run under another schedule. Its menu turns it
   into Check from here, which tries 8 to 64 schedules from the playhead and
