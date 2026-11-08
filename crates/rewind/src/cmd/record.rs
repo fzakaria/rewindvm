@@ -1628,9 +1628,9 @@ fn refuse_unscheduled_stall_max(schedule: u64, stall_max: StallMax) -> Result<()
     Ok(())
 }
 
-/// The clock a run will use: an explicit choice, or for `auto` the branch
-/// counter when this boot's self-test found it exact, with a warning when
-/// it did not.
+/// The clock a run will use. `exits` as asked; `branches` as asked when
+/// this boot's self-test found the counter exact, refused when it did not;
+/// for `auto` the branch counter when exact, with a warning when not.
 fn resolve_clock(home: &Home, guest: &Guest, arg: ClockArg) -> Result<rewind_vmm::ClockSource> {
     use rewind_core::pmu::{self, Vendor};
     use rewind_vmm::ClockSource;
@@ -1643,7 +1643,13 @@ fn resolve_clock(home: &Home, guest: &Guest, arg: ClockArg) -> Result<rewind_vmm
     };
     match arg {
         ClockArg::Exits => Ok(ClockSource::Exits),
-        ClockArg::Branches => branches(),
+        ClockArg::Branches => {
+            let clock = branches()?;
+            if !pmu::counter_usable_this_boot(home, guest, &vendor)? {
+                bail!(pmu::branch_clock_refusal(&vendor));
+            }
+            Ok(clock)
+        }
         ClockArg::Auto => {
             if vendor.event().is_some() && pmu::counter_usable_this_boot(home, guest, &vendor)? {
                 return branches();

@@ -54,7 +54,8 @@ in
         `sudo rewind pmu enable` does until reboot, so runs can let the
         VM's clock follow its work. This sets bit 54 of MSR 0xc0011020
         on every CPU, which changes how the CPU speculates around locked
-        instructions for every program on the machine.
+        instructions for every program on the machine. Nix builds see the
+        workaround too, through its marker in the build sandbox.
       '';
     };
 
@@ -110,9 +111,13 @@ in
 
     # A oneshot at boot, since the MSR bit resets with the CPU. It runs once
     # the msr module is loaded, and has modprobe for a switch that has not
-    # loaded it yet.
+    # loaded it yet. A Nix build cannot read the MSRs, so the directory of
+    # the marker `rewind pmu enable` writes (WORKAROUND_MARKER in
+    # crates/rewind-core/src/pmu.rs) goes into the sandbox, where Rewind
+    # finds it; the `?` lets builds run before the oneshot has made it.
     (lib.mkIf (cfg.enable && cfg.amdBranchCounterWorkaround) {
       boot.kernelModules = [ "msr" ];
+      nix.settings.extra-sandbox-paths = [ "/run/rewind?" ];
       systemd.services.rewind-pmu = {
         description = "Make the AMD branch counter exact for Rewind VM";
         wantedBy = [ "multi-user.target" ];

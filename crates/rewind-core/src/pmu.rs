@@ -260,18 +260,44 @@ pub fn remember(home: &crate::Home, workaround_known: bool, exact: bool) -> Resu
     Ok(())
 }
 
+/// Why this boot's counter cannot drive the VM's clock, for a warning or a
+/// refusal.
+fn inexact_reason(vendor: &Vendor) -> &'static str {
+    if vendor.needs_workaround() {
+        return "this AMD CPU's branch counter is not exact until rr's workaround is set";
+    }
+    "this CPU's branch counter is not exact"
+}
+
 /// The warning a run made with exit time prints, and the app shows.
 pub fn exit_time_warning(vendor: &Vendor) -> String {
-    let why = if vendor.needs_workaround() {
-        "this AMD CPU's branch counter is not exact until rr's workaround is set"
-    } else {
-        "this CPU's branch counter is not exact"
-    };
+    let why = inexact_reason(vendor);
     format!(
         "recording with exit time: {why}. Computation will not move the VM's clock, \
          and a thread that computes without system calls is not preempted. \
          Fix it with `sudo rewind pmu enable` (until reboot), then `rewind pmu status`. \
          Why: {DOCS_URL}"
+    )
+}
+
+/// The error `--clock branches` gives where the counter is not exact: a run
+/// counted on it would neither replay nor match the same inputs on another
+/// host. On AMD Zen a Nix build sees the workaround only through its marker,
+/// which the sandbox lacks unless the build machine adds it.
+pub fn branch_clock_refusal(vendor: &Vendor) -> String {
+    let why = inexact_reason(vendor);
+    let sandbox = if vendor.needs_workaround() {
+        format!(
+            " In a Nix build, {WORKAROUND_MARKER} must be in the sandbox, as \
+             programs.rewind.amdBranchCounterWorkaround puts it."
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "--clock branches needs an exact branch counter, and {why}.{sandbox} \
+         Fix it with `sudo rewind pmu enable` (until reboot), then `rewind pmu status`, \
+         or record with --clock exits. Why: {DOCS_URL}"
     )
 }
 
@@ -537,6 +563,26 @@ mod tests {
         // No workaround exists, so the self-test decides.
         assert!(counter_usable(false, false, true));
         assert!(!counter_usable(false, false, false));
+    }
+
+    #[test]
+    fn an_explicit_branch_clock_refusal_names_the_cause_and_the_ways_out() {
+        // On AMD Zen the refusal names the workaround and where a Nix build
+        // must find its marker; on Intel only the counter. Both offer the
+        // fix and exit time. Builds the messages for each vendor.
+        let amd = branch_clock_refusal(&Vendor::Amd { family: 25 });
+        assert!(amd.contains("until rr's workaround is set"), "{amd}");
+        assert!(amd.contains(WORKAROUND_MARKER), "{amd}");
+        assert!(amd.contains("sudo rewind pmu enable"), "{amd}");
+        assert!(amd.contains("--clock exits"), "{amd}");
+
+        let intel = branch_clock_refusal(&Vendor::Intel);
+        assert!(
+            intel.contains("this CPU's branch counter is not exact"),
+            "{intel}"
+        );
+        assert!(!intel.contains(WORKAROUND_MARKER), "{intel}");
+        assert!(intel.contains("--clock exits"), "{intel}");
     }
 
     /// The counter's value at each probe mark of a run whose counter counts

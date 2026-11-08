@@ -1826,8 +1826,9 @@ in
   # fired its timer early and went its own way. Two shells race under the
   # branch clock, and gdb continues to the end from every third step of
   # the run. A machine whose branch counter cannot be opened, as CI's
-  # cannot, skips the check and says so. Boots the VM, so it needs
-  # /dev/kvm.
+  # cannot, or is not exact, as on AMD Zen when the sandbox lacks the
+  # workaround's marker, skips the check and says so. Boots the VM, so it
+  # needs /dev/kvm.
   gdb-cold =
     pkgs.runCommand "rewind-gdb-cold"
       {
@@ -1847,7 +1848,7 @@ in
           sh -c 'for i in 1 2; do (n=0; while [ $n -lt 20000 ]; do n=$((n+1)); done; echo $i) & done; wait' \
           > run 2>&1; then
           cat run
-          grep -q 'perf_event_open' run
+          grep -q -e 'perf_event_open' -e 'needs an exact branch counter' run
           echo "skipped: this machine's branch counter cannot drive virtual time"
           touch $out
           exit 0
@@ -3885,9 +3886,9 @@ in
     pkgs.writeText "rewind-version" release;
 
   # checks.module: the NixOS module installs both packages, adds Rewind's
-  # binary cache, sets the AMD workaround at boot, and adds the
-  # `rewind-amd` system feature beside NixOS's own, which it must not
-  # replace. Only evaluates, so it needs no KVM.
+  # binary cache, sets the AMD workaround at boot with its marker in the
+  # Nix sandbox, and adds the `rewind-amd` system feature beside NixOS's
+  # own, which it must not replace. Only evaluates, so it needs no KVM.
   module =
     let
       config = moduleSystem.config;
@@ -3898,6 +3899,7 @@ in
     assert builtins.elem "msr" config.boot.kernelModules;
     assert builtins.elem "https://rewindvm.cachix.org" config.nix.settings.extra-substituters;
     assert config.nix.settings.extra-system-features == [ "rewind-amd" ];
+    assert config.nix.settings.extra-sandbox-paths == [ "/run/rewind?" ];
     assert builtins.elem "kvm" config.nix.settings.system-features;
     # The nix.conf the system would install, which NixOS checks with Nix
     # itself when it builds the file.

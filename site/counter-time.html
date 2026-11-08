@@ -186,7 +186,9 @@ programs.rewind.enable = true;
 programs.rewind.amdBranchCounterWorkaround = true;</code></pre>
         <p>
           The module loads the <code>msr</code> kernel module and runs
-          <code>rewind pmu enable</code> at boot.
+          <code>rewind pmu enable</code> at boot. It also puts <code>/run/rewind</code>, where
+          <code>rewind pmu enable</code> notes the setting, in Nix's build sandbox, so a derivation
+          that runs Rewind in its build gets counter time too.
         </p>
       </section>
 
@@ -196,10 +198,11 @@ programs.rewind.amdBranchCounterWorkaround = true;</code></pre>
         </h2>
         <p>
           <code>--clock exits</code> or <code>--clock branches</code> on <code>rewind run</code>,
-          <code>nix</code> or <code>check</code> overrides Rewind's choice. A run remembers its
-          clock and replays with it. A run recorded with counter time replays exactly only on a
-          machine whose counter is exact too; one recorded with exit time does not depend on the
-          counter.
+          <code>nix</code> or <code>check</code> overrides Rewind's choice.
+          <code>--clock branches</code> refuses where the counter is not exact this boot, rather
+          than record a run that would not replay. A run remembers its clock and replays with it. A
+          run recorded with counter time replays exactly only on a machine whose counter is exact
+          too; one recorded with exit time does not depend on the counter.
         </p>
       </section>
     </main>
