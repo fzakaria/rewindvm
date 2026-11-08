@@ -291,6 +291,9 @@ pub(crate) struct Devices {
     /// What turns the guest's read and write records into trace records,
     /// once a guest kernel that buffers them has set up.
     pub io: Option<rewind_trace::io_records::Encoder>,
+    /// What turns the guest's switch records into batches in the trace,
+    /// once a guest kernel that makes them has set up.
+    pub switches: Option<rewind_trace::switches::Encoder>,
 }
 
 pub struct Machine {
@@ -459,6 +462,7 @@ impl Machine {
                 input_sent: false,
                 timer_armed_at: None,
                 io: None,
+                switches: None,
             },
             pmem,
             extras,
@@ -717,9 +721,11 @@ impl Machine {
             };
 
             // A machine that stopped without a step, as a triple fault
-            // stops it, takes what the guest buffered since the last one.
+            // stops it, takes what the guest buffered since the last one,
+            // and the switches still pending.
             if counted.is_none() && self.dev.stop.is_some() {
                 self.dev.drain_io(obs)?;
+                self.dev.finish_switches(obs);
             }
             if let Some(stop) = self.dev.stop {
                 return Ok(Outcome::Stopped(stop));
@@ -1065,6 +1071,16 @@ impl Devices {
                 }
                 let mut record = vec![0u8; len];
                 self.ram.read(value as u64, &mut record)?;
+                // A switch joins the pending batch, which is written first
+                // when it had no room for the switch.
+                if rewind_trace::switches::is_switch(&record)
+                    && let Some(encoder) = self.switches.as_mut()
+                {
+                    if let Some(batch) = encoder.add(self.step, &record)? {
+                        obs.record(self.step, &batch);
+                    }
+                    return Ok(());
+                }
                 obs.record(self.step, &record);
             }
             pv::PORT_TIMER => {
@@ -1099,15 +1115,18 @@ impl Devices {
                     self.stop = Some(Stop::Stalled);
                 }
             }
-            pv::PORT_EXIT => self.stop = Some(Stop::Guest(GuestExit::from_port(value))),
+            pv::PORT_EXIT => {
+                self.finish_switches(obs);
+                self.stop = Some(Stop::Guest(GuestExit::from_port(value)));
+            }
             pv::PORT_SETUP => {
                 let shared = value as u64;
-                let io = pv::check_interface(self.guest_interface(shared)?)?;
+                let records = pv::check_interface(self.guest_interface(shared)?)?;
                 self.ram
                     .write(shared + pv::SHARED_EPOCH, &self.epoch.to_le_bytes())?;
                 self.shared = Some(shared);
-                self.io =
-                    (io == pv::GuestIo::Buffered).then(rewind_trace::io_records::Encoder::new);
+                self.io = records.io.then(rewind_trace::io_records::Encoder::new);
+                self.switches = records.switches.then(rewind_trace::switches::Encoder::new);
             }
             pv::PORT_COM1 => obs.serial(self.step, data[0]),
             _ => {}
@@ -1115,11 +1134,33 @@ impl Devices {
         Ok(())
     }
 
+    /// Writes the switches pending from an earlier window of steps as a
+    /// batch at this step, ahead of anything else the step records.
+    fn flush_switches(&mut self, obs: &mut dyn Observer) {
+        if let Some(encoder) = self.switches.as_mut()
+            && let Some(batch) = encoder.at_step(self.step)
+        {
+            obs.record(self.step, &batch);
+        }
+    }
+
+    /// Writes the switches still pending at the run's end as a batch at
+    /// this step.
+    fn finish_switches(&mut self, obs: &mut dyn Observer) {
+        if let Some(encoder) = self.switches.as_mut()
+            && let Some(batch) = encoder.finish()
+        {
+            obs.record(self.step, &batch);
+        }
+    }
+
     /// Takes the read and write records the guest buffered since the step
     /// before, with how many it had no room for, into the trace at this
-    /// step, and sets both back to 0 for the guest to go on from. Nothing
-    /// for a guest kernel that buffers none.
+    /// step, and sets both back to 0 for the guest to go on from, after
+    /// the switches an earlier window left pending. Nothing for a guest
+    /// kernel that buffers none.
     fn drain_io(&mut self, obs: &mut dyn Observer) -> Result<()> {
+        self.flush_switches(obs);
         let (Some(shared), Some(encoder)) = (self.shared, self.io.as_mut()) else {
             return Ok(());
         };
@@ -1258,6 +1299,7 @@ mod tests {
             input_sent: false,
             timer_armed_at: None,
             io: Some(rewind_trace::io_records::Encoder::new()),
+            switches: None,
         }
     }
 

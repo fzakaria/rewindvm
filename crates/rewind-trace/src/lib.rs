@@ -195,9 +195,19 @@ impl Trace {
 
     /// The trace of a file's records, as [`records`] reads them. The read
     /// and write records among them are not events, and are left to
-    /// [`crate::io_records::decode`]; the switch records are decoded into
-    /// `switches`.
+    /// [`crate::io_records::decode`]; the batches of switches are decoded
+    /// into `switches`.
     pub fn decode(records: &[(u64, Vec<u8>)]) -> io::Result<Trace> {
+        Trace::decode_from(records, switches::Decoder::default())
+    }
+
+    /// The trace of records a machine restored at a step wrote from there
+    /// on, whose batches of switches name tasks the run's trace defined
+    /// before: `decoder` is [`switches::Decoder::resume`] at that step.
+    pub fn decode_from(
+        records: &[(u64, Vec<u8>)],
+        mut decoder: switches::Decoder,
+    ) -> io::Result<Trace> {
         let invalid = |e: DecodeError| io::Error::new(io::ErrorKind::InvalidData, e);
         let mut events = Vec::with_capacity(records.len());
         let mut switches = Vec::new();
@@ -205,8 +215,10 @@ impl Trace {
             if io_records::is_io(record) {
                 continue;
             }
-            if switches::is_switch(record) {
-                switches.push(switches::decode(*step, record).map_err(invalid)?);
+            if switches::is_batch(record) {
+                decoder
+                    .decode(*step, record, &mut switches)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
                 continue;
             }
             events.push(Event::decode(*step, record).map_err(invalid)?);

@@ -144,8 +144,10 @@ struct Checkpoint {
     irqchips: Vec<Vec<u8>>,
     devices: DeviceState,
     /// The read and write records' encoder, which goes on from the
-    /// records made up to the checkpoint.
+    /// records made up to the checkpoint, and the switches' encoder, with
+    /// the switches up to the checkpoint that no batch holds yet pending.
     io: Option<rewind_trace::io_records::Encoder>,
+    switches: Option<rewind_trace::switches::Encoder>,
     pages: KeptPages,
 }
 
@@ -215,6 +217,7 @@ impl Machine {
             irqchips,
             devices,
             io: self.dev.io.clone(),
+            switches: self.dev.switches.clone(),
             pages,
         });
         self.checkpoints.anchor = Some(id);
@@ -278,14 +281,16 @@ impl Machine {
         // The vCPU, the interrupt controllers and the monitor's state, and
         // a dirty log that starts afresh from the checkpoint's memory.
         let checkpoint = &self.checkpoints.taken[id.0];
-        let (cpu, irqchips, devices, io) = (
+        let (cpu, irqchips, devices, io, switches) = (
             checkpoint.cpu.clone(),
             checkpoint.irqchips.clone(),
             checkpoint.devices.clone(),
             checkpoint.io.clone(),
+            checkpoint.switches.clone(),
         );
         self.apply_state(&cpu, &irqchips, &devices)?;
         self.dev.io = io;
+        self.dev.switches = switches;
         self.dirty_pages()?;
         self.checkpoints.since.clear();
         self.checkpoints.anchor = Some(id);
@@ -294,7 +299,8 @@ impl Machine {
 
     /// Puts the machine at the keyframe `chain` ends with, in place: the
     /// full keyframe first, as for [`Machine::restore`], and `trace` the
-    /// run's records up to the last one's step. A machine restored from
+    /// run's records, which the encoders go on from at the last one's
+    /// step. A machine restored from
     /// keyframes can differ from the last one only in the pages written
     /// since it was restored and the pages the two keyframes hold
     /// differently, so only those are written, from `pages`: about 3% of
@@ -364,7 +370,7 @@ impl Machine {
         self.checkpoints = Checkpoints::default();
         self.vm.get_dirty_log(crate::SLOT_RAM, self.dev.ram.len())?;
         self.apply_state(&last.cpu, &last.irqchips, &last.devices)?;
-        self.resume_io(trace)?;
+        self.resume_records(trace, last.devices.step)?;
         Ok(())
     }
 

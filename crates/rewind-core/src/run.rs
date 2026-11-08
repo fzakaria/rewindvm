@@ -736,7 +736,8 @@ impl Run {
         // A run that shares its start with its parent is restored at the
         // parent's keyframe, and replays the parent's events up to there
         // into its trace further down. The restored machine's read and
-        // write records go on from that same prefix of the parent's trace.
+        // write records and switches go on from the parent's trace at
+        // that step.
         // The store a restore opened stays open until this execution knows
         // whether it takes keyframes.
         let (mut machine, mut store, last_keyframe) = match &shortcut {
@@ -746,7 +747,7 @@ impl Run {
                     &config,
                     &s.chain,
                     &crate::keyframes::ReadPages(&store),
-                    &s.prefix,
+                    &s.records,
                 )?;
                 (machine, Some(store), Some(s.base))
             }
@@ -829,9 +830,9 @@ impl Run {
         };
 
         // A run restored at its parent's keyframe begins its trace with
-        // the parent's events up to the keyframe.
+        // the parent's records up to the keyframe.
         if let Some(s) = &shortcut {
-            for (step, record) in &s.prefix {
+            for (step, record) in &s.records[..s.prefix] {
                 recorder.record(*step, record);
             }
         }
@@ -1130,13 +1131,7 @@ impl Run {
     ) -> Result<()> {
         let layers = self.keyframes()?;
         let chain = layers.chain_loaded(step, loaded)?;
-        let records = self.records()?;
-        let through = records.partition_point(|(s, _)| *s <= step);
-        machine.restore_in_place(
-            &chain,
-            &crate::keyframes::ReadPages(store),
-            &records[..through],
-        )
+        machine.restore_in_place(&chain, &crate::keyframes::ReadPages(store), self.records()?)
     }
 
     /// A machine at `step` of this run: the latest keyframe at or before
@@ -1164,13 +1159,11 @@ impl Run {
             Some(kf) => {
                 let store = rewind_store::Store::open(&home.store())?;
                 let chain = keyframes.chain(kf)?;
-                let records = self.records()?;
-                let through = records.partition_point(|(s, _)| *s <= kf);
                 let machine = Machine::restore(
                     &config,
                     &chain,
                     &crate::keyframes::ReadPages(&store),
-                    &records[..through],
+                    self.records()?,
                 )?;
                 let base = Base {
                     step: Some(kf),
@@ -1388,11 +1381,20 @@ impl Run {
         }
         machine.run(self.replay_end(), &mut recorder)?;
         recorder.trace.finish()?;
+        // The replay's own records, read against the run's up to the
+        // keyframe, and both sides' switches after it: the replay writes
+        // the switches pending at the keyframe again, in its first batch.
         let records = rewind_trace::records(tmp.path())?;
-        let again = Trace::decode(&records)?;
-        let original = match start {
-            Some(kf) => original.after(kf),
-            None => original.clone(),
+        let (original, again) = match start {
+            Some(kf) => {
+                let decoder = rewind_trace::switches::Decoder::resume(self.records()?, kf)
+                    .context("reading the context switches up to the keyframe")?;
+                (
+                    original.after(kf),
+                    Trace::decode_from(&records, decoder)?.after(kf),
+                )
+            }
+            None => (original.clone(), Trace::decode(&records)?),
         };
 
         // The events first, then the read and write records.
@@ -1716,8 +1718,11 @@ struct Shortcut {
     /// that restores it.
     base: u64,
     chain: Vec<rewind_vmm::snapshot::Keyframe>,
-    /// The parent's trace up to the keyframe, record by record.
-    prefix: Vec<(u64, Vec<u8>)>,
+    /// The parent's trace, record by record, and how many of its records
+    /// are at or before the keyframe: the prefix this run's trace begins
+    /// with.
+    records: Vec<(u64, Vec<u8>)>,
+    prefix: usize,
     /// The directory a keyframe at the last shared step belongs in.
     owner: PathBuf,
 }
@@ -1745,11 +1750,8 @@ impl Shortcut {
         let layers = parent.keyframes().ok()?;
         let base = layers.steps().into_iter().rfind(|s| *s <= through)?;
         let chain = layers.chain(base).ok()?;
-        let prefix = rewind_trace::records(&parent.dir.join(TRACE))
-            .ok()?
-            .into_iter()
-            .take_while(|(step, _)| *step <= base)
-            .collect();
+        let records = rewind_trace::records(&parent.dir.join(TRACE)).ok()?;
+        let prefix = records.partition_point(|(step, _)| *step <= base);
         Some(Shortcut {
             shared: crate::keyframes::Shared {
                 run: parent.manifest.id.clone(),
@@ -1757,6 +1759,7 @@ impl Shortcut {
             },
             base,
             chain,
+            records,
             prefix,
             owner: layers.owner(through).to_path_buf(),
         })

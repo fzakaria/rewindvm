@@ -1387,6 +1387,24 @@ events: they say nothing a program did, so `rewind events` does not list
 them and comparisons of what two runs did leave them out, while `rewind
 replay` compares them record for record like the rest.
 
+The monitor does not store the guest's 36-byte record. A run switches at
+most of its steps, so those would be most of a long trace. It encodes each
+switch in two or three bytes, the step as the distance from the switch
+before and the task as an index into a table of the tasks named so far,
+and stores many in one record of kind 15: a batch is written at the first
+step of the next window of 4096 steps, when it would exceed a record's
+size, or at the run's end, stamped with the step it is written at, so the
+trace stays in step order and a batch holds only switches at or before its
+step. A machine restored at a keyframe resumes the encoder from the whole
+trace at that step: the tables as the switches up to then left them, and
+pending the switches up to then that the run wrote in a batch after it,
+so a fork's batches come out as the run's did and a replay from a keyframe
+compares them record for record. The PGO demo's trace, with its 63,000
+switches, went from 2.3 MB as guest records to 145 KB encoded. The task
+table is consulted, never copied, per switch: a copy per switch cost a
+hello build under four schedules at once 17 times its wall time in the
+static release, where every allocation takes musl's one malloc lock.
+
 Before interface 5, switches were not recorded, and `rewind threads`
 replayed the window one step at a time, reading `current_task` from guest
 memory at each exit. That saw a switch only when an exit followed it, and

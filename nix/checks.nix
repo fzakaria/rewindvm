@@ -1937,11 +1937,19 @@ in
         pid=$(echo "$write" | awk '{print $2}' | cut -d/ -f1)
         last=$(rewind ls --json | jq -s '.[0].steps')
 
-        # The switches are records of the run, compared by a replay, and
-        # not events.
+        # The switches are records of the run, compared by a replay from
+        # boot and by one from a keyframe, whose first batch holds the
+        # switches pending at the keyframe, and not events. Encoded, they
+        # take a few bytes each.
         rewind replay threads | tee replay
         grep -q 'identical to the recording: .* context switches' replay
-        test "$(rewind events threads | grep -c 'record kind 14')" = 0
+        rewind replay threads --from 300 | tee replay-from
+        grep -q 'identical to the recording from the snapshot' replay-from
+        test "$(rewind events threads | grep -c 'record kind 1[45]')" = 0
+        switches=$(rewind threads threads --json | wc -l)
+        size=$(stat -c %s $REWIND_HOME/runs/*/trace.bin)
+        echo "$switches slices, $size bytes of trace"
+        test "$size" -lt $((switches * 8 + 65536))
 
         # No keyframe is left to replay from: the answer is read.
         rm -rf $REWIND_HOME/runs/*/keyframes

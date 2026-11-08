@@ -186,20 +186,32 @@ pub const SHARED_IO_LOST: u64 = SHARED_IO_HEAD + 4;
 /// kernel's buffer size.
 pub const IO_BUF_MAX: usize = 1 << 20;
 
-/// Whether a guest kernel buffers read and write records for the monitor
-/// to take.
+/// The records a guest kernel of an interface makes beyond its events:
+/// read and write records in a buffer the monitor drains at each step,
+/// and a record at every context switch, which the monitor encodes into
+/// batches.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GuestIo {
-    Unbuffered,
-    Buffered,
+pub struct GuestRecords {
+    pub io: bool,
+    pub switches: bool,
 }
 
 /// Whether a guest kernel that names interface `version` is one this
-/// monitor runs, and if so whether it buffers read and write records.
-pub fn check_interface(version: u32) -> anyhow::Result<GuestIo> {
+/// monitor runs, and if so which records it makes.
+pub fn check_interface(version: u32) -> anyhow::Result<GuestRecords> {
     match version {
-        INTERFACE_VERSION | INTERFACE_WITHOUT_SWITCHES => Ok(GuestIo::Buffered),
-        INTERFACE_WITHOUT_IO => Ok(GuestIo::Unbuffered),
+        INTERFACE_VERSION => Ok(GuestRecords {
+            io: true,
+            switches: true,
+        }),
+        INTERFACE_WITHOUT_SWITCHES => Ok(GuestRecords {
+            io: true,
+            switches: false,
+        }),
+        INTERFACE_WITHOUT_IO => Ok(GuestRecords {
+            io: false,
+            switches: false,
+        }),
         0 => anyhow::bail!(
             "the run's guest kernel names no interface: it is from before rewind 1.0, \
              which this build does not run; record the run again"
@@ -348,15 +360,24 @@ mod interface_tests {
         assert_eq!(INTERFACE_VERSION, 5);
         assert_eq!(
             check_interface(INTERFACE_VERSION).unwrap(),
-            GuestIo::Buffered
+            GuestRecords {
+                io: true,
+                switches: true
+            }
         );
         assert_eq!(
             check_interface(INTERFACE_WITHOUT_SWITCHES).unwrap(),
-            GuestIo::Buffered
+            GuestRecords {
+                io: true,
+                switches: false
+            }
         );
         assert_eq!(
             check_interface(INTERFACE_WITHOUT_IO).unwrap(),
-            GuestIo::Unbuffered
+            GuestRecords {
+                io: false,
+                switches: false
+            }
         );
         let none = format!("{:#}", check_interface(0).unwrap_err());
         assert!(none.contains("before rewind 1.0"), "{none}");

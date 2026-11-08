@@ -317,9 +317,9 @@ impl Machine {
     }
 
     /// A machine restored from a chain of keyframes, the full one first and
-    /// the one to restore last. `trace` is the run's trace up to the last
-    /// keyframe's step, record by record, which the machine's read and
-    /// write records go on from.
+    /// the one to restore last. `trace` is the run's trace, record by
+    /// record, which the machine's read and write records and switches go
+    /// on from at the last keyframe's step.
     pub fn restore(
         config: &Config,
         chain: &[Keyframe],
@@ -342,23 +342,33 @@ impl Machine {
         m.vm.get_dirty_log(SLOT_RAM, m.dev.ram.len())?;
 
         m.apply_state(&last.cpu, &last.irqchips, &last.devices)?;
-        m.resume_io(trace)?;
+        m.resume_records(trace, last.devices.step)?;
         Ok(m)
     }
 
-    /// Sets the read and write records' encoder for a machine just put at
-    /// a keyframe: a kernel that buffers its records has them encoded
-    /// against the ones `trace`, the run's up to the keyframe, holds.
-    pub(crate) fn resume_io(&mut self, trace: &[(u64, Vec<u8>)]) -> Result<()> {
+    /// Sets the record encoders for a machine just put at a keyframe at
+    /// `step`: a kernel that buffers read and write records has them
+    /// encoded against the ones `trace`, the run's whole trace, holds up
+    /// to the step, and a kernel that records switches goes on from the
+    /// batches written by then and the switches up to the step that the
+    /// run wrote in a batch after it.
+    pub(crate) fn resume_records(&mut self, trace: &[(u64, Vec<u8>)], step: u64) -> Result<()> {
         self.dev.io = None;
+        self.dev.switches = None;
         let Some(shared) = self.dev.shared else {
             return Ok(());
         };
-        let io = crate::pv::check_interface(self.dev.guest_interface(shared)?)?;
-        if io == crate::pv::GuestIo::Buffered {
-            let encoder = rewind_trace::io_records::Encoder::resume(trace)
+        let records = crate::pv::check_interface(self.dev.guest_interface(shared)?)?;
+        if records.io {
+            let through = trace.partition_point(|(s, _)| *s <= step);
+            let encoder = rewind_trace::io_records::Encoder::resume(&trace[..through])
                 .context("reading the read and write records up to the keyframe")?;
             self.dev.io = Some(encoder);
+        }
+        if records.switches {
+            let encoder = rewind_trace::switches::Encoder::resume(trace, step)
+                .context("reading the context switches up to the keyframe")?;
+            self.dev.switches = Some(encoder);
         }
         Ok(())
     }
