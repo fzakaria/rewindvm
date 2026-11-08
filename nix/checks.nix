@@ -1893,6 +1893,60 @@ in
         touch $out
       '';
 
+  # checks.switches: the guest records every context switch, and `rewind
+  # threads` reads which task held the CPU from those records, with
+  # nothing replayed. Three workers wait on a futex while the main thread
+  # sleeps a second, then prints and wakes them. The slices cover the
+  # window without a gap, the sleep shows as idle, each worker holds the
+  # CPU after the print, and the answer comes with the run's keyframes
+  # gone, which a replay would need. The switches are not events, and a
+  # replay compares them. Boots the VM, so it needs /dev/kvm.
+  switches =
+    pkgs.runCommand "rewind-switches"
+      {
+        nativeBuildInputs = [
+          rewind
+          pkgs.jq
+        ];
+        requiredSystemFeatures = [ "kvm" ];
+      }
+      ''
+        export REWIND_HOME=$TMPDIR/rewind
+        rewind run -q --clock exits --name threads --root ${gdbRoot} -- /bin/threads
+        write=$(rewind events threads | grep 'write(1, "open')
+        open=$(echo "$write" | awk '{print $1}')
+        pid=$(echo "$write" | awk '{print $2}' | cut -d/ -f1)
+        last=$(rewind ls --json | jq -s '.[0].steps')
+
+        # The switches are records of the run, compared by a replay, and
+        # not events.
+        rewind replay threads | tee replay
+        grep -q 'identical to the recording: .* context switches' replay
+        test "$(rewind events threads | grep -c 'record kind 14')" = 0
+
+        # No keyframe is left to replay from: the answer is read.
+        rm -rf $REWIND_HOME/runs/*/keyframes
+        rewind threads threads --json > slices
+        test "$(wc -l < slices)" -gt 10
+
+        # Contiguous: each slice starts the step after the one before.
+        jq -s '[range(1; length) as $i | select(.[$i].from != .[$i - 1].to + 1)] | length' slices \
+          | grep -qx 0
+        test "$(jq -s -r '.[-1].to' slices)" = "$last"
+
+        # The main thread, idle while it sleeps, and each worker afterwards.
+        test -n "$(jq -c "select(.on == \"thread\" and .pid == $pid and .tid == $pid)" slices)"
+        test -n "$(jq -c "select(.on == \"idle\" and .to < $open)" slices)"
+        workers=$(jq -s -r "map(select(.on == \"thread\" and .pid == $pid and .tid != $pid and .from > $open) | .tid) | unique | length" slices)
+        test "$workers" = 3
+
+        # A window inside the run is the same slices, clipped to it.
+        rewind threads threads --from $((open - 5)) --to $((open + 5)) --json > window
+        test "$(jq -s -r '.[0].from' window)" = $((open - 5))
+        test "$(jq -s -r '.[-1].to' window)" = $((open + 5))
+        touch $out
+      '';
+
   # checks.gdb-threads: `rewind gdb` shows every thread of the process it
   # debugs, those off the CPU included. Three workers wait on a futex
   # while the main thread sleeps, then prints. At that print, gdb lists
@@ -3399,8 +3453,8 @@ in
   # of a window, one slice a line: the thread of every event in the window
   # held it at the event's step, both of race's workers show up, the
   # slices cover the window without a gap, a window past the run's end is
-  # cut there, and one from boot starts once the kernel lists its tasks.
-  # Boots the VM, so it needs /dev/kvm.
+  # cut there, and one from boot starts at the kernel's first recorded
+  # context switch. Boots the VM, so it needs /dev/kvm.
   threads =
     pkgs.runCommand "rewind-threads"
       {
@@ -3425,8 +3479,8 @@ in
         ' slices
         jq -se '[.[] | select(.on == "thread") | .tid] | unique | length >= 3' slices
 
-        # A window from boot starts where the kernel first says where its
-        # tasks are, before which there is no task to read.
+        # A window from boot starts at the first recorded switch, before
+        # which no record says who ran.
         rewind threads race --from 0 --to "$from" --json > booting
         jq -se --argjson from "$from" '
           length > 0 and .[0].from > 0 and .[-1].to == $from

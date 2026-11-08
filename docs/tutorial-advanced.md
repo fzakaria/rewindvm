@@ -307,9 +307,10 @@ the solid one where the runs' events first differ. Zoomed in around the crash:
 
 ## See which thread held the CPU
 
-The VM has one CPU, so a race is an order of threads. `rewind threads` replays
-a window of steps and prints which thread held the CPU, a line per stretch.
-Around the deciding step, in both runs:
+The VM has one CPU, so a race is an order of threads. Every context switch
+in the VM is a step of its own, and `rewind threads` prints which thread held
+the CPU over a window of steps, a line per stretch. Around the deciding step,
+in both runs:
 
 ```console
 $ rewind threads 4736382d --from 4749 --to 4782
