@@ -49,6 +49,10 @@ const MILESTONES = [
     label: "v0.12.0",
     html: `Keyframes are spaced by the guest's work instead of wall time (${commit("67dd7d7a")}), which counted each keyframe's own time and gave this machine about 300 for hello, and the page store keeps one compression context where the static build made one for every page (${commit("2c778eb4")}). hello records in 26.6 s against 81.3 s, with 39 keyframes against 291, and check of the Nix build takes 57 s, against 116 s. Hashing and compressing on several threads (${commit("8f714365")}) gave about a tenth more. A replay compares only the pages written since the last match (${commit("515bc488")}) and is back within a second of 0.9.0's. The late seek is a fifth slower, since a seek can now replay up to a quarter second of the reference laptop's work, which takes longer here.`,
   },
+  {
+    label: "v0.13.0",
+    html: `Every context switch is an exit of its own, with a record naming the task that takes the CPU (${commit("08471c00")}), encoded in a few bytes each (${commit("b35d6052")}), and the guest's scheduler tick no longer reads the clock at every switch. A short run makes twice the steps and hello a sixth fewer. A check of the ping-pong program, where every token pass is now an exit, takes 38% more CPU; hello and check of the Nix build measured 8% and 9% faster, within the rounds' spread. The first run in a new home now checks the branch counter against a known answer before trusting it (${commit("2c0a676d")}), which is the whole of the 1.7 s more on echo-cold, and a run keeps 6 MiB more resident.`,
+  },
 ];
 
 // What each metric reads from a sample.
@@ -93,7 +97,7 @@ const METRICS = [
     label: "Steps",
     unit: "",
     get: (s) => s.steps,
-    note: "Exits the guest made. A change here is a change to the guest or to what the VM shows it, not to speed.",
+    note: "Exits the guest made. A change here is a change to the guest or to what the VM shows it, not to speed. From 0.13.0 every context switch is a step and the scheduler tick no longer reads the clock, so a short run has twice the steps and hello a sixth fewer.",
   },
 ];
 
@@ -764,7 +768,7 @@ const DERIVED = [
   },
   {
     title: "First run's extra",
-    sub: "echo-cold less echo: packing the root, a new store",
+    sub: "echo-cold less echo: packing the root, a new store, and from 0.13.0 the branch counter's self-test",
     unit: "s",
     fn: (run) =>
       run("echo-cold") &&
