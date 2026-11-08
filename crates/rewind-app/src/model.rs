@@ -11,12 +11,16 @@ use std::collections::HashMap;
 
 use rewind_trace::ending::ExitStatus;
 use rewind_trace::sdk::{SdkMark, TestResult};
+use rewind_trace::switches::Switch;
 use rewind_trace::{Event, EventKind, JobExit, Process, Trace, signal};
 
 use crate::shown_line::{Pen, shown};
 
 /// The file descriptor of standard error.
 const STDERR_FD: u32 = 2;
+
+/// Kernel events do not identify a user thread.
+const KERNEL_PID: u32 = 0;
 
 /// The line nixpkgs' setup.sh prints as each phase starts.
 const NIX_PHASE_PREFIX: &str = "Running phase: ";
@@ -413,15 +417,18 @@ fn sdk_findings(trace: &Trace) -> (Vec<Assertion>, Vec<TestSpan>) {
 
 impl Timeline {
     /// Indexes a trace. `total_hint` stretches the timeline past the last
-    /// event, for a run whose manifest says it went on longer.
-    /// The timeline of `trace`, `total_hint` steps long when the run went
-    /// on past its last event, and stopped as the engine's `stop` says.
+    /// event or switch, for a run whose manifest says it went on longer.
+    /// The timeline is stopped as the engine's `stop` says.
     pub fn new(
         trace: Trace,
         total_hint: Option<u64>,
         stop: Option<&rewind_trace::stop::Stop>,
     ) -> Timeline {
-        let total = trace.last_step().max(total_hint.unwrap_or(0));
+        let last_switch = trace.switches.last().map_or(0, |s| s.step);
+        let total = trace
+            .last_step()
+            .max(last_switch)
+            .max(total_hint.unwrap_or(0));
         let stopped = match stop {
             Some(stop) if !stop.is_clean() => Stopped::Abnormally,
             _ => Stopped::Otherwise,
@@ -497,16 +504,38 @@ impl Timeline {
         self.rows.iter().filter(move |r| r.alive_at(step))
     }
 
-    /// Which of the rows alive at `step` did the last event at or before
-    /// it: its thread's row, or its process's row when the thread has no
-    /// row of its own. None when that process is not alive at `step`.
-    pub fn last_event_row(&self, step: u64) -> Option<usize> {
-        let event = self.event_index_at(step).and_then(|i| self.event(i))?;
+    /// The last switch at or before `step`, including idle and kernel tasks.
+    pub fn switch_at(&self, step: u64) -> Option<&Switch> {
+        let after = self.trace.switches.partition_point(|s| s.step <= step);
+        after.checked_sub(1).map(|i| &self.trace.switches[i])
+    }
+
+    /// The user thread named by the latest event or switch. Older traces
+    /// without switches keep following their last event.
+    pub fn active_thread(&self, step: u64) -> Option<(u32, u32)> {
+        let event = self.event_index_at(step).and_then(|i| self.event(i));
+
+        // A switch replaces the last event's thread, even without a new event.
+        if let Some(switch) = self.switch_at(step)
+            && event.is_none_or(|event| switch.step >= event.step)
+        {
+            return (switch.memory && !switch.is_idle()).then_some((switch.pid, switch.tid));
+        }
+
+        // A later event can change identity at exec, or name a thread that exits.
+        let event = event?;
+        (event.pid != KERNEL_PID).then_some((event.pid, event.tid))
+    }
+
+    /// The active thread's row among the rows alive at `step`, or its
+    /// process's row when the thread has no row of its own.
+    pub fn active_row(&self, step: u64) -> Option<usize> {
+        let (pid, tid) = self.active_thread(step)?;
         self.alive_rows(step)
-            .position(|r| r.pid == event.pid && r.tid == event.tid)
+            .position(|r| r.pid == pid && r.tid == tid)
             .or_else(|| {
                 self.alive_rows(step)
-                    .position(|r| r.kind == RowKind::Process && r.pid == event.pid)
+                    .position(|r| r.kind == RowKind::Process && r.pid == pid)
             })
     }
 
@@ -1967,16 +1996,77 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn switches_move_the_active_row_without_an_event() {
+        // A worker takes the CPU after its parent writes, then idle and kernel tasks run.
+        use rewind_trace::switches::Switch;
+        let t = Timeline::new(
+            Trace {
+                events: vec![
+                    exec(1, 1, &["parent"]),
+                    fork(2, 1, 2, false),
+                    fork(3, 2, 3, true),
+                    out(4, 1, 1, "waiting\n"),
+                    exec(10, 2, &["child"]),
+                ],
+                switches: vec![
+                    Switch {
+                        step: 5,
+                        pid: 2,
+                        tid: 3,
+                        memory: true,
+                        name: "worker".into(),
+                    },
+                    Switch {
+                        step: 7,
+                        pid: 0,
+                        tid: 0,
+                        memory: false,
+                        name: "swapper".into(),
+                    },
+                    Switch {
+                        step: 9,
+                        pid: 20,
+                        tid: 20,
+                        memory: false,
+                        name: "kworker".into(),
+                    },
+                    Switch {
+                        step: 12,
+                        pid: 2,
+                        tid: 2,
+                        memory: true,
+                        name: "child".into(),
+                    },
+                ],
+            },
+            None,
+            None,
+        );
+        assert_eq!(t.active_row(0), None);
+        assert_eq!(t.active_row(4), Some(0));
+        assert_eq!(t.active_row(5), Some(2));
+        assert_eq!(t.active_row(6), Some(2));
+        assert_eq!(t.active_row(7), None);
+        assert_eq!(t.active_row(9), None);
+        assert_eq!(t.active_row(10), Some(1));
+        assert_eq!(t.active_row(12), Some(1));
+        assert_eq!(t.total, 12);
+        assert!(t.switch_at(4).is_none());
+        assert_eq!(t.switch_at(5).unwrap().tid, 3);
+        assert_eq!(t.switch_at(6).unwrap().tid, 3);
+    }
+
+    #[test]
     fn the_last_events_row_is_its_thread_or_else_its_process() {
         // Indexes into the rows alive at each step: the compiler's open at
         // step 8, the worker thread's SIGSEGV at 14, the worker's exit at
         // 15 (its row gone, so the test's), and the test's own exit at 16,
         // when no row of it is alive.
         let t = build();
-        assert_eq!(t.last_event_row(8), Some(2));
-        assert_eq!(t.last_event_row(14), Some(3));
-        assert_eq!(t.last_event_row(15), Some(2));
-        assert_eq!(t.last_event_row(16), None);
+        assert_eq!(t.active_row(8), Some(2));
+        assert_eq!(t.active_row(14), Some(3));
+        assert_eq!(t.active_row(15), Some(2));
+        assert_eq!(t.active_row(16), None);
     }
 
     #[test]

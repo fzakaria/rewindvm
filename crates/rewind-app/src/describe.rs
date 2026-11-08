@@ -1,15 +1,17 @@
-//! Events and numbers as the scrubber prints them.
+//! Events, context switches and numbers as the scrubber prints them.
 //!
 //! The "At this step" card shows the last event before the playhead as the
 //! system call or signal that produced it, the way strace would, so that
 //! `write(1, "...")`, `execve(...)` and `SIGSEGV at 0x...` read the same as
 //! in any other Linux tool.
+//! At a context switch, the card names the task taking the CPU instead.
 
 use rewind_trace::{Event, EventKind, signal_name};
 
 use crate::selection::{Mapped, Splice};
 use rewind_trace::ending::ExitStatus;
 use rewind_trace::signal;
+use rewind_trace::switches::Switch;
 
 /// Text inside a described event is cut to this many characters.
 const MAX_QUOTED_CHARS: usize = 160;
@@ -57,6 +59,24 @@ pub enum Length {
 /// Describes an event as a system call or signal.
 pub fn describe(event: &Event) -> Described {
     describe_as(event, Length::Short)
+}
+
+/// Describes the incoming task at a context switch.
+pub fn describe_switch(switch: &Switch) -> String {
+    if switch.is_idle() {
+        return "Switched to idle".to_string();
+    }
+
+    // Kernel threads and exiting tasks can both lack user memory.
+    let memory = if switch.memory {
+        ""
+    } else {
+        " (no user memory)"
+    };
+    format!(
+        "Switched to thread {}/{} {}{memory}",
+        switch.pid, switch.tid, switch.name
+    )
 }
 
 /// Describes an event as a system call or signal, at `length`.
@@ -608,6 +628,29 @@ mod tests {
             tid: 7,
             kind,
         }
+    }
+
+    #[test]
+    fn switches_name_the_incoming_task() {
+        // Describe a user thread, idle and a task without memory as distinct switch cards.
+        use rewind_trace::switches::Switch;
+        let mut record = Switch {
+            step: 20,
+            pid: 40,
+            tid: 42,
+            memory: true,
+            name: "worker".into(),
+        };
+        assert_eq!(describe_switch(&record), "Switched to thread 40/42 worker");
+        record.memory = false;
+        assert_eq!(
+            describe_switch(&record),
+            "Switched to thread 40/42 worker (no user memory)"
+        );
+        record.pid = 0;
+        record.tid = 0;
+        record.name = "swapper".into();
+        assert_eq!(describe_switch(&record), "Switched to idle");
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! What Previous and Next stop at: every event, or only the
 //! events of one thread, one process or one kind, the build log's lines,
-//! the events on one file, or the processes starting and exiting.
+//! the events on one file, the processes starting and exiting, or context switches.
 //!
 //! A stride that follows something, a thread or a file, names it when it
 //! is chosen, from the event at the playhead then, so stepping keeps
@@ -75,6 +75,8 @@ impl Kind {
 pub enum Stride {
     /// Every event; kernel console lines only while the log shows them.
     Every,
+    /// Every recorded context switch, including kernel and idle tasks.
+    Switches,
     /// The events of one thread.
     Thread { pid: u32, tid: u32 },
     /// The events of any thread of one process.
@@ -116,7 +118,7 @@ impl Stride {
                 EventKind::Exec { .. } => true,
                 _ => false,
             },
-            Stride::LogLine | Stride::Bookmarks => false,
+            Stride::Switches | Stride::LogLine | Stride::Bookmarks => false,
         }
     }
 
@@ -188,9 +190,21 @@ pub fn step_by(
     direction: Direction,
     step: u64,
 ) -> Option<u64> {
-    // The log's lines and the bookmarks are steps of their own, in step
-    // order.
+    // Switches, log lines and bookmarks have their own ordered stops.
     match stride {
+        Stride::Switches => {
+            let switches = &timeline.trace.switches;
+            return match direction {
+                Direction::Forward => {
+                    let after = switches.partition_point(|s| s.step <= step);
+                    switches.get(after).map(|s| s.step)
+                }
+                Direction::Back => {
+                    let before = switches.partition_point(|s| s.step < step);
+                    before.checked_sub(1).map(|i| switches[i].step)
+                }
+            };
+        }
         Stride::LogLine => {
             let lines: Vec<u64> = timeline.lines(filter).iter().map(|l| l.step).collect();
             return nearest(&lines, direction, step);
@@ -226,6 +240,7 @@ mod tests {
     // threads, a file and kernel console lines, under each stride.
     use super::*;
     use rewind_trace::Trace;
+    use rewind_trace::switches::Switch;
 
     fn event(step: u64, pid: u32, tid: u32, kind: EventKind) -> Event {
         Event {
@@ -297,7 +312,43 @@ mod tests {
                     },
                 ),
             ],
-            ..Default::default()
+            switches: vec![
+                Switch {
+                    step: 9,
+                    pid: 1,
+                    tid: 1,
+                    memory: true,
+                    name: "init".into(),
+                },
+                Switch {
+                    step: 19,
+                    pid: 5,
+                    tid: 5,
+                    memory: true,
+                    name: "five".into(),
+                },
+                Switch {
+                    step: 35,
+                    pid: 2,
+                    tid: 2,
+                    memory: false,
+                    name: "kworker".into(),
+                },
+                Switch {
+                    step: 79,
+                    pid: 0,
+                    tid: 0,
+                    memory: false,
+                    name: "swapper".into(),
+                },
+                Switch {
+                    step: 90,
+                    pid: 1,
+                    tid: 1,
+                    memory: true,
+                    name: "init".into(),
+                },
+            ],
         };
         Timeline::new(trace, None, None)
     }
@@ -319,6 +370,26 @@ mod tests {
             walk(Direction::Forward, 0),
             walk(Direction::Back, t.total + 1),
         )
+    }
+
+    #[test]
+    fn context_switches_have_their_own_stops() {
+        // Walk all switches, including kernel, idle and the tail after the last event.
+        let (forward, back) = stops(&Stride::Switches, LogFilter::Output);
+        assert_eq!(forward, vec![9, 19, 35, 79, 90]);
+        assert_eq!(back, vec![90, 79, 35, 19, 9]);
+
+        let mut t = timeline();
+        let step = |t: &Timeline, direction, at| {
+            step_by(t, &Stride::Switches, LogFilter::Output, &[], direction, at)
+        };
+        assert_eq!(step(&t, Direction::Forward, 20), Some(35));
+        assert_eq!(step(&t, Direction::Back, 20), Some(19));
+        assert_eq!(step(&t, Direction::Forward, 90), None);
+        assert_eq!(step(&t, Direction::Back, 9), None);
+        t.trace.switches.clear();
+        assert_eq!(step(&t, Direction::Forward, 0), None);
+        assert_eq!(step(&t, Direction::Back, t.total), None);
     }
 
     #[test]

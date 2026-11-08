@@ -48,14 +48,12 @@ use crate::ui::tabs::RightTab;
 use crate::ui::waiting::waiting_block;
 use crate::ui::widgets::{icon, panel_title};
 
-/// Whose stack the panel shows at `step`: the thread of the latest event
-/// at or before it, or the one on the CPU when that event is the kernel's
-/// or there is none yet.
+/// Whose stack the panel shows at `step`: the user thread from the latest
+/// event or switch, or the CPU's task when no user thread is identified.
 fn thread_at(timeline: &Timeline, step: u64) -> Thread {
     timeline
-        .event_index_at(step)
-        .and_then(|i| timeline.event(i))
-        .map_or(Thread::OnTheCpu, |e| target(e.pid, e.tid))
+        .active_thread(step)
+        .map_or(Thread::OnTheCpu, |(pid, tid)| target(pid, tid))
 }
 
 /// Whose stack `panel` shows at `step`, and the access in the step it
@@ -1160,4 +1158,101 @@ fn source_message(panel: &SourcePanel) -> Option<(String, u32)> {
         Some(Shown::Stopped { .. }) => (crate::source::STOPPED.to_string(), theme::SOFT),
         None => (panel.progress.text(), theme::MUTED),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    // Source targets from recorded events and switches, without starting gdb.
+    use super::*;
+    use rewind_trace::switches::Switch;
+    use rewind_trace::{Event, EventKind, Trace};
+
+    #[test]
+    fn source_follows_a_switch_past_the_last_event() {
+        // Thread 41 writes, then thread 42 runs without emitting an event.
+        const WRITE: u64 = 10;
+        const SWITCH: u64 = 20;
+        const PID: u32 = 40;
+        const WRITER: u32 = 41;
+        const RUNNER: u32 = 42;
+        let timeline = Timeline::new(
+            Trace {
+                events: vec![Event {
+                    step: WRITE,
+                    pid: PID,
+                    tid: WRITER,
+                    kind: EventKind::Output {
+                        fd: 1,
+                        bytes: b"ready".to_vec(),
+                    },
+                }],
+                switches: vec![Switch {
+                    step: SWITCH,
+                    pid: PID,
+                    tid: RUNNER,
+                    memory: true,
+                    name: "worker".into(),
+                }],
+            },
+            Some(SWITCH + 1),
+            None,
+        );
+        assert_eq!(
+            thread_at(&timeline, WRITE),
+            Thread::Of {
+                pid: PID,
+                tid: WRITER
+            }
+        );
+        assert_eq!(
+            thread_at(&timeline, SWITCH),
+            Thread::Of {
+                pid: PID,
+                tid: RUNNER
+            }
+        );
+        assert_eq!(
+            thread_at(&timeline, SWITCH + 1),
+            Thread::Of {
+                pid: PID,
+                tid: RUNNER
+            }
+        );
+    }
+
+    #[test]
+    fn source_asks_the_cpu_after_idle_and_kernel_switches() {
+        // A previous user write must not pin source to that user thread after a switch.
+        const WRITE: u64 = 10;
+        const SWITCH: u64 = 20;
+        const USER_PID: u32 = 40;
+        const IDLE_PID: u32 = 0;
+        const KERNEL_PID: u32 = 2;
+        for pid in [IDLE_PID, KERNEL_PID] {
+            let timeline = Timeline::new(
+                Trace {
+                    events: vec![Event {
+                        step: WRITE,
+                        pid: USER_PID,
+                        tid: USER_PID,
+                        kind: EventKind::Output {
+                            fd: 1,
+                            bytes: b"ready".to_vec(),
+                        },
+                    }],
+                    switches: vec![Switch {
+                        step: SWITCH,
+                        pid,
+                        tid: pid,
+                        memory: false,
+                        name: "kernel".into(),
+                    }],
+                },
+                None,
+                None,
+            );
+            assert_eq!(thread_at(&timeline, SWITCH), Thread::OnTheCpu);
+            assert_eq!(thread_at(&timeline, SWITCH + 1), Thread::OnTheCpu);
+        }
+    }
 }

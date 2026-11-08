@@ -176,16 +176,14 @@ pub struct AfterAccess {
 /// Whose stack the panel asks the engine for at a step.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Thread {
-    /// The thread of the latest event at or before the step.
+    /// A user thread identified by an event, switch or explicit selection.
     Of { pid: u32, tid: u32 },
     /// The thread that was on the CPU, which the engine reads from the
-    /// guest kernel: the latest event is the kernel's own, such as a
-    /// console line printed while a thread of the job ran.
+    /// guest kernel when the trace does not identify a user thread.
     OnTheCpu,
 }
 
-/// Whose stack the panel shows at a step whose latest event is `pid`'s
-/// and `tid`'s.
+/// Whose stack the panel shows for a recorded or selected `pid` and `tid`.
 pub fn target(pid: u32, tid: u32) -> Thread {
     const KERNEL_PID: u32 = 0;
     if pid == KERNEL_PID {

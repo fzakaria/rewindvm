@@ -24,7 +24,7 @@ const MAX_PATH_CHARS: usize = 40;
 const MENU_WIDTH: f32 = 300.0;
 
 /// What the chooser says it does when pointed at.
-const CHOOSER_NOTE: &str = "What Previous, Next and the Left and Right keys stop at: every event, the build log's lines, processes starting and exiting, the bookmarks, or the thread, process, kind of event or file of the event at the playhead.";
+const CHOOSER_NOTE: &str = "What Previous, Next and the Left and Right keys stop at: every event, context switches, the build log's lines, processes starting and exiting, the bookmarks, or the thread, process, kind of event or file of the event at the playhead.";
 
 /// What a stride is called in the chooser and its menu.
 pub fn stride_label(stride: &Stride, timeline: &Timeline) -> String {
@@ -35,6 +35,7 @@ pub fn stride_label(stride: &Stride, timeline: &Timeline) -> String {
     };
     match stride {
         Stride::Every => "every event".to_string(),
+        Stride::Switches => "context switches".to_string(),
         Stride::LogLine => "log lines".to_string(),
         Stride::Lifecycle => "process starts and exits".to_string(),
         Stride::Bookmarks => "bookmarks".to_string(),
@@ -115,14 +116,18 @@ impl Scrubber {
     /// ones that follow the event at the playhead, then the file in the
     /// viewer.
     fn offered_strides(&self) -> Vec<Stride> {
-        let mut offered = vec![Stride::Every, Stride::LogLine, Stride::Lifecycle];
+        let timeline = self.session.as_ref().map(|s| &s.run.timeline);
+        let mut offered = vec![Stride::Every];
+        if timeline.is_some_and(|t| !t.trace.switches.is_empty()) {
+            offered.push(Stride::Switches);
+        }
+        offered.extend([Stride::LogLine, Stride::Lifecycle]);
         if !self.bookmarks.is_empty() {
             offered.push(Stride::Bookmarks);
         }
-        let Some(session) = &self.session else {
+        let Some(t) = timeline else {
             return offered;
         };
-        let t = &session.run.timeline;
         if let Some(event) = t.event_index_at(self.step).and_then(|i| t.event(i)) {
             offered.extend(Stride::following(event));
         }

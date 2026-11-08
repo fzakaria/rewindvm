@@ -1329,7 +1329,7 @@ impl Scrubber {
         // before it, as in the files list, and goes there when clicked.
         let rows: Vec<_> = t.alive_rows(step).collect();
         let alive = rows.len();
-        let now = t.last_event_row(step);
+        let now = t.active_row(step);
         let picked = self.picked_row;
         let step_width = self.step_column_width();
         let selected = self.selected_range(Surface::Processes);
@@ -1360,7 +1360,7 @@ impl Scrubber {
                     (0..id_end, color_only(id_color)),
                     (id_end..text.len(), color_only(label_color)),
                 ];
-                // The row of the thread or process that did the last event
+                // The active thread or process from the last event or switch
                 // is lit, as the log lights the playhead's line, and the
                 // picked row more. A plain click on a row picks it, for its
                 // card; a drag or a double click selects its text instead.
@@ -1553,7 +1553,7 @@ impl Scrubber {
             .child(file_list)
     }
 
-    /// The right column: the last event at the playhead, the divergence
+    /// The right column: the switch or last event at the playhead, the divergence
     /// and fork cards when they apply, and the inspect buttons.
     fn render_at_step(&mut self, cx: &mut Context<Self>) -> Div {
         let session = self.session();
@@ -1561,8 +1561,7 @@ impl Scrubber {
         let step = self.step;
         let mono = self.fonts.mono.clone();
 
-        // The last event at or before the playhead, as a system call: a
-        // line about where it happened, then the call itself.
+        // The switch at the playhead or the last event: its step, then its description.
         let registry = self.selecting.registry.clone();
         let event_range = self.selected_range(Surface::EventCard);
         let event_lines = self.event_card_lines();
@@ -1577,13 +1576,13 @@ impl Scrubber {
             selectable(Surface::EventCard, line, text, part, &registry)
         };
         let stopped_here = session.run.stopped_at(step).is_some();
+        let switched_here = t.switch_at(step).is_some_and(|s| s.step == step);
         let event_card = match t
             .event_index_at(step)
             .and_then(|i| t.event(i).map(|e| (i, e)))
         {
-            // Where the machine stopped before the job exited, the
-            // engine's words for how, in place of the last event.
-            _ if stopped_here => card(theme::RAISED, theme::LINE)
+            // Stops and switches replace the last event's card and file link.
+            _ if stopped_here || switched_here => card(theme::RAISED, theme::LINE)
                 .child(
                     div()
                         .font_family(mono.clone())
@@ -1595,7 +1594,11 @@ impl Scrubber {
                     div()
                         .font_family(mono.clone())
                         .text_size(px(size::TEXT_EVENT))
-                        .text_color(rgb(theme::RED))
+                        .text_color(rgb(if stopped_here {
+                            theme::RED
+                        } else {
+                            theme::TEXT
+                        }))
                         .child(event_line(1)),
                 ),
             None => card(theme::RAISED, theme::LINE)
@@ -1670,7 +1673,7 @@ impl Scrubber {
             .gap(px(size::SECTION_GAP))
             .p(px(size::PANEL_PAD_X));
 
-        // The picked process's card stands in for the last event's.
+        // The picked process's card stands in for the step's card.
         column = match self.render_picked_row(cx) {
             Some(picked) => column.child(picked),
             None => column.child(self.with_callout(event_card, Anchor::EventCard, cx)),
@@ -2779,7 +2782,7 @@ impl Scrubber {
             .collect()
     }
 
-    /// The event card: where the last event happened, then the event.
+    /// The step card: a stop or exact switch, otherwise the last event.
     pub(super) fn event_card_lines(&self) -> Vec<Mapped> {
         const NOTHING_YET: &str = "Nothing has happened yet at this step.";
         let Some(session) = &self.session else {
@@ -2791,6 +2794,15 @@ impl Scrubber {
         if let Some(stop) = session.run.stopped_at(self.step) {
             let meta = format!("machine stopped \u{b7} step {}", thousands(t.total));
             return vec![Mapped::plain(meta), mapped(&stop.to_string())];
+        }
+
+        // A switch has no event; show the task taking the CPU at this step.
+        if let Some(switch) = t.switch_at(self.step).filter(|s| s.step == self.step) {
+            let meta = format!("context switch \u{b7} step {}", thousands(switch.step));
+            return vec![
+                Mapped::plain(meta),
+                mapped(&describe::describe_switch(switch)),
+            ];
         }
 
         let Some(event) = t.event_index_at(self.step).and_then(|i| t.event(i)) else {
