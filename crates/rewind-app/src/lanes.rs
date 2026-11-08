@@ -131,6 +131,19 @@ pub struct Window {
 }
 
 impl Window {
+    /// The window of `half` steps either side of `step`, moved so that it
+    /// stays inside a run whose last step is `last`: it starts at step 0
+    /// or ends at `last` when either is nearer `step` than `half`. A run
+    /// shorter than the window starts at 0 and shows all of it.
+    pub fn around(step: u64, half: u64, last: u64) -> Window {
+        let center = if last <= 2 * half {
+            half
+        } else {
+            step.clamp(half, last - half)
+        };
+        Window { center, half }
+    }
+
     /// The window's first step, which is never before step 0.
     pub fn from(&self) -> u64 {
         self.center.saturating_sub(self.half)
@@ -348,6 +361,58 @@ mod tests {
         assert_eq!(early.at(0), Some(0.2));
         assert_eq!(early.step_at(-2), None);
         assert_eq!(early.step_at(1), Some(2));
+    }
+
+    /// A window around a step is centered on it, except where the run's
+    /// edges are nearer than half a window: there it is moved to start at
+    /// step 0 or to end at the run's last step, so no step of a run longer
+    /// than the window is wasted on steps the run does not have. A run
+    /// shorter than the window starts at 0 and shows all of it.
+    #[test]
+    fn a_window_around_a_step_stays_inside_a_longer_run() {
+        let w = |step| Window::around(step, 30, 1000);
+        assert_eq!(
+            w(500),
+            Window {
+                center: 500,
+                half: 30
+            }
+        );
+        assert_eq!(
+            w(10),
+            Window {
+                center: 30,
+                half: 30
+            }
+        );
+        assert_eq!(
+            w(1000),
+            Window {
+                center: 970,
+                half: 30
+            }
+        );
+        assert_eq!(
+            w(985),
+            Window {
+                center: 970,
+                half: 30
+            }
+        );
+        assert_eq!(
+            Window::around(40, 30, 50),
+            Window {
+                center: 30,
+                half: 30
+            }
+        );
+        assert_eq!(
+            Window::around(0, 30, 0),
+            Window {
+                center: 30,
+                half: 30
+            }
+        );
     }
 
     /// Zooming keeps the step under the pointer where it is: in at the

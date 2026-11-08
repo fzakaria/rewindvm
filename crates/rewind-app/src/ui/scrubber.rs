@@ -1143,11 +1143,8 @@ impl Scrubber {
             RightTab::File => self.playhead_moved(cx),
             RightTab::FileDiff => self.file_diff_playhead_moved(cx),
             RightTab::Source => self.source_playhead_moved(cx),
-            RightTab::AtStep
-            | RightTab::Compare
-            | RightTab::Runs
-            | RightTab::Bookmarks
-            | RightTab::Threads => {}
+            RightTab::Threads => self.lanes_playhead_moved(cx),
+            RightTab::AtStep | RightTab::Compare | RightTab::Runs | RightTab::Bookmarks => {}
         }
         cx.notify();
     }

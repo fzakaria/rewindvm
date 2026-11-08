@@ -3,13 +3,15 @@
 //!
 //! Show threads opens it in place of "At this step", as Show source opens
 //! the source. The engine reads each run's threads from its context
-//! switches (`rewind threads`), a window at a time, and the window stays
-//! where it was put while the playhead moves: centered on where the two
-//! runs part, or on the playhead without a compared run. Ctrl and the
-//! wheel zoom it around the pointer, Shift and the wheel pan it, and the
-//! zoom out and in buttons zoom it around its center. Each run is asked
-//! only for the steps it has not been, half a window more on each side,
-//! once the window rests.
+//! switches (`rewind threads`), a window at a time. The window opens
+//! centered on where the two runs part, or on the playhead without a
+//! compared run, and follows the playhead from then on: each move of the
+//! playhead centers the window on it again, at the width it has. Ctrl and
+//! the wheel zoom it around the pointer, Shift and the wheel pan it, and
+//! the zoom out and in buttons zoom it around its center, until the
+//! playhead moves. A window never reaches past the run's last step while
+//! the run is longer than it. Each run is asked only for the steps it has
+//! not been, half a window more on each side, once the window rests.
 //!
 //! The compared run's window is lined up with this run's by a fixed
 //! offset. Two runs whose schedules part at a step are the same machine
@@ -214,13 +216,34 @@ impl Scrubber {
             return;
         };
         let center = session.divergence_step().unwrap_or(self.step);
-        self.lanes = Some(self.new_lanes(Window {
-            center,
-            half: DEFAULT_HALF,
-        }));
+        let window = Window::around(center, DEFAULT_HALF, self.lanes_last());
+        self.lanes = Some(self.new_lanes(window));
         self.right_tab = RightTab::Threads;
         self.fetch_lanes(cx);
         cx.notify();
+    }
+
+    /// The last step a window may reach: the later end of the two runs.
+    fn lanes_last(&self) -> u64 {
+        let Some(session) = &self.session else {
+            return 0;
+        };
+        session
+            .other
+            .as_ref()
+            .map_or(0, |o| o.timeline.total)
+            .max(session.run.timeline.total)
+    }
+
+    /// Centers the window on the playhead, at the width it has, when the
+    /// Threads tab is on screen: the playhead moved, or the tab was chosen
+    /// after it moved.
+    pub(super) fn lanes_playhead_moved(&mut self, cx: &mut Context<Self>) {
+        let Some(half) = self.lanes.as_ref().map(|l| l.window.half) else {
+            return;
+        };
+        let window = Window::around(self.step, half, self.lanes_last());
+        self.move_lanes(window, cx);
     }
 
     /// A tab over `window`, with nothing replayed yet.
@@ -272,15 +295,10 @@ impl Scrubber {
     /// it rests.
     fn move_lanes(&mut self, mut window: Window, cx: &mut Context<Self>) {
         // A window never moves past where both runs have ended.
-        let Some(session) = &self.session else {
+        if self.session.is_none() {
             return;
-        };
-        let last = session
-            .other
-            .as_ref()
-            .map_or(0, |o| o.timeline.total)
-            .max(session.run.timeline.total);
-        window.center = window.center.min(last);
+        }
+        window.center = window.center.min(self.lanes_last());
         let Some(lanes) = &mut self.lanes else {
             return;
         };
@@ -565,14 +583,8 @@ impl Scrubber {
                     thousands(to)
                 ))
         });
-        let recenter = crate::ui::bookmarks::link("lanes-center", "Center on playhead").on_click(
-            cx.listener(move |this, _, _, cx| {
-                if let Some(mut window) = this.lanes.as_ref().map(|l| l.window) {
-                    window.center = this.step;
-                    this.move_lanes(window, cx);
-                }
-            }),
-        );
+        let recenter = crate::ui::bookmarks::link("lanes-center", "Center on playhead")
+            .on_click(cx.listener(move |this, _, _, cx| this.lanes_playhead_moved(cx)));
         div()
             .flex()
             .flex_none()
