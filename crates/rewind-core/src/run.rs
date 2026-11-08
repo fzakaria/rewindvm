@@ -1091,73 +1091,24 @@ impl Run {
         })
     }
 
-    /// What held the CPU at each step of `from..=to`, as the VM kernel's
-    /// current_task names it, grouped into slices: the run is brought to
-    /// `from` as a fork would be, then taken one step at a time. A window
-    /// past the run's end stops there. The replay is checked against the
-    /// run's records the whole way, as [`Run::machine_at`] checks it.
-    ///
-    /// Early in boot the kernel has not yet said where its tasks are, so
-    /// a window that starts there starts at the first step it has.
-    ///
-    /// A step is an exit, so a thread that took and gave back the CPU
-    /// between two exits is not seen.
-    pub fn threads_through(
-        &self,
-        home: &Home,
-        from: u64,
-        to: u64,
-    ) -> Result<Vec<crate::threads::Slice>> {
+    /// What held the CPU over the steps `from..=to`, a slice per stretch
+    /// one task held, from the run's context switches, each of which the
+    /// guest kernel recorded as a step of its own. A window past the run's
+    /// end stops there. Nothing is replayed.
+    pub fn threads_through(&self, from: u64, to: u64) -> Result<Vec<crate::threads::Slice>> {
         if from > to {
             bail!("the window starts at step {from}, after its end at step {to}");
         }
         let to = to.min(self.last_step()?);
-        let mut machine = self.machine_at(home, from, Keep::Nothing, &mut rewind_vmm::Ignore)?;
-
-        // One step at a time, each checked against the run's records.
-        let mut ignore = rewind_vmm::Ignore;
-        let mut checked = Checked::new(&mut ignore, self.records_after(from)?);
-        let mut step = from;
-
-        // Through boot, until the kernel says where its tasks are.
-        let layout = loop {
-            if let Some(layout) = machine.task_layout()? {
-                break layout;
-            }
-            let outcome = machine.run(Some(step + 1), &mut checked)?;
-            if step == to || machine.step() != step + 1 || !matches!(outcome, Outcome::Paused) {
-                bail!(
-                    "run {}'s kernel does not say where its tasks are by step {step}",
-                    self.manifest.id
-                );
-            }
-            step += 1;
-        };
-        let mut held = Vec::new();
-        loop {
-            let (on, name) = crate::threads::Tasks::new(&machine, layout).held()?;
-            held.push((step, on, name));
-            if step == to {
-                break;
-            }
-
-            // The last step is the one the guest stopped on, and a machine
-            // that stopped short of the next step has none after it.
-            let outcome = machine.run(Some(step + 1), &mut checked)?;
-            if machine.step() != step + 1 {
-                break;
-            }
-            step += 1;
-            if !matches!(outcome, Outcome::Paused) {
-                let (on, name) = crate::threads::Tasks::new(&machine, layout).held()?;
-                held.push((step, on, name));
-                break;
-            }
+        let trace = self.trace()?;
+        if trace.switches.is_empty() {
+            bail!(
+                "run {} was recorded by a guest kernel that did not record context switches; \
+                 record it again with this rewind",
+                self.manifest.id
+            );
         }
-        if let Some(differs) = checked.differs_at {
-            return Err(self.went_another_way(differs));
-        }
-        Ok(crate::threads::slices(held))
+        Ok(crate::threads::held_over(&trace.switches, from, to))
     }
 
     /// The error for a replay of this run that made a record other than
@@ -1440,9 +1391,7 @@ impl Run {
         let records = rewind_trace::records(tmp.path())?;
         let again = Trace::decode(&records)?;
         let original = match start {
-            Some(kf) => Trace {
-                events: original.events[original.index_after(kf)..].to_vec(),
-            },
+            Some(kf) => original.after(kf),
             None => original.clone(),
         };
 

@@ -250,7 +250,14 @@ mod tests {
             },
             out(100, "done\n"),
         ];
-        Timeline::new(Trace { events }, None, None)
+        Timeline::new(
+            Trace {
+                events,
+                ..Default::default()
+            },
+            None,
+            None,
+        )
     }
 
     /// A stop that points into the right column opens the tab it points

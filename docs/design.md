@@ -74,7 +74,10 @@ AVIC, and hybrid Intel parts have not been tried this way.
 ### Steps and virtual time
 
 A step is one exit the guest makes: a port or MMIO access. Steps count from
-boot, and the step number is how everything in a run is addressed.
+boot, and the step number is how everything in a run is addressed. The
+guest exits for its events, for a clock read, when it goes idle, when it
+arms its timer, and at every context switch (see [Exploring
+interleavings](#exploring-interleavings)).
 
 Virtual time moves in two ways. Every exit adds a fixed quantum of 5
 microseconds, about what a system call and a context switch cost on current
@@ -616,9 +619,11 @@ records at 11 steps, in stretches of up to 19,000 writes with no exit
 between them. With 1 MiB it lost none.
 
 A guest kernel names the version of its interface with the monitor in the
-shared page. Kernels of version 4 keep these records. The monitor still
-runs kernels of version 3, which keep none, so runs recorded before records
-existed replay as they did.
+shared page. Kernels of version 4 keep these records, and kernels of
+version 5 also write a record at every context switch (see [Exploring
+interleavings](#exploring-interleavings)). The monitor still runs kernels
+of version 3, which keep none, and of version 4, so runs recorded before
+records or switches existed replay as they did.
 
 ### The CPU model
 
@@ -1371,18 +1376,32 @@ true and names each one no run made true. The
 libraries in `sdk/` write each pass or failure once per id and process,
 since every line is an exit.
 
-Which thread held the CPU at a step is not in the trace. Events carry a pid
-and tid, but between two events nothing says who ran, and a race is an order
-of threads. `rewind threads` finds out without a change to the recording. The
-guest kernel publishes `current_task` and the task struct offsets in the
-shared page at boot, so once `machine_at` has brought a fork to the window's
-first step, the engine runs the machine one step at a time and reads the
-task on the CPU from guest memory at each, checking the replay against the
-run's records as every fork does. A step is an exit, so a thread that took
-the CPU and gave it back between two exits is not seen. 2,048 steps of an
-80,000 step Nix build take under a second, seek included. The app's Threads
-tab draws a window of both runs this way, lined up on the step where their
-schedules part, and asks again only when the window moves.
+Which thread held the CPU at a step is in the trace. The guest kernel
+writes a switch record at every context switch, in `finish_task_switch`,
+naming the task the CPU runs from then on: its pid and tid, whether it has
+memory of its own, and its name. Writing the record is an exit, so every
+context switch is a step, and `rewind threads` and the app's Threads tab
+read who held the CPU over any window straight from the trace
+(`rewind_trace::switches`), with nothing replayed. Switch records are not
+events: they say nothing a program did, so `rewind events` does not list
+them and comparisons of what two runs did leave them out, while `rewind
+replay` compares them record for record like the rest.
+
+Before interface 5, switches were not recorded, and `rewind threads`
+replayed the window one step at a time, reading `current_task` from guest
+memory at each exit. That saw a switch only when an exit followed it, and
+most switches made an exit only by accident: Linux 7.2 turns the
+scheduler's high-resolution tick on by default, and `hrtick_schedule_exit`
+reads the clock at the end of every switch once the hrtimer subsystem is in
+high-resolution mode, which it enters at the first periodic tick, 10 ms of
+virtual time after boot at HZ=100. So a program that ran inside the first
+10 ms switched threads with no exit at all, and the same program later in
+a build made an exit, and 5 µs of virtual time, at every switch. The guest
+now turns the hrtick off (`kernel/sched/features.h`) and makes the exit
+itself, at every switch from boot on, so `rewind run` of a program and the
+same program inside `rewind nix` switch under the same rules, and `rewind
+check` has a point to perturb at every handoff, on purpose rather than by a
+timer default.
 
 Three earlier designs did not work, and why is worth keeping.
 

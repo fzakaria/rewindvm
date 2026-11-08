@@ -167,12 +167,15 @@ mod tests {
         // b does what a did two steps later; c writes other text second.
         let a = Trace {
             events: vec![write(3, 4, "one\n"), write(5, 5, "two\n")],
+            ..Default::default()
         };
         let b = Trace {
             events: vec![write(5, 4, "one\n"), write(7, 5, "two\n")],
+            ..Default::default()
         };
         let c = Trace {
             events: vec![write(3, 4, "one\n"), write(6, 5, "three\n")],
+            ..Default::default()
         };
         assert_eq!(Comparison::of(&a, 5, &b, 7).point, None);
         assert!(a.divergence(&b).is_some());
@@ -208,10 +211,16 @@ mod tests {
                 },
             ]
         };
-        let mut a = Trace { events: program(4) };
+        let mut a = Trace {
+            events: program(4),
+            ..Default::default()
+        };
         a.events
             .extend([write(3, 4, "one\n"), write(5, 4, "two\n")]);
-        let mut b = Trace { events: program(4) };
+        let mut b = Trace {
+            events: program(4),
+            ..Default::default()
+        };
         b.events
             .extend([write(3, 4, "one\n"), write(6, 4, "three\n")]);
         let argv = Some(vec!["./pool".to_string()]);

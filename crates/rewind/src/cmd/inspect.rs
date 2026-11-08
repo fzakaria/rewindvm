@@ -327,7 +327,7 @@ pub(crate) fn threads(home: &Home, args: ThreadsArgs) -> Result<ExitCode> {
         None => crate::show::start_step(run.trace()?),
     };
     let to = to.unwrap_or(u64::MAX);
-    let slices = run.threads_through(home, from, to)?;
+    let slices = run.threads_through(from, to)?;
 
     // One line a slice: as JSON for programs, or as a table.
     for slice in &slices {

@@ -50,6 +50,17 @@ pub(crate) fn io_divergence(d: &rewind_trace::Divergence) -> Value {
     })
 }
 
+/// Where a replay's context switches first differ from the run's, with
+/// the events the same.
+pub(crate) fn switch_divergence(d: &rewind_trace::Divergence) -> Value {
+    json!({
+        "part": "switches",
+        "index": d.index,
+        "left_step": d.left_step,
+        "right_step": d.right_step,
+    })
+}
+
 /// Where two runs first differ, with the first event that differs on each
 /// side; null for identical runs.
 pub(crate) fn divergence(left: &Trace, right: &Trace) -> Value {
@@ -185,9 +196,11 @@ mod tests {
         // twice has none.
         let left = Trace {
             events: vec![write(3, 7, "a"), write(5, 7, "b")],
+            ..Default::default()
         };
         let right = Trace {
             events: vec![write(3, 7, "a"), write(6, 7, "c")],
+            ..Default::default()
         };
         let d = divergence(&left, &right);
         assert_eq!(d["index"], 1);
@@ -246,6 +259,7 @@ mod tests {
                     },
                 ),
             ],
+            ..Default::default()
         };
         let at = |step| processes(&trace, step, KernelThreads::Hide);
         let pids = |v: &Value| -> Vec<u64> {

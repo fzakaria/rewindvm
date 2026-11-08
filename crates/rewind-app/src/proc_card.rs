@@ -277,7 +277,14 @@ mod tests {
             fork(2, 1, 7, false),
             exec(3, 7, &argv),
         ];
-        let t = Timeline::new(Trace { events }, None, None);
+        let t = Timeline::new(
+            Trace {
+                events,
+                ..Default::default()
+            },
+            None,
+            None,
+        );
         let card = proc_card(&t, pick(&t, 7), 3).unwrap();
         assert_eq!(card.argv, argv);
         assert_eq!(card.command, "nix");
@@ -401,7 +408,14 @@ mod tests {
             exec(7, 7, &["cat"]),
             out(8, 7, 1, "two\n"),
         ];
-        let t = Timeline::new(Trace { events }, None, None);
+        let t = Timeline::new(
+            Trace {
+                events,
+                ..Default::default()
+            },
+            None,
+            None,
+        );
         let cat = t.rows.iter().find(|r| r.pid == 7 && r.start == 6).unwrap();
         let card = proc_card(&t, Pick::of(cat), 8).unwrap();
         let texts: Vec<&str> = card.output.iter().map(|l| l.text.as_str()).collect();

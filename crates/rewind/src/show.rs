@@ -431,6 +431,15 @@ pub(crate) fn io_divergence(d: &Divergence) -> String {
     )
 }
 
+/// The words for a divergence in the context switches, with the events
+/// the same: the switch the two first differ at, and the step of each.
+pub(crate) fn switch_divergence(d: &Divergence) -> String {
+    format!(
+        "the context switches first differ at step {} (switch {}, step {} replayed)",
+        d.left_step, d.index, d.right_step
+    )
+}
+
 /// The words a divergence's lines start with, and the column they fill.
 const BOTH: &str = "both";
 const LEFT: &str = "left";
@@ -538,9 +547,11 @@ mod tests {
         };
         let short = Trace {
             events: vec![mark(10), mark(20)],
+            ..Default::default()
         };
         let long = Trace {
             events: vec![mark(10), mark(20), mark(90)],
+            ..Default::default()
         };
         let names = ["recording", "replay"];
         let d = short.divergence(&long).unwrap();
@@ -559,7 +570,10 @@ mod tests {
         );
 
         // A trace with no events at all ends before its first.
-        let empty = Trace { events: vec![] };
+        let empty = Trace {
+            events: vec![],
+            ..Default::default()
+        };
         let d = empty.divergence(&short).unwrap();
         assert_eq!(
             ran_out(&d, &empty, &short, names).as_deref(),
@@ -569,6 +583,7 @@ mod tests {
         // Both have an event where they differ.
         let other = Trace {
             events: vec![mark(10), mark(21)],
+            ..Default::default()
         };
         let d = short.divergence(&other).unwrap();
         assert_eq!(ran_out(&d, &short, &other, names), None);
@@ -722,9 +737,11 @@ mod tests {
         // up as without color.
         let left = Trace {
             events: vec![write(3, 7, "a"), write(5, 7, "b")],
+            ..Default::default()
         };
         let right = Trace {
             events: vec![write(3, 7, "a"), write(6, 7, "c")],
+            ..Default::default()
         };
         let plain = divergence(&left, &right, Paint::Plain);
         let painted = divergence(&left, &right, Paint::Ansi);

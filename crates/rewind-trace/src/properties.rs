@@ -584,7 +584,10 @@ mod tests {
         events.push(exit(990, JOB, 0));
         events.push(mark(1000, "rewind-exit 0"));
         events.sort_by_key(|e| e.step);
-        Trace { events }
+        Trace {
+            events,
+            ..Default::default()
+        }
     }
 
     const CREATE: u32 = 0o101; // O_WRONLY | O_CREAT

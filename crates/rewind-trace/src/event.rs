@@ -115,7 +115,7 @@ pub enum EventKind {
     },
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum DecodeError {
     #[error("record is {0} bytes, shorter than its header")]
     Short(usize),

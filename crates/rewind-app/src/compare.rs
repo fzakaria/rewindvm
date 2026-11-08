@@ -202,6 +202,7 @@ mod tests {
                 .enumerate()
                 .map(|(i, t)| write(10 * (i as u64 + 1), 4, &format!("job {t} done\n")))
                 .collect(),
+            ..Default::default()
         };
         let other = Trace {
             events: ["a", "b", "c", "x", "y", "z"]
@@ -209,6 +210,7 @@ mod tests {
                 .enumerate()
                 .map(|(i, t)| write(10 * (i as u64 + 1) + 3, 4, &format!("job {t} done\n")))
                 .collect(),
+            ..Default::default()
         };
         (this, other)
     }

@@ -457,6 +457,7 @@ pub(crate) fn replay(home: &Home, args: ReplayArgs) -> Result<ExitCode> {
         let divergence = match &replayed.divergence {
             None => serde_json::Value::Null,
             Some(d) if d.part == Part::IoRecords => json::io_divergence(d),
+            Some(d) if d.part == Part::Switches => json::switch_divergence(d),
             Some(_) => json::divergence(original, again),
         };
         println!(
@@ -493,15 +494,23 @@ pub(crate) fn replay(home: &Home, args: ReplayArgs) -> Result<ExitCode> {
             "{identical_word} to the recording from the snapshot at step {kf} to the end{compared} ({:.2}s)",
             started.elapsed().as_secs_f64()
         ),
-        (None, None) => println!(
-            "{identical_word} to the recording: {} events and {} read and write records over {} steps{compared}",
-            run.trace()?.events.len(),
-            run.io()?.records.len(),
-            run.manifest.outcome.as_ref().map_or(0, |o| o.step)
-        ),
+        (None, None) => {
+            let trace = run.trace()?;
+            println!(
+                "{identical_word} to the recording: {} events, {} context switches and {} read and write records over {} steps{compared}",
+                trace.events.len(),
+                trace.switches.len(),
+                run.io()?.records.len(),
+                run.manifest.outcome.as_ref().map_or(0, |o| o.step)
+            )
+        }
         (Some(d), Some(kf)) if d.part == Part::IoRecords => {
             println!("{different_word} from the recording after the snapshot at step {kf}:");
             println!("{}", show::io_divergence(d));
+        }
+        (Some(d), Some(kf)) if d.part == Part::Switches => {
+            println!("{different_word} from the recording after the snapshot at step {kf}:");
+            println!("{}", show::switch_divergence(d));
         }
         (Some(_), Some(kf)) => {
             println!("{different_word} from the recording after the snapshot at step {kf}:");
@@ -513,6 +522,10 @@ pub(crate) fn replay(home: &Home, args: ReplayArgs) -> Result<ExitCode> {
         (Some(d), None) if d.part == Part::IoRecords => println!(
             "{different_word} from the recording: {}",
             show::io_divergence(d)
+        ),
+        (Some(d), None) if d.part == Part::Switches => println!(
+            "{different_word} from the recording: {}",
+            show::switch_divergence(d)
         ),
         (Some(d), None) => {
             let names = ["recording", "replay"];

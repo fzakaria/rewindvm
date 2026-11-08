@@ -1839,6 +1839,7 @@ mod tests {
                 open(10, 10, "/build/lib.so"),
                 open(20, 20, "/out/lib.so"),
             ],
+            ..Default::default()
         }
     }
 
@@ -1904,6 +1905,7 @@ mod tests {
                     },
                 },
             ],
+            ..Default::default()
         };
         let setup = process(20, &["Setup", "copy"], 18);
         let mut log = log(vec![
@@ -2153,6 +2155,7 @@ mod tests {
                     },
                 ),
             ],
+            ..Default::default()
         };
         let log = log(vec![
             (
@@ -2272,7 +2275,10 @@ mod tests {
             replace(second_write, 55),
         ];
         events.sort_by_key(|e| e.step);
-        Trace { events }
+        Trace {
+            events,
+            ..Default::default()
+        }
     }
 
     const NOTES_REF: &str = "/build/r/.git/refs/notes/commits";

@@ -2365,6 +2365,7 @@ mod tests {
         };
         let trace = rewind_trace::Trace {
             events: vec![event(3788, 140), event(3795, 147), event(6299, 140)],
+            ..Default::default()
         };
         assert_eq!(last_event_before(&trace, 140, 6298), Some(3788));
         assert_eq!(last_event_before(&trace, 140, 6300), Some(6299));

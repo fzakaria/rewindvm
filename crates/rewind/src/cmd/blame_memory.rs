@@ -948,6 +948,7 @@ mod tests {
         };
         let trace = rewind_trace::Trace {
             events: (1..=5).map(mark).collect(),
+            ..Default::default()
         };
         let steps =
             |events: &[rewind_trace::Event]| events.iter().map(|e| e.step).collect::<Vec<_>>();

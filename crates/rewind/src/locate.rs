@@ -1437,6 +1437,7 @@ mod tests {
                 event(6300, 140, 140, exit(false)),
                 event(6310, 150, 151, exit(true)),
             ],
+            ..Default::default()
         };
         assert_eq!(alive_step(&trace, 6300, 140), 6299);
         assert_eq!(alive_step(&trace, 6299, 140), 6299);
@@ -1479,6 +1480,7 @@ mod tests {
                 event(2300, 50, exit(exited_0)),
                 event(2400, 60, exit(killed_by_sigkill)),
             ],
+            ..Default::default()
         };
         assert_eq!(alive_step(&trace, 2102, 40), 2056);
         assert_eq!(alive_step(&trace, 2098, 34), 2097);
@@ -1501,6 +1503,7 @@ mod tests {
         };
         let trace = Trace {
             events: vec![write(10, 166, 168), write(12, 0, 0), write(14, 170, 170)],
+            ..Default::default()
         };
         let thread = |pid, tid| Pick::Thread { pid, tid };
         assert_eq!(thread_at(&trace, 10, None, None).unwrap(), thread(166, 168));
@@ -1528,6 +1531,7 @@ mod tests {
         // had ended: a step after it means process 300's.
         let reused = Trace {
             events: vec![write(10, 166, 168), write(20, 300, 168)],
+            ..Default::default()
         };
         assert_eq!(
             thread_at(&reused, 15, None, Some(168)).unwrap(),

@@ -155,6 +155,7 @@ mod tests {
                     },
                 ),
             ],
+            ..Default::default()
         };
         let run = Path::new("/runs/abc");
         let key = |step, pid| FileKey::at(run, &trace, "/build/out.o", pid, step);

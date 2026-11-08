@@ -375,8 +375,7 @@ pub trait Engine: Send + Sync {
     ) -> EngineResult<crate::blame::Blamed>;
 
     /// What held the CPU at each step of `from..=to` of `run`, a slice per
-    /// stretch one task held. The engine replays the window one step at a
-    /// time, which takes a second or so for a few thousand steps.
+    /// stretch one task held, read from the run's context switches.
     /// `cancel` stops it early.
     fn threads(
         &self,

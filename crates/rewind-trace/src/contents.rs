@@ -175,6 +175,7 @@ mod tests {
                     },
                 ),
             ],
+            ..Default::default()
         }
     }
 
@@ -230,6 +231,7 @@ mod tests {
                 exit(30, 200),
                 exit(50, 100),
             ],
+            ..Default::default()
         };
         assert_eq!(version(&trace, "/build/out.c", 40), Version::Changing);
         assert_eq!(version(&trace, "/build/out.c", 55), Version::Since(20));
@@ -265,6 +267,7 @@ mod tests {
                 close(15, 100, "/build/out.c"),
                 exit(50, 100),
             ],
+            ..Default::default()
         };
         assert_eq!(version(&trace, "/build/out.c", 13), Version::Changing);
         assert_eq!(version(&trace, "/build/out.c", 20), Version::Since(10));

@@ -297,6 +297,7 @@ mod tests {
                     },
                 ),
             ],
+            ..Default::default()
         };
         Timeline::new(trace, None, None)
     }

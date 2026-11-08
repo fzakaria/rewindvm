@@ -407,7 +407,10 @@ mod tests {
         let mut events = started(5, 10, &["/nix/store/x-binutils/bin/ld", "-o", "lib.so"]).to_vec();
         events.push(open(10, 10, "/out/lib.so", O_TRUNC));
         events.push(close(16, 10, "/out/lib.so"));
-        let trace = Trace { events };
+        let trace = Trace {
+            events,
+            ..Default::default()
+        };
         let log = log(vec![
             (11, write_open(10, FIRST, OUT)),
             (12, write(10, FIRST, 0, 100)),
@@ -440,7 +443,10 @@ mod tests {
         events.push(close(13, 10, "/out/lib.so"));
         events.push(open(20, 20, "/out/lib.so", 0));
         events.push(close(23, 20, "/out/lib.so"));
-        let trace = Trace { events };
+        let trace = Trace {
+            events,
+            ..Default::default()
+        };
         let log = log(vec![
             (11, write_open(10, FIRST, OUT)),
             (12, write(10, FIRST, 0, 100)),
@@ -464,7 +470,10 @@ mod tests {
         events.push(close(15, 10, "/out/lib.so"));
         events.push(open(20, 20, "/out/lib.so", 0));
         events.push(close(25, 20, "/out/lib.so"));
-        let trace = Trace { events };
+        let trace = Trace {
+            events,
+            ..Default::default()
+        };
         let log = log(vec![
             (11, write_open(10, FIRST, OUT)),
             (12, write(10, FIRST, 0, 100)),
@@ -494,7 +503,10 @@ mod tests {
                 to: "/out/lib.so".into(),
             },
         ));
-        let trace = Trace { events };
+        let trace = Trace {
+            events,
+            ..Default::default()
+        };
         let log = log(vec![
             (11, write_open(10, FIRST, TMP)),
             (12, write(10, SECOND, 0, 64)),
@@ -510,7 +522,10 @@ mod tests {
     fn a_run_without_records_names_no_write() {
         let mut events = started(5, 10, &["ld"]).to_vec();
         events.push(open(10, 10, "/out/lib.so", O_TRUNC));
-        let trace = Trace { events };
+        let trace = Trace {
+            events,
+            ..Default::default()
+        };
         let writes = FileWrites::of(&trace, &IoLog::default(), "/out/lib.so", 20);
         assert!(writes.is_empty());
         assert_eq!(set_by(&writes, 0), None);

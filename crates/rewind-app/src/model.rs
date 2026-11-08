@@ -1288,7 +1288,14 @@ pub(crate) mod tests {
             out(18, 2, 2, "make: *** [check] Error 2\n"),
             exit(19, 2, 2, 2 << 8, "make", false),
         ];
-        Timeline::new(Trace { events }, None, None)
+        Timeline::new(
+            Trace {
+                events,
+                ..Default::default()
+            },
+            None,
+            None,
+        )
     }
 
     #[test]
@@ -1322,7 +1329,14 @@ pub(crate) mod tests {
                 },
             ),
         );
-        let t = Timeline::new(Trace { events }, None, None);
+        let t = Timeline::new(
+            Trace {
+                events,
+                ..Default::default()
+            },
+            None,
+            None,
+        );
         assert_eq!(t.lines(LogFilter::Output).len(), 4);
         let all = t.lines(LogFilter::WithConsole);
         assert_eq!(all.len(), 5);
@@ -1357,6 +1371,7 @@ pub(crate) mod tests {
                         },
                     ),
                 ],
+                ..Default::default()
             },
             None,
             None,
@@ -1405,7 +1420,14 @@ pub(crate) mod tests {
         // exit before it does not count.
         let mut events = build().trace.events;
         events.retain(|e| !matches!(e.kind, EventKind::Signal { .. }));
-        let t = Timeline::new(Trace { events }, None, None);
+        let t = Timeline::new(
+            Trace {
+                events,
+                ..Default::default()
+            },
+            None,
+            None,
+        );
         let f = t.failure.unwrap();
         assert_eq!((f.step, f.pid), (16, 4));
         assert_eq!(f.kind, FailureKind::Exit { status: 0x8b });
@@ -1426,7 +1448,14 @@ pub(crate) mod tests {
             exit(1266, 43, 43, 1 << 8, "script.sh", false),
             exit(1338, 40, 40, 101 << 8, "devenv-tasks-te", false),
         ];
-        let mut t = Timeline::new(Trace { events }, None, None);
+        let mut t = Timeline::new(
+            Trace {
+                events,
+                ..Default::default()
+            },
+            None,
+            None,
+        );
         assert_eq!(t.failure.unwrap().step, 1266);
         t.fail_past(Some(1273));
         let f = t.failure.unwrap();
@@ -1470,7 +1499,14 @@ pub(crate) mod tests {
             sdk(50, "rewind-sdk 1 unreachable retry-after-close pool closed"),
             mark(60, "rewind-exit 0"),
         ];
-        let t = Timeline::new(Trace { events }, None, None);
+        let t = Timeline::new(
+            Trace {
+                events,
+                ..Default::default()
+            },
+            None,
+            None,
+        );
 
         let phases: Vec<&str> = t.phases.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(phases, vec![BOOT_PHASE, SETUP_PHASE, "load"]);
@@ -1578,7 +1614,14 @@ pub(crate) mod tests {
                 "rewind-output /nix/store/jgr1axsv7hwwf37n19ssg0fiyaj3bvk7-mylib-0.3.0 ab12",
             ),
         ];
-        Timeline::new(Trace { events }, None, None)
+        Timeline::new(
+            Trace {
+                events,
+                ..Default::default()
+            },
+            None,
+            None,
+        )
     }
 
     #[test]
@@ -1627,7 +1670,14 @@ pub(crate) mod tests {
             },
         ));
         events.sort_by_key(|e| e.step);
-        let t = Timeline::new(Trace { events }, None, None);
+        let t = Timeline::new(
+            Trace {
+                events,
+                ..Default::default()
+            },
+            None,
+            None,
+        );
         assert_eq!(t.job_exit.map(|j| j.status), Some(2 << 8));
         assert!(t.failure.is_some());
         assert!(
@@ -1696,7 +1746,14 @@ pub(crate) mod tests {
         // The exit chain from the job's shell ends at the producer, which
         // SIGPIPE killed: the failure is the SIGPIPE at step 8, where the
         // pipe broke, not the exit it caused a step later.
-        let t = Timeline::new(Trace { events: pipeline() }, None, None);
+        let t = Timeline::new(
+            Trace {
+                events: pipeline(),
+                ..Default::default()
+            },
+            None,
+            None,
+        );
         let f = t.failure.unwrap();
         assert_eq!((f.step, f.pid, f.tid), (8, 3, 3));
         assert_eq!(
@@ -1720,7 +1777,14 @@ pub(crate) mod tests {
         events.push(exec(12, 5, &["cc", "-c", "pool.c"]));
         events.push(exit(13, 5, 5, 1 << 8, "cc", false));
         events.push(exit(14, 1, 1, 1 << 8, "bash", false));
-        let t = Timeline::new(Trace { events }, None, None);
+        let t = Timeline::new(
+            Trace {
+                events,
+                ..Default::default()
+            },
+            None,
+            None,
+        );
         let f = t.failure.unwrap();
         assert_eq!((f.step, f.pid), (13, 5));
         assert_eq!(f.kind, FailureKind::Exit { status: 1 << 8 });
@@ -1737,7 +1801,14 @@ pub(crate) mod tests {
         events.push(signal(30, 45, 45, signal::SIGSEGV));
         events.push(exit(31, 45, 45, SIGKILL_STATUS, "sleep", false));
         events.sort_by_key(|e| e.step);
-        let t = Timeline::new(Trace { events }, None, None);
+        let t = Timeline::new(
+            Trace {
+                events,
+                ..Default::default()
+            },
+            None,
+            None,
+        );
         let f = t.failure.unwrap();
         assert_eq!((f.step, f.pid), (25, 44));
     }
@@ -1765,6 +1836,7 @@ pub(crate) mod tests {
         let hung = Timeline::new(
             Trace {
                 events: events.clone(),
+                ..Default::default()
             },
             Some(50),
             Some(&HUNG),
@@ -1774,7 +1846,14 @@ pub(crate) mod tests {
         assert_eq!(hung.seek(Motion::Failure, 0, None), 50);
 
         events.push(signal(30, 44, 44, signal::SIGSEGV));
-        let crashed = Timeline::new(Trace { events }, Some(50), Some(&HUNG));
+        let crashed = Timeline::new(
+            Trace {
+                events,
+                ..Default::default()
+            },
+            Some(50),
+            Some(&HUNG),
+        );
         assert_eq!(crashed.failure.unwrap().step, 30);
     }
 
@@ -1795,7 +1874,14 @@ pub(crate) mod tests {
             exit(3, 2, 2, 0, "true", false),
             signal(4, 1, 1, 17),
         ];
-        let t = Timeline::new(Trace { events }, None, None);
+        let t = Timeline::new(
+            Trace {
+                events,
+                ..Default::default()
+            },
+            None,
+            None,
+        );
         assert_eq!(t.failure, None);
     }
 
@@ -1830,7 +1916,14 @@ pub(crate) mod tests {
             exec(2, 1, &["/bin/sh", "/init"]),
             fork(3, 1, 40, false),
         ];
-        let t = Timeline::new(Trace { events }, None, None);
+        let t = Timeline::new(
+            Trace {
+                events,
+                ..Default::default()
+            },
+            None,
+            None,
+        );
         let labels: Vec<(u32, &str)> = t.rows.iter().map(|r| (r.pid, r.label.as_str())).collect();
         assert_eq!(
             labels,
@@ -1850,7 +1943,14 @@ pub(crate) mod tests {
         // and tabs escaped, as the log shows them, so the process tree row
         // holds one line and draws nothing over the rows below it.
         let events = vec![exec(1, 1, &["/bin/sh", "-c", "cd src\n\tmake"])];
-        let t = Timeline::new(Trace { events }, None, None);
+        let t = Timeline::new(
+            Trace {
+                events,
+                ..Default::default()
+            },
+            None,
+            None,
+        );
         assert_eq!(t.rows[0].label, r"sh -c cd src\n\tmake");
         assert_eq!(t.name_of(1), Some("sh"));
     }
@@ -1916,6 +2016,7 @@ pub(crate) mod tests {
         let t = Timeline::new(
             Trace {
                 events: vec![exec(5, 1, &["sh"])],
+                ..Default::default()
             },
             Some(50),
             None,
@@ -1976,7 +2077,14 @@ pub(crate) mod tests {
         let a = build();
         let mut events = a.trace.events.clone();
         events[6] = out(7, 3, 2, "pool.c:3: warning: other\n");
-        let b = Timeline::new(Trace { events }, None, None);
+        let b = Timeline::new(
+            Trace {
+                events,
+                ..Default::default()
+            },
+            None,
+            None,
+        );
         assert_eq!(
             Comparison::of(&a.trace, a.total, &b.trace, b.total).step(),
             Some(7)
@@ -2000,7 +2108,14 @@ pub(crate) mod tests {
             e.step += 2;
         }
         events[13] = exit(16, 4, 5, 0, "worker-0", true);
-        let b = Timeline::new(Trace { events }, None, None);
+        let b = Timeline::new(
+            Trace {
+                events,
+                ..Default::default()
+            },
+            None,
+            None,
+        );
         assert_eq!(a.trace.divergence(&b.trace).unwrap().index, 3);
 
         let c = Comparison::of(&a.trace, a.total, &b.trace, b.total);

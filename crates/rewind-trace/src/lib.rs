@@ -11,7 +11,8 @@
 //! went different ways. It also holds what the engine records beside a
 //! trace and the app reads: the manifest, and how a run stopped and
 //! ended. A trace file also holds the run's read and write records,
-//! which [`io_records`] decodes; a [`Trace`] is the events without them.
+//! which [`io_records`] decodes, and its context switches, which
+//! [`switches`] decodes; a [`Trace`] keeps the events apart from both.
 
 // Only rewind-vmm and the command touch memory and the kernel directly.
 #![forbid(unsafe_code)]
@@ -35,6 +36,7 @@ pub mod schedule;
 pub mod sdk;
 pub mod searching;
 pub mod stop;
+pub mod switches;
 pub mod writes;
 
 use std::collections::BTreeMap;
@@ -52,10 +54,14 @@ pub use rewind_init::Mark;
 /// inputs another way than the build that recorded it.
 pub const WENT_ANOTHER_WAY: &str = "went another way at step";
 
-/// Every event of a run, in step order.
+/// Every event of a run, in step order, and its context switches.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Trace {
     pub events: Vec<Event>,
+    /// Every context switch, in step order: which task the CPU ran from
+    /// each step on ([`switches`]). A run recorded by a guest kernel from
+    /// before switches were recorded has none.
+    pub switches: Vec<switches::Switch>,
 }
 
 /// A process's life, as the trace records it.
@@ -152,6 +158,8 @@ pub enum Part {
     /// The read and write records ([`io_records`]), with the events the
     /// same.
     IoRecords,
+    /// The context switches ([`switches`]), with the events the same.
+    Switches,
 }
 
 /// The job's exit, as init reported it.
@@ -187,18 +195,23 @@ impl Trace {
 
     /// The trace of a file's records, as [`records`] reads them. The read
     /// and write records among them are not events, and are left to
-    /// [`crate::io_records::decode`].
+    /// [`crate::io_records::decode`]; the switch records are decoded into
+    /// `switches`.
     pub fn decode(records: &[(u64, Vec<u8>)]) -> io::Result<Trace> {
+        let invalid = |e: DecodeError| io::Error::new(io::ErrorKind::InvalidData, e);
         let mut events = Vec::with_capacity(records.len());
+        let mut switches = Vec::new();
         for (step, record) in records {
             if io_records::is_io(record) {
                 continue;
             }
-            let event = Event::decode(*step, record)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            events.push(event);
+            if switches::is_switch(record) {
+                switches.push(switches::decode(*step, record).map_err(invalid)?);
+                continue;
+            }
+            events.push(Event::decode(*step, record).map_err(invalid)?);
         }
-        Ok(Trace { events })
+        Ok(Trace { events, switches })
     }
 
     /// The last step anything happened on.
@@ -399,17 +412,47 @@ impl Trace {
     /// same inputs is always the answer. Where two runs first behave
     /// differently is [`compare::Comparison`].
     pub fn divergence(&self, other: &Trace) -> Option<Divergence> {
-        let n = self.events.len().min(other.events.len());
-        let index = (0..n)
-            .find(|&i| self.events[i] != other.events[i])
-            .or((self.events.len() != other.events.len()).then_some(n))?;
-        let step_of = |t: &Trace| t.events.get(index).map_or(t.last_step(), |e| e.step);
+        let first_differing = |a: usize, b: usize, differs: &dyn Fn(usize) -> bool| {
+            let n = a.min(b);
+            (0..n).find(|&i| differs(i)).or((a != b).then_some(n))
+        };
+
+        // The events first, then the switches.
+        let events = first_differing(self.events.len(), other.events.len(), &|i| {
+            self.events[i] != other.events[i]
+        });
+        if let Some(index) = events {
+            let step_of = |t: &Trace| t.events.get(index).map_or(t.last_step(), |e| e.step);
+            return Some(Divergence {
+                index,
+                left_step: step_of(self),
+                right_step: step_of(other),
+                part: Part::Events,
+            });
+        }
+        let index = first_differing(self.switches.len(), other.switches.len(), &|i| {
+            self.switches[i] != other.switches[i]
+        })?;
+        let step_of = |t: &Trace| t.switches.get(index).map_or(t.last_step(), |s| s.step);
         Some(Divergence {
             index,
             left_step: step_of(self),
             right_step: step_of(other),
-            part: Part::Events,
+            part: Part::Switches,
         })
+    }
+
+    /// The trace after `step`: the events and switches at later steps.
+    pub fn after(&self, step: u64) -> Trace {
+        Trace {
+            events: self.events[self.index_after(step)..].to_vec(),
+            switches: self
+                .switches
+                .iter()
+                .filter(|s| s.step > step)
+                .cloned()
+                .collect(),
+        }
     }
 
     /// The command line of the process a failed run's failure came from:
@@ -901,6 +944,7 @@ mod tests {
                 fork(6, 5),
                 exec(7, 5, "second"),
             ],
+            ..Default::default()
         };
         let name = |step| trace.process_at(5, step).map(|p| p.name());
         assert_eq!(name(2).as_deref(), Some("first"));
@@ -927,6 +971,7 @@ mod tests {
                 exec_of(4, 5, "flox-activations"),
                 exec_of(6, 5, "bash"),
             ],
+            ..Default::default()
         };
         let at = |step| trace.process_at(5, step).unwrap();
 
@@ -957,6 +1002,7 @@ mod tests {
                 fork_of(8, 5),
                 exec_of(9, 5, "third"),
             ],
+            ..Default::default()
         };
         let began = |step| trace.process_at(5, step).unwrap().memory_began(step);
 
@@ -992,6 +1038,7 @@ mod tests {
                 mark(9, 1, "rewind-output /nix/store/x-out sha256:ff"),
                 mark(10, 1, "rewind-exit 512"),
             ],
+            ..Default::default()
         };
         assert_eq!(trace.job_start(), Some(5));
         assert_eq!(
@@ -1105,6 +1152,7 @@ mod tests {
                     },
                 ),
             ],
+            ..Default::default()
         }
     }
 
@@ -1182,6 +1230,72 @@ mod tests {
         c.events.truncate(10);
         let d = a.divergence(&c).unwrap();
         assert_eq!((d.index, d.left_step, d.right_step), (10, 11, 10));
+    }
+
+    /// With the events the same, the switches are compared: a switch to
+    /// another task, or a run of switches that ends early, is a
+    /// divergence in the switches, at the switch's step on each side.
+    #[test]
+    fn divergence_compares_the_switches_once_the_events_are_the_same() {
+        let switch = |step, tid, name: &str| switches::Switch {
+            step,
+            pid: 4,
+            tid,
+            memory: true,
+            name: name.into(),
+        };
+        let mut a = sample();
+        a.switches = vec![switch(2, 4, "sh"), switch(5, 5, "sh"), switch(9, 4, "sh")];
+        assert_eq!(a.divergence(&a.clone()), None);
+
+        let mut b = a.clone();
+        b.switches[1] = switch(5, 6, "sh");
+        let d = a.divergence(&b).unwrap();
+        assert_eq!(
+            (d.index, d.left_step, d.right_step, d.part),
+            (1, 5, 5, Part::Switches)
+        );
+
+        // A side whose switches ran out is at its last step.
+        let mut c = a.clone();
+        c.switches.truncate(2);
+        let d = a.divergence(&c).unwrap();
+        assert_eq!(
+            (d.index, d.left_step, d.right_step, d.part),
+            (2, 9, c.last_step(), Part::Switches)
+        );
+
+        // An event that differs comes first, whatever the switches do.
+        let mut e = b.clone();
+        e.events[5] = out(6, 3, "different");
+        assert_eq!(a.divergence(&e).unwrap().part, Part::Events);
+    }
+
+    /// The trace after a step keeps the events and the switches past it.
+    #[test]
+    fn after_a_step_keeps_later_events_and_switches() {
+        let mut a = sample();
+        a.switches = vec![
+            switches::Switch {
+                step: 3,
+                pid: 1,
+                tid: 1,
+                memory: true,
+                name: "init".into(),
+            },
+            switches::Switch {
+                step: 8,
+                pid: 0,
+                tid: 0,
+                memory: false,
+                name: "swapper/0".into(),
+            },
+        ];
+        let after = a.after(5);
+        assert!(after.events.iter().all(|e| e.step > 5));
+        assert_eq!(after.events.len(), a.events.len() - a.index_after(5));
+        assert_eq!(after.switches.len(), 1);
+        assert_eq!(after.switches[0].step, 8);
     }
 
     #[test]
@@ -1277,7 +1391,10 @@ mod tests {
                 },
             ));
         }
-        Trace { events }
+        Trace {
+            events,
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -1400,7 +1517,16 @@ mod tests {
         failing.extend(program(20, 1, 6, &["./test"], exit(2)));
         let mut passing = probe();
         passing.extend(program(20, 1, 6, &["./test"], exit(0)));
-        let (failing, passing) = (Trace { events: failing }, Trace { events: passing });
+        let (failing, passing) = (
+            Trace {
+                events: failing,
+                ..Default::default()
+            },
+            Trace {
+                events: passing,
+                ..Default::default()
+            },
+        );
 
         assert_eq!(
             failing.culprit(),
@@ -1426,7 +1552,10 @@ mod tests {
                 thread: false,
             },
         ));
-        let trace = Trace { events };
+        let trace = Trace {
+            events,
+            ..Default::default()
+        };
         let sub = trace.processes().into_iter().find(|p| p.pid == 3).unwrap();
         assert_eq!(sub.argv, vec!["bash".to_string(), "test.sh".to_string()]);
     }

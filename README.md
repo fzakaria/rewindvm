@@ -174,7 +174,7 @@ $ rewind blame <run> --at <step> 'p->stopping' 'p->queue' --reads
 $ rewind where <run> <step>
 $ rewind where <run> <step> --tid <tid> --json
 
-# which thread held the CPU at each step of a window, replayed step by step
+# which thread held the CPU at each step of a window, from the run's context switches
 $ rewind threads <run> --from <step> --to <step>
 
 # branch a run at a step under another schedule or seed, or replay it exactly

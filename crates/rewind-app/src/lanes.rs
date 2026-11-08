@@ -2,10 +2,10 @@
 //! window of this run and, while a run is compared, of the same window of
 //! the compared run, the two lined up on a step each window is centered on.
 //!
-//! The engine finds the threads by replaying the window one step at a time
-//! (`rewind threads --json`); this module groups its slices into a row per
-//! thread, places steps on the window's axis, and finds the first step at
-//! which the two runs had different threads on the CPU.
+//! The engine reads the threads from the run's context switches (`rewind
+//! threads --json`); this module groups its slices into a row per thread,
+//! places steps on the window's axis, and finds the first step at which
+//! the two runs had different threads on the CPU.
 
 use std::collections::BTreeMap;
 

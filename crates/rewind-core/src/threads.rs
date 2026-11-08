@@ -5,6 +5,7 @@
 //! last entered the kernel, and gdb sees those for it.
 
 use anyhow::{Result, bail};
+use rewind_trace::switches::Switch;
 use rewind_vmm::pv::{TaskLayout, pt_regs};
 
 /// The most entries a kernel list is followed through. A list longer than
@@ -54,6 +55,49 @@ pub struct Slice {
     pub to: u64,
     pub on: OnTheCpu,
     pub name: String,
+}
+
+/// What held the CPU over the steps `from..=to`, from the run's context
+/// switches, in step order: a task holds the CPU from its switch to the
+/// step before the next. The switch at or before `from` says who held it
+/// at `from`; steps before the first switch, early in boot, are left out.
+/// Slices are clipped to the window.
+pub fn held_over(switches: &[Switch], from: u64, to: u64) -> Vec<Slice> {
+    // The first switch that matters: the last at or before `from`, or
+    // the first inside the window when none is.
+    let first = switches
+        .partition_point(|s| s.step <= from)
+        .saturating_sub(1);
+    let mut slices: Vec<Slice> = Vec::new();
+    for (i, switch) in switches.iter().enumerate().skip(first) {
+        if switch.step > to {
+            break;
+        }
+        let next = switches.get(i + 1).map_or(u64::MAX, |s| s.step);
+        if next <= from {
+            continue;
+        }
+        let on = if switch.is_idle() {
+            OnTheCpu::Idle
+        } else if switch.memory {
+            OnTheCpu::Thread {
+                pid: switch.pid,
+                tid: switch.tid,
+            }
+        } else {
+            OnTheCpu::WithoutMemory {
+                tid: switch.tid,
+                name: switch.name.clone(),
+            }
+        };
+        slices.push(Slice {
+            from: switch.step.max(from),
+            to: next.saturating_sub(1).min(to),
+            on,
+            name: switch.name.clone(),
+        });
+    }
+    slices
 }
 
 /// The slices `steps` make, each step given in order with what held the
@@ -602,5 +646,86 @@ mod tests {
             err.to_string()
                 .contains(&format!("{:#x}", signal40 + l.thread_head))
         );
+    }
+}
+
+#[cfg(test)]
+mod held_over_tests {
+    // Slices from switches: a window is cut out of the switches of a run
+    // built by hand, and each slice names the task the CPU ran from its
+    // switch to the step before the next.
+    use super::*;
+
+    fn switch(step: u64, pid: u32, tid: u32, memory: bool, name: &str) -> Switch {
+        Switch {
+            step,
+            pid,
+            tid,
+            memory,
+            name: name.into(),
+        }
+    }
+
+    fn run() -> Vec<Switch> {
+        vec![
+            switch(10, 1, 1, true, "init"),
+            switch(20, 34, 34, true, "shuffle"),
+            switch(25, 34, 35, true, "shuffle"),
+            switch(31, 11, 11, false, "ksoftirqd/0"),
+            switch(32, 0, 0, false, "swapper/0"),
+            switch(40, 34, 34, true, "shuffle"),
+        ]
+    }
+
+    #[test]
+    fn a_task_holds_the_cpu_from_its_switch_to_the_step_before_the_next() {
+        let slices = held_over(&run(), 20, 50);
+        let summary: Vec<(u64, u64, OnTheCpu)> =
+            slices.into_iter().map(|s| (s.from, s.to, s.on)).collect();
+        assert_eq!(
+            summary,
+            vec![
+                (20, 24, OnTheCpu::Thread { pid: 34, tid: 34 }),
+                (25, 30, OnTheCpu::Thread { pid: 34, tid: 35 }),
+                (
+                    31,
+                    31,
+                    OnTheCpu::WithoutMemory {
+                        tid: 11,
+                        name: "ksoftirqd/0".into()
+                    }
+                ),
+                (32, 39, OnTheCpu::Idle),
+                (40, 50, OnTheCpu::Thread { pid: 34, tid: 34 }),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_window_starting_between_switches_starts_with_the_task_then_on_the_cpu() {
+        let slices = held_over(&run(), 27, 33);
+        assert_eq!(slices.len(), 3);
+        assert_eq!((slices[0].from, slices[0].to), (27, 30));
+        assert_eq!(slices[0].on, OnTheCpu::Thread { pid: 34, tid: 35 });
+        assert_eq!((slices[2].from, slices[2].to), (32, 33));
+        assert_eq!(slices[2].on, OnTheCpu::Idle);
+    }
+
+    #[test]
+    fn steps_before_the_first_switch_belong_to_nobody() {
+        let slices = held_over(&run(), 0, 12);
+        assert_eq!(slices.len(), 1);
+        assert_eq!((slices[0].from, slices[0].to), (10, 12));
+        assert_eq!(slices[0].name, "init");
+        assert!(held_over(&run(), 0, 5).is_empty());
+        assert!(held_over(&[], 0, 100).is_empty());
+    }
+
+    #[test]
+    fn a_window_of_one_step_is_the_task_on_the_cpu_at_it() {
+        let slices = held_over(&run(), 30, 30);
+        assert_eq!(slices.len(), 1);
+        assert_eq!((slices[0].from, slices[0].to), (30, 30));
+        assert_eq!(slices[0].on, OnTheCpu::Thread { pid: 34, tid: 35 });
     }
 }

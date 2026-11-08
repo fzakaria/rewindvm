@@ -2,14 +2,14 @@
 //! the thread held the CPU, this run above the compared run in each lane.
 //!
 //! Show threads opens it in place of "At this step", as Show source opens
-//! the source. The engine replays steps one at a time in each run (`rewind
-//! threads`), which takes about a second for a few thousand steps, so the
-//! window stays where it was put while the playhead moves: centered on
-//! where the two runs part, or on the playhead without a compared run.
-//! Ctrl and the wheel zoom it around the pointer, Shift and the wheel pan
-//! it, and the zoom out and in buttons zoom it around its center. Each run replays only the
-//! steps it has not, half a window more on each side, once the window
-//! rests.
+//! the source. The engine reads each run's threads from its context
+//! switches (`rewind threads`), a window at a time, and the window stays
+//! where it was put while the playhead moves: centered on where the two
+//! runs part, or on the playhead without a compared run. Ctrl and the
+//! wheel zoom it around the pointer, Shift and the wheel pan it, and the
+//! zoom out and in buttons zoom it around its center. Each run is asked
+//! only for the steps it has not been, half a window more on each side,
+//! once the window rests.
 //!
 //! The compared run's window is lined up with this run's by a fixed
 //! offset. Two runs whose schedules part at a step are the same machine
