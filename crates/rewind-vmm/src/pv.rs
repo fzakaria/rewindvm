@@ -153,9 +153,11 @@ pub const SHARED_TASKS: u64 = (SHARED_STALL_NS + 4).next_multiple_of(8);
 /// the ports, the records and the shared page. The kernel writes it into
 /// the shared page, after the task layout, before it sends setup; a kernel
 /// from before rewind 1.0 wrote none, and the field reads 0. Version 4
-/// added the read and write records; a kernel of version 3 runs as it
-/// did, without them.
-pub const INTERFACE_VERSION: u32 = 4;
+/// added the read and write records, and version 5 a record at every
+/// context switch; a kernel of version 3 or 4 runs as it did, without
+/// them.
+pub const INTERFACE_VERSION: u32 = 5;
+const INTERFACE_WITHOUT_SWITCHES: u32 = 4;
 const INTERFACE_WITHOUT_IO: u32 = 3;
 pub const SHARED_INTERFACE: u64 = SHARED_TASKS + 8 * TASK_LAYOUT_FIELDS as u64;
 
@@ -196,7 +198,7 @@ pub enum GuestIo {
 /// monitor runs, and if so whether it buffers read and write records.
 pub fn check_interface(version: u32) -> anyhow::Result<GuestIo> {
     match version {
-        INTERFACE_VERSION => Ok(GuestIo::Buffered),
+        INTERFACE_VERSION | INTERFACE_WITHOUT_SWITCHES => Ok(GuestIo::Buffered),
         INTERFACE_WITHOUT_IO => Ok(GuestIo::Unbuffered),
         0 => anyhow::bail!(
             "the run's guest kernel names no interface: it is from before rewind 1.0, \
@@ -337,18 +339,23 @@ mod interface_tests {
     }
 
     /// The monitor runs only a kernel that names an interface it speaks:
-    /// its own, whose kernel buffers read and write records, or the one
-    /// before, whose kernel does not. A kernel from before rewind 1.0
+    /// its own, the one before it, whose kernel records no context
+    /// switches but buffers read and write records, or the one before
+    /// that, whose kernel does neither. A kernel from before rewind 1.0
     /// names none, which reads as 0.
     #[test]
     fn the_monitor_runs_only_its_own_interface() {
-        assert_eq!(INTERFACE_VERSION, 4);
+        assert_eq!(INTERFACE_VERSION, 5);
         assert_eq!(
             check_interface(INTERFACE_VERSION).unwrap(),
             GuestIo::Buffered
         );
         assert_eq!(
-            check_interface(INTERFACE_VERSION - 1).unwrap(),
+            check_interface(INTERFACE_WITHOUT_SWITCHES).unwrap(),
+            GuestIo::Buffered
+        );
+        assert_eq!(
+            check_interface(INTERFACE_WITHOUT_IO).unwrap(),
             GuestIo::Unbuffered
         );
         let none = format!("{:#}", check_interface(0).unwrap_err());
