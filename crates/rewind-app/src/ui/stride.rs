@@ -11,7 +11,7 @@ use gpui::{
 
 use crate::describe::{clip, thousands};
 use crate::model::Timeline;
-use crate::stride::{Direction, Stride, step_by};
+use crate::stride::{Direction, Stride, count, step_by};
 use crate::theme::{self, size};
 use crate::ui::scrubber::{NoticeTone, Scrubber};
 use crate::ui::toolbar::{Clipped, ToolbarFit, clip_label};
@@ -24,7 +24,7 @@ const MAX_PATH_CHARS: usize = 40;
 const MENU_WIDTH: f32 = 300.0;
 
 /// What the chooser says it does when pointed at.
-const CHOOSER_NOTE: &str = "What Previous, Next and the Left and Right keys stop at: every event, context switches, the build log's lines, processes starting and exiting, the bookmarks, or the thread, process, kind of event or file of the event at the playhead.";
+const CHOOSER_NOTE: &str = "What Previous, Next and the Left and Right keys stop at: every event, context switches, the build log's lines, processes starting and exiting, the bookmarks, or the thread, process, kind of event or file of the event at the playhead. The menu shows how many stops each has over the run.";
 
 /// What a stride is called in the chooser and its menu.
 pub fn stride_label(stride: &Stride, timeline: &Timeline) -> String {
@@ -207,9 +207,14 @@ impl Scrubber {
             .text_size(px(size::TEXT_UI))
             .text_color(rgb(theme::TEXT))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+        // Each row names its stride and, at the right, how many stops the
+        // stride has over the whole run: the size of the walk Next makes,
+        // known before the stride is chosen.
+        let bookmarks: Vec<u64> = self.bookmarks.iter().map(|b| b.step).collect();
         for (i, stride) in self.offered_strides().into_iter().enumerate() {
             let chosen = stride == self.stride;
             let label = stride_label(&stride, timeline);
+            let stops = count(timeline, &stride, self.log_filter, &bookmarks);
             items = items.child(
                 div()
                     .id(SharedString::from(format!("stride-{i}")))
@@ -217,10 +222,19 @@ impl Scrubber {
                     .py(px(size::MENU_ITEM_PAD_Y))
                     .rounded(px(size::RADIUS_MENU_ITEM))
                     .cursor_pointer()
-                    .truncate()
+                    .flex()
+                    .justify_between()
+                    .gap(px(size::MENU_ITEM_PAD_X))
                     .hover(|s| s.bg(rgb(theme::RAISED_HOVER)))
                     .when(chosen, |d| d.text_color(rgb(theme::AMBER)))
-                    .child(label)
+                    .child(div().min_w_0().truncate().child(label))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(size::TEXT_SMALL))
+                            .text_color(rgb(theme::MUTED))
+                            .child(thousands(stops as u64)),
+                    )
                     .on_click(
                         cx.listener(move |this, _, _, cx| this.choose_stride(stride.clone(), cx)),
                     ),

@@ -234,6 +234,24 @@ pub fn step_by(
     }
 }
 
+/// How many stops `stride` has over the whole run, with the log shown
+/// under `filter` and the run's bookmarks at `bookmarks`: the length of
+/// the walk Next makes from the start, which the chooser shows beside
+/// each stride so the size of a walk is known before it is chosen.
+pub fn count(timeline: &Timeline, stride: &Stride, filter: LogFilter, bookmarks: &[u64]) -> usize {
+    match stride {
+        Stride::Switches => timeline.trace.switches.len(),
+        Stride::LogLine => timeline.lines(filter).len(),
+        Stride::Bookmarks => bookmarks.len(),
+        _ => timeline
+            .trace
+            .events
+            .iter()
+            .filter(|e| stride.stops_at(e, filter))
+            .count(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     // Stepping through a hand-built trace of two processes, one with two
@@ -450,6 +468,33 @@ mod tests {
         let (forward, back) = stops(&Stride::Bookmarks, LogFilter::Output);
         assert_eq!(forward, vec![15, 65]);
         assert_eq!(back, vec![65, 15]);
+    }
+
+    #[test]
+    fn a_stride_s_count_is_the_length_of_its_walk() {
+        // For each stride, the count the chooser shows is how many stops
+        // Next visits from the start, under the same log filter and
+        // bookmarks.
+        let t = timeline();
+        let strides = [
+            Stride::Every,
+            Stride::Switches,
+            Stride::Thread { pid: 5, tid: 7 },
+            Stride::Process { pid: 5 },
+            Stride::Kind(Kind::Output),
+            Stride::LogLine,
+            Stride::File("/build/out.o".into()),
+            Stride::Lifecycle,
+            Stride::Bookmarks,
+        ];
+        for stride in &strides {
+            for filter in [LogFilter::Output, LogFilter::WithConsole] {
+                let walked = stops(stride, filter).0.len();
+                assert_eq!(count(&t, stride, filter, &[15, 65]), walked, "{stride:?}");
+            }
+        }
+        assert_eq!(count(&t, &Stride::Every, LogFilter::WithConsole, &[]), 10);
+        assert_eq!(count(&t, &Stride::Switches, LogFilter::Output, &[]), 5);
     }
 
     #[test]
