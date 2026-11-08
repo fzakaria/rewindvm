@@ -1094,8 +1094,9 @@ impl Run {
 
     /// What held the CPU over the steps `from..=to`, a slice per stretch
     /// one task held, from the run's context switches, each of which the
-    /// guest kernel recorded as a step of its own. A window past the run's
-    /// end stops there. Nothing is replayed.
+    /// guest kernel recorded as a step of its own, with a task renamed at
+    /// its execs. A window past the run's end stops there. Nothing is
+    /// replayed.
     pub fn threads_through(&self, from: u64, to: u64) -> Result<Vec<crate::threads::Slice>> {
         if from > to {
             bail!("the window starts at step {from}, after its end at step {to}");
@@ -1109,7 +1110,17 @@ impl Run {
                 self.manifest.id
             );
         }
-        Ok(crate::threads::held_over(&trace.switches, from, to))
+        let execs: Vec<crate::threads::Exec> = trace
+            .events
+            .iter()
+            .filter_map(|e| match &e.kind {
+                EventKind::Exec { filename, .. } => {
+                    Some(crate::threads::Exec::of(e.step, e.pid, e.tid, filename))
+                }
+                _ => None,
+            })
+            .collect();
+        Ok(crate::threads::held_over(&trace.switches, &execs, from, to))
     }
 
     /// The error for a replay of this run that made a record other than
