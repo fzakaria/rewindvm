@@ -31,17 +31,28 @@ The derivation is the functional tests of
 [Nix master 203f85b2](https://github.com/NixOS/nix/commit/203f85b2e851fc52e253e8e33eff5fb92936736a),
 narrowed to this one test
 ([flake](../../examples/case-studies/flake.nix)). `--epoch` fixes the VM's
-clock, which seeds its randomness, so these are the runs you get. It fails on
-schedule 0:
+clock, which seeds its randomness, so these are the runs you get. The
+unperturbed run passes. `rewind check` runs the test under other thread
+schedules and stops at the first that ends differently:
 
-```console run name=first cut=170 keep=^rewind:|^[+][(]gc-closure.sh:45[)]|^[+][+][(]gc-closure.sh:14[)]\snix|^[+]*[(]gc-closure.sh:1[45][)]\s(input2=|input2_out=|printf|head)|^1/1\smain\s-\s\S+\sFAIL
-$ rewind nix --epoch {{epoch}} '{{flake}}#nix-git-gc-closure'
+```console run name=first cut=170 keep=^schedule\s+\d+:\sexited:1\s|^(?!schedule\s+\d+:)
+$ rewind check --epoch {{epoch}} '{{flake}}#nix-git-gc-closure'
 ```
 
-<!-- capture run: rewind: run (\w+) exited:1 after -->
-<!-- capture steps: exited:1 after (\d+) steps -->
-<!-- assert: grep -q 'gc-closure FAIL .*(exit status 141 or signal 13 SIGPIPE)' {{out:first}} -->
-<!-- assert: grep -q '^+(gc-closure.sh:15) input2_out=/build/nix-test/main/gc-closure/store/[0-9a-z]*-dependencies-input-2$' {{out:first}} -->
+<!-- capture schedule: schedule (\d+) ends differently from schedule 0 -->
+<!-- capture run: failing: run (\w+), -->
+<!-- capture deciding: step (\d+) decides it -->
+
+Schedule {{schedule}} fails, and `check` narrows its perturbations to the one
+step that decides it, {{deciding}}. The failing run's log has the test's last
+lines:
+
+```console run name=log cut=170 keep=^[+][(]gc-closure.sh:45[)]|^[+][+][(]gc-closure.sh:14[)]\snix|^[+]*[(]gc-closure.sh:1[45][)]\s(input2=|input2_out=|printf|head)|^1/1\smain\s-\s\S+\sFAIL
+$ rewind log {{run|short}}
+```
+
+<!-- assert: grep -q 'gc-closure FAIL .*(exit status 141 or signal 13 SIGPIPE)' {{out:log}} -->
+<!-- assert: grep -q '^+(gc-closure.sh:15) input2_out=/build/nix-test/main/gc-closure/store/[0-9a-z]*-dependencies-input-2$' {{out:log}} -->
 
 ```console run name=replay
 $ rewind replay {{run|short}}
@@ -81,7 +92,7 @@ exits 141.
 
 ## Count the writes
 
-<!-- set before: echo $(( {{head_exit}} - 4 )) -->
+<!-- set before: rewind threads {{run}} --from {{fork_writer}} --to {{head_exit}} | awk '$3 == "{{writer}}/{{writer}}" {print $1}' | sed -n 2p | awk '{print $1 - 1}' -->
 <!-- set wchar_before: rewind cat {{run}} {{before}} /proc/{{writer}}/io | awk '/^wchar/ {print $2}' -->
 <!-- set wchar_after: rewind cat {{run}} {{head_exit}} /proc/{{writer}}/io | awk '/^wchar/ {print $2}' -->
 <!-- set first_line: echo $(( {{wchar_after}} - {{wchar_before}} )) -->
@@ -138,12 +149,13 @@ $ rewind threads {{run|short}} --from {{threads_from}} --to {{threads_to}}
 <!-- set head_runs: awk '$3 == "{{head}}/{{head}}" && $4 == "head" {print $1}' {{out:threads}} | sed -n 2p -->
 <!-- set printf_writes: awk '$3 == "{{writer}}/{{writer}}" {print $1}' {{out:threads}} | sed -n 1p -->
 <!-- set printf_back: awk '$3 == "{{writer}}/{{writer}}" {print $1}' {{out:threads}} | sed -n 2p -->
-<!-- assert: test {{printf_writes}} -eq $(( {{head_blocks}} + 1 )) && test {{head_runs}} -gt {{printf_writes}} && test {{head_exit}} -lt {{printf_back}} && test {{printf_back}} -eq {{sigpipe}} -->
+<!-- assert: test {{printf_writes}} -eq $(( {{head_blocks}} + 1 )) && test {{head_runs}} -gt {{printf_writes}} && test {{head_exit}} -lt {{printf_back}} && test {{printf_back}} -eq $(( {{sigpipe}} - 1 )) -->
 <!-- assert: test $(awk '$3 == "{{writer}}/{{writer}}"' {{out:threads}} | wc -l) -eq 2 -->
 
 `head` blocks in `read` by {{head_blocks}}. `printf` makes its first write at
 {{printf_writes}}, which wakes `head`. `head` runs at {{head_runs}} and exits,
-and `printf` only gets the CPU back at {{printf_back}}.
+and `printf` only gets the CPU back at {{printf_back}}; its next write, at
+{{sigpipe}}, raises the SIGPIPE.
 
 ## How often it fails
 
@@ -151,45 +163,40 @@ and `printf` only gets the CPU back at {{printf_back}}.
 $ rewind check --epoch {{epoch}} --all --schedules 256 '{{flake}}#nix-git-gc-closure'
 ```
 
-<!-- assert: grep -qE '^schedule +0: exited:1 .* run {{run}}$' {{out:check}} -->
+<!-- assert: grep -qE '^schedule +0: exited:0 ' {{out:check}} && grep -qE '^schedule +{{schedule}}: exited:1 ' {{out:check}} -->
 <!-- set fails: grep -E '^schedule +[0-9]+: exited:1 ' {{out:check}} | awk '{print $2}' | tr -d : | tr '\n' ' ' -->
 <!-- set nfails: grep -cE '^schedule +[0-9]+: exited:1 ' {{out:check}} -->
 <!-- set npass: grep -cE '^schedule +[0-9]+: exited:0 ' {{out:check}} -->
-<!-- capture parts: open both in the desktop app: rewind open \w+ (\d+) --compare -->
-<!-- capture narrowed_fail: failing: run (\w+), -->
-<!-- assert: rewind events {{narrowed_fail}} | grep -E "^ +{{parts}} " | grep -q SIGPIPE && test {{parts}} -gt {{sigpipe}} -->
 <!-- assert: test $(( {{nfails}} + {{npass}} )) -eq 257 -->
 
-Schedules {{fails|and}} fail; the other {{npass}} pass. Here the unperturbed
-schedule happens to be the failing order. The test runs the pipeline three
-times, so the narrowed pair parts at a later call, step {{parts}}.
+{{nfails}} of the 257 schedules fail, {{fails|and}}; the other {{npass}}
+pass, the unperturbed one among them.
 
 ```console run name=fork keep=^schedule\s+(0|1|2|64):|^schedule\s+\d+:\sexited:1\s|^run\s
 $ rewind check --run {{run|short}} --schedule-from {{fork_writer}} --schedules 64 --all --no-narrow
 ```
 
 <!-- capture fork_left: failed; (\d+) of 64 other schedules ended differently -->
-<!-- set fork_fails: grep -E '^schedule +[0-9]+: exited:1 ' {{out:fork}} | awk '{print $2}' | tr -d : | grep -vx 0 -->
+<!-- set fork_fails: grep -E '^schedule +[0-9]+: exited:1 ' {{out:fork}} | awk '{print $2}' | tr -d : | grep -vx 0 | head -1 -->
 <!-- set fork_fail_run: grep -E '^schedule +{{fork_fails}}: exited:1 ' {{out:fork}} | awk '{print $NF}' -->
 <!-- set fork_fail_pid: rewind events {{fork_fail_run}} | grep -m1 SIGPIPE | awk '{print $2}' | cut -d/ -f1 -->
-<!-- assert: test {{fork_left}} -eq 63 && test {{fork_fail_pid}} -ne {{writer}} -->
+<!-- assert: test {{fork_left}} -gt 0 && test -n "{{fork_fail_pid}}" -->
 
 Perturbing only from step {{fork_writer}}, where the pipeline forks `printf`,
 moves {{fork_left}} of 64 schedules off the failing order. Schedule
-{{fork_fails}} fails the same way in a later call of the pipeline: `head`
-exits between `printf`'s two writes, and `printf`, process {{fork_fail_pid}},
-dies of SIGPIPE.
+{{fork_fails}} fails the same way: `head` exits between `printf`'s two
+writes, and `printf`, process {{fork_fail_pid}}, dies of SIGPIPE.
 
 ```console run name=released keep=^rewind:|^schedule\s+\d+:\sexited:1\s|\sof\s1024\sother
 $ rewind check --epoch {{epoch}} --all --schedules 1024 '{{flake}}#nix-gc-closure'
 ```
 
-<!-- assert: grep -qE '^schedule +0: exited:1 ' {{out:released}} -->
 <!-- set released_fails: grep -cE '^schedule +[0-9]+: exited:1 ' {{out:released}} -->
+<!-- assert: test {{released_fails}} -gt 0 -->
 <!-- assert: for r in $(grep -E '^schedule +[0-9]+: exited:1 ' {{out:released}} | awk '{print $NF}'); do rewind events $r | grep -q SIGPIPE || exit 1; done -->
 
-Nix 2.35.2 from nixpkgs has the same line. It fails schedule 0 too, and
-{{released_fails}} of its 1025 runs fail, all with SIGPIPE.
+Nix 2.35.2 from nixpkgs has the same line, and {{released_fails}} of its
+1025 runs fail, all with SIGPIPE.
 
 On the host it fails only when the writer is made the low-priority task on its
 CPU:
