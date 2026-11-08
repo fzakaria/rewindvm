@@ -1,11 +1,14 @@
 //! What Previous and Next stop at: every event, or only the
 //! events of one thread, one process or one kind, the build log's lines,
-//! the events on one file, the processes starting and exiting, or context switches.
+//! the events on one file, the processes starting and exiting, every
+//! context switch, or the switches that give one thread or one process
+//! the CPU and take it away.
 //!
 //! A stride that follows something, a thread or a file, names it when it
-//! is chosen, from the event at the playhead then, so stepping keeps
-//! following it as the playhead passes other events.
+//! is chosen, from the event or the switch at the playhead then, so
+//! stepping keeps following it as the playhead passes other events.
 
+use rewind_trace::switches::Switch;
 use rewind_trace::{Event, EventKind};
 
 use crate::model::{LogFilter, Timeline};
@@ -77,6 +80,12 @@ pub enum Stride {
     Every,
     /// Every recorded context switch, including kernel and idle tasks.
     Switches,
+    /// The switches that give one thread the CPU and the ones that take
+    /// it away.
+    ThreadSwitches { pid: u32, tid: u32 },
+    /// The switches that give any thread of one process the CPU and the
+    /// ones that hand it to another process, a kernel thread or idle.
+    ProcessSwitches { pid: u32 },
     /// The events of one thread.
     Thread { pid: u32, tid: u32 },
     /// The events of any thread of one process.
@@ -118,8 +127,36 @@ impl Stride {
                 EventKind::Exec { .. } => true,
                 _ => false,
             },
-            Stride::Switches | Stride::LogLine | Stride::Bookmarks => false,
+            Stride::Switches
+            | Stride::ThreadSwitches { .. }
+            | Stride::ProcessSwitches { .. }
+            | Stride::LogLine
+            | Stride::Bookmarks => false,
         }
+    }
+
+    /// Whether `switch` hands the CPU to what this stride follows: the
+    /// thread, or a thread of the process. A task without memory of its
+    /// own, a kernel thread or a thread already past its exit, is not
+    /// the thread it once was.
+    fn takes(&self, switch: &Switch) -> bool {
+        if !switch.memory || switch.is_idle() {
+            return false;
+        }
+        match self {
+            Stride::ThreadSwitches { pid, tid } => switch.pid == *pid && switch.tid == *tid,
+            Stride::ProcessSwitches { pid } => switch.pid == *pid,
+            _ => false,
+        }
+    }
+
+    /// Whether the switch at `i` is a stop of this stride: the followed
+    /// task takes the CPU there, or the task before it had it and loses
+    /// it there.
+    fn switch_stops_at(&self, switches: &[Switch], i: usize) -> bool {
+        let takes = self.takes(&switches[i]);
+        let had = i > 0 && self.takes(&switches[i - 1]);
+        takes != had
     }
 
     /// The strides that follow the event `event`: its thread, its
@@ -140,6 +177,24 @@ impl Stride {
         if let Some(path) = named_file(&event.kind) {
             strides.push(Stride::File(path.to_string()));
         }
+        strides
+    }
+
+    /// The strides that follow the task `switch` gave the CPU: its
+    /// thread, when the thread is not the process's main one, and its
+    /// process. Idle and kernel tasks have nothing to follow.
+    pub fn following_switch(switch: &Switch) -> Vec<Stride> {
+        if !switch.memory || switch.is_idle() {
+            return Vec::new();
+        }
+        let mut strides = Vec::new();
+        if switch.tid != switch.pid {
+            strides.push(Stride::ThreadSwitches {
+                pid: switch.pid,
+                tid: switch.tid,
+            });
+        }
+        strides.push(Stride::ProcessSwitches { pid: switch.pid });
         strides
     }
 }
@@ -205,6 +260,24 @@ pub fn step_by(
                 }
             };
         }
+        Stride::ThreadSwitches { .. } | Stride::ProcessSwitches { .. } => {
+            let switches = &timeline.trace.switches;
+            return match direction {
+                Direction::Forward => {
+                    let after = switches.partition_point(|s| s.step <= step);
+                    (after..switches.len())
+                        .find(|i| stride.switch_stops_at(switches, *i))
+                        .map(|i| switches[i].step)
+                }
+                Direction::Back => {
+                    let before = switches.partition_point(|s| s.step < step);
+                    (0..before)
+                        .rev()
+                        .find(|i| stride.switch_stops_at(switches, *i))
+                        .map(|i| switches[i].step)
+                }
+            };
+        }
         Stride::LogLine => {
             let lines: Vec<u64> = timeline.lines(filter).iter().map(|l| l.step).collect();
             return nearest(&lines, direction, step);
@@ -241,6 +314,12 @@ pub fn step_by(
 pub fn count(timeline: &Timeline, stride: &Stride, filter: LogFilter, bookmarks: &[u64]) -> usize {
     match stride {
         Stride::Switches => timeline.trace.switches.len(),
+        Stride::ThreadSwitches { .. } | Stride::ProcessSwitches { .. } => {
+            let switches = &timeline.trace.switches;
+            (0..switches.len())
+                .filter(|i| stride.switch_stops_at(switches, *i))
+                .count()
+        }
         Stride::LogLine => timeline.lines(filter).len(),
         Stride::Bookmarks => bookmarks.len(),
         _ => timeline
@@ -411,6 +490,51 @@ mod tests {
     }
 
     #[test]
+    fn following_a_thread_s_switches_stops_where_it_takes_and_loses_the_cpu() {
+        // Process 5 takes the CPU at 19 and loses it to the kernel thread
+        // at 35; init has it from 9, loses it at 19 and gets it back at
+        // 90. Neither the kernel thread's switch nor idle's is a stop of
+        // its own.
+        let five = Stride::ThreadSwitches { pid: 5, tid: 5 };
+        assert_eq!(
+            stops(&five, LogFilter::Output),
+            (vec![19, 35], vec![35, 19])
+        );
+        let init = Stride::ProcessSwitches { pid: 1 };
+        assert_eq!(stops(&init, LogFilter::Output).0, vec![9, 19, 90]);
+        let nobody = Stride::ThreadSwitches { pid: 77, tid: 78 };
+        assert_eq!(stops(&nobody, LogFilter::Output).0, Vec::<u64>::new());
+    }
+
+    #[test]
+    fn a_switch_offers_its_thread_and_process() {
+        // A worker thread's switch offers the thread and its process; a
+        // main thread's offers the process alone; a kernel thread's and
+        // idle's offer nothing.
+        let worker = Switch {
+            step: 1,
+            pid: 5,
+            tid: 7,
+            memory: true,
+            name: "five".into(),
+        };
+        assert_eq!(
+            Stride::following_switch(&worker),
+            vec![
+                Stride::ThreadSwitches { pid: 5, tid: 7 },
+                Stride::ProcessSwitches { pid: 5 },
+            ]
+        );
+        let t = timeline();
+        assert_eq!(
+            Stride::following_switch(&t.trace.switches[1]),
+            vec![Stride::ProcessSwitches { pid: 5 }]
+        );
+        assert_eq!(Stride::following_switch(&t.trace.switches[2]), vec![]);
+        assert_eq!(Stride::following_switch(&t.trace.switches[3]), vec![]);
+    }
+
+    #[test]
     fn every_event_skips_console_lines_the_log_hides() {
         // With the console off, the kernel's lines at 25 and 55 are not
         // stops; with it on, they are.
@@ -479,6 +603,8 @@ mod tests {
         let strides = [
             Stride::Every,
             Stride::Switches,
+            Stride::ThreadSwitches { pid: 5, tid: 5 },
+            Stride::ProcessSwitches { pid: 1 },
             Stride::Thread { pid: 5, tid: 7 },
             Stride::Process { pid: 5 },
             Stride::Kind(Kind::Output),

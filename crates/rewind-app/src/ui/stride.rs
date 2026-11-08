@@ -24,7 +24,7 @@ const MAX_PATH_CHARS: usize = 40;
 const MENU_WIDTH: f32 = 300.0;
 
 /// What the chooser says it does when pointed at.
-const CHOOSER_NOTE: &str = "What Previous, Next and the Left and Right keys stop at: every event, context switches, the build log's lines, processes starting and exiting, the bookmarks, or the thread, process, kind of event or file of the event at the playhead. The menu shows how many stops each has over the run.";
+const CHOOSER_NOTE: &str = "What Previous, Next and the Left and Right keys stop at: every event, context switches, the build log's lines, processes starting and exiting, the bookmarks, the thread, process, kind of event or file of the event at the playhead, or the switches that give the thread or process on the CPU at the playhead the CPU and take it away. The menu shows how many stops each has over the run.";
 
 /// What a stride is called in the chooser and its menu.
 pub fn stride_label(stride: &Stride, timeline: &Timeline) -> String {
@@ -41,6 +41,10 @@ pub fn stride_label(stride: &Stride, timeline: &Timeline) -> String {
         Stride::Bookmarks => "bookmarks".to_string(),
         Stride::Thread { pid, tid } => format!("thread {tid} of {pid}{}", name(*pid)),
         Stride::Process { pid } => format!("process {pid}{}", name(*pid)),
+        Stride::ThreadSwitches { pid, tid } => {
+            format!("switches of thread {tid} of {pid}{}", name(*pid))
+        }
+        Stride::ProcessSwitches { pid } => format!("switches of process {pid}{}", name(*pid)),
         Stride::Kind(kind) => format!("{} events", kind.call()),
         Stride::File(path) => clip(path, MAX_PATH_CHARS),
     }
@@ -113,8 +117,9 @@ impl Scrubber {
     }
 
     /// The strides the menu offers: the ones that stand alone, then the
-    /// ones that follow the event at the playhead, then the file in the
-    /// viewer.
+    /// ones that follow the event at the playhead, then the ones that
+    /// follow the task the switch at the playhead gave the CPU, then the
+    /// file in the viewer.
     fn offered_strides(&self) -> Vec<Stride> {
         let timeline = self.session.as_ref().map(|s| &s.run.timeline);
         let mut offered = vec![Stride::Every];
@@ -130,6 +135,9 @@ impl Scrubber {
         };
         if let Some(event) = t.event_index_at(self.step).and_then(|i| t.event(i)) {
             offered.extend(Stride::following(event));
+        }
+        if let Some(switch) = t.switch_at(self.step) {
+            offered.extend(Stride::following_switch(switch));
         }
         if let Some(viewer) = &self.viewer {
             offered.push(Stride::File(viewer.path.clone()));
