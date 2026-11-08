@@ -1587,10 +1587,19 @@ in
         start=$(rewind events busy | grep 'rewind-start' | sed -n 1p | awk '{print $1}')
         end=$(rewind events busy | grep 'rewind-exit' | sed -n 1p | awk '{print $1}')
 
+        # A session at a step before a process's exec, as a forked child's
+        # first context switch is, stops at the exec and refuses to run into
+        # the new program; those are skipped.
+        sessions=0
         for step in $(seq "$start" 4 "$end"); do
           rewind gdb busy "$step" -- -batch -ex 'stepi 3000' -ex continue > gdb 2>&1 || true
+          if grep -q 'debugs the program before it' gdb; then
+            continue
+          fi
           follows "stepping from step $step"
+          sessions=$((sessions + 1))
         done
+        test "$sessions" -gt 5
 
         rewind run -q --clock exits --name fork --root ${gdbRoot} -- /bin/fork
         start=$(rewind events fork | grep 'write(1, "start' | awk '{print $1}')
@@ -1846,9 +1855,17 @@ in
         start=$(rewind events busy | grep 'rewind-start' | sed -n 1p | awk '{print $1}')
         end=$(rewind events busy | grep 'rewind-exit' | sed -n 1p | awk '{print $1}')
 
+        # A step at which a process runs before its exec, as a forked child's
+        # first context switch is, gives a session that stops at the exec
+        # and refuses to run into the new program; those are skipped.
         sessions=0
+        skipped=0
         for step in $(seq "$start" 3 "$end"); do
           rewind gdb busy "$step" -- -batch -ex continue > gdb 2>&1 || true
+          if grep -q 'debugs the program before it' gdb; then
+            skipped=$((skipped + 1))
+            continue
+          fi
           if ! grep -q 'exited normally' gdb || grep -q 'left the recording\|SIGTRAP' gdb; then
             echo "from step $step:"
             cat gdb
@@ -1856,7 +1873,8 @@ in
           fi
           sessions=$((sessions + 1))
         done
-        echo "$sessions forks for gdb, each made at a step without a keyframe, stayed on the recording"
+        test "$sessions" -gt 10
+        echo "$sessions forks for gdb, each made at a step without a keyframe, stayed on the recording; $skipped stopped at an exec"
         touch $out
       '';
 
@@ -2339,17 +2357,21 @@ in
           cat handled-other
           test "$status" != $timeout_term
           test "$status" != $timeout_kill
-          grep 'hit ' handled-other | sed 's/,.*//' > hits
+          # The second thread exits once it has signaled, so a stop in the
+          # main thread after that lists it no more, and a run back brings
+          # it back under a new gdb number; the stops are compared by which
+          # of the two threads they are in.
+          grep 'hit ' handled-other | sed 's/,.*//; s/^Thread [3-9][0-9]* hit/Thread other hit/' > hits
           {
             echo 'Thread 2 hit Hardware watchpoint 1: buffer'
-            echo 'Thread 3 hit Breakpoint 2'
+            echo 'Thread other hit Breakpoint 2'
             echo 'Thread 2 hit Breakpoint 3'
-            echo 'Thread 3 hit Breakpoint 2'
+            echo 'Thread other hit Breakpoint 2'
             echo 'Thread 2 hit Breakpoint 3'
-            echo 'Thread 3 hit Breakpoint 2'
+            echo 'Thread other hit Breakpoint 2'
             echo 'Thread 2 hit Hardware watchpoint 1: buffer'
             echo 'Thread 2 hit Hardware watchpoint 1: buffer'
-            echo 'Thread 3 hit Breakpoint 2'
+            echo 'Thread other hit Breakpoint 2'
           } > expected
           diff expected hits
           grep -q '^0x[0-9a-f]* <[^>]*>:[[:space:]]*0x0f[[:space:]]*0x05$' handled-other
@@ -2372,15 +2394,16 @@ in
           cat handled-second
           test "$status" != $timeout_term
           test "$status" != $timeout_kill
-          grep 'hit ' handled-second | sed 's/,.*//' > hits
+          # The second thread's gdb number changes as above.
+          grep 'hit ' handled-second | sed 's/,.*//; s/^Thread [3-9][0-9]* hit/Thread other hit/' > hits
           {
             echo 'Thread 2 hit Hardware watchpoint 1: buffer[0]'
-            echo 'Thread 3 hit Hardware watchpoint 2: other'
+            echo 'Thread other hit Hardware watchpoint 2: other'
             echo 'Thread 2 hit Breakpoint 3'
-            echo 'Thread 3 hit Hardware watchpoint 2: other'
+            echo 'Thread other hit Hardware watchpoint 2: other'
             echo 'Thread 2 hit Hardware watchpoint 1: buffer[0]'
             echo 'Thread 2 hit Hardware watchpoint 1: buffer[0]'
-            echo 'Thread 3 hit Hardware watchpoint 2: other'
+            echo 'Thread other hit Hardware watchpoint 2: other'
           } > expected
           diff expected hits
           grep -q '^=> 0x[0-9a-f]* <[^>]*>:[[:space:]]*syscall' handled-second
