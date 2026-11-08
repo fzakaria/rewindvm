@@ -2,8 +2,7 @@
 
 <!-- let epoch = 1791936000 -->
 <!-- let flake = github:fzakaria/rewindvm?dir=examples/case-studies -->
-<!-- let schedule = 174 -->
-<!-- let shell_step = 200000 -->
+<!-- let schedule = 31 -->
 
 A Nix master build from April 2026 could hang when several `nix` commands
 opened a new store at once, printing `SQLite database ... is busy` every ten
@@ -93,7 +92,10 @@ ends with SIGTERM in passing runs too.)
 
 ## Where the hung process is
 
-At step {{shell_step}} only {{hung}} is left, and it holds every lock:
+<!-- set shell_step: rewind threads {{run}} --from 200000 --to 260000 | awk '$3 == "idle" {print $1; exit}' -->
+
+At step {{shell_step}}, with the VM idle while {{hung}} sleeps between two
+retries, only {{hung}} is left, and it holds every lock:
 
 ```console run name=locks elide
 $ rewind ps {{run|short}} {{shell_step}}
@@ -116,14 +118,15 @@ inside a read transaction, and nothing else is in its way.
 <!-- run: sed 's/@PID@/{{hung}}/' {{dir}}/nix-schema-migration-hang-gdb.sh > gdb.sh -->
 
 `rewind shell` opens a shell in a throwaway fork of the run at a step. gdb
-attaches to {{hung}} there and catches its next retry. The shell reads these
+attaches to {{hung}} there, stops it where it handles SQLite's next busy
+answer, and catches the retry after that. The shell reads these
 lines from [gdb.sh](../templates/nix-schema-migration-hang-gdb.sh); typed in, they do the same:
 
 ```console run name=gdb elide cut=220 keep=^rewind:|^\x5brewind]|^>|^\x5bNew|^#[0-7]\s|^Breakpoint|^Thread|^statement|^insert|^sqlite3_exec|^extended|^errmsg|^autocommit|^\x5bInferior
 $ rewind shell {{run|short}} {{shell_step}} --pid {{hung}} < gdb.sh
 ```
 
-<!-- assert: grep -q 'in nix::handleSQLiteBusy' {{out:gdb}} && grep -q 'in nix::LocalStore::upgradeDBSchema' {{out:gdb}} -->
+<!-- assert: grep -q '^#0 .*nix::handleSQLiteBusy' {{out:gdb}} && grep -q 'in nix::LocalStore::upgradeDBSchema' {{out:gdb}} -->
 <!-- assert: grep -q "^insert into SchemaMigrations values('20260309-drop-redundant-indexreferrer')$" {{out:gdb}} -->
 <!-- assert: grep -q '^sqlite3_exec returned 5$' {{out:gdb}} && grep -q '^extended error code 517$' {{out:gdb}} && grep -q '^autocommit 0$' {{out:gdb}} -->
 

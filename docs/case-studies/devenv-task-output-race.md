@@ -116,12 +116,12 @@ assertion `left == right` failed
   left: ["line1", "line2"]
  right: ["line1", "line2", "line3"]
 ...
-rewind: run 7176689741c831e4 exited:101 after 1233 steps, 0.034s virtual, 1.438s wall (poweroff)
+rewind: run 5947419e48b1a8dd exited:101 after 1594 steps, 0.036s virtual, 0.370s wall (poweroff)
 ```
 
 ```console
-$ rewind replay 71766897
-identical to the recording: 763 events and 145 read and write records over 1233 steps, and the whole machine at its 3 keyframes
+$ rewind replay 5947419e
+identical to the recording: 763 events, 492 context switches and 145 read and write records over 1594 steps, and the whole machine at its 2 keyframes
 ```
 
 The task printed three lines and devenv kept two, as in the issue.
@@ -130,43 +130,43 @@ The task printed three lines and devenv kept two, as in the issue.
 
 ```console
 $ rewind check --epoch 1791936000 --seed 5 --all --schedules 256 'github:fzakaria/rewindvm?dir=examples/case-studies#devenv-last-lines-before-2296'
-schedule   0: exited:101           1233 steps    run 7176689741c831e4
-schedule   1: exited:101           1291 steps    run a83fbb6085e13263
-schedule   2: exited:101           1395 steps    run 80d7576a566f4402
-schedule   3: exited:101           1338 steps    run 0356b918af4988d2
+schedule   0: exited:101           1594 steps    run 5947419e48b1a8dd
+schedule   1: exited:101           1701 steps    run 8a1e1e249bf3127a
+schedule   2: exited:101           1740 steps    run 8787649768b46bab
+schedule   3: exited:101           1768 steps    run fef971a0373f1de8
 ...
-schedule 256: exited:0             1433 steps  77ac62e2629d  run f87871d7d1e0a0ff
-schedule 0 failed; 34 of 256 other schedules ended differently
+schedule 256: exited:0             1799 steps  77ac62e2629d  run 0a847eb65c6dbb7c
+schedule 0 failed; 36 of 256 other schedules ended differently
 
-schedule 6 passes where schedule 0 fails; finding the step that decides it
-schedule 6 limited to steps 937..1192 still ends differently
-step 1191 decides it: a request to switch threads there makes the run pass
+schedule 5 passes where schedule 0 fails; finding the step that decides it
+schedule 5 limited to steps 835..1645 still ends differently
+step 1644 decides it: a 640 µs pause of the running thread there makes the run pass
 
-passing: run 9af45934c234b618, schedule 6 over steps 937..1192
-failing: run 041dab22855c7ade, schedule 6 over steps 937..1191
-the two are the same run until step 1191
+passing: run dddef5ddcdfdb922, schedule 5 over steps 835..1645
+failing: run 39531d5d872fd152, schedule 5 over steps 835..1644
+the two are the same run until step 1644
 
 where /nix/store/195dbbvj5h0yq9f4vnp833dsbgxpp8w0-devenv-tasks-tests-1.10.1/bin/devenv-tasks-tests test_failed_task_keeps_last_lines first behaves differently:
-  both           1086    40/42    open("/build/.tmpajDf2J/tasks.db-shm", 0o2400102)
-  both           1181    40/41    open("/build/devenv_task_outputfL02tO.json", 0o2000302)
-  both           1184    40/41    fork() = 43
-  failing        1194    40/41    SIGCHLD code=1 addr=0x0
-  failing        1203    40/41    close("anon_inode:[pidfd]")
-  failing        1205    40/41    unlink("/build/devenv_task_outputfL02tO.json")
-  failing        1206    40/41    close("/build/devenv_task_outputfL02tO.json")
-  passing        1214    40/41    close("anon_inode:[pidfd]")
-  passing        1216    40/41    unlink("/build/devenv_task_outputfL02tO.json")
-  passing        1217    40/41    close("/build/devenv_task_outputfL02tO.json")
-  passing        1228    40/42    thread exit(sqlx-sqlite-wor) exited:0
+  both           1500    40/42    open("/build/.tmprigw8M/tasks.db-shm", 0o2400102)
+  both           1636    40/41    open("/build/devenv_task_outputdz3jv1.json", 0o2000302)
+  both           1639    40/41    fork() = 43
+  failing        1647    40/41    SIGCHLD code=1 addr=0x0
+  failing        1656    40/41    close("anon_inode:[pidfd]")
+  failing        1658    40/41    unlink("/build/devenv_task_outputdz3jv1.json")
+  failing        1659    40/41    close("/build/devenv_task_outputdz3jv1.json")
+  passing        1677    40/41    close("anon_inode:[pidfd]")
+  passing        1679    40/41    unlink("/build/devenv_task_outputdz3jv1.json")
+  passing        1680    40/41    close("/build/devenv_task_outputdz3jv1.json")
+  passing        1687    40/41    unlink("/build/scriptGgRKWz.sh")
 
-open both in the desktop app: rewind open 041dab22855c7ade 1194 --compare 9af45934c234b618
+open both in the desktop app: rewind open 39531d5d872fd152 1647 --compare dddef5ddcdfdb922
 ```
 
-223 of 257 runs fail, each keeping `["line1", "line2"]`. The narrowed
+221 of 257 runs fail, each keeping `["line1", "line2"]`. The narrowed
 pair's calls part where the test learns that the task's shell has exited: in
-the failing run SIGCHLD reaches it at step 1194, and in the passing
+the failing run SIGCHLD reaches it at step 1647, and in the passing
 run the first call that differs is the close of the child's pidfd, at step
-1214, with no SIGCHLD before it. What differs is when the task's
+1677, with no SIGCHLD before it. What differs is when the task's
 shell gets the CPU.
 
 ## Who had the CPU
@@ -175,53 +175,55 @@ shell gets the CPU.
 steps, here for the failing run and then the passing one:
 
 ```console
-$ rewind threads 041dab22855c7ade --from 1175 --to 1215
-      1175       1176         40/42  sqlx-sqlite-wor
-      1177       1178         40/41  tests::test_fai
-      1179       1179         40/42  sqlx-sqlite-wor
-      1180       1184         40/41  tests::test_fai
-      1185       1186     kernel 11  ksoftirqd/0
-      1187       1189         43/43  tests::test_fai
-      1190       1191         43/43  scriptZCX6pY.sh
-      1192       1192     kernel 11  ksoftirqd/0
-      1193       1215         40/41  tests::test_fai
+$ rewind threads 39531d5d872fd152 --from 1628 --to 1676
+      1628       1632         40/41  tests::test_fai
+      1633       1633         40/42  sqlx-sqlite-wor
+      1634       1639         40/41  tests::test_fai
+      1640       1641     kernel 11  ksoftirqd/0
+      1642       1642         43/43  tests::test_fai
+      1643       1644         43/43  scriptGgRKWz.sh
+      1645       1645     kernel 11  ksoftirqd/0
+      1646       1672         40/41  tests::test_fai
+      1673       1674     kernel 11  ksoftirqd/0
+      1675       1676         40/40  devenv-tasks-te
 
-$ rewind threads 9af45934c234b618 --from 1175 --to 1215
-      1175       1176         40/42  sqlx-sqlite-wor
-      1177       1178         40/41  tests::test_fai
-      1179       1179         40/42  sqlx-sqlite-wor
-      1180       1184         40/41  tests::test_fai
-      1185       1186     kernel 11  ksoftirqd/0
-      1187       1189         43/43  tests::test_fai
-      1190       1191         43/43  scriptZCX6pY.sh
-      1192       1192     kernel 11  ksoftirqd/0
-      1193       1207         40/41  tests::test_fai
-      1208       1209     kernel 11  ksoftirqd/0
-      1210       1210         43/43  scriptZCX6pY.sh
-      1211       1211     kernel 11  ksoftirqd/0
-      1212       1215         40/41  tests::test_fai
+$ rewind threads dddef5ddcdfdb922 --from 1628 --to 1676
+      1628       1632         40/41  tests::test_fai
+      1633       1633         40/42  sqlx-sqlite-wor
+      1634       1639         40/41  tests::test_fai
+      1640       1641     kernel 11  ksoftirqd/0
+      1642       1642         43/43  tests::test_fai
+      1643       1648         43/43  scriptGgRKWz.sh
+      1649       1649     kernel 11  ksoftirqd/0
+      1650       1664         40/41  tests::test_fai
+      1665       1665     kernel 11  ksoftirqd/0
+      1666       1672          idle  swapper/0
+      1673       1673     kernel 43  scriptGgRKWz.sh
+      1674       1676         40/41  tests::test_fai
 ```
 
 In the failing run the shell (43) finishes exiting before thread
-41 runs. In the passing run the reschedule at step 1191
-sends the shell off the CPU before its exit is done, and it finishes only
-at step 1210. The app's Threads tab shows the same:
+41 runs. In the passing run a 640 µs pause of the running thread at step 1644
+holds the shell in its exit: thread 41 runs ahead, the CPU idles,
+and the shell ends only at step 1673, by then a task with no memory
+of its own, which `rewind threads` lists as `kernel 43`. The app's
+Threads tab shows the same:
 
-![The Threads tab on the failing and passing runs: the task's shell, 43, on the CPU from step 1190 in both, and again at 1210 only in the passing run](../../site/img/devenv-threads.png)
+![The Threads tab on the failing and passing runs: the task's shell, 43, on the CPU from step 1643 in both, and again at 1673 only in the passing run](../../site/img/devenv-threads.png)
 
-Perturbing only from step 1155, where the run forks the task's shell,
+Perturbing only from step 1519, where the run forks the task's shell,
 still lets some schedules pass, so the outcome is decided after the task
 starts:
 
 ```console
-$ rewind check --run 71766897 --schedule-from 1155 --schedules 64 --all --no-narrow
-schedule   0: exited:101           1233 steps    run 7176689741c831e4
-schedule   1: exited:101           1253 steps    run d9ea6c28433b76d3
-schedule   2: exited:101           1265 steps    run 291b13347aed952c
-schedule   3: exited:101           1244 steps    run 4d81574b299281c7
+$ rewind check --run 5947419e --schedule-from 1519 --schedules 64 --all --no-narrow
+schedule   0: exited:101           1594 steps    run 5947419e48b1a8dd
+schedule   1: exited:101           1626 steps    run 7d8b836c77378ac0
+schedule   2: exited:101           1630 steps    run 5761b80ca8b993a3
+schedule   3: exited:101           1631 steps    run 19d57727ed2513d0
 ...
-schedule  64: exited:101           1259 steps    run 0daadf7d51f0e321
-run 7176689741c831e4 failed; 5 of 64 other schedules ended differently
+schedule  64: exited:101           1630 steps    run fc4c3c72e947274d
+run 5947419e48b1a8dd failed; 13 of 64 other schedules ended differently
 ```
 
 ## Where the third line went
@@ -229,12 +231,12 @@ run 7176689741c831e4 failed; 5 of 64 other schedules ended differently
 The events of schedule 0's run around the task:
 
 ```console
-$ rewind events 71766897 --from 1147 --to 1167
-      1152    40/41    open("/build/devenv_task_outputbyuxVm.json", 0o2000302)
-      1155    40/41    fork() = 43
-      1159    43/43    execve("/build/scriptL1Qmi0.sh", ["/bin/sh", "/build/scriptL1Qmi0.sh"])
-      1160    43/43    exit_group(scriptL1Qmi0.sh) exited:1
-      1163    40/41    SIGCHLD code=1 addr=0x0
+$ rewind events 5947419e --from 1511 --to 1531
+      1516    40/41    open("/build/devenv_task_outputasKI1s.json", 0o2000302)
+      1519    40/41    fork() = 43
+      1523    43/43    execve("/build/script1NPIuA.sh", ["/bin/sh", "/build/script1NPIuA.sh"])
+      1524    43/43    exit_group(script1NPIuA.sh) exited:1
+      1527    40/41    SIGCHLD code=1 addr=0x0
 ```
 
 The shell prints all three lines and exits before the loop reads anything.
@@ -242,16 +244,16 @@ The shell prints all three lines and exits before the loop reads anything.
 stdout pipe (fd 13) and on the `child.wait()` branch:
 
 ```console
-$ rewind gdb 71766897 1152 -- -batch -ex 'break read if $rdi == 13' -ex 'break task_state.rs:409' -ex continue -ex 'set $buf = $rsi' -ex finish -ex 'x/s $buf' -ex 'delete 1' -ex continue
-rewind: step 1152 ran in process 40; loading symbols for 5 of its files
+$ rewind gdb 5947419e 1516 -- -batch -ex 'break read if $rdi == 13' -ex 'break task_state.rs:409' -ex continue -ex 'set $buf = $rsi' -ex finish -ex 'x/s $buf' -ex 'delete 1' -ex continue
+rewind: step 1516 ran in process 40; loading symbols for 5 of its files
 rewind: source files for /nix/store/195dbbvj5h0yq9f4vnp833dsbgxpp8w0-devenv-tasks-tests-1.10.1 from /nix/store/hs2328bm8f7s0cq77jjjgdlcqrc13mhm-source
-rewind: gdb at step 1152 of 7176689741c831e4
+rewind: gdb at step 1516 of 5947419e48b1a8dd
 Downloading 1.72 M separate debug info for /nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libm.so.6...
 Downloading 4.35 M separate debug info for /nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6...
 Downloading 658.16 K separate debug info for /nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/ld-linux-x86-64.so.2...
-Downloading 740.00 B source file /build/linux-7.2.8/./arch/x86/include/asm/shared/io.h...
-0xffffffff812850a5 in __outl (value=<optimized out>, port=1504) at ./arch/x86/include/asm/shared/io.h:24
-24	BUILDIO(l,  , u32)
+Downloading 3.12 K source file /build/linux-7.2.8/./arch/x86/include/asm/irqflags.h...
+arch_local_irq_restore (flags=514) at ./arch/x86/include/asm/irqflags.h:146
+146		return !(flags & X86_EFLAGS_IF);
 [Switching to thread 3 (Thread 1.41)]
 Downloading 1.79 K source file /build/glibc-2.44/nptl/../sysdeps/unix/sysv/linux/x86_64/syscall_cancel.S...
 #0  __syscall_cancel_arch () at ../sysdeps/unix/sysv/linux/x86_64/syscall_cancel.S:56
@@ -322,9 +324,9 @@ The same test at the merge commit passes every schedule:
 ```console
 $ rewind check --epoch 1791936000 --seed 5 --all --schedules 256 'github:fzakaria/rewindvm?dir=examples/case-studies#devenv-last-lines-2296'
 rewind: packing 57 store paths for devenv-tasks-test-last-lines-2296
-schedule   0: exited:0             1257 steps  77ac62e2629d  run 671a6d6ca8a0c373
-schedule   1: exited:0             1348 steps  77ac62e2629d  run 0793951a23ecb949
-schedule   2: exited:0             1430 steps  77ac62e2629d  run 5a9aeda3b7ac7448
+schedule   0: exited:0             1618 steps  77ac62e2629d  run 0e3bec4c6a2026fa
+schedule   1: exited:0             1748 steps  77ac62e2629d  run 13e7c1f26410d822
+schedule   2: exited:0             1769 steps  77ac62e2629d  run 69c6252f317c5320
 ...
 0 of 256 other schedules ended differently
 same result under all 257 schedules
@@ -339,15 +341,15 @@ Both files are in the
 [case-studies release](https://github.com/fzakaria/rewindvm/releases/tag/case-studies):
 
 - [devenv-task-output-race.rwd](https://github.com/fzakaria/rewindvm/releases/download/case-studies/devenv-task-output-race.rwd)
-  (11.5 KB), the trace, for `rewind events`, `rewind log` and the app; the
+  (12.5 KB), the trace, for `rewind events`, `rewind log` and the app; the
   [viewer](https://rewindvm.dev/viewer/?url=examples/devenv-task-output-race.rwd) opens it in a browser.
 - [devenv-task-output-race-replayable.rwd](https://github.com/fzakaria/rewindvm/releases/download/case-studies/devenv-task-output-race-replayable.rwd)
-  (184.4 MB), with the kernel, input image and keyframes, for `rewind replay`,
+  (187.0 MB), with the kernel, input image and keyframes, for `rewind replay`,
   `rewind gdb` and `rewind shell`.
 
 ```console
 $ rewind import https://github.com/fzakaria/rewindvm/releases/download/case-studies/devenv-task-output-race-replayable.rwd
-$ rewind replay 71766897
-$ rewind gdb 71766897 1152
+$ rewind replay 5947419e
+$ rewind gdb 5947419e 1516
 $ rewind-app https://github.com/fzakaria/rewindvm/releases/download/case-studies/devenv-task-output-race.rwd
 ```

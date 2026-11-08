@@ -2,7 +2,10 @@ cat > /tmp/g.cmd <<'END'
 set pagination off
 handle SIGSTOP nostop noprint nopass
 set unwind-on-signal on
+break nix::handleSQLiteBusy
+continue
 bt
+delete
 break sqlite3_exec
 continue
 set $db = $rdi

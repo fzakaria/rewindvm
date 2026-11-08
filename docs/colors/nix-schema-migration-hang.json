@@ -1,6 +1,6 @@
 [
  {
-  "text": "$ rewind check --epoch 1791936000 --all --schedules 256 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-concurrent-builds-15693-gdb'\nrewind: packing 260 store paths for nix-functional-concurrent-builds-gdb-2.35.0pre20260414_a94dee9\nschedule   0: exited:0            34629 steps  a50a5ab6d992  run d07f3f1b61cd4329\nschedule   1: exited:0            49268 steps  a50a5ab6d992  run 639e82ab22e6183c\n...\nschedule   4: exited:1           411958 steps    run e9f40610b8f3f70c\n...\nschedule  19: exited:1           412617 steps    run f6ef0e07caf642e9\n...\nschedule  66: exited:1           411913 steps    run 001306b737db571a\n...\nschedule 168: exited:1           560832 steps    run 5b9b20b81aa33cec\n...\nschedule 174: exited:1           410589 steps    run 0450b3777e43dc13\n...\nschedule 250: exited:1           413625 steps    run ac94f3527a2b4fbb\n...\n6 of 256 other schedules ended differently\n\nschedule 4 ends differently from schedule 0; finding the step that decides it\nschedule 4 limited to steps 303..26517 still ends differently\nstep 26516 decides it: a request to switch threads there makes the run fail\n\npassing: run fa9e7202a96db819, schedule 4 over steps 303..26516\nfailing: run e296601ffb6deb66, schedule 4 over steps 303..26517\nthe two are the same run until step 26516\n\nwhere /nix/store/...-bash-5.3p3/bin/bash -x -e -u -o pipefail concurrent-builds.sh first behaves differently:\n  both          22896   188/188   fork() = 223\n  both          22899   188/188   fork() = 224\n  both          22902   188/188   fork() = 225\n  failing      267631   188/188   SIGTERM code=0 addr=0x0\n  failing      267632   188/188   exit_group(bash) killed:SIGTERM\n  passing       34441   188/188   SIGCHLD code=1 addr=0x0\n  passing       36064   188/188   SIGCHLD code=1 addr=0x0\n  passing       37105   188/188   SIGCHLD code=1 addr=0x0\n  passing       37106   188/188   exit_group(bash) exited:0\n\nopen both in the desktop app: rewind open e296601ffb6deb66 267631 --compare fa9e7202a96db819",
+  "text": "$ rewind check --epoch 1791936000 --all --schedules 256 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-concurrent-builds-15693-gdb'\nrewind: packing 260 store paths for nix-functional-concurrent-builds-gdb-2.35.0pre20260414_a94dee9\nschedule   0: exited:0            30956 steps  a50a5ab6d992  run 5a8dd4a66c56e643\nschedule   1: exited:0            43466 steps  a50a5ab6d992  run 4d3c638c841173b5\n...\nschedule   5: exited:1           423262 steps    run d7f79e135fd74035\n...\nschedule  31: exited:1           425496 steps    run fa92b5828ce2ca6e\n...\nschedule  47: exited:1           424122 steps    run e10e618bd33f0c38\n...\nschedule  57: exited:1           426677 steps    run 94b25e8ae4025bbe\n...\nschedule  68: exited:1           422537 steps    run e4e7df6ada8e59d2\n...\nschedule 126: exited:1           424495 steps    run f17ca59f52fb715c\n...\nschedule 136: exited:1           427329 steps    run 2aac0dbc2cae9117\n...\nschedule 146: exited:1           574750 steps    run 3bce3f1ebf4180c0\n...\nschedule 161: exited:1           573380 steps    run effd676fff878f21\n...\nschedule 166: exited:1           575589 steps    run 7e36434f4f756474\n...\nschedule 216: exited:1           427275 steps    run c269399913e017b1\n...\nschedule 229: exited:1           425123 steps    run 858e355550251314\n...\nschedule 243: exited:1           424836 steps    run 01f07f12931e8b6f\n...\nschedule 249: exited:1           422889 steps    run 2672e5c4c6bb591b\n...\n14 of 256 other schedules ended differently\n\nschedule 5 ends differently from schedule 0; finding the step that decides it\nschedule 5 limited to steps 3651..23900 still ends differently\nstep 23899 decides it: a request to switch threads there makes the run fail\n\npassing: run 81a2df9a933f2b5f, schedule 5 over steps 3651..23899\nfailing: run 97c7a128b940042a, schedule 5 over steps 3651..23900\nthe two are the same run until step 23899\n\nwhere /nix/store/...-bash-5.3p3/bin/bash -x -e -u -o pipefail concurrent-builds.sh first behaves differently:\n  both          20467   188/188   fork() = 224\n  both          20507   188/188   fork() = 225\n  both          35666   188/188   SIGCHLD code=1 addr=0x0\n  failing      277383   188/188   SIGTERM code=0 addr=0x0\n  failing      277384   188/188   exit_group(bash) killed:SIGTERM\n  passing       33447   188/188   SIGCHLD code=1 addr=0x0\n  passing       33448   188/188   exit_group(bash) exited:0\n\nopen both in the desktop app: rewind open 97c7a128b940042a 277383 --compare 81a2df9a933f2b5f",
   "spans": [
    [
     1,
@@ -58,54 +58,90 @@
    ],
    [
     17,
-    0,
-    42,
+    14,
+    22,
+    "red"
+   ],
+   [
+    19,
+    14,
+    22,
+    "red"
+   ],
+   [
+    21,
+    14,
+    22,
     "red"
    ],
    [
     23,
-    0,
-    7,
-    "blue"
+    14,
+    22,
+    "red"
    ],
    [
-    24,
-    0,
-    7,
-    "yellow"
+    25,
+    14,
+    22,
+    "red"
+   ],
+   [
+    27,
+    14,
+    22,
+    "red"
+   ],
+   [
+    29,
+    14,
+    22,
+    "red"
    ],
    [
     31,
-    2,
-    9,
-    "yellow"
-   ],
-   [
-    32,
-    2,
-    9,
-    "yellow"
+    14,
+    22,
+    "red"
    ],
    [
     33,
+    0,
+    43,
+    "red"
+   ],
+   [
+    39,
+    0,
+    7,
+    "blue"
+   ],
+   [
+    40,
+    0,
+    7,
+    "yellow"
+   ],
+   [
+    47,
+    2,
+    9,
+    "yellow"
+   ],
+   [
+    48,
+    2,
+    9,
+    "yellow"
+   ],
+   [
+    49,
     2,
     9,
     "blue"
    ],
    [
-    34,
-    2,
-    9,
-    "blue"
-   ],
-   [
-    35,
-    2,
-    9,
-    "blue"
-   ],
-   [
-    36,
+    50,
     2,
     9,
     "blue"
@@ -113,7 +149,7 @@
   ]
  },
  {
-  "text": "$ rewind log 0450b377 | grep -E 'UNIQUE|is busy|TIMEOUT' | sort | uniq -c\n      1 1/1 nix-functional-tests:ca / concurrent-builds TIMEOUT        300.02s   killed by signal 15 SIGTERM\n      1 1/1 nix-functional-tests:ca / concurrent-builds        TIMEOUT        300.02s   killed by signal 15 SIGTERM\n      2        insert into SchemaMigrations values('20251017-ca-derivations')': constraint failed, UNIQUE constraint failed: SchemaMigrations.migration (in '/build/nix-test/ca/concurrent-builds/var/nix/db/db.sqlite')\n     28 warning: SQLite database '/build/nix-test/ca/concurrent-builds/var/nix/db/db.sqlite' is busy\n\n$ rewind events 0450b377 | grep -E 'exit_group\\(nix\\)'\n     29089   223/223   exit_group(nix) exited:1\n     29430   224/224   exit_group(nix) exited:1\n     33059   238/238   exit_group(nix) killed:SIGTERM\n     39077   222/222   exit_group(nix) exited:0\n     42112   221/221   exit_group(nix) exited:0\n     49053   225/225   exit_group(nix) exited:0\n    410403   220/220   exit_group(nix) exited:1",
+  "text": "$ rewind log fa92b582 | grep -E 'UNIQUE|is busy|TIMEOUT' | sort | uniq -c\n      1 1/1 nix-functional-tests:ca / concurrent-builds TIMEOUT        300.01s   killed by signal 15 SIGTERM\n      1 1/1 nix-functional-tests:ca / concurrent-builds        TIMEOUT        300.01s   killed by signal 15 SIGTERM\n      1        insert into SchemaMigrations values('20251017-ca-derivations')': constraint failed, UNIQUE constraint failed: SchemaMigrations.migration (in '/build/nix-test/ca/concurrent-builds/var/nix/db/db.sqlite')\n      1        insert into SchemaMigrations values('20260309-drop-redundant-indexreferrer')': constraint failed, UNIQUE constraint failed: SchemaMigrations.migration (in '/build/nix-test/ca/concurrent-builds/var/nix/db/db.sqlite')\n     28 warning: SQLite database '/build/nix-test/ca/concurrent-builds/var/nix/db/db.sqlite' is busy\n\n$ rewind events fa92b582 | grep -E 'exit_group\\(nix\\)'\n     26648   221/221   exit_group(nix) exited:1\n     27577   222/222   exit_group(nix) exited:1\n     31642   238/238   exit_group(nix) killed:SIGTERM\n     36376   224/224   exit_group(nix) exited:0\n     39516   220/220   exit_group(nix) exited:0\n     46690   225/225   exit_group(nix) exited:0\n    425304   223/223   exit_group(nix) exited:1",
   "spans": [
    [
     1,
@@ -130,7 +166,7 @@
   ]
  },
  {
-  "text": "$ rewind shell 0450b377 200000 --pid 220 < gdb.sh\nrewind: a shell at step 200000 of 0450b3777e43dc13; exit it to leave\n[rewind] /build/source/tests/functional/ca # cat > /tmp/g.cmd <<'END'\n> set pagination off\n> handle SIGSTOP nostop noprint nopass\n> set unwind-on-signal on\n> bt\n> break sqlite3_exec\n> continue\n> set $db = $rdi\n> printf \"statement: %.200s\\n\", (char *) $rsi\n> finish\n> printf \"sqlite3_exec returned %d\\n\", (int) $rax\n> printf \"extended error code %d\\n\", (int) sqlite3_extended_errcode($db)\n> printf \"errmsg %s\\n\", (char *) sqlite3_errmsg($db)\n> printf \"autocommit %d\\n\", (int) sqlite3_get_autocommit($db)\n> detach\n> END\n[rewind] /build/source/tests/functional/ca # gdb -p 220 -batch -x /tmp/g.cmd 2>&1 | grep -vE \"^warning|auto-load|add-auto-load|line to your|To (enable|completely)|set auto-load|For more information|info .\\(gdb\\)|^$\"\n[New LWP 227]\n...\n#0  0x00007fc4f928e223 in clock_nanosleep@GLIBC_2.2.5 () from /nix/store/...-glibc-2.40-218/lib/libc.so.6\n#1  0x00007fc4f929a8e7 in nanosleep () from /nix/store/...-glibc-2.40-218/lib/libc.so.6\n#2  0x00007fc4f9fe5c1a in nix::handleSQLiteBusy(nix::SQLiteBusy const&, long&) () from /nix/store/...-nix-store-2.35.0pre/lib/libnixstore.so.2.35.0\n#3  0x00007fc4f9e8e8d5 in void nix::retrySQLite<void, nix::SQLite::exec(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::{lambda()#1}>(nix::SQLite::exec(std::__cxx11::basic_string< ...\n#4  0x00007fc4f9f8c37e in nix::LocalStore::upgradeDBSchema(nix::LocalStore::State&)::{lambda(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::__cxx11::basic_string<char, std::c ...\n#5  0x00007fc4f9f8e8a9 in nix::LocalStore::upgradeDBSchema(nix::LocalStore::State&) () from /nix/store/...-nix-store-2.35.0pre/lib/libnixstore.so.2.35.0\n#6  0x00007fc4f9f8f605 in nix::LocalStore::LocalStore(nix::ref<nix::LocalStoreConfig const>) () from /nix/store/...-nix-store-2.35.0pre/lib/libnixstore.so.2.35.0\n#7  0x00007fc4f9f89046 in nix::LocalStoreConfig::openStore() const () from /nix/store/...-nix-store-2.35.0pre/lib/libnixstore.so.2.35.0\n...\nBreakpoint 1 at 0x7fc4f84a5a68\nThread 1 \"nix\" hit Breakpoint 1, 0x00007fc4f84a5a68 in sqlite3_exec () from /nix/store/...-sqlite-3.50.4/lib/libsqlite3.so\nstatement: drop index if exists IndexReferrer;\ninsert into SchemaMigrations values('20260309-drop-redundant-indexreferrer')\n...\nsqlite3_exec returned 5\nextended error code 517\nerrmsg database is locked\nautocommit 0\n[Inferior 1 (process 220) detached]\n[rewind] /build/source/tests/functional/ca # exit",
+  "text": "$ rewind shell fa92b582 200000 --pid 223 < gdb.sh\nrewind: a shell at step 200000 of fa92b5828ce2ca6e; exit it to leave\n[rewind] /build/source/tests/functional/ca # cat > /tmp/g.cmd <<'END'\n> set pagination off\n> handle SIGSTOP nostop noprint nopass\n> set unwind-on-signal on\n> break nix::handleSQLiteBusy\n> continue\n> bt\n> delete\n> break sqlite3_exec\n> continue\n> set $db = $rdi\n> printf \"statement: %.200s\\n\", (char *) $rsi\n> finish\n> printf \"sqlite3_exec returned %d\\n\", (int) $rax\n> printf \"extended error code %d\\n\", (int) sqlite3_extended_errcode($db)\n> printf \"errmsg %s\\n\", (char *) sqlite3_errmsg($db)\n> printf \"autocommit %d\\n\", (int) sqlite3_get_autocommit($db)\n> detach\n> END\n[rewind] /build/source/tests/functional/ca # gdb -p 223 -batch -x /tmp/g.cmd 2>&1 | grep -vE \"^warning|auto-load|add-auto-load|line to your|To (enable|completely)|set auto-load|For more information|info .\\(gdb\\)|^$\"\n[New LWP 228]\n...\nBreakpoint 1 at 0x7f5f3325ab76\nThread 1 \"nix\" hit Breakpoint 1, 0x00007f5f3325ab76 in nix::handleSQLiteBusy(nix::SQLiteBusy const&, long&) () from /nix/store/...-nix-store-2.35.0pre/lib/libnixstore.so.2.35.0\n#0  0x00007f5f3325ab76 in nix::handleSQLiteBusy(nix::SQLiteBusy const&, long&) () from /nix/store/...-nix-store-2.35.0pre/lib/libnixstore.so.2.35.0\n#1  0x00007f5f331038d5 in void nix::retrySQLite<void, nix::SQLite::exec(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::{lambda()#1}>(nix::SQLite::exec(std::__cxx11::basic_string< ...\n#2  0x00007f5f3320137e in nix::LocalStore::upgradeDBSchema(nix::LocalStore::State&)::{lambda(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::__cxx11::basic_string<char, std::c ...\n#3  0x00007f5f332038a9 in nix::LocalStore::upgradeDBSchema(nix::LocalStore::State&) () from /nix/store/...-nix-store-2.35.0pre/lib/libnixstore.so.2.35.0\n#4  0x00007f5f33204605 in nix::LocalStore::LocalStore(nix::ref<nix::LocalStoreConfig const>) () from /nix/store/...-nix-store-2.35.0pre/lib/libnixstore.so.2.35.0\n#5  0x00007f5f331fe046 in nix::LocalStoreConfig::openStore() const () from /nix/store/...-nix-store-2.35.0pre/lib/libnixstore.so.2.35.0\n#6  0x00007f5f32944ddc in nix::StoreCommand::createStore() () from /nix/store/...-nix-cmd-2.35.0pre/lib/libnixcmd.so.2.35.0\n#7  0x00007f5f32944edc in nix::StoreCommand::getStore() () from /nix/store/...-nix-cmd-2.35.0pre/lib/libnixcmd.so.2.35.0\n...\nBreakpoint 2 at 0x7f5f3171aa68\nThread 1 \"nix\" hit Breakpoint 2, 0x00007f5f3171aa68 in sqlite3_exec () from /nix/store/...-sqlite-3.50.4/lib/libsqlite3.so\nstatement: drop index if exists IndexReferrer;\ninsert into SchemaMigrations values('20260309-drop-redundant-indexreferrer')\n...\nsqlite3_exec returned 5\nextended error code 517\nerrmsg database is locked\nautocommit 0\n[Inferior 1 (process 223) detached]\n[rewind] /build/source/tests/functional/ca # exit",
   "spans": [
    [
     1,
@@ -141,7 +177,7 @@
   ]
  },
  {
-  "text": "$ rewind check --epoch 1791936000 --all --schedules 256 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-concurrent-builds-15694'\nrewind: packing 216 store paths for nix-functional-concurrent-builds-2.35.0pre20260416_c390460\nschedule   0: exited:0            35477 steps  a50a5ab6d992  run b1e28762428cddd5\n...\nschedule  19: exited:1           415467 steps    run e46d2a628311d089\n...\nschedule  43: exited:1           415889 steps    run a449bc35b2f02eb0\n...\nschedule  52: exited:1           412223 steps    run b335d232ced480da\n...\nschedule  85: exited:1           410672 steps    run 89302b96f97a7b2f\n...\nschedule  90: exited:1           418475 steps    run 8217613ca9e4cbe5\n...\nschedule  99: exited:1           413457 steps    run ad0441f1f357846b\n...\nschedule 121: exited:1           415321 steps    run 94ee005d249f2861\n...\nschedule 186: exited:1           414674 steps    run a1e6d0118ae4e0ae\n...\n8 of 256 other schedules ended differently\n...",
+  "text": "$ rewind check --epoch 1791936000 --all --schedules 256 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-concurrent-builds-15694'\nrewind: packing 216 store paths for nix-functional-concurrent-builds-2.35.0pre20260416_c390460\nschedule   0: exited:0            33246 steps  a50a5ab6d992  run fc62a9dc9b39d2c3\n...\nschedule   3: exited:1           431955 steps    run d2a4072880349ad3\n...\nschedule  47: exited:1           579535 steps    run 711839b954d23b23\n...\nschedule  80: exited:1           724396 steps    run d7a8589a4ea05578\n...\nschedule  93: exited:1           426173 steps    run 4782f1ed670125f9\n...\nschedule 113: exited:1           429523 steps    run 5a7adcb6b35c7928\n...\nschedule 118: exited:1           428800 steps    run e65ee45ac93fcc13\n...\nschedule 137: exited:1           430517 steps    run e00c5d9f710bef77\n...\nschedule 145: exited:1           426330 steps    run af9c9911012cbbda\n...\nschedule 162: exited:1           430509 steps    run 76456b619075c8ad\n...\nschedule 210: exited:1           426631 steps    run 8d3fdf0d05ba27df\n...\nschedule 226: exited:1           427936 steps    run e0019b5d94502b7b\n...\nschedule 242: exited:1           426209 steps    run 5890c7617e0a839f\n...\nschedule 248: exited:1           427501 steps    run 988c69a0bf2fee41\n...\nschedule 251: exited:1           426248 steps    run 6811fbfd4a5f8b4c\n...\n14 of 256 other schedules ended differently\n...",
   "spans": [
    [
     1,
@@ -205,14 +241,50 @@
    ],
    [
     20,
+    14,
+    22,
+    "red"
+   ],
+   [
+    22,
+    14,
+    22,
+    "red"
+   ],
+   [
+    24,
+    14,
+    22,
+    "red"
+   ],
+   [
+    26,
+    14,
+    22,
+    "red"
+   ],
+   [
+    28,
+    14,
+    22,
+    "red"
+   ],
+   [
+    30,
+    14,
+    22,
+    "red"
+   ],
+   [
+    32,
     0,
-    42,
+    43,
     "red"
    ]
   ]
  },
  {
-  "text": "$ rewind log e46d2a62 | grep -E 'UNIQUE|is busy|TIMEOUT' | sort | uniq -c\n      1 1/1 nix-functional-tests:ca / concurrent-builds TIMEOUT        300.02s   killed by signal 15 SIGTERM\n      1 1/1 nix-functional-tests:ca / concurrent-builds        TIMEOUT        300.02s   killed by signal 15 SIGTERM\n     28 warning: SQLite database '/build/nix-test/ca/concurrent-builds/var/nix/db/db.sqlite' is busy",
+  "text": "$ rewind log d2a40728 | grep -E 'UNIQUE|is busy|TIMEOUT' | sort | uniq -c\n      1 1/1 nix-functional-tests:ca / concurrent-builds TIMEOUT        300.00s   killed by signal 15 SIGTERM\n      1 1/1 nix-functional-tests:ca / concurrent-builds        TIMEOUT        300.00s   killed by signal 15 SIGTERM\n     28 warning: SQLite database '/build/nix-test/ca/concurrent-builds/var/nix/db/db.sqlite' is busy",
   "spans": [
    [
     1,
@@ -229,7 +301,7 @@
   ]
  },
  {
-  "text": "$ rewind check --epoch 1791936000 --all --schedules 256 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-concurrent-builds'\nrewind: packing 217 store paths for nix-functional-concurrent-builds-2.35.2\nschedule   0: exited:0            38109 steps  a50a5ab6d992  run 2830edf2f50158ca\n...\n0 of 256 other schedules ended differently\nsame result under all 257 schedules",
+  "text": "$ rewind check --epoch 1791936000 --all --schedules 256 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-concurrent-builds'\nrewind: packing 217 store paths for nix-functional-concurrent-builds-2.35.2\nschedule   0: exited:0            36781 steps  a50a5ab6d992  run 90f1add102a5bf28\n...\n0 of 256 other schedules ended differently\nsame result under all 257 schedules",
   "spans": [
    [
     1,

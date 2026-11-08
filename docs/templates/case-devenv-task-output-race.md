@@ -129,7 +129,8 @@ $ rewind check --epoch {{epoch}} --seed {{seed}} --all --schedules 256 '{{flake}
 <!-- assert: tr '\n' ' ' < {{dir}}/../../README.md | grep -q 'failed under {{nfails}} of 257 schedules' -->
 <!-- capture passing: passing: run (\w+), -->
 <!-- capture failing: failing: run (\w+), -->
-<!-- capture deciding: step (\d+) decides it: a request to switch threads there makes the run pass -->
+<!-- capture deciding: step (\d+) decides it -->
+<!-- capture deciding_words: decides it: (.+) there makes the run pass -->
 <!-- capture sigchld: failing +(\d+) +\d+/\d+ +SIGCHLD -->
 <!-- capture pass_close: passing +(\d+) +\d+/\d+ +close\("anon_inode:\[pidfd\]"\) -->
 <!-- assert: test "$(grep -E '^  (failing|passing) ' {{out:check}} | head -1 | awk '{print $1, $2}')" = "failing {{sigchld}}" && test "$(grep -E '^  passing ' {{out:check}} | head -1 | awk '{print $2}')" = {{pass_close}} && ! grep -qE '^  passing .* SIGCHLD' {{out:check}} -->
@@ -144,7 +145,7 @@ shell gets the CPU.
 ## Who had the CPU
 
 <!-- set threads_from: echo $(( {{deciding}} - 16 )) -->
-<!-- set threads_to: echo $(( {{deciding}} + 24 )) -->
+<!-- set threads_to: echo $(( {{deciding}} + 32 )) -->
 
 `rewind threads` prints which thread held the CPU through each stretch of
 steps, here for the failing run and then the passing one:
@@ -160,14 +161,16 @@ $ rewind threads {{passing}} --from {{threads_from}} --to {{threads_to}}
 <!-- run: rewind threads {{failing}} --from {{threads_from}} --to {{threads_to}} > threads-failing.txt -->
 <!-- run: rewind threads {{passing}} --from {{threads_from}} --to {{threads_to}} > threads-passing.txt -->
 <!-- set shell_start: awk '$3 == "{{shell}}/{{shell}}" && $4 ~ /^script/ {print $1}' threads-failing.txt | sed -n 1p -->
-<!-- set shell_back: awk '$3 == "{{shell}}/{{shell}}" && $4 ~ /^script/ {print $1}' threads-passing.txt | sed -n 2p -->
-<!-- assert: test $(awk '$3 == "{{shell}}/{{shell}}" && $4 ~ /^script/' threads-failing.txt | wc -l) -eq 1 && test $(awk '$3 == "{{shell}}/{{shell}}" && $4 ~ /^script/' threads-passing.txt | wc -l) -eq 2 -->
+<!-- set shell_back: awk '$3 == "kernel" && $4 == "{{shell}}" && $5 ~ /^script/ {print $1}' threads-passing.txt | sed -n 1p -->
+<!-- assert: test $(awk '$3 == "{{shell}}/{{shell}}" && $4 ~ /^script/' threads-failing.txt | wc -l) -eq 1 && test $(awk '$3 == "{{shell}}/{{shell}}" && $4 ~ /^script/' threads-passing.txt | wc -l) -eq 1 && test $(awk '$3 == "kernel" && $4 == "{{shell}}"' threads-passing.txt | wc -l) -eq 1 && ! grep -q 'kernel {{shell}} ' threads-failing.txt -->
 <!-- assert: awk '$3 == "{{shell}}/{{shell}}" && $4 ~ /^script/ {print $2}' threads-failing.txt | grep -qx {{deciding}} && awk '$3 == "{{shell}}/{{shell}}" && $4 ~ /^script/ {print $1}' threads-passing.txt | grep -qx {{shell_start}} -->
 
 In the failing run the shell ({{shell}}) finishes exiting before thread
-{{test_tid}} runs. In the passing run the reschedule at step {{deciding}}
-sends the shell off the CPU before its exit is done, and it finishes only
-at step {{shell_back}}. The app's Threads tab shows the same:
+{{test_tid}} runs. In the passing run {{deciding_words}} at step {{deciding}}
+holds the shell in its exit: thread {{test_tid}} runs ahead, the CPU idles,
+and the shell ends only at step {{shell_back}}, by then a task with no memory
+of its own, which `rewind threads` lists as `kernel {{shell}}`. The app's
+Threads tab shows the same:
 
 <!-- screenshot site/img/devenv-threads: {{home}}/runs/{{failing}} --compare {{home}}/runs/{{passing}} --step {{shell_back}} ;; key t ;; wait 8 ;; click 1058 307 ;; wait 2 -->
 
