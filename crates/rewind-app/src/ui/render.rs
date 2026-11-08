@@ -614,7 +614,8 @@ impl Scrubber {
     }
 
     /// The timeline: phase segments, ticks, markers and the playhead over
-    /// a track that scrubs on click and drag, then the controls row.
+    /// a track that scrubs on click and drag, the switch band under it,
+    /// then the controls row.
     fn render_timeline(
         &mut self,
         fit: ToolbarFit,
@@ -791,6 +792,7 @@ impl Scrubber {
 
         track = track.child(self.track_input(cx));
         let track = self.with_callout(track, Anchor::Timeline, cx);
+        let band = self.render_switch_band(view, cx);
         let tests = self.render_test_strip(view, cx);
 
         div()
@@ -803,7 +805,14 @@ impl Scrubber {
             .px(px(size::PAGE_PAD_X))
             .border_b_1()
             .border_color(rgb(theme::LINE))
-            .child(div().flex().flex_col().child(track).children(tests))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(track)
+                    .children(band)
+                    .children(tests),
+            )
             .child(self.render_controls(fit, labels_width, cx))
     }
 

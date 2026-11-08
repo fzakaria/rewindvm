@@ -17,6 +17,7 @@ pub mod blame_jobs;
 pub mod bookmarks;
 pub mod clock;
 pub mod compare;
+pub mod density;
 pub mod describe;
 pub mod diff_view;
 pub mod engine;

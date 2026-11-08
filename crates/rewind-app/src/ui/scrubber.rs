@@ -350,6 +350,11 @@ pub struct Scrubber {
     pub(super) view: Option<View>,
     /// How far along the track the pointer is, while it is over it.
     pub(super) hover: Option<f32>,
+    /// How far along the switch band the pointer is, while it is over it.
+    pub(super) band_hover: Option<f32>,
+    /// The switch density the band last drew, kept while the view it was
+    /// made for is the one shown.
+    pub(super) band: Option<Rc<crate::density::Density>>,
     /// The searchable text of the run it was built for, by its path.
     pub(super) search_index: Option<(PathBuf, Rc<Index>)>,
     /// Where the "Stop at" menu opened, while it is open.
@@ -477,6 +482,8 @@ impl Scrubber {
             bookmark_editor: None,
             view: None,
             hover: None,
+            band_hover: None,
+            band: None,
             log_filter: LogFilter::Output,
             log_scroll: UniformListScrollHandle::new(),
             files_scroll: UniformListScrollHandle::new(),

@@ -4,6 +4,7 @@
 
 mod ansi;
 mod assertions;
+mod band;
 mod blame;
 mod bookmarks;
 mod chrome;
