@@ -1,0 +1,116 @@
+--- a/arch/x86/kernel/cpu/rewind.c	2026-11-07 17:22:17.756362335 -0800
++++ b/arch/x86/kernel/cpu/rewind.c	2026-11-07 17:36:44.240628886 -0800
+@@ -25,6 +25,9 @@
+  *     in the file it went, and each open of one, appended to a buffer
+  *     the shared page names, which the monitor drains at its next step,
+  *     so they cost no exit,
++ *   - a record at every context switch, naming the task the CPU runs
++ *     from then on, so a switch is an exit the monitor sees and can
++ *     perturb at, and the run's threads are read from its trace,
+  *   - a terminal for the workload's output, as nix-daemon gives a
+  *     builder, whose writes join the event stream,
+  *   - the CPU count the affinity system calls report, which may exceed the
+@@ -102,9 +105,10 @@
+  * ports, the records and struct rewind_shared. The kernel writes it into
+  * rewind_shared.interface before setup, and a monitor that speaks another
+  * stops rather than run it. Interface 4 added the read and write records
+- * in rewind_shared.io_*.
++ * in rewind_shared.io_*, and interface 5 the record at every context
++ * switch.
+  */
+-#define REWIND_INTERFACE	4
++#define REWIND_INTERFACE	5
+ 
+ /* Values written to REWIND_PORT_EXIT. */
+ enum rewind_exit {
+@@ -132,9 +136,12 @@
+ 	 * and write records under in the trace, after it drains them.
+ 	 */
+ 	REWIND_EV_IO = 13,
++	REWIND_EV_SWITCH = 14,	/* the task now on the CPU; payload: comm */
+ };
+ 
+ #define REWIND_FLAG_THREAD	BIT(0)
++/* On a switch record: the task has no memory of its own. */
++#define REWIND_FLAG_NO_MEMORY	BIT(1)
+ 
+ /*
+  * One record, as the monitor reads it out of guest memory. len covers the
+@@ -965,6 +972,26 @@
+ 		    child->pid, NULL, 0, NULL, 0);
+ }
+ 
++/*
++ * Every context switch, from finish_task_switch(): the task the CPU runs
++ * from here on, as a record of its own, so the switch is an exit. The
++ * monitor only perturbs a run at exits, and a handoff between two threads
++ * that make no system call of their own would otherwise be invisible to
++ * it, and to `rewind threads`, which reads these records. The idle task
++ * is named too, pid 0, so the trace shows when nothing ran. A task past
++ * exit_mm(), or one of the kernel's own, has no memory and no program,
++ * which the flag says.
++ */
++void rewind_switch(struct task_struct *next)
++{
++	u16 flags = next->mm ? 0 : REWIND_FLAG_NO_MEMORY;
++
++	if (!rewind_running)
++		return;
++	rewind_emit(REWIND_EV_SWITCH, flags, next->tgid, next->pid, 0,
++		    next->comm, strnlen(next->comm, TASK_COMM_LEN), NULL, 0);
++}
++
+ static void rewind_probe_exit(void *data, struct task_struct *p,
+ 			      bool group_dead)
+ {
+--- a/arch/x86/include/asm/hypervisor.h	2026-11-07 17:22:17.748719195 -0800
++++ b/arch/x86/include/asm/hypervisor.h	2026-11-07 17:36:44.240790298 -0800
+@@ -83,6 +83,7 @@
+ void rewind_report_cpus(const struct task_struct *p, struct cpumask *mask);
+ const struct cpumask *rewind_fold_cpus(const struct cpumask *mask);
+ void rewind_yield(void);
++void rewind_switch(struct task_struct *next);
+ #endif
+ extern enum x86_hypervisor_type x86_hyper_type;
+ extern void init_hypervisor_platform(void);
+--- a/kernel/sched/features.h	2026-09-25 07:37:14.000000000 -0700
++++ b/kernel/sched/features.h	2026-11-07 17:36:44.240884054 -0800
+@@ -65,7 +65,14 @@
+  */
+ SCHED_FEAT(WAKEUP_PREEMPTION, true)
+ 
+-#ifdef CONFIG_HRTIMER_REARM_DEFERRED
++/*
++ * A Rewind guest keeps the hrtick off: hrtick_schedule_exit() reads the
++ * clock at the end of every context switch, which in that guest is an
++ * exit, and the guest makes its own exit at every switch (rewind_switch).
++ * With the hrtick on, a switch would cost two exits, and only once the
++ * hrtimers were in high resolution mode, 10 ms into the run.
++ */
++#if defined(CONFIG_HRTIMER_REARM_DEFERRED) && !defined(CONFIG_REWIND_GUEST)
+ SCHED_FEAT(HRTICK, true)
+ SCHED_FEAT(HRTICK_DL, true)
+ #else
+--- a/kernel/sched/core.c	2026-09-25 07:37:14.000000000 -0700
++++ b/kernel/sched/core.c	2026-11-07 17:36:44.242077058 -0800
+@@ -13,6 +13,9 @@
+ #include <linux/hrtimer_api.h>
+ #include <linux/ktime_api.h>
+ #include <linux/sched/signal.h>
++#ifdef CONFIG_REWIND_GUEST
++#include <asm/hypervisor.h>
++#endif
+ #include <linux/syscalls_api.h>
+ #include <linux/debug_locks.h>
+ #include <linux/prefetch.h>
+@@ -5381,6 +5384,10 @@
+ 	finish_task(prev);
+ 	tick_nohz_task_switch();
+ 	finish_lock_switch(rq);
++#ifdef CONFIG_REWIND_GUEST
++	/* The switch is an exit: the monitor and the trace see every one. */
++	rewind_switch(current);
++#endif
+ 	finish_arch_post_lock_switch();
+ 	kcov_finish_switch(current);
+ 	/*

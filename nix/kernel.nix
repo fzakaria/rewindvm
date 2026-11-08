@@ -21,11 +21,6 @@ let
   # A named series rather than linux_latest, so updating nixpkgs never
   # moves the guest to a new major version without the patch being ported.
   upstream = pkgs.linux_7_2;
-in
-pkgs.stdenv.mkDerivation {
-  pname = "rewind-guest-kernel";
-  separateDebugInfo = true;
-  inherit (upstream) version src;
 
   patches = [
     ../guest/linux/rewind-guest.patch
@@ -41,7 +36,16 @@ pkgs.stdenv.mkDerivation {
     # A TLB flush where a write fault makes a page writable, so every kind
     # of core takes the same page faults
     ../guest/linux/rewind-tlb.patch
+    # A record, and so an exit, at every context switch, and the
+    # scheduler's hrtick off, which read the clock at every switch
+    ../guest/linux/rewind-switch.patch
   ];
+in
+pkgs.stdenv.mkDerivation {
+  pname = "rewind-guest-kernel";
+  separateDebugInfo = true;
+  inherit (upstream) version src;
+  inherit patches;
 
   depsBuildBuild = [ pkgs.buildPackages.stdenv.cc ];
   nativeBuildInputs = [
@@ -115,13 +119,15 @@ pkgs.stdenv.mkDerivation {
 
   # The hook's source overlay holds the files that differ from the
   # tarball, for gdb to show as built. It finds them by checksum, so it
-  # misses the files the patch adds, rewind.c among them, and takes in the
-  # scripts patchShebangs changed, which would make `debug` depend on perl
-  # and python. The overlay is made the patch's files instead.
+  # misses the files the patches add, rewind.c among them, and takes in
+  # the scripts patchShebangs changed, which would make `debug` depend on
+  # perl and python. The overlay is made the patches' files instead.
   postFixup = ''
     overlay=$debug/src/overlay/$sourceRoot
     rm -rf "$overlay"
-    sed -n 's|^+++ b/||p' ${../guest/linux/rewind-guest.patch} | cut -f1 |
+    sed -n 's|^+++ b/||p' ${
+      lib.concatMapStringsSep " " (patch: "${patch}") patches
+    } | cut -f1 | sort -u |
       while read -r file; do
         install -D -m 444 "$file" "$overlay/$file"
       done
