@@ -251,7 +251,7 @@ $ rewind threads {{passing|short}} --from {{threads_from}} --to {{crash_step}}
 
 The lines match up to step {{deciding}}. From there the threads take the CPU in
 another order, and in the failing run thread {{crash_tid}} holds it at the crash.
-A thread that took the CPU and gave it back between two exits is not seen.
+Every switch is a step, so no stretch is too short to appear.
 
 In the app, the t key opens the Threads tab: a lane per thread around where
 the two runs part, this run's above the compared run's, with a bar wherever
