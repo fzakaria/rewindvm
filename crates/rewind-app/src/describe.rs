@@ -61,20 +61,19 @@ pub fn describe(event: &Event) -> Described {
     describe_as(event, Length::Short)
 }
 
-/// Describes the incoming task at a context switch.
+/// Describes the incoming task at a context switch, in the words
+/// `rewind threads` prints: a user thread by pid/tid, a task without
+/// memory of its own (a kernel thread, or a thread that has dropped its
+/// memory on exit) as "kernel" and its tid, and the idle task as idle.
 pub fn describe_switch(switch: &Switch) -> String {
     if switch.is_idle() {
         return "Switched to idle".to_string();
     }
-
-    // Kernel threads and exiting tasks can both lack user memory.
-    let memory = if switch.memory {
-        ""
-    } else {
-        " (no user memory)"
-    };
+    if !switch.memory {
+        return format!("Switched to kernel {} {}", switch.tid, switch.name);
+    }
     format!(
-        "Switched to thread {}/{} {}{memory}",
+        "Switched to thread {}/{} {}",
         switch.pid, switch.tid, switch.name
     )
 }
@@ -632,7 +631,8 @@ mod tests {
 
     #[test]
     fn switches_name_the_incoming_task() {
-        // Describe a user thread, idle and a task without memory as distinct switch cards.
+        // A user thread, a task without memory and idle are named as
+        // rewind threads names them.
         use rewind_trace::switches::Switch;
         let mut record = Switch {
             step: 20,
@@ -643,10 +643,7 @@ mod tests {
         };
         assert_eq!(describe_switch(&record), "Switched to thread 40/42 worker");
         record.memory = false;
-        assert_eq!(
-            describe_switch(&record),
-            "Switched to thread 40/42 worker (no user memory)"
-        );
+        assert_eq!(describe_switch(&record), "Switched to kernel 42 worker");
         record.pid = 0;
         record.tid = 0;
         record.name = "swapper".into();
