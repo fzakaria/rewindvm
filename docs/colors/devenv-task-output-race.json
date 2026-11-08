@@ -1,6 +1,6 @@
 [
  {
-  "text": "$ rewind nix --epoch 1791936000 --seed 5 'github:fzakaria/rewindvm?dir=examples/case-studies#devenv-last-lines-before-2296'\nrewind: packing 57 store paths for devenv-tasks-test-last-lines-before-2296\niteration 1\n\nrunning 1 test\ntest tests::test_failed_task_keeps_last_lines ... FAILED\n\nfailures:\n\n---- tests::test_failed_task_keeps_last_lines stdout ----\n[myapp:task_1] line1\n[myapp:task_1] line2\n\nthread 'tests::test_failed_task_keeps_last_lines' (41) panicked at devenv-tasks/src/tests/mod.rs:3006:13:\nassertion `left == right` failed\n  left: [\"line1\", \"line2\"]\n right: [\"line1\", \"line2\", \"line3\"]\n...\nrewind: run 5947419e48b1a8dd exited:101 after 1594 steps, 0.036s virtual, 0.370s wall (poweroff)",
+  "text": "$ rewind nix --epoch 1791936000 --seed 5 'github:fzakaria/rewindvm?dir=examples/case-studies#devenv-last-lines-before-2296'\nrewind: packing 57 store paths for devenv-tasks-test-last-lines-before-2296\niteration 1\n\nrunning 1 test\ntest tests::test_failed_task_keeps_last_lines ... FAILED\n\nfailures:\n\n---- tests::test_failed_task_keeps_last_lines stdout ----\n[myapp:task_1] line1\n[myapp:task_1] line2\n\nthread 'tests::test_failed_task_keeps_last_lines' (41) panicked at devenv-tasks/src/tests/mod.rs:3006:13:\nassertion `left == right` failed\n  left: [\"line1\", \"line2\"]\n right: [\"line1\", \"line2\", \"line3\"]\n...\nrewind: run 5947419e48b1a8dd exited:101 after 1594 steps, 0.036s virtual, 0.383s wall (poweroff)",
   "spans": [
    [
     1,

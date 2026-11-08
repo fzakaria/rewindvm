@@ -69,7 +69,7 @@ $ rewind run --root mylib.tar --cwd /src -- make check
 ...
 round 3: ok
 test_pool_shutdown: ok
-rewind: run 545800020c238b2c exited:0 after 1784 steps, 0.019s virtual, 0.362s wall (poweroff)
+rewind: run 545800020c238b2c exited:0 after 1784 steps, 0.019s virtual, 0.341s wall (poweroff)
 ```
 
 It passes, in the same 1784 steps every time. Nothing the command
@@ -129,7 +129,7 @@ open both in the desktop app: rewind open f916856e32a52c81 1669 --compare bcaed0
 `check` narrows schedule 1's failure to one step, 1664. The
 passing run perturbs the same steps less that one, and only the failing run
 gets a request to switch threads there. The last block shows where the test's own output
-then differs. The search took 4 seconds. `--all` tries every
+then differs. The search took 3 seconds. `--all` tries every
 schedule:
 
 ```console
@@ -210,8 +210,8 @@ rewind: step 1669 ran in process 39; loading symbols for 3 of its files
 rewind: fetched 12 source files from the VM
 rewind: gdb 16 cannot read thread-local variables, such as errno, at a step; gdb 17 or later can
 rewind: gdb at step 1669 of f916856e32a52c81
-Downloading 3.97 M separate debug info for /home/fmzakari/.cache/rewind-record/home/gdb/1892020-0/newroot/usr/lib/x86_64-linux-gnu/libc.so.6...
-Downloading 539.96 K separate debug info for /home/fmzakari/.cache/rewind-record/home/gdb/1892020-0/newroot/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2...
+Downloading 3.97 M separate debug info for /home/fmzakari/.cache/rewind-record/home/gdb/3250235-0/newroot/usr/lib/x86_64-linux-gnu/libc.so.6...
+Downloading 539.96 K separate debug info for /home/fmzakari/.cache/rewind-record/home/gdb/3250235-0/newroot/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2...
 arch_local_irq_restore (flags=514) at ./arch/x86/include/asm/irqflags.h:146
 146		return !(flags & X86_EFLAGS_IF);
 [Switching to thread 3 (Thread 1.44)]
@@ -252,7 +252,7 @@ $ rewind replay f916856e
 identical to the recording: 349 events, 704 context switches and 13 read and write records over 1701 steps, and the whole machine at its 4 keyframes
 
 $ rewind replay f916856e --from 720
-identical to the recording from the snapshot at step 256 to the end, and the whole machine at its 3 keyframes (0.15s)
+identical to the recording from the snapshot at step 256 to the end, and the whole machine at its 3 keyframes (0.13s)
 ```
 
 `--from` starts at the nearest keyframe before the step. A run replays on any
@@ -262,22 +262,22 @@ machine with the same CPU vendor that has the features of the run's CPU model.
 
 ```console
 $ rewind fork 54580002 720 --schedule 1 --quiet
-rewind: run ab498765ac62a6f4 exited:2 after 1732 steps, 0.019s virtual, 0.062s wall (poweroff)
+rewind: run ab498765ac62a6f4 exited:2 after 1732 steps, 0.019s virtual, 0.053s wall (poweroff)
 rewind: the fork first differs from its parent at step 739
 rewind: open it beside its parent in the desktop app: rewind open ab498765ac62a6f4 739 --compare 545800020c238b2c
 
 $ rewind fork 54580002 720 --schedule 2 --quiet
-rewind: run 5fdcdca8ac28b60a exited:0 after 2031 steps, 0.023s virtual, 0.064s wall (poweroff)
+rewind: run 5fdcdca8ac28b60a exited:0 after 2031 steps, 0.023s virtual, 0.058s wall (poweroff)
 rewind: the fork first differs from its parent at step 737
 rewind: open it beside its parent in the desktop app: rewind open 5fdcdca8ac28b60a 737 --compare 545800020c238b2c
 
 $ rewind fork 54580002 720 --schedule 3 --quiet
-rewind: run ac966a9c1f76414c exited:0 after 2059 steps, 0.023s virtual, 0.066s wall (poweroff)
+rewind: run ac966a9c1f76414c exited:0 after 2059 steps, 0.023s virtual, 0.055s wall (poweroff)
 rewind: the fork first differs from its parent at step 735
 rewind: open it beside its parent in the desktop app: rewind open ac966a9c1f76414c 735 --compare 545800020c238b2c
 
 $ rewind fork 54580002 720 --schedule 4 --quiet
-rewind: run e53f0df8d47a50a9 exited:0 after 2041 steps, 0.021s virtual, 0.063s wall (poweroff)
+rewind: run e53f0df8d47a50a9 exited:0 after 2041 steps, 0.021s virtual, 0.056s wall (poweroff)
 rewind: the fork first differs from its parent at step 737
 rewind: open it beside its parent in the desktop app: rewind open e53f0df8d47a50a9 737 --compare 545800020c238b2c
 ```
@@ -342,7 +342,7 @@ Rebuild the image, export it, and check again:
 
 ```console
 $ docker build -q -t mylib -f Containerfile . && docker export $(docker create mylib) -o mylib.tar
-sha256:8d703e855389d7280701356e842b37a20e51e1db17c11a1b4fab5de723e0a543
+sha256:fb051625a7ef51f4b4854e394698daf9aeb8b9815682a4846f5cc32e957a67b7
 
 $ rewind check --all --root mylib.tar --cwd /src -- make check
 ...

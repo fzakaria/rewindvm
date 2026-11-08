@@ -67,7 +67,7 @@ deterministic virtual machine:
 $ rewind nix --epoch 1790985600 github:fzakaria/rewindvm#mylib
 rewind: packing 62 store paths for mylib-0.3.0
 ...
-rewind: run 9aaa675882df45fb exited:0 after 6030 steps, 0.215s virtual, 0.770s wall (poweroff)
+rewind: run 9aaa675882df45fb exited:0 after 6030 steps, 0.215s virtual, 0.698s wall (poweroff)
 /nix/store/f6a9gy362szw6nxx3ikrklr8glr6rdln-mylib-0.3.0 a9d703ba89774f3d  matches your store, rewindvm.cachix.org
 ```
 
@@ -261,7 +261,7 @@ $ rewind replay 92af07e9
 identical to the recording: 1650 events, 1839 context switches and 1476 read and write records over 5821 steps, and the whole machine at its 4 keyframes
 
 $ rewind replay 92af07e9 --from 712
-identical to the recording from the snapshot at step 256 to the end, and the whole machine at its 3 keyframes (0.45s)
+identical to the recording from the snapshot at step 256 to the end, and the whole machine at its 3 keyframes (0.42s)
 ```
 
 `--from` starts at the nearest keyframe before the step. A run replays on any
@@ -273,22 +273,22 @@ A fork is its parent up to a step, then another schedule:
 
 ```console
 $ rewind fork 9aaa6758 712 --schedule 1 --quiet
-rewind: run 5543b25ff9206206 exited:2 after 5364 steps, 0.208s virtual, 0.380s wall (poweroff)
+rewind: run 5543b25ff9206206 exited:2 after 5364 steps, 0.208s virtual, 0.346s wall (poweroff)
 rewind: the fork first differs from its parent at step 732
 rewind: open it beside its parent in the desktop app: rewind open 5543b25ff9206206 732 --compare 9aaa675882df45fb
 
 $ rewind fork 9aaa6758 712 --schedule 2 --quiet
-rewind: run d87a598bd28776ad exited:0 after 7663 steps, 0.234s virtual, 0.442s wall (poweroff)
+rewind: run d87a598bd28776ad exited:0 after 7663 steps, 0.234s virtual, 0.393s wall (poweroff)
 rewind: the fork first differs from its parent at step 730
 rewind: open it beside its parent in the desktop app: rewind open d87a598bd28776ad 730 --compare 9aaa675882df45fb
 
 $ rewind fork 9aaa6758 712 --schedule 3 --quiet
-rewind: run b419f81debc4ed40 exited:0 after 7857 steps, 0.240s virtual, 0.432s wall (poweroff)
+rewind: run b419f81debc4ed40 exited:0 after 7857 steps, 0.240s virtual, 0.395s wall (poweroff)
 rewind: the fork first differs from its parent at step 732
 rewind: open it beside its parent in the desktop app: rewind open b419f81debc4ed40 732 --compare 9aaa675882df45fb
 
 $ rewind fork 9aaa6758 712 --schedule 4 --quiet
-rewind: run 456452a96eb3ca01 exited:2 after 5822 steps, 0.216s virtual, 0.382s wall (poweroff)
+rewind: run 456452a96eb3ca01 exited:2 after 5822 steps, 0.216s virtual, 0.340s wall (poweroff)
 rewind: the fork first differs from its parent at step 736
 rewind: open it beside its parent in the desktop app: rewind open 456452a96eb3ca01 736 --compare 9aaa675882df45fb
 ```

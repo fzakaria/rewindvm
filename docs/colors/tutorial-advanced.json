@@ -271,7 +271,7 @@
   ]
  },
  {
-  "text": "$ rewind nix --cores 4 --epoch 1790985600 github:fzakaria/rewindvm#mylib\n...\nrewind: run 46747ca7b99570bf exited:0 after 6038 steps, 0.215s virtual, 0.624s wall (poweroff)\n/nix/store/f6a9gy362szw6nxx3ikrklr8glr6rdln-mylib-0.3.0 a9d703ba89774f3d  matches your store, rewindvm.cachix.org",
+  "text": "$ rewind nix --cores 4 --epoch 1790985600 github:fzakaria/rewindvm#mylib\n...\nrewind: run 46747ca7b99570bf exited:0 after 6038 steps, 0.215s virtual, 0.656s wall (poweroff)\n/nix/store/f6a9gy362szw6nxx3ikrklr8glr6rdln-mylib-0.3.0 a9d703ba89774f3d  matches your store, rewindvm.cachix.org",
   "spans": [
    [
     2,
@@ -305,7 +305,7 @@
   ]
  },
  {
-  "text": "$ rewind fork 92af07e9 5680 --schedule 1 --quiet\nrewind: run 69d53369f3d544b5 exited:0 after 7877 steps, 0.241s virtual, 0.171s wall (poweroff)\nrewind: the fork first differs from its parent at step 5722\nrewind: open it beside its parent in the desktop app: rewind open 69d53369f3d544b5 5722 --compare 92af07e9945d3001\n\n$ rewind fork 92af07e9 5680 --schedule 2 --quiet\nrewind: run 9b6bcb95096c0dfa exited:0 after 7812 steps, 0.240s virtual, 0.118s wall (poweroff)\nrewind: the fork first differs from its parent at step 5704\nrewind: open it beside its parent in the desktop app: rewind open 9b6bcb95096c0dfa 5704 --compare 92af07e9945d3001\n\n$ rewind fork 92af07e9 5680 --schedule 3 --quiet\nrewind: run 0e8c67e46ae413ee exited:0 after 7950 steps, 0.242s virtual, 0.121s wall (poweroff)\nrewind: the fork first differs from its parent at step 5684\nrewind: open it beside its parent in the desktop app: rewind open 0e8c67e46ae413ee 5684 --compare 92af07e9945d3001\n\n$ rewind fork 92af07e9 5680 --schedule 4 --quiet\nrewind: run 5a97f338f8c7c6f8 exited:2 after 5822 steps, 0.216s virtual, 0.062s wall (poweroff)\nrewind: the fork first differs from its parent at step 5799\nrewind: open it beside its parent in the desktop app: rewind open 5a97f338f8c7c6f8 5799 --compare 92af07e9945d3001",
+  "text": "$ rewind fork 92af07e9 5680 --schedule 1 --quiet\nrewind: run 69d53369f3d544b5 exited:0 after 7877 steps, 0.241s virtual, 0.165s wall (poweroff)\nrewind: the fork first differs from its parent at step 5722\nrewind: open it beside its parent in the desktop app: rewind open 69d53369f3d544b5 5722 --compare 92af07e9945d3001\n\n$ rewind fork 92af07e9 5680 --schedule 2 --quiet\nrewind: run 9b6bcb95096c0dfa exited:0 after 7812 steps, 0.240s virtual, 0.111s wall (poweroff)\nrewind: the fork first differs from its parent at step 5704\nrewind: open it beside its parent in the desktop app: rewind open 9b6bcb95096c0dfa 5704 --compare 92af07e9945d3001\n\n$ rewind fork 92af07e9 5680 --schedule 3 --quiet\nrewind: run 0e8c67e46ae413ee exited:0 after 7950 steps, 0.242s virtual, 0.115s wall (poweroff)\nrewind: the fork first differs from its parent at step 5684\nrewind: open it beside its parent in the desktop app: rewind open 0e8c67e46ae413ee 5684 --compare 92af07e9945d3001\n\n$ rewind fork 92af07e9 5680 --schedule 4 --quiet\nrewind: run 5a97f338f8c7c6f8 exited:2 after 5822 steps, 0.216s virtual, 0.064s wall (poweroff)\nrewind: the fork first differs from its parent at step 5799\nrewind: open it beside its parent in the desktop app: rewind open 5a97f338f8c7c6f8 5799 --compare 92af07e9945d3001",
   "spans": [
    [
     1,
@@ -676,7 +676,7 @@
   ]
  },
  {
-  "text": "$ rewind run --root spin --timeout 5 --name spin -- /bin/spin\nrewind: run 88df117b846118ad timed-out after 712 steps, 0.004s virtual, 5.008s wall (timed out computing without exits for 4.7s, in user space in main+15 (spin.c:2), process 34 (spin))",
+  "text": "$ rewind run --root spin --timeout 5 --name spin -- /bin/spin\nrewind: run 88df117b846118ad timed-out after 712 steps, 0.004s virtual, 5.010s wall (timed out computing without exits for 4.7s, in user space in main+15 (spin.c:2), process 34 (spin))",
   "spans": [
    [
     1,

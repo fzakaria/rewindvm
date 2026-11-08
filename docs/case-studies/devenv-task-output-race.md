@@ -116,7 +116,7 @@ assertion `left == right` failed
   left: ["line1", "line2"]
  right: ["line1", "line2", "line3"]
 ...
-rewind: run 5947419e48b1a8dd exited:101 after 1594 steps, 0.036s virtual, 0.370s wall (poweroff)
+rewind: run 5947419e48b1a8dd exited:101 after 1594 steps, 0.036s virtual, 0.383s wall (poweroff)
 ```
 
 ```console
