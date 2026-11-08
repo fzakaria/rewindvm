@@ -24,6 +24,9 @@ pub mod snapshot;
 pub mod state;
 mod watchdog;
 
+#[cfg(test)]
+mod test_alloc;
+
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
@@ -294,6 +297,8 @@ pub(crate) struct Devices {
     /// What turns the guest's switch records into batches in the trace,
     /// once a guest kernel that makes them has set up.
     pub switches: Option<rewind_trace::switches::Encoder>,
+    /// Scratch space reused for guest records emitted through the port.
+    record_buffer: Vec<u8>,
 }
 
 pub struct Machine {
@@ -463,6 +468,7 @@ impl Machine {
                 timer_armed_at: None,
                 io: None,
                 switches: None,
+                record_buffer: Vec::new(),
             },
             pmem,
             extras,
@@ -603,7 +609,7 @@ impl Machine {
         if let Some((counter, _)) = &self.pmu {
             counter.resume()?;
         }
-        let Some(work) = &self.work else {
+        let Some(work) = &mut self.work else {
             return Ok(());
         };
         work.counter.resume()?;
@@ -624,7 +630,7 @@ impl Machine {
         if let Some((counter, _)) = &self.pmu {
             counter.pause()?;
         }
-        if let Some(work) = &self.work {
+        if let Some(work) = &mut self.work {
             work.counter.pause()?;
             work.overflow.disarm()?;
         }
@@ -997,7 +1003,7 @@ impl Machine {
     /// interruption may come early: on a hybrid host, when the thread moved
     /// to another kind of core.
     fn reached_preemption(&mut self) -> Result<bool> {
-        let Some(work) = self.work.as_ref() else {
+        let Some(work) = self.work.as_mut() else {
             return Ok(false);
         };
         let Some(target) = work.target else {
@@ -1069,19 +1075,20 @@ impl Devices {
                 if !(pv::RECORD_HEADER..=pv::RECORD_MAX).contains(&len) {
                     bail!("VM record at step {} has length {len}", self.step);
                 }
-                let mut record = vec![0u8; len];
-                self.ram.read(value as u64, &mut record)?;
+                self.record_buffer.resize(len, 0);
+                self.ram.read(value as u64, &mut self.record_buffer)?;
+                let record = &self.record_buffer;
                 // A switch joins the pending batch, which is written first
                 // when it had no room for the switch.
-                if rewind_trace::switches::is_switch(&record)
+                if rewind_trace::switches::is_switch(record)
                     && let Some(encoder) = self.switches.as_mut()
                 {
-                    if let Some(batch) = encoder.add(self.step, &record)? {
+                    if let Some(batch) = encoder.add(self.step, record)? {
                         obs.record(self.step, &batch);
                     }
                     return Ok(());
                 }
-                obs.record(self.step, &record);
+                obs.record(self.step, record);
             }
             pv::PORT_TIMER => {
                 let delta = value as u64;
@@ -1241,6 +1248,43 @@ mod tests {
     const PAGE: usize = 4096;
 
     #[test]
+    fn repeated_switch_exits_do_not_allocate() {
+        // Warm the encoder and guest buffer, then emit the same task without a batch flush.
+        const SWITCH_KIND: u16 = 14;
+        const TASK_PID: u32 = 40;
+        const TASK_TID: u32 = 41;
+        const TASK_NAME: &[u8] = b"worker\0";
+        const WARM_STEPS: u64 = 32;
+        const MEASURED_STEPS: u64 = 8;
+        let mut dev = devices(0);
+        dev.switches = Some(rewind_trace::switches::Encoder::new());
+        let mut record = Vec::new();
+        record.extend_from_slice(&((pv::RECORD_HEADER + TASK_NAME.len()) as u32).to_le_bytes());
+        record.extend_from_slice(&SWITCH_KIND.to_le_bytes());
+        record.extend_from_slice(&0u16.to_le_bytes());
+        record.extend_from_slice(&TASK_PID.to_le_bytes());
+        record.extend_from_slice(&TASK_TID.to_le_bytes());
+        record.extend_from_slice(&0u32.to_le_bytes());
+        record.extend_from_slice(TASK_NAME);
+        dev.ram.write(IO_BUF, &record).unwrap();
+        let pointer = (IO_BUF as u32).to_le_bytes();
+        let mut kept = Kept::default();
+        for step in 1..=WARM_STEPS {
+            dev.step = step;
+            dev.io_out(pv::PORT_EMIT, &pointer, &mut kept).unwrap();
+        }
+
+        let allocations = test_alloc::count(|| {
+            for step in WARM_STEPS + 1..=WARM_STEPS + MEASURED_STEPS {
+                dev.step = step;
+                dev.io_out(pv::PORT_EMIT, &pointer, &mut kept).unwrap();
+            }
+        });
+        assert_eq!(allocations, 0);
+        assert!(kept.0.is_empty());
+    }
+
+    #[test]
     fn the_extras_slot_is_reserved_only_where_the_host_reaches_it() {
         // Address widths on both sides of the slot's 39 bits: 36 is an Ivy
         // Bridge's. A narrow host records the host model without the slot
@@ -1300,6 +1344,7 @@ mod tests {
             timer_armed_at: None,
             io: Some(rewind_trace::io_records::Encoder::new()),
             switches: None,
+            record_buffer: Vec::new(),
         }
     }
 

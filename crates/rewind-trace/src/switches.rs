@@ -20,6 +20,7 @@
 //! the trace's state at that step ([`Encoder::resume`]), so its batches
 //! come out as the run's did.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use crate::event::{DecodeError, HEADER_LEN, RECORD_MAX};
@@ -89,6 +90,18 @@ pub fn is_switch(record: &[u8]) -> bool {
 /// name the task, its flags say whether the task has memory, and the
 /// payload is the task's name.
 pub fn decode(step: u64, record: &[u8]) -> Result<Switch, DecodeError> {
+    let task = guest_task(record)?;
+    Ok(Switch {
+        step,
+        pid: task.pid,
+        tid: task.tid,
+        memory: task.memory,
+        name: task.name.into_owned(),
+    })
+}
+
+/// Borrows a guest task's name for encoding; only invalid UTF-8 needs repair.
+fn guest_task(record: &[u8]) -> Result<Task<'_>, DecodeError> {
     if record.len() < HEADER_LEN {
         return Err(DecodeError::Short(record.len()));
     }
@@ -103,12 +116,11 @@ pub fn decode(step: u64, record: &[u8]) -> Result<Switch, DecodeError> {
     let flags = u16::from_le_bytes([record[6], record[7]]);
     let name = &record[HEADER_LEN..];
     let end = name.iter().position(|b| *b == 0).unwrap_or(name.len());
-    Ok(Switch {
-        step,
+    Ok(Task {
         pid: u32_at(8),
         tid: u32_at(12),
         memory: flags & FLAG_NO_MEMORY == 0,
-        name: String::from_utf8_lossy(&name[..end]).into_owned(),
+        name: String::from_utf8_lossy(&name[..end]),
     })
 }
 
@@ -133,20 +145,21 @@ pub enum SwitchError {
 
 /// A task as the table keeps it: what tells one task from another.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct Task {
+struct Task<'a> {
     pid: u32,
     tid: u32,
     memory: bool,
-    name: String,
+    name: Cow<'a, str>,
 }
 
-impl Task {
-    fn of(switch: &Switch) -> Task {
+impl Task<'_> {
+    /// Owns a name only when the table first defines the task.
+    fn owned(&self) -> Task<'static> {
         Task {
-            pid: switch.pid,
-            tid: switch.tid,
-            memory: switch.memory,
-            name: switch.name.clone(),
+            pid: self.pid,
+            tid: self.tid,
+            memory: self.memory,
+            name: Cow::Owned(self.name.clone().into_owned()),
         }
     }
 }
@@ -156,7 +169,7 @@ impl Task {
 /// encoder and a decoder that have seen the same switches hold the same.
 #[derive(Clone, Debug, Default)]
 struct Tables {
-    tasks: HashMap<Task, u64>,
+    tasks: HashMap<Task<'static>, u64>,
     last_step: u64,
 }
 
@@ -166,11 +179,10 @@ impl Tables {
     /// which for a task not yet defined is the next index followed by the
     /// task. Returns the task to define, when the entry defines one, for
     /// [`Tables::define`] once the entry is kept.
-    fn entry(&self, switch: &Switch, out: &mut Vec<u8>) -> Option<Task> {
-        put(out, switch.step.wrapping_sub(self.last_step));
-        let task = Task::of(switch);
-        if let Some(index) = self.tasks.get(&task) {
-            put(out, *index);
+    fn entry(&self, step: u64, task: &Task<'_>, out: &mut Vec<u8>) -> Option<Task<'static>> {
+        put(out, step.wrapping_sub(self.last_step));
+        if let Some(index) = self.tasks.get(task).copied() {
+            put(out, index);
             return None;
         }
         put(out, self.tasks.len() as u64);
@@ -179,22 +191,16 @@ impl Tables {
         out.push(if task.memory { TASK_MEMORY } else { 0 });
         put(out, task.name.len() as u64);
         out.extend_from_slice(task.name.as_bytes());
-        Some(task)
+        Some(task.owned())
     }
 
-    /// Notes that an entry for `switch` was kept, and the task it defined.
-    fn define(&mut self, switch: &Switch, defined: Option<Task>) {
-        self.last_step = switch.step;
+    /// Notes that the entry at `step` was kept, and the task it defined.
+    fn define(&mut self, step: u64, defined: Option<Task<'static>>) {
+        self.last_step = step;
         if let Some(task) = defined {
             let next = self.tasks.len() as u64;
             self.tasks.insert(task, next);
         }
-    }
-
-    /// Encodes one switch onto `out` and keeps it.
-    fn encode(&mut self, switch: &Switch, out: &mut Vec<u8>) {
-        let defined = self.entry(switch, out);
-        self.define(switch, defined);
     }
 }
 
@@ -204,6 +210,8 @@ pub struct Encoder {
     tables: Tables,
     /// The entries encoded since the last batch was written.
     pending: Vec<u8>,
+    /// Scratch space for checking whether the next entry fits the batch.
+    entry: Vec<u8>,
     /// The step of the first pending entry's switch, which names the
     /// window the batch is for.
     first: Option<u64>,
@@ -222,22 +230,45 @@ impl Encoder {
     /// after it.
     pub fn resume(records: &[(u64, Vec<u8>)], step: u64) -> Result<Encoder, SwitchError> {
         let mut decoder = Decoder::default();
-        let mut encoder = Encoder::new();
-        let mut switches = Vec::new();
-        for (written_at, record) in records.iter().filter(|(_, r)| is_batch(r)) {
-            switches.clear();
-            decoder.decode(*written_at, record, &mut switches)?;
-            for switch in switches.iter().filter(|s| s.step <= step) {
-                if *written_at <= step {
-                    // Written by then: in the tables, not pending.
-                    let mut written = Vec::new();
-                    encoder.tables.encode(switch, &mut written);
-                    continue;
-                }
-                encoder.add_switch(switch);
+        let mut pending = Vec::new();
+        let mut first = None;
+        // A pending batch is flushed by the first step of the next window.
+        let pending_by = step.saturating_add(WINDOW - step % WINDOW);
+        for (written_at, record) in records
+            .iter()
+            .take_while(|(at, _)| *at <= pending_by)
+            .filter(|(_, r)| is_batch(r))
+        {
+            if *written_at <= step {
+                // Written batches contribute only their dictionary and last step.
+                decoder.read_batch(*written_at, record, u64::MAX, |_, _| {})?;
+                continue;
             }
+
+            // All pending switches belong to the first batch written after the keyframe.
+            let prefix = decoder.read_batch(*written_at, record, step, |at, _| {
+                first.get_or_insert(at);
+            })?;
+            pending.extend_from_slice(prefix);
+            break;
         }
-        Ok(encoder)
+
+        // Transfer dictionary ownership without cloning names or re-encoding old switches.
+        let tables = Tables {
+            tasks: decoder
+                .tasks
+                .into_iter()
+                .enumerate()
+                .map(|(i, task)| (task, i as u64))
+                .collect(),
+            last_step: decoder.last_step,
+        };
+        Ok(Encoder {
+            tables,
+            pending,
+            first,
+            ..Default::default()
+        })
     }
 
     /// The batch to write at `step`, before anything else the step
@@ -255,8 +286,8 @@ impl Encoder {
     /// to write first, at this step, when the pending entries had no room
     /// for it.
     pub fn add(&mut self, step: u64, record: &[u8]) -> Result<Option<Vec<u8>>, SwitchError> {
-        let switch = decode(step, record).map_err(|error| SwitchError::Guest { step, error })?;
-        Ok(self.add_switch(&switch))
+        let task = guest_task(record).map_err(|error| SwitchError::Guest { step, error })?;
+        Ok(self.add_task(step, &task))
     }
 
     /// The pending batch at the run's end, if any.
@@ -264,27 +295,28 @@ impl Encoder {
         self.flush()
     }
 
-    fn add_switch(&mut self, switch: &Switch) -> Option<Vec<u8>> {
+    fn add_task(&mut self, step: u64, task: &Task<'_>) -> Option<Vec<u8>> {
         // The entry is made before the tables change, so a batch with no
         // room for it is written first and the entry still reads against
         // what the tables hold then.
-        let mut entry = Vec::new();
-        let defined = self.tables.entry(switch, &mut entry);
-        let written = if self.pending.len() + entry.len() > PAYLOAD_MAX {
+        self.entry.clear();
+        let defined = self.tables.entry(step, task, &mut self.entry);
+        let written = if self.pending.len() + self.entry.len() > PAYLOAD_MAX {
             self.flush()
         } else {
             None
         };
-        self.tables.define(switch, defined);
-        self.pending.extend_from_slice(&entry);
-        self.first.get_or_insert(switch.step);
+        self.tables.define(step, defined);
+        self.pending.extend_from_slice(&self.entry);
+        self.first.get_or_insert(step);
         written
     }
 
     fn flush(&mut self) -> Option<Vec<u8>> {
         self.first.take()?;
-        let payload = std::mem::take(&mut self.pending);
-        Some(batch_record(&payload))
+        let record = batch_record(&self.pending);
+        self.pending.clear();
+        Some(record)
     }
 }
 
@@ -304,7 +336,7 @@ fn batch_record(payload: &[u8]) -> Vec<u8> {
 /// Reads the switches out of a trace's batches, in order.
 #[derive(Clone, Debug, Default)]
 pub struct Decoder {
-    tasks: Vec<Task>,
+    tasks: Vec<Task<'static>>,
     last_step: u64,
 }
 
@@ -315,9 +347,12 @@ impl Decoder {
     /// batches defined.
     pub fn resume(records: &[(u64, Vec<u8>)], step: u64) -> Result<Decoder, SwitchError> {
         let mut decoder = Decoder::default();
-        let mut switches = Vec::new();
-        for (written_at, record) in records.iter().filter(|(s, r)| *s <= step && is_batch(r)) {
-            decoder.decode(*written_at, record, &mut switches)?;
+        for (written_at, record) in records
+            .iter()
+            .take_while(|(s, _)| *s <= step)
+            .filter(|(_, r)| is_batch(r))
+        {
+            decoder.read_batch(*written_at, record, u64::MAX, |_, _| {})?;
         }
         Ok(decoder)
     }
@@ -330,6 +365,27 @@ impl Decoder {
         record: &[u8],
         out: &mut Vec<Switch>,
     ) -> Result<(), SwitchError> {
+        self.read_batch(step, record, u64::MAX, |at, task| {
+            out.push(Switch {
+                step: at,
+                pid: task.pid,
+                tid: task.tid,
+                memory: task.memory,
+                name: task.name.to_string(),
+            });
+        })?;
+        Ok(())
+    }
+
+    /// Visits entries through `through` and returns their encoded prefix.
+    /// A later entry's task is not read or installed in the dictionary.
+    fn read_batch<'a>(
+        &mut self,
+        step: u64,
+        record: &'a [u8],
+        through: u64,
+        mut visit: impl FnMut(u64, &Task<'_>),
+    ) -> Result<&'a [u8], SwitchError> {
         if record.len() < HEADER_LEN {
             return Err(SwitchError::Truncated { step });
         }
@@ -337,12 +393,17 @@ impl Decoder {
         if format != FORMAT {
             return Err(SwitchError::Format { step, format });
         }
+        let payload = &record[HEADER_LEN..];
         let mut r = Reader {
-            bytes: &record[HEADER_LEN..],
+            bytes: payload,
             step,
         };
+        let mut consumed = 0;
         while !r.bytes.is_empty() {
-            self.last_step = self.last_step.wrapping_add(r.varint()?);
+            let at = self.last_step.wrapping_add(r.varint()?);
+            if at > through {
+                break;
+            }
             let index = r.varint()?;
             let task = match usize::try_from(index) {
                 Ok(i) if i < self.tasks.len() => &self.tasks[i],
@@ -356,21 +417,17 @@ impl Decoder {
                         pid,
                         tid,
                         memory,
-                        name: String::from_utf8_lossy(name).into_owned(),
+                        name: Cow::Owned(String::from_utf8_lossy(name).into_owned()),
                     });
                     &self.tasks[i]
                 }
                 _ => return Err(SwitchError::UndefinedTask { step, index }),
             };
-            out.push(Switch {
-                step: self.last_step,
-                pid: task.pid,
-                tid: task.tid,
-                memory: task.memory,
-                name: task.name.clone(),
-            });
+            self.last_step = at;
+            visit(at, task);
+            consumed = payload.len() - r.bytes.len();
         }
-        Ok(())
+        Ok(&payload[..consumed])
     }
 }
 
@@ -611,6 +668,13 @@ pub(crate) mod tests {
         let first_written_at = records[0].0;
         let first_batch = switches_of(&records[..1]);
         assert!(first_batch.last().unwrap().step < first_written_at);
+
+        // Restore on both sides of a capacity flush, including the switch that triggered it.
+        for at in [first_written_at - 1, first_written_at, first_written_at + 1] {
+            let mut resumed = Encoder::resume(&records, at).unwrap();
+            let expected: Vec<_> = records.iter().filter(|(s, _)| *s > at).cloned().collect();
+            assert_eq!(run(&mut resumed, &borrowed, at + 1, 700), expected);
+        }
     }
 
     /// An encoder resumed at a step makes the batches the run made after
@@ -649,6 +713,70 @@ pub(crate) mod tests {
                 .decode(rest[0].0, &rest[0].1, &mut out)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn encoding_keeps_the_existing_batch_bytes() {
+        // Freeze format 1 bytes across new tasks, repeated tasks and window boundaries.
+        let expected = vec![
+            (
+                WINDOW,
+                batch_record(
+                    concat!(
+                        "\x0a\x00\x01\x01\x01\x04init",
+                        "\x0a\x01\x22\x22\x01\x07shuffle",
+                        "\x05\x02\x22\x23\x01\x07shuffle",
+                        "\x06\x03\x0b\x0b\x00\x0bksoftirqd/0",
+                        "\x01\x04\x00\x00\x00\x09swapper/0",
+                        "\x08\x01",
+                    )
+                    .as_bytes(),
+                ),
+            ),
+            (2 * WINDOW, batch_record(&[0xdc, 0x1f, 2, 1, 1])),
+            (9000, batch_record(&[0xa3, 0x26, 4])),
+        ];
+        assert_eq!(run(&mut Encoder::new(), SWITCHES, 0, 9000), expected);
+    }
+
+    #[test]
+    fn resuming_an_encoder_does_not_read_later_batches() {
+        // The first future batch recovers pending entries; corrupt later data is irrelevant.
+        const RESTORED_AT: u64 = 25;
+        let mut whole = run(&mut Encoder::new(), SWITCHES, 0, 9000);
+        whole[1].1 = batch_record(&[0x05]);
+        let mut resumed = Encoder::resume(&whole, RESTORED_AT).unwrap();
+        let rest = run(&mut resumed, SWITCHES, RESTORED_AT + 1, 9000);
+        assert_eq!(rest, run(&mut Encoder::new(), SWITCHES, 0, 9000));
+    }
+
+    #[test]
+    fn resuming_without_pending_switches_stops_at_the_window() {
+        // No pending entry can survive the next window; a later broken batch is irrelevant.
+        const RESTORED_AT: u64 = 25;
+        let future = vec![(2 * WINDOW, batch_record(&[0x05]))];
+        let mut resumed = Encoder::resume(&future, RESTORED_AT).unwrap();
+        assert!(resumed.finish().is_none());
+    }
+
+    #[test]
+    fn resuming_an_encoder_stops_inside_its_pending_batch() {
+        // A valid step delta beyond the restore point ends the prefix before a broken task.
+        const RESTORED_AT: u64 = 25;
+        const FUTURE_STEP: u64 = 31;
+        let prefix: Vec<_> = SWITCHES
+            .iter()
+            .copied()
+            .filter(|(s, ..)| *s <= RESTORED_AT)
+            .collect();
+        let mut whole = run(&mut Encoder::new(), &prefix, 0, WINDOW);
+        let record = &mut whole[0].1;
+        put(record, FUTURE_STEP - RESTORED_AT);
+        let len = record.len() as u32;
+        record[..4].copy_from_slice(&len.to_le_bytes());
+        let mut resumed = Encoder::resume(&whole, RESTORED_AT).unwrap();
+        let rest = run(&mut resumed, SWITCHES, RESTORED_AT + 1, 9000);
+        assert_eq!(rest, run(&mut Encoder::new(), SWITCHES, 0, 9000));
     }
 
     #[test]

@@ -662,7 +662,7 @@ impl Machine {
     /// interrupt armed a margin short of it, or single steps within the
     /// margin.
     pub(crate) fn close_in_on_branches(&mut self) -> Result<Option<DebugStop>> {
-        let (Some(stop), Some(work)) = (self.branch_stop, &self.work) else {
+        let (Some(stop), Some(work)) = (self.branch_stop, &mut self.work) else {
             return Ok(None);
         };
         let count = work.count()?;

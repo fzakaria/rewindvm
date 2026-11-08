@@ -133,13 +133,7 @@ impl Counter {
     }
 
     pub fn read(&self) -> Result<u64> {
-        let readings = self
-            .fds
-            .iter()
-            .rev()
-            .map(|&fd| read_reading(fd))
-            .collect::<Result<Vec<_>>>()?;
-        total(&readings)
+        total(self.fds.iter().rev().map(|&fd| read_reading(fd)))
     }
 
     /// Stops counting until `resume`. The counter counts the thread's
@@ -192,13 +186,24 @@ pub struct Overflow {
     /// One per kind of core, with the kind, which a host with one kind of
     /// core has none of.
     fds: Vec<(i32, Option<KindOfCore>)>,
+    state: OverflowState,
+}
+
+/// Whether any overflow counter may still be enabled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OverflowState {
+    Disarmed,
+    Armed,
 }
 
 impl Overflow {
     /// Must be called on the vCPU's thread, which the signal is sent to.
     pub fn open(event: CounterEvent, modes: Modes) -> Result<Overflow> {
         install_signal_handler();
-        let mut overflow = Overflow { fds: Vec::new() };
+        let mut overflow = Overflow {
+            fds: Vec::new(),
+            state: OverflowState::Disarmed,
+        };
         for kind in each_kind()? {
             // A period so large it never fires until armed.
             let fd = open_event(event, kind.as_ref(), modes, 1 << 62)?;
@@ -223,7 +228,7 @@ impl Overflow {
     /// Signals the thread after `events` more events, once: on a hybrid
     /// host, after at most that many between the kinds of core, and sooner
     /// when the thread moves to another kind, to be armed again there.
-    pub fn arm(&self, events: u64) -> Result<()> {
+    pub fn arm(&mut self, events: u64) -> Result<()> {
         // SAFETY: no arguments, no memory.
         let cpu = usize::try_from(unsafe { libc::sched_getcpu() }).ok();
         let here = self
@@ -234,6 +239,9 @@ impl Overflow {
                     .is_some_and(|k| cpu.is_some_and(|cpu| k.cpus.contains(&cpu)))
             })
             .unwrap_or(0);
+
+        // An error after enabling one core kind must still leave disarm responsible for it.
+        self.state = OverflowState::Armed;
         for ((fd, _), share) in self.fds.iter().zip(shares(events, self.fds.len(), here)) {
             // SAFETY: ioctls on an fd we own.
             unsafe {
@@ -249,13 +257,19 @@ impl Overflow {
         Ok(())
     }
 
-    pub fn disarm(&self) -> Result<()> {
+    pub fn disarm(&mut self) -> Result<()> {
+        if self.state == OverflowState::Disarmed {
+            return Ok(());
+        }
+
+        // Mark the overflow disarmed only after every kind has been disabled successfully.
         for (fd, _) in &self.fds {
             // SAFETY: an ioctl on an fd we own.
             if unsafe { libc::ioctl(*fd, PERF_EVENT_IOC_DISABLE as _, 0) } != 0 {
                 bail!("disarming the overflow: {}", io::Error::last_os_error());
             }
         }
+        self.state = OverflowState::Disarmed;
         Ok(())
     }
 }
@@ -800,11 +814,25 @@ struct Reading {
 /// then, one of them was running, unless it was taken off the hardware or
 /// the thread ran on a core no PMU covers. Read in the order they were
 /// enabled, the others would stop short of it by the time between reads.
-fn total(readings: &[Reading]) -> Result<u64> {
-    let running: u64 = readings.iter().map(|r| r.running_ns).sum();
-    let enabled = readings.iter().map(|r| r.enabled_ns).min().unwrap_or(0);
+fn total(readings: impl IntoIterator<Item = Result<Reading>>) -> Result<u64> {
+    // Aggregate in read order without keeping an allocated vector for every guest exit.
+    let mut value = 0;
+    let mut running = 0;
+    let mut enabled = u64::MAX;
+    let mut kinds = 0;
+    for reading in readings {
+        let reading = reading?;
+        value += reading.value;
+        running += reading.running_ns;
+        enabled = enabled.min(reading.enabled_ns);
+        kinds += 1;
+    }
+    if kinds == 0 {
+        return Ok(0);
+    }
+
     if running < enabled {
-        if readings.len() == 1 {
+        if kinds == 1 {
             bail!(
                 "the host took the guest's counter off the hardware: it counted for {running} of \
                  {enabled} ns, so its count is short. Another program on the host is using the \
@@ -818,7 +846,7 @@ fn total(readings: &[Reading]) -> Result<u64> {
              stop the other program, or run on another host"
         );
     }
-    Ok(readings.iter().map(|r| r.value).sum())
+    Ok(value)
 }
 
 fn read_reading(fd: i32) -> Result<Reading> {
@@ -918,7 +946,63 @@ fn open_event(
 
 #[cfg(test)]
 mod tests {
+    // Counter readings and overflow state, using local file descriptors without a PMU.
     use super::*;
+
+    #[test]
+    fn reading_counters_does_not_allocate() {
+        // Feed the perf read layout through sockets for one core kind and a hybrid pair.
+        use std::io::Write;
+        use std::os::fd::IntoRawFd;
+        use std::os::unix::net::UnixStream;
+        for readings in [
+            vec![reading(99, 990, 990)],
+            vec![reading(60, 1000, 600), reading(39, 990, 390)],
+        ] {
+            let fds = readings
+                .iter()
+                .map(|r| {
+                    let (input, mut output) = UnixStream::pair().unwrap();
+                    output.write_all(&r.value.to_ne_bytes()).unwrap();
+                    output.write_all(&r.enabled_ns.to_ne_bytes()).unwrap();
+                    output.write_all(&r.running_ns.to_ne_bytes()).unwrap();
+                    input.into_raw_fd()
+                })
+                .collect();
+            let counter = Counter { fds };
+            let allocations = crate::test_alloc::count(|| {
+                assert_eq!(counter.read().unwrap(), 99);
+            });
+            assert_eq!(allocations, 0);
+        }
+    }
+
+    #[test]
+    fn disarming_an_unused_overflow_does_not_issue_an_ioctl() {
+        // An invalid descriptor would fail an ioctl; an untouched overflow needs none.
+        const INVALID_FD: i32 = -1;
+        let mut overflow = Overflow {
+            fds: vec![(INVALID_FD, None)],
+            state: OverflowState::Disarmed,
+        };
+        overflow.disarm().unwrap();
+        overflow.disarm().unwrap();
+    }
+
+    #[test]
+    fn a_failed_arm_still_requires_disarming() {
+        // Failure on one core kind can leave another enabled; a failed disable stays armed.
+        const INVALID_FD: i32 = -1;
+        const PERIOD: u64 = 100;
+        let mut overflow = Overflow {
+            fds: vec![(INVALID_FD, None)],
+            state: OverflowState::Disarmed,
+        };
+        assert!(overflow.arm(PERIOD).is_err());
+        assert_eq!(overflow.state, OverflowState::Armed);
+        assert!(overflow.disarm().is_err());
+        assert_eq!(overflow.state, OverflowState::Armed);
+    }
 
     fn reading(value: u64, enabled_ns: u64, running_ns: u64) -> Reading {
         Reading {
@@ -934,10 +1018,12 @@ mod tests {
         // its count, as does one never enabled. One the kernel took off
         // the hardware for part of that time, as it does to share the
         // counters among more events than fit, is short and is refused.
-        assert_eq!(total(&[reading(1234, 5000, 5000)]).unwrap(), 1234);
-        assert_eq!(total(&[Reading::default()]).unwrap(), 0);
+        assert_eq!(total([Ok(reading(1234, 5000, 5000))]).unwrap(), 1234);
+        assert_eq!(total([Ok(Reading::default())]).unwrap(), 0);
 
-        let err = total(&[reading(1000, 5000, 4000)]).unwrap_err().to_string();
+        let err = total([Ok(reading(1000, 5000, 4000))])
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("4000 of 5000 ns"), "{err}");
     }
 
@@ -947,11 +1033,11 @@ mod tests {
         // efficient one: the efficient cores' counter, enabled second, was
         // enabled 10 ns less, and the two ran for all of that.
         assert_eq!(
-            total(&[reading(60, 1000, 600), reading(39, 990, 390)]).unwrap(),
+            total([Ok(reading(60, 1000, 600)), Ok(reading(39, 990, 390))]).unwrap(),
             99
         );
         // Taken off the hardware for 90 ns while both were enabled.
-        let err = total(&[reading(60, 1000, 600), reading(30, 990, 300)])
+        let err = total([Ok(reading(60, 1000, 600)), Ok(reading(30, 990, 300))])
             .unwrap_err()
             .to_string();
         assert!(err.contains("900 of 990 ns"), "{err}");
