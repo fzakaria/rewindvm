@@ -28,14 +28,14 @@ schedule only:
 $ rewind check --epoch 1790985600 --seeds 8 --schedules 0 --all --no-narrow github:fzakaria/rewindvm#tiles
 rewind: packing 75 store paths for tiles-0.2.0
 rewind: 8 random seeds, each run under schedule 0 and 0 other schedules: 8 runs
-seed  0 schedule   0: exited:0             4027 steps  d20b5efd388d  run a88c945d0fbcddc4
-seed  1 schedule   0: exited:0             4027 steps  b4501793e383  run 206bd3571cca6d28
-seed  2 schedule   0: exited:0             4027 steps  0cd5db6c5c2c  run b6d040a5464f0507
-seed  3 schedule   0: exited:0             4027 steps  24f18f09c329  run 71e9ef2a95be248a
-seed  4 schedule   0: exited:0             4027 steps  b4501793e383  run b05317bb329c180d
-seed  5 schedule   0: exited:0             4027 steps  5e1f0a457cbe  run 2d1a22b25ef85e6c
-seed  6 schedule   0: exited:0             4027 steps  d20b5efd388d  run 54508a7a74f50632
-seed  7 schedule   0: exited:0             4027 steps  b4501793e383  run 692321c735dc5784
+seed  0 schedule   0: exited:0             4058 steps  d20b5efd388d  run 2d02117963b74c73
+seed  1 schedule   0: exited:0             4058 steps  b4501793e383  run 3e85ea15ef35347e
+seed  2 schedule   0: exited:0             4058 steps  0cd5db6c5c2c  run 4907111a7d5673aa
+seed  3 schedule   0: exited:0             4058 steps  24f18f09c329  run 1b7de2424bbb3b62
+seed  4 schedule   0: exited:0             4058 steps  b4501793e383  run 9ac4cc4ea04009ba
+seed  5 schedule   0: exited:0             4058 steps  5e1f0a457cbe  run 671d7dde36f0683b
+seed  6 schedule   0: exited:0             4058 steps  d20b5efd388d  run 1d29318f153b7227
+seed  7 schedule   0: exited:0             4058 steps  b4501793e383  run 9386eb44a962d21f
 6 of 7 other runs ended differently
 ```
 
@@ -48,12 +48,12 @@ last is the run id. Eight builds made 5 different outputs, so
 Compare seed 0's run with seed 1's:
 
 ```console
-$ rewind diff --outputs a88c945d 206bd357
+$ rewind diff --outputs 2d021179 3e85ea15
 2 of the 5 files the runs left behind differ:
   /build/tiles/tiles.pc: 22 of 227 bytes differ, first at byte 178
   /nix/store/...-tiles-0.2.0/lib/pkgconfig/tiles.pc: 22 of 227 bytes differ, first at byte 178
 
-$ rewind diff --file /build/tiles/tiles.pc a88c945d 206bd357
+$ rewind diff --file /build/tiles/tiles.pc 2d021179 3e85ea15
 tiles.pc differs, first at line 7.
 Only in the left run: 1 line.
 Only in the right run: 1 line.
@@ -77,17 +77,17 @@ from. `--file` shows the lines: the same three packages in another order.
 the first byte that differs:
 
 ```console
-$ rewind blame a88c945d 206bd357 /nix/store/ihhhzc5qphjjz5vgss7swki10dwkicsb-tiles-0.2.0/lib/pkgconfig/tiles.pc
-tiles.pc differs at byte 178. python3 (pid 112) wrote that byte at step 2,901 in run a88c945d and at step 2,901 in run 206bd357.
+$ rewind blame 2d021179 3e85ea15 /nix/store/ihhhzc5qphjjz5vgss7swki10dwkicsb-tiles-0.2.0/lib/pkgconfig/tiles.pc
+tiles.pc differs at byte 178. python3 (pid 112) wrote that byte at step 3,068 in run 2d021179 and at step 3,068 in run 3e85ea15.
 
 22 of 227 bytes differ. The bytes from byte 178:
-  a88c945d  70 69 78 6d 61 6e 2d 31 2c 20 6c 69 62 70 6e 67  |pixman-1, libpng|
-  206bd357  7a 6c 69 62 2c 20 70 69 78 6d 61 6e 2d 31 2c 20  |zlib, pixman-1, |
+  2d021179  70 69 78 6d 61 6e 2d 31 2c 20 6c 69 62 70 6e 67  |pixman-1, libpng|
+  3e85ea15  7a 6c 69 62 2c 20 70 69 78 6d 61 6e 2d 31 2c 20  |zlib, pixman-1, |
 
-Who wrote the file in run a88c945d, from the last writer back:
-  install (pid 122) copied it from /build/tiles/tiles.pc, starting at step 3,149. Its source already differs, so the copy did not cause the difference.
-  bash (pid 112) wrote /build/tiles/tiles.pc, starting at step 2,788. It is the first writer, and the file already differs when it is done.
-Run 206bd357 made the file the same way, with the same programs.
+Who wrote the file in run 2d021179, from the last writer back:
+  install (pid 122) copied it from /build/tiles/tiles.pc, starting at step 3,280. Its source already differs, so the copy did not cause the difference.
+  bash (pid 112) wrote /build/tiles/tiles.pc, starting at step 2,984. It is the first writer, and the file already differs when it is done.
+Run 3e85ea15 made the file the same way, with the same programs.
 
 In both runs, one write of 227 bytes, from byte 0, set byte 178.
 
@@ -101,7 +101,7 @@ Likely cause: something inside python3 (pid 112), such as randomness or the orde
 ```
 
 The first line is the answer: python3, pid 112, wrote that byte at
-step 2,901. The lines after it show how blame got there. `install`
+step 3,068. The lines after it show how blame got there. `install`
 only copied a file that already differed. Before that, pid 112 opened
 `/build/tiles/tiles.pc` while it was still `bash`, for the `>` redirect,
 then became python3. python3 had the same command line and read the same
@@ -117,7 +117,7 @@ without replaying either run.
 Open the two runs side by side:
 
 ```console
-$ rewind open a88c945d --compare 206bd357
+$ rewind open 2d021179 --compare 3e85ea15
 ```
 
 The Compare tab's Files that differ link lists what `diff --outputs` does:
@@ -128,9 +128,9 @@ A click on a file opens it from both runs. One under the other puts each
 run's copy of a changed line together, this run's in amber and the other's
 in blue. Go to the write moves the playhead to the step whose write set the
 first byte that differs. For `/build/tiles/tiles.pc` that is step
-2,901, with `python3 gen-pc.py` in the process tree:
+3,068, with `python3 gen-pc.py` in the process tree:
 
-![The app at step 2,901, where python3 writes tiles.pc, with the file from both runs one under the other and the Requires.private line in amber and blue](../site/img/app-repro-write.png)
+![The app at step 3,068, where python3 writes tiles.pc, with the file from both runs one under the other and the Requires.private line in amber and blue](../site/img/app-repro-write.png)
 
 ## Fix it
 
@@ -178,17 +178,17 @@ build with the stock order, dirents 0:
 
 ```console
 $ rewind check --epoch 1790985600 --seeds 1 --schedules 0 --all --no-narrow --dirents 3 .#plugins
-dirents  0 schedule   0: exited:0             3887 steps  77b96f07540a  run 130eba8588e5a0b0
-dirents  1 schedule   0: exited:0             3887 steps  3d555b541296  run dddd0c1fedf9b1e1
-dirents  2 schedule   0: exited:0             3887 steps  925dde4ef23a  run 371fc50a1604a75e
-dirents  3 schedule   0: exited:0             3887 steps  abd7877043a8  run 875809d42feba5fc
+dirents  0 schedule   0: exited:0             3943 steps  77b96f07540a  run 9a6ba076725bb5c8
+dirents  1 schedule   0: exited:0             3943 steps  3d555b541296  run 29f205d4b8569000
+dirents  2 schedule   0: exited:0             3943 steps  925dde4ef23a  run 6c5eb36273634569
+dirents  3 schedule   0: exited:0             3943 steps  abd7877043a8  run 7aa57f06b4e4f5d0
 3 of 3 other runs ended differently
 ```
 
 Each key builds another output. The index is the file that changed:
 
 ```console
-$ rewind diff --file /build/plugins/plugins.txt dddd0c1f 371fc50a
+$ rewind diff --file /build/plugins/plugins.txt 29f205d4 6c5eb362
 plugins.txt differs, first at line 3.
 Only in the left run: 2 lines.
 Only in the right run: 2 lines.
@@ -225,10 +225,10 @@ Sort the names in `gen-index.py`:
 ```console
 $ rewind check --epoch 1790985600 --seeds 1 --schedules 0 --all --no-narrow --dirents 3 .#plugins
 ...
-dirents  0 schedule   0: exited:0             3887 steps  164f7a685a08  run 7018642f7d6d5131
-dirents  1 schedule   0: exited:0             3887 steps  164f7a685a08  run fdf1ed7a02b3cf90
-dirents  2 schedule   0: exited:0             3887 steps  164f7a685a08  run 59bea86e58045eea
-dirents  3 schedule   0: exited:0             3887 steps  164f7a685a08  run c8aca2f77e46a1b8
+dirents  0 schedule   0: exited:0             3943 steps  164f7a685a08  run 0522526982d1aeb1
+dirents  1 schedule   0: exited:0             3943 steps  164f7a685a08  run 7a6b007e9c9af39c
+dirents  2 schedule   0: exited:0             3943 steps  164f7a685a08  run e765b3ccfa008eae
+dirents  3 schedule   0: exited:0             3943 steps  164f7a685a08  run ce93a0401904287f
 0 of 3 other runs ended differently
 same result under all 4 runs
 ```

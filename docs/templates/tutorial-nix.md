@@ -105,7 +105,7 @@ $ rewind check --epoch {{epoch}} {{flake}}
 <!-- assert: test {{check_seconds}} -lt 60 -->
 <!-- capture first_diff: \n  failing +(\d+) -->
 <!-- capture first_tid: \n  failing +\d+ +\d+/(\d+) -->
-<!-- capture first_said: \n  failing +\d+ +\d+/\d+ +write\(1, "([^"\\]+)\\n"\) -->
+<!-- capture first_ended: \n  failing +\d+ +\d+/\d+ +(thread exit)\(test_pool_shutd\) exited:0 -->
 <!-- capture check_crash: \n  failing +(\d+) +\d+/\d+ +SIGSEGV -->
 <!-- capture check_crash_tid: \n  failing +\d+ +\d+/(\d+) +SIGSEGV -->
 <!-- assert: test {{first_diff}} -lt {{check_crash}} && test {{first_tid}} != {{check_crash_tid}} -->
@@ -116,11 +116,13 @@ $ rewind check --epoch {{epoch}} {{flake}}
 runs are the same until {{deciding}}, and only the failing one gets
 {{deciding_words}} there. The search took {{check_seconds}} seconds.
 
-The last block shows where the test's own output then differs. The first
+The last block shows where the test's own events then differ. The first
 difference is the cause, showing up before the symptom: at step {{first_diff}}
-thread {{first_tid}} writes `{{first_said}}` while thread {{check_crash_tid}} is held
-at the deciding step. Thread {{check_crash_tid}}'s SIGSEGV comes {{check_gap}} steps later,
-at step {{check_crash}}.
+the other worker, thread {{first_tid}}, exits, having found the queue empty
+while thread {{check_crash_tid}} is held at the deciding step; in the passing
+run thread {{check_crash_tid}} picks the next job first. Thread
+{{check_crash_tid}}'s SIGSEGV comes {{check_gap}} steps later, at step
+{{check_crash}}.
 
 `--all` tries every schedule, which measures how flaky a build is:
 

@@ -33,12 +33,12 @@ schedule 0 already violates it and check finds the bug with no search:
 ```console
 $ rewind check --epoch 1790985600 --schedules 8 --property 'atomic-replace=*.conf' github:fzakaria/rewindvm#config-reload
 rewind: packing 62 store paths for config-reload-0.1.0
-schedule   0: exited:0             4563 steps  f7b1c7741aba  run 366325e47af7c8c3  violates atomic-replace
-  atomic-replace: step 3232: process 139 (config) truncated /build/config-reload/app.conf in place, which the run wrote at step 3227; a reader can see it empty or half written
+schedule   0: exited:0             4496 steps  f7b1c7741aba  run e0e28d6b3041dfa0  violates atomic-replace
+  atomic-replace: step 3321: process 139 (config) truncated /build/config-reload/app.conf in place, which the run wrote at step 3316; a reader can see it empty or half written
 ...
-schedule   8: exited:2             3667 steps    run ff5bfee8e25d87a2  violates atomic-replace
+schedule   8: exited:2             4076 steps    run e2b7b2d76235f45c  violates atomic-replace
 every schedule violated a property, as schedule 0 did
-open it at the step: rewind open 366325e47af7c8c3 3232
+open it at the step: rewind open e0e28d6b3041dfa0 3321
 ```
 
 `atomic-replace` flags the unsafe write whether or not a reader saw the
@@ -50,8 +50,8 @@ narrows it to the step that decides it:
 ```console
 $ rewind check --epoch 1790985600 --property 'no-read-while-written=*.conf' github:fzakaria/rewindvm#config-reload | grep -E 'decides it|failing run'
 schedule 1 violates no-read-while-written; finding the step that decides it
-step 3254 decides it: a request to switch threads there makes the run violate no-read-while-written
-failing run violates no-read-while-written: step 3261: process 140 (config) opened /build/config-reload/app.conf for reading while process 139 (config), which opened it for writing at step 3254, had not closed it
+step 3345 decides it: a request to switch threads there makes the run violate no-read-while-written
+failing run violates no-read-while-written: step 3357: process 140 (config) opened /build/config-reload/app.conf for reading while process 139 (config), which opened it for writing at step 3345, had not closed it
 ```
 
 `--property` replaces the default, and you can repeat it to judge runs by
@@ -103,7 +103,7 @@ finished its deposit before the other started, and check reports the
 ```console
 $ rewind check --epoch 1790985600 --schedules 0 github:fzakaria/rewindvm#bank
 ...
-schedule   0: exited:0             4547 steps  2ffd6b62eb30  run b1d6981401d5d15f  holds
+schedule   0: exited:0             4508 steps  2ffd6b62eb30  run 4519261d25fb2772  holds
 never true in any run: sometimes "deposits-concurrent"
 every property held under the one schedule tried
 ```
@@ -115,10 +115,10 @@ a run that loses a deposit:
 $ rewind check --epoch 1790985600 github:fzakaria/rewindvm#bank | grep -E 'decides it|passing:|failing:|failing run violates sdk|^true in'
 true in 16 of 17 runs that checked it: sometimes "deposits-concurrent"
 schedule 1 violates same-outcome, sdk; finding the step that decides it
-step 3245 decides it: a request to switch threads there makes the run violate same-outcome, sdk
-passing: run b1d6981401d5d15f, schedule 0
-failing: run 240115d5505149aa, schedule 1 over steps 3245..3246
-failing run violates sdk: step 3292: always "balance-adds-up" failed: balance 310, expected 400
+step 3356 decides it: a request to switch threads there makes the run violate same-outcome, sdk
+passing: run 4519261d25fb2772, schedule 0
+failing: run 813d6aafd52dbbb4, schedule 1 over steps 3356..3357
+failing run violates sdk: step 3396: always "balance-adds-up" failed: balance 390, expected 400
 ```
 
 Outside Rewind the SDK's calls do nothing, so they can stay in the program.
@@ -195,11 +195,11 @@ bug. `--seeds 8` runs the job under 8 seeds:
 ```console
 $ rewind check --epoch 1790985600 --seeds 8 --schedules 0 github:fzakaria/rewindvm#hash-order | grep -E '^seed|decides it|passing:|failing:'
 rewind: packing 67 store paths for hash-order-0.1.0
-seed  0 schedule   0: exited:0             4795 steps  83f239c2e313  run 7d360975aaf9c717
-seed  1 schedule   0: exited:2             3550 steps    run 6b1d7829e6427f5d
+seed  0 schedule   0: exited:0             4698 steps  83f239c2e313  run 2e9bbd52744f599e
+seed  1 schedule   0: exited:2             3596 steps    run e2b405d08e26cb9b
 seed 1 decides it: under schedule 0, seed 0 passes and seed 1 fails
-passing: run 7d360975aaf9c717, seed 0, schedule 0
-failing: run 6b1d7829e6427f5d, seed 1, schedule 0
+passing: run 2e9bbd52744f599e, seed 0, schedule 0
+failing: run e2b405d08e26cb9b, seed 1, schedule 0
 ```
 
 Seed 1 puts the tags in the other order and the test fails.
@@ -211,10 +211,10 @@ seed, so one search varies the randomness and the timing together.
 Open the failing `bank` run beside the passing one, at the assertion:
 
 ```console
-$ rewind open 240115d5 3292 --compare b1d69814
+$ rewind open 813d6aaf 3396 --compare 4519261d
 ```
 
-![The app zoomed in around step 3292 of the failing bank run: a red mark above the track where always "balance-adds-up" failed, the test's span under the track in red, and the event card naming it](../site/img/app-assertion.png)
+![The app zoomed in around step 3396 of the failing bank run: a red mark above the track where always "balance-adds-up" failed, the test's span under the track in red, and the event card naming it](../site/img/app-assertion.png)
 
 The red mark above the track is the failed assertion; hover over it to see
 its message. The event card names it too, and Jump to failure goes to it.

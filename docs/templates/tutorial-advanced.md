@@ -206,17 +206,20 @@ $ rewind check --where --epoch {{epoch}} {{flake}} 2>/dev/null | sed -n '/^where
 ```
 
 <!-- capture held_tid: \d+/(\d+) +worker \(src/pool.c:75\), on the CPU at the deciding step -->
-<!-- capture diff_step: (\d+) +\d+/\d+ +worker \(src/pool.c:66\), at the first event that differs -->
-<!-- capture diff_tid: \d+/(\d+) +worker \(src/pool.c:66\), at the first event that differs -->
+<!-- capture diff_step: (\d+) +\d+/\d+ +start_thread \([^)]*\), at the first event that differs -->
+<!-- capture diff_tid: \d+/(\d+) +start_thread \([^)]*\), at the first event that differs -->
 <!-- assert: test {{held_tid}} = {{crash_tid}} && test {{diff_tid}} != {{crash_tid}} && test {{diff_step}} -lt {{crash_step}} -->
+<!-- assert: rewind events {{failing|short}} --from {{diff_step}} --to {{diff_step}} | grep -q '{{pid}}/{{diff_tid}} *thread exit' -->
 <!-- set late_gap: echo $(( {{crash_step}} - {{diff_step}} )) -->
 
-The first event that differs is the other worker, thread {{diff_tid}}, at line
-66, reporting the job it took off the queue. That is the cause showing up
-before the symptom: thread {{crash_tid}} is held at the deciding step, so the
-other worker and the main thread run ahead of it. Its fault at line 77, which
-`rewind where` showed at the top of this page, comes {{late_gap}} steps later,
-at step {{crash_step}}.
+The first event that differs is the other worker, thread {{diff_tid}}, ending:
+it is in `start_thread`, glibc's code around a thread's function, on its way
+out. With thread {{crash_tid}} held at the deciding step, the other worker
+finds the queue empty and returns, where in the passing run thread
+{{crash_tid}} picked the next job first. That is the cause showing up before
+the symptom: the held thread's fault at line 77, which `rewind where` showed
+at the top of this page, comes {{late_gap}} steps later, at step
+{{crash_step}}.
 
 In the app, the deciding step is a dashed blue mark on the timeline, before
 the solid one where the runs' events first differ. Zoomed in around the crash:
@@ -227,9 +230,10 @@ the solid one where the runs' events first differ. Zoomed in around the crash:
 
 ## See which thread held the CPU
 
-The VM has one CPU, so a race is an order of threads. `rewind threads` replays
-a window of steps and prints which thread held the CPU, a line per stretch.
-Around the deciding step, in both runs:
+The VM has one CPU, so a race is an order of threads. Every context switch
+in the VM is a step of its own, and `rewind threads` prints which thread held
+the CPU over a window of steps, a line per stretch. Around the deciding step,
+in both runs:
 
 <!-- set threads_from: echo $(( {{deciding}} - 9 )) -->
 
@@ -467,7 +471,7 @@ comes back:
 
 <!-- screenshot site/img/app-compare-tab: {{home}}/runs/{{failing}} --compare {{home}}/runs/{{passing}} ;; key d ;; click 1153 221 ;; wait 2 -->
 
-![The app's Compare tab: the writes both runs made before they part, then the other worker's write in the failing run beside the passing run's write, and the failing run's SIGSEGV a few events below, each run's text in full with what differs in amber](../site/img/app-compare-tab.png)
+![The app's Compare tab: the writes both runs made before they part, then the other worker's exit in the failing run beside the passing run's write, and the failing run's SIGSEGV a few events below, each run's text in full with what differs in amber](../site/img/app-compare-tab.png)
 
 ## Script it
 

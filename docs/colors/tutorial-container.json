@@ -1,6 +1,6 @@
 [
  {
-  "text": "$ docker export $(docker create mylib) -o mylib.tar\n$ rewind run --root mylib.tar --cwd /src -- make check\n...\nround 3: ok\ntest_pool_shutdown: ok\nrewind: run 0eada656c0127acd exited:0 after 1314 steps, 0.019s virtual, 0.362s wall (poweroff)",
+  "text": "$ docker export $(docker create mylib) -o mylib.tar\n$ rewind run --root mylib.tar --cwd /src -- make check\n...\nround 3: ok\ntest_pool_shutdown: ok\nrewind: run 545800020c238b2c exited:0 after 1784 steps, 0.019s virtual, 0.362s wall (poweroff)",
   "spans": [
    [
     5,
@@ -17,7 +17,7 @@
   ]
  },
  {
-  "text": "$ rewind check --root mylib.tar --cwd /src -- make check\nschedule   0: exited:0             1314 steps    run 0eada656c0127acd\nschedule   1: exited:0             1500 steps    run 9356b3e100312452\nschedule   2: exited:0             1650 steps    run f130916faa024479\nschedule   3: exited:0             1495 steps    run b832b0e462c708cc\nschedule   4: exited:0             1544 steps    run a780f3446921678c\nschedule   5: exited:0             1661 steps    run 52123dd31633c4e1\nschedule   6: exited:2             1154 steps    run 9fe5ad0de66e2620\nschedule   7: exited:2              773 steps    run 64a80f8d32688665\nschedule   8: exited:0             1464 steps    run 2990d4545d9676a0\nschedule   9: exited:2              844 steps    run 07e80a1bac5dd233\nschedule  10: exited:0             1553 steps    run fa9b13acc4c2d2e6\nschedule  11: exited:0             1555 steps    run 64f64b513ab8fc84\nschedule  12: exited:0             1662 steps    run 43e4488a57031080\nschedule  13: exited:0             1564 steps    run 378d2f326b2b8a0e\nschedule  14: exited:0             1538 steps    run 0e78403ab6449aa6\nschedule  15: exited:2             1552 steps    run bbc7c2653e4c68f9\nschedule  16: exited:2             1335 steps    run 575f96eba8c7debd\n\nschedule 6 ends differently from schedule 0; finding the step that decides it\nschedule 6 limited to steps 297..1104 still ends differently\nstep 1103 decides it: a request to switch threads there makes the run fail\n\npassing: run 8da6fdb7de620b24, schedule 6 over steps 297..1103\nfailing: run 0f3425671abc151f, schedule 6 over steps 297..1104\nthe two are the same run until step 1103\n\nwhere ./tests/test_pool_shutdown first behaves differently:\n  both           1088    39/43    write(1, \"job 16 done: 5986\\n\")\n  both           1089    39/43    write(1, \"worker picked job 18\\n\")\n  both           1103    39/42    write(1, \"job 17 done: 43360\\n\")\n  failing        1107    39/43    write(1, \"job 18 done: 26744\\n\")\n  failing        1110    39/43    SIGSEGV code=1 addr=0x108\n  failing        1113    39/39    SIGSEGV code=0 addr=0x0\n  failing        1115    39/43    thread exit(test_pool_shutd) killed:SIGSEGV\n  passing        1104    39/42    write(1, \"worker picked job 19\\n\")\n  passing        1110    39/43    write(1, \"job 18 done: 26744\\n\")\n  passing        1111    39/43    write(1, \"worker picked job 20\\n\")\n  passing        1122    39/42    thread exit(test_pool_shutd) exited:0\n\nopen both in the desktop app: rewind open 0f3425671abc151f 1107 --compare 8da6fdb7de620b24",
+  "text": "$ rewind check --root mylib.tar --cwd /src -- make check\nschedule   0: exited:0             1784 steps    run 545800020c238b2c\nschedule   1: exited:2             1732 steps    run 6ea0ee48bdc469a8\nschedule   2: exited:0             2071 steps    run d08e5852bfa52272\nschedule   3: exited:2             1514 steps    run 632002a2a66fa440\nschedule   4: exited:2             1844 steps    run 8eb43522b5b835e6\nschedule   5: exited:0             2188 steps    run 91a62ba0121976e9\nschedule   6: exited:2             1493 steps    run 2ffb040d2584f0f2\nschedule   7: exited:2             2065 steps    run b2e9687a6a16fe3a\nschedule   8: exited:2             1269 steps    run de85082e4eaea4a5\nschedule   9: exited:0             2032 steps    run 2c45c37f3b064a4b\nschedule  10: exited:0             1997 steps    run c24bfb7ab220f4b3\nschedule  11: exited:0             1988 steps    run 458f46b36b4dc519\nschedule  12: exited:0             2009 steps    run 050e83931825052e\nschedule  13: exited:0             2125 steps    run 6797cc250e1c2257\nschedule  14: exited:0             2071 steps    run fe9a6cf7dbc9e463\nschedule  15: exited:0             2042 steps    run 579b0c52bc41c548\nschedule  16: exited:0             1978 steps    run 675b8036164fe68f\n\nschedule 1 ends differently from schedule 0; finding the step that decides it\nschedule 1 limited to steps 720..1665 still ends differently\nstep 1664 decides it: a request to switch threads there makes the run fail\n\npassing: run bcaed03069060e2b, schedule 1 over steps 720..1664\nfailing: run f916856e32a52c81, schedule 1 over steps 720..1665\nthe two are the same run until step 1664\n\nwhere ./tests/test_pool_shutdown first behaves differently:\n  both           1652    39/44    write(1, \"job 14 done: 39906\\n\")\n  both           1653    39/44    write(1, \"worker picked job 17\\n\")\n  both           1664    39/45    write(1, \"job 16 done: 5986\\n\")\n  failing        1669    39/44    write(1, \"job 17 done: 43360\\n\")\n  failing        1672    39/44    SIGSEGV code=1 addr=0x108\n  failing        1675    39/39    SIGSEGV code=0 addr=0x0\n  failing        1678    39/44    thread exit(test_pool_shutd) killed:SIGSEGV\n  passing        1665    39/45    write(1, \"worker picked job 18\\n\")\n  passing        1671    39/44    write(1, \"job 17 done: 43360\\n\")\n  passing        1672    39/44    write(1, \"worker picked job 19\\n\")\n  passing        1685    39/45    thread exit(test_pool_shutd) exited:0\n\nopen both in the desktop app: rewind open f916856e32a52c81 1669 --compare bcaed03069060e2b",
   "spans": [
    [
     1,
@@ -29,7 +29,7 @@
     2,
     14,
     22,
-    "green"
+    "red"
    ],
    [
     3,
@@ -41,13 +41,13 @@
     4,
     14,
     22,
-    "green"
+    "red"
    ],
    [
     5,
     14,
     22,
-    "green"
+    "red"
    ],
    [
     6,
@@ -71,13 +71,13 @@
     9,
     14,
     22,
-    "green"
+    "red"
    ],
    [
     10,
     14,
     22,
-    "red"
+    "green"
    ],
    [
     11,
@@ -113,13 +113,13 @@
     16,
     14,
     22,
-    "red"
+    "green"
    ],
    [
     17,
     14,
     22,
-    "red"
+    "green"
    ],
    [
     23,
@@ -184,7 +184,7 @@
   ]
  },
  {
-  "text": "$ rewind cat 0f342567 1110 src/pool.c --pid 39 | sed -n '/^void pool_shutdown/,/^}/p'\nvoid pool_shutdown(struct pool *p)\n{\n\tpthread_mutex_lock(&p->lock);\n\tp->stopping = 1;\n\tpthread_cond_broadcast(&p->ready);\n\tpthread_mutex_unlock(&p->lock);\n\n\t/* The bug: the queue goes before the workers are joined. */\n\tfree(p->queue);\n\tp->queue = NULL;\n\n\tfor (int i = 0; i < POOL_WORKERS; i++)\n\t\tpthread_join(p->workers[i], NULL);\n\tpthread_cond_destroy(&p->ready);\n\tpthread_mutex_destroy(&p->lock);\n\tfree(p);\n}\n\n$ printf 'pwd; ls; exit\\n' | rewind shell 0f342567 1110 --pid 39\nrewind: a shell at step 1110 of 0f3425671abc151f; exit it to leave\n[rewind] /src # pwd; ls; exit\n/src\nContainerfile  Makefile  libmylib.a  src  tests",
+  "text": "$ rewind cat f916856e 1672 src/pool.c --pid 39 | sed -n '/^void pool_shutdown/,/^}/p'\nvoid pool_shutdown(struct pool *p)\n{\n\tpthread_mutex_lock(&p->lock);\n\tp->stopping = 1;\n\tpthread_cond_broadcast(&p->ready);\n\tpthread_mutex_unlock(&p->lock);\n\n\t/* The bug: the queue goes before the workers are joined. */\n\tfree(p->queue);\n\tp->queue = NULL;\n\n\tfor (int i = 0; i < POOL_WORKERS; i++)\n\t\tpthread_join(p->workers[i], NULL);\n\tpthread_cond_destroy(&p->ready);\n\tpthread_mutex_destroy(&p->lock);\n\tfree(p);\n}\n\n$ printf 'pwd; ls; exit\\n' | rewind shell f916856e 1672 --pid 39\nrewind: a shell at step 1672 of f916856e32a52c81; exit it to leave\n[rewind] /src # pwd; ls; exit\n/src\nContainerfile  Makefile  libmylib.a  src  tests",
   "spans": [
    [
     20,
@@ -195,7 +195,7 @@
   ]
  },
  {
-  "text": "$ DEBUGINFOD_URLS=https://debuginfod.debian.net rewind gdb 0f342567 1107 -- -batch -ex 'break src/pool.c:77 if p->queue == 0' -ex continue -ex 'bt 3' -ex 'p p->queue' -ex list\nrewind: step 1107 ran in process 39; loading symbols for 3 of its files\nrewind: fetched 12 source files from the VM\nrewind: gdb 16 cannot read thread-local variables, such as errno, at a step; gdb 17 or later can\nrewind: gdb at step 1107 of 0f3425671abc151f\nDownloading 3.97 M separate debug info for /home/fmzakari/.cache/rewind-record/home/gdb/2841502-0/newroot/usr/lib/x86_64-linux-gnu/libc.so.6...\nDownloading 539.96 K separate debug info for /home/fmzakari/.cache/rewind-record/home/gdb/2841502-0/newroot/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2...\narch_local_irq_restore (flags=514) at ./arch/x86/include/asm/irqflags.h:146\n146\t\treturn !(flags & X86_EFLAGS_IF);\n[Switching to thread 4 (Thread 1.43)]\nDownload failed: Invalid argument.  Continuing without source file ./io/../sysdeps/unix/sysv/linux/write.c.\n#0  __GI___libc_write (nbytes=19, buf=0x7ffbd4000b70, fd=1) at ../sysdeps/unix/sysv/linux/write.c:26\nwarning: 26\t../sysdeps/unix/sysv/linux/write.c: No such file or directory\nBreakpoint 1 at 0x55c225bfb40d: file src/pool.c, line 77.\n\nThread 4 hit Breakpoint 1, worker (arg=0x55c25619b680) at src/pool.c:77\n77\t\t\t\tp->queue->completed++;\n#0  worker (arg=0x55c25619b680) at src/pool.c:77\n#1  0x00007ffbdba141f5 in start_thread (arg=<optimized out>) at ./nptl/pthread_create.c:442\n#2  0x00007ffbdba948ec in clone3 () at ../sysdeps/unix/sysv/linux/x86_64/clone3.S:81\n$1 = (struct queue *) 0x0\n72\t\t\t * the bug. */\n73\t\t\tlong result = run_job(job);\n74\t\t\tif (!p->stopping) {\n75\t\t\t\tprintf(\"job %d done: %ld\\n\", job, result & 0xffff);\n76\t\t\t\tfflush(stdout);\n77\t\t\t\tp->queue->completed++;\n78\t\t\t}\n79\t\t}\n80\t}\n81\n[Inferior 1 (process 1) detached]",
+  "text": "$ DEBUGINFOD_URLS=https://debuginfod.debian.net rewind gdb f916856e 1669 -- -batch -ex 'break src/pool.c:77 if p->queue == 0' -ex continue -ex 'bt 3' -ex 'p p->queue' -ex list\nrewind: step 1669 ran in process 39; loading symbols for 3 of its files\nrewind: fetched 12 source files from the VM\nrewind: gdb 16 cannot read thread-local variables, such as errno, at a step; gdb 17 or later can\nrewind: gdb at step 1669 of f916856e32a52c81\nDownloading 3.97 M separate debug info for /home/fmzakari/.cache/rewind-record/home/gdb/1892020-0/newroot/usr/lib/x86_64-linux-gnu/libc.so.6...\nDownloading 539.96 K separate debug info for /home/fmzakari/.cache/rewind-record/home/gdb/1892020-0/newroot/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2...\narch_local_irq_restore (flags=514) at ./arch/x86/include/asm/irqflags.h:146\n146\t\treturn !(flags & X86_EFLAGS_IF);\n[Switching to thread 3 (Thread 1.44)]\nDownload failed: Invalid argument.  Continuing without source file ./io/../sysdeps/unix/sysv/linux/write.c.\n#0  __GI___libc_write (nbytes=19, buf=0x7f92fc000b70, fd=1) at ../sysdeps/unix/sysv/linux/write.c:26\nwarning: 26\t../sysdeps/unix/sysv/linux/write.c: No such file or directory\nBreakpoint 1 at 0x55d6f3d7d40d: file src/pool.c, line 77.\n\nThread 3 hit Breakpoint 1, worker (arg=0x55d6fc83c820) at src/pool.c:77\n77\t\t\t\tp->queue->completed++;\n#0  worker (arg=0x55d6fc83c820) at src/pool.c:77\n#1  0x00007f93039ce1f5 in start_thread (arg=<optimized out>) at ./nptl/pthread_create.c:442\n#2  0x00007f9303a4e8ec in clone3 () at ../sysdeps/unix/sysv/linux/x86_64/clone3.S:81\n$1 = (struct queue *) 0x0\n72\t\t\t * the bug. */\n73\t\t\tlong result = run_job(job);\n74\t\t\tif (!p->stopping) {\n75\t\t\t\tprintf(\"job %d done: %ld\\n\", job, result & 0xffff);\n76\t\t\t\tfflush(stdout);\n77\t\t\t\tp->queue->completed++;\n78\t\t\t}\n79\t\t}\n80\t}\n81\n[Inferior 1 (process 1) detached]",
   "spans": [
    [
     1,
@@ -224,7 +224,7 @@
   ]
  },
  {
-  "text": "$ rewind replay 0f342567\nidentical to the recording: 324 events and 13 read and write records over 1141 steps, and the whole machine at its 4 keyframes\n\n$ rewind replay 0f342567 --from 297\nidentical to the recording from the snapshot at step 256 to the end, and the whole machine at its 3 keyframes (0.11s)",
+  "text": "$ rewind replay f916856e\nidentical to the recording: 349 events, 704 context switches and 13 read and write records over 1701 steps, and the whole machine at its 4 keyframes\n\n$ rewind replay f916856e --from 720\nidentical to the recording from the snapshot at step 256 to the end, and the whole machine at its 3 keyframes (0.15s)",
   "spans": [
    [
     1,
@@ -241,7 +241,7 @@
   ]
  },
  {
-  "text": "$ rewind fork 0eada656 297 --schedule 3 --quiet\nrewind: run b832b0e462c708cc exited:0 after 1495 steps, 0.022s virtual, 0.061s wall (poweroff)\nrewind: the fork first differs from its parent at step 318\nrewind: open it beside its parent in the desktop app: rewind open b832b0e462c708cc 318 --compare 0eada656c0127acd\n\n$ rewind fork 0eada656 297 --schedule 4 --quiet\nrewind: run a780f3446921678c exited:0 after 1544 steps, 0.021s virtual, 0.061s wall (poweroff)\nrewind: the fork first differs from its parent at step 316\nrewind: open it beside its parent in the desktop app: rewind open a780f3446921678c 316 --compare 0eada656c0127acd\n\n$ rewind fork 0eada656 297 --schedule 5 --quiet\nrewind: run 52123dd31633c4e1 exited:0 after 1661 steps, 0.022s virtual, 0.062s wall (poweroff)\nrewind: the fork first differs from its parent at step 316\nrewind: open it beside its parent in the desktop app: rewind open 52123dd31633c4e1 316 --compare 0eada656c0127acd\n\n$ rewind fork 0eada656 297 --schedule 6 --quiet\nrewind: run 9fe5ad0de66e2620 exited:2 after 1154 steps, 0.018s virtual, 0.052s wall (poweroff)\nrewind: the fork first differs from its parent at step 316\nrewind: open it beside its parent in the desktop app: rewind open 9fe5ad0de66e2620 316 --compare 0eada656c0127acd",
+  "text": "$ rewind fork 54580002 720 --schedule 1 --quiet\nrewind: run ab498765ac62a6f4 exited:2 after 1732 steps, 0.019s virtual, 0.062s wall (poweroff)\nrewind: the fork first differs from its parent at step 739\nrewind: open it beside its parent in the desktop app: rewind open ab498765ac62a6f4 739 --compare 545800020c238b2c\n\n$ rewind fork 54580002 720 --schedule 2 --quiet\nrewind: run 5fdcdca8ac28b60a exited:0 after 2031 steps, 0.023s virtual, 0.064s wall (poweroff)\nrewind: the fork first differs from its parent at step 737\nrewind: open it beside its parent in the desktop app: rewind open 5fdcdca8ac28b60a 737 --compare 545800020c238b2c\n\n$ rewind fork 54580002 720 --schedule 3 --quiet\nrewind: run ac966a9c1f76414c exited:0 after 2059 steps, 0.023s virtual, 0.066s wall (poweroff)\nrewind: the fork first differs from its parent at step 735\nrewind: open it beside its parent in the desktop app: rewind open ac966a9c1f76414c 735 --compare 545800020c238b2c\n\n$ rewind fork 54580002 720 --schedule 4 --quiet\nrewind: run e53f0df8d47a50a9 exited:0 after 2041 steps, 0.021s virtual, 0.063s wall (poweroff)\nrewind: the fork first differs from its parent at step 737\nrewind: open it beside its parent in the desktop app: rewind open e53f0df8d47a50a9 737 --compare 545800020c238b2c",
   "spans": [
    [
     1,
@@ -253,7 +253,7 @@
     1,
     29,
     37,
-    "green"
+    "red"
    ],
    [
     2,
@@ -343,7 +343,7 @@
     16,
     29,
     37,
-    "red"
+    "green"
    ],
    [
     17,
@@ -366,7 +366,7 @@
   ]
  },
  {
-  "text": "$ docker build -q -t mylib -f Containerfile . && docker export $(docker create mylib) -o mylib.tar\nsha256:cb9278c70a0b53ffbe08e7d6ee12e362cf347b40d17f8167415014f181c1ecdf\n\n$ rewind check --all --root mylib.tar --cwd /src -- make check\n...\n0 of 64 other schedules ended differently\nsame result under all 65 schedules",
+  "text": "$ docker build -q -t mylib -f Containerfile . && docker export $(docker create mylib) -o mylib.tar\nsha256:8d703e855389d7280701356e842b37a20e51e1db17c11a1b4fab5de723e0a543\n\n$ rewind check --all --root mylib.tar --cwd /src -- make check\n...\n0 of 64 other schedules ended differently\nsame result under all 65 schedules",
   "spans": [
    [
     5,
