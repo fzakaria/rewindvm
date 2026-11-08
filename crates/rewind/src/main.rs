@@ -190,11 +190,11 @@ enum Command {
     /// Which thread held the CPU at each step of a window of a run.
     ///
     /// Prints a line per slice of steps one task held: a thread of a
-    /// process, a kernel thread, or the idle task. Rewind brings the run to
-    /// the window's first step and takes it one step at a time, reading the
-    /// task the VM's kernel has on the CPU, so a wide window takes a while.
-    /// A step is an exit, so a thread that ran between two exits and gave
-    /// the CPU back before the next is not seen.
+    /// process, a kernel thread, or the idle task. The guest kernel records
+    /// every context switch as a step of its own, so the slices come from
+    /// the trace, with nothing replayed, and a whole run is as quick as a
+    /// window. A slice starts at its switch, the step before the task's
+    /// first event. Takes a run recorded by a kernel that records switches.
     Threads(cmd::inspect::ThreadsArgs),
     /// Open a run in the desktop app, at a step and beside another run.
     ///
