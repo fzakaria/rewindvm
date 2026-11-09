@@ -16,7 +16,7 @@ use rewind_text_input::{TextInput, TextInputStyle};
 
 use super::notices::Notices;
 use super::runs::{Pick, RunsPanel};
-use crate::answers::{Answers, FileKey, PlaceKey};
+use crate::answers::{Answers, DirKey, FileKey, PlaceKey};
 use crate::bookmarks::Bookmarks;
 use crate::clock::Instant;
 use crate::describe::thousands;
@@ -302,6 +302,8 @@ pub struct Scrubber {
     pub(super) requests: Requests,
     /// What files held at steps, as the engine said, by the file's version.
     pub(super) file_answers: Answers<FileKey, FileAtStep>,
+    /// What directories held at steps, as the engine said.
+    pub(super) dir_answers: Answers<DirKey, rewind_trace::Listing>,
     /// Where threads were at steps, as the engine said.
     pub(super) place_answers: Answers<PlaceKey, Located>,
     /// The families of the engine's runs, the one changed last first, for
@@ -458,6 +460,7 @@ impl Scrubber {
             importing: None,
             requests: Requests::default(),
             file_answers: Answers::default(),
+            dir_answers: Answers::default(),
             place_answers: Answers::default(),
             link_dialog: None,
             recent: Vec::new(),

@@ -27,6 +27,7 @@ pub mod history;
 pub mod jobs;
 pub mod lanes;
 pub mod license;
+pub mod listing;
 pub mod memo;
 pub mod model;
 pub mod proc_card;

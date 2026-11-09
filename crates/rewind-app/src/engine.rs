@@ -325,6 +325,21 @@ pub trait Engine: Send + Sync {
         progress: &mut dyn FnMut(&str),
     ) -> EngineResult<FileAtStep>;
 
+    /// Lists directory `path` inside the VM as it was at `step` of `run`,
+    /// as process `pid` saw it when one is given: every entry under the
+    /// directory, however deep. The engine brings the run back to the
+    /// step as `cat` does, with the same `progress` and `cancel`. A run
+    /// recorded by a guest from before listings fails.
+    fn list(
+        &self,
+        run: &Path,
+        step: u64,
+        pid: Option<u32>,
+        path: &str,
+        cancel: &Cancel,
+        progress: &mut dyn FnMut(&str),
+    ) -> EngineResult<DirAtStep>;
+
     /// The files the jobs of runs `this` and `other` wrote and left
     /// behind whose bytes differ, as each run had them when its job
     /// exited, and how many are the same. The engine brings each run back
@@ -426,6 +441,115 @@ pub enum FileAtStep {
     /// The path named a directory at the step.
     Directory,
 }
+
+/// A directory as it was at a step.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DirAtStep {
+    /// The entries under the directory.
+    Listed(rewind_trace::Listing),
+    /// Nothing had the path at the step.
+    Missing,
+    /// The path named something other than a directory at the step.
+    NotADirectory,
+}
+
+/// What a path held at a step, as far as the engine could say.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Looked {
+    /// A file's bytes, or that nothing had the path.
+    File(FileAtStep),
+    /// A directory's entries.
+    Listed(rewind_trace::Listing),
+    /// A directory the engine could not list, and why: a run recorded by
+    /// a guest from before listings is one.
+    Unlisted(String),
+}
+
+/// What a path is expected to name, which decides what a look asks the
+/// engine first. Each question forks the run, so a right guess halves
+/// the wait.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Expect {
+    File,
+    Directory,
+}
+
+/// A path inside the VM at a step of a run, as a process saw the path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PathAt {
+    pub run: PathBuf,
+    pub step: u64,
+    /// The process whose root and working directory the path is resolved
+    /// in; the job's when None.
+    pub pid: Option<u32>,
+    pub path: String,
+}
+
+/// Looks at the path `at` names: reads a file, lists a directory, and
+/// asks for the other when the path turns out not to name what was
+/// expected. `progress` and `cancel` are the ones `Engine::cat` takes.
+pub fn look(
+    engine: &dyn Engine,
+    at: &PathAt,
+    expect: Expect,
+    cancel: &Cancel,
+    progress: &mut dyn FnMut(&str),
+) -> EngineResult<Looked> {
+    let PathAt {
+        run,
+        step,
+        pid,
+        path,
+    } = at;
+    let (step, pid) = (*step, *pid);
+    // A failure that says nothing of the path: the look was stopped, or
+    // the run does not replay.
+    let ends_the_look =
+        |e: &EngineError| matches!(e, EngineError::Cancelled) || goes_another_way(e);
+
+    match expect {
+        Expect::File => match engine.cat(run, step, pid, path, cancel, progress)? {
+            FileAtStep::Directory => match engine.list(run, step, pid, path, cancel, progress) {
+                Ok(DirAtStep::Listed(listing)) => Ok(Looked::Listed(listing)),
+                Ok(DirAtStep::Missing | DirAtStep::NotADirectory) => {
+                    Ok(Looked::File(FileAtStep::Directory))
+                }
+                Err(e) if ends_the_look(&e) => Err(e),
+                Err(e) => Ok(Looked::Unlisted(reason(&e))),
+            },
+            file => Ok(Looked::File(file)),
+        },
+        Expect::Directory => match engine.list(run, step, pid, path, cancel, progress) {
+            Ok(DirAtStep::Listed(listing)) => Ok(Looked::Listed(listing)),
+            Ok(DirAtStep::Missing) => Ok(Looked::File(FileAtStep::Missing)),
+            Ok(DirAtStep::NotADirectory) => engine
+                .cat(run, step, pid, path, cancel, progress)
+                .map(Looked::File),
+            Err(e) if ends_the_look(&e) => Err(e),
+
+            // The listing failed. Whether the path names a directory is
+            // still the engine's to say.
+            Err(e) => match engine.cat(run, step, pid, path, cancel, progress)? {
+                FileAtStep::Directory => Ok(Looked::Unlisted(reason(&e))),
+                file => Ok(Looked::File(file)),
+            },
+        },
+    }
+}
+
+/// Why the engine failed, without the name the engine starts its
+/// messages with.
+fn reason(error: &EngineError) -> String {
+    match error {
+        EngineError::Failed { message, .. } => {
+            message.trim_start_matches(ENGINE_PREFIX).to_string()
+        }
+        _ => error.to_string(),
+    }
+}
+
+/// How the rewind command starts its messages.
+pub const ENGINE_PREFIX: &str = "rewind: ";
 
 /// What `rewind diff --outputs --json` prints: the files two runs' jobs
 /// left behind whose bytes differ, and how many are the same.
@@ -815,6 +939,43 @@ impl Engine for CliEngine {
             Some(MISSING_STATUS) => Ok(FileAtStep::Missing),
             Some(DIRECTORY_STATUS) => Ok(FileAtStep::Directory),
             _ => Err(refused(command, &stderr, &status)),
+        }
+    }
+
+    fn list(
+        &self,
+        run: &Path,
+        step: u64,
+        pid: Option<u32>,
+        path: &str,
+        cancel: &Cancel,
+        progress: &mut dyn FnMut(&str),
+    ) -> EngineResult<DirAtStep> {
+        // `rewind files` exits 3 for a directory that did not exist at the
+        // step, and 4 for a path that named something else.
+        const MISSING_STATUS: i32 = 3;
+        const NOT_A_DIRECTORY_STATUS: i32 = 4;
+
+        // rewind files <run> <step> <path> --json [--pid P]
+        let mut args: Vec<OsString> = vec![
+            "files".into(),
+            run.into(),
+            step.to_string().into(),
+            path.into(),
+            "--json".into(),
+        ];
+        if let Some(pid) = pid {
+            args.push("--pid".into());
+            args.push(pid.to_string().into());
+        }
+        let out = self.streamed(&args, cancel, progress)?;
+        match out.status.code() {
+            Some(0) => rewind_trace::Listing::parse(out.stdout.as_bytes())
+                .map(DirAtStep::Listed)
+                .ok_or_else(|| out.refusal()),
+            Some(MISSING_STATUS) => Ok(DirAtStep::Missing),
+            Some(NOT_A_DIRECTORY_STATUS) => Ok(DirAtStep::NotADirectory),
+            _ => Err(out.refusal()),
         }
     }
 
@@ -1889,6 +2050,152 @@ mod tests {
                 complete: FetchedAll::No
             }
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn list_returns_the_directory_s_entries_or_says_why_not() {
+        // The stand-in prints two entries and a cut and exits 0, exits 3
+        // for a directory nothing had, exits 4 for a path that named a
+        // file, or exits 1 with a reason; the arguments name the step, the
+        // process and the path.
+        let dir = temp_dir("list");
+        let run = dir.join("run");
+        let lines = concat!(
+            r#"{"path":"bin","kind":"directory","mode":493,"size":0}\n"#,
+            r#"{"path":"bin/sh","kind":"symlink","mode":511,"size":0,"target":"shuffle"}\n"#,
+            r#"{"cut":true}\n"#
+        );
+        let engine = fake_engine(&dir, &lines.replace('"', "\\\""), "", 0);
+        let list = |engine: &CliEngine, pid| {
+            retrying(|| engine.list(&run, 66_651, pid, "/out", &Cancel::default(), &mut |_| {}))
+        };
+        let DirAtStep::Listed(listing) = list(&engine, Some(40)).unwrap() else {
+            panic!("no listing");
+        };
+        assert_eq!(listing.complete, rewind_trace::ListedAll::No);
+        let seen: Vec<(&str, Option<&str>)> = listing
+            .entries
+            .iter()
+            .map(|e| (e.path.as_str(), e.target.as_deref()))
+            .collect();
+        assert_eq!(seen, vec![("bin", None), ("bin/sh", Some("shuffle"))]);
+        let args = std::fs::read_to_string(dir.join("args")).unwrap();
+        assert!(args.contains("files") && args.contains("66651 /out --json --pid 40"));
+
+        let engine = fake_engine(&dir, "", "rewind: /out: no such directory\\n", 3);
+        assert_eq!(list(&engine, None).unwrap(), DirAtStep::Missing);
+        let engine = fake_engine(&dir, "", "rewind: /out is not a directory\\n", 4);
+        assert_eq!(list(&engine, None).unwrap(), DirAtStep::NotADirectory);
+
+        let engine = fake_engine(&dir, "", "rewind: recorded with a guest from before\\n", 1);
+        let EngineError::Failed { message, .. } = list(&engine, None).unwrap_err() else {
+            panic!("not a failure");
+        };
+        assert_eq!(message, "rewind: recorded with a guest from before");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A stand-in engine whose `files` and `cat` each print and exit as
+    /// told, and that appends the command asked to `asked` in `dir`.
+    fn looking_engine(dir: &Path, files: (&str, i32), cat: (&str, i32)) -> CliEngine {
+        let script = dir.join("rewind");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$1\" >> \"{dir}/asked\"\n\
+                 case \"$1\" in\n\
+                 files) printf '{}'; [ {} = 1 ] && echo 'rewind: no listing' >&2; exit {};;\n\
+                 cat) printf '{}'; exit {};;\n\
+                 esac\n",
+                files.0,
+                files.1,
+                files.1,
+                cat.0,
+                cat.1,
+                dir = dir.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        CliEngine::new(script)
+    }
+
+    #[test]
+    fn a_look_asks_for_what_the_path_is_expected_to_name() {
+        // Stand-ins that answer `files` and `cat` in every way that
+        // matters: a look that expects a file reads it and lists only a
+        // path that turned out a directory; a look that expects a
+        // directory lists it, reads a path that turned out a file, and
+        // when the listing fails says the path is a directory it could
+        // not list. `asked` holds the commands in the order asked.
+        const ENTRY: &str = r#"{\"path\":\"a\",\"kind\":\"file\",\"mode\":420,\"size\":1}\n"#;
+        let dir = temp_dir("look");
+        let run = dir.join("run");
+        let look_at = |engine: &CliEngine, expect: Expect| {
+            let _ = std::fs::remove_file(dir.join("asked"));
+            let at = PathAt {
+                run: run.clone(),
+                step: 5,
+                pid: None,
+                path: "/out".to_string(),
+            };
+            let looked = retrying(|| look(engine, &at, expect, &Cancel::default(), &mut |_| {}));
+            let asked = std::fs::read_to_string(dir.join("asked")).unwrap_or_default();
+            (
+                looked,
+                asked
+                    .split_whitespace()
+                    .map(str::to_string)
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let contents = FileAtStep::Exists {
+            bytes: b"hi".to_vec(),
+            complete: FetchedAll::Yes,
+        };
+
+        // A file where a file was expected: one command.
+        let engine = looking_engine(&dir, (ENTRY, 0), ("hi", 0));
+        let (looked, asked) = look_at(&engine, Expect::File);
+        assert_eq!(looked.unwrap(), Looked::File(contents.clone()));
+        assert_eq!(asked, vec!["cat"]);
+
+        // A directory where a directory was expected: one command.
+        let (looked, asked) = look_at(&engine, Expect::Directory);
+        let Looked::Listed(listing) = looked.unwrap() else {
+            panic!("no listing");
+        };
+        assert_eq!(listing.entries.len(), 1);
+        assert_eq!(asked, vec!["files"]);
+
+        // A directory where a file was expected: read, then listed.
+        let engine = looking_engine(&dir, (ENTRY, 0), ("", 4));
+        let (looked, asked) = look_at(&engine, Expect::File);
+        assert!(matches!(looked.unwrap(), Looked::Listed(_)));
+        assert_eq!(asked, vec!["cat", "files"]);
+
+        // A file where a directory was expected: listed, then read.
+        let engine = looking_engine(&dir, ("", 4), ("hi", 0));
+        let (looked, asked) = look_at(&engine, Expect::Directory);
+        assert_eq!(looked.unwrap(), Looked::File(contents));
+        assert_eq!(asked, vec!["files", "cat"]);
+
+        // Nothing where a directory was expected: missing, one command.
+        let engine = looking_engine(&dir, ("", 3), ("", 3));
+        let (looked, asked) = look_at(&engine, Expect::Directory);
+        assert_eq!(looked.unwrap(), Looked::File(FileAtStep::Missing));
+        assert_eq!(asked, vec!["files"]);
+
+        // A directory the engine cannot list, as in a run recorded by a
+        // guest from before listings: still known for a directory.
+        let engine = looking_engine(&dir, ("", 1), ("", 4));
+        let (looked, asked) = look_at(&engine, Expect::Directory);
+        assert_eq!(looked.unwrap(), Looked::Unlisted("no listing".to_string()));
+        assert_eq!(asked, vec!["files", "cat"]);
+        let (looked, asked) = look_at(&engine, Expect::File);
+        assert_eq!(looked.unwrap(), Looked::Unlisted("no listing".to_string()));
+        assert_eq!(asked, vec!["cat", "files"]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

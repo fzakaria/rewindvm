@@ -8,11 +8,14 @@
 //! new ones arrive. Runs the engine cannot replay (the built-in examples,
 //! runs opened from a .rwd file or a bare trace) say so instead.
 //!
-//! A path that names a directory, as a job's output often does, shows the
-//! files the run wrote under it in place of contents: each with the step
-//! of its last write, which a click goes to, and a click on its path opens
-//! the file. The trace has those, so the list needs no engine and every
-//! run has it.
+//! A path that names a directory, as a job's output often does, shows a
+//! listing in place of contents. The files the run wrote under it show at
+//! once, from the trace, in every run: each with the step of its last
+//! write, which a click goes to, and a click on its path opens the file.
+//! Where the engine can read the run's files, the VM's own listing of the
+//! directory at the step then takes their place, with links, empty
+//! directories, the input image's files and sizes, and the trace's steps
+//! beside the files the run wrote (see [`crate::listing`]).
 
 use std::time::Duration;
 
@@ -22,12 +25,13 @@ use gpui::{
     UniformListScrollHandle, div, prelude::*, px, relative, rgb, uniform_list,
 };
 
-use crate::answers::FileKey;
+use crate::answers::{DirKey, FileKey};
 use crate::describe::{short_store_paths, thousands};
 use crate::engine::{
-    Cancel, EngineError, EngineResult, FileAtStep, REPLAYS_ANOTHER_WAY, goes_another_way,
+    Cancel, EngineError, EngineResult, Expect, FileAtStep, Looked, PathAt, REPLAYS_ANOTHER_WAY,
+    goes_another_way, look,
 };
-use crate::model::WrittenFile;
+use crate::listing::{self, Entry, Source};
 use crate::request::Request;
 use crate::run::{Origin, Replays, Run, Session};
 use crate::selection::{Mapped, Surface, part_of_line};
@@ -45,6 +49,7 @@ use crate::ui::waiting::waiting_block;
 use crate::ui::widgets::{icon, panel_title, tooltip};
 use crate::viewer::{self, Kind, View, hex_spans};
 use crate::waiting::Waiting;
+use rewind_trace::{ListedAll, ListedKind, Listing};
 
 /// How long the playhead must rest before a pinned viewer asks again.
 const DEBOUNCE: Duration = Duration::from_millis(400);
@@ -68,8 +73,9 @@ const STOPPED: &str =
 /// What a listed file's step says on hover.
 const LISTED_STEP_NOTE: &str = "The step this file was last written or renamed at. Click to go there; click the path to see the file at the playhead.";
 
-/// What separates the names of a path.
-const PATH_SEPARATOR: char = '/';
+/// What the viewer says under a listing the VM did not give, before the
+/// engine's reason.
+const UNLISTED: &str = "Only the files the run wrote are listed";
 
 /// Whether the viewer follows the playhead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -109,14 +115,18 @@ pub enum Fetched {
     Stopped {
         step: u64,
     },
-    /// The path names a directory: the files the trace has under it at
-    /// the step, none when the run had written none by then.
+    /// The path names a directory: its entries at the step, as far as
+    /// `source` knows them.
     Directory {
         step: u64,
-        files: Vec<WrittenFile>,
+        entries: Vec<Entry>,
+        source: Source,
         /// How many of the trace's file events happened by the step. The
-        /// files are the same at every step with as many.
+        /// trace's listing is the same at every step with as many.
         events: usize,
+        /// Why the VM's listing is not shown, when the engine was asked
+        /// for one and could not give it.
+        unlisted: Option<String>,
     },
 }
 
@@ -246,65 +256,74 @@ impl Scrubber {
     }
 
     /// Shows what the viewer's path holds at the viewer's step: a
-    /// directory's files, from the trace, or a file's contents, from the
-    /// engine when the engine can read this run's files.
+    /// directory's written files at once, from the trace, and then what
+    /// the engine reads there, when the engine can read this run's files.
     fn read_viewer(&mut self, cx: &mut Context<Self>) {
-        if self.list_directory(cx) {
+        self.list_from_trace(cx);
+        if !self.engine_reads() {
             return;
         }
-        let Some(viewer) = &mut self.viewer else {
-            return;
-        };
-        if viewer.unavailable.is_some() {
-            return;
+        if let Some(viewer) = &mut self.viewer {
+            viewer.loading = true;
         }
-        viewer.loading = true;
         self.fetch_file(cx);
+    }
+
+    /// Whether the engine can read the files of the run the viewer is
+    /// open on. The browser viewer has no engine.
+    fn engine_reads(&self) -> bool {
+        let readable = self
+            .viewer
+            .as_ref()
+            .is_some_and(|viewer| viewer.unavailable.is_none());
+        readable && !cfg!(target_family = "wasm")
     }
 
     /// Shows the files the trace has under the viewer's path at the
     /// viewer's step, when the trace has a file under the path at some
-    /// step. False for any other path, which is left for the engine.
-    fn list_directory(&mut self, cx: &mut Context<Self>) -> bool {
+    /// step, which makes the path a directory. Any other path is left as
+    /// it is.
+    fn list_from_trace(&mut self, cx: &mut Context<Self>) {
         let (Some(viewer), Some(session)) = (&mut self.viewer, &self.session) else {
-            return false;
+            return;
         };
         let timeline = &session.run.timeline;
         if !timeline.has_files_under(&viewer.path) {
-            return false;
+            return;
         }
 
-        // The listing replaces whatever the viewer waited on.
-        viewer.supersede();
-        viewer.request = self.requests.issue();
-        viewer.loading = false;
-        viewer.highlighter = Highlighter::new(None);
-
-        // The listing on screen stands while the playhead crosses no file
-        // event; working the files out again walks every one of them.
+        // A listing on screen stands while the playhead crosses no file
+        // event: working the files out again walks every one of them. The
+        // trace's own is the listing of the new step too. The VM's stays
+        // as the listing of its step until the engine reads the new one.
         let events = timeline.file_count_at(viewer.step);
         if let Some(Fetched::Directory {
             step,
+            source,
             events: listed,
             ..
         }) = &mut viewer.shown
             && *listed == events
         {
-            *step = viewer.step;
+            if *source == Source::Trace {
+                *step = viewer.step;
+            }
             cx.notify();
-            return true;
+            return;
         }
+        viewer.highlighter = Highlighter::new(None);
         viewer.shown = Some(Fetched::Directory {
             step: viewer.step,
-            files: timeline.files_under(&viewer.path, viewer.step),
+            entries: listing::from_trace(timeline.files_under(&viewer.path, viewer.step)),
+            source: Source::Trace,
             events,
+            unlisted: None,
         });
         self.selecting.selection = self
             .selecting
             .selection
             .filter(|s| s.surface != Surface::Viewer);
         cx.notify();
-        true
     }
 
     pub(super) fn close_viewer(&mut self, cx: &mut Context<Self>) {
@@ -358,16 +377,16 @@ impl Scrubber {
     }
 
     /// What the viewer shows in place of contents, as lines: a
-    /// directory's files, each by its path under the directory, or a
+    /// directory's entries, each by its path under the directory, or a
     /// message as one line.
     pub(super) fn viewer_message_lines(&self) -> Vec<Mapped> {
         let Some(viewer) = &self.viewer else {
             return Vec::new();
         };
-        if let Some(files) = listed_files(viewer) {
-            return files
+        if let Some(entries) = listed_entries(viewer) {
+            return entries
                 .iter()
-                .map(|file| Mapped::plain(name_under(&viewer.path, &file.path)))
+                .map(|entry| Mapped::plain(entry.shown(&viewer.path)))
                 .collect();
         }
         viewer_message(viewer)
@@ -402,25 +421,25 @@ impl Scrubber {
         }
         viewer.step = step;
 
-        // A directory's files come from the trace, at once, in every run.
-        if self.list_directory(cx) {
+        // A directory's written files come from the trace, at once, in
+        // every run.
+        self.list_from_trace(cx);
+        if !self.engine_reads() {
             return;
         }
         let Some(viewer) = &mut self.viewer else {
             return;
         };
-        if viewer.unavailable.is_some() {
-            return;
-        }
         viewer.loading = true;
         viewer.supersede();
         viewer.request = self.requests.issue();
         let request = viewer.request;
 
-        // An answer the engine gave for the same version of the file shows
-        // at once; anything else waits for the playhead to rest.
-        if let Some(answer) = self.known_file() {
-            self.show_file(step, Ok(answer), cx);
+        // An answer the engine gave for the same version of the file, or
+        // for the directory at this step, shows at once; anything else
+        // waits for the playhead to rest.
+        if let Some(answer) = self.known_answer() {
+            self.show_looked(step, Ok(answer), cx);
             return;
         }
         let timer = cx.background_executor().timer(DEBOUNCE);
@@ -436,20 +455,24 @@ impl Scrubber {
         .detach();
     }
 
-    /// The answer kept for the file at the viewer's step, when the engine
-    /// gave one for the version the file has there. None while the VM
+    /// The answer kept for the viewer's path at the viewer's step: a
+    /// directory's listing the engine gave for the step, or a file's
+    /// answer for the version the file has there. None while the VM
     /// boots, which the viewer says instead.
-    fn known_file(&self) -> Option<FileAtStep> {
+    fn known_answer(&self) -> Option<Looked> {
         let (viewer, session) = (self.viewer.as_ref()?, self.session.as_ref()?);
         let timeline = &session.run.timeline;
         if viewer.step < timeline.job_start.unwrap_or(0) {
             return None;
         }
-
-        // A path no event writes may name a directory, which appears with
-        // no event, so an answer for one step says nothing of another.
-        if timeline.never_written(&viewer.path) {
-            return None;
+        let listed: DirKey = (
+            session.run.path.clone(),
+            viewer.path.clone(),
+            viewer.pid,
+            viewer.step,
+        );
+        if let Some(listing) = self.dir_answers.get(&listed) {
+            return Some(Looked::Listed(listing));
         }
         let key = FileKey::at(
             &session.run.path,
@@ -458,11 +481,11 @@ impl Scrubber {
             viewer.pid,
             viewer.step,
         );
-        self.file_answers.get(&key)
+        self.file_answers.get(&key).map(Looked::File)
     }
 
-    /// Asks the engine for the file at the viewer's step, on a background
-    /// thread, unless an answer for the file's version there is kept.
+    /// Asks the engine what the viewer's path holds at the viewer's step,
+    /// on a background thread, unless an answer for it is kept.
     fn fetch_file(&mut self, cx: &mut Context<Self>) {
         let (Some(viewer), Some(session)) = (&mut self.viewer, &self.session) else {
             return;
@@ -482,21 +505,37 @@ impl Scrubber {
             return;
         }
         let step = viewer.step;
-        if let Some(answer) = self.known_file() {
-            self.show_file(step, Ok(answer), cx);
+        if let Some(answer) = self.known_answer() {
+            self.show_looked(step, Ok(answer), cx);
             return;
         }
 
-        // The engine's answer, kept by the file's version.
+        // The engine's answer, kept by the file's version or the
+        // directory's step.
         let (Some(viewer), Some(session)) = (&mut self.viewer, &self.session) else {
             return;
         };
         viewer.loading = true;
         viewer.waiting = Waiting::default();
         let request = viewer.request;
-        let (run, pid, path) = (session.run.path.clone(), viewer.pid, viewer.path.clone());
-        let key = FileKey::at(&run, &session.run.timeline.trace, &path, pid, step);
-        let kept = !session.run.timeline.never_written(&path);
+        let timeline = &session.run.timeline;
+        let at = PathAt {
+            run: session.run.path.clone(),
+            step,
+            pid: Some(viewer.pid),
+            path: viewer.path.clone(),
+        };
+        let key = FileKey::at(&at.run, &timeline.trace, &at.path, viewer.pid, step);
+        let listed: DirKey = (at.run.clone(), at.path.clone(), viewer.pid, step);
+
+        // A path no event writes is most often a directory: a job's
+        // output, or one of the input image's. Every file the run made
+        // has an event that wrote it.
+        let expect = if timeline.never_written(&at.path) {
+            Expect::Directory
+        } else {
+            Expect::File
+        };
         let engine = self.engine.clone();
         let cancel = Cancel::default();
         viewer.in_flight = Some(cancel.clone());
@@ -505,7 +544,7 @@ impl Scrubber {
         // the channel closes when the engine is done.
         let (lines, mut said) = futures::channel::mpsc::unbounded::<String>();
         let task = crate::jobs::on_own_thread(move || {
-            engine.cat(&run, step, Some(pid), &path, &cancel, &mut |line| {
+            look(engine.as_ref(), &at, expect, &cancel, &mut |line| {
                 let _ = lines.unbounded_send(line.to_string());
             })
         });
@@ -531,15 +570,78 @@ impl Scrubber {
                 if this.viewer.as_ref().is_none_or(|v| v.request != request) {
                     return;
                 }
-                if let Ok(answer) = &result
-                    && kept
-                {
-                    this.file_answers.insert(key, answer.clone());
+                match &result {
+                    Ok(Looked::Listed(listing)) => {
+                        this.dir_answers.insert(listed, listing.clone());
+                    }
+
+                    // A path no event writes that is missing, or a
+                    // directory, at one step may be anything at another:
+                    // a directory appears with no event. A file's bytes
+                    // there change only with an event.
+                    Ok(Looked::File(answer))
+                        if expect == Expect::File
+                            || matches!(answer, FileAtStep::Exists { .. }) =>
+                    {
+                        this.file_answers.insert(key, answer.clone());
+                    }
+                    _ => {}
                 }
-                this.show_file(step, result, cx);
+                this.show_looked(step, result, cx);
             });
         })
         .detach();
+    }
+
+    /// Shows what the engine found at the viewer's path at `step`.
+    fn show_looked(&mut self, step: u64, result: EngineResult<Looked>, cx: &mut Context<Self>) {
+        match result {
+            Ok(Looked::File(FileAtStep::Directory)) => self.show_directory(step, None, None, cx),
+            Ok(Looked::File(answer)) => self.show_file(step, Ok(answer), cx),
+            Ok(Looked::Listed(listing)) => self.show_directory(step, Some(listing), None, cx),
+            Ok(Looked::Unlisted(why)) => self.show_directory(step, None, Some(why), cx),
+            Err(e) => self.show_file(step, Err(e), cx),
+        }
+    }
+
+    /// Shows the directory at the viewer's path at `step`: the VM's
+    /// `listing` with the trace's steps, or without one the files the
+    /// trace has, and why the VM gave none when the engine said.
+    fn show_directory(
+        &mut self,
+        step: u64,
+        listing: Option<Listing>,
+        unlisted: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.selecting.selection = self
+            .selecting
+            .selection
+            .filter(|s| s.surface != Surface::Viewer);
+        let (Some(viewer), Some(session)) = (&mut self.viewer, &self.session) else {
+            return;
+        };
+        viewer.loading = false;
+        viewer.in_flight = None;
+        viewer.highlighter = Highlighter::new(None);
+
+        let timeline = &session.run.timeline;
+        let written = timeline.files_under(&viewer.path, step);
+        let (entries, source) = match &listing {
+            Some(listing) => (
+                listing::merged(&viewer.path, listing, &written, viewer.pid),
+                Source::Vm(listing.complete),
+            ),
+            None => (listing::from_trace(written), Source::Trace),
+        };
+        viewer.shown = Some(Fetched::Directory {
+            step,
+            entries,
+            source,
+            events: timeline.file_count_at(step),
+            unlisted,
+        });
+        cx.notify();
     }
 
     /// Shows the engine's answer for the file at `step`.
@@ -564,6 +666,27 @@ impl Scrubber {
             }
         }
 
+        // The trace's listing of a directory stands when the engine could
+        // not look: with the engine's reason under it, unless the look
+        // was stopped or the run does not replay, which the viewer says
+        // elsewhere.
+        if let Err(e) = &result
+            && let Some(Fetched::Directory {
+                step: listed,
+                source: Source::Trace,
+                unlisted,
+                ..
+            }) = &mut viewer.shown
+            && *listed == step
+        {
+            let says_elsewhere = matches!(e, EngineError::Cancelled) || goes_another_way(e);
+            if !says_elsewhere {
+                *unlisted = Some(explain(e));
+            }
+            cx.notify();
+            return;
+        }
+
         // Colors start over with the new contents; only text in a known
         // language has any.
         viewer.highlighter = Highlighter::new(None);
@@ -574,12 +697,14 @@ impl Scrubber {
                 Fetched::Contents { step, view }
             }
             Ok(FileAtStep::Missing) => Fetched::Missing { step },
-            // A directory the trace has no file under: the engine found
-            // the directory, and the listing is empty at every step.
+
+            // A directory nothing listed: the trace has no file under it.
             Ok(FileAtStep::Directory) => Fetched::Directory {
                 step,
-                files: Vec::new(),
+                entries: Vec::new(),
+                source: Source::Trace,
                 events: 0,
+                unlisted: None,
             },
             Err(e) if goes_another_way(&e) => Fetched::Unreadable {
                 step,
@@ -653,9 +778,15 @@ impl Scrubber {
 
         // The path and what the viewer knows about the file.
         let status = match (&viewer.shown, viewer.unavailable) {
-            (Some(Fetched::Directory { step, files, .. }), _) => {
-                describe_listing(files.len(), *step)
-            }
+            (
+                Some(Fetched::Directory {
+                    step,
+                    entries,
+                    source,
+                    ..
+                }),
+                _,
+            ) => describe_listing(entries.len(), *source, *step),
             (_, Some(_)) => "not available for this run".to_string(),
             (None, None) => format!("reading step {}\u{2026}", thousands(viewer.step)),
             (Some(Fetched::Contents { view, .. }), None) => describe_view(view),
@@ -703,6 +834,21 @@ impl Scrubber {
                     .text_color(rgb(theme::MUTED))
                     .child(status),
             );
+
+        // Why a directory's listing is the trace's alone, when the engine
+        // was asked for the VM's and could not give it.
+        let heading = match &viewer.shown {
+            Some(Fetched::Directory {
+                unlisted: Some(why),
+                ..
+            }) => heading.child(
+                div()
+                    .text_size(px(size::TEXT_SMALL))
+                    .text_color(rgb(theme::MUTED))
+                    .child(format!("{UNLISTED}: {why}")),
+            ),
+            _ => heading,
+        };
 
         // A file opened from a directory's listing has the way back.
         let heading = match viewer.listed_in.clone() {
@@ -836,49 +982,88 @@ impl Scrubber {
                 .py(px(size::LIST_PAD_Y))
                 .into_any_element()
             }
-            (Some(Fetched::Directory { files, .. }), _, None) => {
+            (Some(Fetched::Directory { entries, .. }), _, None) => {
                 let step_width = self.step_column_width();
                 let comparing = self.session().other.is_some();
+
+                // The size column is as wide as the longest size, and
+                // absent from a listing with none, as the trace's is.
+                let size_chars = entries
+                    .iter()
+                    .filter_map(|entry| entry.size)
+                    .map(|size| thousands(size).len())
+                    .max();
+                let size_width = size_chars.map(|chars| px(chars as f32 * size::MONO_CHAR_WIDTH));
                 uniform_list(
-                    "viewer-files",
-                    files.len(),
+                    "viewer-entries",
+                    entries.len(),
                     cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
                         let registry = this.selecting.registry.clone();
                         let Some(viewer) = this.viewer.as_ref() else {
                             return Vec::new();
                         };
-                        let Some(files) = listed_files(viewer) else {
+                        let Some(entries) = listed_entries(viewer) else {
                             return Vec::new();
                         };
                         range
                             .filter_map(|i| {
-                                let file = files.get(i)?;
+                                let entry = entries.get(i)?;
 
                                 // A click on the step goes there; a click
-                                // anywhere else opens the file, or, while
-                                // two runs are open, compares it in both.
-                                // A drag or a double click selects its
-                                // path instead.
-                                let (path, pid) = (file.path.clone(), file.pid);
+                                // anywhere else opens the entry, or, while
+                                // two runs are open, compares a file in
+                                // both. A directory has no bytes to
+                                // compare, so its listing opens either
+                                // way. A drag or a double click selects
+                                // the path instead.
+                                let compares = comparing && entry.kind != ListedKind::Directory;
+                                let (path, pid) = (entry.path.clone(), entry.pid);
                                 let open = cx.listener(move |this, e: &ClickEvent, _, cx| {
                                     if !this.plain_click(e) {
                                         return;
                                     }
-                                    if comparing {
+                                    if compares {
                                         this.open_file_diff(path.clone(), cx);
                                     } else {
                                         this.open_listed_file(path.clone(), pid, cx);
                                     }
                                 });
-                                let label = if comparing {
-                                    format!("Compare {} in both runs", file.path)
+                                let label = if compares {
+                                    format!("Compare {} in both runs", entry.path)
                                 } else {
-                                    format!("Show {} at this step", file.path)
+                                    format!("Show {} at this step", entry.path)
                                 };
-                                let text = name_under(&viewer.path, &file.path).to_string();
+                                let text = entry.shown(&viewer.path);
                                 let part = selected
                                     .as_ref()
                                     .and_then(|r| part_of_line(r, i, text.len()));
+
+                                // The step the run last wrote the entry
+                                // at; blank for one the run did not write.
+                                let step = div()
+                                    .id(SharedString::from(format!("listed-step-{i}")))
+                                    .flex_none()
+                                    .w(step_width)
+                                    .flex()
+                                    .justify_end()
+                                    .text_color(rgb(theme::FAINT));
+                                let step = match entry.written {
+                                    Some(written) => step
+                                        .hover(|s| s.text_color(rgb(theme::AMBER)))
+                                        .on_click(seek_on_click(written, cx))
+                                        .tooltip(tooltip(LISTED_STEP_NOTE))
+                                        .child(thousands(written)),
+                                    None => step,
+                                };
+                                let size = size_width.map(|width| {
+                                    div()
+                                        .flex_none()
+                                        .w(width)
+                                        .flex()
+                                        .justify_end()
+                                        .text_color(rgb(theme::FAINT))
+                                        .children(entry.size.map(thousands))
+                                });
                                 Some(
                                     div()
                                         .id(i)
@@ -893,19 +1078,8 @@ impl Scrubber {
                                         .items_center()
                                         .gap(px(size::LIST_COLUMN_GAP))
                                         .px(px(size::PANEL_PAD_X))
-                                        .child(
-                                            div()
-                                                .id(SharedString::from(format!("listed-step-{i}")))
-                                                .flex_none()
-                                                .w(step_width)
-                                                .flex()
-                                                .justify_end()
-                                                .text_color(rgb(theme::FAINT))
-                                                .hover(|s| s.text_color(rgb(theme::AMBER)))
-                                                .on_click(seek_on_click(file.step, cx))
-                                                .tooltip(tooltip(LISTED_STEP_NOTE))
-                                                .child(thousands(file.step)),
-                                        )
+                                        .child(step)
+                                        .children(size)
                                         .child(
                                             div()
                                                 .flex_1()
@@ -1044,20 +1218,27 @@ fn language_of(path: &str, view: &View) -> Option<Language> {
 /// The message the viewer shows in place of a file's contents, and its
 /// color, or None while it shows contents.
 fn viewer_message(viewer: &FileViewer) -> Option<(String, u32)> {
-    // A directory's listing comes from the trace, whether or not the
-    // engine can read this run's files.
-    if let Some(Fetched::Directory { step, files, .. }) = &viewer.shown {
-        if !files.is_empty() {
+    // A directory's listing shows whether or not the engine can read this
+    // run's files: the trace has one. With no entry, a line says so.
+    if let Some(Fetched::Directory {
+        step,
+        entries,
+        source,
+        ..
+    }) = &viewer.shown
+    {
+        if !entries.is_empty() {
             return None;
         }
-        return Some((
-            format!(
-                "{} is a directory. The run had written no file under it by step {}; the list shows the files the run wrote.",
-                viewer.path,
-                thousands(*step)
+        let step = thousands(*step);
+        let empty = match source {
+            Source::Trace => format!(
+                "{} is a directory. The run had written no file under it by step {step}; the list shows the files the run wrote.",
+                viewer.path
             ),
-            theme::SOFT,
-        ));
+            Source::Vm(_) => format!("{} is an empty directory at step {step}.", viewer.path),
+        };
+        return Some((empty, theme::SOFT));
     }
     if let Some(reason) = viewer.unavailable {
         return Some((reason.to_string(), theme::SOFT));
@@ -1088,37 +1269,30 @@ fn viewer_message(viewer: &FileViewer) -> Option<(String, u32)> {
     })
 }
 
-/// The files of the listing the viewer shows, when it shows one with
-/// files in it.
-fn listed_files(viewer: &FileViewer) -> Option<&[WrittenFile]> {
+/// The entries of the listing the viewer shows, when it shows one with
+/// entries in it.
+fn listed_entries(viewer: &FileViewer) -> Option<&[Entry]> {
     match viewer.shown.as_ref()? {
-        Fetched::Directory { files, .. } if !files.is_empty() => Some(files),
+        Fetched::Directory { entries, .. } if !entries.is_empty() => Some(entries),
         _ => None,
     }
 }
 
-/// `path`, a file below directory `dir`, as the listing of `dir` names
-/// the file: by the names under the directory.
-fn name_under<'a>(dir: &str, path: &'a str) -> &'a str {
-    let dir = dir.trim_end_matches(PATH_SEPARATOR);
-    path.strip_prefix(dir)
-        .map_or(path, |rest| rest.trim_start_matches(PATH_SEPARATOR))
-}
-
-/// The status line for a directory with `files` files the run wrote
-/// under it by `step`.
-fn describe_listing(files: usize, step: u64) -> String {
-    match files {
-        0 => format!(
-            "directory \u{b7} no file written under it by step {}",
-            thousands(step)
-        ),
-        1 => "directory \u{b7} 1 file the run wrote".to_string(),
-        _ => format!(
-            "directory \u{b7} {} files the run wrote",
-            thousands(files as u64)
-        ),
-    }
+/// The status line for a directory's listing of `entries` entries as of
+/// `step`: what `source` lets the listing count.
+fn describe_listing(entries: usize, source: Source, step: u64) -> String {
+    let count = thousands(entries as u64);
+    let step = thousands(step);
+    let said = match (source, entries) {
+        (Source::Trace, 0) => format!("no file written under it by step {step}"),
+        (Source::Trace, 1) => "1 file the run wrote".to_string(),
+        (Source::Trace, _) => format!("{count} files the run wrote"),
+        (Source::Vm(ListedAll::No), _) => format!("{count} entries, the nearest of more"),
+        (Source::Vm(ListedAll::Yes), 0) => format!("empty at step {step}"),
+        (Source::Vm(ListedAll::Yes), 1) => "1 entry".to_string(),
+        (Source::Vm(ListedAll::Yes), _) => format!("{count} entries"),
+    };
+    format!("directory \u{b7} {said}")
 }
 
 /// The status line for a file's contents: its kind, its size, and a note
@@ -1162,30 +1336,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_listed_file_goes_by_its_names_under_the_directory() {
-        // A file two directories down, and the same directory named with
-        // a trailing slash: the listing shows the path below the
-        // directory. A path outside the directory is shown whole.
-        assert_eq!(name_under("/out", "/out/bin/shuffle"), "bin/shuffle");
-        assert_eq!(name_under("/out/", "/out/bin/shuffle"), "bin/shuffle");
-        assert_eq!(name_under("/out", "/build/main.o"), "/build/main.o");
-    }
-
-    #[test]
-    fn a_listing_says_how_many_files_the_run_wrote() {
-        // None, one and many files: the status counts them, and with none
-        // names the step the listing is as of.
+    fn a_listing_says_what_it_counts() {
+        // The trace's listing counts the files the run wrote, and with
+        // none names the step. The VM's counts entries, says when the
+        // directory is empty, and says when the VM cut the listing.
+        let whole = Source::Vm(ListedAll::Yes);
         assert_eq!(
-            describe_listing(0, 68_381),
+            describe_listing(0, Source::Trace, 68_381),
             "directory \u{b7} no file written under it by step 68,381"
         );
         assert_eq!(
-            describe_listing(1, 5),
+            describe_listing(1, Source::Trace, 5),
             "directory \u{b7} 1 file the run wrote"
         );
         assert_eq!(
-            describe_listing(1_200, 5),
+            describe_listing(1_200, Source::Trace, 5),
             "directory \u{b7} 1,200 files the run wrote"
+        );
+        assert_eq!(
+            describe_listing(0, whole, 68_381),
+            "directory \u{b7} empty at step 68,381"
+        );
+        assert_eq!(describe_listing(1, whole, 5), "directory \u{b7} 1 entry");
+        assert_eq!(describe_listing(4, whole, 5), "directory \u{b7} 4 entries");
+        assert_eq!(
+            describe_listing(9_100, Source::Vm(ListedAll::No), 5),
+            "directory \u{b7} 9,100 entries, the nearest of more"
         );
     }
 }

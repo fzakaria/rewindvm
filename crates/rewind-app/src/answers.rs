@@ -89,6 +89,12 @@ impl FileKey {
     }
 }
 
+/// What a directory's listing is kept by: the run, the directory, the
+/// process whose view of paths it was listed with, and the step. A
+/// directory gains and loses entries with no event in the trace, so no
+/// two steps share a listing.
+pub type DirKey = (PathBuf, String, u32, u64);
+
 /// What a thread's place in its code is kept by: the run, the thread
 /// asked for, the step, and the access in it looked just after, if any.
 pub type PlaceKey = (

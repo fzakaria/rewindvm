@@ -48,6 +48,9 @@ pub use event::{DecodeError, Event, EventKind, HEADER_LEN, RECORD_MAX, signal_na
 /// Init's marks, which every trace holds, for readers that do not depend
 /// on the init themselves.
 pub use rewind_init::Mark;
+/// A directory's listing as init answers it and `rewind files --json`
+/// prints it, for the same readers.
+pub use rewind_init::{Listed, ListedAll, ListedKind, Listing};
 
 /// The words, before the step, that a replay making other records than its
 /// run made is reported with: the engine writes them and the desktop app
