@@ -46,6 +46,7 @@ LINK_MAP = {
     "docs/tutorial-properties.md": "tutorials/properties.html",
     "docs/tutorial-points.md": "tutorials/points.html",
     "docs/tutorial-repro.md": "tutorials/repro.html",
+    "docs/tutorial-derivations.md": "tutorials/derivations.html",
     "docs/tutorial-advanced.md": "tutorials/advanced.html",
     "docs/case-studies/nix-gc-closure-sigpipe.md": "case-studies/nix-gc-closure-sigpipe.html",
     "docs/case-studies/nix-schema-migration-hang.md": "case-studies/nix-schema-migration-hang.html",
@@ -340,6 +341,19 @@ PAGES = [
             ("who-wrote-it", 2, BLAME_FIGURE),
             ("directory-order", 4, DIRENTS_FIGURE),
         ],
+        next=(
+            "tutorials/derivations.html",
+            "Tutorial &middot; Derivations",
+            "Deterministic derivations",
+            "Any derivation built inside the VM by Nix, with the machine in its hash.",
+        ),
+    ),
+    dict(
+        source="docs/tutorial-derivations.md",
+        eyebrow="Tutorial &middot; Derivations",
+        description="Deterministic derivations with Rewind VM: inRewind makes Nix build any derivation inside the VM with the clock, the seed and the schedule in the derivation's hash, so a rebuild makes the same bytes on every machine; or hand Nix's builds for a platform to rewind build.",
+        toc="Steps",
+        figures=[],
         next=(
             "tutorials/advanced.html",
             "Tutorial &middot; Advanced",

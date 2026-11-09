@@ -12,10 +12,13 @@
 5. [Tutorial: reproducible builds](tutorial-repro.md): build under several
    seeds and directory orders, see what differs, and find the program that
    wrote it.
-6. [Tutorial: advanced features](tutorial-advanced.md): the rest of the tools,
+6. [Tutorial: deterministic derivations](tutorial-derivations.md): have Nix
+   build any derivation inside the VM, with the clock, the seed and the
+   schedule in the derivation's hash, by a function or as a platform.
+7. [Tutorial: advanced features](tutorial-advanced.md): the rest of the tools,
    recipe by recipe.
-7. [Time inside the VM](pmu.md): exit time and counter time, and the one
+8. [Time inside the VM](pmu.md): exit time and counter time, and the one
    setting AMD machines need.
-8. [Design](design.md): how the machine is made deterministic, what a run is
+9. [Design](design.md): how the machine is made deterministic, what a run is
    on disk, keyframes and the page store, exploring interleavings, limits,
    and the product.

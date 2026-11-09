@@ -114,6 +114,10 @@ work done inside it; [Time inside the VM](docs/pmu.md) explains why.
 ## Use it
 
 ```console
+# have Nix itself build a derivation in the VM, with the clock, the seed and
+# the schedule in its hash (docs/tutorial-derivations.md)
+$ nix build --impure --expr 'with builtins.getFlake "github:fzakaria/rewindvm"; lib.x86_64-linux.inRewind { epoch = 1790985600; } packages.x86_64-linux.stamp'
+
 # build a derivation in the VM; the output is checked against the host's
 $ rewind nix nixpkgs#hello
 

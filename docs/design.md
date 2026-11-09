@@ -720,6 +720,20 @@ working directory, user, and how the image becomes the root.
   that differs mostly says the package is not bit-reproducible; one that
   matches says the VM built the same bytes. GNU hello and pkgconf built in
   the guest match cache.nixos.org's builds.
+- **A build Nix describes** (`rewind build`). Nix's `external-builders`
+  setting hands a program a JSON description of one build: the builder, its
+  arguments, the environment nix-daemon has already worked out, the input
+  closure, and the files it wrote into the build directory. The command
+  makes the same job of it as of a derivation, with the description's
+  closure as the image and its files as the job's, and calls no `nix`
+  itself, so it also runs inside Nix's sandbox, where a derivation's
+  builder can write the description of its own build (`inRewind`, in the
+  flake's `lib`). The machine is the derivation's `rewindFlags` attribute
+  and nothing given outside it, so the derivation's hash covers it. When
+  the builder exits 0, each output is read out of a fork of the run at its
+  last step, as `rewind cat --archive` reads a tree, and written to the
+  store. The [derivations tutorial](tutorial-derivations.md) builds with
+  both routes.
 
 The guest's wall clock starts at midnight UTC of the day the run was made.
 Configure scripts compare the clock with the timestamps in source tarballs, so

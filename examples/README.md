@@ -168,3 +168,6 @@ writes them into the derivation.
 $ make -C stamp && ./stamp/stamp            # plain, on the host
 $ nix build github:fzakaria/rewindvm#stamp  # as a derivation
 ```
+
+The [deterministic derivations tutorial](../docs/tutorial-derivations.md)
+builds it the same on every machine.
