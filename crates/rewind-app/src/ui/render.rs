@@ -1190,7 +1190,7 @@ impl Scrubber {
     }
 
     /// The width of the step column: the run's longest step number.
-    fn step_column_width(&self) -> Pixels {
+    pub(super) fn step_column_width(&self) -> Pixels {
         let digits = thousands(self.session().run.timeline.total).len();
         px(digits as f32 * size::MONO_CHAR_WIDTH)
     }
@@ -1452,10 +1452,12 @@ impl Scrubber {
 
                         // A click on the step goes there; a click anywhere
                         // else opens the file in the viewer, or, while two
-                        // runs are open, compares it in both. A drag or a
-                        // double click selects its path instead.
+                        // runs are open, compares it in both. A directory
+                        // has no bytes to compare, so the viewer lists its
+                        // files either way. A drag or a double click
+                        // selects the path instead.
                         let (path, pid) = (file.path.clone(), file.pid);
-                        let comparing = this.session().other.is_some();
+                        let comparing = this.session().other.is_some() && !t.has_files_under(&path);
                         let open = cx.listener(move |this, e: &ClickEvent, _, cx| {
                             if !this.plain_click(e) {
                                 return;

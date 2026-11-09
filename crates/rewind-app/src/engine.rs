@@ -423,6 +423,8 @@ pub enum FileAtStep {
     },
     /// The file did not exist at the step.
     Missing,
+    /// The path named a directory at the step.
+    Directory,
 }
 
 /// What `rewind diff --outputs --json` prints: the files two runs' jobs
@@ -716,8 +718,10 @@ impl Engine for CliEngine {
         cancel: &Cancel,
         progress: &mut dyn FnMut(&str),
     ) -> EngineResult<FileAtStep> {
-        // `rewind cat` exits 3 for a file that did not exist at the step.
+        // `rewind cat` exits 3 for a file that did not exist at the step,
+        // and 4 for a path that named a directory.
         const MISSING_STATUS: i32 = 3;
+        const DIRECTORY_STATUS: i32 = 4;
 
         // rewind cat <run> <step> <path> [--pid P]
         let mut args: Vec<OsString> = vec![
@@ -809,6 +813,7 @@ impl Engine for CliEngine {
                 complete: FetchedAll::Yes,
             }),
             Some(MISSING_STATUS) => Ok(FileAtStep::Missing),
+            Some(DIRECTORY_STATUS) => Ok(FileAtStep::Directory),
             _ => Err(refused(command, &stderr, &status)),
         }
     }
@@ -1890,8 +1895,8 @@ mod tests {
     #[test]
     fn cat_returns_the_file_or_says_it_was_missing() {
         // The stand-in prints a file and exits 0, exits 3 for a file that
-        // did not exist, or exits 1 with a reason; the arguments name the
-        // step, the process and the path.
+        // did not exist, exits 4 for a directory, or exits 1 with a reason;
+        // the arguments name the step, the process and the path.
         let dir = temp_dir("cat");
         let run = dir.join("run");
         let engine = fake_engine(&dir, "CFLAGS = -O1\\n", "", 0);
@@ -1929,6 +1934,12 @@ mod tests {
         })
         .unwrap();
         assert_eq!(read, FileAtStep::Missing);
+
+        // Exit status 4 is a path that named a directory.
+        let engine = fake_engine(&dir, "", "rewind: /out is a directory at step 10\\n", 4);
+        let read = retrying(|| engine.cat(&run, 10, None, "/out", &Cancel::default(), &mut |_| {}))
+            .unwrap();
+        assert_eq!(read, FileAtStep::Directory);
 
         let engine = fake_engine(&dir, "", "rewind: no keyframes for this run\\n", 1);
         let err = retrying(|| engine.cat(&run, 10, None, "/x", &Cancel::default(), &mut |_| {}))

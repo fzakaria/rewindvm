@@ -7,7 +7,8 @@
 //! a short list, so dragging the playhead across a trace of any size never
 //! decodes or replays the trace again.
 
-use std::collections::HashMap;
+use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
 
 use rewind_trace::ending::ExitStatus;
 use rewind_trace::sdk::{SdkMark, TestResult};
@@ -195,6 +196,28 @@ impl FileEvent {
         is_core_path(&self.path)
     }
 }
+
+/// A file a directory holds at a step, as far as the trace knows: one a
+/// process opened for writing, or renamed there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WrittenFile {
+    pub path: String,
+    /// The step the file was last opened for writing at, or renamed to
+    /// this path at.
+    pub step: u64,
+    /// The process that did so, whose view of paths the engine reads the
+    /// file with.
+    pub pid: u32,
+}
+
+/// Whether `path` is below directory `dir`, which has no trailing slash.
+fn below(path: &str, dir: &str) -> bool {
+    path.strip_prefix(dir)
+        .is_some_and(|rest| rest.starts_with(PATH_SEPARATOR))
+}
+
+/// What separates the names of a path.
+const PATH_SEPARATOR: char = '/';
 
 /// Whether a path names a core dump: `core` or `core.<pid>`.
 pub fn is_core_path(path: &str) -> bool {
@@ -497,6 +520,102 @@ impl Timeline {
     /// How many file events happened by `step`.
     pub fn file_count_at(&self, step: u64) -> usize {
         self.files.partition_point(|f| f.step <= step)
+    }
+
+    /// Whether the trace has a file below `dir` at any step, which makes
+    /// `dir` a directory of the run.
+    pub fn has_files_under(&self, dir: &str) -> bool {
+        let dir = dir.trim_end_matches(PATH_SEPARATOR);
+        self.files
+            .iter()
+            .any(|f| f.op != FileOp::Output && below(&f.path, dir))
+    }
+
+    /// Whether the trace has no event that writes `path` or renames a
+    /// file to it. Such a path may name a directory, which appears and
+    /// goes with no event to say so.
+    pub fn never_written(&self, path: &str) -> bool {
+        !self
+            .files
+            .iter()
+            .any(|f| f.path == path && matches!(f.op, FileOp::Write | FileOp::Rename))
+    }
+
+    /// The files below `dir` at `step`, by path: each file a process
+    /// opened for writing or renamed there by then and no process removed
+    /// or renamed away since. A renamed directory takes its files along.
+    /// The trace has no event for a symbolic link, an empty directory or
+    /// a file of the input image, so the listing has none of them.
+    pub fn files_under(&self, dir: &str, step: u64) -> Vec<WrittenFile> {
+        let dir = dir.trim_end_matches(PATH_SEPARATOR);
+
+        // Every file the trace knows at the step, with the step and
+        // process that last wrote or named it. Files outside `dir` are
+        // kept too: a rename may bring their directory under it.
+        let mut live: HashMap<Cow<str>, (u64, u32)> = HashMap::new();
+        for file in &self.files[..self.file_count_at(step)] {
+            let at = (file.step, file.pid);
+            match file.op {
+                FileOp::Write => {
+                    live.insert(Cow::Borrowed(&file.path), at);
+                }
+                FileOp::Unlink => {
+                    live.remove(file.path.as_str());
+                }
+                FileOp::Rename => {
+                    let Some(from) = file.from.as_deref() else {
+                        continue;
+                    };
+
+                    // The files of a renamed directory go to the same
+                    // places under its new name.
+                    let moved: Vec<Cow<str>> = live
+                        .keys()
+                        .filter(|path| below(path, from))
+                        .cloned()
+                        .collect();
+                    let renamed_directory = !moved.is_empty();
+                    for path in moved {
+                        live.remove(&path);
+                        let renamed = format!("{}{}", file.path, &path[from.len()..]);
+                        live.insert(Cow::Owned(renamed), at);
+                    }
+                    if renamed_directory {
+                        continue;
+                    }
+
+                    // Anything else renamed is taken for a file.
+                    live.remove(from);
+                    live.insert(Cow::Borrowed(&file.path), at);
+                }
+                FileOp::Output => {}
+            }
+        }
+
+        // A renamed directory with no file in it yet was taken for a
+        // file; a file written under it since shows it is a directory.
+        let mut directories: HashSet<&str> = HashSet::new();
+        for path in live.keys() {
+            let mut rest: &str = path;
+            while let Some((parent, _)) = rest.rsplit_once(PATH_SEPARATOR) {
+                if !directories.insert(parent) {
+                    break;
+                }
+                rest = parent;
+            }
+        }
+
+        let mut under: Vec<WrittenFile> = live
+            .iter()
+            .filter(|(path, _)| below(path, dir) && !directories.contains(path.as_ref()))
+            .map(|(path, &(step, pid))| WrittenFile {
+                path: path.to_string(),
+                step,
+                pid,
+            })
+            .collect();
+        under.sort_by(|a, b| a.path.cmp(&b.path));
+        under
     }
 
     /// The process tree rows alive at `step`, in tree order.
@@ -1729,6 +1848,112 @@ pub(crate) mod tests {
             )]
         );
         assert_eq!(t.files[0].from.as_deref(), Some("ab12"));
+    }
+
+    /// A timeline of file events alone: opens for writing, unlinks and
+    /// renames by pid 7, at the steps given.
+    fn files_timeline(events: Vec<(u64, EventKind)>) -> Timeline {
+        const WRITER: u32 = 7;
+        let events = events
+            .into_iter()
+            .map(|(step, kind)| ev(step, WRITER, WRITER, kind))
+            .collect();
+        Timeline::new(
+            Trace {
+                events,
+                ..Default::default()
+            },
+            None,
+            None,
+        )
+    }
+
+    fn open(path: &str) -> EventKind {
+        EventKind::Open {
+            path: path.into(),
+            flags: 0,
+        }
+    }
+
+    #[test]
+    fn a_directory_lists_the_files_written_under_it_by_the_step() {
+        // Files written under /out and beside it, one of them written
+        // twice: the listing at a step has the files under /out written by
+        // then, by path, each with the step of its last write, and nothing
+        // from /out-dev, whose name only starts the same.
+        let t = files_timeline(vec![
+            (10, open("/out/bin/shuffle")),
+            (20, open("/out-dev/include/shuffle.h")),
+            (30, open("/out/README")),
+            (40, open("/build/main.o")),
+            (50, open("/out/bin/shuffle")),
+        ]);
+        let listed = |step: u64| -> Vec<(String, u64)> {
+            t.files_under("/out", step)
+                .into_iter()
+                .map(|f| (f.path, f.step))
+                .collect()
+        };
+        assert_eq!(listed(9), vec![]);
+        assert_eq!(listed(10), vec![("/out/bin/shuffle".to_string(), 10)]);
+        assert_eq!(
+            listed(60),
+            vec![
+                ("/out/README".to_string(), 30),
+                ("/out/bin/shuffle".to_string(), 50)
+            ]
+        );
+        assert_eq!(t.files_under("/out/", 60), t.files_under("/out", 60));
+        assert!(t.has_files_under("/out"));
+        assert!(t.has_files_under("/out/bin"));
+        assert!(!t.has_files_under("/out/bin/shuffle"));
+        assert!(!t.has_files_under("/nix"));
+
+        // No event writes a directory; each file has one.
+        assert!(t.never_written("/out"));
+        assert!(!t.never_written("/out/README"));
+    }
+
+    #[test]
+    fn a_listing_follows_unlinks_and_renames() {
+        // A temporary file removed, a file renamed into place, a whole
+        // directory renamed into the listed one, and an empty directory
+        // renamed and then written under: a removed file leaves the
+        // listing, a renamed one is listed under its new name from the
+        // step of the rename, and so is each file of a renamed directory.
+        // No directory is listed as a file.
+        let rename = |from: &str, to: &str| EventKind::Rename {
+            from: from.into(),
+            to: to.into(),
+        };
+        let t = files_timeline(vec![
+            (10, open("/out/bin/stYiXh1J")),
+            (11, open("/out/bin/shuffle.tmp")),
+            (12, open("/staging/man/shuffle.1")),
+            (
+                20,
+                EventKind::Unlink {
+                    path: "/out/bin/stYiXh1J".into(),
+                },
+            ),
+            (21, rename("/out/bin/shuffle.tmp", "/out/bin/shuffle")),
+            (22, rename("/staging", "/out/share")),
+            (23, rename("/empty", "/out/lib")),
+            (24, open("/out/lib/libshuffle.so")),
+        ]);
+        let listed: Vec<(String, u64)> = t
+            .files_under("/out", 30)
+            .into_iter()
+            .map(|f| (f.path, f.step))
+            .collect();
+        assert_eq!(
+            listed,
+            vec![
+                ("/out/bin/shuffle".to_string(), 21),
+                ("/out/lib/libshuffle.so".to_string(), 24),
+                ("/out/share/man/shuffle.1".to_string(), 22)
+            ]
+        );
     }
 
     #[test]

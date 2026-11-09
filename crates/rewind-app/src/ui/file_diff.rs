@@ -86,6 +86,9 @@ const COPIES_STOPPED: &str = "Stopped before both copies were read. Move the pla
 const OUTPUTS_STOPPED: &str =
     "Stopped before the files were read. Click Files that differ to read them.";
 
+/// What the view says of a copy whose path named a directory.
+const IS_A_DIRECTORY: &str = "The path names a directory at this step, which has no bytes to compare. Click the directory in the Files panel to list its files.";
+
 /// The names a replay's line goes by in a view of two runs.
 const THIS_RUN: &str = "This run";
 const OTHER_RUN: &str = "The other run";
@@ -539,6 +542,9 @@ impl Scrubber {
             return;
         }
         let read = match result {
+            // A directory has no bytes to compare, and its answer is not
+            // kept: a directory appears with no event in the trace.
+            Ok(FileAtStep::Directory) => Read::Failed(IS_A_DIRECTORY.to_string()),
             Ok(answer) => {
                 self.file_answers.insert(key, answer.clone());
                 Read::Answered(answer)
@@ -565,13 +571,21 @@ impl Scrubber {
                     Some(Some((bytes.clone(), *complete)))
                 }
                 Read::Answered(FileAtStep::Missing) => Some(None),
-                Read::Waiting | Read::Failed(_) | Read::Stopped => None,
+                Read::Answered(FileAtStep::Directory)
+                | Read::Waiting
+                | Read::Failed(_)
+                | Read::Stopped => None,
             }
         };
         let (Some(here), Some(there)) = (copy(&panel.copies.0), copy(&panel.copies.1)) else {
             // A copy that could not be read, or whose reading was stopped,
             // ends the wait: its reason shows.
-            let ended = |read: &Read| matches!(read, Read::Failed(_) | Read::Stopped);
+            let ended = |read: &Read| {
+                matches!(
+                    read,
+                    Read::Failed(_) | Read::Stopped | Read::Answered(FileAtStep::Directory)
+                )
+            };
             if ended(&panel.copies.0) || ended(&panel.copies.1) {
                 panel.loading = false;
             }
