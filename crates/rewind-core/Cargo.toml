@@ -31,6 +31,8 @@ sha2 = "0.10"
 # .drv files as Nix writes them, and the .attrs.json and .attrs.sh a build
 # with structured attributes reads.
 nix-derivation = "0.6"
+# NARs of file trees read out of a run.
+nix-archive = "0.6"
 # Binary caches' .narinfo files, whose NarHash a run's outputs are compared
 # with.
 nix-narinfo = "0.4"

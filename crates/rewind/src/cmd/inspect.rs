@@ -5,8 +5,9 @@
 use std::process::ExitCode;
 
 use anyhow::{Result, bail};
-use rewind_core::inspect::Inspection;
+use rewind_core::inspect::{Inspection, Sent};
 use rewind_core::threads::{OnTheCpu, Slice};
+use rewind_core::tree::{Nar, Tar, UNNAMED_ROOT};
 use rewind_core::{Home, Run};
 use rewind_init::{Listed, ListedAll, ListedKind, Listing};
 
@@ -28,6 +29,31 @@ pub(crate) struct CatArgs {
     /// By default, and once it has exited, the job's.
     #[arg(long)]
     pub(crate) pid: Option<u32>,
+    /// Write the path whole as an archive on standard output, in place
+    /// of a file's bytes: the file, the link or the directory with
+    /// everything below it, however deep.
+    ///
+    /// A tar holds the tree under the path's last name, as `tar -c -C
+    /// /nix/store name` would, each entry with the permissions, the
+    /// numeric owner and group and the modification time the VM held, so
+    /// `tar -x` puts the tree back. A nar is Nix's archive of the tree:
+    /// names, contents, executable bits and links only, and the bytes
+    /// whose SHA-256 is a store path's NAR hash. Either is the same bytes
+    /// each time, on any machine. Links are written, not followed, a
+    /// directory of /proc or /sys below the path is written empty, as
+    /// `rewind files` lists one, and a device, a socket or a pipe is left
+    /// out of a tar and refused by a nar.
+    #[arg(long, value_enum, value_name = "FORMAT")]
+    pub(crate) archive: Option<ArchiveFormat>,
+}
+
+/// The archives `rewind cat --archive` writes.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ArchiveFormat {
+    /// A GNU tar, with permissions, owners and times.
+    Tar,
+    /// A Nix archive, with executable bits only.
+    Nar,
 }
 
 pub(crate) fn cat(home: &Home, args: CatArgs) -> Result<ExitCode> {
@@ -36,10 +62,14 @@ pub(crate) fn cat(home: &Home, args: CatArgs) -> Result<ExitCode> {
         step,
         path,
         pid,
+        archive,
     } = args;
     let run = Run::find(home, &run)?;
     let step = run.check_step(step)?;
     warn_of_machine(&run, step);
+    if let Some(format) = archive {
+        return cat_archive(home, &run, step, pid, &path, format);
+    }
     match rewind_core::inspect::cat(home, &run, step, pid, &path)? {
         Inspection::Contents(bytes) => {
             use std::io::Write;
@@ -52,12 +82,91 @@ pub(crate) fn cat(home: &Home, args: CatArgs) -> Result<ExitCode> {
         }
         Inspection::Failed(message) if names_a_directory(&message) => {
             eprintln!(
-                "{} {path} is a directory at step {step}; `rewind files` lists it",
+                "{} {path} is a directory at step {step}; `rewind files` lists it, and \
+                 --archive writes it whole",
                 crate::color::stderr().prefix()
             );
             Ok(ExitCode::from(CAT_DIRECTORY))
         }
         Inspection::Failed(message) => bail!("reading {path} at step {step}: {message}"),
+    }
+}
+
+/// `rewind cat --archive`: the tree at `path` on standard output as
+/// `format` says, written as the VM sends it.
+fn cat_archive(
+    home: &Home,
+    run: &Run,
+    step: u64,
+    pid: Option<u32>,
+    path: &str,
+    format: ArchiveFormat,
+) -> Result<ExitCode> {
+    use rewind_core::inspect::tree;
+
+    let paint = crate::color::stderr();
+    let out = std::io::BufWriter::new(std::io::stdout().lock());
+
+    // Each format's archive, ended only when the VM sent a whole tree: a
+    // tar cut short has no end mark, and tar says so when it unpacks one.
+    let sent = match format {
+        ArchiveFormat::Tar => {
+            let mut tar = Tar::new(out, root_name(path).as_bytes());
+            let sent = tree(home, run, step, pid, path, &mut tar)?;
+            if sent == Sent::Whole
+                && let Some(left_out) = tar.finish()?
+            {
+                eprintln!(
+                    "{} left out {} that tar cannot hold, a device, a socket or a pipe: {}",
+                    paint.prefix(),
+                    entries(left_out.count),
+                    std::path::Path::new(path)
+                        .join(String::from_utf8_lossy(&left_out.first).as_ref())
+                        .display()
+                );
+            }
+            sent
+        }
+        ArchiveFormat::Nar => {
+            let mut nar = Nar::new(out)?;
+            let sent = tree(home, run, step, pid, path, &mut nar)?;
+            if sent == Sent::Whole {
+                nar.finish()?;
+            }
+            sent
+        }
+    };
+
+    match sent {
+        Sent::Whole => Ok(ExitCode::SUCCESS),
+        Sent::NotFound(message) => {
+            eprintln!("{} {message}", paint.prefix());
+            Ok(ExitCode::from(CAT_NOT_FOUND))
+        }
+        Sent::Failed(message) if message.starts_with(UNKNOWN_REQUEST) => bail!(
+            "run {} was recorded with a guest from before `rewind cat --archive`; record it \
+             again to archive its files",
+            run.manifest.id
+        ),
+        Sent::Failed(message) => bail!("archiving {path} at step {step}: {message}"),
+    }
+}
+
+/// The name a tar gives the tree at `path`: the path's last name, or
+/// UNNAMED_ROOT for a path that ends in none, as `/` and `..` do.
+fn root_name(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .map_or(UNNAMED_ROOT.to_string(), |name| {
+            name.to_string_lossy().into_owned()
+        })
+}
+
+/// A count of entries, in words.
+fn entries(count: usize) -> String {
+    match count {
+        1 => "1 entry".to_string(),
+        n => format!("{n} entries"),
     }
 }
 
@@ -589,5 +698,19 @@ mod tests {
             "dr-xr-xr-x           0  share"
         );
         assert_eq!(mode_letters(ListedKind::File, 0o640), "-rw-r-----");
+    }
+
+    #[test]
+    fn a_tar_names_its_tree_by_the_path_s_last_name() {
+        // An output's tar unpacks to the output's name, a file's to the
+        // file's, and a path with no last name, as the root has none, to
+        // the directory it is unpacked in.
+        assert_eq!(root_name("/nix/store/3ynx-shuffle"), "3ynx-shuffle");
+        assert_eq!(root_name("/out/"), "out");
+        assert_eq!(root_name("notes.txt"), "notes.txt");
+        assert_eq!(root_name("/"), UNNAMED_ROOT);
+        assert_eq!(root_name(".."), UNNAMED_ROOT);
+        assert_eq!(entries(1), "1 entry");
+        assert_eq!(entries(3), "3 entries");
     }
 }

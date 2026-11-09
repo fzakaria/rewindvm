@@ -226,7 +226,12 @@ the root and working directory of the process named in the request. For `cat`
 it writes the file through `/dev/rewind-stdout` between two marks. For `files`
 it walks the directory, nearest entries first and at most 10,000 of them, and
 writes a line of JSON for each; it lists a directory of `/proc` or `/sys`
-below the one asked for without reading it. For `shell`
+below the one asked for without reading it. For `cat --archive` it walks the
+path whole, each directory's entries by name and all of one entry's before the
+next, staying out of `/proc` and `/sys` as a listing does, and writes each
+entry with its permissions, owner and time, then a file's bytes; `rewind`
+writes the tar or the NAR from those as they arrive, so the archive holds
+nothing of the machine that asked. For `shell`
 it opens a pty, starts the shell that process's environment names (for a Nix
 build, the builder's bash with stdenv's PATH) with that environment, and
 relays the pty to `/dev/rewind-console`. Reads of that device return input

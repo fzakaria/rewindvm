@@ -33,6 +33,7 @@ pub mod source_cache;
 pub mod source_lists;
 pub mod state;
 pub mod threads;
+pub mod tree;
 
 pub use home::{Guest, Home};
 

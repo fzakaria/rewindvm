@@ -1450,14 +1450,16 @@ in
 
   # checks.inspect: looking inside a recorded run at a step. A file read
   # before and after it is written, a shell that reads it, a directory
-  # listed, and gdb stopping at a breakpoint in the VM's kernel. Boots the
-  # VM, so it needs /dev/kvm.
+  # listed and archived, and gdb stopping at a breakpoint in the VM's
+  # kernel. Boots the VM, so it needs /dev/kvm.
   inspect =
     pkgs.runCommand "rewind-inspect"
       {
+        # nix for nix-hash, which hashes a tree as a NAR with no store.
         nativeBuildInputs = [
           rewind
           gdb
+          pkgs.nix
         ];
         requiredSystemFeatures = [ "kvm" ];
       }
@@ -1489,11 +1491,13 @@ in
         # path, with a link's target and an empty directory. A file is not
         # a directory to list, a directory is not a file to print, and a
         # directory nothing has is missing.
-        rewind run -q --name tree --root ${busyboxRoot} -- sh -c '
+        rewind run -q --epoch 1790985600 --name tree --root ${busyboxRoot} -- sh -c '
           mkdir -p /out/bin /out/empty
           echo hi > /out/bin/tool
           /bin/busybox chmod 755 /out/bin/tool
-          /bin/busybox ln -s tool /out/bin/alias'
+          /bin/busybox ln -s tool /out/bin/alias
+          echo key > /out/secret
+          /bin/busybox chmod 600 /out/secret'
         tree_end=$(rewind ls --json | sed -n 's/.*"name":"tree",.*"steps":\([0-9]*\).*/\1/p')
         rewind files tree "$tree_end" /out | tee files
         cat > want <<'EOF'
@@ -1501,6 +1505,7 @@ in
         lrwxrwxrwx           0  bin/alias -> tool
         -rwxr-xr-x           3  bin/tool
         drwxr-xr-x           0  empty
+        -rw-------           4  secret
         EOF
         cmp files want
         rewind files tree "$tree_end" /out --json | tee files.json
@@ -1514,6 +1519,46 @@ in
         status=0
         rewind cat tree "$tree_end" /out || status=$?
         test "$status" = 4
+
+        # rewind cat --archive tar: the directory whole, under its own
+        # name, with the VM's permissions, owners and clock, which the
+        # run's epoch set to 2026-10-03. Unpacked, the tree has the file,
+        # the executable, the link and the empty directory, and a second
+        # archive of the same step is the same bytes.
+        rewind cat tree "$tree_end" /out --archive tar > out.tar
+        tar --utc --numeric-owner -tvf out.tar | tee listed
+        cat > want <<'EOF'
+        drwxr-xr-x 0/0               0 2026-10-03 00:00 out/
+        drwxr-xr-x 0/0               0 2026-10-03 00:00 out/bin/
+        lrwxrwxrwx 0/0               0 2026-10-03 00:00 out/bin/alias -> tool
+        -rwxr-xr-x 0/0               3 2026-10-03 00:00 out/bin/tool
+        drwxr-xr-x 0/0               0 2026-10-03 00:00 out/empty/
+        -rw------- 0/0               4 2026-10-03 00:00 out/secret
+        EOF
+        cmp listed want
+        mkdir unpacked
+        tar -x -C unpacked -f out.tar
+        test "$(cat unpacked/out/bin/tool)" = hi
+        test -x unpacked/out/bin/tool
+        test "$(readlink unpacked/out/bin/alias)" = tool
+        test -d unpacked/out/empty
+        test -z "$(ls -A unpacked/out/empty)"
+        test "$(stat -c %a unpacked/out/secret)" = 600
+        test "$(cat unpacked/out/secret)" = key
+        rewind cat tree "$tree_end" /out --archive tar | cmp - out.tar
+
+        # rewind cat --archive nar: the NAR Nix writes of the same tree,
+        # by its hash. A file alone is an archive of one name, and a path
+        # nothing has is missing.
+        rewind cat tree "$tree_end" /out --archive nar > out.nar
+        test "$(sha256sum < out.nar | cut -d' ' -f1)" = \
+          "$(nix-hash --type sha256 --base16 unpacked/out)"
+        rewind cat tree "$tree_end" /out/bin/tool --archive tar | tar -tf - | tee listed
+        test "$(cat listed)" = tool
+        status=0
+        rewind cat tree "$tree_end" /nope --archive tar > missing || status=$?
+        test "$status" = 3
+        test ! -s missing
 
         # rewind gdb: a breakpoint where every event is reported.
         rewind gdb w "$start" --listen 127.0.0.1:12345 2> serve &

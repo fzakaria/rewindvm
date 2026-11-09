@@ -158,7 +158,8 @@ enum Command {
     ///
     /// Rewind forks the run at the step and reads the file inside the VM, so
     /// this takes about as long as seeking there. Exits 3 when the file did
-    /// not exist then.
+    /// not exist then, and 4 when the path named a directory, which
+    /// `rewind files` lists and --archive writes whole, as a tar or a NAR.
     Cat(cmd::inspect::CatArgs),
     /// List a directory as it was at a step of a run.
     ///
@@ -515,6 +516,8 @@ mod tests {
         for line in [
             "rewind fork abc 5",
             "rewind cat abc 5 /etc/hosts",
+            "rewind cat abc 5 /nix/store/x-out --archive tar",
+            "rewind cat abc 5 /nix/store/x-out --archive nar",
             "rewind shell abc 5",
             "rewind gdb abc 5",
             "rewind where abc 5",
@@ -527,6 +530,7 @@ mod tests {
         ] {
             assert!(parses(line), "{line}");
         }
+        assert!(!parses("rewind cat abc 5 /nix/store/x-out --archive zip"));
         assert!(!parses("rewind ps abc --at 5"));
         assert!(!parses("rewind log abc --at 5"));
     }

@@ -15,8 +15,8 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Duration;
 
-use anyhow::{Result, bail};
-use rewind_init::{CONSOLE_FD, InspectRequest, InspectStatus, Mark};
+use anyhow::{Context, Result, bail};
+use rewind_init::{CONSOLE_FD, InspectRequest, InspectStatus, Mark, TreeReader, TreeSink};
 use rewind_trace::{Event, EventKind};
 use rewind_vmm::pv::{CONSOLE_HOLDS, GuestExit};
 use rewind_vmm::{Ignore, Input, Machine, Observer, Outcome, Stop};
@@ -131,6 +131,62 @@ pub fn list(home: &Home, run: &Run, step: u64, pid: Option<u32>, path: &str) -> 
         "the directory could be listed",
     )?;
     Ok(answer.into_inspection(status))
+}
+
+/// How an inspection that hands its answer on as it arrives ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Sent {
+    /// All of it was handed on.
+    Whole,
+    /// Nothing had the path at that step, with the VM's message.
+    NotFound(String),
+    /// Anything else that went wrong inside the VM, with its message.
+    Failed(String),
+}
+
+/// The file, link or directory `path` names at `step` and everything
+/// below it, as process `pid` would have seen the path, handed to `sink`
+/// entry by entry as the VM sends the tree (see
+/// [`rewind_init::TreeEntry`]), so a tree larger than memory passes
+/// through. Not found when nothing had the path, and failed, with the
+/// VM's message, when part of the tree could not be read or the run's
+/// guest is from before trees. An error when `sink` refuses part of the
+/// tree; the fork stops there.
+pub fn tree(
+    home: &Home,
+    run: &Run,
+    step: u64,
+    pid: Option<u32>,
+    path: &str,
+    sink: &mut dyn TreeSink,
+) -> Result<Sent> {
+    let (mut machine, step) = fork_at(home, run, step)?;
+    let path = path.to_string();
+    machine.request_inspection(&InspectRequest::Tree { pid, path }.args())?;
+
+    let mut answer = Answer {
+        tree: Some(TreeAnswer {
+            reader: TreeReader::default(),
+            sink,
+            refused: None,
+        }),
+        ..Answer::default()
+    };
+    let status = finish(&mut machine, step, &mut answer, "the tree could be read")?;
+    let message = String::from_utf8_lossy(&answer.stderr).trim().to_string();
+    match status {
+        InspectStatus::NotFound => return Ok(Sent::NotFound(message)),
+        InspectStatus::Failed => return Ok(Sent::Failed(message)),
+        InspectStatus::Done => {}
+    }
+
+    // The VM says the tree is sent: the reader must have all of it.
+    if let Some(tree) = &answer.tree {
+        tree.reader
+            .finish()
+            .context("the VM's answer is not a whole tree")?;
+    }
+    Ok(Sent::Whole)
 }
 
 /// Process `pid` at `step`, or when None the process that was running
@@ -318,12 +374,15 @@ fn fork_at(home: &Home, run: &Run, step: u64) -> Result<(Machine, u64)> {
 fn finish(
     machine: &mut Machine,
     step: u64,
-    answer: &mut Answer,
+    answer: &mut Answer<'_>,
     what: &str,
 ) -> Result<InspectStatus> {
     loop {
         let until = machine.step() + CHUNK_STEPS;
         let outcome = machine.run(Some(until), answer)?;
+        if let Some(refused) = answer.tree.as_mut().and_then(|tree| tree.refused.take()) {
+            return Err(refused).context("writing the tree");
+        }
         if let Some(status) = answer.status {
             return Ok(status);
         }
@@ -366,7 +425,7 @@ fn stopped(stop: Stop) -> &'static str {
 
 /// The inspection's records, picked out of everything else the fork does.
 #[derive(Default)]
-struct Answer {
+struct Answer<'a> {
     /// The inspecting process, once its begin mark arrives.
     pid: Option<u32>,
     stdout: Vec<u8>,
@@ -374,11 +433,34 @@ struct Answer {
     status: Option<InspectStatus>,
     /// Where a shell's output goes, as it arrives.
     console: Option<Console>,
+    /// Where a tree goes, as it arrives, in place of `stdout`.
+    tree: Option<TreeAnswer<'a>>,
     /// Set with the status, for the input to stop waiting.
     done: Rc<Cell<bool>>,
 }
 
-impl Answer {
+/// A tree being read out of the inspecting process's output and handed
+/// on.
+struct TreeAnswer<'a> {
+    reader: TreeReader,
+    sink: &'a mut dyn TreeSink,
+    /// Why the reader or the sink refused part of the tree; nothing more
+    /// is handed on after.
+    refused: Option<std::io::Error>,
+}
+
+impl TreeAnswer<'_> {
+    /// Hands on the next part of the tree, unless an earlier part was
+    /// refused.
+    fn feed(&mut self, bytes: &[u8]) {
+        if self.refused.is_some() {
+            return;
+        }
+        self.refused = self.reader.feed(bytes, self.sink).err();
+    }
+}
+
+impl Answer<'_> {
     fn into_inspection(self, status: InspectStatus) -> Inspection {
         let message = String::from_utf8_lossy(&self.stderr).trim().to_string();
         match status {
@@ -389,7 +471,15 @@ impl Answer {
     }
 }
 
-impl Observer for Answer {
+impl Observer for Answer<'_> {
+    /// A tree nothing more can be handed on of stops the fork, which
+    /// would otherwise send the rest of the tree to nobody.
+    fn stop(&self) -> bool {
+        self.tree
+            .as_ref()
+            .is_some_and(|tree| tree.refused.is_some())
+    }
+
     fn record(&mut self, step: u64, record: &[u8]) {
         let Ok(event) = Event::decode(step, record) else {
             return;
@@ -418,10 +508,11 @@ impl Observer for Answer {
 
         // Its output is the answer; its errors explain a failure.
         if let EventKind::Output { fd, bytes } = &event.kind {
-            match *fd {
-                STDOUT_FD => self.stdout.extend_from_slice(bytes),
-                STDERR_FD => self.stderr.extend_from_slice(bytes),
-                CONSOLE_FD => {
+            match (*fd, &mut self.tree) {
+                (STDOUT_FD, Some(tree)) => tree.feed(bytes),
+                (STDOUT_FD, None) => self.stdout.extend_from_slice(bytes),
+                (STDERR_FD, _) => self.stderr.extend_from_slice(bytes),
+                (CONSOLE_FD, _) => {
                     if let Some(console) = &mut self.console {
                         console(bytes);
                     }
@@ -474,6 +565,92 @@ mod tests {
             a.into_inspection(status),
             Inspection::Contents(b"hello world\n".to_vec())
         );
+    }
+
+    #[test]
+    fn a_tree_is_handed_on_as_it_arrives() {
+        // The inspecting process writes a tree of one file in two records,
+        // the second cut inside the file's contents, while the job prints:
+        // the sink gets the file's entry and its bytes, none of the job's,
+        // and nothing is kept as the answer's output. A sink that refuses
+        // an entry stops the fork and gets nothing more.
+        use rewind_init::{ListedKind, TreeEntry};
+
+        /// Keeps a tree's paths and bytes, or refuses every entry.
+        #[derive(Default)]
+        struct Kept {
+            refuses: bool,
+            paths: Vec<Vec<u8>>,
+            bytes: Vec<u8>,
+        }
+
+        impl TreeSink for Kept {
+            fn entry(&mut self, entry: &TreeEntry) -> std::io::Result<()> {
+                if self.refuses {
+                    return Err(std::io::Error::other("the disk is full"));
+                }
+                self.paths.push(entry.path.clone());
+                Ok(())
+            }
+
+            fn contents(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+                self.bytes.extend_from_slice(bytes);
+                Ok(())
+            }
+
+            fn end_of_file(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let file = TreeEntry {
+            path: b"notes.txt".to_vec(),
+            kind: ListedKind::File,
+            mode: 0o644,
+            uid: 0,
+            gid: 0,
+            mtime: 1,
+            size: 11,
+            target: Vec::new(),
+        };
+        let mut sent = file.header();
+        sent.extend_from_slice(b"hello ");
+        let records = [
+            mark(40, Mark::InspectBegin),
+            record(KIND_OUTPUT, 40, 1, &sent),
+            record(KIND_OUTPUT, 7, 1, b"job during\n"),
+            record(KIND_OUTPUT, 40, 1, b"world"),
+            mark(40, Mark::InspectEnd(InspectStatus::Done)),
+        ];
+
+        for refuses in [false, true] {
+            let mut kept = Kept {
+                refuses,
+                ..Kept::default()
+            };
+            let mut a = Answer {
+                tree: Some(TreeAnswer {
+                    reader: TreeReader::default(),
+                    sink: &mut kept,
+                    refused: None,
+                }),
+                ..Answer::default()
+            };
+            for (step, record) in records.iter().enumerate() {
+                a.record(step as u64, record);
+            }
+            assert_eq!(a.stop(), refuses);
+            assert!(a.stdout.is_empty());
+            let tree = a.tree.take().unwrap();
+            assert_eq!(tree.refused.is_some(), refuses);
+            if refuses {
+                assert!(kept.paths.is_empty() && kept.bytes.is_empty());
+                continue;
+            }
+            tree.reader.finish().unwrap();
+            assert_eq!(kept.paths, vec![b"notes.txt".to_vec()]);
+            assert_eq!(kept.bytes, b"hello world");
+        }
     }
 
     #[test]
