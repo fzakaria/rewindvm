@@ -89,6 +89,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -687,6 +688,20 @@ def kept(lines, pattern):
     return out
 
 
+def remove_tree(tree):
+    """Removes the directory `tree` and everything in it, if it is there.
+    A Nix store a page's commands made under the page's work directory
+    keeps its directories read-only, where nothing can be unlinked, so a
+    directory that refuses is made writable and tried again."""
+
+    def writable(function, path, _error):
+        os.chmod(os.path.dirname(path), stat.S_IRWXU)
+        function(path)
+
+    if tree.exists():
+        shutil.rmtree(tree, onexc=writable)
+
+
 def collapse(page):
     """The page with the blank lines a dropped directive leaves next to
     another blank line taken out, outside code blocks."""
@@ -819,10 +834,10 @@ def main():
     # page does not depend on which pages were recorded with it.
     home = args.work / "home"
     for name in names:
-        shutil.rmtree(home, ignore_errors=True)
+        remove_tree(home)
         home.mkdir(parents=True)
         work = args.work / name
-        shutil.rmtree(work, ignore_errors=True)
+        remove_tree(work)
         work.mkdir(parents=True)
         record(name, kind, work, home, paths, commit if args.local else None)
 
