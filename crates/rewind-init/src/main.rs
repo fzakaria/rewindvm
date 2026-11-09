@@ -9,15 +9,17 @@
 use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use rewind_init::{
     IMAGE_ROOT, INSPECT_ARG, InspectRequest, InspectStatus, JOB_PATH, Job, Listed, ListedAll,
-    ListedKind, Listing, MAX_LISTED, Mark, Output, Probe, RESIZE_ESCAPE, RESIZE_LEN, RESIZE_TAG,
-    RUNNING_ENV, Root, SECTION_MAPS, SECTION_PID, SELFTEST_ARG, nar_hash, section_header,
+    ListedKind, Listing, MAX_LISTED, MAX_TREE_NAME, Mark, Output, Probe, RESIZE_ESCAPE, RESIZE_LEN,
+    RESIZE_TAG, RUNNING_ENV, Root, SECTION_MAPS, SECTION_PID, SELFTEST_ARG, TreeEntry, nar_hash,
+    section_header,
 };
 
 /// The image the monitor maps as persistent memory.
@@ -589,6 +591,7 @@ fn inspect(request: &[String]) {
         InspectRequest::Running { pid } => running(pid_t(pid), &mut out, &mut err),
         InspectRequest::Files { pid } => files(view(pid), &mut out, &mut err),
         InspectRequest::List { pid, path } => list(view(pid), &path, &mut out, &mut err),
+        InspectRequest::Tree { pid, path } => tree(view(pid), &path, &mut out, &mut err),
         InspectRequest::Shell { pid, size, with } => match shell(view(pid), size, with) {
             Ok(()) => InspectStatus::Done,
             Err(e) => {
@@ -755,17 +758,18 @@ fn list(pid: i32, path: &str, out: &mut File, err: &mut File) -> InspectStatus {
     InspectStatus::Done
 }
 
-/// Whether a listing's walk reads a directory it lists.
+/// Whether a walk, a listing's or a tree's, reads a directory it comes
+/// to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Enter {
     Yes,
     No,
 }
 
-/// Whether a listing's walk reads directory `dir`. Not when the kernel
-/// makes the directory's entries up, as it does under /proc and /sys:
-/// they are no files of the run, and there are thousands of them, enough
-/// to fill a listing of the root. A listing asked of such a directory
+/// Whether a walk reads directory `dir`. Not when the kernel makes the
+/// directory's entries up, as it does under /proc and /sys: they are no
+/// files of the run, and there are thousands of them, enough to fill a
+/// listing of the root. A listing or a tree asked of such a directory
 /// itself still reads the directory.
 fn enters(dir: &Path) -> Enter {
     use std::os::unix::ffi::OsStrExt;
@@ -862,6 +866,137 @@ fn list_below(
         }
     }
     Ok(listing)
+}
+
+/// The file, link or directory `path` names and everything below it on
+/// `out`, as process `pid` sees the path.
+fn tree(pid: i32, path: &str, out: &mut File, err: &mut File) -> InspectStatus {
+    // See the path as the process did: its root and working directory
+    // when it is still alive, else the job's.
+    if let Err(e) = enter_view_of(pid) {
+        let _ = writeln!(err, "inspect: {e}");
+        return InspectStatus::Failed;
+    }
+
+    // Nothing is sent of a path nothing has, so the answer is empty.
+    if let Err(e) = fs::symlink_metadata(path) {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            let _ = writeln!(err, "{path}: no such file or directory at this step");
+            return InspectStatus::NotFound;
+        }
+        let _ = writeln!(err, "{path}: {e}");
+        return InspectStatus::Failed;
+    }
+
+    // The device splits what is written to it into records.
+    match send_tree(Path::new(path), out, &enters) {
+        Ok(()) => InspectStatus::Done,
+        Err(e) => {
+            let _ = writeln!(err, "{path}: {e}");
+            InspectStatus::Failed
+        }
+    }
+}
+
+/// Writes `root` and everything below it to `out` as a tree: a
+/// [`TreeEntry`] for each, a directory's entries after its own by name,
+/// and a file's bytes after the file's entry. Links are sent, not
+/// followed. A directory below `root` that `enters` says not to read is
+/// sent without what is below it, as a listing lists one, so a tree of
+/// the root stays out of /proc and /sys; `root` itself is always read. An
+/// error when anything of the tree cannot be read: a tree is whole or it
+/// is not one.
+fn send_tree(
+    root: &Path,
+    out: &mut impl Write,
+    enters: &dyn Fn(&Path) -> Enter,
+) -> std::io::Result<()> {
+    // The paths below `root` still to send, the next one last. A
+    // directory's entries go on in reverse order of name, so they come
+    // off by name, and all of one entry's before the next name.
+    let mut unsent: Vec<PathBuf> = vec![PathBuf::new()];
+    while let Some(below) = unsent.pop() {
+        // Joining an empty path would add a slash, which a file refuses.
+        let at = if below.as_os_str().is_empty() {
+            root.to_path_buf()
+        } else {
+            root.join(&below)
+        };
+        let meta = fs::symlink_metadata(&at)?;
+
+        // What the entry is, and for a link where it points.
+        let kind = meta.file_type();
+        let (kind, target) = if kind.is_symlink() {
+            let target = fs::read_link(&at)?;
+            (ListedKind::Symlink, target.as_os_str().as_bytes().to_vec())
+        } else if kind.is_dir() {
+            (ListedKind::Directory, Vec::new())
+        } else if kind.is_file() {
+            (ListedKind::File, Vec::new())
+        } else {
+            (ListedKind::Other, Vec::new())
+        };
+        let size = match kind {
+            ListedKind::File => meta.len(),
+            _ => 0,
+        };
+        let entry = TreeEntry {
+            path: below.as_os_str().as_bytes().to_vec(),
+            kind,
+            mode: meta.permissions().mode() & PERMISSION_BITS,
+            uid: meta.uid(),
+            gid: meta.gid(),
+            mtime: meta.mtime(),
+            size,
+            target,
+        };
+        if entry.path.len() > MAX_TREE_NAME || entry.target.len() > MAX_TREE_NAME {
+            return Err(std::io::Error::other(format!(
+                "{} has a longer name than a tree holds",
+                at.display()
+            )));
+        }
+        out.write_all(&entry.header())?;
+
+        let is_root = below.as_os_str().is_empty();
+        match kind {
+            ListedKind::File => send_contents(&at, size, out)?,
+            ListedKind::Directory if is_root || enters(&at) == Enter::Yes => {
+                let mut names: Vec<_> = fs::read_dir(&at)?
+                    .map(|entry| entry.map(|e| e.file_name()))
+                    .collect::<std::io::Result<_>>()?;
+                names.sort();
+                unsent.extend(names.iter().rev().map(|name| below.join(name)));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Writes the `size` bytes of the file at `path` to `out`, in chunks. An
+/// error when the file holds fewer: its entry has promised that many.
+fn send_contents(path: &Path, size: u64, out: &mut impl Write) -> std::io::Result<()> {
+    use std::io::Read;
+
+    let mut file = File::open(path)?.take(size);
+    let mut buf = vec![0u8; INSPECT_CHUNK];
+    let mut sent = 0;
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        out.write_all(&buf[..n])?;
+        sent += n as u64;
+    }
+    if sent < size {
+        return Err(std::io::Error::other(format!(
+            "{} is shorter than its {size} bytes",
+            path.display()
+        )));
+    }
+    Ok(())
 }
 
 /// The bits of a file's mode that are its permissions, set-id and sticky
@@ -1600,6 +1735,7 @@ mod tests {
     // are taken out and applied, and a message split across reads waits
     // for the rest.
     use super::*;
+    use rewind_init::{TreeReader, TreeSink};
 
     #[test]
     fn a_job_runs_its_program_whatever_argv0_says() {
@@ -1712,6 +1848,150 @@ mod tests {
             list_below(&root.join("nope"), MAX_LISTED, &everywhere)
                 .unwrap_err()
                 .kind(),
+            std::io::ErrorKind::NotFound
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A tree is sent whole, each directory's entries by name and a
+    /// directory's own before the next name's, with each file's bytes
+    /// after the file's entry. Lays out a tree with a file, an executable,
+    /// a link, an empty directory and a file two directories down in a
+    /// temporary directory, sends the tree into memory and reads it back
+    /// with the tree's reader. Then sends a file and a link on their own,
+    /// the tree with one directory not to be read, and a path nothing
+    /// has.
+    #[test]
+    fn a_tree_is_sent_depth_first_by_name() {
+        /// What the reader hands on: each entry, with a file's bytes.
+        #[derive(Default)]
+        struct Kept(Vec<(TreeEntry, Vec<u8>)>);
+
+        impl TreeSink for Kept {
+            fn entry(&mut self, entry: &TreeEntry) -> std::io::Result<()> {
+                self.0.push((entry.clone(), Vec::new()));
+                Ok(())
+            }
+
+            fn contents(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+                if let Some((_, contents)) = self.0.last_mut() {
+                    contents.extend_from_slice(bytes);
+                }
+                Ok(())
+            }
+
+            fn end_of_file(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        /// An entry as the test compares one: its path, its kind, its
+        /// file's bytes and its link's target.
+        type Seen<'a> = (&'a [u8], ListedKind, &'a [u8], &'a [u8]);
+
+        /// The tree at `root` as its reader hands it on, with every
+        /// directory read but those whose path ends with `skipped`.
+        fn sent_without(
+            root: &Path,
+            skipped: Option<&str>,
+        ) -> std::io::Result<Vec<(TreeEntry, Vec<u8>)>> {
+            let enters = |dir: &Path| match skipped {
+                Some(name) if dir.ends_with(name) => Enter::No,
+                _ => Enter::Yes,
+            };
+            let mut tree = Vec::new();
+            send_tree(root, &mut tree, &enters)?;
+            let mut kept = Kept::default();
+            let mut reader = TreeReader::default();
+            reader.feed(&tree, &mut kept)?;
+            reader.finish()?;
+            Ok(kept.0)
+        }
+
+        /// The whole tree at `root`.
+        fn sent(root: &Path) -> std::io::Result<Vec<(TreeEntry, Vec<u8>)>> {
+            sent_without(root, None)
+        }
+
+        let root = std::env::temp_dir().join(format!("rewind-init-tree-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("share/man")).unwrap();
+        fs::create_dir_all(root.join("empty")).unwrap();
+        fs::create_dir_all(root.join("bin")).unwrap();
+        fs::write(root.join("bin/shuffle"), b"\x7fELF\n").unwrap();
+        fs::set_permissions(root.join("bin/shuffle"), fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(root.join("share/man/shuffle.1"), b"shuffle").unwrap();
+        fs::set_permissions(
+            root.join("share/man/shuffle.1"),
+            fs::Permissions::from_mode(0o640),
+        )
+        .unwrap();
+        fs::write(root.join("share/notes"), b"").unwrap();
+        symlink("shuffle", root.join("bin/sh")).unwrap();
+
+        let tree = sent(&root).unwrap();
+        let seen: Vec<Seen> = tree
+            .iter()
+            .map(|(e, contents)| (&e.path[..], e.kind, &contents[..], &e.target[..]))
+            .collect();
+        assert_eq!(
+            seen,
+            vec![
+                (&b""[..], ListedKind::Directory, &b""[..], &b""[..]),
+                (b"bin", ListedKind::Directory, b"", b""),
+                (b"bin/sh", ListedKind::Symlink, b"", b"shuffle"),
+                (b"bin/shuffle", ListedKind::File, b"\x7fELF\n", b""),
+                (b"empty", ListedKind::Directory, b"", b""),
+                (b"share", ListedKind::Directory, b"", b""),
+                (b"share/man", ListedKind::Directory, b"", b""),
+                (b"share/man/shuffle.1", ListedKind::File, b"shuffle", b""),
+                (b"share/notes", ListedKind::File, b"", b""),
+            ]
+        );
+
+        // Each entry carries its permissions, its size, and the owner and
+        // time the filesystem holds for it.
+        let entry = |path: &[u8]| {
+            tree.iter()
+                .map(|(e, _)| e)
+                .find(|e| e.path == path)
+                .unwrap()
+        };
+        assert_eq!(entry(b"bin/shuffle").mode, 0o755);
+        assert_eq!(entry(b"bin/shuffle").size, 5);
+        assert_eq!(entry(b"share/man/shuffle.1").mode, 0o640);
+        let meta = fs::metadata(root.join("bin/shuffle")).unwrap();
+        assert_eq!(entry(b"bin/shuffle").uid, meta.uid());
+        assert_eq!(entry(b"bin/shuffle").gid, meta.gid());
+        assert_eq!(entry(b"bin/shuffle").mtime, meta.mtime());
+
+        // A file on its own is a tree of one entry, and so is a link,
+        // which is sent, not followed.
+        let file = sent(&root.join("bin/shuffle")).unwrap();
+        assert_eq!(file.len(), 1);
+        assert_eq!(file[0].0.kind, ListedKind::File);
+        assert_eq!(file[0].0.path, b"");
+        assert_eq!(file[0].1, b"\x7fELF\n");
+        let link = sent(&root.join("bin/sh")).unwrap();
+        assert_eq!(link.len(), 1);
+        assert_eq!(link[0].0.kind, ListedKind::Symlink);
+        assert_eq!(link[0].0.target, b"shuffle");
+
+        // A directory the walk is told not to read is sent, and nothing
+        // below it is. Named as the tree's own root, the same directory
+        // is read.
+        let kept_out = sent_without(&root, Some("share")).unwrap();
+        let paths: Vec<&[u8]> = kept_out.iter().map(|(e, _)| &e.path[..]).collect();
+        let want: Vec<&[u8]> = vec![b"", b"bin", b"bin/sh", b"bin/shuffle", b"empty", b"share"];
+        assert_eq!(paths, want);
+        let named = sent_without(&root.join("share"), Some("share")).unwrap();
+        let paths: Vec<&[u8]> = named.iter().map(|(e, _)| &e.path[..]).collect();
+        let want: Vec<&[u8]> = vec![b"", b"man", b"man/shuffle.1", b"notes"];
+        assert_eq!(paths, want);
+
+        // A path nothing has is an error, as the caller reports.
+        assert_eq!(
+            sent(&root.join("nope")).unwrap_err().kind(),
             std::io::ErrorKind::NotFound
         );
         fs::remove_dir_all(&root).unwrap();

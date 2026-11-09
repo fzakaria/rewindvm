@@ -199,6 +199,14 @@ pub enum InspectRequest {
     /// Not found when nothing has the path; failed when it names
     /// something other than a directory.
     List { pid: Option<u32>, path: String },
+    /// The file, link or directory `path` names, resolved as process `pid`
+    /// sees the path, whole on standard output: a [`TreeEntry`] for the
+    /// path itself and for everything below it, however deep, each file's
+    /// bytes after the file's entry, in the order [`TreeReader`] reads.
+    /// A link is sent, not followed, and a directory of /proc or /sys
+    /// below the path is sent without what the kernel makes up in it, as
+    /// a listing lists one. Not found when nothing has the path.
+    Tree { pid: Option<u32>, path: String },
     /// An interactive shell in the root and working directory of process
     /// `pid`, with the job's environment, on a pty of `size` (columns,
     /// rows). Its terminal is /dev/rewind-console: what the shell prints
@@ -218,6 +226,7 @@ const INSPECT_CAT: &str = "cat";
 const INSPECT_RUNNING: &str = "running";
 const INSPECT_FILES: &str = "files";
 const INSPECT_LIST: &str = "list";
+const INSPECT_TREE: &str = "tree";
 const INSPECT_SHELL: &str = "shell";
 
 /// After a shell's size: the bin directories of the extras slot follow.
@@ -241,6 +250,9 @@ impl InspectRequest {
             InspectRequest::Files { pid: p } => vec![INSPECT_FILES.into(), pid(p)],
             InspectRequest::List { pid: p, path } => {
                 vec![INSPECT_LIST.into(), pid(p), path.clone()]
+            }
+            InspectRequest::Tree { pid: p, path } => {
+                vec![INSPECT_TREE.into(), pid(p), path.clone()]
             }
             InspectRequest::Shell {
                 pid: p,
@@ -280,6 +292,10 @@ impl InspectRequest {
             }),
             [INSPECT_FILES, p] => Some(InspectRequest::Files { pid: pid(p)? }),
             [INSPECT_LIST, p, path] => Some(InspectRequest::List {
+                pid: pid(p)?,
+                path: path.to_string(),
+            }),
+            [INSPECT_TREE, p, path] => Some(InspectRequest::Tree {
                 pid: pid(p)?,
                 path: path.to_string(),
             }),
@@ -533,6 +549,269 @@ impl Listing {
     }
 }
 
+/// One entry of a tree, the answer to [`InspectRequest::Tree`]: the path
+/// asked for, or a file, link or directory below it. Init writes an entry
+/// as [`TreeEntry::header`], then a file's bytes, and [`TreeReader`] reads
+/// the entries back. The entries of a directory follow the directory's
+/// own, by name as bytes compare, and everything below one entry comes
+/// before the next name, so the same tree is always the same bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TreeEntry {
+    /// The entry's path below the path asked for, in the bytes the VM's
+    /// filesystem holds, which need not be text; empty for the path asked
+    /// for.
+    pub path: Vec<u8>,
+    pub kind: ListedKind,
+    /// The permission bits, as chmod takes them.
+    pub mode: u32,
+    /// The entry's owner and group, as the VM numbers them.
+    pub uid: u32,
+    pub gid: u32,
+    /// When the entry was last modified by the VM's clock, in seconds
+    /// since the Unix epoch.
+    pub mtime: i64,
+    /// A file's length in bytes, which follow the entry; 0 for anything
+    /// else.
+    pub size: u64,
+    /// Where a symbolic link points; empty for anything else.
+    pub target: Vec<u8>,
+}
+
+/// The longest path below a tree's root, and the longest link target, a
+/// tree holds, in bytes: more than any path Linux resolves, so only a
+/// corrupt tree names a longer one.
+pub const MAX_TREE_NAME: usize = 64 * 1024;
+
+/// The longest line a tree entry's numbers make, in bytes: eight numbers
+/// of at most 20 digits and the spaces between them fit with room over.
+const MAX_TREE_LINE: usize = 256;
+
+/// The letters that name an entry's kind on the entry's line.
+const TREE_FILE: &str = "f";
+const TREE_DIRECTORY: &str = "d";
+const TREE_SYMLINK: &str = "l";
+const TREE_OTHER: &str = "o";
+
+/// The base an entry's permission bits are written in.
+const OCTAL: u32 = 8;
+
+impl TreeEntry {
+    /// The entry as init writes it, before a file's bytes: a line of the
+    /// kind, the permissions in octal, the owner, the group, the time,
+    /// the size and the lengths of the path and of the target, then the
+    /// path's bytes and the target's. The lengths come first so a path
+    /// may hold any byte, a newline included.
+    pub fn header(&self) -> Vec<u8> {
+        let kind = match self.kind {
+            ListedKind::File => TREE_FILE,
+            ListedKind::Directory => TREE_DIRECTORY,
+            ListedKind::Symlink => TREE_SYMLINK,
+            ListedKind::Other => TREE_OTHER,
+        };
+        let line = format!(
+            "{kind} {:o} {} {} {} {} {} {}\n",
+            self.mode,
+            self.uid,
+            self.gid,
+            self.mtime,
+            self.size,
+            self.path.len(),
+            self.target.len()
+        );
+        let mut header = line.into_bytes();
+        header.extend_from_slice(&self.path);
+        header.extend_from_slice(&self.target);
+        header
+    }
+
+    /// The entry an entry's line describes, with the path and the target
+    /// still to come, and their lengths. None when `line` is no entry's.
+    fn parse_line(line: &[u8]) -> Option<(TreeEntry, usize, usize)> {
+        let line = std::str::from_utf8(line).ok()?;
+        let fields: Vec<&str> = line.split(' ').collect();
+        let [kind, mode, uid, gid, mtime, size, path_len, target_len] = fields.as_slice() else {
+            return None;
+        };
+        let kind = match *kind {
+            TREE_FILE => ListedKind::File,
+            TREE_DIRECTORY => ListedKind::Directory,
+            TREE_SYMLINK => ListedKind::Symlink,
+            TREE_OTHER => ListedKind::Other,
+            _ => return None,
+        };
+        let entry = TreeEntry {
+            path: Vec::new(),
+            kind,
+            mode: u32::from_str_radix(mode, OCTAL).ok()?,
+            uid: uid.parse().ok()?,
+            gid: gid.parse().ok()?,
+            mtime: mtime.parse().ok()?,
+            size: size.parse().ok()?,
+            target: Vec::new(),
+        };
+        let path_len: usize = path_len.parse().ok()?;
+        let target_len: usize = target_len.parse().ok()?;
+        if path_len > MAX_TREE_NAME || target_len > MAX_TREE_NAME {
+            return None;
+        }
+        Some((entry, path_len, target_len))
+    }
+}
+
+/// Where a tree's reader hands on what it reads, in the order init wrote
+/// the tree.
+pub trait TreeSink {
+    /// The next entry. A file's bytes follow in [`TreeSink::contents`],
+    /// `entry.size` of them in all, and then [`TreeSink::end_of_file`].
+    fn entry(&mut self, entry: &TreeEntry) -> std::io::Result<()>;
+
+    /// The next bytes of the last entry's file.
+    fn contents(&mut self, bytes: &[u8]) -> std::io::Result<()>;
+
+    /// The last entry's file has had all its bytes; called for an empty
+    /// file too.
+    fn end_of_file(&mut self) -> std::io::Result<()>;
+}
+
+/// Reads a tree as it arrives, in parts of any size, and hands each entry
+/// and each part of a file's contents to a [`TreeSink`], keeping no more
+/// than an entry's line and names.
+#[derive(Debug, Default)]
+pub struct TreeReader {
+    /// The bytes of an entry's line, or of its path and target, so far.
+    pending: Vec<u8>,
+    reading: TreeReading,
+}
+
+/// What a tree's reader is in the middle of.
+#[derive(Debug, Default)]
+enum TreeReading {
+    /// An entry's line, up to its newline.
+    #[default]
+    Line,
+    /// The path and the target after `entry`'s line, of these lengths.
+    Names {
+        entry: TreeEntry,
+        path_len: usize,
+        target_len: usize,
+    },
+    /// A file's contents, with this many bytes still to come.
+    Contents { remaining: u64 },
+}
+
+impl TreeReader {
+    /// Reads `bytes`, the next part of the tree, handing what they
+    /// complete to `sink`. An error when the bytes are no tree, or `sink`
+    /// returns one; the reader is of no use after either.
+    pub fn feed(
+        &mut self,
+        mut bytes: &[u8],
+        sink: &mut (impl TreeSink + ?Sized),
+    ) -> std::io::Result<()> {
+        while !bytes.is_empty() {
+            match &mut self.reading {
+                TreeReading::Line => bytes = self.feed_line(bytes, sink)?,
+                TreeReading::Names { .. } => bytes = self.feed_names(bytes, sink)?,
+                TreeReading::Contents { remaining } => {
+                    let part =
+                        usize::try_from(*remaining).map_or(bytes.len(), |r| r.min(bytes.len()));
+                    sink.contents(&bytes[..part])?;
+                    *remaining -= part as u64;
+                    bytes = &bytes[part..];
+                    if *remaining == 0 {
+                        sink.end_of_file()?;
+                        self.reading = TreeReading::Line;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether the tree fed so far is whole: an error when it ends inside
+    /// an entry or a file's contents.
+    pub fn finish(&self) -> std::io::Result<()> {
+        if matches!(self.reading, TreeReading::Line) && self.pending.is_empty() {
+            return Ok(());
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "the tree is cut short",
+        ))
+    }
+
+    /// Takes an entry's line off the front of `bytes`, or as much of the
+    /// line as `bytes` holds, and returns the rest.
+    fn feed_line<'a>(
+        &mut self,
+        bytes: &'a [u8],
+        sink: &mut (impl TreeSink + ?Sized),
+    ) -> std::io::Result<&'a [u8]> {
+        let not_a_tree = || std::io::Error::new(std::io::ErrorKind::InvalidData, "not a tree");
+
+        // The line may have started in an earlier part.
+        let Some(end) = bytes.iter().position(|b| *b == b'\n') else {
+            self.pending.extend_from_slice(bytes);
+            if self.pending.len() > MAX_TREE_LINE {
+                return Err(not_a_tree());
+            }
+            return Ok(&[]);
+        };
+        self.pending.extend_from_slice(&bytes[..end]);
+        let (entry, path_len, target_len) =
+            TreeEntry::parse_line(&self.pending).ok_or_else(not_a_tree)?;
+        self.pending.clear();
+        self.reading = TreeReading::Names {
+            entry,
+            path_len,
+            target_len,
+        };
+
+        // An entry with neither a path nor a target, as the path asked
+        // for is unless it is a link, is whole already.
+        self.feed_names(&bytes[end + 1..], sink)
+    }
+
+    /// Takes the path and the target of the entry being read off the
+    /// front of `bytes`, or as much of them as `bytes` holds, hands the
+    /// entry on once it is whole, and returns the rest.
+    fn feed_names<'a>(
+        &mut self,
+        bytes: &'a [u8],
+        sink: &mut (impl TreeSink + ?Sized),
+    ) -> std::io::Result<&'a [u8]> {
+        let TreeReading::Names {
+            entry,
+            path_len,
+            target_len,
+        } = &mut self.reading
+        else {
+            return Ok(bytes);
+        };
+        let missing = *path_len + *target_len - self.pending.len();
+        let part = missing.min(bytes.len());
+        self.pending.extend_from_slice(&bytes[..part]);
+        if part < missing {
+            return Ok(&[]);
+        }
+
+        // The entry is whole: its file's contents come next, if it has
+        // any.
+        entry.target = self.pending.split_off(*path_len);
+        entry.path = std::mem::take(&mut self.pending);
+        sink.entry(entry)?;
+        self.reading = match (entry.kind, entry.size) {
+            (ListedKind::File, 0) => {
+                sink.end_of_file()?;
+                TreeReading::Line
+            }
+            (ListedKind::File, size) => TreeReading::Contents { remaining: size },
+            _ => TreeReading::Line,
+        };
+        Ok(&bytes[part..])
+    }
+}
+
 /// How the input image becomes the job's filesystem.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -658,6 +937,14 @@ mod tests {
                 pid: Some(12),
                 path: "a b".into(),
             },
+            InspectRequest::Tree {
+                pid: None,
+                path: "/nix/store/x-out".into(),
+            },
+            InspectRequest::Tree {
+                pid: Some(12),
+                path: "a b".into(),
+            },
             InspectRequest::Shell {
                 pid: None,
                 size: (80, 24),
@@ -733,6 +1020,147 @@ mod tests {
         assert_eq!(Listing::parse(b""), Some(empty));
         assert_eq!(Listing::parse(b"{\"path\":\"bin"), None);
         assert_eq!(Listing::parse(b"inspect: unknown request\n"), None);
+    }
+
+    /// What a tree's reader hands on, in order, for the tests to compare.
+    #[derive(Debug, PartialEq, Eq)]
+    enum Read {
+        Entry(TreeEntry),
+        Contents(Vec<u8>),
+        EndOfFile,
+    }
+
+    /// Keeps everything a tree's reader hands on.
+    #[derive(Default)]
+    struct Kept(Vec<Read>);
+
+    impl TreeSink for Kept {
+        fn entry(&mut self, entry: &TreeEntry) -> std::io::Result<()> {
+            self.0.push(Read::Entry(entry.clone()));
+            Ok(())
+        }
+
+        fn contents(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+            // Contents arrive in as many parts as the tree was fed in, and
+            // the parts of one file are one file's bytes.
+            if let Some(Read::Contents(so_far)) = self.0.last_mut() {
+                so_far.extend_from_slice(bytes);
+                return Ok(());
+            }
+            self.0.push(Read::Contents(bytes.to_vec()));
+            Ok(())
+        }
+
+        fn end_of_file(&mut self) -> std::io::Result<()> {
+            self.0.push(Read::EndOfFile);
+            Ok(())
+        }
+    }
+
+    /// An entry of a tree with the owner and time every entry of these
+    /// tests has.
+    fn tree_entry(path: &[u8], kind: ListedKind, mode: u32, size: u64, target: &[u8]) -> TreeEntry {
+        TreeEntry {
+            path: path.to_vec(),
+            kind,
+            mode,
+            uid: 1000,
+            gid: 100,
+            mtime: 1_790_985_600,
+            size,
+            target: target.to_vec(),
+        }
+    }
+
+    #[test]
+    fn a_tree_reads_back_as_init_wrote_it() {
+        // A tree of a directory, a file whose contents hold a newline and
+        // bytes that are not text, an empty file, a link and a name that
+        // is not UTF-8, written as init writes one: each entry's header,
+        // then a file's bytes. The reader hands on the same entries and
+        // bytes, and the end of each file, whether the tree arrives whole,
+        // a byte at a time or in parts of seven bytes.
+        let contents = b"\x7fELF\n\x00 1 2\n";
+        let entries = [
+            (
+                tree_entry(b"", ListedKind::Directory, 0o755, 0, b""),
+                &b""[..],
+            ),
+            (
+                tree_entry(
+                    b"bin/tool",
+                    ListedKind::File,
+                    0o755,
+                    contents.len() as u64,
+                    b"",
+                ),
+                &contents[..],
+            ),
+            (
+                tree_entry(b"empty", ListedKind::File, 0o600, 0, b""),
+                &b""[..],
+            ),
+            (
+                tree_entry(b"bin/alias", ListedKind::Symlink, 0o777, 0, b"tool\n2"),
+                &b""[..],
+            ),
+            (
+                tree_entry(b"caf\xe9 \n", ListedKind::Other, 0o644, 0, b""),
+                &b""[..],
+            ),
+        ];
+        let mut tree = Vec::new();
+        let mut want = Vec::new();
+        for (entry, contents) in &entries {
+            tree.extend(entry.header());
+            tree.extend_from_slice(contents);
+            want.push(Read::Entry(entry.clone()));
+            if entry.kind != ListedKind::File {
+                continue;
+            }
+            if !contents.is_empty() {
+                want.push(Read::Contents(contents.to_vec()));
+            }
+            want.push(Read::EndOfFile);
+        }
+
+        for part in [tree.len(), 1, 7] {
+            let mut reader = TreeReader::default();
+            let mut kept = Kept::default();
+            for bytes in tree.chunks(part) {
+                reader.feed(bytes, &mut kept).unwrap();
+            }
+            reader.finish().unwrap();
+            assert_eq!(kept.0, want, "in parts of {part}");
+        }
+    }
+
+    #[test]
+    fn a_tree_cut_short_or_malformed_is_refused() {
+        // A tree that ends inside a header, inside a name or inside a
+        // file's contents is not whole, and its reader says so when asked.
+        // A header that is not one, or that names a path longer than a
+        // tree holds, is refused as it arrives.
+        let entry = tree_entry(b"bin/tool", ListedKind::File, 0o755, 4, b"");
+        let mut whole = entry.header();
+        whole.extend_from_slice(b"\x7fELF");
+        for cut in [3, entry.header().len() - 2, whole.len() - 1] {
+            let mut reader = TreeReader::default();
+            reader.feed(&whole[..cut], &mut Kept::default()).unwrap();
+            assert!(reader.finish().is_err(), "cut at {cut}");
+        }
+
+        let too_long = format!("f 644 0 0 0 0 {} 0\n", MAX_TREE_NAME + 1);
+        for bad in [
+            "inspect: unknown request\n",
+            "x 644 0 0 0 0 1 0\n",
+            "f 644 0 0 0 0 1\n",
+            too_long.as_str(),
+        ] {
+            let mut reader = TreeReader::default();
+            let fed = reader.feed(bad.as_bytes(), &mut Kept::default());
+            assert!(fed.is_err(), "{bad:?}");
+        }
     }
 
     #[test]
