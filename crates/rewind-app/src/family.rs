@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use rewind_trace::ending::Ending;
-use rewind_trace::manifest::{KEYFRAMES_DIR, MANIFEST, Manifest, Source, Spec, executing};
+use rewind_trace::manifest::{KEYFRAMES_DIR, MANIFEST, Manifest, Source, executing};
 use rewind_trace::prune::{self, Forks, Member, Reads};
 
 use crate::describe::{ago, thousands};
@@ -185,7 +185,7 @@ impl RunEntry {
             cores: u64::from(spec.cores),
             window: spec.window(),
             imported: imported(manifest),
-            inputs: Some(inputs_key(spec)),
+            inputs: Some(inputs_key(manifest)),
             created: manifest.created,
             has_keyframes: false,
             modified,
@@ -206,14 +206,20 @@ fn imported(manifest: &Manifest) -> bool {
     named(Some(dir), manifest.id.as_str()) && named(dir.parent(), IMPORTED_INPUTS_DIR)
 }
 
-/// A key for a run's inputs less its schedule and the paths of inputs on
-/// this machine: runs with equal keys are the same build on the same
-/// machine, perturbed or not.
-fn inputs_key(spec: &Spec) -> String {
+/// A key for a run's inputs less its schedule: runs with equal keys are
+/// the same build on the same machine and guest, perturbed or not. The
+/// guest is told by the paths of its kernel and initrd, which name their
+/// contents in the Nix store. A step of one guest is not a step of
+/// another, so a build recorded again on a new guest is other inputs. An
+/// imported run's kernel and initrd are copies under the run's own id,
+/// which say nothing of the guest, and are left out of its key.
+fn inputs_key(manifest: &Manifest) -> String {
     use std::hash::{Hash, Hasher};
-    let mut inputs = spec.unscheduled();
-    inputs.kernel = PathBuf::new();
-    inputs.initrd = PathBuf::new();
+    let mut inputs = manifest.spec.unscheduled();
+    if imported(manifest) {
+        inputs.kernel = PathBuf::new();
+        inputs.initrd = PathBuf::new();
+    }
     let json = serde_json::to_string(&inputs).expect("a spec always serializes");
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     json.hash(&mut hasher);
@@ -228,6 +234,14 @@ pub fn scan(runs: &Path) -> Vec<RunEntry> {
     entries
         .filter_map(|e| RunEntry::read(&e.ok()?.path()))
         .collect()
+}
+
+/// The run of `runs` made last. Of runs made in the same second the one
+/// listed first is the newest.
+fn newest<'a>(runs: impl DoubleEndedIterator<Item = &'a RunEntry>) -> Option<&'a RunEntry> {
+    // max_by_key keeps the last of equal runs, so the runs are walked from
+    // the last listed to the first.
+    runs.rev().max_by_key(|r| r.created)
 }
 
 /// The runs of one build.
@@ -374,16 +388,17 @@ fn window_words(run: &RunEntry) -> String {
 }
 
 impl Family {
-    /// The run the family is known by: the first recorded one, with no
-    /// parent and the unperturbed schedule, else the oldest run without a
-    /// parent here, else the oldest run.
+    /// The run the family is known by: the newest recorded one, with no
+    /// parent and the unperturbed schedule, else the newest run without a
+    /// parent here, else the first run. A build recorded again is known
+    /// by the later recording, whose age the family's row shows. Of runs
+    /// made in the same second the one listed first is the newest.
     pub fn base(&self) -> &RunEntry {
         let by_id = self.by_id();
         let roots = || self.runs.iter().filter(|r| !Self::has_parent_in(r, &by_id));
-        roots()
-            .filter(|r| r.schedule == 0)
-            .min_by_key(|r| r.created)
-            .or_else(|| roots().min_by_key(|r| r.created))
+
+        newest(roots().filter(|r| r.schedule == 0))
+            .or_else(|| newest(roots()))
             .unwrap_or(&self.runs[0])
     }
 
@@ -406,12 +421,17 @@ impl Family {
     /// reports, comes before one without, which would replay from boot.
     /// When that run is a window `rewind check` narrowed, the window one
     /// step shorter stands in for the base, as check reports the two.
+    /// Only the runs under the base in the tree are looked at: a build
+    /// recorded again has runs of other inputs, whose steps are not the
+    /// base's steps.
     pub fn to_open(&self) -> (&RunEntry, Option<&RunEntry>) {
         let base = self.base();
+        let under_base = self.under(base);
         let first = |failed: bool| {
             self.runs
                 .iter()
                 .filter(|r| r.failed == failed && r.id != base.id)
+                .filter(|r| under_base.contains(r.id.as_str()))
                 .min_by_key(|r| (!r.has_keyframes, r.created))
         };
         let Some(other) = first(!base.failed) else {
@@ -423,6 +443,40 @@ impl Family {
         } else {
             (other, Some(partner))
         }
+    }
+
+    /// The ids of `root` and of every run under it in the tree: its
+    /// forks and theirs, and the runs from boot that hang under any of
+    /// them.
+    fn under(&self, root: &RunEntry) -> HashSet<&str> {
+        let by_id = self.by_id();
+        let hangs = self.boot_hangs(&self.recorded_by_inputs());
+        let above = |run: &RunEntry| match &run.parent {
+            Some(parent) => by_id.get(parent.id.as_str()).copied(),
+            None => hangs.get(run.id.as_str()).copied(),
+        };
+
+        // Each run is walked up to a run without one above it. Runs that
+        // name each other as parents would walk for ever, so a walk ends
+        // after as many runs as the family has.
+        let reaches_root = |run: &RunEntry| {
+            let mut at = run;
+            for _ in 0..self.runs.len() {
+                if at.id == root.id {
+                    return true;
+                }
+                let Some(next) = above(at) else {
+                    return false;
+                };
+                at = next;
+            }
+            false
+        };
+        self.runs
+            .iter()
+            .filter(|r| reaches_root(r))
+            .map(|r| r.id.as_str())
+            .collect()
     }
 
     /// The run opening `run` compares it with: for a window `rewind check`
@@ -1099,6 +1153,57 @@ mod tests {
         assert_eq!((open.id.as_str(), compare), ("base", None));
     }
 
+    /// A build recorded in October and again in November, each with a run
+    /// of rewind check under it: `old` and `new` are the recordings, on
+    /// inputs of their own, and each has a failing schedule 1.
+    fn recorded_twice() -> Family {
+        let made = |mut r: RunEntry, inputs: &str, created: u64| {
+            r.inputs = Some(inputs.to_string());
+            r.created = created;
+            r.has_keyframes = true;
+            r
+        };
+        Family {
+            runs: vec![
+                made(run("old", None, 0, "exited:0"), "october", 1),
+                made(run("old-s1", None, 1, "exited:2"), "october", 2),
+                made(run("new", None, 0, "exited:0"), "november", 3),
+                made(run("new-s1", None, 1, "exited:2"), "november", 4),
+            ],
+        }
+    }
+
+    #[test]
+    fn a_family_leads_with_its_newest_recording() {
+        // The build recorded twice is known by the later recording, the
+        // run the family's age is that of, not by the first. Of two
+        // recordings made in the same second the one listed first leads.
+        assert_eq!(recorded_twice().base().id, "new");
+
+        let mut same_second = recorded_twice();
+        for r in &mut same_second.runs {
+            r.created = 0;
+        }
+        assert_eq!(same_second.base().id, "old");
+    }
+
+    #[test]
+    fn a_family_opens_a_comparison_inside_its_newest_recording() {
+        // The newest recording passed and a schedule under it failed, so
+        // the two open together; the older recording's failing schedule,
+        // made first, is of other inputs and is passed over. With no
+        // failing run under the newest recording it opens alone.
+        let f = recorded_twice();
+        let (open, compare) = f.to_open();
+        assert_eq!(open.id, "new-s1");
+        assert_eq!(compare.map(|c| c.id.as_str()), Some("new"));
+
+        let mut passing = recorded_twice();
+        passing.runs.retain(|r| r.id != "new-s1");
+        let (open, compare) = passing.to_open();
+        assert_eq!((open.id.as_str(), compare), ("new", None));
+    }
+
     #[test]
     fn a_family_is_found_by_its_title_derivation_or_a_run_id() {
         // The filter matches the title, the derivation and any run's id,
@@ -1204,6 +1309,38 @@ mod tests {
         assert_eq!(interrupted.progress, Progress::Interrupted);
         assert_eq!(interrupted.ending, "interrupted");
         assert!(!interrupted.passed && !interrupted.failed);
+    }
+
+    #[test]
+    fn a_build_recorded_on_another_guest_has_other_inputs() {
+        // The same build recorded on two guest kernels: a step of one is
+        // not a step of the other, so the two are different inputs, and
+        // each recording keeps the schedules rewind check ran on it. An
+        // imported run's kernel is a copy under the run's own id, which
+        // says nothing of the guest, so two imported runs of one build
+        // have the same inputs.
+        let recorded = crate::examples::manifest_of(crate::examples::FAILING);
+        let inputs = |manifest: &Manifest| {
+            let dir = Path::new("/runs/abc");
+            RunEntry::from_manifest(dir, manifest, SystemTime::UNIX_EPOCH, Executing::No).inputs
+        };
+        let mut again = recorded.clone();
+        assert_eq!(inputs(&recorded), inputs(&again));
+        again.spec.kernel = PathBuf::from("/nix/store/other-rewind-guest-kernel/bzImage");
+        assert_ne!(inputs(&recorded), inputs(&again));
+
+        let imported_as = |id: &str| {
+            let mut manifest = recorded.clone();
+            manifest.id = rewind_trace::manifest::RunId::parse(id).unwrap();
+            manifest.spec.kernel = PathBuf::from(format!("/home/inputs/{id}/bzImage"));
+            manifest.spec.initrd = PathBuf::from(format!("/home/inputs/{id}/initrd"));
+            manifest
+        };
+        let (failing, passing) = (
+            imported_as("00000000000000aa"),
+            imported_as("00000000000000bb"),
+        );
+        assert_eq!(inputs(&failing), inputs(&passing));
     }
 
     #[test]
