@@ -2049,11 +2049,30 @@ fn prepare_nix(
     let drv = nix::show(&drv_path)?;
     nix::runnable(&drv)?;
     let closure = nix::input_closure(&drv)?;
+    let graphs = nix::reference_graphs(&drv, &closure)?;
+    let build = nix::describe(&drv, closure, &graphs, cores)?;
+    let source = Source::Nix {
+        drv: drv_path.display().to_string(),
+        outputs: drv
+            .outputs
+            .iter()
+            .map(|(_, p)| p.display().to_string())
+            .collect(),
+    };
+    prepare_build(home, &build, source)
+}
 
+/// A described build's builder, with the build's inputs as the image.
+fn prepare_build(
+    home: &Home,
+    build: &nix::Build,
+    source: Source,
+) -> Result<(String, Source, Option<PathBuf>, Job)> {
     // Images of store paths are named by the paths, which already name
     // their contents.
     let key = blake3::hash(
-        closure
+        build
+            .inputs
             .iter()
             .map(|p| p.to_string_lossy())
             .collect::<Vec<_>>()
@@ -2066,25 +2085,15 @@ fn prepare_nix(
         eprintln!(
             "{} packing {} store paths for {}",
             color::stderr().prefix(),
-            closure.len(),
-            drv.name
+            build.inputs.len(),
+            build.name
         );
         let tmp = image::temp_beside(&image);
-        image::from_store_paths(&closure, &tmp)?;
+        image::from_store_paths(&build.inputs, &tmp)?;
         image::place(&tmp, &image)?;
     }
 
-    let graphs = nix::reference_graphs(&drv, &closure)?;
-    let job = nix::job(&drv, &graphs, cores)?;
-    let source = Source::Nix {
-        drv: drv_path.display().to_string(),
-        outputs: drv
-            .outputs
-            .iter()
-            .map(|(_, p)| p.display().to_string())
-            .collect(),
-    };
-    Ok((drv.name.clone(), source, Some(image), job))
+    Ok((build.name.clone(), source, Some(image), build.job()))
 }
 
 /// Whether a run prints its one-line summary when it ends.

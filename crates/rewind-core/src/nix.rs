@@ -33,6 +33,9 @@ const ATTRS_JSON: &str = StructuredAttrsFiles::JSON_FILE_NAME;
 const ATTRS_SH_VAR: &str = "NIX_ATTRS_SH_FILE";
 const ATTRS_JSON_VAR: &str = "NIX_ATTRS_JSON_FILE";
 
+/// The variable that tells a build how many cores it may use.
+const BUILD_CORES_VAR: &str = "NIX_BUILD_CORES";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Derivation {
     pub path: PathBuf,
@@ -444,17 +447,46 @@ fn path_infos(json: &Value) -> Result<BTreeMap<PathBuf, PathInfo>> {
     Ok(infos)
 }
 
-/// The builder as a job, with the environment the Nix sandbox gives it.
-/// The order of operations follows nix-daemon's initEnv, so a derivation
-/// that overrides one of these sees its own value. `cores` is the
-/// NIX_BUILD_CORES the build sees, the run's CPU count. `graphs` are the
-/// closures exportReferencesGraph asks for, from [`reference_graphs`].
-pub fn job(drv: &Derivation, graphs: &ReferenceGraphs, cores: u32) -> Result<Job> {
+/// One build as nix-daemon describes it to whatever runs the builder: the
+/// builder, its arguments and its environment as the build sees them, the
+/// files nix-daemon writes into the build directory, the store paths the
+/// build may read and the outputs it makes. `rewind nix` works a
+/// description out of a derivation ([`describe`]), and the builder becomes
+/// a job the same way wherever the description came from
+/// ([`Build::job`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Build {
+    /// The derivation's name.
+    pub name: String,
+    pub builder: String,
+    pub args: Vec<String>,
+    pub env: BTreeMap<String, String>,
+    /// The files in the build directory before the builder starts.
+    pub files: Vec<JobFile>,
+    /// Every store path the build may read: the closure of its inputs.
+    pub inputs: Vec<PathBuf>,
+    /// Output names and their store paths.
+    pub outputs: Vec<(String, PathBuf)>,
+}
+
+/// The build of `drv` as nix-daemon would describe it, with the
+/// environment the Nix sandbox gives the builder. The order of operations
+/// follows nix-daemon's initEnv, so a derivation that overrides one of
+/// these sees its own value. `inputs` is the closure of the derivation's
+/// inputs, from [`input_closure`]. `graphs` are the closures
+/// exportReferencesGraph asks for, from [`reference_graphs`]. `cores` is
+/// the NIX_BUILD_CORES the build sees, the run's CPU count.
+pub fn describe(
+    drv: &Derivation,
+    inputs: Vec<PathBuf>,
+    graphs: &ReferenceGraphs,
+    cores: u32,
+) -> Result<Build> {
     let mut env: BTreeMap<String, String> = BTreeMap::new();
     env.insert("PATH".into(), "/path-not-set".into());
     env.insert("HOME".into(), HOMELESS.into());
     env.insert("NIX_STORE".into(), STORE.into());
-    env.insert("NIX_BUILD_CORES".into(), cores.to_string());
+    env.insert(BUILD_CORES_VAR.into(), cores.to_string());
 
     // The derivation's own attributes: as environment variables, or as
     // files when the derivation uses structured attributes.
@@ -477,13 +509,7 @@ pub fn job(drv: &Derivation, graphs: &ReferenceGraphs, cores: u32) -> Result<Job
         .iter()
         .map(|(name, path)| (hash_placeholder(name), path.to_string_lossy().into_owned()))
         .collect();
-    // nix-daemon executes the builder by its path and passes only the file
-    // name as argv[0].
-    let name = Path::new(&drv.builder)
-        .file_name()
-        .map_or(drv.builder.clone(), |n| n.to_string_lossy().into_owned());
-    let mut argv = vec![name];
-    argv.extend(drv.args.iter().map(|a| rewrite(a, &rewrites)));
+    let args = drv.args.iter().map(|a| rewrite(a, &rewrites)).collect();
     let env = env
         .into_iter()
         .map(|(k, v)| (k, rewrite(&v, &rewrites)))
@@ -496,24 +522,48 @@ pub fn job(drv: &Derivation, graphs: &ReferenceGraphs, cores: u32) -> Result<Job
         })
         .collect();
 
-    Ok(Job {
-        program: Some(drv.builder.clone()),
-        argv,
+    Ok(Build {
+        name: drv.name.clone(),
+        builder: drv.builder.clone(),
+        args,
         env,
-        cwd: BUILD_DIR.into(),
-        uid: BUILDER_UID,
-        gid: BUILDER_GID,
-        hostname: "localhost".into(),
-        root: Root::Store,
-        // nix-daemon gives a builder a pseudoterminal for its output.
-        output: Output::Terminal,
         files,
-        outputs: drv
-            .outputs
-            .iter()
-            .map(|(_, p)| p.to_string_lossy().into_owned())
-            .collect(),
+        inputs,
+        outputs: drv.outputs.clone(),
     })
+}
+
+impl Build {
+    /// The builder as a job, set up as the Nix sandbox sets a build up:
+    /// the build user in the build directory, with the store as the root.
+    pub fn job(&self) -> Job {
+        // nix-daemon executes the builder by its path and passes only the
+        // file name as argv[0].
+        let name = Path::new(&self.builder)
+            .file_name()
+            .map_or(self.builder.clone(), |n| n.to_string_lossy().into_owned());
+        let mut argv = vec![name];
+        argv.extend(self.args.iter().cloned());
+
+        Job {
+            program: Some(self.builder.clone()),
+            argv,
+            env: self.env.clone().into_iter().collect(),
+            cwd: BUILD_DIR.into(),
+            uid: BUILDER_UID,
+            gid: BUILDER_GID,
+            hostname: "localhost".into(),
+            root: Root::Store,
+            // nix-daemon gives a builder a pseudoterminal for its output.
+            output: Output::Terminal,
+            files: self.files.clone(),
+            outputs: self
+                .outputs
+                .iter()
+                .map(|(_, p)| p.to_string_lossy().into_owned())
+                .collect(),
+        }
+    }
 }
 
 /// The derivation's env, set directly in the build's environment or, for
@@ -704,6 +754,12 @@ mod tests {
     /// No reference graphs, for a derivation that asks for none.
     fn no_graphs() -> ReferenceGraphs {
         ReferenceGraphs::new()
+    }
+
+    /// The job of `drv`'s build as described for `cores` cores, with no
+    /// inputs, which a job does not hold.
+    fn job(drv: &Derivation, graphs: &ReferenceGraphs, cores: u32) -> Result<Job> {
+        Ok(describe(drv, Vec::new(), graphs, cores)?.job())
     }
 
     #[test]
