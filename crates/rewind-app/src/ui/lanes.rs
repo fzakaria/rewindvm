@@ -5,12 +5,13 @@
 //! the source. The engine reads each run's threads from its context
 //! switches (`rewind threads`), a window at a time. The window opens
 //! centered on where the two runs part, or on the playhead without a
-//! compared run, and follows the playhead from then on: each move of the
-//! playhead centers the window on it again, at the width it has. Ctrl and
+//! compared run, and follows the playhead from then on: it holds still
+//! while the playhead moves inside it, and centers on the playhead again,
+//! at the width it has, when a move takes the playhead out of it. Ctrl and
 //! the wheel zoom it around the pointer, Shift and the wheel pan it, and
-//! the zoom out and in buttons zoom it around its center, until the
-//! playhead moves. A window never reaches past the run's last step while
-//! the run is longer than it. Each run is asked only for the steps it has
+//! the zoom out and in buttons zoom it around its center. A window placed
+//! around a step never reaches past the run's last step while the run is
+//! longer than it. Each run is asked only for the steps it has
 //! not been, half a window more on each side, once the window rests.
 //!
 //! The compared run's window is lined up with this run's by a fixed
@@ -235,10 +236,24 @@ impl Scrubber {
             .max(session.run.timeline.total)
     }
 
-    /// Centers the window on the playhead, at the width it has, when the
-    /// Threads tab is on screen: the playhead moved, or the tab was chosen
-    /// after it moved.
+    /// Brings the window to the playhead when the playhead has left it,
+    /// while the Threads tab is on screen: the playhead moved, or the tab
+    /// was chosen after it moved. A playhead still inside the window
+    /// leaves the window where it is, so the lanes hold still under a
+    /// walk from step to step and under a click on a bar.
     pub(super) fn lanes_playhead_moved(&mut self, cx: &mut Context<Self>) {
+        let inside = self
+            .lanes
+            .as_ref()
+            .is_some_and(|l| l.window.at(self.step).is_some());
+        if inside {
+            return;
+        }
+        self.center_lanes_on_playhead(cx);
+    }
+
+    /// Centers the window on the playhead, at the width it has.
+    fn center_lanes_on_playhead(&mut self, cx: &mut Context<Self>) {
         let Some(half) = self.lanes.as_ref().map(|l| l.window.half) else {
             return;
         };
@@ -584,7 +599,7 @@ impl Scrubber {
                 ))
         });
         let recenter = crate::ui::bookmarks::link("lanes-center", "Center on playhead")
-            .on_click(cx.listener(move |this, _, _, cx| this.lanes_playhead_moved(cx)));
+            .on_click(cx.listener(move |this, _, _, cx| this.center_lanes_on_playhead(cx)));
         div()
             .flex()
             .flex_none()
