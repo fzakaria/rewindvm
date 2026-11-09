@@ -1345,8 +1345,10 @@ in
           # events replay identically, its machine does not, and the
           # replay names the variable that holds the number. A look
           # before that keyframe warns that it may show values the
-          # recording never had.
-          rewind run -q --name hidden --root ${determinismRoot} -- /bin/hidden
+          # recording never had. The clock is exit time, which the report
+          # below names, on a machine whose sandbox shows the branch
+          # counter's workaround as on one whose sandbox does not.
+          rewind run -q --clock exits --name hidden --root ${determinismRoot} -- /bin/hidden
           if rewind replay hidden > hidden.replay; then exit 1; fi
           cat hidden.replay
           grep -q '^identical to the recording: ' hidden.replay
