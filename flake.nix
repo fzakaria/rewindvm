@@ -283,6 +283,7 @@
             gdb
             ;
           module = self.nixosModules.default;
+          rewindLib = self.lib.${system};
         }
 
         # nixbot (nixbot.decio.us) builds `checks` and nothing else, so the
@@ -317,6 +318,18 @@
             app
             ;
         }
+      );
+
+      # `lib.<system>.inRewind { epoch = 1790985600; } drv`: any derivation
+      # with its builder running inside Rewind, and the clock, the seed and
+      # the schedule among its attributes; `onRewind` asks Nix for the
+      # platform instead (nix/lib.nix)
+      lib = forAllSystems (
+        system:
+        let
+          p = per system;
+        in
+        import ./nix/lib.nix { inherit (p) pkgs rewind; }
       );
 
       # `programs.rewind` and `programs.rewind.app` for NixOS (nix/module.nix)

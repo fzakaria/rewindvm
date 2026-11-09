@@ -6,6 +6,7 @@
   guest,
   gdb,
   module,
+  rewindLib,
 }:
 let
   # A NixOS system with every option of the module turned on, evaluated
@@ -1601,6 +1602,99 @@ in
         grep -q "ran in process $pid;" serve
         touch $out
       '';
+
+  # checks.in-rewind: derivations that `inRewind` rewrote build under a
+  # stock nix-daemon, on the machine their attributes name. Each builder
+  # checks known answers inside the VM: the date is the epoch's day,
+  # 2026-10-03, whatever today is, the build has one core and the build
+  # user's ids, and an attribute passed as a file arrives. The check then
+  # reads what `rewind build` copied out: a file, an executable, a link and
+  # an empty directory, and both outputs of a derivation with structured
+  # attributes. The builder's own arguments reach the VM, bash's -e among
+  # them, without which no failed answer would fail the build. A fixed-output derivation is refused when evaluated, and
+  # `onRewind` changes the platform and adds the machine. The clock is exit
+  # time, which needs no counter. Boots the VM, so it needs /dev/kvm.
+  in-rewind =
+    let
+      inherit (pkgs) lib;
+      machine = {
+        epoch = 1790985600;
+        clock = "exits";
+      };
+
+      # The machine as `rewindFlags` holds one.
+      flags = "--epoch 1790985600 --seed 0 --schedule 0 --cpu v3-compat --clock exits --cores 1 --mem 1024";
+
+      # `inRewind`, less the CPU vendor: CI's builders advertise `kvm` and
+      # no `rewind-<vendor>` feature, and none of the answers below depends
+      # on the vendor.
+      inRewind =
+        drv:
+        let
+          wrapped = rewindLib.inRewind machine drv;
+        in
+        assert wrapped.rewindFlags == "${flags} --vendor amd";
+        assert lib.elem "rewind-amd" wrapped.requiredSystemFeatures;
+        lib.overrideDerivation wrapped (_: {
+          requiredSystemFeatures = [ "kvm" ];
+          rewindFlags = flags;
+        });
+
+      plain = inRewind (
+        pkgs.runCommand "rewind-in-rewind-plain"
+          {
+            text = "passed as a file";
+            passAsFile = [ "text" ];
+          }
+          ''
+            test "$(date -u +%F)" = 2026-10-03
+            test "$NIX_BUILD_CORES" = 1
+            test "$(id -u):$(id -g)" = 1000:100
+            test "$PWD" = /build
+            test "$(cat "$textPath")" = "passed as a file"
+            mkdir -p $out/bin $out/empty
+            date -u +%F > $out/date
+            echo "$-" > $out/shell-options
+            echo '#!/bin/sh' > $out/bin/tool
+            chmod +x $out/bin/tool
+            ln -s tool $out/bin/alias
+          ''
+      );
+
+      structured = inRewind (
+        pkgs.runCommand "rewind-in-rewind-structured"
+          {
+            __structuredAttrs = true;
+            outputs = [
+              "out"
+              "doc"
+            ];
+          }
+          ''
+            mkdir -p $out $doc
+            date -u +%F > $out/date
+            echo read me > $doc/readme
+          ''
+      );
+
+      platform = rewindLib.onRewind machine pkgs.hello;
+      fetched = builtins.tryEval (rewindLib.inRewind machine pkgs.hello.src).drvPath;
+    in
+    assert !fetched.success;
+    assert platform.system == "x86_64-rewind-amd";
+    assert platform.rewindFlags == flags;
+    assert platform.builder == pkgs.hello.builder;
+    pkgs.runCommand "rewind-in-rewind" { } ''
+      test "$(cat ${plain}/date)" = 2026-10-03
+      grep -q e ${plain}/shell-options
+      test -x ${plain}/bin/tool
+      test "$(readlink ${plain}/bin/alias)" = tool
+      test -d ${plain}/empty
+      test -z "$(ls -A ${plain}/empty)"
+      test "$(cat ${structured}/date)" = 2026-10-03
+      test "$(cat ${structured.doc}/readme)" = "read me"
+      touch $out
+    '';
 
   # checks.image-env: the image of a root, and so the run, is the same
   # whether rewind runs in a Nix development shell, which sets
