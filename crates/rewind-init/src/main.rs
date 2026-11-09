@@ -734,7 +734,7 @@ fn list(pid: i32, path: &str, out: &mut File, err: &mut File) -> InspectStatus {
         let _ = writeln!(err, "inspect: {e}");
         return InspectStatus::Failed;
     }
-    let listing = match list_below(Path::new(path), MAX_LISTED) {
+    let listing = match list_below(Path::new(path), MAX_LISTED, &enters) {
         Ok(listing) => listing,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             let _ = writeln!(err, "{path}: no such directory at this step");
@@ -755,13 +755,56 @@ fn list(pid: i32, path: &str, out: &mut File, err: &mut File) -> InspectStatus {
     InspectStatus::Done
 }
 
+/// Whether a listing's walk reads a directory it lists.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Enter {
+    Yes,
+    No,
+}
+
+/// Whether a listing's walk reads directory `dir`. Not when the kernel
+/// makes the directory's entries up, as it does under /proc and /sys:
+/// they are no files of the run, and there are thousands of them, enough
+/// to fill a listing of the root. A listing asked of such a directory
+/// itself still reads the directory.
+fn enters(dir: &Path) -> Enter {
+    use std::os::unix::ffi::OsStrExt;
+
+    let Ok(path) = CString::new(dir.as_os_str().as_bytes()) else {
+        return Enter::No;
+    };
+    // SAFETY: statfs writes only inside the struct, which zeroes are a
+    // valid value of, and reads a NUL-terminated path.
+    let filesystem = unsafe {
+        let mut found: libc::statfs = std::mem::zeroed();
+        if libc::statfs(path.as_ptr(), &mut found) != 0 {
+            return Enter::Yes;
+        }
+        // The field and the constants are signed in one C library and
+        // unsigned in another; every value of either fits an i128.
+        i128::from(found.f_type)
+    };
+    let made_up = [
+        i128::from(libc::PROC_SUPER_MAGIC),
+        i128::from(libc::SYSFS_MAGIC),
+    ];
+    if made_up.contains(&filesystem) {
+        return Enter::No;
+    }
+    Enter::Yes
+}
+
 /// The entries below directory `root`, at most `max` of them: the
 /// directory's own entries by name, then those of each directory among
-/// them, and so on down, so a listing that is cut keeps the entries
-/// nearest `root`. Links are listed, not followed. An error when `root`
-/// cannot be read as a directory; a directory below it that cannot be
-/// read is listed and not entered.
-fn list_below(root: &Path, max: usize) -> std::io::Result<Listing> {
+/// them that `enters` says to read, and so on down, so a listing that is
+/// cut keeps the entries nearest `root`. Links are listed, not followed.
+/// An error when `root` cannot be read as a directory; a directory below
+/// it that cannot be read is listed and not entered.
+fn list_below(
+    root: &Path,
+    max: usize,
+    enters: &dyn Fn(&Path) -> Enter,
+) -> std::io::Result<Listing> {
     use std::collections::VecDeque;
 
     let mut listing = Listing {
@@ -796,7 +839,9 @@ fn list_below(root: &Path, max: usize) -> std::io::Result<Listing> {
                 let target = fs::read_link(root.join(&below)).ok();
                 (ListedKind::Symlink, target.map(|t| t.display().to_string()))
             } else if kind.is_dir() {
-                unread.push_back(below.clone());
+                if enters(&root.join(&below)) == Enter::Yes {
+                    unread.push_back(below.clone());
+                }
                 (ListedKind::Directory, None)
             } else if kind.is_file() {
                 (ListedKind::File, None)
@@ -1605,7 +1650,8 @@ mod tests {
         .unwrap();
         symlink("shuffle", root.join("bin/sh")).unwrap();
 
-        let listing = list_below(&root, MAX_LISTED).unwrap();
+        let everywhere = |_: &Path| Enter::Yes;
+        let listing = list_below(&root, MAX_LISTED, &everywhere).unwrap();
         assert_eq!(listing.complete, ListedAll::Yes);
         let seen: Vec<(&str, ListedKind, u64, Option<&str>)> = listing
             .entries
@@ -1635,15 +1681,35 @@ mod tests {
         assert_eq!(mode("share/man/shuffle.1"), Some(0o644));
 
         // Room for three entries: the three nearest, and the cut noted.
-        let cut = list_below(&root, 3).unwrap();
+        let cut = list_below(&root, 3, &everywhere).unwrap();
         assert_eq!(cut.complete, ListedAll::No);
         let paths: Vec<&str> = cut.entries.iter().map(|e| e.path.as_str()).collect();
         assert_eq!(paths, vec!["bin", "empty", "share"]);
 
-        // A path that is no directory is an error, as the caller reports.
-        assert!(list_below(&root.join("bin/shuffle"), MAX_LISTED).is_err());
+        // A directory the walk is told not to enter is listed, and
+        // nothing below it is. Named as the walk's own directory, the
+        // same directory is read.
+        let not_share = |dir: &Path| {
+            if dir.ends_with("share") {
+                Enter::No
+            } else {
+                Enter::Yes
+            }
+        };
+        let kept_out = list_below(&root, MAX_LISTED, &not_share).unwrap();
+        let paths: Vec<&str> = kept_out.entries.iter().map(|e| e.path.as_str()).collect();
         assert_eq!(
-            list_below(&root.join("nope"), MAX_LISTED)
+            paths,
+            vec!["bin", "empty", "share", "bin/sh", "bin/shuffle"]
+        );
+        let named = list_below(&root.join("share"), MAX_LISTED, &not_share).unwrap();
+        let paths: Vec<&str> = named.entries.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(paths, vec!["man", "man/shuffle.1"]);
+
+        // A path that is no directory is an error, as the caller reports.
+        assert!(list_below(&root.join("bin/shuffle"), MAX_LISTED, &everywhere).is_err());
+        assert_eq!(
+            list_below(&root.join("nope"), MAX_LISTED, &everywhere)
                 .unwrap_err()
                 .kind(),
             std::io::ErrorKind::NotFound

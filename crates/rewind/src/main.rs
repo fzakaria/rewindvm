@@ -167,8 +167,9 @@ enum Command {
     /// where a link points. Rewind forks the run at the step and reads the
     /// directory inside the VM, so this takes about as long as seeking
     /// there. A directory with more than 10,000 entries is cut to the ones
-    /// nearest it. Exits 3 when the directory did not exist then, and 4
-    /// when the path named something other than a directory.
+    /// nearest it, and a directory of /proc or /sys under it is listed and
+    /// not read. Exits 3 when the directory did not exist then, and 4 when
+    /// the path named something other than a directory.
     Files(cmd::inspect::FilesArgs),
     /// A shell inside the VM at a step of a run.
     ///

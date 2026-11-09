@@ -195,6 +195,7 @@ pub enum InspectRequest {
     /// The entries below directory `path`, resolved as process `pid` sees
     /// the path, as a [`Listing`]'s lines on standard output: every file,
     /// link and directory under it, however deep, up to [`MAX_LISTED`].
+    /// A directory of /proc or /sys under it is listed and not read.
     /// Not found when nothing has the path; failed when it names
     /// something other than a directory.
     List { pid: Option<u32>, path: String },

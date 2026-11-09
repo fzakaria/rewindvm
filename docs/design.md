@@ -225,7 +225,8 @@ usermode helper, and power off waits until the helper exits. The helper enters
 the root and working directory of the process named in the request. For `cat`
 it writes the file through `/dev/rewind-stdout` between two marks. For `files`
 it walks the directory, nearest entries first and at most 10,000 of them, and
-writes a line of JSON for each. For `shell`
+writes a line of JSON for each; it lists a directory of `/proc` or `/sys`
+below the one asked for without reading it. For `shell`
 it opens a pty, starts the shell that process's environment names (for a Nix
 build, the builder's bash with stdenv's PATH) with that environment, and
 relays the pty to `/dev/rewind-console`. Reads of that device return input
