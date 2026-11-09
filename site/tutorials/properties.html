@@ -33,6 +33,7 @@
       <nav class="page-links">
         <a href="../#tutorials">Tutorials</a>
         <a href="../#case-studies">Case studies</a>
+        <a href="../nix-builds.html">Nix build reference</a>
         <a href="../counter-time.html">Counter time</a>
         <a href="../viewer/">Viewer</a>
       </nav>
@@ -95,7 +96,7 @@
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind check --epoch 1790985600 --schedules 8 --property 'atomic-replace=*.conf' github:fzakaria/rewindvm#config-reload</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind check <span class="option">--epoch</span> <span class="number">1790985600</span> <span class="option">--schedules</span> <span class="number">8</span> <span class="option">--property</span> <span class="string">'atomic-replace=*.conf'</span> github:fzakaria/rewindvm#config-reload</span>
 <span class="ansi-dim">rewind:</span> packing 62 store paths for config-reload-0.1.0
 schedule   0: <span class="ansi-green">exited:0</span>             4563 steps  f7b1c7741aba  run 366325e47af7c8c3  <span class="ansi-red">violates</span> atomic-replace
   atomic-replace: step 3232: process 139 (config) truncated /build/config-reload/app.conf in place, which the run wrote at step 3227; a reader can see it empty or half written
@@ -112,7 +113,7 @@ open it at the step: rewind open 366325e47af7c8c3 3232</code></pre>
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind check --epoch 1790985600 --property 'no-read-while-written=*.conf' github:fzakaria/rewindvm#config-reload | grep -E 'decides it|failing run'</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind check <span class="option">--epoch</span> <span class="number">1790985600</span> <span class="option">--property</span> <span class="string">'no-read-while-written=*.conf'</span> github:fzakaria/rewindvm#config-reload <span class="operator">|</span> grep <span class="option">-E</span> <span class="string">'decides it|failing run'</span></span>
 schedule 1 violates no-read-while-written; finding the step that decides it
 step 3254 decides it: a request to switch threads there makes the run violate no-read-while-written
 failing run violates no-read-while-written: step 3261: process 140 (config) opened /build/config-reload/app.conf for reading while process 139 (config), which opened it for writing at step 3254, had not closed it</code></pre>
@@ -215,7 +216,7 @@ failing run violates no-read-while-written: step 3261: process 140 (config) open
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind check --epoch 1790985600 --schedules 0 github:fzakaria/rewindvm#bank</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind check <span class="option">--epoch</span> <span class="number">1790985600</span> <span class="option">--schedules</span> <span class="number">0</span> github:fzakaria/rewindvm#bank</span>
 ...
 schedule   0: <span class="ansi-green">exited:0</span>             4547 steps  2ffd6b62eb30  run b1d6981401d5d15f  <span class="ansi-green">holds</span>
 <span class="ansi-yellow">never true in any run: sometimes "deposits-concurrent"</span>
@@ -226,7 +227,7 @@ schedule   0: <span class="ansi-green">exited:0</span>             4547 steps  2
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind check --epoch 1790985600 github:fzakaria/rewindvm#bank | grep -E 'decides it|passing:|failing:|failing run violates sdk|^true in'</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind check <span class="option">--epoch</span> <span class="number">1790985600</span> github:fzakaria/rewindvm#bank <span class="operator">|</span> grep <span class="option">-E</span> <span class="string">'decides it|passing:|failing:|failing run violates sdk|^true in'</span></span>
 true in 16 of 17 runs that checked it: sometimes "deposits-concurrent"
 schedule 1 violates same-outcome, sdk; finding the step that decides it
 step 3245 decides it: a request to switch threads there makes the run violate same-outcome, sdk
@@ -247,7 +248,7 @@ failing run violates sdk: step 3292: always "balance-adds-up" failed: balance 31
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> git clone https://github.com/fzakaria/rewindvm</span>
-<span class="cmd"><span class="prompt">$</span> cd rewindvm</span></code></pre>
+<span class="cmd"><span class="prompt">$</span> <span class="keyword">cd</span> rewindvm</span></code></pre>
         <p>
           In <code>examples/bank/bank.c</code>, hold a mutex from each deposit's read of the balance
           to its store:
@@ -280,7 +281,7 @@ failing run violates sdk: step 3292: always "balance-adds-up" failed: balance 31
 <span class="ctx"></span></code></pre>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind check --epoch 1790985600 .#bank | grep -E '^true in|^every property'</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind check <span class="option">--epoch</span> <span class="number">1790985600</span> .#bank <span class="operator">|</span> grep <span class="option">-E</span> <span class="string">'^true in|^every property'</span></span>
 rewind: packing 62 store paths for bank-0.1.0
 true in 61 of 65 runs that checked it: sometimes "deposits-concurrent"
 every property held under all 65 schedules</code></pre>
@@ -310,7 +311,7 @@ every property held under all 65 schedules</code></pre>
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind check --epoch 1790985600 --seeds 8 --schedules 0 github:fzakaria/rewindvm#hash-order | grep -E '^seed|decides it|passing:|failing:'</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind check <span class="option">--epoch</span> <span class="number">1790985600</span> <span class="option">--seeds</span> <span class="number">8</span> <span class="option">--schedules</span> <span class="number">0</span> github:fzakaria/rewindvm#hash-order <span class="operator">|</span> grep <span class="option">-E</span> <span class="string">'^seed|decides it|passing:|failing:'</span></span>
 rewind: packing 67 store paths for hash-order-0.1.0
 seed  0 schedule   0: exited:0             4795 steps  83f239c2e313  run 7d360975aaf9c717
 seed  1 schedule   0: exited:2             3550 steps    run 6b1d7829e6427f5d
@@ -331,7 +332,7 @@ failing: run 6b1d7829e6427f5d, seed 1, schedule 0</code></pre>
         <p>Open the failing <code>bank</code> run beside the passing one, at the assertion:</p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind open 240115d5 3292 --compare b1d69814</span></code></pre>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind open 240115d5 <span class="number">3292</span> <span class="option">--compare</span> b1d69814</span></code></pre>
         <figure class="shot">
           <picture>
             <source srcset="../img/app-assertion.webp" type="image/webp" />

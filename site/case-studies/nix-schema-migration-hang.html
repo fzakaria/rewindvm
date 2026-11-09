@@ -33,6 +33,7 @@
       <nav class="page-links">
         <a href="../#tutorials">Tutorials</a>
         <a href="../#case-studies">Case studies</a>
+        <a href="../nix-builds.html">Nix build reference</a>
         <a href="../counter-time.html">Counter time</a>
         <a href="../viewer/">Viewer</a>
       </nav>
@@ -122,7 +123,7 @@
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind check --epoch 1791936000 --all --schedules 256 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-concurrent-builds-15693-gdb'</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind check <span class="option">--epoch</span> <span class="number">1791936000</span> <span class="option">--all</span> <span class="option">--schedules</span> <span class="number">256</span> <span class="string">'github:fzakaria/rewindvm?dir=examples/case-studies#nix-concurrent-builds-15693-gdb'</span></span>
 <span class="ansi-dim">rewind:</span> packing 260 store paths for nix-functional-concurrent-builds-gdb-2.35.0pre20260414_a94dee9
 schedule   0: <span class="ansi-green">exited:0</span>            34629 steps  a50a5ab6d992  run d07f3f1b61cd4329
 schedule   1: <span class="ansi-green">exited:0</span>            49268 steps  a50a5ab6d992  run 639e82ab22e6183c
@@ -178,13 +179,13 @@ open both in the desktop app: rewind open e296601ffb6deb66 267631 --compare fa9e
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind log 0450b377 | grep -E 'UNIQUE|is busy|TIMEOUT' | sort | uniq -c</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind log 0450b377 <span class="operator">|</span> grep <span class="option">-E</span> <span class="string">'UNIQUE|is busy|TIMEOUT'</span> <span class="operator">|</span> sort <span class="operator">|</span> uniq <span class="option">-c</span></span>
       1 1/1 nix-functional-tests:ca / concurrent-builds <span class="ansi-bold ansi-red">TIMEOUT       </span> 300.02s   killed by signal 15 SIGTERM
       1 1/1 nix-functional-tests:ca / concurrent-builds        <span class="ansi-bold ansi-red">TIMEOUT       </span> 300.02s   killed by signal 15 SIGTERM
       2        insert into SchemaMigrations values('20251017-ca-derivations')': constraint failed, UNIQUE constraint failed: SchemaMigrations.migration (in '/build/nix-test/ca/concurrent-builds/var/nix/db/db.sqlite')
      28 warning: SQLite database '/build/nix-test/ca/concurrent-builds/var/nix/db/db.sqlite' is busy
 
-<span class="cmd"><span class="prompt">$</span> rewind events 0450b377 | grep -E 'exit_group\(nix\)'</span>
+<span class="cmd"><span class="prompt">$</span> rewind events 0450b377 <span class="operator">|</span> grep <span class="option">-E</span> <span class="string">'exit_group\(nix\)'</span></span>
      29089   223/223   exit_group(nix) exited:1
      29430   224/224   exit_group(nix) exited:1
      33059   238/238   exit_group(nix) killed:SIGTERM
@@ -206,7 +207,7 @@ open both in the desktop app: rewind open e296601ffb6deb66 267631 --compare fa9e
         <p>At step 200000 only 220 is left, and it holds every lock:</p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind ps 0450b377 200000</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind ps 0450b377 <span class="number">200000</span></span>
      1 /init
     34   bash -e /nix/store/...-source-stdenv.sh /nix/store/...-default-builder.sh
    187     /nix/store/...-python3-3.13.11/bin/python3.13 /nix/store/...-meson-1.9.1/bin/meson test --no-rebuild --print-errorlogs concurrent-builds
@@ -214,7 +215,7 @@ open both in the desktop app: rewind open e296601ffb6deb66 267631 --compare fa9e
    220         nix build --no-link --file ./racy.nix
    227           (thread)
 
-<span class="cmd"><span class="prompt">$</span> rewind cat 0450b377 200000 /proc/locks</span>
+<span class="cmd"><span class="prompt">$</span> rewind cat 0450b377 <span class="number">200000</span> /proc/locks</span>
 1: POSIX  ADVISORY  READ 220 00:03:1812 124 124
 2: POSIX  ADVISORY  READ 220 00:03:1812 128 128
 3: POSIX  ADVISORY  READ 220 00:03:1809 1073741826 1073742335
@@ -238,7 +239,7 @@ open both in the desktop app: rewind open e296601ffb6deb66 267631 --compare fa9e
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind shell 0450b377 200000 --pid 220 &lt; gdb.sh</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind shell 0450b377 <span class="number">200000</span> <span class="option">--pid</span> <span class="number">220</span> <span class="operator">&lt;</span> gdb.sh</span>
 <span class="ansi-dim">rewind:</span> a shell at step 200000 of 0450b3777e43dc13; exit it to leave
 [rewind] /build/source/tests/functional/ca # cat &gt; /tmp/g.cmd &lt;&lt;'END'
 &gt; set pagination off
@@ -319,7 +320,7 @@ autocommit 0
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind check --epoch 1791936000 --all --schedules 256 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-concurrent-builds-15694'</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind check <span class="option">--epoch</span> <span class="number">1791936000</span> <span class="option">--all</span> <span class="option">--schedules</span> <span class="number">256</span> <span class="string">'github:fzakaria/rewindvm?dir=examples/case-studies#nix-concurrent-builds-15694'</span></span>
 <span class="ansi-dim">rewind:</span> packing 216 store paths for nix-functional-concurrent-builds-2.35.0pre20260416_c390460
 schedule   0: <span class="ansi-green">exited:0</span>            35477 steps  a50a5ab6d992  run b1e28762428cddd5
 ...
@@ -343,7 +344,7 @@ schedule 186: <span class="ansi-red">exited:1</span>           414674 steps    r
 ...</code></pre>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind log e46d2a62 | grep -E 'UNIQUE|is busy|TIMEOUT' | sort | uniq -c</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind log e46d2a62 <span class="operator">|</span> grep <span class="option">-E</span> <span class="string">'UNIQUE|is busy|TIMEOUT'</span> <span class="operator">|</span> sort <span class="operator">|</span> uniq <span class="option">-c</span></span>
       1 1/1 nix-functional-tests:ca / concurrent-builds <span class="ansi-bold ansi-red">TIMEOUT       </span> 300.02s   killed by signal 15 SIGTERM
       1 1/1 nix-functional-tests:ca / concurrent-builds        <span class="ansi-bold ansi-red">TIMEOUT       </span> 300.02s   killed by signal 15 SIGTERM
      28 warning: SQLite database '/build/nix-test/ca/concurrent-builds/var/nix/db/db.sqlite' is busy</code></pre>
@@ -355,7 +356,7 @@ schedule 186: <span class="ansi-red">exited:1</span>           414674 steps    r
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind check --epoch 1791936000 --all --schedules 256 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-concurrent-builds'</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind check <span class="option">--epoch</span> <span class="number">1791936000</span> <span class="option">--all</span> <span class="option">--schedules</span> <span class="number">256</span> <span class="string">'github:fzakaria/rewindvm?dir=examples/case-studies#nix-concurrent-builds'</span></span>
 <span class="ansi-dim">rewind:</span> packing 217 store paths for nix-functional-concurrent-builds-2.35.2
 schedule   0: <span class="ansi-green">exited:0</span>            38109 steps  a50a5ab6d992  run 2830edf2f50158ca
 ...
@@ -395,7 +396,7 @@ schedule   0: <span class="ansi-green">exited:0</span>            38109 steps  a
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind import https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-schema-migration-hang-replayable.rwd</span>
 <span class="cmd"><span class="prompt">$</span> rewind replay 0450b377</span>
-<span class="cmd"><span class="prompt">$</span> rewind shell 0450b377 &lt;step&gt;</span>
+<span class="cmd"><span class="prompt">$</span> rewind shell 0450b377 <span class="operator">&lt;</span>step<span class="operator">&gt;</span></span>
 <span class="cmd"><span class="prompt">$</span> rewind-app https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-schema-migration-hang.rwd</span></code></pre>
       </section>
 

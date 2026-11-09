@@ -33,6 +33,7 @@
       <nav class="page-links">
         <a href="../#tutorials">Tutorials</a>
         <a href="../#case-studies">Case studies</a>
+        <a href="../nix-builds.html">Nix build reference</a>
         <a href="../counter-time.html">Counter time</a>
         <a href="../viewer/">Viewer</a>
       </nav>
@@ -79,7 +80,9 @@
           enabled and the <code>kvm</code> system feature, with <code>/dev/kvm</code> available to
           builds. It also needs a feature naming the builder's CPU vendor. On NixOS:
         </p>
-        <pre class="console"><code>programs.rewind.systemFeature = "amd";</code></pre>
+        <pre
+          class="console source"
+        ><code>programs.rewind.<span class="property">systemFeature</span> = <span class="string">"amd"</span>;</code></pre>
         <p>
           On another distribution, add <code>extra-system-features = kvm rewind-amd</code> to
           <code>nix.conf</code>. Use <code>intel</code> and <code>rewind-intel</code> on Intel. The
@@ -104,7 +107,7 @@
 ...
 build b2060565-ce20-4c7b-80f9-e19f540dbc78 at 2026-11-09T18:06:35Z
 
-<span class="cmd"><span class="prompt">$</span> nix build --no-link github:fzakaria/rewindvm#stamp --rebuild</span>
+<span class="cmd"><span class="prompt">$</span> nix build <span class="option">--no-link</span> github:fzakaria/rewindvm#stamp <span class="option">--rebuild</span></span>
 ...
 checking outputs of '/nix/store/...-stamp-0.1.0.drv'...
 error: derivation '/nix/store/...-stamp-0.1.0.drv' may not be deterministic: output "/nix/store/...-stamp-0.1.0" differs</code></pre>
@@ -122,14 +125,14 @@ error: derivation '/nix/store/...-stamp-0.1.0.drv' may not be deterministic: out
           Save this as <code>stamp.nix</code>, changing <code>vendor</code> to
           <code>"intel"</code> on an Intel builder:
         </p>
-        <pre class="console"><code>let
-  rewind = builtins.getFlake "github:fzakaria/rewindvm";
-  inherit (rewind.lib.x86_64-linux) inRewind;
-in
+        <pre class="console source"><code><span class="keyword">let</span>
+  <span class="property">rewind</span> = builtins.getFlake <span class="string">"github:fzakaria/rewindvm"</span>;
+  <span class="keyword">inherit</span> (rewind.lib.x86_64-linux) inRewind;
+<span class="keyword">in</span>
 inRewind {
-  epoch = 1790985600;
-  clock = "exits";
-  vendor = "amd";
+  <span class="property">epoch</span> = <span class="number">1790985600</span>;
+  <span class="property">clock</span> = <span class="string">"exits"</span>;
+  <span class="property">vendor</span> = <span class="string">"amd"</span>;
 } rewind.packages.x86_64-linux.stamp</code></pre>
         <p>
           <code>inRewind</code> takes the machine settings and a derivation. Nix runs that
@@ -138,17 +141,17 @@ inRewind {
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> nix build --no-link --print-out-paths --impure -f stamp.nix</span>
+        ><code><span class="cmd"><span class="prompt">$</span> nix build <span class="option">--no-link</span> <span class="option">--print-out-paths</span> <span class="option">--impure</span> <span class="option">-f</span> stamp.nix</span>
 ...
 /nix/store/2va0vhvj2ksl5kf66hyjmshprn19cv8k-stamp-0.1.0
 
-<span class="cmd"><span class="prompt">$</span> $(nix build --no-link --print-out-paths --impure -f stamp.nix)/bin/stamp</span>
+<span class="cmd"><span class="prompt">$</span> <span class="operator">$(</span>nix build <span class="option">--no-link</span> <span class="option">--print-out-paths</span> <span class="option">--impure</span> <span class="option">-f</span> stamp.nix<span class="operator">)</span>/bin/stamp</span>
 ...
 build 4ce9bd9b-a9df-4eb0-968c-cae21737b552 at 2026-10-03T00:00:00Z</code></pre>
         <p>Now rebuild it:</p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> nix build -L --no-link --impure -f stamp.nix --rebuild</span>
+        ><code><span class="cmd"><span class="prompt">$</span> nix build <span class="option">-L</span> <span class="option">--no-link</span> <span class="option">--impure</span> <span class="option">-f</span> stamp.nix <span class="option">--rebuild</span></span>
 ...
 checking outputs of '/nix/store/...-stamp-0.1.0.drv'...
 ...
@@ -175,12 +178,12 @@ stamp&gt; rewind: run a5453754435731c0 exited:0 after 4296 steps, 0.021s virtual
         <p>Change the epoch to midnight on 2025-06-15:</p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> sed -i 's/1790985600/1749945600/' stamp.nix</span>
-<span class="cmd"><span class="prompt">$</span> nix build --no-link --print-out-paths --impure -f stamp.nix</span>
+        ><code><span class="cmd"><span class="prompt">$</span> sed <span class="option">-i</span> <span class="string">'s/1790985600/1749945600/'</span> stamp.nix</span>
+<span class="cmd"><span class="prompt">$</span> nix build <span class="option">--no-link</span> <span class="option">--print-out-paths</span> <span class="option">--impure</span> <span class="option">-f</span> stamp.nix</span>
 ...
 /nix/store/ibl83iyrplb8i1p152fh57535faw8zm3-stamp-0.1.0
 
-<span class="cmd"><span class="prompt">$</span> $(nix build --no-link --print-out-paths --impure -f stamp.nix)/bin/stamp</span>
+<span class="cmd"><span class="prompt">$</span> <span class="operator">$(</span>nix build <span class="option">--no-link</span> <span class="option">--print-out-paths</span> <span class="option">--impure</span> <span class="option">-f</span> stamp.nix<span class="operator">)</span>/bin/stamp</span>
 ...
 build 9332c115-745f-4d61-b6e3-95f52d97852b at 2025-06-15T00:00:00Z</code></pre>
         <p>

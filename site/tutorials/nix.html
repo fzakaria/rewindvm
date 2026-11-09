@@ -33,6 +33,7 @@
       <nav class="page-links">
         <a href="../#tutorials">Tutorials</a>
         <a href="../#case-studies">Case studies</a>
+        <a href="../nix-builds.html">Nix build reference</a>
         <a href="../counter-time.html">Counter time</a>
         <a href="../viewer/">Viewer</a>
       </nav>
@@ -81,20 +82,22 @@
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> nix profile install github:fzakaria/rewindvm</span>
-<span class="cmd"><span class="prompt">$</span> ls -l /dev/kvm</span>
+<span class="cmd"><span class="prompt">$</span> ls <span class="option">-l</span> /dev/kvm</span>
 crw-rw-rw- 1 root kvm 10, 232 Oct  1 20:16 /dev/kvm</code></pre>
         <p>
           The build comes from <code>rewindvm.cachix.org</code>; say yes when Nix asks to trust it.
           The desktop app is <code>github:fzakaria/rewindvm#app</code>. On NixOS, use the module
           instead:
         </p>
-        <pre class="console"><code>inputs.rewind.url = "github:fzakaria/rewindvm";
+        <pre
+          class="console source"
+        ><code>inputs.rewind.<span class="property">url</span> = <span class="string">"github:fzakaria/rewindvm"</span>;
 
-# with inputs.rewind.nixosModules.default imported
-programs.rewind.enable = true;
-programs.rewind.app.enable = true;
-# AMD only: make the branch counter exact at every boot
-programs.rewind.amdBranchCounterWorkaround = true;</code></pre>
+<span class="comment"># with inputs.rewind.nixosModules.default imported</span>
+programs.rewind.<span class="property">enable</span> = <span class="keyword">true</span>;
+programs.rewind.app.<span class="property">enable</span> = <span class="keyword">true</span>;
+<span class="comment"># AMD only: make the branch counter exact at every boot</span>
+programs.rewind.<span class="property">amdBranchCounterWorkaround</span> = <span class="keyword">true</span>;</code></pre>
         <p>
           If <code>/dev/kvm</code> is not yours to use, add yourself to the <code>kvm</code> group.
           On AMD, run <code>sudo rewind pmu enable</code> once after each boot;
@@ -107,7 +110,7 @@ programs.rewind.amdBranchCounterWorkaround = true;</code></pre>
         <p>On the host the build usually passes. Rebuilt 45 times, it failed twice:</p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> nix build --rebuild -L github:fzakaria/rewindvm#mylib</span>
+        ><code><span class="cmd"><span class="prompt">$</span> nix build <span class="option">--rebuild</span> <span class="option">-L</span> github:fzakaria/rewindvm#mylib</span>
 ...
 mylib&gt; running tests/test_pool_shutdown
 ...
@@ -130,7 +133,7 @@ error: Cannot build '/nix/store/hvp2d0h9l97d19d3xp5k3vf6xwhg4axr-mylib-0.3.0.drv
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind nix --epoch 1790985600 github:fzakaria/rewindvm#mylib</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind nix <span class="option">--epoch</span> <span class="number">1790985600</span> github:fzakaria/rewindvm#mylib</span>
 <span class="ansi-dim">rewind:</span> packing 62 store paths for mylib-0.3.0
 ...
 <span class="ansi-dim">rewind:</span> run cc2b986165da8b5e <span class="ansi-green">exited:0</span> after 6196 steps, 0.217s virtual, 1.801s wall (poweroff)
@@ -153,7 +156,7 @@ error: Cannot build '/nix/store/hvp2d0h9l97d19d3xp5k3vf6xwhg4axr-mylib-0.3.0.drv
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind check --epoch 1790985600 github:fzakaria/rewindvm#mylib</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind check <span class="option">--epoch</span> <span class="number">1790985600</span> github:fzakaria/rewindvm#mylib</span>
 schedule   0: <span class="ansi-green">exited:0</span>             6196 steps  a9d703ba8977  run cc2b986165da8b5e
 schedule   1: <span class="ansi-red">exited:2</span>             5675 steps    run 1629130286c433ab
 schedule   2: <span class="ansi-green">exited:0</span>             7282 steps  a9d703ba8977  run df5bd82743a36c38
@@ -209,7 +212,7 @@ open both in the desktop app: rewind open 4736382dc2ed9626 4760 --compare 3f3642
         <p><code>--all</code> tries every schedule, which measures how flaky a build is:</p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind check --all --epoch 1790985600 github:fzakaria/rewindvm#mylib | grep 'ended differently'</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind check <span class="option">--all</span> <span class="option">--epoch</span> <span class="number">1790985600</span> github:fzakaria/rewindvm#mylib <span class="operator">|</span> grep <span class="string">'ended differently'</span></span>
 8 of 64 other schedules ended differently</code></pre>
       </section>
 
@@ -220,13 +223,13 @@ open both in the desktop app: rewind open 4736382dc2ed9626 4760 --compare 3f3642
         <p>The failing run keeps every event with its step:</p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind log 4736382d --steps | tail -4</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind log 4736382d <span class="option">--steps</span> <span class="operator">|</span> tail <span class="option">-4</span></span>
       4760   166  worker picked job 17
       4779   166  job 16 done: 5986
       4796   162  /nix/store/...-bash-5.3p15/bin/bash: line 1:   166 Segmentation fault         ./$t
       4800   161  make: *** [Makefile:18: check] Error 1
 
-<span class="cmd"><span class="prompt">$</span> rewind events 4736382d --from 4779 --to 4784</span>
+<span class="cmd"><span class="prompt">$</span> rewind events 4736382d <span class="option">--from</span> <span class="number">4779</span> <span class="option">--to</span> <span class="number">4784</span></span>
       4779   166/171   write(1, "job 16 done: 5986\n")
       4780     0/0     console "[    0.199389] test_pool_shutd[171]: segfault at 108 ip 00005556d620d437 sp 00007feee6e68e10 error 6 in test_pool_shutdown[1437,5556d620d000+1000] likely on CPU 0 (core 0, socket 0)"
       4781     0/0     console "[    0.199394] Code: fa 48 8d 35 2a 0c 00 00 bf 02 00 00 00 b8 00 00 00 00 e8 ac fc ff ff 48 8b 05 b5 2b 00 00 48 8b 38 e8 8d fc ff ff 49 8b 46 58 &lt;83&gt; 80 08 01 00 00 01 e9 b5 fe ff ff 55 48 89 e5 41 54 53 be 78 00"
@@ -239,7 +242,7 @@ open both in the desktop app: rewind open 4736382dc2ed9626 4760 --compare 3f3642
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind ps 4736382d 4782</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind ps 4736382d <span class="number">4782</span></span>
      1 /init
     34   bash -e /nix/store/...-source-stdenv.sh /nix/store/...-default-builder.sh
    161     make SHELL=/nix/store/...-bash-5.3p15/bin/bash PREFIX=$(out) VERBOSE=y check
@@ -258,7 +261,7 @@ open both in the desktop app: rewind open 4736382dc2ed9626 4760 --compare 3f3642
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind cat 4736382d 4782 src/pool.c --pid 166 | sed -n '/^void pool_shutdown/,/^}/p'</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind cat 4736382d <span class="number">4782</span> src/pool.c <span class="option">--pid</span> <span class="number">166</span> <span class="operator">|</span> sed <span class="option">-n</span> <span class="string">'/^void pool_shutdown/,/^}/p'</span></span>
 void pool_shutdown(struct pool *p)
 {
 	pthread_mutex_lock(&amp;p-&gt;lock);
@@ -277,7 +280,7 @@ void pool_shutdown(struct pool *p)
 	free(p);
 }
 
-<span class="cmd"><span class="prompt">$</span> printf 'pwd; ls; exit\n' | rewind shell 4736382d 4782 --pid 166</span>
+<span class="cmd"><span class="prompt">$</span> <span class="keyword">printf</span> <span class="string">'pwd; ls; exit\n'</span> <span class="operator">|</span> rewind shell 4736382d <span class="number">4782</span> <span class="option">--pid</span> <span class="number">166</span></span>
 <span class="ansi-dim">rewind:</span> a shell at step 4782 of 4736382dc2ed9626; exit it to leave
 [rewind] /build/mylib # pwd; ls; exit
 /build/mylib
@@ -288,7 +291,7 @@ Containerfile  Makefile  libmylib.a  src  tests</code></pre>
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind gdb 4736382d 4779 -- -batch -ex 'break src/pool.c:77 if p-&gt;queue == 0' -ex continue -ex 'bt 3' -ex 'p p-&gt;queue' -ex list</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind gdb 4736382d <span class="number">4779</span> -- <span class="option">-batch</span> <span class="option">-ex</span> <span class="string">'break src/pool.c:77 if p-&gt;queue == 0'</span> <span class="option">-ex</span> continue <span class="option">-ex</span> <span class="string">'bt 3'</span> <span class="option">-ex</span> <span class="string">'p p-&gt;queue'</span> <span class="option">-ex</span> list</span>
 <span class="ansi-dim">rewind:</span> step 4779 ran in process 166; loading symbols for 4 of its files
 <span class="ansi-dim">rewind:</span> fetched 3 source files from the VM
 <span class="ansi-dim">rewind:</span> gdb at step 4779 of 4736382dc2ed9626
@@ -335,7 +338,7 @@ $1 = (struct queue *) 0x0
         ><code><span class="cmd"><span class="prompt">$</span> rewind replay 4736382d</span>
 <span class="ansi-green">identical</span> to the recording: 1687 events and 1476 read and write records over 4821 steps, and the whole machine at its 5 keyframes
 
-<span class="cmd"><span class="prompt">$</span> rewind replay 4736382d --from 4456</span>
+<span class="cmd"><span class="prompt">$</span> rewind replay 4736382d <span class="option">--from</span> <span class="number">4456</span></span>
 <span class="ansi-green">identical</span> to the recording from the snapshot at step 1363 to the end, and the whole machine at its 2 keyframes (0.53s)</code></pre>
         <p>
           <code>--from</code> starts at the nearest keyframe before the step. A run replays on any
@@ -348,22 +351,22 @@ $1 = (struct queue *) 0x0
         <p>A fork is its parent up to a step, then another schedule:</p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind fork cc2b9861 4456 --schedule 1 --quiet</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind fork cc2b9861 <span class="number">4456</span> <span class="option">--schedule</span> <span class="number">1</span> <span class="option">--quiet</span></span>
 <span class="ansi-dim">rewind:</span> run 91d1e54f70186dff <span class="ansi-red">exited:2</span> after 4833 steps, 0.200s virtual, 0.081s wall (poweroff)
 <span class="ansi-dim">rewind:</span> the fork <span class="ansi-red">first differs from its parent</span> at step 4477
 <span class="ansi-dim">rewind:</span> open it beside its parent in the desktop app: rewind open 91d1e54f70186dff 4477 --compare cc2b986165da8b5e
 
-<span class="cmd"><span class="prompt">$</span> rewind fork cc2b9861 4456 --schedule 2 --quiet</span>
+<span class="cmd"><span class="prompt">$</span> rewind fork cc2b9861 <span class="number">4456</span> <span class="option">--schedule</span> <span class="number">2</span> <span class="option">--quiet</span></span>
 <span class="ansi-dim">rewind:</span> run 2a49b5ec4069a273 <span class="ansi-green">exited:0</span> after 6487 steps, 0.219s virtual, 0.149s wall (poweroff)
 <span class="ansi-dim">rewind:</span> the fork <span class="ansi-red">first differs from its parent</span> at step 4471
 <span class="ansi-dim">rewind:</span> open it beside its parent in the desktop app: rewind open 2a49b5ec4069a273 4471 --compare cc2b986165da8b5e
 
-<span class="cmd"><span class="prompt">$</span> rewind fork cc2b9861 4456 --schedule 3 --quiet</span>
+<span class="cmd"><span class="prompt">$</span> rewind fork cc2b9861 <span class="number">4456</span> <span class="option">--schedule</span> <span class="number">3</span> <span class="option">--quiet</span></span>
 <span class="ansi-dim">rewind:</span> run 5f6afd2efeb639d9 <span class="ansi-green">exited:0</span> after 6594 steps, 0.225s virtual, 0.151s wall (poweroff)
 <span class="ansi-dim">rewind:</span> the fork <span class="ansi-red">first differs from its parent</span> at step 4471
 <span class="ansi-dim">rewind:</span> open it beside its parent in the desktop app: rewind open 5f6afd2efeb639d9 4471 --compare cc2b986165da8b5e
 
-<span class="cmd"><span class="prompt">$</span> rewind fork cc2b9861 4456 --schedule 4 --quiet</span>
+<span class="cmd"><span class="prompt">$</span> rewind fork cc2b9861 <span class="number">4456</span> <span class="option">--schedule</span> <span class="number">4</span> <span class="option">--quiet</span></span>
 <span class="ansi-dim">rewind:</span> run cb6bd4c404d0b077 <span class="ansi-green">exited:0</span> after 6570 steps, 0.221s virtual, 0.156s wall (poweroff)
 <span class="ansi-dim">rewind:</span> the fork <span class="ansi-red">first differs from its parent</span> at step 4472
 <span class="ansi-dim">rewind:</span> open it beside its parent in the desktop app: rewind open cb6bd4c404d0b077 4472 --compare cc2b986165da8b5e</code></pre>
@@ -404,7 +407,7 @@ $1 = (struct queue *) 0x0
         </figure>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind-app ~/.local/share/rewind/runs/4736382dc2ed9626 --compare ~/.local/share/rewind/runs/3f364240cc8417d7</span></code></pre>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind-app ~/.local/share/rewind/runs/4736382dc2ed9626 <span class="option">--compare</span> ~/.local/share/rewind/runs/3f364240cc8417d7</span></code></pre>
         <p>
           Press f to jump to the failure at step 4782, then s to open the source panel. After a few
           seconds it shows <code>worker</code> at <code>src/pool.c:77</code>, with
@@ -422,7 +425,7 @@ $1 = (struct queue *) 0x0
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> git clone https://github.com/fzakaria/rewindvm</span>
-<span class="cmd"><span class="prompt">$</span> cd rewindvm</span></code></pre>
+<span class="cmd"><span class="prompt">$</span> <span class="keyword">cd</span> rewindvm</span></code></pre>
         <p>
           In <code>examples/mylib/src/pool.c</code>, count the job under the lock, and free the
           queue after the workers are joined:
@@ -458,7 +461,7 @@ $1 = (struct queue *) 0x0
 <span class="ctx"> 	free(p);</span></code></pre>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind check --all --epoch 1790985600 .#mylib</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind check <span class="option">--all</span> <span class="option">--epoch</span> <span class="number">1790985600</span> .#mylib</span>
 ...
 <span class="ansi-green">0 of 64 other schedules ended differently</span>
 <span class="ansi-green">same result under all 65 schedules</span></code></pre>

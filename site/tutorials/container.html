@@ -33,6 +33,7 @@
       <nav class="page-links">
         <a href="../#tutorials">Tutorials</a>
         <a href="../#case-studies">Case studies</a>
+        <a href="../nix-builds.html">Nix build reference</a>
         <a href="../counter-time.html">Counter time</a>
         <a href="../viewer/">Viewer</a>
       </nav>
@@ -82,8 +83,8 @@
         <p>You need x86_64 Linux with KVM, Docker or Podman, and gdb.</p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> curl -fsSL https://rewindvm.dev/install | REWIND_WITH_DEBUG=1 sh</span>
-<span class="cmd"><span class="prompt">$</span> ls -l /dev/kvm</span>
+        ><code><span class="cmd"><span class="prompt">$</span> curl <span class="option">-fsSL</span> https://rewindvm.dev/install <span class="operator">|</span> REWIND_WITH_DEBUG=<span class="number">1</span> sh</span>
+<span class="cmd"><span class="prompt">$</span> ls <span class="option">-l</span> /dev/kvm</span>
 crw-rw-rw- 1 root kvm 10, 232 Oct  1 20:17 /dev/kvm</code></pre>
         <p>
           The script unpacks the latest
@@ -104,15 +105,15 @@ crw-rw-rw- 1 root kvm 10, 232 Oct  1 20:17 /dev/kvm</code></pre>
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> git clone https://github.com/fzakaria/rewindvm</span>
-<span class="cmd"><span class="prompt">$</span> cd rewindvm/examples/mylib</span>
-<span class="cmd"><span class="prompt">$</span> docker build -t mylib -f Containerfile .</span></code></pre>
+<span class="cmd"><span class="prompt">$</span> <span class="keyword">cd</span> rewindvm/examples/mylib</span>
+<span class="cmd"><span class="prompt">$</span> docker build <span class="option">-t</span> mylib <span class="option">-f</span> Containerfile .</span></code></pre>
         <p>
           On the host, <code>docker run --rm mylib</code> runs <code>make check</code> and usually
           passes. Run 60 times, it failed 3 times:
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> docker run --rm mylib</span>
+        ><code><span class="cmd"><span class="prompt">$</span> docker run <span class="option">--rm</span> mylib</span>
 running tests/test_pool_basic
 ...
 running tests/test_pool_shutdown
@@ -134,8 +135,8 @@ make: *** [Makefile:18: check] Error 1</code></pre>
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> docker export $(docker create mylib) -o mylib.tar</span>
-<span class="cmd"><span class="prompt">$</span> rewind run --root mylib.tar --cwd /src -- make check</span>
+        ><code><span class="cmd"><span class="prompt">$</span> docker <span class="keyword">export</span> <span class="operator">$(</span>docker create mylib<span class="operator">)</span> <span class="option">-o</span> mylib.tar</span>
+<span class="cmd"><span class="prompt">$</span> rewind run <span class="option">--root</span> mylib.tar <span class="option">--cwd</span> /src -- make check</span>
 ...
 round 3: ok
 test_pool_shutdown: ok
@@ -157,7 +158,7 @@ test_pool_shutdown: ok
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind check --root mylib.tar --cwd /src -- make check</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind check <span class="option">--root</span> mylib.tar <span class="option">--cwd</span> /src -- make check</span>
 schedule   0: <span class="ansi-green">exited:0</span>             1314 steps    run 06483e8d9716a584
 schedule   1: <span class="ansi-green">exited:0</span>             1500 steps    run 4c9a2a0d79d1779f
 schedule   2: <span class="ansi-green">exited:0</span>             1650 steps    run cc5d22f1e8e4632b
@@ -206,7 +207,7 @@ open both in the desktop app: rewind open 3d50c85d9e5954e2 1107 --compare 0fb089
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind check --all --root mylib.tar --cwd /src -- make check | grep 'ended differently'</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind check <span class="option">--all</span> <span class="option">--root</span> mylib.tar <span class="option">--cwd</span> /src -- make check <span class="operator">|</span> grep <span class="string">'ended differently'</span></span>
 15 of 64 other schedules ended differently</code></pre>
       </section>
 
@@ -216,13 +217,13 @@ open both in the desktop app: rewind open 3d50c85d9e5954e2 1107 --compare 0fb089
         </h2>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind log 3d50c85d --steps | tail -4</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind log 3d50c85d <span class="option">--steps</span> <span class="operator">|</span> tail <span class="option">-4</span></span>
       1103    39  job 17 done: 43360
       1107    39  job 18 done: 26744
       1125    35  Segmentation fault
       1130    34  make: *** [Makefile:18: check] Error 1
 
-<span class="cmd"><span class="prompt">$</span> rewind events 3d50c85d --from 1107 --to 1112</span>
+<span class="cmd"><span class="prompt">$</span> rewind events 3d50c85d <span class="option">--from</span> <span class="number">1107</span> <span class="option">--to</span> <span class="number">1112</span></span>
       1107    39/43    write(1, "job 18 done: 26744\n")
       1108     0/0     console "[    0.017636] test_pool_shutd[43]: segfault at 108 ip 00005585a2396412 sp 00007fc2d04f9ea0 error 6 in test_pool_shutdown[1412,5585a2396000+1000] likely on CPU 0 (core 0, socket 0)"
       1109     0/0     console "[    0.017641] Code: 5f c3 0f b7 d3 44 89 f6 48 8d 3d 48 0c 00 00 b8 00 00 00 00 e8 6f fc ff ff 48 8b 3d 90 2c 00 00 e8 c3 fc ff ff 49 8b 44 24 58 &lt;83&gt; 80 08 01 00 00 01 e9 c6 fe ff ff 55 53 48 83 ec 08 be 78 00 00"
@@ -235,7 +236,7 @@ open both in the desktop app: rewind open 3d50c85d9e5954e2 1107 --compare 0fb089
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind ps 3d50c85d 1110</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind ps 3d50c85d <span class="number">1110</span></span>
      1 /init
     34   make check
     35     /bin/sh -c for t in tests/test_pool_basic tests/test_pool_shutdown; do echo "running $t"; ./$t || exit 1; done
@@ -254,7 +255,7 @@ open both in the desktop app: rewind open 3d50c85d9e5954e2 1107 --compare 0fb089
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind cat 3d50c85d 1110 src/pool.c --pid 39 | sed -n '/^void pool_shutdown/,/^}/p'</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind cat 3d50c85d <span class="number">1110</span> src/pool.c <span class="option">--pid</span> <span class="number">39</span> <span class="operator">|</span> sed <span class="option">-n</span> <span class="string">'/^void pool_shutdown/,/^}/p'</span></span>
 void pool_shutdown(struct pool *p)
 {
 	pthread_mutex_lock(&amp;p-&gt;lock);
@@ -273,7 +274,7 @@ void pool_shutdown(struct pool *p)
 	free(p);
 }
 
-<span class="cmd"><span class="prompt">$</span> printf 'pwd; ls; exit\n' | rewind shell 3d50c85d 1110 --pid 39</span>
+<span class="cmd"><span class="prompt">$</span> <span class="keyword">printf</span> <span class="string">'pwd; ls; exit\n'</span> <span class="operator">|</span> rewind shell 3d50c85d <span class="number">1110</span> <span class="option">--pid</span> <span class="number">39</span></span>
 <span class="ansi-dim">rewind:</span> a shell at step 1110 of 3d50c85d9e5954e2; exit it to leave
 [rewind] /src # pwd; ls; exit
 /src
@@ -286,7 +287,7 @@ Containerfile  Makefile  libmylib.a  src  tests</code></pre>
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> DEBUGINFOD_URLS=https://debuginfod.debian.net rewind gdb 3d50c85d 1107 -- -batch -ex 'break src/pool.c:77 if p-&gt;queue == 0' -ex continue -ex 'bt 3' -ex 'p p-&gt;queue' -ex list</span>
+        ><code><span class="cmd"><span class="prompt">$</span> DEBUGINFOD_URLS=https://debuginfod.debian.net rewind gdb 3d50c85d <span class="number">1107</span> -- <span class="option">-batch</span> <span class="option">-ex</span> <span class="string">'break src/pool.c:77 if p-&gt;queue == 0'</span> <span class="option">-ex</span> continue <span class="option">-ex</span> <span class="string">'bt 3'</span> <span class="option">-ex</span> <span class="string">'p p-&gt;queue'</span> <span class="option">-ex</span> list</span>
 <span class="ansi-dim">rewind:</span> step 1107 ran in process 39; loading symbols for 3 of its files
 <span class="ansi-dim">rewind:</span> fetched 12 source files from the VM
 <span class="ansi-dim">rewind:</span> gdb 16 cannot read thread-local variables, such as errno, at a step; gdb 17 or later can
@@ -335,7 +336,7 @@ $1 = (struct queue *) 0x0
         ><code><span class="cmd"><span class="prompt">$</span> rewind replay 3d50c85d</span>
 <span class="ansi-green">identical</span> to the recording: 324 events and 13 read and write records over 1141 steps, and the whole machine at its 4 keyframes
 
-<span class="cmd"><span class="prompt">$</span> rewind replay 3d50c85d --from 297</span>
+<span class="cmd"><span class="prompt">$</span> rewind replay 3d50c85d <span class="option">--from</span> <span class="number">297</span></span>
 <span class="ansi-green">identical</span> to the recording from the snapshot at step 256 to the end, and the whole machine at its 3 keyframes (0.17s)</code></pre>
         <p>
           <code>--from</code> starts at the nearest keyframe before the step. A run replays on any
@@ -347,22 +348,22 @@ $1 = (struct queue *) 0x0
         <h2 id="fork-it"><a class="anchor" href="#fork-it">Fork it</a></h2>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind fork 06483e8d 297 --schedule 3 --quiet</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind fork 06483e8d <span class="number">297</span> <span class="option">--schedule</span> <span class="number">3</span> <span class="option">--quiet</span></span>
 <span class="ansi-dim">rewind:</span> run fe35fe8596745ea4 <span class="ansi-green">exited:0</span> after 1495 steps, 0.022s virtual, 0.077s wall (poweroff)
 <span class="ansi-dim">rewind:</span> the fork <span class="ansi-red">first differs from its parent</span> at step 318
 <span class="ansi-dim">rewind:</span> open it beside its parent in the desktop app: rewind open fe35fe8596745ea4 318 --compare 06483e8d9716a584
 
-<span class="cmd"><span class="prompt">$</span> rewind fork 06483e8d 297 --schedule 4 --quiet</span>
+<span class="cmd"><span class="prompt">$</span> rewind fork 06483e8d <span class="number">297</span> <span class="option">--schedule</span> <span class="number">4</span> <span class="option">--quiet</span></span>
 <span class="ansi-dim">rewind:</span> run 94930a9fc050baeb <span class="ansi-green">exited:0</span> after 1544 steps, 0.021s virtual, 0.081s wall (poweroff)
 <span class="ansi-dim">rewind:</span> the fork <span class="ansi-red">first differs from its parent</span> at step 316
 <span class="ansi-dim">rewind:</span> open it beside its parent in the desktop app: rewind open 94930a9fc050baeb 316 --compare 06483e8d9716a584
 
-<span class="cmd"><span class="prompt">$</span> rewind fork 06483e8d 297 --schedule 5 --quiet</span>
+<span class="cmd"><span class="prompt">$</span> rewind fork 06483e8d <span class="number">297</span> <span class="option">--schedule</span> <span class="number">5</span> <span class="option">--quiet</span></span>
 <span class="ansi-dim">rewind:</span> run 26460a7c9a8767a7 <span class="ansi-green">exited:0</span> after 1661 steps, 0.022s virtual, 0.084s wall (poweroff)
 <span class="ansi-dim">rewind:</span> the fork <span class="ansi-red">first differs from its parent</span> at step 316
 <span class="ansi-dim">rewind:</span> open it beside its parent in the desktop app: rewind open 26460a7c9a8767a7 316 --compare 06483e8d9716a584
 
-<span class="cmd"><span class="prompt">$</span> rewind fork 06483e8d 297 --schedule 6 --quiet</span>
+<span class="cmd"><span class="prompt">$</span> rewind fork 06483e8d <span class="number">297</span> <span class="option">--schedule</span> <span class="number">6</span> <span class="option">--quiet</span></span>
 <span class="ansi-dim">rewind:</span> run 3e542e7a9f422b6c <span class="ansi-red">exited:2</span> after 1154 steps, 0.018s virtual, 0.076s wall (poweroff)
 <span class="ansi-dim">rewind:</span> the fork <span class="ansi-red">first differs from its parent</span> at step 316
 <span class="ansi-dim">rewind:</span> open it beside its parent in the desktop app: rewind open 3e542e7a9f422b6c 316 --compare 06483e8d9716a584</code></pre>
@@ -395,7 +396,7 @@ $1 = (struct queue *) 0x0
         </figure>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind-app ~/.local/share/rewind/runs/3d50c85d9e5954e2 --compare ~/.local/share/rewind/runs/0fb08925c96dd15d</span></code></pre>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind-app ~/.local/share/rewind/runs/3d50c85d9e5954e2 <span class="option">--compare</span> ~/.local/share/rewind/runs/0fb08925c96dd15d</span></code></pre>
         <p>
           Press f to jump to the failure at step 1110, then s to open the source panel. After a few
           seconds it shows <code>worker</code> at <code>src/pool.c:77</code>, with
@@ -445,10 +446,10 @@ $1 = (struct queue *) 0x0
         <p>Rebuild the image, export it, and check again:</p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> docker build -q -t mylib -f Containerfile . &amp;&amp; docker export $(docker create mylib) -o mylib.tar</span>
+        ><code><span class="cmd"><span class="prompt">$</span> docker build <span class="option">-q</span> <span class="option">-t</span> mylib <span class="option">-f</span> Containerfile . <span class="operator">&amp;&amp;</span> docker <span class="keyword">export</span> <span class="operator">$(</span>docker create mylib<span class="operator">)</span> <span class="option">-o</span> mylib.tar</span>
 sha256:753e2b2d2225665321c05ddc635df4ddf724a921f1a1459d28545e729941c821
 
-<span class="cmd"><span class="prompt">$</span> rewind check --all --root mylib.tar --cwd /src -- make check</span>
+<span class="cmd"><span class="prompt">$</span> rewind check <span class="option">--all</span> <span class="option">--root</span> mylib.tar <span class="option">--cwd</span> /src -- make check</span>
 ...
 <span class="ansi-green">0 of 64 other schedules ended differently</span>
 <span class="ansi-green">same result under all 65 schedules</span></code></pre>

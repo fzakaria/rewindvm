@@ -113,6 +113,7 @@ section {
 .nav {
   position: relative;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
@@ -1570,7 +1571,8 @@ a.card:hover {
    gutters; long lines scroll inside the block. */
 .page-links {
   display: flex;
-  gap: 20px;
+  flex-wrap: wrap;
+  gap: 10px 20px;
 }
 .page-links a {
   color: var(--soft);
@@ -1809,28 +1811,34 @@ a.card:hover {
 .diff .hunk {
   color: var(--blue);
 }
-/* Rust and C source: tokens from tools/md2html.py, and a band on a marked line. */
+/* Source and shell commands: tokens from tools/md2html.py. */
 .source {
   color: var(--soft);
 }
-.source .keyword {
+.console .keyword {
   color: var(--amber);
 }
-.source .type {
+.console .type,
+.console .property,
+.console .option {
   color: var(--blue-soft);
 }
-.source .macro {
+.console .macro,
+.console .variable {
   color: #c9a6ff;
 }
-.source .string {
+.console .string {
   color: #9be3a6;
 }
-.source .number {
+.console .number {
   color: var(--amber-hi);
 }
-.source .comment,
-.source .attr,
-.source .elide {
+.console .operator {
+  color: var(--muted);
+}
+.console .comment,
+.console .attr,
+.console .elide {
   color: var(--faint);
 }
 .source .mark {

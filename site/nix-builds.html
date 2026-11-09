@@ -33,6 +33,7 @@
       <nav class="page-links">
         <a href="./#tutorials">Tutorials</a>
         <a href="./#case-studies">Case studies</a>
+        <a href="./nix-builds.html">Nix build reference</a>
         <a href="./counter-time.html">Counter time</a>
         <a href="./viewer/">Viewer</a>
       </nav>
@@ -199,10 +200,10 @@
           >
           setting. Nix does not put its usual sandbox around the external builder.
         </p>
-        <pre class="console"><code>rewind.lib.x86_64-linux.onRewind {
-  epoch = 1790985600;
-  clock = "exits";
-  vendor = "amd";
+        <pre class="console source"><code>rewind.lib.x86_64-linux.onRewind {
+  <span class="property">epoch</span> = <span class="number">1790985600</span>;
+  <span class="property">clock</span> = <span class="string">"exits"</span>;
+  <span class="property">vendor</span> = <span class="string">"amd"</span>;
 } pkgs.hello</code></pre>
         <p>
           For a daemon, configure <code>nix.conf</code> with the same Rewind package used by the
@@ -236,7 +237,7 @@ external-builders = [{"systems":["x86_64-rewind-amd"],"program":"/nix/store/&lt;
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind nix .#my-package --epoch 1790985600 --cpu v3-compat --clock exits</span></code></pre>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind nix .#my-package <span class="option">--epoch</span> <span class="number">1790985600</span> <span class="option">--cpu</span> v3-compat <span class="option">--clock</span> exits</span></code></pre>
         <p>
           This builds the original derivation. Its output paths and environment differ from the
           wrapped derivation's, so a failure in <code>inRewind</code> may need more work to
@@ -247,9 +248,11 @@ external-builders = [{"systems":["x86_64-rewind-amd"],"program":"/nix/store/&lt;
           <code>rewind cat RUN STEP PATH --archive tar</code> streams its tree. For example, with
           the run id, step and output path assigned to shell variables:
         </p>
-        <pre class="console"><code>set -o pipefail
-mkdir -p ./extracted
-rewind cat "$run" "$step" "$output" --archive tar | tar -xf - -C ./extracted</code></pre>
+        <pre
+          class="console source"
+        ><code><span class="keyword">set</span> <span class="option">-o</span> pipefail
+mkdir <span class="option">-p</span> ./extracted
+rewind cat <span class="string">"$run"</span> <span class="string">"$step"</span> <span class="string">"$output"</span> <span class="option">--archive</span> tar <span class="operator">|</span> tar <span class="option">-xf</span> - <span class="option">-C</span> ./extracted</code></pre>
         <p>
           The tar contains the path under its last component, with the VM's permissions, numeric
           owners and modification times. Links are preserved; devices, sockets and pipes are omitted

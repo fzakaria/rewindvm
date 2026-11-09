@@ -33,6 +33,7 @@
       <nav class="page-links">
         <a href="../#tutorials">Tutorials</a>
         <a href="../#case-studies">Case studies</a>
+        <a href="../nix-builds.html">Nix build reference</a>
         <a href="../counter-time.html">Counter time</a>
         <a href="../viewer/">Viewer</a>
       </nav>
@@ -94,7 +95,7 @@
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind check --epoch 1790985600 --seeds 8 --schedules 0 --all --no-narrow github:fzakaria/rewindvm#tiles</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind check <span class="option">--epoch</span> <span class="number">1790985600</span> <span class="option">--seeds</span> <span class="number">8</span> <span class="option">--schedules</span> <span class="number">0</span> <span class="option">--all</span> <span class="option">--no-narrow</span> github:fzakaria/rewindvm#tiles</span>
 <span class="ansi-dim">rewind:</span> packing 75 store paths for tiles-0.2.0
 <span class="ansi-dim">rewind:</span> 8 random seeds, each run under schedule 0 and 0 other schedules: 8 runs
 seed  0 schedule   0: <span class="ansi-green">exited:0</span>             4058 steps  d20b5efd388d  run 2d02117963b74c73
@@ -117,12 +118,12 @@ seed  7 schedule   0: <span class="ansi-green">exited:0</span>             4058 
         <p>Compare seed 0's run with seed 1's:</p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind diff --outputs 2d021179 3e85ea15</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind diff <span class="option">--outputs</span> 2d021179 3e85ea15</span>
 <span class="ansi-red">2 of the 5 files the runs left behind differ</span>:
   /build/tiles/tiles.pc: 22 of 227 bytes differ, first at byte 178
   /nix/store/...-tiles-0.2.0/lib/pkgconfig/tiles.pc: 22 of 227 bytes differ, first at byte 178
 
-<span class="cmd"><span class="prompt">$</span> rewind diff --file /build/tiles/tiles.pc 2d021179 3e85ea15</span>
+<span class="cmd"><span class="prompt">$</span> rewind diff <span class="option">--file</span> /build/tiles/tiles.pc 2d021179 3e85ea15</span>
 <span class="ansi-red">tiles.pc differs, first at line 7.</span>
 Only in the left run: 1 line.
 Only in the right run: 1 line.
@@ -149,7 +150,7 @@ Lines marked <span class="ansi-yellow">-</span> are only in the left run. Lines 
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind blame 2d021179 3e85ea15 /nix/store/ihhhzc5qphjjz5vgss7swki10dwkicsb-tiles-0.2.0/lib/pkgconfig/tiles.pc</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind blame 2d021179 3e85ea15 /nix/store/ihhhzc5qphjjz5vgss7swki10dwkicsb-tiles-<span class="number">0</span>.<span class="number">2</span>.<span class="number">0</span>/lib/pkgconfig/tiles.pc</span>
 tiles.pc <span class="ansi-red">differs at byte 178</span>. python3 (pid 112) wrote that byte at step 3,068 in run <span class="ansi-yellow">2d021179</span> and at step 3,068 in run <span class="ansi-blue">3e85ea15</span>.
 
 22 of 227 bytes differ. The bytes from byte 178:
@@ -269,7 +270,7 @@ Likely cause: something inside python3 (pid 112), such as randomness or the orde
         <p>Open the two runs side by side:</p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind open 2d021179 --compare 3e85ea15</span></code></pre>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind open 2d021179 <span class="option">--compare</span> 3e85ea15</span></code></pre>
         <p>The Compare tab's Files that differ link lists what <code>diff --outputs</code> does:</p>
         <figure class="shot">
           <picture>
@@ -324,7 +325,7 @@ Likely cause: something inside python3 (pid 112), such as randomness or the orde
 <span class="ctx"> print("Libs: -L${libdir} -ltiles")</span></code></pre>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind check --epoch 1790985600 --seeds 8 --schedules 0 --all --no-narrow .#tiles</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind check <span class="option">--epoch</span> <span class="number">1790985600</span> <span class="option">--seeds</span> <span class="number">8</span> <span class="option">--schedules</span> <span class="number">0</span> <span class="option">--all</span> <span class="option">--no-narrow</span> .#tiles</span>
 ...
 <span class="ansi-green">0 of 7 other runs ended differently</span>
 <span class="ansi-green">same result under all 8 runs</span></code></pre>
@@ -339,7 +340,7 @@ Likely cause: something inside python3 (pid 112), such as randomness or the orde
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind check --epoch 1790985600 --seeds 8 --schedules 0 --all --no-narrow .#plugins</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind check <span class="option">--epoch</span> <span class="number">1790985600</span> <span class="option">--seeds</span> <span class="number">8</span> <span class="option">--schedules</span> <span class="number">0</span> <span class="option">--all</span> <span class="option">--no-narrow</span> .#plugins</span>
 ...
 <span class="ansi-green">0 of 7 other runs ended differently</span>
 <span class="ansi-green">same result under all 8 runs</span></code></pre>
@@ -354,7 +355,7 @@ Likely cause: something inside python3 (pid 112), such as randomness or the orde
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind check --epoch 1790985600 --seeds 1 --schedules 0 --all --no-narrow --dirents 3 .#plugins</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind check <span class="option">--epoch</span> <span class="number">1790985600</span> <span class="option">--seeds</span> <span class="number">1</span> <span class="option">--schedules</span> <span class="number">0</span> <span class="option">--all</span> <span class="option">--no-narrow</span> <span class="option">--dirents</span> <span class="number">3</span> .#plugins</span>
 dirents  0 schedule   0: <span class="ansi-green">exited:0</span>             3943 steps  77b96f07540a  run 9a6ba076725bb5c8
 dirents  1 schedule   0: <span class="ansi-green">exited:0</span>             3943 steps  <span class="ansi-red">3d555b541296</span>  run 29f205d4b8569000
 dirents  2 schedule   0: <span class="ansi-green">exited:0</span>             3943 steps  <span class="ansi-red">925dde4ef23a</span>  run 6c5eb36273634569
@@ -363,7 +364,7 @@ dirents  3 schedule   0: <span class="ansi-green">exited:0</span>             39
         <p>Each key builds another output. The index is the file that changed:</p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind diff --file /build/plugins/plugins.txt 29f205d4 6c5eb362</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind diff <span class="option">--file</span> /build/plugins/plugins.txt 29f205d4 6c5eb362</span>
 <span class="ansi-red">plugins.txt differs, first at line 3.</span>
 Only in the left run: 2 lines.
 Only in the right run: 2 lines.
@@ -608,7 +609,7 @@ Lines marked <span class="ansi-yellow">-</span> are only in the left run. Lines 
 <span class="ctx">         continue</span></code></pre>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind check --epoch 1790985600 --seeds 1 --schedules 0 --all --no-narrow --dirents 3 .#plugins</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind check <span class="option">--epoch</span> <span class="number">1790985600</span> <span class="option">--seeds</span> <span class="number">1</span> <span class="option">--schedules</span> <span class="number">0</span> <span class="option">--all</span> <span class="option">--no-narrow</span> <span class="option">--dirents</span> <span class="number">3</span> .#plugins</span>
 ...
 dirents  0 schedule   0: <span class="ansi-green">exited:0</span>             3943 steps  164f7a685a08  run 0522526982d1aeb1
 dirents  1 schedule   0: <span class="ansi-green">exited:0</span>             3943 steps  164f7a685a08  run 7a6b007e9c9af39c

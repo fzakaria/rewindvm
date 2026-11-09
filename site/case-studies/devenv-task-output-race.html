@@ -33,6 +33,7 @@
       <nav class="page-links">
         <a href="../#tutorials">Tutorials</a>
         <a href="../#case-studies">Case studies</a>
+        <a href="../nix-builds.html">Nix build reference</a>
         <a href="../counter-time.html">Counter time</a>
         <a href="../viewer/">Viewer</a>
       </nav>
@@ -171,7 +172,7 @@
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind nix --epoch 1791936000 --seed 5 'github:fzakaria/rewindvm?dir=examples/case-studies#devenv-last-lines-before-2296'</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind nix <span class="option">--epoch</span> <span class="number">1791936000</span> <span class="option">--seed</span> <span class="number">5</span> <span class="string">'github:fzakaria/rewindvm?dir=examples/case-studies#devenv-last-lines-before-2296'</span></span>
 <span class="ansi-dim">rewind:</span> packing 57 store paths for devenv-tasks-test-last-lines-before-2296
 iteration 1
 
@@ -192,7 +193,7 @@ assertion `left == right` failed
 <span class="ansi-dim">rewind:</span> run 7176689741c831e4 <span class="ansi-red">exited:101</span> after 1233 steps, 0.034s virtual, 1.438s wall (poweroff)</code></pre>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind replay 71766897</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind replay <span class="number">71766897</span></span>
 <span class="ansi-green">identical</span> to the recording: 763 events and 145 read and write records over 1233 steps, and the whole machine at its 3 keyframes</code></pre>
         <p>The task printed three lines and devenv kept two, as in the issue.</p>
       </section>
@@ -203,7 +204,7 @@ assertion `left == right` failed
         </h2>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind check --epoch 1791936000 --seed 5 --all --schedules 256 'github:fzakaria/rewindvm?dir=examples/case-studies#devenv-last-lines-before-2296'</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind check <span class="option">--epoch</span> <span class="number">1791936000</span> <span class="option">--seed</span> <span class="number">5</span> <span class="option">--all</span> <span class="option">--schedules</span> <span class="number">256</span> <span class="string">'github:fzakaria/rewindvm?dir=examples/case-studies#devenv-last-lines-before-2296'</span></span>
 schedule   0: <span class="ansi-red">exited:101</span>           1233 steps    run 7176689741c831e4
 schedule   1: <span class="ansi-red">exited:101</span>           1291 steps    run a83fbb6085e13263
 schedule   2: <span class="ansi-red">exited:101</span>           1395 steps    run 80d7576a566f4402
@@ -251,7 +252,7 @@ open both in the desktop app: rewind open 041dab22855c7ade 1194 --compare 9af459
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind threads 041dab22855c7ade --from 1175 --to 1215</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind threads 041dab22855c7ade <span class="option">--from</span> <span class="number">1175</span> <span class="option">--to</span> <span class="number">1215</span></span>
       1175       1176         40/42  sqlx-sqlite-wor
       1177       1178         40/41  tests::test_fai
       1179       1179         40/42  sqlx-sqlite-wor
@@ -262,7 +263,7 @@ open both in the desktop app: rewind open 041dab22855c7ade 1194 --compare 9af459
       1192       1192     kernel 11  ksoftirqd/0
       1193       1215         40/41  tests::test_fai
 
-<span class="cmd"><span class="prompt">$</span> rewind threads 9af45934c234b618 --from 1175 --to 1215</span>
+<span class="cmd"><span class="prompt">$</span> rewind threads 9af45934c234b618 <span class="option">--from</span> <span class="number">1175</span> <span class="option">--to</span> <span class="number">1215</span></span>
       1175       1176         40/42  sqlx-sqlite-wor
       1177       1178         40/41  tests::test_fai
       1179       1179         40/42  sqlx-sqlite-wor
@@ -303,7 +304,7 @@ open both in the desktop app: rewind open 041dab22855c7ade 1194 --compare 9af459
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind check --run 71766897 --schedule-from 1155 --schedules 64 --all --no-narrow</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind check <span class="option">--run</span> <span class="number">71766897</span> <span class="option">--schedule-from</span> <span class="number">1155</span> <span class="option">--schedules</span> <span class="number">64</span> <span class="option">--all</span> <span class="option">--no-narrow</span></span>
 schedule   0: <span class="ansi-red">exited:101</span>           1233 steps    run 7176689741c831e4
 schedule   1: <span class="ansi-red">exited:101</span>           1253 steps    run d9ea6c28433b76d3
 schedule   2: <span class="ansi-red">exited:101</span>           1265 steps    run 291b13347aed952c
@@ -320,7 +321,7 @@ schedule  64: <span class="ansi-red">exited:101</span>           1259 steps    r
         <p>The events of schedule 0's run around the task:</p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind events 71766897 --from 1147 --to 1167</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind events <span class="number">71766897</span> <span class="option">--from</span> <span class="number">1147</span> <span class="option">--to</span> <span class="number">1167</span></span>
       1152    40/41    open("/build/devenv_task_outputbyuxVm.json", 0o2000302)
       1155    40/41    fork() = 43
       1159    43/43    execve("/build/scriptL1Qmi0.sh", ["/bin/sh", "/build/scriptL1Qmi0.sh"])
@@ -414,7 +415,7 @@ schedule  64: <span class="ansi-red">exited:101</span>           1259 steps    r
         </div>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind gdb 71766897 1152 -- -batch -ex 'break read if $rdi == 13' -ex 'break task_state.rs:409' -ex continue -ex 'set $buf = $rsi' -ex finish -ex 'x/s $buf' -ex 'delete 1' -ex continue</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind gdb <span class="number">71766897</span> <span class="number">1152</span> -- <span class="option">-batch</span> <span class="option">-ex</span> <span class="string">'break read if $rdi == 13'</span> <span class="option">-ex</span> <span class="string">'break task_state.rs:409'</span> <span class="option">-ex</span> continue <span class="option">-ex</span> <span class="string">'set $buf = $rsi'</span> <span class="option">-ex</span> finish <span class="option">-ex</span> <span class="string">'x/s $buf'</span> <span class="option">-ex</span> <span class="string">'delete 1'</span> <span class="option">-ex</span> continue</span>
 <span class="ansi-dim">rewind:</span> step 1152 ran in process 40; loading symbols for 5 of its files
 <span class="ansi-dim">rewind:</span> source files for /nix/store/195dbbvj5h0yq9f4vnp833dsbgxpp8w0-devenv-tasks-tests-1.10.1 from /nix/store/hs2328bm8f7s0cq77jjjgdlcqrc13mhm-source
 <span class="ansi-dim">rewind:</span> gdb at step 1152 of 7176689741c831e4
@@ -495,7 +496,7 @@ Thread 3 hit Breakpoint 2.1, devenv_tasks::task_state::{impl#1}::run::{async_fn#
         <p>The same test at the merge commit passes every schedule:</p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind check --epoch 1791936000 --seed 5 --all --schedules 256 'github:fzakaria/rewindvm?dir=examples/case-studies#devenv-last-lines-2296'</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind check <span class="option">--epoch</span> <span class="number">1791936000</span> <span class="option">--seed</span> <span class="number">5</span> <span class="option">--all</span> <span class="option">--schedules</span> <span class="number">256</span> <span class="string">'github:fzakaria/rewindvm?dir=examples/case-studies#devenv-last-lines-2296'</span></span>
 <span class="ansi-dim">rewind:</span> packing 57 store paths for devenv-tasks-test-last-lines-2296
 schedule   0: <span class="ansi-green">exited:0</span>             1257 steps  77ac62e2629d  run 671a6d6ca8a0c373
 schedule   1: <span class="ansi-green">exited:0</span>             1348 steps  77ac62e2629d  run 0793951a23ecb949
@@ -539,8 +540,8 @@ schedule   2: <span class="ansi-green">exited:0</span>             1430 steps  7
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind import https://github.com/fzakaria/rewindvm/releases/download/case-studies/devenv-task-output-race-replayable.rwd</span>
-<span class="cmd"><span class="prompt">$</span> rewind replay 71766897</span>
-<span class="cmd"><span class="prompt">$</span> rewind gdb 71766897 1152</span>
+<span class="cmd"><span class="prompt">$</span> rewind replay <span class="number">71766897</span></span>
+<span class="cmd"><span class="prompt">$</span> rewind gdb <span class="number">71766897</span> <span class="number">1152</span></span>
 <span class="cmd"><span class="prompt">$</span> rewind-app https://github.com/fzakaria/rewindvm/releases/download/case-studies/devenv-task-output-race.rwd</span></code></pre>
       </section>
 

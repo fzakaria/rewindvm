@@ -33,6 +33,7 @@
       <nav class="page-links">
         <a href="../#tutorials">Tutorials</a>
         <a href="../#case-studies">Case studies</a>
+        <a href="../nix-builds.html">Nix build reference</a>
         <a href="../counter-time.html">Counter time</a>
         <a href="../viewer/">Viewer</a>
       </nav>
@@ -81,7 +82,7 @@
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind check --epoch 1790985600 github:fzakaria/rewindvm#counter</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind check <span class="option">--epoch</span> <span class="number">1790985600</span> github:fzakaria/rewindvm#counter</span>
 ...
 schedule  64: <span class="ansi-green">exited:0</span>             5293 steps  e3f96e451c97  run 88685f0283a17ca8  <span class="ansi-green">holds</span>
 <span class="ansi-green">every property held under all 65 schedules</span></code></pre>
@@ -100,7 +101,7 @@ schedule  64: <span class="ansi-green">exited:0</span>             5293 steps  e
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> git clone https://github.com/fzakaria/rewindvm</span>
-<span class="cmd"><span class="prompt">$</span> cd rewindvm</span></code></pre>
+<span class="cmd"><span class="prompt">$</span> <span class="keyword">cd</span> rewindvm</span></code></pre>
         <p>
           In <code>examples/counter/counter.c</code>, put a schedule point between the read and the
           store:
@@ -191,7 +192,7 @@ schedule  64: <span class="ansi-green">exited:0</span>             5293 steps  e
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind check --epoch 1790985600 .#counter | grep -E 'decides it|passing:|failing:|failing run violates sdk'</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind check <span class="option">--epoch</span> <span class="number">1790985600</span> .#counter <span class="operator">|</span> grep <span class="option">-E</span> <span class="string">'decides it|passing:|failing:|failing run violates sdk'</span></span>
 rewind: packing 62 store paths for counter-0.1.0
 schedule 1 violates same-outcome, sdk; finding the step that decides it
 step 3237 decides it: a request to switch threads there makes the run violate same-outcome, sdk
@@ -207,12 +208,12 @@ failing run violates sdk: step 3261: always "hits-add-up" failed: 10 hits, expec
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind threads bdb538e1 --from 3235 --to 3239</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind threads bdb538e1 <span class="option">--from</span> <span class="number">3235</span> <span class="option">--to</span> <span class="number">3239</span></span>
       3235       3238       139/140  counter
       3239       3239       139/141  counter</code></pre>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind threads b66c913d --from 3235 --to 3239</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind threads b66c913d <span class="option">--from</span> <span class="number">3235</span> <span class="option">--to</span> <span class="number">3239</span></span>
       3235       3239       139/140  counter</code></pre>
         <p>
           Thread 139/141 takes the CPU at step 3239 of the failing run, and not in the passing one.
@@ -221,7 +222,7 @@ failing run violates sdk: step 3261: always "hits-add-up" failed: 10 hits, expec
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind open bdb538e1 3237 --compare b66c913d</span></code></pre>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind open bdb538e1 <span class="number">3237</span> <span class="option">--compare</span> b66c913d</span></code></pre>
         <figure class="shot">
           <picture>
             <source srcset="../img/app-point.webp" type="image/webp" />
@@ -273,7 +274,7 @@ failing run violates sdk: step 3261: always "hits-add-up" failed: 10 hits, expec
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind check --epoch 1790985600 .#counter | tail -1</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind check <span class="option">--epoch</span> <span class="number">1790985600</span> .#counter <span class="operator">|</span> tail <span class="option">-1</span></span>
 rewind: packing 62 store paths for counter-0.1.0
 every property held under all 65 schedules</code></pre>
       </section>

@@ -966,6 +966,13 @@ in
     touch $out
   '';
 
+  # Syntax colors preserve copyable source and the transcripts' output.
+  docs-render = pkgs.runCommand "rewind-docs-render" { nativeBuildInputs = [ pkgs.python3 ]; } ''
+    cp -r ${../tools} tools
+    python3 -m unittest discover -s tools -p 'test_md2html.py'
+    touch $out
+  '';
+
   # The claim everything else rests on: a run replays exactly, from boot
   # and from a keyframe, and a different seed makes a different run. Needs
   # /dev/kvm in the build sandbox, which the kvm system feature provides.

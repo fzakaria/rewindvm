@@ -466,6 +466,7 @@ HEAD = """<!doctype html>
       <nav class="page-links">
         <a href="{up}#tutorials">Tutorials</a>
         <a href="{up}#case-studies">Case studies</a>
+        <a href="{up}nix-builds.html">Nix build reference</a>
         <a href="{up}counter-time.html">Counter time</a>
         <a href="{up}viewer/">Viewer</a>
       </nav>
@@ -622,7 +623,7 @@ def console(lines, spans=()):
             continue
         body.append(
             f'<span class="cmd"><span class="prompt">{html.escape(prompt)}</span> '
-            + html.escape(line[2:], quote=False)
+            + source_text(line[2:], SHELL_TOKEN)
             + "</span>"
         )
     return '<pre\n  class="console"\n><code>' + "\n".join(body) + "</code></pre>\n"
@@ -665,9 +666,9 @@ C_KEYWORDS = (
     "union unsigned void volatile while"
 ).split()
 C_TOKEN = re.compile(
-    r"(?P<comment>//.*|/\*.*?(?:\*/|$))"
+    r"(?P<comment>//.*|/\*[\s\S]*?(?:\*/|$))"
     r'|(?P<string>"(?:\\.|[^"\\])*")'
-    r"|(?P<attr>^\s*#\s*\w+)"
+    r"|(?P<attr>(?m:^[ \t]*#[ \t]*\w+))"
     r"|(?P<elide>\.\.\.)"
     r"|(?P<keyword>\b(?:" + "|".join(C_KEYWORDS) + r")\b)"
     r"|(?P<macro>\b[A-Z][A-Z0-9_]+\b)"
@@ -675,24 +676,65 @@ C_TOKEN = re.compile(
     r"|(?P<number>\b\d+[lLuU]*\b)"
 )
 
+# Nix strings and block comments can span lines. Keep shell text inside
+# indented strings in the string's color, including escaped quote pairs.
+NIX_KEYWORDS = "assert else if in inherit let or rec then with true false null".split()
+NIX_TOKEN = re.compile(
+    r"(?P<comment>\#.*|/\*[\s\S]*?(?:\*/|$))"
+    r'|(?P<string>"(?:\\.|[^"\\])*"|'
+    r"''(?:''['$]|''\\.|'(?!')|[^'])*'')"
+    r"|(?P<keyword>(?<![\w'-])(?:" + "|".join(NIX_KEYWORDS) + r")(?![\w'-]))"
+    r"|(?P<property>\b[a-zA-Z_][\w'-]*(?=\s*=(?!=)))"
+    r"|(?P<number>\b\d+(?:\.\d+)?\b)"
+)
+
+# A shell comment follows whitespace or starts a line, so a flake's
+# #fragment stays in its argument. Quotes consume apparent tokens inside.
+SHELL_KEYWORDS = (
+    "case do done elif else esac fi for function if in select then until while "
+    "cd echo eval exec exit export local printf read readonly return set shift "
+    "source test trap unset"
+).split()
+SHELL_TOKEN = re.compile(
+    r"(?P<comment>(?<!\S)\#.*)"
+    r"|(?P<string>'[^']*'|\"(?:\\.|[^\"\\])*\")"
+    r"|(?P<variable>\$\{[^}]*\}|\$[a-zA-Z_][a-zA-Z0-9_]*|\$[0-9@*#?$!-])"
+    r"|(?P<option>(?<!\S)--?[a-zA-Z0-9][a-zA-Z0-9-]*)"
+    r"|(?P<keyword>(?<![\w./-])(?:" + "|".join(SHELL_KEYWORDS) + r")(?![\w./-]))"
+    r"|(?P<operator>\$\(|[|&;<>()[\]]+)"
+    r"|(?P<number>\b\d+\b)"
+)
+
 # The languages a fenced block is highlighted in, by the name after its
 # fence.
-SOURCE_TOKENS = {"rust": RUST_TOKEN, "c": C_TOKEN}
+SOURCE_TOKENS = {
+    "rust": RUST_TOKEN,
+    "c": C_TOKEN,
+    "nix": NIX_TOKEN,
+    "sh": SHELL_TOKEN,
+    "bash": SHELL_TOKEN,
+    "shell": SHELL_TOKEN,
+}
 
 
-def source_line(line, tokens):
-    """One line of source as HTML, each token in a span named for its kind."""
+def source_text(source, tokens):
+    """Source as HTML, with each token's spans closed at line boundaries."""
     out = []
     pos = 0
-    for m in tokens.finditer(line):
-        out.append(html.escape(line[pos : m.start()], quote=False))
+    for m in tokens.finditer(source):
+        out.append(html.escape(source[pos : m.start()], quote=False))
+
+        # Separate spans let a marked line enclose part of a multiline token.
         out.append(
-            f'<span class="{m.lastgroup}">'
-            + html.escape(m.group(), quote=False)
-            + "</span>"
+            "\n".join(
+                f'<span class="{m.lastgroup}">'
+                + html.escape(part, quote=False)
+                + "</span>"
+                for part in m.group().split("\n")
+            )
         )
         pos = m.end()
-    out.append(html.escape(line[pos:], quote=False))
+    out.append(html.escape(source[pos:], quote=False))
     return "".join(out)
 
 
@@ -700,8 +742,9 @@ def highlighted(lines, marked, tokens):
     """A block of source, highlighted; the 1-based lines in MARKED get a
     band."""
     body = []
-    for n, line in enumerate(lines, start=1):
-        text = source_line(line, tokens)
+    for n, text in enumerate(
+        source_text("\n".join(lines), tokens).split("\n"), start=1
+    ):
         if n in marked:
             text = f'<span class="mark">{text}</span>'
         body.append(text)
@@ -942,4 +985,5 @@ def main():
         path.write_text(text)
 
 
-main()
+if __name__ == "__main__":
+    main()

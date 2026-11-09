@@ -33,6 +33,7 @@
       <nav class="page-links">
         <a href="../#tutorials">Tutorials</a>
         <a href="../#case-studies">Case studies</a>
+        <a href="../nix-builds.html">Nix build reference</a>
         <a href="../counter-time.html">Counter time</a>
         <a href="../viewer/">Viewer</a>
       </nav>
@@ -92,10 +93,10 @@
           split a derivation's two outputs:
         </p>
         <pre
-          class="console"
-        ><code>    input2=$(nix build -f dependencies2.nix input2_drv --no-link --print-out-paths)
-    input2_out=$(printf "%s" "$input2" | head -n1)
-    input2_out2=$(printf "%s" "$input2" | tail -n1)</code></pre>
+          class="console source"
+        ><code>    input2=<span class="operator">$(</span>nix build <span class="option">-f</span> dependencies2.nix input2_drv <span class="option">--no-link</span> <span class="option">--print-out-paths</span><span class="operator">)</span>
+    input2_out=<span class="operator">$(</span><span class="keyword">printf</span> <span class="string">"%s"</span> <span class="string">"$input2"</span> <span class="operator">|</span> head <span class="option">-n1</span><span class="operator">)</span>
+    input2_out2=<span class="operator">$(</span><span class="keyword">printf</span> <span class="string">"%s"</span> <span class="string">"$input2"</span> <span class="operator">|</span> tail <span class="option">-n1</span><span class="operator">)</span></code></pre>
         <p>
           Meson runs each functional test as <code>bash -x -e -u -o pipefail</code>, so if
           <code>printf</code> dies the pipeline fails and the test ends.
@@ -116,7 +117,7 @@
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind nix --epoch 1791936000 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-git-gc-closure'</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind nix <span class="option">--epoch</span> <span class="number">1791936000</span> <span class="string">'github:fzakaria/rewindvm?dir=examples/case-studies#nix-git-gc-closure'</span></span>
 <span class="ansi-dim">rewind:</span> packing 217 store paths for nix-functional-gc-closure-2.36pre20260912_203f85b2
 ...
 +(gc-closure.sh:45) nix_gc_closure false
@@ -143,7 +144,7 @@
         <p>The events around the failure, and the processes just before it:</p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind events e413b6df --from 37229 --to 37329</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind events e413b6df <span class="option">--from</span> <span class="number">37229</span> <span class="option">--to</span> <span class="number">37329</span></span>
      37239   359/359   fork() = 416
      37242   416/416   fork() = 417
      37245   416/416   fork() = 418
@@ -157,7 +158,7 @@
      37324   359/359   exit_group(bash) exited:141
      37328   358/358   close("anon_inode:[pidfd]")
 
-<span class="cmd"><span class="prompt">$</span> rewind ps e413b6df 37281</span>
+<span class="cmd"><span class="prompt">$</span> rewind ps e413b6df <span class="number">37281</span></span>
      1 /init
     34   bash -e /nix/store/l622p70vy8k5sh7y5wizi5f2mic6ynpg-source-stdenv.sh /nix/store/shkw4qm9qcw5sc5n1k5jznc83ny02r39-default-builder.sh
    358     /nix/store/lb41b0anx1f98y9y5s9mdv97gjgsq740-python3-3.14.7/bin/python3.14 /nix/store/r72868g8znkk4m8pmwsn3cf8v3h84mr0-meson-1.12.1/bin/meson test --no-rebuild --print-errorlogs gc-closure
@@ -182,7 +183,7 @@
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> for step in 37294 37298 37304; do echo "step $step"; rewind cat e413b6df $step /proc/417/io | grep -E '^(wchar|syscw)' | sed 's/^/  417 /'; rewind cat e413b6df $step /proc/418/io | grep -E '^(wchar|syscw)' | sed 's/^/  418 /'; done</span>
+        ><code><span class="cmd"><span class="prompt">$</span> <span class="keyword">for</span> step <span class="keyword">in</span> <span class="number">37294</span> <span class="number">37298</span> <span class="number">37304</span><span class="operator">;</span> <span class="keyword">do</span> <span class="keyword">echo</span> <span class="string">"step $step"</span><span class="operator">;</span> rewind cat e413b6df <span class="variable">$step</span> /proc/<span class="number">417</span>/io <span class="operator">|</span> grep <span class="option">-E</span> <span class="string">'^(wchar|syscw)'</span> <span class="operator">|</span> sed <span class="string">'s/^/  417 /'</span><span class="operator">;</span> rewind cat e413b6df <span class="variable">$step</span> /proc/<span class="number">418</span>/io <span class="operator">|</span> grep <span class="option">-E</span> <span class="string">'^(wchar|syscw)'</span> <span class="operator">|</span> sed <span class="string">'s/^/  418 /'</span><span class="operator">;</span> <span class="keyword">done</span></span>
 step 37294
   417 wchar: 224
   417 syscw: 1
@@ -213,8 +214,8 @@ rewind: /proc/418/io: no such file at this step</code></pre>
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> export X=$'/build/nix-test/main/gc-closure/store/ij8qwx0m6dvpmggqmq8zmhbaiw6ym8pg-dependencies-input-2\n/build/nix-test/main/gc-closure/store/hw6dm6rpynd7hmhl1mnp0z4m28lfbx4b-dependencies-input-2-out2'</span>
-<span class="cmd"><span class="prompt">$</span> strace -f -e trace=write -o /dev/stdout bash -c 'set -o pipefail; y=$(printf "%s" "$X" | cat)' | grep write</span>
+        ><code><span class="cmd"><span class="prompt">$</span> <span class="keyword">export</span> X=$<span class="string">'/build/nix-test/main/gc-closure/store/ij8qwx0m6dvpmggqmq8zmhbaiw6ym8pg-dependencies-input-2\n/build/nix-test/main/gc-closure/store/hw6dm6rpynd7hmhl1mnp0z4m28lfbx4b-dependencies-input-2-out2'</span></span>
+<span class="cmd"><span class="prompt">$</span> strace <span class="option">-f</span> <span class="option">-e</span> trace=write <span class="option">-o</span> /dev/stdout bash <span class="option">-c</span> <span class="string">'set -o pipefail; y=$(printf "%s" "$X" | cat)'</span> <span class="operator">|</span> grep write</span>
 1281845 write(1, "/build/nix-test/main/gc-closure/"..., 92) = 92
 1281845 write(1, "/build/nix-test/main/gc-closure/"..., 96) = 96</code></pre>
         <p>
@@ -234,7 +235,7 @@ rewind: /proc/418/io: no such file at this step</code></pre>
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind threads e413b6df --from 37273 --to 37309</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind threads e413b6df <span class="option">--from</span> <span class="number">37273</span> <span class="option">--to</span> <span class="number">37309</span></span>
      37273      37273       358/358  meson
      37274      37274       418/418  bash
      37275      37290       418/418  head
@@ -262,7 +263,7 @@ rewind: /proc/418/io: no such file at this step</code></pre>
         </h2>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind check --epoch 1791936000 --all --schedules 256 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-git-gc-closure'</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind check <span class="option">--epoch</span> <span class="number">1791936000</span> <span class="option">--all</span> <span class="option">--schedules</span> <span class="number">256</span> <span class="string">'github:fzakaria/rewindvm?dir=examples/case-studies#nix-git-gc-closure'</span></span>
 schedule   0: <span class="ansi-red">exited:1</span>            37496 steps    run e413b6dfe9a4598f
 schedule   1: <span class="ansi-green">exited:0</span>            94286 steps  <span class="ansi-red">a50a5ab6d992</span>  run 96822979453da6c7
 ...
@@ -299,7 +300,7 @@ open both in the desktop app: rewind open 69e21f691f4cb828 75160 --compare 5ecc9
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind check --run e413b6df --schedule-from 37242 --schedules 64 --all --no-narrow</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind check <span class="option">--run</span> e413b6df <span class="option">--schedule-from</span> <span class="number">37242</span> <span class="option">--schedules</span> <span class="number">64</span> <span class="option">--all</span> <span class="option">--no-narrow</span></span>
 schedule   0: <span class="ansi-red">exited:1</span>            37496 steps    run e413b6dfe9a4598f
 schedule   1: <span class="ansi-green">exited:0</span>            88450 steps  <span class="ansi-red">a50a5ab6d992</span>  run cb63a60e00db969f
 schedule   2: <span class="ansi-green">exited:0</span>            88506 steps  <span class="ansi-red">a50a5ab6d992</span>  run 129aa7359e747794
@@ -316,7 +317,7 @@ schedule  64: <span class="ansi-green">exited:0</span>            88363 steps  <
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind check --epoch 1791936000 --all --schedules 1024 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-gc-closure'</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind check <span class="option">--epoch</span> <span class="number">1791936000</span> <span class="option">--all</span> <span class="option">--schedules</span> <span class="number">1024</span> <span class="string">'github:fzakaria/rewindvm?dir=examples/case-studies#nix-gc-closure'</span></span>
 <span class="ansi-dim">rewind:</span> packing 217 store paths for nix-functional-gc-closure-2.35.2
 schedule   0: <span class="ansi-red">exited:1</span>            36762 steps    run dabeaa8b5b119d40
 ...
@@ -382,7 +383,7 @@ schedule 777: <span class="ansi-red">exited:1</span>            42688 steps    r
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind check --epoch 1791936000 --all 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-git-gc-closure-fixed'</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind check <span class="option">--epoch</span> <span class="number">1791936000</span> <span class="option">--all</span> <span class="string">'github:fzakaria/rewindvm?dir=examples/case-studies#nix-git-gc-closure-fixed'</span></span>
 schedule   0: <span class="ansi-green">exited:0</span>            83827 steps  a50a5ab6d992  run f407cd32006aa2f5
 schedule   1: <span class="ansi-green">exited:0</span>            94523 steps  a50a5ab6d992  run 51308cc3c42ede99
 ...
@@ -421,7 +422,7 @@ schedule   1: <span class="ansi-green">exited:0</span>            94523 steps  a
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind import https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-gc-closure-sigpipe-replayable.rwd</span>
 <span class="cmd"><span class="prompt">$</span> rewind replay e413b6df</span>
-<span class="cmd"><span class="prompt">$</span> rewind shell e413b6df &lt;step&gt;</span>
+<span class="cmd"><span class="prompt">$</span> rewind shell e413b6df <span class="operator">&lt;</span>step<span class="operator">&gt;</span></span>
 <span class="cmd"><span class="prompt">$</span> rewind-app https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-gc-closure-sigpipe.rwd</span></code></pre>
         <p>
           The run ids above come from the derivations in the
