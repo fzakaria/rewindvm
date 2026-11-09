@@ -8,6 +8,7 @@ use anyhow::{Result, bail};
 use rewind_core::inspect::Inspection;
 use rewind_core::threads::{OnTheCpu, Slice};
 use rewind_core::{Home, Run};
+use rewind_init::{Listed, ListedAll, ListedKind, Listing};
 
 use crate::{RUN_HELP, RUN_LONG_HELP, STEP_HELP, STEP_LONG_HELP, gdb, locate, terminal};
 
@@ -51,7 +52,7 @@ pub(crate) fn cat(home: &Home, args: CatArgs) -> Result<ExitCode> {
         }
         Inspection::Failed(message) if names_a_directory(&message) => {
             eprintln!(
-                "{} {path} is a directory at step {step}",
+                "{} {path} is a directory at step {step}; `rewind files` lists it",
                 crate::color::stderr().prefix()
             );
             Ok(ExitCode::from(CAT_DIRECTORY))
@@ -62,11 +63,147 @@ pub(crate) fn cat(home: &Home, args: CatArgs) -> Result<ExitCode> {
 
 /// Whether `message`, the VM's reason a file could not be read, says the
 /// path names a directory. The guest opens the path and reads it, and
-/// reports a failed read as the path and the operating system's error,
-/// which ends with the error's number.
+/// reports a failed read as the path and the operating system's error.
 fn names_a_directory(message: &str) -> bool {
-    let number = format!("(os error {})", libc::EISDIR);
+    ends_with_os_error(message, libc::EISDIR)
+}
+
+/// Whether `message`, the VM's reason a directory could not be listed,
+/// says the path names something other than a directory.
+fn names_no_directory(message: &str) -> bool {
+    ends_with_os_error(message, libc::ENOTDIR)
+}
+
+/// Whether `message` is the guest's report of the operating system's
+/// error number `errno`: the guest ends such a report with the number.
+fn ends_with_os_error(message: &str, errno: i32) -> bool {
+    let number = format!("(os error {errno})");
     message.trim_end().ends_with(&number)
+}
+
+/// The arguments of `rewind files`.
+#[derive(clap::Args)]
+pub(crate) struct FilesArgs {
+    #[arg(help = RUN_HELP, long_help = RUN_LONG_HELP)]
+    pub(crate) run: String,
+    #[arg(help = STEP_HELP, long_help = STEP_LONG_HELP)]
+    pub(crate) step: u64,
+    /// The directory's path, absolute or relative to the process's
+    /// working directory.
+    pub(crate) path: String,
+    /// Resolve the path as this process saw it, in its root and working
+    /// directory.
+    ///
+    /// By default, and once it has exited, the job's.
+    #[arg(long)]
+    pub(crate) pid: Option<u32>,
+    /// Print one JSON object a line per entry, for programs such as the
+    /// desktop app: its `path` below the directory, its `kind` (`file`,
+    /// `directory`, `symlink` or `other`), its `mode`, its `size` in
+    /// bytes, and a link's `target`. A listing that was cut ends with a
+    /// line `{"cut":true}`.
+    #[arg(long)]
+    pub(crate) json: bool,
+}
+
+pub(crate) fn files(home: &Home, args: FilesArgs) -> Result<ExitCode> {
+    let FilesArgs {
+        run,
+        step,
+        path,
+        pid,
+        json,
+    } = args;
+    let run = Run::find(home, &run)?;
+    let step = run.check_step(step)?;
+    warn_of_machine(&run, step);
+    let paint = crate::color::stderr();
+    let bytes = match rewind_core::inspect::list(home, &run, step, pid, &path)? {
+        Inspection::Contents(bytes) => bytes,
+        Inspection::NotFound(message) => {
+            eprintln!("{} {message}", paint.prefix());
+            return Ok(ExitCode::from(CAT_NOT_FOUND));
+        }
+        Inspection::Failed(message) if names_no_directory(&message) => {
+            eprintln!(
+                "{} {path} is not a directory at step {step}",
+                paint.prefix()
+            );
+            return Ok(ExitCode::from(FILES_NOT_A_DIRECTORY));
+        }
+        Inspection::Failed(message) if message.starts_with(UNKNOWN_REQUEST) => bail!(
+            "run {} was recorded with a guest from before `rewind files`; record it again to \
+             list its directories",
+            run.manifest.id
+        ),
+        Inspection::Failed(message) => bail!("listing {path} at step {step}: {message}"),
+    };
+    let Some(mut listing) = Listing::parse(&bytes) else {
+        bail!("listing {path} at step {step}: the VM's answer is not a listing");
+    };
+
+    // By path, as `find` piped through `sort` prints a tree.
+    listing.entries.sort_by(|a, b| a.path.cmp(&b.path));
+    if json {
+        print!("{}", listing.lines());
+        return Ok(ExitCode::SUCCESS);
+    }
+    for entry in &listing.entries {
+        println!("{}", listed_line(entry));
+    }
+    if listing.complete == ListedAll::No {
+        eprintln!(
+            "{} {path} holds more; these are the {} entries nearest it",
+            paint.prefix(),
+            listing.entries.len()
+        );
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// How the guest's init starts its reason for refusing a request it does
+/// not know, as a guest from before the request does.
+const UNKNOWN_REQUEST: &str = "inspect: unknown request";
+
+/// An entry as `rewind files` prints it: its kind and permissions as `ls
+/// -l` writes them, its size, its path, and where a link points.
+fn listed_line(entry: &Listed) -> String {
+    /// The width sizes are padded to, which holds a file of gigabytes.
+    const SIZE_WIDTH: usize = 11;
+
+    let mode = mode_letters(entry.kind, entry.mode);
+    let target = match &entry.target {
+        Some(target) => format!(" -> {target}"),
+        None => String::new(),
+    };
+    format!("{mode} {:>SIZE_WIDTH$}  {}{target}", entry.size, entry.path)
+}
+
+/// An entry's kind and permissions as `ls -l` writes them: a letter for
+/// the kind, then read, write and execute for the owner, the group and
+/// everyone else. Set-id and sticky bits are not shown.
+fn mode_letters(kind: ListedKind, mode: u32) -> String {
+    /// The letters of one class's permissions, and how many classes.
+    const LETTERS: [char; 3] = ['r', 'w', 'x'];
+    const CLASSES: u32 = 3;
+    const ABSENT: char = '-';
+
+    let kind = match kind {
+        ListedKind::File => '-',
+        ListedKind::Directory => 'd',
+        ListedKind::Symlink => 'l',
+        ListedKind::Other => '?',
+    };
+    let bits = CLASSES * LETTERS.len() as u32;
+    let permissions = (0..bits).map(|i| {
+        let set = mode & (1 << (bits - 1 - i)) != 0;
+        if set {
+            LETTERS[i as usize % LETTERS.len()]
+        } else {
+            ABSENT
+        }
+    });
+    std::iter::once(kind).chain(permissions).collect()
 }
 
 /// The arguments of `rewind shell`.
@@ -313,6 +450,11 @@ const CAT_NOT_FOUND: u8 = 3;
 /// step, which has no bytes to print.
 const CAT_DIRECTORY: u8 = 4;
 
+/// `rewind files`' exit status when the path named something other than
+/// a directory at the step. A missing directory exits as a missing file
+/// does from `rewind cat`.
+const FILES_NOT_A_DIRECTORY: u8 = 4;
+
 /// How many callers of the chosen frame `rewind where` shows.
 const DEFAULT_CALLERS: usize = 2;
 
@@ -408,5 +550,44 @@ mod tests {
             "/build/secret: Permission denied (os error 13)"
         ));
         assert!(!names_a_directory("inspect: no process 21"));
+
+        // A listing of a file fails with the error for no directory.
+        assert!(names_no_directory(
+            "/out/bin/sh: Not a directory (os error 20)"
+        ));
+        assert!(!names_no_directory("/out: Is a directory (os error 21)"));
+    }
+
+    #[test]
+    fn an_entry_prints_as_ls_writes_it() {
+        // An executable, a link and a directory: each line has the kind
+        // and permissions as letters, the size, the path, and a link's
+        // target.
+        let entry = |path: &str, kind, mode, size, target: Option<&str>| Listed {
+            path: path.into(),
+            kind,
+            mode,
+            size,
+            target: target.map(str::to_string),
+        };
+        assert_eq!(
+            listed_line(&entry("bin/shuffle", ListedKind::File, 0o755, 18_504, None)),
+            "-rwxr-xr-x       18504  bin/shuffle"
+        );
+        assert_eq!(
+            listed_line(&entry(
+                "bin/sh",
+                ListedKind::Symlink,
+                0o777,
+                0,
+                Some("shuffle")
+            )),
+            "lrwxrwxrwx           0  bin/sh -> shuffle"
+        );
+        assert_eq!(
+            listed_line(&entry("share", ListedKind::Directory, 0o555, 0, None)),
+            "dr-xr-xr-x           0  share"
+        );
+        assert_eq!(mode_letters(ListedKind::File, 0o640), "-rw-r-----");
     }
 }

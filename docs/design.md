@@ -215,15 +215,17 @@ platforms. The platform is detected by the CPUID signature `RewindRewind`.
   `drivers/char/random.c`, which mixes bytes into the input pool and rekeys
   the crng at once, are the patch's only changes outside `arch/x86`.
 
-An inspection is how `rewind cat` and `rewind shell` look inside a run at a
-step. Rewind forks the run at the step and writes a request, a list of
+An inspection is how `rewind cat`, `rewind files` and `rewind shell` look
+inside a run at a step. Rewind forks the run at the step and writes a request, a list of
 arguments, into the shared page. In the interrupt, the kernel stops every user
 process with SIGSTOP. Linux never stops the global init with a signal, so init
 is instead held at its next system call, before it can start or write
 anything. The kernel then starts `/init --inspect` with the request as a
 usermode helper, and power off waits until the helper exits. The helper enters
 the root and working directory of the process named in the request. For `cat`
-it writes the file through `/dev/rewind-stdout` between two marks. For `shell`
+it writes the file through `/dev/rewind-stdout` between two marks. For `files`
+it walks the directory, nearest entries first and at most 10,000 of them, and
+writes a line of JSON for each. For `shell`
 it opens a pty, starts the shell that process's environment names (for a Nix
 build, the builder's bash with stdenv's PATH) with that environment, and
 relays the pty to `/dev/rewind-console`. Reads of that device return input

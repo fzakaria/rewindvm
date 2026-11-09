@@ -113,6 +113,26 @@ pub fn cat(home: &Home, run: &Run, step: u64, pid: Option<u32>, path: &str) -> R
     Ok(answer.into_inspection(status))
 }
 
+/// The entries below directory `path` at `step`, as process `pid` would
+/// have seen the directory: a listing's lines (see
+/// [`rewind_init::Listing`]). Not found when nothing had the path, and
+/// failed, with the VM's message, when the path named something other
+/// than a directory or the run's guest is from before listings.
+pub fn list(home: &Home, run: &Run, step: u64, pid: Option<u32>, path: &str) -> Result<Inspection> {
+    let (mut machine, step) = fork_at(home, run, step)?;
+    let path = path.to_string();
+    machine.request_inspection(&InspectRequest::List { pid, path }.args())?;
+
+    let mut answer = Answer::default();
+    let status = finish(
+        &mut machine,
+        step,
+        &mut answer,
+        "the directory could be listed",
+    )?;
+    Ok(answer.into_inspection(status))
+}
+
 /// Process `pid` at `step`, or when None the process that was running
 /// there, and its memory map: its pid on a line, then its /proc/<pid>/maps
 /// as the VM's root sees it (see [`crate::maps`]). Not found when the

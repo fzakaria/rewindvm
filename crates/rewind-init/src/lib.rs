@@ -192,6 +192,12 @@ pub enum InspectRequest {
     /// empty line. Files that are missing, are not regular files or are
     /// too large are left out.
     Files { pid: Option<u32> },
+    /// The entries below directory `path`, resolved as process `pid` sees
+    /// the path, as a [`Listing`]'s lines on standard output: every file,
+    /// link and directory under it, however deep, up to [`MAX_LISTED`].
+    /// Not found when nothing has the path; failed when it names
+    /// something other than a directory.
+    List { pid: Option<u32>, path: String },
     /// An interactive shell in the root and working directory of process
     /// `pid`, with the job's environment, on a pty of `size` (columns,
     /// rows). Its terminal is /dev/rewind-console: what the shell prints
@@ -210,6 +216,7 @@ pub enum InspectRequest {
 const INSPECT_CAT: &str = "cat";
 const INSPECT_RUNNING: &str = "running";
 const INSPECT_FILES: &str = "files";
+const INSPECT_LIST: &str = "list";
 const INSPECT_SHELL: &str = "shell";
 
 /// After a shell's size: the bin directories of the extras slot follow.
@@ -231,6 +238,9 @@ impl InspectRequest {
                 vec![INSPECT_RUNNING.into(), p.to_string()]
             }
             InspectRequest::Files { pid: p } => vec![INSPECT_FILES.into(), pid(p)],
+            InspectRequest::List { pid: p, path } => {
+                vec![INSPECT_LIST.into(), pid(p), path.clone()]
+            }
             InspectRequest::Shell {
                 pid: p,
                 size: (cols, rows),
@@ -268,6 +278,10 @@ impl InspectRequest {
                 pid: Some(p.parse().ok()?),
             }),
             [INSPECT_FILES, p] => Some(InspectRequest::Files { pid: pid(p)? }),
+            [INSPECT_LIST, p, path] => Some(InspectRequest::List {
+                pid: pid(p)?,
+                path: path.to_string(),
+            }),
             [INSPECT_SHELL, p, cols, rows, extras @ ..] => {
                 let with = match extras {
                     [] => None,
@@ -423,6 +437,101 @@ pub fn sections(mut answer: &[u8]) -> Option<Vec<(String, &[u8])>> {
     Some(found)
 }
 
+/// The most entries a listing holds. A directory with more is cut there,
+/// the entries nearest the directory kept.
+pub const MAX_LISTED: usize = 10_000;
+
+/// One entry below a listed directory.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Listed {
+    /// The entry's path below the listed directory.
+    pub path: String,
+    pub kind: ListedKind,
+    /// The permission bits, as chmod takes them.
+    pub mode: u32,
+    /// A file's length in bytes; 0 for anything else.
+    pub size: u64,
+    /// Where a symbolic link points.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+}
+
+/// What a listed entry is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ListedKind {
+    File,
+    Directory,
+    Symlink,
+    /// A device, a socket or a pipe.
+    Other,
+}
+
+/// Whether a listing has every entry below its directory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ListedAll {
+    Yes,
+    /// The directory holds more than [`MAX_LISTED`] entries.
+    No,
+}
+
+/// The entries below a directory, the answer to
+/// [`InspectRequest::List`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Listing {
+    pub entries: Vec<Listed>,
+    pub complete: ListedAll,
+}
+
+/// A line of a listing: an entry, or after the last entry of a listing
+/// that was cut, the note that says so.
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum ListingLine {
+    Entry(Listed),
+    Cut { cut: bool },
+}
+
+impl Listing {
+    /// The listing as init writes it: a line of JSON for each entry, and
+    /// one more after them when the listing was cut.
+    pub fn lines(&self) -> String {
+        let cut = match self.complete {
+            ListedAll::Yes => None,
+            ListedAll::No => Some(ListingLine::Cut { cut: true }),
+        };
+        let mut lines = String::new();
+        let entries = self.entries.iter().cloned().map(ListingLine::Entry);
+        for line in entries.chain(cut) {
+            // A line of strings and numbers always serializes.
+            lines.push_str(&serde_json::to_string(&line).unwrap_or_default());
+            lines.push('\n');
+        }
+        lines
+    }
+
+    /// The listing `answer` holds, or None when `answer` is not a whole
+    /// listing.
+    pub fn parse(answer: &[u8]) -> Option<Listing> {
+        let mut listing = Listing {
+            entries: Vec::new(),
+            complete: ListedAll::Yes,
+        };
+        let text = std::str::from_utf8(answer).ok()?;
+        if !text.is_empty() && !text.ends_with('\n') {
+            return None;
+        }
+        for line in text.lines() {
+            match serde_json::from_str(line).ok()? {
+                ListingLine::Entry(entry) => listing.entries.push(entry),
+                ListingLine::Cut { cut: true } => listing.complete = ListedAll::No,
+                ListingLine::Cut { cut: false } => {}
+            }
+        }
+        Some(listing)
+    }
+}
+
 /// How the input image becomes the job's filesystem.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -540,6 +649,14 @@ mod tests {
             InspectRequest::Running { pid: None },
             InspectRequest::Running { pid: Some(7) },
             InspectRequest::Files { pid: Some(3) },
+            InspectRequest::List {
+                pid: None,
+                path: "/nix/store/x-out".into(),
+            },
+            InspectRequest::List {
+                pid: Some(12),
+                path: "a b".into(),
+            },
             InspectRequest::Shell {
                 pid: None,
                 size: (80, 24),
@@ -568,6 +685,53 @@ mod tests {
         assert_eq!(parse(&["shell", "0", "80"]), None);
         assert_eq!(parse(&["shell", "0", "80", "24", "--without"]), None);
         assert_eq!(parse(&["format", "/"]), None);
+    }
+
+    #[test]
+    fn a_listing_reads_back_as_init_wrote_it() {
+        // A listing of a file, a link and a directory, whole and then cut
+        // short: the lines init writes parse back to the same listing, a
+        // link's target included and the cut noted. An answer that is not
+        // a listing, such as one cut off mid-line, is none.
+        let entries = vec![
+            Listed {
+                path: "bin/shuffle".into(),
+                kind: ListedKind::File,
+                mode: 0o755,
+                size: 18_504,
+                target: None,
+            },
+            Listed {
+                path: "lib/libshuffle.so".into(),
+                kind: ListedKind::Symlink,
+                mode: 0o777,
+                size: 0,
+                target: Some("libshuffle.so.1".into()),
+            },
+            Listed {
+                path: "share/a\nb".into(),
+                kind: ListedKind::Directory,
+                mode: 0o755,
+                size: 0,
+                target: None,
+            },
+        ];
+        for complete in [ListedAll::Yes, ListedAll::No] {
+            let listing = Listing {
+                entries: entries.clone(),
+                complete,
+            };
+            let lines = listing.lines();
+            assert_eq!(Listing::parse(lines.as_bytes()), Some(listing));
+        }
+        let empty = Listing {
+            entries: Vec::new(),
+            complete: ListedAll::Yes,
+        };
+        assert_eq!(empty.lines(), "");
+        assert_eq!(Listing::parse(b""), Some(empty));
+        assert_eq!(Listing::parse(b"{\"path\":\"bin"), None);
+        assert_eq!(Listing::parse(b"inspect: unknown request\n"), None);
     }
 
     #[test]

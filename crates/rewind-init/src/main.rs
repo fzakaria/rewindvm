@@ -15,9 +15,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use rewind_init::{
-    IMAGE_ROOT, INSPECT_ARG, InspectRequest, InspectStatus, JOB_PATH, Job, Mark, Output, Probe,
-    RESIZE_ESCAPE, RESIZE_LEN, RESIZE_TAG, RUNNING_ENV, Root, SECTION_MAPS, SECTION_PID,
-    SELFTEST_ARG, nar_hash, section_header,
+    IMAGE_ROOT, INSPECT_ARG, InspectRequest, InspectStatus, JOB_PATH, Job, Listed, ListedAll,
+    ListedKind, Listing, MAX_LISTED, Mark, Output, Probe, RESIZE_ESCAPE, RESIZE_LEN, RESIZE_TAG,
+    RUNNING_ENV, Root, SECTION_MAPS, SECTION_PID, SELFTEST_ARG, nar_hash, section_header,
 };
 
 /// The image the monitor maps as persistent memory.
@@ -588,6 +588,7 @@ fn inspect(request: &[String]) {
         InspectRequest::Cat { pid, path } => cat(view(pid), &path, &mut out, &mut err),
         InspectRequest::Running { pid } => running(pid_t(pid), &mut out, &mut err),
         InspectRequest::Files { pid } => files(view(pid), &mut out, &mut err),
+        InspectRequest::List { pid, path } => list(view(pid), &path, &mut out, &mut err),
         InspectRequest::Shell { pid, size, with } => match shell(view(pid), size, with) {
             Ok(()) => InspectStatus::Done,
             Err(e) => {
@@ -723,6 +724,104 @@ fn files(pid: i32, out: &mut File, err: &mut File) -> InspectStatus {
     }
     InspectStatus::Done
 }
+
+/// The entries below directory `path` on `out`, as process `pid` sees
+/// the directory.
+fn list(pid: i32, path: &str, out: &mut File, err: &mut File) -> InspectStatus {
+    // See the directory as the process did: its root and working
+    // directory when it is still alive, else the job's.
+    if let Err(e) = enter_view_of(pid) {
+        let _ = writeln!(err, "inspect: {e}");
+        return InspectStatus::Failed;
+    }
+    let listing = match list_below(Path::new(path), MAX_LISTED) {
+        Ok(listing) => listing,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let _ = writeln!(err, "{path}: no such directory at this step");
+            return InspectStatus::NotFound;
+        }
+        Err(e) => {
+            let _ = writeln!(err, "{path}: {e}");
+            return InspectStatus::Failed;
+        }
+    };
+
+    // The lines, in chunks; the device splits them into records.
+    for chunk in listing.lines().as_bytes().chunks(INSPECT_CHUNK) {
+        if out.write_all(chunk).is_err() {
+            return InspectStatus::Failed;
+        }
+    }
+    InspectStatus::Done
+}
+
+/// The entries below directory `root`, at most `max` of them: the
+/// directory's own entries by name, then those of each directory among
+/// them, and so on down, so a listing that is cut keeps the entries
+/// nearest `root`. Links are listed, not followed. An error when `root`
+/// cannot be read as a directory; a directory below it that cannot be
+/// read is listed and not entered.
+fn list_below(root: &Path, max: usize) -> std::io::Result<Listing> {
+    use std::collections::VecDeque;
+
+    let mut listing = Listing {
+        entries: Vec::new(),
+        complete: ListedAll::Yes,
+    };
+
+    // The directories still to read, as paths below `root`.
+    let mut unread: VecDeque<PathBuf> = VecDeque::from([PathBuf::new()]);
+    while let Some(dir) = unread.pop_front() {
+        let entries = match fs::read_dir(root.join(&dir)) {
+            Ok(entries) => entries,
+            Err(e) if dir.as_os_str().is_empty() => return Err(e),
+            Err(_) => continue,
+        };
+        let mut names: Vec<_> = entries.flatten().map(|entry| entry.file_name()).collect();
+        names.sort();
+
+        for name in names {
+            let below = dir.join(&name);
+            let Ok(meta) = fs::symlink_metadata(root.join(&below)) else {
+                continue;
+            };
+            if listing.entries.len() == max {
+                listing.complete = ListedAll::No;
+                return Ok(listing);
+            }
+
+            // What the entry is, and for a link where it points.
+            let kind = meta.file_type();
+            let (kind, target) = if kind.is_symlink() {
+                let target = fs::read_link(root.join(&below)).ok();
+                (ListedKind::Symlink, target.map(|t| t.display().to_string()))
+            } else if kind.is_dir() {
+                unread.push_back(below.clone());
+                (ListedKind::Directory, None)
+            } else if kind.is_file() {
+                (ListedKind::File, None)
+            } else {
+                (ListedKind::Other, None)
+            };
+            let size = match kind {
+                ListedKind::File => meta.len(),
+                _ => 0,
+            };
+            listing.entries.push(Listed {
+                path: below.display().to_string(),
+                kind,
+                mode: meta.permissions().mode() & PERMISSION_BITS,
+                size,
+                target,
+            });
+        }
+    }
+    Ok(listing)
+}
+
+/// The bits of a file's mode that are its permissions, set-id and sticky
+/// bits included, apart from the bits that say what kind of file it is.
+const PERMISSION_BITS: u32 = 0o7777;
 
 /// Lines typed on the console up to an empty one.
 fn read_list() -> std::io::Result<String> {
@@ -1482,6 +1581,74 @@ mod tests {
         job.program = None;
         job.argv[0] = "/bin/sh".into();
         assert_eq!(resolve(&job, "/").unwrap(), PathBuf::from("/bin/sh"));
+    }
+
+    /// A listing has every entry below a directory, nearest first and by
+    /// name within a directory, and is cut at its limit. Lays out a tree
+    /// with a file, an executable, a link, an empty directory and a file
+    /// two directories down in a temporary directory, lists it whole and
+    /// then with room for three entries.
+    #[test]
+    fn a_listing_walks_a_directory_nearest_entries_first() {
+        let root = std::env::temp_dir().join(format!("rewind-init-list-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("share/man")).unwrap();
+        fs::create_dir_all(root.join("empty")).unwrap();
+        fs::create_dir_all(root.join("bin")).unwrap();
+        fs::write(root.join("bin/shuffle"), b"\x7fELF").unwrap();
+        fs::set_permissions(root.join("bin/shuffle"), fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(root.join("share/man/shuffle.1"), b"shuffle").unwrap();
+        fs::set_permissions(
+            root.join("share/man/shuffle.1"),
+            fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        symlink("shuffle", root.join("bin/sh")).unwrap();
+
+        let listing = list_below(&root, MAX_LISTED).unwrap();
+        assert_eq!(listing.complete, ListedAll::Yes);
+        let seen: Vec<(&str, ListedKind, u64, Option<&str>)> = listing
+            .entries
+            .iter()
+            .map(|e| (e.path.as_str(), e.kind, e.size, e.target.as_deref()))
+            .collect();
+        assert_eq!(
+            seen,
+            vec![
+                ("bin", ListedKind::Directory, 0, None),
+                ("empty", ListedKind::Directory, 0, None),
+                ("share", ListedKind::Directory, 0, None),
+                ("bin/sh", ListedKind::Symlink, 0, Some("shuffle")),
+                ("bin/shuffle", ListedKind::File, 4, None),
+                ("share/man", ListedKind::Directory, 0, None),
+                ("share/man/shuffle.1", ListedKind::File, 7, None),
+            ]
+        );
+        let mode = |path: &str| {
+            listing
+                .entries
+                .iter()
+                .find(|e| e.path == path)
+                .map(|e| e.mode)
+        };
+        assert_eq!(mode("bin/shuffle"), Some(0o755));
+        assert_eq!(mode("share/man/shuffle.1"), Some(0o644));
+
+        // Room for three entries: the three nearest, and the cut noted.
+        let cut = list_below(&root, 3).unwrap();
+        assert_eq!(cut.complete, ListedAll::No);
+        let paths: Vec<&str> = cut.entries.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(paths, vec!["bin", "empty", "share"]);
+
+        // A path that is no directory is an error, as the caller reports.
+        assert!(list_below(&root.join("bin/shuffle"), MAX_LISTED).is_err());
+        assert_eq!(
+            list_below(&root.join("nope"), MAX_LISTED)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
+        fs::remove_dir_all(&root).unwrap();
     }
 
     /// An image root gets the localhost lines a Nix build's sandbox has

@@ -160,6 +160,16 @@ enum Command {
     /// this takes about as long as seeking there. Exits 3 when the file did
     /// not exist then.
     Cat(cmd::inspect::CatArgs),
+    /// List a directory as it was at a step of a run.
+    ///
+    /// Prints every file, link and directory under it, however deep, by
+    /// path: its kind and permissions as `ls -l` writes them, its size, and
+    /// where a link points. Rewind forks the run at the step and reads the
+    /// directory inside the VM, so this takes about as long as seeking
+    /// there. A directory with more than 10,000 entries is cut to the ones
+    /// nearest it. Exits 3 when the directory did not exist then, and 4
+    /// when the path named something other than a directory.
+    Files(cmd::inspect::FilesArgs),
     /// A shell inside the VM at a step of a run.
     ///
     /// It has the job's environment and starts in a process's root and
@@ -331,6 +341,7 @@ impl Command {
     fn replays(&self) -> progress::Says {
         match self {
             Command::Cat(_)
+            | Command::Files(_)
             | Command::Shell(_)
             | Command::Gdb(_)
             | Command::Where(_)
@@ -371,6 +382,7 @@ impl Command {
             | Command::Check(_)
             | Command::Fork(_)
             | Command::Cat(_)
+            | Command::Files(_)
             | Command::Shell(_)
             | Command::Gdb(_)
             | Command::Where(_)
@@ -464,6 +476,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Remove(args) => cmd::remove::remove(&home, args),
         Command::Gc(args) => cmd::remove::gc(&home, args),
         Command::Cat(args) => cmd::inspect::cat(&home, args),
+        Command::Files(args) => cmd::inspect::files(&home, args),
         Command::Shell(args) => cmd::inspect::shell(&home, args),
         Command::Gdb(args) => cmd::inspect::gdb(&home, args),
         Command::Where(args) => cmd::inspect::r#where(&home, args),

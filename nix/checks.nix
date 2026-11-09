@@ -1449,8 +1449,9 @@ in
       '';
 
   # checks.inspect: looking inside a recorded run at a step. A file read
-  # before and after it is written, a shell that reads it, and gdb stopping
-  # at a breakpoint in the VM's kernel. Boots the VM, so it needs /dev/kvm.
+  # before and after it is written, a shell that reads it, a directory
+  # listed, and gdb stopping at a breakpoint in the VM's kernel. Boots the
+  # VM, so it needs /dev/kvm.
   inspect =
     pkgs.runCommand "rewind-inspect"
       {
@@ -1483,6 +1484,36 @@ in
         # rewind shell, typed into from a pipe.
         printf 'cat /notes.txt; exit\n' | rewind shell w "$end" | tee shell
         grep -q second shell
+
+        # rewind files: every entry under a directory, however deep, by
+        # path, with a link's target and an empty directory. A file is not
+        # a directory to list, a directory is not a file to print, and a
+        # directory nothing has is missing.
+        rewind run -q --name tree --root ${busyboxRoot} -- sh -c '
+          mkdir -p /out/bin /out/empty
+          echo hi > /out/bin/tool
+          /bin/busybox chmod 755 /out/bin/tool
+          /bin/busybox ln -s tool /out/bin/alias'
+        tree_end=$(rewind ls --json | sed -n 's/.*"name":"tree",.*"steps":\([0-9]*\).*/\1/p')
+        rewind files tree "$tree_end" /out | tee files
+        cat > want <<'EOF'
+        drwxr-xr-x           0  bin
+        lrwxrwxrwx           0  bin/alias -> tool
+        -rwxr-xr-x           3  bin/tool
+        drwxr-xr-x           0  empty
+        EOF
+        cmp files want
+        rewind files tree "$tree_end" /out --json | tee files.json
+        grep -qx '{"path":"bin/alias","kind":"symlink","mode":511,"size":0,"target":"tool"}' files.json
+        status=0
+        rewind files tree "$tree_end" /out/bin/tool || status=$?
+        test "$status" = 4
+        status=0
+        rewind files tree "$tree_end" /nope || status=$?
+        test "$status" = 3
+        status=0
+        rewind cat tree "$tree_end" /out || status=$?
+        test "$status" = 4
 
         # rewind gdb: a breakpoint where every event is reported.
         rewind gdb w "$start" --listen 127.0.0.1:12345 2> serve &

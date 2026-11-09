@@ -146,6 +146,7 @@ $ rewind open <run> <step> --compare <other run>
 $ rewind log <run> --steps
 $ rewind ps <run> <step>
 $ rewind cat <run> <step> /build/env-vars
+$ rewind files <run> <step> /build
 
 # a shell inside the VM at a step, in a throwaway fork; --with brings more
 # Nix packages into it

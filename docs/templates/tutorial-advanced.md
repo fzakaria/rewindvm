@@ -490,8 +490,9 @@ $ for s in 5 6 7 8; do rewind fork {{failing|short}} {{fork_from}} --schedule $s
 `check` exits 1 when a run fails a property, by default by ending
 differently from schedule 0, and 0 when none does, `diff`
 1 when the runs differ, `cat` 3 when the file did not exist at the step and
-4 when the path named a directory, and `doctor` 1 when this machine cannot
-record runs. With `--json`, commands
+4 when the path named a directory, `files` 3 when the directory did not
+exist and 4 when the path named something else, and `doctor` 1 when this
+machine cannot record runs. With `--json`, commands
 print JSON for a program to read in place of their text: one object, or from
 `ls` and `events` one a line. `check --json` lists each run it tried under
 `schedules`, with the properties the run violated under `violations`.
