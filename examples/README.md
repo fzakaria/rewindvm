@@ -154,3 +154,17 @@ $ nix build github:fzakaria/rewindvm#plugins   # as a derivation
 ```
 
 The [reproducible builds tutorial](../docs/tutorial-repro.md) finds both.
+
+## stamp
+
+A program that prints the id and the time of its own build. The Makefile
+reads a UUID from the kernel's random pool and the time from the clock as it
+compiles, as release builds like to, so no two builds on an ordinary machine
+make the same program, and `nix build --rebuild` says so. Inside Rewind VM
+the pool's seed and the clock's start are inputs, and the flake's `inRewind`
+writes them into the derivation.
+
+```console
+$ make -C stamp && ./stamp/stamp            # plain, on the host
+$ nix build github:fzakaria/rewindvm#stamp  # as a derivation
+```

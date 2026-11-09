@@ -222,6 +222,10 @@
           # a plugin index in the order its directory lists, decided by
           # the directory order (nix/examples.nix)
           plugins = p.examples.plugins;
+
+          # a program stamped with a random id and the time of its build,
+          # another on every build outside Rewind (nix/examples.nix)
+          stamp = p.examples.stamp;
         }
       );
 

@@ -15,6 +15,8 @@
 # so its output differs between seeds. plugins writes an index of its
 # plugins in the order the directory lists them, so its output differs
 # between directory orders. The reproducible builds tutorial finds both.
+# stamp compiles a random UUID and the time of its build into its program,
+# so no two builds of it on an ordinary machine are the same.
 { pkgs }:
 {
   mylib = pkgs.stdenv.mkDerivation {
@@ -92,6 +94,15 @@
     makeFlags = [ "PREFIX=$(out)" ];
     doCheck = true;
     meta.description = "A parent waiting with pause, sleeping through its wakeup under some interleavings";
+  };
+
+  stamp = pkgs.stdenv.mkDerivation {
+    pname = "stamp";
+    version = "0.1.0";
+    src = ../examples/stamp;
+    makeFlags = [ "PREFIX=$(out)" ];
+    meta.description = "A program stamped with a random id and the time of its build";
+    meta.mainProgram = "stamp";
   };
 
   tiles = pkgs.stdenv.mkDerivation {
