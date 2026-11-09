@@ -159,8 +159,9 @@ mod tests {
         // The failing run fails with a SIGSEGV and the passing run passes.
         // The two are the same run until the deciding step, where their
         // schedules part. Their events part after it and before the crash:
-        // the other worker runs ahead while the one that crashes is held,
-        // so the first difference is the cause and the crash comes later.
+        // a worker exits where the passing run's worker picks its next
+        // job, so the first difference is the cause and the crash comes
+        // later.
         crate::archive::test_cache();
         let session = open().unwrap();
 
@@ -190,11 +191,10 @@ mod tests {
             lines,
             vec![
                 "This run failed and the passing run did not.",
-                "The two runs are identical until step 4,758. There, Rewind asks the kernel to switch threads and pauses the running thread for 640 µs in this run only.",
-                "test_pool_shutdown did the same things in the same order in both runs until step 4,760.",
-                "Then in this run, thread 7 of test_pool_shutdown writes \"worker picked job 17\" to stdout.",
-                "In the passing run, thread 6 of test_pool_shutdown writes \"job 16 done: 5986\" to stdout.",
-                "Both write to the same stream; the text differs.",
+                "The two runs are identical until step 5,771. There, Rewind asks the kernel to switch threads in this run only.",
+                "test_pool_shutdown did the same things in the same order in both runs until step 5,775.",
+                "Then in this run, thread 5 of test_pool_shutdown exits.",
+                "In the passing run, thread 4 of test_pool_shutdown writes \"worker picked job 18\" to stdout.",
             ]
         );
     }

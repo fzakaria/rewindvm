@@ -120,11 +120,11 @@ mod tests {
         // Both exports and the step, the step written with thousands
         // separators as the app shows steps, and the leading ? optional.
         let address = Address::parse(
-            "?url=examples/mylib-fail.rwd&compare=examples/mylib-pass.rwd&step=4,760",
+            "?url=examples/mylib-fail.rwd&compare=examples/mylib-pass.rwd&step=5,775",
         );
         assert_eq!(address.url.as_deref(), Some("examples/mylib-fail.rwd"));
         assert_eq!(address.compare.as_deref(), Some("examples/mylib-pass.rwd"));
-        assert_eq!(address.step, Some(4760));
+        assert_eq!(address.step, Some(5775));
         assert_eq!(Address::parse("url=a.rwd"), Address::parse("?url=a.rwd"));
     }
 
@@ -167,12 +167,12 @@ mod tests {
         let address = Address {
             url: Some("https://ci.example/run.rwd?sig=a&b".into()),
             compare: Some("examples/mylib-pass.rwd".into()),
-            step: Some(4760),
+            step: Some(5775),
         };
         let query = address.query();
         assert_eq!(
             query,
-            "?url=https://ci.example/run.rwd%3Fsig%3Da%26b&compare=examples/mylib-pass.rwd&step=4760"
+            "?url=https://ci.example/run.rwd%3Fsig%3Da%26b&compare=examples/mylib-pass.rwd&step=5775"
         );
         assert_eq!(Address::parse(&query), address);
     }
