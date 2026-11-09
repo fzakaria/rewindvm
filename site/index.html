@@ -828,8 +828,8 @@
             <span class="eyebrow">Derivations</span>
             <h3>Deterministic derivations</h3>
             <p>
-              Wrap any derivation with <code>inRewind</code>: Nix builds it inside the VM, and its
-              hash covers the clock, the seed and the schedule.
+              Pin a build's environment with <code>inRewind</code> and check that a rebuild produces
+              the same bytes.
             </p>
             <span class="card-link">Read the tutorial &rarr;</span>
           </a>

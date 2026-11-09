@@ -137,14 +137,15 @@ in
       # The machine, and the vendor for `rewind build` to hold the builder
       # to, whatever its Nix says.
       rewindFlags = "${flagsOf machine} --vendor ${machine.vendor}";
+      rewindRuntime = toString rewind;
     });
 
   # The platform route: `onRewind machine drv` is `drv` asking for the
   # platform x86_64-rewind-<vendor> in place of x86_64-linux. Nix hands a
   # build for that platform to the program its external-builders setting
   # names, `rewind build --external-builder`, with no sandbox of its own
-  # around the VM. The Rewind that builds is the one that setting names,
-  # so the hash covers the machine and not the VM's version.
+  # around the VM. `rewindRuntime` pins the Rewind package, including its
+  # kernel and initrd. The configured external builder must match.
   onRewind =
     args: drv:
     let
@@ -153,5 +154,6 @@ in
     lib.overrideDerivation drv (_: {
       system = "x86_64-rewind-${machine.vendor}";
       rewindFlags = flagsOf machine;
+      rewindRuntime = toString rewind;
     });
 }

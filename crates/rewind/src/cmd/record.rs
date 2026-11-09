@@ -1839,13 +1839,13 @@ impl MachineArgs {
     /// which is v3 or v3-compat by what this CPU has, and the clock,
     /// which `auto` picks by this machine's branch counter. A run whose
     /// inputs must all be written down, as a derivation's are, names
-    /// each.
+    /// each. `--cpu host` also depends on the builder's CPU.
     pub(super) fn unpinned(&self) -> Vec<&'static str> {
         let mut unpinned = Vec::new();
         if self.epoch.is_none() {
             unpinned.push("--epoch");
         }
-        if self.cpu.is_none() {
+        if matches!(self.cpu, None | Some(CpuArg::Host)) {
             unpinned.push("--cpu");
         }
         if self.clock == ClockArg::Auto {

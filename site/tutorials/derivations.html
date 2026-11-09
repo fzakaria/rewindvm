@@ -4,7 +4,7 @@
     <title>Tutorial: deterministic derivations: Rewind VM</title>
     <meta
       name="description"
-      content="Deterministic derivations with Rewind VM: inRewind makes Nix build any derivation inside the VM with the clock, the seed and the schedule in the derivation's hash, so a rebuild makes the same bytes on every machine; or hand Nix's builds for a platform to rewind build."
+      content="Use inRewind to pin a Nix build's environment, rebuild it, and compare the output. Change the clock to make a different derivation."
     />
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -46,61 +46,46 @@
       <p class="eyebrow">Tutorial &middot; Derivations</p>
       <h1>Tutorial: deterministic derivations</h1>
       <p>
-        A derivation names its builder, its arguments, its environment and every store path the
-        build may read, and Nix hashes all of that. The build reads more: the clock, the kernel's
-        randomness, the order its threads run in, and the CPU and core count of whichever machine
-        picked the job up. None of those is in the hash, so one derivation can have many outputs.
+        Nix hashes a build's declared inputs. A builder can still read the current time or generate
+        a random UUID, so rebuilding that derivation can produce different bytes.
+        <code>inRewind</code> runs the builder in a VM and puts the VM's settings and runtime in the
+        derivation. The build repeats with those inputs fixed.
       </p>
       <p>
-        Rewind VM fixes each of them, most with an option: <code>--epoch</code> for the clock,
-        <code>--seed</code> for the randomness, <code>--schedule</code> for the thread order. This
-        tutorial puts the options in the derivation, so Nix hashes the machine with everything else
-        and a store path names one output. It uses <code>inRewind</code>, a function in the flake's
-        <code>lib</code>, and then the other route, a platform Nix hands whole builds to.
-      </p>
-      <p>
-        Every transcript below is real output on a 16 core AMD laptop. Install Rewind as the
-        <a href="nix.html">Nix tutorial</a> does.
+        The <a href="repro.html">reproducible builds tutorial</a> varies the environment to find
+        dependencies you can remove, such as an unsorted directory listing. Here we pin the
+        environment so an unchanged program repeats. Sorting the listing makes the build agree
+        across directory orders; pinning the VM picks one order. Both are useful. A race still needs
+        fixing even if one pinned schedule happens to pass.
       </p>
 
       <nav class="toc" aria-label="Steps">
         <p class="toc-head">Steps</p>
         <ol>
-          <li><a href="#what-the-builder-needs">What the builder needs</a></li>
+          <li><a href="#set-up-the-builder">Set up the builder</a></li>
           <li><a href="#a-build-that-stamps-itself">A build that stamps itself</a></li>
-          <li><a href="#the-same-build-inside-rewind">The same build inside Rewind</a></li>
-          <li><a href="#what-changed-in-the-derivation">What changed in the derivation</a></li>
-          <li><a href="#the-machine-is-data">The machine is data</a></li>
-          <li><a href="#looking-inside-a-build">Looking inside a build</a></li>
-          <li><a href="#the-platform-route">The platform route</a></li>
-          <li><a href="#which-route">Which route</a></li>
-          <li><a href="#what-it-costs">What it costs</a></li>
+          <li><a href="#wrap-the-derivation">Wrap the derivation</a></li>
+          <li><a href="#change-the-clock">Change the clock</a></li>
+          <li><a href="#costs-and-limits">Costs and limits</a></li>
         </ol>
       </nav>
 
       <section class="step">
-        <h2 id="what-the-builder-needs">
-          <a class="anchor" href="#what-the-builder-needs">What the builder needs</a>
+        <h2 id="set-up-the-builder">
+          <a class="anchor" href="#set-up-the-builder">Set up the builder</a>
         </h2>
         <p>
-          A derivation that <code>inRewind</code> made asks Nix for two system features:
-          <code>kvm</code>, and <code>rewind-amd</code> or <code>rewind-intel</code> for the CPU's
-          vendor. The guest's CPU model is fixed, but it keeps the host's vendor, so runs of the
-          same inputs are the same on every machine of one vendor and differ between the two. NixOS
-          sets the second feature with the module:
+          Install Rewind as the <a href="nix.html">Nix tutorial</a> describes. Nix needs sandboxing
+          enabled and the <code>kvm</code> system feature, with <code>/dev/kvm</code> available to
+          builds. It also needs a feature naming the builder's CPU vendor. On NixOS:
         </p>
-        <pre class="console"><code>programs.rewind.systemFeature = "amd";
-# AMD only: counter time, here and inside Nix's sandbox
-programs.rewind.amdBranchCounterWorkaround = true;</code></pre>
+        <pre class="console"><code>programs.rewind.systemFeature = "amd";</code></pre>
         <p>
-          On another distribution, add <code>extra-system-features = rewind-amd</code> to
-          <code>nix.conf</code>, and on AMD <code>extra-sandbox-paths = /run/rewind?</code> as well,
-          which shows the sandbox the marker <code>sudo rewind pmu enable</code> leaves.
-        </p>
-        <p>
-          By default the VM's clock follows the work done inside it, counted by the CPU's branch
-          counter, which <a href="../counter-time.html">Time inside the VM</a> explains. A machine
-          without an exact counter builds with <code>clock = "exits"</code> in the machine below.
+          On another distribution, add <code>extra-system-features = kvm rewind-amd</code> to
+          <code>nix.conf</code>. Use <code>intel</code> and <code>rewind-intel</code> on Intel. The
+          examples below were recorded on AMD and use <code>clock = "exits"</code>, which needs no
+          branch counter. The <a href="../nix-builds.html">reference</a> explains the clock options
+          and machine settings.
         </p>
       </section>
 
@@ -109,373 +94,121 @@ programs.rewind.amdBranchCounterWorkaround = true;</code></pre>
           <a class="anchor" href="#a-build-that-stamps-itself">A build that stamps itself</a>
         </h2>
         <p>
-          <code>stamp</code>, from
-          <a href="https://github.com/fzakaria/rewindvm/tree/main/examples">examples</a>, prints
-          when it was built and by which build. Its Makefile reads a UUID from the kernel's random
-          pool and the time from the clock as it compiles, the way release builds record a build id:
+          <a href="https://github.com/fzakaria/rewindvm/tree/main/examples">stamp</a> compiles a
+          UUID and a timestamp into its executable. Each ordinary build reads a new UUID and the
+          current time:
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> nix build --no-link --print-out-paths github:fzakaria/rewindvm#stamp</span>
-/nix/store/...-stamp-0.1.0
-
-<span class="cmd"><span class="prompt">$</span> nix run github:fzakaria/rewindvm#stamp</span>
+        ><code><span class="cmd"><span class="prompt">$</span> nix run github:fzakaria/rewindvm#stamp</span>
+...
 build b2060565-ce20-4c7b-80f9-e19f540dbc78 at 2026-11-09T18:06:35Z
 
 <span class="cmd"><span class="prompt">$</span> nix build --no-link github:fzakaria/rewindvm#stamp --rebuild</span>
+...
 checking outputs of '/nix/store/...-stamp-0.1.0.drv'...
 error: derivation '/nix/store/...-stamp-0.1.0.drv' may not be deterministic: output "/nix/store/...-stamp-0.1.0" differs</code></pre>
         <p>
-          The second build of the same derivation made another program, and
-          <code>--rebuild</code> says so. The store path names whichever build got there first.
+          <code>--rebuild</code> builds the same derivation again and compares the result with the
+          stored output. The bytes differ.
         </p>
       </section>
 
       <section class="step">
-        <h2 id="the-same-build-inside-rewind">
-          <a class="anchor" href="#the-same-build-inside-rewind">The same build inside Rewind</a>
+        <h2 id="wrap-the-derivation">
+          <a class="anchor" href="#wrap-the-derivation">Wrap the derivation</a>
         </h2>
         <p>
-          <code>inRewind</code> takes a machine and a derivation, and returns the derivation with
-          its builder running inside the VM. In a project of your own:
+          Save this as <code>stamp.nix</code>, changing <code>vendor</code> to
+          <code>"intel"</code> on an Intel builder:
         </p>
         <pre class="console"><code>let
   rewind = builtins.getFlake "github:fzakaria/rewindvm";
   inherit (rewind.lib.x86_64-linux) inRewind;
 in
-inRewind { epoch = 1790985600; } rewind.packages.x86_64-linux.stamp</code></pre>
+inRewind {
+  epoch = 1790985600;
+  clock = "exits";
+  vendor = "amd";
+} rewind.packages.x86_64-linux.stamp</code></pre>
         <p>
-          The epoch is the VM's clock at boot, in seconds since 1970, and has no default: Rewind's
-          own is the start of today, which no hash would cover. The commands below give the same
-          expression on the command line. The stock <code>nix-daemon</code> builds it:
+          <code>inRewind</code> takes the machine settings and a derivation. Nix runs that
+          derivation's builder inside Rewind and receives its outputs as usual. The
+          <code>epoch</code> sets the VM's clock at boot to midnight on 2026-10-03.
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> nix build --no-link --print-out-paths --impure --expr 'with builtins.getFlake "github:fzakaria/rewindvm"; lib.x86_64-linux.inRewind { epoch = 1790985600; } packages.x86_64-linux.stamp'</span>
-/nix/store/...-stamp-0.1.0
+        ><code><span class="cmd"><span class="prompt">$</span> nix build --no-link --print-out-paths --impure -f stamp.nix</span>
+...
+/nix/store/2va0vhvj2ksl5kf66hyjmshprn19cv8k-stamp-0.1.0
 
-<span class="cmd"><span class="prompt">$</span> $(nix build --no-link --print-out-paths --impure --expr 'with builtins.getFlake "github:fzakaria/rewindvm"; lib.x86_64-linux.inRewind { epoch = 1790985600; } packages.x86_64-linux.stamp')/bin/stamp</span>
+<span class="cmd"><span class="prompt">$</span> $(nix build --no-link --print-out-paths --impure -f stamp.nix)/bin/stamp</span>
+...
 build 4ce9bd9b-a9df-4eb0-968c-cae21737b552 at 2026-10-03T00:00:00Z</code></pre>
-        <p>
-          1790985600 is midnight on 2026-10-03, and the VM booted then. Build the derivation again,
-          with its log:
-        </p>
+        <p>Now rebuild it:</p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> nix build -L --no-link --impure --expr 'with builtins.getFlake "github:fzakaria/rewindvm"; lib.x86_64-linux.inRewind { epoch = 1790985600; } packages.x86_64-linux.stamp' --rebuild</span>
+        ><code><span class="cmd"><span class="prompt">$</span> nix build -L --no-link --impure -f stamp.nix --rebuild</span>
+...
 checking outputs of '/nix/store/...-stamp-0.1.0.drv'...
 ...
 stamp&gt; gcc -O1 -Wall -DBUILD_ID='"4ce9bd9b-a9df-4eb0-968c-cae21737b552"' -DBUILT_AT='"2026-10-03T00:00:00Z"' -o stamp stamp.c
 ...
-stamp&gt; rewind: run 627beb52427760dd exited:0 after 4366 steps, 0.114s virtual, 0.573s wall (poweroff)</code></pre>
+stamp&gt; rewind: run a5453754435731c0 exited:0 after 4296 steps, 0.021s virtual, 0.605s wall (poweroff)</code></pre>
         <p>
-          The builder's output is the build's log, and the last line of it is the run: its id, a
-          hash of everything the VM was given, and how it ended. <code>--rebuild</code> passes: the
-          second build made the bytes the first made. And a third time:
-        </p>
-        <pre
-          class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> nix build -L --no-link --impure --expr 'with builtins.getFlake "github:fzakaria/rewindvm"; lib.x86_64-linux.inRewind { epoch = 1790985600; } packages.x86_64-linux.stamp' --rebuild</span>
-...
-stamp&gt; rewind: run 627beb52427760dd exited:0 after 4366 steps, 0.114s virtual, 0.609s wall (poweroff)</code></pre>
-        <p>
-          The same run, 627beb52, with the same 4366 steps. The UUID still comes from the kernel's
-          random pool and the time still comes from the clock. They are the same on every build
-          because the pool's seed and the clock's start are in the derivation.
+          <code>--rebuild</code> passes. The program still reads the clock and the kernel's random
+          pool, but both builds see the same values. You can replace <code>stamp</code> with your
+          own derivation without changing its builder.
         </p>
         <p>
-          The run's id is this Rewind's. Rewind is an input of the derivation, so another build of
-          Rewind gives the output another path, which the builder's environment names, and the run
-          another id.
+          The result's hash covers the machine settings in <code>rewindFlags</code> and the Rewind
+          package in <code>rewindRuntime</code>, including its kernel and initrd. Changing any of
+          them gives Nix a different recipe and output path. In a project, pin the Rewind flake
+          input in <code>flake.lock</code> as you pin nixpkgs.
         </p>
       </section>
 
       <section class="step">
-        <h2 id="what-changed-in-the-derivation">
-          <a class="anchor" href="#what-changed-in-the-derivation"
-            >What changed in the derivation</a
-          >
+        <h2 id="change-the-clock">
+          <a class="anchor" href="#change-the-clock">Change the clock</a>
+        </h2>
+        <p>Change the epoch to midnight on 2025-06-15:</p>
+        <pre
+          class="console"
+        ><code><span class="cmd"><span class="prompt">$</span> sed -i 's/1790985600/1749945600/' stamp.nix</span>
+<span class="cmd"><span class="prompt">$</span> nix build --no-link --print-out-paths --impure -f stamp.nix</span>
+...
+/nix/store/ibl83iyrplb8i1p152fh57535faw8zm3-stamp-0.1.0
+
+<span class="cmd"><span class="prompt">$</span> $(nix build --no-link --print-out-paths --impure -f stamp.nix)/bin/stamp</span>
+...
+build 9332c115-745f-4d61-b6e3-95f52d97852b at 2025-06-15T00:00:00Z</code></pre>
+        <p>
+          The new output has its own store path and timestamp. Rebuilding the original recipe still
+          produces the original timestamp.
+        </p>
+      </section>
+
+      <section class="step">
+        <h2 id="costs-and-limits">
+          <a class="anchor" href="#costs-and-limits">Costs and limits</a>
         </h2>
         <p>
-          The result is an ordinary <code>x86_64-linux</code> derivation with three things changed:
-        </p>
-        <pre
-          class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> nix eval --impure --expr '(with builtins.getFlake "github:fzakaria/rewindvm"; lib.x86_64-linux.inRewind { epoch = 1790985600; } packages.x86_64-linux.stamp).rewindFlags'</span>
-"--epoch 1790985600 --seed 0 --schedule 0 --cpu v3-compat --clock branches --cores 1 --mem 1024 --vendor amd"
-
-<span class="cmd"><span class="prompt">$</span> nix eval --impure --expr '(with builtins.getFlake "github:fzakaria/rewindvm"; lib.x86_64-linux.inRewind { epoch = 1790985600; } packages.x86_64-linux.stamp).requiredSystemFeatures'</span>
-[ "kvm" "rewind-amd" ]</code></pre>
-        <ul>
-          <li>
-            <code>rewindFlags</code> is the machine, as the options <code>rewind run</code> takes
-            for one, the defaults written out with the rest. It is an attribute, so Nix hashes it.
-          </li>
-          <li>
-            The builder is a script that describes the build Nix set up and hands the description to
-            <code>rewind build</code>, which runs the derivation's own builder in the VM, as
-            <code>rewind nix</code> runs one, and copies the outputs back. The path of Rewind is
-            among the builder's arguments, so Rewind is an input of the derivation, as the compiler
-            is, and the hash covers the VM and its guest kernel.
-          </li>
-          <li>
-            The system features route the build to a machine with KVM and the vendor's CPU.
-            <code>rewind build</code> checks the vendor itself as well, and refuses the other one.
-          </li>
-        </ul>
-        <p>
-          Three things the build can see are fixed without an option. The VM's store holds the
-          closure of what the original derivation names and nothing else: Nix's sandbox also shows
-          each machine's own <code>sandbox-paths</code>, which no derivation names.
-          <code>NIX_BUILD_CORES</code> is the machine's <code>cores</code>, 1 unless you say
-          otherwise, where Nix passes the count of whichever machine builds. The build directory is
-          <code>/build</code>, so the function needs Nix's sandbox on.
+          The VM has one virtual CPU. Build threads take turns on that CPU, so builds that benefit
+          from many cores will take longer. Each build also packs its input closure into an image.
+          The build directory and outputs live in guest memory; increase <code>mem</code> for large
+          builds.
         </p>
         <p>
-          A derivation with <code>__structuredAttrs</code> works, and so does one with several
-          outputs. A content-addressed derivation does too: Nix gives its builder a scratch path for
-          each output, and <code>rewind build</code> copies to the paths it is given. A fixed-output
-          derivation is refused when it is evaluated, since Nix builds one with the network and a
-          build in the VM has none.
-        </p>
-      </section>
-
-      <section class="step">
-        <h2 id="the-machine-is-data">
-          <a class="anchor" href="#the-machine-is-data">The machine is data</a>
-        </h2>
-        <p>The machine's arguments, with their defaults:</p>
-        <div class="table">
-          <table>
-            <thead>
-              <tr>
-                <th>argument</th>
-                <th>default</th>
-                <th>what it sets</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td><code>epoch</code></td>
-                <td>none</td>
-                <td>the VM's wall clock at boot, in seconds since the Unix epoch</td>
-              </tr>
-              <tr>
-                <td><code>seed</code></td>
-                <td><code>0</code></td>
-                <td>the seed of the kernel's randomness</td>
-              </tr>
-              <tr>
-                <td><code>schedule</code></td>
-                <td><code>0</code></td>
-                <td>the thread schedule; 0 is the unperturbed one</td>
-              </tr>
-              <tr>
-                <td><code>clock</code></td>
-                <td><code>"branches"</code></td>
-                <td>what moves the clock: the VM's work, or <code>"exits"</code> for exits only</td>
-              </tr>
-              <tr>
-                <td><code>cpu</code></td>
-                <td><code>"v3-compat"</code></td>
-                <td>the CPU model: <code>"v3"</code>, or v3 without ERMS, which more hosts show</td>
-              </tr>
-              <tr>
-                <td><code>vendor</code></td>
-                <td><code>"amd"</code></td>
-                <td>the CPU vendor of the machines that build it, or <code>"intel"</code></td>
-              </tr>
-              <tr>
-                <td><code>cores</code></td>
-                <td><code>1</code></td>
-                <td>the CPUs programs are told of, and <code>NIX_BUILD_CORES</code></td>
-              </tr>
-              <tr>
-                <td><code>mem</code></td>
-                <td><code>1024</code></td>
-                <td>the VM's memory in MiB, which also holds the build's files</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-        <p>Another machine is another derivation, with its own output:</p>
-        <pre
-          class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> $(nix build --no-link --print-out-paths --impure --expr 'with builtins.getFlake "github:fzakaria/rewindvm"; lib.x86_64-linux.inRewind { epoch = 1749945600; seed = 7; } packages.x86_64-linux.stamp')/bin/stamp</span>
-build 85271e06-23f4-4b7c-b730-3bc9ffe174df at 2025-06-15T00:00:00Z</code></pre>
-        <p>
-          That build ran on 2025-06-15, as it will every time. A test that reads the calendar, or a
-          build whose threads race, can be pinned the same way, and a list of seeds or schedules is
-          a list of derivations.
-        </p>
-      </section>
-
-      <section class="step">
-        <h2 id="looking-inside-a-build">
-          <a class="anchor" href="#looking-inside-a-build">Looking inside a build</a>
-        </h2>
-        <p>
-          The run of a build made this way is kept in the sandbox and goes with it. To look inside
-          the build, run the original derivation on the same machine with <code>rewind nix</code>,
-          which keeps the run:
-        </p>
-        <pre
-          class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind nix github:fzakaria/rewindvm#stamp --no-compare --epoch 1790985600 --cpu v3-compat --clock branches</span>
-...
-<span class="ansi-dim">rewind:</span> run 9ee8893cc9ef8011 <span class="ansi-green">exited:0</span> after 4378 steps, 0.114s virtual, 0.598s wall (poweroff)
-/nix/store/...-stamp-0.1.0 b35fadaece3b3931  <span class="ansi-red">differs from your store</span>
-...</code></pre>
-        <p>
-          <code>rewind nix</code> compares its output with the store's, which the host built with
-          another UUID at another time. The two runs in the VM have the same builder on the same
-          machine. Their ids differ, since the derivation's attributes are in the builder's
-          environment and <code>inRewind</code> changed them. Every tool of the other tutorials
-          works on the kept run. One of them is how <code>rewind build</code> copies an output out:
-          <code>rewind cat --archive</code> writes a directory as it was at a step, as a tar or a
-          NAR.
-        </p>
-        <pre
-          class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind cat 9ee8893c 4378 /nix/store/yd7qsa9lqlygnddnikr0wjqqzwlcgv6w-stamp-0.1.0 --archive tar | tar --utc --numeric-owner -tvf -</span>
-drwxr-xr-x 1000/100          0 2026-10-03 00:00 yd7qsa9lqlygnddnikr0wjqqzwlcgv6w-stamp-0.1.0/
-drwxr-xr-x 1000/100          0 2026-10-03 00:00 yd7qsa9lqlygnddnikr0wjqqzwlcgv6w-stamp-0.1.0/bin/
--rwxr-xr-x 1000/100      15704 2026-10-03 00:00 yd7qsa9lqlygnddnikr0wjqqzwlcgv6w-stamp-0.1.0/bin/stamp</code></pre>
-        <p>
-          The archive holds what the VM held: the build user's ids and the VM's clock, and nothing
-          of the machine that asked. So the same run at the same step is the same bytes on any
-          machine.
-        </p>
-      </section>
-
-      <section class="step">
-        <h2 id="the-platform-route">
-          <a class="anchor" href="#the-platform-route">The platform route</a>
-        </h2>
-        <p>
-          <code>inRewind</code> puts the VM inside the derivation: the builder starts it, in Nix's
-          sandbox. The other place for the VM is under Nix. Nix's experimental
-          [<code>external-builders</code>](https://nix.dev/manual/nix/latest/command-ref/conf-file.html#conf-external-builders)
-          setting, in Nix 2.32 and later, hands every build for the platforms it lists to a program,
-          in place of the sandbox. <code>rewind build --external-builder</code> is such a program,
-          and <code>onRewind</code> asks for the platform:
-        </p>
-        <pre
-          class="console"
-        ><code>onRewind { epoch = 1790985600; } rewind.packages.x86_64-linux.stamp</code></pre>
-        <p>
-          The derivation keeps its own builder. Its <code>system</code> becomes
-          <code>x86_64-rewind-amd</code>, and <code>rewindFlags</code> holds the machine as before.
-          A client cannot set <code>external-builders</code> for a daemon, so this build uses a
-          store of its own, in a directory:
-        </p>
-        <pre
-          class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> nix build -L --no-link --print-out-paths --impure --store ./platform-store --extra-experimental-features external-builders --external-builders '[{"systems":["x86_64-rewind-amd"],"program":"'$(command -v rewind)'","args":["build","--external-builder"]}]' --expr 'with builtins.getFlake "github:fzakaria/rewindvm"; lib.x86_64-linux.onRewind { epoch = 1790985600; } packages.x86_64-linux.stamp'</span>
-...
-stamp&gt; gcc -O1 -Wall -DBUILD_ID='"4ce9bd9b-a9df-4eb0-968c-cae21737b552"' -DBUILT_AT='"2026-10-03T00:00:00Z"' -o stamp stamp.c
-...
-stamp&gt; rewind: run f4d0d049cdb2512a exited:0 after 4375 steps, 0.114s virtual, 0.526s wall (poweroff)
-/nix/store/...-stamp-0.1.0</code></pre>
-        <p>For a daemon, the same two settings go in its <code>nix.conf</code>:</p>
-        <pre class="console"><code>extra-experimental-features = external-builders
-external-builders = [{"systems":["x86_64-rewind-amd"],"program":"/run/current-system/sw/bin/rewind","args":["build","--external-builder"]}]</code></pre>
-      </section>
-
-      <section class="step">
-        <h2 id="which-route"><a class="anchor" href="#which-route">Which route</a></h2>
-        <p>
-          Start with the function. It needs nothing from Nix but two system features, the stock
-          daemon builds its derivations, and it can wrap only the derivations whose builds are known
-          to differ.
+          Builds have no network. Keep fixed-output derivations, such as source fetches, outside
+          <code>inRewind</code>. AMD and Intel are separate build targets, and upgrading the pinned
+          Rewind package rebuilds the derivations that use it.
         </p>
         <p>
-          The platform is the plainer description: a fixed kernel on a fixed CPU model with a clock
-          you set is another platform than some x86_64 Linux machine. Nix hands the program the
-          exact closure, and no sandbox sits around the VM. It needs an experimental feature on
-          every builder, and nixpkgs knows no system called <code>x86_64-rewind-amd</code>.
+          The <a href="../nix-builds.html">Nix build reference</a> covers all machine settings,
+          exporting files from a recording, and <code>onRewind</code>, which uses Nix's experimental
+          external-builder interface.
         </p>
-        <p>What each derivation's hash covers:</p>
-        <div class="table">
-          <table>
-            <thead>
-              <tr>
-                <th>input</th>
-                <th><code>inRewind</code></th>
-                <th><code>onRewind</code></th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td>the clock, the seed and the schedule</td>
-                <td>yes, in <code>rewindFlags</code></td>
-                <td>yes, in <code>rewindFlags</code></td>
-              </tr>
-              <tr>
-                <td>the CPU model, the cores and the memory</td>
-                <td>yes, in <code>rewindFlags</code></td>
-                <td>yes, in <code>rewindFlags</code></td>
-              </tr>
-              <tr>
-                <td>the CPU vendor</td>
-                <td>yes, in the features and the options</td>
-                <td>yes, in <code>system</code></td>
-              </tr>
-              <tr>
-                <td>Rewind and its guest kernel</td>
-                <td>yes, an input</td>
-                <td>no, <code>nix.conf</code> names a Rewind</td>
-              </tr>
-              <tr>
-                <td>the builder's own kernel, CPU model and cores</td>
-                <td>not read</td>
-                <td>not read</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </section>
-
-      <section class="step">
-        <h2 id="what-it-costs"><a class="anchor" href="#what-it-costs">What it costs</a></h2>
-        <p>GNU hello, rebuilt on the host and then through <code>inRewind</code>:</p>
-        <pre
-          class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> nix build --no-link --impure --expr '(builtins.getFlake "github:fzakaria/rewindvm").inputs.nixpkgs.legacyPackages.x86_64-linux.hello' --rebuild</span></code></pre>
-        <pre
-          class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> nix build -L --no-link --impure --expr 'with builtins.getFlake "github:fzakaria/rewindvm"; lib.x86_64-linux.inRewind { epoch = 1790985600; } inputs.nixpkgs.legacyPackages.x86_64-linux.hello' --rebuild</span>
-...
-hello&gt; rewind: run 03020571472f6a1a exited:0 after 124838 steps, 12.031s virtual, 12.449s wall (poweroff)</code></pre>
-        <p>
-          The host took 12 seconds and <code>inRewind</code> took 17, of which the run's wall time
-          above is the build itself. The rest is evaluating, packing the closure into an image, and
-          copying the output out.
-        </p>
-        <ul>
-          <li>
-            <strong>One virtual CPU.</strong> <code>cores</code> changes what programs are told, and
-            their threads still take turns on one CPU. GNU hello's build is mostly a serial
-            <code>configure</code>; a build that uses sixteen cores takes longer.
-          </li>
-          <li>
-            <strong>An image a build.</strong> The sandbox keeps nothing between builds, so each
-            build packs its input closure into an image again.
-          </li>
-          <li>
-            <strong>Memory.</strong> The build directory and the outputs live in the VM's memory
-            until they are copied out, each in a filesystem half of <code>mem</code> large. A build
-            that writes more is told there is no space left, as on a full disk.
-          </li>
-          <li>
-            <strong>Rewind is in the hash.</strong> With <code>inRewind</code>, a new Rewind
-            rebuilds every derivation the function made, as a new compiler does.
-          </li>
-          <li>
-            <strong>Two vendors.</strong> An AMD builder cannot check an Intel builder's output.
-          </li>
-          <li><strong>No network.</strong> Fixed-output derivations stay as they are.</li>
-        </ul>
       </section>
 
       <a class="card next" href="advanced.html">

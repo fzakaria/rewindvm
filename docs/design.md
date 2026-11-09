@@ -230,7 +230,7 @@ below the one asked for without reading it. For `cat --archive` it walks the
 path whole, each directory's entries by name and all of one entry's before the
 next, staying out of `/proc` and `/sys` as a listing does, and writes each
 entry with its permissions, owner and time, then a file's bytes; `rewind`
-writes the tar or the NAR from those as they arrive, so the archive holds
+writes the tar from those as they arrive, so the archive holds
 nothing of the machine that asked. For `shell`
 it opens a pty, starts the shell that process's environment names (for a Nix
 build, the builder's bash with stdenv's PATH) with that environment, and
@@ -728,12 +728,13 @@ working directory, user, and how the image becomes the root.
   closure as the image and its files as the job's, and calls no `nix`
   itself, so it also runs inside Nix's sandbox, where a derivation's
   builder can write the description of its own build (`inRewind`, in the
-  flake's `lib`). The machine is the derivation's `rewindFlags` attribute
-  and nothing given outside it, so the derivation's hash covers it. When
+  flake's `lib`). The derivation pins the machine in `rewindFlags` and the
+  Rewind package in `rewindRuntime`. The running package must match; the
+  kernel and initrd come from that package. When
   the builder exits 0, each output is read out of a fork of the run at its
   last step, as `rewind cat --archive` reads a tree, and written to the
-  store. The [derivations tutorial](tutorial-derivations.md) builds with
-  both routes.
+  store. The [derivations tutorial](tutorial-derivations.md) uses `inRewind`;
+  the [Nix build reference](nix-builds.md) covers both routes.
 
 The guest's wall clock starts at midnight UTC of the day the run was made.
 Configure scripts compare the clock with the timestamps in source tarballs, so

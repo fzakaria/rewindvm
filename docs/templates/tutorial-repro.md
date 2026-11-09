@@ -3,13 +3,16 @@
 <!-- let epoch = 1790985600 -->
 <!-- let repo = github:fzakaria/rewindvm -->
 
-A build is reproducible when the same inputs give the same bytes, so anyone
-can rebuild a package and check that it matches the one they were given.
-Rewind VM fixes every input of a build, down to its random numbers, the
-order its threads run in and the order its directories list in, so one build
-follows the same run every time. Change one of those inputs and build again:
-if the output changes, that input changed it, and both runs are kept to
-replay and compare.
+A reproducible build produces the same bytes from the same inputs. Builds
+can also depend on details outside a Nix derivation, such as random seeds
+or directory order. Rewind lets you vary those details, compare the
+outputs, and find the code responsible for a difference.
+
+This tutorial fixes two builds so their outputs agree across those
+variations. The [deterministic derivations tutorial](tutorial-derivations.md)
+uses another approach: pin the VM's environment in the derivation and keep
+the build code unchanged. Fixing the code reduces what the output depends
+on; pinning the environment makes those dependencies explicit.
 
 The examples are `tiles` and `plugins` from
 [examples](https://github.com/fzakaria/rewindvm/tree/main/examples), two

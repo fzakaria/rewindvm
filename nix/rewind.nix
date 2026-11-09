@@ -87,8 +87,14 @@ pkgs.runCommand "rewind"
   ''
     mkdir -p $out/bin $out/share
     lndir -silent ${unwrapped}/share $out/share
+    # Builds use the guest pinned by this package, independent of the
+    # environment overrides that interactive runs accept.
+    mkdir -p $out/share/rewind
+    ln -s ${kernel}/bzImage $out/share/rewind/bzImage
+    ln -s ${guest.initrd}/initrd $out/share/rewind/initrd
     makeWrapper ${unwrapped}/bin/rewind $out/bin/rewind \
       --prefix PATH : ${lib.makeBinPath runtimeTools} \
+      --set REWIND_RUNTIME $out \
       --set-default REWIND_KERNEL ${kernel}/bzImage \
       --set-default REWIND_INITRD ${guest.initrd}/initrd \
       --set-default REWIND_KERNEL_DEBUG ${kernelDebug} \

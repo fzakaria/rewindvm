@@ -2066,7 +2066,7 @@ mod tests {
             r#"{"path":"bin/sh","kind":"symlink","mode":511,"size":0,"target":"shuffle"}\n"#,
             r#"{"cut":true}\n"#
         );
-        let engine = fake_engine(&dir, &lines.replace('"', "\\\""), "", 0);
+        let engine = fake_engine(&dir, lines, "", 0);
         let list = |engine: &CliEngine, pid| {
             retrying(|| engine.list(&run, 66_651, pid, "/out", &Cancel::default(), &mut |_| {}))
         };
@@ -2129,7 +2129,7 @@ mod tests {
         // directory lists it, reads a path that turned out a file, and
         // when the listing fails says the path is a directory it could
         // not list. `asked` holds the commands in the order asked.
-        const ENTRY: &str = r#"{\"path\":\"a\",\"kind\":\"file\",\"mode\":420,\"size\":1}\n"#;
+        const ENTRY: &str = r#"{"path":"a","kind":"file","mode":420,"size":1}\n"#;
         let dir = temp_dir("look");
         let run = dir.join("run");
         let look_at = |engine: &CliEngine, expect: Expect| {

@@ -1458,11 +1458,9 @@ in
   inspect =
     pkgs.runCommand "rewind-inspect"
       {
-        # nix for nix-hash, which hashes a tree as a NAR with no store.
         nativeBuildInputs = [
           rewind
           gdb
-          pkgs.nix
         ];
         requiredSystemFeatures = [ "kvm" ];
       }
@@ -1550,12 +1548,8 @@ in
         test "$(cat unpacked/out/secret)" = key
         rewind cat tree "$tree_end" /out --archive tar | cmp - out.tar
 
-        # rewind cat --archive nar: the NAR Nix writes of the same tree,
-        # by its hash. A file alone is an archive of one name, and a path
-        # nothing has is missing.
-        rewind cat tree "$tree_end" /out --archive nar > out.nar
-        test "$(sha256sum < out.nar | cut -d' ' -f1)" = \
-          "$(nix-hash --type sha256 --base16 unpacked/out)"
+        # A file alone is an archive of one name. A missing path fails
+        # without emitting an archive header.
         rewind cat tree "$tree_end" /out/bin/tool --archive tar | tar -tf - | tee listed
         test "$(cat listed)" = tool
         status=0
@@ -1627,19 +1621,34 @@ in
       # The machine as `rewindFlags` holds one.
       flags = "--epoch 1790985600 --seed 0 --schedule 0 --cpu v3-compat --clock exits --cores 1 --mem 1024";
 
-      # `inRewind`, less the CPU vendor: CI's builders advertise `kvm` and
-      # no `rewind-<vendor>` feature, and none of the answers below depends
-      # on the vendor.
+      # CI advertises only `kvm`. These fixtures check vendor-independent
+      # answers, so a test prelude selects the builder's actual vendor.
+      # Production derivations keep the vendor selected at evaluation.
+      selectVendor = pkgs.writeText "in-rewind-check-vendor.sh" ''
+        case $(${lib.getExe pkgs.gawk} -F': ' '/^vendor_id/ { print $2; exit }' /proc/cpuinfo) in
+          AuthenticAMD) vendor=amd ;;
+          GenuineIntel) vendor=intel ;;
+          *) echo "unsupported test CPU vendor" >&2; exit 1 ;;
+        esac
+        export rewindFlags="${flags} --vendor $vendor"
+        exec "$@"
+      '';
+
       inRewind =
         drv:
         let
           wrapped = rewindLib.inRewind machine drv;
         in
         assert wrapped.rewindFlags == "${flags} --vendor amd";
+        assert wrapped.rewindRuntime == toString rewind;
         assert lib.elem "rewind-amd" wrapped.requiredSystemFeatures;
-        lib.overrideDerivation wrapped (_: {
+        lib.overrideDerivation wrapped (attrs: {
           requiredSystemFeatures = [ "kvm" ];
-          rewindFlags = flags;
+          args = [
+            selectVendor
+            pkgs.runtimeShell
+          ]
+          ++ attrs.args;
         });
 
       plain = inRewind (
@@ -1661,6 +1670,20 @@ in
             chmod +x $out/bin/tool
             ln -s tool $out/bin/alias
           ''
+      );
+
+      # A bare derivation omits `outputs`; Nix still gives the builder $out.
+      bare = inRewind (
+        builtins.derivation {
+          name = "rewind-in-rewind-bare";
+          system = "x86_64-linux";
+          builder = pkgs.runtimeShell;
+          args = [
+            "-e"
+            "-c"
+            "echo bare > $out"
+          ];
+        }
       );
 
       structured = inRewind (
@@ -1685,8 +1708,11 @@ in
     assert !fetched.success;
     assert platform.system == "x86_64-rewind-amd";
     assert platform.rewindFlags == flags;
+    assert platform.rewindRuntime == toString rewind;
+    assert builtins.hasContext platform.rewindRuntime;
     assert platform.builder == pkgs.hello.builder;
     pkgs.runCommand "rewind-in-rewind" { } ''
+      test "$(cat ${bare})" = bare
       test "$(cat ${plain}/date)" = 2026-10-03
       grep -q e ${plain}/shell-options
       test -x ${plain}/bin/tool
@@ -1710,7 +1736,12 @@ in
   external-builder =
     let
       busybox = pkgs.pkgsStatic.busybox;
-      closure = pkgs.closureInfo { rootPaths = [ busybox ]; };
+      closure = pkgs.closureInfo {
+        rootPaths = [
+          busybox
+          rewind
+        ];
+      };
     in
     pkgs.runCommand "rewind-external-builder"
       {
@@ -1731,7 +1762,7 @@ in
             ;;
         esac
 
-        # A store of the check's own that holds the builder.
+        # A store of the check's own that holds the builder and runtime.
         export HOME=$TMPDIR/home
         store=$TMPDIR/store
         mkdir -p $store/nix/store
@@ -1739,21 +1770,39 @@ in
         nix-store --store $store --load-db < ${closure}/registration
 
         cat > day.nix <<EOF
+        { runtime ? builtins.storePath ${rewind} }:
         derivation {
           name = "day";
           system = "x86_64-rewind-$vendor";
           builder = "\''${builtins.storePath ${busybox}}/bin/busybox";
           args = [ "sh" "-c" "echo the builder ran; \''${builtins.storePath ${busybox}}/bin/busybox date -u +%F > \\\$out" ];
           rewindFlags = "--epoch 1790985600 --cpu v3-compat --clock exits";
+          rewindRuntime = runtime;
         }
         EOF
-        built=$(nix-build day.nix --store $store --no-out-link \
-          --extra-experimental-features external-builders \
-          --external-builders '[{"systems":["x86_64-rewind-'$vendor'"],"program":"${rewind}/bin/rewind","args":["build","--external-builder"]}]' \
-          --option substituters "" 2> log) || { cat log; exit 1; }
+        build_day() {
+          nix-build day.nix --store $store --no-out-link \
+            --extra-experimental-features external-builders \
+            --external-builders '[{"systems":["x86_64-rewind-'$vendor'"],"program":"${rewind}/bin/rewind","args":["build","--external-builder"]}]' \
+            --option substituters "" "$@"
+        }
+
+        # Shell overrides cannot replace the guest pinned by the runtime.
+        built=$(REWIND_KERNEL=/missing-kernel REWIND_INITRD=/missing-initrd \
+          build_day 2> log) || { cat log; exit 1; }
         cat log
         grep -q 'the builder ran' log
         test "$(cat $store$built)" = 2026-10-03
+
+        # A different package changes the recipe and fails before its job.
+        if build_day --argstr runtime ${busybox} > mismatch-out 2> mismatch; then
+          echo "accepted a different runtime" >&2
+          exit 1
+        fi
+        cat mismatch
+        grep -q 'requires Rewind package' mismatch
+        grep -q 'configured builder is ${rewind}' mismatch
+        if grep -q 'the builder ran' mismatch; then exit 1; fi
         touch $out
       '';
 

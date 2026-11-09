@@ -7,7 +7,7 @@ use std::process::ExitCode;
 use anyhow::{Result, bail};
 use rewind_core::inspect::{Inspection, Sent};
 use rewind_core::threads::{OnTheCpu, Slice};
-use rewind_core::tree::{Nar, Tar, UNNAMED_ROOT};
+use rewind_core::tree::{Tar, UNNAMED_ROOT};
 use rewind_core::{Home, Run};
 use rewind_init::{Listed, ListedAll, ListedKind, Listing};
 
@@ -36,13 +36,13 @@ pub(crate) struct CatArgs {
     /// A tar holds the tree under the path's last name, as `tar -c -C
     /// /nix/store name` would, each entry with the permissions, the
     /// numeric owner and group and the modification time the VM held, so
-    /// `tar -x` puts the tree back. A nar is Nix's archive of the tree:
-    /// names, contents, executable bits and links only, and the bytes
-    /// whose SHA-256 is a store path's NAR hash. Either is the same bytes
-    /// each time, on any machine. Links are written, not followed, a
-    /// directory of /proc or /sys below the path is written empty, as
-    /// `rewind files` lists one, and a device, a socket or a pipe is left
-    /// out of a tar and refused by a nar.
+    /// `tar -x` puts the tree back. The archive has the same bytes each
+    /// time, on any machine. Links are preserved, directories under /proc
+    /// or /sys are written empty, and devices, sockets and pipes are
+    /// omitted with a warning.
+    ///
+    /// Check rewind's exit status: tar can accept an incomplete archive.
+    /// In a shell pipeline, use `set -o pipefail`.
     #[arg(long, value_enum, value_name = "FORMAT")]
     pub(crate) archive: Option<ArchiveFormat>,
 }
@@ -52,8 +52,6 @@ pub(crate) struct CatArgs {
 pub(crate) enum ArchiveFormat {
     /// A GNU tar, with permissions, owners and times.
     Tar,
-    /// A Nix archive, with executable bits only.
-    Nar,
 }
 
 pub(crate) fn cat(home: &Home, args: CatArgs) -> Result<ExitCode> {
@@ -107,8 +105,8 @@ fn cat_archive(
     let paint = crate::color::stderr();
     let out = std::io::BufWriter::new(std::io::stdout().lock());
 
-    // Each format's archive, ended only when the VM sent a whole tree: a
-    // tar cut short has no end mark, and tar says so when it unpacks one.
+    // Write end blocks only after the VM sends the whole tree. The exit
+    // status reports completeness; tar readers may accept missing blocks.
     let sent = match format {
         ArchiveFormat::Tar => {
             let mut tar = Tar::new(out, root_name(path).as_bytes());
@@ -124,14 +122,6 @@ fn cat_archive(
                         .join(String::from_utf8_lossy(&left_out.first).as_ref())
                         .display()
                 );
-            }
-            sent
-        }
-        ArchiveFormat::Nar => {
-            let mut nar = Nar::new(out)?;
-            let sent = tree(home, run, step, pid, path, &mut nar)?;
-            if sent == Sent::Whole {
-                nar.finish()?;
             }
             sent
         }

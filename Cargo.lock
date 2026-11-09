@@ -689,7 +689,6 @@ dependencies = [
  "blake3",
  "gdbstub",
  "gdbstub_arch",
- "nix-archive",
  "nix-derivation",
  "nix-narinfo",
  "rewind-init",

@@ -128,10 +128,12 @@ enum Command {
     /// environment, the store paths it may read and the outputs to make.
     /// The builder runs as `rewind nix` runs one, on the machine the
     /// derivation's `rewindFlags` attribute names, with --epoch, --cpu and
-    /// --clock all given there, and its output is the build's log. The
-    /// run is kept in REWIND_HOME, or without one in the build's own
-    /// temporary directory, which goes when Nix removes it. `inRewind` in
-    /// the flake's lib wraps any derivation's builder in this command.
+    /// --clock all given there, and the CPU vendor in --vendor or system.
+    /// The pinned `rewindRuntime` package must match the running package;
+    /// the build uses that package's kernel and initrd. The builder's
+    /// output is the build log. The run is kept in REWIND_HOME, or in the
+    /// build's own temporary directory, which goes when Nix removes it. `inRewind` in
+    /// the flake's lib wraps a derivation's builder in this command.
     Build(cmd::build::BuildArgs),
     /// Find a schedule that changes how a build or command ends, and where
     /// it went its own way.
@@ -172,7 +174,7 @@ enum Command {
     /// Rewind forks the run at the step and reads the file inside the VM, so
     /// this takes about as long as seeking there. Exits 3 when the file did
     /// not exist then, and 4 when the path named a directory, which
-    /// `rewind files` lists and --archive writes whole, as a tar or a NAR.
+    /// `rewind files` lists and --archive tar writes whole.
     Cat(cmd::inspect::CatArgs),
     /// List a directory as it was at a step of a run.
     ///
@@ -537,7 +539,6 @@ mod tests {
             "rewind fork abc 5",
             "rewind cat abc 5 /etc/hosts",
             "rewind cat abc 5 /nix/store/x-out --archive tar",
-            "rewind cat abc 5 /nix/store/x-out --archive nar",
             "rewind shell abc 5",
             "rewind gdb abc 5",
             "rewind where abc 5",
@@ -551,6 +552,7 @@ mod tests {
             assert!(parses(line), "{line}");
         }
         assert!(!parses("rewind cat abc 5 /nix/store/x-out --archive zip"));
+        assert!(!parses("rewind cat abc 5 /nix/store/x-out --archive nar"));
         assert!(!parses("rewind ps abc --at 5"));
         assert!(!parses("rewind log abc --at 5"));
     }

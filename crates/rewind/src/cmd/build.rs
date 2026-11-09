@@ -46,6 +46,15 @@ pub(crate) struct BuildArgs {
 /// run` takes for one, and --vendor, separated by spaces.
 const FLAGS_ATTRIBUTE: &str = "rewindFlags";
 
+/// The package pinned by the derivation, and the identity the Nix wrapper
+/// sets for the running package. The wrapper always replaces this value.
+const RUNTIME_ATTRIBUTE: &str = "rewindRuntime";
+const ENV_RUNTIME: &str = "REWIND_RUNTIME";
+
+/// The guest shipped by the pinned runtime package.
+const RUNTIME_KERNEL: &str = "share/rewind/bzImage";
+const RUNTIME_INITRD: &str = "share/rewind/initrd";
+
 /// What nix-daemon waits to read from an external builder before taking
 /// the rest of what the builder prints as the build's log.
 const READY: &str = "\x02\n";
@@ -125,16 +134,19 @@ pub(crate) fn build(args: BuildArgs) -> Result<ExitCode> {
 
     // The build and its machine, both from the derivation.
     let description = Description::read(&path)?;
+    let runtime = pinned_runtime(&description, std::env::var(ENV_RUNTIME).ok().as_deref())?;
     let flags = machine_flags(&description)?;
     let vendor = vendor_asked(&description.system, flags.vendor)?;
-    if let Some(vendor) = vendor {
-        refuse_other_vendor(vendor, &Vendor::detect()?)?;
-    }
+    refuse_other_vendor(vendor, &Vendor::detect()?)?;
 
     // The run, with the builder's output as the build's log.
     let home = home_for(&description)?;
     let _in_use = home.in_use()?;
-    let guest = Guest::from_env()?;
+    let guest = Guest {
+        kernel: runtime.join(RUNTIME_KERNEL),
+        initrd: runtime.join(RUNTIME_INITRD),
+        kernel_debug: std::env::var_os(rewind_core::home::ENV_KERNEL_DEBUG).map(PathBuf::from),
+    };
     let workload = Workload::Described {
         description: Box::new(description.clone()),
         path,
@@ -161,7 +173,7 @@ fn machine_flags(description: &Description) -> Result<MachineFlags> {
         bail!(
             "{name} has no {FLAGS_ATTRIBUTE} attribute; a derivation built in Rewind names its \
              machine there, as in {FLAGS_ATTRIBUTE} = \"--epoch 1790985600 --cpu v3-compat \
-             --clock exits\""
+             --clock exits --vendor amd\""
         );
     };
     let flags = match MachineFlags::try_parse_from(words.split_whitespace()) {
@@ -175,13 +187,32 @@ fn machine_flags(description: &Description) -> Result<MachineFlags> {
     let unpinned = flags.machine.unpinned();
     if !unpinned.is_empty() {
         bail!(
-            "{name}'s {FLAGS_ATTRIBUTE}, {words:?}, must also give {}: without, a run takes \
-             today's date, this machine's CPU model or the clock this machine can keep, and \
-             the derivation's hash covers none of them",
+            "{name}'s {FLAGS_ATTRIBUTE}, {words:?}, must also give {}: the date, CPU model \
+             and clock must be pinned by the derivation. Use --cpu v3 or --cpu v3-compat \
+             for a fixed CPU model",
             unpinned.join(", ")
         );
     }
     Ok(flags)
+}
+
+/// Refuses a build whose runtime differs from the package the Nix wrapper
+/// identified. The package's store path covers the VM, kernel and initrd.
+fn pinned_runtime(description: &Description, actual: Option<&str>) -> Result<PathBuf> {
+    let name = &description.build.name;
+    let expected = description.attribute(RUNTIME_ATTRIBUTE).with_context(|| {
+        format!(
+            "{name} has no {RUNTIME_ATTRIBUTE}; use inRewind or onRewind to pin the Rewind package"
+        )
+    })?;
+    let actual = actual.context("rewind build must run through the pinned Rewind Nix package")?;
+    if expected != actual {
+        bail!(
+            "{name} requires Rewind package {expected}, but the configured builder is {actual}; \
+             configure external-builders to use {expected}/bin/rewind"
+        );
+    }
+    Ok(PathBuf::from(expected))
 }
 
 /// What clap says is wrong with a command line, without the usage that
@@ -193,13 +224,14 @@ fn first_line(error: &str) -> &str {
 
 /// The vendor a build is for: the one its `system` ends with when the
 /// system asks for Rewind, as `x86_64-rewind-amd` does, and the one
-/// --vendor names. None when neither names one, and an error when they
-/// name two.
-fn vendor_asked(system: &str, flag: Option<VendorArg>) -> Result<Option<VendorArg>> {
+/// --vendor names. An error when neither names one or the two disagree.
+fn vendor_asked(system: &str, flag: Option<VendorArg>) -> Result<VendorArg> {
     use clap::ValueEnum;
 
     let Some(name) = system.strip_prefix(SYSTEM_PREFIX) else {
-        return Ok(flag);
+        return flag.context(
+            "rewindFlags must give --vendor amd or --vendor intel when the system names no CPU vendor",
+        );
     };
     let Some(platform) = VendorArg::value_variants()
         .iter()
@@ -216,7 +248,7 @@ fn vendor_asked(system: &str, flag: Option<VendorArg>) -> Result<Option<VendorAr
             platform.name(),
             flag.name()
         ),
-        _ => Ok(Some(platform)),
+        _ => Ok(platform),
     }
 }
 
@@ -317,12 +349,38 @@ mod tests {
     }
 
     #[test]
+    fn a_build_requires_the_pinned_runtime() {
+        // A description must name the running package. Missing metadata,
+        // an unwrapped executable and another package are all refused.
+        const PINNED: &str = "/nix/store/pinned-rewind";
+        const OTHER: &str = "/nix/store/other-rewind";
+        let mut description = described("runtime", "x86_64-linux", None);
+        let missing = pinned_runtime(&description, Some(PINNED)).unwrap_err();
+        assert!(missing.to_string().contains("has no rewindRuntime"));
+
+        description
+            .build
+            .env
+            .insert(RUNTIME_ATTRIBUTE.to_string(), PINNED.to_string());
+        assert_eq!(
+            pinned_runtime(&description, Some(PINNED)).unwrap(),
+            PathBuf::from(PINNED)
+        );
+        assert!(pinned_runtime(&description, None).is_err());
+        let mismatch = pinned_runtime(&description, Some(OTHER)).unwrap_err();
+        let message = mismatch.to_string();
+        assert!(message.contains(PINNED), "{message}");
+        assert!(message.contains(OTHER), "{message}");
+        assert!(message.contains("configure external-builders"), "{message}");
+    }
+
+    #[test]
     fn a_derivation_names_its_whole_machine() {
         // A derivation's rewindFlags with the epoch, the CPU model and
         // the clock is taken, the vendor with it. One with no attribute,
         // or without any of the three, is refused, naming what is
         // missing: each would otherwise come from this day or this
-        // machine. So is an option no machine has.
+        // machine. A host CPU and an unknown option are refused too.
         let whole = "--epoch 1790985600 --seed 3 --cpu v3-compat --clock exits --vendor amd";
         let flags = machine_flags(&described("whole", "x86_64-linux", Some(whole))).unwrap();
         assert_eq!(flags.vendor, Some(VendorArg::Amd));
@@ -335,6 +393,8 @@ mod tests {
         let auto = refusal("auto", Some("--epoch 5 --cpu v3 --clock auto"));
         assert!(auto.contains("must also give --clock"), "{auto}");
         assert!(!auto.contains("--epoch,"), "{auto}");
+        let host = refusal("host", Some("--epoch 5 --cpu host --clock exits"));
+        assert!(host.contains("--cpu"), "{host}");
         let unknown = refusal("unknown", Some("--epoch 5 --root /"));
         assert!(
             unknown.contains("unexpected argument '--root'"),
@@ -349,12 +409,20 @@ mod tests {
         // ordinary one leaves the vendor to --vendor. The two together
         // must agree, and a system for a vendor rewind does not know is
         // refused. A build for one vendor is refused on the other's CPU.
-        let amd = Some(VendorArg::Amd);
         let intel = Some(VendorArg::Intel);
-        assert_eq!(vendor_asked("x86_64-rewind-amd", None).unwrap(), amd);
-        assert_eq!(vendor_asked("x86_64-rewind-intel", intel).unwrap(), intel);
-        assert_eq!(vendor_asked("x86_64-linux", intel).unwrap(), intel);
-        assert_eq!(vendor_asked("x86_64-linux", None).unwrap(), None);
+        assert_eq!(
+            vendor_asked("x86_64-rewind-amd", None).unwrap(),
+            VendorArg::Amd
+        );
+        assert_eq!(
+            vendor_asked("x86_64-rewind-intel", intel).unwrap(),
+            VendorArg::Intel
+        );
+        assert_eq!(
+            vendor_asked("x86_64-linux", intel).unwrap(),
+            VendorArg::Intel
+        );
+        assert!(vendor_asked("x86_64-linux", None).is_err());
         assert!(vendor_asked("x86_64-rewind-amd", intel).is_err());
         assert!(vendor_asked("x86_64-rewind-via", None).is_err());
 

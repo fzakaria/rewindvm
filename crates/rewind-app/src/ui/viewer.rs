@@ -216,6 +216,17 @@ pub(super) fn unavailable_run(run: &Run) -> Option<&'static str> {
 impl Scrubber {
     /// Opens `path` in the viewer at the playhead.
     pub(super) fn open_file(&mut self, path: String, pid: u32, cx: &mut Context<Self>) {
+        self.open_viewer(path, pid, None, cx);
+    }
+
+    /// Installs the return path only when the requested viewer can open.
+    fn open_viewer(
+        &mut self,
+        path: String,
+        pid: u32,
+        listed_in: Option<ListedIn>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(session) = &self.session else {
             return;
         };
@@ -233,7 +244,7 @@ impl Scrubber {
             path,
             pid,
             pin: Pin::FollowPlayhead,
-            listed_in: None,
+            listed_in,
             step: self.step,
             unavailable,
             shown: None,
@@ -257,10 +268,7 @@ impl Scrubber {
             path: viewer.path.clone(),
             pid: viewer.pid,
         });
-        self.open_file(path, pid, cx);
-        if let Some(viewer) = &mut self.viewer {
-            viewer.listed_in = listed_in;
-        }
+        self.open_viewer(path, pid, listed_in, cx);
     }
 
     /// Shows what the viewer's path holds at the viewer's step: a

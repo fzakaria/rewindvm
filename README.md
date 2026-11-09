@@ -152,7 +152,7 @@ $ rewind ps <run> <step>
 $ rewind cat <run> <step> /build/env-vars
 $ rewind files <run> <step> /build
 
-# a directory out of the VM whole, as a tar or a NAR: the same bytes on
+# a directory out of the VM whole, as a tar: the same bytes on
 # any machine
 $ rewind cat <run> <step> /build --archive tar | tar -x
 

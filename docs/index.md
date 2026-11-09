@@ -13,8 +13,8 @@
    seeds and directory orders, see what differs, and find the program that
    wrote it.
 6. [Tutorial: deterministic derivations](tutorial-derivations.md): have Nix
-   build any derivation inside the VM, with the clock, the seed and the
-   schedule in the derivation's hash, by a function or as a platform.
+   pin a build's environment with `inRewind` and check that a rebuild
+   produces the same bytes.
 7. [Tutorial: advanced features](tutorial-advanced.md): the rest of the tools,
    recipe by recipe.
 8. [Time inside the VM](pmu.md): exit time and counter time, and the one
@@ -22,3 +22,6 @@
 9. [Design](design.md): how the machine is made deterministic, what a run is
    on disk, keyframes and the page store, exploring interleavings, limits,
    and the product.
+
+[Nix build reference](nix-builds.md): machine settings, runtime identity,
+the external builder, and exporting a recorded build's files.

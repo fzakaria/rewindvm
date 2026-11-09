@@ -3,8 +3,8 @@
 //! The guest's init sends a tree as entries, each file's bytes after the
 //! file's entry (see [`rewind_init::TreeEntry`]), and
 //! [`crate::inspect::tree`] hands them on as they arrive. Here are the
-//! three places a tree goes: a tar archive, a NAR, and a directory on
-//! this machine's disk. An archive holds what the VM held and nothing of
+//! two places a tree goes: a tar archive and a directory on this
+//! machine's disk. An archive holds what the VM held and nothing of
 //! this machine: the names, the contents, and for a tar the permissions,
 //! owners and times the VM's filesystem had. So the same run at the same
 //! step is the same archive on any machine.
@@ -16,7 +16,6 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use nix_archive::nar::Encoder;
 use rewind_init::{ListedKind, TreeEntry, TreeSink};
 
 /// What separates the names in an entry's path.
@@ -28,10 +27,6 @@ pub const UNNAMED_ROOT: &str = ".";
 
 /// The size tar pads each file's contents to a multiple of.
 const TAR_BLOCK: u64 = 512;
-
-/// The bit of a file's permissions that makes the file executable in a
-/// NAR: its owner's, as Nix reads it.
-const OWNER_EXECUTE: u32 = 0o100;
 
 /// An entry a tree holds that an archive cannot: a device, a socket or a
 /// pipe.
@@ -68,8 +63,9 @@ pub struct LeftOut {
 }
 
 /// A tar's output, which takes no more bytes once the tar is abandoned.
-/// The tar crate ends an archive that is dropped, and a tar dropped before
-/// its tree was whole must not read as a whole one.
+/// The tar crate ends an archive on drop. Only a successful transfer may
+/// write the end blocks. Readers can accept missing end blocks, so callers
+/// must also check the producer's exit status.
 struct Abandonable<W> {
     out: W,
     abandoned: bool,
@@ -194,117 +190,6 @@ impl<W: Write> TreeSink for Tar<W> {
     }
 }
 
-/// A tree written as a NAR, Nix's archive: the names, the contents,
-/// whether a file is executable and where a link points, and nothing
-/// else. The tree's root has no name in one. A device, a socket or a pipe
-/// is refused, as Nix refuses one.
-pub struct Nar<W: Write> {
-    encoder: Encoder<W>,
-    /// The directories being written, by path, the innermost last.
-    open: Vec<Vec<u8>>,
-    /// The file being read: its name, whether it is executable, and its
-    /// bytes so far. The encoder takes a file's contents from a writer
-    /// that borrows the encoder, which cannot be kept from one part of a
-    /// file to the next, so a file is kept until it is whole.
-    file: Option<(Option<Vec<u8>>, bool, Vec<u8>)>,
-}
-
-impl<W: Write> std::fmt::Debug for Nar<W> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Nar").field("open", &self.open).finish()
-    }
-}
-
-/// A NAR encoder's error as an I/O error, which a sink returns.
-fn nar_error(e: nix_archive::nar::Error) -> io::Error {
-    io::Error::other(e)
-}
-
-impl<W: Write> Nar<W> {
-    /// A NAR on `out`.
-    pub fn new(out: W) -> io::Result<Nar<W>> {
-        Ok(Nar {
-            encoder: Encoder::new(out).map_err(nar_error)?,
-            open: Vec::new(),
-            file: None,
-        })
-    }
-
-    /// Ends the archive.
-    pub fn finish(mut self) -> io::Result<()> {
-        self.close_to(None)?;
-        self.encoder.finish().map_err(nar_error)?.flush()
-    }
-
-    /// Ends every open directory that is not `parent`, the directory the
-    /// next entry is in; all of them when there is no next entry.
-    fn close_to(&mut self, parent: Option<&[u8]>) -> io::Result<()> {
-        while let Some(innermost) = self.open.last() {
-            if parent == Some(innermost.as_slice()) {
-                break;
-            }
-            self.encoder.end_directory().map_err(nar_error)?;
-            self.open.pop();
-        }
-        Ok(())
-    }
-}
-
-/// The directory an entry's path is in, and the entry's name there. The
-/// tree's root, whose path is empty, is in none and has no name.
-fn split_path(path: &[u8]) -> (Option<&[u8]>, Option<&[u8]>) {
-    if path.is_empty() {
-        return (None, None);
-    }
-    match path.iter().rposition(|b| *b == SEPARATOR) {
-        Some(slash) => (Some(&path[..slash]), Some(&path[slash + 1..])),
-        None => (Some(&[]), Some(path)),
-    }
-}
-
-impl<W: Write> TreeSink for Nar<W> {
-    fn entry(&mut self, entry: &TreeEntry) -> io::Result<()> {
-        // The entries of a directory follow the directory's own, so an
-        // entry anywhere else means the directories in between are done.
-        let (parent, name) = split_path(&entry.path);
-        self.close_to(parent)?;
-
-        match entry.kind {
-            ListedKind::Directory => {
-                self.encoder.start_directory(name).map_err(nar_error)?;
-                self.open.push(entry.path.clone());
-            }
-            ListedKind::Symlink => {
-                self.encoder
-                    .symlink(name, &entry.target)
-                    .map_err(nar_error)?;
-            }
-            ListedKind::File => {
-                let executable = entry.mode & OWNER_EXECUTE != 0;
-                self.file = Some((name.map(<[u8]>::to_vec), executable, Vec::new()));
-            }
-            ListedKind::Other => return Err(unarchivable(entry)),
-        }
-        Ok(())
-    }
-
-    fn contents(&mut self, bytes: &[u8]) -> io::Result<()> {
-        if let Some((_, _, contents)) = &mut self.file {
-            contents.extend_from_slice(bytes);
-        }
-        Ok(())
-    }
-
-    fn end_of_file(&mut self) -> io::Result<()> {
-        let Some((name, executable, contents)) = self.file.take() else {
-            return Ok(());
-        };
-        self.encoder
-            .regular(name.as_deref(), executable, &contents)
-            .map_err(nar_error)
-    }
-}
-
 /// A tree written onto this machine's disk, its root at a path nothing
 /// has yet: each file with its contents and permissions, each link with
 /// its target. Owners and times are this machine's, as for any file
@@ -397,13 +282,11 @@ impl TreeSink for Unpack {
 
 #[cfg(test)]
 mod tests {
-    // One tree, as init would send it, into each of the three places a
-    // tree goes, with the tar read back by the tar crate and the NAR held
-    // to the one nix-archive writes of the same tree on disk.
+    // Send a sample tree through both sinks. Read the tar back with the
+    // tar crate and check the unpacked files on disk.
     use std::io::Read;
     use std::os::unix::fs::MetadataExt;
 
-    use nix_archive::nar::{CaseHack, encode_path};
     use rewind_init::TreeReader;
 
     use super::*;
@@ -572,8 +455,8 @@ mod tests {
     fn a_tar_abandoned_part_way_does_not_end() {
         // A tree the VM could not send whole leaves a tar that was never
         // ended. The bytes written hold the entries that arrived and no
-        // end mark, so tar says the archive is cut short when it unpacks
-        // one, and a tar of a path nothing had is empty.
+        // end mark. A tar of a path nothing had is empty. Neither property
+        // replaces checking the producer's exit status.
         let whole = {
             let mut bytes = Vec::new();
             let mut tar = Tar::new(&mut bytes, b"out");
@@ -632,12 +515,10 @@ mod tests {
     }
 
     #[test]
-    fn an_unpacked_tree_is_the_tree_and_its_nar_is_nix_s() {
+    fn an_unpacked_tree_keeps_contents_and_permissions() {
         // The sample tree unpacked onto disk has each file's contents and
         // permissions, the link, and the directories with theirs, the
-        // read-only one included. The NAR of the tree as sent is, byte for
-        // byte, the NAR nix-archive writes of the unpacked tree, which is
-        // the one Nix hashes a store path by.
+        // read-only one included.
         let dir = scratch("unpack");
         let root = dir.join("out");
         let mut unpack = Unpack::new(root.clone());
@@ -662,52 +543,19 @@ mod tests {
         );
         assert!(root.join("share").join(long_name()).is_file());
 
-        let nar_of = |tree: &[(TreeEntry, Vec<u8>)]| {
-            let mut bytes = Vec::new();
-            let mut nar = Nar::new(&mut bytes).unwrap();
-            send(tree, &mut nar).unwrap();
-            nar.finish().unwrap();
-            bytes
-        };
-        let on_disk = |path: &Path| {
-            let mut bytes = Vec::new();
-            encode_path(&mut bytes, path, CaseHack::native()).unwrap();
-            bytes
-        };
-        assert_eq!(nar_of(&sample()), on_disk(&root));
-
-        // A file on its own and a link on its own are NARs too.
-        for path in ["bin/tool", "bin/alias"] {
-            let (one, contents) = sample()
-                .into_iter()
-                .find(|(e, _)| e.path == path.as_bytes())
-                .unwrap();
-            let alone = vec![(
-                TreeEntry {
-                    path: Vec::new(),
-                    ..one
-                },
-                contents,
-            )];
-            assert_eq!(nar_of(&alone), on_disk(&root.join(path)), "{path}");
-        }
-
         make_removable(&dir).unwrap();
         fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn what_cannot_be_kept_is_refused() {
-        // A NAR and a directory on disk refuse a socket, as Nix refuses
-        // one in a store path. Unpacking refuses a path that would land
+        // Unpacking refuses a socket, as Nix refuses one in a store
+        // path. Unpacking also refuses a path that would land
         // outside the tree's root, and a root something already has.
         let socket = vec![
             (entry("", ListedKind::Directory, 0o755, 0, ""), vec![]),
             (entry("sock", ListedKind::Other, 0o755, 0, ""), vec![]),
         ];
-        let mut nar = Nar::new(Vec::new()).unwrap();
-        assert!(send(&socket, &mut nar).is_err());
-
         let dir = scratch("refuse");
         let mut unpack = Unpack::new(dir.join("socket"));
         assert!(send(&socket, &mut unpack).is_err());

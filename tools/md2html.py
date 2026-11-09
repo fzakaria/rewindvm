@@ -41,6 +41,7 @@ SITE_URL = "https://rewindvm.dev/"
 # Documents the site publishes, by repository path, and their site paths.
 LINK_MAP = {
     "docs/pmu.md": "counter-time.html",
+    "docs/nix-builds.md": "nix-builds.html",
     "docs/tutorial-nix.md": "tutorials/nix.html",
     "docs/tutorial-container.md": "tutorials/container.html",
     "docs/tutorial-properties.md": "tutorials/properties.html",
@@ -345,13 +346,13 @@ PAGES = [
             "tutorials/derivations.html",
             "Tutorial &middot; Derivations",
             "Deterministic derivations",
-            "Any derivation built inside the VM by Nix, with the machine in its hash.",
+            "Pin a build's environment with inRewind and check that a rebuild matches.",
         ),
     ),
     dict(
         source="docs/tutorial-derivations.md",
         eyebrow="Tutorial &middot; Derivations",
-        description="Deterministic derivations with Rewind VM: inRewind makes Nix build any derivation inside the VM with the clock, the seed and the schedule in the derivation's hash, so a rebuild makes the same bytes on every machine; or hand Nix's builds for a platform to rewind build.",
+        description="Use inRewind to pin a Nix build's environment, rebuild it, and compare the output. Change the clock to make a different derivation.",
         toc="Steps",
         figures=[],
         next=(
@@ -359,6 +360,19 @@ PAGES = [
             "Tutorial &middot; Advanced",
             "Advanced features",
             "Watchpoints, the kernel's side of a crash, tools inside the VM, and the rest.",
+        ),
+    ),
+    dict(
+        source="docs/nix-builds.md",
+        eyebrow="Reference &middot; Nix builds",
+        description="Machine settings, pinned Rewind runtimes, the external-builder interface, and exporting files from a recorded build.",
+        toc="Contents",
+        figures=[],
+        next=(
+            "tutorials/derivations.html",
+            "Tutorial &middot; Derivations",
+            "Deterministic derivations",
+            "Pin a build's environment with inRewind and check that a rebuild matches.",
         ),
     ),
     dict(
@@ -812,7 +826,7 @@ def parse(lines):
 def convert(cfg):
     source = cfg["source"]
     page = site_path(source)
-    up = "../" * page.count("/")
+    up = "../" * page.count("/") or "./"
     lines = (REPO / source).read_text().splitlines()
     title = lines[0].removeprefix("# ").strip()
     blocks = parse(lines[1:])

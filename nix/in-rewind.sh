@@ -29,7 +29,8 @@ fi
 exec 3< /proc/self/environ
 
 # With structured attributes Nix writes the outputs' paths to a file, and
-# otherwise to a variable for each output that `outputs` names.
+# otherwise to a variable for each output that `outputs` names. A bare
+# derivation can omit `outputs`, in which case Nix supplies `out`.
 attrs=${NIX_ATTRS_JSON_FILE:-/dev/null}
 
 # The description, version 1. The store paths are the ones the derivation
@@ -58,7 +59,7 @@ attrs=${NIX_ATTRS_JSON_FILE:-/dev/null}
       inputPaths: ($closure | split("\n") | map(select(length > 0 and . != $inputs))),
       outputs: (
         if $attrs[0] then $attrs[0].outputs
-        else $env.outputs | split(" ") | map(select(length > 0) | {key: ., value: $env[.]}) | from_entries
+        else ($env.outputs // "out") | split(" ") | map(select(length > 0) | {key: ., value: $env[.]}) | from_entries
         end
       ),
       storeDir: $env.NIX_STORE,
