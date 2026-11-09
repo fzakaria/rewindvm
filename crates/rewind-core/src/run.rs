@@ -1110,16 +1110,7 @@ impl Run {
                 self.manifest.id
             );
         }
-        let execs: Vec<crate::threads::Exec> = trace
-            .events
-            .iter()
-            .filter_map(|e| match &e.kind {
-                EventKind::Exec { filename, .. } => {
-                    Some(crate::threads::Exec::of(e.step, e.pid, e.tid, filename))
-                }
-                _ => None,
-            })
-            .collect();
+        let execs = rewind_trace::slices::execs(&trace.events);
         Ok(crate::threads::held_over(&trace.switches, &execs, from, to))
     }
 
