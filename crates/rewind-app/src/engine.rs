@@ -374,17 +374,6 @@ pub trait Engine: Send + Sync {
         progress: &mut dyn FnMut(&str),
     ) -> EngineResult<crate::blame::Blamed>;
 
-    /// What held the CPU at each step of `from..=to` of `run`, a slice per
-    /// stretch one task held, read from the run's context switches.
-    /// `cancel` stops it early.
-    fn threads(
-        &self,
-        run: &Path,
-        from: u64,
-        to: u64,
-        cancel: &Cancel,
-    ) -> EngineResult<Vec<crate::lanes::Slice>>;
-
     /// Tries `schedules` schedules from `step` of `run`, each a fork of
     /// it, under the run's own seed and `seeds - 1` more that reseed it at
     /// the step, and says how each ended against the run. The forks are
@@ -909,34 +898,6 @@ impl Engine for CliEngine {
         }
     }
 
-    fn threads(
-        &self,
-        run: &Path,
-        from: u64,
-        to: u64,
-        cancel: &Cancel,
-    ) -> EngineResult<Vec<crate::lanes::Slice>> {
-        // rewind threads <run> --from A --to B --json, a slice a line.
-        let args: Vec<OsString> = vec![
-            "threads".into(),
-            run.into(),
-            "--from".into(),
-            from.to_string().into(),
-            "--to".into(),
-            to.to_string().into(),
-            "--json".into(),
-        ];
-        let out = self.streamed(&args, cancel, &mut |_| {})?;
-        if !out.status.success() {
-            return Err(out.refusal());
-        }
-        out.stdout
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .map(|line| serde_json::from_str(line).map_err(|e| out.failed(e.to_string())))
-            .collect()
-    }
-
     fn check_from(
         &self,
         run: &Path,
@@ -984,13 +945,6 @@ impl Streamed {
     /// The engine's refusal, as [`refused`] reads it.
     fn refusal(&self) -> EngineError {
         refused(self.command.clone(), &self.stderr, &self.status)
-    }
-
-    fn failed(&self, message: String) -> EngineError {
-        EngineError::Failed {
-            command: self.command.clone(),
-            message,
-        }
     }
 }
 
@@ -1758,44 +1712,6 @@ mod tests {
             said.into_inner(),
             vec!["rewind: downloading debug info for libc.so.6; first time only".to_string()]
         );
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// The stand-in prints what `rewind threads --json` does, a slice a
-    /// line; the app reads every slice, and the arguments name the run
-    /// and the window. A refusal reports the engine's reason.
-    #[test]
-    fn threads_reads_a_slice_a_line() {
-        let dir = temp_dir("threads");
-        let run = dir.join("run");
-        let json = concat!(
-            r#"{"from":308,"name":"race","on":"thread","pid":34,"tid":34,"to":314}\n"#,
-            r#"{"from":315,"name":"ksoftirqd/0","on":"kernel","pid":null,"tid":11,"to":315}\n"#,
-            r#"{"from":316,"name":"swapper/0","on":"idle","pid":null,"tid":null,"to":320}\n"#,
-        );
-        let engine = fake_engine(&dir, json, "", 0);
-        let slices = retrying(|| engine.threads(&run, 308, 320, &Cancel::default())).unwrap();
-        let ons: Vec<(u64, crate::lanes::On)> = slices.iter().map(|s| (s.from, s.on)).collect();
-        assert_eq!(
-            ons,
-            vec![
-                (308, crate::lanes::On::Thread),
-                (315, crate::lanes::On::Kernel),
-                (316, crate::lanes::On::Idle),
-            ]
-        );
-        let args = std::fs::read_to_string(dir.join("args")).unwrap();
-        assert_eq!(
-            args.trim(),
-            format!("threads {} --from 308 --to 320 --json", run.display())
-        );
-
-        let refusing = fake_engine(&dir, "", "rewind: the run has no keyframes\n", 1);
-        let err = retrying(|| refusing.threads(&run, 1, 2, &Cancel::default())).unwrap_err();
-        let EngineError::Failed { message, .. } = err else {
-            panic!("{err:?}");
-        };
-        assert_eq!(message, "rewind: the run has no keyframes");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

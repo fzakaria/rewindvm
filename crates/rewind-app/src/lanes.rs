@@ -9,11 +9,11 @@
 
 use std::collections::BTreeMap;
 
-use serde::Deserialize;
+use rewind_trace::slices::{Exec, OnTheCpu, held_over};
+use rewind_trace::switches::Switch;
 
-/// What held the CPU, as `rewind threads --json` says it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
+/// What held the CPU, as `rewind threads` says it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum On {
     /// A thread of a process with memory of its own.
     Thread,
@@ -25,7 +25,7 @@ pub enum On {
 }
 
 /// The steps `from..=to` one task held the CPU through.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Slice {
     pub from: u64,
     pub to: u64,
@@ -33,6 +33,31 @@ pub struct Slice {
     pub pid: Option<u32>,
     pub tid: Option<u32>,
     pub name: String,
+}
+
+/// What held the CPU over the steps `from..=to` of a run, from the run's
+/// `switches`, with each task renamed at its `execs`: the slices `rewind
+/// threads` prints for the window. The switches are in the run's trace,
+/// which the app holds, so nothing is replayed and no engine is asked.
+pub fn held(switches: &[Switch], execs: &[Exec], from: u64, to: u64) -> Vec<Slice> {
+    held_over(switches, execs, from, to)
+        .into_iter()
+        .map(|slice| {
+            let (on, pid, tid) = match slice.on {
+                OnTheCpu::Thread { pid, tid } => (On::Thread, Some(pid), Some(tid)),
+                OnTheCpu::WithoutMemory { tid, .. } => (On::Kernel, None, Some(tid)),
+                OnTheCpu::Idle => (On::Idle, None, None),
+            };
+            Slice {
+                from: slice.from,
+                to: slice.to,
+                on,
+                pid,
+                tid,
+                name: slice.name,
+            }
+        })
+        .collect()
 }
 
 /// The row a slice is drawn in.
@@ -205,8 +230,8 @@ impl Window {
         }
     }
 
-    /// The steps to replay for this window: half a window more on each
-    /// side, so a small pan or zoom out needs no replay of its own.
+    /// The steps to read for this window: half a window more on each
+    /// side, so a small pan or zoom out needs no reading of its own.
     pub fn fetch_range(&self) -> (u64, u64) {
         (
             self.center.saturating_sub(2 * self.half),
@@ -214,7 +239,7 @@ impl Window {
         )
     }
 
-    /// Whether the steps replayed, `fetched`, cover this window, up to the
+    /// Whether the steps read, `fetched`, cover this window, up to the
     /// run's last step, `last`.
     pub fn covered_by(&self, fetched: Option<(u64, u64)>, last: u64) -> bool {
         fetched.is_some_and(|(from, to)| self.from() >= from && self.to().min(last) <= to)
@@ -222,8 +247,8 @@ impl Window {
 }
 
 /// The narrowest and widest a window is, in steps either side of its
-/// center: a few steps make a readable bar, and about 8,000 steps replay
-/// in a few seconds.
+/// center: a few steps make a readable bar, and about 8,000 steps are as
+/// many as a lane's width can tell apart.
 pub const MIN_HALF: u64 = 8;
 pub const MAX_HALF: u64 = 4096;
 
@@ -363,6 +388,49 @@ mod tests {
         assert_eq!(early.step_at(1), Some(2));
     }
 
+    /// A run's slices are read from its switches, as `rewind threads`
+    /// prints them: a thread of a process with its pid and tid, a task
+    /// without memory as a kernel thread with its tid alone, and the idle
+    /// task with neither. A task that execs is renamed from that step.
+    #[test]
+    fn a_run_s_slices_are_read_from_its_switches() {
+        use rewind_trace::slices::Exec;
+        use rewind_trace::switches::Switch;
+        let switch = |step, pid, tid, memory, name: &str| Switch {
+            step,
+            pid,
+            tid,
+            memory,
+            name: name.into(),
+        };
+        let switches = [
+            switch(10, 34, 34, true, "bash"),
+            switch(20, 11, 11, false, "ksoftirqd/0"),
+            switch(22, 0, 0, false, "swapper/0"),
+            switch(30, 34, 35, true, "bash"),
+        ];
+        let execs = [Exec::of(14, 34, 34, "/bin/date")];
+        let slice = |from, to, on, pid, tid, name: &str| Slice {
+            from,
+            to,
+            on,
+            pid,
+            tid,
+            name: name.into(),
+        };
+        assert_eq!(
+            held(&switches, &execs, 12, 31),
+            vec![
+                slice(12, 13, On::Thread, Some(34), Some(34), "bash"),
+                slice(14, 19, On::Thread, Some(34), Some(34), "date"),
+                slice(20, 21, On::Kernel, None, Some(11), "ksoftirqd/0"),
+                slice(22, 29, On::Idle, None, None, "swapper/0"),
+                slice(30, 31, On::Thread, Some(34), Some(35), "bash"),
+            ]
+        );
+        assert!(held(&[], &execs, 0, 100).is_empty());
+    }
+
     /// A window around a step is centered on it, except where the run's
     /// edges are nearer than half a window: there it is moved to start at
     /// step 0 or to end at the run's last step, so no step of a run longer
@@ -468,11 +536,11 @@ mod tests {
         assert_eq!(w.shifted(-2000).center, 0);
     }
 
-    /// A window replays half a window more on each side, and needs a
-    /// replay only once it reaches past what was replayed, up to the run's
+    /// A window reads half a window more on each side, and needs a
+    /// reading only once it reaches past what was read, up to the run's
     /// last step.
     #[test]
-    fn a_window_replays_only_what_it_has_not() {
+    fn a_window_reads_only_what_it_has_not() {
         let w = Window {
             center: 1000,
             half: 100,

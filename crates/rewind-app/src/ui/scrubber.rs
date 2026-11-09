@@ -210,7 +210,6 @@ pub enum Replay {
     Gdb,
     Fork,
     Where,
-    Threads,
     Check,
 }
 
@@ -221,7 +220,6 @@ impl Replay {
             Replay::Gdb => "Attaching gdb",
             Replay::Fork => "Forking",
             Replay::Where => "Showing the source",
-            Replay::Threads => "Showing the threads",
             Replay::Check => "Checking from here",
         }
     }
@@ -232,7 +230,6 @@ impl Replay {
             Replay::Gdb => "attach gdb",
             Replay::Fork => "fork it",
             Replay::Where => "see its source",
-            Replay::Threads => "see its threads",
             Replay::Check => "check it from a step",
         }
     }
@@ -664,7 +661,7 @@ impl Scrubber {
         if let Some(file) = replayable.filter(|_| !cfg!(target_family = "wasm")) {
             self.bring_in(file, cx);
         }
-        self.lanes_session_changed(cx);
+        self.lanes_session_changed();
         self.reload_runs(cx);
         cx.notify();
     }
@@ -1566,10 +1563,10 @@ impl Scrubber {
                 };
                 (PaneKind::Gdb, None, self.engine.gdb_command(&run, step, at))
             }
-            // A fork and a check make runs, and the source and the threads
-            // fill a tab rather than a pane; fork_here, check_here,
-            // open_source and open_lanes do them.
-            Replay::Fork | Replay::Where | Replay::Threads | Replay::Check => return,
+            // A fork and a check make runs, and the source fills a tab
+            // rather than a pane; fork_here, check_here and open_source
+            // do them.
+            Replay::Fork | Replay::Where | Replay::Check => return,
         };
         self.open_terminal(kind, step, pid, command, window, cx);
     }

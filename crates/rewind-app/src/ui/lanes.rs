@@ -2,8 +2,10 @@
 //! the thread held the CPU, this run above the compared run in each lane.
 //!
 //! Show threads opens it in place of "At this step", as Show source opens
-//! the source. The engine reads each run's threads from its context
-//! switches (`rewind threads`), a window at a time. The window opens
+//! the source. Each run's lanes are read from the context switches in its
+//! trace, which the app holds, as `rewind threads` reads them: nothing is
+//! replayed and no engine is asked, so the lanes are there at every pan
+//! and zoom, and for a run that is only a trace. The window opens
 //! centered on where the two runs part, or on the playhead without a
 //! compared run, and follows the playhead from then on: it holds still
 //! while the playhead moves inside it, and centers on the playhead again,
@@ -11,15 +13,13 @@
 //! the wheel zoom it around the pointer, Shift and the wheel pan it, and
 //! the zoom out and in buttons zoom it around its center. A window placed
 //! around a step never reaches past the run's last step while the run is
-//! longer than it. Each run is asked only for the steps it has
-//! not been, half a window more on each side, once the window rests.
+//! longer than it. Each run's switches are read only for the steps not
+//! read yet, half a window more on each side.
 //!
 //! The compared run's window is lined up with this run's by a fixed
 //! offset. Two runs whose schedules part at a step are the same machine
 //! until it, so the offset is 0; other runs are paired by their events, as
 //! the Compare tab pairs them.
-
-use std::time::Duration;
 
 use gpui::{
     Context, Div, ScrollWheelEvent, SharedString, Stateful, div, prelude::*, px, relative, rgb,
@@ -27,20 +27,19 @@ use gpui::{
 };
 
 use crate::describe::{self, thousands};
-use crate::engine::Cancel;
-use crate::lanes::{Lane, Row, Side, Slice, Window, first_switch, rows};
-use crate::request::Request;
-use crate::run::Session;
+use crate::lanes::{Lane, Row, Side, Slice, Window, first_switch, held, rows};
+use crate::run::{Run, Session};
 use crate::selection::{Mapped, Surface, part_of_line};
 use crate::theme::{self, layout, size};
 use crate::ui::icons::Icon;
-use crate::ui::scrubber::{Replay, Scrubber, replay_unavailable};
+use crate::ui::scrubber::Scrubber;
 use crate::ui::selectable::{mapped, selectable, selects};
 use crate::ui::splits::measure;
 use crate::ui::tabs::RightTab;
-use crate::ui::widgets::{Availability, ButtonStyle, button, icon, panel_title, spinner, tooltip};
+use crate::ui::widgets::{Availability, ButtonStyle, button, icon, panel_title, tooltip};
 use crate::ui::zoom::{PAN_PER_NOTCH, wheel_notches};
 use crate::view::ZOOM_IN;
+use rewind_trace::slices::{Exec, execs};
 
 /// How far either side of its center a new tab's window reaches.
 const DEFAULT_HALF: u64 = 64;
@@ -48,9 +47,10 @@ const DEFAULT_HALF: u64 = 64;
 /// How much one press of − or + zooms the window.
 const BUTTON_ZOOM: f64 = 0.5;
 
-/// How long the window must rest before the steps it newly shows are
-/// replayed.
-const DEBOUNCE: Duration = Duration::from_millis(250);
+/// What the tab says for a run whose guest kernel wrote no switch records,
+/// as `rewind threads` says it.
+const NO_SWITCHES: &str = "This run was recorded by a guest kernel that did not record context switches. Record it again with this Rewind to see its threads.";
+const OTHER_NO_SWITCHES: &str = "The compared run was recorded by a guest kernel that did not record context switches. Record it again with this Rewind to see the threads of both.";
 
 /// The width of the column of lane labels.
 const LABEL_WIDTH: f32 = 170.0;
@@ -84,7 +84,7 @@ const SWITCH_OPACITY: f32 = 0.6;
 /// The hatching over steps past a run's end.
 const ENDED_A: u32 = 0xffffff0f;
 
-const ZOOM_NOTE: &str = "The lanes show this many steps either side of the window's center. Ctrl and the wheel over the lanes zoom around the pointer, Shift and the wheel pan, and the wheel alone scrolls the threads. Steps not seen yet are replayed in each run once the window rests, about a second for a few thousand.";
+const ZOOM_NOTE: &str = "The lanes show this many steps either side of the window's center. Ctrl and the wheel over the lanes zoom around the pointer, Shift and the wheel pan, and the wheel alone scrolls the threads.";
 const ZOOM_IN_NOTE: &str =
     "Zoom in: fewer steps, each wider. Ctrl and the wheel zoom around the pointer.";
 const ZOOM_OUT_NOTE: &str =
@@ -93,25 +93,35 @@ const NOTCH_NOTE: &str = "A notch at the top of a lane is one of the thread's ev
 const SWITCH_NOTE: &str = "The first place in the two windows where a different thread held the CPU, which can come before the first event that differs.";
 const DIVERGENCE_NOTE: &str = "The first event where this run differs from the compared run, the solid blue mark on the timeline.";
 
-/// One run's slices: the ones replayed so far, over the steps `range`
-/// covers, and the replay on its way, if one is.
+/// One run's slices: the ones read from its switches so far, over the
+/// steps `range` covers, and the run's execs, which rename its tasks.
 #[derive(Default)]
-pub struct Fetched {
+pub struct Held {
     pub slices: Vec<Slice>,
     pub range: Option<(u64, u64)>,
-    /// The steps the replay on its way covers, the request it answers, and
-    /// what stops it.
-    pending: Option<((u64, u64), Request, Cancel)>,
-    /// Why the last replay failed, until another succeeds.
-    pub error: Option<String>,
+    execs: Vec<Exec>,
 }
 
-impl Fetched {
-    /// Stops the replay on its way.
-    fn supersede(&mut self) {
-        if let Some((_, _, cancel)) = self.pending.take() {
-            cancel.cancel();
+impl Held {
+    /// Nothing read yet of `run`.
+    fn of(run: &Run) -> Held {
+        Held {
+            execs: execs(&run.timeline.trace.events),
+            ..Held::default()
         }
+    }
+
+    /// Reads `run`'s slices around `window` when the ones read do not
+    /// cover it.
+    fn read(&mut self, run: &Run, window: Window) {
+        let last = run.timeline.total;
+        if window.covered_by(self.range, last) {
+            return;
+        }
+        let (from, to) = window.fetch_range();
+        let to = to.min(last);
+        self.slices = held(&run.timeline.trace.switches, &self.execs, from, to);
+        self.range = Some((from, to));
     }
 }
 
@@ -130,13 +140,12 @@ pub struct LanesPanel {
     /// The compared run's window's center less this one's, while a run is
     /// compared.
     pub offset: Option<i64>,
-    /// Why this run cannot be brought to a step, when it cannot.
-    pub unavailable: Option<String>,
-    pub here: Fetched,
-    pub there: Fetched,
+    /// Why the tab has no lanes, when it has none: a run recorded without
+    /// switch records.
+    pub unavailable: Option<&'static str>,
+    pub here: Held,
+    pub there: Held,
     pub picked: Option<Picked>,
-    /// The latest move of the window; a replay waits for it to rest.
-    moved: Request,
 }
 
 impl LanesPanel {
@@ -146,8 +155,8 @@ impl LanesPanel {
     }
 
     /// Both runs' rows, once each run has some slices: a row per thread
-    /// that held the CPU inside the windows, not in the steps replayed
-    /// around them.
+    /// that held the CPU inside the windows, not in the steps read around
+    /// them.
     fn rows(&self) -> Option<Vec<Row>> {
         self.here.range?;
         let inside = |slices: &[Slice], window: Window| -> Vec<Slice> {
@@ -167,29 +176,36 @@ impl LanesPanel {
         Some(rows(&inside(&self.here.slices, self.window), &there))
     }
 
-    /// The steps a replay on its way covers, in either run.
-    fn replaying(&self) -> Option<(u64, u64)> {
-        [&self.here, &self.there]
-            .into_iter()
-            .find_map(|f| f.pending.as_ref().map(|(range, _, _)| *range))
+    /// What the tab says in place of the lanes: why it has none.
+    fn message(&self) -> Option<String> {
+        self.unavailable.map(str::to_string)
     }
 
-    /// What the tab says in place of the lanes: why the run cannot be
-    /// replayed, or why a replay failed before any lanes came.
-    fn message(&self) -> Option<String> {
-        if let Some(why) = &self.unavailable {
-            return Some(why.clone());
+    /// Reads both runs' slices around their windows, where the ones read
+    /// do not cover them.
+    fn read(&mut self, session: &Session) {
+        if self.unavailable.is_some() {
+            return;
         }
-        let error = self.here.error.as_ref().or(self.there.error.as_ref())?;
-        self.rows().is_none().then(|| error.clone())
+        self.here.read(&session.run, self.window);
+        if let (Some(other), Some(window)) = (&session.other, self.other_window()) {
+            self.there.read(other, window);
+        }
     }
 }
 
-impl Drop for LanesPanel {
-    fn drop(&mut self) {
-        self.here.supersede();
-        self.there.supersede();
+/// Why `session`'s runs have no lanes, when they have none: a run whose
+/// guest kernel wrote no switch records has nothing to read them from.
+fn no_lanes(session: &Session) -> Option<&'static str> {
+    let without = |run: &Run| run.timeline.trace.switches.is_empty();
+    if without(&session.run) {
+        return Some(NO_SWITCHES);
     }
+    session
+        .other
+        .as_ref()
+        .is_some_and(without)
+        .then_some(OTHER_NO_SWITCHES)
 }
 
 /// The offset of the compared run's window from this run's, centered on
@@ -205,14 +221,8 @@ fn offset_of(session: &Session, center: u64) -> Option<i64> {
 
 impl Scrubber {
     /// Opens the Threads tab, centered where the two runs part, else on
-    /// the playhead, and asks the engine for both runs' threads.
+    /// the playhead, with both runs' threads read from their switches.
     pub(super) fn open_lanes(&mut self, cx: &mut Context<Self>) {
-        // The browser viewer has no machine to run the recording on.
-        if cfg!(target_family = "wasm") && self.session.is_some() {
-            self.replay_in_desktop_app(Replay::Threads.doing(), cx);
-            return;
-        }
-
         let Some(session) = &self.session else {
             return;
         };
@@ -220,7 +230,6 @@ impl Scrubber {
         let window = Window::around(center, DEFAULT_HALF, self.lanes_last());
         self.lanes = Some(self.new_lanes(window));
         self.right_tab = RightTab::Threads;
-        self.fetch_lanes(cx);
         cx.notify();
     }
 
@@ -261,18 +270,19 @@ impl Scrubber {
         self.move_lanes(window, cx);
     }
 
-    /// A tab over `window`, with nothing replayed yet.
+    /// A tab over `window`, with both runs' slices read around it.
     fn new_lanes(&mut self, window: Window) -> LanesPanel {
         let session = self.session();
-        LanesPanel {
+        let mut lanes = LanesPanel {
             window,
             offset: offset_of(session, window.center),
-            unavailable: replay_unavailable(session, Replay::Threads, self.importing.is_some()),
-            here: Fetched::default(),
-            there: Fetched::default(),
+            unavailable: no_lanes(session),
+            here: Held::of(&session.run),
+            there: session.other.as_ref().map(Held::of).unwrap_or_default(),
             picked: None,
-            moved: self.requests.issue(),
-        }
+        };
+        lanes.read(session);
+        lanes
     }
 
     /// Opens the tab; shows it when it is open behind another; or closes
@@ -295,44 +305,28 @@ impl Scrubber {
     }
 
     /// The tab for a session just shown: the same window over the new
-    /// session's runs, replayed again, when the tab was open.
-    pub(super) fn lanes_session_changed(&mut self, cx: &mut Context<Self>) {
+    /// session's runs, read again, when the tab was open.
+    pub(super) fn lanes_session_changed(&mut self) {
         let Some(lanes) = &self.lanes else {
             return;
         };
         let mut window = lanes.window;
         window.center = window.center.min(self.session().run.timeline.total);
         self.lanes = Some(self.new_lanes(window));
-        self.fetch_lanes(cx);
     }
 
-    /// Moves the window to `window`, and replays what it newly shows once
-    /// it rests.
+    /// Moves the window to `window`, and reads what it newly shows.
     fn move_lanes(&mut self, mut window: Window, cx: &mut Context<Self>) {
         // A window never moves past where both runs have ended.
-        if self.session.is_none() {
-            return;
-        }
         window.center = window.center.min(self.lanes_last());
-        let Some(lanes) = &mut self.lanes else {
+        let (Some(lanes), Some(session)) = (&mut self.lanes, &self.session) else {
             return;
         };
         if lanes.window == window {
             return;
         }
         lanes.window = window;
-        lanes.moved = self.requests.issue();
-        let moved = lanes.moved;
-        let timer = cx.background_executor().timer(DEBOUNCE);
-        cx.spawn(async move |this, cx| {
-            timer.await;
-            let _ = this.update(cx, |this, cx| {
-                if this.lanes.as_ref().is_some_and(|l| l.moved == moved) {
-                    this.fetch_lanes(cx);
-                }
-            });
-        })
-        .detach();
+        lanes.read(session);
         cx.notify();
     }
 
@@ -375,80 +369,6 @@ impl Scrubber {
         cx.stop_propagation();
     }
 
-    /// Replays, in each run, the steps around its window that are not
-    /// replayed yet, each on a thread of its own.
-    fn fetch_lanes(&mut self, cx: &mut Context<Self>) {
-        let (Some(lanes), Some(session)) = (&mut self.lanes, &self.session) else {
-            return;
-        };
-        if lanes.unavailable.is_some() {
-            return;
-        }
-        let mut asks = vec![(
-            Side::Here,
-            session.run.path.clone(),
-            lanes.window,
-            session.run.timeline.total,
-        )];
-        if let (Some(other), Some(window)) = (&session.other, lanes.other_window()) {
-            asks.push((
-                Side::There,
-                other.path.clone(),
-                window,
-                other.timeline.total,
-            ));
-        }
-        for (side, run, window, last) in asks {
-            let fetched = match side {
-                Side::Here => &mut lanes.here,
-                Side::There => &mut lanes.there,
-            };
-            let pending = fetched.pending.as_ref().map(|(range, _, _)| *range);
-            if window.covered_by(fetched.range, last) || window.covered_by(pending, last) {
-                continue;
-            }
-            fetched.supersede();
-            let (from, to) = window.fetch_range();
-            let to = to.min(last);
-            let request = self.requests.issue();
-            let cancel = Cancel::default();
-            fetched.pending = Some(((from, to), request, cancel.clone()));
-            let engine = self.engine.clone();
-            let task = crate::jobs::on_own_thread(move || engine.threads(&run, from, to, &cancel));
-            cx.spawn(async move |this, cx| {
-                let result = task.await;
-                let _ = this.update(cx, |this, cx| {
-                    let Some(lanes) = &mut this.lanes else {
-                        return;
-                    };
-                    let fetched = match side {
-                        Side::Here => &mut lanes.here,
-                        Side::There => &mut lanes.there,
-                    };
-                    if fetched
-                        .pending
-                        .as_ref()
-                        .is_none_or(|(_, r, _)| *r != request)
-                    {
-                        return;
-                    }
-                    fetched.pending = None;
-                    match result {
-                        Ok(slices) => {
-                            fetched.slices = slices;
-                            fetched.range = Some((from, to));
-                            fetched.error = None;
-                        }
-                        Err(e) => fetched.error = Some(e.to_string()),
-                    }
-                    cx.notify();
-                });
-            })
-            .detach();
-        }
-        cx.notify();
-    }
-
     /// A click on a bar: picks it, and moves the playhead to its first
     /// step, or for the compared run's bar, to the same place in this
     /// run's window.
@@ -489,8 +409,8 @@ impl Scrubber {
             .child(panel_title(&title, None))
             .child(self.render_lanes_controls(lanes, cx));
 
-        // A run that cannot be replayed, or a replay that failed before
-        // any lanes came, says why in place of the lanes.
+        // A run recorded without switch records says so in place of the
+        // lanes.
         let lines = self.lanes_lines();
         let registry = self.selecting.registry.clone();
         let range = self.selected_range(Surface::Lanes);
@@ -506,9 +426,7 @@ impl Scrubber {
                 .child(line(0, text));
             return Some(panel.child(selects(note, Surface::Lanes, cx)));
         }
-        let Some(rows) = lanes.rows() else {
-            return Some(panel.child(replaying_note(lanes, session)));
-        };
+        let rows = lanes.rows()?;
 
         // The markers each lane draws: where the runs part, where their
         // threads first differ, and the playhead.
@@ -522,16 +440,6 @@ impl Scrubber {
         };
 
         panel = panel.child(self.render_lanes_legend(lanes, &markers));
-        if let Some(error) = lanes.here.error.as_ref().or(lanes.there.error.as_ref()) {
-            panel = panel.child(
-                div()
-                    .px(px(size::PANEL_PAD_X))
-                    .text_size(px(size::TEXT_SMALL))
-                    .text_color(rgb(theme::RED_SOFT))
-                    .child(error.clone()),
-            );
-        }
-
         // The axis and the rows, where the wheel zooms and pans whether or
         // not it is over a row; a row takes the wheel first, so the rows
         // scroll under it only with neither Ctrl nor Shift held.
@@ -586,18 +494,6 @@ impl Scrubber {
             .text_color(rgb(theme::SOFT))
             .tooltip(tooltip(ZOOM_NOTE))
             .child(format!("\u{b1}{} steps", thousands(lanes.window.half)));
-        let replaying = lanes.replaying().map(|(from, to)| {
-            div()
-                .flex()
-                .items_center()
-                .gap(px(size::LEGEND_GAP))
-                .child(spinner("lanes-replaying", size::ICON_CLOSE, theme::MUTED))
-                .child(format!(
-                    "replaying {}\u{2013}{}",
-                    thousands(from),
-                    thousands(to)
-                ))
-        });
         let recenter = crate::ui::bookmarks::link("lanes-center", "Center on playhead")
             .on_click(cx.listener(move |this, _, _, cx| this.center_lanes_on_playhead(cx)));
         div()
@@ -627,8 +523,7 @@ impl Scrubber {
                         Icon::ZoomIn,
                         ZOOM_IN_NOTE,
                         BUTTON_ZOOM,
-                    ))
-                    .children(replaying),
+                    )),
             )
             .child(recenter)
     }
@@ -1174,28 +1069,6 @@ fn bar_note(
         count,
         if count == 1 { "event" } else { "events" },
     )
-}
-
-/// What the tab says while the first replay of the window runs.
-fn replaying_note(lanes: &LanesPanel, session: &Session) -> Div {
-    let other = session
-        .other
-        .as_ref()
-        .map(|o| format!(" and of {}", o.label()))
-        .unwrap_or_default();
-    let (from, to) = lanes.replaying().unwrap_or(lanes.window.fetch_range());
-    div()
-        .flex()
-        .items_center()
-        .gap(px(size::CARD_GAP))
-        .p(px(size::PANEL_PAD_X))
-        .text_color(rgb(theme::SOFT))
-        .child(spinner("lanes-spinner", size::ICON_FORK, theme::AMBER))
-        .child(format!(
-            "Replaying steps {}\u{2013}{} of this run{other} one step at a time",
-            thousands(from),
-            thousands(to)
-        ))
 }
 
 /// The steps each lane marks with a line.
