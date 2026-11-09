@@ -49,8 +49,24 @@ pub(crate) fn cat(home: &Home, args: CatArgs) -> Result<ExitCode> {
             eprintln!("{} {message}", crate::color::stderr().prefix());
             Ok(ExitCode::from(CAT_NOT_FOUND))
         }
+        Inspection::Failed(message) if names_a_directory(&message) => {
+            eprintln!(
+                "{} {path} is a directory at step {step}",
+                crate::color::stderr().prefix()
+            );
+            Ok(ExitCode::from(CAT_DIRECTORY))
+        }
         Inspection::Failed(message) => bail!("reading {path} at step {step}: {message}"),
     }
+}
+
+/// Whether `message`, the VM's reason a file could not be read, says the
+/// path names a directory. The guest opens the path and reads it, and
+/// reports a failed read as the path and the operating system's error,
+/// which ends with the error's number.
+fn names_a_directory(message: &str) -> bool {
+    let number = format!("(os error {})", libc::EISDIR);
+    message.trim_end().ends_with(&number)
 }
 
 /// The arguments of `rewind shell`.
@@ -293,6 +309,10 @@ pub(crate) fn r#where(home: &Home, args: WhereArgs) -> Result<ExitCode> {
 /// command line it refused.
 const CAT_NOT_FOUND: u8 = 3;
 
+/// `rewind cat`'s exit status when the path named a directory at the
+/// step, which has no bytes to print.
+const CAT_DIRECTORY: u8 = 4;
+
 /// How many callers of the chosen frame `rewind where` shows.
 const DEFAULT_CALLERS: usize = 2;
 
@@ -367,4 +387,26 @@ pub(crate) fn warn_of_machine(run: &Run, step: u64) {
         paint.prefix(),
         paint.paint(crate::color::Style::Warn, warning)
     );
+}
+
+#[cfg(test)]
+mod tests {
+    // What `rewind cat` makes of the VM's answers, with messages as the
+    // guest's init writes them and no VM.
+    use super::*;
+
+    #[test]
+    fn a_read_that_failed_on_a_directory_is_told_apart() {
+        // The guest's message for a path that names a directory ends with
+        // the operating system's error for one; a failure for any other
+        // reason does not.
+        assert!(names_a_directory(
+            "/nix/store/3ynx-shuffle-pgo: Is a directory (os error 21)"
+        ));
+        assert!(names_a_directory("/out: Is a directory (os error 21)\n"));
+        assert!(!names_a_directory(
+            "/build/secret: Permission denied (os error 13)"
+        ));
+        assert!(!names_a_directory("inspect: no process 21"));
+    }
 }
