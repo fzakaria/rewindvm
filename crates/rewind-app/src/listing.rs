@@ -139,6 +139,20 @@ pub fn name_under<'a>(dir: &str, path: &'a str) -> &'a str {
         .map_or(path, |rest| rest.trim_start_matches(PATH_SEPARATOR))
 }
 
+/// The directory that holds `path`, or None for the root and for a
+/// relative path of one name, which name no directory above them.
+pub fn parent_of(path: &str) -> Option<&str> {
+    /// The root directory.
+    const ROOT: &str = "/";
+
+    let path = path.trim_end_matches(PATH_SEPARATOR);
+    let (parent, _) = path.rsplit_once(PATH_SEPARATOR)?;
+    if parent.is_empty() {
+        return Some(ROOT);
+    }
+    Some(parent)
+}
+
 #[cfg(test)]
 mod tests {
     // Listings made from a VM's answer and a trace's written files, both
@@ -230,6 +244,19 @@ mod tests {
         assert_eq!(paths(&listing), vec!["/build/a.o", "/build/z.o"]);
         listing.complete = ListedAll::Yes;
         assert_eq!(paths(&listing), vec!["/build/a.o"]);
+    }
+
+    #[test]
+    fn a_path_s_parent_is_the_directory_that_holds_it() {
+        // A file, a directory named with a trailing slash, and a path one
+        // name below the root: each has the directory above it. The root
+        // has none, and neither does a relative path of one name.
+        assert_eq!(parent_of("/build/src/main.c"), Some("/build/src"));
+        assert_eq!(parent_of("/nix/store/abc-out/"), Some("/nix/store"));
+        assert_eq!(parent_of("/build"), Some("/"));
+        assert_eq!(parent_of("/"), None);
+        assert_eq!(parent_of("src/main.c"), Some("src"));
+        assert_eq!(parent_of("main.c"), None);
     }
 
     #[test]

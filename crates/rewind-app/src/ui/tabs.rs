@@ -125,12 +125,13 @@ impl Scrubber {
                 None => "Runs".to_string(),
             },
             RightTab::File => {
-                let name = self
-                    .viewer
-                    .as_ref()
-                    .and_then(|v| v.path.rsplit('/').next().map(str::to_string))
-                    .unwrap_or_default();
-                format!("File \u{b7} {}", clip(&name, MAX_FILE_CHARS))
+                // The path's last name, or the whole path when it has
+                // none, as the root has.
+                let name = self.viewer.as_ref().map_or("", |viewer| {
+                    let last = viewer.path.trim_end_matches('/').rsplit('/').next();
+                    last.filter(|name| !name.is_empty()).unwrap_or(&viewer.path)
+                });
+                format!("File \u{b7} {}", clip(name, MAX_FILE_CHARS))
             }
             RightTab::FileDiff => self
                 .file_diff

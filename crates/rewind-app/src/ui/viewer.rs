@@ -15,7 +15,10 @@
 //! Where the engine can read the run's files, the VM's own listing of the
 //! directory at the step then takes their place, with links, empty
 //! directories, the input image's files and sizes, and the trace's steps
-//! beside the files the run wrote (see [`crate::listing`]).
+//! beside the files the run wrote (see [`crate::listing`]). A file opened
+//! from a listing has a link back to the listing, and any other path has
+//! one up to the directory that holds it, so a file's neighbours are a
+//! click away.
 
 use std::time::Duration;
 
@@ -72,6 +75,11 @@ const STOPPED: &str =
 
 /// What a listed file's step says on hover.
 const LISTED_STEP_NOTE: &str = "The step this file was last written or renamed at. Click to go there; click the path to see the file at the playhead.";
+
+/// What the heading's link starts with: to the listing a file was opened
+/// from, and to the directory that holds the viewer's path.
+const BACK_TO: &str = "Back to";
+const UP_TO: &str = "Up to";
 
 /// What the viewer says under a listing the VM did not give, before the
 /// engine's reason.
@@ -850,14 +858,21 @@ impl Scrubber {
             _ => heading,
         };
 
-        // A file opened from a directory's listing has the way back.
-        let heading = match viewer.listed_in.clone() {
-            Some(listing) => {
-                let name = short_store_paths(&listing.path);
+        // The way out of the path: back to the listing a file was opened
+        // from, or up to the directory that holds the path. The root has
+        // neither.
+        let way_out = match (&viewer.listed_in, listing::parent_of(&viewer.path)) {
+            (Some(listing), _) => Some((BACK_TO, listing.path.clone(), listing.pid)),
+            (None, Some(parent)) => Some((UP_TO, parent.to_string(), viewer.pid)),
+            (None, None) => None,
+        };
+        let heading = match way_out {
+            Some((leads, path, pid)) => {
+                let name = short_store_paths(&path);
                 heading.child(div().flex().text_size(px(size::TEXT_SMALL)).child(
-                    link("viewer-listing", format!("Back to {name}")).on_click(cx.listener(
-                        move |this, _, _, cx| this.open_file(listing.path.clone(), listing.pid, cx),
-                    )),
+                    link("viewer-listing", format!("{leads} {name}")).on_click(
+                        cx.listener(move |this, _, _, cx| this.open_file(path.clone(), pid, cx)),
+                    ),
                 ))
             }
             None => heading,
