@@ -120,6 +120,19 @@ enum Command {
     Run(cmd::record::RunArgs),
     /// Build a Nix derivation in the deterministic VM.
     Nix(cmd::record::NixArgs),
+    /// Run one build for Nix in the deterministic VM, and copy its outputs
+    /// into the store.
+    ///
+    /// Takes the description of a build that Nix's external-builders
+    /// setting hands a program: the builder, its arguments and
+    /// environment, the store paths it may read and the outputs to make.
+    /// The builder runs as `rewind nix` runs one, on the machine the
+    /// derivation's `rewindFlags` attribute names, with --epoch, --cpu and
+    /// --clock all given there, and its output is the build's log. The
+    /// run is kept in REWIND_HOME, or without one in the build's own
+    /// temporary directory, which goes when Nix removes it. `inRewind` in
+    /// the flake's lib wraps any derivation's builder in this command.
+    Build(cmd::build::BuildArgs),
     /// Find a schedule that changes how a build or command ends, and where
     /// it went its own way.
     ///
@@ -354,6 +367,7 @@ impl Command {
             // execute runs or replay to compare traces.
             Command::Run(_)
             | Command::Nix(_)
+            | Command::Build(_)
             | Command::Check(_)
             | Command::Fork(_)
             | Command::Replay(_)
@@ -396,7 +410,9 @@ impl Command {
             | Command::Import(_) => HomeHold::InUse,
             // Reading files boots each run's VM, as `cat` does.
             Command::Diff(args) if args.reads_files() => HomeHold::InUse,
-            Command::Prune(_)
+            // `build` holds the home it picks for itself.
+            Command::Build(_)
+            | Command::Prune(_)
             | Command::Remove(_)
             | Command::Gc(_)
             | Command::Pmu(_)
@@ -454,6 +470,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
     } = cli;
     let command = match command {
         Command::Generate(args) => return cmd::setup::generate(args),
+        // A build for Nix runs as a build user or in a sandbox, with no
+        // home of its own, and keeps its run where its description says.
+        Command::Build(args) => return cmd::build::build(args),
         command => command,
     };
     let home = Home::open()?;
@@ -472,6 +491,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
     match command {
         Command::Run(args) => cmd::record::run_command(&home, args),
         Command::Nix(args) => cmd::record::nix(&home, args),
+        Command::Build(args) => cmd::build::build(args),
         Command::Check(args) => cmd::record::check(&home, args),
         Command::Fork(args) => cmd::record::fork(&home, args),
         Command::Prune(args) => cmd::remove::prune(&home, args),
@@ -541,6 +561,12 @@ mod tests {
         // recorded already: a recorded run's inputs stand, its directory
         // order among them, so the pair is refused.
         let parses = |line: &str| Cli::try_parse_from(line.split_whitespace()).is_ok();
+        assert!(parses("rewind build /tmp/nix-build-x.drv-0/build.json"));
+        assert!(parses(
+            "rewind build --external-builder /tmp/nix-build-x.drv-0/build.json"
+        ));
+        assert!(!parses("rewind build"));
+        assert!(!parses("rewind build build.json --epoch 5"));
         assert!(parses("rewind check nixpkgs#hello --dirents 3"));
         assert!(parses("rewind check --dirents 3 --root r -- true"));
         assert!(!parses("rewind check --run abc --dirents 3"));

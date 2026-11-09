@@ -131,9 +131,11 @@ impl RunEntry {
     ) -> RunEntry {
         let spec = &manifest.spec;
         let command = spec.job.argv.join(" ");
+        // A build nix-daemon described names no derivation, only the file
+        // of a description that went with the build.
         let drv = match &manifest.source {
             Source::Nix { drv, .. } => Some(drv.clone()),
-            Source::Image { .. } => None,
+            Source::Image { .. } | Source::Build { .. } => None,
         };
         let title = [
             Some(manifest.name.clone()),

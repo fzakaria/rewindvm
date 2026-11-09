@@ -250,6 +250,12 @@ pub enum Source {
     Image { root: String },
     /// A Nix derivation.
     Nix { drv: String, outputs: Vec<String> },
+    /// A build nix-daemon described, as its external-builders setting
+    /// hands one to a program: the description's file, and the outputs.
+    Build {
+        description: String,
+        outputs: Vec<String>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

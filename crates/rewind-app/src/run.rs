@@ -214,14 +214,16 @@ impl Run {
         )
     }
 
-    /// What the run built or ran: the derivation, else the command, else
-    /// the path it was opened from.
+    /// What the run built or ran: the derivation, for a build nix-daemon
+    /// described the build's name, else the command, else the path it was
+    /// opened from.
     pub fn subject(&self) -> String {
         let Some(m) = &self.manifest else {
             return self.path.display().to_string();
         };
         match &m.source {
             Source::Nix { drv, .. } => drv.clone(),
+            Source::Build { .. } => m.name.clone(),
             Source::Image { .. } => m.spec.job.argv.join(" "),
         }
     }

@@ -76,7 +76,8 @@ impl Extras {
         if !image.exists() {
             eprintln!("rewind: packing {} store paths for --with", closure.len());
             let tmp = crate::image::temp_beside(&image);
-            crate::image::from_store_paths(&closure, &tmp)?;
+            let store = std::path::Path::new(crate::nix::STORE);
+            crate::image::from_store_paths(store, &closure, &tmp)?;
             crate::image::place(&tmp, &image)?;
         }
         let bins = outputs

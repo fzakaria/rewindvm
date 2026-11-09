@@ -76,8 +76,10 @@ pub fn from_tar(tar: &Path, out: &Path) -> Result<()> {
 }
 
 /// An image of store paths, laid out as they appear under /nix/store: the
-/// guest mounts it there.
-pub fn from_store_paths(paths: &[PathBuf], out: &Path) -> Result<()> {
+/// guest mounts it there. `store` is where this machine has the paths'
+/// files: /nix/store itself, or the directory a store kept somewhere else
+/// has them in.
+pub fn from_store_paths(store: &Path, paths: &[PathBuf], out: &Path) -> Result<()> {
     let mut names: Vec<String> = paths
         .iter()
         .map(|p| {
@@ -98,9 +100,9 @@ pub fn from_store_paths(paths: &[PathBuf], out: &Path) -> Result<()> {
     let status = tar_command()
         .args(["--create", "--file"])
         .arg(&tar)
+        .arg("--directory")
+        .arg(store)
         .args([
-            "--directory",
-            "/nix/store",
             "--sort=name",
             "--owner=0",
             "--group=0",

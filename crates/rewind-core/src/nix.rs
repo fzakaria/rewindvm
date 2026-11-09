@@ -6,6 +6,12 @@
 //! the image the guest mounts at /nix/store, the builder becomes the job,
 //! and the environment is set up the way the Nix sandbox sets it up, so
 //! the builder cannot tell the difference.
+//!
+//! A build reaches here two ways. `rewind nix` reads a derivation and
+//! works out what nix-daemon would hand its builder ([`describe`]).
+//! `rewind build` reads what nix-daemon did hand over, the description
+//! its external-builders setting writes ([`Description`]). Both are a
+//! [`Build`], and one function makes the job of either ([`Build::job`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -284,19 +290,24 @@ pub fn input_closure(drv: &Derivation) -> Result<Vec<PathBuf>> {
 /// nix-daemon would: one whose builder nix-daemon runs itself, and a
 /// fixed-output one, which nix-daemon gives the network a run lacks.
 pub fn runnable(drv: &Derivation) -> Result<()> {
-    if drv.builder.starts_with(BUILTIN_BUILDER_PREFIX) {
-        bail!(
-            "{} is built by {}, which runs inside nix-daemon and has no program for a run to execute",
-            drv.name,
-            drv.builder
-        );
-    }
+    refuse_builtin(&drv.name, &drv.builder)?;
     if drv.fixed_output {
         bail!(
             "{} is a fixed-output derivation, such as a fetcher, which Nix builds with the \
              network, and a run has none; build it with nix build, and derivations that use \
              it run here with its output as an input",
             drv.name
+        );
+    }
+    Ok(())
+}
+
+/// Refuses a builder nix-daemon runs itself, such as builtin:fetchurl,
+/// for the build named `name`.
+fn refuse_builtin(name: &str, builder: &str) -> Result<()> {
+    if builder.starts_with(BUILTIN_BUILDER_PREFIX) {
+        bail!(
+            "{name} is built by {builder}, which runs inside nix-daemon and has no program for a run to execute"
         );
     }
     Ok(())
@@ -564,6 +575,200 @@ impl Build {
                 .collect(),
         }
     }
+}
+
+impl Build {
+    /// Tells the build it may use `cores` cores, in place of what its
+    /// environment says. A description's count is nix-daemon's own: the
+    /// cores of whichever machine picked the build up, which no
+    /// derivation names.
+    pub fn set_cores(&mut self, cores: u32) {
+        self.env.insert(BUILD_CORES_VAR.into(), cores.to_string());
+    }
+}
+
+/// The version of nix-daemon's build description this reads.
+const DESCRIPTION_VERSION: u64 = 1;
+
+/// The attribute that names a derivation.
+const NAME_ATTRIBUTE: &str = "name";
+
+/// A build as nix-daemon describes one to the program its
+/// external-builders setting names: the JSON document that program is
+/// started with, and the files nix-daemon wrote into the build directory
+/// beside it. The environment is already the one the builder gets, so
+/// nothing of nix-daemon's own work is done again here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Description {
+    pub build: Build,
+    /// The platform the derivation asks for, its `system`.
+    pub system: String,
+    /// Where the store's paths are on this machine: the store itself, or
+    /// the directory a store kept somewhere else has them in.
+    pub real_store: PathBuf,
+    /// A directory of the build's own on this machine, outside the build
+    /// directory, for whatever runs the build to keep its own files in.
+    pub scratch: PathBuf,
+    /// The derivation's structured attributes, when it has them: the
+    /// .attrs.json of the build directory.
+    attrs: Option<Value>,
+}
+
+impl Description {
+    /// The description in the file at `path`.
+    pub fn read(path: &Path) -> Result<Description> {
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let json: Value =
+            serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        Description::parse(&json).with_context(|| format!("reading {}", path.display()))
+    }
+
+    /// The description `json` holds, with the build's files read from
+    /// the build directory `json` names on this machine.
+    pub fn parse(json: &Value) -> Result<Description> {
+        let field = |name: &str| {
+            json.get(name)
+                .with_context(|| format!("the build description has no {name}"))
+        };
+        let text = |name: &str| {
+            field(name)?
+                .as_str()
+                .with_context(|| format!("the build description's {name} is not a string"))
+        };
+        let texts = |name: &str| -> Result<Vec<String>> {
+            serde_json::from_value(field(name)?.clone())
+                .with_context(|| format!("the build description's {name} is not a list of strings"))
+        };
+        let table = |name: &str| -> Result<BTreeMap<String, String>> {
+            serde_json::from_value(field(name)?.clone()).with_context(|| {
+                format!("the build description's {name} is not a table of strings")
+            })
+        };
+
+        // What this reads, and where a run has things: the store at
+        // /nix/store and the build directory where the Nix sandbox has
+        // one, since the environment names both.
+        let version = field("version")?.as_u64();
+        if version != Some(DESCRIPTION_VERSION) {
+            bail!(
+                "the build description is version {}, and this rewind reads version {DESCRIPTION_VERSION}",
+                field("version")?
+            );
+        }
+        let store = text("storeDir")?;
+        if store != STORE {
+            bail!("the build's store is {store}, and a run has its store at {STORE}");
+        }
+        let build_dir = text("tmpDirInSandbox")?;
+        if build_dir != BUILD_DIR {
+            bail!(
+                "the build's directory is {build_dir}, and a run has it at {BUILD_DIR}, where \
+                 the Nix sandbox puts one; build with Nix's sandbox on"
+            );
+        }
+
+        let inputs: Vec<PathBuf> = texts("inputPaths")?
+            .iter()
+            .map(|path| store_path(path))
+            .collect::<Result<_>>()?;
+        let outputs: Vec<(String, PathBuf)> = table("outputs")?
+            .into_iter()
+            .map(|(name, path)| Ok((name, store_path(&path)?)))
+            .collect::<Result<_>>()?;
+        let env = table("env")?;
+        let files = build_files(Path::new(text("tmpDir")?))?;
+
+        // The structured attributes nix-daemon wrote, which also hold the
+        // derivation's name when the environment does not.
+        let attrs_file = env.get(ATTRS_JSON_VAR);
+        let attrs = match files.iter().find(|f| Some(&f.path) == attrs_file) {
+            Some(file) => Some(
+                serde_json::from_str(&file.contents)
+                    .with_context(|| format!("parsing {}", file.path))?,
+            ),
+            None => None,
+        };
+
+        let mut description = Description {
+            build: Build {
+                name: String::new(),
+                builder: text("builder")?.to_string(),
+                args: texts("args")?,
+                env,
+                files,
+                inputs,
+                outputs,
+            },
+            system: text("system")?.to_string(),
+            real_store: PathBuf::from(text("realStoreDir")?),
+            scratch: PathBuf::from(text("topTmpDir")?),
+            attrs,
+        };
+        description.build.name = description.name()?;
+        refuse_builtin(&description.build.name, &description.build.builder)?;
+        Ok(description)
+    }
+
+    /// The derivation's attribute `name`, when it is a string: from the
+    /// build's environment, or with structured attributes from the
+    /// attributes nix-daemon wrote into the build directory.
+    pub fn attribute(&self, name: &str) -> Option<String> {
+        if let Some(value) = self.build.env.get(name) {
+            return Some(value.clone());
+        }
+        let value = self.attrs.as_ref()?.get(name)?;
+        value.as_str().map(str::to_string)
+    }
+
+    /// What to call the build: its derivation's name, or without one the
+    /// name in its first output's path.
+    fn name(&self) -> Result<String> {
+        if let Some(name) = self.attribute(NAME_ATTRIBUTE) {
+            return Ok(name);
+        }
+        let (_, path) = self
+            .build
+            .outputs
+            .first()
+            .context("the build description has no outputs")?;
+        let path = StorePath::from_absolute_path(path.as_os_str().as_encoded_bytes())
+            .with_context(|| format!("{} is not a store path", path.display()))?;
+        Ok(path.name().to_string())
+    }
+}
+
+/// The files nix-daemon wrote into the build directory `dir` on this
+/// machine before the builder starts, as files of the build directory in
+/// the VM: structured attributes, the attributes passAsFile names and the
+/// closures exportReferencesGraph asks for. nix-daemon writes only files
+/// there, so anything else is refused rather than left behind.
+fn build_files(dir: &Path) -> Result<Vec<JobFile>> {
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        if !entry.file_type()?.is_file() {
+            bail!(
+                "{} is not a file, and a build's directory holds only files before its builder starts",
+                path.display()
+            );
+        }
+        let name = entry.file_name();
+        let name = name
+            .to_str()
+            .with_context(|| format!("{} has a name that is not UTF-8", path.display()))?;
+        let contents = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading {}", path.display()))?;
+        files.push(JobFile {
+            path: format!("{BUILD_DIR}/{name}"),
+            contents,
+        });
+    }
+
+    // A directory lists in no order of its own.
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(files)
 }
 
 /// The derivation's env, set directly in the build's environment or, for
@@ -985,6 +1190,153 @@ mod tests {
         let json: Value = serde_json::from_str(files["/build/.attrs.json"]).unwrap();
         assert_eq!(json["outputs"], serde_json::json!({"out": FIXTURE_OUT}));
         assert_eq!(json["stdenv"], "/nix/store/ddd-stdenv");
+    }
+
+    /// A directory of one test's own, empty, standing for the build
+    /// directory nix-daemon makes on this machine.
+    fn build_directory(test: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("rewind-nix-{test}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The description nix-daemon would write of `build`, whose files are
+    /// in `tmp_dir`: version 1 of the document its external-builders
+    /// setting hands a program.
+    fn description_json(build: &Build, tmp_dir: &Path) -> Value {
+        json!({
+            "version": 1,
+            "builder": build.builder,
+            "args": build.args,
+            "env": build.env,
+            "inputPaths": build.inputs,
+            "outputs": build.outputs.iter().cloned().collect::<BTreeMap<_, _>>(),
+            "storeDir": STORE,
+            "realStoreDir": "/tmp/elsewhere/nix/store",
+            "system": "x86_64-rewind-amd",
+            "tmpDir": tmp_dir,
+            "tmpDirInSandbox": BUILD_DIR,
+            "topTmpDir": tmp_dir.parent().unwrap(),
+        })
+    }
+
+    #[test]
+    fn a_description_makes_the_job_its_derivation_makes() {
+        // A derivation that passes an attribute as a file, described the
+        // way rewind nix describes one, and then the way nix-daemon would
+        // describe the same build to an external builder: its environment
+        // with nix-daemon's own core count, its files in a build directory
+        // on this machine. The description read back, with the cores set,
+        // makes the same job, so the two commands run one build.
+        let derived =
+            describe(&sample(), vec![PathBuf::from(FIXTURE_SRC)], &no_graphs(), 1).unwrap();
+        let dir = build_directory("same-job");
+        for file in &derived.files {
+            let name = file.path.strip_prefix("/build/").unwrap();
+            std::fs::write(dir.join(name), &file.contents).unwrap();
+        }
+        let mut theirs = derived.clone();
+        theirs.env.insert("NIX_BUILD_CORES".into(), "16".into());
+        let json = description_json(&theirs, &dir);
+
+        let mut description = Description::parse(&json).unwrap();
+        assert_eq!(description.build.env["NIX_BUILD_CORES"], "16");
+        description.build.set_cores(1);
+        assert_eq!(description.build.job(), derived.job());
+        assert_eq!(description.build.inputs, vec![PathBuf::from(FIXTURE_SRC)]);
+        assert_eq!(description.system, "x86_64-rewind-amd");
+        assert_eq!(
+            description.real_store,
+            Path::new("/tmp/elsewhere/nix/store")
+        );
+        assert_eq!(description.scratch, dir.parent().unwrap());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_description_is_named_and_asked_for_its_attributes() {
+        // A build is named by its derivation's name attribute, and without
+        // one by its first output's path. An attribute comes from the
+        // environment, or with structured attributes from the .attrs.json
+        // nix-daemon wrote into the build directory, where only a string
+        // is one.
+        let dir = build_directory("attributes");
+        let mut build = describe(&sample(), Vec::new(), &no_graphs(), 1).unwrap();
+        build.files.clear();
+        build.env.insert("name".into(), "greet".into());
+        build.env.insert("rewindFlags".into(), "--epoch 5".into());
+        let plain = Description::parse(&description_json(&build, &dir)).unwrap();
+        assert_eq!(plain.build.name, "greet");
+        assert_eq!(plain.attribute("rewindFlags").as_deref(), Some("--epoch 5"));
+        assert_eq!(plain.attribute("rewindVendor"), None);
+
+        build.env.remove("name");
+        build.env.remove("rewindFlags");
+        let unnamed = Description::parse(&description_json(&build, &dir)).unwrap();
+        assert_eq!(unnamed.build.name, "x");
+
+        let attrs = json!({"name": "hello", "rewindFlags": "--epoch 7", "outputs": ["out"]});
+        std::fs::write(dir.join(".attrs.json"), attrs.to_string()).unwrap();
+        build
+            .env
+            .insert("NIX_ATTRS_JSON_FILE".into(), "/build/.attrs.json".into());
+        let structured = Description::parse(&description_json(&build, &dir)).unwrap();
+        assert_eq!(structured.build.name, "hello");
+        assert_eq!(
+            structured.attribute("rewindFlags").as_deref(),
+            Some("--epoch 7")
+        );
+        assert_eq!(structured.attribute("outputs"), None);
+        assert_eq!(structured.build.files.len(), 1);
+        assert_eq!(structured.build.files[0].path, "/build/.attrs.json");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_description_a_run_cannot_build_is_refused() {
+        // Each of these descriptions is refused with the reason: a
+        // version this rewind does not read, a store somewhere other than
+        // /nix/store, a build directory other than the sandbox's, a
+        // builder nix-daemon runs itself, an input that is no store path,
+        // and a build directory holding something other than files.
+        let dir = build_directory("refused");
+        let mut build = describe(&sample(), Vec::new(), &no_graphs(), 1).unwrap();
+        build.files.clear();
+        let good = description_json(&build, &dir);
+        Description::parse(&good).unwrap();
+
+        let refused = |change: &dyn Fn(&mut Value), reason: &str| {
+            let mut json = good.clone();
+            change(&mut json);
+            let err = format!("{:#}", Description::parse(&json).unwrap_err());
+            assert!(err.contains(reason), "{err}");
+        };
+        refused(&|j| j["version"] = json!(2), "version 2");
+        refused(&|j| j["storeDir"] = json!("/gnu/store"), "/gnu/store");
+        refused(
+            &|j| j["tmpDirInSandbox"] = json!("/tmp/nix-build-x-0"),
+            "sandbox",
+        );
+        refused(
+            &|j| j["builder"] = json!("builtin:fetchurl"),
+            "builtin:fetchurl",
+        );
+        refused(&|j| j["inputPaths"] = json!(["/etc/passwd"]), "/etc/passwd");
+        refused(
+            &|j| {
+                j.as_object_mut()
+                    .unwrap()
+                    .remove("env")
+                    .map(|_| ())
+                    .unwrap()
+            },
+            "env",
+        );
+
+        std::fs::create_dir(dir.join("kept")).unwrap();
+        refused(&|_| {}, "kept");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     // More store paths for the reference graph tests: a root, what it

@@ -60,6 +60,11 @@ pub(crate) fn command(m: &Manifest) -> Result<Vec<String>, Unset> {
             let program = vec!["nix".to_string(), drv.clone()];
             Some(program)
         }
+        // A described build's machine is in its description, the
+        // derivation's rewindFlags, and `rewind build` takes no other.
+        Source::Build { description, .. } => {
+            return Ok(vec!["build".to_string(), description.clone()]);
+        }
         Source::Image { root } => {
             let job = &spec.job;
             flag(&mut args, "root", root.clone());
@@ -324,6 +329,25 @@ pub(crate) mod tests {
             "--epoch 1791072000 --cpu v3 --clock exits --name mylib-0.3.0",
         ));
         assert_eq!(command(&m).unwrap(), want);
+    }
+
+    #[test]
+    fn a_described_build_is_made_again_from_its_description() {
+        // A build nix-daemon described holds its machine in the
+        // description, so the command is the description alone, with none
+        // of the options a run or a Nix build names.
+        let m = manifest(
+            "greet",
+            Source::Build {
+                description: "/tmp/nix-build-greet.drv-0/build.json".into(),
+                outputs: vec![],
+            },
+            spec(job(&["bash"], &[], "/build")),
+        );
+        assert_eq!(
+            command(&m).unwrap(),
+            words("build /tmp/nix-build-greet.drv-0/build.json")
+        );
     }
 
     #[test]

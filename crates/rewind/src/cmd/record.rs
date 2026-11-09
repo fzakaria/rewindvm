@@ -1,8 +1,9 @@
 //! The `rewind` subcommands that record runs: a command in a root
 //! filesystem, a Nix build, a search for a schedule that changes how one
-//! ends, and a fork of a run at a step.
+//! ends, and a fork of a run at a step. A build nix-daemon described is
+//! recorded here too, for `rewind build` (see [`super::build`]).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -1832,6 +1833,37 @@ pub(crate) struct MachineArgs {
     kernel_args: String,
 }
 
+impl MachineArgs {
+    /// The options left to a default that this machine or this day
+    /// decides: the epoch, which is the start of today, the CPU model,
+    /// which is v3 or v3-compat by what this CPU has, and the clock,
+    /// which `auto` picks by this machine's branch counter. A run whose
+    /// inputs must all be written down, as a derivation's are, names
+    /// each.
+    pub(super) fn unpinned(&self) -> Vec<&'static str> {
+        let mut unpinned = Vec::new();
+        if self.epoch.is_none() {
+            unpinned.push("--epoch");
+        }
+        if self.cpu.is_none() {
+            unpinned.push("--cpu");
+        }
+        if self.clock == ClockArg::Auto {
+            unpinned.push("--clock exits or --clock branches");
+        }
+        unpinned
+    }
+
+    /// The same options for a run whose files are read where its job
+    /// exits, as a build's outputs are: a run that skips keyframes still
+    /// takes one there, so the read restores the keyframe instead of
+    /// replaying the run from boot.
+    pub(super) fn read_at_exit(mut self) -> MachineArgs {
+        self.exit_keyframe = ExitKeyframe::Take;
+        self
+    }
+}
+
 /// A command in a root filesystem, for `run` and `check`.
 #[derive(clap::Args, Clone)]
 pub(crate) struct ImageArgs {
@@ -1859,9 +1891,14 @@ pub(crate) struct ImageArgs {
 }
 
 /// What a run runs.
-enum Workload {
+pub(super) enum Workload {
     Nix(String),
     Image(ImageArgs),
+    /// A build nix-daemon described, and the file the description is in.
+    Described {
+        description: Box<nix::Description>,
+        path: PathBuf,
+    },
 }
 
 /// The VM's memory in MiB unless --mem says otherwise.
@@ -1938,7 +1975,7 @@ struct Prepared {
 /// How `run` and `nix` report a run: its output as it executes and a
 /// summary when it ends, or nothing until one JSON object.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Report {
+pub(super) enum Report {
     Text,
     Json,
 }
@@ -1951,7 +1988,7 @@ impl Report {
 
 /// Runs a workload with the given machine options, reported as `report`
 /// says.
-fn run_workload(
+pub(super) fn run_workload(
     home: &Home,
     guest: &Guest,
     workload: &Workload,
@@ -1991,6 +2028,9 @@ fn prepare(
     }
     let (name, source, image, job) = match workload {
         Workload::Nix(installable) => prepare_nix(home, installable, machine.cores)?,
+        Workload::Described { description, path } => {
+            prepare_described(home, description, path, machine.cores)?
+        }
         Workload::Image(args) => prepare_image(home, args)?,
     };
     let image_hash = match &image {
@@ -2059,27 +2099,52 @@ fn prepare_nix(
             .map(|(_, p)| p.display().to_string())
             .collect(),
     };
-    prepare_build(home, &build, source)
+    prepare_build(home, &build, Path::new(nix::STORE), source)
+}
+
+/// The builder of a build nix-daemon described in the file at `path`,
+/// told it has `cores` cores, with the inputs the description names as
+/// the image.
+fn prepare_described(
+    home: &Home,
+    description: &nix::Description,
+    path: &Path,
+    cores: u32,
+) -> Result<(String, Source, Option<PathBuf>, Job)> {
+    let mut build = description.build.clone();
+    build.set_cores(cores);
+    let source = Source::Build {
+        description: path.display().to_string(),
+        outputs: build
+            .outputs
+            .iter()
+            .map(|(_, p)| p.display().to_string())
+            .collect(),
+    };
+    prepare_build(home, &build, &description.real_store, source)
 }
 
 /// A described build's builder, with the build's inputs as the image.
+/// `store` is where this machine has the inputs' files.
 fn prepare_build(
     home: &Home,
     build: &nix::Build,
+    store: &Path,
     source: Source,
 ) -> Result<(String, Source, Option<PathBuf>, Job)> {
     // Images of store paths are named by the paths, which already name
-    // their contents.
-    let key = blake3::hash(
-        build
-            .inputs
-            .iter()
-            .map(|p| p.to_string_lossy())
-            .collect::<Vec<_>>()
-            .join("\n")
-            .as_bytes(),
-    )
-    .to_hex();
+    // their contents in one store. A store kept somewhere else may hold
+    // other contents under a path's name, so its images are named by
+    // where the store is as well.
+    let mut names: Vec<String> = build
+        .inputs
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    if store != Path::new(nix::STORE) {
+        names.push(store.to_string_lossy().into_owned());
+    }
+    let key = blake3::hash(names.join("\n").as_bytes()).to_hex();
     let image = home.images().join(format!("store-{}.erofs", &key[..32]));
     if !image.exists() {
         eprintln!(
@@ -2089,7 +2154,7 @@ fn prepare_build(
             build.name
         );
         let tmp = image::temp_beside(&image);
-        image::from_store_paths(&build.inputs, &tmp)?;
+        image::from_store_paths(store, &build.inputs, &tmp)?;
         image::place(&tmp, &image)?;
     }
 
@@ -2386,7 +2451,7 @@ fn print_compared(compared: &Compared) {
 }
 
 /// Builds or reuses the erofs image for a root filesystem argument.
-fn root_image(home: &Home, root: &std::path::Path) -> Result<PathBuf> {
+fn root_image(home: &Home, root: &Path) -> Result<PathBuf> {
     if root.extension().is_some_and(|e| e == "erofs") {
         return Ok(root.to_path_buf());
     }
@@ -2440,7 +2505,7 @@ fn parse_env(pairs: &[String]) -> Result<Vec<(String, String)>> {
 
 /// The job's wait status as the process exit code, the way a shell reports
 /// a child.
-fn exit_status(run: &Run) -> ExitCode {
+pub(super) fn exit_status(run: &Run) -> ExitCode {
     match run.manifest.outcome.as_ref().and_then(|o| o.status) {
         Some(0) => ExitCode::SUCCESS,
         Some(s) => ExitCode::from(rewind_trace::ending::ExitStatus::from_wait(s).shell_code()),
