@@ -1696,6 +1696,65 @@ in
       touch $out
     '';
 
+  # checks.external-builder: Nix hands a build for the platform
+  # x86_64-rewind-<vendor> to `rewind build --external-builder`, and takes
+  # the output the command copied into the store. A Nix inside the check
+  # builds a derivation for this machine's vendor in a store of its own,
+  # with the program named in its external-builders setting; the builder,
+  # a static busybox, writes the date, which is the epoch's day. The check
+  # holds Nix's side of the handover: the description's form, and the line
+  # Nix waits for before it reads the build's log. A CPU of neither vendor
+  # skips the check and says so. Boots the VM, so it needs /dev/kvm.
+  external-builder =
+    let
+      busybox = pkgs.pkgsStatic.busybox;
+      closure = pkgs.closureInfo { rootPaths = [ busybox ]; };
+    in
+    pkgs.runCommand "rewind-external-builder"
+      {
+        nativeBuildInputs = [
+          rewind
+          pkgs.nix
+        ];
+        requiredSystemFeatures = [ "kvm" ];
+      }
+      ''
+        case $(awk -F': ' '/^vendor_id/ { print $2; exit }' /proc/cpuinfo) in
+          AuthenticAMD) vendor=amd ;;
+          GenuineIntel) vendor=intel ;;
+          *)
+            echo "skipped: this CPU is neither AMD's nor Intel's"
+            touch $out
+            exit 0
+            ;;
+        esac
+
+        # A store of the check's own that holds the builder.
+        export HOME=$TMPDIR/home
+        store=$TMPDIR/store
+        mkdir -p $store/nix/store
+        xargs -I{} cp -a {} $store/nix/store/ < ${closure}/store-paths
+        nix-store --store $store --load-db < ${closure}/registration
+
+        cat > day.nix <<EOF
+        derivation {
+          name = "day";
+          system = "x86_64-rewind-$vendor";
+          builder = "\''${builtins.storePath ${busybox}}/bin/busybox";
+          args = [ "sh" "-c" "echo the builder ran; \''${builtins.storePath ${busybox}}/bin/busybox date -u +%F > \\\$out" ];
+          rewindFlags = "--epoch 1790985600 --cpu v3-compat --clock exits";
+        }
+        EOF
+        built=$(nix-build day.nix --store $store --no-out-link \
+          --extra-experimental-features external-builders \
+          --external-builders '[{"systems":["x86_64-rewind-'$vendor'"],"program":"${rewind}/bin/rewind","args":["build","--external-builder"]}]' \
+          --option substituters "" 2> log) || { cat log; exit 1; }
+        cat log
+        grep -q 'the builder ran' log
+        test "$(cat $store$built)" = 2026-10-03
+        touch $out
+      '';
+
   # checks.image-env: the image of a root, and so the run, is the same
   # whether rewind runs in a Nix development shell, which sets
   # SOURCE_DATE_EPOCH to 1980, or outside one. mkfs.erofs reads the
