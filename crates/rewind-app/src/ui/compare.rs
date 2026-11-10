@@ -45,6 +45,7 @@ impl Scrubber {
         }
         let at = step.or_else(|| session.matching_step(self.step));
         let tab = self.right_tab;
+        self.lanes_runs_swapping();
         self.show(session.swapped(), at, cx);
         if tab == RightTab::Compare {
             self.select_tab(RightTab::Compare, cx);

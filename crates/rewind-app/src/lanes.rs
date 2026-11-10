@@ -148,10 +148,13 @@ pub fn rows(here: &[Slice], there: &[Slice]) -> Vec<Row> {
 
 /// The steps a lane shows: `half` steps either side of `center`. Each run
 /// has a center of its own, and the same offset from it lines up across
-/// the two.
+/// the two. This run's window never starts before step 0, so its center
+/// is at least `half`. The compared run's window is this run's shifted by
+/// the offset between the runs, which can put its center before step 0:
+/// the lane is then empty up to the compared run's step 0.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Window {
-    pub center: u64,
+    pub center: i64,
     pub half: u64,
 }
 
@@ -166,23 +169,31 @@ impl Window {
         } else {
             step.clamp(half, last - half)
         };
-        Window { center, half }
+        Window {
+            center: center as i64,
+            half,
+        }
     }
 
     /// The window's first step, which is never before step 0.
     pub fn from(&self) -> u64 {
-        self.center.saturating_sub(self.half)
+        (self.center - self.half as i64).max(0) as u64
     }
 
-    /// The window's last step.
+    /// The window's last step, or step 0 for a window wholly before it.
     pub fn to(&self) -> u64 {
-        self.center + self.half
+        (self.center + self.half as i64).max(0) as u64
+    }
+
+    /// The window's center as a step, for this run's window.
+    pub fn center_step(&self) -> u64 {
+        self.center.max(0) as u64
     }
 
     /// How far along the window `step` is, from 0 at the left edge of its
     /// first offset to 1 at the right edge of its last; None outside it.
     pub fn at(&self, step: u64) -> Option<f32> {
-        let offset = step as i64 - self.center as i64 + self.half as i64;
+        let offset = step as i64 - self.center + self.half as i64;
         if offset < 0 || offset > 2 * self.half as i64 {
             return None;
         }
@@ -197,45 +208,66 @@ impl Window {
     /// This window's step at `offset` steps from its center, when there is
     /// one.
     pub fn step_at(&self, offset: i64) -> Option<u64> {
-        self.center.checked_add_signed(offset)
+        u64::try_from(self.center.checked_add(offset)?).ok()
     }
 
     /// The window `factor` times as wide, above 1 to zoom out, keeping the
     /// step `fraction` of the way across where it is, and its half between
-    /// MIN_HALF and MAX_HALF.
+    /// MIN_HALF and MAX_HALF. The window stops at step 0, so near the
+    /// run's start the step under the pointer moves.
     pub fn zoomed(&self, fraction: f32, factor: f64) -> Window {
         let along = |half: u64| (fraction as f64 * (2 * half + 1) as f64).floor() as i64;
-        let pointer = self.center as i64 - self.half as i64 + along(self.half);
+        let pointer = self.center - self.half as i64 + along(self.half);
         let half = ((self.half as f64 * factor).round() as u64).clamp(MIN_HALF, MAX_HALF);
         let center = pointer - along(half) + half as i64;
-        Window {
-            center: center.max(0) as u64,
-            half,
-        }
+        Window { center, half }.from_step_0()
     }
 
-    /// The window moved by `fraction` of its width, never to a center
-    /// before step 0.
+    /// The window moved by `fraction` of its width, never to start before
+    /// step 0.
     pub fn panned(&self, fraction: f32) -> Window {
         let by = (fraction as f64 * (2 * self.half + 1) as f64).round() as i64;
-        self.shifted(by)
+        self.shifted(by).from_step_0()
     }
 
     /// The same width `by` steps along: the compared run's window, whose
-    /// center is this one's plus the offset between the two runs.
+    /// center is this one's plus the offset between the two runs. The
+    /// center may come out before step 0.
     pub fn shifted(&self, by: i64) -> Window {
         Window {
-            center: self.center.saturating_add_signed(by),
+            center: self.center.saturating_add(by),
             half: self.half,
         }
+    }
+
+    /// This window, moved right when it starts before step 0 so that it
+    /// starts there: where this run's window stops.
+    pub fn from_step_0(&self) -> Window {
+        Window {
+            center: self.center.max(self.half as i64),
+            half: self.half,
+        }
+    }
+
+    /// Whether the steps `from..=to` reach into the window.
+    pub fn overlaps(&self, from: u64, to: u64) -> bool {
+        let half = self.half as i64;
+        to as i64 >= self.center - half && from as i64 <= self.center + half
+    }
+
+    /// This window on the compared run's steps, `by` steps along, for
+    /// when the compared run takes this run's place on screen.
+    pub fn swapped(&self, by: i64) -> Window {
+        self.shifted(by).from_step_0()
     }
 
     /// The steps to read for this window: half a window more on each
     /// side, so a small pan or zoom out needs no reading of its own.
     pub fn fetch_range(&self) -> (u64, u64) {
+        let reach = 2 * self.half as i64;
         (
-            self.center.saturating_sub(2 * self.half),
-            self.center + 2 * self.half,
+            (self.center - reach).max(0) as u64,
+            (self.center + reach).max(0) as u64,
         )
     }
 
@@ -244,6 +276,28 @@ impl Window {
     pub fn covered_by(&self, fetched: Option<(u64, u64)>, last: u64) -> bool {
         fetched.is_some_and(|(from, to)| self.from() >= from && self.to().min(last) <= to)
     }
+}
+
+/// Where two runs part: the step in this run and the step in the
+/// compared run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Parted {
+    pub this: u64,
+    pub other: u64,
+}
+
+/// How many steps the compared run's window is along from this run's,
+/// for a window centered on `center`. `matched` is the compared run's
+/// step paired with `center`. From where the runs part on, each run goes
+/// on from its own step there, so the offset is the same at every center.
+/// None without a paired step.
+pub fn offset(center: u64, parted: Option<Parted>, matched: Option<u64>) -> Option<i64> {
+    if let Some(parted) = parted
+        && center >= parted.this
+    {
+        return Some(parted.other as i64 - parted.this as i64);
+    }
+    Some(matched? as i64 - center as i64)
 }
 
 /// The narrowest and widest a window is, in steps either side of its
@@ -367,7 +421,8 @@ mod tests {
 
     /// A step's place runs from its offset's left edge: the first step of
     /// a window at 0, its center in the middle; steps outside it have
-    /// none. A window near step 0 keeps its width, with no steps before 0.
+    /// none. A window that starts before step 0, as the compared run's
+    /// can, keeps its width, with no steps before 0.
     #[test]
     fn a_step_is_placed_by_its_offset_from_the_center() {
         let w = Window {
@@ -485,7 +540,8 @@ mod tests {
 
     /// Zooming keeps the step under the pointer where it is: in at the
     /// middle keeps the center, in at the left edge keeps the first step,
-    /// and the half stays between MIN_HALF and MAX_HALF.
+    /// and the half stays between MIN_HALF and MAX_HALF. Zooming out near
+    /// the run's start stops the window at step 0.
     #[test]
     fn zooming_keeps_the_step_under_the_pointer() {
         let w = Window {
@@ -517,12 +573,14 @@ mod tests {
             half: MAX_HALF,
         };
         assert_eq!(wide.zoomed(0.5, 2.0).half, MAX_HALF);
-        let early = Window { center: 5, half: 8 };
-        assert_eq!(early.zoomed(1.0, 2.0).center, 0);
+        let early = Window { center: 8, half: 8 };
+        assert_eq!(early.zoomed(1.0, 2.0).center, 16);
     }
 
     /// Panning moves the center by a share of the window's width, and
-    /// stops at step 0; shifting moves it by steps, for the compared run.
+    /// stops with the window's first step at step 0, so the axis's first
+    /// label is the step at the lanes' left edge; shifting moves the
+    /// center by steps, for the compared run.
     #[test]
     fn panning_moves_the_center_by_a_share_of_the_width() {
         let w = Window {
@@ -531,9 +589,66 @@ mod tests {
         };
         assert_eq!(w.panned(0.1).center, 1020);
         assert_eq!(w.panned(-0.1).center, 980);
-        assert_eq!(w.panned(-10.0).center, 0);
+        assert_eq!(w.panned(-10.0).center, 100);
+        assert_eq!(w.panned(-10.0).from(), 0);
         assert_eq!(w.shifted(-4).center, 996);
-        assert_eq!(w.shifted(-2000).center, 0);
+        assert_eq!(w.shifted(-2000).center, -1000);
+    }
+
+    /// The compared run's window is offset from this run's by the steps
+    /// between the two runs at the window's center: before the runs part,
+    /// by the step paired with the center; from where they part on, by
+    /// the same number of steps at every center, since each run goes on
+    /// from its own step there.
+    #[test]
+    fn the_offset_is_fixed_past_where_the_runs_part() {
+        let parted = Some(Parted {
+            this: 100,
+            other: 140,
+        });
+        assert_eq!(offset(50, parted, Some(70)), Some(20));
+        assert_eq!(offset(100, parted, Some(140)), Some(40));
+        assert_eq!(offset(500, parted, Some(140)), Some(40));
+        assert_eq!(offset(500, None, Some(470)), Some(-30));
+        assert_eq!(offset(500, None, None), None);
+    }
+
+    /// The compared run's window keeps its place under this run's when
+    /// the offset takes its center before step 0: its steps stay at the
+    /// same offsets from the center, and the offsets before step 0 have
+    /// no step. A window wholly before step 0 holds no slice.
+    #[test]
+    fn a_shifted_window_may_start_before_step_0() {
+        let w = Window {
+            center: 30,
+            half: 30,
+        };
+        let there = w.shifted(-50);
+        assert_eq!(there.center, -20);
+        assert_eq!((there.from(), there.to()), (0, 10));
+        assert_eq!(there.at(0), Some(50.0 * there.step_width()));
+        assert_eq!(there.at(11), None);
+        assert_eq!(there.step_at(19), None);
+        assert_eq!(there.step_at(20), Some(0));
+        assert!(there.overlaps(0, 4));
+        assert!(!there.overlaps(11, 40));
+        let before = w.shifted(-500);
+        assert!(!before.overlaps(0, 4));
+        assert_eq!(before.fetch_range(), (0, 0));
+    }
+
+    /// When the compared run takes this run's place on screen, the window
+    /// kept moves onto the compared run's steps: the offset along, and no
+    /// further left than a window on screen goes.
+    #[test]
+    fn the_window_moves_onto_the_compared_run_s_steps_at_a_swap() {
+        let w = Window {
+            center: 500,
+            half: 30,
+        };
+        assert_eq!(w.swapped(40).center, 540);
+        assert_eq!(w.swapped(-40).center, 460);
+        assert_eq!(w.swapped(-490).center, 30);
     }
 
     /// A window reads half a window more on each side, and needs a

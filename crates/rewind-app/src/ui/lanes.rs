@@ -27,7 +27,7 @@ use gpui::{
 };
 
 use crate::describe::{self, thousands};
-use crate::lanes::{Lane, Row, Side, Slice, Window, first_switch, held, rows};
+use crate::lanes::{Lane, Parted, Row, Side, Slice, Window, first_switch, held, rows};
 use crate::run::{Run, Session};
 use crate::selection::{Mapped, Surface, part_of_line};
 use crate::theme::{self, layout, size};
@@ -162,7 +162,7 @@ impl LanesPanel {
         let inside = |slices: &[Slice], window: Window| -> Vec<Slice> {
             slices
                 .iter()
-                .filter(|s| s.to >= window.from() && s.from <= window.to())
+                .filter(|s| window.overlaps(s.from, s.to))
                 .cloned()
                 .collect()
         };
@@ -212,11 +212,21 @@ fn no_lanes(session: &Session) -> Option<&'static str> {
 /// `center`.
 fn offset_of(session: &Session, center: u64) -> Option<i64> {
     session.other.as_ref()?;
-    let there = match &session.split {
-        Some(_) => center,
-        None => session.matching_step(center)?,
-    };
-    Some(there as i64 - center as i64)
+
+    // Runs whose schedules part are the same machine until then, and are
+    // lined up step for step.
+    if session.split.is_some() {
+        return Some(0);
+    }
+    let parted = session
+        .comparison
+        .as_ref()
+        .and_then(|c| c.point.as_ref())
+        .map(|p| Parted {
+            this: p.step,
+            other: p.other_step,
+        });
+    crate::lanes::offset(center, parted, session.matching_step(center))
 }
 
 impl Scrubber {
@@ -275,7 +285,7 @@ impl Scrubber {
         let session = self.session();
         let mut lanes = LanesPanel {
             window,
-            offset: offset_of(session, window.center),
+            offset: offset_of(session, window.center_step()),
             unavailable: no_lanes(session),
             here: Held::of(&session.run),
             there: session.other.as_ref().map(Held::of).unwrap_or_default(),
@@ -304,21 +314,37 @@ impl Scrubber {
         cx.notify();
     }
 
+    /// The tab, as the compared run is about to take this run's place on
+    /// screen: the window moves onto the compared run's steps, so the
+    /// lanes show the same place in both runs after the swap.
+    pub(super) fn lanes_runs_swapping(&mut self) {
+        let Some(lanes) = &mut self.lanes else {
+            return;
+        };
+        let Some(offset) = lanes.offset else {
+            return;
+        };
+        lanes.window = lanes.window.swapped(offset);
+    }
+
     /// The tab for a session just shown: the same window over the new
     /// session's runs, read again, when the tab was open.
     pub(super) fn lanes_session_changed(&mut self) {
         let Some(lanes) = &self.lanes else {
             return;
         };
+        let last = self.session().run.timeline.total as i64;
         let mut window = lanes.window;
-        window.center = window.center.min(self.session().run.timeline.total);
-        self.lanes = Some(self.new_lanes(window));
+        window.center = window.center.min(last);
+        self.lanes = Some(self.new_lanes(window.from_step_0()));
     }
 
     /// Moves the window to `window`, and reads what it newly shows.
     fn move_lanes(&mut self, mut window: Window, cx: &mut Context<Self>) {
-        // A window never moves past where both runs have ended.
-        window.center = window.center.min(self.lanes_last());
+        // A window never moves past where both runs have ended, nor to
+        // start before step 0.
+        window.center = window.center.min(self.lanes_last() as i64);
+        window = window.from_step_0();
         let (Some(lanes), Some(session)) = (&mut self.lanes, &self.session) else {
             return;
         };
@@ -648,7 +674,7 @@ impl Scrubber {
                     .text_color(rgb(theme::FAINT))
                     .child(measure(|m| &m.lanes_plot, &self.measured))
                     .child(thousands(window.from()))
-                    .child(thousands(window.center))
+                    .child(thousands(window.center_step()))
                     .child(thousands(window.to())),
             )
     }
