@@ -45,9 +45,36 @@ pub enum Contents {
 
 const PAGE_SIZE: usize = 4096;
 
-/// Writes `run` to `out` as a `.rwd` file.
+/// Writes `run` to `out` as a `.rwd` file. The export is written under a
+/// temporary name beside `out` and renamed into place once it is whole,
+/// so an export that fails leaves a file already at `out` as it was.
 pub fn export(home: &Home, run: &Run, contents: Contents, out: &Path) -> Result<()> {
-    let file = File::create(out).with_context(|| format!("creating {}", out.display()))?;
+    let create =
+        |path: &Path| File::create(path).with_context(|| format!("creating {}", out.display()));
+
+    // A destination that is not a regular file, such as a pipe, has no
+    // earlier export to lose and cannot be renamed over, so the export is
+    // written straight into it.
+    if fs::metadata(out).is_ok_and(|meta| !meta.is_file()) {
+        return write_export(home, run, contents, create(out)?);
+    }
+
+    // Any other destination is written beside itself and renamed into
+    // place. A destination that is a symbolic link stays one: the file
+    // the link names is the one replaced.
+    let dest = fs::canonicalize(out).unwrap_or_else(|_| out.to_path_buf());
+    let tmp = crate::image::temp_beside(&dest);
+    let written = create(&tmp)
+        .and_then(|file| write_export(home, run, contents, file))
+        .and_then(|()| crate::image::place(&tmp, &dest));
+    if written.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    written
+}
+
+/// Writes `run` into `file` as a `.rwd` file.
+fn write_export(home: &Home, run: &Run, contents: Contents, file: File) -> Result<()> {
     let encoder = zstd::Encoder::new(file, COMPRESSION_LEVEL)?;
     let mut tar = tar::Builder::new(encoder);
     tar.mode(tar::HeaderMode::Deterministic);
@@ -461,6 +488,41 @@ mod tests {
         for home in [from, to, view] {
             fs::remove_dir_all(home.root()).unwrap();
         }
+    }
+
+    #[test]
+    fn a_failed_export_leaves_the_file_it_was_writing_over() {
+        // A run whose kernel is gone cannot be exported to replay. The
+        // export fails, the file already at the destination keeps its
+        // bytes, and no temporary file is left beside it. The same run
+        // exported to view then replaces the file, also at a destination
+        // named without a directory.
+        let home = home("export-fails");
+        let dir = home.runs().join(ID);
+        fs::create_dir_all(&dir).unwrap();
+        let mut m: Manifest = serde_json::from_slice(&finished(ID)).unwrap();
+        m.spec.kernel = home.root().join("no-such-kernel");
+        fs::write(dir.join(MANIFEST), serde_json::to_vec_pretty(&m).unwrap()).unwrap();
+        fs::write(dir.join(TRACE), b"trace").unwrap();
+        let run = Run::open(&dir).unwrap();
+
+        let out_dir = home.root().join("exports");
+        fs::create_dir_all(&out_dir).unwrap();
+        let out = out_dir.join("run.rwd");
+        fs::write(&out, b"an earlier export").unwrap();
+        assert!(export(&home, &run, Contents::Replayable, &out).is_err());
+        assert_eq!(fs::read(&out).unwrap(), b"an earlier export");
+        assert_eq!(fs::read_dir(&out_dir).unwrap().count(), 1);
+
+        export(&home, &run, Contents::View, &out).unwrap();
+        assert_ne!(fs::read(&out).unwrap(), b"an earlier export");
+        assert_eq!(fs::read_dir(&out_dir).unwrap().count(), 1);
+
+        let bare = PathBuf::from(format!("rewind-export-test-{}.rwd", std::process::id()));
+        export(&home, &run, Contents::View, &bare).unwrap();
+        assert_eq!(fs::read(&bare).unwrap(), fs::read(&out).unwrap());
+        fs::remove_file(&bare).unwrap();
+        fs::remove_dir_all(home.root()).unwrap();
     }
 
     #[test]

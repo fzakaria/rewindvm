@@ -177,11 +177,23 @@ pub fn place(tmp: &Path, path: &Path) -> Result<()> {
         .and_then(|f| f.sync_all())
         .with_context(|| format!("syncing {}", tmp.display()))?;
     fs::rename(tmp, path).with_context(|| format!("renaming {} into place", tmp.display()))?;
-    if let Some(dir) = path.parent() {
-        fs::File::open(dir)?.sync_all()?;
-    }
+
+    // The directory the name is in. A path of a file name alone has an
+    // empty parent, which names the current directory.
+    let Some(dir) = path.parent() else {
+        return Ok(());
+    };
+    let dir = if dir.as_os_str().is_empty() {
+        Path::new(CURRENT_DIR)
+    } else {
+        dir
+    };
+    fs::File::open(dir)?.sync_all()?;
     Ok(())
 }
+
+/// The directory a path without one is in.
+const CURRENT_DIR: &str = ".";
 
 /// Writes `bytes` to `path` atomically, so a crash never leaves a half
 /// written image where a whole one is expected. Writers of the same path in
