@@ -9,6 +9,7 @@
 //! owners and times the VM's filesystem had. So the same run at the same
 //! step is the same archive on any machine.
 
+use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::{self, Write};
@@ -203,6 +204,8 @@ pub struct Unpack {
     /// tree is whole: a directory the VM kept read-only still has to take
     /// its entries here.
     directories: Vec<(PathBuf, u32)>,
+    /// The directories made, for the parent check each entry takes.
+    made: HashSet<PathBuf>,
 }
 
 impl Unpack {
@@ -212,6 +215,7 @@ impl Unpack {
             root,
             file: None,
             directories: Vec::new(),
+            made: HashSet::new(),
         }
     }
 
@@ -224,7 +228,10 @@ impl Unpack {
     }
 
     /// Where an entry lands. An error for a path that would land outside
-    /// the root, which init never sends.
+    /// the root, which init never sends, and for one whose parent is not
+    /// a directory this tree made: a symlink sent first would take a file
+    /// "under" it anywhere on this machine the link points, as a guest the
+    /// build took over could send one.
     fn path_of(&self, entry: &TreeEntry) -> io::Result<PathBuf> {
         if entry.path.is_empty() {
             return Ok(self.root.clone());
@@ -242,7 +249,22 @@ impl Unpack {
                 ),
             ));
         }
-        Ok(self.root.join(OsStr::from_bytes(&entry.path)))
+
+        // The parent must be a directory of this tree, the root included:
+        // every path from the root down is then one of directories made
+        // here, and no symlink is on the way.
+        let path = self.root.join(OsStr::from_bytes(&entry.path));
+        let parent = path.parent().unwrap_or(&self.root);
+        if !self.made.contains(parent) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{} is not under a directory of the tree",
+                    String::from_utf8_lossy(&entry.path)
+                ),
+            ));
+        }
+        Ok(path)
     }
 }
 
@@ -252,6 +274,7 @@ impl TreeSink for Unpack {
         match entry.kind {
             ListedKind::Directory => {
                 fs::create_dir(&path)?;
+                self.made.insert(path.clone());
                 self.directories.push((path, entry.mode));
             }
             ListedKind::Symlink => {
@@ -576,6 +599,60 @@ mod tests {
         let mut unpack = Unpack::new(dir.join("taken"));
         assert!(send(&file, &mut unpack).is_err());
         assert_eq!(fs::read(dir.join("taken")).unwrap(), b"mine");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_file_under_a_symlink_is_refused() {
+        // A tree that sends a symlink to a directory outside the root, then
+        // a file "under" the link: a VM the build took over could write
+        // anywhere on this machine that way. The file is refused, and
+        // nothing lands where the link points. The same for a file under a
+        // file, and for a file under a link to a directory inside the root.
+        let dir = scratch("symlink");
+        let elsewhere = dir.join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        let escaping = vec![
+            (entry("", ListedKind::Directory, 0o755, 0, ""), vec![]),
+            (
+                entry(
+                    "link",
+                    ListedKind::Symlink,
+                    0o777,
+                    0,
+                    elsewhere.to_str().unwrap(),
+                ),
+                vec![],
+            ),
+            (
+                entry("link/file", ListedKind::File, 0o644, 2, ""),
+                b"hi".to_vec(),
+            ),
+        ];
+        let mut unpack = Unpack::new(dir.join("out"));
+        let err = send(&escaping, &mut unpack).unwrap_err();
+        assert!(err.to_string().contains("link/file"), "{err}");
+        assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
+        fs::remove_dir_all(dir.join("out")).unwrap();
+
+        let under_file = vec![
+            (entry("", ListedKind::Directory, 0o755, 0, ""), vec![]),
+            (entry("a", ListedKind::File, 0o644, 0, ""), vec![]),
+            (entry("a/b", ListedKind::File, 0o644, 0, ""), vec![]),
+        ];
+        let mut unpack = Unpack::new(dir.join("out"));
+        assert!(send(&under_file, &mut unpack).is_err());
+        fs::remove_dir_all(dir.join("out")).unwrap();
+
+        let inside = vec![
+            (entry("", ListedKind::Directory, 0o755, 0, ""), vec![]),
+            (entry("real", ListedKind::Directory, 0o755, 0, ""), vec![]),
+            (entry("link", ListedKind::Symlink, 0o777, 0, "real"), vec![]),
+            (entry("link/file", ListedKind::File, 0o644, 0, ""), vec![]),
+        ];
+        let mut unpack = Unpack::new(dir.join("out"));
+        assert!(send(&inside, &mut unpack).is_err());
+        assert_eq!(fs::read_dir(dir.join("out/real")).unwrap().count(), 0);
         fs::remove_dir_all(&dir).unwrap();
     }
 }
