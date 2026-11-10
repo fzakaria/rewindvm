@@ -433,12 +433,7 @@ impl Scrubber {
         // Lookups still running when the app quits are stopped, as
         // dropping the viewer and the source panel stops them.
         let on_quit = cx.on_app_quit(|this: &mut Scrubber, _| {
-            this.blames.stop_all();
-            this.viewer = None;
-            this.file_diff = None;
-            this.source = None;
-            this.lanes = None;
-            this.sweep = None;
+            this.close_run_panels();
             async {}
         });
         let recent_filter = cx.new(|cx| {
@@ -720,11 +715,7 @@ impl Scrubber {
         let compares = session.other.is_some();
         self.session = Some(session);
         if !compares {
-            self.file_diff = None;
-        }
-        let needs_comparison = matches!(self.right_tab, RightTab::Compare | RightTab::FileDiff);
-        if needs_comparison && !compares {
-            self.right_tab = RightTab::AtStep;
+            self.close_comparison_tabs();
         }
 
         // The panels that said the run was still being imported ask the
@@ -997,82 +988,130 @@ impl Scrubber {
 
     /// Has the engine delete the runs in `dirs` and their forks. When the
     /// run on screen was one of them, the nearest run left above it takes
-    /// its place, or the empty state when none is.
+    /// its place, or the empty state when none is; when the compared run
+    /// was, the run on screen stays alone. A failure part of the way is
+    /// reported, and the runs removed before it are taken off all the
+    /// same.
     fn remove_runs(&mut self, dirs: Vec<PathBuf>, cx: &mut Context<Self>) {
-        let call_dirs = dirs.clone();
         self.with_engine(
             cx,
-            move |engine| {
-                let mut removed = Vec::new();
-                for dir in &call_dirs {
-                    removed.extend(engine.remove(dir)?);
-                }
-                Ok(removed)
-            },
+            move |engine| Ok(remove_each(&dirs, |dir| engine.remove(dir))),
             move |this, result, cx| {
-                let removed = match result {
-                    Ok(removed) => removed,
-                    Err(e) => {
-                        this.report("Could not delete", e, cx);
-                        this.reload_runs(cx);
-                        return;
-                    }
+                let (removed, failed) = match result {
+                    Ok(done) => done,
+                    Err(e) => (Vec::new(), Some(e)),
                 };
-                this.runs.picked.retain(|id| !removed.contains(id));
-
-                // A comparison chosen with a run that is gone is dropped,
-                // or every run opened after would be compared with nothing.
-                this.runs.pinned_compare = this
-                    .runs
-                    .pinned_compare
-                    .take()
-                    .filter(|dir| !removed.iter().any(|id| dir.ends_with(id)));
-                let shown = this
-                    .session
-                    .as_ref()
-                    .and_then(|s| s.run.id())
-                    .map(ToString::to_string);
-
-                // The nearest ancestor of the run on screen that is left.
-                let mut replacement = None;
-                if let (Some(shown), Some(family)) = (&shown, &this.runs.family)
-                    && removed.contains(shown)
-                {
-                    let mut at = family.runs.iter().find(|r| &r.id == shown);
-                    while let Some(run) = at {
-                        if !removed.contains(&run.id) {
-                            replacement = Some(run.dir.clone());
-                            break;
-                        }
-                        at = run
-                            .parent
-                            .as_ref()
-                            .and_then(|p| family.runs.iter().find(|r| r.id == p.id));
-                    }
-                    if replacement.is_none() {
-                        this.session = None;
-                        this.runs.set_family(None);
-                    }
+                if let Some(e) = failed {
+                    this.report("Could not delete", e, cx);
                 }
-                this.notify_user(
-                    NoticeTone::Info,
-                    match removed.len() {
-                        1 => "Deleted 1 run".to_string(),
-                        n => format!("Deleted {n} runs"),
-                    },
-                    removed
-                        .iter()
-                        .map(|id| short_id(id))
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                    cx,
-                );
-                if let Some(dir) = replacement {
-                    this.open(dir, None, cx);
-                }
+                this.runs_removed(removed, cx);
                 this.reload_runs(cx);
             },
         );
+    }
+
+    /// Takes the runs with the ids in `removed`, which the engine
+    /// deleted, off the screen: out of the pick, the chosen comparison,
+    /// the check and the session.
+    fn runs_removed(&mut self, removed: Vec<String>, cx: &mut Context<Self>) {
+        if removed.is_empty() {
+            return;
+        }
+        let in_removed = |dir: &Path| removed.iter().any(|id| dir.ends_with(id));
+        self.runs.picked.retain(|id| !removed.contains(id));
+
+        // A comparison chosen with a run that is gone is dropped, or
+        // every run opened after would be compared with nothing.
+        self.runs.pinned_compare = self
+            .runs
+            .pinned_compare
+            .take()
+            .filter(|dir| !in_removed(dir));
+
+        // A check of a run that is gone has no run to show its card with,
+        // and its forks went with the run.
+        if self.sweep.as_ref().is_some_and(|s| in_removed(&s.run)) {
+            self.sweep = None;
+        }
+
+        // What is left of the session on screen.
+        let id_of =
+            |run: Option<&crate::run::Run>| run.and_then(|r| r.id()).map(ToString::to_string);
+        let shown = id_of(self.session.as_ref().map(|s| &s.run));
+        let compared = id_of(self.session.as_ref().and_then(|s| s.other.as_ref()));
+        let after = after_delete(
+            &removed,
+            shown.as_deref(),
+            compared.as_deref(),
+            self.runs.family.as_ref(),
+        );
+        match &after {
+            AfterDelete::Stays | AfterDelete::Replaced(_) => {}
+            AfterDelete::Alone => self.drop_comparison(),
+            AfterDelete::Gone => {
+                self.session = None;
+                self.runs.set_family(None);
+                self.close_run_panels();
+            }
+        }
+        self.notify_user(
+            NoticeTone::Info,
+            match removed.len() {
+                1 => "Deleted 1 run".to_string(),
+                n => format!("Deleted {n} runs"),
+            },
+            removed
+                .iter()
+                .map(|id| short_id(id))
+                .collect::<Vec<_>>()
+                .join(", "),
+            cx,
+        );
+        if let AfterDelete::Replaced(dir) = after {
+            self.open(dir, None, cx);
+        }
+    }
+
+    /// Closes the panels that hold one run's answers and engine jobs, as
+    /// when the app quits or the run on screen is deleted with no run to
+    /// take its place. Dropping a panel stops the engine command it waits
+    /// on.
+    fn close_run_panels(&mut self) {
+        self.blames.stop_all();
+        self.viewer = None;
+        self.file_diff = None;
+        self.source = None;
+        self.lanes = None;
+        self.sweep = None;
+        self.right_tab = RightTab::AtStep;
+    }
+
+    /// Leaves the run on screen alone, once the run it was compared with
+    /// is gone: the tabs that compare two runs close, and the lanes show
+    /// the one run.
+    fn drop_comparison(&mut self) {
+        let Some(session) = self.session.take() else {
+            return;
+        };
+        let replays = session.replays;
+        let mut alone = Session::new(session.run, None);
+        alone.replays = replays;
+        self.session = Some(alone);
+        self.close_comparison_tabs();
+
+        // A selection in a card or tab that compared the two runs would
+        // now cover other text.
+        self.selecting.selection = None;
+        self.lanes_session_changed();
+    }
+
+    /// Closes the tabs that compare two runs, when the session has one
+    /// run only.
+    fn close_comparison_tabs(&mut self) {
+        self.file_diff = None;
+        if matches!(self.right_tab, RightTab::Compare | RightTab::FileDiff) {
+            self.right_tab = RightTab::AtStep;
+        }
     }
 
     /// Opens a family from the empty state: a failing run compared with a
@@ -1963,6 +2002,71 @@ fn escape_closes(open: Open) -> Option<Closable> {
     None
 }
 
+/// Has `remove` delete each run in `dirs` in turn, as far as it goes: the
+/// ids of the runs removed, and the failure that stopped the deleting,
+/// when one did. The runs removed before a failure are gone all the same.
+fn remove_each(
+    dirs: &[PathBuf],
+    mut remove: impl FnMut(&Path) -> EngineResult<Vec<String>>,
+) -> (Vec<String>, Option<EngineError>) {
+    let mut removed = Vec::new();
+    for dir in dirs {
+        match remove(dir) {
+            Ok(ids) => removed.extend(ids),
+            Err(e) => return (removed, Some(e)),
+        }
+    }
+    (removed, None)
+}
+
+/// What deleting runs leaves of the session on screen.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AfterDelete {
+    /// Neither run on screen was deleted.
+    Stays,
+    /// The compared run was deleted: the run on screen stays, alone.
+    Alone,
+    /// The run on screen was deleted: the nearest run left above it, in
+    /// this directory, takes its place.
+    Replaced(PathBuf),
+    /// The run on screen was deleted and no run above it is left: the
+    /// empty state takes its place.
+    Gone,
+}
+
+/// What is left of a session of the run `shown`, compared with the run
+/// `compared`, once the runs with the ids in `removed` are deleted.
+/// `family` is the family of the run on screen, as read before the
+/// deleting.
+fn after_delete(
+    removed: &[String],
+    shown: Option<&str>,
+    compared: Option<&str>,
+    family: Option<&Family>,
+) -> AfterDelete {
+    let is_removed = |id: &str| removed.iter().any(|r| r == id);
+    let Some(shown) = shown.filter(|id| is_removed(id)) else {
+        return match compared.is_some_and(is_removed) {
+            true => AfterDelete::Alone,
+            false => AfterDelete::Stays,
+        };
+    };
+
+    // The nearest ancestor of the run on screen that is left.
+    let runs = family.map_or(&[][..], |f| &f.runs);
+    let mut at = runs.iter().find(|r| r.id == shown);
+    while let Some(run) = at {
+        if !is_removed(&run.id) {
+            return AfterDelete::Replaced(run.dir.clone());
+        }
+        at = run
+            .parent
+            .as_ref()
+            .and_then(|p| runs.iter().find(|r| r.id == p.id));
+    }
+    AfterDelete::Gone
+}
+
 /// The schedule seed for the next fork of the run `id`: one past the
 /// highest any fork of it has, on disk in `family` or still being made in
 /// `pending`, so two forks of one run never share a seed.
@@ -2061,6 +2165,97 @@ mod tests {
         assert_eq!(next_fork_schedule(Some(&family), "base", &pending), 6);
         assert_eq!(next_fork_schedule(Some(&family), "f4", &[]), 1);
         assert_eq!(next_fork_schedule(None, "base", &[]), 1);
+    }
+
+    /// A family for the delete tests: base, its forks f1 and f4, and g9,
+    /// a fork of f1, each in a directory named by its id.
+    fn delete_family() -> Family {
+        let manifest = crate::examples::manifest_of(crate::examples::FAILING);
+        let entry = |id: &str, parent: Option<&str>| RunEntry {
+            id: id.into(),
+            dir: PathBuf::from(format!("/runs/{id}")),
+            parent: parent.map(|id| crate::family::Parent {
+                id: id.into(),
+                step: 10,
+            }),
+            ..RunEntry::from_manifest(
+                Path::new(id),
+                &manifest,
+                std::time::SystemTime::UNIX_EPOCH,
+                Executing::No,
+            )
+        };
+        Family {
+            runs: vec![
+                entry("base", None),
+                entry("f1", Some("base")),
+                entry("f4", Some("base")),
+                entry("g9", Some("f1")),
+            ],
+        }
+    }
+
+    #[test]
+    fn a_failed_delete_still_reports_the_runs_removed_before_it() {
+        // Three runs are deleted in turn and the engine fails on the
+        // second: the first run's ids come back with the failure, and the
+        // third is not tried. With no failure every id comes back.
+        let dirs: Vec<PathBuf> = ["/runs/a", "/runs/b", "/runs/c"]
+            .map(PathBuf::from)
+            .to_vec();
+        let mut tried = Vec::new();
+        let (removed, failed) = remove_each(&dirs, |dir| {
+            tried.push(dir.to_path_buf());
+            if dir.ends_with("b") {
+                return Err(EngineError::Lost { id: "b".into() });
+            }
+            Ok(vec![
+                dir.file_name().unwrap().to_string_lossy().into_owned(),
+                "fork".into(),
+            ])
+        });
+        assert_eq!(removed, vec!["a".to_string(), "fork".to_string()]);
+        assert_eq!(failed, Some(EngineError::Lost { id: "b".into() }));
+        assert_eq!(tried, dirs[..2]);
+
+        let (removed, failed) = remove_each(&dirs, |_| Ok(vec!["x".into()]));
+        assert_eq!((removed.len(), failed), (3, None));
+    }
+
+    #[test]
+    fn deleting_a_run_on_screen_changes_the_session() {
+        // g9 is on screen. Deleting other runs leaves the session alone;
+        // deleting the run it is compared with leaves g9 alone; deleting
+        // g9, or g9 and f1, shows the nearest run left above; deleting
+        // every run above too, or with no family read, leaves no run.
+        let family = delete_family();
+        let ids = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+        let after = |removed: &[&str], compared| {
+            after_delete(&ids(removed), Some("g9"), compared, Some(&family))
+        };
+        assert_eq!(after(&["f4"], Some("f1")), AfterDelete::Stays);
+        assert_eq!(after(&["f4"], None), AfterDelete::Stays);
+        assert_eq!(after(&["f4"], Some("f4")), AfterDelete::Alone);
+        assert_eq!(
+            after(&["g9"], Some("f1")),
+            AfterDelete::Replaced("/runs/f1".into())
+        );
+        assert_eq!(
+            after(&["f1", "g9"], Some("f1")),
+            AfterDelete::Replaced("/runs/base".into())
+        );
+        assert_eq!(
+            after(&["base", "f1", "f4", "g9"], Some("f4")),
+            AfterDelete::Gone
+        );
+        assert_eq!(
+            after_delete(&ids(&["g9"]), Some("g9"), None, None),
+            AfterDelete::Gone
+        );
+        assert_eq!(
+            after_delete(&ids(&["g9"]), None, None, Some(&family)),
+            AfterDelete::Stays
+        );
     }
 
     #[test]
