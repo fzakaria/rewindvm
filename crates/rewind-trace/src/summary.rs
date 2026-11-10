@@ -56,7 +56,7 @@ impl<'a> Recording<'a> {
 
     /// The step the run ended at: the last step its manifest or its trace
     /// knows.
-    fn end(&self) -> u64 {
+    pub fn end(&self) -> u64 {
         let last_switch = self.trace.switches.last().map_or(0, |s| s.step);
         let ended = self.outcome.map_or(0, |o| o.step);
         self.trace.last_step().max(last_switch).max(ended)
@@ -64,7 +64,7 @@ impl<'a> Recording<'a> {
 
     /// The step the run failed on, as the desktop app's failure marker
     /// finds it.
-    fn failure(&self) -> Option<Failure> {
+    pub fn failure(&self) -> Option<Failure> {
         let stopped = Stopped::of(self.outcome.map(|o| &o.stop));
         failing::find(self.trace, self.trace.job_exit(), self.end(), stopped, None)
     }
@@ -231,7 +231,7 @@ fn comparison_lines(out: &mut String, run: &Recording, other: &Recording) {
         return;
     };
     let within = match &comparison.program {
-        Some(argv) => format!(", in the events of {}", argv.join(" ")),
+        Some(argv) => format!(", in the events of {}", one_line(&argv.join(" "))),
         None => String::new(),
     };
     let _ = writeln!(
@@ -255,6 +255,20 @@ fn side_words(run: &Recording, side: Option<Side>) -> String {
         event.tid,
         event.kind.words()
     )
+}
+
+/// `text` on one line: each control character, a newline in a script
+/// given to `sh -c` among them, written as its escape.
+fn one_line(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_control() {
+                c.escape_default().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
 }
 
 /// The escape character that starts a terminal's control sequences, and
@@ -623,6 +637,44 @@ mod tests {
             Some(recording("fail", &failed, &failed_end, &failing)),
         );
         assert!(same.ends_with("the runs did the same things\n"), "{same}");
+    }
+
+    #[test]
+    fn a_command_line_with_a_newline_stays_on_its_line() {
+        // A job run as `sh -c` with a script of two lines parts from
+        // itself printing other words: the line that names the program
+        // shows the newline as \n, so every line of the summary is one
+        // line of the text.
+        let script = |word: &str| -> Vec<Event> {
+            let mut events = started();
+            if let EventKind::Exec { argv, .. } = &mut events[2].kind {
+                *argv = vec!["sh".into(), "-c".into(), "echo a\nexit 1".into()];
+            }
+            events.push(write(4, JOB, word));
+            events.extend(exited(6, 1 << 8));
+            events
+        };
+        let (left, right) = (trace(script("a\n")), trace(script("b\n")));
+        let failed = Verdict::Failed {
+            reasons: vec![Reason::Exited { code: 1 }],
+        };
+        let ended = outcome(Stop::PoweredOff, 9, Some(1 << 8));
+        let text = summary(
+            recording("left", &failed, &ended, &left),
+            Some(recording("right", &failed, &ended, &right)),
+        );
+        let parts = text
+            .lines()
+            .find(|line| line.starts_with("the runs part"))
+            .unwrap();
+        assert_eq!(
+            parts,
+            "the runs part at step 4 here and step 4 there, in the events of sh -c echo a\\nexit 1"
+        );
+        assert!(
+            text.lines().any(|line| line.starts_with("  there: ")),
+            "{text}"
+        );
     }
 
     #[test]
