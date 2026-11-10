@@ -11,7 +11,7 @@
 //! Without a run, the window opens on an empty state with buttons to open
 //! a file or a copied link, and the runs recorded here most recently.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -80,6 +80,21 @@ fn init_log() {
     }
 }
 
+/// What the app says when a second run follows `first`. A first argument
+/// that is a bare word naming nothing on disk is a command of the rewind
+/// CLI given to the app, as in `rewind-app summary <run>`, so the error is
+/// about that word; otherwise the two runs are named and --compare offered.
+fn two_runs(first: &Path, second: &str) -> String {
+    let word = first.display();
+    let bare_word = first.components().count() == 1 && first.extension().is_none();
+    if bare_word && !first.exists() {
+        return format!(
+            "{word} is not a run: rewind-app opens a run, and `rewind {word}` is a command of the rewind CLI"
+        );
+    }
+    format!("two runs given, {word} and {second}: give one, and the other with --compare")
+}
+
 fn parse(mut args: impl Iterator<Item = String>) -> Result<Parsed, String> {
     let mut parsed = Args {
         run: None,
@@ -116,8 +131,8 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Parsed, String> {
             "--source" => parsed.right = RightColumn::Source,
             flag if flag.starts_with("--") => return Err(format!("unknown option {flag}")),
             path => {
-                if parsed.run.is_some() {
-                    return Err(format!("more than one run given: {path}"));
+                if let Some(first) = &parsed.run {
+                    return Err(two_runs(first, path));
                 }
                 parsed.run = Some(PathBuf::from(path));
             }
@@ -263,6 +278,29 @@ mod tests {
         assert_eq!(args.run, Some(PathBuf::from("runs/fail")));
         assert_eq!(args.compare, Some(PathBuf::from("runs/pass")));
         assert_eq!(args.step, Some(1_204));
+    }
+
+    #[test]
+    fn a_command_word_before_a_run_names_the_rewind_command() {
+        // `rewind-app summary <run>`, the CLI's command given to the app:
+        // the error is about the word that is not a run, and points at the
+        // rewind command, rather than calling the run a second run.
+        let Err(message) = parse_list(&["summary", "runs/fail"]) else {
+            panic!("accepted");
+        };
+        assert!(message.contains("summary is not a run"), "{message}");
+        assert!(message.contains("`rewind summary`"), "{message}");
+    }
+
+    #[test]
+    fn two_runs_point_at_compare() {
+        // Two run paths: the error names both and says how to compare.
+        let Err(message) = parse_list(&["runs/fail", "runs/pass"]) else {
+            panic!("accepted");
+        };
+        assert!(message.contains("runs/fail"), "{message}");
+        assert!(message.contains("runs/pass"), "{message}");
+        assert!(message.contains("--compare"), "{message}");
     }
 
     #[test]
