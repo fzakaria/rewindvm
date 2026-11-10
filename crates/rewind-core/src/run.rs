@@ -1532,16 +1532,22 @@ impl Run {
     /// The last step whose records a replay paused at `step` has made in
     /// full, None when that is no step. A triple fault and the wall-clock
     /// limit end a run after its last step without a step of their own,
-    /// and what the trace takes then, its pending context switches among
-    /// them, is written at the last step, where a paused replay has not
-    /// ended.
+    /// and so does a stall: the monitor decides a guest idle for good on
+    /// the way back into it, after the idle exit. What the trace takes
+    /// then, its pending context switches among them, is written at the
+    /// last step, where a paused replay has not ended.
     fn made_by(&self, step: u64) -> Option<u64> {
         use rewind_trace::stop::Stop as Stopped;
         let ended_between_steps_at = self
             .manifest
             .outcome
             .as_ref()
-            .filter(|o| matches!(o.stop, Stopped::TripleFault | Stopped::TimedOut(_)))
+            .filter(|o| {
+                matches!(
+                    o.stop,
+                    Stopped::TripleFault | Stopped::TimedOut(_) | Stopped::Idle
+                )
+            })
             .map(|o| o.step);
         if ended_between_steps_at == Some(step) {
             return step.checked_sub(1);
@@ -2775,11 +2781,11 @@ pub(crate) mod tests {
 
     #[test]
     fn the_records_of_an_end_between_steps_are_not_a_paused_replays() {
-        // A run that a triple fault or its time limit ended at step 40: a
-        // replay paused at step 40 has not ended, and has made every
-        // record through step 39. At an earlier step, and at any step of a
-        // run that a step ended, a paused replay has made the records of
-        // its step.
+        // A run that a triple fault, its time limit or a stall ended at
+        // step 40: a replay paused at step 40 has not ended, and has made
+        // every record through step 39. At an earlier step, and at any
+        // step of a run that a step ended, a paused replay has made the
+        // records of its step.
         let ended = |stop: rewind_trace::stop::Stop| {
             let mut m = manifest("aaaa", "faulted", 1);
             m.outcome = Some(RunOutcome {
@@ -2807,7 +2813,10 @@ pub(crate) mod tests {
         ));
         assert_eq!(limited.made_by(40), Some(39));
         let idle = ended(rewind_trace::stop::Stop::Idle);
-        assert_eq!(idle.made_by(40), Some(40));
+        assert_eq!(idle.made_by(40), Some(39));
+        assert_eq!(idle.made_by(39), Some(39));
+        let powered_off = ended(rewind_trace::stop::Stop::PoweredOff);
+        assert_eq!(powered_off.made_by(40), Some(40));
     }
 
     #[test]

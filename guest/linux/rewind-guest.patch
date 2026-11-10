@@ -120,7 +120,7 @@ diff -ruN a/arch/x86/kernel/cpu/Makefile b/arch/x86/kernel/cpu/Makefile
 diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 --- a/arch/x86/kernel/cpu/rewind.c	1969-12-31 16:00:00.000000000 -0800
 +++ b/arch/x86/kernel/cpu/rewind.c	1969-12-31 16:00:00.000000000 -0800
-@@ -0,0 +1,1528 @@
+@@ -0,0 +1,1540 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Rewind VM guest platform.
@@ -461,11 +461,23 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +	return READ_ONCE(rewind_shared.now);
 +}
 +
++/*
++ * The clock counts nanoseconds, so a multiplier of 1 and a shift of 0
++ * turn its reading into time exactly. They also leave the kernel no
++ * limit on how long the idle CPU may sleep: clocksource_register_hz
++ * would pick a shift of 24, under which the conversion overflows after
++ * about 30 minutes, and the tick code would then keep a timer armed at
++ * half that even with nothing else to wake for. The monitor takes an
++ * idle exit with no timer armed as the machine idle for good, so that
++ * timer would keep such a run going forever.
++ */
 +static struct clocksource rewind_clocksource = {
 +	.name	= "rewind",
 +	.rating	= 400,
 +	.read	= rewind_clock_read,
 +	.mask	= CLOCKSOURCE_MASK(64),
++	.mult	= 1,
++	.shift	= 0,
 +	.flags	= CLOCK_SOURCE_IS_CONTINUOUS,
 +};
 +
@@ -695,7 +707,7 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +	 */
 +	lapic_timer_period = 1;
 +
-+	clocksource_register_hz(&rewind_clocksource, NSEC_PER_SEC);
++	__clocksource_register(&rewind_clocksource);
 +
 +	rewind_clockevent.cpumask = cpumask_of(0);
 +	clockevents_config_and_register(&rewind_clockevent, NSEC_PER_SEC,
@@ -1726,7 +1738,25 @@ diff -ruN a/arch/x86/kernel/tsc.c b/arch/x86/kernel/tsc.c
 diff -ruN a/drivers/char/random.c b/drivers/char/random.c
 --- a/drivers/char/random.c	2026-10-13 09:00:00.000000000 -0700
 +++ b/drivers/char/random.c	2026-10-13 09:00:00.000000000 -0700
-@@ -937,6 +937,20 @@
+@@ -242,7 +242,17 @@
+ /* This extracts a new crng key from the input pool. */
+ static void crng_reseed(struct work_struct *work)
+ {
++#ifdef CONFIG_REWIND_GUEST
++	/*
++	 * Rewind VM: the reseed every minute waits for the CPU to wake for
++	 * something else. Nothing draws random numbers while the CPU is
++	 * idle, and a timer the idle CPU must wake for would keep a guest
++	 * idle for good from ever being seen as one.
++	 */
++	static DECLARE_DEFERRABLE_WORK(next_reseed, crng_reseed);
++#else
+ 	static DECLARE_DELAYED_WORK(next_reseed, crng_reseed);
++#endif
+ 	unsigned long flags;
+ 	unsigned long next_gen;
+ 	u8 key[CHACHA_KEY_SIZE];
+@@ -937,6 +947,20 @@
  }
  EXPORT_SYMBOL(add_device_randomness);
  
@@ -1747,6 +1777,27 @@ diff -ruN a/drivers/char/random.c b/drivers/char/random.c
  /*
   * Interface for in-kernel drivers of true hardware RNGs. Those devices
   * may produce endless random bits, so this function will sleep for
+diff -ruN a/fs/fs-writeback.c b/fs/fs-writeback.c
+--- a/fs/fs-writeback.c	2026-09-25 07:37:14.000000000 -0700
++++ b/fs/fs-writeback.c	2026-11-10 00:00:00.000000000 -0700
+@@ -2588,7 +2588,17 @@
+  * eventually gets pushed out to disk.
+  */
+ static void wakeup_dirtytime_writeback(struct work_struct *w);
++#ifdef CONFIG_REWIND_GUEST
++/*
++ * Rewind VM: the writeback of inodes whose times alone changed, every
++ * 12 hours, waits for the CPU to wake for something else. A timer the
++ * idle CPU must wake for would keep a guest idle for good from ever
++ * being seen as one.
++ */
++static DECLARE_DEFERRABLE_WORK(dirtytime_work, wakeup_dirtytime_writeback);
++#else
+ static DECLARE_DELAYED_WORK(dirtytime_work, wakeup_dirtytime_writeback);
++#endif
+ 
+ static void wakeup_dirtytime_writeback(struct work_struct *w)
+ {
 diff -ruN a/include/linux/random.h b/include/linux/random.h
 --- a/include/linux/random.h	2026-10-13 09:00:00.000000000 -0700
 +++ b/include/linux/random.h	2026-10-13 09:00:00.000000000 -0700
@@ -1870,3 +1921,24 @@ diff -ruN a/kernel/sched/syscalls.c b/kernel/sched/syscalls.c
  	rq = this_rq_lock_irq(&rf);
  
  	schedstat_inc(rq->yld_count);
+diff -ruN a/net/netfilter/nf_conntrack_core.c b/net/netfilter/nf_conntrack_core.c
+--- a/net/netfilter/nf_conntrack_core.c	2026-09-25 07:37:14.000000000 -0700
++++ b/net/netfilter/nf_conntrack_core.c	2026-11-10 00:00:00.000000000 -0700
+@@ -1642,7 +1642,17 @@
+ 
+ static void conntrack_gc_work_init(struct conntrack_gc_work *gc_work)
+ {
++#ifdef CONFIG_REWIND_GUEST
++	/*
++	 * Rewind VM: the scan for expired connections, at least once a
++	 * minute, waits for the CPU to wake for something else. A timer the
++	 * idle CPU must wake for would keep a guest idle for good from ever
++	 * being seen as one.
++	 */
++	INIT_DEFERRABLE_WORK(&gc_work->dwork, gc_worker);
++#else
+ 	INIT_DELAYED_WORK(&gc_work->dwork, gc_worker);
++#endif
+ 	gc_work->exiting = false;
+ }
+ 

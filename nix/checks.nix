@@ -4149,9 +4149,11 @@ in
         # even byte under seed 0 and an odd one under seed 1, so seed 1's
         # unperturbed run ends differently, after its first batch started
         # beside it. The search reports that run and none of the batch.
+        # The guest kernel mixes its command line into the RNG, so a change
+        # to the built-in one needs another epoch that draws that way.
         export REWIND_HOME=$TMPDIR/dropped
         dropped() {
-          rewind check -j 4 --clock exits --epoch 1767225600 --cpu v3-compat \
+          rewind check -j 4 --clock exits --epoch 1767744000 --cpu v3-compat \
             --all --no-narrow --json "$@" --root ${slowRaceRoot} -- /bin/slowrace "$spins" random
         }
 
@@ -5269,8 +5271,13 @@ in
   # no timer is armed; the run stops as idle. A fork brought to that step
   # sits at the idle exit, and an inspection request wakes it: the VM
   # takes the interrupt, serves the request and goes idle again instead
-  # of being written off as stalled at the exit. Boots the VM, so it
-  # needs /dev/kvm.
+  # of being written off as stalled at the exit. The replay that brings
+  # the fork there has not stalled, so it has not written the context
+  # switches the recording wrote when it did; those are not the replay's
+  # to make. The run itself must stop as stalled: a kernel timer the
+  # guest rearms forever, as kcompactd's did, keeps virtual time moving
+  # and the run never ends, so a timeout turns that hang into a failure.
+  # Boots the VM, so it needs /dev/kvm.
   inspect-idle =
     pkgs.runCommand "rewind-inspect-idle"
       {
@@ -5280,9 +5287,15 @@ in
       ''
         export REWIND_HOME=$TMPDIR/rewind
         export REWIND_DEBUGINFOD=/nonexistent
-        rewind run -q --clock exits --name idle --root ${guestRoot} -- \
-          sh -c 'mkfifo /tmp/f; cat /tmp/f' > run 2>&1 || true
+        status=0
+        timeout 120 rewind run -q --clock exits --name idle --root ${guestRoot} -- \
+          sh -c 'mkfifo /tmp/f; cat /tmp/f' > run 2>&1 || status=$?
         cat run
+        if [ "$status" = 124 ]; then
+          echo "the run did not stop: a guest idle for good must end as stalled"
+          exit 1
+        fi
+        grep -q 'idle with no timer armed' run
         rewind ls --json | tee ls
         grep -q '"name":"idle"' ls
         end=$(sed -n 's/.*"name":"idle",.*"steps":\([0-9]*\).*/\1/p' ls)
@@ -5291,6 +5304,10 @@ in
 
         rewind cat idle "$end" /proc/$pid/comm | tee comm
         grep -q '^cat$' comm
+        rewind files idle "$end" /tmp | tee files
+        grep -q ' f$' files
+        rewind where idle "$end" --pid "$pid" | tee where
+        grep -q 'busybox' where
         rewind gdb idle "$end" --pid "$pid" -- -batch -ex 'info threads' > gdb 2>&1 || true
         cat gdb
         grep -q 'cat' gdb

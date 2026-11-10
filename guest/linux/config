@@ -79,6 +79,14 @@ CONFIG_PREEMPT_LAZY=y
 # CONFIG_HIBERNATION is not set
 # CONFIG_AUDIT is not set
 
+# kcompactd looks for fragmented memory every half second, forever, which
+# the idle CPU wakes for. The monitor takes an idle exit with no timer
+# armed as the machine idle for good, and that timer would keep such a
+# run going forever. The run's own --kernel-args come after this line
+# and can turn the look back on.
+CONFIG_CMDLINE_BOOL=y
+CONFIG_CMDLINE="sysctl.vm.compaction_proactiveness=0"
+
 # No display, no sound, no USB. The virtual terminal and input layers stay:
 # they are only optional under CONFIG_EXPERT, and with no keyboard and no
 # i8042 they do nothing.

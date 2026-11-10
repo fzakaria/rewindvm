@@ -195,6 +195,14 @@ platforms. The platform is detected by the CPUID signature `RewindRewind`.
 - It describes the one local APIC itself, with no MP table, ACPI or I/O APIC.
 - It registers a clocksource and a one-shot clock event device backed by the
   monitor, and replaces the idle routine.
+- It keeps the kernel's own periodic timers off an idle CPU, so a guest with
+  nothing left to wait for goes idle with no timer armed and the monitor
+  stops the run as stalled. The clocksource converts nanoseconds one to
+  one, which leaves the tick no limit on an idle sleep. kcompactd's look for
+  fragmented memory every half second is off on the built-in command line.
+  The RNG's reseed, the scan for expired network connections and the
+  writeback of inodes whose times alone changed wait for the CPU to wake for
+  something else.
 - It sets the wall clock at boot and turns power off, restart and halt into
   port writes.
 - The monitor's interrupt arrives as an MSI on `HYPERVISOR_CALLBACK_VECTOR`.
