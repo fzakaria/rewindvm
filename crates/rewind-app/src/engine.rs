@@ -1532,17 +1532,21 @@ mod tests {
         let dir = temp_dir("cancel");
         let engine = slow_engine(&dir);
         let cancel = Cancel::default();
+        // The lookup is tried again while the stand-in script is busy, as
+        // a test running in parallel can hold it open for a moment.
         let call = {
             let cancel = cancel.clone();
             std::thread::spawn(move || {
-                engine.cat(
-                    Path::new("/run"),
-                    5,
-                    None,
-                    "/etc/hosts",
-                    &cancel,
-                    &mut |_| {},
-                )
+                retrying(|| {
+                    engine.cat(
+                        Path::new("/run"),
+                        5,
+                        None,
+                        "/etc/hosts",
+                        &cancel,
+                        &mut |_| {},
+                    )
+                })
             })
         };
         let pid_file = dir.join("pid");
