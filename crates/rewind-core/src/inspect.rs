@@ -65,6 +65,17 @@ impl Extras {
     /// so a second shell with the same packages reuses it.
     pub fn build(home: &Home, installables: &[String]) -> Result<Extras> {
         let (outputs, closure) = crate::nix::packages(installables)?;
+
+        // The bin directories, refused before anything is packed when the
+        // shell's request has no room for them all.
+        let bins: Vec<String> = outputs
+            .iter()
+            .map(|o| o.join("bin"))
+            .filter(|b| b.is_dir())
+            .map(|b| b.display().to_string())
+            .collect();
+        check_bins(&bins)?;
+
         let key = blake3::hash(
             closure
                 .iter()
@@ -82,14 +93,38 @@ impl Extras {
             crate::image::from_store_paths(store, &closure, &tmp)?;
             crate::image::place(&tmp, &image)?;
         }
-        let bins = outputs
-            .iter()
-            .map(|o| o.join("bin"))
-            .filter(|b| b.is_dir())
-            .map(|b| b.display().to_string())
-            .collect();
         Ok(Extras { image, bins })
     }
+}
+
+/// How many bin directories a shell's request has room for: the arguments
+/// the guest kernel passes on to init, less the ones a shell's request
+/// takes before the directories.
+fn shell_bins_max() -> usize {
+    let before = InspectRequest::Shell {
+        pid: None,
+        size: (0, 0),
+        with: Some(Vec::new()),
+    }
+    .args()
+    .len();
+    rewind_vmm::pv::REQUEST_ARGS_MAX.saturating_sub(before)
+}
+
+/// Refuses `bins`, the bin directories of a shell's extra packages, when
+/// there are more than the shell's request holds. The guest kernel drops
+/// the arguments past the ones it passes on, so the directories past them
+/// would be missing from the shell's PATH without a word.
+fn check_bins(bins: &[String]) -> Result<()> {
+    let max = shell_bins_max();
+    if bins.len() > max {
+        bail!(
+            "the packages given with --with have {} bin directories between them, and a \
+             shell's PATH takes {max} of them; give fewer packages, or one that joins them",
+            bins.len()
+        );
+    }
+    Ok(())
 }
 
 /// What an inspection found.
@@ -538,6 +573,34 @@ mod tests {
     // process's output between its marks counts, and the end mark's code
     // decides the result.
     use super::*;
+
+    #[test]
+    fn a_shell_takes_as_many_bin_directories_as_its_request_holds() {
+        // The guest kernel passes eight request arguments on, and a shell
+        // with extras uses five before its bin directories, so three fit.
+        // Three are taken; four are refused, with how many a shell takes.
+        const ROOM: usize = 3;
+        let bins = |n: usize| -> Vec<String> {
+            (0..n)
+                .map(|i| format!("/nix/store/package-{i}/bin"))
+                .collect()
+        };
+        assert_eq!(shell_bins_max(), ROOM);
+        check_bins(&bins(ROOM)).unwrap();
+        check_bins(&[]).unwrap();
+        let refused = check_bins(&bins(ROOM + 1)).unwrap_err().to_string();
+        assert!(refused.contains("have 4 bin directories"), "{refused}");
+        assert!(refused.contains("takes 3 of them"), "{refused}");
+
+        // A request with that many directories is one the kernel passes
+        // on whole.
+        let request = InspectRequest::Shell {
+            pid: None,
+            size: (80, 24),
+            with: Some(bins(ROOM)),
+        };
+        assert_eq!(request.args().len(), rewind_vmm::pv::REQUEST_ARGS_MAX);
+    }
 
     const HEADER: usize = 20;
     const KIND_OUTPUT: u16 = 2;

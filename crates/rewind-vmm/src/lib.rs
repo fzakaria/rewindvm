@@ -952,21 +952,7 @@ impl Machine {
             .dev
             .shared
             .context("the VM has not finished booting at this step")?;
-        let mut request = Vec::new();
-        for arg in args {
-            if arg.contains('\0') {
-                bail!("an inspection argument contains NUL: {arg:?}");
-            }
-            request.extend_from_slice(arg.as_bytes());
-            request.push(0);
-        }
-        if request.len() > pv::REQUEST_MAX {
-            bail!(
-                "the inspection request is {} bytes; the most is {}",
-                request.len(),
-                pv::REQUEST_MAX
-            );
-        }
+        let request = encode_request(args)?;
         self.dev.ram.write(
             shared + pv::SHARED_REQUEST_LEN,
             &(request.len() as u32).to_le_bytes(),
@@ -1255,6 +1241,36 @@ impl Devices {
         }
         Ok(())
     }
+}
+
+/// An inspection request as the shared page holds it: each of `args` and
+/// a NUL. Refused when the guest kernel would not pass all of it on: more
+/// bytes than it reads, or more arguments than it hands init, the rest of
+/// which it drops without a word.
+fn encode_request(args: &[String]) -> Result<Vec<u8>> {
+    if args.len() > pv::REQUEST_ARGS_MAX {
+        bail!(
+            "the inspection request has {} arguments; the guest kernel passes on {}",
+            args.len(),
+            pv::REQUEST_ARGS_MAX
+        );
+    }
+    let mut request = Vec::new();
+    for arg in args {
+        if arg.contains('\0') {
+            bail!("an inspection argument contains NUL: {arg:?}");
+        }
+        request.extend_from_slice(arg.as_bytes());
+        request.push(0);
+    }
+    if request.len() > pv::REQUEST_MAX {
+        bail!(
+            "the inspection request is {} bytes; the most is {}",
+            request.len(),
+            pv::REQUEST_MAX
+        );
+    }
+    Ok(request)
 }
 
 /// A port write's value, zero-extended from however many bytes it wrote.
@@ -1593,6 +1609,29 @@ mod tests {
         dev.drain_io(&mut kept).unwrap();
         assert!(kept.0.is_empty());
         assert_ne!(shared_u32(&dev, pv::SHARED_IO_HEAD), 0);
+    }
+
+    #[test]
+    fn a_request_holds_no_more_arguments_than_the_kernel_passes_on() {
+        // The guest kernel passes eight request arguments to init and
+        // drops the rest. A request of eight is laid out as each argument
+        // and a NUL. One of nine is refused, and says how many fit.
+        let args = |n: usize| -> Vec<String> { (0..n).map(|i| format!("arg{i}")).collect() };
+        assert_eq!(pv::REQUEST_ARGS_MAX, 8);
+        let request = encode_request(&args(pv::REQUEST_ARGS_MAX)).unwrap();
+        assert!(request.starts_with(b"arg0\0arg1\0"));
+        assert_eq!(request.iter().filter(|b| **b == 0).count(), 8);
+        let refused = encode_request(&args(pv::REQUEST_ARGS_MAX + 1))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            refused,
+            "the inspection request has 9 arguments; the guest kernel passes on 8"
+        );
+
+        // The byte limit and an argument with a NUL are refused as before.
+        assert!(encode_request(&["a".repeat(pv::REQUEST_MAX)]).is_err());
+        assert!(encode_request(&["a\0b".to_string()]).is_err());
     }
 
     #[test]

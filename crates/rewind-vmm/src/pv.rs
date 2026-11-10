@@ -112,10 +112,12 @@ pub const PENDING_INSPECT: u32 = 1 << 2;
 
 /// Offsets of an inspection request in the shared page: its length, then
 /// its arguments, each ending in NUL. The kernel reads at most
-/// REQUEST_MAX bytes.
+/// REQUEST_MAX bytes, and passes at most REQUEST_ARGS_MAX arguments on
+/// to init, its REWIND_INSPECT_ARGS, dropping any after them.
 pub const SHARED_REQUEST_LEN: u64 = 20;
 pub const SHARED_REQUEST: u64 = 24;
 pub const REQUEST_MAX: usize = 2048;
+pub const REQUEST_ARGS_MAX: usize = 8;
 
 /// Input for /dev/rewind-console, after the request: its length, which the
 /// kernel sets back to 0 once it has taken the bytes, then the bytes.
