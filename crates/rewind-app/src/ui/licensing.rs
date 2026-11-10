@@ -40,6 +40,9 @@ const UPDATES_ENDED_TITLE: &str = "Your license's updates have ended";
 const UPDATES_ENDED_PILL: &str = "Updates ended \u{b7} Renew";
 const REFUSED_PILL: &str = "License not accepted";
 
+/// The notice when a pasted license is not taken over the installed one.
+const KEPT_INSTALLED_TITLE: &str = "Kept the license already installed";
+
 /// The dialog's backdrop: the window behind it, dimmed.
 const BACKDROP_A: u32 = 0x0000_00a0;
 const DIALOG_WIDTH: f32 = 600.0;
@@ -194,11 +197,17 @@ impl Scrubber {
             return;
         };
         let result = license::verify(&text);
-        let valid = result.is_ok();
+        let pasted = result.as_ref().ok().cloned();
         dialog.result = Some(result);
         dialog.text = text;
-        if valid {
-            self.register(window, cx);
+        if let Some(pasted) = pasted {
+            match pasting(&self.licensing.registration, &pasted) {
+                Pasting::Replaces => self.register(window, cx),
+                Pasting::Keeps { title, body } => {
+                    self.close_license_dialog(window, cx);
+                    self.notify_user(NoticeTone::Info, title, body, cx);
+                }
+            }
         }
         cx.notify();
     }
@@ -506,6 +515,42 @@ fn updates_ended_body(until: license::Date) -> String {
     )
 }
 
+/// What pasting a valid license does to the license installed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Pasting {
+    /// The pasted license is kept in the installed one's place.
+    Replaces,
+    /// The installed license stays, with a notice saying what the pasted
+    /// one would have changed.
+    Keeps { title: String, body: String },
+}
+
+/// What pasting `pasted` does to `installed`: a license whose updates
+/// end before the installed one's would take updates away, so the
+/// installed one stays and the notice says what would have changed.
+fn pasting(installed: &Registration, pasted: &License) -> Pasting {
+    let Registration::Registered(current) = installed else {
+        return Pasting::Replaces;
+    };
+    if pasted.updates_until >= current.updates_until {
+        return Pasting::Replaces;
+    }
+    Pasting::Keeps {
+        title: KEPT_INSTALLED_TITLE.to_string(),
+        body: format!(
+            "The license pasted, for {} with updates until {}, ends its updates before the one installed, for {} with updates until {}. The installed license stays; to register with the pasted one anyway, delete {} first.",
+            pasted.name,
+            pasted.updates_until,
+            current.name,
+            current.updates_until,
+            license::license_path().map_or_else(
+                || "the license file".to_string(),
+                |p| p.display().to_string()
+            )
+        ),
+    }
+}
+
 /// What checking the pasted text said, in its color.
 fn verdict(result: &Option<Result<License, LicenseError>>) -> Option<(u32, String)> {
     match result {
@@ -600,5 +645,38 @@ mod tests {
         let pasted = Some(Err(LicenseError::NoBlock));
         let lines = texts(dialog_lines(DialogView::Paste, &refused, &pasted));
         assert_eq!(lines.last(), Some(&LicenseError::NoBlock.to_string()));
+    }
+
+    #[test]
+    fn a_license_with_fewer_updates_does_not_replace_the_installed_one() {
+        // A pasted license whose updates end before the installed one's
+        // keeps the installed license, and the notice names both update
+        // dates. One with the same date or a later one replaces it, as
+        // does any license when none is installed or the stored one was
+        // refused.
+        let installed = Registration::Registered(licensed("2029-06-30"));
+        let Pasting::Keeps { title, body } = pasting(&installed, &licensed("2027-01-01")) else {
+            panic!("replaced the installed license");
+        };
+        assert_eq!(title, "Kept the license already installed");
+        assert!(body.contains("2027-01-01"), "{body}");
+        assert!(body.contains("2029-06-30"), "{body}");
+        assert_eq!(
+            pasting(&installed, &licensed("2029-06-30")),
+            Pasting::Replaces
+        );
+        assert_eq!(
+            pasting(&installed, &licensed("2032-01-01")),
+            Pasting::Replaces
+        );
+        assert_eq!(
+            pasting(&Registration::Unregistered, &licensed("2027-01-01")),
+            Pasting::Replaces
+        );
+        let refused = Registration::Invalid("no".into());
+        assert_eq!(
+            pasting(&refused, &licensed("2027-01-01")),
+            Pasting::Replaces
+        );
     }
 }
