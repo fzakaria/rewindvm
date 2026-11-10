@@ -4540,6 +4540,105 @@ in
   # checks.answers: `rewind export --with-answers` (answersExport).
   answers = answersExport;
 
+  # checks.answers-pthread-exit: `rewind export --with-answers` for a job
+  # whose main thread calls pthread_exit after starting two workers, which
+  # loop on a few system calls until one exits the process with status 3.
+  # The guest records the main thread's exit as the process's, so the
+  # trace ends the process there while the workers run on. At a bookmark
+  # on a worker's write after it, the export answers for the two workers,
+  # each located in its function, and not for the main thread, which is
+  # gone. Boots the VM, so it needs /dev/kvm.
+  answers-pthread-exit =
+    let
+      root =
+        pkgs.runCommand "rewind-pthread-exit-root"
+          {
+            nativeBuildInputs = [ pkgs.pkgsStatic.stdenv.cc ];
+            dontStrip = true;
+          }
+          ''
+            mkdir -p $out/bin $out/src
+            cd $out/src
+            cat > pexit.c <<'EOF'
+            #include <pthread.h>
+            #include <stdio.h>
+            #include <stdlib.h>
+            #include <time.h>
+            #include <unistd.h>
+
+            static void *worker(void *arg)
+            {
+              long id = (long)arg;
+              struct timespec pause = { 0, 1000000 };
+
+              for (int i = 0; i < 40; i++) {
+                getpid();
+                nanosleep(&pause, 0);
+                if (i % 20 == 10) {
+                  printf("worker %ld at %d\n", id, i);
+                  fflush(stdout);
+                }
+              }
+              if (id == 2) {
+                exit(3);
+              }
+              for (;;) {
+                nanosleep(&pause, 0);
+              }
+              return 0;
+            }
+
+            int main(void)
+            {
+              pthread_t a, b;
+
+              pthread_create(&a, 0, worker, (void *)1);
+              pthread_create(&b, 0, worker, (void *)2);
+              pthread_exit(0);
+            }
+            EOF
+            $CC -static -O1 -g -pthread -fdebug-prefix-map=$out/src=/src \
+              -o $out/bin/pexit pexit.c
+          '';
+    in
+    pkgs.runCommand "rewind-answers-pthread-exit"
+      {
+        nativeBuildInputs = [
+          rewind
+          gdb
+          pkgs.jq
+          pkgs.zstd
+        ];
+        requiredSystemFeatures = [ "kvm" ];
+      }
+      ''
+        export REWIND_HOME=$TMPDIR/rewind
+        # No debuginfod server: without a network, each of gdb's questions
+        # to it waits out a timeout.
+        export REWIND_DEBUGINFOD=/nonexistent
+
+        rewind run -q --clock exits --name pexit --root ${root} -- /bin/pexit || true
+        rewind events pexit > events
+        pid=$(grep 'execve("/bin/pexit"' events | awk '{print $2}' | cut -d/ -f1)
+        step=$(grep 'write(1, "worker 1 at 30' events | awk '{print $1}')
+        dir=$(dirname "$(grep -l '"name": "pexit"' $REWIND_HOME/runs/*/manifest.json)")
+        echo "{\"version\": 1, \"marks\": [{\"step\": $step, \"note\": \"workers\"}]}" \
+          > $dir/bookmarks.json
+
+        rewind export pexit --with-answers -o pexit.rwd
+        zstd -dc pexit.rwd | tar -xO answers.json > answers.json
+        jq -c '.steps[] | {step, threads: [.threads[] | {pid, tid, kind: .place.kind}]}' answers.json
+
+        # Two workers, each in its function, and not the main thread.
+        jq -e --argjson s "$step" --argjson pid "$pid" \
+          '.steps[] | select(.step == $s) | .threads
+            | length == 2
+              and all(.[]; .pid == $pid and .tid != $pid
+                and (try (.place.located | .frames[.chosen].function == "worker") catch false))' \
+          answers.json
+        touch $out
+      '';
+
   # checks.answers-app: the export checks.answers wrote, read as the
   # browser viewer reads one, through the app's own code: the run opened
   # from the export's bytes, and the engine the scrubber gives its panes

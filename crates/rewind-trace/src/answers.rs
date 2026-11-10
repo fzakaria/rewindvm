@@ -376,24 +376,36 @@ pub fn steps_to_answer(
     steps
 }
 
-/// The threads of the job to answer for at `step`: each thread of a
-/// process alive then, and of one whose exit is at the step, which is
-/// where a run that failed by an exit failed. Init and the kernel's own
-/// threads are not the job's.
+/// The threads of the job to answer for at `step`: each thread alive
+/// then, or whose exit is at the step, which is where a run that failed
+/// by an exit failed. Init and the kernel's own threads are not the job's.
+///
+/// The guest records any exit of a process's main thread as the process's
+/// exit, so a main thread that called pthread_exit ends the process in
+/// the trace while its other threads run on. Each other thread is
+/// answered for while its own lifetime lasts; one whose exit the trace
+/// lacks, while the process's does.
 pub fn live_threads(trace: &Trace, step: u64) -> Vec<(u32, u32)> {
     let mut threads = Vec::new();
     for process in trace.processes() {
-        let ends_here = process.end == Some(step);
-        if !(process.alive_at(step) || ends_here) {
-            continue;
-        }
         let kernel = process.pid == crate::KTHREADD_PID || process.parent == crate::KTHREADD_PID;
         if process.pid == rewind_init::INIT_PID || kernel || process.argv.is_empty() {
             continue;
         }
-        threads.push((process.pid, process.pid));
+
+        // The main thread, while the process is alive or at its exit.
+        let ends_here = process.end == Some(step);
+        if process.alive_at(step) || ends_here {
+            threads.push((process.pid, process.pid));
+        }
+
+        // Each other thread, while it is alive or at its exit.
+        let ended_before = process.end.is_some_and(|end| end < step);
         for &(tid, start, end) in &process.threads {
-            let alive = start <= step && end.is_none_or(|end| step <= end);
+            let alive = match end {
+                Some(end) => start <= step && step <= end,
+                None => start <= step && !ended_before,
+            };
             if alive {
                 threads.push((process.pid, tid));
             }
@@ -653,5 +665,79 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(live_threads(&trace, 8), [(7, 7), (7, 9), (10, 10)]);
+    }
+
+    #[test]
+    fn threads_outlive_a_main_thread_that_called_pthread_exit() {
+        // The job, 7, starts threads 8 and 9, and its main thread calls
+        // pthread_exit at step 4, which the guest records as the process's
+        // exit, as it records any exit of the thread whose id is the
+        // process's. Thread 9 exits at step 7 and thread 8, the last, at
+        // step 9, both as threads. At step 5 the two threads are answered
+        // and the main thread is not; at its exit, all three; past step 9,
+        // none. Thread 10, whose exit was never recorded, is not answered
+        // past the process's exit.
+        let event = |step, tid, kind| Event {
+            step,
+            pid: 7,
+            tid,
+            kind,
+        };
+        let exit = |step, tid, thread| {
+            event(
+                step,
+                tid,
+                EventKind::Exit {
+                    status: 0,
+                    comm: "pool".into(),
+                    thread,
+                },
+            )
+        };
+        let trace = Trace {
+            events: vec![
+                event(
+                    0,
+                    7,
+                    EventKind::Exec {
+                        filename: "/bin/pool".into(),
+                        argv: vec!["pool".into()],
+                        old_pid: 7,
+                    },
+                ),
+                event(
+                    1,
+                    7,
+                    EventKind::Fork {
+                        child: 8,
+                        thread: true,
+                    },
+                ),
+                event(
+                    2,
+                    7,
+                    EventKind::Fork {
+                        child: 9,
+                        thread: true,
+                    },
+                ),
+                event(
+                    3,
+                    7,
+                    EventKind::Fork {
+                        child: 10,
+                        thread: true,
+                    },
+                ),
+                exit(4, 7, false),
+                exit(7, 9, true),
+                exit(9, 8, true),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(live_threads(&trace, 5), [(7, 8), (7, 9)]);
+        assert_eq!(live_threads(&trace, 4), [(7, 7), (7, 8), (7, 9), (7, 10)]);
+        assert_eq!(live_threads(&trace, 8), [(7, 8)]);
+        assert!(live_threads(&trace, 10).is_empty());
     }
 }
