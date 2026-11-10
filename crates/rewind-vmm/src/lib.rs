@@ -1848,14 +1848,16 @@ mod dirty_log_tests {
 
     /// A machine created without the dirty log refuses to list dirty
     /// pages instead of answering with none, so a keyframe or checkpoint
-    /// asked of one fails loudly. Needs /dev/kvm; without one the test
-    /// says so and passes.
+    /// asked of one fails loudly. The machine shows the guest the CPU
+    /// model a run that asks for none gets on this host: v3, or v3-compat
+    /// on a host without ERMS. Needs /dev/kvm; without one the test says
+    /// so and passes.
     #[test]
     fn a_machine_without_the_dirty_log_refuses_to_list_dirty_pages() {
-        if kvm::open().is_err() {
+        let Ok(kvm) = kvm::open() else {
             eprintln!("skipped: /dev/kvm does not open");
             return;
-        }
+        };
         let config = Config {
             kernel: PathBuf::new(),
             initrd: Vec::new(),
@@ -1866,7 +1868,7 @@ mod dirty_log_tests {
             epoch: 0,
             quantum: 1,
             schedule: Schedule::default(),
-            cpu: CpuModel::V3,
+            cpu: cpu::default_model(&kvm).unwrap(),
             clock: ClockSource::Exits,
             preemption: Preemption::AtExits,
             extras: Extras::Absent,
