@@ -116,7 +116,7 @@ pub struct Located {
     pub process: String,
     pub frames: Vec<Frame>,
     /// The index in `frames` of the innermost frame in the program's own
-    /// code, when there is one.
+    /// code, when there is one. Always an index `frames` has.
     pub chosen: Option<usize>,
     /// Each source file the frames are in, by the path a frame's
     /// `fullname` gives it.
@@ -125,12 +125,15 @@ pub struct Located {
 
 impl From<rewind_trace::located::Located> for Located {
     fn from(answer: rewind_trace::located::Located) -> Located {
+        // The engine's index is checked once, here: every later use of
+        // `chosen` may take it for a frame the answer has.
+        let chosen = answer.chosen.filter(|at| *at < answer.frames.len());
         Located {
             pid: answer.pid,
             tid: answer.tid,
             process: answer.process,
             frames: answer.frames,
-            chosen: answer.chosen,
+            chosen,
             files: answer
                 .files
                 .into_iter()
@@ -144,6 +147,12 @@ impl Located {
     /// The chosen frame.
     pub fn chosen_frame(&self) -> Option<&Frame> {
         self.frames.get(self.chosen?)
+    }
+
+    /// The level gdb numbers frame `frame` of `frames` by, when the
+    /// answer has that frame.
+    pub fn level_of(&self, frame: usize) -> Option<u32> {
+        self.frames.get(frame).map(|f| f.level)
     }
 
     /// The source file frame `frame` is in, when the answer carries it.
@@ -385,6 +394,25 @@ mod tests {
         serde_json::from_str::<rewind_trace::located::Located>(&at_the_crash())
             .unwrap()
             .into()
+    }
+
+    /// An answer whose chosen frame is past its frames, as a damaged or
+    /// mismatched engine could print, reads as an answer with no chosen
+    /// frame: the panel shows no frame's source, and gdb is given no
+    /// frame to start in, where indexing the frames would panic.
+    #[test]
+    fn a_chosen_frame_the_answer_does_not_have_is_no_frame() {
+        const PAST_THE_FRAMES: usize = 7;
+        let mut answer =
+            serde_json::from_str::<rewind_trace::located::Located>(&at_the_crash()).unwrap();
+        answer.chosen = Some(PAST_THE_FRAMES);
+        let located: Located = answer.into();
+        assert_eq!(located.chosen, None);
+        assert_eq!(located.chosen_frame(), None);
+        assert_eq!(located.level_of(PAST_THE_FRAMES), None);
+        assert_eq!(located.level_of(1), Some(1));
+        let shown = shown(5060, Ok(located));
+        assert_eq!(shown.located().unwrap().1, None);
     }
 
     /// The answer reads into the frames, the chosen one, and each source

@@ -1681,7 +1681,7 @@ impl Scrubber {
                     Aim::Playhead => self.place_at_playhead().map(|(located, frame)| GdbAt {
                         pid: located.pid,
                         tid: located.tid,
-                        frame: frame.map(|f| located.frames[f].level),
+                        frame: frame.and_then(|f| located.level_of(f)),
                     }),
                 };
                 (PaneKind::Gdb, None, self.engine.gdb_command(&run, step, at))
