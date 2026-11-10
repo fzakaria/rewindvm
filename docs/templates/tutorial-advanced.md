@@ -206,20 +206,21 @@ $ rewind check --where --epoch {{epoch}} {{flake}} 2>/dev/null | sed -n '/^where
 ```
 
 <!-- capture held_tid: \d+/(\d+) +worker \(src/pool.c:75\), on the CPU at the deciding step -->
-<!-- capture diff_step: (\d+) +\d+/\d+ +start_thread \([^)]*\), at the first event that differs -->
-<!-- capture diff_tid: \d+/(\d+) +start_thread \([^)]*\), at the first event that differs -->
+<!-- capture diff_step: (\d+) +\d+/\d+ +worker \(src/pool.c:75\), at the first event that differs -->
+<!-- capture diff_tid: \d+/(\d+) +worker \(src/pool.c:75\), at the first event that differs -->
 <!-- assert: test {{held_tid}} = {{crash_tid}} && test {{diff_tid}} != {{crash_tid}} && test {{diff_step}} -lt {{crash_step}} -->
-<!-- assert: rewind events {{failing|short}} --from {{diff_step}} --to {{diff_step}} | grep -q '{{pid}}/{{diff_tid}} *thread exit' -->
+<!-- set diff_job: rewind events {{failing}} --from {{diff_step}} --to {{diff_step}} | grep -oE '{{pid}}/{{diff_tid}} +write\(1, "job [0-9]+ done' | grep -oE '[0-9]+ done' | cut -d' ' -f1 -->
+<!-- set next_job: rewind events {{failing}} --from {{diff_step}} --to {{crash_step}} | grep -oE '{{pid}}/{{diff_tid}} +write\(1, "worker picked job [0-9]+' | head -1 | grep -oE '[0-9]+$' -->
+<!-- assert: rewind events {{passing}} --from {{deciding}} --to {{diff_step}} | grep -q '{{pid}}/{{crash_tid}} *write(1, "worker picked job {{next_job}}' -->
 <!-- set late_gap: echo $(( {{crash_step}} - {{diff_step}} )) -->
 
-The first event that differs is the other worker, thread {{diff_tid}}, ending:
-it is in `start_thread`, glibc's code around a thread's function, on its way
-out. With thread {{crash_tid}} held at the deciding step, the other worker
-finds the queue empty and returns, where in the passing run thread
-{{crash_tid}} picked the next job first. That is the cause showing up before
-the symptom: the held thread's fault at line 77, which `rewind where` showed
-at the top of this page, comes {{late_gap}} steps later, at step
-{{crash_step}}.
+The first event that differs is the other worker, thread {{diff_tid}}, printing
+job {{diff_job}} done from line 75. With thread {{crash_tid}} held at the
+deciding step, the other worker finishes its job and picks job {{next_job}},
+where in the passing run thread {{crash_tid}} counted job {{crash_job}} and
+picked job {{next_job}} first. That is the cause showing up before the
+symptom: the held thread's fault at line 77, which `rewind where` showed at
+the top of this page, comes {{late_gap}} steps later, at step {{crash_step}}.
 
 In the app, the deciding step is a dashed blue mark on the timeline, before
 the solid one where the runs' events first differ. Zoomed in around the crash:

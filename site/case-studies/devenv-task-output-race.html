@@ -190,11 +190,11 @@ assertion `left == right` failed
   left: ["line1", "line2"]
  right: ["line1", "line2", "line3"]
 ...
-<span class="ansi-dim">rewind:</span> run 7176689741c831e4 <span class="ansi-red">exited:101</span> after 1233 steps, 0.034s virtual, 1.438s wall (poweroff)</code></pre>
+<span class="ansi-dim">rewind:</span> run 5947419e48b1a8dd <span class="ansi-red">exited:101</span> after 1594 steps, 0.036s virtual, 0.383s wall (poweroff)</code></pre>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind replay <span class="number">71766897</span></span>
-<span class="ansi-green">identical</span> to the recording: 763 events and 145 read and write records over 1233 steps, and the whole machine at its 3 keyframes</code></pre>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind replay 5947419e</span>
+<span class="ansi-green">identical</span> to the recording: 763 events, 492 context switches and 145 read and write records over 1594 steps, and the whole machine at its 2 keyframes</code></pre>
         <p>The task printed three lines and devenv kept two, as in the issue.</p>
       </section>
 
@@ -205,41 +205,41 @@ assertion `left == right` failed
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind check <span class="option">--epoch</span> <span class="number">1791936000</span> <span class="option">--seed</span> <span class="number">5</span> <span class="option">--all</span> <span class="option">--schedules</span> <span class="number">256</span> <span class="string">'github:fzakaria/rewindvm?dir=examples/case-studies#devenv-last-lines-before-2296'</span></span>
-schedule   0: <span class="ansi-red">exited:101</span>           1233 steps    run 7176689741c831e4
-schedule   1: <span class="ansi-red">exited:101</span>           1291 steps    run a83fbb6085e13263
-schedule   2: <span class="ansi-red">exited:101</span>           1395 steps    run 80d7576a566f4402
-schedule   3: <span class="ansi-red">exited:101</span>           1338 steps    run 0356b918af4988d2
+schedule   0: <span class="ansi-red">exited:101</span>           1594 steps    run 5947419e48b1a8dd
+schedule   1: <span class="ansi-red">exited:101</span>           1701 steps    run 8a1e1e249bf3127a
+schedule   2: <span class="ansi-red">exited:101</span>           1740 steps    run 8787649768b46bab
+schedule   3: <span class="ansi-red">exited:101</span>           1768 steps    run fef971a0373f1de8
 ...
-schedule 256: <span class="ansi-green">exited:0</span>             1433 steps  <span class="ansi-red">77ac62e2629d</span>  run f87871d7d1e0a0ff
-<span class="ansi-red">schedule 0 failed; 34 of 256 other schedules ended differently</span>
+schedule 256: <span class="ansi-green">exited:0</span>             1799 steps  <span class="ansi-red">77ac62e2629d</span>  run 0a847eb65c6dbb7c
+<span class="ansi-red">schedule 0 failed; 36 of 256 other schedules ended differently</span>
 
-schedule 6 passes where schedule 0 fails; finding the step that decides it
-schedule 6 limited to steps 937..1192 still ends differently
-step 1191 decides it: a request to switch threads there makes the run pass
+schedule 5 passes where schedule 0 fails; finding the step that decides it
+schedule 5 limited to steps 835..1645 still ends differently
+step 1644 decides it: a 640 µs pause of the running thread there makes the run pass
 
-<span class="ansi-blue">passing</span>: run 9af45934c234b618, schedule 6 over steps 937..1192
-<span class="ansi-yellow">failing</span>: run 041dab22855c7ade, schedule 6 over steps 937..1191
-the two are the same run until step 1191
+<span class="ansi-blue">passing</span>: run dddef5ddcdfdb922, schedule 5 over steps 835..1645
+<span class="ansi-yellow">failing</span>: run 39531d5d872fd152, schedule 5 over steps 835..1644
+the two are the same run until step 1644
 
 where /nix/store/195dbbvj5h0yq9f4vnp833dsbgxpp8w0-devenv-tasks-tests-1.10.1/bin/devenv-tasks-tests test_failed_task_keeps_last_lines first behaves differently:
-  both           1086    40/42    open("/build/.tmpajDf2J/tasks.db-shm", 0o2400102)
-  both           1181    40/41    open("/build/devenv_task_outputfL02tO.json", 0o2000302)
-  both           1184    40/41    fork() = 43
-  <span class="ansi-yellow">failing</span>        1194    40/41    SIGCHLD code=1 addr=0x0
-  <span class="ansi-yellow">failing</span>        1203    40/41    close("anon_inode:[pidfd]")
-  <span class="ansi-yellow">failing</span>        1205    40/41    unlink("/build/devenv_task_outputfL02tO.json")
-  <span class="ansi-yellow">failing</span>        1206    40/41    close("/build/devenv_task_outputfL02tO.json")
-  <span class="ansi-blue">passing</span>        1214    40/41    close("anon_inode:[pidfd]")
-  <span class="ansi-blue">passing</span>        1216    40/41    unlink("/build/devenv_task_outputfL02tO.json")
-  <span class="ansi-blue">passing</span>        1217    40/41    close("/build/devenv_task_outputfL02tO.json")
-  <span class="ansi-blue">passing</span>        1228    40/42    thread exit(sqlx-sqlite-wor) exited:0
+  both           1500    40/42    open("/build/.tmprigw8M/tasks.db-shm", 0o2400102)
+  both           1636    40/41    open("/build/devenv_task_outputdz3jv1.json", 0o2000302)
+  both           1639    40/41    fork() = 43
+  <span class="ansi-yellow">failing</span>        1647    40/41    SIGCHLD code=1 addr=0x0
+  <span class="ansi-yellow">failing</span>        1656    40/41    close("anon_inode:[pidfd]")
+  <span class="ansi-yellow">failing</span>        1658    40/41    unlink("/build/devenv_task_outputdz3jv1.json")
+  <span class="ansi-yellow">failing</span>        1659    40/41    close("/build/devenv_task_outputdz3jv1.json")
+  <span class="ansi-blue">passing</span>        1677    40/41    close("anon_inode:[pidfd]")
+  <span class="ansi-blue">passing</span>        1679    40/41    unlink("/build/devenv_task_outputdz3jv1.json")
+  <span class="ansi-blue">passing</span>        1680    40/41    close("/build/devenv_task_outputdz3jv1.json")
+  <span class="ansi-blue">passing</span>        1687    40/41    unlink("/build/scriptGgRKWz.sh")
 
-open both in the desktop app: rewind open 041dab22855c7ade 1194 --compare 9af45934c234b618</code></pre>
+open both in the desktop app: rewind open 39531d5d872fd152 1647 --compare dddef5ddcdfdb922</code></pre>
         <p>
-          223 of 257 runs fail, each keeping <code>["line1", "line2"]</code>. The narrowed pair's
+          221 of 257 runs fail, each keeping <code>["line1", "line2"]</code>. The narrowed pair's
           calls part where the test learns that the task's shell has exited: in the failing run
-          SIGCHLD reaches it at step 1194, and in the passing run the first call that differs is the
-          close of the child's pidfd, at step 1214, with no SIGCHLD before it. What differs is when
+          SIGCHLD reaches it at step 1647, and in the passing run the first call that differs is the
+          close of the child's pidfd, at step 1677, with no SIGCHLD before it. What differs is when
           the task's shell gets the CPU.
         </p>
       </section>
@@ -252,35 +252,37 @@ open both in the desktop app: rewind open 041dab22855c7ade 1194 --compare 9af459
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind threads 041dab22855c7ade <span class="option">--from</span> <span class="number">1175</span> <span class="option">--to</span> <span class="number">1215</span></span>
-      1175       1176         40/42  sqlx-sqlite-wor
-      1177       1178         40/41  tests::test_fai
-      1179       1179         40/42  sqlx-sqlite-wor
-      1180       1184         40/41  tests::test_fai
-      1185       1186     kernel 11  ksoftirqd/0
-      1187       1189         43/43  tests::test_fai
-      1190       1191         43/43  scriptZCX6pY.sh
-      1192       1192     kernel 11  ksoftirqd/0
-      1193       1215         40/41  tests::test_fai
+        ><code><span class="cmd"><span class="prompt">$</span> rewind threads 39531d5d872fd152 <span class="option">--from</span> <span class="number">1628</span> <span class="option">--to</span> <span class="number">1676</span></span>
+      1628       1632         40/41  tests::test_fai
+      1633       1633         40/42  sqlx-sqlite-wor
+      1634       1639         40/41  tests::test_fai
+      1640       1641     kernel 11  ksoftirqd/0
+      1642       1642         43/43  tests::test_fai
+      1643       1644         43/43  scriptGgRKWz.sh
+      1645       1645     kernel 11  ksoftirqd/0
+      1646       1672         40/41  tests::test_fai
+      1673       1674     kernel 11  ksoftirqd/0
+      1675       1676         40/40  devenv-tasks-te
 
-<span class="cmd"><span class="prompt">$</span> rewind threads 9af45934c234b618 <span class="option">--from</span> <span class="number">1175</span> <span class="option">--to</span> <span class="number">1215</span></span>
-      1175       1176         40/42  sqlx-sqlite-wor
-      1177       1178         40/41  tests::test_fai
-      1179       1179         40/42  sqlx-sqlite-wor
-      1180       1184         40/41  tests::test_fai
-      1185       1186     kernel 11  ksoftirqd/0
-      1187       1189         43/43  tests::test_fai
-      1190       1191         43/43  scriptZCX6pY.sh
-      1192       1192     kernel 11  ksoftirqd/0
-      1193       1207         40/41  tests::test_fai
-      1208       1209     kernel 11  ksoftirqd/0
-      1210       1210         43/43  scriptZCX6pY.sh
-      1211       1211     kernel 11  ksoftirqd/0
-      1212       1215         40/41  tests::test_fai</code></pre>
+<span class="cmd"><span class="prompt">$</span> rewind threads dddef5ddcdfdb922 <span class="option">--from</span> <span class="number">1628</span> <span class="option">--to</span> <span class="number">1676</span></span>
+      1628       1632         40/41  tests::test_fai
+      1633       1633         40/42  sqlx-sqlite-wor
+      1634       1639         40/41  tests::test_fai
+      1640       1641     kernel 11  ksoftirqd/0
+      1642       1642         43/43  tests::test_fai
+      1643       1648         43/43  scriptGgRKWz.sh
+      1649       1649     kernel 11  ksoftirqd/0
+      1650       1664         40/41  tests::test_fai
+      1665       1665     kernel 11  ksoftirqd/0
+      1666       1672          idle  swapper/0
+      1673       1673     kernel 43  scriptGgRKWz.sh
+      1674       1676         40/41  tests::test_fai</code></pre>
         <p>
           In the failing run the shell (43) finishes exiting before thread 41 runs. In the passing
-          run the reschedule at step 1191 sends the shell off the CPU before its exit is done, and
-          it finishes only at step 1210. The app's Threads tab shows the same:
+          run a 640 µs pause of the running thread at step 1644 holds the shell in its exit: thread
+          41 runs ahead, the CPU idles, and the shell ends only at step 1673, by then a task with no
+          memory of its own, which <code>rewind threads</code> lists as <code>kernel 43</code>. The
+          app's Threads tab shows the same:
         </p>
         <figure class="shot">
           <picture>
@@ -290,28 +292,28 @@ open both in the desktop app: rewind open 041dab22855c7ade 1194 --compare 9af459
               width="1440"
               height="900"
               loading="lazy"
-              alt="The Threads tab on the failing and passing runs: the task&#x27;s shell, 43, on the CPU from step 1190 in both, and again at 1210 only in the passing run"
+              alt="The Threads tab on the failing and passing runs: the task&#x27;s shell, 43, on the CPU from step 1643 in both, and again at 1673 only in the passing run"
             />
           </picture>
           <figcaption>
             The Threads tab on the failing and passing runs: the task&#x27;s shell, 43, on the CPU
-            from step 1190 in both, and again at 1210 only in the passing run
+            from step 1643 in both, and again at 1673 only in the passing run
           </figcaption>
         </figure>
         <p>
-          Perturbing only from step 1155, where the run forks the task's shell, still lets some
+          Perturbing only from step 1519, where the run forks the task's shell, still lets some
           schedules pass, so the outcome is decided after the task starts:
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind check <span class="option">--run</span> <span class="number">71766897</span> <span class="option">--schedule-from</span> <span class="number">1155</span> <span class="option">--schedules</span> <span class="number">64</span> <span class="option">--all</span> <span class="option">--no-narrow</span></span>
-schedule   0: <span class="ansi-red">exited:101</span>           1233 steps    run 7176689741c831e4
-schedule   1: <span class="ansi-red">exited:101</span>           1253 steps    run d9ea6c28433b76d3
-schedule   2: <span class="ansi-red">exited:101</span>           1265 steps    run 291b13347aed952c
-schedule   3: <span class="ansi-red">exited:101</span>           1244 steps    run 4d81574b299281c7
+        ><code><span class="cmd"><span class="prompt">$</span> rewind check <span class="option">--run</span> 5947419e <span class="option">--schedule-from</span> <span class="number">1519</span> <span class="option">--schedules</span> <span class="number">64</span> <span class="option">--all</span> <span class="option">--no-narrow</span></span>
+schedule   0: <span class="ansi-red">exited:101</span>           1594 steps    run 5947419e48b1a8dd
+schedule   1: <span class="ansi-red">exited:101</span>           1626 steps    run 7d8b836c77378ac0
+schedule   2: <span class="ansi-red">exited:101</span>           1630 steps    run 5761b80ca8b993a3
+schedule   3: <span class="ansi-red">exited:101</span>           1631 steps    run 19d57727ed2513d0
 ...
-schedule  64: <span class="ansi-red">exited:101</span>           1259 steps    run 0daadf7d51f0e321
-<span class="ansi-red">run 7176689741c831e4 failed; 5 of 64 other schedules ended differently</span></code></pre>
+schedule  64: <span class="ansi-red">exited:101</span>           1630 steps    run fc4c3c72e947274d
+<span class="ansi-red">run 5947419e48b1a8dd failed; 13 of 64 other schedules ended differently</span></code></pre>
       </section>
 
       <section class="step">
@@ -321,12 +323,12 @@ schedule  64: <span class="ansi-red">exited:101</span>           1259 steps    r
         <p>The events of schedule 0's run around the task:</p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind events <span class="number">71766897</span> <span class="option">--from</span> <span class="number">1147</span> <span class="option">--to</span> <span class="number">1167</span></span>
-      1152    40/41    open("/build/devenv_task_outputbyuxVm.json", 0o2000302)
-      1155    40/41    fork() = 43
-      1159    43/43    execve("/build/scriptL1Qmi0.sh", ["/bin/sh", "/build/scriptL1Qmi0.sh"])
-      1160    43/43    exit_group(scriptL1Qmi0.sh) exited:1
-      1163    40/41    SIGCHLD code=1 addr=0x0</code></pre>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind events 5947419e <span class="option">--from</span> <span class="number">1511</span> <span class="option">--to</span> <span class="number">1531</span></span>
+      1516    40/41    open("/build/devenv_task_outputasKI1s.json", 0o2000302)
+      1519    40/41    fork() = 43
+      1523    43/43    execve("/build/script1NPIuA.sh", ["/bin/sh", "/build/script1NPIuA.sh"])
+      1524    43/43    exit_group(script1NPIuA.sh) exited:1
+      1527    40/41    SIGCHLD code=1 addr=0x0</code></pre>
         <p>
           The shell prints all three lines and exits before the loop reads anything.
           <code>rewind gdb</code> opens gdb on a fork of the run at a step. Break on
@@ -343,7 +345,7 @@ schedule  64: <span class="ansi-red">exited:101</span>           1259 steps    r
                     width="1440"
                     height="900"
                     loading="lazy"
-                    alt="The Rewind desktop app on the failing devenv run at step 1,194, compared with the passing run 9af45934: the build log stops at running 1 test, SIGCHLD has reached thread 41, and the runs are the same until step 1,191. Opens the full-size image."
+                    alt="The Rewind desktop app on the failing devenv run at step 1,647, compared with the passing run dddef5dd: the build log stops at running 1 test, SIGCHLD has reached thread 41, and the runs are the same until step 1,644. Opens the full-size image."
                   />
                 </picture>
               </a>
@@ -381,16 +383,16 @@ schedule  64: <span class="ansi-red">exited:101</span>           1259 steps    r
               </button>
             </div>
             <figcaption>
-              The app on the failing run 041dab22 at step 1,194, compared with the passing run
-              9af45934.
+              The app on the failing run 39531d5d at step 1,647, compared with the passing run
+              dddef5dd.
             </figcaption>
           </figure>
           <ol class="tour-cards">
             <li class="tour-card" id="tour-1" tabindex="0">
               <h3>The timeline</h3>
               <p>
-                Step 1,194 of 1,264, three steps after the one where only the passing run is
-                rescheduled.
+                Step 1,647 of 1,714, three steps after the one where only the passing run has its
+                running thread paused.
               </p>
             </li>
             <li class="tour-card" id="tour-2" tabindex="0">
@@ -407,24 +409,24 @@ schedule  64: <span class="ansi-red">exited:101</span>           1259 steps    r
             <li class="tour-card" id="tour-4" tabindex="0">
               <h3>Divergence</h3>
               <p>
-                The runs are the same until step 1,191, where only the passing run is asked to
-                switch threads. This SIGCHLD is the first call that differs.
+                The runs are the same until step 1,644, where only the passing run has its running
+                thread paused for 640 µs. This SIGCHLD is the first call that differs.
               </p>
             </li>
           </ol>
         </div>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind gdb <span class="number">71766897</span> <span class="number">1152</span> -- <span class="option">-batch</span> <span class="option">-ex</span> <span class="string">'break read if $rdi == 13'</span> <span class="option">-ex</span> <span class="string">'break task_state.rs:409'</span> <span class="option">-ex</span> continue <span class="option">-ex</span> <span class="string">'set $buf = $rsi'</span> <span class="option">-ex</span> finish <span class="option">-ex</span> <span class="string">'x/s $buf'</span> <span class="option">-ex</span> <span class="string">'delete 1'</span> <span class="option">-ex</span> continue</span>
-<span class="ansi-dim">rewind:</span> step 1152 ran in process 40; loading symbols for 5 of its files
+        ><code><span class="cmd"><span class="prompt">$</span> rewind gdb 5947419e <span class="number">1516</span> -- <span class="option">-batch</span> <span class="option">-ex</span> <span class="string">'break read if $rdi == 13'</span> <span class="option">-ex</span> <span class="string">'break task_state.rs:409'</span> <span class="option">-ex</span> continue <span class="option">-ex</span> <span class="string">'set $buf = $rsi'</span> <span class="option">-ex</span> finish <span class="option">-ex</span> <span class="string">'x/s $buf'</span> <span class="option">-ex</span> <span class="string">'delete 1'</span> <span class="option">-ex</span> continue</span>
+<span class="ansi-dim">rewind:</span> step 1516 ran in process 40; loading symbols for 5 of its files
 <span class="ansi-dim">rewind:</span> source files for /nix/store/195dbbvj5h0yq9f4vnp833dsbgxpp8w0-devenv-tasks-tests-1.10.1 from /nix/store/hs2328bm8f7s0cq77jjjgdlcqrc13mhm-source
-<span class="ansi-dim">rewind:</span> gdb at step 1152 of 7176689741c831e4
+<span class="ansi-dim">rewind:</span> gdb at step 1516 of 5947419e48b1a8dd
 Downloading 1.72 M separate debug info for /nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libm.so.6...
 Downloading 4.35 M separate debug info for /nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6...
 Downloading 658.16 K separate debug info for /nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/ld-linux-x86-64.so.2...
-Downloading 740.00 B source file /build/linux-7.2.8/./arch/x86/include/asm/shared/io.h...
-0xffffffff812850a5 in __outl (value=&lt;optimized out&gt;, port=1504) at ./arch/x86/include/asm/shared/io.h:24
-24	BUILDIO(l,  , u32)
+Downloading 3.12 K source file /build/linux-7.2.8/./arch/x86/include/asm/irqflags.h...
+arch_local_irq_restore (flags=514) at ./arch/x86/include/asm/irqflags.h:146
+146		return !(flags &amp; X86_EFLAGS_IF);
 [Switching to thread 3 (Thread 1.41)]
 Downloading 1.79 K source file /build/glibc-2.44/nptl/../sysdeps/unix/sysv/linux/x86_64/syscall_cancel.S...
 #0  __syscall_cancel_arch () at ../sysdeps/unix/sysv/linux/x86_64/syscall_cancel.S:56
@@ -498,9 +500,9 @@ Thread 3 hit Breakpoint 2.1, devenv_tasks::task_state::{impl#1}::run::{async_fn#
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind check <span class="option">--epoch</span> <span class="number">1791936000</span> <span class="option">--seed</span> <span class="number">5</span> <span class="option">--all</span> <span class="option">--schedules</span> <span class="number">256</span> <span class="string">'github:fzakaria/rewindvm?dir=examples/case-studies#devenv-last-lines-2296'</span></span>
 <span class="ansi-dim">rewind:</span> packing 57 store paths for devenv-tasks-test-last-lines-2296
-schedule   0: <span class="ansi-green">exited:0</span>             1257 steps  77ac62e2629d  run 671a6d6ca8a0c373
-schedule   1: <span class="ansi-green">exited:0</span>             1348 steps  77ac62e2629d  run 0793951a23ecb949
-schedule   2: <span class="ansi-green">exited:0</span>             1430 steps  77ac62e2629d  run 5a9aeda3b7ac7448
+schedule   0: <span class="ansi-green">exited:0</span>             1618 steps  77ac62e2629d  run 0e3bec4c6a2026fa
+schedule   1: <span class="ansi-green">exited:0</span>             1748 steps  77ac62e2629d  run 13e7c1f26410d822
+schedule   2: <span class="ansi-green">exited:0</span>             1769 steps  77ac62e2629d  run 69c6252f317c5320
 ...
 <span class="ansi-green">0 of 256 other schedules ended differently</span>
 <span class="ansi-green">same result under all 257 schedules</span></code></pre>
@@ -524,7 +526,7 @@ schedule   2: <span class="ansi-green">exited:0</span>             1430 steps  7
               href="https://github.com/fzakaria/rewindvm/releases/download/case-studies/devenv-task-output-race.rwd"
               >devenv-task-output-race.rwd</a
             >
-            (11.5 KB), the trace, for <code>rewind events</code>, <code>rewind log</code> and the
+            (12.5 KB), the trace, for <code>rewind events</code>, <code>rewind log</code> and the
             app; the <a href="../viewer/?url=examples/devenv-task-output-race.rwd">viewer</a> opens
             it in a browser.
           </li>
@@ -533,15 +535,15 @@ schedule   2: <span class="ansi-green">exited:0</span>             1430 steps  7
               href="https://github.com/fzakaria/rewindvm/releases/download/case-studies/devenv-task-output-race-replayable.rwd"
               >devenv-task-output-race-replayable.rwd</a
             >
-            (184.4 MB), with the kernel, input image and keyframes, for <code>rewind replay</code>,
+            (187.0 MB), with the kernel, input image and keyframes, for <code>rewind replay</code>,
             <code>rewind gdb</code> and <code>rewind shell</code>.
           </li>
         </ul>
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind import https://github.com/fzakaria/rewindvm/releases/download/case-studies/devenv-task-output-race-replayable.rwd</span>
-<span class="cmd"><span class="prompt">$</span> rewind replay <span class="number">71766897</span></span>
-<span class="cmd"><span class="prompt">$</span> rewind gdb <span class="number">71766897</span> <span class="number">1152</span></span>
+<span class="cmd"><span class="prompt">$</span> rewind replay 5947419e</span>
+<span class="cmd"><span class="prompt">$</span> rewind gdb 5947419e <span class="number">1516</span></span>
 <span class="cmd"><span class="prompt">$</span> rewind-app https://github.com/fzakaria/rewindvm/releases/download/case-studies/devenv-task-output-race.rwd</span></code></pre>
       </section>
 

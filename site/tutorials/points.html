@@ -84,7 +84,7 @@
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind check <span class="option">--epoch</span> <span class="number">1790985600</span> github:fzakaria/rewindvm#counter</span>
 ...
-schedule  64: <span class="ansi-green">exited:0</span>             5293 steps  e3f96e451c97  run 88685f0283a17ca8  <span class="ansi-green">holds</span>
+schedule  64: <span class="ansi-green">exited:0</span>             5832 steps  e3f96e451c97  run d2ad8d9f7ec3393b  <span class="ansi-green">holds</span>
 <span class="ansi-green">every property held under all 65 schedules</span></code></pre>
         <p>
           The threads do race. On a multicore host they run at the same instant, and one hit in a
@@ -195,34 +195,34 @@ schedule  64: <span class="ansi-green">exited:0</span>             5293 steps  e
         ><code><span class="cmd"><span class="prompt">$</span> rewind check <span class="option">--epoch</span> <span class="number">1790985600</span> .#counter <span class="operator">|</span> grep <span class="option">-E</span> <span class="string">'decides it|passing:|failing:|failing run violates sdk'</span></span>
 rewind: packing 62 store paths for counter-0.1.0
 schedule 1 violates same-outcome, sdk; finding the step that decides it
-step 3237 decides it: a request to switch threads there makes the run violate same-outcome, sdk
-passing: run b66c913d300d5ef7, schedule 0
-failing: run bdb538e102adc31a, schedule 1 over steps 3237..3238
-failing run violates sdk: step 3261: always "hits-add-up" failed: 10 hits, expected 20</code></pre>
+step 3387 decides it: a request to switch threads there makes the run violate same-outcome, sdk
+passing: run bff975cd314c983e, schedule 1 over steps 3202..3387
+failing: run d4ea11ffd5b1485c, schedule 1 over steps 3202..3388
+failing run violates sdk: step 3411: always "hits-add-up" failed: 10 hits, expected 20</code></pre>
         <p>
           The run violates <code>same-outcome</code> too, since the job's build fails where schedule
-          0's passed. Step 3237 is a point: one thread has read the count and not stored it, and the
+          0's passed. Step 3387 is a point: one thread has read the count and not stored it, and the
           switch there lets the other thread count every hit it has before the store lands.
           <code>rewind threads</code> shows which thread held the CPU around the point, in the
           failing run and in the passing one it was forked from:
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind threads bdb538e1 <span class="option">--from</span> <span class="number">3235</span> <span class="option">--to</span> <span class="number">3239</span></span>
-      3235       3238       139/140  counter
-      3239       3239       139/141  counter</code></pre>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind threads d4ea11ff <span class="option">--from</span> <span class="number">3385</span> <span class="option">--to</span> <span class="number">3389</span></span>
+      3385       3388       139/140  counter
+      3389       3389       139/141  counter</code></pre>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind threads b66c913d <span class="option">--from</span> <span class="number">3235</span> <span class="option">--to</span> <span class="number">3239</span></span>
-      3235       3239       139/140  counter</code></pre>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind threads bff975cd <span class="option">--from</span> <span class="number">3385</span> <span class="option">--to</span> <span class="number">3389</span></span>
+      3385       3389       139/140  counter</code></pre>
         <p>
-          Thread 139/141 takes the CPU at step 3239 of the failing run, and not in the passing one.
+          Thread 139/141 takes the CPU at step 3389 of the failing run, and not in the passing one.
           Open the failing run beside the passing one, at the point, with the thread lanes shown and
           zoomed in on the window around it:
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind open bdb538e1 <span class="number">3237</span> <span class="option">--compare</span> b66c913d</span></code></pre>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind open d4ea11ff <span class="number">3387</span> <span class="option">--compare</span> bff975cd</span></code></pre>
         <figure class="shot">
           <picture>
             <source srcset="../img/app-point.webp" type="image/webp" />
@@ -231,13 +231,13 @@ failing run violates sdk: step 3261: always "hits-add-up" failed: 10 hits, expec
               width="1440"
               height="900"
               loading="lazy"
-              alt="The app at step 3237 of the failing counter run, compared with the passing one, with the Threads panel open: a lane per thread, the playhead at the point, and the other counter thread on the CPU from step 3239"
+              alt="The app at step 3387 of the failing counter run, compared with the passing one, with the Threads panel open: a lane per thread, the playhead at the point, and the other counter thread on the CPU from step 3389"
             />
           </picture>
           <figcaption>
-            The app at step 3237 of the failing counter run, compared with the passing one, with the
+            The app at step 3387 of the failing counter run, compared with the passing one, with the
             Threads panel open: a lane per thread, the playhead at the point, and the other counter
-            thread on the CPU from step 3239
+            thread on the CPU from step 3389
           </figcaption>
         </figure>
         <p>

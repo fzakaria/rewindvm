@@ -1,6 +1,6 @@
 [
  {
-  "text": "$ rewind check --epoch 1790985600 --seeds 8 --schedules 0 --all --no-narrow github:fzakaria/rewindvm#tiles\nrewind: packing 75 store paths for tiles-0.2.0\nrewind: 8 random seeds, each run under schedule 0 and 0 other schedules: 8 runs\nseed  0 schedule   0: exited:0             4058 steps  d20b5efd388d  run 2d02117963b74c73\nseed  1 schedule   0: exited:0             4058 steps  b4501793e383  run 3e85ea15ef35347e\nseed  2 schedule   0: exited:0             4058 steps  0cd5db6c5c2c  run 4907111a7d5673aa\nseed  3 schedule   0: exited:0             4058 steps  24f18f09c329  run 1b7de2424bbb3b62\nseed  4 schedule   0: exited:0             4058 steps  b4501793e383  run 9ac4cc4ea04009ba\nseed  5 schedule   0: exited:0             4058 steps  5e1f0a457cbe  run 671d7dde36f0683b\nseed  6 schedule   0: exited:0             4058 steps  d20b5efd388d  run 1d29318f153b7227\nseed  7 schedule   0: exited:0             4058 steps  b4501793e383  run 9386eb44a962d21f\n6 of 7 other runs ended differently",
+  "text": "$ rewind check --epoch 1790985600 --seeds 8 --schedules 0 --all --no-narrow github:fzakaria/rewindvm#tiles\nrewind: packing 75 store paths for tiles-0.2.0\nrewind: 8 random seeds, each run under schedule 0 and 0 other schedules: 8 runs\nseed  0 schedule   0: exited:0             4058 steps  d20b5efd388d  run d289f15aa42115bc\nseed  1 schedule   0: exited:0             4058 steps  b4501793e383  run efcf2922efba1248\nseed  2 schedule   0: exited:0             4058 steps  0cd5db6c5c2c  run 51dabdf03329e5ef\nseed  3 schedule   0: exited:0             4058 steps  24f18f09c329  run 96e475710a0282dd\nseed  4 schedule   0: exited:0             4058 steps  b4501793e383  run 84f77cca275f106a\nseed  5 schedule   0: exited:0             4058 steps  5e1f0a457cbe  run 2dfb6865c200b738\nseed  6 schedule   0: exited:0             4058 steps  d20b5efd388d  run 2fba19a5e336f7b4\nseed  7 schedule   0: exited:0             4058 steps  b4501793e383  run cc488264bf96feeb\n6 of 7 other runs ended differently",
   "spans": [
    [
     1,
@@ -107,7 +107,7 @@
   ]
  },
  {
-  "text": "$ rewind diff --outputs 2d021179 3e85ea15\n2 of the 5 files the runs left behind differ:\n  /build/tiles/tiles.pc: 22 of 227 bytes differ, first at byte 178\n  /nix/store/...-tiles-0.2.0/lib/pkgconfig/tiles.pc: 22 of 227 bytes differ, first at byte 178\n\n$ rewind diff --file /build/tiles/tiles.pc 2d021179 3e85ea15\ntiles.pc differs, first at line 7.\nOnly in the left run: 1 line.\nOnly in the right run: 1 line.\n\nLines marked - are only in the left run. Lines marked + are only in the right run.\n  Name: tiles\n  Description: Tile a large image into small ones\n  Version: 0.2.0\n- Requires.private: pixman-1, libpng, zlib\n+ Requires.private: zlib, pixman-1, libpng\n  Libs: -L${libdir} -ltiles",
+  "text": "$ rewind diff --outputs d289f15a efcf2922\n2 of the 5 files the runs left behind differ:\n  /build/tiles/tiles.pc: 22 of 227 bytes differ, first at byte 178\n  /nix/store/...-tiles-0.2.0/lib/pkgconfig/tiles.pc: 22 of 227 bytes differ, first at byte 178\n\n$ rewind diff --file /build/tiles/tiles.pc d289f15a efcf2922\ntiles.pc differs, first at line 7.\nOnly in the left run: 1 line.\nOnly in the right run: 1 line.\n\nLines marked - are only in the left run. Lines marked + are only in the right run.\n  Name: tiles\n  Description: Tile a large image into small ones\n  Version: 0.2.0\n- Requires.private: pixman-1, libpng, zlib\n+ Requires.private: zlib, pixman-1, libpng\n  Libs: -L${libdir} -ltiles",
   "spans": [
    [
     1,
@@ -148,7 +148,7 @@
   ]
  },
  {
-  "text": "$ rewind blame 2d021179 3e85ea15 /nix/store/ihhhzc5qphjjz5vgss7swki10dwkicsb-tiles-0.2.0/lib/pkgconfig/tiles.pc\ntiles.pc differs at byte 178. python3 (pid 112) wrote that byte at step 3,068 in run 2d021179 and at step 3,068 in run 3e85ea15.\n\n22 of 227 bytes differ. The bytes from byte 178:\n  2d021179  70 69 78 6d 61 6e 2d 31 2c 20 6c 69 62 70 6e 67  |pixman-1, libpng|\n  3e85ea15  7a 6c 69 62 2c 20 70 69 78 6d 61 6e 2d 31 2c 20  |zlib, pixman-1, |\n\nWho wrote the file in run 2d021179, from the last writer back:\n  install (pid 122) copied it from /build/tiles/tiles.pc, starting at step 3,280. Its source already differs, so the copy did not cause the difference.\n  bash (pid 112) wrote /build/tiles/tiles.pc, starting at step 2,984. It is the first writer, and the file already differs when it is done.\nRun 3e85ea15 made the file the same way, with the same programs.\n\nIn both runs, one write of 227 bytes, from byte 0, set byte 178.\n\npython3 ran with the same command line in both runs, so the difference comes from something it read or from randomness.\n\nWhat python3 read:\n  1 file that the build made, all the same in both runs: /build/tiles/gen-pc.py.\n  31 other files that the build did not make, such as programs and libraries.\n\nLikely cause: something inside python3 (pid 112), such as randomness or the order its threads ran in. Its command line and the files the build made that it read are the same in both runs.",
+  "text": "$ rewind blame d289f15a efcf2922 /nix/store/ihhhzc5qphjjz5vgss7swki10dwkicsb-tiles-0.2.0/lib/pkgconfig/tiles.pc\ntiles.pc differs at byte 178. python3 (pid 112) wrote that byte at step 3,068 in run d289f15a and at step 3,068 in run efcf2922.\n\n22 of 227 bytes differ. The bytes from byte 178:\n  d289f15a  70 69 78 6d 61 6e 2d 31 2c 20 6c 69 62 70 6e 67  |pixman-1, libpng|\n  efcf2922  7a 6c 69 62 2c 20 70 69 78 6d 61 6e 2d 31 2c 20  |zlib, pixman-1, |\n\nWho wrote the file in run d289f15a, from the last writer back:\n  install (pid 122) copied it from /build/tiles/tiles.pc, starting at step 3,280. Its source already differs, so the copy did not cause the difference.\n  bash (pid 112) wrote /build/tiles/tiles.pc, starting at step 2,984. It is the first writer, and the file already differs when it is done.\nRun efcf2922 made the file the same way, with the same programs.\n\nIn both runs, one write of 227 bytes, from byte 0, set byte 178.\n\npython3 ran with the same command line in both runs, so the difference comes from something it read or from randomness.\n\nWhat python3 read:\n  1 file that the build made, all the same in both runs: /build/tiles/gen-pc.py.\n  31 other files that the build did not make, such as programs and libraries.\n\nLikely cause: something inside python3 (pid 112), such as randomness or the order its threads ran in. Its command line and the files the build made that it read are the same in both runs.",
   "spans": [
    [
     1,
@@ -217,7 +217,7 @@
   ]
  },
  {
-  "text": "$ rewind check --epoch 1790985600 --seeds 1 --schedules 0 --all --no-narrow --dirents 3 .#plugins\ndirents  0 schedule   0: exited:0             3943 steps  77b96f07540a  run 9a6ba076725bb5c8\ndirents  1 schedule   0: exited:0             3943 steps  3d555b541296  run 29f205d4b8569000\ndirents  2 schedule   0: exited:0             3943 steps  925dde4ef23a  run 6c5eb36273634569\ndirents  3 schedule   0: exited:0             3943 steps  abd7877043a8  run 7aa57f06b4e4f5d0\n3 of 3 other runs ended differently",
+  "text": "$ rewind check --epoch 1790985600 --seeds 1 --schedules 0 --all --no-narrow --dirents 3 .#plugins\ndirents  0 schedule   0: exited:0             3943 steps  77b96f07540a  run 152543acf6616336\ndirents  1 schedule   0: exited:0             3943 steps  3d555b541296  run 6b5084c244941332\ndirents  2 schedule   0: exited:0             3943 steps  925dde4ef23a  run ecbea4c15840436a\ndirents  3 schedule   0: exited:0             3943 steps  abd7877043a8  run baf511ff1d779a65\n3 of 3 other runs ended differently",
   "spans": [
    [
     1,
@@ -270,7 +270,7 @@
   ]
  },
  {
-  "text": "$ rewind diff --file /build/plugins/plugins.txt 29f205d4 6c5eb362\nplugins.txt differs, first at line 3.\nOnly in the left run: 2 lines.\nOnly in the right run: 2 lines.\n\nLines marked - are only in the left run. Lines marked + are only in the right run.\n  # The plugins this package ships, one a line.\n  sharpen\n+ resize\n  crop\n- blur\n  rotate\n- resize\n+ blur",
+  "text": "$ rewind diff --file /build/plugins/plugins.txt 6b5084c2 ecbea4c1\nplugins.txt differs, first at line 3.\nOnly in the left run: 2 lines.\nOnly in the right run: 2 lines.\n\nLines marked - are only in the left run. Lines marked + are only in the right run.\n  # The plugins this package ships, one a line.\n  sharpen\n+ resize\n  crop\n- blur\n  rotate\n- resize\n+ blur",
   "spans": [
    [
     1,
@@ -317,7 +317,7 @@
   ]
  },
  {
-  "text": "$ rewind check --epoch 1790985600 --seeds 1 --schedules 0 --all --no-narrow --dirents 3 .#plugins\n...\ndirents  0 schedule   0: exited:0             3943 steps  164f7a685a08  run 0522526982d1aeb1\ndirents  1 schedule   0: exited:0             3943 steps  164f7a685a08  run 7a6b007e9c9af39c\ndirents  2 schedule   0: exited:0             3943 steps  164f7a685a08  run e765b3ccfa008eae\ndirents  3 schedule   0: exited:0             3943 steps  164f7a685a08  run ce93a0401904287f\n0 of 3 other runs ended differently\nsame result under all 4 runs",
+  "text": "$ rewind check --epoch 1790985600 --seeds 1 --schedules 0 --all --no-narrow --dirents 3 .#plugins\n...\ndirents  0 schedule   0: exited:0             3943 steps  164f7a685a08  run 40c71199bbce2552\ndirents  1 schedule   0: exited:0             3943 steps  164f7a685a08  run 816b9cfa4b7fa45d\ndirents  2 schedule   0: exited:0             3943 steps  164f7a685a08  run cd5f476215dad4c9\ndirents  3 schedule   0: exited:0             3943 steps  164f7a685a08  run de5d40197fcf6a25\n0 of 3 other runs ended differently\nsame result under all 4 runs",
   "spans": [
    [
     2,
