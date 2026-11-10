@@ -120,7 +120,7 @@ diff -ruN a/arch/x86/kernel/cpu/Makefile b/arch/x86/kernel/cpu/Makefile
 diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 --- a/arch/x86/kernel/cpu/rewind.c	1969-12-31 16:00:00.000000000 -0800
 +++ b/arch/x86/kernel/cpu/rewind.c	1969-12-31 16:00:00.000000000 -0800
-@@ -0,0 +1,1519 @@
+@@ -0,0 +1,1528 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Rewind VM guest platform.
@@ -1029,10 +1029,19 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +static void rewind_probe_exit(void *data, struct task_struct *p,
 +			      bool group_dead)
 +{
-+	u16 flags = p->pid != p->tgid ? REWIND_FLAG_THREAD : 0;
++	/*
++	 * The exit of a process's last thread, whichever thread that is, is
++	 * the process's exit, under its main thread's name. Every other exit
++	 * is one thread's, the main thread's included: a main thread that
++	 * calls pthread_exit while its workers run leaves the process
++	 * running. The main thread's task stays until the group is gone, so
++	 * its name is there to read.
++	 */
++	u16 flags = group_dead ? 0 : REWIND_FLAG_THREAD;
++	const char *comm = group_dead ? p->group_leader->comm : p->comm;
 +
 +	rewind_emit(REWIND_EV_EXIT, flags, p->tgid, p->pid, p->exit_code,
-+		    p->comm, strnlen(p->comm, TASK_COMM_LEN), NULL, 0);
++		    comm, strnlen(comm, TASK_COMM_LEN), NULL, 0);
 +}
 +
 +static void rewind_probe_signal(void *data, int sig,

@@ -668,6 +668,7 @@ mod tests {
                 status: None,
                 comm: None,
                 threads: Vec::new(),
+                main_end: None,
             }
         };
         let cc1 = process(4, &["/nix/store/x-gcc/libexec/cc1", "-quiet", "a.c"]);

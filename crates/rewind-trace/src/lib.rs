@@ -122,6 +122,11 @@ pub struct Process {
     /// Threads other than the main one, with the steps they started and
     /// ended on.
     pub threads: Vec<(u32, u64, Option<u64>)>,
+    /// The step its main thread exited on, when that was before the
+    /// process's exit: a main thread that called pthread_exit while other
+    /// threads ran. None while the main thread lives as long as the
+    /// process.
+    pub main_end: Option<u64>,
 }
 
 /// kthreadd, the parent of every kernel thread, and what it and they are
@@ -380,6 +385,7 @@ impl Trace {
                 status: None,
                 comm: None,
                 threads: Vec::new(),
+                main_end: None,
             });
             live.insert(pid, procs.len() - 1);
             procs.len() - 1
@@ -410,12 +416,27 @@ impl Trace {
                         procs[c].argv = parent_argv;
                     }
                 }
-                EventKind::Exec { argv, .. } => {
+                EventKind::Exec { argv, old_pid, .. } => {
                     let i = entry(&mut procs, &mut live, e.pid, None, 0);
                     let p = &mut procs[i];
                     p.argv = argv.clone();
                     p.execd = true;
                     p.execs.push((e.step, argv.clone()));
+
+                    // A thread other than the main one that execs takes
+                    // the process's id and becomes its main thread, after
+                    // Linux has ended the old main thread: the thread's
+                    // own id ends there, with no exit of its own.
+                    p.main_end = None;
+                    if *old_pid != e.pid
+                        && let Some(t) = p
+                            .threads
+                            .iter_mut()
+                            .rev()
+                            .find(|t| t.0 == *old_pid && t.2.is_none())
+                    {
+                        t.2 = Some(e.step);
+                    }
                 }
                 EventKind::Exit {
                     status,
@@ -426,19 +447,29 @@ impl Trace {
                         continue;
                     };
                     let p = &mut procs[i];
-                    if *thread {
-                        // Linux hands a thread id out again once its
-                        // thread has exited, so the exit ends the newest
-                        // lifetime with the id still live.
-                        if let Some(t) = p
-                            .threads
-                            .iter_mut()
-                            .rev()
-                            .find(|t| t.0 == e.tid && t.2.is_none())
-                        {
-                            t.2 = Some(e.step);
-                        }
-                    } else {
+
+                    // The guest records the exit of a process's last
+                    // thread as the process's, whichever thread that is,
+                    // so that thread's lifetime ends there too. A main
+                    // thread's exit before then is its own, as after
+                    // pthread_exit.
+                    if *thread && e.tid == e.pid {
+                        p.main_end = Some(e.step);
+                        continue;
+                    }
+
+                    // Linux hands a thread id out again once its thread
+                    // has exited, so the exit ends the newest lifetime
+                    // with the id still live.
+                    if let Some(t) = p
+                        .threads
+                        .iter_mut()
+                        .rev()
+                        .find(|t| t.0 == e.tid && t.2.is_none())
+                    {
+                        t.2 = Some(e.step);
+                    }
+                    if !*thread {
                         p.end = Some(e.step);
                         p.status = Some(*status);
                         p.comm = Some(comm.clone());
@@ -1035,6 +1066,99 @@ mod tests {
                 thread: false,
             },
         )
+    }
+
+    #[test]
+    fn a_main_thread_that_exits_first_leaves_its_process_running() {
+        // Process 7 starts thread 8, its main thread exits at step 4 as
+        // after pthread_exit, and thread 8 ends the process at step 9, as
+        // the guest records a group's last exit. The process lives from
+        // its fork to step 9, its main thread ended at 4, and thread 8
+        // ran to 9. Builds the trace by hand.
+        let exit = |step, tid, thread| {
+            ev(
+                step,
+                7,
+                tid,
+                EventKind::Exit {
+                    status: 3 << 8,
+                    comm: "pexit".into(),
+                    thread,
+                },
+            )
+        };
+        let trace = Trace {
+            events: vec![
+                fork_of(1, 7),
+                exec_of(2, 7, "pexit"),
+                ev(
+                    3,
+                    7,
+                    7,
+                    EventKind::Fork {
+                        child: 8,
+                        thread: true,
+                    },
+                ),
+                exit(4, 7, true),
+                exit(9, 8, false),
+            ],
+            ..Default::default()
+        };
+        let process = trace.process_at(7, 6).unwrap();
+        assert!(process.alive_at(6));
+        assert_eq!(process.end, Some(9));
+        assert_eq!(process.status, Some(3 << 8));
+        assert_eq!(process.main_end, Some(4));
+        assert_eq!(process.threads, vec![(8, 3, Some(9))]);
+    }
+
+    #[test]
+    fn a_thread_that_execs_becomes_the_main_thread() {
+        // Thread 8 of process 7 execs at step 5. Linux kills the main
+        // thread first, which the guest records as a thread exit at 4,
+        // and gives thread 8 the process's id, so 8 is gone without an
+        // exit of its own. Afterwards the process has a main thread again
+        // and no other. Builds the trace by hand.
+        let trace = Trace {
+            events: vec![
+                fork_of(1, 7),
+                exec_of(2, 7, "pexit"),
+                ev(
+                    3,
+                    7,
+                    7,
+                    EventKind::Fork {
+                        child: 8,
+                        thread: true,
+                    },
+                ),
+                ev(
+                    4,
+                    7,
+                    7,
+                    EventKind::Exit {
+                        status: 0,
+                        comm: "pexit".into(),
+                        thread: true,
+                    },
+                ),
+                ev(
+                    5,
+                    7,
+                    7,
+                    EventKind::Exec {
+                        filename: "sh".into(),
+                        argv: vec!["sh".into()],
+                        old_pid: 8,
+                    },
+                ),
+            ],
+            ..Default::default()
+        };
+        let process = trace.process_at(7, 6).unwrap();
+        assert_eq!(process.main_end, None);
+        assert_eq!(process.threads, vec![(8, 3, Some(5))]);
     }
 
     #[test]

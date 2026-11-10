@@ -1824,6 +1824,7 @@ mod tests {
             status: None,
             comm: None,
             threads: Vec::new(),
+            main_end: None,
         }
     }
 

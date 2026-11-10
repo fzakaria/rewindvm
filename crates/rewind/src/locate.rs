@@ -875,8 +875,9 @@ pub(crate) fn thread_at(
 /// since by then the kernel has taken its memory and, with it, every file
 /// that names its frames. A process that called exit is looked at the
 /// step before. A process killed by a signal is looked at its last event
-/// before the exit: the kernel tears it down from the kill on, and can
-/// drop it from /proc steps before its exit is recorded.
+/// before the exit, other than its threads' exits: the kernel tears it
+/// down from the kill on, and can drop it from /proc steps before its exit
+/// is recorded.
 fn alive_step(trace: &Trace, step: u64, pid: u32) -> u64 {
     let status = trace.events.iter().find_map(|e| match e.kind {
         rewind_trace::EventKind::Exit {
@@ -891,14 +892,18 @@ fn alive_step(trace: &Trace, step: u64, pid: u32) -> u64 {
     };
 
     // A killed process's last event of its own, else the step before.
+    // Its threads' exits are the kill tearing it down, recorded before the
+    // process's own exit, which its last thread makes.
     let before = step.saturating_sub(1);
+    let torn_down =
+        |e: &rewind_trace::Event| matches!(e.kind, rewind_trace::EventKind::Exit { .. });
     match ExitStatus::from_raw(status) {
         ExitStatus::Code(_) => before,
         ExitStatus::Signal { .. } => trace
             .events
             .iter()
             .rev()
-            .find(|e| e.pid == pid && e.step < step)
+            .find(|e| e.pid == pid && e.step < step && !torn_down(e))
             .map_or(before, |e| e.step),
     }
 }
@@ -1627,6 +1632,46 @@ mod tests {
 
         // Killed with no event of its own before, the step before it is.
         assert_eq!(alive_step(&trace, 2400, 60), 2399);
+    }
+
+    /// A process whose worker crashed is looked at the crash: the other
+    /// threads' exits the kill brings, recorded before the process's own,
+    /// are the teardown, not events of a live process. Thread 35 of
+    /// process 34 gets SIGSEGV at 700, threads 34 and 36 exit at 705 and
+    /// 708, and thread 35 ends the process at 712. Builds the trace by
+    /// hand.
+    #[test]
+    fn a_crashed_process_is_looked_at_before_its_threads_exit() {
+        let event = |step, tid, kind| rewind_trace::Event {
+            step,
+            pid: 34,
+            tid,
+            kind,
+        };
+        let killed_by_sigsegv = 11;
+        let exit = |thread| rewind_trace::EventKind::Exit {
+            status: killed_by_sigsegv,
+            comm: "crash".into(),
+            thread,
+        };
+        let trace = Trace {
+            events: vec![
+                event(
+                    700,
+                    35,
+                    rewind_trace::EventKind::Signal {
+                        signo: 11,
+                        code: 1,
+                        addr: 0,
+                    },
+                ),
+                event(705, 34, exit(true)),
+                event(708, 36, exit(true)),
+                event(712, 35, exit(false)),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(alive_step(&trace, 712, 34), 700);
     }
 
     #[test]

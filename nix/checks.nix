@@ -1264,6 +1264,61 @@ let
         $CC -static -O1 -g -pthread -o $out/bin/leader leader.c
       '';
 
+  # A root whose /bin/pexit starts two workers and ends its main thread
+  # with pthread_exit. The workers loop on a few system calls, each
+  # printing twice, then worker 2 exits the process with status 3 while
+  # worker 1 sleeps on.
+  pthreadExitRoot =
+    pkgs.runCommand "rewind-pthread-exit-root"
+      {
+        nativeBuildInputs = [ pkgs.pkgsStatic.stdenv.cc ];
+        dontStrip = true;
+      }
+      ''
+        mkdir -p $out/bin $out/src
+        cd $out/src
+        cat > pexit.c <<'EOF'
+        #include <pthread.h>
+        #include <stdio.h>
+        #include <stdlib.h>
+        #include <time.h>
+        #include <unistd.h>
+
+        static void *worker(void *arg)
+        {
+          long id = (long)arg;
+          struct timespec pause = { 0, 1000000 };
+
+          for (int i = 0; i < 40; i++) {
+            getpid();
+            nanosleep(&pause, 0);
+            if (i % 20 == 10) {
+              printf("worker %ld at %d\n", id, i);
+              fflush(stdout);
+            }
+          }
+          if (id == 2) {
+            exit(3);
+          }
+          for (;;) {
+            nanosleep(&pause, 0);
+          }
+          return 0;
+        }
+
+        int main(void)
+        {
+          pthread_t a, b;
+
+          pthread_create(&a, 0, worker, (void *)1);
+          pthread_create(&b, 0, worker, (void *)2);
+          pthread_exit(0);
+        }
+        EOF
+        $CC -static -O1 -g -pthread -fdebug-prefix-map=$out/src=/src \
+          -o $out/bin/pexit pexit.c
+      '';
+
   # A root with nixpkgs' coreutils, copied into the root's /nix/store with
   # its closure and linked into /bin, beside busybox's shell, for
   # checks.file-events: cp opens the directory it copies into with O_PATH
@@ -4593,11 +4648,12 @@ in
   # checks.answers-pthread-exit: `rewind export --with-answers` for a job
   # whose main thread calls pthread_exit after starting two workers, which
   # loop on a few system calls until one exits the process with status 3.
-  # The guest records the main thread's exit as the process's, so the
-  # trace ends the process there while the workers run on. At a bookmark
-  # on a worker's write after it, the export answers for the two workers,
-  # each located in its function, and not for the main thread, which is
-  # gone. Boots the VM, so it needs /dev/kvm.
+  # The trace keeps the process alive past its main thread's exit, which
+  # is a thread exit, until the worker that exits the process. At a
+  # bookmark on a worker's write after the main thread's exit, the export
+  # answers for the two workers, each located in its function, and not
+  # for the main thread, which is gone. Boots the VM, so it needs
+  # /dev/kvm.
   answers-pthread-exit =
     let
       root =
@@ -5329,6 +5385,45 @@ in
         prop '(echo a > /var/run/x.pid; sleep 1) & wait; (echo b > /run/x.pid) & wait'
         if prop '(exec 3>> /var/run/x.pid; echo a >&3; sleep 2) & (sleep 1; echo b >> /run/x.pid) & wait'; then exit 1; fi
         grep -q 'opened /run/x.pid for writing while process' out
+        touch $out
+      '';
+
+  # checks.pthread-exit: a process lives until its last thread exits. The
+  # main thread of /bin/pexit (pthreadExitRoot) calls pthread_exit while
+  # its workers run, and that is the main thread's own exit, not the
+  # process's; the process exits once, after the workers' output, with
+  # the status worker 2 gave exit(). `rewind summary` then names that
+  # exit as the failing step. Boots the VM, so it needs /dev/kvm.
+  pthread-exit =
+    pkgs.runCommand "rewind-pthread-exit"
+      {
+        nativeBuildInputs = [ rewind ];
+        requiredSystemFeatures = [ "kvm" ];
+      }
+      ''
+        export REWIND_HOME=$TMPDIR/rewind
+        rewind run -q --clock exits --name pexit --root ${pthreadExitRoot} -- /bin/pexit || true
+        rewind events pexit | tee events
+        pid=$(grep 'execve("/bin/pexit"' events | awk '{print $2}' | cut -d/ -f1)
+        test -n "$pid"
+
+        # The main thread's exit, a thread exit of the thread whose id is
+        # the process's, before the workers write.
+        main=$(awk -v t="$pid/$pid" '$2 == t && /thread exit\(pexit\) exited:0$/ {print $1}' events)
+        first=$(grep -m1 'write(1, "worker' events | awk '{print $1}')
+        last=$(grep 'write(1, "worker' events | tail -n 1 | awk '{print $1}')
+        test -n "$main" && test "$main" -lt "$first"
+
+        # One process exit, by whichever thread was last, after them all.
+        test "$(awk -v p="$pid" 'index($2, p "/") == 1 && /exit_group\(/' events | wc -l)" = 1
+        end=$(awk -v p="$pid" 'index($2, p "/") == 1 && /exit_group\(pexit\) exited:3$/ {print $1}' events)
+        test -n "$end" && test "$last" -lt "$end"
+
+        status=0
+        rewind summary pexit > summary || status=$?
+        cat summary
+        test "$status" = 1
+        grep -q "^failing step: $end, in process $pid (pexit), thread [0-9]*: exit_group(pexit) exited:3$" summary
         touch $out
       '';
 

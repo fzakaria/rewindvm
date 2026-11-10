@@ -191,7 +191,8 @@ pub fn find(
         }
     }
 
-    // Otherwise the failure is that process's exit event.
+    // Otherwise the failure is that process's exit event, in the thread
+    // that exited last, which need not be the main one.
     let step = end;
     let index = trace.events.iter().position(|e| {
         e.step == step
@@ -201,10 +202,77 @@ pub fn find(
     Some(Failure {
         step,
         pid: current.pid,
-        tid: current.pid,
+        tid: trace.events[index].tid,
         index,
         kind: FailureKind::Exit {
             status: current.status.unwrap_or_default(),
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    // Finding the failing event in traces built by hand.
+    use super::*;
+    use crate::Event;
+
+    /// A job whose main thread ends with pthread_exit fails where its last
+    /// thread ends the process: process 7 starts thread 8, its main thread
+    /// exits at step 4, and thread 8 exits the process with status 3 at
+    /// step 9, which init reports at 10. The failure is the exit at 9, in
+    /// thread 8.
+    #[test]
+    fn a_process_fails_at_its_last_thread_s_exit() {
+        let event = |step, pid, tid, kind| Event {
+            step,
+            pid,
+            tid,
+            kind,
+        };
+        let status: u32 = 3 << 8;
+        let exit = |step, tid, thread| {
+            event(
+                step,
+                7,
+                tid,
+                EventKind::Exit {
+                    status,
+                    comm: "pexit".into(),
+                    thread,
+                },
+            )
+        };
+        let trace = Trace {
+            events: vec![
+                event(
+                    1,
+                    1,
+                    1,
+                    EventKind::Fork {
+                        child: 7,
+                        thread: false,
+                    },
+                ),
+                event(
+                    3,
+                    7,
+                    7,
+                    EventKind::Fork {
+                        child: 8,
+                        thread: true,
+                    },
+                ),
+                exit(4, 7, true),
+                exit(9, 8, false),
+            ],
+            ..Default::default()
+        };
+        let job_exit = JobExit {
+            step: 10,
+            status: status as i32,
+        };
+        let failure = find(&trace, Some(job_exit), 10, Stopped::Otherwise, None).unwrap();
+        assert_eq!((failure.step, failure.pid, failure.tid), (9, 7, 8));
+        assert_eq!(failure.kind, FailureKind::Exit { status });
+    }
 }
