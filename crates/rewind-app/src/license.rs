@@ -513,6 +513,19 @@ impl Registration {
             Registration::Unregistered | Registration::Invalid(_) => false,
         }
     }
+
+    /// The installed license that stays when `offered` is given in its
+    /// place, or None when `offered` replaces it. A license whose updates
+    /// end before the installed one's takes updates away, which nobody
+    /// gives on purpose: the installed one stays. One with the same date
+    /// or a later one replaces it, as does any license where none is
+    /// installed or the stored one was refused.
+    pub fn kept_over(&self, offered: &License) -> Option<&License> {
+        let Registration::Registered(current) = self else {
+            return None;
+        };
+        (offered.updates_until < current.updates_until).then_some(current)
+    }
 }
 
 /// Reads and checks the stored license.
@@ -961,6 +974,31 @@ mod tests {
         );
         license.updates_until = RELEASE_DATE;
         assert_eq!(license.coverage(), Coverage::Current);
+    }
+
+    #[test]
+    fn an_installed_license_is_kept_over_one_with_fewer_updates() {
+        // Offered licenses with updates ending before, on and after the
+        // installed one's date; then an offer where none is installed
+        // and where the stored one was refused.
+        let until = |text: &str| {
+            let mut license = sample();
+            license.updates_until = Date::parse(text).unwrap();
+            license
+        };
+        let installed = Registration::Registered(until("2029-06-30"));
+        assert_eq!(
+            installed.kept_over(&until("2027-01-01")),
+            Some(&until("2029-06-30"))
+        );
+        assert_eq!(installed.kept_over(&until("2029-06-30")), None);
+        assert_eq!(installed.kept_over(&until("2032-01-01")), None);
+        assert_eq!(
+            Registration::Unregistered.kept_over(&until("2027-01-01")),
+            None
+        );
+        let refused = Registration::Invalid("no".into());
+        assert_eq!(refused.kept_over(&until("2027-01-01")), None);
     }
 
     #[test]

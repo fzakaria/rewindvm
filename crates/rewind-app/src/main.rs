@@ -198,7 +198,9 @@ fn main() -> ExitCode {
 }
 
 /// Checks and stores the license block in `file`, or on standard input,
-/// and says what it registered.
+/// and says what it registered. A license whose updates end before the
+/// installed one's is refused, as pasting one into the app is: the
+/// installed license stays, and the error says how to replace it anyway.
 fn register(file: &std::path::Path) -> Result<String, String> {
     use rewind_app::license::{self, Coverage};
 
@@ -208,6 +210,19 @@ fn register(file: &std::path::Path) -> Result<String, String> {
         std::fs::read_to_string(file).map_err(|e| format!("{}: {e}", file.display()))?
     };
     let license = license::verify(&text).map_err(|e| e.to_string())?;
+    if let Some(current) = license::load().kept_over(&license) {
+        return Err(format!(
+            "the license given, for {} with updates until {}, ends its updates before the one installed, for {} with updates until {}; the installed license stays. To register with the given one anyway, delete {} first",
+            license.name,
+            license.updates_until,
+            current.name,
+            current.updates_until,
+            license::license_path().map_or_else(
+                || "the license file".to_string(),
+                |p| p.display().to_string()
+            )
+        ));
+    }
     let path = license::save(&text).map_err(|e| e.to_string())?;
     let seats = if license.seats == 1 { "seat" } else { "seats" };
     let mut said = format!(

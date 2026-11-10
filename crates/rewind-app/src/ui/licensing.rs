@@ -525,16 +525,13 @@ enum Pasting {
     Keeps { title: String, body: String },
 }
 
-/// What pasting `pasted` does to `installed`: a license whose updates
-/// end before the installed one's would take updates away, so the
-/// installed one stays and the notice says what would have changed.
+/// What pasting `pasted` does to `installed`, as `Registration::kept_over`
+/// rules: when the installed one stays, the notice says what would have
+/// changed.
 fn pasting(installed: &Registration, pasted: &License) -> Pasting {
-    let Registration::Registered(current) = installed else {
+    let Some(current) = installed.kept_over(pasted) else {
         return Pasting::Replaces;
     };
-    if pasted.updates_until >= current.updates_until {
-        return Pasting::Replaces;
-    }
     Pasting::Keeps {
         title: KEPT_INSTALLED_TITLE.to_string(),
         body: format!(
