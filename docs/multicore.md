@@ -86,6 +86,43 @@ be included when evaluating the prototype.
   the same action graph run serially. Measure compilation and linking
   separately so a serial critical path is visible.
 
+## A multi-CPU kernel on one running vCPU
+
+Between isolated actions and general SMP there is a third shape, which
+the 0.14.0 review described. The guest boots a multi-CPU kernel with N
+virtual CPUs, and the monitor's one thread runs exactly one of them at a
+time, switching between them at steps. Such a run is a legal multi-CPU
+execution, the one in which the other CPUs happened to be slow. It is
+deterministic for the same reason today's runs are.
+
+What it gives:
+
+- `--cores` becomes real. Today the VM has one CPU and Rewind tells
+  programs otherwise through `sched_getaffinity` and files in sysfs.
+  Kernel code that asks how many CPUs are online still gets 1. The
+  bcachefs build failure from the Hydra pilot needed more than four
+  online CPUs to occur, so Rewind could not reproduce it.
+- Per-CPU run queues, migration between CPUs and interrupts between CPUs
+  behave as on hardware.
+- Which virtual CPU runs next is one more thing a schedule seed can vary.
+
+What it costs:
+
+- The guest patch requires a one-CPU kernel and protects its buffers by
+  turning interrupts off. Those buffers have to become per-CPU.
+- Kernel code that spins while it waits for another CPU would spin
+  indefinitely, since the other CPU is not running. The kernel's "I am
+  waiting" hint has to become an exit that hands over the CPU.
+- Keyframes, the whole-machine comparison, gdb and the trace all hold one
+  CPU today.
+- It does not run anything faster.
+- User code that spins waiting for another thread still hangs unless
+  preemption exists (see [preemption.md](preemption.md)).
+
+The review's estimate was four to six weeks, with every recorded format
+changing. The recommendation was to wait until preemption is settled and
+until a customer workload needs it.
+
 ## General SMP routes
 
 Published systems establish feasibility, with different compatibility
@@ -125,6 +162,26 @@ instruction budgets, but concurrent execution still needs a memory
 protocol. QEMU's [instruction counting] is incompatible with multithreaded
 TCG. Use isolated-action measurements to decide whether a workload warrants
 this larger redesign.
+
+## What more CPUs would buy
+
+A different question needs no second CPU at all. From a recording of a
+threaded program on one CPU, Rewind can work out how long the program
+would take on many, and what holds it back. The VM has no network and no
+outside input, so when its CPU is idle the only thing that can end the
+idle is a timer some thread set, and every idle nanosecond can be charged
+to one cause. Two numbers then describe a threaded run: work, all the
+computing added up across threads, which is the time on one CPU; and
+span, the longest chain of computing in which each piece could not start
+until the one before it finished, which is the time with unlimited CPUs.
+Work divided by span is the number of CPUs the run can use, and the chain
+itself names what to shorten.
+
+The guest would have to record which thread woke which, and the record
+of each context switch would need the address the thread was at in user
+code. Neither is recorded today, and the review's proposal for a command
+that prints the account (a "time ledger") was deferred on 2026-11-10
+until there is a reason to build it.
 
 [codegen units]: https://doc.rust-lang.org/stable/rustc/codegen-options/#codegen-units
 [`-p` option]: https://pkg.go.dev/cmd/go
