@@ -181,20 +181,16 @@ impl Running {
         // machine's copy is the same file, with the scripts gdb loads
         // beside it. The VM sends them all the same, since they are
         // outside its /nix/store, where a build in the VM writes.
-        if let Some(store) = path.strip_prefix(IMAGE_ROOT)
-            && store.starts_with(NIX_STORE)
-            && Path::new(store).exists()
-        {
-            return Some((PathBuf::from(store), Origin::Store));
+        if let Some(store) = crate::guest_path::in_store(path, IMAGE_ROOT) {
+            return Some((store, Origin::Store));
         }
         if self.sent.iter().any(|(p, _)| p == path) {
             return Some((copy, Origin::Sent));
         }
-        if let Some(at) = path.find(NIX_STORE) {
-            let here = PathBuf::from(&path[at..]);
-            if here.exists() {
-                return Some((here, Origin::Store));
-            }
+        if let Some(at) = path.find(NIX_STORE)
+            && let Some(here) = crate::guest_path::in_store(path, &path[..at])
+        {
+            return Some((here, Origin::Store));
         }
         Some((copy, Origin::Image)).filter(|(p, _)| p.exists())
     }
@@ -842,6 +838,25 @@ mod tests {
         let files = running.symbol_files(&dir, None).unwrap();
         assert_eq!(files[0].origin, Origin::Sent);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_store_path_that_leaves_the_store_is_not_read_from_this_machine() {
+        // A forged map names a file through /nix/store/ and `..`, a file
+        // of this machine's that is in no store path: /proc/self/exe
+        // through /nix/store/../../proc/self/exe, which exists and is
+        // ELF. It is offered to gdb from nowhere, under a root
+        // filesystem's prefix the same.
+        let climbing = format!("{NIX_STORE}../../proc/self/exe");
+        let in_root = format!("{IMAGE_ROOT}{climbing}");
+        let dir = std::env::temp_dir().join(format!("rewind-maps-climb-{}", std::process::id()));
+        for path in [climbing.as_str(), in_root.as_str()] {
+            let map = format!("7f0000000000-7f0000001000 r--p 00000000 00:1a 77 {path}\n");
+            let running = Running::parse(&answer_with(&map, &[])).unwrap();
+            assert_eq!(running.local(path, &dir), None, "{path}");
+            assert_eq!(running.symbol_files(&dir, None).unwrap(), vec![], "{path}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

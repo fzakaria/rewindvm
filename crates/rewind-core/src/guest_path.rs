@@ -25,11 +25,65 @@ pub fn under(dir: &Path, path: &str) -> Option<PathBuf> {
     Some(dir.join(path.trim_start_matches('/')))
 }
 
+/// The Nix store on this machine.
+const NIX_STORE: &str = "/nix/store";
+
+/// `path`, a path inside the VM that names a store file, as that store
+/// file on this machine: the path from its `/nix/store/` on, when every
+/// name below the store is a plain one and the file is there and
+/// resolves under this machine's store. A path through `..`, such as
+/// `/nix/store/../../etc/passwd`, which a forged run could name, is no
+/// store file. `prefix` is what the VM has before `/nix/store`, such as a
+/// root filesystem's mount, or nothing.
+pub fn in_store(path: &str, prefix: &str) -> Option<PathBuf> {
+    let store = path.strip_prefix(prefix)?;
+    if !store.starts_with(NIX_STORE) {
+        return None;
+    }
+    let below = Path::new(store).strip_prefix(NIX_STORE).ok()?;
+    let mut depth = 0usize;
+    for component in below.components() {
+        match component {
+            Component::Normal(_) => depth += 1,
+            _ => return None,
+        }
+    }
+    if depth == 0 {
+        return None;
+    }
+    let here = PathBuf::from(store);
+    let resolved = std::fs::canonicalize(&here).ok()?;
+    resolved.starts_with(NIX_STORE).then_some(here)
+}
+
 #[cfg(test)]
 mod tests {
     // Paths a VM could name, mapped under a session directory, with no
     // file touched.
     use super::*;
+
+    #[test]
+    fn a_store_path_is_only_one_with_plain_names_that_resolves_in_the_store() {
+        // The store file this test runs from is one; the same path
+        // through a root's prefix is too, and only with that prefix. A
+        // path through `..` or `.`, the store itself, and a path outside
+        // the store are none.
+        let exe = std::fs::read_link("/proc/self/exe").unwrap();
+        let exe = exe.to_str().unwrap();
+        if !exe.starts_with(NIX_STORE) {
+            eprintln!("the test runs from outside the store; skipped");
+            return;
+        }
+        assert_eq!(in_store(exe, ""), Some(PathBuf::from(exe)));
+        let in_root = format!("/root{exe}");
+        assert_eq!(in_store(&in_root, "/root"), Some(PathBuf::from(exe)));
+        assert_eq!(in_store(&in_root, ""), None);
+        assert_eq!(in_store("/nix/store/../../proc/self/exe", ""), None);
+        assert_eq!(in_store("/nix/store/./x/bin/x", ""), None);
+        assert_eq!(in_store("/nix/store", ""), None);
+        assert_eq!(in_store("/nix/store/", ""), None);
+        assert_eq!(in_store("/proc/self/exe", ""), None);
+    }
 
     #[test]
     fn a_guest_path_lands_under_its_directory() {

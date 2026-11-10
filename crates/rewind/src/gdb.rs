@@ -1129,11 +1129,14 @@ impl KernelSymbols {
         let build_id = std::fs::File::open(dir.join(VMLINUX))
             .ok()
             .and_then(|mut f| rewind_core::maps::build_id(&mut f));
+        // The recording's own path only when it names a store path: a
+        // crafted recording could name any directory on this machine.
         let candidates: Vec<PathBuf> = run
             .manifest
             .spec
             .kernel_debug
             .clone()
+            .filter(|path| in_the_store(path))
             .into_iter()
             .chain(std::env::var_os(rewind_core::home::ENV_KERNEL_DEBUG).map(PathBuf::from))
             .collect();
@@ -2166,10 +2169,26 @@ fn realise(path: &Path, what: &str) -> bool {
     path.exists()
 }
 
-/// The store path a path is in: /nix/store/<hash>-<name>.
+/// Whether `path` is a path in the store, written out: under /nix/store,
+/// with a store path's name and nothing but plain names below it, so no
+/// `..` leaves the store.
+fn in_the_store(path: &Path) -> bool {
+    let Ok(inside) = path.strip_prefix(NIX_STORE) else {
+        return false;
+    };
+    let mut components = inside.components().peekable();
+    components.peek().is_some()
+        && components.all(|component| matches!(component, std::path::Component::Normal(_)))
+}
+
+/// The store path a path is in: /nix/store/<hash>-<name>. None for a path
+/// that climbs out of the store, which a forged run could name, so gdb
+/// is told to trust no scripts outside the store.
 fn store_root(path: &Path) -> Option<PathBuf> {
     let inside = path.strip_prefix(NIX_STORE).ok()?;
-    let first = inside.components().next()?;
+    let std::path::Component::Normal(first) = inside.components().next()? else {
+        return None;
+    };
     Some(Path::new(NIX_STORE).join(first))
 }
 
@@ -2410,6 +2429,23 @@ mod tests {
             Some(PathBuf::from("/nix/store/abc-kernel-debug"))
         );
         assert_eq!(store_root(Path::new("/opt/rewind/vmlinux")), None);
+        // A path that climbs out of the store names no store path, so
+        // gdb is not told to trust scripts there.
+        assert_eq!(store_root(Path::new("/nix/store/../../etc/x.py")), None);
+        assert_eq!(store_root(Path::new("/nix/store")), None);
+    }
+
+    #[test]
+    fn a_recorded_kernel_debug_path_counts_only_inside_the_store() {
+        // The kernel debug path a recording names is used only when it is
+        // a store path written out: one with `..` that leaves the store,
+        // the store itself, and a path elsewhere are refused.
+        assert!(in_the_store(Path::new("/nix/store/abc-linux-debug")));
+        assert!(in_the_store(Path::new("/nix/store/abc-linux-debug/lib")));
+        assert!(!in_the_store(Path::new("/nix/store/../../home/me")));
+        assert!(!in_the_store(Path::new("/nix/store/abc/../../etc")));
+        assert!(!in_the_store(Path::new("/nix/store")));
+        assert!(!in_the_store(Path::new("/home/me/linux-debug")));
     }
 
     #[test]
