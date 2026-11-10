@@ -16,6 +16,7 @@ use crate::theme::{self, size};
 use crate::ui::scrubber::{NoticeTone, Scrubber};
 use crate::ui::toolbar::{Clipped, ToolbarFit, clip_label};
 use crate::ui::widgets::{Availability, ButtonStyle, button, tooltip};
+use rewind_trace::Life;
 
 /// How many characters of a file's path the chooser shows.
 const MAX_PATH_CHARS: usize = 40;
@@ -28,9 +29,9 @@ const CHOOSER_NOTE: &str = "What Previous, Next and the Left and Right keys stop
 
 /// What a stride is called in the chooser and its menu.
 pub fn stride_label(stride: &Stride, timeline: &Timeline) -> String {
-    let name = |pid: u32| {
+    let name = |life: Life| {
         timeline
-            .name_of(pid)
+            .name_of(life)
             .map_or_else(String::new, |n| format!(" ({n})"))
     };
     match stride {
@@ -39,12 +40,14 @@ pub fn stride_label(stride: &Stride, timeline: &Timeline) -> String {
         Stride::LogLine => "log lines".to_string(),
         Stride::Lifecycle => "process starts and exits".to_string(),
         Stride::Bookmarks => "bookmarks".to_string(),
-        Stride::Thread { pid, tid } => format!("thread {tid} of {pid}{}", name(*pid)),
-        Stride::Process { pid } => format!("process {pid}{}", name(*pid)),
-        Stride::ThreadSwitches { pid, tid } => {
-            format!("switches of thread {tid} of {pid}{}", name(*pid))
+        Stride::Thread { life, tid } => format!("thread {tid} of {}{}", life.pid, name(*life)),
+        Stride::Process { life } => format!("process {}{}", life.pid, name(*life)),
+        Stride::ThreadSwitches { life, tid } => {
+            format!("switches of thread {tid} of {}{}", life.pid, name(*life))
         }
-        Stride::ProcessSwitches { pid } => format!("switches of process {pid}{}", name(*pid)),
+        Stride::ProcessSwitches { life } => {
+            format!("switches of process {}{}", life.pid, name(*life))
+        }
         Stride::Kind(kind) => format!("{} events", kind.call()),
         Stride::File(path) => clip(path, MAX_PATH_CHARS),
     }
@@ -134,10 +137,10 @@ impl Scrubber {
             return offered;
         };
         if let Some(event) = t.event_index_at(self.step).and_then(|i| t.event(i)) {
-            offered.extend(Stride::following(event));
+            offered.extend(Stride::following(t, event));
         }
         if let Some(switch) = t.switch_at(self.step) {
-            offered.extend(Stride::following_switch(switch));
+            offered.extend(Stride::following_switch(t, switch));
         }
         if let Some(viewer) = &self.viewer {
             offered.push(Stride::File(viewer.path.clone()));

@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use rewind_trace::ending::ExitStatus;
 use rewind_trace::sdk::{SdkMark, TestResult};
 use rewind_trace::switches::Switch;
-use rewind_trace::{Event, EventKind, JobExit, Process, Trace, signal};
+use rewind_trace::{Event, EventKind, JobExit, Life, Process, Trace, signal};
 
 use crate::shown_line::{Pen, shown};
 
@@ -151,6 +151,10 @@ pub struct ProcRow {
     pub pid: u32,
     /// The thread id: the pid for a process row.
     pub tid: u32,
+    /// The life of the process: its own for a process row, its process's
+    /// for a thread row. A pid is given out again once its process has
+    /// exited, so the life, not the pid, says which process a row is.
+    pub life: Life,
     pub kind: RowKind,
     /// What the row is called from its process's last exec on; for a row
     /// that never exec'd, at every step.
@@ -348,8 +352,8 @@ pub struct Timeline {
     /// The step the job started on, when init wrote its start mark:
     /// before it the VM is still booting.
     pub job_start: Option<u64>,
-    /// A display name per process row pid, for describing events.
-    names: HashMap<u32, String>,
+    /// A display name per process life, for describing events.
+    names: HashMap<Life, String>,
     /// What the job asserted with the Rewind SDK and broke, in step order.
     pub assertions: Vec<Assertion>,
     /// The tests the job marked with the Rewind SDK, in the order they
@@ -460,11 +464,10 @@ impl Timeline {
         let failure = find_failure(&trace, job_exit, total, stopped, None);
         let (assertions, tests) = sdk_findings(&trace);
 
-        // Command names for event descriptions: the latest process per pid
-        // wins, which is the right one for any pid that was not reused.
+        // Command names for event descriptions, one per life of a pid.
         let mut names = HashMap::new();
         for row in rows.iter().filter(|r| r.kind == RowKind::Process) {
-            names.insert(row.pid, command_name(&row.label));
+            names.insert(row.life, command_name(&row.label));
         }
 
         Timeline {
@@ -669,11 +672,17 @@ impl Timeline {
         self.trace.events.get(index)
     }
 
-    /// The display name of a pid, if the trace saw it: of the last
-    /// process that had the pid, as the process ended. For what is said of
-    /// a pid over the whole run; an event's process is `name_at`'s.
-    pub fn name_of(&self, pid: u32) -> Option<&str> {
-        self.names.get(&pid).map(String::as_str)
+    /// The display name of one life of a pid, if the trace saw it, as the
+    /// process ended. For what is said of a process over the whole run;
+    /// an event's process at its step is `name_at`'s.
+    pub fn name_of(&self, life: Life) -> Option<&str> {
+        self.names.get(&life).map(String::as_str)
+    }
+
+    /// The life of the process that had `pid` at `step`, which a reader
+    /// that follows a process past the step holds in place of the pid.
+    pub fn life_at(&self, pid: u32, step: u64) -> Option<Life> {
+        rewind_trace::process_among(&self.procs, pid, step).map(Process::life)
     }
 
     /// The display name of the process that had `pid` at `step`, as the
@@ -1082,7 +1091,7 @@ fn find_failure(
     loop {
         let cause = failed
             .iter()
-            .filter(|c| c.parent == current.pid && c.start >= current.start && c.end <= current.end)
+            .filter(|c| c.parent_life == Some(current.life()) && c.end <= current.end)
             .max_by_key(|c| c.end);
         match cause {
             Some(c) => current = c,
@@ -1176,33 +1185,28 @@ fn file_events(trace: &Trace) -> Vec<FileEvent> {
 /// The process tree as rows in depth-first order: each process, then its
 /// threads, then its children in the order they started.
 fn process_rows(trace: &Trace, procs: &[Process]) -> Vec<ProcRow> {
-    // The name each thread and process had when it exited, keyed by thread
-    // id and exit step so that a reused id finds its own name.
+    // The name each thread had when it exited, keyed by thread id and
+    // exit step so that a reused id finds its own name.
     let mut comms: HashMap<(u32, u64), String> = HashMap::new();
     for e in &trace.events {
-        if let EventKind::Exit { comm, .. } = &e.kind {
+        if let EventKind::Exit {
+            comm, thread: true, ..
+        } = &e.kind
+        {
             comms.insert((e.tid, e.step), comm.clone());
         }
     }
 
-    // Each process's parent is the process with the parent's pid that was
-    // alive when the child was forked, which tells reused pids apart.
-    let mut by_pid: HashMap<u32, Vec<usize>> = HashMap::new();
+    // Each process hangs under the life that forked it.
+    let mut by_life: HashMap<Life, usize> = HashMap::new();
     for (i, p) in procs.iter().enumerate() {
-        by_pid.entry(p.pid).or_default().push(i);
+        by_life.insert(p.life(), i);
     }
     let mut children: Vec<Vec<usize>> = vec![Vec::new(); procs.len()];
     let mut roots: Vec<usize> = Vec::new();
     for (i, p) in procs.iter().enumerate() {
-        let parent = by_pid
-            .get(&p.parent)
-            .into_iter()
-            .flatten()
-            .filter(|j| **j != i && procs[**j].start <= p.start)
-            .max_by_key(|j| procs[**j].start)
-            .copied();
-        match parent {
-            Some(j) if p.parent != 0 => children[j].push(i),
+        match p.parent_life.and_then(|life| by_life.get(&life)) {
+            Some(&j) if j != i => children[j].push(i),
             _ => roots.push(i),
         }
     }
@@ -1223,7 +1227,7 @@ fn process_rows(trace: &Trace, procs: &[Process]) -> Vec<ProcRow> {
         roots.iter().rev().map(|i| (*i, 0, None)).collect();
     while let Some((i, depth, parent_command)) = stack.pop() {
         let p = &procs[i];
-        let comm = p.end.and_then(|end| comms.get(&(p.pid, end)));
+        let comm = p.comm.as_ref();
 
         // What the process is called while it has not exec'd. The name it
         // exited with is the name of its last program, so it names only a
@@ -1264,6 +1268,7 @@ fn process_rows(trace: &Trace, procs: &[Process]) -> Vec<ProcRow> {
         let row = ProcRow {
             pid: p.pid,
             tid: p.pid,
+            life: p.life(),
             kind: RowKind::Process,
             label,
             earlier,
@@ -1292,6 +1297,7 @@ fn process_rows(trace: &Trace, procs: &[Process]) -> Vec<ProcRow> {
             rows.push(ProcRow {
                 pid: p.pid,
                 tid: *tid,
+                life: p.life(),
                 kind: RowKind::Thread,
                 label,
                 earlier: Vec::new(),
@@ -2221,7 +2227,7 @@ pub(crate) mod tests {
                 (30, "kernel thread"),
             ]
         );
-        assert_eq!(t.name_of(1), Some("sh"));
+        assert_eq!(t.name_of(Life { pid: 1, start: 0 }), Some("sh"));
     }
 
     #[test]
@@ -2287,7 +2293,7 @@ pub(crate) mod tests {
             None,
         );
         assert_eq!(t.rows[0].label, r"sh -c cd src\n\tmake");
-        assert_eq!(t.name_of(1), Some("sh"));
+        assert_eq!(t.name_of(Life { pid: 1, start: 0 }), Some("sh"));
     }
 
     #[test]

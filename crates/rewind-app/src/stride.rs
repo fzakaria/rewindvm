@@ -9,7 +9,7 @@
 //! stepping keeps following it as the playhead passes other events.
 
 use rewind_trace::switches::Switch;
-use rewind_trace::{Event, EventKind};
+use rewind_trace::{Event, EventKind, Life};
 
 use crate::model::{LogFilter, Timeline};
 
@@ -80,16 +80,19 @@ pub enum Stride {
     Every,
     /// Every recorded context switch, including kernel and idle tasks.
     Switches,
-    /// The switches that give one thread the CPU and the ones that take
-    /// it away.
-    ThreadSwitches { pid: u32, tid: u32 },
-    /// The switches that give any thread of one process the CPU and the
-    /// ones that hand it to another process, a kernel thread or idle.
-    ProcessSwitches { pid: u32 },
-    /// The events of one thread.
-    Thread { pid: u32, tid: u32 },
-    /// The events of any thread of one process.
-    Process { pid: u32 },
+    /// The switches that give one thread of one life of a process the CPU
+    /// and the ones that take it away.
+    ThreadSwitches { life: Life, tid: u32 },
+    /// The switches that give any thread of one life of a process the CPU
+    /// and the ones that hand it to another process, a kernel thread or
+    /// idle.
+    ProcessSwitches { life: Life },
+    /// The events of one thread of one life of a process.
+    Thread { life: Life, tid: u32 },
+    /// The events of any thread of one life of a process. A pid is given
+    /// out again once its process has exited, so the stride follows the
+    /// life, not the pid.
+    Process { life: Life },
     /// The events of one kind.
     Kind(Kind),
     /// The lines of the build log as it is filtered.
@@ -111,15 +114,19 @@ pub enum Direction {
 
 impl Stride {
     /// Whether `event` is one this stride stops at, with the log shown
-    /// under `filter`.
-    fn stops_at(&self, event: &Event, filter: LogFilter) -> bool {
+    /// under `filter`, in `timeline`, which says which life of a pid an
+    /// event is.
+    fn stops_at(&self, timeline: &Timeline, event: &Event, filter: LogFilter) -> bool {
+        let of_life = |life: &Life| {
+            event.pid == life.pid && timeline.life_at(event.pid, event.step) == Some(*life)
+        };
         match self {
             Stride::Every => {
                 let console = matches!(event.kind, EventKind::Console { .. });
                 !console || filter == LogFilter::WithConsole
             }
-            Stride::Thread { pid, tid } => event.pid == *pid && event.tid == *tid,
-            Stride::Process { pid } => event.pid == *pid,
+            Stride::Thread { life, tid } => event.tid == *tid && of_life(life),
+            Stride::Process { life } => of_life(life),
             Stride::Kind(kind) => Kind::of(&event.kind) == *kind,
             Stride::File(path) => touches(event, path),
             Stride::Lifecycle => match &event.kind {
@@ -136,16 +143,19 @@ impl Stride {
     }
 
     /// Whether `switch` hands the CPU to what this stride follows: the
-    /// thread, or a thread of the process. A task without memory of its
-    /// own, a kernel thread or a thread already past its exit, is not
-    /// the thread it once was.
-    fn takes(&self, switch: &Switch) -> bool {
+    /// thread, or a thread of the process, in the life the stride
+    /// follows. A task without memory of its own, a kernel thread or a
+    /// thread already past its exit, is not the thread it once was.
+    fn takes(&self, timeline: &Timeline, switch: &Switch) -> bool {
         if !switch.memory || switch.is_idle() {
             return false;
         }
+        let of_life = |life: &Life| {
+            switch.pid == life.pid && timeline.life_at(switch.pid, switch.step) == Some(*life)
+        };
         match self {
-            Stride::ThreadSwitches { pid, tid } => switch.pid == *pid && switch.tid == *tid,
-            Stride::ProcessSwitches { pid } => switch.pid == *pid,
+            Stride::ThreadSwitches { life, tid } => switch.tid == *tid && of_life(life),
+            Stride::ProcessSwitches { life } => of_life(life),
             _ => false,
         }
     }
@@ -153,25 +163,30 @@ impl Stride {
     /// Whether the switch at `i` is a stop of this stride: the followed
     /// task takes the CPU there, or the task before it had it and loses
     /// it there.
-    fn switch_stops_at(&self, switches: &[Switch], i: usize) -> bool {
-        let takes = self.takes(&switches[i]);
-        let had = i > 0 && self.takes(&switches[i - 1]);
+    fn switch_stops_at(&self, timeline: &Timeline, i: usize) -> bool {
+        let switches = &timeline.trace.switches;
+        let takes = self.takes(timeline, &switches[i]);
+        let had = i > 0 && self.takes(timeline, &switches[i - 1]);
         takes != had
     }
 
     /// The strides that follow the event `event`: its thread, its
     /// process, its kind, and the file it names, if any. The kernel's own
-    /// events have no thread or process to follow.
-    pub fn following(event: &Event) -> Vec<Stride> {
+    /// events have no thread or process to follow, and neither has an
+    /// event of a pid `timeline` never saw as a process.
+    pub fn following(timeline: &Timeline, event: &Event) -> Vec<Stride> {
         let mut strides = Vec::new();
-        if event.pid != KERNEL_PID {
+        let life = (event.pid != KERNEL_PID)
+            .then(|| timeline.life_at(event.pid, event.step))
+            .flatten();
+        if let Some(life) = life {
             if event.tid != event.pid {
                 strides.push(Stride::Thread {
-                    pid: event.pid,
+                    life,
                     tid: event.tid,
                 });
             }
-            strides.push(Stride::Process { pid: event.pid });
+            strides.push(Stride::Process { life });
         }
         strides.push(Stride::Kind(Kind::of(&event.kind)));
         if let Some(path) = named_file(&event.kind) {
@@ -182,19 +197,23 @@ impl Stride {
 
     /// The strides that follow the task `switch` gave the CPU: its
     /// thread, when the thread is not the process's main one, and its
-    /// process. Idle and kernel tasks have nothing to follow.
-    pub fn following_switch(switch: &Switch) -> Vec<Stride> {
+    /// process. Idle and kernel tasks have nothing to follow, nor has a
+    /// task of a pid `timeline` never saw as a process.
+    pub fn following_switch(timeline: &Timeline, switch: &Switch) -> Vec<Stride> {
         if !switch.memory || switch.is_idle() {
             return Vec::new();
         }
+        let Some(life) = timeline.life_at(switch.pid, switch.step) else {
+            return Vec::new();
+        };
         let mut strides = Vec::new();
         if switch.tid != switch.pid {
             strides.push(Stride::ThreadSwitches {
-                pid: switch.pid,
+                life,
                 tid: switch.tid,
             });
         }
-        strides.push(Stride::ProcessSwitches { pid: switch.pid });
+        strides.push(Stride::ProcessSwitches { life });
         strides
     }
 }
@@ -266,14 +285,14 @@ pub fn step_by(
                 Direction::Forward => {
                     let after = switches.partition_point(|s| s.step <= step);
                     (after..switches.len())
-                        .find(|i| stride.switch_stops_at(switches, *i))
+                        .find(|i| stride.switch_stops_at(timeline, *i))
                         .map(|i| switches[i].step)
                 }
                 Direction::Back => {
                     let before = switches.partition_point(|s| s.step < step);
                     (0..before)
                         .rev()
-                        .find(|i| stride.switch_stops_at(switches, *i))
+                        .find(|i| stride.switch_stops_at(timeline, *i))
                         .map(|i| switches[i].step)
                 }
             };
@@ -293,7 +312,7 @@ pub fn step_by(
             let after = timeline.trace.index_after(step);
             events[after..]
                 .iter()
-                .find(|e| stride.stops_at(e, filter))
+                .find(|e| stride.stops_at(timeline, e, filter))
                 .map(|e| e.step)
         }
         Direction::Back => {
@@ -301,7 +320,7 @@ pub fn step_by(
             events[..before]
                 .iter()
                 .rev()
-                .find(|e| stride.stops_at(e, filter))
+                .find(|e| stride.stops_at(timeline, e, filter))
                 .map(|e| e.step)
         }
     }
@@ -315,9 +334,8 @@ pub fn count(timeline: &Timeline, stride: &Stride, filter: LogFilter, bookmarks:
     match stride {
         Stride::Switches => timeline.trace.switches.len(),
         Stride::ThreadSwitches { .. } | Stride::ProcessSwitches { .. } => {
-            let switches = &timeline.trace.switches;
-            (0..switches.len())
-                .filter(|i| stride.switch_stops_at(switches, *i))
+            (0..timeline.trace.switches.len())
+                .filter(|i| stride.switch_stops_at(timeline, *i))
                 .count()
         }
         Stride::LogLine => timeline.lines(filter).len(),
@@ -326,7 +344,7 @@ pub fn count(timeline: &Timeline, stride: &Stride, filter: LogFilter, bookmarks:
             .trace
             .events
             .iter()
-            .filter(|e| stride.stops_at(e, filter))
+            .filter(|e| stride.stops_at(timeline, e, filter))
             .count(),
     }
 }
@@ -353,6 +371,16 @@ mod tests {
             fd: 1,
             bytes: format!("{text}\n").into_bytes(),
         }
+    }
+
+    /// The lives of init and of process 5 in the timeline: init was first
+    /// seen as the parent at step 10, and 5 was forked there.
+    fn init() -> Life {
+        Life { pid: 1, start: 0 }
+    }
+
+    fn five() -> Life {
+        Life { pid: 5, start: 10 }
     }
 
     fn timeline() -> Timeline {
@@ -495,14 +523,20 @@ mod tests {
         // at 35; init has it from 9, loses it at 19 and gets it back at
         // 90. Neither the kernel thread's switch nor idle's is a stop of
         // its own.
-        let five = Stride::ThreadSwitches { pid: 5, tid: 5 };
+        let five = Stride::ThreadSwitches {
+            life: five(),
+            tid: 5,
+        };
         assert_eq!(
             stops(&five, LogFilter::Output),
             (vec![19, 35], vec![35, 19])
         );
-        let init = Stride::ProcessSwitches { pid: 1 };
+        let init = Stride::ProcessSwitches { life: init() };
         assert_eq!(stops(&init, LogFilter::Output).0, vec![9, 19, 90]);
-        let nobody = Stride::ThreadSwitches { pid: 77, tid: 78 };
+        let nobody = Stride::ThreadSwitches {
+            life: Life { pid: 77, start: 0 },
+            tid: 78,
+        };
         assert_eq!(stops(&nobody, LogFilter::Output).0, Vec::<u64>::new());
     }
 
@@ -511,27 +545,30 @@ mod tests {
         // A worker thread's switch offers the thread and its process; a
         // main thread's offers the process alone; a kernel thread's and
         // idle's offer nothing.
+        let t = timeline();
         let worker = Switch {
-            step: 1,
+            step: 40,
             pid: 5,
             tid: 7,
             memory: true,
             name: "five".into(),
         };
         assert_eq!(
-            Stride::following_switch(&worker),
+            Stride::following_switch(&t, &worker),
             vec![
-                Stride::ThreadSwitches { pid: 5, tid: 7 },
-                Stride::ProcessSwitches { pid: 5 },
+                Stride::ThreadSwitches {
+                    life: five(),
+                    tid: 7
+                },
+                Stride::ProcessSwitches { life: five() },
             ]
         );
-        let t = timeline();
         assert_eq!(
-            Stride::following_switch(&t.trace.switches[1]),
-            vec![Stride::ProcessSwitches { pid: 5 }]
+            Stride::following_switch(&t, &t.trace.switches[1]),
+            vec![Stride::ProcessSwitches { life: five() }]
         );
-        assert_eq!(Stride::following_switch(&t.trace.switches[2]), vec![]);
-        assert_eq!(Stride::following_switch(&t.trace.switches[3]), vec![]);
+        assert_eq!(Stride::following_switch(&t, &t.trace.switches[2]), vec![]);
+        assert_eq!(Stride::following_switch(&t, &t.trace.switches[3]), vec![]);
     }
 
     #[test]
@@ -549,12 +586,71 @@ mod tests {
     fn a_thread_or_a_process_stops_at_its_own_events() {
         // Thread 7 of process 5 did 40, 60 and 70; process 5 as a whole
         // also did 20, 30 and 80.
-        let thread = Stride::Thread { pid: 5, tid: 7 };
+        let thread = Stride::Thread {
+            life: five(),
+            tid: 7,
+        };
         assert_eq!(stops(&thread, LogFilter::Output).0, vec![40, 60, 70]);
-        let process = Stride::Process { pid: 5 };
+        let process = Stride::Process { life: five() };
         assert_eq!(
             stops(&process, LogFilter::Output).0,
             vec![20, 30, 40, 60, 70, 80]
+        );
+    }
+
+    #[test]
+    fn a_process_stride_follows_one_life_of_a_reused_pid() {
+        // Process 5 writes at 20 and exits at 80; init then forks a new
+        // process 5 at 90, which writes at 95. Following the first life
+        // stops at its write and its exit and not at the new process's
+        // write; following the second stops at 95 alone. An event of the
+        // second offers its own life to follow.
+        let fork = EventKind::Fork {
+            child: 5,
+            thread: false,
+        };
+        let exit = EventKind::Exit {
+            status: 0,
+            comm: "five".into(),
+            thread: false,
+        };
+        let trace = Trace {
+            events: vec![
+                event(10, 1, 1, fork.clone()),
+                event(20, 5, 5, output("first")),
+                event(80, 5, 5, exit),
+                event(90, 1, 1, fork),
+                event(95, 5, 5, output("second")),
+            ],
+            ..Default::default()
+        };
+        let t = Timeline::new(trace, None, None);
+        let stops_of = |stride: &Stride| -> Vec<u64> {
+            let mut at = 0;
+            let mut seen = Vec::new();
+            while let Some(next) =
+                step_by(&t, stride, LogFilter::Output, &[], Direction::Forward, at)
+            {
+                seen.push(next);
+                at = next;
+            }
+            seen
+        };
+        let second = Life { pid: 5, start: 90 };
+        assert_eq!(stops_of(&Stride::Process { life: five() }), vec![20, 80]);
+        assert_eq!(stops_of(&Stride::Process { life: second }), vec![95]);
+        assert_eq!(
+            count(
+                &t,
+                &Stride::Process { life: five() },
+                LogFilter::Output,
+                &[]
+            ),
+            2
+        );
+        assert_eq!(
+            Stride::following(&t, &t.trace.events[4]),
+            vec![Stride::Process { life: second }, Stride::Kind(Kind::Output)]
         );
     }
 
@@ -603,10 +699,16 @@ mod tests {
         let strides = [
             Stride::Every,
             Stride::Switches,
-            Stride::ThreadSwitches { pid: 5, tid: 5 },
-            Stride::ProcessSwitches { pid: 1 },
-            Stride::Thread { pid: 5, tid: 7 },
-            Stride::Process { pid: 5 },
+            Stride::ThreadSwitches {
+                life: five(),
+                tid: 5,
+            },
+            Stride::ProcessSwitches { life: init() },
+            Stride::Thread {
+                life: five(),
+                tid: 7,
+            },
+            Stride::Process { life: five() },
             Stride::Kind(Kind::Output),
             Stride::LogLine,
             Stride::File("/build/out.o".into()),
@@ -631,20 +733,23 @@ mod tests {
         let t = timeline();
         let open = &t.trace.events[4];
         assert_eq!(
-            Stride::following(open),
+            Stride::following(&t, open),
             vec![
-                Stride::Thread { pid: 5, tid: 7 },
-                Stride::Process { pid: 5 },
+                Stride::Thread {
+                    life: five(),
+                    tid: 7
+                },
+                Stride::Process { life: five() },
                 Stride::Kind(Kind::Open),
                 Stride::File("/build/out.o".into()),
             ]
         );
         assert_eq!(
-            Stride::following(&t.trace.events[1]),
-            vec![Stride::Process { pid: 5 }, Stride::Kind(Kind::Output)]
+            Stride::following(&t, &t.trace.events[1]),
+            vec![Stride::Process { life: five() }, Stride::Kind(Kind::Output)]
         );
         assert_eq!(
-            Stride::following(&t.trace.events[2]),
+            Stride::following(&t, &t.trace.events[2]),
             vec![Stride::Kind(Kind::Console)]
         );
     }

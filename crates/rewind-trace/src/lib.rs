@@ -45,6 +45,8 @@ use std::collections::BTreeMap;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::Path;
 
+use serde::{Deserialize, Serialize};
+
 pub use event::{DecodeError, Event, EventKind, HEADER_LEN, RECORD_MAX, signal_name};
 /// Init's marks, which every trace holds, for readers that do not depend
 /// on the init themselves.
@@ -69,12 +71,31 @@ pub struct Trace {
     pub switches: Vec<switches::Switch>,
 }
 
+/// One life of a pid: the pid, and the step the trace first saw it, the
+/// fork that made the process, or 0 for one the trace first saw as a
+/// parent, init and the kernel's threads among them. The kernel gives a
+/// pid out again once its process has exited, and every fork is a step of
+/// its own, so two lives of one pid never share a start, and the pair
+/// names a process for the whole run where the pid alone does not. A
+/// reader resolves an event's pid to a life once, at the event's step,
+/// and holds the life from then on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct Life {
+    pub pid: u32,
+    pub start: u64,
+}
+
 /// A process's life, as the trace records it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Process {
     pub pid: u32,
     /// The process that forked it; 0 for the first process.
     pub parent: u32,
+    /// The life of the process that forked it: the one alive at the fork,
+    /// which the parent's pid alone does not name once the kernel has
+    /// given the pid out again. None for a process nothing the trace saw
+    /// forked.
+    pub parent_life: Option<Life>,
     /// The command line of its last exec in the run, or, if it never
     /// exec'd, its parent's: a forked child runs its parent's program. Empty
     /// for processes nothing exec'd before them, such as kernel threads.
@@ -109,6 +130,14 @@ const KERNEL_THREAD_NAME: &str = "kernel thread";
 impl Process {
     pub fn alive_at(&self, step: u64) -> bool {
         self.start <= step && self.end.is_none_or(|end| step < end)
+    }
+
+    /// The id of this life of the process's pid.
+    pub fn life(&self) -> Life {
+        Life {
+            pid: self.pid,
+            start: self.start,
+        }
     }
 
     /// The step its memory began at, as of `step`: its last exec on or
@@ -319,75 +348,68 @@ impl Trace {
             .collect()
     }
 
-    /// Every process the trace saw, in the order they started.
+    /// Every process the trace saw, in the order they started: one entry
+    /// per life of a pid, so a pid the kernel gave out again is two.
     pub fn processes(&self) -> Vec<Process> {
-        let mut procs: BTreeMap<u32, Process> = BTreeMap::new();
-        let mut order: Vec<u32> = Vec::new();
-        fn entry<'a>(
-            procs: &'a mut BTreeMap<u32, Process>,
-            order: &mut Vec<u32>,
+        let mut procs: Vec<Process> = Vec::new();
+        // The newest life of each pid, by its index in `procs`.
+        let mut live: BTreeMap<u32, usize> = BTreeMap::new();
+        fn entry(
+            procs: &mut Vec<Process>,
+            live: &mut BTreeMap<u32, usize>,
             pid: u32,
-            parent: u32,
+            parent: Option<Life>,
             step: u64,
-        ) -> &'a mut Process {
-            procs.entry(pid).or_insert_with(|| {
-                order.push(pid);
-                Process {
-                    pid,
-                    parent,
-                    argv: Vec::new(),
-                    execd: false,
-                    forked_argv: Vec::new(),
-                    execs: Vec::new(),
-                    start: step,
-                    end: None,
-                    status: None,
-                    comm: None,
-                    threads: Vec::new(),
-                }
-            })
+        ) -> usize {
+            if let Some(&i) = live.get(&pid) {
+                return i;
+            }
+            procs.push(Process {
+                pid,
+                parent: parent.map_or(0, |p| p.pid),
+                parent_life: parent,
+                argv: Vec::new(),
+                execd: false,
+                forked_argv: Vec::new(),
+                execs: Vec::new(),
+                start: step,
+                end: None,
+                status: None,
+                comm: None,
+                threads: Vec::new(),
+            });
+            live.insert(pid, procs.len() - 1);
+            procs.len() - 1
         }
 
         for e in &self.events {
             match &e.kind {
                 EventKind::Fork { child, thread } => {
-                    entry(&mut procs, &mut order, e.pid, 0, 0);
+                    let parent = entry(&mut procs, &mut live, e.pid, None, 0);
                     if *thread {
-                        if let Some(p) = procs.get_mut(&e.pid) {
-                            p.threads.push((*child, e.step, None));
-                        }
-                    } else {
-                        // A pid can be reused once its process has exited.
-                        if procs.get(child).is_some_and(|p| p.end.is_some())
-                            && let Some(old) = procs.remove(child)
-                        {
-                            let key = u32::MAX - order.len() as u32;
-                            procs.insert(
-                                key,
-                                Process {
-                                    pid: old.pid,
-                                    ..old
-                                },
-                            );
-                            if let Some(slot) = order.iter_mut().rev().find(|p| **p == *child) {
-                                *slot = key;
-                            }
-                        }
-                        entry(&mut procs, &mut order, *child, e.pid, e.step);
+                        procs[parent].threads.push((*child, e.step, None));
+                        continue;
+                    }
 
-                        // A forked child runs its parent's program until it
-                        // execs, and Linux shows it under that command line.
-                        let parent_argv = procs.get(&e.pid).map(|p| p.argv.clone());
-                        if let (Some(argv), Some(c)) = (parent_argv, procs.get_mut(child))
-                            && c.argv.is_empty()
-                        {
-                            c.forked_argv = argv.clone();
-                            c.argv = argv;
-                        }
+                    // A pid the kernel gave out again starts a new life
+                    // once the old one has exited.
+                    if live.get(child).is_some_and(|&i| procs[i].end.is_some()) {
+                        live.remove(child);
+                    }
+                    let parent_life = procs[parent].life();
+                    let parent_argv = procs[parent].argv.clone();
+                    let c = entry(&mut procs, &mut live, *child, Some(parent_life), e.step);
+
+                    // A forked child runs its parent's program until it
+                    // execs, and Linux shows it under that command line.
+                    if procs[c].argv.is_empty() {
+                        procs[c].forked_argv = parent_argv.clone();
+                        procs[c].argv = parent_argv;
                     }
                 }
                 EventKind::Exec { argv, .. } => {
-                    let p = entry(&mut procs, &mut order, e.pid, 0, 0);
+                    let i = entry(&mut procs, &mut live, e.pid, None, 0);
+                    let p = &mut procs[i];
                     p.argv = argv.clone();
                     p.execd = true;
                     p.execs.push((e.step, argv.clone()));
@@ -397,33 +419,32 @@ impl Trace {
                     comm,
                     thread,
                 } => {
-                    if let Some(p) = procs.get_mut(&e.pid) {
-                        if *thread {
-                            // Linux hands a thread id out again once its
-                            // thread has exited, so the exit ends the
-                            // newest lifetime with the id still live.
-                            if let Some(t) = p
-                                .threads
-                                .iter_mut()
-                                .rev()
-                                .find(|t| t.0 == e.tid && t.2.is_none())
-                            {
-                                t.2 = Some(e.step);
-                            }
-                        } else {
-                            p.end = Some(e.step);
-                            p.status = Some(*status);
-                            p.comm = Some(comm.clone());
+                    let Some(&i) = live.get(&e.pid) else {
+                        continue;
+                    };
+                    let p = &mut procs[i];
+                    if *thread {
+                        // Linux hands a thread id out again once its
+                        // thread has exited, so the exit ends the newest
+                        // lifetime with the id still live.
+                        if let Some(t) = p
+                            .threads
+                            .iter_mut()
+                            .rev()
+                            .find(|t| t.0 == e.tid && t.2.is_none())
+                        {
+                            t.2 = Some(e.step);
                         }
+                    } else {
+                        p.end = Some(e.step);
+                        p.status = Some(*status);
+                        p.comm = Some(comm.clone());
                     }
                 }
                 _ => {}
             }
         }
-        order
-            .into_iter()
-            .filter_map(|pid| procs.remove(&pid))
-            .collect()
+        procs
     }
 
     /// The process that had id `pid` at `step`: the one alive then, else
@@ -432,7 +453,19 @@ impl Trace {
     /// is not always the one a step means. It is returned as it was at the
     /// step ([Process::as_of]), running the program it had exec'd by then.
     pub fn process_at(&self, pid: u32, step: u64) -> Option<Process> {
-        process_in(&self.processes(), pid, step).map(|p| p.as_of(step))
+        process_among(&self.processes(), pid, step).map(|p| p.as_of(step))
+    }
+
+    /// The life of the process that had id `pid` at `step`, as
+    /// [`Trace::process_at`] finds the process: what a reader holds on to
+    /// in place of the pid once it has the step.
+    pub fn life_at(&self, pid: u32, step: u64) -> Option<Life> {
+        process_among(&self.processes(), pid, step).map(Process::life)
+    }
+
+    /// The process that was `life`, if the trace saw it.
+    pub fn process_of(&self, life: Life) -> Option<Process> {
+        self.processes().into_iter().find(|p| p.life() == life)
     }
 
     /// The name of the program the process that had `pid` at `step` ran
@@ -542,7 +575,7 @@ impl Trace {
     fn failures(&self) -> Vec<(Vec<String>, Ending)> {
         let procs = self.processes();
         let argv_of = |pid: u32, step: u64| {
-            process_in(&procs, pid, step)
+            process_among(&procs, pid, step)
                 .filter(|p| !p.argv.is_empty())
                 .map(|p| p.argv.clone())
         };
@@ -566,16 +599,24 @@ impl Trace {
     /// The events of the processes running `argv`, each with its thread
     /// numbered by the order the program's threads first appear.
     pub fn program_events(&self, argv: &[String]) -> ProgramEvents {
-        let pids: Vec<u32> = self
+        // The lives running the program, each with the step it ended at:
+        // an event of a pid is one of the program's only while the life
+        // that ran it had the pid, its exit included.
+        let lives: Vec<(Life, Option<u64>)> = self
             .processes()
             .iter()
             .filter(|p| p.argv == argv)
-            .map(|p| p.pid)
+            .map(|p| (p.life(), p.end))
             .collect();
+        let runs_program = |e: &Event| {
+            lives.iter().any(|(life, end)| {
+                life.pid == e.pid && life.start <= e.step && end.is_none_or(|end| e.step <= end)
+            })
+        };
         let mut numbers: BTreeMap<u32, usize> = BTreeMap::new();
         let mut events = ProgramEvents::default();
         for (index, e) in self.events.iter().enumerate() {
-            if !pids.contains(&e.pid) {
+            if !runs_program(e) {
                 continue;
             }
             let next = numbers.len();
@@ -612,9 +653,11 @@ impl Trace {
     }
 }
 
-/// The process among `procs` that had id `pid` at `step`, as
-/// [`Trace::process_at`] finds it.
-fn process_in(procs: &[Process], pid: u32, step: u64) -> Option<&Process> {
+/// The process among `procs`, as [`Trace::processes`] lists them, that
+/// had id `pid` at `step`: the one alive then, else the nearest before
+/// it, else the first after it, as [`Trace::process_at`] finds it. For
+/// readers that keep the list and resolve many pids against it.
+pub fn process_among(procs: &[Process], pid: u32, step: u64) -> Option<&Process> {
     let with_pid = procs.iter().filter(|p| p.pid == pid);
     if let Some(alive) = with_pid.clone().find(|p| p.alive_at(step)) {
         return Some(alive);
@@ -1014,6 +1057,111 @@ mod tests {
         assert!(trace.process_at(5, 2).unwrap().alive_at(2));
         assert!(!trace.process_at(5, 4).unwrap().alive_at(4));
         assert_eq!(trace.process_at(9, 2), None);
+    }
+
+    #[test]
+    fn each_life_of_a_pid_has_an_id_of_its_own() {
+        // Process 5 runs "first" from step 1 to 3; a second process 5
+        // runs "second" from step 6. Each is one life, named by its pid
+        // and the step it was forked at, which the step it is asked about
+        // picks: the one alive then, else the nearest before. A life finds
+        // its process again, and a life the run never had finds none.
+        let (fork, exec, exit) = (fork_of, exec_of, exit_of);
+        let trace = Trace {
+            events: vec![
+                fork(1, 5),
+                exec(2, 5, "first"),
+                exit(3, 5),
+                fork(6, 5),
+                exec(7, 5, "second"),
+            ],
+            ..Default::default()
+        };
+        let first = Life { pid: 5, start: 1 };
+        let second = Life { pid: 5, start: 6 };
+        let lives: Vec<Life> = trace.processes().iter().map(Process::life).collect();
+        assert_eq!(lives, vec![Life { pid: 1, start: 0 }, first, second]);
+        assert_eq!(trace.life_at(5, 2), Some(first));
+        assert_eq!(trace.life_at(5, 4), Some(first));
+        assert_eq!(trace.life_at(5, 8), Some(second));
+        assert_eq!(trace.life_at(9, 2), None);
+        assert_eq!(trace.process_of(second).unwrap().name(), "second");
+        assert_eq!(trace.process_of(Life { pid: 5, start: 4 }), None);
+    }
+
+    #[test]
+    fn a_child_names_the_life_of_the_parent_that_forked_it() {
+        // Init forks 5, which forks 7 and exits; init forks a second 5,
+        // which forks 8. Each child's parent is the life of pid 5 that
+        // was alive at the fork, not the pid alone; init, forked by no
+        // one the trace saw, has no parent life.
+        let fork_by = |step, parent, child| {
+            ev(
+                step,
+                parent,
+                parent,
+                EventKind::Fork {
+                    child,
+                    thread: false,
+                },
+            )
+        };
+        let trace = Trace {
+            events: vec![
+                fork_by(1, 1, 5),
+                fork_by(2, 5, 7),
+                exit_of(3, 5),
+                fork_by(6, 1, 5),
+                fork_by(7, 5, 8),
+            ],
+            ..Default::default()
+        };
+        let parent_of = |pid, step| trace.process_at(pid, step).unwrap().parent_life;
+        assert_eq!(parent_of(7, 2), Some(Life { pid: 5, start: 1 }));
+        assert_eq!(parent_of(8, 7), Some(Life { pid: 5, start: 6 }));
+        assert_eq!(parent_of(5, 7), Some(Life { pid: 1, start: 0 }));
+        assert_eq!(parent_of(1, 7), None);
+    }
+
+    #[test]
+    fn a_program_s_events_leave_out_a_reused_pid_s_other_life() {
+        // Process 5 runs "first" and writes at step 2, then exits at 3;
+        // a second process 5 runs "second" and writes at step 8. The
+        // events of "first" are its own life's, its exit included, and
+        // none of the second's.
+        let write = |step, pid| {
+            ev(
+                step,
+                pid,
+                pid,
+                EventKind::Output {
+                    fd: 1,
+                    bytes: b"x".to_vec(),
+                },
+            )
+        };
+        let trace = Trace {
+            events: vec![
+                fork_of(1, 5),
+                exec_of(2, 5, "first"),
+                write(2, 5),
+                exit_of(3, 5),
+                fork_of(6, 5),
+                exec_of(7, 5, "second"),
+                write(8, 5),
+            ],
+            ..Default::default()
+        };
+        let steps = |name: &str| -> Vec<u64> {
+            trace
+                .program_events(&[name.to_string()])
+                .indices
+                .iter()
+                .map(|i| trace.events[*i].step)
+                .collect()
+        };
+        assert_eq!(steps("first"), vec![2, 2, 3]);
+        assert_eq!(steps("second"), vec![7, 8]);
     }
 
     #[test]

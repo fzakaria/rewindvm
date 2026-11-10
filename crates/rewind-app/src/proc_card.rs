@@ -210,19 +210,13 @@ fn process_index(procs: &[Process], row: &ProcRow) -> Option<usize> {
     })
 }
 
-/// A process's parent: of the processes with its parent's pid, the latest
-/// to start by the time it was forked, as the tree finds it.
+/// A process's parent: the life that forked it, as the tree hangs it.
 fn parent_index(procs: &[Process], index: usize) -> Option<usize> {
-    let child = &procs[index];
-    if child.parent == 0 {
-        return None;
-    }
+    let parent = procs[index].parent_life?;
     procs
         .iter()
-        .enumerate()
-        .filter(|(j, p)| *j != index && p.pid == child.parent && p.start <= child.start)
-        .max_by_key(|(_, p)| p.start)
-        .map(|(j, _)| j)
+        .position(|p| p.life() == parent)
+        .filter(|j| *j != index)
 }
 
 #[cfg(test)]

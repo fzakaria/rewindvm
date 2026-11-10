@@ -1700,7 +1700,7 @@ fn explain_argv(origins: &[Writer; 2], traces: &[&Trace; 2], ids: &[&str; 2]) {
         let children: Vec<String> = trace
             .processes()
             .into_iter()
-            .filter(|c| c.parent == p.pid && c.start > *from && c.start < *to)
+            .filter(|c| c.parent_life == Some(p.life()) && c.start > *from && c.start < *to)
             .map(|c| brief(&c.argv))
             .collect();
         println!(
@@ -1814,6 +1814,7 @@ mod tests {
         Process {
             pid,
             parent: 1,
+            parent_life: Some(rewind_trace::Life { pid: 1, start: 0 }),
             argv: argv.clone(),
             execd: true,
             forked_argv: Vec::new(),

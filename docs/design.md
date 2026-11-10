@@ -884,6 +884,15 @@ reads it and answers the scrubber's questions: which processes were alive at a
 step, what they had printed, which files they had written, which build phase
 it was, and where two runs first differ.
 
+The guest gives a pid out again once its process has exited, so a pid alone
+does not name a process for the whole run. A life of a pid, `Life` in
+`rewind_trace`, is the pid and the step the trace first saw it: the fork
+that made the process, or 0 for a process first seen as a parent. Every fork
+is a step of its own, so two lives of one pid never share a start. A reader
+resolves an event's pid to a life at the event's step and holds the life
+from then on; each process records the life that forked it. The trace format
+carries no life of its own: the fork's step is in every trace already.
+
 The read and write records of a step are stored in the same file, as one or
 more records of kind 13 at that step, before the record the step itself
 makes, if any. The guest never sends kind 13. Their payload is a compact encoding, in

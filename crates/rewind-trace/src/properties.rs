@@ -102,15 +102,12 @@ impl Job {
         let mut all = trace.processes();
         all.sort_by_key(|p| p.start);
 
-        // The root, then each process whose parent is in the job and was
-        // alive when it was forked.
+        // The root, then each process forked by one in the job.
         let mut processes: Vec<Process> = Vec::new();
         for p in all {
             let root =
                 processes.is_empty() && p.parent == rewind_init::INIT_PID && p.start >= start;
-            let child = processes.iter().any(|m| {
-                m.pid == p.parent && m.start <= p.start && m.end.is_none_or(|end| p.start <= end)
-            });
+            let child = processes.iter().any(|m| Some(m.life()) == p.parent_life);
             if root || child {
                 processes.push(p);
             }
@@ -127,41 +124,40 @@ impl Job {
         self.processes.iter().map(|p| p.pid).collect()
     }
 
-    /// Whether process `ancestor` forked process `pid`, directly or
-    /// through its children, as the processes alive at `step` are
-    /// related.
+    /// Whether process `ancestor` forked the process that had `pid` at
+    /// `step`, directly or through its children: up the lives that forked
+    /// each, from the process at the step.
     fn descends(&self, pid: u32, ancestor: u32, step: u64) -> bool {
-        let alive = |pid: u32| {
-            self.processes
-                .iter()
-                .rfind(|p| p.pid == pid && p.start <= step)
-        };
         let mut seen = HashSet::new();
-        let mut at = alive(pid);
+        let mut at = crate::process_among(&self.processes, pid, step);
         while let Some(p) = at {
             if p.parent == ancestor {
                 return true;
             }
-            if !seen.insert(p.pid) {
+            if !seen.insert(p.life()) {
                 return false;
             }
-            at = alive(p.parent);
+            at = p
+                .parent_life
+                .and_then(|life| self.processes.iter().find(|q| q.life() == life));
         }
         false
     }
 
     /// A process of the job by pid, as it was at `step`, for its name.
     fn name(&self, pid: u32, step: u64) -> String {
-        self.processes
-            .iter()
-            .rfind(|p| p.pid == pid && p.start <= step)
-            .map_or_else(|| format!("pid {pid}"), |p| short(&p.as_of(step).name()))
+        crate::process_among(&self.processes, pid, step)
+            .map_or_else(|| format!("pid {pid}"), |p| program_name(p, step))
     }
 }
 
-/// A command's file name without its directory.
-fn short(command: &str) -> String {
-    command.rsplit('/').next().unwrap_or(command).to_string()
+/// The name of the program `process` ran at `step`, for a finding, else
+/// its pid.
+fn program_name(process: &Process, step: u64) -> String {
+    process
+        .as_of(step)
+        .program_name()
+        .unwrap_or_else(|| format!("pid {}", process.pid))
 }
 
 /// No process of the job crashed: none was killed by a signal that dumps
@@ -181,7 +177,7 @@ pub fn no_crash(trace: &Trace) -> Option<Finding> {
                 why: format!(
                     "process {} ({}) died of {}",
                     p.pid,
-                    short(&p.as_of(end).name()),
+                    program_name(p, end),
                     signal_name(signo)
                 ),
             })
@@ -206,7 +202,7 @@ pub fn no_orphans(trace: &Trace) -> Option<Finding> {
             why: format!(
                 "process {} ({}), started at step {}, was still running when the job's main process exited at step {main_end}",
                 p.pid,
-                short(&p.as_of(main_end).name()),
+                program_name(p, main_end),
                 p.start,
             ),
         })

@@ -56,7 +56,7 @@ pub fn last_writer(trace: &Trace, path: &str, before: u64) -> Option<Writer> {
             } if *opened == path => {
                 // The guest gives a pid out again, so the writer is the
                 // process that had the pid at the open.
-                let process = crate::process_in(&processes, e.pid, e.step)?.as_of(e.step);
+                let process = crate::process_among(&processes, e.pid, e.step)?.as_of(e.step);
                 let close = close_after(&trace.events[i + 1..], e, &path, &process);
                 return Some(Writer {
                     path,
@@ -658,6 +658,7 @@ mod tests {
             Process {
                 pid,
                 parent: 1,
+                parent_life: Some(crate::Life { pid: 1, start: 0 }),
                 argv: argv.clone(),
                 execd: true,
                 forked_argv: Vec::new(),
