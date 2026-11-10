@@ -1,11 +1,13 @@
 //! The Threads tab's lanes: which thread held the CPU at each step of a
-//! window of this run and, while a run is compared, of the same window of
-//! the compared run, the two lined up on a step each window is centered on.
+//! window of this run and, while a run is compared, of a window of the
+//! compared run as wide, the two lined up by the offset between the runs.
 //!
-//! The engine reads the threads from the run's context switches (`rewind
-//! threads --json`); this module groups its slices into a row per thread,
-//! places steps on the window's axis, and finds the first step at which
-//! the two runs had different threads on the CPU.
+//! This module reads the threads from the context switches in the run's
+//! trace, which the app holds, as `rewind threads` reads them: no engine
+//! is asked and nothing is replayed. It groups the slices into a row per
+//! thread, places steps on the window's axis, works out the offset of the
+//! compared run's window, and finds the first step at which the two runs
+//! had different threads on the CPU.
 
 use std::collections::BTreeMap;
 
