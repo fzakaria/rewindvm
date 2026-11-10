@@ -84,13 +84,23 @@ mod web {
         });
     }
 
-    /// Opens a file the page read, picked or dropped: it has no address to
-    /// share.
+    /// Says the page starts reading the file `name`, picked or dropped,
+    /// and returns the token to pass to [`open_file`] with its bytes. A
+    /// page that calls this before it reads the file lets the app tell
+    /// which of two reads, or of a read and a fetch, the user asked for
+    /// last.
     #[wasm_bindgen]
-    pub fn open_file(name: String, bytes: Vec<u8>) {
-        // A file is newer than every fetch started before the page read
-        // the file.
-        let request = page::file_read();
+    pub fn begin_file(name: String) -> u32 {
+        page::file_started(&name)
+    }
+
+    /// Opens a file the page read, picked or dropped: it has no address to
+    /// share. `token` is what [`begin_file`] gave for the read. Without
+    /// one, the file counts as asked for when its bytes arrive: newer than
+    /// every fetch and read started before.
+    #[wasm_bindgen]
+    pub fn open_file(name: String, bytes: Vec<u8>, token: Option<u32>) {
+        let request = page::file_read(token);
         let opened = Run::open_bytes(&name, &bytes, InMemoryOrigin::Export);
         page::deliver(match opened {
             Ok(run) => Delivery::Open {

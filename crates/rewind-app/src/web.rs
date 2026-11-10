@@ -22,7 +22,8 @@ use crate::run::Session;
 /// than the newest it has seen, so a fetch that answers late does not
 /// replace a run opened after the fetch started.
 pub enum Delivery {
-    /// The page started fetching the export at `url`.
+    /// The page started fetching the export at `url`, or reading the file
+    /// of that name.
     Fetching { url: String, request: Request },
     /// Runs the page fetched or read from a file, with the address that
     /// names them, which is empty for a file. Boxed: a session is large
@@ -141,9 +142,22 @@ pub fn unfetched(url: &str) -> Request {
     FETCHES.with(|fetches| fetches.borrow_mut().unfetched(url))
 }
 
-/// The number of a file the page read and now hands over.
-pub fn file_read() -> Request {
-    FETCHES.with(|fetches| fetches.borrow_mut().file())
+/// The page starts reading the file `name`, which the user picked or
+/// dropped: tells the scrubber, and gives the token for the page to hand
+/// back with the file's bytes.
+pub fn file_started(name: &str) -> u32 {
+    let (token, request) = FETCHES.with(|fetches| fetches.borrow_mut().file_started());
+    deliver(Delivery::Fetching {
+        url: name.to_string(),
+        request,
+    });
+    token
+}
+
+/// The number of a file the page read and now hands over, with the token
+/// its read was started under when the page asked for one.
+pub fn file_read(token: Option<u32>) -> Request {
+    FETCHES.with(|fetches| fetches.borrow_mut().file_read(token))
 }
 
 /// Asks the page to fetch the exports `address` names.

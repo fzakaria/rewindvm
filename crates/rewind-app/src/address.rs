@@ -122,6 +122,10 @@ pub struct Fetches {
     requests: Requests,
     /// The fetches started and not answered, oldest first.
     pending: Vec<(Request, Address)>,
+    /// The file reads started and not finished, by their tokens.
+    reading: Vec<(u32, Request)>,
+    /// The token the last file read took.
+    next_token: u32,
 }
 
 impl Fetches {
@@ -132,10 +136,26 @@ impl Fetches {
         request
     }
 
-    /// A file the page read arrives. No fetch brought the file, so it
-    /// takes a number of its own, newer than every fetch started before.
-    pub fn file(&mut self) -> Request {
-        self.requests.issue()
+    /// The page starts reading a file the user picked or dropped: the
+    /// number the read takes, and a token for the page to hand back with
+    /// the file's bytes.
+    pub fn file_started(&mut self) -> (u32, Request) {
+        let request = self.requests.issue();
+        self.next_token += 1;
+        self.reading.push((self.next_token, request));
+        (self.next_token, request)
+    }
+
+    /// A file the page read arrives, with the token its read was started
+    /// under when the page asked for one: the read's number. A file with
+    /// no token, as a page that does not say when a read starts hands it,
+    /// takes a number of its own, newer than everything started before.
+    pub fn file_read(&mut self, token: Option<u32>) -> Request {
+        let started = token.and_then(|token| self.reading.iter().position(|(t, _)| *t == token));
+        match started {
+            Some(at) => self.reading.remove(at).1,
+            None => self.requests.issue(),
+        }
     }
 
     /// The page hands back the exports fetched from `url` and `compare`:
@@ -208,7 +228,7 @@ mod tests {
         assert_eq!(late, slow);
         assert!(is_overtaken(newest, late));
 
-        let file = fetches.file();
+        let file = fetches.file_read(None);
         assert!(!is_overtaken(newest, file));
         newest = Some(file);
         assert!(is_overtaken(newest, fast));
@@ -226,6 +246,28 @@ mod tests {
         assert_eq!(fetches.fetched("same.rwd", None), second);
         assert_eq!(fetches.fetched("same.rwd", None), first);
         assert!(fetches.fetched("same.rwd", None) > second);
+    }
+
+    #[test]
+    fn a_file_read_takes_its_number_when_the_read_starts() {
+        // The page says a large file's read starts, then a small file's.
+        // The small file arrives first and is shown; the large one
+        // arrives under the older number and is dropped. A fetch started
+        // while a file is being read is newer than the file. A token no
+        // read waits on takes a new number.
+        let mut fetches = Fetches::default();
+        let (large, large_read) = fetches.file_started();
+        let (small, small_read) = fetches.file_started();
+        assert_ne!(large, small);
+        assert_eq!(fetches.file_read(Some(small)), small_read);
+        assert_eq!(fetches.file_read(Some(large)), large_read);
+        assert!(is_overtaken(Some(small_read), large_read));
+
+        let (slow, slow_read) = fetches.file_started();
+        let fetch = fetches.start(&Address::default());
+        assert_eq!(fetches.file_read(Some(slow)), slow_read);
+        assert!(is_overtaken(Some(fetch), slow_read));
+        assert!(fetches.file_read(Some(slow)) > fetch);
     }
 
     #[test]
