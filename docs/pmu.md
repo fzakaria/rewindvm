@@ -34,7 +34,8 @@ going idle. Each of those points is a step. Steps happen at the same places
 in every run, so a clock that moves only at steps is the same in every run.
 
 **Exit time** moves the clock 5 microseconds per step. When nothing is
-runnable, it jumps straight to the next timer, so `sleep 10` costs nothing.
+runnable, it jumps straight to the next timer, so `sleep 10` takes ten
+seconds on the VM's clock and almost none of yours.
 Computation between steps takes no time at all: a program that computes for
 a second of real time sees a few microseconds pass.
 

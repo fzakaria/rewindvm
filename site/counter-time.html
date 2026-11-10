@@ -88,9 +88,9 @@
         </p>
         <p>
           <strong>Exit time</strong> moves the clock 5 microseconds per step. When nothing is
-          runnable, it jumps straight to the next timer, so <code>sleep 10</code> costs nothing.
-          Computation between steps takes no time at all: a program that computes for a second of
-          real time sees a few microseconds pass.
+          runnable, it jumps straight to the next timer, so <code>sleep 10</code> takes ten seconds
+          on the VM's clock and almost none of yours. Computation between steps takes no time at
+          all: a program that computes for a second of real time sees a few microseconds pass.
         </p>
         <p>
           <strong>Counter time</strong> also adds the work done since the last step. Your CPU's
@@ -174,7 +174,7 @@ probe branches: 3000000 branches, as built
 probe locked: 2000000 branches, as built
 probe not-branches: 1000000 branches, as built
 probe exits: 8192 branches, as built
-self-test: 58071879 and 58071879 branches, exact at every exit
+self-test: 58071879 and 58071879 branches, exact at every step
 runs will use counter time</code></pre>
         <p>
           The self-test runs a small program twice in the VM, threads adding to one shared number,

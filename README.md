@@ -118,18 +118,18 @@ work done inside it; [Time inside the VM](docs/pmu.md) explains why.
 ## Use it
 
 ```console
-# have Nix itself build a derivation in the VM, with the clock, the seed and
-# the schedule in its hash (docs/tutorial-derivations.md)
-$ nix build --impure --expr 'with builtins.getFlake "github:fzakaria/rewindvm"; lib.x86_64-linux.inRewind { epoch = 1790985600; } packages.x86_64-linux.stamp'
-
-# build a derivation in the VM; the output is checked against the host's
-$ rewind nix nixpkgs#hello
-
-# run the derivation under many thread schedules, and name the step that decides a failure
+# build a derivation under many thread schedules, and name the step that decides a failure
 $ rewind check github:fzakaria/rewindvm#mylib
 
 # the same, with the line of code each thread involved was on
 $ rewind check --where github:fzakaria/rewindvm#mylib
+
+# build a derivation in the VM once; the output is checked against the host's
+$ rewind nix nixpkgs#hello
+
+# have Nix itself build a derivation in the VM, with the clock, the seed and
+# the schedule in its hash (docs/tutorial-derivations.md)
+$ nix build --impure --expr 'with builtins.getFlake "github:fzakaria/rewindvm"; lib.x86_64-linux.inRewind { epoch = 1790985600; } packages.x86_64-linux.stamp'
 
 # how many of 16 schedules from a step of a recorded run end differently,
 # each a fork of the run

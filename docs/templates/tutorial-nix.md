@@ -75,7 +75,10 @@ $ rewind nix --epoch {{epoch}} {{flake}}
 <!-- capture built_steps: exited:0 after (\d+) steps -->
 <!-- assert: grep -q 'matches your store' {{out:build}} -->
 
-It passes, in the same {{built_steps}} steps every time. `--epoch` fixes the
+It passes, in the same {{built_steps}} steps every time. A step is a point
+where the VM stops and hands control to Rewind, such as a system call that
+reports a file or a process; steps number a run's events and are where you
+look inside it. `--epoch` fixes the
 VM's clock at boot, one of the run's inputs, so your runs are the ones shown
 here. The last line says the output matches the copy in your store.
 
@@ -190,7 +193,9 @@ $ rewind replay {{failing|short}} --from {{window_from}}
 
 <!-- assert: rewind replay {{failing}} | grep -q '^identical' -->
 
-`--from` starts at the nearest keyframe before the step. A run replays on any
+`--from` starts at the nearest keyframe before the step. A keyframe is a copy
+of the VM's whole state, registers and memory, that recording saves every so
+many steps, so a replay can start there instead of at boot. A run replays on any
 machine with the same CPU vendor that has the features of the run's CPU model.
 
 ## Fork it
