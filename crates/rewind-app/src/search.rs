@@ -122,6 +122,25 @@ impl Index {
     }
 }
 
+/// The matches Enter acts on: those of `typed`, the text in the field
+/// when Enter is pressed. `shown` is the query the matches on screen are
+/// for, and those matches. Queries run in the background, so the matches
+/// on screen may be an earlier query's; `index` is then searched for
+/// `typed` at once, for up to `limit` matches. None while there is no
+/// index to search.
+pub fn hits_for_enter(
+    typed: &str,
+    shown: (&str, &Hits),
+    index: Option<&Index>,
+    limit: usize,
+) -> Option<Hits> {
+    let (query, hits) = shown;
+    if typed == query {
+        return Some(hits.clone());
+    }
+    Some(index?.find(typed, limit))
+}
+
 /// The index of the run on screen, as far as it is built. The index
 /// belongs to one run: showing another run drops it, and an index whose
 /// build was started for a run shown before is never taken.
@@ -289,6 +308,30 @@ mod tests {
 
         indexed.another_run();
         assert!(indexed.ready().is_none());
+    }
+
+    #[test]
+    fn enter_acts_on_the_matches_of_the_text_in_the_field() {
+        // The matches on screen are for "make" and the field now says
+        // "test", whose search has not answered: Enter takes the matches
+        // of "test". With the field still saying "make" it takes the ones
+        // on screen. While the index is not built there are none to take
+        // for a text that is not on screen.
+        let index = Index::build(&timeline());
+        let make = index.find("make", 10);
+        let on_screen = ("make", &make);
+        let taken = hits_for_enter("test", on_screen, Some(&index), 10).unwrap();
+        assert_eq!(taken, index.find("test", 10));
+        assert_eq!(taken.total, 4);
+        assert_eq!(
+            hits_for_enter("make", on_screen, Some(&index), 10),
+            Some(make.clone())
+        );
+        assert_eq!(
+            hits_for_enter("make", on_screen, None, 10),
+            Some(make.clone())
+        );
+        assert_eq!(hits_for_enter("test", on_screen, None, 10), None);
     }
 
     #[test]

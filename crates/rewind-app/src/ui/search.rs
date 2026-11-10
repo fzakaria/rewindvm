@@ -19,7 +19,7 @@ use rewind_text_input::{TextInput, TextInputStyle};
 
 use crate::describe::{clip, thousands};
 use crate::request::Request;
-use crate::search::{Hits, Index};
+use crate::search::{Hits, Index, hits_for_enter};
 use crate::theme::{self, size};
 use crate::ui::scrubber::Scrubber;
 use crate::ui::{CloseDialog, ConfirmSearch, SEARCH_CONTEXT, SearchNext, SearchPrevious};
@@ -137,8 +137,27 @@ impl Scrubber {
     }
 
     /// Enter: with no match chosen yet, takes the playhead to the first
-    /// one at or after it; then closes the box.
+    /// one at or after it; then closes the box. The matches are those of
+    /// the text in the field: when its search has not answered yet, the
+    /// index is searched here, once, so Enter never acts on an earlier
+    /// query's matches. While the run's index is still being built, Enter
+    /// waits: the box stays open.
     fn confirm_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(search) = &mut self.search else {
+            return;
+        };
+        let typed = search.input.read(cx).text().to_string();
+        let index = self.search_index.ready().map(|index| index.as_ref());
+        let on_screen = (search.query.as_str(), &search.hits);
+        let Some(hits) = hits_for_enter(&typed, on_screen, index, MAX_HITS) else {
+            return;
+        };
+        if typed != search.query {
+            search.hits = hits;
+            search.query = typed;
+            search.asked = None;
+            search.selected = None;
+        }
         let first = self.search.as_ref().and_then(|search| {
             if search.selected.is_some() {
                 return None;
