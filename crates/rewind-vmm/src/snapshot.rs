@@ -206,16 +206,27 @@ fn put_pages(
 impl Machine {
     /// Captures the machine at its current step. With a parent, only the
     /// pages written since the parent was captured are stored; without
-    /// one, every non-zero page is.
+    /// one, every page written since the machine was made, by boot, the
+    /// guest, the monitor or a restore, which holds every page that is not
+    /// zero. A full keyframe used to read all of memory to find them, a
+    /// cost that grew with the machine's memory rather than with what was
+    /// written, and faulted in every page the guest had not touched: a
+    /// 1 GiB machine has 262,144 pages, of which the first keyframe of a
+    /// run, at step 256, lists about 16,200. That keyframe took about
+    /// 120 ms either way on a loaded host, hashing those pages and
+    /// writing the file; what is saved is the memory walk, which a machine
+    /// with more memory paid more for. A page a full keyframe does not
+    /// list restores as zero.
     pub fn keyframe(&mut self, pages: &mut dyn Pages, parent: Option<u64>) -> Result<Keyframe> {
         self.complete_pending_exit()?;
-        let ram_pages = self.dev.ram.len() / PAGE_SIZE;
 
         // The dirty log is read even for a full keyframe, to clear it, so
-        // the next keyframe's delta starts here.
+        // the next keyframe's delta starts here; reading it also marks the
+        // pages it names among the pages written since the machine was
+        // made.
         let dirty = self.dirty_pages()?;
         let mut indices: Vec<usize> = match parent {
-            None => (0..ram_pages).collect(),
+            None => self.dev.ram.written_pages(),
             Some(_) => dirty,
         };
         // The monitor writes the shared page itself, and the dirty log only
@@ -339,9 +350,11 @@ impl Machine {
 
         // Memory: each page once, with the contents the last keyframe that
         // lists it gives it, which a rewind to a checkpoint reads again.
-        let ram = m.dev.ram.as_mut_slice();
-        let restored = final_pages(chain, ram.len() / PAGE_SIZE)?;
-        read_pages(ram, &restored, pages)?;
+        let restored = final_pages(chain, m.dev.ram.len() / PAGE_SIZE)?;
+        for (page, _) in &restored {
+            m.dev.ram.mark_page(*page as usize);
+        }
+        read_pages(m.dev.ram.as_mut_slice(), &restored, pages)?;
         m.origin = crate::Origin::Restored(restored.into_iter().map(|(i, h)| (i, *h)).collect());
         // Start the dirty log afresh from the restored memory.
         m.vm.get_dirty_log(SLOT_RAM, m.dev.ram.len())?;
@@ -656,6 +669,52 @@ pub(crate) mod tests {
             let captured = x87_and_sse_in_use(xsave);
             assert_eq!(captured.region[XSTATE_BV_WORD], header | X87_AND_SSE);
             assert_eq!(captured.region[0], 0x037f);
+        }
+    }
+
+    #[test]
+    fn a_page_a_full_keyframe_leaves_out_restores_as_zero() {
+        // A full keyframe of a four-page machine lists pages 0 and 2, as
+        // one taken from the pages written since boot does when pages 1
+        // and 3 were never touched. Restoring reads only the two listed
+        // pages into zeroed memory, so the unlisted pages are zero, the
+        // same as when the keyframe listed them as the zero page.
+        let listed = [kf(10, None, &[(0, 1), (2, 3)])];
+        let with_zeros = [kf(10, None, &[(0, 1), (1, 0), (2, 3), (3, 0)])];
+        let pages: Vec<(u32, u8)> = final_pages(&listed, 4)
+            .unwrap()
+            .into_iter()
+            .map(|(i, h)| (i, h[0]))
+            .collect();
+        assert_eq!(pages, [(0, 1), (2, 3)]);
+        assert_eq!(
+            final_pages(&with_zeros, 4).unwrap(),
+            final_pages(&listed, 4).unwrap()
+        );
+
+        let mut ram = vec![0xffu8; 4 * PAGE_SIZE];
+        let restored = final_pages(&listed, 4).unwrap();
+        read_pages(&mut ram, &restored, &ByFirstByte).unwrap();
+        for (page, fill) in [(0, 1), (2, 3)] {
+            assert!(ram[page * PAGE_SIZE..(page + 1) * PAGE_SIZE] == vec![fill; PAGE_SIZE]);
+        }
+        // A new machine's memory is zero; here the unlisted pages keep
+        // what was there, which restoring never reads.
+        for page in [1, 3] {
+            assert!(ram[page * PAGE_SIZE..(page + 1) * PAGE_SIZE] == vec![0xffu8; PAGE_SIZE]);
+        }
+    }
+
+    /// A page store whose every page is its hash's first byte repeated.
+    struct ByFirstByte;
+
+    impl Pages for ByFirstByte {
+        fn put_all(&mut self, _pages: &[&[u8]]) -> Result<Vec<[u8; 32]>> {
+            bail!("only gets")
+        }
+        fn get(&self, hash: &[u8; 32], out: &mut [u8]) -> Result<()> {
+            out.fill(hash[0]);
+            Ok(())
         }
     }
 

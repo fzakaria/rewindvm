@@ -183,6 +183,9 @@ impl Machine {
         self.checkpoints
             .since
             .extend(pages.iter().map(|&i| i as Page));
+        for &page in &pages {
+            self.dev.ram.mark_page(page);
+        }
         Ok(pages)
     }
 
@@ -276,6 +279,7 @@ impl Machine {
                 .expect("the page is kept where its source says");
             let at = page as usize * PAGE_SIZE;
             self.dev.ram.as_mut_slice()[at..at + PAGE_SIZE].copy_from_slice(contents);
+            self.dev.ram.mark_page(page as usize);
         }
 
         // The vCPU, the interrupt controllers and the monitor's state, and
@@ -351,6 +355,9 @@ impl Machine {
             unreachable!("checked to be restored above");
         };
         let rewrite = to_rewrite(old, &new, &written);
+        for (page, _) in &rewrite {
+            self.dev.ram.mark_page(*page as usize);
+        }
         let ram = self.dev.ram.as_mut_slice();
         let mut read: Vec<(u32, &[u8; 32])> = Vec::new();
         for (page, hash) in &rewrite {
