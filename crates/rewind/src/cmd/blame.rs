@@ -815,9 +815,11 @@ fn byte_writer(trace: &Trace, writer: &Writer, settled: &Settled) -> Named {
 
 /// The writer with its process as it was when it gave the byte its value,
 /// for the lines about what made the byte; as it was at the open when
-/// that step is not known.
+/// that step is not known. A write the records name was made the step
+/// before its record's.
 fn at_write(writer: &Writer, settled: &Settled) -> Writer {
-    let Some(step) = settled.step else {
+    let made = settled.write.map(|write| write.made());
+    let Some(step) = made.or(settled.step) else {
         return writer.clone();
     };
     Writer {
@@ -2233,6 +2235,28 @@ mod tests {
             write: None,
         };
         assert_eq!(label(&at_write(&writer, &unknown).process), "bash");
+    }
+
+    /// A write whose record is at the step of the writer's exec was made
+    /// by the program before the exec: the record is taken at the step
+    /// after the write. Here the record is at step 12, where bash execs
+    /// python3, so the byte's writer and the origin's command line are
+    /// bash's.
+    #[test]
+    fn a_write_taken_at_an_exec_is_the_program_before_s() {
+        const EXEC_STEP: u64 = 12;
+        let (trace, _, writer) = redirected_then_execd();
+        let settled = Settled {
+            step: Some(EXEC_STEP),
+            write: Some(FinalWrite {
+                step: EXEC_STEP,
+                tid: 34,
+                pos: 0,
+                count: 23,
+            }),
+        };
+        assert_eq!(byte_writer(&trace, &writer, &settled).program, "bash");
+        assert_eq!(label(&at_write(&writer, &settled).process), "bash");
     }
 
     /// The git notes runs' history of the notes ref, by hand: pid 53

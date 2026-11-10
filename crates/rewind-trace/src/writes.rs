@@ -80,18 +80,30 @@ fn close_after(rest: &[Event], open: &Event, path: &str, process: &Process) -> u
         .unwrap_or(open.step)
 }
 
-/// The process thread `tid` belonged to at `step`, by the trace's forks;
-/// the thread itself when the trace does not say.
+/// The process thread `tid` belonged to when it made the write whose
+/// record is at `step`, by the trace's forks; the thread itself when the
+/// trace does not say.
 pub fn pid_of(trace: &Trace, tid: u32, step: u64) -> u32 {
     pid_among(&trace.processes(), tid, step)
 }
 
-/// The process thread `tid` belonged to at `step` among `processes`; the
-/// thread itself when none of them has it.
+/// The step a write whose record is at `step` was made by: the one
+/// before. The monitor takes a record at the step after its write, so a
+/// write followed directly by its process's exit or exec has its record
+/// at the step of that event, where the process is no longer alive or
+/// already runs another program.
+fn written_by(step: u64) -> u64 {
+    step.saturating_sub(1)
+}
+
+/// The process thread `tid` belonged to among `processes` when it made
+/// the write whose record is at `step`; the thread itself when none of
+/// them has it.
 fn pid_among(processes: &[Process], tid: u32, step: u64) -> u32 {
+    let written = written_by(step);
     processes
         .iter()
-        .filter(|p| p.alive_at(step))
+        .filter(|p| p.alive_at(written))
         .find(|p| thread_of(p, tid))
         .map_or(tid, |p| p.pid)
 }
@@ -121,6 +133,7 @@ pub fn file_of(log: &IoLog, writer: &Writer) -> Option<FileId> {
 /// One write to a file, from any thread, as the records have it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FinalWrite {
+    /// The step of the write's record, the step after the write.
     pub step: u64,
     pub tid: u32,
     pub pos: u64,
@@ -128,6 +141,11 @@ pub struct FinalWrite {
 }
 
 impl FinalWrite {
+    /// The step the write was made by: the one before its record's.
+    pub fn made(&self) -> u64 {
+        written_by(self.step)
+    }
+
     /// Whether the write went over byte `offset` of its file.
     pub fn covers(&self, offset: u64) -> bool {
         (self.pos..self.pos + u64::from(self.count)).contains(&offset)
@@ -213,16 +231,18 @@ pub struct ByteWrite {
 
 impl ByteWrite {
     /// Who made `write`, among `processes`: the process its thread
-    /// belonged to at the step of the write, by the program that process
-    /// ran then. A process that opened a file and exec'd another program
-    /// before writing it is named by the program that wrote.
+    /// belonged to when the write was made, the step before its record's,
+    /// by the program that process ran then. A process that opened a file
+    /// and exec'd another program before writing it is named by the
+    /// program that wrote.
     pub fn of(processes: &[Process], write: &FinalWrite) -> ByteWrite {
         let pid = pid_among(processes, write.tid, write.step);
+        let written = write.made();
         let program = processes
             .iter()
-            .filter(|p| p.alive_at(write.step))
+            .filter(|p| p.alive_at(written))
             .find(|p| p.pid == pid)
-            .map_or_else(|| format!("pid {pid}"), |p| label(&p.as_of(write.step)));
+            .map_or_else(|| format!("pid {pid}"), |p| label(&p.as_of(written)));
         ByteWrite {
             step: write.step,
             pid,
@@ -371,6 +391,19 @@ mod tests {
         event(step, pid, EventKind::Close { path: path.into() })
     }
 
+    /// Process `pid` exiting at `step`.
+    fn exited(step: u64, pid: u32) -> Event {
+        event(
+            step,
+            pid,
+            EventKind::Exit {
+                status: 0,
+                comm: String::new(),
+                thread: false,
+            },
+        )
+    }
+
     fn log(records: Vec<(u64, Io)>) -> IoLog {
         IoLog {
             records: records
@@ -514,6 +547,57 @@ mod tests {
         ]);
         let writes = FileWrites::of(&trace, &log, "/out/lib.so", 20);
         assert_eq!(set_by(&writes, 3), Some((13, 10)));
+    }
+
+    /// A write record is taken at the step after its write. A linker
+    /// whose thread 11 writes and which then exits has the record at the
+    /// step of its exit, and a shell that writes and then execs another
+    /// program has the record at the step of the exec. Each write is
+    /// still its process's, by the program that process ran when it
+    /// wrote.
+    #[test]
+    fn a_write_taken_at_the_writer_s_exit_is_the_writer_s() {
+        const LINKER_THREAD: u32 = 11;
+        let mut events = started(5, 10, &["ld"]).to_vec();
+        events.push(event(
+            7,
+            10,
+            EventKind::Fork {
+                child: LINKER_THREAD,
+                thread: true,
+            },
+        ));
+        events.push(open(10, 10, "/out/lib.so", O_TRUNC));
+        events.push(exited(13, 10));
+        events.extend(started(20, 30, &["sh"]));
+        events.push(open(22, 30, "/build/out.tmp", O_TRUNC));
+        events.push(event(
+            24,
+            30,
+            EventKind::Exec {
+                filename: "cat".into(),
+                argv: vec!["cat".into()],
+                old_pid: 30,
+            },
+        ));
+        events.push(exited(28, 30));
+        let trace = Trace {
+            events,
+            ..Default::default()
+        };
+        let log = log(vec![
+            (11, write_open(10, FIRST, OUT)),
+            (13, write(LINKER_THREAD, FIRST, 0, 100)),
+            (23, write_open(30, SECOND, TMP)),
+            (24, write(30, SECOND, 0, 100)),
+        ]);
+        assert_eq!(pid_of(&trace, LINKER_THREAD, 13), 10);
+        let writes = FileWrites::of(&trace, &log, "/out/lib.so", 40);
+        assert_eq!(set_by(&writes, 0), Some((13, 10)));
+        assert_eq!(writes.byte(0).unwrap().program, "ld");
+        let writes = FileWrites::of(&trace, &log, "/build/out.tmp", 40);
+        assert_eq!(set_by(&writes, 0), Some((24, 30)));
+        assert_eq!(writes.byte(0).unwrap().program, "sh");
     }
 
     /// A run recorded without read and write records: the writer is known
