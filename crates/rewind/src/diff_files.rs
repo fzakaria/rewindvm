@@ -175,14 +175,31 @@ pub(crate) struct OutputDiff {
     pub first_byte: Option<usize>,
 }
 
+/// What the heading over the files not compared says.
+const NOT_COMPARED_HEADING: &str =
+    "Not compared, since neither run has a regular file there that is small enough to read:";
+
+/// How the files two runs' jobs left behind compare.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Outputs {
+    /// The files whose bytes differ, in the order asked for.
+    pub differ: Vec<OutputDiff>,
+    /// How many files are the same in both runs.
+    pub same: usize,
+    /// The files asked for that neither run returned.
+    pub not_compared: Vec<String>,
+}
+
 /// The files of `paths` whose bytes differ between `left` and `right`,
-/// each run's files by path, in the order of `paths`; and how many of
-/// `paths` were the same in both. A path neither run has is left out.
+/// each run's files by path, in the order of `paths`; how many of
+/// `paths` were the same in both; and the paths neither run returned.
+/// The guest returns no file that is gone, is not a regular file, or is
+/// too large for the guest to send, so such a path was not compared.
 pub(crate) fn differing_outputs(
     paths: &[String],
     left: &[(String, &[u8])],
     right: &[(String, &[u8])],
-) -> (Vec<OutputDiff>, usize) {
+) -> Outputs {
     let find = |files: &[(String, &[u8])], path: &str| -> Option<Vec<u8>> {
         files
             .iter()
@@ -191,9 +208,11 @@ pub(crate) fn differing_outputs(
     };
     let mut differ = Vec::new();
     let mut same = 0;
+    let mut not_compared = Vec::new();
     for path in paths {
         let (here, there) = (find(left, path), find(right, path));
         if here.is_none() && there.is_none() {
+            not_compared.push(path.clone());
             continue;
         }
         if here == there {
@@ -215,7 +234,11 @@ pub(crate) fn differing_outputs(
             first_byte: bytes.first(),
         });
     }
-    (differ, same)
+    Outputs {
+        differ,
+        same,
+        not_compared,
+    }
 }
 
 /// How a file differs, after its path in a list.
@@ -398,11 +421,11 @@ pub(crate) fn diff_outputs(
     let here = read_files(home, left, left_step, &paths)?;
     let there = read_files(home, right, right_step, &paths)?;
     let (here, there) = (sections(&here, left)?, sections(&there, right)?);
-    let (differ, same) = differing_outputs(&paths, &here, &there);
+    let outputs = differing_outputs(&paths, &here, &there);
 
     match format {
         Format::Text => {
-            for line in outputs_report(&differ, same, crate::color::stdout()) {
+            for line in outputs_report(&outputs, crate::color::stdout()) {
                 println!("{line}");
             }
         }
@@ -413,12 +436,13 @@ pub(crate) fn diff_outputs(
                 "right": right.manifest.id,
                 "left_step": left_step,
                 "right_step": right_step,
-                "same": same,
-                "differ": differ,
+                "same": outputs.same,
+                "differ": outputs.differ,
+                "not_compared": outputs.not_compared,
             })
         ),
     }
-    Ok(if differ.is_empty() {
+    Ok(if outputs.differ.is_empty() {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
@@ -447,29 +471,48 @@ fn sections<'a>(answer: &'a [u8], run: &Run) -> Result<Vec<(String, &'a [u8])>> 
 
 /// What `rewind diff --outputs` prints: how many files differ, then one
 /// line for each; the count green when none differ and red when some do.
-pub(crate) fn outputs_report(differ: &[OutputDiff], same: usize, paint: Paint) -> Vec<String> {
+/// The files neither run returned follow under a heading, and the count
+/// is then of the files compared, not green when none of them differ.
+pub(crate) fn outputs_report(outputs: &Outputs, paint: Paint) -> Vec<String> {
+    let Outputs {
+        differ,
+        same,
+        not_compared,
+    } = outputs;
     let total = differ.len() + same;
+
+    // What the count is of, and what the first line says after the
+    // count when some files were not compared.
+    let (counted, skipped) = match not_compared.len() {
+        0 => ("the runs left behind", String::new()),
+        1 => ("compared", "; 1 was not compared".to_string()),
+        n => ("compared", format!("; {n} were not compared")),
+    };
+
+    // The count, then the files that differ.
+    let mut report = Vec::new();
     if differ.is_empty() {
-        return vec![paint.verdict(
-            Same::Yes,
-            format!("None of the {total} files the runs left behind differ."),
-        )];
+        let none = format!("None of the {total} files {counted} differ{skipped}.");
+        if not_compared.is_empty() {
+            report.push(paint.verdict(Same::Yes, none));
+        } else {
+            report.push(none);
+        }
+    } else {
+        let some = format!("{} of the {total} files {counted} differ", differ.len());
+        report.push(format!("{}{skipped}:", paint.verdict(Same::No, some)));
     }
-    let mut report = vec![format!(
-        "{}:",
-        paint.verdict(
-            Same::No,
-            format!(
-                "{} of the {total} files the runs left behind differ",
-                differ.len()
-            )
-        )
-    )];
     report.extend(
         differ
             .iter()
             .map(|d| format!("  {}: {}", d.path, output_note(d))),
     );
+
+    // The files not compared, under their heading.
+    if !not_compared.is_empty() {
+        report.push(NOT_COMPARED_HEADING.to_string());
+        report.extend(not_compared.iter().map(|path| format!("  {path}")));
+    }
     report
 }
 
@@ -547,7 +590,8 @@ mod tests {
     }
 
     /// A file the same in both runs, one whose bytes differ, one only the
-    /// left run left behind, and one neither has any more.
+    /// left run left behind, and one neither run returned, which is
+    /// listed as not compared.
     #[test]
     fn outputs_that_differ_are_listed_in_order() {
         let paths = ["/out/same", "/out/pc", "/out/only-left", "/out/gone"].map(String::from);
@@ -560,8 +604,13 @@ mod tests {
             ("/out/pc".into(), b"prefix=/nix/store/9z"),
             ("/out/same".into(), b"same"),
         ];
-        let (differ, same) = differing_outputs(&paths, &left, &right);
+        let Outputs {
+            differ,
+            same,
+            not_compared,
+        } = differing_outputs(&paths, &left, &right);
         assert_eq!(same, 1);
+        assert_eq!(not_compared, ["/out/gone"]);
         assert_eq!(
             differ,
             vec![
@@ -598,16 +647,63 @@ mod tests {
             differing_bytes: 16,
             first_byte: Some(216),
         };
+        let mut outputs = Outputs {
+            differ: vec![pc],
+            same: 11,
+            not_compared: Vec::new(),
+        };
         assert_eq!(
-            outputs_report(&[pc], 11, Paint::Plain),
+            outputs_report(&outputs, Paint::Plain),
             [
                 "1 of the 12 files the runs left behind differ:",
                 "  /out/lib/pkgconfig/neatvnc.pc: 16 of 407 bytes differ, first at byte 216",
             ]
         );
+        outputs.differ.clear();
+        outputs.same = 3;
         assert_eq!(
-            outputs_report(&[], 3, Paint::Plain),
+            outputs_report(&outputs, Paint::Plain),
             ["None of the 3 files the runs left behind differ."]
+        );
+    }
+
+    /// Files neither run returned are listed after the count as not
+    /// compared, and the count is then of the files compared: with none
+    /// that differ the first line does not speak for every file, in
+    /// words or in green.
+    #[test]
+    fn the_outputs_report_lists_files_not_compared() {
+        let mut outputs = Outputs {
+            differ: Vec::new(),
+            same: 3,
+            not_compared: vec!["/out/share".into(), "/out/disk.img".into()],
+        };
+        let expected = [
+            "None of the 3 files compared differ; 2 were not compared.",
+            NOT_COMPARED_HEADING,
+            "  /out/share",
+            "  /out/disk.img",
+        ];
+        assert_eq!(outputs_report(&outputs, Paint::Plain), expected);
+        assert_eq!(outputs_report(&outputs, Paint::Ansi), expected);
+
+        // One file that differs and one not compared.
+        outputs.not_compared.pop();
+        outputs.differ.push(OutputDiff {
+            path: "/out/a".into(),
+            left_size: Some(1),
+            right_size: None,
+            differing_bytes: 1,
+            first_byte: Some(0),
+        });
+        assert_eq!(
+            outputs_report(&outputs, Paint::Plain),
+            [
+                "1 of the 4 files compared differ; 1 was not compared:",
+                "  /out/a: only in the left run",
+                NOT_COMPARED_HEADING,
+                "  /out/share",
+            ]
         );
     }
 
