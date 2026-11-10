@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::layout::PAGE_SIZE;
 use crate::pv::Clock;
-use crate::{Config, Machine, SLOT_RAM};
+use crate::{Config, DirtyLog, Machine, SLOT_RAM};
 
 /// Where keyframe pages go: a content-addressed page store.
 pub trait Pages {
@@ -335,18 +335,21 @@ impl Machine {
     /// A machine restored from a chain of keyframes, the full one first and
     /// the one to restore last. `trace` is the run's trace, record by
     /// record, which the machine's read and write records and switches go
-    /// on from at the last keyframe's step.
+    /// on from at the last keyframe's step. A machine that takes neither
+    /// keyframes nor checkpoints restores with `DirtyLog::Off`; see
+    /// [`DirtyLog`].
     pub fn restore(
         config: &Config,
         chain: &[Keyframe],
         pages: &(dyn Pages + Sync),
         trace: &[(u64, Vec<u8>)],
+        dirty_log: DirtyLog,
     ) -> Result<Machine> {
         let last = chain.last().context("restoring from no keyframes")?;
         if chain[0].parent.is_some() {
             bail!("a keyframe chain must start with a full keyframe");
         }
-        let mut m = Self::create(config)?;
+        let mut m = Self::create(config, dirty_log)?;
 
         // Memory: each page once, with the contents the last keyframe that
         // lists it gives it, which a rewind to a checkpoint reads again.
@@ -356,8 +359,11 @@ impl Machine {
         }
         read_pages(m.dev.ram.as_mut_slice(), &restored, pages)?;
         m.origin = crate::Origin::Restored(restored.into_iter().map(|(i, h)| (i, *h)).collect());
-        // Start the dirty log afresh from the restored memory.
-        m.vm.get_dirty_log(SLOT_RAM, m.dev.ram.len())?;
+        // Start the dirty log, when there is one, afresh from the restored
+        // memory.
+        if m.dirty_log == DirtyLog::On {
+            m.vm.get_dirty_log(SLOT_RAM, m.dev.ram.len())?;
+        }
 
         m.apply_state(&last.cpu, &last.irqchips, &last.devices)?;
         m.resume_records(trace, last.devices.step)?;

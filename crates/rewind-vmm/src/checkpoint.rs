@@ -19,7 +19,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::layout::PAGE_SIZE;
 use crate::snapshot::{CpuState, DeviceState, Pages};
@@ -171,8 +171,13 @@ pub(crate) struct Checkpoints {
 
 impl Machine {
     /// Reads KVM's dirty log, which it clears, and notes the pages it
-    /// names as written since the anchor. Returns their numbers.
+    /// names as written since the anchor. Returns their numbers. A
+    /// machine without the log cannot say which pages changed, so asking
+    /// one is an error rather than an empty answer.
     pub(crate) fn dirty_pages(&mut self) -> Result<Vec<usize>> {
+        if self.dirty_log == crate::DirtyLog::Off {
+            bail!("the machine runs without a dirty log");
+        }
         let dirty = self
             .vm
             .get_dirty_log(crate::SLOT_RAM, self.dev.ram.len())

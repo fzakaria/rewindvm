@@ -25,7 +25,7 @@ use anyhow::{Context, Result};
 use rewind_vmm::debug::{DebugStop, Stepping};
 use rewind_vmm::snapshot::Keyframe;
 use rewind_vmm::state::StateDifference;
-use rewind_vmm::{Machine, Observer, Outcome};
+use rewind_vmm::{DirtyLog, Machine, Observer, Outcome};
 use serde::Serialize;
 
 use crate::Home;
@@ -174,7 +174,7 @@ impl Copy {
         let mut records = Records::default();
         let machine = match from {
             Some(kf) => run.machine_at(home, kf, Keep::Nothing, &mut records)?,
-            None => Machine::boot(&run.manifest.spec.config()?)?,
+            None => Machine::boot(&run.manifest.spec.config()?, DirtyLog::On)?,
         };
         let mut memory = Memory::new(machine.ram_pages());
         if let Some(kf) = from {

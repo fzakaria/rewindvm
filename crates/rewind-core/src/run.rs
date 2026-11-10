@@ -17,7 +17,7 @@ pub use rewind_store::Store;
 use rewind_trace::schedule::Timer;
 use rewind_trace::stop::StalledThread;
 use rewind_trace::{Event, EventKind, Trace, TraceWriter};
-use rewind_vmm::{Config, Machine, Observer, Outcome, Stop};
+use rewind_vmm::{Config, DirtyLog, Machine, Observer, Outcome, Stop};
 use serde::{Deserialize, Serialize};
 
 use crate::cpio;
@@ -794,6 +794,12 @@ impl Run {
         // that step.
         // A store a restore opened of its own stays open until this
         // execution knows whether it takes keyframes.
+        // A run that takes no keyframes needs no dirty log, and runs
+        // faster without one: KVM keeps its RAM in 2 MiB pages.
+        let dirty_log = match keyframes {
+            Keyframes::Take | Keyframes::AtExit => DirtyLog::On,
+            Keyframes::Skip => DirtyLog::Off,
+        };
         let (mut machine, mut store, last_keyframe) = match &shortcut {
             Some(s) => {
                 let mut own = None;
@@ -806,10 +812,11 @@ impl Run {
                     &s.chain,
                     &crate::keyframes::ReadPages(read),
                     &s.records,
+                    dirty_log,
                 )?;
                 (machine, own, Some(s.base))
             }
-            None => (Machine::boot(&config)?, None, None),
+            None => (Machine::boot(&config, dirty_log)?, None, None),
         };
 
         fs::create_dir_all(&dir)?;
@@ -1061,7 +1068,7 @@ impl Run {
             error: None,
             pause_at_exit: false,
         };
-        let mut machine = Machine::boot(&self.manifest.spec.config()?)?;
+        let mut machine = Machine::boot(&self.manifest.spec.config()?, DirtyLog::On)?;
         machine.run(self.replay_end(), &mut recorder)?;
         self.end_replay(&mut machine, &mut recorder);
         recorder.trace.finish()?;
@@ -1255,6 +1262,7 @@ impl Run {
                     &chain,
                     &crate::keyframes::ReadPages(&store),
                     self.records()?,
+                    DirtyLog::On,
                 )?;
                 let base = Base {
                     step: Some(kf),
@@ -1264,7 +1272,7 @@ impl Run {
                 (machine, base)
             }
             None => {
-                let machine = Machine::boot(&config)?;
+                let machine = Machine::boot(&config, DirtyLog::On)?;
                 let base = Base {
                     step: None,
                     memory: Some(crate::keyframes::Memory::new(machine.ram_pages())),
@@ -1452,7 +1460,7 @@ impl Run {
         };
         let mut machine = match start {
             Some(kf) => self.machine_at(home, kf, Keep::Nothing, &mut recorder)?,
-            None => Machine::boot(&self.manifest.spec.config()?)?,
+            None => Machine::boot(&self.manifest.spec.config()?, DirtyLog::On)?,
         };
 
         // To each keyframe after the start, comparing the machine there,

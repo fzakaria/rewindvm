@@ -675,9 +675,12 @@ time.
 
 `rewind-vmm` is a few hundred lines on top of rust-vmm's `kvm-ioctls`. It
 creates a VM with the in-kernel local APIC and no PIT. It maps guest RAM with
-dirty logging and the input image as a read-only memory slot. It then boots
-the bzImage with the 64-bit boot protocol and runs one vCPU. Its run loop
-handles each exit, counts it, moves time, and sends the interrupt if the timer
+dirty logging and the input image as a read-only memory slot. A run that takes
+no keyframes, as most of `rewind check`'s runs do, maps guest RAM without dirty
+logging: KVM then backs the RAM with 2 MiB pages, where logging splits the RAM
+into 4 KiB pages to note each write. The monitor then boots the bzImage with
+the 64-bit boot protocol and runs one vCPU. Its run loop handles each exit,
+counts it, moves time, and sends the interrupt if the timer
 is due and the APIC will take it. If the guest goes idle with no timer armed,
 nothing can ever wake it; the monitor stops the run as stalled instead of
 hanging.

@@ -23,7 +23,7 @@ use rewind_init::{Job, Mark, Probe, Root, SELFTEST_ARG};
 use rewind_trace::EventKind;
 use rewind_vmm::CounterEvent as Event;
 use rewind_vmm::pmu::{Counter, Modes, Pinned};
-use rewind_vmm::{Machine, Observer, Outcome};
+use rewind_vmm::{DirtyLog, Machine, Observer, Outcome};
 
 use crate::home::Guest;
 use crate::run::{BASE_CMDLINE, DEFAULT_CORES, DEFAULT_QUANTUM, Spec, SpecExt};
@@ -424,7 +424,7 @@ pub fn selftest(guest: &Guest) -> Result<SelfTest> {
         let mut these = [0u64; 2];
         let mut first = None;
         for count in &mut these {
-            let mut machine = Machine::boot(&config)?;
+            let mut machine = Machine::boot(&config, DirtyLog::On)?;
             machine.pmu = Some((
                 Counter::open(event, Modes::UserOnly)?,
                 0xcbf2_9ce4_8422_2325,

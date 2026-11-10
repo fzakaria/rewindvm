@@ -120,6 +120,26 @@ pub struct Config {
     pub extras: Extras,
 }
 
+/// Whether KVM logs the pages the guest writes, which keyframes and
+/// checkpoints read to list the pages that changed. Logging makes KVM map
+/// the guest's RAM in 4 KiB pages, so a run that takes neither keyframes
+/// nor checkpoints runs faster without the log, in 2 MiB pages.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DirtyLog {
+    On,
+    Off,
+}
+
+impl DirtyLog {
+    /// The RAM slot's KVM flags.
+    fn slot_flags(self) -> u32 {
+        match self {
+            DirtyLog::On => KVM_MEM_LOG_DIRTY_PAGES,
+            DirtyLog::Off => 0,
+        }
+    }
+}
+
 /// Where boot's writes go: the machine's RAM, or memory of their own.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BootInto {
@@ -310,6 +330,8 @@ pub struct Machine {
     /// The extras slot's memory, when the machine reserves one.
     pub(crate) extras: Option<Mapping>,
     pub(crate) config: Config,
+    /// Whether KVM logs the guest's writes; see [`DirtyLog`].
+    pub(crate) dirty_log: DirtyLog,
     /// Exits counted by port and guest instruction pointer, when profiling.
     pub profile: Option<std::collections::HashMap<(u16, u64), u64>>,
     /// An experiment: a guest-mode performance counter read at every exit,
@@ -375,7 +397,7 @@ impl std::fmt::Debug for Machine {
 impl Machine {
     /// Creates the VM with its memory and devices, but no guest state:
     /// either [`Machine::boot`] or a snapshot restore supplies that.
-    fn create(config: &Config) -> Result<Machine> {
+    fn create(config: &Config, dirty_log: DirtyLog) -> Result<Machine> {
         if config.mem_bytes > RAM_MAX || config.mem_bytes < (64 << 20) {
             bail!("VM memory must be between 64 MiB and {} MiB", RAM_MAX >> 20);
         }
@@ -396,7 +418,7 @@ impl Machine {
         unsafe {
             vm.set_user_memory_region(kvm_userspace_memory_region {
                 slot: SLOT_RAM,
-                flags: KVM_MEM_LOG_DIRTY_PAGES,
+                flags: dirty_log.slot_flags(),
                 guest_phys_addr: 0,
                 memory_size: ram.len() as u64,
                 userspace_addr: ram.host_addr(),
@@ -473,6 +495,7 @@ impl Machine {
             pmem,
             extras,
             config: config.clone(),
+            dirty_log,
             profile: None,
             pmu: None,
             work: None,
@@ -492,8 +515,10 @@ impl Machine {
     }
 
     /// A machine at step 0: the kernel loaded, the vCPU at its entry point.
-    pub fn boot(config: &Config) -> Result<Machine> {
-        let mut m = Self::create(config)?;
+    /// A machine that takes neither keyframes nor checkpoints boots with
+    /// `DirtyLog::Off`; see [`DirtyLog`].
+    pub fn boot(config: &Config, dirty_log: DirtyLog) -> Result<Machine> {
+        let mut m = Self::create(config, dirty_log)?;
         let entry = m.write_boot(BootInto::Ram)?;
 
         cpu::setup_msrs(&m.vcpu)?;
@@ -1663,5 +1688,51 @@ mod tests {
         let mut short = [0u8; 2];
         dev.io_in(pv::PORT_CLOCK, &mut short).unwrap();
         assert_eq!(short, [0x88, 0x77]);
+    }
+}
+
+#[cfg(test)]
+mod dirty_log_tests {
+    use super::*;
+
+    /// A machine without the dirty log registers its RAM without KVM's
+    /// logging flag, and one with the log registers it with the flag.
+    #[test]
+    fn the_dirty_log_sets_the_ram_slots_flag() {
+        assert_eq!(DirtyLog::On.slot_flags(), KVM_MEM_LOG_DIRTY_PAGES);
+        assert_eq!(DirtyLog::Off.slot_flags(), 0);
+    }
+
+    /// A machine created without the dirty log refuses to list dirty
+    /// pages instead of answering with none, so a keyframe or checkpoint
+    /// asked of one fails loudly. Needs /dev/kvm; without one the test
+    /// says so and passes.
+    #[test]
+    fn a_machine_without_the_dirty_log_refuses_to_list_dirty_pages() {
+        if kvm::open().is_err() {
+            eprintln!("skipped: /dev/kvm does not open");
+            return;
+        }
+        let config = Config {
+            kernel: PathBuf::new(),
+            initrd: Vec::new(),
+            image: None,
+            mem_bytes: 64 << 20,
+            cmdline: String::new(),
+            seed: [0; 32],
+            epoch: 0,
+            quantum: 1,
+            schedule: Schedule::default(),
+            cpu: CpuModel::V3,
+            clock: ClockSource::Exits,
+            preemption: Preemption::AtExits,
+            extras: Extras::Absent,
+        };
+        let mut off = Machine::create(&config, DirtyLog::Off).unwrap();
+        let err = off.dirty_pages().unwrap_err();
+        assert!(err.to_string().contains("without a dirty log"), "{err}");
+
+        let mut on = Machine::create(&config, DirtyLog::On).unwrap();
+        assert!(on.dirty_pages().unwrap().is_empty());
     }
 }
