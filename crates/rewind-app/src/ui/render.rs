@@ -8,9 +8,10 @@ use std::path::Path;
 
 use gpui::{
     AnyElement, Bounds, ClickEvent, Context, CursorStyle, DispatchPhase, Div, Font, FontWeight,
-    HighlightStyle, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection,
-    PathBuilder, Pixels, Point, Role, ScrollStrategy, ScrollWheelEvent, SharedString, TextRun,
-    Window, canvas, div, fill, font, point, prelude::*, px, relative, rgb, rgba, uniform_list,
+    HighlightStyle, HitboxBehavior, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    NavigationDirection, PathBuilder, Pixels, Point, Role, ScrollStrategy, ScrollWheelEvent,
+    SharedString, TextRun, Window, canvas, div, fill, font, point, prelude::*, px, relative, rgb,
+    rgba, uniform_list,
 };
 
 use crate::describe::{self, EventTone, short_store_paths, thousands};
@@ -818,14 +819,18 @@ impl Scrubber {
 
     /// An invisible layer over the track that turns clicks and drags into
     /// playhead moves. The listeners are window-wide so a drag keeps going
-    /// when the pointer leaves the track.
+    /// when the pointer leaves the track. The window calls them for every
+    /// event wherever the pointer is and whatever is drawn over the track,
+    /// so a press, the pointer's readout and the wheel each ask the
+    /// layer's hitbox whether the pointer is on the track with no menu,
+    /// sheet or dialog over it.
     fn track_input(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let view = cx.entity();
         let dragging = self.dragging.clone();
         let focus = self.focus.clone();
         canvas(
-            |_, _, _| (),
-            move |bounds, (), window, _| {
+            |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
+            move |bounds, hitbox, window, _| {
                 let along = move |position: Point<Pixels>| {
                     let offset = position.x - bounds.origin.x;
                     offset / bounds.size.width
@@ -833,8 +838,9 @@ impl Scrubber {
 
                 // A press on the track starts a drag and moves the playhead.
                 let (down_view, down_drag) = (view.clone(), dragging.clone());
+                let down_hitbox = hitbox.clone();
                 window.on_mouse_event(move |e: &MouseDownEvent, phase, window, cx| {
-                    let pressed = e.button == MouseButton::Left && bounds.contains(&e.position);
+                    let pressed = e.button == MouseButton::Left && down_hitbox.is_hovered(window);
                     if phase != DispatchPhase::Bubble || !pressed {
                         return;
                     }
@@ -849,11 +855,12 @@ impl Scrubber {
                 // without it over the track shows the step under the
                 // pointer.
                 let (move_view, move_drag) = (view.clone(), dragging.clone());
-                window.on_mouse_event(move |e: &MouseMoveEvent, phase, _, cx| {
+                let move_hitbox = hitbox.clone();
+                window.on_mouse_event(move |e: &MouseMoveEvent, phase, window, cx| {
                     if phase != DispatchPhase::Bubble {
                         return;
                     }
-                    let over = bounds.contains(&e.position).then(|| along(e.position));
+                    let over = move_hitbox.is_hovered(window).then(|| along(e.position));
                     move_view.update(cx, |this, cx| this.set_hover(over, cx));
                     if !move_drag.get() {
                         return;
@@ -869,8 +876,8 @@ impl Scrubber {
 
                 // The wheel over the track zooms and pans.
                 let wheel_view = view.clone();
-                window.on_mouse_event(move |e: &ScrollWheelEvent, phase, _, cx| {
-                    if phase != DispatchPhase::Bubble || !bounds.contains(&e.position) {
+                window.on_mouse_event(move |e: &ScrollWheelEvent, phase, window, cx| {
+                    if phase != DispatchPhase::Bubble || !hitbox.should_handle_scroll(window) {
                         return;
                     }
                     wheel_view.update(cx, |this, cx| {

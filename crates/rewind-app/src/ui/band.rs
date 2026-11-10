@@ -9,8 +9,9 @@
 use std::rc::Rc;
 
 use gpui::{
-    Bounds, Context, DispatchPhase, Div, MouseButton, MouseDownEvent, MouseMoveEvent,
-    ScrollWheelEvent, Stateful, canvas, div, fill, point, prelude::*, px, relative, rgb, rgba,
+    Bounds, Context, DispatchPhase, Div, HitboxBehavior, MouseButton, MouseDownEvent,
+    MouseMoveEvent, ScrollWheelEvent, Stateful, canvas, div, fill, point, prelude::*, px, relative,
+    rgb, rgba,
 };
 
 use crate::density::{Density, switches_between};
@@ -39,7 +40,8 @@ const LABEL_FLIP: f32 = 0.75;
 
 impl Scrubber {
     /// The density the band draws for `view`, computed once per view and
-    /// kept until the view changes.
+    /// kept until the view changes or another session is shown, which
+    /// drops the kept density.
     fn band_density(&mut self, view: View) -> Rc<Density> {
         if let Some(density) = &self.band
             && density.view == view
@@ -126,26 +128,30 @@ impl Scrubber {
 
     /// The layer over the band that takes the pointer: moving over it
     /// names the bucket, the wheel zooms and pans the track, and a press
-    /// moves the playhead to the step under it.
+    /// moves the playhead to the step under it. The window calls these
+    /// listeners for every event wherever the pointer is and whatever is
+    /// drawn over the band, so each asks the layer's hitbox whether the
+    /// pointer is on the band with no menu, sheet or dialog over it.
     fn band_input(&self, view: View, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
         canvas(
-            |_, _, _| (),
-            move |bounds, (), window, _| {
+            |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
+            move |bounds, hitbox, window, _| {
                 let along = move |x: gpui::Pixels| (x - bounds.origin.x) / bounds.size.width;
 
-                let move_entity = entity.clone();
-                window.on_mouse_event(move |e: &MouseMoveEvent, phase, _, cx| {
+                let (move_entity, move_hitbox) = (entity.clone(), hitbox.clone());
+                window.on_mouse_event(move |e: &MouseMoveEvent, phase, window, cx| {
                     if phase != DispatchPhase::Bubble {
                         return;
                     }
-                    let over = bounds.contains(&e.position).then(|| along(e.position.x));
+                    let over = move_hitbox.is_hovered(window).then(|| along(e.position.x));
                     move_entity.update(cx, |this, cx| this.set_band_hover(over, cx));
                 });
 
-                let wheel_entity = entity.clone();
-                window.on_mouse_event(move |e: &ScrollWheelEvent, phase, _, cx| {
-                    if phase != DispatchPhase::Bubble || !bounds.contains(&e.position) {
+                let (wheel_entity, wheel_hitbox) = (entity.clone(), hitbox.clone());
+                window.on_mouse_event(move |e: &ScrollWheelEvent, phase, window, cx| {
+                    if phase != DispatchPhase::Bubble || !wheel_hitbox.should_handle_scroll(window)
+                    {
                         return;
                     }
                     wheel_entity.update(cx, |this, cx| {
@@ -154,8 +160,8 @@ impl Scrubber {
                 });
 
                 let down_entity = entity.clone();
-                window.on_mouse_event(move |e: &MouseDownEvent, phase, _, cx| {
-                    let pressed = e.button == MouseButton::Left && bounds.contains(&e.position);
+                window.on_mouse_event(move |e: &MouseDownEvent, phase, window, cx| {
+                    let pressed = e.button == MouseButton::Left && hitbox.is_hovered(window);
                     if phase != DispatchPhase::Bubble || !pressed {
                         return;
                     }

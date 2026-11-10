@@ -352,7 +352,7 @@ pub struct Scrubber {
     /// How far along the switch band the pointer is, while it is over it.
     pub(super) band_hover: Option<f32>,
     /// The switch density the band last drew, kept while the view it was
-    /// made for is the one shown.
+    /// made for is the one shown and until another session is shown.
     pub(super) band: Option<Rc<crate::density::Density>>,
     /// The searchable text of the run it was built for, by its path.
     pub(super) search_index: Option<(PathBuf, Rc<Index>)>,
@@ -602,6 +602,11 @@ impl Scrubber {
             self.picked_row = None;
         }
         self.step = start;
+
+        // The band's density is of the run that was on screen. Two runs
+        // of the same length have the same view, so the view alone does
+        // not tell the densities apart.
+        self.band = None;
         self.search = None;
         self.bookmark_editor = None;
         self.bookmarks = load_bookmarks(&session.run);

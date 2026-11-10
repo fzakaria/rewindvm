@@ -1000,6 +1000,9 @@ fn menu_frame(items: gpui::Div, position: Point<Pixels>, cx: &mut Context<Scrubb
         .left_0()
         .size_full()
         .child(
+            // The left press that closes the menu goes no further, so it
+            // does not also move the playhead or click the row under the
+            // menu. A right press goes on, to open the menu where it lands.
             div()
                 .id("menu-backdrop")
                 .absolute()
@@ -1008,7 +1011,10 @@ fn menu_frame(items: gpui::Div, position: Point<Pixels>, cx: &mut Context<Scrubb
                 .size_full()
                 .on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(|this, _, _, cx| this.close_context_menu(cx)),
+                    cx.listener(|this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.close_context_menu(cx);
+                    }),
                 )
                 .on_mouse_down(
                     MouseButton::Right,
