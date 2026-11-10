@@ -325,7 +325,7 @@ fn unpack_and_place(home: &Home, reader: impl Read, source: &str, staging: &Path
         take_bookmarks(staging, &dir)?;
         if staging.join(INPUTS_DIR).exists() && !has_inputs(&local.manifest) {
             place_inputs(home, staging, &mut local.manifest)?;
-            write_manifest(&dir, &local.manifest)?;
+            write_manifest(home, &dir, &local.manifest)?;
         }
         return Run::open(&dir);
     }
@@ -341,13 +341,15 @@ fn unpack_and_place(home: &Home, reader: impl Read, source: &str, staging: &Path
 
     // The manifest goes last, whole or not at all.
     manifest.trace_hash = Some(trace_hash);
-    write_manifest(&dir, &manifest)?;
+    write_manifest(home, &dir, &manifest)?;
     Run::open(&dir)
 }
 
-/// Writes `manifest` into the run directory `dir`, whole or not at all.
-fn write_manifest(dir: &Path, manifest: &Manifest) -> Result<()> {
-    crate::image::write_atomic(&dir.join(MANIFEST), &serde_json::to_vec_pretty(manifest)?)
+/// Writes `manifest` into the run directory `dir` of `home`, whole or not
+/// at all, and brings the home's index of runs up to date with it.
+fn write_manifest(home: &Home, dir: &Path, manifest: &Manifest) -> Result<()> {
+    crate::image::write_atomic(&dir.join(MANIFEST), &serde_json::to_vec_pretty(manifest)?)?;
+    crate::run_index::note(home, dir)
 }
 
 /// Whether the inputs `manifest` names are on this machine: a kernel and

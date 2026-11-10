@@ -793,7 +793,8 @@ impl Run {
         fs::create_dir_all(&dir)?;
         let _executing = lock_executing(&dir)?;
         let write_manifest = |m: &Manifest| -> Result<()> {
-            crate::image::write_atomic(&dir.join(MANIFEST), &serde_json::to_vec_pretty(m)?)
+            crate::image::write_atomic(&dir.join(MANIFEST), &serde_json::to_vec_pretty(m)?)?;
+            crate::run_index::note(home, &dir)
         };
 
         // Keyframes a finished earlier execution of the same run took as
@@ -1600,8 +1601,9 @@ impl Run {
     /// other. `@` is the newest run, as `rewind ls` lists them first, and
     /// `@N` the Nth newest. Otherwise the newest run named exactly `what`
     /// wins over ids that start with it, so a run named `a` is found even
-    /// when another run's id starts with an `a`; only `@` and names need
-    /// every manifest read.
+    /// when another run's id starts with an `a`. `@` and names are
+    /// answered from the home's index of runs (see [`crate::run_index`]),
+    /// so no manifest but the run's own is read.
     pub fn find(home: &Home, what: &str) -> Result<Run> {
         let path = Path::new(what);
         if path.join(MANIFEST).exists() {
@@ -1615,22 +1617,32 @@ impl Run {
 
         // `@` and `@N`: the runs in the order `rewind ls` prints them.
         if let Some(nth) = newest_index(what)? {
-            let headers = Run::headers(home)?;
-            let Some((dir, _)) = headers.get(nth - 1) else {
+            let newest = crate::run_index::Index::load(home)?.newest_first();
+            let Some(dir) = newest.get(nth - 1) else {
                 bail!(
                     "there are {} runs, so {what} is past the oldest; see `rewind ls`",
-                    headers.len()
+                    newest.len()
                 );
             };
             return Run::open(dir);
         }
 
-        // The newest run named `what`.
-        let named = Run::headers(home)?
-            .into_iter()
-            .find(|(_, header)| header.name == what);
-        if let Some((dir, _)) = named {
-            return Run::open(&dir);
+        // The newest run named `what`. The index may name a run under a
+        // name its manifest no longer has, when a writer that does not
+        // know the index replaced the manifest; the run is then looked
+        // for again in an index rebuilt from the manifests.
+        for rebuild in [
+            crate::run_index::Rebuild::IfStale,
+            crate::run_index::Rebuild::Now,
+        ] {
+            let index = crate::run_index::Index::load_with(home, rebuild)?;
+            let Some(dir) = index.named(what) else {
+                break;
+            };
+            let run = Run::open(&dir)?;
+            if run.manifest.name == what {
+                return Ok(run);
+            }
         }
 
         // Else the runs whose id starts with `what`. Ones whose manifests
@@ -1655,24 +1667,6 @@ impl Run {
                 Err(anyhow::anyhow!(message))
             }
         }
-    }
-
-    /// Every readable run's directory and the parts of its manifest
-    /// `find` matches on, newest first. Each manifest is read for those
-    /// fields alone, which is faster than opening every run.
-    fn headers(home: &Home) -> Result<Vec<(PathBuf, Header)>> {
-        let mut headers = Vec::new();
-        for dir in Run::dirs_starting(home, "")? {
-            let Ok(bytes) = fs::read(dir.join(MANIFEST)) else {
-                continue;
-            };
-            let Ok(header) = serde_json::from_slice::<Header>(&bytes) else {
-                continue;
-            };
-            headers.push((dir, header));
-        }
-        headers.sort_by_cached_key(|(dir, header)| newest_first(header.created, dir));
-        Ok(headers)
     }
 
     /// The directories in the home's runs directory whose names start with
@@ -1745,13 +1739,6 @@ impl Unreadable {
             written,
         }
     }
-}
-
-/// What [`Run::find`] reads of a manifest to order runs and match a name.
-#[derive(Deserialize)]
-struct Header {
-    name: String,
-    created: u64,
 }
 
 /// How many runs an ambiguous id prefix lists.

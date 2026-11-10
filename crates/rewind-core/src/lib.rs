@@ -27,6 +27,7 @@ pub mod pmu;
 pub mod progress;
 pub mod prune;
 pub mod run;
+mod run_index;
 #[cfg(test)]
 mod settle;
 pub mod source_cache;

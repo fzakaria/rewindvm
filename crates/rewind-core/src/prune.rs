@@ -105,6 +105,7 @@ pub fn remove_with_forks(home: &Home, ids: &[String], act: Act) -> Result<Vec<St
 fn delete(home: &Home, id: &str) -> Result<()> {
     let dir = home.runs().join(id);
     fs::remove_dir_all(&dir).with_context(|| format!("removing {}", dir.display()))?;
+    crate::run_index::forget(home, id)?;
     let inputs = home.inputs().join(id);
     if inputs.exists() {
         fs::remove_dir_all(&inputs).with_context(|| format!("removing {}", inputs.display()))?;

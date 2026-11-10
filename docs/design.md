@@ -797,12 +797,29 @@ keyframes. With `--seeds`, only the first seed runs under the keys.
   images/2/*.erofs            input images, by content
   store/                      the page store
   cache/sources/<id>/         source files read out of a run's VM
+  cache/runs.json             each run's name and age, for finding one
   lock                        held while a process adds images or runs
 ```
 
 Images live in a directory named for how they are built, so an image an
 earlier way of building made is not taken for one this way makes. Runs that
 booted an older image keep naming it where it is, in `images/` itself.
+
+A command names a run by its id, a prefix of it, its name, or `@N` for the
+Nth newest. A prefix is matched against the directory names in `runs/`. A
+name or `@N` needs every run's name and creation time, which only its
+manifest holds, and reading every manifest took 78 ms in a home of 6,233
+runs, for every command. So `cache/runs.json` holds, for each directory in
+`runs/`, what its manifest said when last read. The paths that make,
+replace and remove runs (record, fork, check, import, remove, prune) bring
+it up to date, under a lock of its own, since every process executing a run
+holds the home's lock shared. A reader that finds it missing, another
+build's, or naming other directories than `runs/` holds rebuilds it from the
+manifests, and a lookup by name opens the run it names and checks the name,
+so a writer that does not know the index costs one rebuild. In a synthetic
+home of 6,000 runs, `rewind show <name>` took 379 ms before and 33 ms
+after, and `rewind show @5` 292 ms and 39 ms, on a host running other
+builds at the time.
 
 Besides the inputs, a manifest records `trace_hash`, the BLAKE3 hash of
 `trace.bin` once the run has finished, so runs that did the same thing are
