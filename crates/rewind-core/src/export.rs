@@ -28,7 +28,7 @@ use rewind_store::{Hash, Store, ZERO_PAGE, hex};
 
 use crate::home::Home;
 use crate::keyframes;
-use crate::run::{BOOKMARKS, MANIFEST, Manifest, Run, TRACE};
+use crate::run::{BOOKMARKS, MANIFEST, Manifest, Run, SpecExt, TRACE};
 use rewind_trace::export::{
     COMPRESSION_LEVEL, IMAGE, INITRD, INPUTS_DIR, KERNEL, MAX_BOOKMARKS, PAGES_DIR,
 };
@@ -167,7 +167,9 @@ pub fn is_url(source: &str) -> bool {
 
 /// Reads a `.rwd` file into the home and returns the run. A replayable
 /// export's inputs land in the home too, and its manifest is rewritten to
-/// point at them.
+/// point at them. A finished copy of the run already in the home keeps
+/// its manifest and its inputs, and takes only the keyframes and
+/// bookmarks it lacks.
 pub fn import(home: &Home, file: &Path) -> Result<Run> {
     let reader = File::open(file).with_context(|| format!("opening {}", file.display()))?;
     import_from(home, reader, &file.display().to_string())
@@ -274,6 +276,12 @@ fn unpack_and_place(home: &Home, reader: impl Read, source: &str, staging: &Path
     }
     let trace_hash = crate::image::hash_file(&staged_trace)?;
 
+    // The inputs a replayable export carries must be the ones that make
+    // the run its manifest names, before anything is placed.
+    if staging.join(INPUTS_DIR).exists() {
+        verify_inputs(&manifest, staging, source)?;
+    }
+
     // A copy of the run already here: none may be executing it, and a
     // finished one keeps its recording unless the export's trace is the
     // same.
@@ -293,61 +301,144 @@ fn unpack_and_place(home: &Home, reader: impl Read, source: &str, staging: &Path
         );
     }
 
-    // Inputs move into the home, where replays will look for them.
+    // A finished copy of the run already here, with the same trace, keeps
+    // its manifest, which names its own inputs and the run it shares
+    // keyframes with, and keeps those inputs. The export gives the copy
+    // only what the copy lacks: keyframes, bookmarks, and inputs when the
+    // copy's own are not on this machine, as after a view export's
+    // import. The manifest is then written again with the new inputs'
+    // paths and nothing else changed.
+    if let Some(mut local) = recorded {
+        take_keyframes(staging, &dir)?;
+        take_bookmarks(staging, &dir)?;
+        if staging.join(INPUTS_DIR).exists() && !has_inputs(&local.manifest) {
+            place_inputs(home, staging, &mut local.manifest)?;
+            write_manifest(&dir, &local.manifest)?;
+        }
+        return Run::open(&dir);
+    }
+
+    // A run that is new here, or that never finished here: its inputs,
+    // its trace, its keyframes and its bookmarks.
     if staging.join(INPUTS_DIR).exists() {
-        let inputs = home.inputs().join(&manifest.id);
-        fs::create_dir_all(&inputs)?;
-        let place = |name: &str| -> Result<Option<PathBuf>> {
-            let from = staging.join(name);
-            if !from.exists() {
-                return Ok(None);
-            }
-            let to = inputs.join(Path::new(name).file_name().expect("a file's path"));
-            fs::rename(&from, &to)?;
-            Ok(Some(to))
-        };
-        if let Some(kernel) = place(KERNEL)? {
-            manifest.spec.kernel = kernel;
-        }
-        if let Some(initrd) = place(INITRD)? {
-            manifest.spec.initrd = initrd;
-        }
-        if let Some(image) = place(IMAGE)? {
-            manifest.spec.image = Some(image);
-        }
+        place_inputs(home, staging, &mut manifest)?;
     }
-
-    // A finished copy of the run already here keeps its keyframes, which
-    // other runs here may read; the export's would only be the same states
-    // again.
-    let keeps_keyframes = recorded
-        .as_ref()
-        .filter(|_| keyframes::own_state(&dir) == keyframes::Own::Readable);
-    if recorded.is_none() {
-        fs::rename(&staged_trace, dir.join(TRACE))?;
-    }
-    let kf_from = staging.join(keyframes::DIR);
-    match keeps_keyframes {
-        Some(local) => manifest.shared_keyframes = local.manifest.shared_keyframes.clone(),
-        None if kf_from.exists() => {
-            let kf_to = dir.join(keyframes::DIR);
-            let _ = fs::remove_dir_all(&kf_to);
-            fs::rename(kf_from, kf_to)?;
-        }
-        None => {}
-    }
-
-    // A copy of the run already here keeps its own bookmarks.
-    let staged_bookmarks = staging.join(BOOKMARKS);
-    let local_bookmarks = dir.join(BOOKMARKS);
-    if staged_bookmarks.is_file() && !local_bookmarks.exists() {
-        fs::rename(&staged_bookmarks, &local_bookmarks)?;
-    }
+    fs::rename(&staged_trace, dir.join(TRACE))?;
+    take_keyframes(staging, &dir)?;
+    take_bookmarks(staging, &dir)?;
 
     // The manifest goes last, whole or not at all.
     manifest.trace_hash = Some(trace_hash);
-    crate::image::write_atomic(&dir.join(MANIFEST), &serde_json::to_vec_pretty(&manifest)?)?;
+    write_manifest(&dir, &manifest)?;
     Run::open(&dir)
+}
+
+/// Writes `manifest` into the run directory `dir`, whole or not at all.
+fn write_manifest(dir: &Path, manifest: &Manifest) -> Result<()> {
+    crate::image::write_atomic(&dir.join(MANIFEST), &serde_json::to_vec_pretty(manifest)?)
+}
+
+/// Whether the inputs `manifest` names are on this machine: a kernel and
+/// an initramfs that make the manifest's run id, and the image when the
+/// run booted one.
+fn has_inputs(manifest: &Manifest) -> bool {
+    let spec = &manifest.spec;
+    let image_here = spec.image.as_ref().is_none_or(|image| image.is_file());
+    spec.kernel.is_file() && spec.initrd.is_file() && image_here && spec.id() == manifest.id
+}
+
+/// Moves the kernel, initramfs and image staged in `staging` into the
+/// home's inputs, where replays will look for them, and makes `manifest`
+/// name them there.
+fn place_inputs(home: &Home, staging: &Path, manifest: &mut Manifest) -> Result<()> {
+    let inputs = home.inputs().join(&manifest.id);
+    fs::create_dir_all(&inputs)?;
+    let place = |name: &str| -> Result<Option<PathBuf>> {
+        let from = staging.join(name);
+        if !from.exists() {
+            return Ok(None);
+        }
+        let to = inputs.join(Path::new(name).file_name().expect("a file's path"));
+        fs::rename(&from, &to)?;
+        Ok(Some(to))
+    };
+    if let Some(kernel) = place(KERNEL)? {
+        manifest.spec.kernel = kernel;
+    }
+    if let Some(initrd) = place(INITRD)? {
+        manifest.spec.initrd = initrd;
+    }
+    if let Some(image) = place(IMAGE)? {
+        manifest.spec.image = Some(image);
+    }
+    Ok(())
+}
+
+/// Checks that the kernel, initramfs and image staged in `staging` are
+/// the inputs of the run `manifest` names: with them the manifest's spec
+/// hashes to the manifest's run id, and the image has the hash the spec
+/// names. An export whose inputs were changed after it was written, or
+/// that lacks one, is refused, so no replay here boots other inputs under
+/// the run's id. `source` names the export in errors.
+fn verify_inputs(manifest: &Manifest, staging: &Path, source: &str) -> Result<()> {
+    let id = &manifest.id;
+
+    // A run's id hashes its kernel and initramfs by their contents, and
+    // every other field of its spec as the manifest has it.
+    let mut spec = manifest.spec.clone();
+    spec.kernel = staging.join(KERNEL);
+    spec.initrd = staging.join(INITRD);
+    for input in [&spec.kernel, &spec.initrd] {
+        if !input.is_file() {
+            bail!("{source} carries inputs for run {id} without its kernel or its initramfs");
+        }
+    }
+    if spec.id() != *id {
+        bail!(
+            "the kernel and initramfs {source} carries do not make run {id}, which its \
+             manifest names; the export was changed after it was written"
+        );
+    }
+
+    // The image counts by the hash the spec names.
+    let image = staging.join(IMAGE);
+    match (&manifest.spec.image_hash, image.is_file()) {
+        (None, false) => Ok(()),
+        (Some(_), false) => bail!("{source} carries inputs for run {id} without its image"),
+        (None, true) => bail!("{source} carries an image, and run {id} booted none"),
+        (Some(hash), true) => {
+            if crate::image::hash_file(&image)? != *hash {
+                bail!("the image {source} carries is not the one run {id} booted");
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Moves the keyframes staged in `staging` into the run directory `dir`,
+/// in place of any there, unless the run has keyframes of its own that
+/// read back: other runs here may read those, and the export's would only
+/// be the same states again.
+fn take_keyframes(staging: &Path, dir: &Path) -> Result<()> {
+    let from = staging.join(keyframes::DIR);
+    if !from.exists() || keyframes::own_state(dir) == keyframes::Own::Readable {
+        return Ok(());
+    }
+    let to = dir.join(keyframes::DIR);
+    let _ = fs::remove_dir_all(&to);
+    fs::rename(from, to)?;
+    Ok(())
+}
+
+/// Moves the bookmarks staged in `staging` into the run directory `dir`,
+/// unless the run has bookmarks already, which stay.
+fn take_bookmarks(staging: &Path, dir: &Path) -> Result<()> {
+    let staged = staging.join(BOOKMARKS);
+    let local = dir.join(BOOKMARKS);
+    if staged.is_file() && !local.exists() {
+        fs::rename(&staged, &local)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -433,8 +524,9 @@ mod tests {
         let mut m: Manifest = serde_json::from_slice(&finished(ID)).unwrap();
         m.spec.kernel = inputs.join("kernel");
         m.spec.initrd = inputs.join("initrd");
+        m.id = m.spec.id();
         m.trace_hash = Some(blake3_hex(b"trace"));
-        let dir = from.runs().join(ID);
+        let dir = from.runs().join(&m.id);
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join(MANIFEST), serde_json::to_vec_pretty(&m).unwrap()).unwrap();
         fs::write(dir.join(TRACE), b"trace").unwrap();
@@ -523,6 +615,153 @@ mod tests {
         assert_eq!(fs::read(&bare).unwrap(), fs::read(&out).unwrap());
         fs::remove_file(&bare).unwrap();
         fs::remove_dir_all(home.root()).unwrap();
+    }
+
+    /// A finished run in a home, as an import of a replayable export
+    /// leaves one: its kernel and initramfs under the home's inputs, its
+    /// id the one those inputs make, and a trace of the bytes `trace`.
+    fn replayable_run(home: &Home, name: &str) -> Run {
+        let mut m: Manifest = serde_json::from_slice(&finished(ID)).unwrap();
+        m.name = name.into();
+        let given = home.root().join("given");
+        fs::create_dir_all(&given).unwrap();
+        fs::write(given.join("kernel"), b"kernel").unwrap();
+        fs::write(given.join("initrd"), b"initrd").unwrap();
+        m.spec.kernel = given.join("kernel");
+        m.spec.initrd = given.join("initrd");
+        m.id = m.spec.id();
+        m.trace_hash = Some(blake3_hex(b"trace"));
+        let dir = home.runs().join(&m.id);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(MANIFEST), serde_json::to_vec_pretty(&m).unwrap()).unwrap();
+        fs::write(dir.join(TRACE), b"trace").unwrap();
+        Run::open(&dir).unwrap()
+    }
+
+    #[test]
+    fn an_import_keeps_the_manifest_and_inputs_of_a_run_already_here() {
+        // The run is recorded here, under the name "local", with its
+        // inputs. Importing a view export of the same run that another
+        // machine named "theirs" leaves the manifest here byte for byte,
+        // so the run still names its own inputs. Importing a replayable
+        // export of it leaves the manifest and the inputs too, and brings
+        // the keyframe and the bookmarks the run here lacks.
+        let (from, here) = (home("already-from"), home("already-here"));
+        let theirs = replayable_run(&from, "theirs");
+        let mut kf = rewind_vmm::snapshot::Keyframe::default();
+        kf.step = 5;
+        keyframes::save(&theirs.dir, &kf).unwrap();
+        fs::write(theirs.dir.join(BOOKMARKS), b"theirs").unwrap();
+        let view = from.root().join("view.rwd");
+        let replayable = from.root().join("replayable.rwd");
+        export(&from, &theirs, Contents::View, &view).unwrap();
+        export(&from, &theirs, Contents::Replayable, &replayable).unwrap();
+
+        let local = replayable_run(&here, "local");
+        assert_eq!(local.manifest.id, theirs.manifest.id);
+        let manifest_here = fs::read(local.dir.join(MANIFEST)).unwrap();
+
+        let unchanged = |run: &Run| fs::read(run.dir.join(MANIFEST)).unwrap() == manifest_here;
+        let got = import(&here, &view).unwrap();
+        assert!(unchanged(&got), "the view export changed the manifest");
+        assert_eq!(got.manifest.spec.kernel, local.manifest.spec.kernel);
+        assert!(got.keyframes().unwrap().steps().is_empty());
+
+        let got = import(&here, &replayable).unwrap();
+        assert!(
+            unchanged(&got),
+            "the replayable export changed the manifest"
+        );
+        assert!(!here.inputs().join(&local.manifest.id).exists());
+        assert_eq!(got.keyframes().unwrap().steps(), vec![5]);
+        assert_eq!(fs::read(got.dir.join(BOOKMARKS)).unwrap(), b"theirs");
+        for home in [from, here] {
+            fs::remove_dir_all(home.root()).unwrap();
+        }
+    }
+
+    #[test]
+    fn an_import_gives_a_copy_without_inputs_the_export_s() {
+        // The run came here first as a view export, renamed "mine" since,
+        // and its manifest names a kernel and an initramfs that are not
+        // on this machine. A replayable export of the same run then
+        // brings its inputs: the manifest here names them under this
+        // home's inputs, and keeps the name the run has here.
+        let (from, here) = (home("inputs-from"), home("inputs-here"));
+        let theirs = replayable_run(&from, "theirs");
+        let view = from.root().join("view.rwd");
+        let replayable = from.root().join("replayable.rwd");
+        export(&from, &theirs, Contents::View, &view).unwrap();
+        export(&from, &theirs, Contents::Replayable, &replayable).unwrap();
+        fs::remove_dir_all(from.root().join("given")).unwrap();
+
+        let viewed = import(&here, &view).unwrap();
+        assert!(!viewed.manifest.spec.kernel.exists());
+        let mut renamed = viewed.manifest.clone();
+        renamed.name = "mine".into();
+        let renamed = serde_json::to_vec_pretty(&renamed).unwrap();
+        fs::write(viewed.dir.join(MANIFEST), renamed).unwrap();
+
+        let got = import(&here, &replayable).unwrap();
+        assert_eq!(got.manifest.name, "mine");
+        assert!(got.manifest.spec.kernel.starts_with(here.inputs()));
+        assert_eq!(fs::read(&got.manifest.spec.kernel).unwrap(), b"kernel");
+        assert_eq!(fs::read(&got.manifest.spec.initrd).unwrap(), b"initrd");
+        for home in [from, here] {
+            fs::remove_dir_all(home.root()).unwrap();
+        }
+    }
+
+    #[test]
+    fn an_import_refuses_inputs_that_do_not_make_its_run() {
+        // A replayable export repacked with another kernel, initramfs or
+        // image, its manifest and trace as they were. Its inputs no
+        // longer make the run its manifest names, so the import is
+        // refused, into a home without the run, where nothing is placed,
+        // and into a home with the run, whose inputs stay.
+        let (empty, here) = (home("identity-empty"), home("identity-here"));
+        let local = replayable_run(&here, "local");
+        let manifest = fs::read(local.dir.join(MANIFEST)).unwrap();
+        let altered = [
+            vec![
+                ("inputs/kernel", "not a kernel"),
+                ("inputs/initrd", "initrd"),
+            ],
+            vec![("inputs/kernel", "kernel"), ("inputs/initrd", "other")],
+            vec![("inputs/kernel", "kernel")],
+            vec![
+                ("inputs/kernel", "kernel"),
+                ("inputs/initrd", "initrd"),
+                ("inputs/image.erofs", "an image the run never booted"),
+            ],
+        ];
+        for inputs in altered {
+            let mut entries = vec![
+                Entry::File(MANIFEST, &manifest),
+                Entry::File(TRACE, b"trace"),
+            ];
+            entries.extend(
+                inputs
+                    .iter()
+                    .map(|(name, bytes)| Entry::File(name, bytes.as_bytes())),
+            );
+            let bytes = archive(&entries);
+
+            let refused = import_bytes(&empty, &bytes).unwrap_err();
+            assert!(
+                format!("{refused:#}").contains(local.manifest.id.as_str()),
+                "{refused:#}"
+            );
+            assert_eq!(fs::read_dir(empty.runs()).unwrap().count(), 0);
+            assert!(!empty.inputs().exists());
+
+            assert!(import_bytes(&here, &bytes).is_err());
+            assert_eq!(fs::read(&local.manifest.spec.kernel).unwrap(), b"kernel");
+            assert!(fs::read(local.dir.join(MANIFEST)).unwrap() == manifest);
+        }
+        for home in [empty, here] {
+            fs::remove_dir_all(home.root()).unwrap();
+        }
     }
 
     #[test]
