@@ -23,16 +23,12 @@ use rewind_trace::export;
 use rewind_trace::manifest::{MANIFEST, RunId, TRACE};
 
 /// The binary units sizes are said in.
-#[cfg(not(target_family = "wasm"))]
 const KIBIBYTE: u64 = 1 << 10;
-#[cfg(not(target_family = "wasm"))]
 const MEBIBYTE: u64 = 1 << 20;
-#[cfg(not(target_family = "wasm"))]
 const GIBIBYTE: u64 = 1 << 30;
 
 /// A size in words, in the largest binary unit that divides it: 16 GiB,
 /// 512 MiB, 100 bytes.
-#[cfg(not(target_family = "wasm"))]
 fn size_words(bytes: u64) -> String {
     let units = [(GIBIBYTE, "GiB"), (MEBIBYTE, "MiB"), (KIBIBYTE, "KiB")];
     for (unit, name) in units {
@@ -226,9 +222,68 @@ pub struct InMemory {
     pub replayable: bool,
 }
 
+/// The most bytes of an export's manifest and of its trace the app reads.
+/// The archive is compressed, so a small file can claim members of any
+/// size, and the app holds a run's whole trace in memory.
+#[derive(Clone, Copy, Debug)]
+struct MemberLimits {
+    manifest: u64,
+    trace: u64,
+}
+
+/// The limits exports are read within. A manifest is a few kilobytes of
+/// JSON. A trace is read whole into memory: the desktop app has the
+/// machine's, and the browser viewer has a 32-bit address space that
+/// also holds the export's own bytes.
+const MEMBER_LIMITS: MemberLimits = MemberLimits {
+    manifest: 16 * MEBIBYTE,
+    trace: if cfg!(target_family = "wasm") {
+        512 * MEBIBYTE
+    } else {
+        8 * GIBIBYTE
+    },
+};
+
+impl MemberLimits {
+    /// The most bytes the member at `path` may be, for the manifest and
+    /// the trace.
+    fn of(&self, path: &Path) -> Option<u64> {
+        if path == Path::new(MANIFEST) {
+            return Some(self.manifest);
+        }
+        (path == Path::new(TRACE)).then_some(self.trace)
+    }
+
+    /// The member at `path`, `size` bytes long by its header, as far as
+    /// the app reads it: all of it, or for a manifest or trace past its
+    /// limit a refusal that names the limit.
+    fn reader<'a, R: Read>(
+        &self,
+        entry: &'a mut R,
+        path: &Path,
+        size: u64,
+    ) -> Result<io::Take<&'a mut R>> {
+        let limit = self.of(path).unwrap_or(size);
+        if size > limit {
+            bail!(
+                "the archive's {} is {}, and Rewind reads one of at most {}",
+                path.display(),
+                size_words(size),
+                size_words(limit)
+            );
+        }
+        Ok(entry.take(limit))
+    }
+}
+
 /// Reads the manifest and trace of an export held in memory, without a
 /// disk to unpack them to, as the browser build opens exports.
 pub fn read_bytes(bytes: &[u8]) -> Result<InMemory> {
+    read_bytes_within(bytes, MEMBER_LIMITS)
+}
+
+/// Reads an export as [`read_bytes`] does, within `limits`.
+fn read_bytes_within(bytes: &[u8], limits: MemberLimits) -> Result<InMemory> {
     let mut archive = tar::Archive::new(decompress(bytes)?);
     let mut manifest = None;
     let mut trace = None;
@@ -247,7 +302,8 @@ pub fn read_bytes(bytes: &[u8]) -> Result<InMemory> {
 
         // The manifest, the trace and the bookmarks, as a regular file no
         // larger than the engine writes, are kept; every other member is
-        // skipped.
+        // skipped. A manifest or trace past its limit refuses the export
+        // before any of the member is read into memory.
         let carried = path == Path::new(BOOKMARKS_FILE)
             && entry.header().entry_type().is_file()
             && entry.size() <= BOOKMARKS_MAX_BYTES;
@@ -260,8 +316,11 @@ pub fn read_bytes(bytes: &[u8]) -> Result<InMemory> {
         } else {
             continue;
         };
+        let size = entry.size();
         let mut bytes = Vec::new();
-        entry.read_to_end(&mut bytes)?;
+        limits
+            .reader(&mut entry, &path, size)?
+            .read_to_end(&mut bytes)?;
         *slot = Some(bytes);
     }
     let manifest = manifest.with_context(|| format!("the archive has no {MANIFEST}"))?;
@@ -300,6 +359,11 @@ pub fn import_bytes(bytes: &[u8]) -> Result<Unpacked> {
 /// is: its id is the hash of its inputs, and runs are deterministic, so
 /// the same id means the same run.
 pub fn import(reader: impl Read, into: &Path) -> Result<Unpacked> {
+    import_within(reader, into, MEMBER_LIMITS)
+}
+
+/// Unpacks an export as [`import`] does, within `limits`.
+fn import_within(reader: impl Read, into: &Path, limits: MemberLimits) -> Result<Unpacked> {
     fs::create_dir_all(into).with_context(|| format!("creating {}", into.display()))?;
 
     // Unpack into a staging directory first; the run's id is known only
@@ -307,7 +371,7 @@ pub fn import(reader: impl Read, into: &Path) -> Result<Unpacked> {
     let staging = into.join(format!(".staging-{}-{}", std::process::id(), unique()));
     let _ = fs::remove_dir_all(&staging);
     fs::create_dir_all(&staging)?;
-    let result = unpack(reader, &staging).and_then(|replayable| {
+    let result = unpack(reader, &staging, limits).and_then(|replayable| {
         let dir = place(&staging, into)?;
         Ok(Unpacked { dir, replayable })
     });
@@ -324,8 +388,9 @@ fn unique() -> u64 {
 
 /// Writes the archive's manifest and trace into `staging`, and says
 /// whether it holds what replay needs. Every other entry is skipped; a
-/// path that is not plain names inside the archive is refused.
-fn unpack(reader: impl Read, staging: &Path) -> Result<bool> {
+/// path that is not plain names inside the archive is refused, and so is
+/// a manifest or trace larger than `limits` allow.
+fn unpack(reader: impl Read, staging: &Path, limits: MemberLimits) -> Result<bool> {
     let mut archive = tar::Archive::new(decompress(reader)?);
     let mut replayable = false;
     for entry in archive.entries().context("not a tar archive")? {
@@ -349,8 +414,13 @@ fn unpack(reader: impl Read, staging: &Path) -> Result<bool> {
         if !wanted {
             continue;
         }
+
+        // A manifest or trace past its limit refuses the export before
+        // any of the member is written to the cache.
+        let size = entry.size();
+        let mut member = limits.reader(&mut entry, &path, size)?;
         let mut out = File::create(staging.join(&path))?;
-        io::copy(&mut entry, &mut out)?;
+        io::copy(&mut member, &mut out)?;
     }
     for name in [MANIFEST, TRACE] {
         if !staging.join(name).is_file() {
@@ -360,7 +430,21 @@ fn unpack(reader: impl Read, staging: &Path) -> Result<bool> {
     Ok(replayable)
 }
 
-/// Moves a staged run to `<into>/<id>`, or keeps the copy already there.
+/// Gives `dir`, a copy of the run unpacked before, the bookmarks the
+/// export staged in `staging` carried, when the copy has none: the copy
+/// may be from an export made before the run was bookmarked. Bookmarks
+/// the copy has are the user's latest and stay. The link fails where a
+/// bookmarks file exists, so a file saved at the same moment is not
+/// replaced.
+fn carry_bookmarks(staging: &Path, dir: &Path) {
+    let staged = staging.join(BOOKMARKS_FILE);
+    if staged.is_file() {
+        let _ = fs::hard_link(&staged, dir.join(BOOKMARKS_FILE));
+    }
+}
+
+/// Moves a staged run to `<into>/<id>`, or keeps the copy already there,
+/// with the staged bookmarks when that copy has none.
 fn place(staging: &Path, into: &Path) -> Result<PathBuf> {
     let manifest: Value = serde_json::from_slice(&fs::read(staging.join(MANIFEST))?)
         .context("the archive's manifest.json is not JSON")?;
@@ -371,13 +455,18 @@ fn place(staging: &Path, into: &Path) -> Result<PathBuf> {
         .map_or_else(|| NO_ID.to_string(), |id| id.to_string());
     let dir = into.join(&id);
     if is_complete(&dir) {
+        carry_bookmarks(staging, &dir);
         return Ok(dir);
     }
 
     // The rename is atomic and fails onto a directory that has entries, so
     // when another import of the same run wins the race, its copy stays
     // and this one is dropped.
-    if fs::rename(staging, &dir).is_ok() || is_complete(&dir) {
+    if fs::rename(staging, &dir).is_ok() {
+        return Ok(dir);
+    }
+    if is_complete(&dir) {
+        carry_bookmarks(staging, &dir);
         return Ok(dir);
     }
 
@@ -740,6 +829,79 @@ mod tests {
         let unpacked = import(&second[..], &dir).unwrap();
         assert!(!unpacked.replayable, "a trace alone is not replayable");
         assert_eq!(fs::read(unpacked.dir.join("trace.bin")).unwrap(), b"one");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Limits for the tests: a manifest of at most 32 bytes and a trace
+    /// of at most 8.
+    const SMALL: MemberLimits = MemberLimits {
+        manifest: 32,
+        trace: 8,
+    };
+
+    #[test]
+    fn an_export_with_a_member_past_its_limit_is_refused() {
+        // A trace of 9 bytes against a limit of 8, and a manifest of 33
+        // against 32: read into memory or unpacked to disk, each is
+        // refused in words that name the member and the limit, and
+        // nothing is left in the cache. Members at their limits are read.
+        let manifest = br#"{"id": "00000000000000c1"}"#;
+        let long_manifest = br#"{"id": "00000000000000c2"}       "#;
+        assert_eq!((manifest.len(), long_manifest.len()), (26, 33));
+        let fits = archive(&[("manifest.json", manifest), ("trace.bin", b"12345678")]);
+        let big_trace = archive(&[("manifest.json", manifest), ("trace.bin", b"123456789")]);
+        let big_manifest = archive(&[("manifest.json", long_manifest), ("trace.bin", b"1")]);
+
+        assert_eq!(read_bytes_within(&fits, SMALL).unwrap().trace, b"12345678");
+        let dir = temp_dir("limits");
+        let unpacked = import_within(&fits[..], &dir, SMALL).unwrap();
+        fs::remove_dir_all(unpacked.dir).unwrap();
+
+        for (bytes, member, limit) in [
+            (&big_trace, "trace.bin", "8 bytes"),
+            (&big_manifest, "manifest.json", "32 bytes"),
+        ] {
+            let read = read_bytes_within(bytes, SMALL).map(|_| ()).unwrap_err();
+            let unpacked = import_within(&bytes[..], &dir, SMALL).unwrap_err();
+            for refused in [read, unpacked] {
+                let words = format!("{refused:#}");
+                assert!(words.contains(member) && words.contains(limit), "{words}");
+            }
+            let left: Vec<_> = fs::read_dir(&dir).unwrap().collect();
+            assert!(left.is_empty(), "{left:?}");
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn bookmarks_come_with_a_run_unpacked_before_without_any() {
+        // A run is unpacked from an export without bookmarks, then opened
+        // from an export of the same run that carries some: the copy
+        // unpacked before is kept and takes the bookmarks. Bookmarks the
+        // copy already has are not replaced by an export's.
+        let dir = temp_dir("carry");
+        let manifest = br#"{"id": "00000000000000d1"}"#;
+        let marks = br#"{"version": 1, "marks": [{"step": 4, "note": "carried"}]}"#;
+        let others = br#"{"version": 1, "marks": [{"step": 9, "note": "other"}]}"#;
+        let plain = archive(&[("manifest.json", manifest), ("trace.bin", b"one")]);
+        let with = |marks: &[u8]| {
+            archive(&[
+                ("manifest.json", manifest),
+                ("trace.bin", b"two"),
+                (BOOKMARKS_FILE, marks),
+            ])
+        };
+        let run = import(&plain[..], &dir).unwrap().dir;
+        assert!(!run.join(BOOKMARKS_FILE).exists());
+
+        assert_eq!(import(&with(marks)[..], &dir).unwrap().dir, run);
+        assert_eq!(fs::read(run.join("trace.bin")).unwrap(), b"one");
+        assert_eq!(fs::read(run.join(BOOKMARKS_FILE)).unwrap(), marks);
+
+        import(&with(others)[..], &dir).unwrap();
+        assert_eq!(fs::read(run.join(BOOKMARKS_FILE)).unwrap(), marks);
+        let left: Vec<_> = fs::read_dir(&dir).unwrap().collect();
+        assert_eq!(left.len(), 1, "staging left behind");
         fs::remove_dir_all(&dir).unwrap();
     }
 
