@@ -309,7 +309,7 @@ to any step restores the nearest keyframe and runs forward.
 
 A GNU hello build from nixpkgs runs at close to native speed in the VM, and its
 output is bit for bit the one Nix builds on the host.
-[Design](docs/design.md) has the details, the limits, and what comes next.
+[Design](docs/design.md) has the details and the limits.
 
 ## Develop
 
@@ -335,10 +335,13 @@ $ nix run .#serve              # the website on a local port
 - `nix/`: one file per derivation; `flake.nix` only wires them together.
 - `site/`: rewindvm.dev.
 - `docs/`: tutorials, the time reference and the design.
-- `tools/`: the prose check and the local site server.
+- `tools/`: the prose check, the tutorial recorder, the renderer that makes
+  the site's pages from `docs/`, the benchmark, the version setter and the
+  local site server.
 
-Pushing a `v*` tag that matches the version in `Cargo.toml` publishes a
-release with both tarballs.
+Pushing a `v*` tag that matches `VERSION` publishes a release with three
+tarballs, one each for the command, the kernel's debug info and the desktop
+app.
 
 ## License
 
