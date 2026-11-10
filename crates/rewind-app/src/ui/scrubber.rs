@@ -292,6 +292,8 @@ pub struct Scrubber {
     pub(super) session: Option<Session>,
     /// A run being read in the background.
     pub(super) loading: Option<PathBuf>,
+    /// The run it is read to be compared with, when one was asked for.
+    loading_compare: Option<PathBuf>,
     /// The request that reads it, the latest run asked for; a run read
     /// for an earlier request is not shown.
     pub(super) opening: Option<Request>,
@@ -459,6 +461,7 @@ impl Scrubber {
             engine: launch.engine,
             session: None,
             loading: None,
+            loading_compare: None,
             opening: None,
             importing: None,
             requests: Requests::default(),
@@ -1040,6 +1043,24 @@ impl Scrubber {
             self.sweep = None;
         }
 
+        // A run still being read when it was deleted must not come on
+        // screen when its reading ends, and one read beside a deleted run
+        // is read again without it.
+        let reopen = match open_after_delete(
+            &removed,
+            self.loading.as_deref(),
+            self.loading_compare.as_deref(),
+        ) {
+            OpenAfterDelete::Stands => None,
+            OpenAfterDelete::Dropped => {
+                self.opening = None;
+                self.loading = None;
+                self.loading_compare = None;
+                None
+            }
+            OpenAfterDelete::Alone(dir) => Some(dir),
+        };
+
         // What is left of the session on screen.
         let id_of =
             |run: Option<&crate::run::Run>| run.and_then(|r| r.id()).map(ToString::to_string);
@@ -1073,7 +1094,15 @@ impl Scrubber {
                 .join(", "),
             cx,
         );
-        if let AfterDelete::Replaced(dir) = after {
+        if let Some(dir) = reopen {
+            self.open(dir, None, cx);
+        }
+
+        // A run the user asked for meanwhile, and that is left, is on its
+        // way to the screen: the run above the deleted one gives way.
+        if let AfterDelete::Replaced(dir) = after
+            && self.opening.is_none()
+        {
             self.open(dir, None, cx);
         }
     }
@@ -1921,6 +1950,7 @@ impl Scrubber {
         let request = self.requests.issue();
         self.opening = Some(request);
         self.loading = Some(path.clone());
+        self.loading_compare = compare.clone();
         cx.notify();
 
         // A run named by a URL is downloaded first, which waits on the
@@ -1945,6 +1975,7 @@ impl Scrubber {
                 }
                 this.opening = None;
                 this.loading = None;
+                this.loading_compare = None;
                 match result {
                     Ok(session) => this.show(session, None, cx),
                     Err(e) => this.notify_user(
@@ -2034,6 +2065,40 @@ fn remove_each(
         }
     }
     (removed, None)
+}
+
+/// What deleting runs leaves of an open that is still reading its runs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum OpenAfterDelete {
+    /// Nothing is being opened, or neither of its runs was deleted.
+    Stands,
+    /// The run being opened was deleted: the open is dropped, so the
+    /// deleted run is not shown when its reading ends.
+    Dropped,
+    /// The run to compare with was deleted: the run in this directory is
+    /// opened again without it.
+    Alone(PathBuf),
+}
+
+/// What is left of an open of the run in `run`, compared with the run in
+/// `compare`, once the runs with the ids in `removed` are deleted. A
+/// run's directory is named by its id.
+fn open_after_delete(
+    removed: &[String],
+    run: Option<&Path>,
+    compare: Option<&Path>,
+) -> OpenAfterDelete {
+    let is_removed = |dir: &Path| removed.iter().any(|id| dir.ends_with(id));
+    let Some(run) = run else {
+        return OpenAfterDelete::Stands;
+    };
+    if is_removed(run) {
+        return OpenAfterDelete::Dropped;
+    }
+    match compare.is_some_and(is_removed) {
+        true => OpenAfterDelete::Alone(run.to_path_buf()),
+        false => OpenAfterDelete::Stands,
+    }
 }
 
 /// What deleting runs leaves of the session on screen.
@@ -2272,6 +2337,35 @@ mod tests {
         assert_eq!(
             after_delete(&ids(&["g9"]), None, None, Some(&family)),
             AfterDelete::Stays
+        );
+    }
+
+    #[test]
+    fn a_delete_drops_an_open_of_a_deleted_run() {
+        // f1 and g9 are deleted while a run is still being read. An open
+        // of g9 is dropped; an open of f4 beside g9 is made again without
+        // g9; an open of f4 beside base stands, as does no open at all.
+        let removed = vec!["f1".to_string(), "g9".to_string()];
+        let after = |run: &str, compare: Option<&str>| {
+            open_after_delete(&removed, Some(Path::new(run)), compare.map(Path::new))
+        };
+        assert_eq!(
+            after("/runs/g9", Some("/runs/f1")),
+            OpenAfterDelete::Dropped
+        );
+        assert_eq!(after("/runs/g9", None), OpenAfterDelete::Dropped);
+        assert_eq!(
+            after("/runs/f4", Some("/runs/g9")),
+            OpenAfterDelete::Alone("/runs/f4".into())
+        );
+        assert_eq!(
+            after("/runs/f4", Some("/runs/base")),
+            OpenAfterDelete::Stands
+        );
+        assert_eq!(after("/runs/f4", None), OpenAfterDelete::Stands);
+        assert_eq!(
+            open_after_delete(&removed, None, None),
+            OpenAfterDelete::Stands
         );
     }
 
