@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use rewind_trace::ending::Ending;
+use rewind_trace::ending;
 use rewind_trace::manifest::{KEYFRAMES_DIR, MANIFEST, Manifest, Source, executing};
 use rewind_trace::prune::{self, Forks, Member, Reads};
 
@@ -153,14 +153,11 @@ impl RunEntry {
                 spec.image_hash.as_deref().unwrap_or_default()
             ),
         };
-        // How it ended as `rewind ls` says it, which reads no traces and
-        // so counts no missing outputs.
-        let ended = manifest
-            .outcome
-            .as_ref()
-            .map(|o| Ending::of(&o.stop, o.status, &[]));
-        let (progress, ending) = match (ended, executing) {
-            (Some(ending), _) => (Progress::Ended, ending.to_string()),
+        // How it ended as `rewind ls` says it, from the outcome and the
+        // verdict the engine wrote into the manifest.
+        let verdict = &manifest.verdict;
+        let (progress, ending) = match (&manifest.outcome, executing) {
+            (Some(outcome), _) => (Progress::Ended, ending::label(outcome, verdict)),
             (None, Executing::Yes) => (Progress::Running, RUNNING_ENDING.to_string()),
             (None, Executing::No) => (Progress::Interrupted, INTERRUPTED_ENDING.to_string()),
         };
@@ -175,8 +172,8 @@ impl RunEntry {
             }),
             schedule: spec.schedule,
             ending,
-            failed: ended.is_some_and(|e| !e.passed()),
-            passed: ended.is_some_and(Ending::passed),
+            failed: verdict.failed(),
+            passed: verdict.passed(),
             first_difference: manifest.first_difference,
             trace_hash: manifest.trace_hash.clone(),
             progress,
@@ -1329,8 +1326,9 @@ mod tests {
     #[test]
     fn a_run_stopped_at_its_time_limit_is_listed_as_failed() {
         // A manifest with no wait status whose machine was stopped at its
-        // time limit: the start screen and the Runs panel call it
-        // timed-out and failed, as the header does, not unknown.
+        // time limit, and whose verdict says so: the start screen and the
+        // Runs panel call it timed-out and failed, as the header does,
+        // not unknown.
         let mut manifest = crate::examples::manifest_of(crate::examples::FAILING);
         let outcome = manifest.outcome.as_mut().unwrap();
         outcome.status = None;
@@ -1338,6 +1336,9 @@ mod tests {
             since_exit_ms: 0,
             doing: rewind_trace::stop::Doing::MakingExits,
         });
+        manifest.verdict = rewind_trace::verdict::Verdict::Failed {
+            reasons: vec![rewind_trace::verdict::Reason::TimedOut],
+        };
         let entry = RunEntry::from_manifest(
             Path::new("/runs/abc"),
             &manifest,
@@ -1350,12 +1351,13 @@ mod tests {
 
     #[test]
     fn a_run_with_no_outcome_is_running_or_interrupted() {
-        // A manifest with no outcome is a run that has not ended: listed as
-        // running while a process executes it, as a fork does until it
-        // finishes, and as interrupted once nothing does. Neither passed
-        // nor failed.
+        // A manifest with no outcome and no verdict yet is a run that has
+        // not ended: listed as running while a process executes it, as a
+        // fork does until it finishes, and as interrupted once nothing
+        // does. Neither passed nor failed.
         let mut manifest = crate::examples::manifest_of(crate::examples::FAILING);
         manifest.outcome = None;
+        manifest.verdict = rewind_trace::verdict::Verdict::Unfinished;
         let dir = Path::new("/runs/abc");
         let running =
             RunEntry::from_manifest(dir, &manifest, SystemTime::UNIX_EPOCH, Executing::Yes);

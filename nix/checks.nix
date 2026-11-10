@@ -3918,6 +3918,52 @@ in
         touch $out
       '';
 
+  # checks.verdict: a run's verdict is judged once, by the engine, and
+  # written into the manifest, so a job that breaks an `always` assertion
+  # and exits 0 is failed everywhere that says so: the manifest, `rewind
+  # run --json`, `rewind ls` and `rewind ls --status failed`. Boots the VM,
+  # so it needs /dev/kvm.
+  verdict =
+    pkgs.runCommand "rewind-verdict"
+      {
+        nativeBuildInputs = [
+          rewind
+          pkgs.jq
+        ];
+        requiredSystemFeatures = [ "kvm" ];
+      }
+      ''
+        export REWIND_HOME=$TMPDIR/rewind
+        rewind run -q --json --name asserted --root ${busyboxRoot} -- sh -c '
+          printf "rewind-sdk 1 always fail even byte 3 is odd\n" > /dev/rewind
+          exit 0' > run.json
+        cat run.json
+        jq -e '.status == 0 and .ending == "exited:0, assertion failed"' run.json
+        jq -e '.verdict.state == "failed" and (.verdict.reasons | length == 1)
+          and .verdict.reasons[0].why == "failed_assertions"
+          and .verdict.reasons[0].assertions[0].text == "always \"even\" failed: byte 3 is odd"' run.json
+        manifest=$(jq -r .dir run.json)/manifest.json
+        jq -e '.version == 5 and .outcome.status == 0' $manifest
+        [ "$(jq -cS .verdict $manifest)" = "$(jq -cS .verdict run.json)" ]
+
+        # The list reads the same field: the run is failed, with its
+        # assertion in its ending, and no run passed.
+        rewind ls | tee listed
+        grep -q 'exited:0, assertion failed' listed
+        rewind ls --json | jq -e '.state == "failed" and .ending == "exited:0, assertion failed"
+          and .verdict.reasons[0].why == "failed_assertions"'
+        [ "$(rewind ls --status failed | wc -l)" = 1 ]
+        [ "$(rewind ls --status passed | wc -l)" = 0 ]
+
+        # A job that holds its assertion and exits 0 passes, and a run
+        # still executing has no verdict yet.
+        rewind run -q --json --name held --root ${busyboxRoot} -- sh -c '
+          printf "rewind-sdk 1 always pass even\n" > /dev/rewind' > held.json
+        jq -e '.ending == "exited:0" and .verdict == {"state": "passed"}' held.json
+        [ "$(rewind ls --status passed | wc -l)" = 1 ]
+        touch $out
+      '';
+
   # checks.trace-properties: the properties `rewind check --property`
   # decides from the trace alone, each on a shell job in the busybox root
   # that breaks it, and on one that does not: a child killed by SIGSEGV

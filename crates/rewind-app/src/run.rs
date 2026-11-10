@@ -11,19 +11,17 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, Result, bail};
 use rewind_trace::Trace;
-use rewind_trace::ending::{Ending, ExitStatus};
+use rewind_trace::ending::{self, ExitStatus};
 use rewind_trace::io_records::{self, IoLog};
 use rewind_trace::manifest::{MANIFEST, Manifest, Parent, RunId, Source, Spec, TRACE, executing};
 use rewind_trace::schedule::{Schedule, stall_words};
 use rewind_trace::stop::Stop;
+use rewind_trace::verdict::Verdict as RecordedVerdict;
 
 use crate::archive;
 use crate::describe::{self, thousands};
 use crate::model::{Comparison, Timeline};
 
-/// What a run's label adds when its job broke an assertion it made with
-/// the Rewind SDK.
-const ASSERTION_FAILED: &str = "assertion failed";
 /// Where a run came from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Origin {
@@ -261,35 +259,29 @@ impl Run {
         ))
     }
 
-    /// How the run ended, in the engine's words, once the engine has
-    /// recorded its end. A Nix build that exited 0 without creating every
-    /// output ended missing-output, as nix-daemon would fail it.
-    pub fn ending(&self) -> Option<Ending> {
+    /// The run's verdict as the engine judged it, from its manifest, once
+    /// the engine has recorded the run's end.
+    pub fn recorded_verdict(&self) -> Option<&RecordedVerdict> {
         let m = self.manifest.as_ref()?;
-        let outcome = m.outcome.as_ref()?;
-        let built = self.timeline.trace.outputs();
-        let missing: Vec<String> = m
-            .spec
-            .job
-            .outputs
-            .iter()
-            .filter(|path| !built.iter().any(|(p, _)| p == *path))
-            .cloned()
-            .collect();
-        Some(Ending::of(&outcome.stop, outcome.status, &missing))
+        m.verdict.is_final().then_some(&m.verdict)
     }
 
-    /// Whether the run failed: as its ending says, once the engine has
-    /// recorded one. A trace without a manifest goes by init's exit mark,
-    /// else by a crash or failing exit in the trace. A job that broke an
-    /// assertion it made with the Rewind SDK failed, however it exited.
+    /// The verdict of a run with no manifest, or whose manifest has no
+    /// verdict yet, judged the way the engine judges a run from its trace
+    /// alone: by init's exit mark, with no stop and no outputs to miss.
+    fn trace_verdict(&self) -> RecordedVerdict {
+        let status = self.timeline.job_exit.map(|exit| exit.status);
+        RecordedVerdict::judge(&Stop::PoweredOff, status, &[], &self.timeline.trace)
+    }
+
+    /// Whether the run passed or failed: as its manifest's verdict says,
+    /// which the engine judged when the run ended; a trace without one is
+    /// judged the same way from the trace alone.
     pub fn verdict(&self) -> Verdict {
-        let ended_well = match (self.ending(), self.timeline.job_exit) {
-            (Some(ending), _) => ending.passed(),
-            (None, Some(exit)) => ExitStatus::from_wait(exit.status).success(),
-            (None, None) => self.timeline.failure.is_none(),
+        let passed = match self.recorded_verdict() {
+            Some(verdict) => verdict.passed(),
+            None => self.trace_verdict().passed(),
         };
-        let passed = ended_well && self.timeline.assertions.is_empty();
         if passed {
             Verdict::Passed
         } else {
@@ -311,15 +303,14 @@ impl Run {
     }
 
     /// How the run ended, in the engine's words (exited:2, killed:SIGSEGV,
-    /// timed-out), else by init's exit mark, else passed or failed; with
-    /// "assertion failed" after an ending that passed when the job broke
-    /// an assertion it made with the Rewind SDK.
+    /// timed-out, with "assertion failed" after an exit of 0 when the job
+    /// broke an assertion it made with the Rewind SDK), from its manifest;
+    /// else by init's exit mark, else passed or failed.
     pub fn verdict_label(&self) -> String {
-        if let Some(ending) = self.ending() {
-            if ending.passed() && !self.timeline.assertions.is_empty() {
-                return format!("{ending}, {ASSERTION_FAILED}");
-            }
-            return ending.to_string();
+        if let Some(m) = &self.manifest
+            && let Some(outcome) = &m.outcome
+        {
+            return ending::label(outcome, &m.verdict);
         }
         match self.timeline.job_exit {
             Some(exit) => ExitStatus::from_wait(exit.status).to_string(),
@@ -807,6 +798,7 @@ mod tests {
     use super::*;
     use crate::examples::{FAILING, PASSING, Until, manifest_of, trace_of, trace_until};
     use rewind_trace::manifest::EXECUTING_LOCK;
+    use rewind_trace::verdict::{FailedAssertion, Reason};
 
     /// A run stopped at its time limit while computing in user space.
     fn hung_in_user_space() -> Stop {
@@ -922,25 +914,32 @@ mod tests {
     #[test]
     fn a_run_without_a_wait_status_fails_however_it_stopped() {
         // The passing example's boot, before its job, under manifests with
-        // no wait status and each way a machine stops: one stopped at its
-        // time limit says timed-out, as `rewind ls` does, and the others
-        // no-status. None of them passed: the job never reported its end.
+        // no wait status and each way a machine stops, judged as the
+        // engine judges them: one stopped at its time limit says
+        // timed-out, as `rewind ls` does, and the others no-status. None
+        // of them passed: the job never reported its end.
         let dir = temp_dir("stops");
         std::fs::write(dir.join(TRACE), trace_until(PASSING, Until::JobStart)).unwrap();
-        let with_stop = |stop: Stop| {
+        let with_stop = |stop: Stop, reason: Reason| {
             let mut manifest = manifest_of(PASSING);
             let outcome = manifest.outcome.as_mut().unwrap();
             outcome.stop = stop;
             outcome.status = None;
+            manifest.verdict = RecordedVerdict::Failed {
+                reasons: vec![reason],
+            };
             write_manifest(&dir, &manifest);
             Run::open(&dir).unwrap()
         };
 
-        let hung = with_stop(hung_in_user_space());
+        let hung = with_stop(hung_in_user_space(), Reason::TimedOut);
         assert_eq!(hung.verdict(), Verdict::Failed);
         assert_eq!(hung.verdict_label(), "timed-out");
-        assert_eq!(with_stop(Stop::TripleFault).verdict(), Verdict::Failed);
-        let powered_off = with_stop(Stop::PoweredOff);
+        assert_eq!(
+            with_stop(Stop::TripleFault, Reason::Crashed).verdict(),
+            Verdict::Failed
+        );
+        let powered_off = with_stop(Stop::PoweredOff, Reason::Crashed);
         assert_eq!(powered_off.verdict(), Verdict::Failed);
         assert_eq!(powered_off.verdict_label(), "no-status");
         std::fs::remove_dir_all(&dir).unwrap();
@@ -989,25 +988,83 @@ mod tests {
     }
 
     #[test]
-    fn a_wait_status_and_the_outputs_built_decide_a_nix_build() {
-        // The passing example, a Nix build, under manifests with two wait
-        // statuses: 0 passes, 1 fails. Its boot alone, which built none of
-        // its outputs, under status 0 fails as nix-daemon would.
-        let dir = temp_dir("status");
-        let with_status = |status: i32| {
+    fn the_header_reads_the_verdict_the_engine_wrote() {
+        // The passing example under manifests whose verdicts the engine
+        // judged: failed for an exit of 1, passed for an exit of 0, failed
+        // for an output the job did not create, and failed for an
+        // assertion the job broke before exiting 0. The header, the label
+        // and the Runs panel's entry all read the one field, so a run
+        // that fails by assertion alone is failed in each.
+        let dir = temp_dir("verdict");
+        std::fs::write(dir.join(TRACE), trace_of(PASSING)).unwrap();
+        let judged = |status: i32, verdict: RecordedVerdict| {
             let mut manifest = manifest_of(PASSING);
             manifest.outcome.as_mut().unwrap().status = Some(status);
+            manifest.verdict = verdict;
             write_manifest(&dir, &manifest);
-            Run::open(&dir).unwrap()
+            let entry = crate::family::RunEntry::read(&dir).unwrap();
+            (Run::open(&dir).unwrap(), entry)
         };
-        std::fs::write(dir.join(TRACE), trace_of(PASSING)).unwrap();
-        assert_eq!(with_status(1 << 8).verdict(), Verdict::Failed);
-        assert_eq!(with_status(0).verdict(), Verdict::Passed);
+        let failed = |reason| RecordedVerdict::Failed {
+            reasons: vec![reason],
+        };
 
-        std::fs::write(dir.join(TRACE), trace_until(PASSING, Until::JobStart)).unwrap();
-        let unbuilt = with_status(0);
-        assert_eq!(unbuilt.verdict(), Verdict::Failed);
-        assert_eq!(unbuilt.verdict_label(), "missing-output");
+        let (run, entry) = judged(1 << 8, failed(Reason::Exited { code: 1 }));
+        assert_eq!(run.verdict(), Verdict::Failed);
+        assert_eq!(run.verdict_label(), "exited:1");
+        assert!(entry.failed && !entry.passed);
+
+        let (run, entry) = judged(0, RecordedVerdict::Passed);
+        assert_eq!(run.verdict(), Verdict::Passed);
+        assert_eq!(run.verdict_label(), "exited:0");
+        assert!(entry.passed && !entry.failed);
+
+        let dev = "/nix/store/0000000000000000000000000000000c-x-dev".to_string();
+        let (run, entry) = judged(0, failed(Reason::MissingOutputs { paths: vec![dev] }));
+        assert_eq!(run.verdict(), Verdict::Failed);
+        assert_eq!(run.verdict_label(), "missing-output");
+        assert_eq!(entry.ending, "missing-output");
+        assert!(entry.failed);
+
+        let broke = Reason::FailedAssertions {
+            assertions: vec![FailedAssertion {
+                step: 30,
+                pid: 7,
+                tid: 7,
+                text: "always \"even\" failed".into(),
+            }],
+        };
+        let (run, entry) = judged(0, failed(broke));
+        assert_eq!(run.verdict(), Verdict::Failed);
+        assert_eq!(run.verdict_label(), "exited:0, assertion failed");
+        assert_eq!(entry.ending, "exited:0, assertion failed");
+        assert!(entry.failed && !entry.passed);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_trace_without_a_verdict_is_judged_from_init_s_exit_mark() {
+        // A bare trace, and a manifest with no verdict yet, go by the
+        // job's exit mark: the passing example's trace passes and the
+        // failing one's fails, as the engine would judge them.
+        let dir = temp_dir("unjudged");
+        std::fs::write(dir.join(TRACE), trace_of(PASSING)).unwrap();
+        assert_eq!(
+            Run::open(&dir.join(TRACE)).unwrap().verdict(),
+            Verdict::Passed
+        );
+        let mut manifest = manifest_of(PASSING);
+        manifest.verdict = RecordedVerdict::Unfinished;
+        write_manifest(&dir, &manifest);
+        let run = Run::open(&dir).unwrap();
+        assert_eq!(run.recorded_verdict(), None);
+        assert_eq!(run.verdict(), Verdict::Passed);
+
+        std::fs::write(dir.join(TRACE), trace_of(FAILING)).unwrap();
+        assert_eq!(
+            Run::open(&dir.join(TRACE)).unwrap().verdict(),
+            Verdict::Failed
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

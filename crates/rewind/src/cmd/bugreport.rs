@@ -16,7 +16,7 @@ use std::process::{Command, ExitCode};
 
 use anyhow::{Context, Result};
 use rewind_core::{Home, Run, export};
-use rewind_trace::ending::Ending;
+use rewind_trace::ending;
 
 use crate::{RUN_HELP, RUN_LONG_HELP, color, show};
 
@@ -249,7 +249,7 @@ fn report_text(run: &Run, command: &str, replayed: &str, doctor: &str) -> String
         let _ = writeln!(
             out,
             "- ended: {} at step {} ({})",
-            Ending::of(&o.stop, o.status, &[]),
+            ending::label(o, &m.verdict),
             o.step,
             o.stop
         );

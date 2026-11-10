@@ -829,7 +829,7 @@ keyframes. With `--seeds`, only the first seed runs under the keys.
 
 ```
 ~/.local/share/rewind/
-  runs/<id>/manifest.json     inputs, what they describe, parent, outcome
+  runs/<id>/manifest.json     inputs, what they describe, parent, outcome, verdict
   runs/<id>/trace.bin         every record, each prefixed with its step
   runs/<id>/keyframes/*.kf    keyframes, by step
   images/2/*.erofs            input images, by content
@@ -860,7 +860,18 @@ home of 6,000 runs, `rewind show <name>` took 379 ms before and 33 ms
 after, and `rewind show @5` 292 ms and 39 ms, on a host running other
 builds at the time.
 
-Besides the inputs, a manifest records `trace_hash`, the BLAKE3 hash of
+Besides the inputs, a manifest records `outcome`, how the machine stopped
+and the job's wait status, and `verdict`, whether the run passed and, when
+it did not, every reason: a timeout, an exit status other than 0 or a
+signal, a machine that stopped before init reported the job's end, the
+outputs an exit of 0 did not create, and the SDK assertions the job broke.
+The engine judges the run once, as it ends, in `rewind_trace::verdict`;
+`rewind ls`, `check` and `show`, the desktop app and the browser viewer
+read the field and judge nothing themselves, so a job that breaks an
+`always` assertion and exits 0 is failed in each of them. A run that has
+not ended has the verdict `unfinished`, and whether a process is still
+executing it is told by its executing lock. A manifest also records
+`trace_hash`, the BLAKE3 hash of
 `trace.bin` once the run has finished, so runs that did the same thing are
 found without reading their traces. A fork records `parent`, the run and step
 it was forked from, `first_difference`, the step where its trace first differs
@@ -1399,9 +1410,7 @@ length.
 The maximum is part of the schedule: the spec records it as `stall_max_ns`
 for the run's own window and for each inherited one, so a replay and a fork
 stall the same way. The field is left out at the default, so a run made
-without the flag has the spec, the id and the manifest it always had, and
-its manifest names format 3. A manifest with the field names format 4, which
-an older build refuses rather than replaying it with shorter stalls. A
+without the flag has the spec and the id it always had. A
 fork's own window takes the default unless `fork` or `check --run` is given
 `--stall-max`, as its seed takes its own value, while the windows it
 inherits keep their maxima. One seed under two maxima stalls at the same

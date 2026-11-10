@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::machine::{ClockSource, CpuModel, Extras, Preemption};
 use crate::schedule::StallMax;
 use crate::stop::Stop;
+use crate::verdict::Verdict;
 
 /// The manifest inside a run directory.
 pub const MANIFEST: &str = "manifest.json";
@@ -42,15 +43,8 @@ pub fn executing(dir: &Path) -> bool {
 
 /// The version of the manifest format. Every manifest before rewind 1.0
 /// said 1, whatever its fields, so 1.0's was 2; 3 adds a fork's reseeds,
-/// and 4 a schedule's longest stall.
-pub const MANIFEST_VERSION: u32 = 4;
-
-/// The version a manifest names when its spec keeps every schedule's
-/// longest stall at the default: such a manifest is format 3 byte for
-/// byte, so runs made without `--stall-max` keep their manifests, and a
-/// build that reads only format 3 refuses a run it would replay with
-/// stalls too short.
-pub const MANIFEST_VERSION_BEFORE_STALL_MAX: u32 = 3;
+/// 4 a schedule's longest stall, and 5 the run's verdict.
+pub const MANIFEST_VERSION: u32 = 5;
 
 /// The version every manifest before rewind 1.0 named.
 const BEFORE_1_0: u32 = 1;
@@ -60,9 +54,7 @@ const BEFORE_1_0: u32 = 1;
 pub enum ManifestError {
     #[error("a manifest from before rewind 1.0, which this build does not read")]
     BeforeFormats,
-    #[error(
-        "a manifest of format {0}; this build of rewind reads formats {MANIFEST_VERSION_BEFORE_STALL_MAX} and {MANIFEST_VERSION}"
-    )]
+    #[error("a manifest of format {0}; this build of rewind reads format {MANIFEST_VERSION}")]
     Version(u32),
     #[error("{0}")]
     Json(#[from] serde_json::Error),
@@ -78,9 +70,7 @@ impl Manifest {
         }
         let Version { version } = serde_json::from_slice(bytes)?;
         match version {
-            MANIFEST_VERSION_BEFORE_STALL_MAX | MANIFEST_VERSION => {
-                Ok(serde_json::from_slice(bytes)?)
-            }
+            MANIFEST_VERSION => Ok(serde_json::from_slice(bytes)?),
             BEFORE_1_0 => Err(ManifestError::BeforeFormats),
             other => Err(ManifestError::Version(other)),
         }
@@ -283,6 +273,10 @@ pub struct Manifest {
     /// up to the last step the two runs share.
     pub shared_keyframes: Option<SharedKeyframes>,
     pub outcome: Option<RunOutcome>,
+    /// Whether the run passed and, when it did not, why: judged by the
+    /// engine once, as the run ended, and read by everything that says a
+    /// run passed or failed.
+    pub verdict: Verdict,
     /// The BLAKE3 hash of trace.bin in hex, once the run has finished. Runs
     /// with equal hashes did the same thing.
     pub trace_hash: Option<String>,
@@ -355,21 +349,6 @@ impl Spec {
             max
         };
         Spec { stall_max, ..self }
-    }
-
-    /// The manifest format a run of this spec is written in: the one from
-    /// before longest stalls when every schedule in it keeps the default,
-    /// so the manifest is the one such a run always had.
-    pub fn manifest_version(&self) -> u32 {
-        let defaults = self.stall_max.is_default()
-            && self
-                .inherited_schedules
-                .iter()
-                .all(|s| s.stall_max.is_default());
-        if defaults {
-            return MANIFEST_VERSION_BEFORE_STALL_MAX;
-        }
-        MANIFEST_VERSION
     }
 
     /// This spec with the guest's RNG reseeded with `seed` at `step`, as
@@ -468,6 +447,11 @@ mod version_tests {
         let current = format!(r#"{{"version": {MANIFEST_VERSION}}}"#);
         let err = Manifest::parse(current.as_bytes()).unwrap_err();
         assert!(matches!(err, ManifestError::Json(_)), "{err}");
+
+        // The format before the verdict is refused by its version alone.
+        let before_verdict = format!(r#"{{"version": {}}}"#, MANIFEST_VERSION - 1);
+        let err = Manifest::parse(before_verdict.as_bytes()).unwrap_err();
+        assert!(matches!(err, ManifestError::Version(4)), "{err}");
         let err = Manifest::parse(b"not json").unwrap_err();
         assert!(matches!(err, ManifestError::Json(_)), "{err}");
     }

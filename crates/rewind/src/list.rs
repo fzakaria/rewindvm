@@ -4,17 +4,18 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
 use rewind_core::Run;
-use rewind_core::run::{RunOutcome, Unreadable};
-use rewind_trace::ending::Ending;
+use rewind_core::run::{Unreadable, Verdict};
+use rewind_trace::ending;
 
 use crate::color::{Paint, Style};
 
 /// How a run stands, as `rewind ls --status` picks runs by.
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Status {
-    /// The job exited 0.
+    /// Its manifest's verdict says it passed: the job exited 0 having
+    /// made every output and broken no assertion.
     Passed,
-    /// It ended any other way, timed out included.
+    /// Its verdict says it failed, for any reason, timed out included.
     Failed,
     /// It was stopped at its time limit.
     TimedOut,
@@ -34,18 +35,17 @@ pub(crate) enum Executing {
 }
 
 impl Status {
-    /// How a run that ended as `outcome` says, or has not ended, stands.
-    /// A run that timed out is `TimedOut`, which [`Status::takes`] counts
-    /// as failed too.
-    pub(crate) fn of(outcome: Option<&RunOutcome>, executing: Executing) -> Status {
-        match (outcome, executing) {
-            (Some(o), _) => match Ending::of(&o.stop, o.status, &[]) {
-                Ending::TimedOut => Status::TimedOut,
-                ending if ending.passed() => Status::Passed,
-                _ => Status::Failed,
-            },
-            (None, Executing::Yes) => Status::Running,
-            (None, Executing::No) => Status::Interrupted,
+    /// How a run whose manifest judged it `verdict` stands. A run that
+    /// timed out is `TimedOut`, which [`Status::takes`] counts as failed
+    /// too; one with no verdict yet is running while a process executes
+    /// it and interrupted otherwise.
+    pub(crate) fn of(verdict: &Verdict, executing: Executing) -> Status {
+        match (verdict, executing) {
+            (Verdict::Passed, _) => Status::Passed,
+            (Verdict::Failed { .. }, _) if verdict.timed_out() => Status::TimedOut,
+            (Verdict::Failed { .. }, _) => Status::Failed,
+            (Verdict::Unfinished, Executing::Yes) => Status::Running,
+            (Verdict::Unfinished, Executing::No) => Status::Interrupted,
         }
     }
 
@@ -93,7 +93,7 @@ impl Entry {
             name: Some(m.name.clone()),
             created: m.created,
             parent: m.parent.as_ref().map(|p| p.run.to_string()),
-            status: Status::of(m.outcome.as_ref(), executing),
+            status: Status::of(&m.verdict, executing),
         }
     }
 
@@ -183,7 +183,8 @@ pub(crate) fn json(entry: &Entry, row: &Row) -> serde_json::Value {
         "parent": m.parent,
         "state": entry.status.word(),
         "status": outcome.and_then(|o| o.status),
-        "ending": outcome.map(|o| Ending::of(&o.stop, o.status, &[]).to_string()),
+        "ending": outcome.map(|o| ending::label(o, &m.verdict)),
+        "verdict": m.verdict,
         "steps": outcome.map(|o| o.step),
     })
 }
@@ -295,7 +296,7 @@ mod tests {
     // Which runs `rewind ls` keeps, over entries made by hand, and the
     // times --since takes.
     use super::*;
-    use rewind_trace::stop::{Doing, Stop, Timeout};
+    use rewind_trace::verdict::{FailedAssertion, Reason};
 
     fn entry(id: &str, name: &str, created: u64, parent: Option<&str>, status: Status) -> Entry {
         Entry {
@@ -307,33 +308,38 @@ mod tests {
         }
     }
 
-    fn outcome(stop: Stop, status: Option<i32>) -> RunOutcome {
-        RunOutcome {
-            stop,
-            step: 10,
-            virtual_ns: 0,
-            status,
-            wall_ms: 0,
-        }
+    fn failed(reasons: Vec<Reason>) -> Verdict {
+        Verdict::Failed { reasons }
     }
 
     #[test]
-    fn a_run_stands_by_how_it_ended() {
-        // Exited 0 passed, any other status or none failed, a stop at the
-        // time limit timed out whatever the status, and a run with no
-        // outcome is running while executed and interrupted otherwise.
+    fn a_run_stands_by_its_manifests_verdict() {
+        // A verdict of passed is passed; one failed for any reason is
+        // failed, a broken assertion after an exit of 0 included; one
+        // failed by a timeout, among other reasons or alone, is timed-out;
+        // and a run with no verdict yet is running while executed and
+        // interrupted otherwise.
         use Status::*;
-        let ended = |stop, status| Status::of(Some(&outcome(stop, status)), Executing::No);
-        let hung = Stop::TimedOut(Timeout {
-            since_exit_ms: 0,
-            doing: Doing::MakingExits,
-        });
-        assert_eq!(ended(Stop::PoweredOff, Some(0)), Passed);
-        assert_eq!(ended(Stop::PoweredOff, Some(2 << 8)), Failed);
-        assert_eq!(ended(Stop::PoweredOff, None), Failed);
-        assert_eq!(ended(hung, None), TimedOut);
-        assert_eq!(Status::of(None, Executing::Yes), Running);
-        assert_eq!(Status::of(None, Executing::No), Interrupted);
+        let stands = |verdict: &Verdict| Status::of(verdict, Executing::No);
+        assert_eq!(stands(&Verdict::Passed), Passed);
+        assert_eq!(stands(&failed(vec![Reason::Exited { code: 2 }])), Failed);
+        assert_eq!(stands(&failed(vec![Reason::Crashed])), Failed);
+        let asserted = failed(vec![Reason::FailedAssertions {
+            assertions: vec![FailedAssertion {
+                step: 9,
+                pid: 7,
+                tid: 7,
+                text: "always \"even\" failed".into(),
+            }],
+        }]);
+        assert_eq!(stands(&asserted), Failed);
+        assert_eq!(stands(&failed(vec![Reason::TimedOut])), TimedOut);
+        assert_eq!(
+            stands(&failed(vec![Reason::TimedOut, Reason::Exited { code: 1 }])),
+            TimedOut
+        );
+        assert_eq!(Status::of(&Verdict::Unfinished, Executing::Yes), Running);
+        assert_eq!(Status::of(&Verdict::Unfinished, Executing::No), Interrupted);
     }
 
     #[test]

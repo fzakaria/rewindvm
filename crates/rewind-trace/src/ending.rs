@@ -4,8 +4,10 @@
 
 use std::fmt;
 
+use crate::manifest::RunOutcome;
 use crate::signal_name;
 use crate::stop::Stop;
+use crate::verdict::Verdict;
 
 /// The bits of a wait status, or of the kernel's exit_code, that hold the
 /// terminating signal.
@@ -88,8 +90,7 @@ pub enum Ending {
 impl Ending {
     /// How a run ended whose machine stopped as `stop` and whose job init
     /// reported with wait status `status`, given `missing`, the outputs
-    /// the job was to create and did not. Lists that do not read traces
-    /// pass no missing outputs.
+    /// the job was to create and did not.
     pub fn of(stop: &Stop, status: Option<i32>, missing: &[String]) -> Ending {
         if stop.timeout().is_some() {
             return Ending::TimedOut;
@@ -101,11 +102,27 @@ impl Ending {
         }
     }
 
-    /// Whether the run passed: its job exited 0 having created every
-    /// output.
-    pub fn passed(self) -> bool {
-        matches!(self, Ending::Job(exit) if exit.success())
+    /// How a run ended, from its manifest: the outcome the engine
+    /// recorded and the verdict it judged, which names the outputs the
+    /// job did not create.
+    pub fn recorded(outcome: &RunOutcome, verdict: &Verdict) -> Ending {
+        Ending::of(&outcome.stop, outcome.status, verdict.missing_outputs())
     }
+}
+
+/// What a run's label adds to its ending when its job broke an assertion
+/// it made with the Rewind SDK.
+pub const ASSERTION_FAILED: &str = "assertion failed";
+
+/// How a run ended, in words, from its manifest: the ending, with
+/// "assertion failed" after it when the job broke an assertion, as in
+/// `exited:0, assertion failed`.
+pub fn label(outcome: &RunOutcome, verdict: &Verdict) -> String {
+    let ending = Ending::recorded(outcome, verdict);
+    if verdict.failed_assertions().is_empty() {
+        return ending.to_string();
+    }
+    format!("{ending}, {ASSERTION_FAILED}")
 }
 
 impl fmt::Display for Ending {
@@ -149,7 +166,7 @@ mod tests {
     fn a_run_ends_as_rewind_ls_says() {
         // A timeout wins over any status; exiting 0 without every output
         // is missing-output; a machine that stopped before the job's end
-        // has no status. Only exiting 0 with every output passes.
+        // has no status.
         let hung = Stop::TimedOut(Timeout {
             since_exit_ms: 0,
             doing: Doing::MakingExits,
@@ -165,8 +182,51 @@ mod tests {
             "no-status"
         );
         assert_eq!(ended(&hung, None, &[]).to_string(), "timed-out");
-        assert!(ended(&off, Some(0), &[]).passed());
-        assert!(!ended(&off, Some(0), &missing).passed());
-        assert!(!ended(&hung, Some(0), &[]).passed());
+    }
+
+    #[test]
+    fn a_label_reads_the_ending_and_the_verdict_from_the_manifest() {
+        // The ending's words come from the outcome and the verdict's
+        // missing outputs; a broken assertion is said after them, and a
+        // run that passed reads as its exit alone.
+        use crate::verdict::{FailedAssertion, Reason};
+        let outcome = |status| RunOutcome {
+            stop: Stop::PoweredOff,
+            step: 10,
+            virtual_ns: 0,
+            status,
+            wall_ms: 0,
+        };
+        assert_eq!(label(&outcome(Some(0)), &Verdict::Passed), "exited:0");
+        let unbuilt = Verdict::Failed {
+            reasons: vec![Reason::MissingOutputs {
+                paths: vec!["/nix/store/x-dev".into()],
+            }],
+        };
+        assert_eq!(label(&outcome(Some(0)), &unbuilt), "missing-output");
+        let asserted = Verdict::Failed {
+            reasons: vec![Reason::FailedAssertions {
+                assertions: vec![FailedAssertion {
+                    step: 3,
+                    pid: 7,
+                    tid: 7,
+                    text: "always \"even\" failed".into(),
+                }],
+            }],
+        };
+        assert_eq!(
+            label(&outcome(Some(0)), &asserted),
+            "exited:0, assertion failed"
+        );
+        let both = Verdict::Failed {
+            reasons: vec![
+                Reason::Exited { code: 2 },
+                Reason::FailedAssertions {
+                    assertions: Vec::new(),
+                },
+            ],
+        };
+        assert_eq!(label(&outcome(Some(2 << 8)), &both), "exited:2");
+        assert_eq!(label(&outcome(None), &Verdict::Unfinished), "no-status");
     }
 }

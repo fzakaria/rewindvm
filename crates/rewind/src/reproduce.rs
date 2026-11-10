@@ -284,6 +284,7 @@ pub(crate) mod tests {
             "spec": spec,
             "parent": null,
             "outcome": null,
+            "verdict": {"state": "unfinished"},
             "recorded_by": rewind_core::VERSION,
         }))
         .unwrap()

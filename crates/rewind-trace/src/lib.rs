@@ -38,6 +38,7 @@ pub mod searching;
 pub mod slices;
 pub mod stop;
 pub mod switches;
+pub mod verdict;
 pub mod writes;
 
 use std::collections::BTreeMap;

@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 use rewind_core::keyframes::{self, KEYFRAME_VERSION};
 use rewind_store::{STORE_VERSION, Store, hex};
-use rewind_trace::manifest::{MANIFEST_VERSION, MANIFEST_VERSION_BEFORE_STALL_MAX, Manifest};
+use rewind_trace::manifest::{MANIFEST_VERSION, Manifest};
 use rewind_trace::{TRACE_VERSION, TraceWriter};
 use rewind_vmm::snapshot::Keyframe;
 
@@ -39,6 +39,10 @@ const SAMPLES: &[(&str, &str)] = &[
     (
         "manifest-4.json",
         "12b95a14cb8935932fc8ff2167bcfea842e55a683d1c7536af1ae7b3175cfbf8",
+    ),
+    (
+        "manifest-5.json",
+        "daac67689a299adb07f5f1b0d3dd3895dfe2069cf3a5c1cf8ac50a99b1b37489",
     ),
     (
         "store-1/format",
@@ -183,30 +187,14 @@ fn samples_are_as_they_were_checked_in() {
     );
 }
 
-/// The manifest sample reads, and writes back as the same bytes, and the
-/// spec in it, a perturbed run's with a longest stall, names the version.
+/// The manifest sample reads, and writes back as the same bytes, and
+/// carries a verdict the engine judged.
 #[test]
 fn the_manifest_sample_reads_and_writes_back() {
     let bytes = fs::read(manifest_sample()).expect("a manifest sample of the current version");
     let manifest = Manifest::parse(&bytes).unwrap();
     assert_eq!(serde_json::to_vec_pretty(&manifest).unwrap(), bytes);
-    assert!(!manifest.spec.stall_max.is_default());
-    assert_eq!(manifest.spec.manifest_version(), MANIFEST_VERSION);
-}
-
-/// A run made without --stall-max is still written in the format from
-/// before it: the sample of that format reads, writes back as the same
-/// bytes, and its spec names that version again.
-#[test]
-fn the_manifest_sample_without_a_stall_max_reads_and_writes_back() {
-    let bytes = fs::read(manifest_sample_of(MANIFEST_VERSION_BEFORE_STALL_MAX))
-        .expect("a manifest sample from before longest stalls");
-    let manifest = Manifest::parse(&bytes).unwrap();
-    assert_eq!(serde_json::to_vec_pretty(&manifest).unwrap(), bytes);
-    assert_eq!(
-        manifest.spec.manifest_version(),
-        MANIFEST_VERSION_BEFORE_STALL_MAX
-    );
+    assert!(manifest.verdict.is_final());
 }
 
 /// The trace sample's records read, and write back as the same bytes.

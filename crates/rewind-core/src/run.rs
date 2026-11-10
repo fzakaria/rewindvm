@@ -24,10 +24,10 @@ use crate::cpio;
 use crate::home::Home;
 
 pub use rewind_trace::manifest::{
-    BOOKMARKS, EXECUTING_LOCK, ID_LEN, MANIFEST, MANIFEST_VERSION,
-    MANIFEST_VERSION_BEFORE_STALL_MAX, Manifest, Parent, RunId, RunOutcome, ScheduleSegment,
-    Source, Spec, TRACE, executing,
+    BOOKMARKS, EXECUTING_LOCK, ID_LEN, MANIFEST, MANIFEST_VERSION, Manifest, Parent, RunId,
+    RunOutcome, ScheduleSegment, Source, Spec, TRACE, executing,
 };
+pub use rewind_trace::verdict::Verdict;
 
 /// The kernel command line every guest boots with. The first two keep the
 /// kernel from waiting on hardware time. loglevel=7 sends informational
@@ -759,7 +759,7 @@ impl Run {
             Start::After(run) => (None, Some(run)),
         };
         let manifest = Manifest {
-            version: spec.manifest_version(),
+            version: MANIFEST_VERSION,
             id: spec.id(),
             name,
             created: now(),
@@ -768,6 +768,7 @@ impl Run {
             parent,
             shared_keyframes: None,
             outcome: None,
+            verdict: Verdict::Unfinished,
             trace_hash: None,
             first_difference: None,
             recorded_by: crate::VERSION.to_string(),
@@ -900,8 +901,10 @@ impl Run {
 
         // A run executing for the first time, or again after an execution
         // that never finished, is listed while it executes, with no outcome
-        // yet. A run with a recording goes on showing that recording.
+        // and no verdict yet. A run with a recording goes on showing that
+        // recording.
         manifest.outcome = None;
+        manifest.verdict = Verdict::Unfinished;
         manifest.trace_hash = None;
         if !recorded {
             write_manifest(&manifest)?;
@@ -1035,13 +1038,24 @@ impl Run {
         // How the machine stopped, with the thread a run computing in user
         // space stopped in, read from the VM's kernel while the machine is
         // here.
-        manifest.outcome = Some(RunOutcome {
+        let outcome = RunOutcome {
             stop: stop_of(outcome, &manifest.spec.kernel, || thread_on_cpu(&machine))?,
             step: machine.step(),
             virtual_ns: machine.now(),
             status: recorder.status,
             wall_ms: wall.as_millis() as u64,
-        });
+        };
+
+        // The run is judged here, once, over the trace it made: every
+        // reader takes the verdict from the manifest.
+        let ours = Trace::read(new_trace.tmp())?;
+        manifest.verdict = Verdict::judge(
+            &outcome.stop,
+            outcome.status,
+            &manifest.spec.job.outputs,
+            &ours,
+        );
+        manifest.outcome = Some(outcome);
 
         // The new trace replaces the recording, if it may.
         let trace_hash = crate::image::hash_file(new_trace.tmp())?;
@@ -1065,7 +1079,6 @@ impl Run {
             .as_ref()
             .and_then(|p| Run::open(&home.runs().join(&p.run)).ok())
         {
-            let ours = Trace::read(&dir.join(TRACE))?;
             manifest.first_difference = parent.trace()?.divergence(&ours).map(|d| d.right_step);
         }
         write_manifest(&manifest)?;
@@ -2698,7 +2711,7 @@ pub(crate) mod tests {
     fn a_spec_without_a_stall_max_writes_back_unchanged() {
         // A spec at the default longest stall, a fork's included, writes
         // no stall_max_ns, reads back as itself and writes back as the
-        // same bytes, and names the manifest format from before the field.
+        // same bytes.
         let fork = spec().fork(4855, 10).fork(6000, 3);
         for s in [spec(), fork] {
             let bytes = serde_json::to_vec_pretty(&s).unwrap();
@@ -2706,19 +2719,18 @@ pub(crate) mod tests {
             let read: Spec = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(read, s);
             assert_eq!(serde_json::to_vec_pretty(&read).unwrap(), bytes);
-            assert_eq!(read.manifest_version(), MANIFEST_VERSION_BEFORE_STALL_MAX);
         }
     }
 
     #[test]
     fn a_spec_with_a_stall_max_round_trips_and_forks_inherit_it() {
         // A perturbed spec given a longest stall writes it in nanoseconds,
-        // reads back as itself, has another id and the newer manifest
-        // format. Schedule 0 never stalls, so an unperturbed spec stays at
-        // the default. A fork's own window takes the default unless given
-        // another, as its seed does, while the window it inherits keeps
-        // its maximum, and two forks at one step under different maxima
-        // part where their windows start.
+        // reads back as itself and has another id. Schedule 0 never
+        // stalls, so an unperturbed spec stays at the default. A fork's
+        // own window takes the default unless given another, as its seed
+        // does, while the window it inherits keeps its maximum, and two
+        // forks at one step under different maxima part where their
+        // windows start.
         let max: StallMax = "50ms".parse().unwrap();
         let long = perturbed(3, 2000, u64::MAX).with_stall_max(max);
         let json = serde_json::to_value(&long).unwrap();
@@ -2726,14 +2738,12 @@ pub(crate) mod tests {
         let read: Spec = serde_json::from_value(json).unwrap();
         assert_eq!(read, long);
         assert_ne!(long.id(), perturbed(3, 2000, u64::MAX).id());
-        assert_eq!(long.manifest_version(), MANIFEST_VERSION);
         assert!(spec().with_stall_max(max).stall_max.is_default());
 
         // A fork inherits the parent's window with its maximum.
         let short = long.fork(4000, 5);
         assert!(short.stall_max.is_default());
         assert_eq!(short.inherited_schedules[0].stall_max, max);
-        assert_eq!(short.manifest_version(), MANIFEST_VERSION);
         assert_eq!(long.same_through(&short), Some(3999));
         let json = serde_json::to_value(&short).unwrap();
         assert_eq!(json["inherited_schedules"][0]["stall_max_ns"], 50_000_000);
@@ -2774,6 +2784,7 @@ pub(crate) mod tests {
             parent: None,
             shared_keyframes: None,
             outcome: None,
+            verdict: Verdict::Unfinished,
             trace_hash: None,
             first_difference: None,
             recorded_by: crate::VERSION.into(),

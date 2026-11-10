@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use rewind_core::Run;
 use rewind_core::compare::{Comparison, Source, Verdict};
-use rewind_trace::ending::{Ending, ExitStatus};
+use rewind_trace::ending::{self, ExitStatus};
+use rewind_trace::manifest::Manifest;
 use rewind_trace::{Divergence, Event, EventKind, Trace, signal_name};
 
 use crate::color::{Paint, Same, Style};
@@ -13,26 +14,25 @@ use crate::color::{Paint, Same, Style};
 /// How wide `rewind ls` keeps the column that says how a run ended.
 const ENDING_WIDTH: usize = 9;
 
-/// How a run's ending is painted: green when the job exited 0, red when
-/// it did not.
-fn ending(paint: Paint, ending: Ending, width: usize) -> String {
-    let style = if ending.passed() {
+/// How a run's ending reads from its manifest, painted green when the
+/// manifest's verdict says the run passed and red when it did not.
+fn ending(paint: Paint, manifest: &Manifest, width: usize) -> String {
+    let Some(outcome) = &manifest.outcome else {
+        return paint.padded(Style::Differs, ending::Ending::NoStatus, width);
+    };
+    let style = if manifest.verdict.passed() {
         Style::Same
     } else {
         Style::Differs
     };
-    paint.padded(style, ending, width)
+    paint.padded(style, ending::label(outcome, &manifest.verdict), width)
 }
 
 /// A one-line summary for `rewind ls`, painted for standard output.
 pub(crate) fn summary(run: &Run, paint: Paint) -> String {
     let m = &run.manifest;
     let outcome = match &m.outcome {
-        Some(o) => format!(
-            "{} {:>12} steps",
-            ending(paint, Ending::of(&o.stop, o.status, &[]), ENDING_WIDTH),
-            o.step
-        ),
+        Some(o) => format!("{} {:>12} steps", ending(paint, m, ENDING_WIDTH), o.step),
         None if run.executing() => paint.paint(Style::Warn, "running"),
         None => paint.paint(Style::Differs, "interrupted"),
     };
@@ -50,7 +50,7 @@ pub(crate) fn finished(run: &Run, stop: Option<&str>, paint: Paint) -> String {
         "{} run {} {} after {} steps, {:.3}s virtual, {:.3}s wall ({})",
         paint.prefix(),
         m.id,
-        ending(paint, Ending::of(&o.stop, o.status, &[]), 0),
+        ending(paint, m, 0),
         o.step,
         Duration::from_nanos(o.virtual_ns).as_secs_f64(),
         Duration::from_millis(o.wall_ms).as_secs_f64(),
@@ -146,18 +146,6 @@ pub(crate) fn comparison(
     out
 }
 
-/// The outputs the job was to create that init never hashed, from the
-/// paths and hashes of [`outcome_key`]. Init hashes outputs only after
-/// the job exits 0, so for such a job these are the outputs it did not
-/// create.
-pub(crate) fn missing_outputs(expected: &[String], hashed: &[(String, String)]) -> Vec<String> {
-    expected
-        .iter()
-        .filter(|path| !hashed.iter().any(|(p, _)| p == *path))
-        .cloned()
-        .collect()
-}
-
 /// One line for an output of a Nix run: its path, the start of its NAR
 /// hash, and what this machine's store and the caches said about it,
 /// painted for standard output.
@@ -244,19 +232,11 @@ pub(crate) const DIFFERS_NOTE: &str = "a store path names a build's inputs, not 
 const CHECK_ENDING_WIDTH: usize = 14;
 
 /// One line per run for `rewind check`, painted for standard output: its
-/// ending green when the job exited 0 and red when not, and each output's
-/// hash red where it differs from the same output's in `base`, the
-/// unperturbed run's.
+/// ending green when the manifest's verdict says the run passed and red
+/// when not, and each output's hash red where it differs from the same
+/// output's in `base`, the unperturbed run's.
 pub(crate) fn outcome_line(run: &Run, base: &OutcomeKey, paint: Paint) -> anyhow::Result<String> {
-    let OutcomeKey {
-        status: status_,
-        outputs,
-    } = outcome_key(run)?;
-    let missing = missing_outputs(&run.manifest.spec.job.outputs, &outputs);
-    let ended = match &run.manifest.outcome {
-        Some(o) => Ending::of(&o.stop, status_, &missing),
-        None => Ending::NoStatus,
-    };
+    let OutcomeKey { outputs, .. } = outcome_key(run)?;
     let steps = run.manifest.outcome.as_ref().map_or(0, |o| o.step);
     let hashes: Vec<String> = outputs
         .iter()
@@ -273,7 +253,7 @@ pub(crate) fn outcome_line(run: &Run, base: &OutcomeKey, paint: Paint) -> anyhow
         .collect();
     Ok(format!(
         "{} {:>10} steps  {}  run {}",
-        ending(paint, ended, CHECK_ENDING_WIDTH),
+        ending(paint, &run.manifest, CHECK_ENDING_WIDTH),
         steps,
         hashes.join(" "),
         run.manifest.id
@@ -508,9 +488,7 @@ pub(crate) fn divergence(left: &Trace, right: &Trace, paint: Paint) -> String {
 
 #[cfg(test)]
 mod tests {
-    // How a run that exited 0 reads when its job left an output uncreated:
-    // nix-daemon fails such a build, so Rewind calls it missing-output
-    // rather than exited:0.
+    // The words runs, schedules and outputs are printed in.
     use super::*;
 
     use crate::reproduce::tests::{job, spec};
@@ -608,17 +586,6 @@ mod tests {
             schedule_words(&s),
             "schedule 6 over steps 3629..5140, stalls up to 50 ms"
         );
-    }
-
-    const OUT: &str = "/nix/store/0000000000000000000000000000000b-x";
-    const DEV: &str = "/nix/store/0000000000000000000000000000000c-x-dev";
-
-    #[test]
-    fn an_output_init_never_hashed_is_missing() {
-        let expected = vec![OUT.to_string(), DEV.to_string()];
-        let hashed = vec![(OUT.to_string(), "0123abcd".to_string())];
-        assert_eq!(missing_outputs(&expected, &hashed), vec![DEV.to_string()]);
-        assert!(missing_outputs(&expected[..1], &hashed).is_empty());
     }
 
     #[test]

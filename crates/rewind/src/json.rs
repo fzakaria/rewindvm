@@ -4,20 +4,20 @@ use anyhow::Result;
 use rewind_core::Run;
 use rewind_core::compare::{Comparison, Source, Verdict};
 use rewind_trace::Trace;
-use rewind_trace::ending::Ending;
+use rewind_trace::ending;
 use serde_json::{Value, json};
 
 use crate::show::{self, KernelThreads};
 
 /// A run: its id, name and directory, the run and step it was forked from,
-/// how it ended, and the outputs its job hashed and left uncreated.
+/// how it ended, its manifest's verdict, and the outputs its job hashed
+/// and left uncreated.
 pub(crate) fn run(run: &Run) -> Result<Value> {
     let m = &run.manifest;
     let show::OutcomeKey {
         status,
         outputs: hashed,
     } = show::outcome_key(run)?;
-    let missing = show::missing_outputs(&m.spec.job.outputs, &hashed);
     let outputs: Vec<Value> = hashed
         .iter()
         .map(|(path, hash)| json!({ "path": path, "hash": hash }))
@@ -29,13 +29,14 @@ pub(crate) fn run(run: &Run) -> Result<Value> {
         "dir": run.dir,
         "parent": m.parent,
         "status": status,
-        "ending": outcome.map(|o| Ending::of(&o.stop, status, &missing).to_string()),
+        "ending": outcome.map(|o| ending::label(o, &m.verdict)),
+        "verdict": m.verdict,
         "steps": outcome.map(|o| o.step),
         "stop": outcome.map(|o| o.stop.to_string()),
         "first_difference": m.first_difference,
         "recorded_by": m.recorded_by,
         "outputs": outputs,
-        "missing": missing,
+        "missing": m.verdict.missing_outputs(),
     }))
 }
 

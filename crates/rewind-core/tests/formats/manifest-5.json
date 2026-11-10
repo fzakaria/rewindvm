@@ -1,0 +1,87 @@
+{
+  "version": 5,
+  "id": "3cb2d96f67f44ca3",
+  "name": "sample",
+  "created": 1794288410,
+  "source": {
+    "mode": "image",
+    "root": "/nix/store/00000000000000000000000000000000-rewind-busybox-root"
+  },
+  "spec": {
+    "kernel": "/nix/store/4qj0z9pxr27nqvsbr0xiaakz7rqxdvrp-rewind-guest-kernel-7.2.8/bzImage",
+    "initrd": "/nix/store/yc5n3dp8nakfa54gzwf56258rz3wbnlx-rewind-initrd/initrd",
+    "kernel_debug": "/nix/store/s201l76gpwfpd5as574mv692c0gsc8kw-rewind-guest-kernel-7.2.8-debug",
+    "image": "/home/user/.local/share/rewind/images/2/0000000000000000000000000000000000000000000000000000000000000000.erofs",
+    "image_hash": "2012bf5b2699b579bdcfa11d0b68d75835ad9eb646d6bbc64179a925fed18dd2",
+    "mem_mib": 1024,
+    "cores": 1,
+    "seed": 0,
+    "epoch": 1794268800,
+    "quantum": 5000,
+    "schedule": 3,
+    "schedule_from": 100,
+    "schedule_until": 18446744073709551615,
+    "stall_max_ns": 50000000,
+    "inherited_schedules": [],
+    "reseeds": [],
+    "cpu": "v3",
+    "clock": {
+      "branches": "amd_retired_conditional_branches"
+    },
+    "preemption": "at_exits",
+    "extras": "reserved",
+    "cmdline": "nolapic_timer lpj=1000000 panic=-1 rdinit=/init loglevel=7 mitigations=off",
+    "job": {
+      "program": null,
+      "argv": [
+        "sh",
+        "-c",
+        "printf \"rewind-sdk 1 always fail even byte 3 is odd\\n\" > /dev/rewind; echo hi; exit 0"
+      ],
+      "env": [
+        [
+          "PATH",
+          "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        ]
+      ],
+      "cwd": "/",
+      "uid": 0,
+      "gid": 0,
+      "hostname": "localhost",
+      "root": "image",
+      "files": [],
+      "outputs": [],
+      "output": "plain"
+    }
+  },
+  "parent": null,
+  "shared_keyframes": null,
+  "outcome": {
+    "stop": {
+      "how": "powered_off"
+    },
+    "step": 797,
+    "virtual_ns": 4008819,
+    "status": 0,
+    "wall_ms": 2370
+  },
+  "verdict": {
+    "state": "failed",
+    "reasons": [
+      {
+        "why": "failed_assertions",
+        "assertions": [
+          {
+            "step": 786,
+            "pid": 34,
+            "tid": 34,
+            "text": "always \"even\" failed: byte 3 is odd"
+          }
+        ]
+      }
+    ]
+  },
+  "trace_hash": "7dd254ef31ca55469137b0c52dacfd3021489cc4af20055748ebde47a966a633",
+  "first_difference": null,
+  "recorded_by": "0.14.0"
+}

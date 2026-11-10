@@ -379,34 +379,10 @@ pub struct TestSpan {
 }
 
 /// An SDK mark in words, and whether it says something broke: what the
-/// event card, the log and the timeline show for it.
+/// event card, the log and the timeline show for it, in the words the
+/// engine's verdict uses.
 pub fn sdk_words(mark: &SdkMark) -> (String, bool) {
-    let said = |what: String, message: &str| {
-        if message.is_empty() {
-            what
-        } else {
-            format!("{what}: {message}")
-        }
-    };
-    match mark {
-        SdkMark::Always {
-            id,
-            held: false,
-            message,
-        } => (said(format!("always \"{id}\" failed"), message), true),
-        SdkMark::Always { id, .. } => (format!("always \"{id}\" held"), false),
-        SdkMark::Sometimes { id, hit: true } => (format!("sometimes \"{id}\" was true"), false),
-        SdkMark::Sometimes { id, hit: false } => (format!("sometimes \"{id}\" was false"), false),
-        SdkMark::Unreachable { id, message } => {
-            (said(format!("unreachable \"{id}\" reached"), message), true)
-        }
-        SdkMark::TestBegin { name } => (format!("test {name} began"), false),
-        SdkMark::TestEnd { name, result } => match result {
-            TestResult::Pass => (format!("test {name} passed"), false),
-            TestResult::Fail => (format!("test {name} failed"), true),
-            TestResult::Skip => (format!("test {name} was skipped"), false),
-        },
-    }
+    (mark.words(), mark.broke())
 }
 
 /// The assertions that broke and the tests, from the job's SDK marks.

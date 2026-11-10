@@ -15,7 +15,7 @@ use std::str::FromStr;
 use anyhow::{Context, Result, bail};
 use rewind_core::inspect::{self, Inspection};
 use rewind_core::{Home, Run};
-use rewind_trace::ending::Ending;
+use rewind_trace::ending::{self, Ending};
 use rewind_trace::properties::{self as trace_properties, Finding, Glob};
 use rewind_trace::sdk::{SdkMark, TestResult};
 
@@ -232,7 +232,7 @@ pub(crate) struct Judge<'a> {
     home: &'a Home,
     base_id: String,
     base_key: OutcomeKey,
-    base_ending: Ending,
+    base_ending: String,
     /// How each test the unperturbed run marked with the SDK ended.
     base_tests: BTreeMap<String, TestResult>,
     /// How each test in the unperturbed run's JUnit reports ended, by the
@@ -281,7 +281,7 @@ impl<'a> Judge<'a> {
         Ok(Judge {
             home,
             base_id: base.manifest.id.to_string(),
-            base_ending: ending(base, &base_key),
+            base_ending: ending(base),
             base_key,
             base_tests,
             base_junit,
@@ -344,23 +344,21 @@ impl<'a> Judge<'a> {
                     end_step(run).ok(),
                     format!(
                         "ended {}, where {} ended {}",
-                        ending(run, &key),
+                        ending(run),
                         self.base_id,
                         self.base_ending
                     ),
                 )))
             }
 
-            // The job's own ending.
+            // The run's own verdict, as its manifest judged it.
             Property::ExitZero => {
-                let key = show::outcome_key(run)?;
-                let ended = ending(run, &key);
-                if ended.passed() {
+                if run.manifest.verdict.passed() {
                     return Ok(None);
                 }
                 Ok(Some(violation(
                     end_step(run).ok(),
-                    format!("ended {ended}"),
+                    format!("ended {}", ending(run)),
                 )))
             }
 
@@ -646,12 +644,11 @@ pub(crate) fn writes_sdk_marks(run: &Run) -> Result<bool> {
     Ok(run.trace()?.sdk_marks().next().is_some())
 }
 
-/// How `run` ended, as a run's line says it.
-fn ending(run: &Run, key: &OutcomeKey) -> Ending {
-    let missing = show::missing_outputs(&run.manifest.spec.job.outputs, &key.outputs);
+/// How `run` ended, as a run's line says it, from its manifest.
+fn ending(run: &Run) -> String {
     match &run.manifest.outcome {
-        Some(o) => Ending::of(&o.stop, key.status, &missing),
-        None => Ending::NoStatus,
+        Some(o) => ending::label(o, &run.manifest.verdict),
+        None => Ending::NoStatus.to_string(),
     }
 }
 

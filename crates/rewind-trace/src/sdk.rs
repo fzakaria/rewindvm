@@ -135,6 +135,60 @@ impl SdkMark {
     }
 }
 
+impl SdkMark {
+    /// The mark in words, as the command and the desktop app say it:
+    /// `always "even" failed: byte 221 is odd`, `test coin flip passed`.
+    pub fn words(&self) -> String {
+        let said = |what: String, message: &str| {
+            if message.is_empty() {
+                what
+            } else {
+                format!("{what}: {message}")
+            }
+        };
+        match self {
+            SdkMark::Always {
+                id,
+                held: false,
+                message,
+            } => said(format!("always \"{id}\" failed"), message),
+            SdkMark::Always { id, .. } => format!("always \"{id}\" held"),
+            SdkMark::Sometimes { id, hit: true } => format!("sometimes \"{id}\" was true"),
+            SdkMark::Sometimes { id, hit: false } => format!("sometimes \"{id}\" was false"),
+            SdkMark::Unreachable { id, message } => {
+                said(format!("unreachable \"{id}\" reached"), message)
+            }
+            SdkMark::TestBegin { name } => format!("test {name} began"),
+            SdkMark::TestEnd { name, result } => match result {
+                TestResult::Pass => format!("test {name} passed"),
+                TestResult::Fail => format!("test {name} failed"),
+                TestResult::Skip => format!("test {name} was skipped"),
+            },
+        }
+    }
+
+    /// Whether the mark says something broke: an `always` that failed, an
+    /// `unreachable` reached, or a test that failed.
+    pub fn broke(&self) -> bool {
+        match self {
+            SdkMark::Always { held, .. } => !held,
+            SdkMark::Unreachable { .. } => true,
+            SdkMark::TestEnd { result, .. } => *result == TestResult::Fail,
+            SdkMark::Sometimes { .. } | SdkMark::TestBegin { .. } => false,
+        }
+    }
+
+    /// Whether the mark is an assertion the job broke: an `always` that
+    /// failed or an `unreachable` reached. A test that failed is reported
+    /// by the job's own exit, and is not one.
+    pub fn is_failed_assertion(&self) -> bool {
+        matches!(
+            self,
+            SdkMark::Always { held: false, .. } | SdkMark::Unreachable { .. }
+        )
+    }
+}
+
 impl Event {
     /// The SDK mark this event is, if a process other than init wrote one.
     pub fn sdk_mark(&self) -> Option<SdkMark> {
@@ -152,6 +206,20 @@ impl crate::Trace {
     /// order.
     pub fn sdk_marks(&self) -> impl Iterator<Item = (&Event, SdkMark)> {
         self.events.iter().filter_map(|e| Some((e, e.sdk_mark()?)))
+    }
+
+    /// Every assertion the job made with the Rewind SDK and broke, in
+    /// step order, each in its words.
+    pub fn failed_assertions(&self) -> Vec<crate::verdict::FailedAssertion> {
+        self.sdk_marks()
+            .filter(|(_, mark)| mark.is_failed_assertion())
+            .map(|(e, mark)| crate::verdict::FailedAssertion {
+                step: e.step,
+                pid: e.pid,
+                tid: e.tid,
+                text: mark.words(),
+            })
+            .collect()
     }
 }
 
@@ -205,6 +273,37 @@ mod tests {
                 name: "tests/test_cache.py::test_stale".into(),
                 result: TestResult::Fail,
             })
+        );
+    }
+
+    // Each mark in the words the command and the app say it in, and which
+    // of them say something broke or are an assertion the job broke.
+    #[test]
+    fn marks_have_words_and_say_whether_something_broke() {
+        let mark = |line: &str| SdkMark::parse(line).unwrap();
+        let failed = mark("rewind-sdk 1 always fail even byte 221 is odd");
+        assert_eq!(failed.words(), "always \"even\" failed: byte 221 is odd");
+        assert!(failed.broke() && failed.is_failed_assertion());
+        let held = mark("rewind-sdk 1 always pass even");
+        assert_eq!(held.words(), "always \"even\" held");
+        assert!(!held.broke() && !held.is_failed_assertion());
+        let reached = mark("rewind-sdk 1 unreachable closed");
+        assert_eq!(reached.words(), "unreachable \"closed\" reached");
+        assert!(reached.broke() && reached.is_failed_assertion());
+        let test_failed = mark("rewind-sdk 1 test-end fail coin flip");
+        assert_eq!(test_failed.words(), "test coin flip failed");
+        assert!(test_failed.broke() && !test_failed.is_failed_assertion());
+        assert_eq!(
+            mark("rewind-sdk 1 sometimes miss sold-out").words(),
+            "sometimes \"sold-out\" was false"
+        );
+        assert_eq!(
+            mark("rewind-sdk 1 test-begin coin flip").words(),
+            "test coin flip began"
+        );
+        assert_eq!(
+            mark("rewind-sdk 1 test-end skip coin flip").words(),
+            "test coin flip was skipped"
         );
     }
 

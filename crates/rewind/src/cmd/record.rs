@@ -605,7 +605,6 @@ pub(crate) fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
     ));
     print_timeout(home, 0, &base, say);
     print_violations(&judge, &base_violations, say);
-    let base_key = judge.base_key().clone();
     let mut tried_runs = vec![schedule_json(&base, false, &base_violations)?];
 
     // A schedule can make a program loop forever where schedule 0
@@ -619,12 +618,10 @@ pub(crate) fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
     }
 
     // When the unperturbed run is the one that fails, the schedules
-    // that end differently are the ones that pass. A job that exits
-    // 0 without creating every output fails, as under nix-daemon.
-    let base_missing = show::missing_outputs(&base.manifest.spec.job.outputs, &base_key.outputs);
-    let base_failed = !base.manifest.outcome.as_ref().is_some_and(|o| {
-        rewind_trace::ending::Ending::of(&o.stop, base_key.status, &base_missing).passed()
-    });
+    // that end differently are the ones that pass. Whether it failed is
+    // its manifest's verdict, which counts an exit of 0 that left an
+    // output uncreated or broke an assertion as a failure.
+    let base_failed = !base.manifest.verdict.passed();
 
     // A run the search is after is one whose verdict differs from
     // schedule 0's. With the default property, schedule 0 always holds it
@@ -2430,7 +2427,7 @@ struct Compared {
 /// Asks this machine's store and the binary caches `lookup` names about
 /// each output the run's job hashed.
 fn compare_outputs(run: &Run, lookup: &compare::Lookup) -> Result<Compared> {
-    let show::OutcomeKey { status, outputs } = show::outcome_key(run)?;
+    let show::OutcomeKey { outputs, .. } = show::outcome_key(run)?;
 
     // The caches to ask; without Nix's configuration, only the store.
     let caches = match compare::caches(lookup) {
@@ -2449,11 +2446,7 @@ fn compare_outputs(run: &Run, lookup: &compare::Lookup) -> Result<Compared> {
         compare::Netrc::load()
     };
     let results = compare::compare(&outputs, &caches, &netrc);
-    let missing = if status == Some(0) {
-        show::missing_outputs(&run.manifest.spec.job.outputs, &outputs)
-    } else {
-        Vec::new()
-    };
+    let missing = run.manifest.verdict.missing_outputs().to_vec();
     Ok(Compared {
         outputs: outputs
             .into_iter()
