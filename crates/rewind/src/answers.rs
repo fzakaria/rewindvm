@@ -12,7 +12,7 @@ use anyhow::Result;
 use rewind_core::inspect::{self, Inspection};
 use rewind_core::{Home, Run};
 use rewind_trace::Trace;
-use rewind_trace::answers::{self, Gathered, LIMITS, Packed, Place, ThreadAnswer, Why};
+use rewind_trace::answers::{self, Gathered, LIMITS, LeftOutWhy, Packed, Place, ThreadAnswer, Why};
 use rewind_trace::manifest::BOOKMARKS;
 use rewind_trace::properties::{Glob, written_files};
 use rewind_trace::summary::Recording;
@@ -93,9 +93,14 @@ fn thread_answer(home: &Home, run: &Run, step: u64, (pid, tid): (u32, u32)) -> T
 }
 
 /// Each file the job had written by `step` and left in place, with its
-/// bytes at the step, or None for a file the VM sent none of. A read that
-/// fails sends none, and says why.
-fn files_at(home: &Home, run: &Run, trace: &Trace, step: u64) -> Vec<(String, Option<Vec<u8>>)> {
+/// bytes at the step, or why the export has none of them. A read that
+/// fails says why, there and on standard error.
+fn files_at(
+    home: &Home,
+    run: &Run,
+    trace: &Trace,
+    step: u64,
+) -> Vec<(String, Result<Vec<u8>, LeftOutWhy>)> {
     let by_then = Trace {
         events: trace.until(step).to_vec(),
         switches: Vec::new(),
@@ -116,21 +121,73 @@ fn files_at(home: &Home, run: &Run, trace: &Trace, step: u64) -> Vec<(String, Op
         Ok(Inspection::NotFound(message) | Inspection::Failed(message)) => Err(message),
         Err(e) => Err(format!("{e:#}")),
     };
-    let read = read.unwrap_or_else(|why| {
+    if let Err(why) = &read {
         eprintln!(
             "{} reading the job's files at step {step}: {why}",
             color::stderr().prefix()
         );
-        Vec::new()
-    });
+    }
+    files_read(paths, read)
+}
+
+/// Each of `paths` with its bytes among the files `read` holds, the ones
+/// the VM sent, or why the export has none of them: the VM sent none of
+/// the file, or the read failed, for the reason `read` gives.
+fn files_read(
+    paths: Vec<String>,
+    read: Result<Vec<(String, Vec<u8>)>, String>,
+) -> Vec<(String, Result<Vec<u8>, LeftOutWhy>)> {
+    let sent = match read {
+        Ok(sent) => sent,
+        Err(error) => {
+            let why = LeftOutWhy::ReadFailed { error };
+            return paths
+                .into_iter()
+                .map(|path| (path, Err(why.clone())))
+                .collect();
+        }
+    };
     paths
         .into_iter()
         .map(|path| {
-            let bytes = read
+            let bytes = sent
                 .iter()
                 .find(|(p, _)| *p == path)
-                .map(|(_, b)| b.clone());
+                .map(|(_, b)| b.clone())
+                .ok_or(LeftOutWhy::NotRead);
             (path, bytes)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    // Matching the files a read of the job's files sent to the files the
+    // job wrote, from reads made up by hand.
+    use super::*;
+
+    #[test]
+    fn a_failed_read_leaves_each_file_out_with_its_error() {
+        // A read that sent one of two files: the other is left out as
+        // not sent. A read that failed: both are left out with its error.
+        let paths = vec!["/b/out.log".to_string(), "/b/gone".to_string()];
+        let sent = vec![("/b/out.log".to_string(), b"ok\n".to_vec())];
+        assert_eq!(
+            files_read(paths.clone(), Ok(sent)),
+            [
+                ("/b/out.log".to_string(), Ok(b"ok\n".to_vec())),
+                ("/b/gone".to_string(), Err(LeftOutWhy::NotRead)),
+            ]
+        );
+        let failed = LeftOutWhy::ReadFailed {
+            error: "the fork did not answer".into(),
+        };
+        assert_eq!(
+            files_read(paths, Err("the fork did not answer".into())),
+            [
+                ("/b/out.log".to_string(), Err(failed.clone())),
+                ("/b/gone".to_string(), Err(failed)),
+            ]
+        );
+    }
 }

@@ -263,11 +263,14 @@ mod tests {
     // run's questions go to the engine it wraps.
     use super::*;
     use crate::engine::CliEngine;
-    use rewind_trace::answers::{Gathered, LIMITS, ThreadAnswer, Why, pack};
+    use rewind_trace::answers::{Gathered, LIMITS, LeftOutWhy, ThreadAnswer, Why, pack};
     use std::collections::BTreeMap;
 
     const STEP: u64 = 5_775;
     const PID: u32 = 166;
+
+    /// Why reading the job's files failed, as the export says it.
+    const READ_ERROR: &str = "the fork did not answer";
 
     fn packed() -> Carried {
         let located = rewind_trace::located::Located {
@@ -301,8 +304,14 @@ mod tests {
                     },
                 ],
                 files: vec![
-                    ("/build/out.log".into(), Some(b"ok\n".to_vec())),
-                    ("/build/gone".into(), None),
+                    ("/build/out.log".into(), Ok(b"ok\n".to_vec())),
+                    ("/build/gone".into(), Err(LeftOutWhy::NotRead)),
+                    (
+                        "/build/unread".into(),
+                        Err(LeftOutWhy::ReadFailed {
+                            error: READ_ERROR.into(),
+                        }),
+                    ),
                 ],
             }],
             LIMITS,
@@ -361,14 +370,17 @@ mod tests {
 
     #[test]
     fn what_the_export_lacks_is_said_with_the_steps_it_answers() {
-        // A file left out says why; a file never written, a step not
-        // answered and a thread not answered each name the answered step;
-        // a thread rewind where could not locate says what it said.
+        // A file left out says why, and a file whose read failed says the
+        // read's error; a file never written, a step not answered and a
+        // thread not answered each name the answered step; a thread rewind
+        // where could not locate says what it said.
         let engine = answering();
         let words = |result: EngineResult<FileAtStep>| result.unwrap_err().to_string();
         assert!(
             words(cat(&engine, "run.rwd", STEP, "/build/gone")).contains("left /build/gone out")
         );
+        let unread = words(cat(&engine, "run.rwd", STEP, "/build/unread"));
+        assert!(unread.contains(READ_ERROR), "{unread}");
         let never = words(cat(&engine, "run.rwd", STEP, "/etc/hosts"));
         assert!(never.contains("at step 5,775"), "{never}");
         let elsewhere = words(cat(&engine, "run.rwd", STEP + 1, "/build/out.log"));

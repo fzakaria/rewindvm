@@ -140,6 +140,8 @@ pub enum LeftOutWhy {
     /// The VM sent no bytes: the file was gone, was not a regular file, or
     /// was larger than the VM sends.
     NotRead,
+    /// Reading the job's files at the step failed, for the reason given.
+    ReadFailed { error: String },
     /// Its bytes would have taken the export's files past
     /// [`Limits::total_bytes`].
     OverTotal { size: u64 },
@@ -152,6 +154,9 @@ impl LeftOutWhy {
             LeftOutWhy::NotRead => "the VM sent no bytes of it: it was gone, was not a regular \
                                     file, or was larger than the VM sends"
                 .to_string(),
+            LeftOutWhy::ReadFailed { error } => {
+                format!("reading the job's files at the step failed: {error}")
+            }
             LeftOutWhy::OverTotal { size } => {
                 let total = limits.map_or(TOTAL_BYTES, |l| l.total_bytes);
                 format!("its {size} bytes would have taken the export's files past {total} bytes")
@@ -161,14 +166,14 @@ impl LeftOutWhy {
 }
 
 /// What a replay found at one step, before packing: the threads' places,
-/// and each file the job had written with its bytes, or None where the VM
-/// sent none.
+/// and each file the job had written with its bytes, or why the replay
+/// has none of them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Gathered {
     pub step: u64,
     pub why: Vec<Why>,
     pub threads: Vec<ThreadAnswer>,
-    pub files: Vec<(String, Option<Vec<u8>>)>,
+    pub files: Vec<(String, Result<Vec<u8>, LeftOutWhy>)>,
 }
 
 /// Answers ready for an export: the index, and each member's name and
@@ -191,12 +196,12 @@ pub fn pack(gathered: Vec<Gathered>, limits: Limits) -> Packed {
         let mut files = Vec::new();
         let mut left_out = Vec::new();
         for (path, bytes) in found.files {
-            let Some(bytes) = bytes else {
-                left_out.push(LeftOut {
-                    path,
-                    why: LeftOutWhy::NotRead,
-                });
-                continue;
+            let bytes = match bytes {
+                Ok(bytes) => bytes,
+                Err(why) => {
+                    left_out.push(LeftOut { path, why });
+                    continue;
+                }
             };
 
             // The file's start, past the limit of one file.
@@ -426,7 +431,7 @@ mod tests {
         }
     }
 
-    fn found(step: u64, files: &[(&str, Option<&[u8]>)]) -> Gathered {
+    fn found(step: u64, files: &[(&str, Result<&[u8], LeftOutWhy>)]) -> Gathered {
         Gathered {
             step,
             why: vec![Why::Failure],
@@ -437,8 +442,15 @@ mod tests {
             }],
             files: files
                 .iter()
-                .map(|(path, bytes)| (path.to_string(), bytes.map(<[u8]>::to_vec)))
+                .map(|(path, bytes)| (path.to_string(), bytes.clone().map(<[u8]>::to_vec)))
                 .collect(),
+        }
+    }
+
+    /// Why a file is left out when reading the job's files failed.
+    fn failed_read() -> LeftOutWhy {
+        LeftOutWhy::ReadFailed {
+            error: "the fork did not answer".into(),
         }
     }
 
@@ -453,24 +465,26 @@ mod tests {
     fn files_are_kept_within_their_limits_and_the_rest_is_said() {
         // Step 5 has a file of 3 bytes, one of 6 that is cut to its first
         // 4, and one the VM did not send; step 9 has the first file
-        // unchanged, which costs nothing more, and two new ones, the
-        // second of which would pass the total of 10.
+        // unchanged, which costs nothing more, two new ones, the second of
+        // which would pass the total of 10, and one whose read failed,
+        // left out with the read's error.
         let packed = pack(
             vec![
                 found(
                     5,
                     &[
-                        ("/b/small", Some(b"abc")),
-                        ("/b/large", Some(b"123456")),
-                        ("/b/gone", None),
+                        ("/b/small", Ok(b"abc")),
+                        ("/b/large", Ok(b"123456")),
+                        ("/b/gone", Err(LeftOutWhy::NotRead)),
                     ],
                 ),
                 found(
                     9,
                     &[
-                        ("/b/small", Some(b"abc")),
-                        ("/b/new", Some(b"xyz")),
-                        ("/b/over", Some(b"!")),
+                        ("/b/small", Ok(b"abc")),
+                        ("/b/new", Ok(b"xyz")),
+                        ("/b/over", Ok(b"!")),
+                        ("/b/unread", Err(failed_read())),
                     ],
                 ),
             ],
@@ -495,11 +509,19 @@ mod tests {
         assert_eq!(second.files[0].member, first.files[0].member);
         assert_eq!(
             second.left_out,
-            [LeftOut {
-                path: "/b/over".into(),
-                why: LeftOutWhy::OverTotal { size: 1 }
-            }]
+            [
+                LeftOut {
+                    path: "/b/over".into(),
+                    why: LeftOutWhy::OverTotal { size: 1 }
+                },
+                LeftOut {
+                    path: "/b/unread".into(),
+                    why: failed_read()
+                }
+            ]
         );
+        let words = second.left_out[1].why.words(packed.answers.limits);
+        assert!(words.contains("the fork did not answer"), "{words}");
         assert_eq!(packed.answers.limits, Some(SMALL));
     }
 
@@ -513,7 +535,7 @@ mod tests {
         let packed = pack(
             vec![found(
                 5,
-                &[("/b/small", Some(b"abc")), ("/b/large", Some(b"123456"))],
+                &[("/b/small", Ok(b"abc")), ("/b/large", Ok(b"123456"))],
             )],
             SMALL,
         );

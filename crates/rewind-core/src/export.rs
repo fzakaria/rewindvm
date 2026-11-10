@@ -1024,7 +1024,7 @@ mod tests {
                 step: 1,
                 why: vec![Why::Failure],
                 threads: Vec::new(),
-                files: vec![("/build/out".into(), Some(b"written".to_vec()))],
+                files: vec![("/build/out".into(), Ok(b"written".to_vec()))],
             }],
             LIMITS,
         );
