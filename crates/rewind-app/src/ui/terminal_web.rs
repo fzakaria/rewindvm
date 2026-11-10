@@ -66,7 +66,7 @@ impl Scrubber {
         );
     }
 
-    pub(super) fn close_terminal(&mut self, _cx: &mut Context<Self>) {}
+    pub(super) fn close_terminal(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {}
 
     pub(super) fn scroll_terminal_toward(&self, _up: bool) {}
 

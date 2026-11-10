@@ -123,6 +123,27 @@ fn key_of(keystroke: &Keystroke) -> Option<Key> {
     chars.next().is_none().then_some(Key::Char(c))
 }
 
+/// Where a key typed in the pane goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KeyGoes {
+    /// To the command running in the pane.
+    ToCommand,
+    /// Nowhere: the pane closes.
+    ClosesPane,
+    /// Nowhere.
+    Nowhere,
+}
+
+/// Where `key` goes in a pane whose command ended as `ended` says, or
+/// still runs.
+fn key_goes(ended: Option<Ended>, key: &Key) -> KeyGoes {
+    match (ended, key) {
+        (None, _) => KeyGoes::ToCommand,
+        (Some(_), Key::Escape) => KeyGoes::ClosesPane,
+        (Some(_), _) => KeyGoes::Nowhere,
+    }
+}
+
 fn rgb_of(c: Rgb) -> gpui::Hsla {
     rgb(((c.r as u32) << 16) | ((c.g as u32) << 8) | c.b as u32).into()
 }
@@ -178,21 +199,26 @@ impl Scrubber {
             measured: Rc::new(Cell::new(None)),
         });
         self.clear_selection_in(&[Surface::Terminal]);
-        self.listen_to_terminal(events, request, cx);
+        self.listen_to_terminal(events, request, window, cx);
         cx.notify();
     }
 
     /// Reads the terminal's events on the UI thread for as long as the
     /// pane's session lives. They belong to the pane `request` started.
+    /// The events are read with the window, which closing the pane gives
+    /// the keyboard back in.
     fn listen_to_terminal(
         &mut self,
         mut events: UnboundedReceiver<Event>,
         request: Request,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             while let Some(event) = events.next().await {
-                let alive = this.update(cx, |this, cx| this.terminal_event(event, request, cx));
+                let alive = this.update_in(cx, |this, window, cx| {
+                    this.terminal_event(event, request, window, cx)
+                });
                 if alive.is_err() {
                     break;
                 }
@@ -201,7 +227,13 @@ impl Scrubber {
         .detach();
     }
 
-    fn terminal_event(&mut self, event: Event, request: Request, cx: &mut Context<Self>) {
+    fn terminal_event(
+        &mut self,
+        event: Event,
+        request: Request,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // An event of a pane since closed or replaced is dropped: its
         // answers to the program would be typed into another's pty, and
         // its exit would close the pane now open.
@@ -250,7 +282,7 @@ impl Scrubber {
                 });
                 if pane.ended == Some(Ended::Code(0)) {
                     let (kind, step) = (pane.kind, pane.step);
-                    self.close_terminal(cx);
+                    self.close_terminal(window, cx);
                     self.notify_user(
                         NoticeTone::Info,
                         format!("{} at step {} ended", kind.name(), thousands(step)),
@@ -267,10 +299,21 @@ impl Scrubber {
 
     /// Closes the pane and hangs up on its command if it still runs.
     /// Closing a shell or gdb is a moment the app was worth something.
-    pub(super) fn close_terminal(&mut self, cx: &mut Context<Self>) {
-        if self.drop_terminal(cx) {
-            self.value_moment(cx);
+    /// The keyboard goes back to the scrubber when the pane had it: the
+    /// pane's focus handle goes with the pane, and a window whose focused
+    /// handle is gone sends its keys to no one.
+    pub(super) fn close_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let had_keyboard = self
+            .terminal
+            .as_ref()
+            .is_some_and(|pane| pane.focus.is_focused(window));
+        if !self.drop_terminal(cx) {
+            return;
         }
+        if had_keyboard {
+            window.focus(&self.focus, cx);
+        }
+        self.value_moment(cx);
     }
 
     /// Takes the pane down, as a new one does the old. Returns whether
@@ -286,13 +329,16 @@ impl Scrubber {
 
     /// A key typed in the pane, sent to the command as xterm encodes it.
     /// Shift with Page Up and Page Down scrolls the scrollback instead.
-    pub(super) fn terminal_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+    /// Once the command has ended, Escape closes the pane.
+    pub(super) fn terminal_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(pane) = &self.terminal else {
             return;
         };
-        if pane.ended.is_some() {
-            return;
-        }
         let m = &event.keystroke.modifiers;
         let mods = Mods {
             shift: m.shift,
@@ -302,6 +348,15 @@ impl Scrubber {
         let Some(key) = key_of(&event.keystroke) else {
             return;
         };
+        match key_goes(pane.ended, &key) {
+            KeyGoes::ToCommand => {}
+            KeyGoes::ClosesPane => {
+                cx.stop_propagation();
+                self.close_terminal(window, cx);
+                return;
+            }
+            KeyGoes::Nowhere => return,
+        }
         cx.stop_propagation();
         let page = pane.session.size().lines as i32;
         match (&key, mods.shift && !mods.ctrl && !mods.alt) {
@@ -442,7 +497,7 @@ impl Scrubber {
             .cursor_pointer()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(icon(Icon::Close, size::ICON_CLOSE, theme::MUTED))
-            .on_click(cx.listener(|this, _, _, cx| this.close_terminal(cx)));
+            .on_click(cx.listener(|this, _, window, cx| this.close_terminal(window, cx)));
         let bar = panel_title(&title, Some(close.into_any_element()));
 
         // The grid: one selectable line per row, styled per span, the
@@ -572,7 +627,9 @@ impl Scrubber {
                 .id("terminal")
                 .key_context(TERMINAL_CONTEXT)
                 .track_focus(&pane.focus)
-                .on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| this.terminal_key(e, cx)))
+                .on_key_down(cx.listener(|this, e: &KeyDownEvent, window, cx| {
+                    this.terminal_key(e, window, cx)
+                }))
                 .on_action(cx.listener(|this, _: &TerminalCopy, _, cx| this.terminal_copy(cx)))
                 .on_action(cx.listener(|this, _: &TerminalPaste, _, cx| this.terminal_paste(cx)))
                 .flex()
@@ -627,6 +684,22 @@ fn overlay(
 mod tests {
     // The cursor's overlay on a row's spans, checked on plain ranges.
     use super::*;
+
+    #[test]
+    fn escape_closes_a_pane_whose_command_ended() {
+        // A running command gets every key, Escape among them, which vi
+        // and gdb's TUI read. Once the command has ended, with a nonzero
+        // status or by a signal, the pane stays to show what the command
+        // printed and has no one to send keys to: Escape closes the pane
+        // and other keys go nowhere.
+        assert_eq!(key_goes(None, &Key::Escape), KeyGoes::ToCommand);
+        assert_eq!(key_goes(None, &Key::Char('q')), KeyGoes::ToCommand);
+        let failed = Some(Ended::Code(1));
+        assert_eq!(key_goes(failed, &Key::Escape), KeyGoes::ClosesPane);
+        assert_eq!(key_goes(failed, &Key::Char('q')), KeyGoes::Nowhere);
+        let killed = Some(Ended::Signal(9));
+        assert_eq!(key_goes(killed, &Key::Escape), KeyGoes::ClosesPane);
+    }
 
     #[test]
     fn the_cursor_cuts_the_span_under_it() {

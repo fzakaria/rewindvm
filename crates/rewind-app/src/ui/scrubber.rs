@@ -1267,7 +1267,7 @@ impl Scrubber {
             Some(Closable::Blame) => self.close_blame(true, cx),
             Some(Closable::Tab(tab)) => self.close_tab(tab, cx),
             Some(Closable::Pick) => self.pick_row(None, cx),
-            Some(Closable::Terminal) => self.close_terminal(cx),
+            Some(Closable::Terminal) => self.close_terminal(window, cx),
             None => return,
         }
         window.focus(&self.focus, cx);
