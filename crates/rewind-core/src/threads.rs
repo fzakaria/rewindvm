@@ -205,6 +205,15 @@ impl<'a, M: Memory + ?Sized> Tasks<'a, M> {
         Ok(None)
     }
 
+    /// The page table of process `tgid`, as [`Tasks::process_page_table`]
+    /// finds it; None when the kernel lists no such process.
+    pub fn page_table_of(&self, tgid: u32) -> Result<Option<u64>> {
+        let Some(task) = self.process(tgid)? else {
+            return Ok(None);
+        };
+        self.process_page_table(task)
+    }
+
     /// The user registers a task saved when it last entered the kernel, in
     /// struct pt_regs at the top of its stack.
     pub fn user_registers(&self, task: u64) -> Result<[u64; pt_regs::WORDS]> {
@@ -508,6 +517,21 @@ mod tests {
         assert_eq!(tasks.process_page_table(t40).unwrap(), None);
         let t50 = tasks.process(50).unwrap().unwrap();
         assert_eq!(tasks.process_page_table(t50).unwrap(), None);
+    }
+
+    /// A process found by its id has its page table after its first
+    /// thread has exited, mm cleared, while another thread runs on. A
+    /// kernel thread has none, and neither has an id no process has.
+    #[test]
+    fn a_process_named_by_its_id_keeps_its_page_table() {
+        let (fake, [t40, ..]) = kernel();
+        let l = layout();
+        let tasks = Tasks::new(&fake, l);
+        assert_eq!(tasks.page_table_of(40).unwrap(), Some(0x9000));
+        fake.put_u64(t40 + l.mm, 0);
+        assert_eq!(tasks.page_table_of(40).unwrap(), Some(0x9000));
+        assert_eq!(tasks.page_table_of(50).unwrap(), None);
+        assert_eq!(tasks.page_table_of(60).unwrap(), None);
     }
 
     /// A thread's user registers are the words of its pt_regs, at the

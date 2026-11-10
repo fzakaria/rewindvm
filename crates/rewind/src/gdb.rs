@@ -294,16 +294,14 @@ pub(crate) fn on_the_cpu(machine: &rewind_vmm::Machine) -> Result<Option<OnTheCp
 }
 
 /// The page table of process `pid` on `machine`, or None from a kernel
-/// that does not say where its tasks are, or with no such process.
+/// that does not say where its tasks are, or with no such process. A
+/// process whose first thread has exited still has the page table its
+/// other threads run in.
 fn process_space(machine: &rewind_vmm::Machine, pid: u32) -> Result<Option<u64>> {
     let Some(layout) = machine.task_layout()? else {
         return Ok(None);
     };
-    let tasks = Tasks::new(machine, layout);
-    let Some(task) = tasks.process(pid)? else {
-        return Ok(None);
-    };
-    tasks.page_table(task)
+    Tasks::new(machine, layout).page_table_of(pid)
 }
 
 /// Where gdb's output goes: to the terminal, or back to the caller.
