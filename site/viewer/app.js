@@ -14,6 +14,20 @@
 // phone never downloads it.
 let web = null;
 
+// Where the app is: not asked for yet, loading, on screen, or stopped by
+// an error while it loaded or in its own code, which only a reload undoes.
+const Phase = {
+  Idle: "idle",
+  Starting: "starting",
+  Running: "running",
+  Stopped: "stopped",
+};
+let phase = Phase.Idle;
+
+// A file picked or dropped while the app was loading, opened once the app
+// is on screen.
+let heldFile = null;
+
 // The fonts the app is set in, which the web platform needs as files: it
 // starts with none, and cannot read the system's or the stylesheet's.
 const FONTS = [
@@ -34,21 +48,43 @@ const ADDRESS_DELAY_MS = 300;
 // started scrolls sideways.
 const APP_MIN_WIDTH = 960;
 
+// What the page says once the app's code has stopped.
+const STOPPED_NOTE =
+  "The viewer stopped on an error. Reload the page to start it again.";
+
+// What the page tells the app of a link whose body stopped short. The app
+// shows it after the link, "answered" and the server's status.
+const DROPPED_ANSWER = "then the connection dropped";
+
 const header = document.getElementById("site-header");
 const narrowNote = document.getElementById("viewer-narrow");
 const app = document.getElementById("viewer-app");
 const frame = document.getElementById("viewer-frame");
 const status = document.getElementById("viewer-status");
+const notice = document.getElementById("viewer-notice");
 const pick = document.getElementById("pick");
 const veil = document.getElementById("drop-veil");
 
-// The window fills the viewport below the header, however tall it wraps.
+// The window fills the viewport below the header, however tall it wraps,
+// and below the page's notice while one shows.
 function fitBelowHeader() {
-  const top = header.offsetHeight;
+  let top = header.offsetHeight;
+  if (!notice.hidden) {
+    const gap = parseFloat(getComputedStyle(notice).marginBottom);
+    top += notice.offsetHeight + gap;
+  }
   document.documentElement.style.setProperty("--viewer-top", `${top}px`);
 }
 new ResizeObserver(fitBelowHeader).observe(document.body);
 fitBelowHeader();
+
+// The page's word on the app goes away once the app has something to
+// show, unless that word is that the app stopped.
+function clearStatus() {
+  if (phase !== Phase.Stopped) {
+    status.hidden = true;
+  }
+}
 
 // The app appends its canvas, and any message that the browser cannot
 // draw, to the body; they go into the frame. On a touch screen narrower
@@ -57,7 +93,7 @@ fitBelowHeader();
 function adopt(node) {
   if (node instanceof HTMLCanvasElement) {
     frame.appendChild(node);
-    status.hidden = true;
+    clearStatus();
     const narrow = app.clientWidth < APP_MIN_WIDTH;
     if (narrow && matchMedia("(pointer: coarse)").matches) {
       node.style.touchAction = "pan-x";
@@ -68,7 +104,7 @@ function adopt(node) {
     node instanceof HTMLParagraphElement &&
     node.parentElement === document.body
   ) {
-    status.hidden = true;
+    clearStatus();
     frame.appendChild(node);
   }
 }
@@ -78,9 +114,56 @@ new MutationObserver((changes) => {
   }
 }).observe(document.body, { childList: true });
 
-// The bytes of an export, fetched whole. A server's error answer comes
-// back as its status; a fetch the browser refused, as a server without
-// CORS headers gets, as null.
+// Says `words` above the window, for what the app has no way to say: why
+// the page did not hand it a file. Null takes the notice away.
+function say(words) {
+  notice.textContent = words ?? "";
+  notice.hidden = words === null;
+  fitBelowHeader();
+}
+
+// The app's code stopped: a panic in it ends every later call too, and
+// its canvas stays as it was last drawn. The page says so over the canvas
+// and hands the app nothing more.
+function showStopped(error) {
+  console.error(error);
+  phase = Phase.Stopped;
+  heldFile = null;
+  veil.hidden = true;
+  status.textContent = STOPPED_NOTE;
+  status.classList.add("stopped");
+  status.hidden = false;
+}
+
+// Calls into the app. A call that throws is the app's code stopping.
+function callApp(call) {
+  if (phase !== Phase.Running) {
+    return;
+  }
+  try {
+    call();
+  } catch (error) {
+    showStopped(error);
+  }
+}
+
+// A panic outside any call the page makes, in a frame or an event the app
+// handles, reaches the window as a trap in the app's WebAssembly. Errors
+// of other kinds are not the app stopping, and are left alone.
+function watchForStop(error) {
+  if (error instanceof WebAssembly.RuntimeError) {
+    showStopped(error);
+  }
+}
+window.addEventListener("error", (event) => watchForStop(event.error));
+window.addEventListener("unhandledrejection", (event) =>
+  watchForStop(event.reason),
+);
+
+// The bytes at a link, fetched whole. A server's error answer comes back
+// as its status, and a body that stops short as its status and what
+// happened; a fetch the browser refused, as a server without CORS headers
+// gets, as null.
 async function fetchBytes(url) {
   let response;
   try {
@@ -88,39 +171,63 @@ async function fetchBytes(url) {
   } catch {
     return { answer: null };
   }
+  const answer = `${response.status} ${response.statusText}`.trim();
   if (!response.ok) {
-    return { answer: `${response.status} ${response.statusText}`.trim() };
+    return { answer };
   }
-  return { bytes: new Uint8Array(await response.arrayBuffer()) };
+  try {
+    return { bytes: new Uint8Array(await response.arrayBuffer()) };
+  } catch {
+    return { answer: `${answer}, ${DROPPED_ANSWER}` };
+  }
 }
 
 // Fetches the exports an address names and hands them to the app, or
 // tells it which one did not come.
 async function fetchRuns(url, compare, step) {
+  say(null);
   const [run, other] = await Promise.all([
     fetchBytes(url),
     compare ? fetchBytes(compare) : null,
   ]);
   if (!run.bytes) {
-    web.unfetched(url, run.answer ?? undefined);
+    callApp(() => web.unfetched(url, run.answer ?? undefined));
     return;
   }
   if (other && !other.bytes) {
-    web.unfetched(compare, other.answer ?? undefined);
+    callApp(() => web.unfetched(compare, other.answer ?? undefined));
     return;
   }
-  web.open_fetched(
-    run.bytes,
-    url,
-    other?.bytes,
-    compare ?? undefined,
-    step ?? undefined,
+  callApp(() =>
+    web.open_fetched(
+      run.bytes,
+      url,
+      other?.bytes,
+      compare ?? undefined,
+      step ?? undefined,
+    ),
   );
 }
 
-// Hands a picked or dropped file to the app, read in the browser.
+// Hands a picked or dropped file to the app, read in the browser. A file
+// that comes while the app loads is held until the app is on screen.
 async function openFile(file) {
-  web.open_file(file.name, new Uint8Array(await file.arrayBuffer()));
+  if (phase === Phase.Starting) {
+    heldFile = file;
+    return;
+  }
+  say(null);
+
+  // The file's bytes, which the browser can fail to read, as when the
+  // file was removed after it was picked.
+  let bytes;
+  try {
+    bytes = new Uint8Array(await file.arrayBuffer());
+  } catch {
+    say(`The browser could not read ${file.name}.`);
+    return;
+  }
+  callApp(() => web.open_file(file.name, bytes));
 }
 
 // The address follows what is on screen once the playhead rests, without
@@ -153,15 +260,19 @@ pick.addEventListener("change", () => {
 
 // A .rwd file dropped anywhere on the page opens. The app's canvas takes
 // drops for itself and discards their files, so the page listens first.
+// A dragged file is always taken from the browser, which would otherwise
+// leave the page to show the file; the page opens the file only while the
+// app is loading or on screen.
 const dragsFiles = (event) => event.dataTransfer?.types.includes("Files");
+const takesFiles = () => phase === Phase.Starting || phase === Phase.Running;
 window.addEventListener(
   "dragover",
   (event) => {
-    if (!web || !dragsFiles(event)) {
+    if (!dragsFiles(event)) {
       return;
     }
     event.preventDefault();
-    veil.hidden = false;
+    veil.hidden = !takesFiles();
   },
   { capture: true },
 );
@@ -177,14 +288,14 @@ window.addEventListener(
 window.addEventListener(
   "drop",
   (event) => {
-    if (!web || !dragsFiles(event)) {
+    if (!dragsFiles(event)) {
       return;
     }
     event.preventDefault();
     event.stopPropagation();
     veil.hidden = true;
     const [file] = event.dataTransfer.files;
-    if (file) {
+    if (file && takesFiles()) {
       openFile(file);
     }
   },
@@ -198,11 +309,13 @@ async function fetchFont(url) {
   return fetched.bytes ?? null;
 }
 
-// Loads the app's code and fonts and starts it on the page's address.
+// Loads the app's code and fonts and starts it on the page's address,
+// then opens the file that came while it loaded, if one did.
 async function startApp() {
   narrowNote.hidden = true;
   status.hidden = false;
   frame.classList.add("running");
+  phase = Phase.Starting;
   try {
     const [module, ...fonts] = await Promise.all([
       import("./pkg/rewind-web.js"),
@@ -217,8 +330,22 @@ async function startApp() {
     web = module;
     web.start(location.search);
   } catch (error) {
+    phase = Phase.Stopped;
+    heldFile = null;
     status.hidden = false;
     status.textContent = `The viewer did not start: ${error}`;
+    return;
+  }
+
+  // An error while the app loaded has already stopped it.
+  if (phase !== Phase.Starting) {
+    return;
+  }
+  phase = Phase.Running;
+  if (heldFile) {
+    const file = heldFile;
+    heldFile = null;
+    openFile(file);
   }
 }
 

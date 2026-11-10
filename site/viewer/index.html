@@ -82,6 +82,30 @@
       .viewer-status[hidden] {
         display: none;
       }
+      /* Over the canvas once the app has stopped, which stays as it was
+         last drawn underneath. */
+      .viewer-status.stopped {
+        z-index: 1;
+        padding: 24px;
+        text-align: center;
+        background: rgb(14 16 19 / 85%);
+        color: var(--text);
+      }
+      /* What the page says of a file it did not hand the app, above the
+         window. */
+      .viewer-notice {
+        margin: 0 0 12px;
+        padding: 10px 16px;
+        border: 1px solid var(--line);
+        border-left: 3px solid var(--amber);
+        border-radius: 10px;
+        background: var(--panel-2);
+        color: var(--text);
+        overflow-wrap: anywhere;
+      }
+      .viewer-notice[hidden] {
+        display: none;
+      }
       /* Shown over the page while a file is dragged onto it. */
       .drop-veil {
         position: fixed;
@@ -147,6 +171,8 @@
     <!-- The desktop app's window, read-only, drawn on a canvas that app.js
          moves into the frame once the app makes it. -->
     <main class="wrap viewer-page">
+      <!-- Why app.js did not hand the app a picked or dropped file. -->
+      <p class="viewer-notice" id="viewer-notice" role="alert" hidden></p>
       <div class="viewer-app" id="viewer-app">
         <div class="viewer-frame" id="viewer-frame">
           <p class="viewer-status" id="viewer-status" aria-live="polite">
