@@ -52,7 +52,7 @@ const RUNTIME_ATTRIBUTE: &str = "rewindRuntime";
 const ENV_RUNTIME: &str = "REWIND_RUNTIME";
 
 /// The guest shipped by the pinned runtime package.
-const RUNTIME_KERNEL: &str = "share/rewind/bzImage";
+const RUNTIME_KERNEL: &str = "share/rewind/vmlinux";
 const RUNTIME_INITRD: &str = "share/rewind/initrd";
 
 /// What nix-daemon waits to read from an external builder before taking

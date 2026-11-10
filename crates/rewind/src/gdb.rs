@@ -1,8 +1,8 @@
 //! `rewind gdb`: gdb on a fork of a run at a step, with every symbol this
 //! machine can find for what was running there.
 //!
-//! The kernel's symbols come from its package: vmlinux with its symbol
-//! table next to the bzImage, and its DWARF in the package's `debug`
+//! The kernel's symbols come from its package: the symbol table of the
+//! vmlinux the VM boots, and its DWARF in the package's `debug`
 //! output, fetched the first time someone debugs. The process that was
 //! running at the step is found by an inspection on a second fork, and
 //! each program and library it had mapped is loaded at the address it was
@@ -47,8 +47,8 @@ pub(crate) const GDB_LOCAL: &str = "127.0.0.1:0";
 const NIX_STORE: &str = "/nix/store";
 const NIX_STORE_PROGRAM: &str = "nix-store";
 
-/// The kernel package's files: vmlinux with its symbol table and the
-/// kernel's gdb scripts, next to the bzImage; in the `debug` output,
+/// The kernel package's files: vmlinux, which the VM boots, with its
+/// symbol table, and the kernel's gdb scripts; in the `debug` output,
 /// vmlinux's DWARF, linked by name as well as by build ID.
 const VMLINUX: &str = "vmlinux";
 const GDB_SCRIPTS: &str = "vmlinux-gdb.py";

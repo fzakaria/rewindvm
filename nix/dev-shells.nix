@@ -25,7 +25,7 @@
       pkgs.python3
     ];
 
-    REWIND_KERNEL = "${kernel}/bzImage";
+    REWIND_KERNEL = "${kernel}/vmlinux";
     REWIND_INITRD = "${guest.initrd}/initrd";
     REWIND_KERNEL_DEBUG = "${kernel.debug}";
     REWIND_DEBUGINFOD = pkgs.lib.getExe nixseparatedebuginfod2;

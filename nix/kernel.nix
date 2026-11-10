@@ -7,8 +7,8 @@
 # kernel has no modules at all.
 #
 # Two outputs of one build, so they describe the same code. `out` is what
-# runs and `rewind gdb` start from: the bzImage the VM boots, vmlinux with
-# its symbol table but no DWARF, System.map, the final .config and the
+# runs and `rewind gdb` start from: vmlinux, which the VM boots and gdb
+# reads the symbol table of, with no DWARF, System.map, the final .config and the
 # kernel's gdb scripts (lx-ps, lx-dmesg and the rest). `debug` is
 # nixpkgs' separateDebugInfo output: vmlinux's DWARF under
 # lib/debug/.build-id, which gdb and debuginfod servers such as
@@ -98,7 +98,7 @@ pkgs.stdenv.mkDerivation {
 
   buildPhase = ''
     runHook preBuild
-    make -j$NIX_BUILD_CORES bzImage vmlinux scripts_gdb
+    make -j$NIX_BUILD_CORES vmlinux scripts_gdb
     runHook postBuild
   '';
 
@@ -108,7 +108,7 @@ pkgs.stdenv.mkDerivation {
   installPhase = ''
     runHook preInstall
     mkdir -p $out
-    cp arch/x86/boot/bzImage .config System.map vmlinux $out/
+    cp .config System.map vmlinux $out/
     # The gdb scripts are the Python files in scripts/gdb, some of them
     # generated, next to the build's own files there.
     (cd scripts/gdb && find . -name '*.py' -exec install -D -m 444 {} $out/scripts/gdb/{} \;)

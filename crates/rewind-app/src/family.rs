@@ -1387,13 +1387,13 @@ mod tests {
         };
         let mut again = recorded.clone();
         assert_eq!(inputs(&recorded), inputs(&again));
-        again.spec.kernel = PathBuf::from("/nix/store/other-rewind-guest-kernel/bzImage");
+        again.spec.kernel = PathBuf::from("/nix/store/other-rewind-guest-kernel/vmlinux");
         assert_ne!(inputs(&recorded), inputs(&again));
 
         let imported_as = |id: &str| {
             let mut manifest = recorded.clone();
             manifest.id = rewind_trace::manifest::RunId::parse(id).unwrap();
-            manifest.spec.kernel = PathBuf::from(format!("/home/inputs/{id}/bzImage"));
+            manifest.spec.kernel = PathBuf::from(format!("/home/inputs/{id}/vmlinux"));
             manifest.spec.initrd = PathBuf::from(format!("/home/inputs/{id}/initrd"));
             manifest
         };

@@ -552,7 +552,7 @@ mod tests {
         // guest the host's CPU: a host without the x86-64-v3 baseline, such
         // as a Zen 3 without ERMS, must still be able to run it.
         let guest = Guest {
-            kernel: PathBuf::from("bzImage"),
+            kernel: PathBuf::from("vmlinux"),
             initrd: PathBuf::from("initrd"),
             kernel_debug: None,
         };

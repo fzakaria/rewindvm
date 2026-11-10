@@ -1945,7 +1945,7 @@ fn thread_on_cpu(machine: &Machine) -> Option<StalledThread> {
     })
 }
 
-/// The kernel's symbol table, beside its bzImage.
+/// The kernel's symbol table, beside its vmlinux.
 pub(crate) const SYSTEM_MAP: &str = "System.map";
 
 /// `addr` as `symbol+0xoffset`, from the System.map text `map`: the symbol
@@ -2441,7 +2441,7 @@ pub(crate) mod tests {
             "ffffffff81000000 T _text\nffffffff81285080 t rewind_clock_read\nffffffff812850c0 T rewind_yield\n",
         )
         .unwrap();
-        let kernel = dir.join("bzImage");
+        let kernel = dir.join("vmlinux");
         let worker = StalledThread {
             pid: 34,
             tid: 36,

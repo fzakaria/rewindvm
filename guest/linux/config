@@ -57,6 +57,12 @@ CONFIG_NO_HZ_IDLE=y
 CONFIG_PREEMPT_LAZY=y
 # CONFIG_PREEMPT_DYNAMIC is not set
 
+# Once the kernel has made its own text read-only it walks every page
+# table entry looking for a page both writable and executable, and warns
+# of any. The walk is a check on the kernel's own page tables, which do
+# not change between boots, and costs host time on every one.
+# CONFIG_DEBUG_WX is not set
+
 # Everything built in, so the initramfs carries only the init.
 # CONFIG_MODULES is not set
 
@@ -82,6 +88,7 @@ CONFIG_PREEMPT_LAZY=y
 # CONFIG_USB_SUPPORT is not set
 
 # DWARF and the kernel's gdb scripts, for `rewind gdb`. nix/kernel.nix
-# moves them to the `symbols` output; the bzImage carries none of it.
+# moves them to the `debug` output; the vmlinux the VM boots carries none
+# of it.
 CONFIG_DEBUG_INFO_DWARF5=y
 CONFIG_GDB_SCRIPTS=y

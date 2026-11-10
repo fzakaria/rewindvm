@@ -34,9 +34,9 @@ pub const SETUP_DATA: u64 = 0x21000;
 /// 1 MiB, as firmware.
 pub const EBDA_START: u64 = 0x9fc00;
 
-/// Where the protected-mode kernel is loaded, and its 64-bit entry point.
-pub const KERNEL_START: u64 = 0x10_0000;
-pub const KERNEL_ENTRY_64: u64 = KERNEL_START + 0x200;
+/// Where RAM resumes above the firmware hole. The kernel's segments go
+/// above it, at the physical addresses its vmlinux names (16 MiB).
+pub const RAM_START: u64 = 0x10_0000;
 
 /// RAM stops below the 32-bit MMIO hole, where the local APIC and I/O APIC
 /// live. Guests are small, so no RAM is placed above 4 GiB.

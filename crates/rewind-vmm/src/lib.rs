@@ -1665,7 +1665,10 @@ mod tests {
         let (exited, kept_exit) = exit_port(pv::PORT_EXIT);
         let (mut stalled, mut kept_stall) = exit_port(pv::PORT_IDLE);
         assert_eq!(stalled.stop, None);
-        assert_eq!(stalled.stall_if_idle(&mut kept_stall).unwrap(), Some(Stop::Stalled));
+        assert_eq!(
+            stalled.stall_if_idle(&mut kept_stall).unwrap(),
+            Some(Stop::Stalled)
+        );
         assert_eq!(stalled.stop, Some(Stop::Stalled));
         let mut faulted = devices_with_pending_switches(&SWITCHED_AT);
         faulted.step = STOPPED_AT;
@@ -1725,7 +1728,8 @@ mod tests {
         // A timer armed wakes the guest at the exit itself.
         let mut timed = devices(0);
         timed.clock.arm(1000);
-        timed.io_out(pv::PORT_IDLE, &0u32.to_le_bytes(), &mut Kept::default())
+        timed
+            .io_out(pv::PORT_IDLE, &0u32.to_le_bytes(), &mut Kept::default())
             .unwrap();
         assert!(!timed.idle);
     }

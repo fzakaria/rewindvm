@@ -1,6 +1,7 @@
 # `nix build .#release`: the command's release asset, for people without
-# Nix. It holds a static rewind, the guest kernel and initramfs, the
-# kernel's vmlinux and gdb scripts for `rewind gdb`, static mkfs.erofs and
+# Nix. It holds a static rewind, the guest kernel (its vmlinux, which the
+# VM boots and `rewind gdb` reads) and initramfs, the kernel's gdb
+# scripts, static mkfs.erofs and
 # GNU tar for building input images, static dump.erofs for `rewind gdb` to
 # read files out of them, and a launcher that points rewind at all of
 # them. The host needs only /dev/kvm; `rewind nix` also needs nix on PATH.
@@ -61,7 +62,7 @@ let
     here=$(dirname "$(readlink -f "$0")")
     PATH="$here/../libexec/rewind-tools:$PATH"
     export PATH
-    : "''${REWIND_KERNEL:=$here/../share/rewind/bzImage}"
+    : "''${REWIND_KERNEL:=$here/../share/rewind/vmlinux}"
     : "''${REWIND_INITRD:=$here/../share/rewind/initrd}"
     debug=$(readlink -f "$here/../../rewind-debug-x86_64-linux")
     if [ -z "''${REWIND_KERNEL_DEBUG:-}" ] && [ -e "$debug/lib/debug/vmlinux" ]; then
@@ -81,7 +82,7 @@ pkgs.runCommand "rewind-release" { } ''
   cp ${pkgs.pkgsStatic.erofs-utils}/bin/mkfs.erofs ${pkgs.pkgsStatic.erofs-utils}/bin/dump.erofs \
     ${staticTar}/bin/tar $dir/libexec/rewind-tools/
   install -m 755 ${launcher} $dir/bin/rewind
-  cp -r ${kernel}/bzImage ${kernel}/vmlinux ${kernel}/vmlinux-gdb.py ${kernel}/scripts \
+  cp -r ${kernel}/vmlinux ${kernel}/vmlinux-gdb.py ${kernel}/scripts \
     ${guest.initrd}/initrd $dir/share/rewind/
   chmod -R u+w $dir/share/rewind
   cp ${../LICENSE} $dir/LICENSE

@@ -725,7 +725,7 @@ def check_guest(home, paths):
     def digest(path):
         return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
-    files = {"kernel": "bzImage", "initrd": "initrd"}
+    files = {"kernel": "vmlinux", "initrd": "initrd"}
     want = {name: digest(Path(paths[name]) / file) for name, file in files.items()}
     for manifest in sorted((home / "runs").glob("*/manifest.json")):
         spec = json.loads(manifest.read_text())["spec"]
