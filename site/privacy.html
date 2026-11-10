@@ -53,8 +53,11 @@
         then asks those binary caches whether each holds the same output, logging in with your netrc
         entry where a cache has one. <code>rewind gdb</code>, and the other commands and app panels
         that show source code, download debug information and source files from cache.nixos.org,
-        from those binary caches and from any debuginfod servers you have set.
-        <code>rewind import</code> and the app download a recording from a link you give them.
+        from those binary caches and from any debuginfod servers you have set. With the NixOS
+        module, one of those caches is rewindvm.cachix.org, which we run on Cachix: debug
+        information for the guest kernel comes from there, and Cachix sees the usual details of the
+        request. <code>rewind import</code> and the app download a recording from a link you give
+        them.
       </p>
 
       <h2>Your runs stay on your machine</h2>
