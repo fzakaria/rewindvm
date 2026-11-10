@@ -46,8 +46,9 @@ pub struct RunsPanel {
     /// Runs picked with Ctrl and Shift clicks, by id, for copying their
     /// ids or deleting them together.
     pub picked: Vec<String>,
-    /// The row a Shift click picks from.
-    pub anchor: Option<usize>,
+    /// The run a Shift click picks from, by id: the panel's rows move
+    /// while a run executes, so a row's index does not stay its run's.
+    pub anchor: Option<String>,
     /// The run chosen with Compare against this run, which every run
     /// opened from the Runs panel is compared with until the choice is
     /// dropped. Without one, a run is compared with its parent.
@@ -138,16 +139,23 @@ impl RunsPanel {
         }
         match how {
             Pick::Range => {
-                let from = self.anchor.unwrap_or(index);
+                // From the row the anchor's run has now; from the row
+                // pressed when the run has no row any more.
+                let anchored = self.anchor.as_deref().and_then(|id| {
+                    rows.iter()
+                        .position(|r| r.kind == RowKind::Run && r.run.id == id)
+                });
+                let from = anchored.unwrap_or(index);
                 let (lo, hi) = (from.min(index), from.max(index));
-                for r in rows[lo..=hi.min(rows.len() - 1)]
+                // The runs in the range that are not picked yet, found
+                // with a set so a range of thousands of rows is one pass.
+                let already: HashSet<&str> = self.picked.iter().map(String::as_str).collect();
+                let more: Vec<String> = rows[lo..=hi.min(rows.len() - 1)]
                     .iter()
-                    .filter(|r| r.kind == RowKind::Run)
-                {
-                    if !self.picked.contains(&r.run.id) {
-                        self.picked.push(r.run.id.clone());
-                    }
-                }
+                    .filter(|r| r.kind == RowKind::Run && !already.contains(r.run.id.as_str()))
+                    .map(|r| r.run.id.clone())
+                    .collect();
+                self.picked.extend(more);
                 true
             }
             Pick::Toggle => {
@@ -158,12 +166,12 @@ impl RunsPanel {
                     }
                     None => self.picked.push(id.clone()),
                 }
-                self.anchor = Some(index);
+                self.anchor = Some(row.run.id.clone());
                 true
             }
             Pick::Open => {
                 self.picked.clear();
-                self.anchor = Some(index);
+                self.anchor = Some(row.run.id.clone());
                 false
             }
         }
@@ -192,7 +200,7 @@ impl RunsPanel {
         }
         if !self.picked.contains(&row.run.id) {
             self.picked = vec![row.run.id.clone()];
-            self.anchor = Some(index);
+            self.anchor = Some(row.run.id.clone());
         }
     }
 
@@ -202,10 +210,11 @@ impl RunsPanel {
         let Some(family) = &self.family else {
             return Vec::new();
         };
+        let picked: HashSet<&str> = self.picked.iter().map(String::as_str).collect();
         family
             .rows()
             .into_iter()
-            .filter(|r| self.picked.contains(&r.run.id))
+            .filter(|r| picked.contains(r.run.id.as_str()))
             .map(|r| r.run)
             .collect()
     }
@@ -217,28 +226,13 @@ impl RunsPanel {
         let family = self.family.as_ref()?;
         let picked: Vec<&str> = runs.iter().map(|r| r.id.as_str()).collect();
 
-        // Runs under another picked run go with it.
-        let tops: Vec<&RunEntry> = runs
-            .iter()
-            .filter(|r| {
-                !picked
-                    .iter()
-                    .any(|p| family.descendants(p).iter().any(|d| d.id == r.id))
-            })
-            .collect();
-        let mut gone: Vec<&str> = Vec::new();
-        for top in &tops {
-            for id in std::iter::once(top.id.as_str())
-                .chain(family.descendants(&top.id).iter().map(|d| d.id.as_str()))
-            {
-                if !gone.contains(&id) {
-                    gone.push(id);
-                }
-            }
-        }
+        // Runs under another picked run go with it. The family's forks
+        // are walked once for every picked run together.
+        let removal = family.removal(&picked);
+        let (tops, gone) = (removal.tops, removal.runs);
         let dirs: Vec<PathBuf> = tops.iter().map(|r| r.dir.clone()).collect();
-        let at_once = tops.len() == 1 && tops[0].parent.is_some() && gone.len() == 1;
-        let question = (!at_once).then(|| match (tops.len(), gone.len() - tops.len()) {
+        let at_once = tops.len() == 1 && tops[0].parent.is_some() && gone == 1;
+        let question = (!at_once).then(|| match (tops.len(), gone - tops.len()) {
             (1, 0) => format!("Delete run {}?", short_id(&tops[0].id)),
             (1, 1) => format!("Delete run {} and its fork?", short_id(&tops[0].id)),
             (1, n) => format!("Delete run {} and its {n} forks?", short_id(&tops[0].id)),
@@ -247,7 +241,7 @@ impl RunsPanel {
         });
         Some(Deletion {
             dirs,
-            runs: gone.len(),
+            runs: gone,
             question,
         })
     }
@@ -315,6 +309,31 @@ mod tests {
 
         assert!(!panel.pick(&rows, at("f1a"), Pick::Open));
         assert!(panel.picked.is_empty());
+    }
+
+    #[test]
+    fn shift_picks_from_the_run_pressed_last_when_the_rows_have_moved() {
+        // A plain press on f2 makes it the run Shift picks from. A fork
+        // of base at an earlier step then appears, as one does while a
+        // check runs, and takes a row above f2. Shift on f1 picks from f1
+        // to f2, where f2 is now, not to the row f2 had.
+        let mut panel = panel();
+        let rows = panel.rows("", "");
+        let at = |rows: &[Row], id: &str| rows.iter().position(|r| r.run.id == id).unwrap();
+        assert!(!panel.pick(&rows, at(&rows, "f2"), Pick::Open));
+
+        let mut runs = panel.family.as_ref().unwrap().runs.clone();
+        let mut early = entry("f0", Some("base"));
+        early.parent.as_mut().unwrap().step = 5;
+        runs.push(early);
+        panel.set_family(Some(Family { runs }));
+        let rows = panel.rows("", "");
+        assert!(at(&rows, "f0") < at(&rows, "f2"));
+
+        assert!(panel.pick(&rows, at(&rows, "f1"), Pick::Range));
+        let mut picked = panel.picked.clone();
+        picked.sort();
+        assert_eq!(picked, vec!["f1", "f1a", "f2"]);
     }
 
     #[test]

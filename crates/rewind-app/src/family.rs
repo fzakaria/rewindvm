@@ -975,6 +975,54 @@ impl Family {
             .collect()
     }
 
+    /// What removing the runs `ids` removes: the runs of `ids` that no
+    /// other of them is above, in the order given, which the engine is
+    /// asked to remove, and how many runs go in all with the forks under
+    /// them. The forks are walked once for all of `ids`, so picking every
+    /// run of a large family costs one pass over it.
+    pub fn removal(&self, ids: &[&str]) -> Removal<'_> {
+        // The forks of each run, built once.
+        let by_id = self.by_id();
+        let mut forks: HashMap<&str, Vec<&RunEntry>> = HashMap::new();
+        for run in &self.runs {
+            if let Some(parent) = &run.parent {
+                forks.entry(parent.id.as_str()).or_default().push(run);
+            }
+        }
+
+        // Every run under one of `ids`, walking down from each. A run
+        // found under an earlier one has had its forks walked, so no
+        // run's forks are walked twice.
+        let mut under: HashSet<&str> = HashSet::new();
+        for root in ids {
+            if under.contains(root) {
+                continue;
+            }
+            let mut walk: Vec<&RunEntry> = forks.get(root).cloned().unwrap_or_default();
+            while let Some(run) = walk.pop() {
+                // Runs that name each other as parents lead back to the
+                // root, which is not under itself.
+                if run.id == *root || !under.insert(run.id.as_str()) {
+                    continue;
+                }
+                walk.extend(forks.get(run.id.as_str()).into_iter().flatten());
+            }
+        }
+
+        // The runs asked for that are under no other, each once.
+        let mut named: HashSet<&str> = HashSet::new();
+        let tops: Vec<&RunEntry> = ids
+            .iter()
+            .filter(|id| !under.contains(*id))
+            .filter_map(|id| by_id.get(id).copied())
+            .filter(|run| named.insert(run.id.as_str()))
+            .collect();
+        Removal {
+            runs: tops.len() + under.len(),
+            tops,
+        }
+    }
+
     /// How many forks repeat the trace of a run listed before them, and
     /// so add nothing to the family.
     pub fn identical(&self) -> usize {
@@ -983,6 +1031,15 @@ impl Family {
             .filter(|r| r.identical_to.is_some())
             .count()
     }
+}
+
+/// What removing some runs of a family removes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Removal<'a> {
+    /// The runs asked for that no other run asked for is above.
+    pub tops: Vec<&'a RunEntry>,
+    /// How many runs go in all, forks included.
+    pub runs: usize,
 }
 
 /// `runs` grouped into families, the one changed most recently first.
@@ -1422,6 +1479,47 @@ mod tests {
         assert_eq!(ids("f1"), vec!["f1a"]);
         assert_eq!(ids("f1a"), Vec::<&str>::new());
         assert_eq!(ids("base"), vec!["dup", "f1", "f1a", "f2"]);
+    }
+
+    #[test]
+    fn removing_runs_takes_each_with_its_forks_once() {
+        // f1 goes with its fork; f1 and f1a named together are f1 and its
+        // fork, once, in either order; base takes every run. A family of
+        // thousands of runs, a chain of forks and many forks of its last
+        // run, with every run named, is one top and is worked out in one
+        // pass: by a walk of the family per pair of runs named it does not
+        // finish in the time a test has.
+        let f = family();
+        let removal = |ids: &[&str]| {
+            let removal = f.removal(ids);
+            let tops: Vec<&str> = removal.tops.iter().map(|r| r.id.as_str()).collect();
+            (tops, removal.runs)
+        };
+        assert_eq!(removal(&["f1"]), (vec!["f1"], 2));
+        assert_eq!(removal(&["f1", "f1a"]), (vec!["f1"], 2));
+        assert_eq!(removal(&["f1a", "f1"]), (vec!["f1"], 2));
+        assert_eq!(removal(&["f1a", "f2"]), (vec!["f1a", "f2"], 2));
+        assert_eq!(removal(&["base"]), (vec!["base"], 5));
+        assert_eq!(removal(&["f2", "base", "f2"]), (vec!["base"], 5));
+        assert_eq!(removal(&["gone"]), (vec![], 0));
+
+        const CHAIN: usize = 1_500;
+        const LEAVES: usize = 1_500;
+        let mut runs = vec![run("c0", None, 0, "exited:0")];
+        for i in 1..CHAIN {
+            let parent = format!("c{}", i - 1);
+            runs.push(run(&format!("c{i}"), Some((&parent, 10)), 1, "exited:2"));
+        }
+        let last = format!("c{}", CHAIN - 1);
+        for i in 0..LEAVES {
+            runs.push(run(&format!("l{i}"), Some((&last, 20)), 1, "exited:2"));
+        }
+        let big = Family { runs };
+        let every: Vec<&str> = big.runs.iter().rev().map(|r| r.id.as_str()).collect();
+        let removal = big.removal(&every);
+        assert_eq!(removal.tops.len(), 1);
+        assert_eq!(removal.tops[0].id, "c0");
+        assert_eq!(removal.runs, CHAIN + LEAVES);
     }
 
     #[test]
