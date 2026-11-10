@@ -528,9 +528,9 @@ the last event that wrote, renamed or unlinked each path, or as original when
 none did, and keeps the paths the VM did not have as absent. A later lookup
 whose step has the same last event for a path reads it from there, and makes
 no `files` fork when every path is there. An open for writing counts once
-every process that opened the file has closed it or exited, since the open
-marks only the start of its writes; until then the file is read from the VM
-each time.
+every process holding it, the one that opened the file and any forked from
+a holder since, has closed it or exited, since the open marks only the
+start of its writes; until then the file is read from the VM each time.
 
 DWARF and sources for everything in the store come by build ID from
 nixseparatedebuginfod2, which Rewind starts for the session on a socket it

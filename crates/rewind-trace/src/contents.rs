@@ -29,9 +29,11 @@ pub enum Version {
 ///
 /// An open for writing marks only the start of the writes, which the
 /// trace does not record one by one, so its version is finished once
-/// every process that opened the file has closed it or exited. A process
-/// one of them forked after opening could hold the file open longer;
-/// builds do not write source files that way.
+/// every open of the file is over. An open is held by the process that
+/// made it and by every process forked from a holder since, which
+/// inherits the descriptor; the kernel reports the close that drops the
+/// file's last reference, whichever holder makes it, and a holder that
+/// exits drops its own. The open is over once no holder is left.
 pub fn version(trace: &Trace, path: &str, step: u64) -> Version {
     // Events name absolute paths without `.` or `..`.
     let Some(path) = normal(path) else {
@@ -39,35 +41,51 @@ pub fn version(trace: &Trace, path: &str, step: u64) -> Version {
     };
     let path = path.as_str();
 
-    // The last event up to the step that changed the path, and the
-    // processes that opened it for writing and had not exited by the
-    // step. An earlier opener than the last may still hold the file and
-    // write it after a later open, rename or unlink, so every opener
-    // counts, and an open is finished once its process has exited.
+    // The last event up to the step that changed the path, and the opens
+    // for writing still held by the step, each as the processes holding
+    // it. An earlier open than the last may still be held and written
+    // after a later open, rename or unlink, so every open counts.
     let mut last = None;
-    let mut writers: HashSet<u32> = HashSet::new();
+    let mut opens: Vec<HashSet<u32>> = Vec::new();
     for e in trace.until(step) {
         if changes(&e.kind, path) {
             last = Some(e.step);
             if let EventKind::Open { .. } = e.kind {
-                writers.insert(e.pid);
+                opens.push(HashSet::from([e.pid]));
             }
             continue;
         }
         match &e.kind {
-            EventKind::Exit { thread: false, .. } if !writers.is_empty() => {
-                writers.remove(&e.pid);
+            // A forked child holds every open its parent holds; a thread
+            // shares its process's table and holds nothing of its own.
+            EventKind::Fork {
+                child,
+                thread: false,
+            } => {
+                for holders in opens.iter_mut().filter(|h| h.contains(&e.pid)) {
+                    holders.insert(*child);
+                }
             }
+            EventKind::Exit { thread: false, .. } => {
+                for holders in &mut opens {
+                    holders.remove(&e.pid);
+                }
+            }
+            // The file's last reference through one open went: that
+            // open is over for every process that held it.
             EventKind::Close { path: closed } if closed == path => {
-                writers.remove(&e.pid);
+                if let Some(over) = opens.iter().position(|h| h.contains(&e.pid)) {
+                    opens.swap_remove(over);
+                }
             }
             _ => {}
         }
+        opens.retain(|holders| !holders.is_empty());
     }
 
     match last {
         None => Version::Original,
-        Some(_) if !writers.is_empty() => Version::Changing,
+        Some(_) if !opens.is_empty() => Version::Changing,
         Some(at) => Version::Since(at),
     }
 }
@@ -271,5 +289,82 @@ mod tests {
         };
         assert_eq!(version(&trace, "/build/out.c", 13), Version::Changing);
         assert_eq!(version(&trace, "/build/out.c", 20), Version::Since(10));
+    }
+
+    #[test]
+    fn a_child_that_inherited_the_descriptor_keeps_the_path_changing() {
+        // Process 100 opens out.c at 10 and forks 150 at 12, which
+        // inherits the descriptor. The kernel reports a close only when
+        // the file's last reference goes, so 100's exit at 20 closes
+        // nothing: the file is changing until the child closes it at 25,
+        // or, in a second trace, until the child exits at 30. A thread
+        // cloned at 12 shares the table instead, so its exit at 14 holds
+        // nothing open, and the process's close at 15 ends the writes. A
+        // second process that opened the file itself holds its own
+        // reference, which the child's close does not drop.
+        let close = |step: u64, pid: u32, path: &str| {
+            event(step, pid, EventKind::Close { path: path.into() })
+        };
+        let fork = |step: u64, pid: u32, child: u32, thread: bool| {
+            event(step, pid, EventKind::Fork { child, thread })
+        };
+        let path = "/build/out.c";
+        let child_closes = Trace {
+            events: vec![
+                open(10, 100, path),
+                fork(12, 100, 150, false),
+                exit(20, 100),
+                close(25, 150, path),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(version(&child_closes, path, 22), Version::Changing);
+        assert_eq!(version(&child_closes, path, 27), Version::Since(10));
+
+        let child_exits = Trace {
+            events: vec![
+                open(10, 100, path),
+                fork(12, 100, 150, false),
+                exit(20, 100),
+                exit(30, 150),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(version(&child_exits, path, 25), Version::Changing);
+        assert_eq!(version(&child_exits, path, 35), Version::Since(10));
+
+        let mut thread_exit = exit(14, 100);
+        thread_exit.tid = 151;
+        thread_exit.kind = EventKind::Exit {
+            status: 0,
+            comm: "tar".into(),
+            thread: true,
+        };
+        let thread = Trace {
+            events: vec![
+                open(10, 100, path),
+                fork(12, 100, 151, true),
+                thread_exit,
+                close(15, 100, path),
+                exit(50, 100),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(version(&thread, path, 13), Version::Changing);
+        assert_eq!(version(&thread, path, 20), Version::Since(10));
+
+        let two_opens = Trace {
+            events: vec![
+                open(10, 100, path),
+                fork(12, 100, 150, false),
+                open(20, 200, path),
+                exit(22, 100),
+                close(25, 150, path),
+                close(30, 200, path),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(version(&two_opens, path, 27), Version::Changing);
+        assert_eq!(version(&two_opens, path, 35), Version::Since(20));
     }
 }
