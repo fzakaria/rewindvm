@@ -1,15 +1,31 @@
 # Publishes the marketing site. The deployed tree is exactly `nix build
 # .#site`, the same one `nix run .#serve` previews, so what gets tested
 # locally is what ships. Downloads are release assets (release.yml), so
-# the site depends on nothing but site/.
+# the site is built from site/, the release's number in VERSION, and the
+# viewer, which is the desktop app built for the browser (nix/web.nix).
 name: pages
 
+# The paths are the inputs of `nix build .#site`. The viewer's wasm is
+# built from the app's workspace in crates/rewind-app, which holds its own
+# Cargo.lock, from the rewind-trace and rewind-init crates the app reads
+# traces with, and from the root Cargo.toml, which rewind-trace inherits
+# its version, edition and license from (nix/crane.nix). The root
+# Cargo.lock belongs to the engine's workspace and is no input of the
+# site.
 on:
   push:
     branches: [main]
     paths:
       - site/**
+      - VERSION
+      - Cargo.toml
+      - crates/rewind-app/**
+      - crates/rewind-trace/**
+      - crates/rewind-init/**
       - nix/site.nix
+      - nix/web.nix
+      - nix/crane.nix
+      - flake.nix
       - flake.lock
       - .github/workflows/pages.yml
   workflow_dispatch:
