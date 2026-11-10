@@ -10,16 +10,18 @@
   *   - a terminal for the workload's output, as nix-daemon gives a
   *     builder, whose writes join the event stream,
   *   - the CPU count the affinity system calls report, which may exceed the
-@@ -102,9 +105,10 @@
+@@ -102,9 +105,12 @@
   * ports, the records and struct rewind_shared. The kernel writes it into
   * rewind_shared.interface before setup, and a monitor that speaks another
   * stops rather than run it. Interface 4 added the read and write records
 - * in rewind_shared.io_*.
 + * in rewind_shared.io_*, and interface 5 the record at every context
-+ * switch.
++ * switch. Interface 6 changed what the records say, not their form: a
++ * file event names the path the kernel resolved, a crash is reported
++ * once, RDTSC traps in every task, and idle follows any held interrupt.
   */
 -#define REWIND_INTERFACE	4
-+#define REWIND_INTERFACE	5
++#define REWIND_INTERFACE	6
  
  /* Values written to REWIND_PORT_EXIT. */
  enum rewind_exit {

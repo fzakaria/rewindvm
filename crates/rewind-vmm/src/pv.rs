@@ -154,13 +154,10 @@ pub const SHARED_TASKS: u64 = (SHARED_STALL_NS + 4).next_multiple_of(8);
 /// The version of the interface between the monitor and the guest kernel:
 /// the ports, the records and the shared page. The kernel writes it into
 /// the shared page, after the task layout, before it sends setup; a kernel
-/// from before rewind 1.0 wrote none, and the field reads 0. Version 4
-/// added the read and write records, and version 5 a record at every
-/// context switch; a kernel of version 3 or 4 runs as it did, without
-/// them.
-pub const INTERFACE_VERSION: u32 = 5;
-const INTERFACE_WITHOUT_SWITCHES: u32 = 4;
-const INTERFACE_WITHOUT_IO: u32 = 3;
+/// from before rewind 1.0 wrote none, and the field reads 0. Version 6
+/// changed what a kernel records at an event, not the form: a kernel of
+/// any other version is refused, and its runs are recorded again.
+pub const INTERFACE_VERSION: u32 = 6;
 pub const SHARED_INTERFACE: u64 = SHARED_TASKS + 8 * TASK_LAYOUT_FIELDS as u64;
 
 /// Where a task off the CPU saved its user FS and GS bases, as offsets in
@@ -188,39 +185,18 @@ pub const SHARED_IO_LOST: u64 = SHARED_IO_HEAD + 4;
 /// kernel's buffer size.
 pub const IO_BUF_MAX: usize = 1 << 20;
 
-/// The records a guest kernel of an interface makes beyond its events:
-/// read and write records in a buffer the monitor drains at each step,
-/// and a record at every context switch, which the monitor encodes into
-/// batches.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct GuestRecords {
-    pub io: bool,
-    pub switches: bool,
-}
-
 /// Whether a guest kernel that names interface `version` is one this
-/// monitor runs, and if so which records it makes.
-pub fn check_interface(version: u32) -> anyhow::Result<GuestRecords> {
+/// monitor runs: its own, and no other.
+pub fn check_interface(version: u32) -> anyhow::Result<()> {
     match version {
-        INTERFACE_VERSION => Ok(GuestRecords {
-            io: true,
-            switches: true,
-        }),
-        INTERFACE_WITHOUT_SWITCHES => Ok(GuestRecords {
-            io: true,
-            switches: false,
-        }),
-        INTERFACE_WITHOUT_IO => Ok(GuestRecords {
-            io: false,
-            switches: false,
-        }),
+        INTERFACE_VERSION => Ok(()),
         0 => anyhow::bail!(
             "the run's guest kernel names no interface: it is from before rewind 1.0, \
              which this build does not run; record the run again"
         ),
         other => anyhow::bail!(
             "the run's guest kernel speaks interface {other}, and this build of rewind \
-             speaks interface {INTERFACE_VERSION}"
+             speaks interface {INTERFACE_VERSION}; record the run again"
         ),
     }
 }
@@ -352,37 +328,17 @@ mod interface_tests {
         assert_eq!(RESEED_BYTES, 32);
     }
 
-    /// The monitor runs only a kernel that names an interface it speaks:
-    /// its own, the one before it, whose kernel records no context
-    /// switches but buffers read and write records, or the one before
-    /// that, whose kernel does neither. A kernel from before rewind 1.0
-    /// names none, which reads as 0.
+    /// The monitor runs only a kernel that names its own interface. A
+    /// kernel from before rewind 1.0 names none, which reads as 0, and
+    /// one of the interface before is told to record again.
     #[test]
     fn the_monitor_runs_only_its_own_interface() {
-        assert_eq!(INTERFACE_VERSION, 5);
-        assert_eq!(
-            check_interface(INTERFACE_VERSION).unwrap(),
-            GuestRecords {
-                io: true,
-                switches: true
-            }
-        );
-        assert_eq!(
-            check_interface(INTERFACE_WITHOUT_SWITCHES).unwrap(),
-            GuestRecords {
-                io: true,
-                switches: false
-            }
-        );
-        assert_eq!(
-            check_interface(INTERFACE_WITHOUT_IO).unwrap(),
-            GuestRecords {
-                io: false,
-                switches: false
-            }
-        );
+        assert_eq!(INTERFACE_VERSION, 6);
+        check_interface(INTERFACE_VERSION).unwrap();
         let none = format!("{:#}", check_interface(0).unwrap_err());
         assert!(none.contains("before rewind 1.0"), "{none}");
+        let before = format!("{:#}", check_interface(INTERFACE_VERSION - 1).unwrap_err());
+        assert!(before.contains("record the run again"), "{before}");
         let other = format!("{:#}", check_interface(INTERFACE_VERSION + 1).unwrap_err());
         assert!(
             other.contains(&format!("interface {}", INTERFACE_VERSION + 1)),

@@ -662,11 +662,12 @@ records at 11 steps, in stretches of up to 19,000 writes with no exit
 between them. With 1 MiB it lost none.
 
 A guest kernel names the version of its interface with the monitor in the
-shared page. Kernels of version 4 keep these records, and kernels of
-version 5 also write a record at every context switch (see [Exploring
-interleavings](#exploring-interleavings)). The monitor still runs kernels
-of version 3, which keep none, and of version 4, so runs recorded before
-records or switches existed replay as they did.
+shared page, and the monitor runs a kernel of its own version only. Version
+4 added these records, version 5 the record at every context switch (see
+[Exploring interleavings](#exploring-interleavings)), and version 6
+changed what the records say: a file event names the path the kernel
+resolved, a crash is reported once, and RDTSC traps in every task. A run
+recorded with an older kernel is recorded again.
 
 ### The CPU model
 

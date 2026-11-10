@@ -1230,12 +1230,12 @@ impl Devices {
             }
             pv::PORT_SETUP => {
                 let shared = value as u64;
-                let records = pv::check_interface(self.guest_interface(shared)?)?;
+                pv::check_interface(self.guest_interface(shared)?)?;
                 self.ram
                     .write(shared + pv::SHARED_EPOCH, &self.epoch.to_le_bytes())?;
                 self.shared = Some(shared);
-                self.io = records.io.then(rewind_trace::io_records::Encoder::new);
-                self.switches = records.switches.then(rewind_trace::switches::Encoder::new);
+                self.io = Some(rewind_trace::io_records::Encoder::new());
+                self.switches = Some(rewind_trace::switches::Encoder::new());
             }
             pv::PORT_COM1 => obs.serial(self.step, data[0]),
             _ => {}

@@ -373,27 +373,23 @@ impl Machine {
     /// Sets the record encoders for a machine just put at a keyframe at
     /// `step`: a kernel that buffers read and write records has them
     /// encoded against the ones `trace`, the run's whole trace, holds up
-    /// to the step, and a kernel that records switches goes on from the
-    /// batches written by then and the switches up to the step that the
-    /// run wrote in a batch after it.
+    /// to the step, and the switches go on from the batches written by
+    /// then and the switches up to the step that the run wrote in a batch
+    /// after it.
     pub(crate) fn resume_records(&mut self, trace: &[(u64, Vec<u8>)], step: u64) -> Result<()> {
         self.dev.io = None;
         self.dev.switches = None;
         let Some(shared) = self.dev.shared else {
             return Ok(());
         };
-        let records = crate::pv::check_interface(self.dev.guest_interface(shared)?)?;
-        if records.io {
-            let through = trace.partition_point(|(s, _)| *s <= step);
-            let encoder = rewind_trace::io_records::Encoder::resume(&trace[..through])
-                .context("reading the read and write records up to the keyframe")?;
-            self.dev.io = Some(encoder);
-        }
-        if records.switches {
-            let encoder = rewind_trace::switches::Encoder::resume(trace, step)
-                .context("reading the context switches up to the keyframe")?;
-            self.dev.switches = Some(encoder);
-        }
+        crate::pv::check_interface(self.dev.guest_interface(shared)?)?;
+        let through = trace.partition_point(|(s, _)| *s <= step);
+        let encoder = rewind_trace::io_records::Encoder::resume(&trace[..through])
+            .context("reading the read and write records up to the keyframe")?;
+        self.dev.io = Some(encoder);
+        let encoder = rewind_trace::switches::Encoder::resume(trace, step)
+            .context("reading the context switches up to the keyframe")?;
+        self.dev.switches = Some(encoder);
         Ok(())
     }
 
