@@ -665,6 +665,7 @@ mod tests {
                 start: 1,
                 end: None,
                 status: None,
+                comm: None,
                 threads: Vec::new(),
             }
         };

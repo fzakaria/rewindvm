@@ -765,11 +765,11 @@ fn alive_step(trace: &Trace, step: u64, pid: u32) -> u64 {
 }
 
 /// The name of the process with id `pid` at `step`: the file name of the
-/// program it last ran.
+/// program it ran then, as the desktop app names it too, else its pid.
 fn process_name(trace: &Trace, pid: u32, step: u64) -> String {
-    let process = trace.process_at(pid, step);
-    let name = process.map_or_else(|| format!("pid {pid}"), |p| p.name());
-    name.rsplit('/').next().unwrap_or(&name).to_string()
+    trace
+        .process_name_at(pid, step)
+        .unwrap_or_else(|| format!("pid {pid}"))
 }
 
 /// Where x86-64's lower half, user space, ends: an instruction at or

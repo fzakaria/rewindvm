@@ -677,30 +677,12 @@ impl Timeline {
     }
 
     /// The display name of the process that had `pid` at `step`, as the
-    /// process was then: the program it had exec'd by the step. A pid is
-    /// given out again once its process has exited, and a process execs
-    /// more than once, so the name depends on the step.
+    /// process was then: the program it had exec'd by the step, in the
+    /// words the engine's `rewind where` uses. A pid is given out again
+    /// once its process has exited, and a process execs more than once,
+    /// so the name depends on the step.
     pub fn name_at(&self, pid: u32, step: u64) -> Option<String> {
-        let row = self.process_row_at(pid, step)?;
-        Some(command_name(row.label_at(step)))
-    }
-
-    /// The process tree's row of the process that had `pid` at `step`:
-    /// the one alive then, else the nearest before, else the first after,
-    /// as `Trace::process_at` finds a process.
-    fn process_row_at(&self, pid: u32, step: u64) -> Option<&ProcRow> {
-        let with_pid = || {
-            self.rows
-                .iter()
-                .filter(move |r| r.kind == RowKind::Process && r.pid == pid)
-        };
-        if let Some(alive) = with_pid().find(|r| r.alive_at(step)) {
-            return Some(alive);
-        }
-        let before = with_pid()
-            .filter(|r| r.start <= step)
-            .max_by_key(|r| r.start);
-        before.or_else(|| with_pid().min_by_key(|r| r.start))
+        self.trace.process_name_at(pid, step)
     }
 
     /// How a file row is drawn at `step`.

@@ -29,19 +29,10 @@ use rewind_store::{Hash, Store, ZERO_PAGE, hex};
 use crate::home::Home;
 use crate::keyframes;
 use crate::run::{BOOKMARKS, MANIFEST, Manifest, Run, SpecExt, TRACE};
+pub use rewind_trace::export::Contents;
 use rewind_trace::export::{
-    COMPRESSION_LEVEL, IMAGE, INITRD, INPUTS_DIR, KERNEL, MAX_BOOKMARKS, PAGES_DIR,
+    COMPRESSION_LEVEL, IMAGE, INITRD, INPUTS_DIR, KERNEL, MAX_BOOKMARKS, Member, PAGES_DIR,
 };
-
-/// What an export carries.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Contents {
-    /// The manifest and trace: enough to view and scrub the run.
-    View,
-    /// Also keyframes, pages and inputs: enough to replay the run on
-    /// another machine with a compatible CPU.
-    Replayable,
-}
 
 const PAGE_SIZE: usize = 4096;
 
@@ -212,44 +203,27 @@ fn import_from(home: &Home, reader: impl Read, source: &str) -> Result<Run> {
 
 fn unpack_and_place(home: &Home, reader: impl Read, source: &str, staging: &Path) -> Result<Run> {
     let decoder = zstd::Decoder::new(reader)?;
-    let mut tar = tar::Archive::new(decoder);
     let mut store: Option<Store> = None;
-    for entry in tar.entries()? {
-        let mut entry = entry?;
-        let path = entry.path()?.into_owned();
-        if path
-            .components()
-            .any(|c| !matches!(c, std::path::Component::Normal(_)))
-        {
-            bail!("{source} holds an unsafe path {}", path.display());
-        }
 
-        // An export holds only files and directories. A link could point
-        // anywhere, and an entry under it would be written there.
-        let kind = entry.header().entry_type();
-        if !matches!(kind, tar::EntryType::Regular | tar::EntryType::Directory) {
-            bail!(
-                "{source} holds {} as a {kind:?}, which no export does",
-                path.display()
-            );
-        }
-
+    // Pages go straight into the store; everything else is staged. The
+    // walk refuses a path that is not plain names and any member that is
+    // not a file or a directory.
+    rewind_trace::export::walk(decoder, |path, member, size, reader| {
         // Bookmarks are notes, never larger than MAX_BOOKMARKS.
-        if path == Path::new(BOOKMARKS) && entry.header().size()? > MAX_BOOKMARKS {
+        if member == Member::Bookmarks && size > MAX_BOOKMARKS {
             bail!("{source} holds bookmarks over {MAX_BOOKMARKS} bytes");
         }
 
-        // Pages go straight into the store; everything else is staged. A
-        // page is PAGE_SIZE bytes, so nothing longer is read into memory.
-        if path.starts_with(PAGES_DIR) {
-            if entry.header().size()? != PAGE_SIZE as u64 {
+        // A page is PAGE_SIZE bytes, so nothing longer is read into memory.
+        if member == Member::Page {
+            if size != PAGE_SIZE as u64 {
                 bail!(
                     "page {} in {source} is not {PAGE_SIZE} bytes",
                     path.display()
                 );
             }
             let mut page = vec![0u8; PAGE_SIZE];
-            entry.read_exact(&mut page)?;
+            reader.read_exact(&mut page)?;
             let store = match &mut store {
                 Some(s) => s,
                 None => store.insert(Store::open(&home.store())?),
@@ -262,14 +236,17 @@ fn unpack_and_place(home: &Home, reader: impl Read, source: &str, staging: &Path
             if hex(&hash) != named {
                 bail!("page {named} in {source} does not match its contents");
             }
-            continue;
+            return Ok(());
         }
-        let target = staging.join(&path);
+        let target = staging.join(path);
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)?;
         }
-        entry.unpack(&target)?;
-    }
+        let mut out = File::create(&target)?;
+        std::io::copy(reader, &mut out)?;
+        Ok(())
+    })
+    .with_context(|| format!("reading {source}"))?;
     if let Some(store) = &store {
         store.sync()?;
     }

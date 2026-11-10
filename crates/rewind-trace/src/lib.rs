@@ -92,10 +92,19 @@ pub struct Process {
     /// The kernel's exit_code: status in bits 8 to 15, or the terminating
     /// signal in bits 0 to 6.
     pub status: Option<u32>,
+    /// The name the kernel had for the process when it exited, which names
+    /// a kernel thread that ran no program.
+    pub comm: Option<String>,
     /// Threads other than the main one, with the steps they started and
     /// ended on.
     pub threads: Vec<(u32, u64, Option<u64>)>,
 }
+
+/// kthreadd, the parent of every kernel thread, and what it and they are
+/// called when nothing else names them.
+pub const KTHREADD_PID: u32 = 2;
+const KTHREADD_NAME: &str = "kthreadd";
+const KERNEL_THREAD_NAME: &str = "kernel thread";
 
 impl Process {
     pub fn alive_at(&self, step: u64) -> bool {
@@ -139,6 +148,27 @@ impl Process {
             Some(cmd) => cmd.clone(),
             None => format!("pid {}", self.pid),
         }
+    }
+
+    /// The name of the program the process runs, as the command and the
+    /// desktop app both say it: the file name of its command line's first
+    /// word; for a process that ran no program, the name the kernel had
+    /// for it when it exited, else kthreadd or a kernel thread by what it
+    /// is. None when nothing names it.
+    pub fn program_name(&self) -> Option<String> {
+        if let Some(first) = self.argv.first() {
+            return Some(first.rsplit('/').next().unwrap_or(first).to_string());
+        }
+        if let Some(comm) = &self.comm {
+            return Some(comm.clone());
+        }
+        if self.pid == KTHREADD_PID && self.parent == 0 {
+            return Some(KTHREADD_NAME.to_string());
+        }
+        if self.parent == KTHREADD_PID {
+            return Some(KERNEL_THREAD_NAME.to_string());
+        }
+        None
     }
 }
 
@@ -312,6 +342,7 @@ impl Trace {
                     start: step,
                     end: None,
                     status: None,
+                    comm: None,
                     threads: Vec::new(),
                 }
             })
@@ -361,7 +392,11 @@ impl Trace {
                     p.execd = true;
                     p.execs.push((e.step, argv.clone()));
                 }
-                EventKind::Exit { status, thread, .. } => {
+                EventKind::Exit {
+                    status,
+                    comm,
+                    thread,
+                } => {
                     if let Some(p) = procs.get_mut(&e.pid) {
                         if *thread {
                             // Linux hands a thread id out again once its
@@ -378,6 +413,7 @@ impl Trace {
                         } else {
                             p.end = Some(e.step);
                             p.status = Some(*status);
+                            p.comm = Some(comm.clone());
                         }
                     }
                 }
@@ -397,6 +433,14 @@ impl Trace {
     /// step ([Process::as_of]), running the program it had exec'd by then.
     pub fn process_at(&self, pid: u32, step: u64) -> Option<Process> {
         process_in(&self.processes(), pid, step).map(|p| p.as_of(step))
+    }
+
+    /// The name of the program the process that had `pid` at `step` ran
+    /// then ([Process::program_name]): what `rewind where` and the
+    /// desktop app both call the process. None for a pid the run never
+    /// had, or a process nothing names.
+    pub fn process_name_at(&self, pid: u32, step: u64) -> Option<String> {
+        self.process_at(pid, step)?.program_name()
     }
 
     /// Output lines completed by `step`, both streams interleaved in the
@@ -970,6 +1014,66 @@ mod tests {
         assert!(trace.process_at(5, 2).unwrap().alive_at(2));
         assert!(!trace.process_at(5, 4).unwrap().alive_at(4));
         assert_eq!(trace.process_at(9, 2), None);
+    }
+
+    #[test]
+    fn a_process_is_named_by_the_program_it_ran_at_the_step() {
+        // Init runs /bin/sh and forks 5, which runs its parent's program
+        // until it execs /usr/bin/gcc, then exits; kthreadd, pid 2, forks
+        // 30, which never runs a program and exits as kworker/0:1, and
+        // 31, which never exits. The name at a step is the file name of
+        // the program the process with the pid ran then, as the command
+        // and the app both say it; a kernel thread goes by the name it
+        // exited with, else by what it is; a pid the run never had names
+        // nothing.
+        let exit_as = |step, pid, comm: &str| {
+            ev(
+                step,
+                pid,
+                pid,
+                EventKind::Exit {
+                    status: 0,
+                    comm: comm.into(),
+                    thread: false,
+                },
+            )
+        };
+        let trace = Trace {
+            events: vec![
+                exec_of(1, 1, "/bin/sh"),
+                fork_of(2, 5),
+                exec_of(4, 5, "/usr/bin/gcc"),
+                exit_as(6, 5, "gcc"),
+                ev(
+                    7,
+                    2,
+                    2,
+                    EventKind::Fork {
+                        child: 30,
+                        thread: false,
+                    },
+                ),
+                ev(
+                    8,
+                    2,
+                    2,
+                    EventKind::Fork {
+                        child: 31,
+                        thread: false,
+                    },
+                ),
+                exit_as(9, 30, "kworker/0:1"),
+            ],
+            ..Default::default()
+        };
+        let name = |pid, step| trace.process_name_at(pid, step);
+        assert_eq!(name(1, 3).as_deref(), Some("sh"));
+        assert_eq!(name(5, 3).as_deref(), Some("sh"));
+        assert_eq!(name(5, 5).as_deref(), Some("gcc"));
+        assert_eq!(name(2, 8).as_deref(), Some("kthreadd"));
+        assert_eq!(name(30, 10).as_deref(), Some("kworker/0:1"));
+        assert_eq!(name(31, 10).as_deref(), Some("kernel thread"));
+        assert_eq!(name(9, 3), None);
     }
 
     /// A process that execs more than once runs a different program at

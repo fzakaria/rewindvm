@@ -14,4 +14,6 @@ rewind-init = { path = "../rewind-init", default-features = false }
 serde = { version = "1", features = ["derive"] }
 # Manifests, read by their version first.
 serde_json = "1"
+# .rwd exports: a tar archive, which rewind import and the app both walk here.
+tar = "0.4"
 thiserror = "2"

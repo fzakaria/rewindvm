@@ -11,7 +11,7 @@
 
 use std::fs::{self, File};
 use std::io::{self, Read};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 #[cfg(not(target_family = "wasm"))]
 use std::time::Duration;
 
@@ -19,7 +19,7 @@ use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
 use crate::bookmarks::{BOOKMARKS_FILE, MAX_BYTES as BOOKMARKS_MAX_BYTES};
-use rewind_trace::export;
+use rewind_trace::export::{self, Contents, Member};
 use rewind_trace::manifest::{MANIFEST, RunId, TRACE};
 
 /// The binary units sizes are said in.
@@ -257,12 +257,12 @@ impl MemberLimits {
     /// The member at `path`, `size` bytes long by its header, as far as
     /// the app reads it: all of it, or for a manifest or trace past its
     /// limit a refusal that names the limit.
-    fn reader<'a, R: Read>(
+    fn reader<'a>(
         &self,
-        entry: &'a mut R,
+        entry: &'a mut dyn Read,
         path: &Path,
         size: u64,
-    ) -> Result<io::Take<&'a mut R>> {
+    ) -> Result<io::Take<&'a mut dyn Read>> {
         let limit = self.of(path).unwrap_or(size);
         if size > limit {
             bail!(
@@ -284,52 +284,34 @@ pub fn read_bytes(bytes: &[u8]) -> Result<InMemory> {
 
 /// Reads an export as [`read_bytes`] does, within `limits`.
 fn read_bytes_within(bytes: &[u8], limits: MemberLimits) -> Result<InMemory> {
-    let mut archive = tar::Archive::new(decompress(bytes)?);
     let mut manifest = None;
     let mut trace = None;
     let mut bookmarks = None;
-    let mut replayable = false;
-    for entry in archive.entries().context("not a tar archive")? {
-        let mut entry = entry?;
-        let path = entry.path()?.into_owned();
 
-        // The members only replay needs mark the export replayable, and
-        // are not read.
-        if export::REPLAY_DIRS.iter().any(|d| path.starts_with(d)) {
-            replayable = true;
-            continue;
-        }
-
-        // The manifest, the trace and the bookmarks, as a regular file no
-        // larger than the engine writes, are kept; every other member is
-        // skipped. A manifest or trace past its limit refuses the export
-        // before any of the member is read into memory.
-        let carried = path == Path::new(BOOKMARKS_FILE)
-            && entry.header().entry_type().is_file()
-            && entry.size() <= BOOKMARKS_MAX_BYTES;
-        let slot = if path == Path::new(MANIFEST) {
-            &mut manifest
-        } else if path == Path::new(TRACE) {
-            &mut trace
-        } else if carried {
-            &mut bookmarks
-        } else {
-            continue;
+    // The manifest, the trace and the bookmarks, as a regular file no
+    // larger than the engine writes, are kept; every other member is
+    // skipped, and the members only replay needs are not read. A manifest
+    // or trace past its limit refuses the export before any of the member
+    // is read into memory.
+    let contents = export::walk(decompress(bytes)?, |path, member, size, reader| {
+        let slot = match member {
+            Member::Manifest => &mut manifest,
+            Member::Trace => &mut trace,
+            Member::Bookmarks if size <= BOOKMARKS_MAX_BYTES => &mut bookmarks,
+            _ => return Ok(()),
         };
-        let size = entry.size();
         let mut bytes = Vec::new();
-        limits
-            .reader(&mut entry, &path, size)?
-            .read_to_end(&mut bytes)?;
+        limits.reader(reader, path, size)?.read_to_end(&mut bytes)?;
         *slot = Some(bytes);
-    }
+        anyhow::Ok(())
+    })?;
     let manifest = manifest.with_context(|| format!("the archive has no {MANIFEST}"))?;
     let trace = trace.with_context(|| format!("the archive has no {TRACE}"))?;
     Ok(InMemory {
         manifest,
         trace,
         bookmarks,
-        replayable,
+        replayable: contents == Contents::Replayable,
     })
 }
 
@@ -391,43 +373,29 @@ fn unique() -> u64 {
 /// path that is not plain names inside the archive is refused, and so is
 /// a manifest or trace larger than `limits` allow.
 fn unpack(reader: impl Read, staging: &Path, limits: MemberLimits) -> Result<bool> {
-    let mut archive = tar::Archive::new(decompress(reader)?);
-    let mut replayable = false;
-    for entry in archive.entries().context("not a tar archive")? {
-        let mut entry = entry?;
-        let path = entry.path()?.into_owned();
-        if path
-            .components()
-            .any(|c| !matches!(c, Component::Normal(_)))
-        {
-            bail!("the archive holds an unsafe path {}", path.display());
-        }
-        if export::REPLAY_DIRS.iter().any(|d| path.starts_with(d)) {
-            replayable = true;
-        }
-        // The run's bookmarks come too, as a regular file no larger than
-        // the engine writes.
-        let bookmarks = path == Path::new(BOOKMARKS_FILE)
-            && entry.header().entry_type().is_file()
-            && entry.size() <= BOOKMARKS_MAX_BYTES;
-        let wanted = path == Path::new(MANIFEST) || path == Path::new(TRACE) || bookmarks;
+    // The run's bookmarks come too, as a regular file no larger than the
+    // engine writes. A manifest or trace past its limit refuses the export
+    // before any of the member is written to the cache.
+    let contents = export::walk(decompress(reader)?, |path, member, size, reader| {
+        let wanted = match member {
+            Member::Manifest | Member::Trace => true,
+            Member::Bookmarks => size <= BOOKMARKS_MAX_BYTES,
+            _ => false,
+        };
         if !wanted {
-            continue;
+            return Ok(());
         }
-
-        // A manifest or trace past its limit refuses the export before
-        // any of the member is written to the cache.
-        let size = entry.size();
-        let mut member = limits.reader(&mut entry, &path, size)?;
-        let mut out = File::create(staging.join(&path))?;
+        let mut member = limits.reader(reader, path, size)?;
+        let mut out = File::create(staging.join(path))?;
         io::copy(&mut member, &mut out)?;
-    }
+        anyhow::Ok(())
+    })?;
     for name in [MANIFEST, TRACE] {
         if !staging.join(name).is_file() {
             bail!("the archive has no {name}");
         }
     }
-    Ok(replayable)
+    Ok(contents == Contents::Replayable)
 }
 
 /// Gives `dir`, a copy of the run unpacked before, the bookmarks the
