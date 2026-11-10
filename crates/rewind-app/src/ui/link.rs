@@ -25,12 +25,41 @@ const DIALOG_WIDTH: f32 = 600.0;
 
 /// The dialog's words.
 const DIALOG_TITLE: &str = "Open link";
-#[cfg(not(target_family = "wasm"))]
-const DIALOG_HELP: &str = "The link to a .rwd file, such as one on a case study page. A replayable export can be shelled into, debugged and forked once it is in.";
-#[cfg(target_family = "wasm")]
-const DIALOG_HELP: &str = "The link to a .rwd file, such as one a CI job keeps. The link must be served with CORS headers. It is read in your browser and is not uploaded.";
 const PLACEHOLDER: &str = "https://\u{2026}/run.rwd";
 const NOT_A_LINK: &str = "That is not an http or https link.";
+
+/// What the browser viewer says of where a link can point. A browser
+/// fetches a file from another site only when that site allows it, with
+/// CORS headers; of GitHub's hosts, raw file links and Pages sites do and
+/// release downloads do not.
+#[cfg(any(target_family = "wasm", test))]
+pub const CORS_NOTE: &str = "The link's site has to let other sites fetch from it: a raw.githubusercontent.com link or a GitHub Pages site does, a GitHub release download does not.";
+
+/// What the dialog says under its title.
+#[cfg(not(target_family = "wasm"))]
+fn dialog_help() -> String {
+    "The link to a .rwd file, such as one on a case study page. A replayable export can be shelled into, debugged and forked once it is in.".to_string()
+}
+
+/// What the dialog says under its title in the browser viewer, which
+/// fetches the link from the page.
+#[cfg(target_family = "wasm")]
+fn dialog_help() -> String {
+    use crate::ui::page::NOT_UPLOADED;
+    format!("The link to a .rwd file, such as one a CI job keeps. {CORS_NOTE} {NOT_UPLOADED}")
+}
+
+/// What the browser viewer says of a link it could not open: the server's
+/// `answer`, such as "404 Not Found", as it is; or when the browser got
+/// none, as it gets none from a site that does not let this one fetch
+/// from it, where a link can point.
+#[cfg(any(target_family = "wasm", test))]
+pub fn unfetched_words(url: &str, answer: Option<&str>) -> String {
+    match answer {
+        Some(status) => format!("{url} answered {status}."),
+        None => format!("The browser could not fetch {url}. {CORS_NOTE}"),
+    }
+}
 
 /// The dialog's state: the field, and why its link was not opened.
 pub struct LinkDialog {
@@ -176,7 +205,7 @@ impl Scrubber {
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(DIALOG_TITLE),
             )
-            .child(div().text_color(rgb(theme::SOFT)).child(DIALOG_HELP))
+            .child(div().text_color(rgb(theme::SOFT)).child(dialog_help()))
             .child(field);
         if let Some(error) = dialog.error {
             card = card.child(
@@ -203,5 +232,31 @@ impl Scrubber {
                     .child(card),
             ),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // What the browser viewer says of a link it could not open.
+    use super::*;
+
+    #[test]
+    fn a_refused_fetch_names_the_hosts_that_work_and_the_one_that_does_not() {
+        // A server's answer is said as it is. No answer means the browser
+        // refused the fetch, as it does for a site that does not let this
+        // one fetch from it: the words name the hosts that do, and GitHub
+        // release downloads as one that does not.
+        let refused = unfetched_words("https://github.com/o/r/releases/download/v1/run.rwd", None);
+        assert!(
+            refused.contains("raw.githubusercontent.com")
+                && refused.contains("GitHub Pages")
+                && refused.contains("release download"),
+            "{refused}"
+        );
+        let answered = unfetched_words("https://ci.example/run.rwd", Some("404 Not Found"));
+        assert_eq!(
+            answered,
+            "https://ci.example/run.rwd answered 404 Not Found."
+        );
     }
 }

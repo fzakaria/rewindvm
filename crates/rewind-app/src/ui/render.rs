@@ -2060,7 +2060,8 @@ impl Scrubber {
     /// from, and the examples served beside the viewer, one row each with
     /// its title and the file it opens.
     fn render_examples(&self, cx: &mut Context<Self>) -> Div {
-        use crate::ui::page::{CORS_NOTE, EXAMPLES, NOT_UPLOADED};
+        use crate::ui::link::CORS_NOTE;
+        use crate::ui::page::{EXAMPLES, NOT_UPLOADED};
 
         let mut rows = div().flex().flex_col();
         for (i, example) in EXAMPLES.iter().enumerate() {

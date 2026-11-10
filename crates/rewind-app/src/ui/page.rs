@@ -8,12 +8,9 @@ use futures::StreamExt;
 use gpui::Context;
 
 use crate::address::{Address, is_overtaken};
+use crate::ui::link::unfetched_words;
 use crate::ui::scrubber::{NoticeTone, Scrubber};
 use crate::web::Delivery;
-
-/// What the app says of a link the browser could not fetch, and of the
-/// links the Open link dialog takes.
-pub const CORS_NOTE: &str = "The link must be served with CORS headers.";
 
 /// What the app says of a file it opens in the browser.
 pub const NOT_UPLOADED: &str = "It is read in your browser and is not uploaded.";
@@ -91,10 +88,7 @@ impl Scrubber {
             }
             Delivery::Unfetched { url, answer, .. } => {
                 self.loading = None;
-                let why = match answer {
-                    Some(status) => format!("{url} answered {status}."),
-                    None => format!("The browser could not fetch {url}. {CORS_NOTE}"),
-                };
+                let why = unfetched_words(&url, answer.as_deref());
                 self.notify_user(NoticeTone::Error, "Could not open the link", why, cx);
             }
             Delivery::Unread { name, why, .. } => {
