@@ -353,27 +353,14 @@ pub struct Scrubber {
     /// The Open link dialog, when it is open.
     pub(super) link_dialog: Option<LinkDialog>,
     pub(super) step: u64,
-    /// The steps the playhead jumped from, for Back and Forward.
-    pub(super) history: History,
+    /// What belongs to the run on screen and goes with it.
+    pub(super) shown: Shown,
     /// The step readout's field, while a step is being typed.
     pub(super) step_entry: Option<StepEntry>,
-    /// What Previous and Next stop at.
-    pub(super) stride: Stride,
-    /// The search box, while it is open.
-    pub(super) search: Option<SearchBox>,
-    /// The run's bookmarks.
-    pub(super) bookmarks: Bookmarks,
-    /// The bookmark note dialog, while it is open.
-    pub(super) bookmark_editor: Option<BookmarkEditor>,
-    /// The steps the timeline is zoomed in on; None shows the whole run.
-    pub(super) view: Option<View>,
     /// How far along the track the pointer is, while it is over it.
     pub(super) hover: Option<f32>,
     /// How far along the switch band the pointer is, while it is over it.
     pub(super) band_hover: Option<f32>,
-    /// The switch density the band last drew, kept while the view it was
-    /// made for is the one shown and until another session is shown.
-    pub(super) band: Option<Rc<crate::density::Density>>,
     /// The searchable text of the run on screen, as far as it is built.
     /// Another run on screen drops it.
     pub(super) search_index: Indexed,
@@ -385,33 +372,20 @@ pub struct Scrubber {
     /// The At this step column's scroll, which tells whether cards are
     /// hidden below its foot.
     pub(super) at_step_scroll: gpui::ScrollHandle,
-    /// The playhead and line count the log last followed, so that a
-    /// render that does not move the playhead leaves the user's scroll.
-    pub(super) log_followed: Option<(u64, LogFilter)>,
-    pub(super) files_followed: Option<usize>,
     /// Whether the pointer is dragging the playhead. Shared with the
     /// timeline's mouse listeners, which outlive a render.
     pub(super) dragging: Rc<Cell<bool>>,
-    pub(super) forks: Vec<ForkMark>,
     pub(super) notices: Notices,
     /// The license, the dialog to enter one, and the reminder.
     pub(super) licensing: Licensing,
-    /// The guided tour, while it runs, and the focus its callout takes.
-    pub(super) tour: Option<Tour>,
+    /// The focus the guided tour's callout takes while the tour runs.
     pub(super) tour_focus: FocusHandle,
     /// Whether the shortcut sheet is open, and the focus it takes.
     pub(super) shortcuts_open: bool,
     pub(super) shortcuts_focus: FocusHandle,
-    /// The file viewer, while a file is open in it.
-    pub(super) viewer: Option<FileViewer>,
-    /// The source panel, while it is open; it shares the file viewer's
-    /// place.
-    pub(super) source: Option<SourcePanel>,
     /// The searches for who wrote values the source panel shows, and the
     /// one on screen.
     pub(super) blames: crate::ui::blame::Blames,
-    /// The two-run file view, while it is open.
-    pub(super) file_diff: Option<crate::ui::file_diff::FileDiffPanel>,
     /// The Threads tab, while it is open.
     pub(super) lanes: Option<crate::ui::lanes::LanesPanel>,
     /// The latest check from a step, running or done, of the run on
@@ -420,9 +394,6 @@ pub struct Scrubber {
     /// What the amber button does at the playhead, and where its menu
     /// opened, while it is open.
     pub(super) here_action: crate::sweep::HereAction,
-    /// The row picked in the process tree, whose card "At this step"
-    /// shows in place of the last event's.
-    pub(super) picked_row: Option<crate::proc_card::Pick>,
     /// Which toolbar is shown, and what it has learned of the full row's
     /// width; written as the toolbar is laid out.
     pub(super) toolbar: Rc<Cell<crate::ui::toolbar::ToolbarMemory>>,
@@ -445,6 +416,101 @@ pub struct Scrubber {
     /// browser viewer of; what an older one brings is dropped.
     #[cfg(target_family = "wasm")]
     pub(super) page_newest: Option<Request>,
+}
+
+/// What belongs to the run on screen: the panels open on it, its
+/// bookmarks, and where the user is in it. Showing a run replaces the
+/// whole of it, so nothing of the run before stays behind; the same run
+/// shown again, as a change of comparison does, keeps the user's place
+/// (`keep_place_of`). A field added here is reset with the rest, which
+/// a field of the scrubber reset by hand in `show` was not.
+pub(super) struct Shown {
+    /// The steps the playhead jumped from, for Back and Forward.
+    pub(super) history: History,
+    /// What Previous and Next stop at.
+    pub(super) stride: Stride,
+    /// The steps the timeline is zoomed in on; None shows the whole run.
+    pub(super) view: Option<View>,
+    /// The row picked in the process tree, whose card "At this step"
+    /// shows in place of the last event's.
+    pub(super) picked_row: Option<crate::proc_card::Pick>,
+    /// The search box, while it is open.
+    pub(super) search: Option<SearchBox>,
+    /// The run's bookmarks.
+    pub(super) bookmarks: Bookmarks,
+    /// The bookmark note dialog, while it is open.
+    pub(super) bookmark_editor: Option<BookmarkEditor>,
+    /// The switch density the band last drew, kept while the view it was
+    /// made for is the one shown. Two runs of the same length have the
+    /// same view, so the view alone does not tell their densities apart:
+    /// another run on screen drops it.
+    pub(super) band: Option<Rc<crate::density::Density>>,
+    /// The playhead and line count the log last followed, so that a
+    /// render that does not move the playhead leaves the user's scroll.
+    pub(super) log_followed: Option<(u64, LogFilter)>,
+    pub(super) files_followed: Option<usize>,
+    pub(super) forks: Vec<ForkMark>,
+    /// The guided tour, while it runs.
+    pub(super) tour: Option<Tour>,
+    /// The file viewer, while a file is open in it.
+    pub(super) viewer: Option<FileViewer>,
+    /// The source panel, while it is open; it shares the file viewer's
+    /// place.
+    pub(super) source: Option<SourcePanel>,
+    /// The two-run file view, while it is open.
+    pub(super) file_diff: Option<crate::ui::file_diff::FileDiffPanel>,
+}
+
+impl Shown {
+    /// Nothing open on a run with `bookmarks`, the user's place at the
+    /// start.
+    pub(super) fn fresh(bookmarks: Bookmarks) -> Shown {
+        Shown {
+            history: History::default(),
+            stride: Stride::Every,
+            view: None,
+            picked_row: None,
+            search: None,
+            bookmarks,
+            bookmark_editor: None,
+            band: None,
+            log_followed: None,
+            files_followed: None,
+            forks: Vec::new(),
+            tour: None,
+            viewer: None,
+            source: None,
+            file_diff: None,
+        }
+    }
+
+    /// Takes the user's place in the run from `previous`, the same run
+    /// shown before: the steps jumped from, the stride, the zoom and the
+    /// picked row. The rest of `previous` is dropped, which stops the
+    /// work its panels had running.
+    pub(super) fn keep_place_of(&mut self, previous: Shown) {
+        let Shown {
+            history,
+            stride,
+            view,
+            picked_row,
+            search: _,
+            bookmarks: _,
+            bookmark_editor: _,
+            band: _,
+            log_followed: _,
+            files_followed: _,
+            forks: _,
+            tour: _,
+            viewer: _,
+            source: _,
+            file_diff: _,
+        } = previous;
+        self.history = history;
+        self.stride = stride;
+        self.view = view;
+        self.picked_row = picked_row;
+    }
 }
 
 impl Scrubber {
@@ -497,29 +563,19 @@ impl Scrubber {
             split_drag: None,
             measured: Rc::new(Measured::default()),
             step: 0,
-            history: History::default(),
+            shown: Shown::fresh(Bookmarks::default()),
             step_entry: None,
-            stride: Stride::Every,
             stride_menu: None,
-            search: None,
             search_index: Indexed::default(),
-            bookmarks: Bookmarks::default(),
-            bookmark_editor: None,
-            view: None,
             hover: None,
             band_hover: None,
-            band: None,
             log_filter: LogFilter::Output,
             log_scroll: UniformListScrollHandle::new(),
             files_scroll: UniformListScrollHandle::new(),
             at_step_scroll: gpui::ScrollHandle::new(),
-            log_followed: None,
-            files_followed: None,
             dragging: Rc::new(Cell::new(false)),
-            forks: Vec::new(),
             notices: Notices::default(),
             licensing: Licensing::load(),
-            tour: None,
             tour_focus: cx.focus_handle(),
             shortcuts_open: false,
             shortcuts_focus: cx.focus_handle(),
@@ -527,14 +583,10 @@ impl Scrubber {
             selecting: SelectionState::default(),
             terminal: None,
             exporting: None,
-            viewer: None,
-            file_diff: None,
-            source: None,
             blames: Default::default(),
             lanes: None,
             sweep: None,
             here_action: crate::sweep::HereAction::Fork,
-            picked_row: None,
             toolbar: Rc::default(),
             here_menu: None,
             title: None,
@@ -611,31 +663,21 @@ impl Scrubber {
                 cx,
             );
         }
-        // Steps jumped from in another run mean nothing in this one, and
-        // the search index is of the run it was built for; the same run
-        // shown again, as a change of comparison does, keeps them.
-        if !self.shows_run_of(&session) {
+        // What was open on the run before goes; the same run shown again,
+        // as a change of comparison does, keeps the user's place in it.
+        // The search index is of the run it was built for, and the
+        // blames are of its source.
+        let same_run = self.shows_run_of(&session);
+        let previous =
+            std::mem::replace(&mut self.shown, Shown::fresh(load_bookmarks(&session.run)));
+        if same_run {
+            self.shown.keep_place_of(previous);
+        } else {
+            drop(previous);
             self.search_index.another_run();
             self.blames.leave_run();
-            self.history = History::default();
-            self.stride = Stride::Every;
-            self.view = None;
-            self.picked_row = None;
         }
         self.step = start;
-
-        // The band's density is of the run that was on screen. Two runs
-        // of the same length have the same view, so the view alone does
-        // not tell the densities apart.
-        self.band = None;
-        self.search = None;
-        self.bookmark_editor = None;
-        self.bookmarks = load_bookmarks(&session.run);
-        self.forks.clear();
-        self.tour = None;
-        self.viewer = None;
-        self.file_diff = None;
-        self.source = None;
         let keeps = match self.right_tab {
             RightTab::Runs | RightTab::Bookmarks | RightTab::Threads => true,
             RightTab::Compare => session.other.is_some(),
@@ -644,8 +686,6 @@ impl Scrubber {
         if !keeps {
             self.right_tab = RightTab::AtStep;
         }
-        self.log_followed = None;
-        self.files_followed = None;
         self.selecting.selection = None;
 
         // A replayable export goes into the engine's runs, where it can
@@ -718,8 +758,8 @@ impl Scrubber {
         // ran; the imported run's directory holds only what the export
         // carried.
         if let Some(dir) = bookmarks_dir(&session.run) {
-            let (bookmarks, written) = std::mem::take(&mut self.bookmarks).moved_to(&dir);
-            self.bookmarks = bookmarks;
+            let (bookmarks, written) = std::mem::take(&mut self.shown.bookmarks).moved_to(&dir);
+            self.shown.bookmarks = bookmarks;
             if let Err(e) = written {
                 self.notify_user(
                     NoticeTone::Error,
@@ -811,7 +851,11 @@ impl Scrubber {
             loop {
                 cx.background_executor().timer(RUNNING_POLL).await;
                 let more = this.update(cx, |this, cx| {
-                    let forking = this.forks.iter().any(|f| f.state == ForkState::Pending);
+                    let forking = this
+                        .shown
+                        .forks
+                        .iter()
+                        .any(|f| f.state == ForkState::Pending);
                     if !forking && !this.runs.any_running() {
                         this.runs.watching = false;
                         return false;
@@ -1129,13 +1173,13 @@ impl Scrubber {
     /// the engine command it waits on.
     fn close_run_panels(&mut self) {
         self.blames.stop_all();
-        self.viewer = None;
-        self.file_diff = None;
-        self.source = None;
+        self.shown.viewer = None;
+        self.shown.file_diff = None;
+        self.shown.source = None;
         self.lanes = None;
         self.sweep = None;
-        self.search = None;
-        self.bookmark_editor = None;
+        self.shown.search = None;
+        self.shown.bookmark_editor = None;
         self.step_entry = None;
         self.right_tab = RightTab::AtStep;
     }
@@ -1162,7 +1206,7 @@ impl Scrubber {
     /// Closes the tabs that compare two runs, when the session has one
     /// run only.
     fn close_comparison_tabs(&mut self) {
-        self.file_diff = None;
+        self.shown.file_diff = None;
         if matches!(self.right_tab, RightTab::Compare | RightTab::FileDiff) {
             self.right_tab = RightTab::AtStep;
         }
@@ -1324,7 +1368,7 @@ impl Scrubber {
             return;
         };
         let step = step.min(session.run.timeline.total);
-        self.history.jumped(self.step, step);
+        self.shown.history.jumped(self.step, step);
         self.go_to(step, cx);
     }
 
@@ -1362,7 +1406,7 @@ impl Scrubber {
                 || self.here_menu.is_some(),
             blame: self.blames.popover_open(),
             tab: self.right_tab,
-            picked: self.picked_row.is_some(),
+            picked: self.shown.picked_row.is_some(),
             terminal: self.terminal.is_some(),
         };
         match escape_closes(open) {
@@ -1382,7 +1426,7 @@ impl Scrubber {
 
     /// Moves the playhead back to the step it last jumped from.
     pub(super) fn go_back(&mut self, cx: &mut Context<Self>) {
-        if let Some(step) = self.history.back(self.step) {
+        if let Some(step) = self.shown.history.back(self.step) {
             self.go_to(step, cx);
         }
         cx.notify();
@@ -1390,7 +1434,7 @@ impl Scrubber {
 
     /// Moves the playhead forward to the step Back last left.
     pub(super) fn go_forward(&mut self, cx: &mut Context<Self>) {
-        if let Some(step) = self.history.forward(self.step) {
+        if let Some(step) = self.shown.history.forward(self.step) {
             self.go_to(step, cx);
         }
         cx.notify();
@@ -1590,11 +1634,11 @@ impl Scrubber {
         }
         let step = self.step;
         let id = session.run.id().map_or("", |id| id.as_str());
-        let schedule = next_fork_schedule(self.runs.family.as_ref(), id, &self.forks);
+        let schedule = next_fork_schedule(self.runs.family.as_ref(), id, &self.shown.forks);
         let run = session.run.path.clone();
         let parent = run.clone();
         let request = self.requests.issue();
-        self.forks.push(ForkMark {
+        self.shown.forks.push(ForkMark {
             request,
             step,
             schedule,
@@ -1609,7 +1653,7 @@ impl Scrubber {
             move |this, result, cx| {
                 // The fork's mark, unless another run was shown meanwhile;
                 // the fork is made either way, so it is announced either way.
-                let mark = this.forks.iter_mut().find(|m| m.request == request);
+                let mark = this.shown.forks.iter_mut().find(|m| m.request == request);
                 match result {
                     Ok(forked) => {
                         if let Some(mark) = mark {
@@ -2180,6 +2224,29 @@ fn next_fork_schedule(family: Option<&Family>, id: &str, pending: &[ForkMark]) -
 mod tests {
     // What the scrubber decides about a run, with no window.
     use super::*;
+
+    #[test]
+    fn the_same_run_shown_again_keeps_the_place_and_drops_the_rest() {
+        // A run with a jump in its history, a zoom, a picked row and a
+        // followed log, shown again: the history, zoom and picked row
+        // carry over to the fresh state, and the followed log does not.
+        let mut previous = Shown::fresh(Bookmarks::default());
+        previous.history.jumped(10, 500);
+        previous.view = Some(View { lo: 100, hi: 900 });
+        previous.picked_row = Some(crate::proc_card::Pick {
+            pid: 7,
+            tid: 7,
+            start: 3,
+        });
+        previous.log_followed = Some((500, LogFilter::Output));
+
+        let mut shown = Shown::fresh(Bookmarks::default());
+        shown.keep_place_of(previous);
+        assert!(shown.history.can_go_back());
+        assert_eq!(shown.view, Some(View { lo: 100, hi: 900 }));
+        assert_eq!(shown.picked_row.map(|p| p.pid), Some(7));
+        assert_eq!(shown.log_followed, None);
+    }
 
     #[test]
     fn escape_closes_the_nearest_thing_first() {

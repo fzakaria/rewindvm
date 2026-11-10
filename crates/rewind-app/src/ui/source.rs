@@ -146,7 +146,7 @@ impl Scrubber {
         let unavailable = replay_unavailable(session, Replay::Where, self.importing.is_some());
         let readable = unavailable.is_none();
         self.right_tab = RightTab::Source;
-        self.source = Some(SourcePanel {
+        self.shown.source = Some(SourcePanel {
             step: self.step,
             unavailable,
             shown: None,
@@ -171,7 +171,7 @@ impl Scrubber {
     /// where the playhead's thread was now.
     pub(super) fn source_run_imported(&mut self, cx: &mut Context<Self>) {
         let importing = self.importing.is_some();
-        let (Some(panel), Some(session)) = (&mut self.source, &self.session) else {
+        let (Some(panel), Some(session)) = (&mut self.shown.source, &self.session) else {
             return;
         };
         panel.unavailable = replay_unavailable(session, Replay::Where, importing);
@@ -190,17 +190,21 @@ impl Scrubber {
         (thread, after): (Thread, Option<AfterAccess>),
         cx: &mut Context<Self>,
     ) {
-        if self.source.is_none() {
+        if self.shown.source.is_none() {
             self.open_source(cx);
         }
         self.right_tab = RightTab::Source;
-        if let Some(panel) = &mut self.source {
+        if let Some(panel) = &mut self.shown.source {
             panel.pinned = Some((step, thread, after));
         }
 
         // At the step already, the playhead does not move, so the panel
         // asks for the new thread or moment itself.
-        let stays = self.source.as_ref().is_some_and(|panel| panel.step == step);
+        let stays = self
+            .shown
+            .source
+            .as_ref()
+            .is_some_and(|panel| panel.step == step);
         self.jump_to(step, cx);
         if stays {
             self.fetch_source(cx);
@@ -208,7 +212,7 @@ impl Scrubber {
     }
 
     pub(super) fn close_source(&mut self, cx: &mut Context<Self>) {
-        self.source = None;
+        self.shown.source = None;
         if self.right_tab == RightTab::Source {
             self.right_tab = RightTab::AtStep;
         }
@@ -220,7 +224,7 @@ impl Scrubber {
     /// Opens the panel; shows its tab when it is open behind another; or
     /// closes it when it shows.
     pub(super) fn toggle_source(&mut self, cx: &mut Context<Self>) {
-        match (&self.source, self.right_tab) {
+        match (&self.shown.source, self.right_tab) {
             (Some(_), RightTab::Source) => self.close_source(cx),
             (Some(_), _) => self.select_tab(RightTab::Source, cx),
             (None, _) => self.open_source(cx),
@@ -231,7 +235,7 @@ impl Scrubber {
     /// stale and asks again once the playhead rests.
     pub(super) fn source_playhead_moved(&mut self, cx: &mut Context<Self>) {
         let step = self.step;
-        let Some(panel) = &mut self.source else {
+        let Some(panel) = &mut self.shown.source else {
             return;
         };
         if panel.unavailable.is_some() || panel.step == step {
@@ -253,7 +257,11 @@ impl Scrubber {
         cx.spawn(async move |this, cx| {
             timer.await;
             let _ = this.update(cx, |this, cx| {
-                let still_latest = this.source.as_ref().is_some_and(|p| p.request == request);
+                let still_latest = this
+                    .shown
+                    .source
+                    .as_ref()
+                    .is_some_and(|p| p.request == request);
                 if still_latest {
                     this.fetch_source(cx);
                 }
@@ -266,7 +274,7 @@ impl Scrubber {
     /// thread. The thread is the one of the latest event at or before the
     /// panel's step.
     fn fetch_source(&mut self, cx: &mut Context<Self>) {
-        let Some(panel) = &mut self.source else {
+        let Some(panel) = &mut self.shown.source else {
             return;
         };
         panel.supersede();
@@ -275,7 +283,7 @@ impl Scrubber {
 
         // The searches made ahead for the step the panel leaves stop.
         self.search_ahead(cx);
-        let (Some(panel), Some(session)) = (&mut self.source, &self.session) else {
+        let (Some(panel), Some(session)) = (&mut self.shown.source, &self.session) else {
             return;
         };
 
@@ -296,7 +304,7 @@ impl Scrubber {
         }
 
         // The engine's answer, kept by the thread and the step.
-        let Some(panel) = &mut self.source else {
+        let Some(panel) = &mut self.shown.source else {
             return;
         };
         panel.loading = true;
@@ -320,7 +328,7 @@ impl Scrubber {
             // still waits for this request.
             while let Some(line) = said.next().await {
                 let alive = this.update(cx, |this, cx| {
-                    let Some(panel) = &mut this.source else {
+                    let Some(panel) = &mut this.shown.source else {
                         return;
                     };
                     if panel.request != request {
@@ -336,7 +344,12 @@ impl Scrubber {
 
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
-                if this.source.as_ref().is_none_or(|p| p.request != request) {
+                if this
+                    .shown
+                    .source
+                    .as_ref()
+                    .is_none_or(|p| p.request != request)
+                {
                     return;
                 }
                 if let Ok(answer) = &result {
@@ -352,7 +365,7 @@ impl Scrubber {
     /// gave one there. None while the VM boots, which the panel says
     /// instead.
     fn known_place(&self) -> Option<Located> {
-        let (panel, session) = (self.source.as_ref()?, self.session.as_ref()?);
+        let (panel, session) = (self.shown.source.as_ref()?, self.session.as_ref()?);
         let timeline = &session.run.timeline;
         if panel.step < timeline.job_start.unwrap_or(0) {
             return None;
@@ -365,7 +378,7 @@ impl Scrubber {
     /// The answer the source panel shows for the playhead's step, when it
     /// shows one: what gdb starts in, at the frame the panel shows.
     pub(super) fn place_at_playhead(&self) -> Option<(&Located, Option<usize>)> {
-        let panel = self.source.as_ref()?;
+        let panel = self.shown.source.as_ref()?;
         if panel.step != self.step || panel.loading {
             return None;
         }
@@ -375,7 +388,12 @@ impl Scrubber {
     /// Stops the lookup the panel waits on; the engine's answer, a
     /// cancellation, then says so.
     fn cancel_source_lookup(&mut self, cx: &mut Context<Self>) {
-        if let Some(cancel) = self.source.as_ref().and_then(|p| p.in_flight.as_ref()) {
+        if let Some(cancel) = self
+            .shown
+            .source
+            .as_ref()
+            .and_then(|p| p.in_flight.as_ref())
+        {
             cancel.cancel();
         }
         cx.notify();
@@ -383,7 +401,7 @@ impl Scrubber {
 
     /// Shows the engine's answer for the thread at `step`.
     fn show_place(&mut self, step: u64, result: EngineResult<Located>, cx: &mut Context<Self>) {
-        let Some(panel) = &mut self.source else {
+        let Some(panel) = &mut self.shown.source else {
             return;
         };
         panel.loading = false;
@@ -413,13 +431,13 @@ impl Scrubber {
     /// The answer on screen, when the panel shows one, and the frame whose
     /// source it shows.
     fn located(&self) -> Option<(&Located, Option<usize>)> {
-        self.source.as_ref()?.shown.as_ref()?.located()
+        self.shown.source.as_ref()?.shown.as_ref()?.located()
     }
 
     /// Shows frame `frame`'s source, when a row of the frame list is
     /// clicked, from the start of its lines.
     fn select_frame(&mut self, frame: usize, cx: &mut Context<Self>) {
-        let Some(panel) = self.source.as_mut() else {
+        let Some(panel) = self.shown.source.as_mut() else {
             return;
         };
         let Some(shown) = panel.shown.as_mut() else {
@@ -444,7 +462,7 @@ impl Scrubber {
 
     /// Scrolls the shown file so the shown frame's line is in the middle.
     fn centre_shown_line(&self) {
-        let Some(panel) = &self.source else {
+        let Some(panel) = &self.shown.source else {
             return;
         };
         let Some((located, Some(at))) = self.located() else {
@@ -463,7 +481,7 @@ impl Scrubber {
         };
         let widest = line_width(file.widest);
         let visible = text_column(width, file.digits());
-        let Some(panel) = &mut self.source else {
+        let Some(panel) = &mut self.shown.source else {
             return;
         };
         panel.sideways.scroll_by(pixels, widest, visible);
@@ -472,7 +490,7 @@ impl Scrubber {
 
     /// Scrolls the shown file so row `row` is at its top.
     pub(super) fn scroll_source_to(&self, row: usize) {
-        if let Some(panel) = &self.source {
+        if let Some(panel) = &self.shown.source {
             panel.scroll.scroll_to_item(row, ScrollStrategy::Top);
         }
     }
@@ -489,7 +507,8 @@ impl Scrubber {
                 .map(Mapped::plain)
                 .collect();
         }
-        self.source
+        self.shown
+            .source
             .as_ref()
             .and_then(source_message)
             .map(|(text, _)| vec![Mapped::plain(text)])
@@ -498,7 +517,7 @@ impl Scrubber {
 
     /// The panel in place of the right column.
     pub(super) fn render_source(&self, cx: &mut Context<Self>) -> Option<Div> {
-        let panel = self.source.as_ref()?;
+        let panel = self.shown.source.as_ref()?;
         let mono = self.fonts.mono.clone();
 
         // The title bar: the step shown and the close button.
@@ -737,7 +756,7 @@ impl Scrubber {
                     highlighters,
                     request,
                     ..
-                }) = this.source.as_mut()
+                }) = this.shown.source.as_mut()
                 else {
                     return Vec::new();
                 };
@@ -868,6 +887,7 @@ impl Scrubber {
             .unwrap_or_default();
         let whose = self.located().map(|(l, _)| (l.pid, l.tid));
         let step = self
+            .shown
             .source
             .as_ref()
             .map_or(self.step, |p| p.shown.as_ref().map_or(p.step, Shown::step));
@@ -1113,7 +1133,7 @@ fn finish_colors(
     cx.spawn(async move |this, cx| {
         let finished = task.await;
         let _ = this.update(cx, |this, cx| {
-            let Some(panel) = &mut this.source else {
+            let Some(panel) = &mut this.shown.source else {
                 return;
             };
             if panel.request != request {

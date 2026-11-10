@@ -65,7 +65,7 @@ impl Scrubber {
         let Some(session) = &self.session else {
             return;
         };
-        if let Some(search) = &self.search {
+        if let Some(search) = &self.shown.search {
             let handle = search.input.focus_handle(cx);
             window.focus(&handle, cx);
             return;
@@ -82,7 +82,7 @@ impl Scrubber {
         let input = cx.new(|cx| TextInput::new(style, cx));
         window.focus(&input.focus_handle(cx), cx);
         let typed = cx.observe(&input, |this, _, cx| this.search_typed(cx));
-        self.search = Some(SearchBox {
+        self.shown.search = Some(SearchBox {
             input,
             query: String::new(),
             hits: Hits::default(),
@@ -128,10 +128,10 @@ impl Scrubber {
     /// Closes the box where the playhead is; Back returns to where the
     /// search started.
     pub(super) fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(search) = self.search.take() else {
+        let Some(search) = self.shown.search.take() else {
             return;
         };
-        self.history.jumped(search.origin, self.step);
+        self.shown.history.jumped(search.origin, self.step);
         window.focus(&self.focus, cx);
         cx.notify();
     }
@@ -143,7 +143,7 @@ impl Scrubber {
     /// query's matches. While the run's index is still being built, Enter
     /// waits: the box stays open.
     fn confirm_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(search) = &mut self.search else {
+        let Some(search) = &mut self.shown.search else {
             return;
         };
         let typed = search.input.read(cx).text().to_string();
@@ -158,7 +158,7 @@ impl Scrubber {
             search.asked = None;
             search.selected = None;
         }
-        let first = self.search.as_ref().and_then(|search| {
+        let first = self.shown.search.as_ref().and_then(|search| {
             if search.selected.is_some() {
                 return None;
             }
@@ -176,7 +176,7 @@ impl Scrubber {
     /// Runs the query again, in the background, when the field's text
     /// changed.
     fn search_typed(&mut self, cx: &mut Context<Self>) {
-        let Some(search) = &mut self.search else {
+        let Some(search) = &mut self.shown.search else {
             return;
         };
         let query = search.input.read(cx).text().to_string();
@@ -202,7 +202,7 @@ impl Scrubber {
             let hits = found.await;
             let _ = this.update(cx, |this, cx| {
                 // Matches for a query typed over since are dropped.
-                let Some(search) = &mut this.search else {
+                let Some(search) = &mut this.shown.search else {
                     return;
                 };
                 let Some((_, query)) = search.asked.take_if(|(asked, _)| *asked == request) else {
@@ -220,7 +220,7 @@ impl Scrubber {
     /// Takes the playhead to match `index` and marks it, scrolling the
     /// list to it as Up and Down move through the matches.
     fn select_hit(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some(search) = &mut self.search else {
+        let Some(search) = &mut self.shown.search else {
             return;
         };
         let Some(hit) = search.hits.hits.get(index) else {
@@ -238,7 +238,12 @@ impl Scrubber {
     /// writing it is often empty; any other match takes the playhead to
     /// its step.
     fn open_hit(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(hit) = self.search.as_ref().and_then(|s| s.hits.hits.get(index)) else {
+        let Some(hit) = self
+            .shown
+            .search
+            .as_ref()
+            .and_then(|s| s.hits.hits.get(index))
+        else {
             return;
         };
         let (step, file) = (hit.step, hit.file.clone());
@@ -254,7 +259,7 @@ impl Scrubber {
     /// Down or Up: the next or previous match, starting from the playhead
     /// when none is chosen yet.
     fn move_hit(&mut self, forward: bool, cx: &mut Context<Self>) {
-        let Some(search) = &self.search else {
+        let Some(search) = &self.shown.search else {
             return;
         };
         let hits = &search.hits.hits;
@@ -275,7 +280,7 @@ impl Scrubber {
 
     /// The box over the panels, when it is open.
     pub(super) fn render_search(&self, cx: &mut Context<Self>) -> Option<gpui::Stateful<Div>> {
-        let search = self.search.as_ref()?;
+        let search = self.shown.search.as_ref()?;
         let field = div()
             .key_context(SEARCH_CONTEXT)
             .on_action(
@@ -321,7 +326,7 @@ impl Scrubber {
             "search-hits",
             rows,
             cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
-                let Some(search) = &this.search else {
+                let Some(search) = &this.shown.search else {
                     return Vec::new();
                 };
                 range

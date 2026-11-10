@@ -240,7 +240,7 @@ impl Scrubber {
         }
         let unavailable = unavailable(session);
         self.right_tab = RightTab::File;
-        self.viewer = Some(FileViewer {
+        self.shown.viewer = Some(FileViewer {
             path,
             pid,
             pin: Pin::FollowPlayhead,
@@ -265,7 +265,7 @@ impl Scrubber {
     /// viewer that said the run was still being imported reads its path
     /// through the engine now.
     pub(super) fn viewer_run_imported(&mut self, cx: &mut Context<Self>) {
-        let (Some(viewer), Some(session)) = (&mut self.viewer, &self.session) else {
+        let (Some(viewer), Some(session)) = (&mut self.shown.viewer, &self.session) else {
             return;
         };
         viewer.unavailable = unavailable(session);
@@ -275,7 +275,7 @@ impl Scrubber {
     /// Opens `path`, a file of the listing the viewer shows, and keeps the
     /// way back to the listing.
     fn open_listed_file(&mut self, path: String, pid: u32, cx: &mut Context<Self>) {
-        let listed_in = self.viewer.as_ref().map(|viewer| ListedIn {
+        let listed_in = self.shown.viewer.as_ref().map(|viewer| ListedIn {
             path: viewer.path.clone(),
             pid: viewer.pid,
         });
@@ -290,7 +290,7 @@ impl Scrubber {
         if !self.engine_reads() {
             return;
         }
-        if let Some(viewer) = &mut self.viewer {
+        if let Some(viewer) = &mut self.shown.viewer {
             viewer.loading = true;
         }
         self.fetch_file(cx);
@@ -300,6 +300,7 @@ impl Scrubber {
     /// open on. The browser viewer has no engine.
     fn engine_reads(&self) -> bool {
         let readable = self
+            .shown
             .viewer
             .as_ref()
             .is_some_and(|viewer| viewer.unavailable.is_none());
@@ -311,7 +312,7 @@ impl Scrubber {
     /// step, which makes the path a directory. Any other path is left as
     /// it is.
     fn list_from_trace(&mut self, cx: &mut Context<Self>) {
-        let (Some(viewer), Some(session)) = (&mut self.viewer, &self.session) else {
+        let (Some(viewer), Some(session)) = (&mut self.shown.viewer, &self.session) else {
             return;
         };
         let timeline = &session.run.timeline;
@@ -354,7 +355,7 @@ impl Scrubber {
     }
 
     pub(super) fn close_viewer(&mut self, cx: &mut Context<Self>) {
-        self.viewer = None;
+        self.shown.viewer = None;
         if self.right_tab == RightTab::File {
             self.right_tab = RightTab::AtStep;
         }
@@ -365,7 +366,7 @@ impl Scrubber {
     /// Stops the read the viewer waits on; the engine's answer, a
     /// cancellation, then says so.
     pub(super) fn cancel_viewer_read(&mut self, cx: &mut Context<Self>) {
-        if let Some(viewer) = &mut self.viewer
+        if let Some(viewer) = &mut self.shown.viewer
             && let Some(cancel) = &viewer.in_flight
         {
             cancel.cancel();
@@ -375,7 +376,7 @@ impl Scrubber {
 
     /// The contents on screen, when the viewer shows a file's contents.
     pub(super) fn viewer_view(&self) -> Option<&View> {
-        match self.viewer.as_ref()?.shown.as_ref()? {
+        match self.shown.viewer.as_ref()?.shown.as_ref()? {
             Fetched::Contents { view, .. } => Some(view),
             _ => None,
         }
@@ -383,7 +384,7 @@ impl Scrubber {
 
     /// Scrolls the viewer so line `line` is at its top.
     pub(super) fn scroll_viewer_to(&self, line: usize) {
-        if let Some(viewer) = &self.viewer {
+        if let Some(viewer) = &self.shown.viewer {
             viewer.scroll.scroll_to_item(line, ScrollStrategy::Top);
         }
     }
@@ -396,7 +397,7 @@ impl Scrubber {
         };
         let widest = line_width(view.widest);
         let visible = text_column(width, gutter_digits(view));
-        let Some(viewer) = &mut self.viewer else {
+        let Some(viewer) = &mut self.shown.viewer else {
             return;
         };
         viewer.sideways.scroll_by(pixels, widest, visible);
@@ -407,7 +408,7 @@ impl Scrubber {
     /// directory's entries, each by its path under the directory, or a
     /// message as one line.
     pub(super) fn viewer_message_lines(&self) -> Vec<Mapped> {
-        let Some(viewer) = &self.viewer else {
+        let Some(viewer) = &self.shown.viewer else {
             return Vec::new();
         };
         if let Some(entries) = listed_entries(viewer) {
@@ -422,7 +423,7 @@ impl Scrubber {
     }
 
     pub(super) fn toggle_pin(&mut self, cx: &mut Context<Self>) {
-        let Some(viewer) = &mut self.viewer else {
+        let Some(viewer) = &mut self.shown.viewer else {
             return;
         };
         viewer.pin = match viewer.pin {
@@ -440,7 +441,7 @@ impl Scrubber {
     /// contents stale and reads the file again once the playhead rests.
     pub(super) fn playhead_moved(&mut self, cx: &mut Context<Self>) {
         let step = self.step;
-        let Some(viewer) = &mut self.viewer else {
+        let Some(viewer) = &mut self.shown.viewer else {
             return;
         };
         if viewer.pin != Pin::FollowPlayhead || viewer.step == step {
@@ -454,7 +455,7 @@ impl Scrubber {
         if !self.engine_reads() {
             return;
         }
-        let Some(viewer) = &mut self.viewer else {
+        let Some(viewer) = &mut self.shown.viewer else {
             return;
         };
         viewer.loading = true;
@@ -473,7 +474,11 @@ impl Scrubber {
         cx.spawn(async move |this, cx| {
             timer.await;
             let _ = this.update(cx, |this, cx| {
-                let still_latest = this.viewer.as_ref().is_some_and(|v| v.request == request);
+                let still_latest = this
+                    .shown
+                    .viewer
+                    .as_ref()
+                    .is_some_and(|v| v.request == request);
                 if still_latest {
                     this.fetch_file(cx);
                 }
@@ -487,7 +492,7 @@ impl Scrubber {
     /// answer for the version the file has there. None while the VM
     /// boots, which the viewer says instead.
     fn known_answer(&self) -> Option<Looked> {
-        let (viewer, session) = (self.viewer.as_ref()?, self.session.as_ref()?);
+        let (viewer, session) = (self.shown.viewer.as_ref()?, self.session.as_ref()?);
         let timeline = &session.run.timeline;
         if viewer.step < timeline.job_start.unwrap_or(0) {
             return None;
@@ -514,7 +519,7 @@ impl Scrubber {
     /// Asks the engine what the viewer's path holds at the viewer's step,
     /// on a background thread, unless an answer for it is kept.
     fn fetch_file(&mut self, cx: &mut Context<Self>) {
-        let (Some(viewer), Some(session)) = (&mut self.viewer, &self.session) else {
+        let (Some(viewer), Some(session)) = (&mut self.shown.viewer, &self.session) else {
             return;
         };
         viewer.supersede();
@@ -539,7 +544,7 @@ impl Scrubber {
 
         // The engine's answer, kept by the file's version or the
         // directory's step.
-        let (Some(viewer), Some(session)) = (&mut self.viewer, &self.session) else {
+        let (Some(viewer), Some(session)) = (&mut self.shown.viewer, &self.session) else {
             return;
         };
         viewer.loading = true;
@@ -580,7 +585,7 @@ impl Scrubber {
             // says while it still waits for this request.
             while let Some(line) = said.next().await {
                 let alive = this.update(cx, |this, cx| {
-                    let Some(viewer) = &mut this.viewer else {
+                    let Some(viewer) = &mut this.shown.viewer else {
                         return;
                     };
                     if viewer.request == request && viewer.waiting.said(&line) {
@@ -594,7 +599,12 @@ impl Scrubber {
 
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
-                if this.viewer.as_ref().is_none_or(|v| v.request != request) {
+                if this
+                    .shown
+                    .viewer
+                    .as_ref()
+                    .is_none_or(|v| v.request != request)
+                {
                     return;
                 }
                 match &result {
@@ -645,7 +655,7 @@ impl Scrubber {
             .selecting
             .selection
             .filter(|s| s.surface != Surface::Viewer);
-        let (Some(viewer), Some(session)) = (&mut self.viewer, &self.session) else {
+        let (Some(viewer), Some(session)) = (&mut self.shown.viewer, &self.session) else {
             return;
         };
         viewer.loading = false;
@@ -677,7 +687,7 @@ impl Scrubber {
             .selecting
             .selection
             .filter(|s| s.surface != Surface::Viewer);
-        let Some(viewer) = &mut self.viewer else {
+        let Some(viewer) = &mut self.shown.viewer else {
             return;
         };
         viewer.loading = false;
@@ -748,7 +758,7 @@ impl Scrubber {
 
     /// The viewer in place of the right column.
     pub(super) fn render_viewer(&self, cx: &mut Context<Self>) -> Option<Div> {
-        let viewer = self.viewer.as_ref()?;
+        let viewer = self.shown.viewer.as_ref()?;
         let mono = self.fonts.mono.clone();
 
         // The title bar: the step shown, the pin and the close button.
@@ -937,7 +947,7 @@ impl Scrubber {
                             highlighter,
                             request,
                             ..
-                        }) = this.viewer.as_mut()
+                        }) = this.shown.viewer.as_mut()
                         else {
                             return Vec::new();
                         };
@@ -1033,7 +1043,7 @@ impl Scrubber {
                     entries.len(),
                     cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
                         let registry = this.selecting.registry.clone();
-                        let Some(viewer) = this.viewer.as_ref() else {
+                        let Some(viewer) = this.shown.viewer.as_ref() else {
                             return Vec::new();
                         };
                         let Some(entries) = listed_entries(viewer) else {
@@ -1218,7 +1228,7 @@ fn finish_colors(
     cx.spawn(async move |this, cx| {
         let finished = task.await;
         let _ = this.update(cx, |this, cx| {
-            let Some(viewer) = &mut this.viewer else {
+            let Some(viewer) = &mut this.shown.viewer else {
                 return;
             };
             if viewer.request != request {

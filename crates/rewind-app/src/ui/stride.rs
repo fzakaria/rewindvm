@@ -63,16 +63,16 @@ impl Scrubber {
             return;
         };
         let timeline = &session.run.timeline;
-        let bookmarks: Vec<u64> = self.bookmarks.iter().map(|b| b.step).collect();
+        let bookmarks: Vec<u64> = self.shown.bookmarks.iter().map(|b| b.step).collect();
         let found = step_by(
             timeline,
-            &self.stride,
+            &self.shown.stride,
             self.log_filter,
             &bookmarks,
             direction,
             self.step,
         );
-        let target = match (found, &self.stride, direction) {
+        let target = match (found, &self.shown.stride, direction) {
             (Some(step), _, _) => step,
             (None, Stride::Every, Direction::Forward) => timeline.total,
             (None, Stride::Every, Direction::Back) => 0,
@@ -114,7 +114,7 @@ impl Scrubber {
     }
 
     fn choose_stride(&mut self, stride: Stride, cx: &mut Context<Self>) {
-        self.stride = stride;
+        self.shown.stride = stride;
         self.stride_menu = None;
         cx.notify();
     }
@@ -130,7 +130,7 @@ impl Scrubber {
             offered.push(Stride::Switches);
         }
         offered.extend([Stride::LogLine, Stride::Lifecycle]);
-        if !self.bookmarks.is_empty() {
+        if !self.shown.bookmarks.is_empty() {
             offered.push(Stride::Bookmarks);
         }
         let Some(t) = timeline else {
@@ -142,7 +142,7 @@ impl Scrubber {
         if let Some(switch) = t.switch_at(self.step) {
             offered.extend(Stride::following_switch(t, switch));
         }
-        if let Some(viewer) = &self.viewer {
+        if let Some(viewer) = &self.shown.viewer {
             offered.push(Stride::File(viewer.path.clone()));
         }
         let mut unique: Vec<Stride> = Vec::new();
@@ -151,8 +151,8 @@ impl Scrubber {
                 unique.push(stride);
             }
         }
-        if !unique.contains(&self.stride) {
-            unique.push(self.stride.clone());
+        if !unique.contains(&self.shown.stride) {
+            unique.push(self.shown.stride.clone());
         }
         unique
     }
@@ -163,7 +163,7 @@ impl Scrubber {
             &self
                 .session
                 .as_ref()
-                .map(|s| stride_label(&self.stride, &s.run.timeline))
+                .map(|s| stride_label(&self.shown.stride, &s.run.timeline))
                 .unwrap_or_default(),
         )
     }
@@ -221,9 +221,9 @@ impl Scrubber {
         // Each row names its stride and, at the right, how many stops the
         // stride has over the whole run: the size of the walk Next makes,
         // known before the stride is chosen.
-        let bookmarks: Vec<u64> = self.bookmarks.iter().map(|b| b.step).collect();
+        let bookmarks: Vec<u64> = self.shown.bookmarks.iter().map(|b| b.step).collect();
         for (i, stride) in self.offered_strides().into_iter().enumerate() {
-            let chosen = stride == self.stride;
+            let chosen = stride == self.shown.stride;
             let label = stride_label(&stride, timeline);
             let stops = count(timeline, &stride, self.log_filter, &bookmarks);
             items = items.child(

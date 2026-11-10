@@ -43,14 +43,14 @@ impl Scrubber {
     /// kept until the view changes or another session is shown, which
     /// drops the kept density.
     fn band_density(&mut self, view: View) -> Rc<Density> {
-        if let Some(density) = &self.band
+        if let Some(density) = &self.shown.band
             && density.view == view
         {
             return density.clone();
         }
         let switches = &self.session().run.timeline.trace.switches;
         let density = Rc::new(Density::of(switches, view, BUCKETS));
-        self.band = Some(density.clone());
+        self.shown.band = Some(density.clone());
         density
     }
 

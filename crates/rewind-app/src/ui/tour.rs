@@ -95,14 +95,14 @@ impl Scrubber {
             session.divergence_step().is_some(),
             self.runs.family.as_ref().is_some_and(|f| f.runs.len() > 1),
         );
-        self.tour = Some(Tour::new(stops));
+        self.shown.tour = Some(Tour::new(stops));
         self.show_tour_stop(cx);
         window.focus(&self.tour_focus, cx);
     }
 
     /// Moves the playhead to what the current stop talks about.
     fn show_tour_stop(&mut self, cx: &mut Context<Self>) {
-        let (Some(tour), Some(session)) = (&self.tour, &self.session) else {
+        let (Some(tour), Some(session)) = (&self.shown.tour, &self.session) else {
             return;
         };
         let Some(stop) = tour.current() else {
@@ -128,7 +128,7 @@ impl Scrubber {
     }
 
     pub(super) fn tour_next(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(tour) = &mut self.tour else {
+        let Some(tour) = &mut self.shown.tour else {
             return;
         };
         match tour.advance() {
@@ -138,7 +138,7 @@ impl Scrubber {
     }
 
     pub(super) fn tour_back(&mut self, cx: &mut Context<Self>) {
-        let Some(tour) = &mut self.tour else {
+        let Some(tour) = &mut self.shown.tour else {
             return;
         };
         tour.back();
@@ -147,7 +147,7 @@ impl Scrubber {
 
     /// Ends the tour, finished or skipped, and remembers that it was.
     pub(super) fn end_tour(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.tour = None;
+        self.shown.tour = None;
         tour::remember_dismissed();
         window.focus(&self.focus, cx);
         cx.notify();
@@ -161,7 +161,7 @@ impl Scrubber {
         anchor: Anchor,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let tour = self.tour.as_ref()?;
+        let tour = self.shown.tour.as_ref()?;
         let stop = tour.current()?;
         if stop.anchor != anchor {
             return None;

@@ -108,7 +108,7 @@ impl Scrubber {
             .session
             .as_ref()
             .is_some_and(|s| s.run.origin == Origin::Example);
-        if self.terminal.is_some() || self.tour.is_some() || example {
+        if self.terminal.is_some() || self.shown.tour.is_some() || example {
             return;
         }
         let today = Date::today();

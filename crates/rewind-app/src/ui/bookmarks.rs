@@ -95,7 +95,7 @@ impl Scrubber {
             caret_color: rgb(theme::AMBER).into(),
             selection_color: rgba(theme::FOCUS_RING_A).into(),
         };
-        let existing = self.bookmarks.at(step).map(|b| b.note.clone());
+        let existing = self.shown.bookmarks.at(step).map(|b| b.note.clone());
         let input = cx.new(|cx| TextInput::new(style, cx));
         if let Some(note) = &existing {
             input.update(cx, |input, cx| {
@@ -104,7 +104,7 @@ impl Scrubber {
             });
         }
         window.focus(&input.focus_handle(cx), cx);
-        self.bookmark_editor = Some(BookmarkEditor {
+        self.shown.bookmark_editor = Some(BookmarkEditor {
             step,
             input,
             existed: existing.is_some(),
@@ -113,25 +113,25 @@ impl Scrubber {
     }
 
     pub(super) fn close_bookmark_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.bookmark_editor = None;
+        self.shown.bookmark_editor = None;
         window.focus(&self.focus, cx);
         cx.notify();
     }
 
     /// Saves the dialog's note on its step and closes it.
     fn save_bookmark(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(editor) = &self.bookmark_editor else {
+        let Some(editor) = &self.shown.bookmark_editor else {
             return;
         };
         let note = editor.input.read(cx).text().trim().to_string();
-        self.bookmarks.set(editor.step, note);
+        self.shown.bookmarks.set(editor.step, note);
         self.close_bookmark_editor(window, cx);
         self.keep_bookmarks(cx);
     }
 
     /// Removes the dialog's bookmark and closes it.
     fn remove_bookmark(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(editor) = &self.bookmark_editor else {
+        let Some(editor) = &self.shown.bookmark_editor else {
             return;
         };
         let step = editor.step;
@@ -141,7 +141,7 @@ impl Scrubber {
 
     /// Removes the bookmark at `step`.
     fn remove_bookmark_at(&mut self, step: u64, cx: &mut Context<Self>) {
-        self.bookmarks.remove(step);
+        self.shown.bookmarks.remove(step);
         self.keep_bookmarks(cx);
         cx.notify();
     }
@@ -160,7 +160,7 @@ impl Scrubber {
                 return;
             };
             let settings = crate::settings::kept();
-            match self.bookmarks.to_json() {
+            match self.shown.bookmarks.to_json() {
                 Some(text) => settings.write(&name, &text),
                 None => settings.remove(&name),
             }
@@ -175,7 +175,7 @@ impl Scrubber {
             );
             return;
         };
-        if let Err(e) = self.bookmarks.save(&dir) {
+        if let Err(e) = self.shown.bookmarks.save(&dir) {
             self.notify_user(
                 NoticeTone::Error,
                 "Could not save the bookmarks",
@@ -190,7 +190,7 @@ impl Scrubber {
     /// bookmark the step and to the Bookmarks tab.
     pub(super) fn render_bookmark_here(&self, cx: &mut Context<Self>) -> Div {
         let mut column = div().flex().flex_col().gap(px(size::CARD_GAP));
-        if let Some(mark) = self.bookmarks.at(self.step) {
+        if let Some(mark) = self.shown.bookmarks.at(self.step) {
             let note = if mark.note.is_empty() {
                 div().text_color(rgb(theme::MUTED)).child("No note.")
             } else {
@@ -220,7 +220,7 @@ impl Scrubber {
         }
 
         let mut links = div().flex().gap(px(size::SECTION_GAP));
-        if self.bookmarks.at(self.step).is_none() {
+        if self.shown.bookmarks.at(self.step).is_none() {
             links = links.child(
                 link("bookmark-add", "Bookmark this step (b)")
                     .tooltip(tooltip(ADD_NOTE))
@@ -229,11 +229,11 @@ impl Scrubber {
                     ),
             );
         }
-        if !self.bookmarks.is_empty() {
+        if !self.shown.bookmarks.is_empty() {
             links = links.child(
                 link(
                     "bookmark-all",
-                    format!("All bookmarks \u{b7} {}", self.bookmarks.len()),
+                    format!("All bookmarks \u{b7} {}", self.shown.bookmarks.len()),
                 )
                 .on_click(cx.listener(|this, _, _, cx| this.select_tab(RightTab::Bookmarks, cx))),
             );
@@ -253,7 +253,7 @@ impl Scrubber {
             .min_h_0()
             .overflow_y_scroll()
             .py(px(size::LIST_PAD_Y));
-        if self.bookmarks.is_empty() {
+        if self.shown.bookmarks.is_empty() {
             list = list.child(
                 div()
                     .px(px(size::PANEL_PAD_X))
@@ -261,7 +261,7 @@ impl Scrubber {
                     .child("No bookmarks. Press b to bookmark the playhead's step."),
             );
         }
-        for (i, mark) in self.bookmarks.iter().enumerate() {
+        for (i, mark) in self.shown.bookmarks.iter().enumerate() {
             let step = mark.step;
             let here = step == self.step;
             let note = if mark.note.is_empty() {
@@ -328,7 +328,7 @@ impl Scrubber {
             .min_h_0()
             .bg(rgb(theme::PANEL))
             .child(panel_title(
-                &format!("Bookmarks \u{b7} {}", self.bookmarks.len()),
+                &format!("Bookmarks \u{b7} {}", self.shown.bookmarks.len()),
                 None,
             ))
             .child(list)
@@ -337,7 +337,8 @@ impl Scrubber {
     /// The marks of the bookmarks the track shows, by step: each goes to
     /// its step on a click and shows its note when pointed at.
     pub(super) fn bookmark_marks(&self, view: View, cx: &mut Context<Self>) -> Vec<Stateful<Div>> {
-        self.bookmarks
+        self.shown
+            .bookmarks
             .iter()
             .enumerate()
             .filter(|(_, mark)| view.contains(mark.step))
@@ -367,7 +368,7 @@ impl Scrubber {
 
     /// The note dialog over a dimmed window, when it is open.
     pub(super) fn render_bookmark_editor(&self, cx: &mut Context<Self>) -> Option<Div> {
-        let editor = self.bookmark_editor.as_ref()?;
+        let editor = self.shown.bookmark_editor.as_ref()?;
         let field = div()
             .key_context(BOOKMARK_CONTEXT)
             .on_action(

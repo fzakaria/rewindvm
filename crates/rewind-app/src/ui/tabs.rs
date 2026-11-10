@@ -101,13 +101,13 @@ impl Scrubber {
         if self.bookmarks_tab {
             tabs.push(RightTab::Bookmarks);
         }
-        if self.viewer.is_some() {
+        if self.shown.viewer.is_some() {
             tabs.push(RightTab::File);
         }
-        if self.file_diff.is_some() {
+        if self.shown.file_diff.is_some() {
             tabs.push(RightTab::FileDiff);
         }
-        if self.source.is_some() {
+        if self.shown.source.is_some() {
             tabs.push(RightTab::Source);
         }
         if self.lanes.is_some() {
@@ -127,20 +127,21 @@ impl Scrubber {
             RightTab::File => {
                 // The path's last name, or the whole path when it has
                 // none, as the root has.
-                let name = self.viewer.as_ref().map_or("", |viewer| {
+                let name = self.shown.viewer.as_ref().map_or("", |viewer| {
                     let last = viewer.path.trim_end_matches('/').rsplit('/').next();
                     last.filter(|name| !name.is_empty()).unwrap_or(&viewer.path)
                 });
                 format!("File \u{b7} {}", clip(name, MAX_FILE_CHARS))
             }
             RightTab::FileDiff => self
+                .shown
                 .file_diff
                 .as_ref()
                 .map(|panel| panel.label())
                 .unwrap_or_default(),
             RightTab::Source => "Source".to_string(),
             RightTab::Threads => "Threads".to_string(),
-            RightTab::Bookmarks => format!("Bookmarks \u{b7} {}", self.bookmarks.len()),
+            RightTab::Bookmarks => format!("Bookmarks \u{b7} {}", self.shown.bookmarks.len()),
         }
     }
 

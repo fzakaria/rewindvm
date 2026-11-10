@@ -281,7 +281,7 @@ impl Scrubber {
 
         // The layout and the list, and the wait for it, go on from a view
         // open before.
-        let mut kept = self.file_diff.take();
+        let mut kept = self.shown.file_diff.take();
         let (layout, outputs, outputs_request, outputs_cancel, outputs_waiting) =
             match kept.as_mut() {
                 Some(panel) => (
@@ -301,7 +301,7 @@ impl Scrubber {
         let unread = matches!(outputs, None | Some(OutputList::Stopped));
         let reading_list = path.is_none() && unread && unavailable.is_none();
         self.right_tab = RightTab::FileDiff;
-        self.file_diff = Some(FileDiffPanel {
+        self.shown.file_diff = Some(FileDiffPanel {
             path,
             at,
             layout,
@@ -332,7 +332,7 @@ impl Scrubber {
     /// view that said the run was still being imported reads the list and
     /// both copies through the engine now.
     pub(super) fn file_diff_run_imported(&mut self, cx: &mut Context<Self>) {
-        let (Some(panel), Some(session)) = (&mut self.file_diff, &self.session) else {
+        let (Some(panel), Some(session)) = (&mut self.shown.file_diff, &self.session) else {
             return;
         };
         let Some(other) = &session.other else {
@@ -350,7 +350,7 @@ impl Scrubber {
     }
 
     pub(super) fn close_file_diff(&mut self, cx: &mut Context<Self>) {
-        self.file_diff = None;
+        self.shown.file_diff = None;
         self.clear_selection_in(&ROW_SURFACES);
         if self.right_tab == RightTab::FileDiff {
             self.right_tab = RightTab::AtStep;
@@ -362,7 +362,7 @@ impl Scrubber {
     /// shows: this run's playhead moves there, and the other run is shown
     /// in this one's place, at the step, with the same file compared.
     fn jump_to_write(&mut self, side: Side, step: u64, cx: &mut Context<Self>) {
-        let Some(panel) = &self.file_diff else {
+        let Some(panel) = &self.shown.file_diff else {
             return;
         };
         if side == Side::This {
@@ -384,7 +384,7 @@ impl Scrubber {
 
     /// Compares at the playhead, or at each run's end.
     fn set_diff_at(&mut self, at: DiffAt, cx: &mut Context<Self>) {
-        let Some(panel) = &mut self.file_diff else {
+        let Some(panel) = &mut self.shown.file_diff else {
             return;
         };
         if panel.at == at {
@@ -397,7 +397,7 @@ impl Scrubber {
 
     /// Lays the copies out side by side, or one under the other.
     fn set_diff_layout(&mut self, layout: Layout, cx: &mut Context<Self>) {
-        let Some(panel) = &mut self.file_diff else {
+        let Some(panel) = &mut self.shown.file_diff else {
             return;
         };
         if panel.layout == layout {
@@ -410,7 +410,7 @@ impl Scrubber {
 
     /// The steps the view compares now: this run's and the other run's.
     fn diff_steps(&self) -> Option<(u64, u64)> {
-        let (panel, session) = (self.file_diff.as_ref()?, self.session.as_ref()?);
+        let (panel, session) = (self.shown.file_diff.as_ref()?, self.session.as_ref()?);
         let other = session.other.as_ref()?;
         Some(match panel.at {
             DiffAt::Playhead => {
@@ -436,7 +436,7 @@ impl Scrubber {
     /// rests.
     pub(super) fn file_diff_playhead_moved(&mut self, cx: &mut Context<Self>) {
         let steps = self.diff_steps();
-        let Some(panel) = &mut self.file_diff else {
+        let Some(panel) = &mut self.shown.file_diff else {
             return;
         };
         let follows = panel.at == DiffAt::Playhead && panel.path.is_some();
@@ -452,6 +452,7 @@ impl Scrubber {
             timer.await;
             let _ = this.update(cx, |this, cx| {
                 let still_latest = this
+                    .shown
                     .file_diff
                     .as_ref()
                     .is_some_and(|p| p.request == request);
@@ -469,7 +470,8 @@ impl Scrubber {
     /// is kept.
     fn fetch_copies(&mut self, cx: &mut Context<Self>) {
         let steps = self.diff_steps();
-        let (Some(panel), Some(session), Some(steps)) = (&mut self.file_diff, &self.session, steps)
+        let (Some(panel), Some(session), Some(steps)) =
+            (&mut self.shown.file_diff, &self.session, steps)
         else {
             return;
         };
@@ -524,7 +526,7 @@ impl Scrubber {
                 // says while it still waits for this request.
                 while let Some(line) = said.next().await {
                     let alive = this.update(cx, |this, cx| {
-                        let Some(panel) = &mut this.file_diff else {
+                        let Some(panel) = &mut this.shown.file_diff else {
                             return;
                         };
                         if panel.request == request && panel.waiting.said(&line) {
@@ -556,7 +558,7 @@ impl Scrubber {
         result: EngineResult<FileAtStep>,
         cx: &mut Context<Self>,
     ) {
-        let Some(panel) = &mut self.file_diff else {
+        let Some(panel) = &mut self.shown.file_diff else {
             return;
         };
         if panel.request != request {
@@ -580,7 +582,7 @@ impl Scrubber {
     /// Compares the two copies on a background thread, once both are in,
     /// and shows the comparison if the view still waits on the same ones.
     fn compare_copies(&mut self, cx: &mut Context<Self>) {
-        let Some(panel) = &mut self.file_diff else {
+        let Some(panel) = &mut self.shown.file_diff else {
             return;
         };
         let Some(path) = panel.path.clone() else {
@@ -621,7 +623,7 @@ impl Scrubber {
         cx.spawn(async move |this, cx| {
             let compared = task.await;
             let _ = this.update(cx, |this, cx| {
-                let Some(panel) = &mut this.file_diff else {
+                let Some(panel) = &mut this.shown.file_diff else {
                     return;
                 };
                 if panel.request != request || panel.layout != layout {
@@ -658,7 +660,7 @@ impl Scrubber {
 
     /// The rows of the comparison on screen, for the selection.
     pub(super) fn file_diff_rows(&self) -> Option<&[Row]> {
-        match &self.file_diff.as_ref()?.shown {
+        match &self.shown.file_diff.as_ref()?.shown {
             Some((
                 Compared {
                     laid: Some(laid), ..
@@ -671,7 +673,7 @@ impl Scrubber {
 
     /// Scrolls the view so row `row` is at its top.
     pub(super) fn scroll_file_diff_to(&self, row: usize) {
-        if let Some(panel) = &self.file_diff {
+        if let Some(panel) = &self.shown.file_diff {
             panel.scroll.scroll_to_item(row, ScrollStrategy::Top);
         }
     }
@@ -679,7 +681,7 @@ impl Scrubber {
     /// Stops reading both copies; the engine's answers, cancellations,
     /// then say so.
     fn cancel_copies(&mut self, cx: &mut Context<Self>) {
-        if let Some(panel) = &self.file_diff {
+        if let Some(panel) = &self.shown.file_diff {
             for cancel in &panel.in_flight {
                 cancel.cancel();
             }
@@ -691,6 +693,7 @@ impl Scrubber {
     /// cancellation, then says so.
     fn cancel_outputs(&mut self, cx: &mut Context<Self>) {
         if let Some(cancel) = self
+            .shown
             .file_diff
             .as_ref()
             .and_then(|p| p.outputs_cancel.as_ref())
@@ -716,7 +719,7 @@ impl Scrubber {
 
     /// Asks the engine for the files that differ at the runs' ends.
     fn fetch_outputs(&mut self, cx: &mut Context<Self>) {
-        let (Some(panel), Some(session)) = (&mut self.file_diff, &self.session) else {
+        let (Some(panel), Some(session)) = (&mut self.shown.file_diff, &self.session) else {
             return;
         };
         let Some(other) = &session.other else {
@@ -744,7 +747,7 @@ impl Scrubber {
             // while it still waits for this request.
             while let Some(line) = said.next().await {
                 let alive = this.update(cx, |this, cx| {
-                    let Some(panel) = &mut this.file_diff else {
+                    let Some(panel) = &mut this.shown.file_diff else {
                         return;
                     };
                     if panel.outputs_request == Some(request) && panel.outputs_waiting.said(&line) {
@@ -758,7 +761,7 @@ impl Scrubber {
 
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
-                let Some(panel) = &mut this.file_diff else {
+                let Some(panel) = &mut this.shown.file_diff else {
                     return;
                 };
                 if panel.outputs_request != Some(request) {
@@ -779,7 +782,7 @@ impl Scrubber {
     /// Scrolls the view's rows `pixels` sideways, in an area `width`
     /// pixels wide.
     fn scroll_diff_sideways(&mut self, pixels: f32, width: f32, cx: &mut Context<Self>) {
-        let Some(panel) = &mut self.file_diff else {
+        let Some(panel) = &mut self.shown.file_diff else {
             return;
         };
         let Some((
@@ -800,7 +803,7 @@ impl Scrubber {
 
     /// The view in place of the right column.
     pub(super) fn render_file_diff(&self, cx: &mut Context<Self>) -> Option<Div> {
-        let panel = self.file_diff.as_ref()?;
+        let panel = self.shown.file_diff.as_ref()?;
         let session = self.session.as_ref()?;
         let other = session.other.as_ref()?;
         let mono = self.fonts.mono.clone();
@@ -1251,7 +1254,7 @@ impl Scrubber {
                             )),
                         ..
                     },
-                ) = this.file_diff.as_ref()
+                ) = this.shown.file_diff.as_ref()
                 else {
                     return Vec::new();
                 };

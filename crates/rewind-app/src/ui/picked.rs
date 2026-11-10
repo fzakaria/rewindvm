@@ -65,7 +65,7 @@ impl Scrubber {
             RowClick::Selecting
         };
         let before = TreeState {
-            picked: self.picked_row,
+            picked: self.shown.picked_row,
             step: self.step,
         };
         let after = after_row_click(before, row, click);
@@ -77,7 +77,7 @@ impl Scrubber {
 
     /// Picks a row, or none, and shows "At this step", where its card is.
     pub(super) fn pick_row(&mut self, pick: Option<Pick>, cx: &mut Context<Self>) {
-        self.picked_row = pick;
+        self.shown.picked_row = pick;
         if pick.is_some() && self.right_tab != RightTab::AtStep {
             self.select_tab(RightTab::AtStep, cx);
         }
@@ -86,7 +86,7 @@ impl Scrubber {
 
     /// The card for the picked row at the playhead, while one is picked.
     pub(super) fn render_picked_row(&self, cx: &mut Context<Self>) -> Option<Div> {
-        let pick = self.picked_row?;
+        let pick = self.shown.picked_row?;
         let t = &self.session.as_ref()?.run.timeline;
         let card = proc_card(t, pick, self.step)?;
         Some(self.render_proc_card(&card, cx))

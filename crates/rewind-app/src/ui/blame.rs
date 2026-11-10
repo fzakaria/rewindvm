@@ -276,7 +276,7 @@ impl Scrubber {
 
         // The frame on screen, while the panel's answer is for the step
         // it is at rather than one it is leaving.
-        let shown = self.source.as_ref().and_then(|panel| {
+        let shown = self.shown.source.as_ref().and_then(|panel| {
             let shown = panel.shown.as_ref()?;
             let (located, at) = shown.located()?;
             let frame = located.frames.get(at?)?;
@@ -313,8 +313,8 @@ impl Scrubber {
             .registry
             .hit(crate::selection::Surface::Source, at)?;
         let (file, frame) = self.shown_file()?;
-        let (located, _) = self.source.as_ref()?.shown.as_ref()?.located()?;
-        let step = self.source.as_ref()?.shown.as_ref()?.step();
+        let (located, _) = self.shown.source.as_ref()?.shown.as_ref()?.located()?;
+        let step = self.shown.source.as_ref()?.shown.as_ref()?.step();
         let line = file.lines.get(hit.line)?;
         let mapped = crate::ui::selectable::viewer_line(line);
         let run = &self.session.as_ref()?.run.path;

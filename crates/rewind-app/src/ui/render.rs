@@ -714,7 +714,7 @@ impl Scrubber {
             })
         };
         track = track.children(self.fork_marks(view, cx));
-        for (n, fork) in self.forks.iter().enumerate() {
+        for (n, fork) in self.shown.forks.iter().enumerate() {
             let color = match fork.state {
                 ForkState::Failed(_) => theme::MUTED,
                 ForkState::Pending | ForkState::Created(_) => theme::AMBER_PALE,
@@ -988,7 +988,7 @@ impl Scrubber {
         let back = button(
             "back",
             ButtonStyle::Neutral,
-            availability(self.history.can_go_back()),
+            availability(self.shown.history.can_go_back()),
         )
         .aria_label("Back (Alt+Left)")
         .tooltip(tooltip(BACK_NOTE))
@@ -999,7 +999,7 @@ impl Scrubber {
         let forward = button(
             "forward",
             ButtonStyle::Neutral,
-            availability(self.history.can_go_forward()),
+            availability(self.shown.history.can_go_forward()),
         )
         .aria_label("Forward (Alt+Right)")
         .tooltip(tooltip(FORWARD_NOTE))
@@ -1095,6 +1095,7 @@ impl Scrubber {
         // While forks made here run, the button's icon turns and its note
         // says how many; a click still starts another.
         let forking = self
+            .shown
             .forks
             .iter()
             .filter(|f| f.state == ForkState::Pending)
@@ -1211,10 +1212,10 @@ impl Scrubber {
         // Follow the playhead: when it moves, scroll the newest line to
         // the bottom; otherwise leave the user's scroll alone.
         let key = (self.step, filter);
-        if self.log_followed != Some(key) && count > 0 {
+        if self.shown.log_followed != Some(key) && count > 0 {
             self.log_scroll
                 .scroll_to_item_strict(count - 1, ScrollStrategy::Bottom);
-            self.log_followed = Some(key);
+            self.shown.log_followed = Some(key);
         }
 
         let console_on = filter == LogFilter::WithConsole;
@@ -1346,7 +1347,7 @@ impl Scrubber {
         let rows: Vec<_> = t.alive_rows(step).collect();
         let alive = rows.len();
         let now = t.active_row(step);
-        let picked = self.picked_row;
+        let picked = self.shown.picked_row;
         let step_width = self.step_column_width();
         let selected = self.selected_range(Surface::Processes);
         let registry = self.selecting.registry.clone();
@@ -1429,9 +1430,9 @@ impl Scrubber {
 
         // Files, newest first: scroll back to the top when a new one lands.
         let files = t.file_count_at(step);
-        if self.files_followed != Some(files) {
+        if self.shown.files_followed != Some(files) {
             self.files_scroll.scroll_to_item(0, ScrollStrategy::Top);
-            self.files_followed = Some(files);
+            self.shown.files_followed = Some(files);
         }
         let step_width = self.step_column_width();
         let selected = self.selected_range(Surface::Files);
@@ -2888,7 +2889,7 @@ impl Scrubber {
 
     /// The fork card for the latest fork made from the playhead.
     pub(super) fn fork_card_lines(&self) -> Vec<Mapped> {
-        let Some(fork) = self.forks.last() else {
+        let Some(fork) = self.shown.forks.last() else {
             return Vec::new();
         };
         let step = thousands(fork.step);

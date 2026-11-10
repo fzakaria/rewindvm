@@ -29,7 +29,8 @@ impl Scrubber {
     /// The steps the timeline shows: the zoomed window, or the whole run.
     pub(super) fn timeline_view(&self) -> View {
         let total = self.session.as_ref().map_or(0, |s| s.run.timeline.total);
-        self.view
+        self.shown
+            .view
             .filter(|v| v.hi <= total && v.lo < v.hi)
             .unwrap_or(View::whole(total))
     }
@@ -42,7 +43,7 @@ impl Scrubber {
         };
         let total = session.run.timeline.total;
         let zoomed = self.timeline_view().zoomed(fraction, factor, total);
-        self.view = (!zoomed.is_whole(total)).then_some(zoomed);
+        self.shown.view = (!zoomed.is_whole(total)).then_some(zoomed);
         cx.notify();
     }
 
@@ -66,16 +67,16 @@ impl Scrubber {
 
     /// Shows the whole run again, as 0 does.
     pub(super) fn zoom_reset(&mut self, cx: &mut Context<Self>) {
-        self.view = None;
+        self.shown.view = None;
         cx.notify();
     }
 
     /// Moves the zoomed window by `fraction` of its width.
     pub(super) fn pan(&mut self, fraction: f32, cx: &mut Context<Self>) {
-        let (Some(session), Some(view)) = (&self.session, self.view) else {
+        let (Some(session), Some(view)) = (&self.session, self.shown.view) else {
             return;
         };
-        self.view = Some(view.panned(fraction, session.run.timeline.total));
+        self.shown.view = Some(view.panned(fraction, session.run.timeline.total));
         cx.notify();
     }
 
@@ -100,11 +101,11 @@ impl Scrubber {
     /// Keeps the playhead on screen: when it moves out of the zoomed
     /// window, the window moves to have it in its middle.
     pub(super) fn keep_playhead_in_view(&mut self) {
-        let (Some(session), Some(view)) = (&self.session, self.view) else {
+        let (Some(session), Some(view)) = (&self.session, self.shown.view) else {
             return;
         };
         if !view.contains(self.step) {
-            self.view = Some(view.centred_on(self.step, session.run.timeline.total));
+            self.shown.view = Some(view.centred_on(self.step, session.run.timeline.total));
         }
     }
 
