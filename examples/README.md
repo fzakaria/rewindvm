@@ -9,7 +9,7 @@ that has finished a job checks whether the pool is stopping without holding
 the lock, then counts the job through the queue. When shutdown runs between
 that check and the count, the worker writes through a null queue pointer and
 `test_pool_shutdown` dies with SIGSEGV. On a 16 core laptop that happens in
-roughly one build in ten.
+roughly one build in twenty.
 
 ```console
 $ make -C mylib check                           # plain, on the host
