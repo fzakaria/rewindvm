@@ -120,7 +120,7 @@ diff -ruN a/arch/x86/kernel/cpu/Makefile b/arch/x86/kernel/cpu/Makefile
 diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 --- a/arch/x86/kernel/cpu/rewind.c	1969-12-31 16:00:00.000000000 -0800
 +++ b/arch/x86/kernel/cpu/rewind.c	1969-12-31 16:00:00.000000000 -0800
-@@ -0,0 +1,1471 @@
+@@ -0,0 +1,1484 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Rewind VM guest platform.
@@ -202,6 +202,7 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +#include <asm/setup.h>
 +#include <asm/tsc.h>
 +#include <asm/syscall.h>
++#include <asm/tlbflush.h>
 +#include <asm/unistd.h>
 +#include <asm/x86_init.h>
 +
@@ -869,6 +870,17 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +	rewind_publish_tasks();
 +	rewind_shared.interface = REWIND_INTERFACE;
 +	outl(__pa_symbol(&rewind_shared), REWIND_PORT_SETUP);
++
++	/*
++	 * RDTSC traps in every user task (see rewind_fixup_rdtsc). The flag
++	 * that asks for the trap is a task's and is copied to its children,
++	 * and the boot task running here is the ancestor of every task there
++	 * will be: pid 1 and its descendants, but also kthreadd's, among
++	 * which the usermode helper that starts an inspection's process.
++	 * The trap itself, CR4.TSD, is set once the CPU is set up
++	 * (rewind_events_init), since cpu_init() clears the bit.
++	 */
++	set_thread_flag(TIF_NOTSC);
 +
 +	sysvec_install(HYPERVISOR_CALLBACK_VECTOR, sysvec_rewind_callback);
 +
@@ -1567,10 +1579,11 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +		return 0;
 +
 +	/*
-+	 * Initcalls run as pid 1, and every user task descends from it, so
-+	 * setting TIF_NOTSC here traps RDTSC in all of them.
++	 * Every task has TIF_NOTSC from the boot task (rewind_init_platform),
++	 * so the switch code never toggles CR4.TSD, and the bit set here
++	 * stays set for every task, kernel threads' children included.
 +	 */
-+	disable_TSC();
++	cr4_set_bits(X86_CR4_TSD);
 +
 +	for (i = 0; i < ARRAY_SIZE(rewind_devices); i++) {
 +		err = misc_register(&rewind_devices[i]);
@@ -1592,6 +1605,38 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +	return 0;
 +}
 +device_initcall(rewind_events_init);
+diff -ruN a/arch/x86/kernel/process.c b/arch/x86/kernel/process.c
+--- a/arch/x86/kernel/process.c	2026-11-09 21:15:48.682406724 -0800
++++ b/arch/x86/kernel/process.c	2026-11-09 21:34:23.688307826 -0800
+@@ -54,6 +54,9 @@
+ #include <asm/mmu_context.h>
+ #include <asm/msr.h>
+ #include <asm/shstk.h>
++#ifdef CONFIG_REWIND_GUEST
++#include <asm/hypervisor.h>
++#endif
+ 
+ #include "process.h"
+ 
+@@ -330,6 +333,18 @@
+ 
+ int set_tsc_mode(unsigned int val)
+ {
++#ifdef CONFIG_REWIND_GUEST
++	/*
++	 * A Rewind guest traps RDTSC in every task, so the counter a
++	 * program reads is the guest's clock and not the host's, which
++	 * would differ on every run. PR_TSC_ENABLE is accepted and changes
++	 * nothing: the program's RDTSC works, it reads the guest's clock,
++	 * and a program that would refuse to start on EPERM starts.
++	 * PR_TSC_SIGSEGV changes nothing either; the trap is already on.
++	 */
++	if (rewind_running)
++		return val == PR_TSC_SIGSEGV || val == PR_TSC_ENABLE ? 0 : -EINVAL;
++#endif
+ 	if (val == PR_TSC_SIGSEGV)
+ 		disable_TSC();
+ 	else if (val == PR_TSC_ENABLE)
 diff -ruN a/arch/x86/kernel/traps.c b/arch/x86/kernel/traps.c
 --- a/arch/x86/kernel/traps.c	2026-09-30 15:14:16.695108029 -0700
 +++ b/arch/x86/kernel/traps.c	2026-09-30 15:14:16.705151220 -0700
@@ -1637,11 +1682,10 @@ diff -ruN a/arch/x86/kernel/tsc.c b/arch/x86/kernel/tsc.c
 diff -ruN a/drivers/char/random.c b/drivers/char/random.c
 --- a/drivers/char/random.c	2026-10-13 09:00:00.000000000 -0700
 +++ b/drivers/char/random.c	2026-10-13 09:00:00.000000000 -0700
-@@ -936,6 +936,20 @@
- 	spin_unlock_irqrestore(&input_pool.lock, flags);
+@@ -937,6 +937,20 @@
  }
  EXPORT_SYMBOL(add_device_randomness);
-+
+ 
 +#ifdef CONFIG_REWIND_GUEST
 +/*
 + * Rewind VM: mixes bytes from the monitor into the input pool and rekeys
@@ -1655,9 +1699,10 @@ diff -ruN a/drivers/char/random.c b/drivers/char/random.c
 +	crng_reseed(NULL);
 +}
 +#endif
- 
++
  /*
   * Interface for in-kernel drivers of true hardware RNGs. Those devices
+  * may produce endless random bits, so this function will sleep for
 diff -ruN a/include/linux/random.h b/include/linux/random.h
 --- a/include/linux/random.h	2026-10-13 09:00:00.000000000 -0700
 +++ b/include/linux/random.h	2026-10-13 09:00:00.000000000 -0700

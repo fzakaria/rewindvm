@@ -1024,6 +1024,75 @@ let
           -o $out/bin/point point.c
       '';
 
+  # A root of static programs for the checks of what the guest kernel
+  # reports and traps, with busybox's shell and tools: one reads the
+  # timestamp counter after asking prctl to let it; one starts a worker
+  # thread and ends its main thread, so the worker outlives the thread
+  # group leader.
+  guestRoot =
+    pkgs.runCommand "rewind-guest-root"
+      {
+        nativeBuildInputs = [ pkgs.pkgsStatic.stdenv.cc ];
+        dontStrip = true;
+      }
+      ''
+        mkdir -p $out/bin $out/tmp
+        cp ${pkgs.pkgsStatic.busybox}/bin/busybox $out/bin/
+        for tool in sh echo cat grep mkdir mkfifo ln mv rm; do
+          ln -s busybox $out/bin/$tool
+        done
+
+        # Prints whether RDTSC traps (prctl's PR_TSC_SIGSEGV is 2, and
+        # PR_TSC_ENABLE 1), after asking for PR_TSC_ENABLE when told to,
+        # then the counter.
+        cat > tsc.c <<'EOF'
+        #include <stdio.h>
+        #include <string.h>
+        #include <sys/prctl.h>
+        #include <x86intrin.h>
+
+        int main(int argc, char **argv)
+        {
+          int mode = 0;
+
+          if (argc > 1 && strcmp(argv[1], "enable") == 0)
+            printf("prctl %d\n", prctl(PR_SET_TSC, PR_TSC_ENABLE, 0, 0, 0));
+          prctl(PR_GET_TSC, &mode, 0, 0, 0);
+          printf("mode %d tsc %llu\n", mode, (unsigned long long)__rdtsc());
+          return 0;
+        }
+        EOF
+        $CC -static -O1 -g -o $out/bin/tsc tsc.c
+
+        cat > leader.c <<'EOF'
+        #include <pthread.h>
+        #include <time.h>
+        #include <unistd.h>
+
+        /* The worker outlives the main thread, which ends with pthread_exit. */
+        static void *worker(void *arg)
+        {
+          struct timespec pause = { 0, 50000000 };
+
+          nanosleep(&pause, 0);
+          write(1, "worker\n", 7);
+          nanosleep(&pause, 0);
+          write(1, "done\n", 5);
+          return arg;
+        }
+
+        int main(void)
+        {
+          pthread_t t;
+
+          pthread_create(&t, 0, worker, 0);
+          write(1, "leader exits\n", 13);
+          pthread_exit(0);
+        }
+        EOF
+        $CC -static -O1 -g -pthread -o $out/bin/leader leader.c
+      '';
+
   # Background jobs racing through a pipe, the kernel's RNG, and a sleep:
   # everything that would differ between two runs of an ordinary VM.
   workload = ''
@@ -4645,6 +4714,34 @@ in
 
         at ruby -ex bt
         has ruby 'ruby_run_node'
+        touch $out
+      '';
+
+  # checks.guest-tsc: RDTSC reads the guest's clock in every process,
+  # whatever started it, and prctl cannot turn the trap off. A program
+  # that asks for PR_TSC_ENABLE is told yes, still sees the trap on, and
+  # its run replays identically: with the host's counter leaking in, the
+  # replay prints another number. The same holds in a shell, whose
+  # process the kernel's usermode helper starts rather than init. Boots
+  # the VM, so it needs /dev/kvm.
+  guest-tsc =
+    pkgs.runCommand "rewind-guest-tsc"
+      {
+        nativeBuildInputs = [ rewind ];
+        requiredSystemFeatures = [ "kvm" ];
+      }
+      ''
+        export REWIND_HOME=$TMPDIR/rewind
+        rewind run -q --clock exits --name tsc --root ${guestRoot} -- /bin/tsc enable
+        rewind events tsc | tee events
+        grep -q 'write(1, "prctl 0' events
+        grep -q 'write(1, "mode 2 tsc' events
+        rewind replay tsc | tee replay
+        grep -q '^identical' replay
+
+        end=$(rewind ls --json | sed -n 's/.*"name":"tsc",.*"steps":\([0-9]*\).*/\1/p')
+        printf '/bin/tsc enable; exit\n' | rewind shell tsc "$end" | tee shell
+        grep -q 'mode 2 tsc' shell
         touch $out
       '';
 
