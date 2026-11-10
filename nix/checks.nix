@@ -1843,8 +1843,10 @@ in
   # across some of them and continues to the end. Then gdb steps a program
   # past its fork system call and continues: the child starts with the
   # trap flag the step left in the flags it copied, which must not stop
-  # gdb. Exit time and the schedule are chosen here so the check means the
-  # same on any machine. Boots the VM, so it needs /dev/kvm.
+  # gdb. Under the host's CPU model, a step at a syscall instruction
+  # enters the kernel. Exit time and the schedule are chosen here so the
+  # check means the same on any machine. Boots the VM, so it needs
+  # /dev/kvm.
   gdb-step =
     pkgs.runCommand "rewind-gdb-step"
       {
@@ -1893,6 +1895,30 @@ in
         rewind gdb fork "$start" -- -batch \
           -ex 'break _Fork' -ex continue -ex 'stepi 300' -ex continue > gdb 2>&1 || true
         follows "stepping past fork"
+
+        # The host's CPU model shows the guest SMAP where the host has it,
+        # and the fixed models never do. With SMAP on, KVM translates no
+        # user address for the monitor. Stepped to _Fork's syscall
+        # instruction and one instruction on, the fork is at the kernel's
+        # entry, as under the fixed models, and the CPU's thread there
+        # reads the program's code.
+        rewind run -q --clock exits --cpu host --name fork-host --root ${gdbRoot} -- /bin/fork
+        start=$(rewind events fork-host | grep 'write(1, "start' | awk '{print $1}')
+        cat > to-syscall.gdb <<'EOF'
+        break _Fork
+        continue
+        while (*(unsigned short *)$pc != 0x050f)
+          stepi
+        end
+        stepi
+        thread 1
+        x/2i _Fork
+        EOF
+        rewind gdb fork-host "$start" -- -batch -x to-syscall.gdb > gdb 2>&1 || true
+        cat gdb
+        grep -q '^#0 .*entry_SYSCALL_64 ()' gdb
+        grep -q '<_Fork+1>:' gdb
+        test "$(grep -c 'Cannot access memory' gdb)" = 0
         touch $out
       '';
 

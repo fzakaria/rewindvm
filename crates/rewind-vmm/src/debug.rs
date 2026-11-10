@@ -79,6 +79,9 @@ const PTE_SIZE: u64 = 8;
 /// CR4's LA57 bit: five levels of page tables rather than four.
 const CR4_LA57: u64 = 1 << 12;
 
+/// CR0's PG bit: paging is on.
+const CR0_PG: u64 = 1 << 31;
+
 /// How many levels of page tables translate an address.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Levels {
@@ -92,6 +95,14 @@ impl Levels {
             Levels::Four => 4,
             Levels::Five => 5,
         }
+    }
+
+    /// Whether `address` is canonical for this many levels: every bit
+    /// above the ones the tables index is a copy of the highest of those.
+    fn canonical(self, address: u64) -> bool {
+        let indexed = PAGE_SHIFT + INDEX_BITS * self.count();
+        let above = (address as i64) >> (indexed - 1);
+        above == 0 || above == -1
     }
 }
 
@@ -1350,10 +1361,56 @@ impl Machine {
         Ok(())
     }
 
-    /// The physical address behind a virtual one, if it is mapped.
+    /// The physical address behind a virtual one, if it is mapped, in the
+    /// page tables the vCPU is on. The tables are walked here, where the
+    /// walk asks only what is mapped. KVM_TRANSLATE walks them as a read
+    /// by the kernel and applies the guest's SMAP to it: with SMAP on and
+    /// RFLAGS.AC clear, as a guest shown the host's CPU runs nearly
+    /// always, KVM translates no user page, whether the vCPU is in user
+    /// space or the kernel. The fixed CPU models show the guest no SMAP.
     fn translate(&self, address: u64) -> Result<Option<u64>> {
-        let t = self.vcpu.translate_gva(address)?;
-        Ok((t.valid != 0).then_some(t.physical_address))
+        let sregs = self.vcpu.get_sregs()?;
+        let paging = Paging {
+            cr0: sregs.cr0,
+            cr3: sregs.cr3,
+            cr4: sregs.cr4,
+        };
+        let read = |physical: u64| {
+            let mut entry = [0u8; PTE_SIZE as usize];
+            self.dev.ram.read(physical, &mut entry).ok()?;
+            Some(u64::from_le_bytes(entry))
+        };
+        Ok(paging.translate(read, address))
+    }
+}
+
+/// The control registers that say how a vCPU translates an address.
+#[derive(Clone, Copy, Debug)]
+struct Paging {
+    cr0: u64,
+    cr3: u64,
+    cr4: u64,
+}
+
+impl Paging {
+    /// The physical address `address` maps to for a vCPU with these
+    /// registers, reading each page table entry with `read`, or None where
+    /// nothing is mapped: the address itself with paging off, else what
+    /// the tables at CR3 map a canonical address to, whoever the mapping
+    /// lets read it.
+    fn translate(self, read: impl Fn(u64) -> Option<u64>, address: u64) -> Option<u64> {
+        if self.cr0 & CR0_PG == 0 {
+            return Some(address);
+        }
+        let levels = if self.cr4 & CR4_LA57 != 0 {
+            Levels::Five
+        } else {
+            Levels::Four
+        };
+        if !levels.canonical(address) {
+            return None;
+        }
+        walk(read, self.cr3, address, levels)
     }
 }
 
@@ -1991,6 +2048,43 @@ mod tests {
         t.entry(0x2000, index(address, 2), 0x8000_0000, PTE_LARGE);
         let read = |p| t.read(p);
         assert_eq!(walk(read, 0x1000, address, Levels::Four), Some(0x8012_3456));
+    }
+
+    /// A user page, one whose every entry has the user bit, translates
+    /// for a vCPU with paging on whose CR4 has SMAP: the translation asks
+    /// only what is mapped. With paging off an address is its own
+    /// physical address. An address that is not canonical maps nowhere,
+    /// though its low bits index the same tables. CR4's LA57 picks five
+    /// levels.
+    #[test]
+    fn a_translation_asks_only_what_is_mapped() {
+        const PTE_USER: u64 = 1 << 2;
+        const CR4_SMAP: u64 = 1 << 21;
+        const ROOT: u64 = 0x1000;
+        let address = 0x0000_0000_0040_18a0;
+        let mut t = Tables::default();
+        t.entry(ROOT, index(address, 3), 0x2000, PTE_USER);
+        t.entry(0x2000, index(address, 2), 0x3000, PTE_USER);
+        t.entry(0x3000, index(address, 1), 0x4000, PTE_USER);
+        t.entry(0x4000, index(address, 0), 0x9000, PTE_USER);
+        let read = |p| t.read(p);
+        let paging = Paging {
+            cr0: CR0_PG,
+            cr3: ROOT,
+            cr4: CR4_SMAP,
+        };
+        assert_eq!(paging.translate(read, address), Some(0x98a0));
+        assert_eq!(paging.translate(read, address + PAGE_SIZE), None);
+        assert_eq!(paging.translate(read, address | 1 << 62), None);
+
+        let off = Paging { cr0: 0, ..paging };
+        assert_eq!(off.translate(read, address), Some(address));
+
+        let five = Paging {
+            cr4: CR4_SMAP | CR4_LA57,
+            ..paging
+        };
+        assert_eq!(five.translate(read, address), None);
     }
 
     /// With five levels the walk starts one table higher, indexed by the
