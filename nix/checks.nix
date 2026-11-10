@@ -1265,22 +1265,61 @@ let
       '';
 
   # A root with nixpkgs' coreutils, copied into the root's /nix/store with
-  # its closure, beside busybox's shell, for checks.file-events: cp opens
-  # the directory it copies into with O_PATH and opens the copy relative
-  # to that descriptor. /var/run is a link to /run, as on most systems.
+  # its closure and linked into /bin, beside busybox's shell, for
+  # checks.file-events: cp opens the directory it copies into with O_PATH
+  # and opens the copy relative to that descriptor, and rm and mv remove
+  # and rename relative to the working directory. /bin/openat2 DIR NAME
+  # writes DIR/NAME with openat2, relative to DIR opened with O_PATH.
+  # /var/run is a link to /run, as on most systems.
   coreutilsRoot =
     let
       closure = pkgs.closureInfo { rootPaths = [ pkgs.coreutils ]; };
     in
-    pkgs.runCommand "rewind-coreutils-root" { } ''
-      mkdir -p $out/bin $out/nix/store $out/run $out/var $out/tmp
-      while read -r path; do
-        cp -a "$path" $out/nix/store/
-      done < ${closure}/store-paths
-      cp ${pkgs.pkgsStatic.busybox}/bin/busybox $out/bin/
-      ln -s busybox $out/bin/sh
-      ln -s ../run $out/var/run
-    '';
+    pkgs.runCommand "rewind-coreutils-root"
+      {
+        nativeBuildInputs = [ pkgs.pkgsStatic.stdenv.cc ];
+      }
+      ''
+        mkdir -p $out/bin $out/nix/store $out/run $out/var $out/tmp
+        while read -r path; do
+          cp -a "$path" $out/nix/store/
+        done < ${closure}/store-paths
+        for tool in ${pkgs.coreutils}/bin/*; do
+          ln -s "$tool" $out/bin/
+        done
+        cp ${pkgs.pkgsStatic.busybox}/bin/busybox $out/bin/
+        ln -s busybox $out/bin/sh
+        ln -s ../run $out/var/run
+
+        cat > openat2.c <<'EOF'
+        #include <fcntl.h>
+        #include <linux/openat2.h>
+        #include <sys/syscall.h>
+        #include <unistd.h>
+
+        int main(int argc, char **argv)
+        {
+          struct open_how how = {
+            .flags = O_WRONLY | O_CREAT | O_TRUNC,
+            .mode = 0644,
+          };
+          int dir, fd;
+
+          if (argc != 3)
+            return 2;
+          dir = open(argv[1], O_PATH | O_DIRECTORY);
+          if (dir < 0)
+            return 1;
+          fd = syscall(SYS_openat2, dir, argv[2], &how, sizeof(how));
+          if (fd < 0)
+            return 1;
+          if (write(fd, "x\n", 2) != 2)
+            return 1;
+          return close(fd) != 0;
+        }
+        EOF
+        $CC -static -O1 -o $out/bin/openat2 openat2.c
+      '';
 
   # Background jobs racing through a pipe, the kernel's RNG, and a sleep:
   # everything that would differ between two runs of an ordinary VM.
@@ -5255,8 +5294,10 @@ in
           $cp /tmp/new.c /tmp/dir/
           echo pid > /var/run/x.pid
           rm /var/run/x.pid
+          openat2 /var/run y.pid
           cd /tmp && mv new.c moved.c
           sh -c 'echo x > /nope/file' 2> /dev/null
+          openat2 /tmp nope/file
           rm /nope/gone 2> /dev/null
           mv /nope/a /nope/b 2> /dev/null
           exit 0"
@@ -5266,9 +5307,14 @@ in
         grep -q 'open("/run/x.pid"' events
         grep -q 'close("/run/x.pid"' events
         grep -q 'unlink("/run/x.pid"' events
+        grep -q 'open("/run/y.pid"' events
+        grep -q 'close("/run/y.pid"' events
         grep -q 'rename("/tmp/new.c", "/tmp/moved.c")' events
-        test "$(grep -c 'var/run' events)" = 0
-        test "$(grep -c '/nope' events)" = 0
+        # The command lines name /var/run and /nope; the file events
+        # must not.
+        grep -E '(open|close|unlink|rename)\(' events > file-events
+        test "$(grep -c 'var/run' file-events)" = 0
+        test "$(grep -c 'nope' file-events)" = 0
 
         # One writer at a time of a file named through the link, and
         # through it and directly: a conflict only when the second opens
