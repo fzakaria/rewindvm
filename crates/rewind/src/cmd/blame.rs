@@ -1602,9 +1602,21 @@ fn settle(home: &Home, run: &Run, writer: &Writer, last: &[u8], offset: usize) -
         Ok(bytes.get(offset..end) == Some(want))
     };
 
-    // Invariant: unsettled at lo, settled at hi.
-    let (mut lo, mut hi) = (writer.open, writer.close);
-    while hi - lo > 1 {
+    first_settled(writer.open, writer.close, settled)
+}
+
+/// The first step after `open`, up to `close`, at which `settled` holds,
+/// by bisection: `settled` does not hold at `open`, holds at `close`, and
+/// once it holds it keeps holding.
+fn first_settled(
+    open: u64,
+    close: u64,
+    mut settled: impl FnMut(u64) -> Result<bool>,
+) -> Result<u64> {
+    // Invariant: unsettled at lo, settled at hi. A close that is not
+    // after the open leaves no step between them to try.
+    let (mut lo, mut hi) = (open, close);
+    while hi.saturating_sub(lo) > 1 {
         let mid = lo + (hi - lo) / 2;
         if settled(mid)? {
             hi = mid;
@@ -2257,6 +2269,18 @@ mod tests {
         };
         assert_eq!(byte_writer(&trace, &writer, &settled).program, "bash");
         assert_eq!(label(&at_write(&writer, &settled).process), "bash");
+    }
+
+    /// The bisection finds the first step a byte had its final value,
+    /// here step 14 of a file open from step 10 to step 20. A close
+    /// before the open, which a writer should never have, ends the
+    /// bisection at once and does not underflow.
+    #[test]
+    fn the_bisection_takes_a_close_before_the_open() {
+        const SETTLED_FROM: u64 = 14;
+        let settled = |step: u64| Ok(step >= SETTLED_FROM);
+        assert_eq!(first_settled(10, 20, settled).unwrap(), SETTLED_FROM);
+        assert_eq!(first_settled(25, 4, settled).unwrap(), 4);
     }
 
     /// The git notes runs' history of the notes ref, by hand: pid 53

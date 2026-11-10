@@ -54,7 +54,9 @@ pub fn last_writer(trace: &Trace, path: &str, before: u64) -> Option<Writer> {
                 path: opened,
                 flags,
             } if *opened == path => {
-                let process = processes.iter().find(|p| p.pid == e.pid)?.as_of(e.step);
+                // The guest gives a pid out again, so the writer is the
+                // process that had the pid at the open.
+                let process = crate::process_in(&processes, e.pid, e.step)?.as_of(e.step);
                 let close = close_after(&trace.events[i + 1..], e, &path, &process);
                 return Some(Writer {
                     path,
@@ -71,13 +73,15 @@ pub fn last_writer(trace: &Trace, path: &str, before: u64) -> Option<Writer> {
 }
 
 /// The step the write that `open` started ended: the close of the file's
-/// last reference, else the process's exit.
+/// last reference, else the process's exit, and never a step before the
+/// open. `rest` is the events after the open.
 fn close_after(rest: &[Event], open: &Event, path: &str, process: &Process) -> u64 {
     rest.iter()
         .find(|e| matches!(&e.kind, EventKind::Close { path: p } if p == path))
         .map(|e| e.step)
         .or(process.end)
         .unwrap_or(open.step)
+        .max(open.step)
 }
 
 /// The process thread `tid` belonged to when it made the write whose
@@ -598,6 +602,35 @@ mod tests {
         let writes = FileWrites::of(&trace, &log, "/build/out.tmp", 40);
         assert_eq!(set_by(&writes, 0), Some((24, 30)));
         assert_eq!(writes.byte(0).unwrap().program, "sh");
+    }
+
+    /// The guest gives a pid out again: process 10 runs `true` and exits,
+    /// and a later process 10 runs `ld` and writes /out/lib.so until it
+    /// exits, without a close in the trace. The writer is the process
+    /// alive at the open, by its own program, and its write ends at its
+    /// own exit, so the write between is found.
+    #[test]
+    fn a_reused_pid_names_the_writer_alive_at_the_open() {
+        let mut events = started(2, 10, &["true"]).to_vec();
+        events.push(exited(4, 10));
+        events.extend(started(20, 10, &["ld"]));
+        events.push(open(25, 10, "/out/lib.so", O_TRUNC));
+        events.push(exited(30, 10));
+        let trace = Trace {
+            events,
+            ..Default::default()
+        };
+        let writer = last_writer(&trace, "/out/lib.so", 40).unwrap();
+        assert_eq!(writer.process.argv, ["ld"]);
+        assert_eq!((writer.open, writer.close), (25, 30));
+
+        let log = log(vec![
+            (26, write_open(10, FIRST, OUT)),
+            (27, write(10, FIRST, 0, 100)),
+        ]);
+        let writes = FileWrites::of(&trace, &log, "/out/lib.so", 40);
+        assert_eq!(set_by(&writes, 0), Some((27, 10)));
+        assert_eq!(writes.byte(0).unwrap().program, "ld");
     }
 
     /// A run recorded without read and write records: the writer is known
