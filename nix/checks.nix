@@ -4818,6 +4818,37 @@ in
         touch $out
       '';
 
+  # checks.signal-once: a crash on a worker thread is one signal event,
+  # on the thread it hit, with its fault address; the SIGKILL the core
+  # dump sends the main thread adds no second one. A crash on the main
+  # thread is one event too, and a signal that does not dump core is
+  # still reported once. Boots the VM, so it needs /dev/kvm.
+  signal-once =
+    pkgs.runCommand "rewind-signal-once"
+      {
+        nativeBuildInputs = [ rewind ];
+        requiredSystemFeatures = [ "kvm" ];
+      }
+      ''
+        export REWIND_HOME=$TMPDIR/rewind
+        rewind run -q --clock exits --name worker --root ${gdbRoot} -- /bin/crash || true
+        rewind events worker | grep SIGSEGV | tee worker
+        test "$(wc -l < worker)" = 1
+        pid=$(awk '{print $2}' worker | cut -d/ -f1)
+        tid=$(awk '{print $2}' worker | cut -d/ -f2)
+        test "$pid" != "$tid"
+        grep -q 'SIGSEGV code=1 addr=0x0' worker
+
+        rewind run -q --clock exits --name main --root ${busyboxRoot} -- sh -c 'kill -SEGV $$' || true
+        test "$(rewind events main | grep -c SIGSEGV)" = 1
+
+        rewind run -q --clock exits --name term --root ${busyboxRoot} -- \
+          sh -c 'sleep 5 & kill -TERM $!; wait' || true
+        rewind events term | grep SIGTERM | tee term
+        test "$(wc -l < term)" = 1
+        touch $out
+      '';
+
   # checks.version: VERSION is the release's version, and Cargo cannot read
   # it, so the two Cargo.toml files that name it must agree with it;
   # tools/set-version changes all three.

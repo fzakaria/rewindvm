@@ -120,7 +120,7 @@ diff -ruN a/arch/x86/kernel/cpu/Makefile b/arch/x86/kernel/cpu/Makefile
 diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 --- a/arch/x86/kernel/cpu/rewind.c	1969-12-31 16:00:00.000000000 -0800
 +++ b/arch/x86/kernel/cpu/rewind.c	1969-12-31 16:00:00.000000000 -0800
-@@ -0,0 +1,1504 @@
+@@ -0,0 +1,1509 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Rewind VM guest platform.
@@ -1040,11 +1040,16 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +	 * thread, which says nothing, and a fatal signal such as SIGPIPE that
 +	 * does not dump core is turned into one for every thread, which hides
 +	 * it. Report the signal the group is dying of, once, on its leader.
++	 * A signal that dumps core, such as SIGSEGV, was delivered to the
++	 * thread it hit and reported then, below, with its code and address;
++	 * the SIGKILLs the dump sends the other threads say nothing more,
++	 * the leader's included when a worker thread crashed.
 +	 */
 +	if (sig == SIGKILL && (current->signal->flags & SIGNAL_GROUP_EXIT)) {
 +		int cause = current->signal->group_exit_code & 0x7f;
 +
-+		if (!cause || cause == SIGKILL || current->pid != current->tgid)
++		if (!cause || cause == SIGKILL || sig_kernel_coredump(cause) ||
++		    current->pid != current->tgid)
 +			return;
 +		rewind_emit(REWIND_EV_SIGNAL, 0, current->tgid, current->pid,
 +			    cause, &detail, sizeof(detail), NULL, 0);
