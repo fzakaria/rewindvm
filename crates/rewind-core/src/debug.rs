@@ -69,6 +69,10 @@ const GPR_COUNT: usize = 16;
 /// The most bytes one debug register watches.
 const MAX_PIECE: u64 = 8;
 
+/// The most bytes the debug registers watch together: each on a whole
+/// piece.
+pub(crate) const MAX_WATCH_LEN: u64 = MAX_TRAPS as u64 * MAX_PIECE;
+
 /// CR3's page table base, bits 12 to 51, which names an address space;
 /// the bits below are the PCID, which changes as the kernel switches. The
 /// guest boots with mitigations off, so a process has one page table, not
@@ -548,7 +552,8 @@ impl Traps {
     /// Adds a watch if all its pieces fit in the registers left, once
     /// `break` breakpoints in registers have moved into `memory` as int3
     /// to make room. x86 has no trap on reads alone, so a read watch is
-    /// refused, and gdb says so.
+    /// refused, and gdb says so. So is a range the registers could never
+    /// watch ([`watchable`]), whatever length gdb's packet gives.
     fn add_watch(
         &mut self,
         address: u64,
@@ -557,7 +562,7 @@ impl Traps {
         memory: &mut impl Int3Memory,
     ) -> Result<bool> {
         let watch = Watch { address, len, kind };
-        if kind == WatchKind::Read {
+        if kind == WatchKind::Read || !watchable(address, len) {
             return Ok(false);
         }
         if self.watches.contains(&watch) {
@@ -618,9 +623,19 @@ fn watch_registers(w: &Watch) -> Vec<Trap> {
         .collect()
 }
 
+/// Whether the debug registers could watch `len` bytes at `address` with
+/// nothing else set: at least one byte, no more than every register on a
+/// whole piece covers, and none past the end of the address space. A
+/// range that fails this is refused before [`pieces`] splits it, which
+/// takes time and memory by the length and assumes the range has an end.
+pub(crate) fn watchable(address: u64, len: u64) -> bool {
+    (1..=MAX_WATCH_LEN).contains(&len) && address.checked_add(len).is_some()
+}
+
 /// `len` bytes at `address` as the pieces a debug register can watch: at
 /// each address, the largest power of two up to 8 that it is aligned to
-/// and that does not run past the end.
+/// and that does not run past the end. For a range that is
+/// [`watchable`], or as short.
 pub(crate) fn pieces(address: u64, len: u64) -> Vec<(u64, u64)> {
     let end = address + len;
     let mut at = address;
@@ -2703,6 +2718,31 @@ mod tests {
             self.written.retain(|p| *p != physical);
             Ok(())
         }
+    }
+
+    /// A watch whose length gdb's packet makes 0, more than the four
+    /// registers cover, or enough to run past the end of the address
+    /// space is refused before it is split into pieces: a length of 1 GiB
+    /// would be 134 million of them. The most the registers cover, 32
+    /// bytes aligned to 8, is taken.
+    #[test]
+    fn a_watch_is_refused_by_its_length_before_it_is_split() {
+        const GIGABYTE: u64 = 0x4000_0000;
+        let mut memory = FakeMemory::default();
+        let mut traps = Traps::default();
+        let mut add = |address, len| {
+            traps
+                .add_watch(address, len, WatchKind::Write, &mut memory)
+                .unwrap()
+        };
+        assert!(!add(0x1000, 0));
+        assert!(!add(0x1000, GIGABYTE));
+        assert!(!add(0x1000, MAX_WATCH_LEN + 1));
+        assert!(!add(u64::MAX - 3, 8));
+        assert!(!add(0x1000, u64::MAX));
+        assert!(add(0x1000, MAX_WATCH_LEN));
+        assert_eq!(traps.registers().len(), MAX_TRAPS);
+        assert_eq!(traps.watches.len(), 1);
     }
 
     /// Breakpoints and watch pieces share the four registers: a watch that

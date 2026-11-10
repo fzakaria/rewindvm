@@ -163,10 +163,20 @@ struct Watch {
 /// writes, one per piece trapping writes; for reads, two per piece, one
 /// trapping writes and one trapping reads and writes.
 fn watches(values: &[Value], wanted: Wanted) -> Result<Vec<Watch>> {
-    let total: u64 = values.iter().map(|v| v.len).sum();
     if values.is_empty() {
         bail!("nothing to watch");
     }
+
+    // The lengths are whatever the caller was given, so their sum is
+    // taken without wrapping, and a value that runs past the end of the
+    // address space is past what the registers watch too.
+    let total = values
+        .iter()
+        .try_fold(0u64, |total, v| {
+            v.address.checked_add(v.len)?;
+            total.checked_add(v.len)
+        })
+        .unwrap_or(u64::MAX);
     let kinds: &[TrapAccess] = match wanted {
         Wanted::LastWrites(0) | Wanted::Accesses(0) => bail!("a search keeps at least 1 access"),
         Wanted::LastWrites(_) => &[TrapAccess::Write],
@@ -845,6 +855,30 @@ mod tests {
             .to_string();
         assert!(error.contains("2 of them for each"), "{error}");
         assert!(watches(&three, Wanted::LastWrites(0)).is_err());
+    }
+
+    /// Values whose lengths add up past a u64, or that run past the end
+    /// of the address space, are refused by their size before any is split
+    /// into pieces.
+    #[test]
+    fn a_search_refuses_lengths_that_overflow() {
+        const HALF: u64 = 1 << 63;
+        let wrapping = [
+            Value {
+                address: 0x1000,
+                len: HALF,
+            },
+            Value {
+                address: 0x2000,
+                len: HALF,
+            },
+        ];
+        assert!(watches(&wrapping, Wanted::LastWrites(1)).is_err());
+        let past_the_end = [Value {
+            address: u64::MAX - 3,
+            len: 8,
+        }];
+        assert!(watches(&past_the_end, Wanted::LastWrites(1)).is_err());
     }
 
     /// Last writes keep each value's latest n whatever the order windows
