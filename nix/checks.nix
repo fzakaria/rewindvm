@@ -5336,7 +5336,9 @@ in
   # on the thread it hit, with its fault address; the SIGKILL the core
   # dump sends the main thread adds no second one. A crash on the main
   # thread is one event too, and a signal that does not dump core is
-  # still reported once. Boots the VM, so it needs /dev/kvm.
+  # still reported once. A signal event reads `SIGNAME code=`; the exit
+  # of a process or thread a signal killed names the signal too, and is
+  # no signal event. Boots the VM, so it needs /dev/kvm.
   signal-once =
     pkgs.runCommand "rewind-signal-once"
       {
@@ -5346,7 +5348,7 @@ in
       ''
         export REWIND_HOME=$TMPDIR/rewind
         rewind run -q --clock exits --name worker --root ${gdbRoot} -- /bin/crash || true
-        rewind events worker | grep SIGSEGV | tee worker
+        rewind events worker | grep 'SIGSEGV code=' | tee worker
         test "$(wc -l < worker)" = 1
         pid=$(awk '{print $2}' worker | cut -d/ -f1)
         tid=$(awk '{print $2}' worker | cut -d/ -f2)
@@ -5354,11 +5356,11 @@ in
         grep -q 'SIGSEGV code=1 addr=0x0' worker
 
         rewind run -q --clock exits --name main --root ${busyboxRoot} -- sh -c 'kill -SEGV $$' || true
-        test "$(rewind events main | grep -c SIGSEGV)" = 1
+        test "$(rewind events main | grep -c 'SIGSEGV code=')" = 1
 
         rewind run -q --clock exits --name term --root ${busyboxRoot} -- \
           sh -c 'sleep 5 & kill -TERM $!; wait' || true
-        rewind events term | grep SIGTERM | tee term
+        rewind events term | grep 'SIGTERM code=' | tee term
         test "$(wc -l < term)" = 1
         touch $out
       '';
