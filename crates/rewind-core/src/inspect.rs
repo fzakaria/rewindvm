@@ -24,7 +24,9 @@ use rewind_vmm::{Ignore, Input, Machine, Observer, Outcome, Stop};
 use crate::home::Home;
 use crate::run::{Keep, Run};
 
-/// How far a fork runs between checks on the answer, in steps.
+/// How far a fork runs between checks on whether the inspection has
+/// started, in steps. The answer's end mark stops the fork at its own
+/// step, wherever in a chunk that is.
 const CHUNK_STEPS: u64 = 20_000;
 
 /// How long a fork may run without the inspection starting, in steps. A
@@ -370,8 +372,9 @@ fn fork_at(home: &Home, run: &Run, step: u64) -> Result<(Machine, u64)> {
     ))
 }
 
-/// Runs the machine in chunks until the inspection's end mark arrives.
-/// `what` finishes the sentence for when the VM stops first.
+/// Runs the machine in chunks until the inspection's end mark arrives,
+/// where `answer` stops the machine. `what` finishes the sentence for
+/// when the VM stops first.
 fn finish(
     machine: &mut Machine,
     step: u64,
@@ -473,12 +476,17 @@ impl Answer<'_> {
 }
 
 impl Observer for Answer<'_> {
-    /// A tree nothing more can be handed on of stops the fork, which
-    /// would otherwise send the rest of the tree to nobody.
+    /// The end mark stops the fork at its step: the inspecting process
+    /// writes the mark after the last of its answer, so the steps after
+    /// the mark would only run the job on. A tree nothing more can be
+    /// handed on of stops the fork too, which would otherwise send the
+    /// rest of the tree to nobody.
     fn stop(&self) -> bool {
-        self.tree
+        let refused = self
+            .tree
             .as_ref()
-            .is_some_and(|tree| tree.refused.is_some())
+            .is_some_and(|tree| tree.refused.is_some());
+        self.status.is_some() || refused
     }
 
     fn record(&mut self, step: u64, record: &[u8]) {
@@ -637,10 +645,12 @@ mod tests {
                 }),
                 ..Answer::default()
             };
-            for (step, record) in records.iter().enumerate() {
+            let (end_mark, before) = records.split_last().unwrap();
+            for (step, record) in before.iter().enumerate() {
                 a.record(step as u64, record);
             }
             assert_eq!(a.stop(), refuses);
+            a.record(before.len() as u64, end_mark);
             assert!(a.stdout.is_empty());
             let tree = a.tree.take().unwrap();
             assert_eq!(tree.refused.is_some(), refuses);
@@ -652,6 +662,24 @@ mod tests {
             assert_eq!(kept.paths, vec![b"notes.txt".to_vec()]);
             assert_eq!(kept.bytes, b"hello world");
         }
+    }
+
+    #[test]
+    fn the_end_mark_stops_the_fork() {
+        // The inspecting process, pid 40, writes its answer and then its
+        // end mark. The fork runs on through the answer and through
+        // another process's end mark, and stops at pid 40's: all of the
+        // answer is in by then, and steps after it would only run the
+        // job on.
+        let mut a = Answer::default();
+        a.record(1, &mark(40, Mark::InspectBegin));
+        a.record(2, &record(KIND_OUTPUT, 40, 1, b"hello\n"));
+        assert!(!a.stop());
+        a.record(3, &mark(7, Mark::InspectEnd(InspectStatus::Done)));
+        assert!(!a.stop());
+        a.record(4, &mark(40, Mark::InspectEnd(InspectStatus::Done)));
+        assert!(a.stop());
+        assert_eq!(a.stdout, b"hello\n");
     }
 
     #[test]
