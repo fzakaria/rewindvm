@@ -9,7 +9,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use rewind_core::run::{
-    BASE_CMDLINE, DEFAULT_CORES, DEFAULT_QUANTUM, MAX_CORES, Start, default_epoch,
+    BASE_CMDLINE, DEFAULT_CORES, DEFAULT_QUANTUM, MAX_CORES, RestoreStore, Start, Store,
+    default_epoch,
 };
 use rewind_core::{
     Echo, Execution, Guest, Home, Keyframes, Run, Source, Spec, TimeLimit, compare, image, nix,
@@ -336,10 +337,17 @@ struct Window {
 }
 
 impl Subject<'_> {
-    /// Runs each window on its own VM, all at once, and returns the runs
-    /// in the order given. `machine` holds the time limit, and for a job
+    /// Runs each window on its own VM, all at once, each restoring the
+    /// keyframe it starts from out of `store`, and returns the runs in
+    /// the order given. `machine` holds the time limit, and for a job
     /// every other option of its runs.
-    fn try_all(&self, home: &Home, machine: &MachineArgs, windows: &[Window]) -> Result<Vec<Run>> {
+    fn try_all(
+        &self,
+        home: &Home,
+        machine: &MachineArgs,
+        windows: &[Window],
+        store: &Store,
+    ) -> Result<Vec<Run>> {
         match self {
             // A job's runs, recorded as `rewind run` and `nix` record them.
             Subject::Job {
@@ -356,7 +364,7 @@ impl Subject<'_> {
                         ..machine.clone()
                     })
                     .collect();
-                execute_all(home, guest, prepared, machines, start.clone())
+                execute_all(home, guest, prepared, machines, start.clone(), store)
             }
 
             // A run's forks, each on a thread of its own.
@@ -364,7 +372,9 @@ impl Subject<'_> {
                 let handles: Vec<_> = windows
                     .iter()
                     .map(|w| {
-                        scope.spawn(move || fork_window(home, run, machine, *w, reseed.as_ref()))
+                        scope.spawn(move || {
+                            fork_window(home, run, machine, *w, reseed.as_ref(), store)
+                        })
                     })
                     .collect();
                 handles
@@ -379,13 +389,14 @@ impl Subject<'_> {
 /// Forks `run` at the first step of `window`, perturbed by its seed until
 /// its last, and its RNG reseeded as `reseed` says, with only the
 /// keyframes `machine` asks of a run that skips them, as `rewind check`
-/// tries it.
+/// tries it. The fork restores the parent's keyframe out of `store`.
 fn fork_window(
     home: &Home,
     run: &Run,
     machine: &MachineArgs,
     window: Window,
     reseed: Option<&Reseed>,
+    store: &Store,
 ) -> Result<Run> {
     let Window { seed, from, until } = window;
     let m = &run.manifest;
@@ -405,6 +416,7 @@ fn fork_window(
         echo: Echo::Quiet,
         keyframes: keyframes_for(machine),
         limit: time_limit(machine.timeout),
+        store: RestoreStore::Shared(store),
     };
     Run::execute(
         home,
@@ -536,6 +548,7 @@ pub(crate) fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
                 &with_keyframes(&machine),
                 Start::Boot,
                 Announce::No,
+                RestoreStore::Own,
             )?;
 
             // Every other run is the unperturbed run until its schedule
@@ -550,6 +563,13 @@ pub(crate) fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
             (base, subject, Some((&guest, &prepared)))
         }
     };
+    // The page store every other run restores its start out of, opened
+    // once. The unperturbed run's keyframes are past the store's sorted
+    // segments, so a store of each run's own read the index's unsorted
+    // tail into a map of its own: 160 ms and 49 MiB a run on this
+    // project's laptop.
+    let store = Store::open(&home.store())?;
+
     // The first seed is the unperturbed run's own: --seed for a job, and
     // whatever a recorded run was recorded with.
     let first_seed = base.manifest.spec.seed;
@@ -659,7 +679,7 @@ pub(crate) fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
             batch[0],
             batch[batch.len() - 1]
         ));
-        let runs = execute_all(home, guest, prepared, machines, Start::Boot);
+        let runs = execute_all(home, guest, prepared, machines, Start::Boot, &store);
         let judged = runs.and_then(|runs| judge_all(&judge, runs));
         clear_status();
         for (&key, (run, violations)) in batch.iter().zip(judged?) {
@@ -716,7 +736,7 @@ pub(crate) fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
                         from: reseed.step,
                         until: u64::MAX,
                     };
-                    let seed_base = fork_window(home, run, &machine, window, Some(&reseed));
+                    let seed_base = fork_window(home, run, &machine, window, Some(&reseed), &store);
                     let subject = Subject::Run {
                         run: Box::new(Run::open(&run.dir)?),
                         reseed: Some(reseed),
@@ -732,8 +752,15 @@ pub(crate) fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
                     } else {
                         seed_machine.clone()
                     };
-                    let seed_base =
-                        execute(home, guest, prepared, &started, Start::Boot, Announce::No);
+                    let seed_base = execute(
+                        home,
+                        guest,
+                        prepared,
+                        &started,
+                        Start::Boot,
+                        Announce::No,
+                        RestoreStore::Own,
+                    );
                     let subject = match &seed_base {
                         Ok(b) => Subject::Job {
                             guest,
@@ -799,7 +826,7 @@ pub(crate) fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
                 batch[0],
                 batch[batch.len() - 1]
             ));
-            let runs = s.subject.try_all(home, &s.machine, &windows);
+            let runs = s.subject.try_all(home, &s.machine, &windows, &store);
             let judged = runs.and_then(|runs| judge_all(&judge, runs));
             clear_status();
             for (run, violations) in judged? {
@@ -1105,7 +1132,7 @@ pub(crate) fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
                         until,
                     })
                     .collect();
-                let runs = s.subject.try_all(home, &s.machine, &windows)?;
+                let runs = s.subject.try_all(home, &s.machine, &windows, &store)?;
                 Ok(judge_all(&judge, runs)?
                     .into_iter()
                     .map(|(run, violations)| Judged {
@@ -1568,6 +1595,7 @@ pub(crate) fn fork(home: &Home, args: ForkArgs) -> Result<ExitCode> {
         echo,
         keyframes: Keyframes::Take,
         limit: time_limit(timeout),
+        store: RestoreStore::Own,
     };
     let child = Run::execute(
         home,
@@ -2004,7 +2032,15 @@ pub(super) fn run_workload(
             Announce::No
         }
     };
-    execute(home, guest, &prepared, &machine, Start::Boot, announce)
+    execute(
+        home,
+        guest,
+        &prepared,
+        &machine,
+        Start::Boot,
+        announce,
+        RestoreStore::Own,
+    )
 }
 
 fn prepare(
@@ -2167,6 +2203,9 @@ enum Announce {
     No,
 }
 
+/// Executes the workload `prepared` under `machine`'s options, started as
+/// `start` says, restoring the keyframe it starts from, if any, out of
+/// `store`.
 fn execute(
     home: &Home,
     guest: &Guest,
@@ -2174,6 +2213,7 @@ fn execute(
     machine: &MachineArgs,
     start: Start,
     announce: Announce,
+    store: RestoreStore,
 ) -> Result<Run> {
     let cpu = machine
         .resolved_cpu
@@ -2219,6 +2259,7 @@ fn execute(
         echo,
         keyframes: keyframes_for(machine),
         limit: time_limit(machine.timeout),
+        store,
     };
     let run = Run::execute(
         home,
@@ -2235,21 +2276,26 @@ fn execute(
     Ok(run)
 }
 
-/// Runs each machine option set on its own VM, `jobs` at a time, and
-/// returns the runs in the order given.
+/// Runs each machine option set on its own VM, all at once, every one
+/// restoring the keyframe it starts from out of `store`, and returns the
+/// runs in the order given.
 fn execute_all(
     home: &Home,
     guest: &Guest,
     prepared: &Prepared,
     machines: Vec<MachineArgs>,
     start: Start,
+    store: &Store,
 ) -> Result<Vec<Run>> {
     std::thread::scope(|scope| {
         let handles: Vec<_> = machines
             .into_iter()
             .map(|m| {
                 let start = start.clone();
-                scope.spawn(move || execute(home, guest, prepared, &m, start, Announce::No))
+                scope.spawn(move || {
+                    let shared = RestoreStore::Shared(store);
+                    execute(home, guest, prepared, &m, start, Announce::No, shared)
+                })
             })
             .collect();
         handles

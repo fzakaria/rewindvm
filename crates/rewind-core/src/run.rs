@@ -13,6 +13,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use rewind_init::Job;
+pub use rewind_store::Store;
 use rewind_trace::schedule::Timer;
 use rewind_trace::stop::StalledThread;
 use rewind_trace::{Event, EventKind, Trace, TraceWriter};
@@ -173,11 +174,27 @@ pub enum TimeLimit {
 }
 
 /// How to execute a run, none of which changes what the run is.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Execution {
+#[derive(Clone, Copy, Debug)]
+pub struct Execution<'a> {
     pub echo: Echo,
     pub keyframes: Keyframes,
     pub limit: TimeLimit,
+    pub store: RestoreStore<'a>,
+}
+
+/// The page store a run reads the keyframe it starts from out of.
+#[derive(Clone, Copy, Debug)]
+pub enum RestoreStore<'a> {
+    /// A store of the run's own, opened for the restore. A restore from a
+    /// keyframe past the store's sorted segments reads the index's
+    /// unsorted tail, up to a million entries, into a map the store holds:
+    /// 160 ms and 49 MiB on this project's laptop.
+    Own,
+    /// A store already open, which the runs `rewind check` starts at once
+    /// share: a restore only reads pages, which a store does from any
+    /// number of threads. A run that takes keyframes still opens a store
+    /// of its own to write them.
+    Shared(&'a Store),
 }
 
 /// Whether a run takes keyframes as it executes.
@@ -594,7 +611,7 @@ struct Base {
     /// pages the first time a keyframe is kept: a table of every page,
     /// which most forks never need.
     memory: Option<crate::keyframes::Memory>,
-    store: Option<rewind_store::Store>,
+    store: Option<Store>,
 }
 
 /// A run on disk.
@@ -754,6 +771,7 @@ impl Run {
             echo,
             keyframes,
             limit,
+            store: restore_store,
         } = how;
         let dir = home.runs().join(&manifest.id);
 
@@ -774,18 +792,22 @@ impl Run {
         // into its trace further down. The restored machine's read and
         // write records and switches go on from the parent's trace at
         // that step.
-        // The store a restore opened stays open until this execution knows
-        // whether it takes keyframes.
+        // A store a restore opened of its own stays open until this
+        // execution knows whether it takes keyframes.
         let (mut machine, mut store, last_keyframe) = match &shortcut {
             Some(s) => {
-                let store = rewind_store::Store::open(&home.store())?;
+                let mut own = None;
+                let read: &Store = match restore_store {
+                    RestoreStore::Shared(shared) => shared,
+                    RestoreStore::Own => own.insert(Store::open(&home.store())?),
+                };
                 let machine = Machine::restore(
                     &config,
                     &s.chain,
-                    &crate::keyframes::ReadPages(&store),
+                    &crate::keyframes::ReadPages(read),
                     &s.records,
                 )?;
-                (machine, Some(store), Some(s.base))
+                (machine, own, Some(s.base))
             }
             None => (Machine::boot(&config)?, None, None),
         };
@@ -881,7 +903,7 @@ impl Run {
             Keyframes::Take => {
                 let store = match &mut store {
                     Some(s) => s,
-                    None => store.insert(rewind_store::Store::open(&home.store())?),
+                    None => store.insert(Store::open(&home.store())?),
                 };
                 let mut parent = last_keyframe;
                 let mut memory = shortcut
@@ -955,7 +977,7 @@ impl Run {
                         recorder.pause_at_exit = false;
                         let store = match &mut store {
                             Some(s) => s,
-                            None => store.insert(rewind_store::Store::open(&home.store())?),
+                            None => store.insert(Store::open(&home.store())?),
                         };
                         let kf =
                             machine.keyframe(&mut crate::keyframes::StorePages(store), None)?;
@@ -1116,6 +1138,7 @@ impl Run {
             echo: Echo::Quiet,
             keyframes: Keyframes::Take,
             limit,
+            store: RestoreStore::Own,
         };
         Run::execute_manifest(home, manifest, None, how)
     }
@@ -1171,7 +1194,7 @@ impl Run {
         &self,
         machine: &mut Machine,
         step: u64,
-        store: &rewind_store::Store,
+        store: &Store,
         loaded: &mut crate::keyframes::Loaded,
     ) -> Result<()> {
         let layers = self.keyframes()?;
@@ -1225,7 +1248,7 @@ impl Run {
         // and the keyframe names them: `rewind gc` refuses while it is.
         let (mut machine, mut base) = match from {
             Some(kf) => {
-                let store = rewind_store::Store::open(&home.store())?;
+                let store = Store::open(&home.store())?;
                 let chain = keyframes.chain(kf)?;
                 let machine = Machine::restore(
                     &config,
@@ -1367,7 +1390,7 @@ impl Run {
         // The pages first, durably, then the keyframe naming them.
         let store = match &mut base.store {
             Some(store) => store,
-            None => base.store.insert(rewind_store::Store::open(&home.store())?),
+            None => base.store.insert(Store::open(&home.store())?),
         };
         let memory = match &mut base.memory {
             Some(memory) => memory,
@@ -1435,7 +1458,7 @@ impl Run {
         // To each keyframe after the start, comparing the machine there,
         // then to the end. The recording's pages are read from the store
         // to show the bytes that differ, when it still has them.
-        let store = rewind_store::Store::open(&home.store()).ok();
+        let store = Store::open(&home.store()).ok();
         let system_map =
             fs::read_to_string(self.manifest.spec.kernel.with_file_name(SYSTEM_MAP)).ok();
         let mut watch = crate::state::Watch::new(
@@ -3002,6 +3025,7 @@ pub(crate) mod tests {
                     echo: Echo::Quiet,
                     keyframes: Keyframes::Take,
                     limit: TimeLimit::None,
+                    store: RestoreStore::Own,
                 },
             );
             assert!(fork.is_err());
@@ -3011,6 +3035,75 @@ pub(crate) mod tests {
                 .collect();
             assert_eq!(runs, vec![std::ffi::OsString::from(parent.id.as_str())]);
         }
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_fork_given_a_shared_store_opens_none_of_its_own() {
+        // A parent with a keyframe before the fork step that names a page
+        // no store holds, forked twice: once restoring out of a shared
+        // store kept elsewhere, once out of a store of its own. Both
+        // restores fail at the missing page, before any guest code runs,
+        // whether or not this host has KVM. Only the fork with a store of
+        // its own opens one under the home, which creates the home's
+        // store directory.
+        const FORK_STEP: u64 = 5;
+        const KEYFRAME_STEP: u64 = 4;
+        const MISSING_PAGE: [u8; 32] = [0x5A; 32];
+        let root = runs_dir("shared-store-fork");
+        let home = Home::at(root.clone()).unwrap();
+
+        // A parent whose spec names a kernel and an initramfs that read,
+        // so its fork's config builds; the kernel never boots.
+        let initrd = root.join("initrd");
+        fs::write(&initrd, b"").unwrap();
+        let kernel = root.join("kernel");
+        fs::write(&kernel, b"").unwrap();
+        let mut parent = manifest("bbbb000000000000", "parent", 1);
+        parent.spec.kernel = kernel;
+        parent.spec.initrd = initrd;
+        parent.outcome = Some(RunOutcome {
+            stop: rewind_trace::stop::Stop::PoweredOff,
+            step: 12,
+            virtual_ns: 0,
+            status: Some(0),
+            wall_ms: 0,
+        });
+        let dir = write_run(&home.runs(), &parent, &[3, 5, 9], b"a");
+        let mut kf = rewind_vmm::snapshot::Keyframe::default();
+        kf.step = KEYFRAME_STEP;
+        kf.pages = vec![(0, MISSING_PAGE)];
+        crate::keyframes::save(&dir, &kf).unwrap();
+        crate::keyframes::mark_taken(&dir).unwrap();
+        let shared = Store::open(&root.join("shared-store")).unwrap();
+
+        // Forks the parent at FORK_STEP, restoring out of `store`.
+        let fork = |store: RestoreStore| {
+            Run::execute(
+                &home,
+                "fork".into(),
+                parent.source.clone(),
+                parent.spec.fork(FORK_STEP, 3),
+                Start::Fork {
+                    parent: parent.id.clone(),
+                    step: FORK_STEP,
+                },
+                Execution {
+                    echo: Echo::Quiet,
+                    keyframes: Keyframes::Skip,
+                    limit: TimeLimit::None,
+                    store,
+                },
+            )
+        };
+
+        // The fork given the shared store leaves the home without one.
+        assert!(fork(RestoreStore::Shared(&shared)).is_err());
+        assert!(!home.store().exists());
+
+        // The fork given none opens the home's.
+        assert!(fork(RestoreStore::Own).is_err());
+        assert!(home.store().exists());
         fs::remove_dir_all(&root).unwrap();
     }
 
