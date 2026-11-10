@@ -1363,7 +1363,9 @@ them. `script=PATH` runs a program on the host with the run's id, schedule
 0's and the job's exit step in its environment, and `junit=GLOB` reads the
 JUnit XML reports the job left matching the glob, through one `files`
 inspection of the run at the job's exit, and compares results by test name
-with schedule 0's.
+with schedule 0's. A report that does not parse, as a test runner killed
+while writing one leaves, is a violation that names the file in any run
+but schedule 0, where it is an error.
 
 `check`'s runs take no keyframes, and a fork at the job's exit would replay
 one from boot. So with either property each run takes a single keyframe of

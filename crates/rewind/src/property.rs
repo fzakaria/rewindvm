@@ -83,7 +83,8 @@ pub(crate) enum Property {
     /// unperturbed run passed (see [`rewind_trace::sdk`]).
     Sdk,
     /// Every test that passed in the unperturbed run passed, as the JUnit
-    /// XML reports the job wrote to files matching the glob say.
+    /// XML reports the job wrote to files matching the glob say, and
+    /// every report parses.
     Junit(Glob),
     /// A program on this machine judges the run: exit 0 means the
     /// property holds, 1 that it is violated, and any other ending is an
@@ -265,7 +266,8 @@ impl<'a> Judge<'a> {
             let Property::Junit(glob) = property else {
                 continue;
             };
-            let results = junit_results(home, base, glob)?;
+            let results =
+                junit_reports(home, base, glob)?.into_base(&base.manifest.id.to_string())?;
             if results.is_empty() {
                 bail!(
                     "{JUNIT}={} matched no JUnit report schedule 0 wrote; a pattern without a / \
@@ -387,9 +389,9 @@ impl<'a> Judge<'a> {
             // The tests in the job's reports against the unperturbed run's.
             Property::Junit(glob) => {
                 let base = &self.base_junit[glob.as_str()];
-                let here = junit_results(self.home, run, glob)?;
+                let here = junit_reports(self.home, run, glob)?;
                 let end = end_step(run)?;
-                Ok(regressed(base, &here).map(|why| violation(Some(end), why)))
+                Ok(here.violation(base).map(|why| violation(Some(end), why)))
             }
 
             // A program's verdict on the run.
@@ -495,13 +497,63 @@ fn regressed(
         })
 }
 
-/// The tests in the JUnit reports `run`'s job wrote to files matching
-/// `glob`, read at the job's exit.
-fn junit_results(home: &Home, run: &Run, glob: &Glob) -> Result<BTreeMap<String, TestResult>> {
+/// What the JUnit reports of one run say.
+#[derive(Debug, Default)]
+struct Reports {
+    /// How each test ended, by name.
+    results: BTreeMap<String, TestResult>,
+    /// The reports that are not XML a parser accepts, each by its path
+    /// with the parser's error, in the order read. A test runner killed
+    /// while it wrote a report leaves one.
+    unreadable: Vec<(String, anyhow::Error)>,
+}
+
+impl Reports {
+    /// The reports in `sections`, each a report's path and its bytes.
+    fn read(sections: &[(String, &[u8])]) -> Reports {
+        let mut reports = Reports::default();
+        for (path, xml) in sections {
+            match crate::junit::results(&String::from_utf8_lossy(xml)) {
+                Ok(results) => reports.results.extend(results),
+                Err(error) => reports.unreadable.push((path.clone(), error)),
+            }
+        }
+        reports
+    }
+
+    /// The results, for the unperturbed run `run_id`, which every other
+    /// run is compared with: a report of that run that does not parse is
+    /// an error.
+    fn into_base(self, run_id: &str) -> Result<BTreeMap<String, TestResult>> {
+        match self.unreadable.into_iter().next() {
+            Some((path, error)) => Err(error.context(format!("{path} in run {run_id}"))),
+            None => Ok(self.results),
+        }
+    }
+
+    /// Why a run with these reports, other than the unperturbed run,
+    /// violates the junit property, where `base` is the unperturbed
+    /// run's results: the first report that does not parse, by its path
+    /// with the parser's error, else the first test that regressed. The
+    /// unperturbed run wrote reports that parse, so a report that does
+    /// not is something the run's schedule did.
+    fn violation(&self, base: &BTreeMap<String, TestResult>) -> Option<String> {
+        if let Some((path, error)) = self.unreadable.first() {
+            return Some(format!(
+                "JUnit report {path} cannot be read: {}",
+                error.root_cause()
+            ));
+        }
+        regressed(base, &self.results)
+    }
+}
+
+/// The JUnit reports `run`'s job wrote to files matching `glob`, read at
+/// the job's exit.
+fn junit_reports(home: &Home, run: &Run, glob: &Glob) -> Result<Reports> {
     let files = trace_properties::written_files(run.trace()?, glob);
-    let mut found = BTreeMap::new();
     if files.is_empty() {
-        return Ok(found);
+        return Ok(Reports::default());
     }
     let end = end_step(run)?;
     let bytes = match inspect::files(home, run, end, None, &files)? {
@@ -515,12 +567,7 @@ fn junit_results(home: &Home, run: &Run, glob: &Glob) -> Result<BTreeMap<String,
     };
     let sections = rewind_init::sections(&bytes)
         .with_context(|| format!("reading the JUnit reports of run {}", run.manifest.id))?;
-    for (path, xml) in sections {
-        let report = crate::junit::results(&String::from_utf8_lossy(xml))
-            .with_context(|| format!("{path} in run {}", run.manifest.id))?;
-        found.extend(report);
-    }
-    Ok(found)
+    Ok(Reports::read(&sections))
 }
 
 /// `what`, followed by what the program said about it when it said
@@ -753,6 +800,49 @@ mod tests {
         let error = format!("{:#}", Property::read_file(&file).unwrap_err());
         assert!(error.contains("rewind.properties:2"), "{error}");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // A schedule that kills the test runner while it writes a report
+    // leaves a report cut short. In a run other than the unperturbed one
+    // that report is a violation that names the file and the parser's
+    // error, ahead of the tests it no longer reports, and the reports
+    // that do parse are still read. In the unperturbed run it is an
+    // error that names the file and the run.
+    #[test]
+    fn a_report_cut_short_violates_the_junit_property() {
+        const WHOLE: &str = r#"<testsuite><testcase classname="a" name="adds"/></testsuite>"#;
+        const CUT: &str = r#"<testsuite><testcase classname="b" name="su"#;
+        let sections: Vec<(String, &[u8])> = vec![
+            ("/build/reports/TEST-a.xml".into(), WHOLE.as_bytes()),
+            ("/build/reports/TEST-b.xml".into(), CUT.as_bytes()),
+        ];
+        let base: BTreeMap<String, TestResult> = [
+            ("a.adds".to_string(), TestResult::Pass),
+            ("b.subtracts".to_string(), TestResult::Pass),
+        ]
+        .into();
+
+        let reports = Reports::read(&sections);
+        assert_eq!(reports.results.get("a.adds"), Some(&TestResult::Pass));
+        let why = reports.violation(&base).unwrap();
+        assert!(
+            why.starts_with("JUnit report /build/reports/TEST-b.xml cannot be read: "),
+            "{why}"
+        );
+
+        // Reports that all parse are judged by their tests alone.
+        let whole = Reports::read(&sections[..1]);
+        assert_eq!(
+            whole.violation(&base).unwrap(),
+            "test b.subtracts passed in the unperturbed run and has no result here"
+        );
+
+        // The unperturbed run's own report cut short stops the command.
+        let error = format!("{:#}", reports.into_base("1a2b3c4d").unwrap_err());
+        assert!(
+            error.starts_with("/build/reports/TEST-b.xml in run 1a2b3c4d: parsing a JUnit XML"),
+            "{error}"
+        );
     }
 
     // A script is named by its file name, without directory or
