@@ -72,7 +72,7 @@ impl std::fmt::Display for EngineError {
         match self {
             EngineError::Missing { program } => write!(
                 f,
-                "The engine command {program} was not found on PATH. Install it, or set {PROGRAM_ENV} to its path."
+                "The rewind command was not found on PATH as {program}. Install it, or set {PROGRAM_ENV} to its path."
             ),
             EngineError::Failed { command, message }
             | EngineError::WentAnotherWay {
@@ -80,7 +80,7 @@ impl std::fmt::Display for EngineError {
             } => write!(f, "{command} failed: {message}"),
             EngineError::Lost { id } => write!(
                 f,
-                "The engine made run {id}, but it is not next to its parent or in the Rewind home."
+                "The rewind command made run {id}, but it is not next to its parent or in the Rewind home."
             ),
             EngineError::Cancelled => write!(f, "The request was cancelled."),
         }
@@ -1315,8 +1315,8 @@ impl EngineVersion {
             .as_ref()
             .map_or_else(String::new, |c| format!(" ({c})"));
         Some(format!(
-            "This app is version {app_version} and its engine is rewind {}{commit}. A command the engine does not have, or answers another way, fails or shows the wrong thing; install rewind {app_version}, or set {PROGRAM_ENV} to it.",
-            self.version
+            "This app is version {app_version} and the rewind command is version {}{commit}. A command rewind {} does not have, or answers another way, fails or shows the wrong thing; install rewind {app_version}, or set {PROGRAM_ENV} to it.",
+            self.version, self.version
         ))
     }
 }

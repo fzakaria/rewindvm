@@ -71,7 +71,23 @@ const EXPORT_FALLBACK_NAME: &str = "run";
 const EXPORT_EXTENSION: &str = "rwd";
 
 /// Why an example run cannot be forked, or checked from a step.
-pub(super) const EXAMPLE_FORK: &str = "Forking runs the build again from the playhead, which needs the engine and KVM on this machine. The example's inputs, its kernel, initrd and Nix store paths, belong to the machine that recorded it. Record a run of your own with rewind nix to fork it.";
+pub(super) const EXAMPLE_FORK: &str = "Forking runs the build again from the playhead, which needs the rewind command and KVM on this machine. The example's inputs, its kernel, initrd and Nix store paths, belong to the machine that recorded it. Record a run of your own with rewind nix to fork it.";
+
+/// What the notices say of a rewind command of another version than the
+/// app, of none on PATH, and of one that did not say its version. The
+/// command line is named the rewind command everywhere the app speaks of
+/// it.
+const CLI_ANOTHER_VERSION: &str = "The rewind command is another version";
+const CLI_NOT_INSTALLED: &str = "The rewind command is not installed";
+const CLI_NO_VERSION: &str = "The rewind command did not say its version";
+
+/// What the notice says under [`CLI_NOT_INSTALLED`]: `program` is the
+/// name the command was looked for by.
+fn cli_not_installed_body(program: &str) -> String {
+    format!(
+        "Runs open and scrub without it. Files, source, shells, gdb and forks need the rewind command on PATH as {program}, or {PROGRAM_ENV} naming it."
+    )
+}
 
 /// Why a run the engine is still executing does not open.
 const STILL_RUNNING: &str = "Its trace is written when it finishes, which for a fork takes about as long as the run it was forked from did.";
@@ -244,7 +260,7 @@ pub fn replay_unavailable(session: &Session, replay: Replay, importing: bool) ->
     }
     let origin = &session.run.origin;
     let needs = format!(
-        "{} forks the run at the playhead, which needs the run's inputs and Rewind with KVM on this machine.",
+        "{} forks the run at the playhead, which needs the run's inputs and the rewind command with KVM on this machine.",
         replay.doing()
     );
     let why = match origin {
@@ -561,23 +577,16 @@ impl Scrubber {
         match result {
             Ok(engine) => {
                 if let Some(warning) = engine.mismatch(APP_VERSION) {
-                    self.notify_user(
-                        NoticeTone::Error,
-                        "The engine is another version",
-                        warning,
-                        cx,
-                    );
+                    self.notify_user(NoticeTone::Error, CLI_ANOTHER_VERSION, warning, cx);
                 }
             }
             Err(EngineError::Missing { program }) => self.notify_user(
                 NoticeTone::Info,
-                "The engine is not installed",
-                format!(
-                    "Runs open and scrub without it. Files, source, shells, gdb and forks need the engine command {program} on PATH, or {PROGRAM_ENV} naming it."
-                ),
+                CLI_NOT_INSTALLED,
+                cli_not_installed_body(&program),
                 cx,
             ),
-            Err(e) => self.report("The engine did not say its version", e, cx),
+            Err(e) => self.report(CLI_NO_VERSION, e, cx),
         }
     }
 
@@ -1199,14 +1208,14 @@ impl Scrubber {
                     Ok(removed) => this.notify_user(
                         NoticeTone::Info,
                         format!(
-                            "Removed {} identical fork{}",
+                            "Deleted {} identical fork{}",
                             removed.len(),
                             if removed.len() == 1 { "" } else { "s" }
                         ),
                         "Each repeated the trace of an older fork, which is kept.",
                         cx,
                     ),
-                    Err(e) => this.report("Could not remove identical forks", e, cx),
+                    Err(e) => this.report("Could not delete identical forks", e, cx),
                 }
                 this.reload_runs(cx);
             },
@@ -2437,6 +2446,50 @@ mod tests {
         let bare = why(Origin::TraceFile, false).unwrap();
         assert!(bare.contains("run directory"), "{bare}");
         assert!(bare.starts_with("Opening a shell forks the run"), "{bare}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_command_line_has_one_name_in_the_apps_words() {
+        // Every notice that names the command line calls it the rewind
+        // command, so the user is told one thing to install: the words
+        // that called it the engine, or Rewind with KVM, are gone. The
+        // example's refusals, a missing or lost command, one of another
+        // version and the three notices about its version are checked.
+        let dir = std::env::temp_dir().join(format!("rewind-app-cli-name-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let trace = crate::examples::trace_of(crate::examples::FAILING);
+        std::fs::write(dir.join(rewind_trace::manifest::TRACE), trace).unwrap();
+        let mut session = Session::open(&dir, None).unwrap();
+        session.run.origin = Origin::Example;
+        let version = EngineVersion::parse("rewind 0.1.0").unwrap();
+        let words = [
+            EXAMPLE_FORK.to_string(),
+            replay_unavailable(&session, Replay::Fork, false).unwrap(),
+            crate::ui::viewer::EXAMPLE_REASON.to_string(),
+            EngineError::Missing {
+                program: "rewind".into(),
+            }
+            .to_string(),
+            EngineError::Lost { id: "abc".into() }.to_string(),
+            version.mismatch(APP_VERSION).unwrap(),
+            CLI_ANOTHER_VERSION.to_string(),
+            CLI_NOT_INSTALLED.to_string(),
+            CLI_NO_VERSION.to_string(),
+            cli_not_installed_body("rewind"),
+        ];
+        for said in words {
+            assert!(said.contains("rewind command"), "{said}");
+            for other in [
+                "the engine",
+                "The engine",
+                "Rewind with KVM",
+                "engine command",
+            ] {
+                assert!(!said.contains(other), "{said}");
+            }
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

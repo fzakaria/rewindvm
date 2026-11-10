@@ -61,7 +61,7 @@ const DEBOUNCE: Duration = Duration::from_millis(400);
 const STALE_OPACITY: f32 = 0.45;
 
 /// Why the viewer cannot read files of some runs.
-const EXAMPLE_REASON: &str = "This example was recorded on another machine and ships as its trace only. Reading a file means replaying the run up to the step, which needs the run's inputs and Rewind with KVM on this machine. Record a run of your own to read its files at any step.";
+pub(super) const EXAMPLE_REASON: &str = "This example was recorded on another machine and ships as its trace only. Reading a file means replaying the run up to the step, which needs the run's inputs and the rewind command with KVM on this machine. Record a run of your own to read its files at any step.";
 const EXPORT_TRACE_REASON: &str = "This run was opened from a .rwd file that holds its trace only. Open its replayable export, the -replayable.rwd file, to read its files at any step.";
 const EXPORT_IMPORTING_REASON: &str = "This run is being imported into Rewind from its .rwd file. Its files can be read at any step once it is in.";
 const TRACE_REASON: &str = "This run was opened from a bare trace file. Open its run directory instead to read its files at any step.";

@@ -2280,9 +2280,9 @@ impl Scrubber {
             });
         let prune = (identical > 0).then(|| {
             let label = if self.runs.pruning {
-                "removing\u{2026}".to_string()
+                "deleting\u{2026}".to_string()
             } else {
-                format!("remove {identical} identical")
+                format!("delete {identical} identical")
             };
             div()
                 .id("prune-identical")
