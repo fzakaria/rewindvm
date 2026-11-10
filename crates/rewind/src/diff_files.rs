@@ -277,8 +277,9 @@ pub(crate) fn diff_file(
     let there = read_file(home, right, right_step, path)?;
     let name = path.rsplit('/').next().unwrap_or(path);
 
-    // The report: how the copies differ, or which run has the file, and
-    // a note when they were too long to compare whole.
+    // The report: how the copies differ, or which run has the file. The
+    // verdict is about the whole copies, also when they were too long to
+    // match up whole.
     let (report, same) = match (&here, &there) {
         (None, None) => bail!(
             "neither run has {path} when its job exits; `rewind events` lists the files each wrote"
@@ -286,13 +287,8 @@ pub(crate) fn diff_file(
         (Some(_), None) => (vec![file_diff::only_in(name, SIDES.a)], false),
         (None, Some(_)) => (vec![file_diff::only_in(name, SIDES.b)], false),
         (Some(a), Some(b)) => {
-            let cut = a.len() > file_diff::MAX_COMPARED || b.len() > file_diff::MAX_COMPARED;
-            let (a, b) = (compared(a), compared(b));
-            let mut report = file_report(name, a, b, crate::color::stdout());
-            if cut {
-                report.insert(1, file_diff::cut_note());
-            }
-            (report, a == b)
+            let (report, same) = whole_file_report(name, a, b, crate::color::stdout());
+            (report, same == Same::Yes)
         }
     };
     match format {
@@ -321,6 +317,44 @@ pub(crate) fn diff_file(
     } else {
         ExitCode::FAILURE
     })
+}
+
+/// The report `rewind diff --file` prints for a file both runs have,
+/// the left run's whole copy `a` and the right run's `b`, and whether
+/// the whole copies are the same. Only the first
+/// `file_diff::MAX_COMPARED` bytes of each copy are matched up for the
+/// excerpt, and the verdict is about every byte.
+pub(crate) fn whole_file_report(
+    name: &str,
+    a: &[u8],
+    b: &[u8],
+    paint: Paint,
+) -> (Vec<String>, Same) {
+    // Copies the same to the last byte need no excerpt, however long
+    // they are, so the report gives their whole size.
+    if a == b {
+        return (file_report(name, a, b, paint), Same::Yes);
+    }
+
+    // Copies that differ only past the compared part have no excerpt
+    // either: the report says where they first differ.
+    let (head_a, head_b) = (compared(a), compared(b));
+    if head_a == head_b {
+        let mut report = file_diff::differs_past_compared(name, a, b, SIDES);
+        if let Some(verdict) = report.first_mut() {
+            *verdict = paint.verdict(Same::No, &verdict);
+        }
+        return (report, Same::No);
+    }
+
+    // Copies that differ in the compared part: how that part differs,
+    // and after the verdict a note when either copy was longer.
+    let cut = a.len() > file_diff::MAX_COMPARED || b.len() > file_diff::MAX_COMPARED;
+    let mut report = file_report(name, head_a, head_b, paint);
+    if cut {
+        report.insert(1, file_diff::cut_note());
+    }
+    (report, Same::No)
 }
 
 /// The part of a copy that is compared.
@@ -601,6 +635,57 @@ mod tests {
                 "+ FAIL b",
             ]
         );
+    }
+
+    /// Copies longer than the compared part. Two that differ only in
+    /// their last byte, past that part, are not the same, and the report
+    /// says where they differ. Two the same to the last byte are the
+    /// same at their whole size. Two that differ in the compared part
+    /// keep the note that only that part was matched up.
+    #[test]
+    fn copies_that_differ_past_the_compared_part_are_not_the_same() {
+        const TAIL: usize = 8;
+        let a = vec![b'a'; file_diff::MAX_COMPARED + TAIL];
+        let mut b = a.clone();
+        *b.last_mut().unwrap() = b'b';
+        let (report, same) = whole_file_report("big.bin", &a, &b, Paint::Plain);
+        assert_eq!(same, Same::No);
+        assert_eq!(
+            report,
+            [
+                "big.bin differs past the first 1,024 KiB: first at byte 1,048,583.",
+                "The first 1,024 KiB of each copy is the same.",
+            ]
+        );
+
+        // A longer copy that starts as the shorter one does: the sizes
+        // follow, as they do for any copies of two sizes.
+        let (report, same) = whole_file_report("big.bin", &a, &a[..a.len() - 1], Paint::Plain);
+        assert_eq!(same, Same::No);
+        assert_eq!(
+            report,
+            [
+                "big.bin differs past the first 1,024 KiB: first at byte 1,048,583.",
+                "The first 1,024 KiB of each copy is the same.",
+                "Size in the left run: 1,048,584 bytes.",
+                "Size in the right run: 1,048,583 bytes.",
+            ]
+        );
+
+        // The same to the last byte.
+        let (report, same) = whole_file_report("big.bin", &a, &a, Paint::Plain);
+        assert_eq!(same, Same::Yes);
+        assert_eq!(
+            report,
+            ["big.bin is the same in both runs: 1,048,584 bytes."]
+        );
+
+        // A difference in the compared part.
+        let mut c = a.clone();
+        c[0] = 0;
+        let (report, same) = whole_file_report("big.bin", &a, &c, Paint::Plain);
+        assert_eq!(same, Same::No);
+        assert_eq!(report[1], file_diff::cut_note());
     }
 
     /// The same report in color: the verdict red, the left run's line and

@@ -433,16 +433,8 @@ pub fn summary(name: &str, a: &[u8], b: &[u8], diff: &FileDiff, sides: Sides) ->
                 thousands(bytes.first().unwrap_or(0))
             )];
             if a.len() != b.len() {
-                said.push(format!(
-                    "Size in {}: {} bytes.",
-                    sides.a,
-                    thousands(a.len())
-                ));
-                said.push(format!(
-                    "Size in {}: {} bytes.",
-                    sides.b,
-                    thousands(b.len())
-                ));
+                said.push(size_in(sides.a, a.len()));
+                said.push(size_in(sides.b, b.len()));
             }
             said
         }
@@ -478,13 +470,50 @@ pub fn summary(name: &str, a: &[u8], b: &[u8], diff: &FileDiff, sides: Sides) ->
     }
 }
 
+/// `MAX_COMPARED` in KiB, as the notes about long copies write it.
+fn compared_kib() -> String {
+    const KIB: usize = 1024;
+    thousands(MAX_COMPARED / KIB)
+}
+
 /// What a summary says when a copy was longer than `MAX_COMPARED`.
 pub fn cut_note() -> String {
-    const KIB: usize = 1024;
     format!(
         "Only the first {} KiB of each copy was compared.",
-        thousands(MAX_COMPARED / KIB)
+        compared_kib()
     )
+}
+
+/// The summary for whole copies `a` and `b` of file `name` whose first
+/// `MAX_COMPARED` bytes are the same and whose later bytes are not:
+/// where the copies first differ, then the sizes when they are not the
+/// same.
+pub fn differs_past_compared(name: &str, a: &[u8], b: &[u8], sides: Sides) -> Vec<String> {
+    // The first offset whose bytes differ, or the shorter copy's length
+    // when the longer copy starts with the whole shorter one.
+    let first = a
+        .iter()
+        .zip(b)
+        .position(|(x, y)| x != y)
+        .unwrap_or(a.len().min(b.len()));
+    let mut said = vec![
+        format!(
+            "{name} differs past the first {} KiB: first at byte {}.",
+            compared_kib(),
+            thousands(first)
+        ),
+        format!("The first {} KiB of each copy is the same.", compared_kib()),
+    ];
+    if a.len() != b.len() {
+        said.push(size_in(sides.a, a.len()));
+        said.push(size_in(sides.b, b.len()));
+    }
+    said
+}
+
+/// What a summary says of a copy's size in run `side`.
+fn size_in(side: &str, bytes: usize) -> String {
+    format!("Size in {side}: {} bytes.", thousands(bytes))
 }
 
 /// What a summary says of file `name` when only run `side` has it.
