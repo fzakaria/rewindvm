@@ -1916,9 +1916,20 @@ impl Scrubber {
         self.opening = Some(request);
         self.loading = Some(path.clone());
         cx.notify();
-        let read = cx
-            .background_executor()
-            .spawn(async move { Session::open(&path, compare.as_deref()) });
+
+        // A run named by a URL is downloaded first, which waits on the
+        // network for as long as the download takes: on a thread of its
+        // own, so the wait holds none of the background executor's few.
+        let downloads = std::iter::once(&path)
+            .chain(&compare)
+            .any(|p| crate::archive::is_url(p));
+        let read = move || Session::open(&path, compare.as_deref());
+        let read = match downloads {
+            true => cx
+                .background_executor()
+                .spawn(crate::jobs::on_own_thread(read)),
+            false => cx.background_executor().spawn(async move { read() }),
+        };
         cx.spawn(async move |this, cx| {
             let result = read.await;
             let _ = this.update(cx, |this, cx| {

@@ -12,6 +12,8 @@
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
+#[cfg(not(target_family = "wasm"))]
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
@@ -19,6 +21,27 @@ use serde_json::Value;
 use crate::bookmarks::{BOOKMARKS_FILE, MAX_BYTES as BOOKMARKS_MAX_BYTES};
 use rewind_trace::export;
 use rewind_trace::manifest::{MANIFEST, RunId, TRACE};
+
+/// The binary units sizes are said in.
+#[cfg(not(target_family = "wasm"))]
+const KIBIBYTE: u64 = 1 << 10;
+#[cfg(not(target_family = "wasm"))]
+const MEBIBYTE: u64 = 1 << 20;
+#[cfg(not(target_family = "wasm"))]
+const GIBIBYTE: u64 = 1 << 30;
+
+/// A size in words, in the largest binary unit that divides it: 16 GiB,
+/// 512 MiB, 100 bytes.
+#[cfg(not(target_family = "wasm"))]
+fn size_words(bytes: u64) -> String {
+    let units = [(GIBIBYTE, "GiB"), (MEBIBYTE, "MiB"), (KIBIBYTE, "KiB")];
+    for (unit, name) in units {
+        if bytes >= unit && bytes.is_multiple_of(unit) {
+            return format!("{} {name}", bytes / unit);
+        }
+    }
+    format!("{bytes} bytes")
+}
 
 /// The first four bytes of every zstd frame.
 const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
@@ -98,6 +121,37 @@ pub fn is_url(path: &Path) -> bool {
 /// fetches it once.
 #[cfg(not(target_family = "wasm"))]
 pub fn download(url: &str) -> Result<PathBuf> {
+    download_within(url, DOWNLOAD_LIMITS)
+}
+
+/// What a download is held to, so a server that stops answering or never
+/// stops sending cannot hold the download's thread or fill the disk.
+#[cfg(not(target_family = "wasm"))]
+#[derive(Clone, Copy, Debug)]
+struct DownloadLimits {
+    /// How long finding the host and connecting to it may take.
+    connect: Duration,
+    /// How long the server may take to answer once the request is sent.
+    response: Duration,
+    /// How long the whole file may take to arrive.
+    body: Duration,
+    /// The most bytes a download may be.
+    bytes: u64,
+}
+
+/// The limits downloads are held to: a replayable export of a long build
+/// is a few gigabytes, and a slow connection moves one in under an hour.
+#[cfg(not(target_family = "wasm"))]
+const DOWNLOAD_LIMITS: DownloadLimits = DownloadLimits {
+    connect: Duration::from_secs(20),
+    response: Duration::from_secs(60),
+    body: Duration::from_secs(60 * 60),
+    bytes: 16 * GIBIBYTE,
+};
+
+/// Downloads `url` as [`download`] does, within `limits`.
+#[cfg(not(target_family = "wasm"))]
+fn download_within(url: &str, limits: DownloadLimits) -> Result<PathBuf> {
     // Each URL gets a directory of its own, so two URLs whose files share
     // a name never pass for each other.
     let dir = downloads_dir()
@@ -107,7 +161,16 @@ pub fn download(url: &str) -> Result<PathBuf> {
     let name = download_name(url);
     let file = dir.join(name);
 
-    let response = ureq::get(url)
+    // ureq waits without end unless told how long to wait.
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_resolve(Some(limits.connect))
+        .timeout_connect(Some(limits.connect))
+        .timeout_recv_response(Some(limits.response))
+        .timeout_recv_body(Some(limits.body))
+        .build()
+        .into();
+    let response = agent
+        .get(url)
         .call()
         .with_context(|| format!("downloading {url}"))?;
     let length = response
@@ -115,22 +178,35 @@ pub fn download(url: &str) -> Result<PathBuf> {
         .get("content-length")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok());
+    let too_large = || {
+        anyhow::anyhow!(
+            "{url} is larger than {}, the largest export Rewind downloads",
+            size_words(limits.bytes)
+        )
+    };
+    if length.is_some_and(|length| length > limits.bytes) {
+        return Err(too_large());
+    }
     let have = fs::metadata(&file).ok().map(|m| m.len());
     if length.is_some() && have == length {
         return Ok(file);
     }
 
     // Written under another name and renamed whole, so a download cut
-    // short never passes for the file.
+    // short never passes for the file. One byte past the limit is read, to
+    // tell a file of the limit's size from a larger one.
     let partial = dir.join(format!(".{name}.{}-{}", std::process::id(), unique()));
-    let written = File::create(&partial)
-        .and_then(|mut out| io::copy(&mut response.into_body().into_reader(), &mut out))
-        .and_then(|_| fs::rename(&partial, &file));
-    if let Err(e) = written {
+    let mut body = response.into_body().into_reader().take(limits.bytes + 1);
+    let written = File::create(&partial).and_then(|mut out| io::copy(&mut body, &mut out));
+    let kept = match written {
+        Ok(bytes) if bytes > limits.bytes => Err(too_large()),
+        Ok(_) => fs::rename(&partial, &file).with_context(|| format!("downloading {url}")),
+        Err(e) => Err(e).with_context(|| format!("downloading {url}")),
+    };
+    if kept.is_err() {
         let _ = fs::remove_file(&partial);
-        return Err(e).with_context(|| format!("downloading {url}"));
     }
-    Ok(file)
+    kept.map(|()| file)
 }
 
 /// The browser build has no disk to download to: the page fetches an
@@ -412,6 +488,118 @@ mod tests {
             let file = download(&format!("http://127.0.0.1:{port}{path}")).unwrap();
             assert_eq!(fs::read(&file).unwrap(), body);
         }
+    }
+
+    /// Serves every connection to a local port with what `respond` writes
+    /// after the request line is read, and returns the port.
+    fn serve(respond: impl Fn(&mut std::net::TcpStream) + Send + Sync + 'static) -> u16 {
+        use std::io::{BufRead, BufReader};
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = server.local_addr().unwrap().port();
+        let respond = std::sync::Arc::new(respond);
+        std::thread::spawn(move || {
+            for stream in server.incoming() {
+                let respond = respond.clone();
+                std::thread::spawn(move || {
+                    let mut stream = stream.unwrap();
+                    let mut request = String::new();
+                    BufReader::new(&stream).read_line(&mut request).unwrap();
+                    respond(&mut stream);
+                });
+            }
+        });
+        port
+    }
+
+    /// Limits for the tests: short waits, and room for 8 bytes.
+    const TEST_LIMITS: DownloadLimits = DownloadLimits {
+        connect: Duration::from_secs(5),
+        response: Duration::from_millis(500),
+        body: Duration::from_millis(500),
+        bytes: 8,
+    };
+
+    /// How long a server in these tests holds a connection it has
+    /// stopped answering, and the most a download from one may take.
+    const STALL: Duration = Duration::from_secs(20);
+    const GIVES_UP_WITHIN: Duration = Duration::from_secs(10);
+
+    /// The files a download left for `url`: none when it failed.
+    fn downloaded(url: &str) -> Vec<PathBuf> {
+        let dir = downloads_dir().unwrap().join(url_key(url));
+        fs::read_dir(dir)
+            .map(|entries| entries.filter_map(|e| Some(e.ok()?.path())).collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn a_download_that_stalls_gives_up() {
+        // One server answers with its headers and half the file, then
+        // holds the connection; another reads the request and never
+        // answers. Each download fails once its limit passes, long before
+        // the server lets go, and leaves no file.
+        use std::io::Write;
+        super::test_cache();
+        let half = serve(|stream| {
+            let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\nAAAA");
+            let _ = stream.flush();
+            std::thread::sleep(STALL);
+        });
+        let silent = serve(|_| std::thread::sleep(STALL));
+        for port in [half, silent] {
+            let url = format!("http://127.0.0.1:{port}/stall.rwd");
+            let started = std::time::Instant::now();
+            assert!(download_within(&url, TEST_LIMITS).is_err());
+            assert!(
+                started.elapsed() < GIVES_UP_WITHIN,
+                "{:?}",
+                started.elapsed()
+            );
+            assert_eq!(downloaded(&url), Vec::<PathBuf>::new());
+        }
+    }
+
+    #[test]
+    fn a_download_past_the_size_limit_is_refused() {
+        // A file the server says is 16 bytes, and one of 16 bytes sent
+        // with no length, against a limit of 8: each is refused in words
+        // that name the limit, and leaves no file. A file of 8 bytes is
+        // kept.
+        use std::io::Write;
+        super::test_cache();
+        const BODY: &[u8; 16] = b"0123456789abcdef";
+        let sized = serve(|stream| {
+            let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: 16\r\n\r\n");
+            let _ = stream.write_all(BODY);
+        });
+        let unsized_ = serve(|stream| {
+            let _ = write!(stream, "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n");
+            let _ = stream.write_all(BODY);
+        });
+        for port in [sized, unsized_] {
+            let url = format!("http://127.0.0.1:{port}/big.rwd");
+            let refused = download_within(&url, TEST_LIMITS).unwrap_err();
+            assert!(format!("{refused:#}").contains("8 bytes"), "{refused:#}");
+            assert_eq!(downloaded(&url), Vec::<PathBuf>::new());
+        }
+        let fits = serve(|stream| {
+            let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\n");
+            let _ = stream.write_all(&BODY[..8]);
+        });
+        let url = format!("http://127.0.0.1:{fits}/fits.rwd");
+        let file = download_within(&url, TEST_LIMITS).unwrap();
+        assert_eq!(fs::read(file).unwrap(), &BODY[..8]);
+    }
+
+    #[test]
+    fn sizes_are_said_in_the_largest_unit_that_divides_them() {
+        // Limits are whole units and read as such; other sizes read in
+        // bytes.
+        assert_eq!(size_words(16 * GIBIBYTE), "16 GiB");
+        assert_eq!(size_words(512 * MEBIBYTE), "512 MiB");
+        assert_eq!(size_words(4 * KIBIBYTE), "4 KiB");
+        assert_eq!(size_words(8), "8 bytes");
+        assert_eq!(size_words(GIBIBYTE + 1), "1073741825 bytes");
     }
 
     #[test]
