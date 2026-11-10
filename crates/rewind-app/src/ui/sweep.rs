@@ -9,7 +9,7 @@
 //! The forks stay among the run's forks, where the Runs tab lists them.
 //! A cell picked in the card opens its run, or compares this run with it.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use futures::StreamExt;
 use gpui::{
@@ -39,7 +39,9 @@ const SWATCH: f32 = 10.0;
 /// The width of the menu of what the amber button does.
 const HERE_MENU_WIDTH: f32 = 250.0;
 
-/// A check from here, running or done.
+/// A check from here, running or done. The check is of one run and is
+/// kept while other runs are shown: showing another run neither stops a
+/// running check nor drops a finished one's results.
 pub struct Sweep {
     /// The run it forks, the step it forks at, and how many schedules and
     /// seeds it tries.
@@ -74,6 +76,33 @@ impl Drop for Sweep {
     }
 }
 
+/// What stands in the way of starting a check.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Busy {
+    /// Nothing: no check runs.
+    No,
+    /// A check of the run on screen runs, and its card shows it.
+    WithThisRun,
+    /// A check of another run runs, from `step` of the run in `run`. Its
+    /// card shows when that run is on screen again.
+    WithAnotherRun { run: PathBuf, step: u64 },
+}
+
+/// What stands in the way of a check of the run in `run`, given the latest
+/// check.
+fn busy_with(sweep: Option<&Sweep>, run: &Path) -> Busy {
+    let Some(sweep) = sweep.filter(|s| matches!(s.state, SweepState::Running { .. })) else {
+        return Busy::No;
+    };
+    if sweep.run == run {
+        return Busy::WithThisRun;
+    }
+    Busy::WithAnotherRun {
+        run: sweep.run.clone(),
+        step: sweep.step,
+    }
+}
+
 impl Scrubber {
     /// Tries schedules from the playhead, unless a check runs already or
     /// the run cannot be forked here.
@@ -105,10 +134,29 @@ impl Scrubber {
             );
             return;
         }
-        if self.checking() {
-            return;
-        }
         let run = session.run.path.clone();
+
+        // One check runs at a time. A check of another run goes on while
+        // this run is on screen, with its card out of sight, so the app
+        // says where the check is.
+        match busy_with(self.sweep.as_ref(), &run) {
+            Busy::No => {}
+            Busy::WithThisRun => return,
+            Busy::WithAnotherRun { run, step } => {
+                let id = run.file_name().unwrap_or_default().to_string_lossy();
+                self.notify_user(
+                    NoticeTone::Info,
+                    "Another run is being checked",
+                    format!(
+                        "Run {} is being checked from step {}. Open that run to see the check or to cancel it.",
+                        short_id(&id),
+                        thousands(step)
+                    ),
+                    cx,
+                );
+                return;
+            }
+        }
         let step = self.step;
         let request = self.requests.issue();
         let cancel = Cancel::default();
@@ -297,7 +345,9 @@ impl Scrubber {
         cx.notify();
     }
 
-    /// The check card, for the run on screen.
+    /// The check card, while the run the check forks is the one on
+    /// screen. The check stays with its run while another run is shown,
+    /// and its card shows again when its run does.
     pub(super) fn render_sweep(&self, cx: &mut Context<Self>) -> Option<Div> {
         let sweep = self.sweep.as_ref()?;
         if self.session().run.path != sweep.run {
@@ -611,4 +661,47 @@ fn legend() -> Div {
         ))
         .child(item(swatch(Some(theme::BLUE), theme::BLUE), "differently"))
         .child(item(swatch(None, theme::MUTED), "timed out"))
+}
+
+#[cfg(test)]
+mod tests {
+    // What the latest check means for starting another, with no window.
+    use super::*;
+    use crate::request::Requests;
+
+    fn sweep(run: &str, state: SweepState) -> Sweep {
+        Sweep {
+            run: run.into(),
+            step: 40,
+            schedules: 8,
+            seeds: 1,
+            first_seed: None,
+            state,
+            picked: None,
+            request: Requests::default().issue(),
+            cancel: Cancel::default(),
+        }
+    }
+
+    #[test]
+    fn a_check_stays_with_its_run_while_another_run_is_shown() {
+        // A check of run a that still runs is in the way of another check
+        // whichever run is on screen, and with run b on screen it says
+        // which run and step it is of. A check that is done or failed, of
+        // either run, is in the way of nothing.
+        let running = sweep("/runs/a", SweepState::Running { ended: Vec::new() });
+        let (a, b) = (Path::new("/runs/a"), Path::new("/runs/b"));
+        assert_eq!(busy_with(None, a), Busy::No);
+        assert_eq!(busy_with(Some(&running), a), Busy::WithThisRun);
+        assert_eq!(
+            busy_with(Some(&running), b),
+            Busy::WithAnotherRun {
+                run: a.to_path_buf(),
+                step: 40
+            }
+        );
+        let failed = sweep("/runs/a", SweepState::Failed("no KVM".into()));
+        assert_eq!(busy_with(Some(&failed), a), Busy::No);
+        assert_eq!(busy_with(Some(&failed), b), Busy::No);
+    }
 }

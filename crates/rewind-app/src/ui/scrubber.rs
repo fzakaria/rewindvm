@@ -393,7 +393,8 @@ pub struct Scrubber {
     pub(super) file_diff: Option<crate::ui::file_diff::FileDiffPanel>,
     /// The Threads tab, while it is open.
     pub(super) lanes: Option<crate::ui::lanes::LanesPanel>,
-    /// The latest check from a step, running or done.
+    /// The latest check from a step, running or done, of the run on
+    /// screen or of one shown before. Its card shows only with its run.
     pub(super) sweep: Option<crate::ui::sweep::Sweep>,
     /// What the amber button does at the playhead, and where its menu
     /// opened, while it is open.
@@ -620,14 +621,6 @@ impl Scrubber {
             RightTab::Compare => session.other.is_some(),
             RightTab::AtStep | RightTab::File | RightTab::FileDiff | RightTab::Source => false,
         };
-        // A check from a step stays with the run it forked.
-        if self
-            .sweep
-            .as_ref()
-            .is_some_and(|s| s.run != session.run.path)
-        {
-            self.sweep = None;
-        }
         if !keeps {
             self.right_tab = RightTab::AtStep;
         }
