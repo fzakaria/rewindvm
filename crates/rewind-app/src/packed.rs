@@ -28,6 +28,17 @@ use crate::viewer::FetchedAll;
 /// any other step.
 const ELSEWHERE: &str = "At other steps, reading files and the source is in the desktop app.";
 
+/// `steps` in words, as a sentence lists them: "step 719", "steps 719
+/// and 731", "steps 1, 2 and 3".
+fn steps_words(steps: &[u64]) -> String {
+    let words: Vec<String> = steps.iter().map(|s| thousands(*s)).collect();
+    match words.as_slice() {
+        [] => "no step".to_string(),
+        [one] => format!("step {one}"),
+        [rest @ .., last] => format!("steps {} and {last}", rest.join(", ")),
+    }
+}
+
 /// An engine that answers from an export's answers for one run.
 pub struct Answering {
     /// The run the answers are of, by the path the app opened it as.
@@ -54,11 +65,10 @@ impl Answering {
     /// The refusal of a question about `step` the export holds no answer
     /// for, which names the steps it answers.
     fn unanswered(&self, what: String) -> EngineError {
-        let steps: Vec<String> = self.answers.steps().iter().map(|s| thousands(*s)).collect();
         EngineError::Unanswered {
             message: format!(
-                "{what} The export answers at step {}. {ELSEWHERE}",
-                steps.join(", ")
+                "{what} The export answers at {}. {ELSEWHERE}",
+                steps_words(&self.answers.steps())
             ),
         }
     }
@@ -503,6 +513,14 @@ mod tests {
             })
         });
         assert!(found, "no thread at step {} is in {function}", marked.step);
+    }
+
+    #[test]
+    fn the_answered_steps_are_listed_as_a_sentence_lists_them() {
+        // One step is "step N"; several are "steps A, B and C".
+        assert_eq!(steps_words(&[5_775]), "step 5,775");
+        assert_eq!(steps_words(&[719, 731]), "steps 719 and 731");
+        assert_eq!(steps_words(&[1, 2, 3]), "steps 1, 2 and 3");
     }
 
     #[test]
