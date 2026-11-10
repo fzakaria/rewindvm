@@ -4396,8 +4396,11 @@ in
         # its boot clock into its randomness, and the default epoch is the
         # start of the current day, so without a fixed one the six seeds'
         # coins land anew each day, and all six land the same way about one
-        # day in 64.
-        epoch=1790985600
+        # day in 64. The guest's kernel command line and the CPU model are
+        # mixed in too, so a guest change can move the coins at a fixed
+        # epoch: this one splits both the seeds and the reseeded run under
+        # v3 and under v3-compat for 0.15.0's guest.
+        epoch=1791072000
 
         # Seeds: a job that fails when the first byte it reads from the
         # kernel's randomness is odd. Some seed of six decides it with no
