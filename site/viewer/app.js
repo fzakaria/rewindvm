@@ -10,6 +10,8 @@
 // resolve against this page, so the examples beside it open as
 // ?url=examples/philosophers.rwd.
 
+import { ZipRefusal, isZip, rwdFromZip } from "./zip.js";
+
 // The app's module, loaded only once the frame is wide enough for it, so a
 // phone never downloads it.
 let web = null;
@@ -216,13 +218,27 @@ async function fetchBytes(url) {
   }
 }
 
-// The export at a link. A link the browser would refuse is not tried, and
-// the reason comes back in the place of a server's answer.
+// The export at a link: the link's bytes, or the .rwd file inside them
+// when they are a zip. A link the browser would refuse is not tried, and
+// a zip that is not opened comes back as the reason, both in the place of
+// a server's answer.
 async function fetchExport(url) {
   if (isMixedContent(url)) {
     return { answer: MIXED_ANSWER };
   }
-  return fetchBytes(url);
+  const fetched = await fetchBytes(url);
+  if (!fetched.bytes || !isZip(fetched.bytes)) {
+    return fetched;
+  }
+  try {
+    const inside = await rwdFromZip(fetched.bytes);
+    return { bytes: inside.bytes };
+  } catch (error) {
+    if (error instanceof ZipRefusal) {
+      return { answer: error.reason };
+    }
+    throw error;
+  }
 }
 
 // Fetches the exports an address names and hands them to the app, or
@@ -252,8 +268,9 @@ async function fetchRuns(url, compare, step) {
   );
 }
 
-// Hands a picked or dropped file to the app, read in the browser. A file
-// that comes while the app loads is held until the app is on screen.
+// Hands a picked or dropped file to the app, read in the browser. A zip
+// is opened as the .rwd file inside it. A file that comes while the app
+// loads is held until the app is on screen.
 async function openFile(file) {
   if (phase === Phase.Starting) {
     heldFile = file;
@@ -270,7 +287,25 @@ async function openFile(file) {
     say(`The browser could not read ${file.name}.`);
     return;
   }
-  callApp(() => web.open_file(file.name, bytes));
+
+  // A plain export goes to the app as it is.
+  if (!isZip(bytes)) {
+    callApp(() => web.open_file(file.name, bytes));
+    return;
+  }
+
+  // A zip gives the export inside it, or the reason it is not opened.
+  let inside;
+  try {
+    inside = await rwdFromZip(bytes);
+  } catch (error) {
+    if (error instanceof ZipRefusal) {
+      say(`${file.name} is ${error.reason}.`);
+      return;
+    }
+    throw error;
+  }
+  callApp(() => web.open_file(inside.name, inside.bytes));
 }
 
 // The address follows what is on screen once the playhead rests, without
