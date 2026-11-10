@@ -7,6 +7,7 @@
 //! run opens as its trace alone.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context as _, Result, bail};
 use rewind_trace::Trace;
@@ -68,7 +69,9 @@ pub struct Run {
     pub manifest: Option<Manifest>,
     /// Why the manifest was set aside, when it did not parse.
     pub manifest_warning: Option<String>,
-    pub timeline: Timeline,
+    /// The run indexed for scrubbing, shared with work in the background
+    /// that reads the whole of it, such as building the search index.
+    pub timeline: Arc<Timeline>,
     /// The run's read and write records: which step wrote each byte of
     /// the files it made. Empty for a run recorded before runs made them.
     pub io: IoLog,
@@ -154,7 +157,7 @@ impl Run {
         let outcome = manifest.as_ref().and_then(|m| m.outcome.as_ref());
         let total_hint = outcome.map(|o| o.step);
         let stop = outcome.map(|o| &o.stop);
-        let timeline = Timeline::new(trace, total_hint, stop);
+        let timeline = Arc::new(Timeline::new(trace, total_hint, stop));
         Run {
             path,
             origin,
@@ -480,7 +483,8 @@ impl Session {
             true => comparison.as_ref().and_then(Comparison::step),
             false => None,
         };
-        run.timeline.fail_past(shared);
+        // A timeline some background work still reads is copied first.
+        Arc::make_mut(&mut run.timeline).fail_past(shared);
         Session {
             run,
             other,

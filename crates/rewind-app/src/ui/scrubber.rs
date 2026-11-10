@@ -31,7 +31,7 @@ use crate::history::History;
 use crate::model::{LogFilter, Motion};
 use crate::request::{Finished, Readings, Request, Requests, Reread};
 use crate::run::{Origin, Replays, Session, short_id};
-use crate::search::Index;
+use crate::search::Indexed;
 use crate::selection::Surface;
 use crate::source::Located;
 use crate::stride::{Direction, Stride};
@@ -356,8 +356,9 @@ pub struct Scrubber {
     /// The switch density the band last drew, kept while the view it was
     /// made for is the one shown and until another session is shown.
     pub(super) band: Option<Rc<crate::density::Density>>,
-    /// The searchable text of the run it was built for, by its path.
-    pub(super) search_index: Option<(PathBuf, Rc<Index>)>,
+    /// The searchable text of the run on screen, as far as it is built.
+    /// Another run on screen drops it.
+    pub(super) search_index: Indexed,
     /// Where the "Stop at" menu opened, while it is open.
     pub(super) stride_menu: Option<gpui::Point<gpui::Pixels>>,
     pub(super) log_filter: LogFilter,
@@ -481,7 +482,7 @@ impl Scrubber {
             stride: Stride::Every,
             stride_menu: None,
             search: None,
-            search_index: None,
+            search_index: Indexed::default(),
             bookmarks: Bookmarks::default(),
             bookmark_editor: None,
             view: None,
@@ -595,10 +596,11 @@ impl Scrubber {
                 cx,
             );
         }
-        // Steps jumped from in another run mean nothing in this one; the
-        // same run shown again, as a change of comparison does, keeps
-        // them.
+        // Steps jumped from in another run mean nothing in this one, and
+        // the search index is of the run it was built for; the same run
+        // shown again, as a change of comparison does, keeps them.
         if !self.shows_run_of(&session) {
+            self.search_index.another_run();
             self.blames.leave_run();
             self.history = History::default();
             self.stride = Stride::Every;

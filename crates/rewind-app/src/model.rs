@@ -312,6 +312,7 @@ impl Motion {
 }
 
 /// One run, indexed for scrubbing.
+#[derive(Clone)]
 pub struct Timeline {
     pub trace: Trace,
     /// The last step of the run: the right end of the timeline.

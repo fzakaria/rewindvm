@@ -2,15 +2,19 @@
 //! them, the events the log does not show, and the paths of the files the
 //! run wrote, for text typed into the search box.
 //!
-//! The index is built once per run, in the background, and each query
-//! scans it: a match is the query anywhere in the text, ignoring case.
+//! The index is built once per run, in the background, the first time the
+//! search box opens on the run, and each query scans it, in the background
+//! too: a match is the query anywhere in the text, ignoring case.
+//! `Indexed` keeps the index with the run on screen.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use rewind_trace::EventKind;
 
 use crate::describe;
 use crate::model::{LogFilter, Timeline};
+use crate::request::{Request, Requests};
 
 /// Where a match was found.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -118,6 +122,55 @@ impl Index {
     }
 }
 
+/// The index of the run on screen, as far as it is built. The index
+/// belongs to one run: showing another run drops it, and an index whose
+/// build was started for a run shown before is never taken.
+#[derive(Default)]
+pub enum Indexed {
+    /// Not asked for yet.
+    #[default]
+    No,
+    /// Being built in the background, under this request's number.
+    Building(Request),
+    Ready(Arc<Index>),
+}
+
+impl Indexed {
+    /// Asks for the index. Returns the number to build it under, or None
+    /// when it is built or being built already.
+    pub fn begin(&mut self, requests: &mut Requests) -> Option<Request> {
+        if !matches!(self, Indexed::No) {
+            return None;
+        }
+        let request = requests.issue();
+        *self = Indexed::Building(request);
+        Some(request)
+    }
+
+    /// Takes the index built under `request`. Returns whether it is the
+    /// one waited on; any other is dropped.
+    pub fn built(&mut self, request: Request, index: Index) -> bool {
+        if !matches!(self, Indexed::Building(waited) if *waited == request) {
+            return false;
+        }
+        *self = Indexed::Ready(Arc::new(index));
+        true
+    }
+
+    /// Another run is on screen: the index, built or not, is not its.
+    pub fn another_run(&mut self) {
+        *self = Indexed::No;
+    }
+
+    /// The index, once built.
+    pub fn ready(&self) -> Option<&Arc<Index>> {
+        match self {
+            Indexed::Ready(index) => Some(index),
+            Indexed::No | Indexed::Building(_) => None,
+        }
+    }
+}
+
 fn entry(step: u64, found: Found, text: String, file: Option<(String, u32)>) -> Entry {
     Entry {
         lower: text.to_lowercase(),
@@ -211,6 +264,31 @@ mod tests {
         assert_eq!(make.hits.len(), 1);
         assert_eq!(make.hits[0].found, Found::Event);
         assert!(make.hits[0].text.contains("/bin/make"));
+    }
+
+    #[test]
+    fn the_index_stays_with_the_run_it_was_built_for() {
+        // The search box opens on a run and its index starts building;
+        // opening the box again starts no second build. Another run is
+        // shown before the build ends, and the box opens on it: the first
+        // run's index arrives and is dropped, the second run's is taken.
+        // Showing a third run drops the index that was ready.
+        let mut requests = Requests::default();
+        let mut indexed = Indexed::default();
+        let first = indexed.begin(&mut requests).unwrap();
+        assert_eq!(indexed.begin(&mut requests), None);
+        assert!(indexed.ready().is_none());
+
+        indexed.another_run();
+        let second = indexed.begin(&mut requests).unwrap();
+        assert!(!indexed.built(first, Index::build(&timeline())));
+        assert!(indexed.ready().is_none());
+        assert!(indexed.built(second, Index::build(&timeline())));
+        assert_eq!(indexed.ready().unwrap().find("make", 10).total, 1);
+        assert_eq!(indexed.begin(&mut requests), None);
+
+        indexed.another_run();
+        assert!(indexed.ready().is_none());
     }
 
     #[test]

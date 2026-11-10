@@ -6,9 +6,9 @@
 //! A click takes the playhead to a match and closes the box; a file
 //! match opens in the viewer at the playhead instead. Enter and Escape close the box where the
 //! playhead is, and Back returns to where the search started.
-//! `crate::search` builds the index and runs the queries.
-
-use std::rc::Rc;
+//! `crate::search` builds the index and runs the queries, both in the
+//! background: the index holds every line and event of the run, and a
+//! query reads all of it.
 
 use gpui::{
     Context, Div, Entity, Focusable, HighlightStyle, ScrollStrategy, SharedString, StyledText,
@@ -18,6 +18,7 @@ use gpui::{
 use rewind_text_input::{TextInput, TextInputStyle};
 
 use crate::describe::{clip, thousands};
+use crate::request::Request;
 use crate::search::{Hits, Index};
 use crate::theme::{self, size};
 use crate::ui::scrubber::Scrubber;
@@ -36,12 +37,18 @@ const ROWS_SHOWN: f32 = 12.0;
 /// Where the box sits: under the timeline, across the window's middle.
 const BOX_TOP: f32 = size::HEADER_HEIGHT + 132.0;
 
+/// What the box says under the field while the run's index is built.
+const INDEXING: &str = "Reading the run's log, files and events\u{2026}";
+
 /// The search box while it is open.
 pub struct SearchBox {
     pub input: Entity<TextInput>,
     /// The query the matches are for.
     query: String,
     hits: Hits,
+    /// The query being searched for in the background, and its request:
+    /// matches found for any other request are dropped.
+    asked: Option<(Request, String)>,
     /// The match the playhead was taken to, if any.
     selected: Option<usize>,
     /// The step the playhead was at when the box opened, for Back.
@@ -63,12 +70,8 @@ impl Scrubber {
             window.focus(&handle, cx);
             return;
         }
-        let path = session.run.path.clone();
-        let stale = self.search_index.as_ref().is_none_or(|(p, _)| *p != path);
-        if stale {
-            let index = Index::build(&session.run.timeline);
-            self.search_index = Some((path, Rc::new(index)));
-        }
+        let timeline = session.run.timeline.clone();
+        self.build_search_index(timeline, cx);
 
         let style = TextInputStyle {
             placeholder: "Search the log, files and events".into(),
@@ -83,12 +86,43 @@ impl Scrubber {
             input,
             query: String::new(),
             hits: Hits::default(),
+            asked: None,
             selected: None,
             origin: self.step,
             scroll: UniformListScrollHandle::new(),
             _typed: typed,
         });
         cx.notify();
+    }
+
+    /// Builds the index of the run on screen, whose timeline is
+    /// `timeline`, in the background, unless the index is built or being
+    /// built. The index of a run shown before, arriving late, is dropped.
+    fn build_search_index(
+        &mut self,
+        timeline: std::sync::Arc<crate::model::Timeline>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(request) = self.search_index.begin(&mut self.requests) else {
+            return;
+        };
+        let built = cx
+            .background_executor()
+            .spawn(async move { Index::build(&timeline) });
+        cx.spawn(async move |this, cx| {
+            let index = built.await;
+            let _ = this.update(cx, |this, cx| {
+                if !this.search_index.built(request, index) {
+                    return;
+                }
+
+                // What was typed while the index was built is searched
+                // for now.
+                this.search_typed(cx);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Closes the box where the playhead is; Back returns to where the
@@ -120,22 +154,48 @@ impl Scrubber {
         self.close_search(window, cx);
     }
 
-    /// Runs the query again when the field's text changed.
+    /// Runs the query again, in the background, when the field's text
+    /// changed.
     fn search_typed(&mut self, cx: &mut Context<Self>) {
         let Some(search) = &mut self.search else {
             return;
         };
         let query = search.input.read(cx).text().to_string();
-        if query == search.query {
+        let latest = search
+            .asked
+            .as_ref()
+            .map_or(&search.query, |(_, asked)| asked);
+        if query == *latest {
             return;
         }
-        let Some((_, index)) = &self.search_index else {
+
+        // Until the index is built there is nothing to search; the text
+        // in the field is searched for when the index arrives.
+        let Some(index) = self.search_index.ready().cloned() else {
             return;
         };
-        search.hits = index.find(&query, MAX_HITS);
-        search.query = query;
-        search.selected = None;
-        cx.notify();
+        let request = self.requests.issue();
+        search.asked = Some((request, query.clone()));
+        let found = cx
+            .background_executor()
+            .spawn(async move { index.find(&query, MAX_HITS) });
+        cx.spawn(async move |this, cx| {
+            let hits = found.await;
+            let _ = this.update(cx, |this, cx| {
+                // Matches for a query typed over since are dropped.
+                let Some(search) = &mut this.search else {
+                    return;
+                };
+                let Some((_, query)) = search.asked.take_if(|(asked, _)| *asked == request) else {
+                    return;
+                };
+                search.hits = hits;
+                search.query = query;
+                search.selected = None;
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Takes the playhead to match `index` and marks it, scrolling the
@@ -217,8 +277,11 @@ impl Scrubber {
             .text_color(rgb(theme::TEXT))
             .child(search.input.clone());
 
-        // How many matched, under the field.
+        // How many matched, under the field, or that the run's text is
+        // still being read into the index.
+        let indexing = self.search_index.ready().is_none();
         let count = match (search.query.trim().is_empty(), search.hits.total) {
+            _ if indexing => INDEXING.to_string(),
             (true, _) => "Up and Down go through the matches; Enter or Escape closes.".to_string(),
             (false, 0) => "No matches.".to_string(),
             (false, 1) => "1 match".to_string(),
