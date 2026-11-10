@@ -1,0 +1,26 @@
+--- a/kernel/trace/trace.c
++++ b/kernel/trace/trace.c
+@@ -9161,6 +9161,23 @@
+ 		return -ENOMEM;
+ 	}
+ 
++	/*
++	 * Rewind: leave every trace event's format as compiled. The update
++	 * replaces the enum and sizeof names in each event's print format
++	 * and field types with their values, for tools such as perf and
++	 * trace-cmd that read the format files under tracefs; without it a
++	 * format file shows the names. Nothing in a Rewind guest reads those
++	 * files, and the update takes one step of 150 to 300 ms at boot,
++	 * more than half the guest's time in a run of /bin/echo.
++	 *
++	 * The tracing core itself stays: the platform code hooks the system
++	 * call, scheduler and signal tracepoints, and Linux does not link
++	 * with CONFIG_TRACEPOINTS but no CONFIG_TRACING, since every
++	 * TRACE_EVENT() also expands to code of the event tracer's.
++	 */
++	if (IS_ENABLED(CONFIG_REWIND_GUEST))
++		return 0;
++
+ 	queue_work(trace_init_wq, &eval_map_work);
+ 	return 0;
+ }

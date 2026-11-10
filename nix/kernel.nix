@@ -39,6 +39,10 @@ let
     # A record, and so an exit, at every context switch, and the
     # scheduler's hrtick off, which read the clock at every switch
     ../guest/linux/rewind-switch.patch
+    # The trace events' formats left as compiled, rather than rewritten
+    # for tracefs readers in a boot step that took more than half of a
+    # short run's guest time
+    ../guest/linux/rewind-trace.patch
   ];
 in
 pkgs.stdenv.mkDerivation {
