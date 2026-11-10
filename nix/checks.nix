@@ -1050,6 +1050,17 @@ in
         rewind diff a a --json > same.json
         grep -q '"divergence":null' same.json
 
+        # A command that could not do its job exits 2, apart from 1, so
+        # `rewind diff a b || report_flaky` does not report a run that
+        # does not exist as a flaky build.
+        for command in 'diff a nonesuch' 'replay nonesuch' 'blame a nonesuch /out'; do
+          status=0
+          rewind $command 2> failed || status=$?
+          cat failed
+          test "$status" = 2
+          grep -q 'no run matches' failed
+        done
+
         # A fork reads its parent's keyframes up to its step and replays
         # like any run, from boot and from a keyframe on either side of the
         # step. So does a fork of that fork.

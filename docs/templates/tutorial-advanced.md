@@ -493,7 +493,9 @@ differently from schedule 0, and 0 when none does, `diff`
 1 when the runs differ, `cat` 3 when the file did not exist at the step and
 4 when the path named a directory, which `cat --archive tar` writes whole,
 `files` 3 when the directory did not exist and 4 when the path named
-something else, and `doctor` 1 when this machine cannot record runs. With `--json`, commands
+something else, and `doctor` 1 when this machine cannot record runs. Every
+command exits 2 when it could not do what was asked, as for a run that does
+not exist, so `rewind diff a b || report_flaky` reports only runs that differ. With `--json`, commands
 print JSON for a program to read in place of their text: one object, or from
 `ls` and `events` one a line. `check --json` lists each run it tried under
 `schedules`, with the properties the run violated under `violations`.

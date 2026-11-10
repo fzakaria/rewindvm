@@ -541,8 +541,8 @@ pub(crate) fn r#where(home: &Home, args: WhereArgs) -> Result<ExitCode> {
 }
 
 /// `rewind cat`'s exit status when the file did not exist at the step:
-/// apart from 1, which any failure exits with, and 2, clap's for a
-/// command line it refused.
+/// apart from 1, which other commands say "differs" with, and 2, which
+/// any failure exits with (see exit.rs).
 const CAT_NOT_FOUND: u8 = 3;
 
 /// `rewind cat`'s exit status when the path named a directory at the

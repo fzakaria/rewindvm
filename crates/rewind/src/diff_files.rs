@@ -12,6 +12,7 @@ use rewind_trace::properties::{Glob, written_files};
 
 use crate::cmd::view::Format;
 use crate::color::{Paint, Same, Style};
+use crate::exit;
 use crate::property::end_step;
 
 /// What the summaries call the two runs, as the rest of `rewind diff`
@@ -338,7 +339,7 @@ pub(crate) fn diff_file(
     Ok(if same {
         ExitCode::SUCCESS
     } else {
-        ExitCode::FAILURE
+        ExitCode::from(exit::DIFFERS)
     })
 }
 
@@ -445,7 +446,7 @@ pub(crate) fn diff_outputs(
     Ok(if outputs.differ.is_empty() {
         ExitCode::SUCCESS
     } else {
-        ExitCode::FAILURE
+        ExitCode::from(exit::DIFFERS)
     })
 }
 

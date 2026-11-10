@@ -9,6 +9,7 @@ use rewind_core::{Guest, Home, Run, image};
 use rewind_trace::Part;
 
 use crate::color::{self, Same};
+use crate::exit;
 use crate::{RUN_HELP, RUN_LONG_HELP, json, list, reproduce, show};
 
 /// The arguments of `rewind open`.
@@ -424,7 +425,7 @@ pub(crate) fn replay(home: &Home, args: ReplayArgs) -> Result<ExitCode> {
     let exit = if identical {
         ExitCode::SUCCESS
     } else {
-        ExitCode::FAILURE
+        ExitCode::from(exit::DIFFERS)
     };
 
     // Down to the step and the instruction, when asked and there is a
@@ -1039,7 +1040,7 @@ pub(crate) fn diff(home: &Home, args: DiffArgs) -> Result<ExitCode> {
     }
     match lt.divergence(rt) {
         None => Ok(ExitCode::SUCCESS),
-        Some(_) => Ok(ExitCode::FAILURE),
+        Some(_) => Ok(ExitCode::from(exit::DIFFERS)),
     }
 }
 

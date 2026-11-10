@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use clap::CommandFactory;
 use rewind_core::{Guest, Home};
 
-use crate::{Cli, Generate, PmuAction, doctor};
+use crate::{Cli, Generate, PmuAction, doctor, exit};
 
 pub(crate) fn doctor(home: &Home) -> Result<ExitCode> {
     println!("rewind {}", rewind_core::VERSION);
@@ -18,7 +18,7 @@ pub(crate) fn doctor(home: &Home) -> Result<ExitCode> {
     }
     let failed = found.iter().any(|f| f.level == doctor::Level::Fail);
     Ok(if failed {
-        ExitCode::FAILURE
+        ExitCode::from(exit::DIFFERS)
     } else {
         ExitCode::SUCCESS
     })
@@ -125,7 +125,7 @@ pub(crate) fn pmu(home: &Home, args: PmuArgs) -> Result<ExitCode> {
             Ok(if usable {
                 ExitCode::SUCCESS
             } else {
-                ExitCode::FAILURE
+                ExitCode::from(exit::DIFFERS)
             })
         }
     }

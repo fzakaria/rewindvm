@@ -5,6 +5,7 @@ mod color;
 mod diff_files;
 mod doctor;
 mod downloads;
+mod exit;
 mod failure;
 mod gdb;
 mod json;
@@ -40,7 +41,12 @@ const STEP_LONG_HELP: &str = "A step of the run: how many times the VM had stopp
 #[derive(Parser)]
 #[command(
     version = rewind_core::VERSION,
-    about = "Run Linux workloads in a deterministic VM, then scrub, rewind and fork them"
+    about = "Run Linux workloads in a deterministic VM, then scrub, rewind and fork them",
+    long_about = "Run Linux workloads in a deterministic VM, then scrub, rewind and fork them.\n\n\
+        A command that could not do what was asked, as for a run that does not exist, exits 2. \
+        The commands that compare or check exit 1 for what they found: diff, replay and blame \
+        when the runs differ, check when a run fails, doctor when this machine cannot record. \
+        run, nix and fork exit with the job's own status, as a shell reports a child."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -279,7 +285,8 @@ enum Command {
     Generate(cmd::setup::GenerateArgs),
     /// Compare two runs and show where they first differ.
     ///
-    /// Exits 0 when the runs are identical and 1 when they differ. With
+    /// Exits 0 when the runs are identical, 1 when they differ and 2 when
+    /// it could not compare them, as for a run that does not exist. With
     /// --file or --outputs, compares the files the runs left behind
     /// instead of their events.
     Diff(cmd::view::DiffArgs),
@@ -446,13 +453,11 @@ fn main() -> ExitCode {
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     color::init(cli.color);
     let errors = cli.errors;
-    match run(cli) {
-        Ok(code) => code,
-        Err(e) => {
-            failure::report(errors, &e);
-            ExitCode::FAILURE
-        }
+    let result = run(cli);
+    if let Err(e) = &result {
+        failure::report(errors, e);
     }
+    exit::status(&result)
 }
 
 fn run(cli: Cli) -> Result<ExitCode> {

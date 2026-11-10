@@ -49,6 +49,7 @@ use rewind_trace::writes::{
 use rewind_trace::{EventKind, Process, Trace};
 
 use crate::color::{self, Same, Style};
+use crate::exit;
 
 /// How many bytes from the first differing offset are shown and bisected
 /// on.
@@ -744,7 +745,7 @@ pub(crate) fn blame(
             }
         }
     }
-    Ok(ExitCode::FAILURE)
+    Ok(ExitCode::from(exit::DIFFERS))
 }
 
 /// When a writer gave the byte the value it ends with: the step, and the

@@ -22,8 +22,8 @@ use rewind_trace::schedule::{Reseed, StallMax};
 use crate::color::{self, Paint, Same, Style};
 use crate::property::{self, Coverage, Judge, Property, Violation};
 use crate::{
-    RUN_HELP, RUN_LONG_HELP, STEP_HELP, STEP_LONG_HELP, Terminal, clear_status, json, locate, show,
-    status,
+    RUN_HELP, RUN_LONG_HELP, STEP_HELP, STEP_LONG_HELP, Terminal, clear_status, exit, json, locate,
+    show, status,
 };
 
 /// The arguments of `rewind run`.
@@ -937,7 +937,7 @@ pub(crate) fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
             println!("{}", search(serde_json::Value::Null));
         }
         if !base_holds {
-            return Ok(ExitCode::FAILURE);
+            return Ok(ExitCode::from(exit::DIFFERS));
         }
         return Ok(ExitCode::SUCCESS);
     };
@@ -980,7 +980,7 @@ pub(crate) fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
         if json {
             println!("{}", search(serde_json::Value::Null));
         }
-        return Ok(ExitCode::FAILURE);
+        return Ok(ExitCode::from(exit::DIFFERS));
     }
 
     // What the run found violates, or the unperturbed run does when the
@@ -1249,7 +1249,7 @@ pub(crate) fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
             "threads": threads.iter().map(|(involved, step, answer)| thread_json(*involved, *step, answer)).collect::<Vec<_>>(),
         });
         println!("{}", search(narrowed));
-        return Ok(ExitCode::FAILURE);
+        return Ok(ExitCode::from(exit::DIFFERS));
     }
     let words = |run: &Run| {
         let spec = &run.manifest.spec;
@@ -1305,7 +1305,7 @@ pub(crate) fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
         Some(&passing.manifest.id),
     );
     println!("\nopen both in the desktop app: {open}");
-    Ok(ExitCode::FAILURE)
+    Ok(ExitCode::from(exit::DIFFERS))
 }
 
 /// Replays each of `runs`, named by the words a search calls it, from boot
