@@ -29,9 +29,17 @@
 //! looks at gdb's connection. A Ctrl-C stops it at the next position it
 //! comes to, which gdb can inspect and run from like any other; a closed
 //! connection ends the session at once.
+//!
+//! Past the first window, a run back replays the windows several at a
+//! time, keyframe to keyframe, each on a machine of its own forked from
+//! the run, as many as there are cores, and takes their results newest
+//! first: the hit found is the newest window's last, as one window at a
+//! time would find it.
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc;
 
 use anyhow::{Result, bail};
 use rewind_vmm::Machine;
@@ -45,7 +53,7 @@ use crate::run::{Keep, Run};
 use crate::{Home, keyframes};
 
 /// The run a fork came from, which running the fork backwards replays.
-pub trait History: std::fmt::Debug {
+pub trait History: std::fmt::Debug + Sync {
     /// A machine at the start of step `step` of the run, or of an earlier
     /// step when `obs` stops the replay there.
     fn machine_at(&self, step: u64, obs: &mut dyn Observer) -> Result<Machine>;
@@ -1023,8 +1031,107 @@ impl Debuggee<'_> {
             if found.is_some() || start == self.began {
                 return Ok(found);
             }
+
+            // Past the first window, several windows at once, when there
+            // are several left.
+            let windows = whole_windows(&keyframes, self.began, start);
+            if windows.len() > 1 {
+                return self.scan_at_once(&windows, here);
+            }
             end = Some(start);
             before = start - 1;
+        }
+    }
+
+    /// Scans `windows`, each whole steps from its start to its end, newest
+    /// first, several at once on machines of their own, and returns the
+    /// last hit in the newest window that has one: what scanning them one
+    /// at a time would return. A Ctrl-C heard while they run stops the
+    /// fork at `here`, where the first window's scan left it.
+    fn scan_at_once(
+        &mut self,
+        windows: &[(u64, u64)],
+        here: &Position,
+    ) -> Result<Option<(Position, GdbTrap)>> {
+        let threads = std::thread::available_parallelism()
+            .map_or(1, |n| n.get())
+            .min(windows.len());
+        let next = AtomicUsize::new(0);
+        let stop = AtomicBool::new(false);
+        let (tx, rx) = mpsc::channel();
+        let scanner = Scanner {
+            traps: self.traps.clone(),
+            process: self.process,
+            space: self.space,
+            layout: self.layout,
+            began: self.began,
+            hits_of: self.hits_of,
+        };
+        let history = self.history.as_deref().expect("going back takes a history");
+        let listener = &self.listener;
+
+        // Each thread takes the next window not yet taken; the results
+        // are taken newest first, each once every newer window's is in.
+        let ended = std::thread::scope(|scope| {
+            for _ in 0..threads {
+                let tx = tx.clone();
+                let (next, stop, scanner) = (&next, &stop, &scanner);
+                scope.spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        let index = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(&(start, end)) = windows.get(index) else {
+                            return;
+                        };
+                        let found = scanner.scan(history, start, end, stop);
+                        if tx.send((index, found)).is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+            drop(tx);
+
+            let mut results = BTreeMap::new();
+            let mut taken = 0;
+            let ended = loop {
+                if let Some(found) = results.remove(&taken) {
+                    match found {
+                        Ok(None) => {
+                            taken += 1;
+                            continue;
+                        }
+                        other => break AtOnce::Found(other),
+                    }
+                }
+                if taken == windows.len() {
+                    break AtOnce::Found(Ok(None));
+                }
+                match rx.recv_timeout(LISTEN_AT_ONCE) {
+                    Ok((index, found)) => {
+                        results.insert(index, found);
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        let heard = listener.look();
+                        if heard != Heard::Nothing {
+                            break AtOnce::Heard(heard);
+                        }
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        break AtOnce::Found(Err(anyhow::anyhow!(
+                            "the threads scanning windows ended with windows left"
+                        )));
+                    }
+                }
+            };
+            stop.store(true, Ordering::Relaxed);
+            ended
+        });
+        match ended {
+            AtOnce::Found(found) => found,
+            AtOnce::Heard(heard) => {
+                self.stop_for(heard, || here.clone())?;
+                Ok(None)
+            }
         }
     }
 
@@ -1042,27 +1149,8 @@ impl Debuggee<'_> {
         self.set_traps_for_scan(None)?;
         let mut scan = Scan::default();
         let until = end.unwrap_or(here.step);
-
-        // Whole steps, up to `until`'s start, in chunks with a look at
-        // gdb's connection between them.
-        loop {
-            let pause = (self.machine.step() + LISTEN_EVERY_STEPS).min(until);
-            let outcome = self.machine.run(Some(pause), &mut Ignore)?;
-            let at = self.machine.step();
-            match outcome {
-                Outcome::Paused if at >= until => break,
-                // A step's start is a position once its exit is done,
-                // as a replay to it leaves it.
-                Outcome::Paused => {
-                    let heard = self.listener.look();
-                    self.stop_at_step_start(heard)?;
-                }
-                Outcome::Stopped(_) => return Ok(scan.last),
-                Outcome::Debug(stop) => self.note_hit(&mut scan, at, stop)?,
-                Outcome::Interrupted => bail!("a scan for hits was interrupted"),
-            }
-        }
-        if end.is_some() {
+        let ended = self.scan_steps(&mut scan, until, &AtomicBool::new(false))?;
+        if ended == Ended::Stopped || end.is_some() {
             return Ok(scan.last);
         }
 
@@ -1160,6 +1248,110 @@ impl Debuggee<'_> {
     }
 }
 
+/// How long a run back that scans several windows at once waits for one
+/// of them between looks at gdb's connection.
+const LISTEN_AT_ONCE: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// How a scan of several windows at once ended: with what it found, or
+/// with what gdb sent on the way.
+enum AtOnce {
+    Found(Result<Option<(Position, GdbTrap)>>),
+    Heard(Heard),
+}
+
+/// How a scan of whole steps ended: at the step it was to reach, with
+/// the machine stopped short of it for good, or told to stop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ended {
+    Reached,
+    Stopped,
+    Told,
+}
+
+/// The windows of whole steps from `began` up to the start of step
+/// `before`, newest first, each from a keyframe, or from `began`, to the
+/// start of the next.
+fn whole_windows(keyframes: &[u64], began: u64, before: u64) -> Vec<(u64, u64)> {
+    let mut starts: Vec<u64> = keyframes
+        .iter()
+        .copied()
+        .filter(|&step| step > began && step < before)
+        .collect();
+    starts.insert(0, began);
+    let mut windows: Vec<(u64, u64)> = starts
+        .iter()
+        .zip(starts.iter().skip(1).chain(std::iter::once(&before)))
+        .map(|(&start, &end)| (start, end))
+        .filter(|(start, end)| start < end)
+        .collect();
+    windows.reverse();
+    windows
+}
+
+/// What a scan of a window on a machine of its own needs of the fork:
+/// gdb's traps and what decides whether a hit counts.
+struct Scanner {
+    traps: super::Traps,
+    process: Option<u32>,
+    space: Option<u64>,
+    layout: Option<rewind_vmm::pv::TaskLayout>,
+    began: u64,
+    hits_of: Option<u64>,
+}
+
+impl Scanner {
+    /// The last hit in the debugged process in the whole steps from the
+    /// start of step `start` to the start of step `end`, replayed on a
+    /// machine of the run forked at `start` with gdb's traps set, as the
+    /// fork's own scan would find it. None as well when `stop` is set on
+    /// the way, since nothing then reads the result.
+    fn scan(
+        &self,
+        history: &dyn History,
+        start: u64,
+        end: u64,
+        stop: &AtomicBool,
+    ) -> Result<Option<(Position, GdbTrap)>> {
+        let machine = history.machine_at(start, &mut Ignore)?;
+        if machine.step() != start {
+            bail!(
+                "the run ended at step {} before step {start}",
+                machine.step()
+            );
+        }
+        let mut fork = Debuggee {
+            machine,
+            traps: self.traps.clone(),
+            mode: super::Mode::Continue,
+            stepped: None,
+            process: self.process,
+            space: self.space,
+            layout: self.layout,
+            threads: Vec::new(),
+            follow: Follow::new(Vec::new()),
+            told: false,
+            libraries: None,
+            history: None,
+            position: Position::start(start),
+            checkpoints: Checkpoints::new(),
+            altered: false,
+            lost: false,
+            listener: Listener::default(),
+            began: self.began,
+            hits_of: self.hits_of,
+            exec_stop: None,
+            queued: None,
+        };
+        fork.set_traps_for_scan(None)?;
+        let mut scan = Scan {
+            since: Position::start(start),
+            last: None,
+        };
+        fork.scan_steps(&mut scan, end, stop)?;
+        Ok(scan.last)
+    }
+}
+
 /// What a replay with gdb's traps set has seen: where the fork is, as a
 /// position, and the last hit of a trap in the debugged process.
 #[derive(Default)]
@@ -1175,6 +1367,34 @@ impl Default for Position {
 }
 
 impl Debuggee<'_> {
+    /// Replays whole steps with gdb's traps set, from where the fork is up
+    /// to the start of step `until`, in chunks with a look at gdb's
+    /// connection between them, noting hits in `scan`. Stops early when
+    /// `stop` is set, as a scan of several windows at once that has its
+    /// answer sets it.
+    fn scan_steps(&mut self, scan: &mut Scan, until: u64, stop: &AtomicBool) -> Result<Ended> {
+        loop {
+            if stop.load(Ordering::Relaxed) {
+                return Ok(Ended::Told);
+            }
+            let pause = (self.machine.step() + LISTEN_EVERY_STEPS).min(until);
+            let outcome = self.machine.run(Some(pause), &mut Ignore)?;
+            let at = self.machine.step();
+            match outcome {
+                Outcome::Paused if at >= until => return Ok(Ended::Reached),
+                // A step's start is a position once its exit is done,
+                // as a replay to it leaves it.
+                Outcome::Paused => {
+                    let heard = self.listener.look();
+                    self.stop_at_step_start(heard)?;
+                }
+                Outcome::Stopped(_) => return Ok(Ended::Stopped),
+                Outcome::Debug(stop) => self.note_hit(scan, at, stop)?,
+                Outcome::Interrupted => bail!("a scan for hits was interrupted"),
+            }
+        }
+    }
+
     /// Sets gdb's traps on the fork for a replay, as gdb set them, with
     /// the registers `target` takes that gdb's traps lack, when given: a
     /// breakpoint gdb holds in a register moves into int3 to make room.
@@ -1551,5 +1771,28 @@ mod tests {
         assert_eq!(window_start(kept, 300, 0), 256);
         assert_eq!(window_start(kept, 255, 0), 0);
         assert_eq!(window_start([], 40, 0), 0);
+    }
+
+    /// The windows past a search back's first, scanned several at once,
+    /// cover every step from where the process began up to the first
+    /// window's start, each once, newest first, each from a keyframe or
+    /// from where the process began. Keyframes at steps 0, 256, 512 and
+    /// 768, with the process begun at 301 and the first window from 700;
+    /// a keyframe at the begin step itself is no window of its own; and
+    /// with no keyframe between, one window.
+    #[test]
+    fn windows_at_once_cover_the_steps_back_to_the_begin_newest_first() {
+        let keyframes = [0, 256, 512, 768];
+        assert_eq!(
+            whole_windows(&keyframes, 301, 700),
+            [(512, 700), (301, 512)]
+        );
+        assert_eq!(
+            whole_windows(&keyframes, 256, 700),
+            [(512, 700), (256, 512)]
+        );
+        assert_eq!(whole_windows(&keyframes, 0, 256), [(0, 256)]);
+        assert_eq!(whole_windows(&keyframes, 600, 700), [(600, 700)]);
+        assert_eq!(whole_windows(&[], 10, 10), []);
     }
 }

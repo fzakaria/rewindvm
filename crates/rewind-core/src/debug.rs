@@ -441,7 +441,7 @@ trait Int3Memory {
 /// address registers, where nothing in the VM changes, and a watched range
 /// takes one register for each aligned piece of it the CPU can watch.
 /// Breakpoints past the registers are int3 in memory.
-#[derive(Default, Debug)]
+#[derive(Clone, Default, Debug)]
 struct Traps {
     breakpoints: Vec<Breakpoint>,
     watches: Vec<Watch>,

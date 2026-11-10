@@ -315,7 +315,10 @@ the rest single-stepped, then stepped until the step that reaches it. Under
 exit time, which counts no branches, the whole way is single-stepped, which is
 slow in a long step. `reverse-continue` replays the run with gdb's traps set
 from the latest keyframe or checkpoint at or before the position, then from
-the one before that, newest first, and stops at the last hit: at a
+the one before that, newest first, and stops at the last hit. Past the first
+window, the windows from keyframe to keyframe are replayed several at once, on
+machines of their own forked from the run, and the newest window's last hit is
+the one taken, as one window at a time would find it. It stops: at a
 breakpoint as it was reached, and before the instruction that wrote a watched
 value, so gdb sees the value change. A hit counts when the CPU had the
 process's page table, as in `rewind blame`. That includes the kernel writing
@@ -499,7 +502,13 @@ is: in memory at an address, in a register, or optimized out. A value in memory
 and at most 32 bytes, the four debug address registers' 8 bytes each, is
 watched while the run is replayed a keyframe window at a time, newest first,
 from the latest keyframe before the step up to it, then the window before, back
-to the process's start or last exec. A hit counts when the CPU had the
+to the process's start or last exec. The windows are replayed several at once,
+one thread and one machine each, as many as there are cores, and their accesses
+are taken newest window first, each once every newer window's are in, so the
+search keeps what one window at a time would keep and stops the rest once it
+has enough. On a run whose write is 300,000 steps and 24 windows back, the
+search took 4.4 s on 16 cores where one window at a time took 8.4 s; a write
+in the first window costs the same either way. A hit counts when the CPU had the
 process's page table: one of its threads, or the kernel copying into the value
 for one of them. The trap comes after the store, so its line is the line of the
 address just before the trap's pc. One store can cover several values, such as

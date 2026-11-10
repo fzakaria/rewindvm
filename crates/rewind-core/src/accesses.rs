@@ -29,8 +29,16 @@
 //! A search keeps a bounded number of accesses as it replays: each
 //! value's last writes, or the latest accesses of every kind up to a cap,
 //! so a long loop over a value costs replay time and not memory.
+//!
+//! The windows are replayed several at a time, one thread and one machine
+//! each, as many as the machine has cores, and merged newest first: a
+//! window's accesses count once every newer window's have, so the search
+//! finds what it would find one window at a time, and stops the rest
+//! once it has enough.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
@@ -238,9 +246,9 @@ fn accessed(watches: &[Watch], traps: TrapSet) -> Vec<(usize, Kind)> {
     by_value.into_iter().collect()
 }
 
-/// Where an access falls in the run: its step, then the order the
-/// replays saw it in, which is the run's order within a step, as one
-/// window's replay sees all of a step.
+/// Where an access falls in the run: its step, then the order its
+/// window's replay saw it in, which is the run's order within a step, as
+/// one window's replay sees all of a step.
 type Order = (u64, u64);
 
 /// The accesses a search keeps, bounded however many it sees: the latest
@@ -405,6 +413,146 @@ pub fn search(home: &Home, run: &Run, search: &Search, report: Report<'_>) -> Re
     Ok(search_keeping(home, run, search, report)?.0)
 }
 
+/// The windows a search replays, newest first: each from the latest
+/// keyframe before where the one before began, and no earlier than
+/// `since`.
+fn windows(search: &Search, keyframes: &[u64]) -> Vec<(u64, u64)> {
+    let mut windows = Vec::new();
+    let mut end = search.before;
+    while end > search.since {
+        let start = keyframes
+            .iter()
+            .copied()
+            .rfind(|&s| s < end)
+            .unwrap_or(0)
+            .max(search.since);
+        windows.push((start, end));
+        end = start;
+    }
+    windows
+}
+
+/// What one window's replay found, for the search to take in window
+/// order.
+struct Scanned<'a> {
+    index: usize,
+    /// The accesses, in the order the replay saw them, each with where it
+    /// falls in the run.
+    accesses: Vec<(Order, Access)>,
+    /// Each value's bytes at the window's start, and at its end.
+    initial: Vec<Option<Vec<u8>>>,
+    now: Vec<Option<Vec<u8>>>,
+    /// The step of the latest write in the window, and the window with
+    /// its machine, kept when the window held a write: the newest such
+    /// window's machine is the search's.
+    writes_in_window: Option<u64>,
+    window: Option<Window<'a>>,
+}
+
+/// What a window's thread tells the search.
+enum Message<'a> {
+    /// The replay of the window got to this step.
+    Reached {
+        index: usize,
+        step: u64,
+    },
+    Scanned(Box<Scanned<'a>>),
+    Failed(anyhow::Error),
+}
+
+/// What every thread of a search shares: the run, the search, its
+/// watches, its windows and the run's keyframes, the next window to
+/// take, and whether to stop.
+struct Shared<'a, 's> {
+    home: &'s Home,
+    run: &'s Run,
+    search: &'a Search,
+    watches: &'s [Watch],
+    windows: &'s [(u64, u64)],
+    keyframes: &'s [u64],
+    next: AtomicUsize,
+    stop: AtomicBool,
+}
+
+/// What a window's replay saw: the process's accesses in the order seen,
+/// each with where it falls in the run, and the step of the latest write.
+struct Replay {
+    accesses: Vec<(Order, Access)>,
+    last_write: Option<u64>,
+}
+
+/// Replays windows on one thread, taking the next window to do each
+/// time, until none is left or the search has stopped the rest. A window
+/// that held no write hands its machine to the thread's next, which puts
+/// it at its own keyframe in place rather than restoring a new one.
+fn replay_windows<'a>(shared: &Shared<'a, '_>, tx: &mpsc::Sender<Message<'a>>) {
+    let Shared {
+        home,
+        run,
+        search,
+        watches,
+        windows,
+        keyframes,
+        next,
+        stop,
+    } = shared;
+    let mut loaded = crate::keyframes::Loaded::default();
+    let mut spare: Option<Window<'a>> = None;
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
+        let index = next.fetch_add(1, Ordering::Relaxed);
+        let Some(&(start, end)) = windows.get(index) else {
+            return;
+        };
+        let at_keyframe = keyframes.binary_search(&start).is_ok();
+        let window = match spare.take() {
+            Some(spare) if at_keyframe => spare.moved_to(run, start, &mut loaded),
+            _ => Window::new(home, run, search, start),
+        };
+        let mut tell = |step: u64| {
+            let _ = tx.send(Message::Reached { index, step });
+            !stop.load(Ordering::Relaxed)
+        };
+        let scanned = window.and_then(|mut window| {
+            let initial = window.values()?;
+            let Replay {
+                accesses,
+                last_write: writes_in_window,
+            } = window.replay(end, watches, &mut tell)?;
+            let now = window.values()?;
+            let window = match writes_in_window {
+                Some(_) => {
+                    // The search's thread takes the machine over.
+                    window.machine.release_counters();
+                    Some(window)
+                }
+                None => {
+                    spare = Some(window);
+                    None
+                }
+            };
+            Ok(Box::new(Scanned {
+                index,
+                accesses,
+                initial,
+                now,
+                writes_in_window,
+                window,
+            }))
+        });
+        let message = match scanned {
+            Ok(scanned) => Message::Scanned(scanned),
+            Err(error) => Message::Failed(error),
+        };
+        let failed = matches!(message, Message::Failed(_));
+        if tx.send(message).is_err() || failed {
+            return;
+        }
+    }
+}
+
 /// Searches `run` as [`search`] does, and keeps the machine of the window
 /// the latest write was found in, brought to the start of that write's
 /// step: a fork there, for a caller that looks at the write next, without
@@ -418,6 +566,7 @@ pub fn search_keeping(
     let watches = watches(&search.values, search.wanted)?;
     let keyframes = run.keyframes()?.steps();
     let started = Instant::now();
+    let windows = windows(search, &keyframes);
     let mut progress = Searching {
         phase: Phase::Restoring,
         before: search.before,
@@ -429,67 +578,108 @@ pub fn search_keeping(
         reads: 0,
         elapsed_ms: 0,
     };
+    report(&progress);
 
-    // Windows newest first, each from the latest keyframe before where
-    // the last one began, and no earlier than `since`. A window that held
-    // no write hands its machine to the next, which puts it at its own
-    // keyframe in place rather than restoring a new one.
-    let mut kept = Kept::new(search.wanted, search.values.len());
-    let mut replayed = Replayed {
-        seen: 0,
-        writes_in_window: None,
+    // As many threads as there are cores and windows, each replaying the
+    // next window not yet taken. The windows are taken in newest first,
+    // and so are their results, each once every newer window's are in:
+    // the accesses then come in the order one replay of all of them
+    // would see, and the newest window with a write holds the latest
+    // write, whichever thread found it. Once the search has what it
+    // keeps, the threads stop at their next look.
+    let threads = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .min(windows.len())
+        .max(1);
+    let shared = Shared {
+        home,
+        run,
+        search,
+        watches: &watches,
+        windows: &windows,
+        keyframes: &keyframes,
+        next: AtomicUsize::new(0),
+        stop: AtomicBool::new(false),
     };
+    let stop = &shared.stop;
+    let (tx, rx) = mpsc::channel();
+    let mut kept = Kept::new(search.wanted, search.values.len());
     let mut writer: Option<(Window<'_>, u64)> = None;
-    let mut spare: Option<Window<'_>> = None;
-    let mut loaded = crate::keyframes::Loaded::default();
-    let mut end = search.before;
     let mut initial = Vec::new();
     let mut now = None;
-    let mut start = end;
-    while end > search.since {
-        start = keyframes
-            .iter()
-            .copied()
-            .rfind(|&s| s < end)
-            .unwrap_or(0)
-            .max(search.since);
-        progress.phase = Phase::Restoring;
-        progress.window = (start, end);
-        progress.reached = start;
-        progress.elapsed_ms = started.elapsed().as_millis() as u64;
-        report(&progress);
+    let mut reached: Vec<u64> = windows.iter().map(|&(start, _)| start).collect();
+    let mut pending: BTreeMap<usize, Box<Scanned<'_>>> = BTreeMap::new();
+    let mut taken = 0;
+    let searched = std::thread::scope(|scope| -> Result<()> {
+        for _ in 0..threads {
+            let tx = tx.clone();
+            let shared = &shared;
+            scope.spawn(move || replay_windows(shared, &tx));
+        }
+        drop(tx);
 
-        let at_keyframe = keyframes.binary_search(&start).is_ok();
-        let mut window = match spare.take() {
-            Some(spare) if at_keyframe => spare.moved_to(run, start, &mut loaded)?,
-            _ => Window::new(home, run, search, start)?,
-        };
-        initial = window.values()?;
-        progress.phase = Phase::Searching;
-        replayed.writes_in_window = None;
-        window.replay(
-            end,
-            &watches,
-            (&mut kept, &mut replayed),
-            (&mut progress, &started),
-            report,
-        )?;
-        if now.is_none() {
-            now = Some(window.values()?);
+        // Each message, until every window is in or the search is done.
+        while taken < windows.len() {
+            let message = match rx.recv() {
+                Ok(message) => message,
+                Err(_) => bail!("the search's threads ended with windows left"),
+            };
+            match message {
+                Message::Reached { index, step } => {
+                    reached[index] = step;
+                    progress.phase = Phase::Searching;
+                    progress.window = windows[taken];
+                    progress.reached = reached[taken];
+                    progress.steps = windows
+                        .iter()
+                        .zip(&reached)
+                        .map(|(&(start, _), &reached)| reached - start)
+                        .sum();
+                    progress.elapsed_ms = started.elapsed().as_millis() as u64;
+                    report(&progress);
+                }
+                Message::Failed(error) => {
+                    stop.store(true, Ordering::Relaxed);
+                    return Err(error);
+                }
+                Message::Scanned(scanned) => {
+                    pending.insert(scanned.index, scanned);
+                }
+            }
+            while let Some(scanned) = pending.remove(&taken) {
+                let (_, end) = windows[taken];
+                initial = scanned.initial;
+                if now.is_none() {
+                    now = Some(scanned.now);
+                }
+                for (order, access) in scanned.accesses {
+                    match access.kind {
+                        Kind::Write => progress.writes += 1,
+                        Kind::Read => progress.reads += 1,
+                    }
+                    kept.push(order, access);
+                }
+                if let (Some(step), None) = (scanned.writes_in_window, &writer)
+                    && let Some(window) = scanned.window
+                {
+                    writer = Some((window, step));
+                }
+                reached[taken] = end;
+                progress.windows += 1;
+                taken += 1;
+                if kept.done() {
+                    stop.store(true, Ordering::Relaxed);
+                    return Ok(());
+                }
+            }
         }
-        progress.steps += end - start;
-        progress.windows += 1;
-
-        // The newest window with a write holds the latest write.
-        match replayed.writes_in_window {
-            Some(step) if writer.is_none() => writer = Some((window, step)),
-            _ => spare = Some(window),
-        }
-        if kept.done() {
-            break;
-        }
-        end = start;
-    }
+        Ok(())
+    });
+    searched?;
+    let searched_from = windows
+        .get(taken.wrapping_sub(1))
+        .map_or(search.before, |w| w.0);
+    progress.steps = windows[..taken].iter().map(|&(s, e)| e - s).sum();
     progress.writes = kept.count(Kind::Write);
     progress.reads = kept.count(Kind::Read);
     progress.elapsed_ms = started.elapsed().as_millis() as u64;
@@ -510,7 +700,7 @@ pub fn search_keeping(
     let dropped = kept.dropped;
     let found = Found {
         accesses: kept.into_accesses(),
-        searched_from: start,
+        searched_from,
         initial,
         now: now.unwrap_or_default(),
         windows: progress.windows,
@@ -518,14 +708,6 @@ pub fn search_keeping(
         elapsed_ms: progress.elapsed_ms,
     };
     Ok((found, machine))
-}
-
-/// What a search's replays have seen: how many accesses, which orders
-/// them, and the step of the latest write in the window being replayed.
-#[derive(Debug)]
-struct Replayed {
-    seen: u64,
-    writes_in_window: Option<u64>,
 }
 
 /// A machine at a window's start, to replay the window from.
@@ -593,16 +775,16 @@ impl<'a> Window<'a> {
     }
 
     /// Replays the window from where the machine is to the start of step
-    /// `end` with `watches` in the debug registers, keeping the process's
-    /// accesses in `kept`.
+    /// `end` with `watches` in the debug registers, telling `tell` how
+    /// far it has got every so often and stopping short when `tell` says
+    /// to. Returns the process's accesses in the order seen, each with
+    /// where it falls in the run, and the step of the latest write.
     fn replay(
         &mut self,
         end: u64,
         watches: &[Watch],
-        (kept, replayed): (&mut Kept, &mut Replayed),
-        (progress, started): (&mut Searching, &Instant),
-        report: Report<'_>,
-    ) -> Result<()> {
+        tell: &mut dyn FnMut(u64) -> bool,
+    ) -> Result<Replay> {
         let traps: Vec<Trap> = watches
             .iter()
             .map(|w| Trap::Watch {
@@ -614,7 +796,9 @@ impl<'a> Window<'a> {
         self.machine.set_debug(Stepping::No, &traps)?;
         let mut now = self.values()?;
         let mut hits = Hits::default();
-        let base = progress.steps;
+        let mut accesses = Vec::new();
+        let mut last_write = None;
+        let mut seen = 0;
         loop {
             let at = self.machine.step();
             if at >= end {
@@ -623,25 +807,20 @@ impl<'a> Window<'a> {
             let pause = (at + REPORT_EVERY).min(end);
             match self.machine.run(Some(pause), &mut Ignore)? {
                 Outcome::Paused => {
-                    progress.reached = self.machine.step();
-                    progress.steps = base + (progress.reached - self.start);
-                    progress.elapsed_ms = started.elapsed().as_millis() as u64;
-                    report(progress);
+                    if !tell(self.machine.step()) {
+                        break;
+                    }
                 }
                 Outcome::Stopped(_) => break,
                 Outcome::Interrupted => bail!("the search for accesses was interrupted"),
                 Outcome::Debug(DebugStop::Watchpoint { traps, .. }) => {
                     for mut access in self.hit(&accessed(watches, traps), &mut now)? {
                         access.hit = hits.next(access.value, access.step, access.kind);
-                        match access.kind {
-                            Kind::Write => {
-                                progress.writes += 1;
-                                replayed.writes_in_window = Some(access.step);
-                            }
-                            Kind::Read => progress.reads += 1,
+                        if access.kind == Kind::Write {
+                            last_write = Some(access.step);
                         }
-                        replayed.seen += 1;
-                        kept.push((access.step, replayed.seen), access);
+                        seen += 1;
+                        accesses.push(((access.step, seen), access));
                     }
                 }
                 Outcome::Debug(other) => {
@@ -650,7 +829,10 @@ impl<'a> Window<'a> {
             }
         }
         self.machine.clear_debug()?;
-        Ok(())
+        Ok(Replay {
+            accesses,
+            last_write,
+        })
     }
 
     /// The accesses one stop made to the values in `values`, by index and
@@ -721,6 +903,34 @@ pub fn process_page_table(machine: &Machine, pid: u32, step: u64) -> Result<u64>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A search's windows, replayed several at once, run newest first from
+    /// the latest keyframe before where the last began, the first ending
+    /// where the search is asked about and the last starting no earlier
+    /// than `since`, so together they cover each step once. Keyframes at
+    /// 0, 256 and 512: a search before 600 since 0 has three windows, one
+    /// since 300 two, and one before 512 starts its first window at 256.
+    #[test]
+    fn windows_cover_the_steps_once_newest_first() {
+        let search = |before, since| Search {
+            pid: 1,
+            values: Vec::new(),
+            before,
+            since,
+            wanted: Wanted::LastWrites(1),
+        };
+        let keyframes = [0, 256, 512];
+        assert_eq!(
+            windows(&search(600, 0), &keyframes),
+            [(512, 600), (256, 512), (0, 256)]
+        );
+        assert_eq!(
+            windows(&search(600, 300), &keyframes),
+            [(512, 600), (300, 512)]
+        );
+        assert_eq!(windows(&search(512, 0), &keyframes), [(256, 512), (0, 256)]);
+        assert_eq!(windows(&search(5, 5), &keyframes), []);
+    }
 
     fn access(step: u64, value: usize, kind: Kind) -> Access {
         Access {

@@ -11,8 +11,8 @@
 //! on a pty inside the VM, what it prints comes back through the console
 //! device, and what the person types goes in through it.
 
-use std::cell::Cell;
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -441,12 +441,12 @@ fn finish(
 /// so the machine can stop instead of waiting for keys nobody will press.
 struct UntilDone {
     input: Box<dyn Input>,
-    done: Rc<Cell<bool>>,
+    done: Arc<AtomicBool>,
 }
 
 impl Input for UntilDone {
     fn wait(&mut self, timeout: Option<Duration>) -> Vec<u8> {
-        if self.done.get() {
+        if self.done.load(Ordering::Relaxed) {
             return Vec::new();
         }
         self.input.wait(timeout)
@@ -478,7 +478,7 @@ struct Answer<'a> {
     /// Where a tree goes, as it arrives, in place of `stdout`.
     tree: Option<TreeAnswer<'a>>,
     /// Set with the status, for the input to stop waiting.
-    done: Rc<Cell<bool>>,
+    done: Arc<AtomicBool>,
 }
 
 /// A tree being read out of the inspecting process's output and handed
@@ -542,7 +542,7 @@ impl Observer for Answer<'_> {
                 Some(Mark::InspectEnd(status)) => {
                     if self.pid == Some(event.pid) {
                         self.status = Some(status);
-                        self.done.set(true);
+                        self.done.store(true, Ordering::Relaxed);
                     }
                     return;
                 }

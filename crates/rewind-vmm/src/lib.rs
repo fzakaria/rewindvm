@@ -284,7 +284,7 @@ impl Observer for Ignore {}
 /// waits for it in real time whenever the VM goes idle, up to the next
 /// timer, so the VM's clock keeps pace with the person rather than racing
 /// ahead to the next timer. Recordings have no input.
-pub trait Input {
+pub trait Input: Send {
     /// Bytes to type into the VM, waiting at most `timeout` for them, or
     /// for as long as it takes when None. Empty when none came, and, with
     /// no timeout, when none ever will.
@@ -594,6 +594,16 @@ impl Machine {
     /// Guest branches counted so far, when virtual time follows them.
     pub fn branches(&self) -> u64 {
         self.work.as_ref().map_or(self.work_base, |w| w.total)
+    }
+
+    /// Lets go of the counters the thread that ran the machine opened,
+    /// which count that thread's guest alone, so the machine can run on
+    /// another thread, where its next run opens counters of its own with
+    /// the branches counted so far as their base. Between runs only, at
+    /// a step's start, where the count is settled.
+    pub fn release_counters(&mut self) {
+        self.work_base = self.branches();
+        self.work = None;
     }
 
     /// Virtual nanoseconds since boot.
