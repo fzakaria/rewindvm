@@ -182,10 +182,13 @@ stops when either does not replay exactly, since then no schedule does.
 
 ### The guest kernel
 
-The kernel is upstream Linux 7.2 with two patches and a small config, built
-by `nix/kernel.nix`. The second patch changes the order directories list in
-when the command line asks for it (see [Directory order](#directory-order)).
-The first adds a hypervisor platform to
+The kernel is upstream Linux 7.2 with the patches in `guest/linux/` and a
+small config, built by `nix/kernel.nix`, which says what each patch is for.
+`rewind-dirents.patch` changes the order directories list in when the
+command line asks for it (see [Directory order](#directory-order)).
+`rewind-trace.patch` skips the boot-time rewrite of the trace events'
+formats for tracefs, which took more than half the guest's time in a short
+run. `rewind-guest.patch` adds a hypervisor platform to
 `arch/x86/kernel/cpu/rewind.c`, in the pattern of the Jailhouse and ACRN guest
 platforms. The platform is detected by the CPUID signature `RewindRewind`.
 
