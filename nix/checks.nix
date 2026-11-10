@@ -4763,6 +4763,40 @@ in
         touch $out
       '';
 
+  # checks.inspect-idle: a run that went idle for good can still be
+  # inspected at its last step. cat blocks opening a fifo nobody opens
+  # for writing while the shell waits for cat, so nothing is runnable and
+  # no timer is armed; the run stops as idle. A fork brought to that step
+  # sits at the idle exit, and an inspection request wakes it: the VM
+  # takes the interrupt, serves the request and goes idle again instead
+  # of being written off as stalled at the exit. Boots the VM, so it
+  # needs /dev/kvm.
+  inspect-idle =
+    pkgs.runCommand "rewind-inspect-idle"
+      {
+        nativeBuildInputs = [ rewind ];
+        requiredSystemFeatures = [ "kvm" ];
+      }
+      ''
+        export REWIND_HOME=$TMPDIR/rewind
+        export REWIND_DEBUGINFOD=/nonexistent
+        rewind run -q --clock exits --name idle --root ${guestRoot} -- \
+          sh -c 'mkfifo /tmp/f; cat /tmp/f' > run 2>&1 || true
+        cat run
+        rewind ls --json | tee ls
+        grep -q '"name":"idle"' ls
+        end=$(sed -n 's/.*"name":"idle",.*"steps":\([0-9]*\).*/\1/p' ls)
+        pid=$(rewind events idle | grep 'execve("/bin/cat"' | awk '{print $2}' | cut -d/ -f1)
+        test -n "$pid"
+
+        rewind cat idle "$end" /proc/$pid/comm | tee comm
+        grep -q '^cat$' comm
+        rewind gdb idle "$end" --pid "$pid" -- -batch -ex 'info threads' > gdb 2>&1 || true
+        cat gdb
+        grep -q 'cat' gdb
+        touch $out
+      '';
+
   # checks.file-events: every file event names its file one way, the
   # path the kernel resolves, whatever the program passed. cp's open
   # relative to a directory it opened with O_PATH is reported, as is an

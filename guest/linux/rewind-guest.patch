@@ -120,7 +120,7 @@ diff -ruN a/arch/x86/kernel/cpu/Makefile b/arch/x86/kernel/cpu/Makefile
 diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 --- a/arch/x86/kernel/cpu/rewind.c	1969-12-31 16:00:00.000000000 -0800
 +++ b/arch/x86/kernel/cpu/rewind.c	1969-12-31 16:00:00.000000000 -0800
-@@ -0,0 +1,1509 @@
+@@ -0,0 +1,1519 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Rewind VM guest platform.
@@ -707,13 +707,23 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 + * monitor advances virtual time to the armed timer and injects it before
 + * the port write completes, so the interrupt is taken right after it,
 + * exactly where HLT would have woken.
++ *
++ * An interrupt the monitor sent at an exit the kernel made with
++ * interrupts off, as the tick code makes on the way here, is still to be
++ * taken. The CPU takes it after the instruction that follows sti, so the
++ * nop is where the handler runs, and what the handler did decides: an
++ * inspection request or a woken task sets need_resched, and the idle
++ * loop then runs the task instead of telling the monitor nothing is
++ * runnable, which the monitor, with no timer armed, would take as the
++ * machine idle for good.
 + */
 +DECLARE_STATIC_CALL(x86_idle, default_idle);
 +
 +static void __cpuidle rewind_idle(void)
 +{
-+	raw_local_irq_enable();
-+	outl(0, REWIND_PORT_IDLE);
++	asm volatile("sti; nop" ::: "memory");
++	if (!need_resched())
++		outl(0, REWIND_PORT_IDLE);
 +	raw_local_irq_disable();
 +}
 +

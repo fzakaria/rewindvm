@@ -306,6 +306,11 @@ pub(crate) struct Devices {
     pub stop: Option<Stop>,
     /// An inspection request waiting for the VM's APIC to take it.
     pub inspect: bool,
+    /// The guest said nothing is runnable with no timer armed, so nothing
+    /// wakes it unless an interrupt is sent before it runs again. Decided
+    /// on the way back into the guest, since a fork paused at the idle
+    /// exit may still get a request.
+    pub idle: bool,
     /// The console's input, when a person is typing into the VM.
     pub input: Option<Box<dyn Input>>,
     /// Typed bytes not yet given to the VM.
@@ -503,6 +508,7 @@ impl Machine {
                 step: 0,
                 stop: None,
                 inspect: false,
+                idle: false,
                 input: None,
                 typed: std::collections::VecDeque::new(),
                 input_sent: false,
@@ -737,6 +743,9 @@ impl Machine {
                 let stop = Stop::TimedOut(self.stall()?);
                 self.dev.stop = Some(stop);
                 self.dev.end_trace(stop, obs)?;
+                return Ok(Outcome::Stopped(stop));
+            }
+            if let Some(stop) = self.dev.stall_if_idle(obs)? {
                 return Ok(Outcome::Stopped(stop));
             }
             if self.work.is_some() && self.config.preemption == Preemption::AtBranchCounts {
@@ -1127,11 +1136,36 @@ impl Machine {
             data: CALLBACK_VECTOR,
             ..Default::default()
         };
-        Ok(self.vm.signal_msi(msi)? > 0)
+        let taken = self.vm.signal_msi(msi)? > 0;
+        if taken {
+            // An interrupt the APIC holds wakes a guest that said it was
+            // idle: it is taken right after the idle exit's port write.
+            self.dev.idle = false;
+        }
+        Ok(taken)
     }
 }
 
 impl Devices {
+    /// Stops the machine as stalled when the guest's last exit said
+    /// nothing is runnable with no timer armed and nothing has been sent
+    /// to wake it since: a request still waiting for the APIC goes again
+    /// at the exit the guest makes, and one the APIC took is taken right
+    /// after that exit. None when the guest can run on.
+    fn stall_if_idle(&mut self, obs: &mut dyn Observer) -> Result<Option<Stop>> {
+        if !self.idle {
+            return Ok(None);
+        }
+        self.idle = false;
+        if self.inspect {
+            return Ok(None);
+        }
+        let stop = Stop::Stalled;
+        self.stop = Some(stop);
+        self.end_trace(stop, obs)?;
+        Ok(Some(stop))
+    }
+
     fn io_out(&mut self, port: u16, data: &[u8], obs: &mut dyn Observer) -> Result<()> {
         let value = port_value(data);
         match port {
@@ -1185,8 +1219,10 @@ impl Devices {
                     }
                 }
                 // A pending request wakes the VM like a timer would.
+                // With neither, the guest is idle for good unless an
+                // interrupt is sent before it runs again (stall_if_idle).
                 if !self.clock.idle() && !self.inspect {
-                    self.stop = Some(Stop::Stalled);
+                    self.idle = true;
                 }
             }
             pv::PORT_EXIT => {
@@ -1455,6 +1491,7 @@ mod tests {
             step: 0,
             stop: None,
             inspect: false,
+            idle: false,
             input: None,
             typed: std::collections::VecDeque::new(),
             input_sent: false,
@@ -1626,7 +1663,9 @@ mod tests {
             (dev, kept)
         };
         let (exited, kept_exit) = exit_port(pv::PORT_EXIT);
-        let (stalled, kept_stall) = exit_port(pv::PORT_IDLE);
+        let (mut stalled, mut kept_stall) = exit_port(pv::PORT_IDLE);
+        assert_eq!(stalled.stop, None);
+        assert_eq!(stalled.stall_if_idle(&mut kept_stall).unwrap(), Some(Stop::Stalled));
         assert_eq!(stalled.stop, Some(Stop::Stalled));
         let mut faulted = devices_with_pending_switches(&SWITCHED_AT);
         faulted.step = STOPPED_AT;
@@ -1647,6 +1686,48 @@ mod tests {
             assert_eq!(kept.0[0].0, STOPPED_AT, "{stop:?}");
             assert_eq!(switch_steps(&kept.0), SWITCHED_AT, "{stop:?}");
         }
+    }
+
+    #[test]
+    fn an_idle_exit_stalls_only_when_nothing_wakes_the_guest() {
+        // An idle exit with no timer armed and no request pending does
+        // not stop the machine at the exit: the verdict waits for the
+        // guest's next entry, where a request sent in between, one the
+        // APIC took (which clears `idle`) or one still waiting for it,
+        // lets the guest run on, and nothing sent stalls the machine and
+        // ends its trace at the exit's step.
+        let idle_exit = || {
+            let mut dev = devices(0);
+            dev.step = 6;
+            dev.io_out(pv::PORT_IDLE, &0u32.to_le_bytes(), &mut Kept::default())
+                .unwrap();
+            assert!(dev.idle);
+            assert_eq!(dev.stop, None);
+            dev
+        };
+
+        let mut woken = idle_exit();
+        woken.idle = false;
+        assert_eq!(woken.stall_if_idle(&mut Kept::default()).unwrap(), None);
+        assert_eq!(woken.stop, None);
+
+        let mut asked = idle_exit();
+        asked.inspect = true;
+        assert_eq!(asked.stall_if_idle(&mut Kept::default()).unwrap(), None);
+        assert_eq!(asked.stop, None);
+
+        let mut alone = idle_exit();
+        let mut kept = Kept::default();
+        assert_eq!(alone.stall_if_idle(&mut kept).unwrap(), Some(Stop::Stalled));
+        assert_eq!(alone.stop, Some(Stop::Stalled));
+        assert!(!alone.idle);
+
+        // A timer armed wakes the guest at the exit itself.
+        let mut timed = devices(0);
+        timed.clock.arm(1000);
+        timed.io_out(pv::PORT_IDLE, &0u32.to_le_bytes(), &mut Kept::default())
+            .unwrap();
+        assert!(!timed.idle);
     }
 
     #[test]
