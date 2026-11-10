@@ -1,7 +1,9 @@
 //! Removing what no run uses: cached images no run's manifest names,
 //! pages in the page store no keyframe names, the source file caches of
-//! runs that are gone, and the debuginfod servers' caches no `rewind gdb`
-//! session holds, which a later session fetches again as it needs. `rewind remove` and `rewind prune` delete runs
+//! runs that are gone, the debuginfod servers' caches no `rewind gdb`
+//! session holds, which a later session fetches again as it needs, and
+//! the temporary images and import staging directories that processes
+//! killed half way left. `rewind remove` and `rewind prune` delete runs
 //! and leave images and pages behind, since another run may still use
 //! them.
 //!
@@ -54,12 +56,26 @@ pub struct Garbage {
     pub source_caches: Vec<PathBuf>,
     /// The debuginfod servers' caches no session holds.
     pub debuginfod_caches: Vec<crate::debuginfod_cache::Unused>,
+    /// What rewind processes that are gone left half made: temporary
+    /// files in the image directories and import staging directories.
+    pub leftovers: Vec<Leftover>,
+}
+
+/// A file or directory a rewind process that is gone left half made.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Leftover {
+    pub path: PathBuf,
+    pub bytes: u64,
 }
 
 impl Garbage {
-    /// The bytes the images, pages and debuginfod caches take.
+    /// The bytes the images, pages, debuginfod caches and leftovers take.
     pub fn bytes(&self) -> u64 {
-        self.image_bytes() + self.pages.bytes + self.debuginfod_bytes()
+        self.image_bytes() + self.pages.bytes + self.debuginfod_bytes() + self.leftover_bytes()
+    }
+
+    pub fn leftover_bytes(&self) -> u64 {
+        self.leftovers.iter().map(|l| l.bytes).sum()
     }
 
     pub fn debuginfod_bytes(&self) -> u64 {
@@ -135,11 +151,12 @@ pub fn collect(home: &Home, act: Act) -> Result<Garbage> {
     };
 
     // Every check has passed: find the garbage, then remove the pages,
-    // then the images and the source caches, then the debuginfod caches,
-    // each of which a session may be holding until the moment it is
-    // locked.
+    // then the images, the source caches and the leftovers, then the
+    // debuginfod caches, each of which a session may be holding until the
+    // moment it is locked.
     let images = unused_images(home)?;
     let source_caches = orphan_source_caches(home)?;
+    let leftovers = leftovers(home)?;
     let (live, unreadable_keyframes) = live_pages(home)?;
     let store_act = match act {
         Act::DryRun => rewind_store::Act::DryRun,
@@ -156,6 +173,15 @@ pub fn collect(home: &Home, act: Act) -> Result<Garbage> {
         for cache in &source_caches {
             fs::remove_dir_all(cache).with_context(|| format!("removing {}", cache.display()))?;
         }
+        for leftover in &leftovers {
+            let path = &leftover.path;
+            let removed = if path.is_dir() {
+                fs::remove_dir_all(path)
+            } else {
+                fs::remove_file(path)
+            };
+            removed.with_context(|| format!("removing {}", path.display()))?;
+        }
     }
     let debuginfod_caches = crate::debuginfod_cache::collect(&home.debuginfod_cache(), act)?;
     Ok(Garbage {
@@ -164,6 +190,7 @@ pub fn collect(home: &Home, act: Act) -> Result<Garbage> {
         unreadable_keyframes,
         source_caches,
         debuginfod_caches,
+        leftovers,
     })
 }
 
@@ -267,10 +294,61 @@ fn named_image(dir: &Path) -> Result<Option<PathBuf>> {
     Ok(uses.spec.image)
 }
 
-/// Every image file in the cache: at its top, where the first way of
-/// building images kept them, and in the directory of each way since.
-fn cached_images(home: &Home) -> Result<Vec<PathBuf>> {
-    let mut images = Vec::new();
+/// Where Linux lists the processes that are alive, each under its id.
+const PROC: &str = "/proc";
+
+/// Whether a process with id `pid` is alive.
+fn alive(pid: u32) -> bool {
+    Path::new(PROC).join(pid.to_string()).exists()
+}
+
+/// What rewind processes that are gone left half made in the home: the
+/// temporary images and scratch files of an image being packed, in the
+/// image directories, and the staging directories of imports, in the
+/// home's root. Each is named for the process that made it. Collecting
+/// holds the home alone, so no process is packing or importing here now;
+/// a leftover whose process id is alive, as another program's by now,
+/// waits for a later collection.
+fn leftovers(home: &Home) -> Result<Vec<Leftover>> {
+    let mut found = Vec::new();
+
+    // Temporary images and their scratch files.
+    for dir in image_dirs(home)? {
+        for entry in fs::read_dir(&dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let Some(pid) = crate::image::temp_writer(&path) else {
+                continue;
+            };
+            if alive(pid) || !entry.file_type()?.is_file() {
+                continue;
+            }
+            let bytes = entry.metadata()?.len();
+            found.push(Leftover { path, bytes });
+        }
+    }
+
+    // Import staging directories.
+    for entry in fs::read_dir(home.root())? {
+        let entry = entry?;
+        let path = entry.path();
+        let Some(pid) = crate::export::staging_writer(&path) else {
+            continue;
+        };
+        if alive(pid) || !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let bytes = crate::home::bytes_under(&path);
+        found.push(Leftover { path, bytes });
+    }
+    found.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(found)
+}
+
+/// The directories images are cached in: the cache's top, where the
+/// first way of building images kept them, and the directory of each way
+/// since.
+fn image_dirs(home: &Home) -> Result<Vec<PathBuf>> {
     let mut dirs = vec![home.image_cache()];
     for entry in fs::read_dir(home.image_cache())? {
         let entry = entry?;
@@ -278,7 +356,13 @@ fn cached_images(home: &Home) -> Result<Vec<PathBuf>> {
             dirs.push(entry.path());
         }
     }
-    for dir in dirs {
+    Ok(dirs)
+}
+
+/// Every image file in the cache, in each of its directories.
+fn cached_images(home: &Home) -> Result<Vec<PathBuf>> {
+    let mut images = Vec::new();
+    for dir in image_dirs(home)? {
         for entry in fs::read_dir(&dir)? {
             let entry = entry?;
             let path = entry.path();
@@ -343,6 +427,9 @@ mod tests {
     use rewind_vmm::snapshot::Keyframe;
 
     const PAGE: usize = 4096;
+
+    /// A process id above any Linux gives out, so no process has it.
+    const NO_PROCESS: u32 = u32::MAX;
 
     /// A fresh home for one test.
     fn home(name: &str) -> Home {
@@ -424,7 +511,8 @@ mod tests {
         // Two runs name an image each, one in images/2 and one in the
         // older top-level images directory. The unused image beside each,
         // and an extras image no run names, go; a dry run names them and
-        // deletes nothing. A leftover that is no image stays.
+        // deletes nothing. A temporary file named for process 1, which
+        // is alive, is no image and stays.
         let home = home("images");
         let top = home.root().join("images");
         let used_new = image(&home.images().join("store-a.erofs"), 10);
@@ -458,6 +546,62 @@ mod tests {
         assert_eq!(collected.images.len(), 3);
         assert!(!unused_new.exists() && !unused_old.exists() && !extras.exists());
         assert!(used_new.exists() && used_old.exists() && leftover.exists());
+        fs::remove_dir_all(home.root()).unwrap();
+    }
+
+    #[test]
+    fn leftovers_of_processes_that_are_gone_go() {
+        // A process killed while it packed an image leaves its temporary
+        // image and scratch files in the image directories, and one
+        // killed while it imported leaves its staging directory. Those
+        // named for a process that is gone go, and a dry run names them
+        // and removes nothing. Those named for a live process stay, as
+        // do files and directories that are no rewind process's.
+        let home = home("leftovers");
+        let top = home.root().join("images");
+        let here = std::process::id();
+        let gone = [
+            image(
+                &home.images().join(format!("store-a.tmp-{NO_PROCESS}-0")),
+                10,
+            ),
+            image(
+                &home
+                    .images()
+                    .join(format!("store-a.tmp-{NO_PROCESS}-0.tar")),
+                20,
+            ),
+            image(&top.join(format!("root.tmp-{NO_PROCESS}-3")), 30),
+        ];
+        let staging = home.root().join(format!("importing-{NO_PROCESS}"));
+        image(&staging.join("trace.bin"), 40);
+        let kept = [
+            image(&home.images().join(format!("store-b.tmp-{here}-0")), 50),
+            image(&home.images().join("notes.txt"), 60),
+            image(
+                &home
+                    .root()
+                    .join(format!("importing-{here}"))
+                    .join("trace.bin"),
+                70,
+            ),
+            image(&home.root().join("importing-notes").join("readme"), 80),
+        ];
+
+        let planned = settled(&home, Act::DryRun);
+        let mut named: Vec<PathBuf> = planned.leftovers.iter().map(|l| l.path.clone()).collect();
+        named.sort();
+        let mut expected = gone.to_vec();
+        expected.push(staging.clone());
+        expected.sort();
+        assert_eq!(named, expected);
+        assert!(planned.bytes() >= 60);
+        assert!(expected.iter().all(|path| path.exists()));
+
+        let collected = settled(&home, Act::Remove);
+        assert_eq!(collected.leftovers.len(), expected.len());
+        assert!(expected.iter().all(|path| !path.exists()));
+        assert!(kept.iter().all(|path| path.exists()));
         fs::remove_dir_all(home.root()).unwrap();
     }
 

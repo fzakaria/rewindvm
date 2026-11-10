@@ -121,8 +121,8 @@ pub(crate) struct GcArgs {
     pub(crate) dry_run: bool,
     /// Print what was removed as one JSON object on standard output:
     /// {"images": [{"path", "bytes"}], "source_caches": [paths],
-    /// "debuginfod_caches": [{"path", "bytes"}], "pages", "page_bytes",
-    /// "bytes"}.
+    /// "debuginfod_caches": [{"path", "bytes"}], "leftovers": [{"path",
+    /// "bytes"}], "pages", "page_bytes", "bytes"}.
     #[arg(long)]
     pub(crate) json: bool,
 }
@@ -146,12 +146,18 @@ pub(crate) fn gc(home: &Home, args: GcArgs) -> Result<ExitCode> {
             .iter()
             .map(|c| serde_json::json!({ "path": c.path, "bytes": c.bytes }))
             .collect();
+        let leftovers: Vec<serde_json::Value> = garbage
+            .leftovers
+            .iter()
+            .map(|l| serde_json::json!({ "path": l.path, "bytes": l.bytes }))
+            .collect();
         println!(
             "{}",
             serde_json::json!({
                 "images": images,
                 "source_caches": garbage.source_caches,
                 "debuginfod_caches": debuginfod_caches,
+                "leftovers": leftovers,
                 "pages": garbage.pages.pages,
                 "page_bytes": garbage.pages.bytes,
                 "bytes": garbage.bytes(),
@@ -179,6 +185,13 @@ pub(crate) fn gc(home: &Home, args: GcArgs) -> Result<ExitCode> {
             "{verb} {} ({})",
             cache.path.display(),
             show::size(cache.bytes)
+        );
+    }
+    for leftover in &garbage.leftovers {
+        println!(
+            "{verb} {} ({})",
+            leftover.path.display(),
+            show::size(leftover.bytes)
         );
     }
     println!(

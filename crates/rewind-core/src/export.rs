@@ -185,12 +185,24 @@ pub fn import_url(home: &Home, url: &str) -> Result<Run> {
     import_from(home, reader, url)
 }
 
+/// What an import's staging directory in the home's root is named, before
+/// the id of the importing process.
+const STAGING_PREFIX: &str = "importing-";
+
+/// The id of the process whose import staged into `dir`, when `dir` is
+/// named as a staging directory is. None for any other name.
+pub(crate) fn staging_writer(dir: &Path) -> Option<u32> {
+    let name = dir.file_name()?.to_str()?;
+    name.strip_prefix(STAGING_PREFIX)?.parse().ok()
+}
+
 /// Reads an export from `reader` into the home; `source` names it in
-/// errors.
+/// errors. An import that is killed leaves its staging directory, which
+/// `rewind gc` removes.
 fn import_from(home: &Home, reader: impl Read, source: &str) -> Result<Run> {
     let staging = home
         .root()
-        .join(format!("importing-{}", std::process::id()));
+        .join(format!("{STAGING_PREFIX}{}", std::process::id()));
     let _ = fs::remove_dir_all(&staging);
     fs::create_dir_all(&staging)?;
     let result = unpack_and_place(home, reader, source, &staging);

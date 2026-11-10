@@ -1103,7 +1103,9 @@ removes images or pages, which other runs may share. `rewind gc` removes the
 images in `images/` and its subdirectories that no run's manifest names, the
 pages that no keyframe in any run's directory names, the source file
 caches of runs no longer in `runs/`, and the debuginfod caches under
-`cache/debuginfod` that no `rewind gdb` session holds.
+`cache/debuginfod` that no `rewind gdb` session holds. It also removes what
+a killed process left half made: temporary images in `images/` and
+`importing-<pid>` directories, each once its process is gone.
 A fork reads keyframes from the directories of the runs it shares them with,
 so counting every directory's keyframes counts every keyframe a run reads.
 `--dry-run` reports the same figures and removes nothing. On a machine with

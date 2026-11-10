@@ -168,6 +168,21 @@ pub fn is_temp_beside(path: &Path, name: &Path) -> bool {
         .starts_with(prefix.as_encoded_bytes())
 }
 
+/// The id of the process that wrote under `name`, when `name` is one
+/// `temp_beside` gives for some file or a scratch file named after one:
+/// the process id in the name. None for any other name.
+pub fn temp_writer(name: &Path) -> Option<u32> {
+    let name = name.file_name()?.to_str()?;
+    let (_, rest) = name.split_once(&format!(".{TEMP_EXTENSION}"))?;
+
+    // The writer's process id and count, then a scratch file's kind when
+    // there is one.
+    let ids = rest.split('.').next()?;
+    let (pid, count) = ids.split_once('-')?;
+    count.parse::<u64>().ok()?;
+    pid.parse().ok()
+}
+
 /// Puts the file written at `tmp` in place at `path`, durably: its bytes
 /// reach the disk before the rename, and the rename before this returns,
 /// so a crash never leaves a short image under its final name, where a
@@ -254,6 +269,23 @@ mod tests {
             assert_ne!(scratch_beside(&first, kind), scratch_beside(&second, kind));
             assert!(is_temp_beside(image, &scratch_beside(&first, kind)));
         }
+    }
+
+    #[test]
+    fn a_temporary_name_says_which_process_wrote_it() {
+        // A temporary name and the scratch files named after it carry
+        // this process's id; an image, a file that only looks like a
+        // temporary one, and a name without a count carry none.
+        let image = Path::new("/home/images/store-abc.erofs");
+        let tmp = temp_beside(image);
+        let here = Some(std::process::id());
+        assert_eq!(temp_writer(&tmp), here);
+        assert_eq!(temp_writer(&scratch_beside(&tmp, "tar")), here);
+        assert_eq!(temp_writer(Path::new("/images/root.tmp-41-7")), Some(41));
+        assert_eq!(temp_writer(image), None);
+        assert_eq!(temp_writer(Path::new("/images/root.tmp")), None);
+        assert_eq!(temp_writer(Path::new("/images/root.tmp-41")), None);
+        assert_eq!(temp_writer(Path::new("/images/root.tmp-notes-1")), None);
     }
 
     #[test]
