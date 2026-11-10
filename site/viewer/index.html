@@ -100,7 +100,10 @@
     </style>
     <!-- No Google Analytics on this page: a page view carries the address,
          and the address carries the link to the recording, which can be a
-         private or signed URL. -->
+         private or signed URL. The pages the header and footer link to do
+         run analytics, and a browser tells them the address a visitor came
+         from, so this page has them told only the site's name. -->
+    <meta name="referrer" content="origin" />
     <script type="module" src="app.js"></script>
   </head>
   <body>
