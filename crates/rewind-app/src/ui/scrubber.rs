@@ -71,7 +71,7 @@ const EXPORT_FALLBACK_NAME: &str = "run";
 const EXPORT_EXTENSION: &str = "rwd";
 
 /// Why an example run cannot be forked, or checked from a step.
-pub(super) const EXAMPLE_FORK: &str = "Forking runs the build again from the playhead, which needs the engine and KVM on this machine. The example's inputs, its kernel, initramfs and Nix store paths, belong to the machine that recorded it. Record a run of your own with rewind nix to fork it.";
+pub(super) const EXAMPLE_FORK: &str = "Forking runs the build again from the playhead, which needs the engine and KVM on this machine. The example's inputs, its kernel, initrd and Nix store paths, belong to the machine that recorded it. Record a run of your own with rewind nix to fork it.";
 
 /// Why a run the engine is still executing does not open.
 const STILL_RUNNING: &str = "Its trace is written when it finishes, which for a fork takes about as long as the run it was forked from did.";

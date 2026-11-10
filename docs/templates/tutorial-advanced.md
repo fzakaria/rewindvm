@@ -609,7 +609,7 @@ $ rewind check --root ready --stall-max 50ms -- /bin/ready | grep -E 'ends diffe
 <!-- set mylib_default_secs: TIMEFORMAT=%R; { time rewind check --epoch {{epoch}} --schedules 32 --all --no-narrow {{flake}} > /dev/null 2>&1; } 2>&1 | xargs printf '%.1f' -->
 <!-- set mylib_long_secs: TIMEFORMAT=%R; { time rewind check --epoch {{epoch}} --schedules 32 --all --no-narrow --stall-max 100ms {{flake}} > /dev/null 2>&1; } 2>&1 | xargs printf '%.1f' -->
 
-The same steps stall, one exit in 128, but each stall picks one of the
+The same steps stall, one step in 128, but each stall picks one of the
 doublings of 10 µs up to the maximum, 14 of them for 50 ms, so fewer stalls
 are short. How often a race turns up then depends on how long it needs a
 thread held: 32 schedules of mylib crash {{mylib_default}} times by default and

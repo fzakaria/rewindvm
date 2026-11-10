@@ -99,7 +99,7 @@ probe branches: 3000000 branches, as built
 probe locked: 2000000 branches, as built
 probe not-branches: 1000000 branches, as built
 probe exits: 8192 branches, as built
-self-test: 58071879 and 58071879 branches, exact at every exit
+self-test: 58071879 and 58071879 branches, exact at every step
 runs will use counter time
 ```
 

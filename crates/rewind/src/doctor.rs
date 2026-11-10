@@ -85,7 +85,7 @@ pub(crate) fn findings(home: &Home) -> Vec<Finding> {
             Level::Ok,
             "guest",
             format!(
-                "kernel {}, initramfs {}",
+                "kernel {}, initrd {}",
                 g.kernel.display(),
                 g.initrd.display()
             ),

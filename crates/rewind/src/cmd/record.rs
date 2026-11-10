@@ -1747,7 +1747,7 @@ pub(crate) struct MachineArgs {
     /// race whose window holds a sleep, a timer or slow I/O may need one
     /// task held off the CPU that long.
     ///
-    /// One exit in 128 still stalls, for between 10us and this maximum,
+    /// One step in 128 still stalls, for between 10us and this maximum,
     /// each doubling of 10us as likely as the next, so the run spends more
     /// virtual time stalled. From the default up to 1s; at the default a
     /// run is the one made without the flag.
@@ -1763,7 +1763,7 @@ pub(crate) struct MachineArgs {
     /// The CPU model `cpu` resolved to, once per command.
     #[arg(skip)]
     resolved_cpu: Option<rewind_vmm::CpuModel>,
-    /// What moves the VM's clock besides exits: the work done inside it,
+    /// What moves the VM's clock besides its steps: the work done inside it,
     /// counted by this machine's branch counter (`branches`), or nothing
     /// (`exits`).
     ///
@@ -1771,7 +1771,7 @@ pub(crate) struct MachineArgs {
     #[arg(long, value_enum, default_value_t = ClockArg::Auto)]
     clock: ClockArg,
     /// Experimental: with counter time, also interrupt a VM computing without
-    /// exits at the timer's branch count.
+    /// stepping at the timer's branch count.
     ///
     /// See docs/pmu.md.
     #[arg(long, hide = true)]

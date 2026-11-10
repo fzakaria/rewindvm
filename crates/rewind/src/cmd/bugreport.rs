@@ -72,7 +72,7 @@ pub(crate) struct BugreportArgs {
     /// `rewind replay --bisect`, and include what it says.
     #[arg(long)]
     pub(crate) bisect: bool,
-    /// Also write the export another machine can replay, with the guest's
+    /// Also write the export another machine can replay, with the VM's
     /// kernel, input image and keyframes: tens of megabytes or more, too
     /// large to attach to an issue, for when a maintainer asks for it.
     #[arg(long, conflicts_with = "no_run")]
@@ -140,7 +140,7 @@ pub(crate) fn bugreport(home: &Home, args: BugreportArgs) -> Result<ExitCode> {
         export::export(home, &run, export::Contents::Replayable, &full)?;
         let size = std::fs::metadata(&full)?.len();
         eprintln!(
-            "{} wrote {} ({}), with the guest's kernel, input image and memory",
+            "{} wrote {} ({}), with the VM's kernel, input image and memory",
             paint.prefix(),
             full.display(),
             show::size(size)

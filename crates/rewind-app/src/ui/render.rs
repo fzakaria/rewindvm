@@ -2474,7 +2474,7 @@ const FAILURE_NOTE: &str = "Jump to failure. Key: F.";
 const FORK_NOTE: &str = "Fork from here: runs this run again from the playhead under another thread schedule, so Rewind switches and pauses threads at other steps. The menu beside it turns it into a check of many schedules.";
 const FORWARD_NOTE: &str =
     "Forward again, after Back. Key: Alt+Right, or the mouse's forward button.";
-const EXPORT_NOTE: &str = "Writes this run to one .rwd file, with the machine snapshots and inputs another machine needs to open, replay and fork it.";
+const EXPORT_NOTE: &str = "Writes this run to one .rwd file, with the keyframes and inputs another machine needs to open, replay and fork it.";
 const THREADS_NOTE: &str = "A lane per thread over a window of steps, a bar where the thread held the CPU, beside the compared run's. The lanes are read from the context switches each run recorded. Key: t.";
 
 /// The amber button's note when it checks from here.

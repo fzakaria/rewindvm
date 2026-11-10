@@ -62,7 +62,7 @@ pub(crate) fn pmu(home: &Home, args: PmuArgs) -> Result<ExitCode> {
             }
             let usable = rewind_core::pmu::counter_usable(needs, known, t.exact);
             let verdict = if t.exact {
-                "exact at every exit"
+                "exact at every step"
             } else {
                 "NOT exact"
             };

@@ -216,7 +216,7 @@ pub(crate) fn show(home: &Home, args: ShowArgs) -> Result<ExitCode> {
     }
     if same_guest == Some(false) {
         eprintln!(
-            "{} this rewind boots another kernel or initramfs than the run did, so \
+            "{} this rewind boots another kernel or initrd than the run did, so \
                  these commands make other runs",
             paint.prefix()
         );
@@ -355,7 +355,7 @@ pub(crate) struct ReplayArgs {
     /// keyframe after the start, only at the last, or nowhere, comparing
     /// only events and records.
     ///
-    /// Each comparison hashes the pages the guest wrote since the last
+    /// Each comparison hashes the pages the VM wrote since the last
     /// one, as recording does when it takes the keyframe, without storing
     /// them. `last` takes no capture before the last keyframe, so the
     /// replay runs as one without keyframes would.
@@ -492,7 +492,7 @@ pub(crate) fn replay(home: &Home, args: ReplayArgs) -> Result<ExitCode> {
     };
     match (&replayed.divergence, replayed.keyframe) {
         (None, Some(kf)) => println!(
-            "{identical_word} to the recording from the snapshot at step {kf} to the end{compared} ({:.2}s)",
+            "{identical_word} to the recording from the keyframe at step {kf} to the end{compared} ({:.2}s)",
             started.elapsed().as_secs_f64()
         ),
         (None, None) => {
@@ -506,15 +506,15 @@ pub(crate) fn replay(home: &Home, args: ReplayArgs) -> Result<ExitCode> {
             )
         }
         (Some(d), Some(kf)) if d.part == Part::IoRecords => {
-            println!("{different_word} from the recording after the snapshot at step {kf}:");
+            println!("{different_word} from the recording after the keyframe at step {kf}:");
             println!("{}", show::io_divergence(d));
         }
         (Some(d), Some(kf)) if d.part == Part::Switches => {
-            println!("{different_word} from the recording after the snapshot at step {kf}:");
+            println!("{different_word} from the recording after the keyframe at step {kf}:");
             println!("{}", show::switch_divergence(d));
         }
         (Some(_), Some(kf)) => {
-            println!("{different_word} from the recording after the snapshot at step {kf}:");
+            println!("{different_word} from the recording after the keyframe at step {kf}:");
             print!(
                 "{}",
                 show::divergence(&replayed.original, &replayed.again, paint)

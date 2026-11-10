@@ -1,5 +1,5 @@
 //! What a view says while the engine brings a run back to a step. The
-//! engine replays the run from the nearest saved snapshot, a keyframe, at
+//! engine replays the run from the nearest keyframe at
 //! or before the step, and says how far it got (see
 //! [`rewind_trace::replaying`]). A short replay gets the view's own short
 //! sentence. A long one, whose recent speed says it has more than
@@ -19,7 +19,7 @@ const LONG_WAIT: Duration = Duration::from_secs(3);
 
 /// What the view says under its rows while a long replay runs.
 pub const QUICKER_NEXT_TIME: &str =
-    "Rewind saves snapshots on the way, so looking near here again is quicker.";
+    "Rewind saves keyframes on the way, so looking near here again is quicker.";
 
 /// The replays a view waits on, as far as the engine has said.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -132,7 +132,7 @@ fn describe(r: &Replaying, left: Option<Duration>, label: Option<String>) -> Str
     let start = if r.from == 0 {
         "its start".to_string()
     } else {
-        format!("a saved snapshot at step {}", thousands(r.from))
+        format!("the keyframe at step {}", thousands(r.from))
     };
     let (replayed, replaying) = match &label {
         Some(label) => (format!("{label}: replayed"), format!("{label}: replaying")),
@@ -175,7 +175,7 @@ mod tests {
 
     #[test]
     fn a_short_replay_has_no_row() {
-        // 1,000 steps from a snapshot, done in nine seconds, with under
+        // 1,000 steps from a keyframe, done in nine seconds, with under
         // three seconds left when the speed is first known: no row, and
         // the engine's other lines are not progress.
         let mut waiting = Waiting::default();
@@ -216,7 +216,7 @@ mod tests {
 
     #[test]
     fn two_runs_each_get_a_row_under_their_label() {
-        // This run replays from a snapshot at step 50,000 and the other
+        // This run replays from the keyframe at step 50,000 and the other
         // from its start, both long: a row each, labeled, in the order
         // first heard.
         let mut waiting = Waiting::default();
@@ -236,7 +236,7 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(
             rows[0].text,
-            "This run: replaying from a saved snapshot at step 50,000 to step 150,000: now at step 60,000, about 2 minutes left."
+            "This run: replaying from the keyframe at step 50,000 to step 150,000: now at step 60,000, about 2 minutes left."
         );
         assert!(
             rows[1]

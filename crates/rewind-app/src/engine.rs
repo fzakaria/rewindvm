@@ -312,7 +312,7 @@ pub trait Engine: Send + Sync {
     /// Reads `path` inside the VM as it was at `step` of `run`, as process
     /// `pid` saw it when one is given. The engine brings the run back to
     /// the step to read it, which takes seconds, or minutes far from a
-    /// saved snapshot; `progress` is handed each line the engine says while
+    /// keyframe; `progress` is handed each line the engine says while
     /// it works, how far the replay got among them (see
     /// [`crate::waiting`]), and `cancel` stops it early.
     fn cat(
@@ -344,7 +344,7 @@ pub trait Engine: Send + Sync {
     /// behind whose bytes differ, as each run had them when its job
     /// exited, and how many are the same. The engine brings each run back
     /// to that step once to read them all, which takes seconds, or minutes
-    /// far from a saved snapshot; `progress` is handed each line the
+    /// far from a keyframe; `progress` is handed each line the
     /// engine says while it works, and `cancel` stops it early.
     fn differing_outputs(
         &self,

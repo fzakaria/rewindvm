@@ -119,7 +119,7 @@ pub fn load(ram: &mut Mapping, spec: &BootSpec) -> Result<u64> {
             .map(|top| top & !(PAGE_SIZE as u64 - 1))
             .filter(|addr| *addr >= KERNEL_START + init_size)
             .with_context(|| {
-                format!("initramfs of {initrd_len} bytes does not fit in RAM above the kernel")
+                format!("initrd of {initrd_len} bytes does not fit in RAM above the kernel")
             })?;
         ram.write(initrd_addr, spec.initrd)?;
         write_u32(&mut params, bp::RAMDISK_IMAGE, initrd_addr as u32);

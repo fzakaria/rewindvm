@@ -1036,7 +1036,7 @@ in
         grep -qx "$far" kept
         rewind cat long "$far" /bin/busybox > /dev/null
         test "$(keyframes | wc -l)" = $((count + 1))
-        rewind replay long --from "$far" | grep "^identical to the recording from the snapshot at step $far "
+        rewind replay long --from "$far" | grep "^identical to the recording from the keyframe at step $far "
 
         rewind run -q --name b --seed 1 --root ${busyboxRoot} -- sh -c '${workload}'
         # rewind diff exits 1 for runs that differ, 0 for identical ones.
@@ -1087,7 +1087,7 @@ in
         test -z "$differs" || test "$differs" -ge "$step"
         rewind replay $fork2 | grep '^identical'
         rewind replay $fork2 --from 300 | grep '^identical'
-        rewind replay $fork2 --from $((step - 1)) | grep "^identical to the recording from the snapshot at step $((step - 1)) "
+        rewind replay $fork2 --from $((step - 1)) | grep "^identical to the recording from the keyframe at step $((step - 1)) "
         rewind replay $fork2 --from "$(end $fork2)" | grep '^identical'
 
         # A replayable export of the fork of a fork carries every keyframe
@@ -1195,7 +1195,7 @@ in
         test "$(bare_keyframes | wc -l)" -ge 2
         test "$(bare_keyframes | tail -1)" = "$end"
         along=$(bare_keyframes | sed -n 1p)
-        rewind replay bare --from "$along" | grep "^identical to the recording from the snapshot at step $along "
+        rewind replay bare --from "$along" | grep "^identical to the recording from the keyframe at step $along "
 
         # Asked with --progress json, or with REWIND_PROGRESS=json as the
         # desktop app asks, a look inside a run says how far its replay
@@ -1270,7 +1270,7 @@ in
 
         for k in $(keyframes | sed '$d'); do
           rewind replay a --from "$k" | tee from-$k
-          grep -q "^identical to the recording from the snapshot at step $k to the end, and the whole machine" from-$k
+          grep -q "^identical to the recording from the keyframe at step $k to the end, and the whole machine" from-$k
         done
 
         rewind replay a --machine last | tee last

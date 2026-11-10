@@ -103,7 +103,7 @@ fn write_export(home: &Home, run: &Run, contents: Contents, file: File) -> Resul
         tar.append_path_with_name(&spec.kernel, KERNEL)
             .with_context(|| format!("adding the kernel {}", spec.kernel.display()))?;
         tar.append_path_with_name(&spec.initrd, INITRD)
-            .with_context(|| format!("adding the initramfs {}", spec.initrd.display()))?;
+            .with_context(|| format!("adding the initrd {}", spec.initrd.display()))?;
         if let Some(image) = &spec.image {
             tar.append_path_with_name(image, IMAGE)
                 .with_context(|| format!("adding the image {}", image.display()))?;
@@ -402,12 +402,12 @@ fn verify_inputs(manifest: &Manifest, staging: &Path, source: &str) -> Result<()
     spec.initrd = staging.join(INITRD);
     for input in [&spec.kernel, &spec.initrd] {
         if !input.is_file() {
-            bail!("{source} carries inputs for run {id} without its kernel or its initramfs");
+            bail!("{source} carries inputs for run {id} without its kernel or its initrd");
         }
     }
     if spec.id() != *id {
         bail!(
-            "the kernel and initramfs {source} carries do not make run {id}, which its \
+            "the kernel and initrd {source} carries do not make run {id}, which its \
              manifest names; the export was changed after it was written"
         );
     }
