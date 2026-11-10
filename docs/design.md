@@ -965,6 +965,27 @@ append-only index. A crash can leave at most a torn last index entry, which is
 dropped when the store opens. Pages no keyframe names any more stay until
 `rewind gc` removes them (see [Removing runs](#removing-runs)).
 
+The index can also name a page that is not in its pack. Each writer appends
+pages to a pack of its own and entries to the shared index, and syncing the
+index makes every writer's entries durable, including ones whose pages are
+still in the page cache; a power loss then leaves entries without pages. A
+disk that fills while an entry is written leaves part of one, and every entry
+any writer appends after it is shifted and reads as nothing. Recording the
+same run again does not mend either: the run is deterministic, it puts the
+same pages, and the store skips them as already there. So an opener with the
+store to itself, or `rewind gc`, verifies the entries written since the index
+was last marked verified: an entry whose page lies past its pack's end, or
+whose bytes do not decompress and hash to its name, is dropped, with every
+entry after a shifted one, and the segments covering the dropped entries go.
+The dropped pages are absent, and the next keyframe that has them puts them
+again. The last store to close marks the whole index verified once every
+pack is synced, so a session that ends well leaves nothing to verify; a
+writer whose index write came up short raises a flag that keeps every close
+from marking. Verifying the whole index at every open would be too slow: on
+a store of 20.7 million pages, 18.5 GB of packs, reading every page took 55
+s on eight threads, and checking only that each page lies within its pack,
+which reads the 1 GB index alone, 1.8 s.
+
 A store with many runs has millions of index entries, too many to read into
 memory every time it opens. The index's entries are also kept in a few sorted
 segments: files of entries sorted by hash, mapped into memory and searched with

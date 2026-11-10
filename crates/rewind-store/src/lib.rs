@@ -12,6 +12,19 @@
 //! pack, offset and length, and a file naming the store's format. Both only ever grow, so a crash can at worst
 //! leave a partial last entry, which [`Store::open`] drops.
 //!
+//! The index can still name a page that is not in its pack: a crash after
+//! the index reached the disk and before the pack did, or a full disk that
+//! cut an index entry short, shifting every entry any writer appended
+//! after it. A page named but not there is never put again, since the
+//! run that would put it is deterministic and the store already names
+//! its hash. So an opener with the store to itself verifies the entries
+//! written since the index was last marked verified, by length and by
+//! hash, drops the ones whose pages are not there, and moves the mark;
+//! the last store to close marks the whole index once every pack is
+//! synced. Verifying the whole index would read every pack: on a 20.7
+//! million page store it took 55 s, and checking lengths alone 1.8 s,
+//! both too long for every open.
+//!
 //! Any number of processes can have a store open at once. Each one that
 //! writes appends to a pack no other is writing, which it holds a lock on,
 //! and appends each index entry in a single write, so entries from
@@ -565,6 +578,184 @@ fn remove_if_there(path: &Path) -> Result<()> {
     }
 }
 
+/// The mark that says how far the index has been verified against the
+/// packs: a line of how many of its first entries name pages whose bytes
+/// are in their packs and hash to their names, then the index's device and
+/// inode numbers, since a collector replaces the index by another file. An
+/// opener with the store to itself verifies the entries after the mark and
+/// moves it; the last store to close moves it to the end once every pack
+/// is synced, so a session that ends well leaves nothing to verify.
+const VERIFIED: &str = "index.verified";
+
+/// The flag a writer raises when an index write came up short, as a full
+/// disk leaves it: the entries written after the part it left are shifted
+/// and read as nothing, so no close may mark them verified. The next
+/// opener with the store to itself verifies them, drops them, and lowers
+/// the flag.
+const TORN: &str = "index.torn";
+
+/// How many of the index `log`'s first entries the mark in `dir` says
+/// are verified: none without a mark, or with a mark of another index.
+fn verified(dir: &Path, log: &File) -> Result<Option<u64>> {
+    let text = match fs::read_to_string(dir.join(VERIFIED)) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(e).with_context(|| format!("reading {}", dir.join(VERIFIED).display()));
+        }
+    };
+    let mut fields = text.split_whitespace().map(|f| f.parse::<u64>().ok());
+    let (Some(Some(entries)), Some(Some(dev)), Some(Some(ino))) =
+        (fields.next(), fields.next(), fields.next())
+    else {
+        return Ok(None);
+    };
+    let index = log.metadata()?;
+    if (dev, ino) != (index.dev(), index.ino()) {
+        return Ok(None);
+    }
+    Ok(Some(entries))
+}
+
+/// Marks the first `entries` entries of the index `log` verified, under a
+/// name of this writer's own until whole.
+fn mark_verified(dir: &Path, log: &File, entries: u64) -> Result<()> {
+    static WRITTEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = WRITTEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let index = log.metadata()?;
+    let tmp = dir.join(format!("{VERIFIED}.{}.{n}", std::process::id()));
+    fs::write(&tmp, format!("{entries} {} {}\n", index.dev(), index.ino()))?;
+    fs::rename(&tmp, dir.join(VERIFIED))?;
+    Ok(())
+}
+
+/// Whether the page an index entry names is in its pack: within the
+/// pack's length, and bytes that decompress and hash to the entry's name.
+/// `packs` holds the packs this thread has opened, by number.
+fn page_is_there(
+    dir: &Path,
+    entry: &Entry,
+    lengths: &HashMap<u32, u64>,
+    packs: &mut HashMap<u32, File>,
+    decompressor: &mut zstd::bulk::Decompressor<'static>,
+    compressed: &mut Vec<u8>,
+    page: &mut Vec<u8>,
+) -> Result<bool> {
+    let loc = Location::of(entry);
+    let end = loc.offset + u64::from(loc.len);
+    if loc.len == 0 || lengths.get(&loc.pack).is_none_or(|len| end > *len) {
+        return Ok(false);
+    }
+    let pack = match packs.entry(loc.pack) {
+        std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+        std::collections::hash_map::Entry::Vacant(e) => {
+            e.insert(File::open(Store::pack_path(dir, loc.pack))?)
+        }
+    };
+    compressed.resize(loc.len as usize, 0);
+    pack.read_exact_at(compressed, loc.offset)?;
+
+    // Bytes that are not a frame, or not one of the size it says, are not
+    // the page.
+    let Ok(Some(size)) = zstd::zstd_safe::get_frame_content_size(compressed) else {
+        return Ok(false);
+    };
+    let Ok(size) = usize::try_from(size) else {
+        return Ok(false);
+    };
+    page.clear();
+    page.reserve(size);
+    let Ok(n) = decompressor.decompress_to_buffer(compressed, page) else {
+        return Ok(false);
+    };
+    Ok(n == size && Store::hash(page) == entry[..32])
+}
+
+/// Verifies the entries of the index `log` after the mark against the
+/// packs, with the store to the caller alone, and moves the mark to the
+/// end. An entry whose page is not in its pack, because a crash kept the
+/// pack from reaching the disk while the index did or an index write came
+/// up short and shifted every entry after it, is dropped: the index is cut
+/// off before the first such entry and the entries after it that do name
+/// their pages are appended again, and the segments that covered the cut
+/// go, since a segment names its entries where the index had them. A
+/// dropped page is then absent, and the next keyframe that has it puts it
+/// again.
+fn verify_index(dir: &Path, log: &File) -> Result<()> {
+    let entries = log.metadata()?.len() / INDEX_ENTRY as u64;
+    let from = verified(dir, log)?.unwrap_or(0).min(entries);
+    if from == entries {
+        remove_if_there(&dir.join(TORN))?;
+        return Ok(());
+    }
+
+    // The entries after the mark, and each pack's length.
+    let mut tail = vec![[0u8; INDEX_ENTRY]; usize::try_from(entries - from)?];
+    log.read_exact_at(tail.as_flattened_mut(), from * INDEX_ENTRY as u64)?;
+    let mut lengths = HashMap::new();
+    for id in Store::pack_ids(dir)? {
+        lengths.insert(id, file_len(&Store::pack_path(dir, id))?);
+    }
+
+    // Whether each entry's page is there, on threads, as a keyframe's
+    // pages are hashed.
+    let mut there = vec![true; tail.len()];
+    let share = tail.len().div_ceil(writers(tail.len())).max(1);
+    at_once(
+        tail.chunks(share).zip(there.chunks_mut(share)),
+        |(part, out)| {
+            let mut packs = HashMap::new();
+            let mut decompressor = zstd::bulk::Decompressor::new()?;
+            let (mut compressed, mut page) = (Vec::new(), Vec::new());
+            for (entry, ok) in part.iter().zip(out) {
+                *ok = page_is_there(
+                    dir,
+                    entry,
+                    &lengths,
+                    &mut packs,
+                    &mut decompressor,
+                    &mut compressed,
+                    &mut page,
+                )?;
+            }
+            Ok(())
+        },
+    )?;
+    let Some(first) = there.iter().position(|ok| !ok) else {
+        mark_verified(dir, log, entries)?;
+        remove_if_there(&dir.join(TORN))?;
+        return Ok(());
+    };
+
+    // The segments that cover the cut go first, so a crash leaves none
+    // beside an index whose entries they do not describe.
+    let cut = from + first as u64;
+    for path in segment_files(dir)? {
+        if let Some(Some(segment)) = Sorted::open(&path, log).ok()
+            && segment.to <= cut
+        {
+            continue;
+        }
+        remove_if_there(&path)?;
+    }
+    File::open(dir)?.sync_all()?;
+
+    // The index cut off, with the entries after the cut that name their
+    // pages appended again, durable before the mark says they are.
+    let mut kept = Vec::with_capacity((tail.len() - first) * INDEX_ENTRY);
+    for (entry, ok) in tail[first..].iter().zip(&there[first..]) {
+        if *ok {
+            kept.extend_from_slice(entry);
+        }
+    }
+    log.set_len(cut * INDEX_ENTRY as u64)?;
+    log.write_all_at(&kept, cut * INDEX_ENTRY as u64)?;
+    log.sync_data()?;
+    mark_verified(dir, log, cut + (kept.len() / INDEX_ENTRY) as u64)?;
+    remove_if_there(&dir.join(TORN))?;
+    Ok(())
+}
+
 /// Calls `each` with the entries of `inputs`, each sorted by hash with
 /// each hash once, merged in hash order with each hash once: for a hash
 /// more than one input has, the entry of the first that has it. Returns
@@ -907,6 +1098,11 @@ impl Store {
             if !segments_match_index(dir, &index)? {
                 remove_if_there(&dir.join(SEGMENT_INDEX))?;
             }
+
+            // An entry a crash left naming a page that never reached its
+            // pack, or an index write that came up short left shifted, is
+            // dropped here, so the page is put again rather than trusted.
+            verify_index(dir, &index)?;
         }
         lock.lock_shared()
             .with_context(|| format!("locking {}", dir.display()))?;
@@ -1263,14 +1459,22 @@ impl Store {
         // The pages are in their packs before the entries naming them are
         // written, and the entries go in one write, whole, after everyone
         // else's.
-        let written = (&self.index_log).write(&entries)?;
-        if written != entries.len() {
-            bail!(
-                "wrote {written} of {} index entries' {} bytes",
-                locations.len(),
-                entries.len()
-            );
-        }
+        // A write that came up short, as a full disk leaves one, left part
+        // of an entry that shifts whatever any writer appends after it; the
+        // flag keeps every close from marking them verified.
+        let written = match (&self.index_log).write(&entries) {
+            Ok(written) if written == entries.len() => written,
+            short => {
+                let _ = File::create(self.dir.join(TORN));
+                let written = short?;
+                bail!(
+                    "wrote {written} of {} index entries' {} bytes",
+                    locations.len(),
+                    entries.len()
+                );
+            }
+        };
+        debug_assert_eq!(written, entries.len());
         self.index().pages.extend(locations);
         Ok(())
     }
@@ -1332,6 +1536,39 @@ impl Store {
         Ok(())
     }
 
+    /// Marks the whole index verified when this store is the last to
+    /// close, once every pack and the index are durable, so the next
+    /// opener with the store to itself verifies nothing a store that
+    /// closed well wrote. A store whose index write came up short raised
+    /// the flag, and the next such opener verifies instead. Taking the
+    /// lock exclusively lets the shared hold go whether or not it is
+    /// taken, which a closing store no longer needs.
+    fn close(&mut self) -> Result<()> {
+        #[cfg(test)]
+        if tests::crashing() {
+            return Ok(());
+        }
+        if self._lock.try_lock().is_err() || self.dir.join(TORN).exists() {
+            return Ok(());
+        }
+        for id in Self::pack_ids(&self.dir)? {
+            File::open(Self::pack_path(&self.dir, id))?.sync_data()?;
+        }
+        self.index_log.sync_data()?;
+        let entries = self.index_log.metadata()?.len() / INDEX_ENTRY as u64;
+        mark_verified(&self.dir, &self.index_log, entries)
+    }
+}
+
+/// A close that fails to mark the index verified leaves the next opener
+/// to verify it; there is no one to tell.
+impl Drop for Store {
+    fn drop(&mut self) {
+        let _ = self.close();
+    }
+}
+
+impl Store {
     /// How much the store holds, as far as this store has read the index.
     /// Reads every segment whole.
     pub fn stats(&self) -> Stats {
@@ -1408,10 +1645,21 @@ impl Collector {
         check_format(dir)?;
         let lock = open_lock(&dir.join(LOCK))?;
         match lock.try_lock() {
-            Ok(()) => Ok(Some(Collector {
-                dir: dir.to_path_buf(),
-                _lock: lock,
-            })),
+            Ok(()) => {
+                // An entry naming a page that is not in its pack would fail
+                // the collection when the page is moved; an opener with the
+                // store to itself drops such entries, and so does this.
+                let index = OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .read(true)
+                    .open(dir.join(INDEX))?;
+                verify_index(dir, &index)?;
+                Ok(Some(Collector {
+                    dir: dir.to_path_buf(),
+                    _lock: lock,
+                }))
+            }
             Err(fs::TryLockError::WouldBlock) => Ok(None),
             Err(fs::TryLockError::Error(e)) => {
                 Err(e).with_context(|| format!("locking {}", dir.display()))
@@ -1617,10 +1865,14 @@ impl Collector {
         remove_if_there(&self.dir.join(SEGMENT_INDEX))?;
         fs::rename(&tmp, self.dir.join(INDEX))?;
         File::open(&self.dir)?.sync_all()?;
+
+        // Every entry of the new index was verified when this collector
+        // took the store, and names its page where the copy put it.
+        let log = File::open(self.dir.join(INDEX))?;
+        mark_verified(&self.dir, &log, entries.len() as u64)?;
         if entries.len() < COMPACT_AT {
             return Ok(());
         }
-        let log = File::open(self.dir.join(INDEX))?;
         write_segment(&self.dir, &log, &[&entries], 0, entries.len() as u64)?;
         Ok(())
     }
@@ -1671,6 +1923,23 @@ mod tests {
         /// Whether the next append to a pack on this thread writes half of
         /// its bytes and fails, as a disk that fills up does.
         static CUT_SHORT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+
+        /// Whether the next store dropped on this thread goes without
+        /// marking the index verified, as a store whose process died does.
+        static CRASH_ON_DROP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    /// Whether the store being dropped on this thread is to go as a
+    /// killed process's would.
+    pub(super) fn crashing() -> bool {
+        CRASH_ON_DROP.replace(false)
+    }
+
+    /// How many entries the mark in `dir` says are verified, of the index
+    /// there now.
+    fn verified(dir: &Path) -> Option<u64> {
+        let log = File::open(dir.join(INDEX)).unwrap();
+        super::verified(dir, &log).unwrap()
     }
 
     /// Writes half of `bytes` to `file` and fails, if a test on this
@@ -1983,6 +2252,218 @@ mod tests {
             fs::metadata(dir.join("index")).unwrap().len(),
             INDEX_ENTRY as u64
         );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The entries of the index in `dir`, in order.
+    fn index_entries(dir: &Path) -> Vec<Entry> {
+        fs::read(dir.join(INDEX))
+            .unwrap()
+            .as_chunks::<INDEX_ENTRY>()
+            .0
+            .to_vec()
+    }
+
+    /// Lets `store` go as a process that was killed, or lost power, lets
+    /// it go: without marking the index verified.
+    fn crash(store: Store) {
+        CRASH_ON_DROP.set(true);
+        drop(store);
+    }
+
+    #[test]
+    fn pages_past_a_packs_end_are_absent_after_reopening() {
+        // Six pages are put, and the store's process dies before its pack
+        // reached the disk: the pack is cut off after the third page while
+        // the index names all six, as a power loss after the index was
+        // synced and before the pack was leaves them. The next opener with
+        // the store to itself drops the three entries whose pages are not
+        // there, so the pages are absent and a keyframe puts them again,
+        // and the three that are there are found. Opening again finds the
+        // index verified and leaves it as it is.
+        let dir = tmp("pack-cut-off");
+        let mut store = Store::open(&dir).unwrap();
+        let hashes = put_pages(&mut store, 1, 6);
+        let entries = index_entries(&dir);
+        let third = Location::of(&entries[2]);
+        crash(store);
+        OpenOptions::new()
+            .write(true)
+            .open(Store::pack_path(&dir, third.pack))
+            .unwrap()
+            .set_len(third.offset + u64::from(third.len))
+            .unwrap();
+
+        let mut store = Store::open(&dir).unwrap();
+        for (hash, fill) in hashes.iter().zip(1..) {
+            assert_eq!(store.contains(hash), fill <= 3, "page {fill}");
+        }
+        assert_eq!(index_entries(&dir), entries[..3]);
+        assert_eq!(put_pages(&mut store, 4, 3), hashes[3..]);
+        let mut out = vec![0u8; PAGE];
+        for (hash, fill) in hashes.iter().zip(1..) {
+            store.get(hash, &mut out).unwrap();
+            assert_eq!(out, page(fill));
+        }
+        drop(store);
+        let before = index_entries(&dir);
+        assert_eq!(before.len(), 6);
+        drop(Store::open(&dir).unwrap());
+        assert_eq!(index_entries(&dir), before);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_page_whose_bytes_changed_is_absent_after_reopening() {
+        // The bytes of the second of three pages are overwritten in the
+        // pack, as a disk that lost a write leaves them, and the store's
+        // process dies. The next opener finds the page's bytes hash to
+        // something else and drops its entry, keeping the other two.
+        let dir = tmp("pack-damaged");
+        let mut store = Store::open(&dir).unwrap();
+        let hashes = put_pages(&mut store, 1, 3);
+        let second = Location::of(&index_entries(&dir)[1]);
+        crash(store);
+        let pack = OpenOptions::new()
+            .write(true)
+            .open(Store::pack_path(&dir, second.pack))
+            .unwrap();
+        pack.write_all_at(&vec![0xffu8; second.len as usize], second.offset)
+            .unwrap();
+
+        let store = Store::open(&dir).unwrap();
+        assert!(store.contains(&hashes[0]));
+        assert!(!store.contains(&hashes[1]));
+        assert!(store.contains(&hashes[2]));
+        assert_eq!(index_entries(&dir).len(), 2);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn entries_after_a_short_index_write_are_dropped() {
+        // A writer's disk fills while it writes an index entry, leaving
+        // part of one, and another writer, open at the same time, appends
+        // three whole entries after it, each shifted by the part. The next
+        // opener with the store to itself cuts the index off before the
+        // part, since nothing after it reads as the entry it was: the
+        // pages named after the part are absent, put again, and read
+        // back.
+        const PART: usize = 20;
+        let dir = tmp("short-index-write");
+        let mut first = Store::open(&dir).unwrap();
+        let before = put_pages(&mut first, 1, 3);
+        OpenOptions::new()
+            .append(true)
+            .open(dir.join(INDEX))
+            .unwrap()
+            .write_all(&[7u8; PART])
+            .unwrap();
+        let mut second = Store::open(&dir).unwrap();
+        let after = put_pages(&mut second, 4, 3);
+        crash(second);
+        crash(first);
+
+        let mut store = Store::open(&dir).unwrap();
+        for hash in &before {
+            assert!(store.contains(hash));
+        }
+        for hash in &after {
+            assert!(!store.contains(hash));
+        }
+        assert_eq!(index_entries(&dir).len(), 3);
+        assert_eq!(put_pages(&mut store, 4, 3), after);
+        let mut out = vec![0u8; PAGE];
+        for (hash, fill) in before.iter().chain(&after).zip(1..) {
+            store.get(hash, &mut out).unwrap();
+            assert_eq!(out, page(fill));
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_segment_naming_a_dropped_entry_goes_with_it() {
+        // Ten pages put by one store, and sorted into a segment by a
+        // second opened beside it, which verifies nothing, having the
+        // store shared. Both die, and the pack is cut off before the last
+        // page. The segment covers the dropped entry, so it goes too, and
+        // the nine pages that are there are found through the index and
+        // sorted again.
+        let dir = tmp("segment-dropped");
+        let mut store = Store::open(&dir).unwrap();
+        let hashes = put_pages(&mut store, 1, 10);
+        let sorter = Store::open(&dir).unwrap();
+        let segment = only_segment(&dir).path.clone();
+        crash(sorter);
+        crash(store);
+        let last = Location::of(index_entries(&dir).last().unwrap());
+        OpenOptions::new()
+            .write(true)
+            .open(Store::pack_path(&dir, last.pack))
+            .unwrap()
+            .set_len(last.offset)
+            .unwrap();
+
+        let store = Store::open(&dir).unwrap();
+        assert!(!segment.exists());
+        assert!(!store.contains(&hashes[9]));
+        let mut out = vec![0u8; PAGE];
+        for (hash, fill) in hashes[..9].iter().zip(1..) {
+            store.get(hash, &mut out).unwrap();
+            assert_eq!(out, page(fill));
+        }
+        let segment = only_segment(&dir);
+        assert_eq!((segment.from, segment.to), (0, 9));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_store_closed_last_marks_the_index_verified() {
+        // The last store to close has the store to itself, and marks the
+        // whole index verified, so the next opener reads none of it again.
+        // A store that crashes marks nothing, and the next opener verifies
+        // what was written since the last mark.
+        let dir = tmp("verified-mark");
+        let mut store = Store::open(&dir).unwrap();
+        put_pages(&mut store, 1, 3);
+        drop(store);
+        assert_eq!(verified(&dir).unwrap(), 3);
+
+        let mut store = Store::open(&dir).unwrap();
+        put_pages(&mut store, 4, 2);
+        crash(store);
+        assert_eq!(verified(&dir).unwrap(), 3);
+        drop(Store::open(&dir).unwrap());
+        assert_eq!(verified(&dir).unwrap(), 5);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_collection_verifies_the_index_first_and_marks_the_new_one() {
+        // A collector takes the store to itself as an opener does, so it
+        // verifies the index first: an entry whose page is not in its pack
+        // is dropped before pages are moved, rather than failing the
+        // collection. The index it writes is marked verified.
+        let dir = tmp("collect-verifies");
+        let mut store = Store::open(&dir).unwrap();
+        let hashes = put_pages(&mut store, 1, 3);
+        let last = Location::of(index_entries(&dir).last().unwrap());
+        crash(store);
+        OpenOptions::new()
+            .write(true)
+            .open(Store::pack_path(&dir, last.pack))
+            .unwrap()
+            .set_len(last.offset)
+            .unwrap();
+
+        let collector = Collector::lock(&dir).unwrap().unwrap();
+        assert_eq!(verified(&dir).unwrap(), 2);
+        collector.collect(&live(&hashes[1..]), Act::Remove).unwrap();
+        assert_eq!(verified(&dir).unwrap(), 1);
+        drop(collector);
+        let store = Store::open(&dir).unwrap();
+        assert!(!store.contains(&hashes[0]));
+        assert!(store.contains(&hashes[1]));
+        assert!(!store.contains(&hashes[2]));
         fs::remove_dir_all(&dir).unwrap();
     }
 
