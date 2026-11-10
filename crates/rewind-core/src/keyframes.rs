@@ -789,56 +789,159 @@ impl Spacing {
 
 /// Runs a machine to the end, taking keyframes as it goes, or until the
 /// observer asks it to stop short of a stop, where it returns
-/// [`Outcome::Paused`] and can be called again to run on. `parent` names
-/// the keyframe the machine was restored from or last took, or none
-/// before the first, which then holds every page; `spacing` says when the
-/// next one is due. Both carry over from one call to the next.
+/// [`Outcome::Paused`] and can be called again to run on. `taking` says
+/// what the next keyframe is a delta from and when it is due, and carries
+/// over from one call to the next.
 pub fn run_with_keyframes(
     machine: &mut Machine,
     obs: &mut dyn Observer,
     run_dir: &Path,
     store: &mut Store,
-    parent: &mut Option<u64>,
-    spacing: &mut Spacing,
-    memory: &mut Memory,
+    taking: &mut Taking,
 ) -> Result<Outcome> {
     loop {
         // A stretch to the next stop, which takes a keyframe only once
         // one is due.
         let from = Progress::of(machine);
-        let outcome = machine.run(Some(spacing.next_stop(from.step)), obs)?;
+        let outcome = machine.run(Some(taking.spacing.next_stop(from.step)), obs)?;
         if let Outcome::Stopped(_) = outcome {
             return Ok(outcome);
         }
-        spacing.ran(from, Progress::of(machine));
+        taking.spacing.ran(from, Progress::of(machine));
         if obs.stop() {
             return Ok(outcome);
         }
-        if !spacing.due() {
+        if !taking.spacing.due() {
             continue;
         }
-        spacing.kept();
-        take(machine, run_dir, store, parent, memory)?;
+        taking.take(machine, run_dir, store)?;
     }
 }
 
-/// Takes a keyframe of the machine where it is, holding only the pages
-/// whose contents changed since the keyframe at `parent`, saves it in
-/// `run_dir` and names it the next keyframe's parent.
-pub fn take(
-    machine: &mut Machine,
-    run_dir: &Path,
-    store: &mut Store,
-    parent: &mut Option<u64>,
-    memory: &mut Memory,
-) -> Result<()> {
-    let mut kf = machine.keyframe(&mut StorePages(store), *parent)?;
-    memory.trim(kf.parent, &mut kf.pages)?;
+/// How many keyframes a recording takes between two flushes of what they
+/// wrote: the pages put in the store, and the keyframe files naming them.
+/// Flushed one keyframe at a time, each waited for the disk three times,
+/// for the pack, the index and the keyframe's file, which was 2% of a
+/// hello build on a laptop's NVMe drive and would be more on a slower
+/// disk. Eight keyframes are about two seconds of the guest's work, so a
+/// flush that often costs a small fraction of that, and a crash loses at
+/// most those two seconds of keyframes, of an execution the crash
+/// interrupted: one that never finished keeps no recording, and executing
+/// it again takes every keyframe afresh.
+pub const KEYFRAMES_PER_FLUSH: usize = 8;
 
-    // The pages first, durably, then the keyframe naming them.
-    store.sync()?;
-    save(run_dir, &kf)?;
-    *parent = Some(kf.step);
+/// A recording's keyframes as it takes them: the keyframe the next is a
+/// delta from, when the next is due, memory as of the last, and the
+/// keyframes saved since the recording last flushed. A keyframe is saved
+/// under a temporary name, and listed under its own only once the pages
+/// it names are durable and so is its file, so whatever lists a run's
+/// keyframes sees only ones that restore, however the recording ends. A
+/// flush comes every [`KEYFRAMES_PER_FLUSH`] keyframes, and the recording
+/// flushes once more when it ends.
+#[derive(Debug)]
+pub struct Taking {
+    /// The keyframe the machine was restored from or last took, or none
+    /// before the first, which then holds every page.
+    pub parent: Option<u64>,
+    pub spacing: Spacing,
+    pub memory: Memory,
+    /// The keyframes saved since the last flush, oldest first.
+    pending: Vec<Pending>,
+}
+
+/// A keyframe saved and not yet flushed: where it is, and where it goes.
+#[derive(Debug)]
+struct Pending {
+    tmp: PathBuf,
+    path: PathBuf,
+}
+
+impl Taking {
+    /// Keyframes over the one at `parent`, whose memory is `memory`, for
+    /// the recording in `run_dir`. Keyframes an execution that was killed
+    /// left there under temporary names go first; the caller holds the
+    /// run's executing lock, so no other execution is saving here now.
+    pub fn new(run_dir: &Path, parent: Option<u64>, memory: Memory) -> Result<Taking> {
+        remove_unflushed(run_dir)?;
+        Ok(Taking {
+            parent,
+            spacing: Spacing::default(),
+            memory,
+            pending: Vec::new(),
+        })
+    }
+
+    /// Takes a keyframe of the machine where it is, holding only the pages
+    /// whose contents changed since the keyframe at `parent`, saves it in
+    /// `run_dir` and names it the next keyframe's parent, then flushes
+    /// once [`KEYFRAMES_PER_FLUSH`] have gathered.
+    pub fn take(&mut self, machine: &mut Machine, run_dir: &Path, store: &mut Store) -> Result<()> {
+        let mut kf = machine.keyframe(&mut StorePages(store), self.parent)?;
+        self.memory.trim(kf.parent, &mut kf.pages)?;
+        self.save(run_dir, &kf, store)
+    }
+
+    /// Saves `kf`, whose pages are in `store`, in `run_dir` under a
+    /// temporary name, names it the next keyframe's parent, and flushes
+    /// once [`KEYFRAMES_PER_FLUSH`] keyframes have gathered.
+    fn save(&mut self, run_dir: &Path, kf: &Keyframe, store: &Store) -> Result<()> {
+        let path = path(run_dir, kf.step);
+        let tmp = crate::image::temp_beside(&path);
+        fs::create_dir_all(run_dir.join(DIR))?;
+        fs::write(&tmp, encode(kf)?).with_context(|| format!("writing {}", tmp.display()))?;
+        self.pending.push(Pending { tmp, path });
+        self.parent = Some(kf.step);
+        self.spacing.kept();
+        if self.pending.len() >= KEYFRAMES_PER_FLUSH {
+            self.flush(store)?;
+        }
+        Ok(())
+    }
+
+    /// Makes the pages put since the last flush durable, then each
+    /// keyframe saved since, oldest first, and lists each under its own
+    /// name. The pages first, then the keyframes naming them, so a crash
+    /// never leaves a listed keyframe whose pages are gone.
+    pub fn flush(&mut self, store: &Store) -> Result<()> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        store.sync()?;
+        for Pending { tmp, path } in self.pending.drain(..) {
+            fs::File::open(&tmp)
+                .and_then(|f| f.sync_all())
+                .with_context(|| format!("flushing {}", tmp.display()))?;
+            fs::rename(&tmp, &path)
+                .with_context(|| format!("renaming {} into place", tmp.display()))?;
+        }
+        Ok(())
+    }
+
+    /// How many keyframes are saved and not yet flushed.
+    pub fn unflushed(&self) -> usize {
+        self.pending.len()
+    }
+}
+
+/// Removes the keyframes left under temporary names in `run_dir` by
+/// executions that are gone, which never flushed them.
+fn remove_unflushed(run_dir: &Path) -> Result<()> {
+    let dir = run_dir.join(DIR);
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
+    };
+    for entry in entries {
+        let path = entry?.path();
+        let Some(pid) = crate::image::temp_writer(&path) else {
+            continue;
+        };
+        if crate::gc::alive(pid) {
+            continue;
+        }
+        fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+    }
     Ok(())
 }
 
@@ -1369,5 +1472,83 @@ mod tests {
             "{message}"
         );
         assert!(message.contains("2400"), "{message}");
+    }
+}
+
+#[cfg(test)]
+mod taking_tests {
+    // A recording's keyframes are listed in batches: each is saved under a
+    // temporary name, and listed under its own only when the batch is
+    // flushed, after the store's pages. The tests save keyframes of made-up
+    // pages into a store of their own and read the run directory back.
+    use super::*;
+
+    /// A fresh run directory and page store for one test.
+    fn setup(name: &str) -> (PathBuf, Store) {
+        let dir = std::env::temp_dir().join(format!("rewind-taking-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("store")).unwrap();
+        (dir.join("run"), store)
+    }
+
+    /// A keyframe at `step` naming one page.
+    fn keyframe(step: u64) -> Keyframe {
+        let mut kf = Keyframe::default();
+        kf.step = step;
+        kf.pages = vec![(1, [step as u8; 32])];
+        kf
+    }
+
+    /// Keyframes saved one at a time are listed only once
+    /// KEYFRAMES_PER_FLUSH of them have gathered, and then all of them, in
+    /// order, each reading back as saved; a flush lists the rest.
+    #[test]
+    fn keyframes_are_listed_a_batch_at_a_time() {
+        let (run, store) = setup("batch");
+        let mut taking = Taking::new(&run, None, Memory::new(8)).unwrap();
+        for step in 1..KEYFRAMES_PER_FLUSH as u64 {
+            taking.save(&run, &keyframe(step), &store).unwrap();
+            assert!(own_steps(&run).is_empty(), "step {step}");
+            assert_eq!(taking.unflushed(), step as usize);
+            assert_eq!(taking.parent, Some(step));
+        }
+        taking
+            .save(&run, &keyframe(KEYFRAMES_PER_FLUSH as u64), &store)
+            .unwrap();
+        let listed: Vec<u64> = (1..=KEYFRAMES_PER_FLUSH as u64).collect();
+        assert_eq!(own_steps(&run), listed);
+        assert_eq!(taking.unflushed(), 0);
+        let layers = Layers::open(&run, None).unwrap();
+        assert_eq!(layers.load(3).unwrap().pages, keyframe(3).pages);
+
+        taking.save(&run, &keyframe(20), &store).unwrap();
+        taking.save(&run, &keyframe(21), &store).unwrap();
+        assert_eq!(own_steps(&run), listed);
+        taking.flush(&store).unwrap();
+        let mut all = listed.clone();
+        all.extend([20, 21]);
+        assert_eq!(own_steps(&run), all);
+        assert_eq!(taking.unflushed(), 0);
+        taking.flush(&store).unwrap();
+        fs::remove_dir_all(run.parent().unwrap()).unwrap();
+    }
+
+    /// A keyframe an execution that is gone left under a temporary name
+    /// is removed when the next execution starts taking keyframes; one a
+    /// live process is writing, named for this process, stays.
+    #[test]
+    fn unflushed_keyframes_of_a_gone_execution_are_removed() {
+        let (run, _store) = setup("stale");
+        fs::create_dir_all(run.join(DIR)).unwrap();
+        let gone = run.join(DIR).join(format!("{:016}.tmp-{}-0", 5, u32::MAX));
+        let live = crate::image::temp_beside(&path(&run, 6));
+        fs::write(&gone, b"half").unwrap();
+        fs::write(&live, b"half").unwrap();
+        Taking::new(&run, None, Memory::new(8)).unwrap();
+        assert!(!gone.exists());
+        assert!(live.exists());
+        assert!(own_steps(&run).is_empty());
+        fs::remove_dir_all(run.parent().unwrap()).unwrap();
     }
 }

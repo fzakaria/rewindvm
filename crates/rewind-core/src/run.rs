@@ -914,40 +914,32 @@ impl Run {
                 // whole machine after the job ran even when the job was too
                 // short for a second keyframe by its work. A run whose job
                 // exited before the shared step has passed its exit.
-                let mut spacing = crate::keyframes::Spacing::default();
+                let mut taking = crate::keyframes::Taking::new(&dir, parent, memory)?;
                 recorder.pause_at_exit = recorder.status.is_none();
                 let mut outcome = crate::keyframes::run_with_keyframes(
                     &mut machine,
                     &mut recorder,
                     &dir,
                     store,
-                    &mut parent,
-                    &mut spacing,
-                    &mut memory,
+                    &mut taking,
                 )?;
                 if let Outcome::Paused = outcome {
                     recorder.pause_at_exit = false;
-                    if parent != Some(machine.step()) {
-                        crate::keyframes::take(
-                            &mut machine,
-                            &dir,
-                            store,
-                            &mut parent,
-                            &mut memory,
-                        )?;
-                        spacing.kept();
+                    if taking.parent != Some(machine.step()) {
+                        taking.take(&mut machine, &dir, store)?;
                     }
                     outcome = crate::keyframes::run_with_keyframes(
                         &mut machine,
                         &mut recorder,
                         &dir,
                         store,
-                        &mut parent,
-                        &mut spacing,
-                        &mut memory,
+                        &mut taking,
                     )?;
                 }
-                store.sync()?;
+
+                // The last keyframes, and the marker only once every one
+                // of them is listed.
+                taking.flush(store)?;
                 crate::keyframes::mark_taken(&dir)?;
                 outcome
             }

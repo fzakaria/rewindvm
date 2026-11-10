@@ -298,7 +298,7 @@ fn named_image(dir: &Path) -> Result<Option<PathBuf>> {
 const PROC: &str = "/proc";
 
 /// Whether a process with id `pid` is alive.
-fn alive(pid: u32) -> bool {
+pub(crate) fn alive(pid: u32) -> bool {
     Path::new(PROC).join(pid.to_string()).exists()
 }
 
