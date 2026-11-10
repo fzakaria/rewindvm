@@ -23,13 +23,14 @@
 //! side by side a selection stays in the run's side it started in.
 
 use std::ops::Range;
+use std::rc::Rc;
 use std::time::Duration;
 
 use futures::StreamExt;
 use gpui::{
-    AnyElement, Context, CursorStyle, Div, FontWeight, HighlightStyle, MouseButton, Role,
-    ScrollStrategy, SharedString, UniformListScrollHandle, WeakEntity, div, prelude::*, px,
-    relative, rgb, uniform_list,
+    AnyElement, Context, CursorStyle, Div, FontWeight, HighlightStyle, MouseButton, MouseMoveEvent,
+    MouseUpEvent, Pixels, Point, Role, ScrollStrategy, SharedString, UniformListScrollHandle,
+    WeakEntity, div, prelude::*, px, relative, rgb, uniform_list,
 };
 
 use crate::answers::FileKey;
@@ -1378,6 +1379,24 @@ fn jumps_of(panel: &FileDiffPanel, cell: &Cell, scrubber: &WeakEntity<Scrubber>)
     })
 }
 
+/// The differing part of line `row` of `surface` under the pointer at
+/// `at`, of a hex dump line's `parts`: a byte's pair or its character.
+fn part_under<'a>(
+    this: &Scrubber,
+    surface: Surface,
+    row: usize,
+    parts: &'a [(Range<usize>, SharedString, Option<u64>)],
+    at: Point<Pixels>,
+) -> Option<&'a (Range<usize>, SharedString, Option<u64>)> {
+    let hit = this.selecting.registry.hit(surface, at)?;
+    if hit.line != row {
+        return None;
+    }
+    parts
+        .iter()
+        .find(|(range, _, _)| range.start <= hit.offset && hit.offset < range.end)
+}
+
 /// Which of a row's two cells an element is, for its id.
 fn cell_id(row: usize, side: Side) -> SharedString {
     let side = match side {
@@ -1496,37 +1515,39 @@ fn half(
     }
 
     // A hex dump line: each differing byte's pair and character name its
-    // write, and the ones with a recorded write go to it.
-    let steps: Vec<(Range<usize>, u64)> = parts
-        .iter()
-        .filter_map(|(range, _, step)| step.map(|step| (range.clone(), step)))
-        .collect();
-    let notes: Vec<(Range<usize>, SharedString)> = parts
-        .into_iter()
-        .map(|(range, note, _)| (range, note))
-        .collect();
-    let clickable = steps.iter().map(|(range, _)| range.clone()).collect();
-    let interactive = text.interactive(id, move |text| {
-        text.on_click(clickable, move |i, _, cx| {
-            let Some(&(_, step)) = steps.get(i) else {
-                return;
-            };
-
-            // A press that ends a drag selecting text is not a click on
-            // the byte.
-            let _ = scrubber.update(cx, |this, cx| {
-                if this.selected_text().is_none() {
-                    this.jump_to_write(side, step, cx);
-                }
-            });
-        })
-        .tooltip(move |at, window, cx| {
-            let (_, note) = notes.iter().find(|(range, _)| range.contains(&at))?;
-            Some(tooltip(note.clone())(window, cx))
-        })
-    });
+    // write beside the pointer, and the ones with a recorded write go to
+    // it on a click. The byte under the pointer is found from where the
+    // line was drawn, as the source panel finds its values.
+    let parts = Rc::new(parts);
+    let hovered = parts.clone();
     place
-        .child(shifted(offset, interactive).text_color(rgb(theme::SOFT)))
+        .id(id)
+        .on_mouse_move(cx.listener(move |this, e: &MouseMoveEvent, _, cx| {
+            let note = part_under(this, surface, row, &hovered, e.position)
+                .map(|(_, note, _)| note.to_string());
+            this.show_value_note(note, e.position, cx);
+        }))
+        .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+            if !hovered {
+                this.show_value_note(None, Point::default(), cx);
+            }
+        }))
+        .on_mouse_up(
+            MouseButton::Left,
+            cx.listener(move |this, e: &MouseUpEvent, _, cx| {
+                // A press that ends a drag selecting text is not a click
+                // on the byte.
+                if this.selected_text().is_some() {
+                    return;
+                }
+                let Some(&(_, _, Some(step))) = part_under(this, surface, row, &parts, e.position)
+                else {
+                    return;
+                };
+                this.jump_to_write(side, step, cx);
+            }),
+        )
+        .child(shifted(offset, text).text_color(rgb(theme::SOFT)))
         .into_any_element()
 }
 

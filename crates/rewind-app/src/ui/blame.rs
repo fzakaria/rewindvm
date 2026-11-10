@@ -360,6 +360,18 @@ impl Scrubber {
                 .find(|(range, _)| range.start <= offset && offset < range.end)
                 .map(|(_, note)| note)
         });
+        self.show_value_note(note, at, cx);
+    }
+
+    /// Shows `note` beside the pointer at `at`, or no note for None. A
+    /// note already shown stays where it first showed while the pointer
+    /// moves over the same thing.
+    pub(super) fn show_value_note(
+        &mut self,
+        note: Option<String>,
+        at: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
         let was = self.blames.hover.as_ref().map(|(_, n)| n.clone());
         if note == was {
             return;
