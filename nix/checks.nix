@@ -1939,7 +1939,9 @@ in
   # recording. Its child writes the global at the same address in its own
   # address space first, and calls write first, which must stop gdb at
   # neither a watchpoint nor a breakpoint. x86 has no trap on reads alone,
-  # so `rwatch` is refused. Boots the VM, so it needs /dev/kvm.
+  # so `rwatch` is refused. One store over two watched values is a stop
+  # for each watch, at the same pc, the second told of without running.
+  # Boots the VM, so it needs /dev/kvm.
   gdb-watch =
     pkgs.runCommand "rewind-gdb-watch"
       {
@@ -1979,6 +1981,26 @@ in
         rewind gdb watch "$start" -- -batch -ex 'rwatch counter' -ex continue > read 2>&1 || true
         cat read
         grep -q 'Could not insert' read
+
+        # The 64-bit store at fields.c:19 writes both halves of the pair:
+        # the first continue stops for the low half, the second for the
+        # high half at the same pc, and the third at the store to the high
+        # half alone at line 20, with the value the first store left.
+        rewind run -q --clock exits --name fields --root ${gdbRoot} -- /bin/fields > /dev/null
+        exec=$(rewind events fields | grep 'execve("/bin/fields"' | awk '{print $1}')
+        rewind gdb fields "$exec" -- -batch -ex 'watch -l pair.fields.low' \
+          -ex 'watch -l pair.fields.high' -ex continue -ex 'print $pc' -ex continue \
+          -ex 'print $pc' -ex continue -ex 'print $pc' > pair 2>&1 || true
+        cat pair
+        grep -A3 'watchpoint 1: -location pair.fields.low' pair | grep -q 'New value = 1'
+        grep -A3 'watchpoint 2: -location pair.fields.high' pair | grep -q 'New value = 2'
+        grep -A3 'watchpoint 2: -location pair.fields.high' pair | grep -q 'Old value = 2'
+        grep -q 'New value = 5' pair
+        grep '^\$[123] = ' pair | awk '{print $5}' > pcs
+        test "$(wc -l < pcs)" = 3
+        test "$(sed -n 1p pcs)" = "$(sed -n 2p pcs)"
+        test "$(sed -n 2p pcs)" != "$(sed -n 3p pcs)"
+        test "$(grep -c 'left the recording\|SIGTRAP' pair)" = 0
         touch $out
       '';
 

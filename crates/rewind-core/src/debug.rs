@@ -45,7 +45,7 @@ use gdbstub::target::ext::libraries::{LibrariesSvr4, LibrariesSvr4Ops};
 use gdbstub::target::ext::thread_extra_info::{ThreadExtraInfo, ThreadExtraInfoOps};
 use gdbstub::target::{Target, TargetError, TargetResult};
 use gdbstub_arch::x86::reg::X86_64CoreRegs;
-use rewind_vmm::debug::{Access, DebugStop, MAX_TRAPS, Stepping, Trap};
+use rewind_vmm::debug::{Access, DebugStop, MAX_TRAPS, Stepping, Trap, TrapSet};
 use rewind_vmm::pv::{TaskLayout, pt_regs};
 use rewind_vmm::{Machine, Observer, Outcome};
 
@@ -604,6 +604,27 @@ impl Traps {
             .iter()
             .find(|w| (w.address..w.address + w.len).contains(&address))
             .copied()
+    }
+
+    /// The watches, as gdb set them, whose pieces are among `hit`, the
+    /// registers one access matched, each once, in the order of their
+    /// registers: one store can write the bytes of several.
+    fn watches_hit(&self, hit: TrapSet) -> Vec<Watch> {
+        let mut watches: Vec<Watch> = Vec::new();
+        for (i, trap) in self.registers().iter().enumerate() {
+            let Trap::Watch { address, .. } = trap else {
+                continue;
+            };
+            if !hit.contains(i) {
+                continue;
+            }
+            if let Some(watch) = self.watch_containing(*address)
+                && !watches.contains(&watch)
+            {
+                watches.push(watch);
+            }
+        }
+        watches
     }
 }
 
@@ -2271,7 +2292,10 @@ impl<'h> BlockingEventLoop for EventLoop<'h> {
                         .map_err(target_error)?;
                     return Ok(Event::TargetStopped(reason));
                 }
-                Outcome::Debug(DebugStop::Watchpoint { address: piece, .. }) => {
+                Outcome::Debug(DebugStop::Watchpoint {
+                    address: piece,
+                    traps: hits,
+                }) => {
                     let hit = target.traps.watch_containing(piece).map(GdbTrap::Watch);
                     target.arrived(hit.map(Move::Hit)).map_err(target_error)?;
 
@@ -2315,10 +2339,36 @@ impl<'h> BlockingEventLoop for EventLoop<'h> {
                             signal: Signal::SIGTRAP,
                         },
                     };
+
+                    // One store can write the bytes of several watches,
+                    // and gdb's stop names one, so each other watch the
+                    // store wrote is a stop of its own, told of next,
+                    // without running, as a kernel write's are.
+                    let others = target
+                        .traps
+                        .watches_hit(hits)
+                        .into_iter()
+                        .filter(|w| Some(GdbTrap::Watch(*w)) != hit)
+                        .map(|w| MultiThreadStopReason::Watch {
+                            tid,
+                            kind: w.kind,
+                            addr: w.address,
+                        });
                     if writes.is_empty() {
+                        let stops: std::collections::VecDeque<_> = others.collect();
+                        if !stops.is_empty() {
+                            target.queued = Some(Queued {
+                                at: target.position.clone(),
+                                stops,
+                            });
+                        }
                         return Ok(Event::TargetStopped(reason));
                     }
+                    let others: Vec<_> = others.collect();
                     let reason = target.tell(&writes, Some(reason)).map_err(target_error)?;
+                    if let Some(queued) = &mut target.queued {
+                        queued.stops.extend(others);
+                    }
                     return Ok(Event::TargetStopped(reason));
                 }
                 Outcome::Debug(stop @ (DebugStop::Branches | DebugStop::PassedBranches)) => {
