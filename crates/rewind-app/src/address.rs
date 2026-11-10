@@ -1,8 +1,9 @@
 //! The browser viewer's address: `?url=<rwd>&compare=<rwd>&step=<n>`,
 //! the export to open, the one to compare it with, and the step to put
-//! the playhead on. The page reads it at start, and the app writes it back
-//! as the playhead moves, so the address is always a link to what is on
-//! screen.
+//! the playhead on, then the tab on screen, the thread picked in the
+//! process tree and the text in the search box. The page reads it at
+//! start, and the app writes it back as any of them changes, so the
+//! address is always a link to what is on screen.
 
 use crate::request::{Request, Requests};
 
@@ -10,6 +11,37 @@ use crate::request::{Request, Requests};
 const URL: &str = "url";
 const COMPARE: &str = "compare";
 const STEP: &str = "step";
+const TAB: &str = "tab";
+const THREAD: &str = "thread";
+const SEARCH: &str = "search";
+
+/// The tabs of the right column a link can name: those the viewer opens
+/// from the recording alone. "At this step" is the tab a link without one
+/// shows; the file, source and runs tabs need the machine.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tab {
+    Compare,
+    Bookmarks,
+    Threads,
+}
+
+impl Tab {
+    /// The tab's name in the address.
+    pub fn name(self) -> &'static str {
+        match self {
+            Tab::Compare => "compare",
+            Tab::Bookmarks => "bookmarks",
+            Tab::Threads => "threads",
+        }
+    }
+
+    /// The tab an address names, if a link can name it.
+    pub fn parse(name: &str) -> Option<Tab> {
+        [Tab::Compare, Tab::Bookmarks, Tab::Threads]
+            .into_iter()
+            .find(|tab| tab.name() == name)
+    }
+}
 
 /// What the address asks the viewer to show.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -20,12 +52,18 @@ pub struct Address {
     pub compare: Option<String>,
     /// Where to put the playhead; None picks the failure, or the end.
     pub step: Option<u64>,
+    /// The tab of the right column to show; None shows "At this step".
+    pub tab: Option<Tab>,
+    /// The id of the thread to pick in the process tree.
+    pub thread: Option<u32>,
+    /// The text to search for, with the search box open.
+    pub search: Option<String>,
 }
 
 impl Address {
     /// The address a query string asks for, with or without its leading
-    /// `?`. Unknown parameters, empty values and a step that is not a
-    /// number are left out.
+    /// `?`. Unknown parameters, empty values, a step or thread that is not
+    /// a number and a tab a link cannot name are left out.
     pub fn parse(query: &str) -> Address {
         let mut address = Address::default();
         let query = query.strip_prefix('?').unwrap_or(query);
@@ -41,6 +79,9 @@ impl Address {
                 URL => address.url = Some(value),
                 COMPARE => address.compare = Some(value),
                 STEP => address.step = value.replace(',', "").parse().ok(),
+                TAB => address.tab = Tab::parse(&value),
+                THREAD => address.thread = value.parse().ok(),
+                SEARCH => address.search = Some(value),
                 _ => {}
             }
         }
@@ -60,6 +101,15 @@ impl Address {
         }
         if let Some(step) = self.step {
             query.push_str(&format!("&{STEP}={step}"));
+        }
+        if let Some(tab) = self.tab {
+            query.push_str(&format!("&{TAB}={}", tab.name()));
+        }
+        if let Some(thread) = self.thread {
+            query.push_str(&format!("&{THREAD}={thread}"));
+        }
+        if let Some(search) = &self.search {
+            query.push_str(&format!("&{SEARCH}={}", encode(search)));
         }
         query
     }
@@ -160,34 +210,47 @@ impl Fetches {
 
     /// The page hands back the exports fetched from `url` and `compare`:
     /// the number of the newest fetch of that pair still waited on, which
-    /// is then answered. An answer no fetch waits on takes a new number.
-    pub fn fetched(&mut self, url: &str, compare: Option<&str>) -> Request {
-        self.answered(|address| {
+    /// is then answered, and the address the fetch was started for, with
+    /// the step, the tab, the thread and the search the page hands back
+    /// none of. An answer no fetch waits on takes a new number and an
+    /// address of the two exports alone.
+    pub fn fetched(&mut self, url: &str, compare: Option<&str>) -> (Request, Address) {
+        let answered = self.answered(|address| {
             address.url.as_deref() == Some(url) && address.compare.as_deref() == compare
+        });
+        answered.unwrap_or_else(|| {
+            let address = Address {
+                url: Some(url.to_string()),
+                compare: compare.map(str::to_string),
+                ..Address::default()
+            };
+            (self.requests.issue(), address)
         })
     }
 
     /// The page could not fetch `url`: the number of the newest fetch
     /// still waited on that names `url`, as its export or as the one to
-    /// compare with, which is then answered.
+    /// compare with, which is then answered. An answer no fetch waits on
+    /// takes a new number.
     pub fn unfetched(&mut self, url: &str) -> Request {
-        self.answered(|address| {
+        let answered = self.answered(|address| {
             address.url.as_deref() == Some(url) || address.compare.as_deref() == Some(url)
-        })
+        });
+        match answered {
+            Some((request, _)) => request,
+            None => self.requests.issue(),
+        }
     }
 
     /// Takes the newest fetch still waited on whose address is `the_one`
-    /// off the list and gives its number, or a new number when there is
-    /// no such fetch.
-    fn answered(&mut self, the_one: impl Fn(&Address) -> bool) -> Request {
-        match self
+    /// off the list and gives its number and address, or None when there
+    /// is no such fetch.
+    fn answered(&mut self, the_one: impl Fn(&Address) -> bool) -> Option<(Request, Address)> {
+        let at = self
             .pending
             .iter()
-            .rposition(|(_, address)| the_one(address))
-        {
-            Some(at) => self.pending.remove(at).0,
-            None => self.requests.issue(),
-        }
+            .rposition(|(_, address)| the_one(address))?;
+        Some(self.pending.remove(at))
     }
 }
 
@@ -214,17 +277,17 @@ mod tests {
         let address = |url: &str, compare: Option<&str>| Address {
             url: Some(url.into()),
             compare: compare.map(str::to_string),
-            step: None,
+            ..Address::default()
         };
         let mut fetches = Fetches::default();
         let slow = fetches.start(&address("slow.rwd", Some("base.rwd")));
         let fast = fetches.start(&address("fast.rwd", None));
         let mut newest = Some(fast);
 
-        let arrived = fetches.fetched("fast.rwd", None);
+        let (arrived, _) = fetches.fetched("fast.rwd", None);
         assert_eq!(arrived, fast);
         assert!(!is_overtaken(newest, arrived));
-        let late = fetches.fetched("slow.rwd", Some("base.rwd"));
+        let (late, _) = fetches.fetched("slow.rwd", Some("base.rwd"));
         assert_eq!(late, slow);
         assert!(is_overtaken(newest, late));
 
@@ -243,9 +306,40 @@ mod tests {
         // no fetch waits on is newer than everything before it.
         let first = fetches.start(&address("same.rwd", None));
         let second = fetches.start(&address("same.rwd", None));
-        assert_eq!(fetches.fetched("same.rwd", None), second);
-        assert_eq!(fetches.fetched("same.rwd", None), first);
-        assert!(fetches.fetched("same.rwd", None) > second);
+        assert_eq!(fetches.fetched("same.rwd", None).0, second);
+        assert_eq!(fetches.fetched("same.rwd", None).0, first);
+        assert!(fetches.fetched("same.rwd", None).0 > second);
+    }
+
+    #[test]
+    fn an_answered_fetch_brings_back_the_view_it_was_started_for() {
+        // The page fetches by the two links alone and hands back only
+        // those: the step, the tab, the thread and the search the address
+        // asked for come back from the fetch the page answers. An answer
+        // no fetch waits on has the two links and nothing more.
+        let asked = Address {
+            url: Some("examples/bank.rwd".into()),
+            compare: Some("examples/bank-pass.rwd".into()),
+            step: Some(40),
+            tab: Some(Tab::Threads),
+            thread: Some(12),
+            search: Some("deposit".into()),
+        };
+        let mut fetches = Fetches::default();
+        let started = fetches.start(&asked);
+        let (request, address) =
+            fetches.fetched("examples/bank.rwd", Some("examples/bank-pass.rwd"));
+        assert_eq!(request, started);
+        assert_eq!(address, asked);
+
+        let (_, bare) = fetches.fetched("examples/bank.rwd", None);
+        assert_eq!(
+            bare,
+            Address {
+                url: Some("examples/bank.rwd".into()),
+                ..Address::default()
+            }
+        );
     }
 
     #[test]
@@ -323,6 +417,7 @@ mod tests {
             url: Some("https://ci.example/run.rwd?sig=a&b".into()),
             compare: Some("examples/mylib-pass.rwd".into()),
             step: Some(5775),
+            ..Address::default()
         };
         let query = address.query();
         assert_eq!(
@@ -339,7 +434,46 @@ mod tests {
             url: None,
             compare: None,
             step: Some(12),
+            ..Address::default()
         };
         assert_eq!(address.query(), "");
+    }
+
+    #[test]
+    fn the_address_carries_the_tab_the_thread_and_the_search() {
+        // The tab on screen, the thread picked in the tree and the text in
+        // the search box go into the link and read back. An address with
+        // the step alone, as links made before carry, still reads; a tab
+        // the viewer does not open from a link and a thread that is not a
+        // number are left out.
+        let address = Address {
+            url: Some("examples/bank.rwd".into()),
+            compare: None,
+            step: Some(40),
+            tab: Some(Tab::Threads),
+            thread: Some(12),
+            search: Some("deposit 5".into()),
+        };
+        let query = address.query();
+        assert_eq!(
+            query,
+            "?url=examples/bank.rwd&step=40&tab=threads&thread=12&search=deposit%205"
+        );
+        assert_eq!(Address::parse(&query), address);
+
+        let old = Address::parse("?url=examples/bank.rwd&step=40");
+        assert_eq!(
+            old,
+            Address {
+                url: Some("examples/bank.rwd".into()),
+                step: Some(40),
+                ..Address::default()
+            }
+        );
+        let odd = Address::parse("?url=a.rwd&tab=file&thread=main");
+        assert_eq!((odd.tab, odd.thread), (None, None));
+        for tab in [Tab::Compare, Tab::Bookmarks, Tab::Threads] {
+            assert_eq!(Tab::parse(tab.name()), Some(tab));
+        }
     }
 }

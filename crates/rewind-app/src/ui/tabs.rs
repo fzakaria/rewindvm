@@ -11,6 +11,7 @@
 
 use gpui::{Context, Div, MouseButton, Role, SharedString, div, prelude::*, px, rgb};
 
+use crate::address::Tab;
 use crate::describe::clip;
 use crate::theme::{self, size};
 use crate::ui::icons::Icon;
@@ -40,6 +41,33 @@ pub enum RightTab {
     Source,
     /// A lane per thread over a window of steps.
     Threads,
+}
+
+#[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
+impl RightTab {
+    /// The tab as a link to the browser viewer names it, for the tabs a
+    /// link can name: those the viewer opens from the recording alone.
+    pub fn linked(self) -> Option<Tab> {
+        match self {
+            RightTab::Compare => Some(Tab::Compare),
+            RightTab::Bookmarks => Some(Tab::Bookmarks),
+            RightTab::Threads => Some(Tab::Threads),
+            RightTab::AtStep
+            | RightTab::Runs
+            | RightTab::File
+            | RightTab::FileDiff
+            | RightTab::Source => None,
+        }
+    }
+
+    /// The tab a link names.
+    pub fn from_link(tab: Tab) -> RightTab {
+        match tab {
+            Tab::Compare => RightTab::Compare,
+            Tab::Bookmarks => RightTab::Bookmarks,
+            Tab::Threads => RightTab::Threads,
+        }
+    }
 }
 
 impl Scrubber {
@@ -197,5 +225,32 @@ impl Scrubber {
             bar = bar.child(item);
         }
         bar
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // The tabs as a link to the browser viewer names them.
+    use super::*;
+
+    #[test]
+    fn a_link_names_the_tabs_the_viewer_opens_from_the_recording() {
+        // The compare, bookmarks and threads tabs go into a link and come
+        // back as themselves. The file, source and runs tabs need the
+        // machine, and "At this step" is what a link without a tab shows,
+        // so none of them is named.
+        for tab in [RightTab::Compare, RightTab::Bookmarks, RightTab::Threads] {
+            let named = tab.linked().expect("named in a link");
+            assert_eq!(RightTab::from_link(named), tab);
+        }
+        for tab in [
+            RightTab::AtStep,
+            RightTab::Runs,
+            RightTab::File,
+            RightTab::FileDiff,
+            RightTab::Source,
+        ] {
+            assert_eq!(tab.linked(), None, "{tab:?}");
+        }
     }
 }

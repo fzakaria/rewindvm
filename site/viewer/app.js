@@ -4,10 +4,13 @@
 // of its own; this page does those for it, through window.rewindPage,
 // which crates/rewind-app/src/web.rs calls.
 //
-//     viewer/?url=<rwd>&compare=<rwd>&step=<n>
+//     viewer/?url=<rwd>&compare=<rwd>&step=<n>&tab=<tab>&thread=<tid>&search=<text>
 //
-// opens an export, compared with another, at a step. Relative links
-// resolve against this page, so the examples beside it open as
+// opens an export, compared with another, at a step, on a tab of the
+// right column, with a thread picked in the process tree and text in the
+// search box; crates/rewind-app/src/address.rs reads and writes the
+// address, and only the first part is needed. Relative links resolve
+// against this page, so the examples beside it open as
 // ?url=examples/philosophers.rwd.
 
 import { ZipRefusal, isZip, rwdFromZip } from "./zip.js";
@@ -355,9 +358,10 @@ async function fetchExport(url) {
   }
 }
 
-// Fetches the exports an address names and hands them to the app, or
-// tells it which one did not come.
-async function fetchRuns(url, compare, step) {
+// Fetches the two exports the app asks for and hands them back under
+// their links, or tells the app which one did not come. The app keeps the
+// rest of the address, the view to open them on, with the fetch.
+async function fetchRuns(url, compare) {
   say(null);
   const [run, other] = await Promise.all([
     fetchExport(url),
@@ -372,13 +376,7 @@ async function fetchRuns(url, compare, step) {
     return;
   }
   callApp(() =>
-    web.open_fetched(
-      run.bytes,
-      url,
-      other?.bytes,
-      compare ?? undefined,
-      step ?? undefined,
-    ),
+    web.open_fetched(run.bytes, url, other?.bytes, compare ?? undefined),
   );
 }
 
@@ -435,8 +433,9 @@ async function openFile(file) {
   callApp(() => web.open_file(inside.name, inside.bytes, token));
 }
 
-// The address follows what is on screen once the playhead rests, without
-// a history entry for every step.
+// The address follows what is on screen once the playhead, the tab, the
+// thread and the search rest, without a history entry for every step or
+// every letter typed.
 let addressTimer;
 function showAddress(query) {
   clearTimeout(addressTimer);

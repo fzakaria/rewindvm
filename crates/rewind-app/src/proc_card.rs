@@ -27,6 +27,22 @@ impl Pick {
     }
 }
 
+/// The row of `t`'s tree that a link's thread id names as of `step`.
+/// Linux hands ids out again, so of the rows with the id the one alive at
+/// the step is picked, else the last one started by then, else the first.
+pub fn pick_thread(t: &Timeline, tid: u32, step: u64) -> Option<Pick> {
+    let rows = || t.rows.iter().filter(|row| row.tid == tid);
+    let row = rows()
+        .find(|row| row.alive_at(step))
+        .or_else(|| {
+            rows()
+                .filter(|row| row.start <= step)
+                .max_by_key(|row| row.start)
+        })
+        .or_else(|| rows().min_by_key(|row| row.start))?;
+    Some(Pick::of(row))
+}
+
 /// Another row the card links to: a process's parent, or a thread's
 /// process.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -224,12 +240,47 @@ mod tests {
     // The card for rows of the model's small build, and of a trace with a
     // long command line, at steps before, at and after their ends.
     use super::*;
-    use crate::model::tests::{build, exec, fork, out};
+    use crate::model::tests::{build, exec, exit, fork, out};
     use rewind_trace::{Trace, signal};
 
     /// The row of `t`'s tree for `tid`.
     fn pick(t: &Timeline, tid: u32) -> Pick {
         Pick::of(t.rows.iter().find(|r| r.tid == tid).unwrap())
+    }
+
+    #[test]
+    fn a_thread_in_a_link_is_the_row_alive_at_the_step() {
+        // Thread 5 of test_pool runs from step 13 to 15: at step 14 the
+        // link's thread 5 is that row, and so it is at step 20, after the
+        // row ended, and at step 2, before it started. An id no row has
+        // names nothing. An id Linux handed out twice names the row alive
+        // at the step, or the last one started by then.
+        let t = build();
+        for step in [14, 20, 2] {
+            assert_eq!(pick_thread(&t, 5, step), Some(pick(&t, 5)), "step {step}");
+        }
+        assert_eq!(pick_thread(&t, 99, 14), None);
+
+        let events = vec![
+            exec(1, 1, &["init"]),
+            fork(2, 1, 7, false),
+            exit(3, 7, 7, 0, "first", false),
+            fork(4, 1, 7, false),
+            exit(5, 7, 7, 0, "second", false),
+        ];
+        let t = Timeline::new(
+            Trace {
+                events,
+                ..Default::default()
+            },
+            None,
+            None,
+        );
+        let start_at = |step| pick_thread(&t, 7, step).unwrap().start;
+        assert_eq!(
+            (start_at(2), start_at(3), start_at(4), start_at(9)),
+            (2, 2, 4, 4)
+        );
     }
 
     #[test]

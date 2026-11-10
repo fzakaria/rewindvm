@@ -82,26 +82,19 @@ mod web {
         archive::prefix(bytes).into()
     }
 
-    /// Opens the exports the page fetched for an address: `run` from
-    /// `url`, compared with `compare` from `compare_url`, at `step`.
+    /// Opens the exports the page fetched: `run` from `url`, compared with
+    /// `compare` from `compare_url`, on the view the address that asked
+    /// for the fetch names.
     #[wasm_bindgen]
     pub fn open_fetched(
         run: Vec<u8>,
         url: String,
         compare: Option<Vec<u8>>,
         compare_url: Option<String>,
-        step: Option<f64>,
     ) {
-        let address = Address {
-            url: Some(url),
-            compare: compare_url,
-            step: step.map(|step| step as u64),
-        };
-        // The fetch the page answers, by the links the fetch was given.
-        let request = page::fetched(
-            address.url.as_deref().unwrap_or_default(),
-            address.compare.as_deref(),
-        );
+        // The fetch the page answers, by the links the fetch was given,
+        // and the address it was started for.
+        let (request, address) = page::fetched(&url, compare_url.as_deref());
         let opened = session_of(&address, &run, compare.as_deref());
         page::deliver(match opened {
             Ok(session) => Delivery::Open {

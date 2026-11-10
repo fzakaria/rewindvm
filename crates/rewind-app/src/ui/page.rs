@@ -5,15 +5,23 @@
 use std::path::PathBuf;
 
 use futures::StreamExt;
-use gpui::Context;
+use gpui::{Context, Window};
 
 use crate::address::{Address, is_overtaken};
+use crate::proc_card::pick_thread;
 use crate::ui::link::unfetched_words;
 use crate::ui::scrubber::{NoticeTone, Scrubber};
-use crate::web::Delivery;
+use crate::ui::tabs::RightTab;
+use crate::web::{Delivery, absolute_url};
 
 /// What the app says of a file it opens in the browser.
 pub const NOT_UPLOADED: &str = "It is read in your browser and is not uploaded.";
+
+/// What the Copy link button's note says.
+pub const COPY_LINK_NOTE: &str = "Copies a link to this recording at the playhead, with the tab, the picked thread and the search as they are on screen. A recording opened from your disk has no link.";
+
+/// What the notice says once the link is on the clipboard.
+const LINK_COPIED: &str = "Link copied";
 
 /// The example recordings served next to the viewer, which open without
 /// CORS and without installing anything.
@@ -48,13 +56,15 @@ pub const EXAMPLES: [Example; 4] = [
 
 impl Scrubber {
     /// Takes what the page delivers for as long as the window is open.
-    pub(super) fn listen_to_page(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn listen_to_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(mut inbox) = crate::web::take_inbox() else {
             return;
         };
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             while let Some(delivery) = inbox.next().await {
-                let taken = this.update(cx, |this, cx| this.take_delivery(delivery, cx));
+                let taken = this.update_in(cx, |this, window, cx| {
+                    this.take_delivery(delivery, window, cx)
+                });
                 if taken.is_err() {
                     break;
                 }
@@ -63,7 +73,7 @@ impl Scrubber {
         .detach();
     }
 
-    fn take_delivery(&mut self, delivery: Delivery, cx: &mut Context<Self>) {
+    fn take_delivery(&mut self, delivery: Delivery, window: &mut Window, cx: &mut Context<Self>) {
         // What a fetch or file open older than the newest brings is
         // dropped: the newer one's run is on screen, or on its way.
         let request = delivery.request();
@@ -79,12 +89,9 @@ impl Scrubber {
                 session, address, ..
             } => {
                 self.loading = None;
-                let step = address.step;
-                self.address_bar.address = Address {
-                    step: None,
-                    ..address
-                };
-                self.show(*session, step, cx);
+                self.address_bar.opened(&address);
+                self.show(*session, address.step, cx);
+                self.show_view(&address, window, cx);
             }
             Delivery::Unfetched { url, answer, .. } => {
                 self.loading = None;
@@ -99,12 +106,44 @@ impl Scrubber {
         cx.notify();
     }
 
+    /// Opens the rest of the view `address` asks for, once its run is on
+    /// screen at its step: the thread picked in the process tree, the
+    /// tab, and the search box with its text. The thread goes first, as
+    /// picking one shows "At this step". A tab the run cannot show, as
+    /// the Compare tab of a run compared with nothing, stays closed.
+    fn show_view(&mut self, address: &Address, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        let compared = session.other.is_some();
+        let picked = address
+            .thread
+            .and_then(|tid| pick_thread(&session.run.timeline, tid, self.step));
+        if picked.is_some() {
+            self.pick_row(picked, cx);
+        }
+        match address.tab.map(RightTab::from_link) {
+            Some(RightTab::Threads) => self.open_lanes(cx),
+            Some(RightTab::Compare) if compared => self.select_tab(RightTab::Compare, cx),
+            Some(RightTab::Bookmarks) => self.select_tab(RightTab::Bookmarks, cx),
+            _ => {}
+        }
+        if let Some(text) = &address.search {
+            self.open_search(window, cx);
+            if let Some(search) = &self.shown.search {
+                search
+                    .input
+                    .update(cx, |input, cx| input.insert(text, window, cx));
+            }
+        }
+    }
+
     /// Opens an example served next to the viewer.
     pub(super) fn open_example(&mut self, example: &Example, cx: &mut Context<Self>) {
         let address = Address {
             url: Some(example.url.to_string()),
             compare: example.compare.map(str::to_string),
-            step: None,
+            ..Address::default()
         };
         crate::web::fetch(&address);
         cx.notify();
@@ -114,20 +153,60 @@ impl Scrubber {
     pub(super) fn open_link(&mut self, link: String, cx: &mut Context<Self>) {
         let address = Address {
             url: Some(link),
-            compare: None,
-            step: None,
+            ..Address::default()
         };
         crate::web::fetch(&address);
         cx.notify();
     }
 
-    /// Keeps the address bar on the exports on screen and the playhead.
-    /// Before a run is on screen the address the page was opened with
-    /// stays, so a link that did not open can be tried again.
-    pub(super) fn sync_address(&mut self) {
-        if self.session.is_none() {
+    /// The address of what is on screen: the exports, the playhead, the
+    /// tab, the thread picked in the process tree and the text in the
+    /// search box, when there is any. None before a run is on screen.
+    fn address_here(&self, cx: &Context<Self>) -> Option<Address> {
+        self.session.as_ref()?;
+        let search = self
+            .shown
+            .search
+            .as_ref()
+            .map(|search| search.input.read(cx).text().to_string())
+            .filter(|text| !text.is_empty());
+        Some(Address {
+            step: Some(self.step),
+            tab: self.right_tab.linked(),
+            thread: self.shown.picked_row.map(|pick| pick.tid),
+            search,
+            ..self.address_bar.address.clone()
+        })
+    }
+
+    /// Keeps the address bar on what is on screen. Before a run is on
+    /// screen the address the page was opened with stays, so a link that
+    /// did not open can be tried again.
+    pub(super) fn sync_address(&mut self, cx: &Context<Self>) {
+        let Some(address) = self.address_here(cx) else {
             return;
+        };
+        self.address_bar.show(address);
+    }
+
+    /// The link to what is on screen, for another browser: the page's
+    /// address with the query of [`Self::address_here`]. None before a
+    /// run is on screen, and for a run opened from a file, which no link
+    /// reaches.
+    pub(super) fn link_here(&self, cx: &Context<Self>) -> Option<String> {
+        let query = self.address_here(cx)?.query();
+        if query.is_empty() {
+            return None;
         }
-        self.address_bar.show(self.step);
+        Some(absolute_url(&query))
+    }
+
+    /// Puts the link to what is on screen on the clipboard, and says so.
+    pub(super) fn copy_link(&mut self, cx: &mut Context<Self>) {
+        let Some(link) = self.link_here(cx) else {
+            return;
+        };
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(link.clone()));
+        self.notify_user(NoticeTone::Info, LINK_COPIED, link, cx);
     }
 }

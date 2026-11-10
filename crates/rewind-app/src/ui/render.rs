@@ -54,7 +54,7 @@ impl Render for Scrubber {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_title(window);
         #[cfg(target_family = "wasm")]
-        self.sync_address();
+        self.sync_address(cx);
 
         // The selectable lines register where they land as this frame is
         // laid out.
@@ -1801,11 +1801,15 @@ impl Scrubber {
                     ),
             )
             .child(
-                div().flex().gap(px(size::CARD_GAP)).child(
-                    inspect("threads", "Show threads".into(), Availability::Enabled)
-                        .tooltip(tooltip(THREADS_NOTE))
-                        .on_click(cx.listener(|this, _, _, cx| this.toggle_lanes(cx))),
-                ),
+                div()
+                    .flex()
+                    .gap(px(size::CARD_GAP))
+                    .child(
+                        inspect("threads", "Show threads".into(), Availability::Enabled)
+                            .tooltip(tooltip(THREADS_NOTE))
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_lanes(cx))),
+                    )
+                    .children(self.render_copy_link(&inspect, cx)),
             );
         // The buttons stay at the foot of the column however long the
         // cards above them grow, which scroll instead.
@@ -2054,8 +2058,42 @@ impl Scrubber {
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
+impl Scrubber {
+    /// The desktop app has no link to copy: nothing beside Show threads.
+    fn render_copy_link(
+        &self,
+        _inspect: &dyn Fn(&'static str, String, Availability) -> gpui::Stateful<Div>,
+        _cx: &mut Context<Self>,
+    ) -> Option<gpui::Stateful<Div>> {
+        None
+    }
+}
+
 #[cfg(target_family = "wasm")]
 impl Scrubber {
+    /// The browser viewer's Copy link button, beside Show threads, made
+    /// with `inspect` as the other Inspect buttons are. It can be pressed
+    /// while there is a link to what is on screen: not for a run opened
+    /// from a file.
+    fn render_copy_link(
+        &self,
+        inspect: &dyn Fn(&'static str, String, Availability) -> gpui::Stateful<Div>,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::Stateful<Div>> {
+        use crate::ui::page::COPY_LINK_NOTE;
+
+        let availability = match self.link_here(cx) {
+            Some(_) => Availability::Enabled,
+            None => Availability::Disabled,
+        };
+        Some(
+            inspect("copy-link", "Copy link".into(), availability)
+                .tooltip(tooltip(COPY_LINK_NOTE))
+                .on_click(cx.listener(|this, _, _, cx| this.copy_link(cx))),
+        )
+    }
+
     /// What the browser viewer's start screen adds: where a file comes
     /// from, and the examples served beside the viewer, one row each with
     /// its title and the file it opens.

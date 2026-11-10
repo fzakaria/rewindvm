@@ -76,7 +76,7 @@ web-time = "1.1"
 # web dev shell and nix/web.nix provide it.
 wasm-bindgen = "=0.2.127"
 # The page's localStorage, for what the desktop app keeps in files.
-web-sys = { version = "0.3", features = ["console", "Storage", "Window"] }
+web-sys = { version = "0.3", features = ["console", "Location", "Storage", "Url", "Window"] }
 
 # build.rs reads the grammars' YAML and dumps the syntax set it compiles,
 # so the app loads the dump instead of parsing YAML at every start.

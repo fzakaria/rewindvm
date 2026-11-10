@@ -117,9 +117,9 @@ extern "C" {
     fn page_pick_file();
 
     /// Fetches the export at `url`, and the one at `compare` when given,
-    /// and hands them back with the step to show.
+    /// and hands them back under those links.
     #[wasm_bindgen(js_namespace = rewindPage, js_name = fetchRuns)]
-    fn page_fetch_runs(url: &str, compare: Option<String>, step: Option<f64>);
+    fn page_fetch_runs(url: &str, compare: Option<String>);
 
     /// Puts `query` in the address bar, without a new history entry.
     #[wasm_bindgen(js_namespace = rewindPage, js_name = showAddress)]
@@ -132,8 +132,8 @@ pub fn pick_file() {
 }
 
 /// The number of the fetch of `url` and `compare` the page now hands the
-/// exports of.
-pub fn fetched(url: &str, compare: Option<&str>) -> Request {
+/// exports of, and the address the fetch was started for.
+pub fn fetched(url: &str, compare: Option<&str>) -> (Request, Address) {
     FETCHES.with(|fetches| fetches.borrow_mut().fetched(url, compare))
 }
 
@@ -160,7 +160,9 @@ pub fn file_read(token: Option<u32>) -> Request {
     FETCHES.with(|fetches| fetches.borrow_mut().file_read(token))
 }
 
-/// Asks the page to fetch the exports `address` names.
+/// Asks the page to fetch the exports `address` names. The rest of the
+/// address, the view to open them on, waits with the fetch and comes
+/// back with the page's answer (see [`fetched`]).
 pub fn fetch(address: &Address) {
     let Some(url) = &address.url else {
         return;
@@ -170,17 +172,15 @@ pub fn fetch(address: &Address) {
         url: url.clone(),
         request,
     });
-    page_fetch_runs(
-        url,
-        address.compare.clone(),
-        address.step.map(|step| step as f64),
-    );
+    page_fetch_runs(url, address.compare.clone());
 }
 
 /// The address bar, kept on what is on screen.
 #[derive(Default)]
 pub struct AddressBar {
-    /// The exports on screen, as the address named them.
+    /// The exports on screen, as the address named them: the two links,
+    /// and nothing of the view, which is read off the screen each time
+    /// the address is shown.
     pub address: Address,
     /// The query last shown, so an unchanged one is not shown again; None
     /// until a run is on screen, so the first one is always shown, over
@@ -189,13 +189,26 @@ pub struct AddressBar {
 }
 
 impl AddressBar {
-    /// Shows the address of the exports on screen with the playhead at
-    /// `step`; the page waits for the playhead to rest before it does.
-    pub fn show(&mut self, step: u64) {
-        let address = Address {
-            step: Some(step),
-            ..self.address.clone()
+    /// Keeps the two links of `address`, the exports about to be shown,
+    /// for the addresses shown from now on.
+    pub fn opened(&mut self, address: &Address) {
+        self.address = Address {
+            url: address.url.clone(),
+            compare: address.compare.clone(),
+            ..Address::default()
         };
+    }
+
+    /// The compared export takes the shown one's place on screen, and the
+    /// shown one is compared with: the links swap too.
+    pub fn swapped(&mut self) {
+        std::mem::swap(&mut self.address.url, &mut self.address.compare);
+    }
+
+    /// Shows `address`: the exports on screen with the playhead, the tab,
+    /// the thread and the search as they are now. The page waits for them
+    /// to rest before it does.
+    pub fn show(&mut self, address: Address) {
         let query = address.query();
         if self.shown.as_ref() == Some(&query) {
             return;
@@ -203,4 +216,16 @@ impl AddressBar {
         page_show_address(&query);
         self.shown = Some(query);
     }
+}
+
+/// `url` made absolute against the page's address, for a link or a
+/// command used away from the page: a link as the address names it, or a
+/// query alone, which gives the page's own address with that query. A URL
+/// the browser cannot resolve is given as it is.
+pub fn absolute_url(url: &str) -> String {
+    let resolved = web_sys::window()
+        .and_then(|window| window.location().href().ok())
+        .and_then(|base| web_sys::Url::new_with_base(url, &base).ok())
+        .map(|resolved| resolved.href());
+    resolved.unwrap_or_else(|| url.to_string())
 }

@@ -596,7 +596,7 @@ impl Scrubber {
             page_newest: None,
         };
         #[cfg(target_family = "wasm")]
-        this.listen_to_page(cx);
+        this.listen_to_page(window, cx);
         if let Some(session) = launch.session {
             this.show(session, launch.step, cx);
             if launch.right == RightColumn::Source {
