@@ -215,6 +215,9 @@ pub const EXPORT_IN_DESKTOP_APP: &str = "Export writes a run recorded on your ma
 /// What reading a file at a step is doing, in the browser viewer's words.
 pub const READING_A_FILE: &str = "Reading a file at a step";
 
+/// What finding who wrote a value is doing, in the browser viewer's words.
+pub const BLAMING_A_VALUE: &str = "Finding who wrote a value";
+
 /// Where gdb or a shell starts: in the process of the event at the
 /// playhead, or in a process or thread picked in the tree.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -262,6 +265,12 @@ impl Replay {
 pub fn replay_unavailable(session: &Session, replay: Replay, importing: bool) -> Option<String> {
     if session.replays == Replays::AnotherWay {
         return Some(REPLAYS_ANOTHER_WAY.to_string());
+    }
+
+    // An export with answers says where threads were at the steps it
+    // answers, and why not at any other.
+    if replay == Replay::Where && session.run.answers.is_some() {
+        return None;
     }
     let origin = &session.run.origin;
     let needs = format!(
@@ -1553,6 +1562,31 @@ impl Scrubber {
         #[cfg(not(target_family = "wasm"))]
         let _ = right;
         self.in_desktop_app(title, said, cx);
+    }
+
+    /// The engine the panes that read files and locate threads ask about
+    /// the run on screen: the export's answers in front of the app's
+    /// engine, when the run came from an export written with answers.
+    pub(super) fn engine_for_run(&self) -> Arc<dyn Engine> {
+        let Some(session) = &self.session else {
+            return self.engine.clone();
+        };
+        let Some(answers) = &session.run.answers else {
+            return self.engine.clone();
+        };
+        Arc::new(crate::packed::Answering::new(
+            session.run.path.clone(),
+            answers.clone(),
+            self.engine.clone(),
+        ))
+    }
+
+    /// Whether the run on screen carries answers at the playhead, which
+    /// the browser viewer shows in place of the desktop app's notice.
+    pub(super) fn answered_here(&self) -> bool {
+        self.session
+            .as_ref()
+            .is_some_and(|session| session.run.answers_at(self.step))
     }
 
     /// Changes the body of a notice on screen.

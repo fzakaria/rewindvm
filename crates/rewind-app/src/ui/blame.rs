@@ -26,8 +26,9 @@ use crate::blame_jobs::{BlameEntry, BlameKey, Jobs, Start, Why};
 use crate::describe::thousands;
 use crate::source::Frame;
 use crate::theme::{self, layout, size};
+use crate::ui::RightColumn;
 use crate::ui::icons::Icon;
-use crate::ui::scrubber::Scrubber;
+use crate::ui::scrubber::{BLAMING_A_VALUE, Scrubber};
 use crate::ui::widgets::{Availability, ButtonStyle, button, icon, spinner, tooltip};
 use crate::view::View;
 
@@ -142,6 +143,14 @@ impl Scrubber {
         popover: Option<Point<Pixels>>,
         cx: &mut Context<Self>,
     ) {
+        // The browser viewer has no machine to search the recording on:
+        // a click says so, and a search ahead of one is not made.
+        if cfg!(target_family = "wasm") {
+            if popover.is_some() {
+                self.replay_in_desktop_app(BLAMING_A_VALUE, RightColumn::Source, cx);
+            }
+            return;
+        }
         let Some(session) = &self.session else {
             return;
         };

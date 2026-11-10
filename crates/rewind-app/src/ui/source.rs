@@ -135,8 +135,9 @@ impl Drop for SourcePanel {
 impl Scrubber {
     /// Opens the source panel at the playhead, in a tab of its own.
     pub(super) fn open_source(&mut self, cx: &mut Context<Self>) {
-        // The browser viewer has no machine to run the recording on.
-        if cfg!(target_family = "wasm") && self.session.is_some() {
+        // The browser viewer has no machine to run the recording on; at a
+        // step an export with answers answers, the source comes from them.
+        if cfg!(target_family = "wasm") && self.session.is_some() && !self.answered_here() {
             self.replay_in_desktop_app(Replay::Where.doing(), RightColumn::Source, cx);
             return;
         }
@@ -312,7 +313,10 @@ impl Scrubber {
         panel.progress = Progress::default();
         let request = panel.request;
         let key: PlaceKey = (run.clone(), thread, step, after);
-        let engine = self.engine.clone();
+        let engine = self.engine_for_run();
+        let Some(panel) = &mut self.shown.source else {
+            return;
+        };
 
         // The engine's lines come through a channel as it says them, and
         // the channel closes when the engine is done.

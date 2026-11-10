@@ -1,6 +1,7 @@
 //! A `.rwd` export: a zstd-compressed tar of a run's directory. Every
 //! export carries the manifest and trace, the run's summary in plain text,
-//! and the bookmarks the desktop app made; a replayable one also carries the keyframes, the pages they
+//! and the bookmarks the desktop app made; one written with answers also
+//! carries them (see [`crate::answers`]); a replayable one also carries the keyframes, the pages they
 //! name and the VM's inputs. `rewind export` writes them, and `rewind
 //! import` and the app read them through [`walk`].
 
@@ -8,6 +9,7 @@ use std::fmt;
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 
+use crate::answers::{ANSWERS, ANSWERS_DIR};
 use crate::manifest::{BOOKMARKS, KEYFRAMES_DIR, MANIFEST, TRACE};
 use crate::summary::SUMMARY;
 
@@ -57,6 +59,10 @@ pub enum Member {
     Summary,
     /// The desktop app's bookmarks.
     Bookmarks,
+    /// The index of the answers packed into the export.
+    Answers,
+    /// The bytes of a file the answers carry.
+    Answer,
     /// A keyframe, or the mark that the run took keyframes as it executed.
     Keyframe,
     /// A page's contents, under its hash.
@@ -81,6 +87,12 @@ impl Member {
         }
         if path == Path::new(BOOKMARKS) {
             return Member::Bookmarks;
+        }
+        if path == Path::new(ANSWERS) {
+            return Member::Answers;
+        }
+        if path.starts_with(ANSWERS_DIR) {
+            return Member::Answer;
         }
         if path.starts_with(KEYFRAMES_DIR) {
             return Member::Keyframe;
@@ -239,10 +251,10 @@ mod tests {
 
     #[test]
     fn members_come_out_in_order_each_named_for_what_it_is() {
-        // A view export's four members, then one of each kind a
-        // replayable export adds and one no export writes: each is handed
-        // over with its bytes, and the replay members make the export
-        // replayable.
+        // A view export's four members, then one of each kind an export
+        // with answers and a replayable export add and one no export
+        // writes: each is handed over with its bytes, and the replay
+        // members make the export replayable.
         let view = archive(&[
             ("trace.bin", b"trace"),
             ("manifest.json", b"{}"),
@@ -274,6 +286,8 @@ mod tests {
             ("trace.bin", b"trace"),
             ("keyframes/0000000000000100.kf", b"kf"),
             ("keyframes/taken", b""),
+            ("answers.json", b"{}"),
+            ("answers/0", b"bytes"),
             ("pages/00ff", &[0u8; 16]),
             ("inputs/kernel", b"kernel"),
             ("notes.txt", b"?"),
@@ -288,6 +302,8 @@ mod tests {
                 Member::Trace,
                 Member::Keyframe,
                 Member::Keyframe,
+                Member::Answers,
+                Member::Answer,
                 Member::Page,
                 Member::Input,
                 Member::Other,

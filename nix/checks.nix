@@ -1,7 +1,10 @@
 # `nix flake check`: everything CI asserts, offline.
 {
   pkgs,
+  rust,
   rewind,
+  app,
+  releaseDate,
   kernel,
   guest,
   gdb,
@@ -684,6 +687,112 @@ let
         EOF
         $CC -static -O1 -g -pthread -fdebug-prefix-map=$out/src=/src \
           -o $out/bin/pool main.c pool.c
+      '';
+
+  # A root for checks.answers: a program, built with its symbols, that
+  # writes a report to /tmp, starts a thread that prints, joins it, and
+  # exits 3.
+  answersRoot =
+    pkgs.runCommand "rewind-answers-root"
+      {
+        nativeBuildInputs = [ pkgs.pkgsStatic.stdenv.cc ];
+        dontStrip = true;
+      }
+      ''
+        mkdir -p $out/bin $out/src
+        cd $out/src
+        cat > report.c <<'EOF'
+        #include <pthread.h>
+        #include <stdio.h>
+
+        static void *worker(void *arg)
+        {
+          printf("worker wrote the report\n"); /* the write */
+          fflush(stdout);
+          return arg;
+        }
+
+        int main(void)
+        {
+          pthread_t t;
+          FILE *report = fopen("/tmp/report.txt", "w");
+
+          fputs("the answer is 42\n", report);
+          fclose(report);
+          pthread_create(&t, 0, worker, 0);
+          pthread_join(t, 0);
+          return 3;
+        }
+        EOF
+        $CC -static -O1 -g -pthread -fdebug-prefix-map=$out/src=/src \
+          -o $out/bin/report report.c
+      '';
+
+  # The path and bytes of the report answersRoot's program writes, and
+  # the function its thread prints in.
+  answersReport = {
+    path = "/tmp/report.txt";
+    bytes = "the answer is 42\n";
+    function = "worker";
+  };
+
+  # What checks.answers checks, `rewind export --with-answers`, and the
+  # export checks.answers-app reads. The program in answersRoot writes a
+  # report, prints from a thread and exits 3; a bookmark marks the
+  # thread's write. The export with answers answers
+  # at the failing step and at the bookmark: the thread at the bookmark
+  # is located in its function, as `rewind where` locates it, and the
+  # report reads back from its member whole at the failing step. An
+  # export without --with-answers carries no answers. The output holds
+  # the export, for checks.answers-app. Boots the VM, so it needs
+  # /dev/kvm.
+  answersExport =
+    pkgs.runCommand "rewind-answers"
+      {
+        nativeBuildInputs = [
+          rewind
+          gdb
+          pkgs.jq
+          pkgs.zstd
+        ];
+        requiredSystemFeatures = [ "kvm" ];
+      }
+      ''
+        export REWIND_HOME=$TMPDIR/rewind
+        # No debuginfod server: without a network, each of gdb's questions
+        # to it waits out a timeout.
+        export REWIND_DEBUGINFOD=/nonexistent
+
+        rewind run -q --clock exits --name report --root ${answersRoot} -- /bin/report || true
+        step=$(rewind events report | grep 'write(1, "worker' | awk '{print $1}')
+        dir=$(dirname "$(grep -l '"name": "report"' $REWIND_HOME/runs/*/manifest.json)")
+        echo "{\"version\": 1, \"marks\": [{\"step\": $step, \"note\": \"the write\"}]}" \
+          > $dir/bookmarks.json
+
+        mkdir -p $out
+        rewind export report --with-answers -o $out/report.rwd
+        rewind export report -o plain.rwd
+        if zstd -dc plain.rwd | tar -t | grep -qx answers.json; then exit 1; fi
+        zstd -dc $out/report.rwd | tar -t | tee members
+        grep -qx summary.txt members
+        zstd -dc $out/report.rwd | tar -xO answers.json > answers.json
+        head -c 4000 answers.json
+        echo
+
+        # The failing step and the bookmark, the thread at the bookmark in
+        # its function, and the report at the failing step.
+        failing=$( (rewind summary report || true) | sed -n 's/^failing step: \([0-9]*\),.*/\1/p')
+        jq -e --argjson s "$step" --argjson f "$failing" \
+          '[.steps[].step] == ([$s, $f] | sort)' answers.json
+        jq -e --argjson s "$step" --arg function ${answersReport.function} \
+          '.steps[] | select(.step == $s) | .why == [{"what": "bookmark", "note": "the write"}]
+            and any(.threads[]; try (.place.located
+              | .frames[.chosen].function == $function) catch false)' answers.json
+        member=$(jq -r --argjson f "$failing" --arg path ${answersReport.path} \
+          '.steps[] | select(.step == $f) | .files[] | select(.path == $path and .kept == "whole")
+            | .member' answers.json)
+        printf '${answersReport.bytes}' > expected
+        zstd -dc $out/report.rwd | tar -xO "$member" | cmp - expected
       '';
 
   # A root for checks.where-idle: a program built from 200 source files
@@ -4045,6 +4154,29 @@ in
         grep -q 'no run matches' missing
         touch $out
       '';
+
+  # checks.answers: `rewind export --with-answers` (answersExport).
+  answers = answersExport;
+
+  # checks.answers-app: the export checks.answers wrote, read as the
+  # browser viewer reads one, through the app's own code: the run opened
+  # from the export's bytes, and the engine the scrubber gives its panes
+  # asked for the report at the step the app marks as the failure and for
+  # the thread at the bookmark. The app's test that does so is ignored in
+  # the app's own build, which has no such export.
+  answers-app = rust.craneLib.cargoTest (
+    rust.app
+    // {
+      pname = "rewind-app-answers";
+      inherit (app) cargoArtifacts;
+      REWIND_RELEASE_DATE = releaseDate;
+      REWIND_ANSWERS_EXPORT = "${answersExport}/report.rwd";
+      REWIND_ANSWERS_PATH = answersReport.path;
+      REWIND_ANSWERS_BYTES = answersReport.bytes;
+      REWIND_ANSWERS_FUNCTION = answersReport.function;
+      cargoTestExtraArgs = "--lib -- --ignored --exact packed::tests::an_engines_export_with_answers_reads_back_through_the_app";
+    }
+  );
 
   # checks.trace-properties: the properties `rewind check --property`
   # decides from the trace alone, each on a shell job in the busybox root

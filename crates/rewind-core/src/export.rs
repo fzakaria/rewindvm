@@ -4,16 +4,20 @@
 //! run's `manifest.json` and `trace.bin`, which is everything the scrubber
 //! needs to show the run, `summary.txt`, the run in plain text as `rewind
 //! summary` prints it, for a person or a program without the scrubber, and
-//! the desktop app's bookmarks of the run when it has any. A replayable
-//! export adds what another machine needs to run it again: the keyframes,
-//! the pages they use, the input image, and the guest kernel and initramfs
-//! the run booted.
+//! the desktop app's bookmarks of the run when it has any. An export
+//! written with answers carries what a replay found at the run's failing
+//! step, its broken assertions and its bookmarks (see
+//! [`rewind_trace::answers`]). A replayable export adds what another
+//! machine needs to run it again: the keyframes, the pages they use, the
+//! input image, and the guest kernel and initramfs the run booted.
 //!
 //! ```text
 //! manifest.json
 //! summary.txt
 //! trace.bin
 //! bookmarks.json               when the run has bookmarks
+//! answers.json                 with answers only: the index
+//! answers/<n>                  with answers only: a file's bytes
 //! keyframes/<step>.kf          replayable only
 //! pages/<hex hash>             replayable only: 4 KiB page contents
 //! inputs/kernel                replayable only
@@ -32,6 +36,7 @@ use rewind_store::{Hash, Store, ZERO_PAGE, hex};
 use crate::home::Home;
 use crate::keyframes;
 use crate::run::{BOOKMARKS, MANIFEST, Manifest, Run, SpecExt, TRACE};
+use rewind_trace::answers::{ANSWERS, Packed};
 pub use rewind_trace::export::Contents;
 use rewind_trace::export::{
     COMPRESSION_LEVEL, Flow, IMAGE, INITRD, INPUTS_DIR, KERNEL, MAX_BOOKMARKS, Member, PAGES_DIR,
@@ -44,6 +49,29 @@ const PAGE_SIZE: usize = 4096;
 /// temporary name beside `out` and renamed into place once it is whole,
 /// so an export that fails leaves a file already at `out` as it was.
 pub fn export(home: &Home, run: &Run, contents: Contents, out: &Path) -> Result<()> {
+    export_answering(home, run, contents, None, out)
+}
+
+/// Writes `run` to `out` as [`export`] does, with `answers`, what a replay
+/// of the run found, packed in after the bookmarks.
+pub fn export_with_answers(
+    home: &Home,
+    run: &Run,
+    contents: Contents,
+    answers: &Packed,
+    out: &Path,
+) -> Result<()> {
+    export_answering(home, run, contents, Some(answers), out)
+}
+
+/// Writes `run` to `out`, with `answers` when there are some.
+fn export_answering(
+    home: &Home,
+    run: &Run,
+    contents: Contents,
+    answers: Option<&Packed>,
+    out: &Path,
+) -> Result<()> {
     let create =
         |path: &Path| File::create(path).with_context(|| format!("creating {}", out.display()));
 
@@ -51,7 +79,7 @@ pub fn export(home: &Home, run: &Run, contents: Contents, out: &Path) -> Result<
     // earlier export to lose and cannot be renamed over, so the export is
     // written straight into it.
     if fs::metadata(out).is_ok_and(|meta| !meta.is_file()) {
-        return write_export(home, run, contents, create(out)?);
+        return write_export(home, run, (contents, answers), create(out)?);
     }
 
     // Any other destination is written beside itself and renamed into
@@ -60,7 +88,7 @@ pub fn export(home: &Home, run: &Run, contents: Contents, out: &Path) -> Result<
     let dest = fs::canonicalize(out).unwrap_or_else(|_| out.to_path_buf());
     let tmp = crate::image::temp_beside(&dest);
     let written = create(&tmp)
-        .and_then(|file| write_export(home, run, contents, file))
+        .and_then(|file| write_export(home, run, (contents, answers), file))
         .and_then(|()| crate::image::place(&tmp, &dest));
     if written.is_err() {
         let _ = fs::remove_file(&tmp);
@@ -68,8 +96,14 @@ pub fn export(home: &Home, run: &Run, contents: Contents, out: &Path) -> Result<
     written
 }
 
-/// Writes `run` into `file` as a `.rwd` file.
-fn write_export(home: &Home, run: &Run, contents: Contents, file: File) -> Result<()> {
+/// Writes `run` into `file` as a `.rwd` file, with `answers` when there
+/// are some.
+fn write_export(
+    home: &Home,
+    run: &Run,
+    (contents, answers): (Contents, Option<&Packed>),
+    file: File,
+) -> Result<()> {
     let encoder = zstd::Encoder::new(file, COMPRESSION_LEVEL)?;
     let mut tar = tar::Builder::new(encoder);
     tar.mode(tar::HeaderMode::Deterministic);
@@ -96,6 +130,15 @@ fn write_export(home: &Home, run: &Run, contents: Contents, file: File) -> Resul
             );
         }
         tar.append_path_with_name(&bookmarks, BOOKMARKS)?;
+    }
+
+    // The answers, before anything only a replay needs, where a reader
+    // that stops at the first of those still finds them.
+    if let Some(packed) = answers {
+        append_bytes(&mut tar, ANSWERS, &serde_json::to_vec(&packed.answers)?)?;
+        for (name, bytes) in &packed.members {
+            append_bytes(&mut tar, name, bytes)?;
+        }
     }
 
     if contents == Contents::Replayable {
@@ -964,6 +1007,51 @@ mod tests {
         export(&home, &run, Contents::View, &out).unwrap();
         let carried = member(&out, SUMMARY).expect("the export has no summary.txt");
         assert_eq!(String::from_utf8(carried).unwrap(), expected);
+        fs::remove_dir_all(home.root()).unwrap();
+    }
+
+    #[test]
+    fn answers_go_in_only_when_given_and_before_the_replay_members() {
+        // A run exported to replay without answers has no answers member;
+        // with them, its index and its file come after the bookmarks and
+        // before the first keyframe, page or input, and read back as they
+        // were packed.
+        use rewind_trace::answers::{Carried, Gathered, LIMITS, Why, pack};
+        let home = home("answers");
+        let run = replayable_run(&home, "answered");
+        let packed = pack(
+            vec![Gathered {
+                step: 1,
+                why: vec![Why::Failure],
+                threads: Vec::new(),
+                files: vec![("/build/out".into(), Some(b"written".to_vec()))],
+            }],
+            LIMITS,
+        );
+        let plain = home.root().join("plain.rwd");
+        export(&home, &run, Contents::Replayable, &plain).unwrap();
+        assert_eq!(member(&plain, ANSWERS), None);
+
+        let answered = home.root().join("answered.rwd");
+        export_with_answers(&home, &run, Contents::Replayable, &packed, &answered).unwrap();
+        let decoder = zstd::Decoder::new(File::open(&answered).unwrap()).unwrap();
+        let mut order = Vec::new();
+        rewind_trace::export::walk(decoder, |path, member, _, _| -> Result<Flow, String> {
+            order.push((path.display().to_string(), member));
+            Ok(Flow::Continue)
+        })
+        .unwrap();
+        let at = |name: &str| order.iter().position(|(n, _)| n == name).unwrap();
+        let first_replay = order.iter().position(|(_, m)| m.replay_only()).unwrap();
+        assert!(at(ANSWERS) < first_replay && at("answers/0") < first_replay);
+
+        let index = member(&answered, ANSWERS).unwrap();
+        let contents = [(
+            "answers/0".to_string(),
+            member(&answered, "answers/0").unwrap(),
+        )];
+        let read = Carried::read(&index, contents.into_iter().collect()).unwrap();
+        assert_eq!(read.answers, packed.answers);
         fs::remove_dir_all(home.root()).unwrap();
     }
 

@@ -10,6 +10,7 @@
 //! other run. The rest stays in the file for `rewind import`, which can
 //! replay it.
 
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -21,6 +22,7 @@ use serde_json::Value;
 
 use crate::bookmarks::{BOOKMARKS_FILE, MAX_BYTES as BOOKMARKS_MAX_BYTES};
 use rewind_trace::Trace;
+use rewind_trace::answers::{self, Carried};
 use rewind_trace::export::{self, Contents, Flow, Member};
 use rewind_trace::manifest::{MANIFEST, Manifest, RunId, TRACE};
 use rewind_trace::summary::{self, Recording, SUMMARY};
@@ -223,6 +225,9 @@ pub struct InMemory {
     pub summary: Option<Vec<u8>>,
     /// The bookmarks the desktop app made, when the export carries them.
     pub bookmarks: Option<Vec<u8>>,
+    /// What a replay found at the steps the export answers, when it was
+    /// written with answers.
+    pub answers: Option<Carried>,
     /// Whether it holds the keyframes, pages and inputs replay needs.
     pub replayable: bool,
 }
@@ -300,6 +305,9 @@ fn read_within(reader: impl Read, limits: MemberLimits) -> Result<InMemory> {
     let mut trace = None;
     let mut summary = None;
     let mut bookmarks = None;
+    let mut answers_index = None;
+    let mut answered: HashMap<String, Vec<u8>> = HashMap::new();
+    let mut answered_bytes = 0u64;
 
     // The manifest, the trace, and the summary and the bookmarks as
     // regular files no larger than the engine writes, are kept; every other member is
@@ -312,11 +320,30 @@ fn read_within(reader: impl Read, limits: MemberLimits) -> Result<InMemory> {
         if member.replay_only() && manifest.is_some() && trace.is_some() {
             return Ok(Flow::Stop);
         }
+        // A file the answers carry, within the limits an export packs
+        // them in, so a small archive cannot claim more.
+        if member == Member::Answer {
+            if size > answers::FILE_BYTES || answered_bytes + size > answers::TOTAL_BYTES {
+                bail!(
+                    "the archive's {} would take its answers past what an export carries",
+                    path.display()
+                );
+            }
+            let mut bytes = Vec::new();
+            reader.take(size).read_to_end(&mut bytes)?;
+            if bytes.len() as u64 != size {
+                bail!("the archive's {} is cut short", path.display());
+            }
+            answered_bytes += size;
+            answered.insert(path.to_string_lossy().into_owned(), bytes);
+            return Ok(Flow::Continue);
+        }
         let slot = match member {
             Member::Manifest => &mut manifest,
             Member::Trace => &mut trace,
             Member::Summary if size <= export::MAX_SUMMARY => &mut summary,
             Member::Bookmarks if size <= BOOKMARKS_MAX_BYTES => &mut bookmarks,
+            Member::Answers if size <= answers::MAX_INDEX => &mut answers_index,
             _ => return Ok(Flow::Continue),
         };
         let mut bytes = Vec::new();
@@ -329,11 +356,16 @@ fn read_within(reader: impl Read, limits: MemberLimits) -> Result<InMemory> {
     })?;
     let manifest = manifest.with_context(|| format!("the archive has no {MANIFEST}"))?;
     let trace = trace.with_context(|| format!("the archive has no {TRACE}"))?;
+    let answers = answers_index
+        .map(|index| Carried::read(&index, answered))
+        .transpose()
+        .with_context(|| format!("reading the archive's {}", answers::ANSWERS))?;
     Ok(InMemory {
         manifest,
         trace,
         summary,
         bookmarks,
+        answers,
         replayable: contents == Contents::Replayable,
     })
 }

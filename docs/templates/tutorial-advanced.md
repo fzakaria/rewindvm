@@ -689,7 +689,11 @@ replays on any machine with the same CPU vendor. Without `--replayable` it is
 the events alone, {{small}}: enough to read and to scrub in the app, whose
 Export button writes the replayable kind. Both kinds carry the run's
 bookmarks, and `summary.txt`, the run in plain text as `rewind summary`
-prints it: the verdict, the failing step and the last lines of output.
+prints it: the verdict, the failing step and the last lines of output. With
+`--with-answers`, an export also carries where each thread was and the
+files the job had written at the failing step, at each broken assertion
+and at each bookmark, which the browser viewer shows without a machine
+to replay on.
 
 The other machine also needs the features of the run's CPU model. A run
 without `--cpu` gets `v3`, whose features include ERMS, the fast `rep movsb`

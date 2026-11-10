@@ -22,6 +22,19 @@ pub(crate) struct ExportArgs {
     /// run.
     #[arg(long)]
     pub(crate) replayable: bool,
+    /// Replay the run and pack in, at the step it failed on, at each
+    /// assertion it broke and at each bookmark, where every live thread
+    /// of the job was and the files the job had written by then.
+    ///
+    /// For a reader without a machine to replay on, such as the browser
+    /// viewer. Source and file contents can say more of a job than its
+    /// trace does, so an export carries them only when asked; its
+    /// answers.json says they are inside. A file is kept up to 1 MiB and
+    /// the files up to 32 MiB between them; the export says which were
+    /// cut or left out. Takes gdb with Python on PATH, as `rewind where`
+    /// does.
+    #[arg(long)]
+    pub(crate) with_answers: bool,
 }
 
 pub(crate) fn export(home: &Home, args: ExportArgs) -> Result<ExitCode> {
@@ -29,6 +42,7 @@ pub(crate) fn export(home: &Home, args: ExportArgs) -> Result<ExitCode> {
         run,
         output,
         replayable,
+        with_answers,
     } = args;
     let run = Run::find(home, &run)?;
     let out = output.unwrap_or_else(|| PathBuf::from(format!("{}.rwd", run.manifest.id)));
@@ -37,7 +51,12 @@ pub(crate) fn export(home: &Home, args: ExportArgs) -> Result<ExitCode> {
     } else {
         export::Contents::View
     };
-    export::export(home, &run, contents, &out)?;
+    if with_answers {
+        let packed = crate::answers::gather(home, &run)?;
+        export::export_with_answers(home, &run, contents, &packed, &out)?;
+    } else {
+        export::export(home, &run, contents, &out)?;
+    }
     let size = std::fs::metadata(&out)?.len();
     eprintln!(
         "{} wrote {} ({})",

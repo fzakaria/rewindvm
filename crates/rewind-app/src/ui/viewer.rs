@@ -203,8 +203,11 @@ pub(super) fn unavailable(session: &Session) -> Option<&'static str> {
 }
 
 /// Why a run's files cannot be read, by where it was opened from, if they
-/// cannot.
+/// cannot. A run whose export carries answers is read from them.
 pub(super) fn unavailable_run(run: &Run) -> Option<&'static str> {
+    if run.answers.is_some() {
+        return None;
+    }
     match run.origin {
         Origin::Example => Some(EXAMPLE_REASON),
         Origin::Export(ref export) if export.replayable => Some(EXPORT_IMPORTING_REASON),
@@ -233,9 +236,10 @@ impl Scrubber {
         };
 
         // The browser viewer has no machine to run the recording on. A
-        // directory's files come from the trace, which needs none.
+        // directory's files come from the trace, which needs none, and at
+        // a step an export with answers answers, a file comes from them.
         let listed = session.run.timeline.has_files_under(&path);
-        if cfg!(target_family = "wasm") && !listed {
+        if cfg!(target_family = "wasm") && !listed && !self.answered_here() {
             self.replay_in_desktop_app(READING_A_FILE, RightColumn::AtStep, cx);
             return;
         }
@@ -298,14 +302,24 @@ impl Scrubber {
     }
 
     /// Whether the engine can read the files of the run the viewer is
-    /// open on. The browser viewer has no engine.
+    /// open on.
     fn engine_reads(&self) -> bool {
-        let readable = self
-            .shown
-            .viewer
-            .as_ref()
-            .is_some_and(|viewer| viewer.unavailable.is_none());
-        readable && !cfg!(target_family = "wasm")
+        let Some(viewer) = &self.shown.viewer else {
+            return false;
+        };
+        if viewer.unavailable.is_some() {
+            return false;
+        }
+        if !cfg!(target_family = "wasm") {
+            return true;
+        }
+
+        // The browser viewer has no engine. It reads a file, and not a
+        // directory, whose files come from the trace, from the answers
+        // an export carries.
+        self.session.as_ref().is_some_and(|session| {
+            session.run.answers.is_some() && !session.run.timeline.has_files_under(&viewer.path)
+        })
     }
 
     /// Shows the files the trace has under the viewer's path at the
@@ -569,7 +583,10 @@ impl Scrubber {
         } else {
             Expect::File
         };
-        let engine = self.engine.clone();
+        let engine = self.engine_for_run();
+        let Some(viewer) = &mut self.shown.viewer else {
+            return;
+        };
         let cancel = Cancel::default();
         viewer.in_flight = Some(cancel.clone());
 

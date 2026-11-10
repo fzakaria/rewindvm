@@ -66,6 +66,9 @@ pub enum EngineError {
     /// The request was cancelled, superseded by a newer one, before the
     /// engine answered.
     Cancelled,
+    /// The answers an export carries hold none for the request, in words
+    /// that say which they hold (see [`crate::packed`]).
+    Unanswered { message: String },
 }
 
 impl std::fmt::Display for EngineError {
@@ -84,6 +87,7 @@ impl std::fmt::Display for EngineError {
                 "The rewind command made run {id}, but it is not next to its parent or in the Rewind home."
             ),
             EngineError::Cancelled => write!(f, "The request was cancelled."),
+            EngineError::Unanswered { message } => write!(f, "{message}"),
         }
     }
 }

@@ -884,6 +884,19 @@ it was forked from, `first_difference`, the step where its trace first differs
 from its parent's (absent when the two are identical), and `shared_keyframes`,
 described under [Forks](#forks).
 
+`rewind export --with-answers` replays the run and packs in, at the
+failing step, at each broken assertion and at each bookmark, where each
+live thread of the job was, as `rewind where` says it, and the files
+the job had written by then: `answers.json` and a member under
+`answers/` for each file's bytes, ahead of anything only a replay needs.
+A file is kept to its first MiB and the files to 32 MiB between them,
+and the index says what was cut or left out. The browser viewer, which
+has no engine, reads files and source at those steps through
+`packed::Answering`, an engine that answers from the export and hands
+every other question on; at other steps it says the desktop app does
+it. Source and file contents say more of a job than a trace does, so a
+plain export carries none.
+
 `trace.bin` is a sequence of events. Each is its step as eight little-endian
 bytes, followed by the record exactly as the guest wrote it. `rewind-trace`
 reads it and answers the scrubber's questions: which processes were alive at a

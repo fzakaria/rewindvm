@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, Result, bail};
 use rewind_trace::Trace;
+use rewind_trace::answers::Carried;
 use rewind_trace::ending::{self, ExitStatus};
 use rewind_trace::io_records::{self, IoLog};
 use rewind_trace::manifest::{MANIFEST, Manifest, Parent, RunId, Source, Spec, TRACE, executing};
@@ -76,9 +77,19 @@ pub struct Run {
     /// The bookmarks file an export opened from memory carried; a run on
     /// disk keeps its bookmarks in its directory instead.
     pub carried_bookmarks: Option<Vec<u8>>,
+    /// What a replay found at some steps, which an export opened from
+    /// memory carried when it was written with answers: the browser
+    /// viewer reads files and source there without an engine.
+    pub answers: Option<Arc<Carried>>,
 }
 
 impl Run {
+    /// Whether the run carries answers at `step`, which the browser viewer
+    /// shows in place of the desktop app's notice.
+    pub fn answers_at(&self, step: u64) -> bool {
+        self.answers.as_ref().is_some_and(|a| a.at(step).is_some())
+    }
+
     /// Opens a run directory, a `.rwd` export, an http or https URL of
     /// one, or a bare trace file. The manifest or trace inside a run
     /// directory opens the directory, so one file picker reaches them all.
@@ -140,6 +151,7 @@ impl Run {
             .with_context(|| format!("reading the trace in {name}"))?;
         let mut run = Run::with_trace(path, origin, manifest, manifest_warning, trace, io);
         run.carried_bookmarks = export.bookmarks;
+        run.answers = export.answers.map(Arc::new);
         Ok(run)
     }
 
@@ -164,6 +176,7 @@ impl Run {
             timeline,
             io,
             carried_bookmarks: None,
+            answers: None,
         }
     }
 

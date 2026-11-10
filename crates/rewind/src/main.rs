@@ -1,5 +1,6 @@
 //! The `rewind` command.
 
+mod answers;
 mod cmd;
 mod color;
 mod diff_files;
@@ -380,6 +381,7 @@ impl Command {
             | Command::Threads(_)
             | Command::Blame(_) => progress::Says::Replays,
             Command::Diff(args) if args.reads_files() => progress::Says::Replays,
+            Command::Export(args) if args.with_answers => progress::Says::Replays,
             // `check` draws a status line of its own, and the others
             // execute runs or replay to compare traces.
             Command::Run(_)
@@ -631,6 +633,7 @@ mod tests {
             "rewind diff abc def --outputs",
             "rewind diff abc def --file /x",
             "rewind blame abc def /x",
+            "rewind export abc --with-answers",
         ] {
             assert_eq!(
                 cli(line).command.replays(),
@@ -644,6 +647,7 @@ mod tests {
             "rewind fork abc 5 --schedule 2",
             "rewind diff abc def",
             "rewind replay abc",
+            "rewind export abc",
             "rewind ls",
         ] {
             assert_eq!(

@@ -99,6 +99,7 @@
         {
           inherit
             pkgs
+            rust
             kernel
             guest
             nixseparatedebuginfod2
@@ -281,11 +282,14 @@
         import ./nix/checks.nix {
           inherit (p)
             pkgs
+            rust
             rewind
+            app
             kernel
             guest
             gdb
             ;
+          inherit releaseDate;
           module = self.nixosModules.default;
           rewindLib = self.lib.${system};
         }

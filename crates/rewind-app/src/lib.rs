@@ -32,6 +32,7 @@ pub mod license;
 pub mod listing;
 pub mod memo;
 pub mod model;
+pub mod packed;
 pub mod proc_card;
 pub mod request;
 pub mod run;
