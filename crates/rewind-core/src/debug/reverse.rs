@@ -733,9 +733,16 @@ impl Debuggee<'_> {
             }
 
             // A hit in another process leaves the fork between positions;
-            // the move's own hit is the next.
+            // the move's own hit is the next. A fork that stands on the
+            // move's breakpoint after an earlier move runs past it first,
+            // as the search that made the position did, or the trap would
+            // stop the fork again where it stands.
             Move::Hit(target) => {
                 self.machine.set_debug(Stepping::No, &target.registers())?;
+                let rip = self.machine.registers()?.rip;
+                if passes_first(mv, from, rip) && self.in_scope(rip)? {
+                    self.machine.pass_breakpoint()?;
+                }
                 loop {
                     match self.machine.run(None, &mut Ignore)? {
                         Outcome::Debug(DebugStop::Breakpoint(address)) => {
@@ -1161,13 +1168,18 @@ impl Debuggee<'_> {
                 }
                 self.machine.pass_breakpoint()?;
             }
+            // A breakpoint of gdb's at the instruction after the write is
+            // a hit where the write's move ended, as after any other move,
+            // and is passed so that a later hit of it is a move of its
+            // own.
             DebugStop::Watchpoint { address: piece, .. } => {
                 let hit = scan
                     .since
                     .then(Move::Hit(GdbTrap::Watch(self.watch_of(piece)?)));
                 if self.note_watch(scan, piece, hit.clone())? {
                     scan.since = hit.clone();
-                    self.listen(|| hit)?;
+                    self.listen(|| hit.clone())?;
+                    self.pass_breakpoint_here(scan, &hit)?;
                 } else {
                     self.listen_between()?;
                 }
@@ -1236,6 +1248,20 @@ impl Debuggee<'_> {
         self.refresh_threads();
         Ok(())
     }
+}
+
+/// Whether a replay of `mv` from `from`, the fork at the instruction
+/// `rip`, first runs past the breakpoint the move runs to. A search back
+/// passes a breakpoint of gdb's where a move ended before the fork runs
+/// on, so a hit of the breakpoint the fork stands on, after `from`, is the
+/// next arrival there. At a step's start the fork has run nothing of the
+/// step: a breakpoint at that instruction is hit at once, and that hit is
+/// the move.
+fn passes_first(mv: Move, from: &Position, rip: u64) -> bool {
+    let Move::Hit(GdbTrap::Breakpoint(address)) = mv else {
+        return false;
+    };
+    address == rip && !from.moves.is_empty()
 }
 
 /// Where a search back's window ending at step `before` starts: the
@@ -1317,6 +1343,32 @@ mod tests {
         assert_eq!(b.moves.split_last(), Some((breakpoint, a.moves.clone())));
         assert_ne!(a, b);
         assert_eq!(b, Position::start(7).then(Move::Steps(5)).then(breakpoint));
+    }
+
+    /// A replay of a run to a breakpoint starts by passing the breakpoint
+    /// when the fork stands on it after an earlier move, as after the hit
+    /// before of the same breakpoint or single steps that ended there. At
+    /// a step's start, at another instruction, and for a run to a watch,
+    /// the replay passes nothing.
+    #[test]
+    fn a_replayed_hit_first_passes_the_breakpoint_the_fork_stands_on() {
+        const ADD: u64 = 0x401185;
+        const ELSEWHERE: u64 = 0x401200;
+        let hit = Move::Hit(GdbTrap::Breakpoint(ADD));
+        let watch = Move::Hit(GdbTrap::Watch(Watch {
+            address: ADD,
+            len: 4,
+            kind: crate::debug::WatchKind::Write,
+        }));
+        let start = Position::start(7);
+        let after_a_hit = start.then(hit);
+        let after_steps = start.then(Move::Steps(3));
+        assert!(passes_first(hit, &after_a_hit, ADD));
+        assert!(passes_first(hit, &after_steps, ADD));
+        assert!(!passes_first(hit, &start, ADD));
+        assert!(!passes_first(hit, &after_a_hit, ELSEWHERE));
+        assert!(!passes_first(watch, &after_a_hit, ADD));
+        assert!(!passes_first(Move::Steps(1), &after_a_hit, ADD));
     }
 
     /// A list of a million moves, as many hits in one step make, is made

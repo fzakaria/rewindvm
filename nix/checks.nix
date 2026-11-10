@@ -2410,6 +2410,9 @@ in
   # breakpoint gone, through the lines before it into the round before. A reverse-stepi then a stepi land where they began.
   # With the watch and two breakpoints set, reverse-next goes back over
   # the dot's write() to the line before, the four debug registers held.
+  # A breakpoint hit five times in one step stops, run backwards, at each
+  # hit, the last first, and one at the instruction after a watched write
+  # stops after the write, the watch before it.
   # Run forwards again, the fork stops at the next add, the third, and
   # ends as the run did, on its recording. With nothing to stop at, a run backwards
   # reaches the program's exec, where its memory began. A watch on a buffer
@@ -2561,6 +2564,49 @@ in
           grep -q 'Reached end of recorded history' burst
           grep -q '^\$1 = 0$' burst
           test "$(grep -c 'unreadable' burst)" = 0
+
+          # Five hits of one breakpoint in that step, with no exit
+          # between: each run back stops at the hit before, the fifth
+          # round first, and a sixth run back reaches the program's exec.
+          # A session that hangs is cut short, and fails.
+          status=0
+          timeout -k 5 300 rewind gdb "burst-$clock" "$done" -- -batch -ex 'break burst.c:9' \
+            -ex reverse-continue -ex 'print i' -ex reverse-continue -ex 'print i' \
+            -ex reverse-continue -ex 'print i' -ex reverse-continue -ex 'print i' \
+            -ex reverse-continue -ex 'print i' -ex reverse-continue \
+            > burst-break 2>&1 || status=$?
+          cat burst-break
+          test "$status" != $timeout_term
+          test "$status" != $timeout_kill
+          test "$(grep -c 'hit Breakpoint 1, main () at .*burst.c:9' burst-break)" = 5
+          grep '^\$[0-9]* = ' burst-break > rounds
+          printf '$1 = 5\n$2 = 4\n$3 = 3\n$4 = 2\n$5 = 1\n' > expected
+          diff expected rounds
+          grep -q 'Reached end of recorded history' burst-break
+          test "$(grep -c 'fatal error\|Remote connection closed' burst-break)" = 0
+
+          # A breakpoint at the instruction after the add's write, with
+          # the watch set: run back, the breakpoint stops after the fifth
+          # write, then the watch before it, then the same for the fourth.
+          done=$(rewind events "reverse-$clock" | grep 'write(1, "done' | awk '{print $1}')
+          status=0
+          timeout -k 5 300 rewind gdb "reverse-$clock" "$done" -- -batch -ex 'watch total' \
+            -ex 'break reverse.c:8' -ex reverse-continue -ex reverse-continue \
+            -ex reverse-continue -ex reverse-continue > after-write 2>&1 || status=$?
+          cat after-write
+          test "$status" != $timeout_term
+          test "$status" != $timeout_kill
+          grep 'hit \|^Old value' after-write | sed 's/^Thread [0-9]* //; s/ at .*//' > hits
+          {
+            echo 'hit Breakpoint 2, add (n=5)'
+            echo 'hit Hardware watchpoint 1: total'
+            echo 'Old value = 15'
+            echo 'hit Breakpoint 2, add (n=4)'
+            echo 'hit Hardware watchpoint 1: total'
+            echo 'Old value = 10'
+          } > expected
+          diff expected hits
+          test "$(grep -c 'fatal error\|Remote connection closed' after-write)" = 0
 
           # The kernel fills the buffer in read(), byte by byte, after the
           # child that writes the pipe has slept, so other tasks ran
