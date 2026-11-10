@@ -6,34 +6,21 @@
 //! out, the epoch above all: by default it is the start of the day the run
 //! was made, so the same command a day later makes another run.
 
-use rewind_core::run::{BASE_CMDLINE, DEFAULT_CORES, DEFAULT_QUANTUM};
+use rewind_core::run::{BASE_CMDLINE, DEFAULT_CORES, DEFAULT_QUANTUM, Parent};
 use rewind_core::{Manifest, Source};
 use rewind_init::Output;
 
 /// The arguments after `rewind` that make the run `m` describes again: a
 /// fork of its parent, or a run or Nix build from boot. Inputs no
-/// command line sets, such as the quantum, are named in `Unset`.
+/// command line sets, such as the quantum or a fork's bounded schedule,
+/// are named in `Unset`.
 pub(crate) fn command(m: &Manifest) -> Result<Vec<String>, Unset> {
     let spec = &m.spec;
     let mut args: Vec<String> = Vec::new();
 
-    // A fork is its parent's run up to its step, then its own schedule,
-    // with its own longest stall; the ones it inherits are the parent's.
+    // A fork is made from its parent.
     if let Some(parent) = &m.parent {
-        let mut args = vec![
-            "fork".to_string(),
-            parent.run.to_string(),
-            parent.step.to_string(),
-            "--schedule".to_string(),
-            spec.schedule.to_string(),
-        ];
-        if !spec.stall_max.is_default() {
-            args.extend(["--stall-max".to_string(), spec.stall_max.to_string()]);
-        }
-        if let Some(seconds) = timed_out_after(m) {
-            args.extend(["--timeout".to_string(), seconds.to_string()]);
-        }
-        return Ok(args);
+        return fork_command(m, parent);
     }
 
     // Inputs this rewind always sets one way.
@@ -153,6 +140,62 @@ pub(crate) fn command(m: &Manifest) -> Result<Vec<String>, Unset> {
             command
         }
     })
+}
+
+/// The arguments after `rewind` that make the fork `m` of `parent` again.
+/// A fork is its parent's run up to its step, then its own schedule, with
+/// its own longest stall and, when it was given one, its own seed; the
+/// schedules and seeds from before its step are the parent's. `rewind
+/// check` makes forks `rewind fork` has no flags for, and those are named
+/// in `Unset`.
+fn fork_command(m: &Manifest, parent: &Parent) -> Result<Vec<String>, Unset> {
+    let spec = &m.spec;
+
+    // `rewind fork` perturbs from the fork's step to the end of the run.
+    if spec.schedule_until != u64::MAX {
+        return Err(Unset(format!(
+            "a schedule that stops at step {}, where `rewind fork` perturbs to the end of the run",
+            spec.schedule_until
+        )));
+    }
+
+    // The fork's own seeds: `rewind fork --seed` gives one, at the fork's
+    // step. A seed from before the step is the parent's.
+    let mut own = spec.reseeds.iter().filter(|r| r.step >= parent.step);
+    let seed = match (own.next(), own.next()) {
+        (None, _) => None,
+        (Some(reseed), None) if reseed.step == parent.step => Some(reseed.seed),
+        (Some(reseed), _) => {
+            return Err(Unset(format!(
+                "seed {} from step {}, where `rewind fork` gives a seed from the fork's step {}",
+                reseed.seed, reseed.step, parent.step
+            )));
+        }
+    };
+
+    // `rewind fork` refuses a fork that would repeat its parent.
+    if spec.schedule == 0 && seed.is_none() {
+        return Err(Unset(
+            "schedule 0 and no seed of its own, which `rewind fork` refuses".into(),
+        ));
+    }
+
+    let mut args = vec![
+        "fork".to_string(),
+        parent.run.to_string(),
+        parent.step.to_string(),
+    ];
+    flag(&mut args, "schedule", spec.schedule.to_string());
+    if let Some(seed) = seed {
+        flag(&mut args, "seed", seed.to_string());
+    }
+    if !spec.stall_max.is_default() {
+        flag(&mut args, "stall-max", spec.stall_max.to_string());
+    }
+    if let Some(seconds) = timed_out_after(m) {
+        flag(&mut args, "timeout", seconds.to_string());
+    }
+    Ok(args)
 }
 
 /// Adds `--name value` to `args`.
@@ -382,7 +425,7 @@ pub(crate) mod tests {
             stall_max: "100ms".parse().unwrap(),
         }];
         let mut m = manifest("x (fork)", Source::Image { root: "/r".into() }, s);
-        m.parent = Some(rewind_core::run::Parent {
+        m.parent = Some(Parent {
             run: rewind_core::run::RunId::parse("fedcba9876543210").unwrap(),
             step: 400,
         });
@@ -398,6 +441,57 @@ pub(crate) mod tests {
             command(&m).unwrap(),
             words("fork fedcba9876543210 400 --schedule 5 --stall-max 50ms")
         );
+    }
+
+    /// A fork of run fedcba9876543210 at step 400 under `spec`.
+    fn fork_at_400(spec: Spec) -> Manifest {
+        let mut m = manifest("x (fork)", Source::Image { root: "/r".into() }, spec);
+        m.parent = Some(Parent {
+            run: rewind_core::run::RunId::parse("fedcba9876543210").unwrap(),
+            step: 400,
+        });
+        m
+    }
+
+    #[test]
+    fn a_fork_given_a_seed_names_the_seed() {
+        // A fork whose RNG is reseeded at its own step, as `rewind fork
+        // --seed` makes one, under schedule 0 and under schedule 5. A
+        // reseed before the step is the parent's and takes no flag.
+        let mut s = spec(job(&["sh"], &[], "/")).fork(400, 0).reseeded(400, 7);
+        assert_eq!(
+            command(&fork_at_400(s.clone())).unwrap(),
+            words("fork fedcba9876543210 400 --schedule 0 --seed 7")
+        );
+        s.schedule = 5;
+        s = s.reseeded(300, 9);
+        assert_eq!(
+            command(&fork_at_400(s)).unwrap(),
+            words("fork fedcba9876543210 400 --schedule 5 --seed 7")
+        );
+    }
+
+    #[test]
+    fn a_fork_no_one_command_makes_is_named() {
+        // Forks as `rewind check` makes them and `rewind fork` cannot: a
+        // schedule that stops before the end of the run, a new seed that
+        // takes effect after the fork's step, and schedule 0 with no new
+        // seed. Each is named instead of a command that would make
+        // another run.
+        let forked = spec(job(&["sh"], &[], "/")).fork(400, 5);
+        let mut bounded = forked.clone();
+        bounded.schedule_until = 900;
+        let unset = command(&fork_at_400(bounded)).unwrap_err().0;
+        assert!(unset.contains("stops at step 900"), "{unset}");
+
+        let later = forked.reseeded(450, 7);
+        let unset = command(&fork_at_400(later)).unwrap_err().0;
+        assert!(unset.contains("seed 7 from step 450"), "{unset}");
+
+        let mut unperturbed = forked.clone();
+        unperturbed.schedule = 0;
+        let unset = command(&fork_at_400(unperturbed)).unwrap_err().0;
+        assert!(unset.contains("schedule 0"), "{unset}");
     }
 
     #[test]
