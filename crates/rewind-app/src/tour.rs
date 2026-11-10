@@ -112,7 +112,7 @@ pub const STOPS: [Stop; 6] = [
     Stop {
         anchor: Anchor::RunsPill,
         title: "Every run of this build",
-        body: "The runs pill, or the Runs tab beside At this step, shows every run of this build, drawn as a tree. A schedule is a numbered pattern of thread switches, pauses and late timers that Rewind adds to a run. Schedule 0 adds none: it is the run with its threads left alone. Under it hang its forks, each at the step it forked from, and the runs rewind check started from boot under other schedules; those that ended the way schedule 0 did fold into one row. Click a run to open it beside the run it hangs under; right-click it to compare, copy or remove it.",
+        body: "The runs pill, or the Runs tab beside At this step, shows every run of this build, drawn as a tree. A schedule is a numbered pattern of thread switches, pauses and late timers that Rewind adds to a run. Schedule 0 adds none: it is the run with its threads left alone. Under it hang its forks, each at the step it forked from, and the runs rewind check started from boot under other schedules; those that ended the way schedule 0 did fold into one row. Click a run to open it beside the run it hangs under; right-click it to compare it, copy its id or delete it.",
         playhead: Playhead::Divergence,
         needs: Needs::Family,
     },

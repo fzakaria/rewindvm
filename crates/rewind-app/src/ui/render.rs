@@ -2471,7 +2471,7 @@ const FORK_NOTE: &str = "Fork from here: runs this run again from the playhead u
 const FORWARD_NOTE: &str =
     "Forward again, after Back. Key: Alt+Right, or the mouse's forward button.";
 const EXPORT_NOTE: &str = "Writes this run to one .rwd file, with the machine snapshots and inputs another machine needs to open, replay and fork it.";
-const THREADS_NOTE: &str = "A lane per thread over a window of steps, a bar where the thread held the CPU, beside the compared run's. Rewind replays the window one step at a time in each run to find them. Key: t.";
+const THREADS_NOTE: &str = "A lane per thread over a window of steps, a bar where the thread held the CPU, beside the compared run's. The lanes are read from the context switches each run recorded. Key: t.";
 
 /// The amber button's note when it checks from here.
 fn check_note(schedules: u64, seeds: u64) -> String {
