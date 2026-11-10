@@ -2719,7 +2719,7 @@ in
         rewind replay threads | tee replay
         grep -q 'identical to the recording: .* context switches' replay
         rewind replay threads --from 300 | tee replay-from
-        grep -q 'identical to the recording from the snapshot' replay-from
+        grep -q 'identical to the recording from the keyframe' replay-from
         test "$(rewind events threads | grep -c 'record kind 1[45]')" = 0
         switches=$(rewind threads threads --json | wc -l)
         size=$(stat -c %s $REWIND_HOME/runs/*/trace.bin)
