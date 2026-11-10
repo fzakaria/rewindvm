@@ -580,7 +580,7 @@ impl Session {
         };
 
         // What each run did next, and what differs.
-        let name_here = |pid: u32| self.run.timeline.name_of(pid).map(str::to_string);
+        let name_here = |pid: u32| self.run.timeline.name_at(pid, point.step);
         let difference = describe::difference(
             party(&self.run, point.here),
             party(other, point.there),

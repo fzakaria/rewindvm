@@ -152,7 +152,14 @@ pub struct ProcRow {
     /// The thread id: the pid for a process row.
     pub tid: u32,
     pub kind: RowKind,
+    /// What the row is called from its process's last exec on; for a row
+    /// that never exec'd, at every step.
     pub label: String,
+    /// What the row was called before its process's last exec: each label
+    /// with the step of the exec that ended it, in step order. First what
+    /// a fork is called, until the first exec, then each program until the
+    /// next. Empty for a thread and for a process that never exec'd.
+    pub earlier: Vec<(u64, String)>,
     pub depth: usize,
     pub start: u64,
     pub end: Option<u64>,
@@ -163,6 +170,15 @@ pub struct ProcRow {
 impl ProcRow {
     pub fn alive_at(&self, step: u64) -> bool {
         self.start <= step && self.end.is_none_or(|end| step < end)
+    }
+
+    /// The row's label as of `step`: the program its process had exec'd
+    /// by then, or the label of a fork before its first exec.
+    pub fn label_at(&self, step: u64) -> &str {
+        self.earlier
+            .iter()
+            .find(|(until, _)| step < *until)
+            .map_or(&self.label, |(_, label)| label)
     }
 }
 
@@ -677,9 +693,38 @@ impl Timeline {
         self.trace.events.get(index)
     }
 
-    /// The display name of a pid, if the trace saw it.
+    /// The display name of a pid, if the trace saw it: of the last
+    /// process that had the pid, as the process ended. For what is said of
+    /// a pid over the whole run; an event's process is `name_at`'s.
     pub fn name_of(&self, pid: u32) -> Option<&str> {
         self.names.get(&pid).map(String::as_str)
+    }
+
+    /// The display name of the process that had `pid` at `step`, as the
+    /// process was then: the program it had exec'd by the step. A pid is
+    /// given out again once its process has exited, and a process execs
+    /// more than once, so the name depends on the step.
+    pub fn name_at(&self, pid: u32, step: u64) -> Option<String> {
+        let row = self.process_row_at(pid, step)?;
+        Some(command_name(row.label_at(step)))
+    }
+
+    /// The process tree's row of the process that had `pid` at `step`:
+    /// the one alive then, else the nearest before, else the first after,
+    /// as `Trace::process_at` finds a process.
+    fn process_row_at(&self, pid: u32, step: u64) -> Option<&ProcRow> {
+        let with_pid = || {
+            self.rows
+                .iter()
+                .filter(move |r| r.kind == RowKind::Process && r.pid == pid)
+        };
+        if let Some(alive) = with_pid().find(|r| r.alive_at(step)) {
+            return Some(alive);
+        }
+        let before = with_pid()
+            .filter(|r| r.start <= step)
+            .max_by_key(|r| r.start);
+        before.or_else(|| with_pid().min_by_key(|r| r.start))
     }
 
     /// How a file row is drawn at `step`.
@@ -1213,38 +1258,70 @@ fn process_rows(trace: &Trace, procs: &[Process]) -> Vec<ProcRow> {
 
     // Walk the tree depth first with an explicit stack, children pushed in
     // reverse so they pop in start order.
-    // Each stack entry carries the parent's command name, which names a
-    // child that forked without exec'ing.
+    // Each stack entry carries the parent's command name as of the fork,
+    // which names a child until the child execs.
     let mut rows = Vec::with_capacity(procs.len());
     let mut stack: Vec<(usize, usize, Option<String>)> =
         roots.iter().rev().map(|i| (*i, 0, None)).collect();
     while let Some((i, depth, parent_command)) = stack.pop() {
         let p = &procs[i];
         let comm = p.end.and_then(|end| comms.get(&(p.pid, end)));
-        let label = if p.execd && !p.argv.is_empty() {
-            program_label(&p.argv)
-        } else if let Some(comm) = comm {
-            comm.clone()
-        } else if p.pid == KTHREADD_PID && p.parent == 0 {
-            KTHREADD_NAME.to_string()
-        } else if p.parent == KTHREADD_PID {
-            KERNEL_THREAD_NAME.to_string()
-        } else if let Some(parent) = &parent_command {
-            format!("{parent} {FORK_SUFFIX}")
-        } else {
-            format!("pid {}", p.pid)
+
+        // What the process is called while it has not exec'd. The name it
+        // exited with is the name of its last program, so it names only a
+        // process that never exec'd.
+        let unexecd = |exit_name: Option<&String>| {
+            if let Some(comm) = exit_name {
+                comm.clone()
+            } else if p.pid == KTHREADD_PID && p.parent == 0 {
+                KTHREADD_NAME.to_string()
+            } else if p.parent == KTHREADD_PID {
+                KERNEL_THREAD_NAME.to_string()
+            } else if let Some(parent) = &parent_command {
+                format!("{parent} {FORK_SUFFIX}")
+            } else {
+                format!("pid {}", p.pid)
+            }
         };
-        let command = command_name(&label);
-        rows.push(ProcRow {
+        let execd = p.execd && !p.argv.is_empty();
+        let label = if execd {
+            program_label(&p.argv)
+        } else {
+            unexecd(comm)
+        };
+
+        // What the row was called up to each of its execs: a fork, then
+        // each program it exec'd but the last, which `label` holds.
+        let mut earlier = Vec::new();
+        if execd {
+            let mut current = unexecd(None);
+            for (at, argv) in &p.execs {
+                let next = match argv.is_empty() {
+                    true => current.clone(),
+                    false => program_label(argv),
+                };
+                earlier.push((*at, std::mem::replace(&mut current, next)));
+            }
+        }
+        let row = ProcRow {
             pid: p.pid,
             tid: p.pid,
             kind: RowKind::Process,
             label,
+            earlier,
             depth,
             start: p.start,
             end: p.end,
             status: p.status,
-        });
+        };
+
+        // Each child is named after the program this process ran when it
+        // forked the child.
+        for child in children[i].iter().rev() {
+            let command = command_name(row.label_at(procs[*child].start));
+            stack.push((*child, depth + 1, Some(command)));
+        }
+        rows.push(row);
 
         // Threads sit one level under their process, named by the name
         // they exited with when that differs from the process's own.
@@ -1259,15 +1336,12 @@ fn process_rows(trace: &Trace, procs: &[Process]) -> Vec<ProcRow> {
                 tid: *tid,
                 kind: RowKind::Thread,
                 label,
+                earlier: Vec::new(),
                 depth: depth + 1,
                 start: *start,
                 end: *end,
                 status: None,
             });
-        }
-
-        for child in children[i].iter().rev() {
-            stack.push((*child, depth + 1, Some(command.clone())));
         }
     }
     rows
@@ -2190,6 +2264,54 @@ pub(crate) mod tests {
             ]
         );
         assert_eq!(t.name_of(1), Some("sh"));
+    }
+
+    #[test]
+    fn a_process_is_named_as_it_was_at_the_step() {
+        // sh, pid 1, forks pid 5 and pid 6, then execs make. Pid 5 execs
+        // sh -c, then gcc, and exits; pid 6 never execs. make forks a new
+        // pid 5, which execs ld. Each name is the program the process
+        // with the pid at the step had exec'd by then, and a fork's is
+        // the program it was forked from at the time.
+        let events = vec![
+            exec(1, 1, &["/bin/sh", "/init"]),
+            fork(10, 1, 5, false),
+            fork(12, 1, 6, false),
+            exec(20, 5, &["/bin/sh", "-c", "x"]),
+            exec(50, 5, &["/usr/bin/gcc", "a.c"]),
+            exit(60, 5, 5, 0, "gcc", false),
+            exec(65, 1, &["/bin/make"]),
+            fork(70, 1, 5, false),
+            exec(80, 5, &["/bin/ld", "a.o"]),
+        ];
+        let t = Timeline::new(
+            Trace {
+                events,
+                ..Default::default()
+            },
+            None,
+            None,
+        );
+        let name = |pid, step| t.name_at(pid, step);
+        assert_eq!(name(5, 15).as_deref(), Some("sh"));
+        assert_eq!(name(5, 30).as_deref(), Some("sh"));
+        assert_eq!(name(5, 55).as_deref(), Some("gcc"));
+        assert_eq!(name(5, 75).as_deref(), Some("make"));
+        assert_eq!(name(5, 85).as_deref(), Some("ld"));
+        assert_eq!(name(1, 30).as_deref(), Some("sh"));
+        assert_eq!(name(1, 66).as_deref(), Some("make"));
+        assert_eq!(name(6, 90).as_deref(), Some("sh"));
+        assert_eq!(name(9, 30), None);
+
+        // The rows of the process tree are labelled the same way, and a
+        // row's own label is the one it ended with.
+        let first = t.rows.iter().find(|r| r.pid == 5 && r.start == 10).unwrap();
+        assert_eq!(first.label_at(15), "sh (fork)");
+        assert_eq!(first.label_at(30), "sh -c x");
+        assert_eq!(first.label_at(55), "gcc a.c");
+        assert_eq!(first.label, "gcc a.c");
+        let never = t.rows.iter().find(|r| r.pid == 6).unwrap();
+        assert_eq!(never.label_at(90), "sh (fork)");
     }
 
     #[test]

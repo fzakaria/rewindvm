@@ -1367,7 +1367,8 @@ impl Scrubber {
                     RowKind::Process => (theme::BLUE, theme::TEXT),
                     RowKind::Thread => (theme::FAINT, theme::MUTED),
                 };
-                let text = process_row(row.tid, &row.label).shown;
+                let label = row.label_at(step);
+                let text = process_row(row.tid, label).shown;
                 let id_end = PID_CHARS.min(text.len());
                 let part = selected
                     .as_ref()
@@ -1384,7 +1385,7 @@ impl Scrubber {
                 div()
                     .id(SharedString::from(format!("proc-{i}")))
                     .role(Role::Button)
-                    .aria_label(format!("Show the card of {} {}", row.tid, row.label))
+                    .aria_label(format!("Show the card of {} {label}", row.tid))
                     .flex()
                     .w_full()
                     .flex_none()
@@ -2784,7 +2785,7 @@ impl Scrubber {
             .run
             .timeline
             .alive_rows(self.step)
-            .map(|row| process_row(row.tid, &row.label))
+            .map(|row| process_row(row.tid, row.label_at(self.step)))
             .collect()
     }
 
@@ -2834,8 +2835,11 @@ impl Scrubber {
         if event.tid != event.pid {
             meta.push_str(&format!(" \u{b7} tid {}", event.tid));
         }
-        if let Some(name) = t.name_of(event.pid) {
-            meta.push_str(&format!(" \u{b7} {}", describe::clip(name, MAX_NAME_CHARS)));
+        if let Some(name) = t.name_at(event.pid, event.step) {
+            meta.push_str(&format!(
+                " \u{b7} {}",
+                describe::clip(&name, MAX_NAME_CHARS)
+            ));
         }
         vec![Mapped::plain(meta), mapped(&describe::describe(event).text)]
     }

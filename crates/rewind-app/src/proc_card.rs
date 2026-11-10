@@ -105,7 +105,7 @@ pub fn proc_card(t: &Timeline, pick: Pick, step: u64) -> Option<ProcCard<'_>> {
         t.rows
             .iter()
             .find(|r| Pick::of(r) == pick)
-            .map_or_else(String::new, |r| command_name(&r.label))
+            .map_or_else(String::new, |r| command_name(r.label_at(step)))
     };
     let linked = |pick: Pick| Linked {
         command: command_of(pick),
@@ -121,7 +121,7 @@ pub fn proc_card(t: &Timeline, pick: Pick, step: u64) -> Option<ProcCard<'_>> {
     // process.
     let (command, parent, execs, threads) = match row.kind {
         RowKind::Process => (
-            command_name(&row.label),
+            command_name(row.label_at(step)),
             parent_index(&t.procs, index).map(|j| {
                 let parent = &t.procs[j];
                 linked(Pick {
