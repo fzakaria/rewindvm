@@ -1985,6 +1985,11 @@ fn run_back_to(
             tid: Some(tid),
             pos: ReplayLogPosition::Begin,
         },
+        // The fork is back where it was, and gdb's user is told why.
+        Back::NoRegister => {
+            eprintln!("rewind: {}", reverse::NO_REGISTER);
+            target.step_stop()
+        }
         Back::Interrupted(_) => unreachable!("returned above"),
     })))
 }

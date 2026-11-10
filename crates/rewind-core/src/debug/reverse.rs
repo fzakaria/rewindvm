@@ -448,6 +448,26 @@ impl std::fmt::Display for Passed {
 
 impl std::error::Error for Passed {}
 
+/// A search back that needs a debug register for a hit on the way to
+/// where gdb was, of a trap gdb no longer has, with every register held
+/// by gdb's watchpoints and by breakpoints that cannot be int3.
+#[derive(Debug)]
+struct NoRegister;
+
+impl std::fmt::Display for NoRegister {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(NO_REGISTER)
+    }
+}
+
+impl std::error::Error for NoRegister {}
+
+/// What gdb's user is told when a run backwards has no debug register to
+/// find its way with, and the fork stays where it was.
+pub(super) const NO_REGISTER: &str = "running backwards from here replays a stop at a watchpoint or \
+     breakpoint gdb no longer has, which takes a debug register, and gdb's watchpoints and \
+     hardware breakpoints hold them all; delete one and run backwards again";
+
 /// What running backwards came to.
 pub(super) enum Back {
     /// One instruction back.
@@ -464,6 +484,9 @@ pub(super) enum Back {
     /// gdb's Ctrl-C, or its connection closing, before the fork got there:
     /// it stopped on the way, at its position.
     Interrupted(Heard),
+    /// Nowhere: the search back had no debug register to replay a stop
+    /// with ([`NO_REGISTER`]), and the fork is where it was.
+    NoRegister,
 }
 
 /// The fork's checkpoints in memory, by the step whose start each keeps.
@@ -524,8 +547,23 @@ impl Debuggee<'_> {
     /// Ctrl-C stopped the fork on the way.
     pub(super) fn continue_back(&mut self) -> Result<Back> {
         self.listener.begin(OnInterrupt::Stop);
+        let here = self.position.clone();
         let back = self.continue_back_unless_interrupted();
+        let back = self.unless_out_of_registers(back, &here);
         self.unless_interrupted(back)
+    }
+
+    /// `back`, or, when the search had no debug register to replay a stop
+    /// with, the fork brought back to `here`, where gdb had it, and
+    /// readied for gdb.
+    fn unless_out_of_registers(&mut self, back: Result<Back>, here: &Position) -> Result<Back> {
+        match back {
+            Err(e) if e.is::<NoRegister>() => {
+                self.go_to_or_retry(here)?;
+                Ok(Back::NoRegister)
+            }
+            other => other,
+        }
     }
 
     /// `back`, or, when gdb interrupted it, the fork readied for gdb where
@@ -1105,22 +1143,20 @@ impl Default for Position {
 
 impl Debuggee<'_> {
     /// Sets gdb's traps on the fork for a replay, as gdb set them, with
-    /// `target`'s register too when given: a breakpoint gdb holds in a
-    /// register moves into int3 to make room.
+    /// the registers `target` takes that gdb's traps lack, when given: a
+    /// breakpoint gdb holds in a register moves into int3 to make room.
+    /// Fails with [`NoRegister`] when that is not room enough.
     fn set_traps_for_scan(&mut self, target: Option<GdbTrap>) -> Result<()> {
         self.place_traps()?;
         let mut registers = self.traps.registers();
         if let Some(target) = target {
-            let needed = target.registers();
+            let needed = lacking(&self.traps, target);
             let mut memory = super::Int3Writer {
                 machine: &mut self.machine,
                 space: self.space,
             };
             if !self.traps.free_registers(needed.len(), &mut memory)? {
-                bail!(
-                    "running backwards to here takes a debug register that gdb's \
-                     watchpoints and hardware breakpoints hold"
-                );
+                return Err(NoRegister.into());
             }
             registers = self.traps.registers();
             registers.extend(needed);
@@ -1250,6 +1286,24 @@ impl Debuggee<'_> {
     }
 }
 
+/// The debug registers `target`, a hit a replay runs to, takes that
+/// gdb's `traps` do not already give: none for a breakpoint gdb still has,
+/// in a register or as int3, since either stops the fork there, and for a
+/// watch the pieces no register of gdb's watches.
+fn lacking(traps: &super::Traps, target: GdbTrap) -> Vec<Trap> {
+    if let GdbTrap::Breakpoint(address) = target
+        && traps.breakpoints.iter().any(|b| b.address == address)
+    {
+        return Vec::new();
+    }
+    let held = traps.registers();
+    target
+        .registers()
+        .into_iter()
+        .filter(|register| !held.contains(register))
+        .collect()
+}
+
 /// Whether a replay of `mv` from `from`, the fork at the instruction
 /// `rip`, first runs past the breakpoint the move runs to. A search back
 /// passes a breakpoint of gdb's where a move ended before the fork runs
@@ -1369,6 +1423,56 @@ mod tests {
         assert!(!passes_first(hit, &after_a_hit, ELSEWHERE));
         assert!(!passes_first(watch, &after_a_hit, ADD));
         assert!(!passes_first(Move::Steps(1), &after_a_hit, ADD));
+    }
+
+    /// A replayed hit takes only the debug registers gdb's traps lack: none
+    /// for a watch gdb still has, however many pieces, or a breakpoint gdb
+    /// still has, in a register or as int3; all of its own for a trap gdb
+    /// has deleted; and for a watch that overlaps one of gdb's, the pieces
+    /// gdb's does not cover.
+    #[test]
+    fn a_replayed_hit_takes_only_the_registers_gdb_lacks() {
+        const STRUCT: u64 = 0x408180;
+        const ADD: u64 = 0x401185;
+        const ELSEWHERE: u64 = 0x401200;
+        let write = |address, len| Watch {
+            address,
+            len,
+            kind: crate::debug::WatchKind::Write,
+        };
+        let wide = write(STRUCT, 24);
+        let breakpoint = |address, place| crate::debug::Breakpoint {
+            address,
+            kind: crate::debug::Kind::Software,
+            place,
+        };
+        let traps = crate::debug::Traps {
+            breakpoints: vec![
+                breakpoint(ADD, crate::debug::Place::Int3(0x1185)),
+                breakpoint(ELSEWHERE, crate::debug::Place::Register),
+            ],
+            watches: vec![wide],
+            refused: Vec::new(),
+        };
+        assert_eq!(traps.registers().len(), 4);
+        assert_eq!(lacking(&traps, GdbTrap::Watch(wide)), []);
+        assert_eq!(lacking(&traps, GdbTrap::Breakpoint(ADD)), []);
+        assert_eq!(lacking(&traps, GdbTrap::Breakpoint(ELSEWHERE)), []);
+
+        let deleted = write(STRUCT + 64, 8);
+        assert_eq!(
+            lacking(&traps, GdbTrap::Watch(deleted)),
+            super::super::watch_registers(&deleted)
+        );
+        assert_eq!(
+            lacking(&traps, GdbTrap::Breakpoint(0x401300)),
+            [Trap::Execute(0x401300)]
+        );
+        let longer = write(STRUCT, 32);
+        assert_eq!(
+            lacking(&traps, GdbTrap::Watch(longer)),
+            super::super::watch_registers(&write(STRUCT + 24, 8))
+        );
     }
 
     /// A list of a million moves, as many hits in one step make, is made
