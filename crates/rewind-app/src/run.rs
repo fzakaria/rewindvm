@@ -539,6 +539,20 @@ impl Session {
         }
     }
 
+    /// This session with `run` in place of its run: the same run read
+    /// from another directory, as after `rewind import`. The compared run
+    /// stays the run it is, opened from where it was, and the two are
+    /// compared by the same program's events.
+    pub fn with_run(self, run: Run) -> Session {
+        let program = self.comparison.as_ref().and_then(|c| c.program.clone());
+        let mut session = match self.other {
+            Some(other) => Session::compared(run, Some(other), Program::Given(program)),
+            None => Session::new(run, None),
+        };
+        session.replays = self.replays;
+        session
+    }
+
     /// The step of the first divergence from the compared run.
     pub fn divergence_step(&self) -> Option<u64> {
         self.comparison.as_ref().and_then(Comparison::step)
@@ -1186,6 +1200,34 @@ mod tests {
         );
         assert!(run.path.join(TRACE).is_file());
         assert_eq!(run.verdict(), Verdict::Failed);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_run_read_again_keeps_the_run_it_is_compared_with() {
+        // Two exports open from their files, one compared with the other.
+        // The first is then read again from a run directory, as after
+        // `rewind import`, and takes its place in the session. The
+        // compared run stays an export of its file: opened again by the
+        // directory it was unpacked into, it would pass for a run of this
+        // machine, whose files the engine can read.
+        crate::archive::test_cache();
+        let dir = temp_dir("import-compare");
+        let (fail, pass) = (dir.join("mylib-fail.rwd"), dir.join("mylib-pass.rwd"));
+        std::fs::write(&fail, crate::examples::FAILING).unwrap();
+        std::fs::write(&pass, crate::examples::PASSING).unwrap();
+        let session = Session::open(&fail, Some(&pass)).unwrap();
+        let compared = session.other.as_ref().unwrap().origin.clone();
+        assert!(matches!(compared, Origin::Export(_)), "{compared:?}");
+        let divergence = session.divergence_step();
+        assert!(divergence.is_some());
+
+        let read_again = Run::open(&session.run.path).unwrap();
+        assert_eq!(read_again.origin, Origin::Local);
+        let session = session.with_run(read_again);
+        assert_eq!(session.run.origin, Origin::Local);
+        assert_eq!(session.other.as_ref().unwrap().origin, compared);
+        assert_eq!(session.divergence_step(), divergence);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

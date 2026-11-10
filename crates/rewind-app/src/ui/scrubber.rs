@@ -681,26 +681,26 @@ impl Scrubber {
             .is_some_and(|shown| shown.run.id().is_some() && shown.run.id() == session.run.id())
     }
 
-    /// Puts `session` on screen in place of the export it was imported
-    /// from: the same run, now read from the engine's runs. The playhead,
-    /// the search, the note dialog, the tabs and the selection stay as the
-    /// user left them while the import ran, and the bookmarks on screen
-    /// move to the imported run's directory.
-    fn show_imported(&mut self, session: Session, cx: &mut Context<Self>) {
-        // A run that cannot be told to be the one on screen is shown as
-        // any run is, at the playhead's step.
-        if !self.shows_run_of(&session) {
+    /// Puts `run` on screen in place of the export it was imported from:
+    /// the same run, now read from the engine's runs. The run it is
+    /// compared with stays the run it is: read again from the directory
+    /// it was unpacked into, a compared export would pass for a run of
+    /// this machine. The playhead, the search, the note dialog, the tabs
+    /// and the selection stay as the user left them while the import ran,
+    /// and the bookmarks on screen move to the imported run's directory.
+    fn show_imported(&mut self, run: crate::run::Run, cx: &mut Context<Self>) {
+        let Some(shown) = self.session.take() else {
+            return;
+        };
+        let same_run = shown.run.id().is_some() && shown.run.id() == run.id();
+        let session = shown.with_run(run);
+
+        // A run that cannot be told to be the one that was on screen is
+        // shown as any run is, at the playhead's step.
+        if !same_run {
             let step = self.step;
             self.show(session, Some(step), cx);
             return;
-        }
-        if let Some(why) = &session.unopened_compare {
-            self.notify_user(
-                NoticeTone::Info,
-                "Imported without a comparison",
-                format!("The run to compare with did not open: {why}"),
-                cx,
-            );
         }
 
         // The bookmarks on screen hold what was marked while the import
@@ -719,20 +719,13 @@ impl Scrubber {
             }
         }
 
-        // The tabs that compare two runs close when the comparison did
-        // not open again.
-        let compares = session.other.is_some();
         self.session = Some(session);
-        if !compares {
-            self.close_comparison_tabs();
-        }
 
         // The panels that said the run was still being imported ask the
         // engine now, and the Runs panel reads the run's family.
         self.viewer_run_imported(cx);
         self.file_diff_run_imported(cx);
         self.source_run_imported(cx);
-        self.lanes_session_changed();
         self.reload_runs(cx);
         cx.notify();
     }
@@ -1212,17 +1205,12 @@ impl Scrubber {
     fn bring_in(&mut self, file: PathBuf, cx: &mut Context<Self>) {
         let request = self.requests.issue();
         self.importing = Some(request);
-        let compare = self
-            .session
-            .as_ref()
-            .and_then(|s| s.other.as_ref())
-            .map(|other| other.path.clone());
         let engine = self.engine.clone();
         let read = crate::jobs::on_own_thread({
             let file = file.clone();
             move || {
                 let imported = engine.import(&file).map_err(|e| e.to_string())?;
-                Session::open(&imported.dir, compare.as_deref()).map_err(|e| format!("{e:#}"))
+                crate::run::Run::open(&imported.dir).map_err(|e| format!("{e:#}"))
             }
         });
         cx.spawn(async move |this, cx| {
@@ -1243,7 +1231,7 @@ impl Scrubber {
                     return;
                 }
                 match result {
-                    Ok(session) => this.show_imported(session, cx),
+                    Ok(run) => this.show_imported(run, cx),
                     Err(message) => this.notify_user(
                         NoticeTone::Info,
                         "Shown from its trace",
