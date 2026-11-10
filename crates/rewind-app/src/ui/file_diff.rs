@@ -328,6 +328,27 @@ impl Scrubber {
         cx.notify();
     }
 
+    /// The view, once the export on screen is in the engine's runs: a
+    /// view that said the run was still being imported reads the list and
+    /// both copies through the engine now.
+    pub(super) fn file_diff_run_imported(&mut self, cx: &mut Context<Self>) {
+        let (Some(panel), Some(session)) = (&mut self.file_diff, &self.session) else {
+            return;
+        };
+        let Some(other) = &session.other else {
+            return;
+        };
+        panel.unavailable = unavailable(session).or_else(|| unavailable_run(other));
+
+        // The list is read when it never was, as when the view opens.
+        let unread = matches!(panel.outputs, None | Some(OutputList::Stopped));
+        let reading_list = panel.path.is_none() && unread && panel.unavailable.is_none();
+        if reading_list {
+            self.fetch_outputs(cx);
+        }
+        self.fetch_copies(cx);
+    }
+
     pub(super) fn close_file_diff(&mut self, cx: &mut Context<Self>) {
         self.file_diff = None;
         self.clear_selection_in(&ROW_SURFACES);

@@ -261,6 +261,17 @@ impl Scrubber {
         cx.notify();
     }
 
+    /// The viewer, once the export on screen is in the engine's runs: a
+    /// viewer that said the run was still being imported reads its path
+    /// through the engine now.
+    pub(super) fn viewer_run_imported(&mut self, cx: &mut Context<Self>) {
+        let (Some(viewer), Some(session)) = (&mut self.viewer, &self.session) else {
+            return;
+        };
+        viewer.unavailable = unavailable(session);
+        self.read_viewer(cx);
+    }
+
     /// Opens `path`, a file of the listing the viewer shows, and keeps the
     /// way back to the listing.
     fn open_listed_file(&mut self, path: String, pid: u32, cx: &mut Context<Self>) {

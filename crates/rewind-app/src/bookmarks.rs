@@ -119,6 +119,22 @@ impl Bookmarks {
         fs::rename(&tmp, &path)
     }
 
+    /// These bookmarks, moved to `dir`: the directory the run they mark is
+    /// now read from, as when an export on screen is imported into the
+    /// engine's runs. The bookmarks are written to `dir` in place of the
+    /// ones `dir` holds, which are older: the import copied them from the
+    /// export. Returns the bookmarks to show, and why they were not
+    /// written when they were not. Bookmarks that are kept apart as unread
+    /// have nothing to write, so `dir` keeps its file and its bookmarks
+    /// are the ones to show.
+    pub fn moved_to(self, dir: &Path) -> (Bookmarks, io::Result<()>) {
+        if self.unread.is_some() {
+            return (Bookmarks::load(dir), Ok(()));
+        }
+        let written = self.save(dir);
+        (self, written)
+    }
+
     /// The bookmarks as a bookmarks file holds them, or None when there
     /// are none, or when what was read is kept apart as unread.
     pub fn to_json(&self) -> Option<String> {
@@ -217,6 +233,43 @@ mod tests {
         fs::write(dir.join(BOOKMARKS_FILE), "not json").unwrap();
         assert!(Bookmarks::load(&dir).is_empty());
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn bookmarks_move_with_the_run_to_another_directory() {
+        // A run shown from one directory, with the bookmark its export
+        // carried, is imported into another directory that holds the same
+        // carried bookmark. A bookmark added before the import finished is
+        // only in memory and in the first directory. Moving writes the
+        // bookmarks in memory to the second directory; with none left it
+        // removes the second directory's file; bookmarks that were not
+        // read leave the second directory's file as it is and show its
+        // bookmarks.
+        let (from, to) = (temp_dir("move-from"), temp_dir("move-to"));
+        let mut carried = Bookmarks::default();
+        carried.set(5, "carried".into());
+        carried.save(&from).unwrap();
+        carried.save(&to).unwrap();
+
+        let mut kept = Bookmarks::load(&from);
+        kept.set(9, "added during the import".into());
+        let (shown, written) = kept.clone().moved_to(&to);
+        written.unwrap();
+        assert_eq!(shown, kept);
+        assert_eq!(Bookmarks::load(&to), kept);
+
+        let (shown, written) = Bookmarks::default().moved_to(&to);
+        written.unwrap();
+        assert!(shown.is_empty());
+        assert!(!to.join(BOOKMARKS_FILE).exists());
+
+        carried.save(&to).unwrap();
+        let (shown, written) = Bookmarks::parse(b"not json").moved_to(&to);
+        written.unwrap();
+        assert_eq!(shown, carried);
+        assert_eq!(Bookmarks::load(&to), carried);
+        fs::remove_dir_all(&from).unwrap();
+        fs::remove_dir_all(&to).unwrap();
     }
 
     /// The sample of the current format, under formats/, which never

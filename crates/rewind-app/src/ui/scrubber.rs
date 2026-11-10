@@ -37,7 +37,7 @@ use crate::source::Located;
 use crate::stride::{Direction, Stride};
 use crate::theme;
 use crate::tour::Tour;
-use crate::ui::bookmarks::{BookmarkEditor, load_bookmarks};
+use crate::ui::bookmarks::{BookmarkEditor, bookmarks_dir, load_bookmarks};
 use crate::ui::licensing::Licensing;
 use crate::ui::link::LinkDialog;
 use crate::ui::search::SearchBox;
@@ -592,12 +592,9 @@ impl Scrubber {
             );
         }
         // Steps jumped from in another run mean nothing in this one; the
-        // same run shown again, as an import does, keeps them.
-        let same_run = self
-            .session
-            .as_ref()
-            .is_some_and(|shown| shown.run.id().is_some() && shown.run.id() == session.run.id());
-        if !same_run {
+        // same run shown again, as a change of comparison does, keeps
+        // them.
+        if !self.shows_run_of(&session) {
             self.blames.leave_run();
             self.history = History::default();
             self.stride = Stride::Every;
@@ -664,6 +661,74 @@ impl Scrubber {
         if let Some(file) = replayable.filter(|_| !cfg!(target_family = "wasm")) {
             self.bring_in(file, cx);
         }
+        self.lanes_session_changed();
+        self.reload_runs(cx);
+        cx.notify();
+    }
+
+    /// Whether the run on screen is `session`'s run, by its id. Runs
+    /// without an id, as a bare trace is, are never told to be the same.
+    fn shows_run_of(&self, session: &Session) -> bool {
+        self.session
+            .as_ref()
+            .is_some_and(|shown| shown.run.id().is_some() && shown.run.id() == session.run.id())
+    }
+
+    /// Puts `session` on screen in place of the export it was imported
+    /// from: the same run, now read from the engine's runs. The playhead,
+    /// the search, the note dialog, the tabs and the selection stay as the
+    /// user left them while the import ran, and the bookmarks on screen
+    /// move to the imported run's directory.
+    fn show_imported(&mut self, session: Session, cx: &mut Context<Self>) {
+        // A run that cannot be told to be the one on screen is shown as
+        // any run is, at the playhead's step.
+        if !self.shows_run_of(&session) {
+            let step = self.step;
+            self.show(session, Some(step), cx);
+            return;
+        }
+        if let Some(why) = &session.unopened_compare {
+            self.notify_user(
+                NoticeTone::Info,
+                "Imported without a comparison",
+                format!("The run to compare with did not open: {why}"),
+                cx,
+            );
+        }
+
+        // The bookmarks on screen hold what was marked while the import
+        // ran; the imported run's directory holds only what the export
+        // carried.
+        if let Some(dir) = bookmarks_dir(&session.run) {
+            let (bookmarks, written) = std::mem::take(&mut self.bookmarks).moved_to(&dir);
+            self.bookmarks = bookmarks;
+            if let Err(e) = written {
+                self.notify_user(
+                    NoticeTone::Error,
+                    "Could not save the bookmarks",
+                    format!("{}: {e}", dir.display()),
+                    cx,
+                );
+            }
+        }
+
+        // The tabs that compare two runs close when the comparison did
+        // not open again.
+        let compares = session.other.is_some();
+        self.session = Some(session);
+        if !compares {
+            self.file_diff = None;
+        }
+        let needs_comparison = matches!(self.right_tab, RightTab::Compare | RightTab::FileDiff);
+        if needs_comparison && !compares {
+            self.right_tab = RightTab::AtStep;
+        }
+
+        // The panels that said the run was still being imported ask the
+        // engine now, and the Runs panel reads the run's family.
+        self.viewer_run_imported(cx);
+        self.file_diff_run_imported(cx);
+        self.source_run_imported(cx);
         self.lanes_session_changed();
         self.reload_runs(cx);
         cx.notify();
@@ -1048,8 +1113,8 @@ impl Scrubber {
     }
 
     /// Imports the export `file` into the engine's runs in the background,
-    /// then shows the imported run at the same step, so the shell, gdb,
-    /// fork and file buttons work on it. The app already has the file, so
+    /// then shows the imported run in the export's place, with the panels
+    /// as they are, so the shell, gdb, fork and file buttons work on it. The app already has the file, so
     /// nothing is downloaded again. A failure leaves the trace on screen.
     fn bring_in(&mut self, file: PathBuf, cx: &mut Context<Self>) {
         let request = self.requests.issue();
@@ -1085,10 +1150,7 @@ impl Scrubber {
                     return;
                 }
                 match result {
-                    Ok(session) => {
-                        let step = this.step;
-                        this.show(session, Some(step), cx);
-                    }
+                    Ok(session) => this.show_imported(session, cx),
                     Err(message) => this.notify_user(
                         NoticeTone::Info,
                         "Shown from its trace",

@@ -166,6 +166,22 @@ impl Scrubber {
         cx.notify();
     }
 
+    /// The panel, once the export on screen is in the engine's runs: a
+    /// panel that said the run was still being imported asks the engine
+    /// where the playhead's thread was now.
+    pub(super) fn source_run_imported(&mut self, cx: &mut Context<Self>) {
+        let importing = self.importing.is_some();
+        let (Some(panel), Some(session)) = (&mut self.source, &self.session) else {
+            return;
+        };
+        panel.unavailable = replay_unavailable(session, Replay::Where, importing);
+        if panel.unavailable.is_some() {
+            return;
+        }
+        panel.loading = true;
+        self.fetch_source(cx);
+    }
+
     /// Moves the playhead to `step` with the source panel open on
     /// `thread` there, in place of the step's event's thread.
     pub(super) fn show_thread_at(
