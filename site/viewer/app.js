@@ -52,8 +52,22 @@ const APP_MIN_WIDTH = 960;
 const STOPPED_NOTE =
   "The viewer stopped on an error. Reload the page to start it again.";
 
-// What the page tells the app of a link whose body stopped short. The app
-// shows it after the link, "answered" and the server's status.
+// The schemes of a page served securely and of a link that is not. A
+// browser refuses to fetch the second from the first, as mixed content,
+// and tells the page nothing of why.
+const SECURE_SCHEME = "https:";
+const PLAIN_SCHEME = "http:";
+
+// The hosts a browser fetches over plain http even from a secure page:
+// the visitor's own machine.
+const LOOPBACK_HOSTS = ["localhost", "[::1]"];
+const LOOPBACK_DOMAIN = ".localhost";
+const LOOPBACK_IPV4 = /^127(\.\d{1,3}){3}$/;
+
+// What the page tells the app of a link it did not fetch or could not
+// read whole. The app shows each after the link and "answered".
+const MIXED_ANSWER =
+  "nothing, because a browser does not fetch an http link from an https page. Use an https link";
 const DROPPED_ANSWER = "then the connection dropped";
 
 const header = document.getElementById("site-header");
@@ -160,6 +174,26 @@ window.addEventListener("unhandledrejection", (event) =>
   watchForStop(event.reason),
 );
 
+// Whether a browser refuses to fetch `url` from this page as mixed
+// content: a plain http link, not to this machine, from a secure page.
+function isMixedContent(url) {
+  let target;
+  try {
+    target = new URL(url, location.href);
+  } catch {
+    return false;
+  }
+  if (location.protocol !== SECURE_SCHEME || target.protocol !== PLAIN_SCHEME) {
+    return false;
+  }
+  const host = target.hostname;
+  const loopback =
+    LOOPBACK_HOSTS.includes(host) ||
+    host.endsWith(LOOPBACK_DOMAIN) ||
+    LOOPBACK_IPV4.test(host);
+  return !loopback;
+}
+
 // The bytes at a link, fetched whole. A server's error answer comes back
 // as its status, and a body that stops short as its status and what
 // happened; a fetch the browser refused, as a server without CORS headers
@@ -182,13 +216,22 @@ async function fetchBytes(url) {
   }
 }
 
+// The export at a link. A link the browser would refuse is not tried, and
+// the reason comes back in the place of a server's answer.
+async function fetchExport(url) {
+  if (isMixedContent(url)) {
+    return { answer: MIXED_ANSWER };
+  }
+  return fetchBytes(url);
+}
+
 // Fetches the exports an address names and hands them to the app, or
 // tells it which one did not come.
 async function fetchRuns(url, compare, step) {
   say(null);
   const [run, other] = await Promise.all([
-    fetchBytes(url),
-    compare ? fetchBytes(compare) : null,
+    fetchExport(url),
+    compare ? fetchExport(compare) : null,
   ]);
   if (!run.bytes) {
     callApp(() => web.unfetched(url, run.answer ?? undefined));
