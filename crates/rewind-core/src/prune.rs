@@ -8,7 +8,7 @@ use std::fs;
 
 use anyhow::{Context, Result};
 
-use crate::home::Home;
+use crate::home::{Home, Removing};
 use crate::run::{Run, Unreadable};
 
 pub use rewind_trace::prune::{Member, Reads, Refusal, Removal, identical, removal_set};
@@ -49,14 +49,16 @@ fn unreadable_member(run: &Unreadable) -> Member {
 }
 
 /// The forks of `root` that `identical` would remove, among the runs in
-/// the home.
-pub fn plan_identical(home: &Home, root: &Run) -> Result<Vec<Removal>> {
+/// the home, which the caller holds for removing: a fork registered after
+/// the listing would otherwise name a parent `remove` deletes.
+pub fn plan_identical(home: &Home, _held: &Removing, root: &Run) -> Result<Vec<Removal>> {
     let members: Vec<Member> = Run::list(home)?.iter().map(member).collect();
     Ok(identical(&root.manifest.id, &members))
 }
 
-/// Deletes the runs `identical` chose.
-pub fn remove(home: &Home, removals: &[Removal]) -> Result<()> {
+/// Deletes the runs `identical` chose, under the same hold the plan was
+/// made under.
+pub fn remove(home: &Home, _held: &Removing, removals: &[Removal]) -> Result<()> {
     for r in removals {
         delete(home, &r.id)?;
     }
@@ -87,8 +89,11 @@ pub fn remove_tree(home: &Home, ids: &[&str], runs: &[Member], act: Act) -> Resu
 
 /// `remove_tree` of the runs `ids` over the runs in the home, which are
 /// listed once however many runs go. Runs whose manifests do not read are
-/// among them, so one can be removed by its id.
+/// among them, so one can be removed by its id. The runs are held from
+/// the listing to the last deletion, so no fork of a run that goes is
+/// registered between the two.
 pub fn remove_with_forks(home: &Home, ids: &[String], act: Act) -> Result<Vec<String>> {
+    let _held = home.removing()?;
     let listing = Run::list_all(home)?;
     let members: Vec<Member> = listing
         .runs
@@ -264,11 +269,12 @@ mod tests {
             format!("run {} is executing; remove it once it has finished", f.id)
         );
         let r = Run::open(&home.runs().join(&r.id)).unwrap();
-        assert_eq!(plan_identical(&home, &r).unwrap(), vec![]);
+        let removing = home.removing().unwrap();
+        assert_eq!(plan_identical(&home, &removing, &r).unwrap(), vec![]);
 
         drop(held);
         let idle = crate::settle::settle("f to stop executing", || {
-            let idle = plan_identical(&home, &r).unwrap();
+            let idle = plan_identical(&home, &removing, &r).unwrap();
             (!idle.is_empty()).then_some(idle)
         });
         assert_eq!(
@@ -321,6 +327,36 @@ mod tests {
         );
         assert!(runs.iter().all(|r| home.runs().join(&r.id).exists()));
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_removal_waits_for_a_run_being_registered() {
+        // Another process is registering a run, as a fork of a run being
+        // removed would be: it holds the runs for registering. Removing r
+        // waits for the registration to end, so a fork registered
+        // meanwhile is listed and refuses the removal, or is registered
+        // only after r is gone and sees that. The removal is on a thread
+        // of its own; r is still there while the registration is held, and
+        // gone once it ends.
+        let root =
+            std::env::temp_dir().join(format!("rewind-remove-registering-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let home = Home::at(root.clone()).unwrap();
+        let r = run("r", None, 0, "h0");
+        fs::create_dir_all(home.runs().join(&r.id)).unwrap();
+        let registering = home.registering().unwrap();
+
+        let dir = home.runs().join(&r.id);
+        let removal = std::thread::spawn(move || {
+            let home = Home::at(root).unwrap();
+            remove_with_forks(&home, &["r".to_string()], Act::Remove).unwrap()
+        });
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(dir.exists(), "removed while a run was being registered");
+        drop(registering);
+        assert_eq!(removal.join().unwrap(), vec!["r".to_string()]);
+        assert!(!dir.exists());
+        fs::remove_dir_all(home.root()).unwrap();
     }
 
     #[test]

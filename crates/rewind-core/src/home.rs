@@ -29,12 +29,33 @@ pub const ENV_HOME: &str = "REWIND_HOME";
 /// lock when its process dies, however it dies.
 const LOCK: &str = "lock";
 
+/// The file in the home that a process registering a run, writing its
+/// directory and manifest, holds a shared lock on, and one removing runs
+/// an exclusive one from listing them to deleting them. A fork registered
+/// between the two would name a parent the removal deletes.
+const RUNS_LOCK: &str = "runs.lock";
+
 /// A process's hold on the home while it packs images, executes runs or
 /// mounts an image in a shell: `rewind gc` refuses while any is held, since
 /// an image just packed is named by no run until the run's manifest is
 /// written. Let go when dropped.
 #[derive(Debug)]
 pub struct InUse {
+    _lock: File,
+}
+
+/// A process's hold on the runs while it registers one: its directory,
+/// its executing lock and its manifest. Let go when dropped.
+#[derive(Debug)]
+pub struct Registering {
+    _lock: File,
+}
+
+/// The runs held by one process alone while it lists and removes them,
+/// so no run is registered between the listing and the deletion. Let go
+/// when dropped.
+#[derive(Debug)]
+pub struct Removing {
     _lock: File,
 }
 
@@ -147,6 +168,29 @@ impl Home {
             }
         }
         Ok(InUse { _lock: lock })
+    }
+
+    fn runs_lock_file(&self) -> Result<File> {
+        let path = self.root.join(RUNS_LOCK);
+        rewind_store::open_lock(&path).with_context(|| format!("creating {}", path.display()))
+    }
+
+    /// Holds the runs while this process registers one, waiting first
+    /// for a removal that has them alone.
+    pub fn registering(&self) -> Result<Registering> {
+        let lock = self.runs_lock_file()?;
+        lock.lock_shared()
+            .with_context(|| format!("locking the runs in {}", self.root.display()))?;
+        Ok(Registering { _lock: lock })
+    }
+
+    /// The runs to this process alone, from listing them to deleting
+    /// some, waiting first for any registration under way.
+    pub fn removing(&self) -> Result<Removing> {
+        let lock = self.runs_lock_file()?;
+        lock.lock()
+            .with_context(|| format!("locking the runs in {}", self.root.display()))?;
+        Ok(Removing { _lock: lock })
     }
 
     /// The home to this process alone, or None while another process holds

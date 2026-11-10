@@ -37,10 +37,15 @@ pub(crate) fn prune(home: &Home, args: PruneArgs) -> Result<ExitCode> {
         bail!("say what to prune: --identical removes forks that ran the same");
     }
     let root = Run::find(home, &run)?;
-    let removals = rewind_core::prune::plan_identical(home, &root)?;
+
+    // The runs are held from the plan to the last removal, so no fork of
+    // a run that goes is registered between the two.
+    let held = home.removing()?;
+    let removals = rewind_core::prune::plan_identical(home, &held, &root)?;
     if !dry_run {
-        rewind_core::prune::remove(home, &removals)?;
+        rewind_core::prune::remove(home, &held, &removals)?;
     }
+    drop(held);
     if json {
         let ids: Vec<&str> = removals.iter().map(|r| r.id.as_str()).collect();
         println!("{}", serde_json::json!(ids));

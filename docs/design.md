@@ -802,6 +802,7 @@ keyframes. With `--seeds`, only the first seed runs under the keys.
   cache/sources/<id>/         source files read out of a run's VM
   cache/runs.json             each run's name and age, for finding one
   lock                        held while a process adds images or runs
+  runs.lock                   held while a run is registered or runs are removed
 ```
 
 Images live in a directory named for how they are built, so an image an
@@ -1133,6 +1134,12 @@ Each call reads every manifest in the home once, so many runs go in one call
 rather than one call each: on a home of 8,000 runs, removing 6,000 with one
 call per run took 35 minutes, and the refusals are checked once for the
 whole set, so a run and the run that reads its keyframes can go together.
+The runs are held, by an exclusive lock on `runs.lock`, from the listing to
+the last deletion, and an execution holds the same lock shared while it
+registers its run: its directory, its executing lock and its manifest. A
+fork `rewind check --run` makes while runs are removed is therefore listed,
+and refuses the removal as executing, or is registered after and refused
+when its parent is gone, and never left with a parent the removal took.
 
 `rewind prune <run> --identical` removes forks in a run's family, its forks
 and their forks, whose `trace_hash` equals an older member's. The run itself

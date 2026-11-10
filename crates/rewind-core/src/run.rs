@@ -591,6 +591,22 @@ pub(crate) fn lock_executing(dir: &Path) -> Result<fs::File> {
     }
 }
 
+/// Refuses to register a fork whose parent is gone: a removal took the
+/// parent after the fork's machine was built from its keyframes. A run
+/// with no parent registers whatever is there.
+fn parent_present(home: &Home, manifest: &Manifest) -> Result<()> {
+    let Some(parent) = &manifest.parent else {
+        return Ok(());
+    };
+    if home.runs().join(&parent.run).is_dir() {
+        return Ok(());
+    }
+    bail!(
+        "run {}, which this fork is forked from, has been removed",
+        parent.run
+    )
+}
+
 /// Whether bringing a machine to a step of a run keeps a keyframe there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Keep {
@@ -819,6 +835,12 @@ impl Run {
             None => (Machine::boot(&config, dirty_log)?, None, None),
         };
 
+        // The run is registered, its directory, its executing lock and its
+        // manifest, with the runs held, so a removal lists it or finds it
+        // not yet there, never a directory with no manifest naming its
+        // parent. A parent a removal took meanwhile is seen here.
+        let registering = home.registering()?;
+        parent_present(home, &manifest)?;
         fs::create_dir_all(&dir)?;
         let _executing = lock_executing(&dir)?;
         let write_manifest = |m: &Manifest| -> Result<()> {
@@ -884,6 +906,7 @@ impl Run {
         if !recorded {
             write_manifest(&manifest)?;
         }
+        drop(registering);
 
         let (new_trace, trace_file) = NewTrace::create(&dir)?;
         let mut recorder = Recorder {
@@ -2442,6 +2465,34 @@ pub(crate) mod tests {
             timeout(3, Doing::MakingExits)
         );
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_fork_of_a_removed_run_is_refused_as_it_registers() {
+        // A fork is registered after its parent was removed, which can
+        // happen when the removal ran between the fork's machine being
+        // built and its directory being made: the registration names the
+        // parent and refuses. With the parent there, or no parent, the
+        // registration goes ahead.
+        let root = std::env::temp_dir().join(format!("rewind-register-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let home = Home::at(root.clone()).unwrap();
+        let parent = manifest("0000000000000001", "parent", 1);
+        let mut fork = manifest("0000000000000002", "fork", 2);
+        fork.parent = Some(Parent {
+            run: RunId::parse(&parent.id).unwrap(),
+            step: 7,
+        });
+
+        let err = parent_present(&home, &fork).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "run 0000000000000001, which this fork is forked from, has been removed"
+        );
+        fs::create_dir_all(home.runs().join(&parent.id)).unwrap();
+        parent_present(&home, &fork).unwrap();
+        parent_present(&home, &parent).unwrap();
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
