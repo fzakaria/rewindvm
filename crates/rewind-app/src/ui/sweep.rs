@@ -22,6 +22,7 @@ use crate::request::Request;
 use crate::run::{Origin, short_id};
 use crate::sweep::{Cell, Checked, HereAction, Outcome, SEEDED, SIZES, cells, schedule_said};
 use crate::theme::{self, size};
+use crate::ui::RightColumn;
 use crate::ui::render::{card, card_title};
 use crate::ui::scrubber::{EXAMPLE_FORK, NoticeTone, Replay, Scrubber, replay_unavailable};
 use crate::ui::widgets::{Availability, ButtonStyle, button, tooltip};
@@ -109,7 +110,7 @@ impl Scrubber {
     pub(super) fn check_here(&mut self, schedules: u64, seeds: u64, cx: &mut Context<Self>) {
         // The browser viewer has no machine to run the recording on.
         if cfg!(target_family = "wasm") && self.session.is_some() {
-            self.replay_in_desktop_app(Replay::Check.doing(), cx);
+            self.replay_in_desktop_app(Replay::Check.doing(), RightColumn::AtStep, cx);
             return;
         }
 

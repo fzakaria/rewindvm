@@ -9,6 +9,8 @@ mod blame;
 mod bookmarks;
 mod chrome;
 mod compare;
+#[cfg(any(target_family = "wasm", test))]
+mod desktop;
 mod file_diff;
 mod icons;
 mod lanes;

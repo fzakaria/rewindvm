@@ -9,6 +9,8 @@ use gpui::{Context, Window};
 
 use crate::address::{Address, is_overtaken};
 use crate::proc_card::pick_thread;
+use crate::ui::RightColumn;
+use crate::ui::desktop::desktop_command;
 use crate::ui::link::unfetched_words;
 use crate::ui::scrubber::{NoticeTone, Scrubber};
 use crate::ui::tabs::RightTab;
@@ -208,5 +210,25 @@ impl Scrubber {
         };
         cx.write_to_clipboard(gpui::ClipboardItem::new_string(link.clone()));
         self.notify_user(NoticeTone::Info, LINK_COPIED, link, cx);
+    }
+
+    /// The command that opens the run on screen in the desktop app at
+    /// the playhead, with the right column on `right`: the run and the
+    /// one it is compared with by their links, made absolute for a shell
+    /// on another machine, or by their names for runs opened from files.
+    /// None before a run is on screen.
+    pub(super) fn desktop_command_here(&self, right: RightColumn) -> Option<String> {
+        let session = self.session.as_ref()?;
+        let address = &self.address_bar.address;
+        let run = match &address.url {
+            Some(url) => absolute_url(url),
+            None => session.run.path.display().to_string(),
+        };
+        let compare = match (&address.compare, &session.other) {
+            (Some(url), _) => Some(absolute_url(url)),
+            (None, Some(other)) => Some(other.path.display().to_string()),
+            (None, None) => None,
+        };
+        Some(desktop_command(&run, compare.as_deref(), self.step, right))
     }
 }

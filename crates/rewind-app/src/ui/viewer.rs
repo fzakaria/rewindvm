@@ -41,6 +41,7 @@ use crate::selection::{Mapped, Surface, part_of_line};
 use crate::sideways::{Sideways, line_width, text_column};
 use crate::syntax::{Highlighter, Language};
 use crate::theme::{self, layout, size};
+use crate::ui::RightColumn;
 use crate::ui::bookmarks::link;
 use crate::ui::icons::Icon;
 use crate::ui::render::seek_on_click;
@@ -235,7 +236,7 @@ impl Scrubber {
         // directory's files come from the trace, which needs none.
         let listed = session.run.timeline.has_files_under(&path);
         if cfg!(target_family = "wasm") && !listed {
-            self.replay_in_desktop_app(READING_A_FILE, cx);
+            self.replay_in_desktop_app(READING_A_FILE, RightColumn::AtStep, cx);
             return;
         }
         let unavailable = unavailable(session);

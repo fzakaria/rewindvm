@@ -39,6 +39,7 @@ use crate::source::{
 };
 use crate::syntax::{Highlighter, Language};
 use crate::theme::{self, layout, size};
+use crate::ui::RightColumn;
 use crate::ui::icons::Icon;
 use crate::ui::scrubber::{Replay, Scrubber, replay_unavailable};
 use crate::ui::selectable::{colored, selectable, selects, viewer_line};
@@ -136,7 +137,7 @@ impl Scrubber {
     pub(super) fn open_source(&mut self, cx: &mut Context<Self>) {
         // The browser viewer has no machine to run the recording on.
         if cfg!(target_family = "wasm") && self.session.is_some() {
-            self.replay_in_desktop_app(Replay::Where.doing(), cx);
+            self.replay_in_desktop_app(Replay::Where.doing(), RightColumn::Source, cx);
             return;
         }
 

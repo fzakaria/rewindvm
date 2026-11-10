@@ -45,6 +45,7 @@ use crate::run::Run;
 use crate::selection::{Mapped, Pos, Surface, part_of_line};
 use crate::sideways::{Sideways, line_width, text_column};
 use crate::theme::{self, layout, size};
+use crate::ui::RightColumn;
 use crate::ui::bookmarks::link;
 use crate::ui::icons::Icon;
 use crate::ui::scrubber::{READING_A_FILE, Scrubber};
@@ -269,7 +270,7 @@ impl Scrubber {
     fn show_file_diff(&mut self, path: Option<String>, at: DiffAt, cx: &mut Context<Self>) {
         // The browser viewer has no machine to run the recordings on.
         if cfg!(target_family = "wasm") && self.session.is_some() {
-            self.replay_in_desktop_app(READING_A_FILE, cx);
+            self.replay_in_desktop_app(READING_A_FILE, RightColumn::AtStep, cx);
             return;
         }
         let Some(session) = &self.session else {

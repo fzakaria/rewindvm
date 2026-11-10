@@ -159,6 +159,10 @@ pub enum NoticeAction {
     Reveal(PathBuf),
     /// Put text on the clipboard.
     CopyText(String),
+    /// Put the command that goes on in the desktop app on the clipboard;
+    /// the browser viewer's alone.
+    #[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
+    CopyCommand(String),
     /// Remove runs and their forks from the engine's runs.
     RemoveRuns(Vec<PathBuf>),
     /// Close the notice.
@@ -175,6 +179,7 @@ impl NoticeAction {
             NoticeAction::ExportTo(_) => "Export there",
             NoticeAction::Reveal(_) => "Show in folder",
             NoticeAction::CopyText(_) => "Copy path",
+            NoticeAction::CopyCommand(_) => "Copy command",
             NoticeAction::RemoveRuns(_) => "Delete",
             NoticeAction::Dismiss => "Not now",
         }
@@ -1514,13 +1519,40 @@ impl Scrubber {
         );
     }
 
-    /// Says that `doing` is the desktop app's, in the browser viewer.
-    pub(super) fn replay_in_desktop_app(&mut self, doing: &str, cx: &mut Context<Self>) {
-        self.in_desktop_app(
-            format!("{doing} is in the desktop app"),
-            in_desktop_app(doing),
-            cx,
-        );
+    /// Says that `doing` is the desktop app's, in the browser viewer,
+    /// with the command that opens the recording on screen there at the
+    /// playhead, the right column on `right`, and a button that copies
+    /// the command.
+    pub(super) fn replay_in_desktop_app(
+        &mut self,
+        doing: &str,
+        right: RightColumn,
+        cx: &mut Context<Self>,
+    ) {
+        let title = format!("{doing} is in the desktop app");
+        let said = in_desktop_app(doing);
+
+        // The desktop build never says so: the command is the browser
+        // viewer's to give.
+        #[cfg(target_family = "wasm")]
+        if let Some(command) = self.desktop_command_here(right) {
+            let body = crate::ui::desktop::go_on_words(&said, &command);
+            self.offer(
+                NoticeTone::Info,
+                title,
+                body,
+                vec![
+                    NoticeAction::CopyCommand(command),
+                    NoticeAction::GetApp,
+                    NoticeAction::Dismiss,
+                ],
+                cx,
+            );
+            return;
+        }
+        #[cfg(not(target_family = "wasm"))]
+        let _ = right;
+        self.in_desktop_app(title, said, cx);
     }
 
     /// Changes the body of a notice on screen.
@@ -1565,7 +1597,7 @@ impl Scrubber {
             NoticeAction::EnterLicense => self.open_license_dialog(window, cx),
             NoticeAction::ExportTo(path) => self.start_export(path, cx),
             NoticeAction::Reveal(path) => cx.reveal_path(&path),
-            NoticeAction::CopyText(text) => {
+            NoticeAction::CopyText(text) | NoticeAction::CopyCommand(text) => {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(text))
             }
             NoticeAction::RemoveRuns(dirs) => self.remove_runs(dirs, window, cx),
@@ -1604,7 +1636,7 @@ impl Scrubber {
     pub(super) fn fork_here(&mut self, cx: &mut Context<Self>) {
         // The browser viewer has no machine to run the recording on.
         if cfg!(target_family = "wasm") && self.session.is_some() {
-            self.replay_in_desktop_app(Replay::Fork.doing(), cx);
+            self.replay_in_desktop_app(Replay::Fork.doing(), RightColumn::AtStep, cx);
             return;
         }
 
@@ -1722,7 +1754,7 @@ impl Scrubber {
     ) {
         // The browser viewer has no machine to run the recording on.
         if cfg!(target_family = "wasm") && self.session.is_some() {
-            self.replay_in_desktop_app(replay.doing(), cx);
+            self.replay_in_desktop_app(replay.doing(), RightColumn::AtStep, cx);
             return;
         }
 
