@@ -370,7 +370,7 @@ fn process_places(machine: &Machine, frames: &BTreeSet<u64>) -> Vec<(u64, Place)
     };
     let mut found = Vec::new();
     for task in processes {
-        let Ok(Some(page_table)) = tasks.page_table(task) else {
+        let Ok(Some(page_table)) = tasks.process_page_table(task) else {
             continue;
         };
         let (Ok(pid), Ok(name)) = (tasks.tgid(task), tasks.name(task)) else {

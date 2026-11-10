@@ -176,7 +176,8 @@ impl<'a, M: Memory + ?Sized> Tasks<'a, M> {
     }
 
     /// The physical address of a task's page table, or None for a kernel
-    /// thread, which has no memory of its own.
+    /// thread, which has no memory of its own, and for a thread that has
+    /// exited. A process's is [`Tasks::process_page_table`].
     pub fn page_table(&self, task: u64) -> Result<Option<u64>> {
         let mm = self.pointer(task + self.layout.mm)?;
         if mm == 0 {
@@ -184,6 +185,24 @@ impl<'a, M: Memory + ?Sized> Tasks<'a, M> {
         }
         let pgd = self.pointer(mm + self.layout.pgd)?;
         Ok(Some(pgd - self.layout.page_offset))
+    }
+
+    /// The physical address of the page table of the process `task`
+    /// belongs to: that of the first thread on the process's list that
+    /// still has memory. A process's first thread can exit while the
+    /// others run on, as a main that ends in pthread_exit does, and the
+    /// kernel clears an exited thread's mm. None when no thread has
+    /// memory: a kernel thread, or a process all of whose threads are on
+    /// their way out.
+    pub fn process_page_table(&self, task: u64) -> Result<Option<u64>> {
+        let signal = self.pointer(task + self.layout.signal)?;
+        let head = signal + self.layout.thread_head;
+        for thread in self.entries(head, self.layout.thread_node)? {
+            if let Some(table) = self.page_table(thread)? {
+                return Ok(Some(table));
+            }
+        }
+        Ok(None)
     }
 
     /// The user registers a task saved when it last entered the kernel, in
@@ -466,6 +485,29 @@ mod tests {
         assert_eq!(tasks.page_table(t40).unwrap(), Some(0x9000));
         let t50 = tasks.process(50).unwrap().unwrap();
         assert_eq!(tasks.page_table(t50).unwrap(), None);
+    }
+
+    /// A process keeps its page table while any of its threads has
+    /// memory: with the first thread's mm cleared, as the kernel clears it
+    /// when that thread calls pthread_exit, the page table is the next
+    /// thread's. With every thread's mm cleared the process has none, and
+    /// neither has a kernel thread.
+    #[test]
+    fn a_process_s_page_table_outlives_its_first_thread() {
+        let (fake, [t40, t41, t42]) = kernel();
+        let l = layout();
+        let tasks = Tasks::new(&fake, l);
+        assert_eq!(tasks.process_page_table(t40).unwrap(), Some(0x9000));
+
+        fake.put_u64(t40 + l.mm, 0);
+        assert_eq!(tasks.page_table(t40).unwrap(), None);
+        assert_eq!(tasks.process_page_table(t40).unwrap(), Some(0x9000));
+
+        fake.put_u64(t41 + l.mm, 0);
+        fake.put_u64(t42 + l.mm, 0);
+        assert_eq!(tasks.process_page_table(t40).unwrap(), None);
+        let t50 = tasks.process(50).unwrap().unwrap();
+        assert_eq!(tasks.process_page_table(t50).unwrap(), None);
     }
 
     /// A thread's user registers are the words of its pt_regs, at the

@@ -650,6 +650,15 @@ fn in_scope(address: u64, space: Option<u64>, cr3: u64) -> bool {
     }
 }
 
+/// Whether an exec moved the debugged process off `space`, the page
+/// table gdb debugs, given `now`, the process's page table as the
+/// kernel's tasks give it. A process none of whose threads has memory is
+/// exiting, which is no exec: its last threads run on in the kernel with
+/// the traps still gdb's to stop at.
+fn switched_by_exec(now: Option<u64>, space: Option<u64>) -> bool {
+    now.is_some_and(|table| Some(table) != space)
+}
+
 /// Whether a thread entered the kernel by a syscall instruction, from
 /// `saved`, the user registers it saved on the way in, and `code`, the
 /// two bytes before its saved pc when they could be read. The instruction
@@ -861,7 +870,7 @@ impl<'h> Debuggee<'h> {
                 let task = tasks
                     .process(pid)?
                     .with_context(|| format!("no process {pid} at this step"))?;
-                tasks.page_table(task)?
+                tasks.process_page_table(task)?
             }
             (Some(_), None) => Some(page_table(machine.special_registers()?.cr3)),
             (None, _) => None,
@@ -1065,13 +1074,14 @@ impl<'h> Debuggee<'h> {
         let Some(task) = tasks.process(pid)? else {
             return Ok(false);
         };
-        Ok(tasks.page_table(task)? == self.space)
+        Ok(tasks.process_page_table(task)? == self.space)
     }
 
     /// Whether an exec has switched the debugged process to another page
     /// table than the one gdb debugs: the new program's, which the kernel
     /// moves the process to before the exec's record. None of this when
-    /// the process is gone, or with no process or task layout.
+    /// the process is gone or none of its threads has memory left, or with
+    /// no process or task layout.
     fn exec_switched(&self) -> Result<bool> {
         let (Some(pid), Some(layout)) = (self.process, self.layout) else {
             return Ok(false);
@@ -1080,7 +1090,8 @@ impl<'h> Debuggee<'h> {
         let Some(task) = tasks.process(pid)? else {
             return Ok(false);
         };
-        Ok(tasks.page_table(task)? != self.space)
+        let now = tasks.process_page_table(task)?;
+        Ok(switched_by_exec(now, self.space))
     }
 
     /// Where the kernel may be saving the user registers of the thread on
@@ -2338,6 +2349,20 @@ mod tests {
     // A fork's records compared with the run's, as gdb runs it: the step
     // of the first that differs is kept, and only that one.
     use super::*;
+
+    #[test]
+    fn a_process_without_memory_has_exited_not_execed() {
+        // The space gdb debugs against the page table the kernel's tasks
+        // give the process now: the same table is no exec, another table
+        // is the new program's, and no table at all, as when every thread
+        // has let its memory go on the way out, is an exit.
+        const SPACE: u64 = 0x9000;
+        const NEW_PROGRAM: u64 = 0xa000;
+        assert!(!switched_by_exec(Some(SPACE), Some(SPACE)));
+        assert!(switched_by_exec(Some(NEW_PROGRAM), Some(SPACE)));
+        assert!(!switched_by_exec(None, Some(SPACE)));
+        assert!(switched_by_exec(Some(NEW_PROGRAM), None));
+    }
 
     /// Address spaces are told apart by CR3's page table base alone: the
     /// PCID in its low bits changes as the kernel switches. User addresses

@@ -698,7 +698,7 @@ pub fn process_page_table(machine: &Machine, pid: u32, step: u64) -> Result<u64>
         .process(pid)?
         .with_context(|| format!("no process {pid} at step {step}"))?;
     tasks
-        .page_table(task)?
+        .process_page_table(task)?
         .with_context(|| format!("process {pid} has no memory of its own at step {step}"))
 }
 
