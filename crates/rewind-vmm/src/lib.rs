@@ -664,7 +664,7 @@ impl Machine {
             {
                 let stop = Stop::TimedOut(self.stall()?);
                 self.dev.stop = Some(stop);
-                self.dev.drain_io(obs)?;
+                self.dev.end_trace(stop, obs)?;
                 return Ok(Outcome::Stopped(stop));
             }
             if self.work.is_some() && self.config.preemption == Preemption::AtBranchCounts {
@@ -727,11 +727,9 @@ impl Machine {
             };
 
             // A machine that stopped without a step, as a triple fault
-            // stops it, takes what the guest buffered since the last one,
-            // and the switches still pending.
-            if counted.is_none() && self.dev.stop.is_some() {
-                self.dev.drain_io(obs)?;
-                self.dev.finish_switches(obs);
+            // stops it, ends its trace here.
+            if let (None, Some(stop)) = (counted, self.dev.stop) {
+                self.dev.end_trace(stop, obs)?;
             }
             if let Some(stop) = self.dev.stop {
                 return Ok(Outcome::Stopped(stop));
@@ -1161,6 +1159,25 @@ impl Devices {
         }
     }
 
+    /// Ends the trace of a machine that stopped as `stop` without a step
+    /// of its own. The trace holds what the inputs decide up to the last
+    /// step, so a replay that pauses at that step makes the same trace.
+    fn end_trace(&mut self, stop: Stop, obs: &mut dyn Observer) -> Result<()> {
+        // The time limit lands wherever the host's signal finds the guest
+        // between two exits. How many records the guest had buffered by
+        // then is the host's doing, so the trace leaves them out.
+        if matches!(stop, Stop::TimedOut(_)) {
+            return Ok(());
+        }
+
+        // A guest that stopped by itself did so at the same instruction in
+        // every execution: the trace takes what the guest buffered since
+        // the last step, and the switches still pending.
+        self.drain_io(obs)?;
+        self.finish_switches(obs);
+        Ok(())
+    }
+
     /// Takes the read and write records the guest buffered since the step
     /// before, with how many it had no room for, into the trace at this
     /// step, and sets both back to 0 for the guest to go on from, after
@@ -1418,6 +1435,36 @@ mod tests {
         assert_eq!(log.lost(), 2);
         assert_eq!(shared_u32(&dev, pv::SHARED_IO_HEAD), 0);
         assert_eq!(shared_u32(&dev, pv::SHARED_IO_LOST), 0);
+    }
+
+    /// A time limit that stopped a guest computing in user space.
+    fn timed_out() -> Stop {
+        Stop::TimedOut(Stall {
+            rip: 0,
+            mode: CpuMode::User,
+            since_exit: std::time::Duration::ZERO,
+        })
+    }
+
+    #[test]
+    fn a_time_limit_leaves_buffered_records_out_of_the_trace() {
+        // A write the guest buffered after its last exit, and a machine
+        // that stops at its time limit: the trace gets nothing, as a replay
+        // paused at the last step makes nothing, and the guest's buffer
+        // stays as the guest left it. The same buffer under a triple
+        // fault, which the guest reaches by itself, goes into the trace.
+        let mut dev = devices(0);
+        dev.step = 12;
+        buffer(&mut dev, &guest_write(3, 0, 10), 0);
+        let mut kept = Kept::default();
+        dev.end_trace(timed_out(), &mut kept).unwrap();
+        assert!(kept.0.is_empty());
+        assert_ne!(shared_u32(&dev, pv::SHARED_IO_HEAD), 0);
+
+        dev.end_trace(Stop::TripleFault, &mut kept).unwrap();
+        let log = rewind_trace::io_records::decode(&kept.0).unwrap();
+        assert_eq!(log.records.len(), 1);
+        assert!(kept.0.iter().all(|(step, _)| *step == 12));
     }
 
     #[test]
