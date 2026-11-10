@@ -4797,6 +4797,35 @@ in
         touch $out
       '';
 
+  # checks.orphan-worker: gdb debugs a worker thread whose main thread
+  # ended with pthread_exit. /proc/<pid>/maps is the leader's and is
+  # empty once the leader has gone, so the guest's init reads a live
+  # thread's map instead; without that the process has no files and gdb
+  # has no symbols for the worker. Boots the VM, so it needs /dev/kvm.
+  orphan-worker =
+    pkgs.runCommand "rewind-orphan-worker"
+      {
+        nativeBuildInputs = [ rewind ];
+        requiredSystemFeatures = [ "kvm" ];
+      }
+      ''
+        export REWIND_HOME=$TMPDIR/rewind
+        export REWIND_DEBUGINFOD=/nonexistent
+        rewind run -q --clock exits --name leader --root ${guestRoot} -- /bin/leader
+        rewind events leader | tee events
+        write=$(grep 'write(1, "worker' events)
+        step=$(echo "$write" | awk '{print $1}')
+        pid=$(echo "$write" | awk '{print $2}' | cut -d/ -f1)
+        tid=$(echo "$write" | awk '{print $2}' | cut -d/ -f2)
+        test "$pid" != "$tid"
+
+        rewind gdb leader "$step" --pid "$pid" -- -batch -ex 'thread apply all bt' > gdb 2>&1 || true
+        cat gdb
+        grep -q 'worker (arg=.*leader\.c' gdb
+        test "$(grep -c 'had died' gdb)" = 0
+        touch $out
+      '';
+
   # checks.file-events: every file event names its file one way, the
   # path the kernel resolves, whatever the program passed. cp's open
   # relative to a directory it opened with O_PATH is reported, as is an

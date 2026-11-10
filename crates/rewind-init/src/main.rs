@@ -657,7 +657,7 @@ fn running(pid: Option<i32>, out: &mut File, err: &mut File) -> InspectStatus {
         return InspectStatus::NotFound;
     }
 
-    let maps = match fs::read_to_string(format!("/proc/{pid}/maps")) {
+    let maps = match live_maps(pid) {
         Ok(maps) => maps,
         Err(e) if asked && e.kind() == std::io::ErrorKind::NotFound => {
             let _ = writeln!(err, "no process {pid} at this step");
@@ -1018,6 +1018,28 @@ fn read_list() -> std::io::Result<String> {
         list.extend_from_slice(&buf[..n]);
     }
     Ok(String::from_utf8_lossy(&list).into_owned())
+}
+
+/// The memory map of process `pid`, read from a thread of it that is
+/// still alive. /proc/<pid>/maps is the thread group leader's, and is
+/// empty once the leader has exited while other threads run on, as a
+/// program that ends its main thread with pthread_exit leaves it; the
+/// other threads share the process's memory, so any live one's map is
+/// the process's.
+fn live_maps(pid: i32) -> std::io::Result<String> {
+    let maps = fs::read_to_string(format!("/proc/{pid}/maps"))?;
+    if !maps.is_empty() {
+        return Ok(maps);
+    }
+    for thread in fs::read_dir(format!("/proc/{pid}/task"))? {
+        let Ok(maps) = fs::read_to_string(thread?.path().join("maps")) else {
+            continue;
+        };
+        if !maps.is_empty() {
+            return Ok(maps);
+        }
+    }
+    Ok(maps)
 }
 
 /// The files a memory map maps that did not come from the input image's
