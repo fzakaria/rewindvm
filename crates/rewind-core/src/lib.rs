@@ -43,7 +43,8 @@ pub use home::{Guest, Home};
 /// build knew it, as in `0.4.1 (5a6d5c6b072e)`.
 pub const VERSION: &str = env!("REWIND_VERSION");
 pub use run::{
-    Echo, Execution, Keyframes, Manifest, Run, RunOutcome, Source, Spec, SpecExt, TimeLimit,
+    Created, Echo, Execution, Keyframes, Manifest, Run, RunOutcome, Source, Spec, SpecExt,
+    TimeLimit,
 };
 
 /// The error for a state the engine should never reach, such as a replay

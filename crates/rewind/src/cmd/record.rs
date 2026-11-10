@@ -14,7 +14,8 @@ use rewind_core::run::{
     RestoreStore, Start, Store, default_epoch,
 };
 use rewind_core::{
-    Echo, Execution, Guest, Home, Keyframes, Run, Source, Spec, TimeLimit, compare, image, nix,
+    Created, Echo, Execution, Guest, Home, Keyframes, Run, Source, Spec, TimeLimit, compare, image,
+    nix,
 };
 use rewind_init::{Job, Output, Root};
 use rewind_trace::compare::Comparison;
@@ -341,13 +342,15 @@ impl Subject<'_> {
     /// Runs each window on its own VM, all at once, each restoring the
     /// keyframe it starts from out of `store`, and returns the runs in
     /// the order given. `machine` holds the time limit, and for a job
-    /// every other option of its runs.
+    /// every other option of its runs. Each run that makes its directory
+    /// is noted in `created`, if given.
     fn try_all(
         &self,
         home: &Home,
         machine: &MachineArgs,
         windows: &[Window],
         store: &Store,
+        created: Option<&Created>,
     ) -> Result<Vec<Run>> {
         match self {
             // A job's runs, recorded as `rewind run` and `nix` record them.
@@ -365,7 +368,15 @@ impl Subject<'_> {
                         ..machine.clone()
                     })
                     .collect();
-                execute_all(home, guest, prepared, machines, start.clone(), store)
+                execute_all(
+                    home,
+                    guest,
+                    prepared,
+                    machines,
+                    start.clone(),
+                    store,
+                    created,
+                )
             }
 
             // A run's forks, each on a thread of its own.
@@ -374,7 +385,7 @@ impl Subject<'_> {
                     .iter()
                     .map(|w| {
                         scope.spawn(move || {
-                            fork_window(home, run, machine, *w, reseed.as_ref(), store)
+                            fork_window(home, run, machine, *w, reseed.as_ref(), store, created)
                         })
                     })
                     .collect();
@@ -390,7 +401,8 @@ impl Subject<'_> {
 /// Forks `run` at the first step of `window`, perturbed by its seed until
 /// its last, and its RNG reseeded as `reseed` says, with only the
 /// keyframes `machine` asks of a run that skips them, as `rewind check`
-/// tries it. The fork restores the parent's keyframe out of `store`.
+/// tries it. The fork restores the parent's keyframe out of `store`, and
+/// is noted in `created`, if given, when it makes its directory.
 fn fork_window(
     home: &Home,
     run: &Run,
@@ -398,6 +410,7 @@ fn fork_window(
     window: Window,
     reseed: Option<&Reseed>,
     store: &Store,
+    created: Option<&Created>,
 ) -> Result<Run> {
     let Window { seed, from, until } = window;
     let m = &run.manifest;
@@ -419,6 +432,7 @@ fn fork_window(
         limit: time_limit(machine.timeout, machine.late_timeout.as_ref()),
         store: RestoreStore::Shared(store),
         handoff: None,
+        created,
     };
     Run::execute(
         home,
@@ -592,10 +606,7 @@ pub(crate) fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
                             prepared: &prepared,
                             start: Start::Live(live),
                         };
-                        (
-                            from,
-                            subject.try_all(home, &batch_machine, &windows, &store),
-                        )
+                        FirstBatch::execute(home, &subject, &batch_machine, from, &windows, &store)
                     };
 
                     // An unperturbed run that failed stops the batch at
@@ -721,7 +732,7 @@ pub(crate) fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
             batch[0],
             batch[batch.len() - 1]
         ));
-        let runs = execute_all(home, guest, prepared, machines, Start::Boot, &store);
+        let runs = execute_all(home, guest, prepared, machines, Start::Boot, &store, None);
         let judged = runs.and_then(|runs| judge_all(&judge, runs));
         clear_status();
         for (&key, (run, violations)) in batch.iter().zip(judged?) {
@@ -754,7 +765,8 @@ pub(crate) fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
         let seed = first_seed + i;
 
         // The seed's first batch of schedules when it ran alongside the
-        // seed's unperturbed run, with the step its windows start at.
+        // seed's unperturbed run. A batch the search does not reach removes
+        // the runs it made as it goes.
         let mut precomputed = match i {
             0 => first_batch.take(),
             _ => None,
@@ -793,7 +805,8 @@ pub(crate) fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
                     // The seed's forks start from the recorded run, not
                     // from the seed's unperturbed run, so the first batch
                     // of them starts right away beside it.
-                    let fork = || fork_window(home, run, &machine, window, Some(&reseed), &store);
+                    let fork =
+                        || fork_window(home, run, &machine, window, Some(&reseed), &store, None);
                     let seed_base = match batch_alongside(i, dirents, schedules) {
                         Alongside::No => fork(),
                         Alongside::Yes => std::thread::scope(|scope| {
@@ -803,7 +816,14 @@ pub(crate) fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
                             let seed_machine = &seed_machine;
                             let store = &store;
                             let batch = scope.spawn(move || {
-                                (from, subject.try_all(home, seed_machine, &windows, store))
+                                FirstBatch::execute(
+                                    home,
+                                    subject,
+                                    seed_machine,
+                                    from,
+                                    &windows,
+                                    store,
+                                )
                             });
                             let seed_base = fork();
                             precomputed = Some(batch.join().expect("a batch's thread panicked"));
@@ -847,7 +867,14 @@ pub(crate) fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
                                     prepared,
                                     start: Start::Live(live),
                                 };
-                                (from, subject.try_all(home, &seed_machine, &windows, &store))
+                                FirstBatch::execute(
+                                    home,
+                                    &subject,
+                                    &seed_machine,
+                                    from,
+                                    &windows,
+                                    &store,
+                                )
                             };
                             let (seed_base, batch) =
                                 with_first_batch(user_from, first, batch, |_| {});
@@ -923,15 +950,16 @@ pub(crate) fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
             // The first batch may have run already, alongside the seed's
             // unperturbed run, over the same windows.
             let runs = match precomputed.take() {
-                Some((from, runs)) => {
+                Some(first) => {
                     anyhow::ensure!(
-                        from == s.start,
-                        "seed {seed}'s first schedules started at step {from}, and its unperturbed run's job at step {}",
+                        first.from == s.start,
+                        "seed {seed}'s first schedules started at step {}, and its unperturbed run's job at step {}",
+                        first.from,
                         s.start
                     );
-                    runs
+                    first.used()
                 }
-                None => s.subject.try_all(home, &s.machine, &windows, &store),
+                None => s.subject.try_all(home, &s.machine, &windows, &store, None),
             };
             let judged = runs.and_then(|runs| judge_all(&judge, runs));
             clear_status();
@@ -1238,7 +1266,9 @@ pub(crate) fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
                         until,
                     })
                     .collect();
-                let runs = s.subject.try_all(home, &s.machine, &windows, &store)?;
+                let runs = s
+                    .subject
+                    .try_all(home, &s.machine, &windows, &store, None)?;
                 Ok(judge_all(&judge, runs)?
                     .into_iter()
                     .map(|(run, violations)| Judged {
@@ -1546,6 +1576,76 @@ fn check_timeout(base: &Run) -> u64 {
         .as_secs()
 }
 
+/// A seed's first batch of schedules, executed alongside the seed's
+/// unperturbed run before the search knew it would try them: the step
+/// their windows start at, the runs, and the runs whose directories the
+/// batch made. Every run of the batch has stopped by the time the batch
+/// is made. A batch the search drops without using, as when the seed's
+/// unperturbed run ends differently or fails, removes the runs it made
+/// when it goes, since the search in order never started them. A run it
+/// found already there under the same id, recorded before by anything,
+/// stays.
+struct FirstBatch<'h> {
+    home: &'h Home,
+    from: u64,
+    runs: Option<Result<Vec<Run>>>,
+    created: Created,
+}
+
+impl<'h> FirstBatch<'h> {
+    /// Tries `windows` of `subject`, which start perturbing at `from`, as
+    /// [`Subject::try_all`] does, noting the runs that make their
+    /// directories.
+    fn execute(
+        home: &'h Home,
+        subject: &Subject,
+        machine: &MachineArgs,
+        from: u64,
+        windows: &[Window],
+        store: &Store,
+    ) -> FirstBatch<'h> {
+        let created = Created::new();
+        let runs = subject.try_all(home, machine, windows, store, Some(&created));
+        FirstBatch {
+            home,
+            from,
+            runs: Some(runs),
+            created,
+        }
+    }
+
+    /// The batch's runs, which the search goes on to judge and keep.
+    fn used(mut self) -> Result<Vec<Run>> {
+        self.runs
+            .take()
+            .expect("a first batch's runs are taken once")
+    }
+}
+
+impl Drop for FirstBatch<'_> {
+    fn drop(&mut self) {
+        // A batch the search used keeps its runs.
+        let Some(runs) = self.runs.take() else {
+            return;
+        };
+
+        // The runs the batch made, closed first, go as `rewind remove`
+        // removes runs. A removal that fails leaves them, and says so,
+        // without failing the search.
+        drop(runs);
+        let ids: Vec<String> = self.created.ids().iter().map(|id| id.to_string()).collect();
+        if ids.is_empty() {
+            return;
+        }
+        if let Err(e) = rewind_core::prune::remove_only(self.home, &ids) {
+            eprintln!(
+                "{} removing the runs of schedules the search did not try: {e:#}",
+                color::stderr().prefix()
+            );
+        }
+    }
+}
+
 /// The run a seed's schedules start from, executed by `first`, and its
 /// first batch of schedules, executed by `batch` alongside it: from the
 /// [`Live`] the run hands off once it has passed the step they start
@@ -1568,6 +1668,7 @@ fn with_first_batch<T: Send>(
             first(Shares {
                 store: RestoreStore::Own,
                 handoff: Some(&handoff),
+                created: None,
             })
         });
         let batch = handed
@@ -1780,6 +1881,7 @@ pub(crate) fn fork(home: &Home, args: ForkArgs) -> Result<ExitCode> {
         limit: time_limit(timeout, None),
         store: RestoreStore::Own,
         handoff: None,
+        created: None,
     };
     let child = Run::execute(
         home,
@@ -2393,19 +2495,23 @@ enum Announce {
 }
 
 /// What a run shares with the runs executing beside it: the page store it
-/// restores the keyframe it starts from out of, and, for a run others
-/// start from, where it hands them off while it goes on.
+/// restores the keyframe it starts from out of, for a run others start
+/// from, where it hands them off while it goes on, and for a run of a
+/// batch the search may drop, where it notes that it made its directory.
 #[derive(Clone, Copy)]
 struct Shares<'a> {
     store: RestoreStore<'a>,
     handoff: Option<&'a Handoff>,
+    created: Option<&'a Created>,
 }
 
 impl Shares<'_> {
-    /// A run executing alone: a store of its own, and no handoff.
+    /// A run executing alone: a store of its own, no handoff, and nothing
+    /// to note.
     const ALONE: Shares<'static> = Shares {
         store: RestoreStore::Own,
         handoff: None,
+        created: None,
     };
 }
 
@@ -2466,6 +2572,7 @@ fn execute(
         limit: time_limit(machine.timeout, machine.late_timeout.as_ref()),
         store: shares.store,
         handoff: shares.handoff,
+        created: shares.created,
     };
     let run = Run::execute(
         home,
@@ -2484,7 +2591,8 @@ fn execute(
 
 /// Runs each machine option set on its own VM, all at once, every one
 /// restoring the keyframe it starts from out of `store`, and returns the
-/// runs in the order given.
+/// runs in the order given. Each run that makes its directory is noted in
+/// `created`, if given.
 fn execute_all(
     home: &Home,
     guest: &Guest,
@@ -2492,6 +2600,7 @@ fn execute_all(
     machines: Vec<MachineArgs>,
     start: Start,
     store: &Store,
+    created: Option<&Created>,
 ) -> Result<Vec<Run>> {
     std::thread::scope(|scope| {
         let handles: Vec<_> = machines
@@ -2502,6 +2611,7 @@ fn execute_all(
                     let shared = Shares {
                         store: RestoreStore::Shared(store),
                         handoff: None,
+                        created,
                     };
                     execute(home, guest, prepared, &m, start, Announce::No, shared)
                 })

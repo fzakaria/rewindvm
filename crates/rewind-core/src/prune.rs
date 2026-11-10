@@ -4,6 +4,7 @@
 //! its directory, its imported inputs and its source file cache; pages its
 //! keyframes named stay in the page store.
 
+use std::collections::BTreeSet;
 use std::fs;
 
 use anyhow::{Context, Result};
@@ -105,6 +106,47 @@ pub fn remove_with_forks(home: &Home, ids: &[String], act: Act) -> Result<Vec<St
     remove_tree(home, &ids, &members, act)
 }
 
+/// Removes the runs `ids`, which the caller made and has no use for, as
+/// `remove_with_forks` removes them, and nothing else the home holds. A
+/// run goes with its forks only when each fork is among `ids` too. A run
+/// another process executes, forks or reads keyframes from stays. The
+/// runs are held from the listing to the last deletion. Returns the ids
+/// removed, each run's forks before the run.
+pub fn remove_only(home: &Home, ids: &[String]) -> Result<Vec<String>> {
+    let _held = home.removing()?;
+    let listing = Run::list_all(home)?;
+    let mut members: Vec<Member> = listing
+        .runs
+        .iter()
+        .map(member)
+        .chain(listing.unreadable.iter().map(unreadable_member))
+        .collect();
+    let ours: BTreeSet<&str> = ids.iter().map(String::as_str).collect();
+    let mut removed = Vec::new();
+    for id in ids {
+        // A run already gone, as a fork of one removed earlier, or never
+        // registered, has nothing left to remove.
+        if !members.iter().any(|m| m.id == *id) {
+            continue;
+        }
+
+        // The run with its forks, when all of them are the caller's and
+        // nothing else needs them.
+        let Ok(set) = removal_set(&[id.as_str()], &members) else {
+            continue;
+        };
+        if !set.iter().all(|r| ours.contains(r.as_str())) {
+            continue;
+        }
+        for run in set.iter().rev() {
+            delete(home, run)?;
+            removed.push(run.clone());
+        }
+        members.retain(|m| !set.contains(&m.id));
+    }
+    Ok(removed)
+}
+
 /// Deletes a run's directory, its imported inputs and its source file
 /// cache.
 fn delete(home: &Home, id: &str) -> Result<()> {
@@ -188,6 +230,62 @@ mod tests {
         assert!(home.inputs().join("r").exists());
         assert!(!home.source_cache().join("a").exists());
         assert!(home.source_cache().join("r").exists());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn removing_only_a_callers_runs_leaves_every_run_another_needs() {
+        // A home of written manifests. The caller made a, its fork b, c,
+        // e and h, which is not there. c has a fork d the caller did not
+        // make, and f, not the caller's, reads e's keyframes. Removing the
+        // caller's runs takes b, then a, and leaves c, d, e, f and g, which
+        // is no one's but the home's.
+        use crate::run::tests::manifest;
+        use crate::run::{Parent, RunId};
+        let root = std::env::temp_dir().join(format!("rewind-remove-only-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let home = Home::at(root.clone()).unwrap();
+        let write = |m: &crate::run::Manifest| {
+            let dir = home.runs().join(&m.id);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(
+                dir.join(crate::run::MANIFEST),
+                serde_json::to_vec(m).unwrap(),
+            )
+            .unwrap();
+        };
+        let id = |n: u64| format!("{n:016x}");
+        let fork_of = |child: u64, parent: u64| {
+            let mut m = manifest(&id(child), "fork", child);
+            m.parent = Some(Parent {
+                run: RunId::parse(&id(parent)).unwrap(),
+                step: 7,
+            });
+            m
+        };
+        let (a, b, c, d, e, f, g, h) = (1, 2, 3, 4, 5, 6, 7, 8);
+        write(&manifest(&id(a), "a", a));
+        write(&fork_of(b, a));
+        write(&manifest(&id(c), "c", c));
+        write(&fork_of(d, c));
+        write(&manifest(&id(e), "e", e));
+        let mut reader = manifest(&id(f), "f", f);
+        reader.shared_keyframes = Some(rewind_trace::manifest::SharedKeyframes {
+            run: RunId::parse(&id(e)).unwrap(),
+            through: 99,
+        });
+        write(&reader);
+        write(&manifest(&id(g), "g", g));
+
+        let ours: Vec<String> = [a, b, c, e, h].into_iter().map(id).collect();
+        let removed = remove_only(&home, &ours).unwrap();
+        assert_eq!(removed, vec![id(b), id(a)]);
+        for gone in [a, b] {
+            assert!(!home.runs().join(id(gone)).exists());
+        }
+        for stays in [c, d, e, f, g] {
+            assert!(home.runs().join(id(stays)).exists(), "{stays}");
+        }
         fs::remove_dir_all(&root).unwrap();
     }
 

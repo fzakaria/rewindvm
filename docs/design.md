@@ -1318,7 +1318,11 @@ nothing.
    there, the switches pending at that keyframe included. Each later seed's
    unperturbed run does the same for that seed's first batch. The search
    still reads the runs in the order it would have made them one after
-   another, so what it prints is the same. By default a run
+   another, so what it prints is the same. A batch the search then drops,
+   as when its seed's unperturbed run ends differently, is removed as
+   `rewind remove` removes runs: only the runs whose directories its
+   executions made, never a run of the same id that was there already.
+   By default a run
    is judged by its exit status and output hashes against schedule 0's;
    `--property` judges it by what a correct run is (see
    [Properties](#properties-seeds-and-the-sdk)). A schedule can make a program loop forever, so each run gets ten

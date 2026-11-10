@@ -972,7 +972,9 @@ let
   # each way, past the window of 4096 steps whose switches a run writes in
   # one batch, which the runs that start from it read before they start.
   # Then a loop without exits, its length the first argument, so the run
-  # takes seconds after it hands off to them.
+  # takes seconds after it hands off to them. With `random` as its second
+  # argument, the program then exits 2 when a byte from getrandom is odd,
+  # so the run's seed alone decides how it ends.
   slowRaceRoot =
     pkgs.runCommand "rewind-slow-race-root"
       {
@@ -984,11 +986,14 @@ let
         #include <pthread.h>
         #include <stdio.h>
         #include <stdlib.h>
+        #include <string.h>
+        #include <sys/random.h>
         #include <unistd.h>
 
         #define WORKERS 2
         #define ADDS 10
         #define PASSES 3000
+        #define ODD_DRAW 2
 
         static long total;
         static int ping[2], pong[2];
@@ -1031,6 +1036,13 @@ let
           for (volatile long i = 0; i < spins; i++)
             ;
           dprintf(1, "\ntotal %ld\n", total);
+          if (argc > 2 && strcmp(argv[2], "random") == 0) {
+            unsigned char draw = 0;
+            getrandom(&draw, 1, 0);
+            dprintf(1, "draw %u\n", draw);
+            if (draw & 1)
+              return ODD_DRAW;
+          }
           return total != WORKERS * ADDS;
         }
         EOF
@@ -3864,8 +3876,10 @@ in
   # the keyframes it took and takes none, so it hands off nothing, and the
   # batch waits for it to end. The two searches print the same, byte for
   # byte: every run of a sweep with --all, and the default search with
-  # its narrowing, with one seed and with two. Boots the VM, so it needs
-  # /dev/kvm.
+  # its narrowing, with one seed and with two. A later seed's batch that
+  # the search drops, since that seed's unperturbed run ends differently,
+  # leaves none of the runs it made, and keeps the runs it found already
+  # there under the same ids. Boots the VM, so it needs /dev/kvm.
   check-overlap =
     pkgs.runCommand "rewind-check-overlap"
       {
@@ -3947,6 +3961,43 @@ in
         overlapped seeds.overlapped.json "$at" "$second"
         check --seeds 2 --all --no-narrow --json > seeds.ordered.json || true
         cmp seeds.overlapped.json seeds.ordered.json
+
+        # A dropped batch: with the epoch and CPU pinned, the job draws an
+        # even byte under seed 0 and an odd one under seed 1, so seed 1's
+        # unperturbed run ends differently, after its first batch started
+        # beside it. The search reports that run and none of the batch.
+        export REWIND_HOME=$TMPDIR/dropped
+        dropped() {
+          rewind check -j 4 --clock exits --epoch 1767225600 --cpu v3-compat \
+            --all --no-narrow --json "$@" --root ${slowRaceRoot} -- /bin/slowrace "$spins" random
+        }
+
+        # Seed 1's schedules 1 and 2, made first: the batch makes runs with
+        # their ids. Seed 1's unperturbed run goes, so the search executes
+        # it afresh and it hands off to the batch.
+        dropped --seed 1 --schedules 2 > earlier.json || true
+        rewind remove "$(basename "$(jq -r '.schedules[0].dir' earlier.json)")"
+        ls $REWIND_HOME/runs | sort > before
+        test "$(wc -l < before)" = 2
+        was=$(jq .created "$(manifest earlier.json 1)")
+
+        dropped --seed 0 --seeds 2 --schedules 4 > dropped.json || true
+        jq -e '[.schedules[] | select(.seed == 1)] | length == 1 and .[0].differs' dropped.json
+        at=$(jq '.schedules | to_entries[] | select(.value.seed == 1) | .key' dropped.json)
+
+        # The batch started seconds before seed 1's unperturbed run ended:
+        # it executed schedule 1's run again then.
+        now=$(jq .created "$(manifest earlier.json 1)")
+        echo "schedule 1's run created at $was, again at $now; seed 1's run ended at $(ended dropped.json "$at")"
+        test "$now" -gt "$was"
+        test "$now" -lt "$(($(ended dropped.json "$at") - 2))"
+
+        # The runs are the ones made before and the ones reported: the
+        # batch's own runs are gone, and the two it found stay.
+        jq -r '.schedules[].dir' dropped.json | xargs -n 1 basename > reported
+        sort -u before reported > expected
+        ls $REWIND_HOME/runs | sort > after
+        diff expected after
         touch $out
       '';
 

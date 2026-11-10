@@ -193,6 +193,37 @@ pub struct Execution<'a> {
     /// Where a run that takes keyframes hands the runs that start from it
     /// what they need, once it has it, while it goes on.
     pub handoff: Option<&'a Handoff>,
+    /// Where the execution notes its run when it made the run's directory,
+    /// rather than finding one there.
+    pub created: Option<&'a Created>,
+}
+
+/// The runs whose directories executions made, rather than found already
+/// there: `rewind check` deletes the runs of a batch it drops, and only
+/// those it made. A run's id is the hash of its inputs, so a run the batch
+/// executed may be one recorded before, which stays.
+#[derive(Debug, Default)]
+pub struct Created(std::sync::Mutex<Vec<RunId>>);
+
+impl Created {
+    pub fn new() -> Created {
+        Created::default()
+    }
+
+    fn note(&self, id: &RunId) {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(id.clone());
+    }
+
+    /// The runs noted, in the order their directories were made.
+    pub fn ids(&self) -> Vec<RunId> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
 }
 
 /// Where a run that takes keyframes sends the runs that start from it a
@@ -992,6 +1023,7 @@ impl Run {
             limit,
             store: restore_store,
             handoff,
+            created,
         } = how;
         let dir = home.runs().join(&manifest.id);
 
@@ -1045,7 +1077,11 @@ impl Run {
         // parent. A parent a removal took meanwhile is seen here.
         let registering = home.registering()?;
         parent_present(home, &manifest)?;
-        fs::create_dir_all(&dir)?;
+        if make_run_dir(&dir)? == RunDir::Made
+            && let Some(created) = created
+        {
+            created.note(&manifest.id);
+        }
         let _executing = lock_executing(&dir)?;
         let write_manifest = |m: &Manifest| -> Result<()> {
             crate::image::write_atomic(&dir.join(MANIFEST), &serde_json::to_vec_pretty(m)?)?;
@@ -1429,6 +1465,7 @@ impl Run {
             limit,
             store: RestoreStore::Own,
             handoff: None,
+            created: None,
         };
         Run::execute_manifest(home, manifest, &StartFrom::Parent, how)
     }
@@ -2100,6 +2137,29 @@ fn now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or(Duration::ZERO)
         .as_secs()
+}
+
+/// Whether an execution made its run's directory or found one there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RunDir {
+    Made,
+    Found,
+}
+
+/// Makes the run directory `dir`, and the runs directory it is in. Of two
+/// executions making the same directory at once, from two processes or
+/// two threads, exactly one makes it and the other finds it, since making
+/// a directory fails when one is there: a listing taken before and after
+/// would credit both.
+fn make_run_dir(dir: &Path) -> Result<RunDir> {
+    if let Some(runs) = dir.parent() {
+        fs::create_dir_all(runs).with_context(|| format!("creating {}", runs.display()))?;
+    }
+    match fs::create_dir(dir) {
+        Ok(()) => Ok(RunDir::Made),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(RunDir::Found),
+        Err(e) => Err(e).with_context(|| format!("creating {}", dir.display())),
+    }
 }
 
 /// The run an execution starts from, when it shares its start with one:
@@ -3387,6 +3447,49 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn of_executions_making_one_run_directory_exactly_one_made_it() {
+        // Threads make the same run directory at once, in a runs directory
+        // not yet there: one finds it made by itself, the rest find it
+        // there. A directory made before any of them is found by all.
+        const THREADS: usize = 8;
+        let root = runs_dir("make-run-dir");
+        let dir = root.join("runs").join("aaaa000000000000");
+        let made: Vec<RunDir> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..THREADS)
+                .map(|_| scope.spawn(|| make_run_dir(&dir).unwrap()))
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert_eq!(made.iter().filter(|m| **m == RunDir::Made).count(), 1);
+        assert_eq!(make_run_dir(&dir).unwrap(), RunDir::Found);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn created_lists_the_runs_noted_in_order() {
+        // Runs noted from two threads are all listed, each thread's in the
+        // order it noted them.
+        let created = Created::new();
+        let (a, b, c) = (
+            id("aaaa000000000000"),
+            id("bbbb000000000000"),
+            id("cccc000000000000"),
+        );
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                created.note(&a);
+                created.note(&b);
+            });
+            scope.spawn(|| created.note(&c));
+        });
+        let ids = created.ids();
+        assert_eq!(ids.len(), 3);
+        let at = |x: &RunId| ids.iter().position(|i| i == x).unwrap();
+        assert!(at(&a) < at(&b));
+        assert!(ids.contains(&c));
+    }
+
+    #[test]
     fn a_fork_whose_machine_does_not_build_leaves_no_run_behind() {
         // A fork that fails before its machine runs never started, so it
         // must not be listed as an interrupted run. Forks a finished parent
@@ -3435,6 +3538,7 @@ pub(crate) mod tests {
                     limit: TimeLimit::None,
                     store: RestoreStore::Own,
                     handoff: None,
+                    created: None,
                 },
             );
             assert!(fork.is_err());
@@ -3503,6 +3607,7 @@ pub(crate) mod tests {
                     limit: TimeLimit::None,
                     store,
                     handoff: None,
+                    created: None,
                 },
             )
         };
