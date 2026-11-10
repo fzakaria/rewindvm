@@ -102,7 +102,7 @@ the window around it:
 $ rewind open {{failing|short}} {{deciding}} --compare {{passing|short}}
 ```
 
-<!-- screenshot site/img/app-point: {{home}}/runs/{{failing}} --compare {{home}}/runs/{{passing}} --step {{deciding}} ;; key plus ;; key plus ;; key plus ;; key plus ;; key plus ;; key plus ;; key plus ;; key plus ;; click 1236 860 ;; click 1058 317 ;; click 1371 317 ;; wait 2 -->
+<!-- screenshot site/img/app-point: {{home}}/runs/{{failing}} --compare {{home}}/runs/{{passing}} --step {{deciding}} ;; key plus ;; key plus ;; key plus ;; key plus ;; key plus ;; key plus ;; key plus ;; key plus ;; click 1236 860 ;; click 1058 338 ;; click 1371 338 ;; wait 2 -->
 
 ![The app at step {{deciding}} of the failing counter run, compared with the passing one, with the Threads panel open: a lane per thread, the playhead at the point, and the other counter thread on the CPU from step {{switch_step}}](../site/img/app-point.png)
 

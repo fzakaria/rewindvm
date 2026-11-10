@@ -169,7 +169,7 @@ with one lane per thread, or blame the write before this one. The popover moves
 by its top line. At the step where the run failed, the panel
 starts searching for the failing line's values before you click.
 
-<!-- screenshot site/img/app-blame: {{home}}/runs/{{failing}} --compare {{home}}/runs/{{passing}} --step {{crash_step}} --source ;; wait 20 ;; click 1090 477 ;; wait 6 -->
+<!-- screenshot site/img/app-blame: {{home}}/runs/{{failing}} --compare {{home}}/runs/{{passing}} --step {{crash_step}} --source ;; wait 20 ;; click 1090 487 ;; wait 6 -->
 
 ![The app's source panel at step {{crash_step}} with the answer for p->queue: it became 0x0 at step {{blame_step}}, written by the main thread in pool_shutdown at pool.c:125, p->queue = NULL, with the value before it, buttons to go to the write, show the reads and blame the earlier value, and where the other threads were](../site/img/app-blame.png)
 
@@ -206,21 +206,31 @@ $ rewind check --where --epoch {{epoch}} {{flake}} 2>/dev/null | sed -n '/^where
 ```
 
 <!-- capture held_tid: \d+/(\d+) +worker \(src/pool.c:75\), on the CPU at the deciding step -->
-<!-- capture diff_step: (\d+) +\d+/\d+ +worker \(src/pool.c:75\), at the first event that differs -->
-<!-- capture diff_tid: \d+/(\d+) +worker \(src/pool.c:75\), at the first event that differs -->
+<!-- capture diff_step: (\d+) +\d+/\d+ +start_thread \([^)]*\), at the first event that differs -->
+<!-- capture diff_tid: \d+/(\d+) +start_thread \([^)]*\), at the first event that differs -->
 <!-- assert: test {{held_tid}} = {{crash_tid}} && test {{diff_tid}} != {{crash_tid}} && test {{diff_step}} -lt {{crash_step}} -->
-<!-- set diff_job: rewind events {{failing}} --from {{diff_step}} --to {{diff_step}} | grep -oE '{{pid}}/{{diff_tid}} +write\(1, "job [0-9]+ done' | grep -oE '[0-9]+ done' | cut -d' ' -f1 -->
-<!-- set next_job: rewind events {{failing}} --from {{diff_step}} --to {{crash_step}} | grep -oE '{{pid}}/{{diff_tid}} +write\(1, "worker picked job [0-9]+' | head -1 | grep -oE '[0-9]+$' -->
-<!-- assert: rewind events {{passing}} --from {{deciding}} --to {{diff_step}} | grep -q '{{pid}}/{{crash_tid}} *write(1, "worker picked job {{next_job}}' -->
+<!-- assert: rewind events {{failing}} --from {{diff_step}} --to {{diff_step}} | grep -qE '{{pid}}/{{diff_tid}} +thread exit\(test_pool_shutd\) exited:0' -->
+<!-- assert: test {{blame_step}} -gt {{deciding}} && test {{blame_step}} -lt {{diff_step}} -->
+<!-- assert: grep -qE "^  thread {{diff_tid}}  pool.c:45  run_job" {{out:blame}} -->
+<!-- set other_job: rewind events {{failing}} --to {{diff_step}} | grep -oE '{{pid}}/{{diff_tid}} +write\(1, "worker picked job [0-9]+' | tail -1 | grep -oE '[0-9]+$' -->
+<!-- set next_pick: rewind events {{passing}} --from {{deciding}} | grep -m1 -E '{{pid}}/{{crash_tid}} +write\(1, "worker picked job' | awk '{print $1}' -->
+<!-- set next_job: rewind events {{passing}} --from {{next_pick}} --to {{next_pick}} | grep -oE 'worker picked job [0-9]+' | grep -oE '[0-9]+$' -->
+<!-- set passing_exit: rewind events {{passing}} --from {{deciding}} | grep -m1 -E '{{pid}}/{{diff_tid}} +thread exit' | awk '{print $1}' -->
+<!-- assert: test -n "{{other_job}}" && test -n "{{next_job}}" && test {{next_pick}} -lt {{passing_exit}} -->
 <!-- set late_gap: echo $(( {{crash_step}} - {{diff_step}} )) -->
 
-The first event that differs is the other worker, thread {{diff_tid}}, printing
-job {{diff_job}} done from line 75. With thread {{crash_tid}} held at the
-deciding step, the other worker finishes its job and picks job {{next_job}},
-where in the passing run thread {{crash_tid}} counted job {{crash_job}} and
-picked job {{next_job}} first. That is the cause showing up before the
-symptom: the held thread's fault at line 77, which `rewind where` showed at
-the top of this page, comes {{late_gap}} steps later, at step {{crash_step}}.
+The first event that differs is the other worker, thread {{diff_tid}},
+exiting: it is in `start_thread`, glibc's code around a thread's function, on
+its way out. With thread {{crash_tid}} held at the deciding step, the main
+thread shuts the pool down, nulling the queue at step {{blame_step}}. The
+other worker was in job
+{{other_job}}'s wait then, as blame showed; it finds the pool stopping, skips
+the count, and returns. In the passing run thread {{crash_tid}} counts job
+{{crash_job}} and picks job {{next_job}} before the shutdown, and the other
+worker exits after that, at step {{passing_exit}}. That is the cause showing
+up before the symptom: the held thread's fault at line 77, which `rewind
+where` showed at the top of this page, comes {{late_gap}} steps later, at step
+{{crash_step}}.
 
 In the app, the deciding step is a dashed blue mark on the timeline, before
 the solid one where the runs' events first differ. Zoomed in around the crash:
@@ -322,7 +332,7 @@ The kernel's DWARF comes from `rewindvm.cachix.org` with Nix, and from the
 debug tarball next to `rewind` without. The app's build log shows the kernel's
 messages beside the program's with kernel console on:
 
-<!-- screenshot site/img/app-kernel: {{home}}/runs/{{failing}} --compare {{home}}/runs/{{passing}} --step {{crash_step}} ;; click 550 227 ;; wait 2 -->
+<!-- screenshot site/img/app-kernel: {{home}}/runs/{{failing}} --compare {{home}}/runs/{{passing}} --step {{crash_step}} ;; click 550 248 ;; wait 2 -->
 
 ![The app's build log with the kernel console on, showing the segfault report under the test's output](../site/img/app-kernel.png)
 
@@ -473,7 +483,7 @@ both runs shared, then each run's next events side by side, with what differs
 in amber. The x key swaps to the other run at the matching step, and x again
 comes back:
 
-<!-- screenshot site/img/app-compare-tab: {{home}}/runs/{{failing}} --compare {{home}}/runs/{{passing}} ;; key d ;; click 1153 221 ;; wait 2 -->
+<!-- screenshot site/img/app-compare-tab: {{home}}/runs/{{failing}} --compare {{home}}/runs/{{passing}} ;; key d ;; click 1153 242 ;; wait 2 -->
 
 ![The app's Compare tab: the writes both runs made before they part, then the other worker's exit in the failing run beside the passing run's write, and the failing run's SIGSEGV a few events below, each run's text in full with what differs in amber](../site/img/app-compare-tab.png)
 
@@ -594,7 +604,7 @@ which runs the schedules from the playhead and fills a cell per schedule:
 grey for ended as this run did, blue for differently. Pick a cell to compare
 with or open its run:
 
-<!-- screenshot site/img/app-check: {{home}}/runs/{{passing}} --step {{deciding}} ;; click 1408 168 ;; wait 1 ;; click 1296 261 ;; wait 1 ;; click 1300 168 ;; wait 40 ;; click 1075 492 ;; wait 1 -->
+<!-- screenshot site/img/app-check: {{home}}/runs/{{passing}} --step {{deciding}} ;; click 1408 189 ;; wait 1 ;; click 1296 282 ;; wait 1 ;; click 1300 189 ;; wait 40 ;; click 1075 513 ;; wait 1 -->
 
 ![The app after Check from here at step {{deciding}} of the passing run: a card counting how the 16 schedules ended, a cell per schedule, the first picked with its run and Compare and Open](../site/img/app-check.png)
 

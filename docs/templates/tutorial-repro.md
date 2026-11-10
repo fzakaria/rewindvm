@@ -55,8 +55,9 @@ $ rewind diff --outputs {{seed0|short}} {{seed1|short}}
 $ rewind diff --file /build/tiles/tiles.pc {{seed0|short}} {{seed1|short}}
 ```
 
-<!-- assert: grep -q '^- Requires.private: pixman-1, libpng, zlib$' {{out:outputs}} -->
-<!-- assert: grep -q '^+ Requires.private: zlib, pixman-1, libpng$' {{out:outputs}} -->
+<!-- set left_order: grep '^- Requires.private: ' {{out:outputs}} | cut -d: -f2- | tr -d ' ' -->
+<!-- set right_order: grep '^+ Requires.private: ' {{out:outputs}} | cut -d: -f2- | tr -d ' ' -->
+<!-- assert: for o in {{left_order}} {{right_order}}; do test "$(echo $o | tr , '\n' | sort | tr '\n' ' ')" = 'libpng pixman-1 zlib ' || exit 1; done && test {{left_order}} != {{right_order}} -->
 
 `--outputs` lists the files the runs left behind whose bytes differ: the
 installed `tiles.pc`, and the copy in the build directory it was installed
@@ -102,7 +103,7 @@ $ rewind open {{seed0|short}} --compare {{seed1|short}}
 
 The Compare tab's Files that differ link lists what `diff --outputs` does:
 
-<!-- screenshot site/img/app-repro-files: {{home}}/runs/{{seed0}} --compare {{home}}/runs/{{seed1}} ;; click 1153 221 ;; click 1239 259 ;; wait 8 -->
+<!-- screenshot site/img/app-repro-files: {{home}}/runs/{{seed0}} --compare {{home}}/runs/{{seed1}} ;; click 1153 242 ;; click 1239 280 ;; wait 8 -->
 
 ![The app on seed 0's tiles run, compared with seed 1's, with the Files that differ tab listing both copies of tiles.pc](../site/img/app-repro-files.png)
 
@@ -112,7 +113,7 @@ in blue. Go to the write moves the playhead to the step whose write set the
 first byte that differs. For `/build/tiles/tiles.pc` that is step
 {{write_step}}, with `python3 gen-pc.py` in the process tree:
 
-<!-- screenshot site/img/app-repro-write: {{home}}/runs/{{seed0}} --compare {{home}}/runs/{{seed1}} ;; click 1153 221 ;; click 1239 259 ;; wait 8 ;; click 1000 366 ;; wait 10 ;; click 1263 394 ;; click 1123 325 ;; wait 10 -->
+<!-- screenshot site/img/app-repro-write: {{home}}/runs/{{seed0}} --compare {{home}}/runs/{{seed1}} ;; click 1153 242 ;; click 1239 280 ;; wait 8 ;; click 1000 387 ;; wait 10 ;; click 1263 415 ;; click 1123 346 ;; wait 10 -->
 
 ![The app at step {{write_step}}, where python3 writes tiles.pc, with the file from both runs one under the other and the Requires.private line in amber and blue](../site/img/app-repro-write.png)
 

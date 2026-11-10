@@ -198,7 +198,7 @@ each of 7 other seeds, as forks reseeded at the playhead. At the start of
 `hash-order`'s passing run it shows a row of cells per seed, blue where the
 test failed:
 
-<!-- screenshot site/img/app-seeds: {{home}}/runs/{{hash_passing}} --step {{hash_start}} ;; click 1408 168 ;; wait 1 ;; click 1300 376 ;; wait 1 ;; click 1300 168 ;; wait 120 -->
+<!-- screenshot site/img/app-seeds: {{home}}/runs/{{hash_passing}} --step {{hash_start}} ;; click 1408 189 ;; wait 1 ;; click 1300 397 ;; wait 1 ;; click 1300 189 ;; wait 120 -->
 
 ![The app after Check from here with 8 seeds of 8 schedules at the start of hash-order's passing run: a card with a row of cells per seed, the seeds that made the test fail in blue](../site/img/app-seeds.png)
 

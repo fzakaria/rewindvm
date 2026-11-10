@@ -108,10 +108,13 @@ $ rewind check --epoch {{epoch}} {{flake}}
 <!-- assert: test {{check_seconds}} -lt 60 -->
 <!-- capture first_diff: \n  failing +(\d+) -->
 <!-- capture first_tid: \n  failing +\d+ +\d+/(\d+) -->
-<!-- capture first_job: \n  failing +\d+ +\d+/\d+ +write\(1, "job (\d+) done -->
 <!-- capture check_crash: \n  failing +(\d+) +\d+/\d+ +SIGSEGV -->
 <!-- capture check_crash_tid: \n  failing +\d+ +\d+/(\d+) +SIGSEGV -->
 <!-- assert: test {{first_diff}} -lt {{check_crash}} && test {{first_tid}} != {{check_crash_tid}} -->
+<!-- assert: grep -m1 '^  failing' {{out:check}} | grep -qE ' [0-9]+/{{first_tid}} +thread exit\(test_pool_shutd\) exited:0' -->
+<!-- capture pass_job: \n  passing +\d+ +\d+/\d+ +write\(1, "worker picked job (\d+) -->
+<!-- assert: grep -m1 '^  passing' {{out:check}} | grep -qE ' [0-9]+/{{check_crash_tid}} +write\(1, "worker picked job {{pass_job}}\\n' -->
+<!-- assert: grep '^  passing' {{out:check}} | grep -qE ' [0-9]+/{{first_tid}} +thread exit' -->
 <!-- set check_gap: echo $(( {{check_crash}} - {{first_diff}} )) -->
 
 {{failed_said}}. `check` narrows schedule {{narrowed}}'s failure to one step,
@@ -121,11 +124,12 @@ runs are the same until {{deciding}}, and only the failing one gets
 
 The last block shows where the test's own events then differ. The first
 difference is the cause, showing up before the symptom: at step {{first_diff}}
-the other worker, thread {{first_tid}}, prints job {{first_job}} done and goes
-on to pick the next job while thread {{check_crash_tid}} is held at the
-deciding step; in the passing run thread {{check_crash_tid}} picks that job
-first. Thread {{check_crash_tid}}'s SIGSEGV comes {{check_gap}} steps later,
-at step {{check_crash}}.
+the other worker, thread {{first_tid}}, exits. While thread
+{{check_crash_tid}} is held at the deciding step, the test shuts the pool
+down, and the other worker finds it stopping and leaves; in the passing run
+thread {{check_crash_tid}} picks job {{pass_job}} first, and the other worker
+exits after that. Thread {{check_crash_tid}}'s SIGSEGV comes {{check_gap}}
+steps later, at step {{check_crash}}.
 
 `--all` tries every schedule, which measures how flaky a build is:
 
