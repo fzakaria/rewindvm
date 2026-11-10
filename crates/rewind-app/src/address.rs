@@ -4,6 +4,8 @@
 //! as the playhead moves, so the address is always a link to what is on
 //! screen.
 
+use crate::request::{Request, Requests};
+
 /// The parameters' names.
 const URL: &str = "url";
 const COMPARE: &str = "compare";
@@ -108,12 +110,123 @@ fn decode(value: &str) -> String {
     String::from_utf8_lossy(&decoded).into_owned()
 }
 
+/// The page's fetches that have not answered yet, each with the number
+/// the fetch was started under. The page fetches in its own time and
+/// hands back only the addresses it was given, so an answer finds its
+/// number by its address. A later fetch or file has a greater number, and
+/// the viewer drops what arrives under a number older than the newest
+/// (see [`is_overtaken`]): a slow fetch never replaces a run opened after
+/// the fetch started.
+#[derive(Debug, Default)]
+pub struct Fetches {
+    requests: Requests,
+    /// The fetches started and not answered, oldest first.
+    pending: Vec<(Request, Address)>,
+}
+
+impl Fetches {
+    /// A fetch of the exports `address` names starts: its number.
+    pub fn start(&mut self, address: &Address) -> Request {
+        let request = self.requests.issue();
+        self.pending.push((request, address.clone()));
+        request
+    }
+
+    /// A file the page read arrives. No fetch brought the file, so it
+    /// takes a number of its own, newer than every fetch started before.
+    pub fn file(&mut self) -> Request {
+        self.requests.issue()
+    }
+
+    /// The page hands back the exports fetched from `url` and `compare`:
+    /// the number of the newest fetch of that pair still waited on, which
+    /// is then answered. An answer no fetch waits on takes a new number.
+    pub fn fetched(&mut self, url: &str, compare: Option<&str>) -> Request {
+        self.answered(|address| {
+            address.url.as_deref() == Some(url) && address.compare.as_deref() == compare
+        })
+    }
+
+    /// The page could not fetch `url`: the number of the newest fetch
+    /// still waited on that names `url`, as its export or as the one to
+    /// compare with, which is then answered.
+    pub fn unfetched(&mut self, url: &str) -> Request {
+        self.answered(|address| {
+            address.url.as_deref() == Some(url) || address.compare.as_deref() == Some(url)
+        })
+    }
+
+    /// Takes the newest fetch still waited on whose address is `the_one`
+    /// off the list and gives its number, or a new number when there is
+    /// no such fetch.
+    fn answered(&mut self, the_one: impl Fn(&Address) -> bool) -> Request {
+        match self
+            .pending
+            .iter()
+            .rposition(|(_, address)| the_one(address))
+        {
+            Some(at) => self.pending.remove(at).0,
+            None => self.requests.issue(),
+        }
+    }
+}
+
+/// Whether what arrived under `request` is older than `newest`, the
+/// newest number the viewer has seen start or arrive, and so is dropped.
+pub fn is_overtaken(newest: Option<Request>, request: Request) -> bool {
+    newest.is_some_and(|newest| request < newest)
+}
+
 #[cfg(test)]
 mod tests {
     // The address in both directions: query strings the page may be opened
     // with parse to what they ask for, and what the app writes back parses
     // to the same address.
     use super::*;
+
+    #[test]
+    fn a_late_fetch_does_not_take_the_place_of_a_newer_one() {
+        // The viewer fetches a slow example with a compared run, then a
+        // fast one. The fast one answers first and is shown; the slow
+        // one's answer carries the older number and is dropped. A file
+        // read after both is newer than either. A fetch that fails is
+        // found by either of its two links.
+        let address = |url: &str, compare: Option<&str>| Address {
+            url: Some(url.into()),
+            compare: compare.map(str::to_string),
+            step: None,
+        };
+        let mut fetches = Fetches::default();
+        let slow = fetches.start(&address("slow.rwd", Some("base.rwd")));
+        let fast = fetches.start(&address("fast.rwd", None));
+        let mut newest = Some(fast);
+
+        let arrived = fetches.fetched("fast.rwd", None);
+        assert_eq!(arrived, fast);
+        assert!(!is_overtaken(newest, arrived));
+        let late = fetches.fetched("slow.rwd", Some("base.rwd"));
+        assert_eq!(late, slow);
+        assert!(is_overtaken(newest, late));
+
+        let file = fetches.file();
+        assert!(!is_overtaken(newest, file));
+        newest = Some(file);
+        assert!(is_overtaken(newest, fast));
+        assert!(!is_overtaken(None, slow));
+
+        let failing = fetches.start(&address("a.rwd", Some("gone.rwd")));
+        assert_eq!(fetches.unfetched("gone.rwd"), failing);
+        let failing = fetches.start(&address("gone.rwd", None));
+        assert_eq!(fetches.unfetched("gone.rwd"), failing);
+
+        // Two fetches of one address answer newest first, and an answer
+        // no fetch waits on is newer than everything before it.
+        let first = fetches.start(&address("same.rwd", None));
+        let second = fetches.start(&address("same.rwd", None));
+        assert_eq!(fetches.fetched("same.rwd", None), second);
+        assert_eq!(fetches.fetched("same.rwd", None), first);
+        assert!(fetches.fetched("same.rwd", None) > second);
+    }
 
     #[test]
     fn an_address_names_the_exports_and_the_step() {

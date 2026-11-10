@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use futures::StreamExt;
 use gpui::Context;
 
-use crate::address::Address;
+use crate::address::{Address, is_overtaken};
 use crate::ui::scrubber::{NoticeTone, Scrubber};
 use crate::web::Delivery;
 
@@ -67,11 +67,20 @@ impl Scrubber {
     }
 
     fn take_delivery(&mut self, delivery: Delivery, cx: &mut Context<Self>) {
+        // What a fetch or file open older than the newest brings is
+        // dropped: the newer one's run is on screen, or on its way.
+        let request = delivery.request();
+        if is_overtaken(self.page_newest, request) {
+            return;
+        }
+        self.page_newest = Some(request);
         match delivery {
-            Delivery::Fetching { url } => {
+            Delivery::Fetching { url, .. } => {
                 self.loading = Some(PathBuf::from(url));
             }
-            Delivery::Open { session, address } => {
+            Delivery::Open {
+                session, address, ..
+            } => {
                 self.loading = None;
                 let step = address.step;
                 self.address_bar.address = Address {
@@ -80,7 +89,7 @@ impl Scrubber {
                 };
                 self.show(*session, step, cx);
             }
-            Delivery::Unfetched { url, answer } => {
+            Delivery::Unfetched { url, answer, .. } => {
                 self.loading = None;
                 let why = match answer {
                     Some(status) => format!("{url} answered {status}."),
@@ -88,7 +97,7 @@ impl Scrubber {
                 };
                 self.notify_user(NoticeTone::Error, "Could not open the link", why, cx);
             }
-            Delivery::Unread { name, why } => {
+            Delivery::Unread { name, why, .. } => {
                 self.loading = None;
                 self.notify_user(NoticeTone::Error, format!("Could not open {name}"), why, cx);
             }

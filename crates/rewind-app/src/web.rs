@@ -13,26 +13,51 @@ use std::cell::RefCell;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use wasm_bindgen::prelude::*;
 
-use crate::address::Address;
+use crate::address::{Address, Fetches};
+use crate::request::Request;
 use crate::run::Session;
 
-/// What the page hands the app.
+/// What the page hands the app. Each delivery carries the number of the
+/// fetch or file open it belongs to: the scrubber drops a delivery older
+/// than the newest it has seen, so a fetch that answers late does not
+/// replace a run opened after the fetch started.
 pub enum Delivery {
     /// The page started fetching the export at `url`.
-    Fetching { url: String },
+    Fetching { url: String, request: Request },
     /// Runs the page fetched or read from a file, with the address that
     /// names them, which is empty for a file. Boxed: a session is large
     /// beside the other deliveries.
     Open {
         session: Box<Session>,
         address: Address,
+        request: Request,
     },
     /// The page could not fetch `url`: the server's answer, such as
     /// "404 Not Found", or None when the browser got none, as it gets
     /// none from a server without CORS headers.
-    Unfetched { url: String, answer: Option<String> },
+    Unfetched {
+        url: String,
+        answer: Option<String>,
+        request: Request,
+    },
     /// Why the bytes of `name` are not an export.
-    Unread { name: String, why: String },
+    Unread {
+        name: String,
+        why: String,
+        request: Request,
+    },
+}
+
+impl Delivery {
+    /// The number of the fetch or file open the delivery belongs to.
+    pub fn request(&self) -> Request {
+        match self {
+            Delivery::Fetching { request, .. }
+            | Delivery::Open { request, .. }
+            | Delivery::Unfetched { request, .. }
+            | Delivery::Unread { request, .. } => *request,
+        }
+    }
 }
 
 /// The deliveries the scrubber has not taken yet. The page can deliver
@@ -51,6 +76,10 @@ thread_local! {
             receiver: Some(receiver),
         })
     };
+
+    /// The page's fetches that have not answered, and where fetches and
+    /// file opens get their numbers.
+    static FETCHES: RefCell<Fetches> = RefCell::new(Fetches::default());
 
     /// The fonts the page fetched, until the app starts and loads them.
     static FONTS: RefCell<Vec<Vec<u8>>> = const { RefCell::new(Vec::new()) };
@@ -101,12 +130,32 @@ pub fn pick_file() {
     page_pick_file();
 }
 
+/// The number of the fetch of `url` and `compare` the page now hands the
+/// exports of.
+pub fn fetched(url: &str, compare: Option<&str>) -> Request {
+    FETCHES.with(|fetches| fetches.borrow_mut().fetched(url, compare))
+}
+
+/// The number of the fetch that could not fetch `url`.
+pub fn unfetched(url: &str) -> Request {
+    FETCHES.with(|fetches| fetches.borrow_mut().unfetched(url))
+}
+
+/// The number of a file the page read and now hands over.
+pub fn file_read() -> Request {
+    FETCHES.with(|fetches| fetches.borrow_mut().file())
+}
+
 /// Asks the page to fetch the exports `address` names.
 pub fn fetch(address: &Address) {
     let Some(url) = &address.url else {
         return;
     };
-    deliver(Delivery::Fetching { url: url.clone() });
+    let request = FETCHES.with(|fetches| fetches.borrow_mut().start(address));
+    deliver(Delivery::Fetching {
+        url: url.clone(),
+        request,
+    });
     page_fetch_runs(
         url,
         address.compare.clone(),

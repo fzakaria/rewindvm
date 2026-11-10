@@ -423,6 +423,10 @@ pub struct Scrubber {
     /// The browser's address bar, kept on the exports on screen.
     #[cfg(target_family = "wasm")]
     pub(super) address_bar: crate::web::AddressBar,
+    /// The number of the newest fetch or file open the page has told the
+    /// browser viewer of; what an older one brings is dropped.
+    #[cfg(target_family = "wasm")]
+    pub(super) page_newest: Option<Request>,
 }
 
 impl Scrubber {
@@ -515,6 +519,8 @@ impl Scrubber {
             title: None,
             #[cfg(target_family = "wasm")]
             address_bar: crate::web::AddressBar::default(),
+            #[cfg(target_family = "wasm")]
+            page_newest: None,
         };
         #[cfg(target_family = "wasm")]
         this.listen_to_page(cx);

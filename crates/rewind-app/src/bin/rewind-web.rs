@@ -64,15 +64,22 @@ mod web {
             compare: compare_url,
             step: step.map(|step| step as u64),
         };
+        // The fetch the page answers, by the links the fetch was given.
+        let request = page::fetched(
+            address.url.as_deref().unwrap_or_default(),
+            address.compare.as_deref(),
+        );
         let opened = session_of(&address, &run, compare.as_deref());
         page::deliver(match opened {
             Ok(session) => Delivery::Open {
                 session: Box::new(session),
                 address,
+                request,
             },
             Err(e) => Delivery::Unread {
                 name: name_of(address.url.as_deref().unwrap_or_default()).to_string(),
                 why: format!("{e:#}"),
+                request,
             },
         });
     }
@@ -81,15 +88,20 @@ mod web {
     /// share.
     #[wasm_bindgen]
     pub fn open_file(name: String, bytes: Vec<u8>) {
+        // A file is newer than every fetch started before the page read
+        // the file.
+        let request = page::file_read();
         let opened = Run::open_bytes(&name, &bytes, InMemoryOrigin::Export);
         page::deliver(match opened {
             Ok(run) => Delivery::Open {
                 session: Box::new(Session::new(run, None)),
                 address: Address::default(),
+                request,
             },
             Err(e) => Delivery::Unread {
                 name,
                 why: format!("{e:#}"),
+                request,
             },
         });
     }
@@ -98,7 +110,12 @@ mod web {
     /// when the browser got none.
     #[wasm_bindgen]
     pub fn unfetched(url: String, answer: Option<String>) {
-        page::deliver(Delivery::Unfetched { url, answer });
+        let request = page::unfetched(&url);
+        page::deliver(Delivery::Unfetched {
+            url,
+            answer,
+            request,
+        });
     }
 
     /// The session of the exports an address names.
