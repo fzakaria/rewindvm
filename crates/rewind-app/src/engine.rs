@@ -1564,9 +1564,11 @@ mod tests {
         const GIVE_UP: std::time::Duration = std::time::Duration::from_secs(5);
         let dir = temp_dir("stop-all");
         let engine = Arc::new(slow_engine(&dir));
+        // The fork is tried again while the stand-in script is busy, as a
+        // test running in parallel can hold it open for a moment.
         let call = {
             let engine = engine.clone();
-            std::thread::spawn(move || engine.fork(Path::new("/run"), 5, 1))
+            std::thread::spawn(move || retrying(|| engine.fork(Path::new("/run"), 5, 1)))
         };
         let pid_file = dir.join("pid");
         let pid: i32 = wait_for("the engine to start", || {
