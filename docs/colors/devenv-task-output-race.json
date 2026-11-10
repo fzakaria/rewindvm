@@ -1,6 +1,6 @@
 [
  {
-  "text": "$ rewind nix --epoch 1791936000 --seed 5 'github:fzakaria/rewindvm?dir=examples/case-studies#devenv-last-lines-before-2296'\nrewind: packing 57 store paths for devenv-tasks-test-last-lines-before-2296\niteration 1\n\nrunning 1 test\ntest tests::test_failed_task_keeps_last_lines ... FAILED\n\nfailures:\n\n---- tests::test_failed_task_keeps_last_lines stdout ----\n[myapp:task_1] line1\n[myapp:task_1] line2\n\nthread 'tests::test_failed_task_keeps_last_lines' (41) panicked at devenv-tasks/src/tests/mod.rs:3006:13:\nassertion `left == right` failed\n  left: [\"line1\", \"line2\"]\n right: [\"line1\", \"line2\", \"line3\"]\n...\nrewind: run 5947419e48b1a8dd exited:101 after 1594 steps, 0.036s virtual, 0.383s wall (poweroff)",
+  "text": "$ rewind nix --epoch 1791936000 --seed 13 'github:fzakaria/rewindvm?dir=examples/case-studies#devenv-last-lines-before-2296'\nrewind: packing 57 store paths for devenv-tasks-test-last-lines-before-2296\niteration 1\n\nrunning 1 test\ntest tests::test_failed_task_keeps_last_lines ... FAILED\n\nfailures:\n\n---- tests::test_failed_task_keeps_last_lines stdout ----\n[myapp:task_1] line1\n[myapp:task_1] line2\n\nthread 'tests::test_failed_task_keeps_last_lines' (41) panicked at devenv-tasks/src/tests/mod.rs:3006:13:\nassertion `left == right` failed\n  left: [\"line1\", \"line2\"]\n right: [\"line1\", \"line2\", \"line3\"]\n...\nrewind: run 20a2be3f118191eb exited:101 after 1600 steps, 0.036s virtual, 0.279s wall (poweroff)",
   "spans": [
    [
     1,
@@ -23,7 +23,7 @@
   ]
  },
  {
-  "text": "$ rewind replay 5947419e\nidentical to the recording: 763 events, 492 context switches and 145 read and write records over 1594 steps, and the whole machine at its 2 keyframes",
+  "text": "$ rewind replay 20a2be3f\nidentical to the recording: 762 events, 491 context switches and 145 read and write records over 1600 steps, and the whole machine at its 2 keyframes",
   "spans": [
    [
     1,
@@ -34,7 +34,7 @@
   ]
  },
  {
-  "text": "$ rewind check --epoch 1791936000 --seed 5 --all --schedules 256 'github:fzakaria/rewindvm?dir=examples/case-studies#devenv-last-lines-before-2296'\nschedule   0: exited:101           1594 steps    run 5947419e48b1a8dd\nschedule   1: exited:101           1701 steps    run 8a1e1e249bf3127a\nschedule   2: exited:101           1740 steps    run 8787649768b46bab\nschedule   3: exited:101           1768 steps    run fef971a0373f1de8\n...\nschedule 256: exited:0             1799 steps  77ac62e2629d  run 0a847eb65c6dbb7c\nschedule 0 failed; 36 of 256 other schedules ended differently\n\nschedule 5 passes where schedule 0 fails; finding the step that decides it\nschedule 5 limited to steps 835..1645 still ends differently\nstep 1644 decides it: a 640 \u00b5s pause of the running thread there makes the run pass\n\npassing: run dddef5ddcdfdb922, schedule 5 over steps 835..1645\nfailing: run 39531d5d872fd152, schedule 5 over steps 835..1644\nthe two are the same run until step 1644\n\nwhere /nix/store/195dbbvj5h0yq9f4vnp833dsbgxpp8w0-devenv-tasks-tests-1.10.1/bin/devenv-tasks-tests test_failed_task_keeps_last_lines first behaves differently:\n  both           1500    40/42    open(\"/build/.tmprigw8M/tasks.db-shm\", 0o2400102)\n  both           1636    40/41    open(\"/build/devenv_task_outputdz3jv1.json\", 0o2000302)\n  both           1639    40/41    fork() = 43\n  failing        1647    40/41    SIGCHLD code=1 addr=0x0\n  failing        1656    40/41    close(\"anon_inode:[pidfd]\")\n  failing        1658    40/41    unlink(\"/build/devenv_task_outputdz3jv1.json\")\n  failing        1659    40/41    close(\"/build/devenv_task_outputdz3jv1.json\")\n  passing        1677    40/41    close(\"anon_inode:[pidfd]\")\n  passing        1679    40/41    unlink(\"/build/devenv_task_outputdz3jv1.json\")\n  passing        1680    40/41    close(\"/build/devenv_task_outputdz3jv1.json\")\n  passing        1687    40/41    unlink(\"/build/scriptGgRKWz.sh\")\n\nopen both in the desktop app: rewind open 39531d5d872fd152 1647 --compare dddef5ddcdfdb922",
+  "text": "$ rewind check --epoch 1791936000 --seed 13 --all --schedules 256 'github:fzakaria/rewindvm?dir=examples/case-studies#devenv-last-lines-before-2296'\nschedule   0: exited:101           1600 steps    run 20a2be3f118191eb\nschedule   1: exited:101           1751 steps    run 89bd2038ded573a3\nschedule   2: exited:101           1713 steps    run f2e848c47966ad36\nschedule   3: exited:101           1761 steps    run c6d34680e29755b8\n...\nschedule 256: exited:101           1739 steps    run 990c8554f8789c4e\nschedule 0 failed; 34 of 256 other schedules ended differently\n\nschedule 5 passes where schedule 0 fails; finding the step that decides it\nschedule 5 limited to steps 803..1669 still ends differently\nstep 1668 decides it: a request to switch threads there makes the run pass\n\npassing: run afe1eafcba1b52c4, schedule 5 over steps 803..1669\nfailing: run 9e2b0a092c75cd35, schedule 5 over steps 803..1668\nthe two are the same run until step 1668\n\nwhere /nix/store/195dbbvj5h0yq9f4vnp833dsbgxpp8w0-devenv-tasks-tests-1.10.1/bin/devenv-tasks-tests test_failed_task_keeps_last_lines first behaves differently:\n  both           1537    40/42    open(\"/build/.tmpxtQSu5/tasks.db-shm\", 0o2400102)\n  both           1660    40/41    open(\"/build/devenv_task_output8TEwnR.json\", 0o2000302)\n  both           1665    40/41    fork() = 43\n  failing        1671    40/41    SIGCHLD code=1 addr=0x0\n  failing        1680    40/41    close(\"anon_inode:[pidfd]\")\n  failing        1682    40/41    unlink(\"/build/devenv_task_output8TEwnR.json\")\n  failing        1683    40/41    close(\"/build/devenv_task_output8TEwnR.json\")\n  passing        1692    40/41    close(\"anon_inode:[pidfd]\")\n  passing        1694    40/41    unlink(\"/build/devenv_task_output8TEwnR.json\")\n  passing        1695    40/41    close(\"/build/devenv_task_output8TEwnR.json\")\n  passing        1705    40/41    unlink(\"/build/scriptiikovq.sh\")\n\nopen both in the desktop app: rewind open 9e2b0a092c75cd35 1671 --compare afe1eafcba1b52c4",
   "spans": [
    [
     1,
@@ -63,13 +63,7 @@
    [
     6,
     14,
-    22,
-    "green"
-   ],
-   [
-    6,
-    47,
-    59,
+    24,
     "red"
    ],
    [
@@ -141,7 +135,7 @@
   ]
  },
  {
-  "text": "$ rewind check --run 5947419e --schedule-from 1519 --schedules 64 --all --no-narrow\nschedule   0: exited:101           1594 steps    run 5947419e48b1a8dd\nschedule   1: exited:101           1626 steps    run 7d8b836c77378ac0\nschedule   2: exited:101           1630 steps    run 5761b80ca8b993a3\nschedule   3: exited:101           1631 steps    run 19d57727ed2513d0\n...\nschedule  64: exited:101           1630 steps    run fc4c3c72e947274d\nrun 5947419e48b1a8dd failed; 13 of 64 other schedules ended differently",
+  "text": "$ rewind check --run 20a2be3f --schedule-from 1525 --schedules 64 --all --no-narrow\nschedule   0: exited:101           1600 steps    run 20a2be3f118191eb\nschedule   1: exited:101           1654 steps    run 40ee9017aa0e267f\nschedule   2: exited:0             1688 steps  77ac62e2629d  run 097da648985ba834\nschedule   3: exited:101           1631 steps    run 81ffc67ac14d1fdb\n...\nschedule  64: exited:0             1657 steps  77ac62e2629d  run 5cf59ac396d049ef\nrun 20a2be3f118191eb failed; 15 of 64 other schedules ended differently",
   "spans": [
    [
     1,
@@ -158,7 +152,13 @@
    [
     3,
     14,
-    24,
+    22,
+    "green"
+   ],
+   [
+    3,
+    47,
+    59,
     "red"
    ],
    [
@@ -170,7 +170,13 @@
    [
     6,
     14,
-    24,
+    22,
+    "green"
+   ],
+   [
+    6,
+    47,
+    59,
     "red"
    ],
    [
@@ -182,7 +188,7 @@
   ]
  },
  {
-  "text": "$ rewind gdb 5947419e 1516 -- -batch -ex 'break read if $rdi == 13' -ex 'break task_state.rs:409' -ex continue -ex 'set $buf = $rsi' -ex finish -ex 'x/s $buf' -ex 'delete 1' -ex continue\nrewind: step 1516 ran in process 40; loading symbols for 5 of its files\nrewind: source files for /nix/store/195dbbvj5h0yq9f4vnp833dsbgxpp8w0-devenv-tasks-tests-1.10.1 from /nix/store/hs2328bm8f7s0cq77jjjgdlcqrc13mhm-source\nrewind: gdb at step 1516 of 5947419e48b1a8dd\nDownloading 1.72 M separate debug info for /nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libm.so.6...\nDownloading 4.35 M separate debug info for /nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6...\nDownloading 658.16 K separate debug info for /nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/ld-linux-x86-64.so.2...\nDownloading 3.12 K source file /build/linux-7.2.8/./arch/x86/include/asm/irqflags.h...\narch_local_irq_restore (flags=514) at ./arch/x86/include/asm/irqflags.h:146\n146\t\treturn !(flags & X86_EFLAGS_IF);\n[Switching to thread 3 (Thread 1.41)]\nDownloading 1.79 K source file /build/glibc-2.44/nptl/../sysdeps/unix/sysv/linux/x86_64/syscall_cancel.S...\n#0  __syscall_cancel_arch () at ../sysdeps/unix/sysv/linux/x86_64/syscall_cancel.S:56\n56\t\tret\nDownloading 1.18 K source file /build/glibc-2.44/io/../sysdeps/unix/sysv/linux/read.c...\nBreakpoint 1 at 0x7ff64601f190: file ../sysdeps/unix/sysv/linux/read.c, line 25.\nBreakpoint 2 at 0x55dd6284c8a7: task_state.rs:409. (2 locations)\n\nThread 3 hit Breakpoint 1, __GI___libc_read (fd=13, buf=0x7ff640015f20, nbytes=8192) at ../sysdeps/unix/sysv/linux/read.c:25\n25\t{\n0x000055dd62b239bd in std::fs::{impl#9}::read (buf=Python Exception <class 'gdb.error'>: value has been optimized out\n&mut [u8](size=8192), self=<optimized out>) at /rustc/48a229ceaefd4985c50990b14116b6d856af0985/library/std/src/fs.rs:1335\n\u26a0\ufe0f warning: 1335\t/rustc/48a229ceaefd4985c50990b14116b6d856af0985/library/std/src/fs.rs: No such file or directory\nValue returned is $1 = 18\n0x7ff640015f20:\t\"line1\\nline2\\nline3\\n\"\n\nThread 3 hit Breakpoint 2.1, devenv_tasks::task_state::{impl#1}::run::{async_fn#0}::{async_block#0}::{async_block#0} () at devenv-tasks/src/task_state.rs:415\n415\t                            let expanded_paths = expand_glob_patterns(&self.task.exec_if_modified);\n[Inferior 1 (process 1) detached]",
+  "text": "$ rewind gdb 20a2be3f 1522 -- -batch -ex 'break read if $rdi == 13' -ex 'break task_state.rs:409' -ex continue -ex 'set $buf = $rsi' -ex finish -ex 'x/s $buf' -ex 'delete 1' -ex continue\nrewind: step 1522 ran in process 40; loading symbols for 5 of its files\nrewind: source files for /nix/store/195dbbvj5h0yq9f4vnp833dsbgxpp8w0-devenv-tasks-tests-1.10.1 from /nix/store/hs2328bm8f7s0cq77jjjgdlcqrc13mhm-source\nrewind: gdb at step 1522 of 20a2be3f118191eb\nDownloading 1.72 M separate debug info for /nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libm.so.6...\nDownloading 4.35 M separate debug info for /nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6...\nDownloading 658.16 K separate debug info for /nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/ld-linux-x86-64.so.2...\nDownloading 3.12 K source file /build/linux-7.2.8/./arch/x86/include/asm/irqflags.h...\narch_local_irq_restore (flags=514) at ./arch/x86/include/asm/irqflags.h:146\n146\t\treturn !(flags & X86_EFLAGS_IF);\n[Switching to thread 3 (Thread 1.41)]\nDownloading 1.79 K source file /build/glibc-2.44/nptl/../sysdeps/unix/sysv/linux/x86_64/syscall_cancel.S...\n#0  __syscall_cancel_arch () at ../sysdeps/unix/sysv/linux/x86_64/syscall_cancel.S:56\n56\t\tret\nDownloading 1.18 K source file /build/glibc-2.44/io/../sysdeps/unix/sysv/linux/read.c...\nBreakpoint 1 at 0x7fb0924af190: file ../sysdeps/unix/sysv/linux/read.c, line 25.\nBreakpoint 2 at 0x564631bd18a7: task_state.rs:409. (2 locations)\n\nThread 3 hit Breakpoint 1, __GI___libc_read (fd=13, buf=0x7fb08c015f20, nbytes=8192) at ../sysdeps/unix/sysv/linux/read.c:25\n25\t{\n0x0000564631ea89bd in std::fs::{impl#9}::read (buf=Python Exception <class 'gdb.error'>: value has been optimized out\n&mut [u8](size=8192), self=<optimized out>) at /rustc/48a229ceaefd4985c50990b14116b6d856af0985/library/std/src/fs.rs:1335\n\u26a0\ufe0f warning: 1335\t/rustc/48a229ceaefd4985c50990b14116b6d856af0985/library/std/src/fs.rs: No such file or directory\nValue returned is $1 = 18\n0x7fb08c015f20:\t\"line1\\nline2\\nline3\\n\"\n\nThread 3 hit Breakpoint 2.1, devenv_tasks::task_state::{impl#1}::run::{async_fn#0}::{async_block#0}::{async_block#0} () at devenv-tasks/src/task_state.rs:415\n415\t                            let expanded_paths = expand_glob_patterns(&self.task.exec_if_modified);\n[Inferior 1 (process 1) detached]",
   "spans": [
    [
     1,
@@ -205,7 +211,7 @@
   ]
  },
  {
-  "text": "$ rewind check --epoch 1791936000 --seed 5 --all --schedules 256 'github:fzakaria/rewindvm?dir=examples/case-studies#devenv-last-lines-2296'\nrewind: packing 57 store paths for devenv-tasks-test-last-lines-2296\nschedule   0: exited:0             1618 steps  77ac62e2629d  run 0e3bec4c6a2026fa\nschedule   1: exited:0             1748 steps  77ac62e2629d  run 13e7c1f26410d822\nschedule   2: exited:0             1769 steps  77ac62e2629d  run 69c6252f317c5320\n...\n0 of 256 other schedules ended differently\nsame result under all 257 schedules",
+  "text": "$ rewind check --epoch 1791936000 --seed 13 --all --schedules 256 'github:fzakaria/rewindvm?dir=examples/case-studies#devenv-last-lines-2296'\nrewind: packing 57 store paths for devenv-tasks-test-last-lines-2296\nschedule   0: exited:0             1624 steps  77ac62e2629d  run 9787f72121c4c6f0\nschedule   1: exited:0             1778 steps  77ac62e2629d  run e1995e8af57583fe\nschedule   2: exited:0             1746 steps  77ac62e2629d  run bd514fb83eeedfb1\n...\n0 of 256 other schedules ended differently\nsame result under all 257 schedules",
   "spans": [
    [
     1,

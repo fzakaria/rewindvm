@@ -1,6 +1,6 @@
 # Case study: a SIGPIPE in Nix's gc-closure test
 
-<!-- let epoch = 1791936000 -->
+<!-- let epoch = 1792368000 -->
 <!-- let flake = github:fzakaria/rewindvm?dir=examples/case-studies -->
 
 Nix's functional test `gc-closure.sh` can fail with exit status 141. Rewind VM
@@ -93,9 +93,10 @@ exits 141.
 ## Count the writes
 
 <!-- set before: rewind threads {{run}} --from {{fork_writer}} --to {{head_exit}} | awk '$3 == "{{writer}}/{{writer}}" {print $1}' | sed -n 2p | awk '{print $1 - 1}' -->
-<!-- set wchar_before: rewind cat {{run}} {{before}} /proc/{{writer}}/io | awk '/^wchar/ {print $2}' -->
 <!-- set wchar_after: rewind cat {{run}} {{head_exit}} /proc/{{writer}}/io | awk '/^wchar/ {print $2}' -->
-<!-- set first_line: echo $(( {{wchar_after}} - {{wchar_before}} )) -->
+<!-- set head_before: rewind cat {{run}} {{before}} /proc/{{head}}/io | awk '/^wchar/ {print $2}' -->
+<!-- set head_after: rewind cat {{run}} {{head_exit}} /proc/{{head}}/io | awk '/^wchar/ {print $2}' -->
+<!-- set first_line: echo $(( {{head_after}} - {{head_before}} )) -->
 
 `rewind cat` reads a file in a fork of the run at any step. `/proc/<pid>/io`
 counts each process's writes:
@@ -104,14 +105,15 @@ counts each process's writes:
 $ for step in {{before}} {{head_exit}} {{sigpipe}}; do echo "step $step"; rewind cat {{run|short}} $step /proc/{{writer}}/io | grep -E '^(wchar|syscw)' | sed 's/^/  {{writer}} /'; rewind cat {{run|short}} $step /proc/{{head}}/io | grep -E '^(wchar|syscw)' | sed 's/^/  {{head}} /'; done
 ```
 
-<!-- assert: test "$(grep -A4 '^step {{before}}$' {{out:writes}} | grep syscw | tr -s ' ' | cut -d' ' -f4 | tr '\n' ' ')" = '1 1 ' -->
+<!-- assert: test "$(grep -A4 '^step {{before}}$' {{out:writes}} | grep syscw | tr -s ' ' | cut -d' ' -f4 | tr '\n' ' ')" = '0 1 ' -->
 <!-- assert: test "$(grep -A4 '^step {{head_exit}}$' {{out:writes}} | grep syscw | tr -s ' ' | cut -d' ' -f4 | tr '\n' ' ')" = '2 2 ' -->
 <!-- assert: grep -A3 '^step {{sigpipe}}$' {{out:writes}} | grep -q '  {{writer}} syscw: 3' && grep -A3 '^step {{sigpipe}}$' {{out:writes}} | grep -q '  {{writer}} wchar: {{wchar_after}}' && grep -q 'rewind: /proc/{{head}}/io: no such file at this step' {{out:writes}} -->
 
-The first write of each is its `bash -x` trace line. By {{head_exit}} `printf`
-has written the first store path ({{first_line}} bytes) and `head` has echoed
-it and exited. At {{sigpipe}} `printf`'s third write adds no bytes: the pipe
-has no reader left.
+The first write of each is its `bash -x` trace line. At {{before}} only `head`
+has made it, and waits for input. By {{head_exit}} `printf` has made its
+trace line and written the first store path, and `head` has echoed that line,
+{{first_line}} bytes, and exited. At {{sigpipe}} `printf`'s third write adds no
+bytes: the pipe has no reader left.
 
 ## Root cause
 
@@ -135,7 +137,7 @@ and `-e` ends the test.
 
 ## Who had the CPU
 
-<!-- set threads_from: echo $(( {{head_exec}} - 2 )) -->
+<!-- set threads_from: echo {{head_exec}} -->
 <!-- set threads_to: echo $(( {{sigpipe}} + 5 )) -->
 
 `rewind threads` prints which process held the CPU through each stretch of
@@ -152,8 +154,8 @@ $ rewind threads {{run|short}} --from {{threads_from}} --to {{threads_to}}
 <!-- assert: test {{printf_writes}} -eq $(( {{head_blocks}} + 1 )) && test {{head_runs}} -gt {{printf_writes}} && test {{head_exit}} -lt {{printf_back}} && test {{printf_back}} -eq $(( {{sigpipe}} - 1 )) -->
 <!-- assert: test $(awk '$3 == "{{writer}}/{{writer}}"' {{out:threads}} | wc -l) -eq 2 -->
 
-`head` blocks in `read` by {{head_blocks}}. `printf` makes its first write at
-{{printf_writes}}, which wakes `head`. `head` runs at {{head_runs}} and exits,
+`head` blocks in `read` by {{head_blocks}}. `printf` writes its trace line
+and the first store path at {{printf_writes}}, which wakes `head`. `head` runs at {{head_runs}} and exits,
 and `printf` only gets the CPU back at {{printf_back}}; its next write, at
 {{sigpipe}}, raises the SIGPIPE.
 
@@ -168,9 +170,9 @@ $ rewind check --epoch {{epoch}} --all --schedules 256 '{{flake}}#nix-git-gc-clo
 <!-- set nfails: grep -cE '^schedule +[0-9]+: exited:1 ' {{out:check}} -->
 <!-- set npass: grep -cE '^schedule +[0-9]+: exited:0 ' {{out:check}} -->
 <!-- assert: test $(( {{nfails}} + {{npass}} )) -eq 257 -->
+<!-- set fails_said: python3 -c 'import sys; s = sys.argv[1:]; print(f"Only schedule {s[0]} of the 257 fails" if len(s) == 1 else f"{len(s)} of the 257 schedules fail, {", ".join(s[:-1])} and {s[-1]}")' {{fails}} -->
 
-{{nfails}} of the 257 schedules fail, {{fails|and}}; the other {{npass}}
-pass, the unperturbed one among them.
+{{fails_said}}; the other {{npass}} pass, the unperturbed one among them.
 
 ```console run name=fork keep=^schedule\s+(0|1|2|64):|^schedule\s+\d+:\sexited:1\s|^run\s
 $ rewind check --run {{run|short}} --schedule-from {{fork_writer}} --schedules 64 --all --no-narrow

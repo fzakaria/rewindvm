@@ -111,7 +111,7 @@ DEVENV_FIGURE = """<div class="tour tour-article">
             width="1440"
             height="900"
             loading="lazy"
-            alt="The Rewind desktop app on the failing devenv run at step 1,647, compared with the passing run dddef5dd: the build log stops at running 1 test, SIGCHLD has reached thread 41, and the runs are the same until step 1,644. Opens the full-size image."
+            alt="The Rewind desktop app on the failing devenv run at step 1,671, compared with the passing run afe1eafc: the build log stops at running 1 test, SIGCHLD has reached thread 41, and the runs are the same until step 1,668. Opens the full-size image."
           />
         </picture>
       </a>
@@ -121,13 +121,13 @@ DEVENV_FIGURE = """<div class="tour tour-article">
       <button type="button" class="pin pin-4" style="left: 97.2%; top: 44.6%" aria-label="4: where the runs part">4</button>
     </div>
     <figcaption>
-      The app on the failing run 39531d5d at step 1,647, compared with the passing run dddef5dd.
+      The app on the failing run 9e2b0a09 at step 1,671, compared with the passing run afe1eafc.
     </figcaption>
   </figure>
   <ol class="tour-cards">
     <li class="tour-card" id="tour-1" tabindex="0">
       <h3>The timeline</h3>
-      <p>Step 1,647 of 1,714, three steps after the one where only the passing run has its running thread paused.</p>
+      <p>Step 1,671 of 1,738, three steps after the one where only the passing run is asked to switch threads.</p>
     </li>
     <li class="tour-card" id="tour-2" tabindex="0">
       <h3>Build log</h3>
@@ -139,7 +139,7 @@ DEVENV_FIGURE = """<div class="tour tour-article">
     </li>
     <li class="tour-card" id="tour-4" tabindex="0">
       <h3>Divergence</h3>
-      <p>The runs are the same until step 1,644, where only the passing run has its running thread paused for 640 µs. This SIGCHLD is the first call that differs.</p>
+      <p>The runs are the same until step 1,668, where only the passing run is asked to switch threads. This SIGCHLD is the first call that differs.</p>
     </li>
   </ol>
 </div>

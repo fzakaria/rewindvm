@@ -1,7 +1,7 @@
 # Case study: lost task output in devenv
 
 <!-- let epoch = 1791936000 -->
-<!-- let seed = 5 -->
+<!-- let seed = 13 -->
 <!-- let flake = github:fzakaria/rewindvm?dir=examples/case-studies -->
 
 [devenv](https://devenv.sh/) could drop the last lines a task printed. This is
@@ -161,18 +161,18 @@ $ rewind threads {{passing}} --from {{threads_from}} --to {{threads_to}}
 <!-- run: rewind threads {{failing}} --from {{threads_from}} --to {{threads_to}} > threads-failing.txt -->
 <!-- run: rewind threads {{passing}} --from {{threads_from}} --to {{threads_to}} > threads-passing.txt -->
 <!-- set shell_start: awk '$3 == "{{shell}}/{{shell}}" && $4 ~ /^script/ {print $1}' threads-failing.txt | sed -n 1p -->
-<!-- set shell_back: awk '$3 == "kernel" && $4 == "{{shell}}" && $5 ~ /^script/ {print $1}' threads-passing.txt | sed -n 1p -->
-<!-- assert: test $(awk '$3 == "{{shell}}/{{shell}}" && $4 ~ /^script/' threads-failing.txt | wc -l) -eq 1 && test $(awk '$3 == "{{shell}}/{{shell}}" && $4 ~ /^script/' threads-passing.txt | wc -l) -eq 1 && test $(awk '$3 == "kernel" && $4 == "{{shell}}"' threads-passing.txt | wc -l) -eq 1 && ! grep -q 'kernel {{shell}} ' threads-failing.txt -->
-<!-- assert: awk '$3 == "{{shell}}/{{shell}}" && $4 ~ /^script/ {print $2}' threads-failing.txt | grep -qx {{deciding}} && awk '$3 == "{{shell}}/{{shell}}" && $4 ~ /^script/ {print $1}' threads-passing.txt | grep -qx {{shell_start}} -->
+<!-- set shell_back: awk '$3 == "{{shell}}/{{shell}}" && $4 ~ /^script/ {print $1}' threads-passing.txt | sed -n 2p -->
+<!-- assert: test $(awk '$3 == "{{shell}}/{{shell}}" && $4 ~ /^script/' threads-failing.txt | wc -l) -eq 1 && test $(awk '$3 == "{{shell}}/{{shell}}" && $4 ~ /^script/' threads-passing.txt | wc -l) -eq 2 -->
+<!-- assert: test "$(awk '$3 == "{{shell}}/{{shell}}" && $4 ~ /^script/ {print $1, $2}' threads-failing.txt)" = "{{shell_start}} {{deciding}}" && test "$(awk '$3 == "{{shell}}/{{shell}}" && $4 ~ /^script/ {print $1, $2}' threads-passing.txt | sed -n 1p)" = "{{shell_start}} {{deciding}}" -->
+<!-- assert: rewind events {{failing}} --from {{deciding}} --to {{deciding}} | grep -qE ' {{shell}}/{{shell}} +exit_group\(script' && rewind events {{passing}} --from {{deciding}} --to {{deciding}} | grep -qE ' {{shell}}/{{shell}} +exit_group\(script' -->
 
-In the failing run the shell ({{shell}}) finishes exiting before thread
-{{test_tid}} runs. In the passing run {{deciding_words}} at step {{deciding}}
-holds the shell in its exit: thread {{test_tid}} runs ahead, the CPU idles,
-and the shell ends only at step {{shell_back}}, by then a task with no memory
-of its own, which `rewind threads` lists as `kernel {{shell}}`. The app's
-Threads tab shows the same:
+The shell ({{shell}}) starts exiting at step {{deciding}} in both runs. In the
+failing run it finishes before thread {{test_tid}} runs. In the passing run
+{{deciding_words}} at that step takes the CPU from the shell in the middle of
+its exit: thread {{test_tid}} runs ahead, and the shell gets the CPU back to
+finish only at step {{shell_back}}. The app's Threads tab shows the same:
 
-<!-- screenshot site/img/devenv-threads: {{home}}/runs/{{failing}} --compare {{home}}/runs/{{passing}} --step {{shell_back}} ;; key t ;; wait 8 ;; click 1058 307 ;; wait 2 -->
+<!-- screenshot site/img/devenv-threads: {{home}}/runs/{{failing}} --compare {{home}}/runs/{{passing}} --step {{shell_back}} ;; key t ;; wait 8 ;; click 1058 328 ;; wait 2 -->
 
 ![The Threads tab on the failing and passing runs: the task's shell, {{shell}}, on the CPU from step {{shell_start}} in both, and again at {{shell_back}} only in the passing run](../../site/img/devenv-threads.png)
 
