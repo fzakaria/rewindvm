@@ -971,12 +971,17 @@ impl Scrubber {
 
     /// Deletes `runs` and their forks: a single fork with no forks of its
     /// own at once, anything more once the user says so.
-    pub(super) fn ask_delete_runs(&mut self, runs: Vec<RunEntry>, cx: &mut Context<Self>) {
+    pub(super) fn ask_delete_runs(
+        &mut self,
+        runs: Vec<RunEntry>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(deletion) = self.runs.deletion(&runs) else {
             return;
         };
         let Some(question) = deletion.question else {
-            self.remove_runs(deletion.dirs, cx);
+            self.remove_runs(deletion.dirs, window, cx);
             return;
         };
         self.offer(
@@ -994,28 +999,29 @@ impl Scrubber {
     /// was, the run on screen stays alone. A failure part of the way is
     /// reported, and the runs removed before it are taken off all the
     /// same.
-    fn remove_runs(&mut self, dirs: Vec<PathBuf>, cx: &mut Context<Self>) {
-        self.with_engine(
-            cx,
-            move |engine| Ok(remove_each(&dirs, |dir| engine.remove(dir))),
-            move |this, result, cx| {
-                let (removed, failed) = match result {
-                    Ok(done) => done,
-                    Err(e) => (Vec::new(), Some(e)),
-                };
+    fn remove_runs(&mut self, dirs: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        // The answer is taken with the window: when no run is left to
+        // show, the keyboard goes back to the scrubber.
+        let engine = self.engine.clone();
+        let task = crate::jobs::on_own_thread(move || remove_each(&dirs, |dir| engine.remove(dir)));
+        cx.spawn_in(window, async move |this, cx| {
+            let (removed, failed) = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
                 if let Some(e) = failed {
                     this.report("Could not delete", e, cx);
                 }
-                this.runs_removed(removed, cx);
+                this.runs_removed(removed, window, cx);
                 this.reload_runs(cx);
-            },
-        );
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Takes the runs with the ids in `removed`, which the engine
     /// deleted, off the screen: out of the pick, the chosen comparison,
     /// the check and the session.
-    fn runs_removed(&mut self, removed: Vec<String>, cx: &mut Context<Self>) {
+    fn runs_removed(&mut self, removed: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
         if removed.is_empty() {
             return;
         }
@@ -1072,6 +1078,11 @@ impl Scrubber {
                 self.session = None;
                 self.runs.set_family(None);
                 self.close_run_panels();
+
+                // A field that was closed may have had the keyboard, and a
+                // window whose focused field is gone sends its keys to no
+                // one.
+                window.focus(&self.focus, cx);
             }
         }
         self.notify_user(
@@ -1100,10 +1111,11 @@ impl Scrubber {
         }
     }
 
-    /// Closes the panels that hold one run's answers and engine jobs, as
-    /// when the app quits or the run on screen is deleted with no run to
-    /// take its place. Dropping a panel stops the engine command it waits
-    /// on.
+    /// Closes the panels that hold one run's answers and engine jobs, and
+    /// the fields over the run that search it, note a step of it and take
+    /// a step of it to go to, as when the app quits or the run on screen
+    /// is deleted with no run to take its place. Dropping a panel stops
+    /// the engine command it waits on.
     fn close_run_panels(&mut self) {
         self.blames.stop_all();
         self.viewer = None;
@@ -1111,6 +1123,9 @@ impl Scrubber {
         self.source = None;
         self.lanes = None;
         self.sweep = None;
+        self.search = None;
+        self.bookmark_editor = None;
+        self.step_entry = None;
         self.right_tab = RightTab::AtStep;
     }
 
@@ -1498,7 +1513,7 @@ impl Scrubber {
             NoticeAction::CopyText(text) => {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(text))
             }
-            NoticeAction::RemoveRuns(dirs) => self.remove_runs(dirs, cx),
+            NoticeAction::RemoveRuns(dirs) => self.remove_runs(dirs, window, cx),
             NoticeAction::Dismiss => {}
         }
     }

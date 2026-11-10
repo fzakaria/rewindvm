@@ -915,9 +915,9 @@ impl Scrubber {
                 };
                 let targets = runs.clone();
                 items = items.child(item("menu-run-delete", delete.into()).on_click(cx.listener(
-                    move |this, _, _, cx| {
+                    move |this, _, window, cx| {
                         this.close_context_menu(cx);
-                        this.ask_delete_runs(targets.clone(), cx);
+                        this.ask_delete_runs(targets.clone(), window, cx);
                     },
                 )));
             }
