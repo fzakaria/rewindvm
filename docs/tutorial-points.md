@@ -22,7 +22,7 @@ run by the `sdk` property. Under 64 schedules, every run holds:
 ```console
 $ rewind check --epoch 1790985600 github:fzakaria/rewindvm#counter
 ...
-schedule  64: exited:0             5832 steps  e3f96e451c97  run d2ad8d9f7ec3393b  holds
+schedule  64: exited:0             5787 steps  e3f96e451c97  run f4ffc4fe7087867d  holds
 every property held under all 65 schedules
 ```
 
@@ -69,9 +69,9 @@ $ rewind check --epoch 1790985600 .#counter | grep -E 'decides it|passing:|faili
 rewind: packing 62 store paths for counter-0.1.0
 schedule 1 violates same-outcome, sdk; finding the step that decides it
 step 3387 decides it: a request to switch threads there makes the run violate same-outcome, sdk
-passing: run bff975cd314c983e, schedule 1 over steps 3202..3387
-failing: run d4ea11ffd5b1485c, schedule 1 over steps 3202..3388
-failing run violates sdk: step 3411: always "hits-add-up" failed: 10 hits, expected 20
+passing: run 14a6a06cf7013a65, schedule 1 over steps 3187..3387
+failing: run 83ab2b833f5592c8, schedule 1 over steps 3187..3388
+failing run violates sdk: step 3414: always "hits-add-up" failed: 10 hits, expected 20
 ```
 
 The run violates `same-outcome` too, since the job's build fails where
@@ -82,13 +82,13 @@ thread held the CPU around the point, in the failing run and in the
 passing one it was forked from:
 
 ```console
-$ rewind threads d4ea11ff --from 3385 --to 3389
+$ rewind threads 83ab2b83 --from 3385 --to 3389
       3385       3388       139/140  counter
       3389       3389       139/141  counter
 ```
 
 ```console
-$ rewind threads bff975cd --from 3385 --to 3389
+$ rewind threads 14a6a06c --from 3385 --to 3389
       3385       3389       139/140  counter
 ```
 
@@ -98,7 +98,7 @@ passing one, at the point, with the thread lanes shown and zoomed in on
 the window around it:
 
 ```console
-$ rewind open d4ea11ff 3387 --compare bff975cd
+$ rewind open 83ab2b83 3387 --compare 14a6a06c
 ```
 
 ![The app at step 3387 of the failing counter run, compared with the passing one, with the Threads panel open: a lane per thread, the playhead at the point, and the other counter thread on the CPU from step 3389](../site/img/app-point.png)

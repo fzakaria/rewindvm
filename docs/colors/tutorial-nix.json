@@ -1,6 +1,6 @@
 [
  {
-  "text": "$ rewind nix --epoch 1790985600 github:fzakaria/rewindvm#mylib\nrewind: packing 62 store paths for mylib-0.3.0\n...\nrewind: run 0a1dae14daee9820 exited:0 after 6030 steps, 0.215s virtual, 0.780s wall (poweroff)\n/nix/store/f6a9gy362szw6nxx3ikrklr8glr6rdln-mylib-0.3.0 a9d703ba89774f3d  matches your store, rewindvm.cachix.org",
+  "text": "$ rewind nix --epoch 1790985600 github:fzakaria/rewindvm#mylib\nrewind: packing 62 store paths for mylib-0.3.0\n...\nrewind: run e35196f0da934c64 exited:0 after 6033 steps, 0.215s virtual, 0.736s wall (poweroff)\n/nix/store/f6a9gy362szw6nxx3ikrklr8glr6rdln-mylib-0.3.0 a9d703ba89774f3d  matches your store, rewindvm.cachix.org",
   "spans": [
    [
     1,
@@ -29,7 +29,7 @@
   ]
  },
  {
-  "text": "$ rewind check --epoch 1790985600 github:fzakaria/rewindvm#mylib\nschedule   0: exited:0             6030 steps  a9d703ba8977  run 0a1dae14daee9820\nschedule   1: exited:0             7773 steps  a9d703ba8977  run eb388bf93ef00f21\nschedule   2: exited:0             7663 steps  a9d703ba8977  run 00555e83e6bab5fb\nschedule   3: exited:0             7930 steps  a9d703ba8977  run 6d888ae3d6e366b3\nschedule   4: exited:2             6285 steps    run c63ac15c205593ff\nschedule   5: exited:0             7610 steps  a9d703ba8977  run ba01494aa81fff96\nschedule   6: exited:0             7496 steps  a9d703ba8977  run 37378a3c2677e60d\nschedule   7: exited:0             7487 steps  a9d703ba8977  run 2a132209bc749aa6\nschedule   8: exited:0             7632 steps  a9d703ba8977  run ae812cedbe8b508a\nschedule   9: exited:2             5626 steps    run b28d0974a8ba0dea\nschedule  10: exited:0             7581 steps  a9d703ba8977  run 469ec339402db31e\nschedule  11: exited:0             7740 steps  a9d703ba8977  run 9a68c323065d3d1a\nschedule  12: exited:0             7706 steps  a9d703ba8977  run d1ba6c7da93e4c1e\nschedule  13: exited:2             5849 steps    run 3b3bf41704b8e8fc\nschedule  14: exited:2             5728 steps    run 19d4977c9ae7c0ca\nschedule  15: exited:0             7691 steps  a9d703ba8977  run ae457c867fd7a330\nschedule  16: exited:2             5926 steps    run 00b3be8ad26202c1\n\nschedule 4 ends differently from schedule 0; finding the step that decides it\nschedule 4 limited to steps 4246..4826 still ends differently\nstep 4825 decides it: a request to switch threads there makes the run fail\n\npassing: run 9ceb6f28d5ffd7ca, schedule 4 over steps 4246..4825\nfailing: run aa6759a6362f43a2, schedule 4 over steps 4246..4826\nthe two are the same run until step 4825\n\nwhere ./tests/test_pool_shutdown first behaves differently:\n  both           4813   166/172   write(1, \"job 16 done: 5986\\n\")\n  both           4814   166/172   write(1, \"worker picked job 18\\n\")\n  both           4825   166/171   write(1, \"job 17 done: 43360\\n\")\n  failing        4829   166/172   write(1, \"job 18 done: 26744\\n\")\n  failing        4830   166/172   write(1, \"worker picked job 19\\n\")\n  failing        4839   166/171   SIGSEGV code=1 addr=0x108\n  failing        4841   166/166   SIGSEGV code=0 addr=0x0\n  passing        4826   166/171   write(1, \"worker picked job 19\\n\")\n  passing        4833   166/172   write(1, \"job 18 done: 26744\\n\")\n  passing        4834   166/172   write(1, \"worker picked job 20\\n\")\n  passing        4846   166/171   thread exit(test_pool_shutd) exited:0\n\nopen both in the desktop app: rewind open aa6759a6362f43a2 4829 --compare 9ceb6f28d5ffd7ca",
+  "text": "$ rewind check --epoch 1790985600 github:fzakaria/rewindvm#mylib\nschedule   0: exited:0             6033 steps  a9d703ba8977  run e35196f0da934c64\nschedule   1: exited:2             5364 steps    run f6e38e32029e12b9\nschedule   2: exited:0             7531 steps  a9d703ba8977  run bace2959cd1a7609\nschedule   3: exited:0             7805 steps  a9d703ba8977  run 72fda384720d3d09\nschedule   4: exited:0             7935 steps  a9d703ba8977  run 9324a61b874ed09f\nschedule   5: exited:0             7562 steps  a9d703ba8977  run 1f58a22d9d1d3e11\nschedule   6: exited:0             7619 steps  a9d703ba8977  run 8c218469ead68840\nschedule   7: exited:0             7643 steps  a9d703ba8977  run 8b6ad224f154f955\nschedule   8: exited:2             5842 steps    run 0281c776bba6e6f7\nschedule   9: exited:2             5377 steps    run 4fe19139bdd3bf06\nschedule  10: exited:2             5392 steps    run 956b799a1af0aca0\nschedule  11: exited:0             7640 steps  a9d703ba8977  run a4730d40d05cb02e\nschedule  12: exited:0             7791 steps  a9d703ba8977  run eb5c975cf7980a34\nschedule  13: exited:2             5953 steps    run 01f557942934f577\nschedule  14: exited:0             7708 steps  a9d703ba8977  run 247acef69f8334f5\nschedule  15: exited:0             7830 steps  a9d703ba8977  run 326d07fbb33fd16c\nschedule  16: exited:0             7612 steps  a9d703ba8977  run 88d3d8e26a79595d\n\nschedule 1 ends differently from schedule 0; finding the step that decides it\nschedule 1 limited to steps 4533..4759 still ends differently\nstep 4758 decides it: a request to switch threads and a 640 \u00b5s pause of the running thread there makes the run fail\n\npassing: run bcdb4788ffc5bce2, schedule 1 over steps 4533..4758\nfailing: run 455a57d2ee648d59, schedule 1 over steps 4533..4759\nthe two are the same run until step 4758\n\nwhere ./tests/test_pool_shutdown first behaves differently:\n  both           4746   166/172   write(1, \"job 15 done: 42559\\n\")\n  both           4747   166/172   write(1, \"worker picked job 17\\n\")\n  both           4758   166/171   write(1, \"job 16 done: 5986\\n\")\n  failing        4770   166/172   thread exit(test_pool_shutd) exited:0\n  failing        4782   166/171   SIGSEGV code=1 addr=0x108\n  failing        4786   166/171   thread exit(test_pool_shutd) killed:SIGSEGV\n  failing        4790   166/166   exit_group(test_pool_shutd) killed:SIGSEGV\n  passing        4759   166/171   write(1, \"worker picked job 18\\n\")\n  passing        4771   166/172   thread exit(test_pool_shutd) exited:0\n  passing        4775   166/171   thread exit(test_pool_shutd) exited:0\n  passing        4778   166/166   write(1, \"round 2: ok\\n\")\n\nopen both in the desktop app: rewind open 455a57d2ee648d59 4770 --compare bcdb4788ffc5bce2",
   "spans": [
    [
     1,
@@ -41,7 +41,7 @@
     2,
     14,
     22,
-    "green"
+    "red"
    ],
    [
     3,
@@ -59,7 +59,7 @@
     5,
     14,
     22,
-    "red"
+    "green"
    ],
    [
     6,
@@ -83,7 +83,7 @@
     9,
     14,
     22,
-    "green"
+    "red"
    ],
    [
     10,
@@ -95,7 +95,7 @@
     11,
     14,
     22,
-    "green"
+    "red"
    ],
    [
     12,
@@ -119,7 +119,7 @@
     15,
     14,
     22,
-    "red"
+    "green"
    ],
    [
     16,
@@ -131,7 +131,7 @@
     17,
     14,
     22,
-    "red"
+    "green"
    ],
    [
     23,
@@ -196,7 +196,7 @@
   ]
  },
  {
-  "text": "$ rewind cat aa6759a6 4839 src/pool.c --pid 166 | sed -n '/^void pool_shutdown/,/^}/p'\nvoid pool_shutdown(struct pool *p)\n{\n\tpthread_mutex_lock(&p->lock);\n\tp->stopping = 1;\n\tpthread_cond_broadcast(&p->ready);\n\tpthread_mutex_unlock(&p->lock);\n\n\t/* The bug: the queue goes before the workers are joined. */\n\tfree(p->queue);\n\tp->queue = NULL;\n\n\tfor (int i = 0; i < POOL_WORKERS; i++)\n\t\tpthread_join(p->workers[i], NULL);\n\tpthread_cond_destroy(&p->ready);\n\tpthread_mutex_destroy(&p->lock);\n\tfree(p);\n}\n\n$ printf 'pwd; ls; exit\\n' | rewind shell aa6759a6 4839 --pid 166\nrewind: a shell at step 4839 of aa6759a6362f43a2; exit it to leave\n[rewind] /build/mylib # pwd; ls; exit\n/build/mylib\nContainerfile  Makefile  libmylib.a  src  tests",
+  "text": "$ rewind cat 455a57d2 4782 src/pool.c --pid 166 | sed -n '/^void pool_shutdown/,/^}/p'\nvoid pool_shutdown(struct pool *p)\n{\n\tpthread_mutex_lock(&p->lock);\n\tp->stopping = 1;\n\tpthread_cond_broadcast(&p->ready);\n\tpthread_mutex_unlock(&p->lock);\n\n\t/* The bug: the queue goes before the workers are joined. */\n\tfree(p->queue);\n\tp->queue = NULL;\n\n\tfor (int i = 0; i < POOL_WORKERS; i++)\n\t\tpthread_join(p->workers[i], NULL);\n\tpthread_cond_destroy(&p->ready);\n\tpthread_mutex_destroy(&p->lock);\n\tfree(p);\n}\n\n$ printf 'pwd; ls; exit\\n' | rewind shell 455a57d2 4782 --pid 166\nrewind: a shell at step 4782 of 455a57d2ee648d59; exit it to leave\n[rewind] /build/mylib # pwd; ls; exit\n/build/mylib\nContainerfile  Makefile  libmylib.a  src  tests",
   "spans": [
    [
     20,
@@ -207,7 +207,7 @@
   ]
  },
  {
-  "text": "$ rewind gdb aa6759a6 4825 -- -batch -ex 'break src/pool.c:77 if p->queue == 0' -ex continue -ex 'bt 3' -ex 'p p->queue' -ex list\nrewind: step 4825 ran in process 166; loading symbols for 4 of its files\nrewind: fetched 3 source files from the VM\nrewind: gdb at step 4825 of aa6759a6362f43a2\nDownloading 10.70 K separate debug info for /nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libpthread.so.0...\nDownloading 4.35 M separate debug info for /nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6...\nDownloading 658.16 K separate debug info for /nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/ld-linux-x86-64.so.2...\nDownloading 3.12 K source file /build/linux-7.2.8/./arch/x86/include/asm/irqflags.h...\narch_local_irq_restore (flags=518) at ./arch/x86/include/asm/irqflags.h:146\n146\t\treturn !(flags & X86_EFLAGS_IF);\n[Switching to thread 3 (Thread 1.171)]\nDownloading 1.79 K source file /build/glibc-2.44/nptl/../sysdeps/unix/sysv/linux/x86_64/syscall_cancel.S...\n#0  __syscall_cancel_arch () at ../sysdeps/unix/sysv/linux/x86_64/syscall_cancel.S:56\n56\t\tret\nBreakpoint 1 at 0x5556d620d433: file src/pool.c, line 77.\n\nThread 3 hit Breakpoint 1, worker (arg=0x5556f833c010) at src/pool.c:77\n77\t\t\t\tp->queue->completed++;\n#0  worker (arg=0x5556f833c010) at src/pool.c:77\n#1  0x00007feee6f0c7d1 in start_thread (arg=<optimized out>) at pthread_create.c:454\n#2  0x00007feee6f98b1c in __GI___clone3 () at ../sysdeps/unix/sysv/linux/x86_64/clone3.S:78\n$1 = (struct queue *) 0x0\n72\t\t\t * the bug. */\n73\t\t\tlong result = run_job(job);\n74\t\t\tif (!p->stopping) {\n75\t\t\t\tprintf(\"job %d done: %ld\\n\", job, result & 0xffff);\n76\t\t\t\tfflush(stdout);\n77\t\t\t\tp->queue->completed++;\n78\t\t\t}\n79\t\t}\n80\t}\n81\n[Inferior 1 (process 1) detached]",
+  "text": "$ rewind gdb 455a57d2 4758 -- -batch -ex 'break src/pool.c:77 if p->queue == 0' -ex continue -ex 'bt 3' -ex 'p p->queue' -ex list\nrewind: step 4758 ran in process 166; loading symbols for 4 of its files\nrewind: fetched 3 source files from the VM\nrewind: gdb at step 4758 of 455a57d2ee648d59\nDownloading 10.70 K separate debug info for /nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libpthread.so.0...\nDownloading 4.35 M separate debug info for /nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6...\nDownloading 658.16 K separate debug info for /nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/ld-linux-x86-64.so.2...\nDownloading 3.12 K source file /build/linux-7.2.8/./arch/x86/include/asm/irqflags.h...\narch_local_irq_restore (flags=518) at ./arch/x86/include/asm/irqflags.h:146\n146\t\treturn !(flags & X86_EFLAGS_IF);\n[Switching to thread 3 (Thread 1.171)]\nDownloading 1.79 K source file /build/glibc-2.44/nptl/../sysdeps/unix/sysv/linux/x86_64/syscall_cancel.S...\n#0  __syscall_cancel_arch () at ../sysdeps/unix/sysv/linux/x86_64/syscall_cancel.S:56\n56\t\tret\nBreakpoint 1 at 0x55c06fa1d433: file src/pool.c, line 77.\n[Thread 1.172 exited]\n\nThread 3 hit Breakpoint 1, worker (arg=0x55c074530010) at src/pool.c:77\n77\t\t\t\tp->queue->completed++;\n#0  worker (arg=0x55c074530010) at src/pool.c:77\n#1  0x00007fda399f47d1 in start_thread (arg=<optimized out>) at pthread_create.c:454\n#2  0x00007fda39a80b1c in __GI___clone3 () at ../sysdeps/unix/sysv/linux/x86_64/clone3.S:78\n$1 = (struct queue *) 0x0\n72\t\t\t * the bug. */\n73\t\t\tlong result = run_job(job);\n74\t\t\tif (!p->stopping) {\n75\t\t\t\tprintf(\"job %d done: %ld\\n\", job, result & 0xffff);\n76\t\t\t\tfflush(stdout);\n77\t\t\t\tp->queue->completed++;\n78\t\t\t}\n79\t\t}\n80\t}\n81\n[Inferior 1 (process 1) detached]",
   "spans": [
    [
     1,
@@ -230,7 +230,7 @@
   ]
  },
  {
-  "text": "$ rewind replay aa6759a6\nidentical to the recording: 1693 events, 1148 context switches and 1476 read and write records over 4887 steps, and the whole machine at its 4 keyframes\n\n$ rewind replay aa6759a6 --from 4246\nidentical to the recording from the snapshot at step 256 to the end, and the whole machine at its 3 keyframes (0.48s)",
+  "text": "$ rewind replay 455a57d2\nidentical to the recording: 1687 events, 1114 context switches and 1476 read and write records over 4823 steps, and the whole machine at its 4 keyframes\n\n$ rewind replay 455a57d2 --from 4533\nidentical to the recording from the keyframe at step 256 to the end, and the whole machine at its 3 keyframes (0.40s)",
   "spans": [
    [
     1,
@@ -247,7 +247,7 @@
   ]
  },
  {
-  "text": "$ rewind fork 0a1dae14 4246 --schedule 1 --quiet\nrewind: run 376770718d157ce2 exited:0 after 6638 steps, 0.223s virtual, 0.119s wall (poweroff)\nrewind: the fork first differs from its parent at step 4254\nrewind: open it beside its parent in the desktop app: rewind open 376770718d157ce2 4254 --compare 0a1dae14daee9820\n\n$ rewind fork 0a1dae14 4246 --schedule 2 --quiet\nrewind: run 5dac25d3c22f4b95 exited:0 after 6584 steps, 0.220s virtual, 0.124s wall (poweroff)\nrewind: the fork first differs from its parent at step 4257\nrewind: open it beside its parent in the desktop app: rewind open 5dac25d3c22f4b95 4257 --compare 0a1dae14daee9820\n\n$ rewind fork 0a1dae14 4246 --schedule 3 --quiet\nrewind: run 90ba18ef8f535ce2 exited:0 after 6632 steps, 0.224s virtual, 0.125s wall (poweroff)\nrewind: the fork first differs from its parent at step 4269\nrewind: open it beside its parent in the desktop app: rewind open 90ba18ef8f535ce2 4269 --compare 0a1dae14daee9820\n\n$ rewind fork 0a1dae14 4246 --schedule 4 --quiet\nrewind: run 2eca68d10c22e3a7 exited:2 after 4893 steps, 0.200s virtual, 0.067s wall (poweroff)\nrewind: the fork first differs from its parent at step 4256\nrewind: open it beside its parent in the desktop app: rewind open 2eca68d10c22e3a7 4256 --compare 0a1dae14daee9820",
+  "text": "$ rewind fork e35196f0 4533 --schedule 1 --quiet\nrewind: run a25c3ad9167d9412 exited:2 after 4838 steps, 0.200s virtual, 0.066s wall (poweroff)\nrewind: the fork first differs from its parent at step 4546\nrewind: open it beside its parent in the desktop app: rewind open a25c3ad9167d9412 4546 --compare e35196f0da934c64\n\n$ rewind fork e35196f0 4533 --schedule 2 --quiet\nrewind: run fd3ea41791df132e exited:2 after 4802 steps, 0.199s virtual, 0.067s wall (poweroff)\nrewind: the fork first differs from its parent at step 4552\nrewind: open it beside its parent in the desktop app: rewind open fd3ea41791df132e 4552 --compare e35196f0da934c64\n\n$ rewind fork e35196f0 4533 --schedule 3 --quiet\nrewind: run 6625a3557e7b0fac exited:0 after 6562 steps, 0.222s virtual, 0.119s wall (poweroff)\nrewind: the fork first differs from its parent at step 4573\nrewind: open it beside its parent in the desktop app: rewind open 6625a3557e7b0fac 4573 --compare e35196f0da934c64\n\n$ rewind fork e35196f0 4533 --schedule 4 --quiet\nrewind: run 9f4f8b27cf7b2b11 exited:0 after 6557 steps, 0.220s virtual, 0.120s wall (poweroff)\nrewind: the fork first differs from its parent at step 4547\nrewind: open it beside its parent in the desktop app: rewind open 9f4f8b27cf7b2b11 4547 --compare e35196f0da934c64",
   "spans": [
    [
     1,
@@ -259,7 +259,7 @@
     1,
     29,
     37,
-    "green"
+    "red"
    ],
    [
     2,
@@ -289,7 +289,7 @@
     6,
     29,
     37,
-    "green"
+    "red"
    ],
    [
     7,
@@ -349,7 +349,7 @@
     16,
     29,
     37,
-    "red"
+    "green"
    ],
    [
     17,

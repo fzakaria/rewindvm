@@ -98,12 +98,12 @@
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind check <span class="option">--epoch</span> <span class="number">1790985600</span> <span class="option">--schedules</span> <span class="number">8</span> <span class="option">--property</span> <span class="string">'atomic-replace=*.conf'</span> github:fzakaria/rewindvm#config-reload</span>
 <span class="ansi-dim">rewind:</span> packing 62 store paths for config-reload-0.1.0
-schedule   0: <span class="ansi-green">exited:0</span>             4496 steps  f7b1c7741aba  run 79e30c4b26eab8fe  <span class="ansi-red">violates</span> atomic-replace
-  atomic-replace: step 3321: process 139 (config) truncated /build/config-reload/app.conf in place, which the run wrote at step 3316; a reader can see it empty or half written
+schedule   0: <span class="ansi-green">exited:0</span>             4509 steps  f7b1c7741aba  run a46a2267af7f9de7  <span class="ansi-red">violates</span> atomic-replace
+  atomic-replace: step 3328: process 139 (config) truncated /build/config-reload/app.conf in place, which the run wrote at step 3323; a reader can see it empty or half written
 ...
-schedule   8: <span class="ansi-red">exited:2</span>             4076 steps    run 2a427ebe14bb3b40  <span class="ansi-red">violates</span> atomic-replace
+schedule   8: <span class="ansi-green">exited:0</span>             5646 steps  f7b1c7741aba  run 08a9e845a4b51c4e  <span class="ansi-red">violates</span> atomic-replace
 <span class="ansi-red">every schedule violated a property, as schedule 0 did</span>
-open it at the step: rewind open 79e30c4b26eab8fe 3321</code></pre>
+open it at the step: rewind open a46a2267af7f9de7 3328</code></pre>
         <p>
           <code>atomic-replace</code> flags the unsafe write whether or not a reader saw the
           half-written file. <code>no-read-while-written</code> flags the reader: it fails a run in
@@ -115,8 +115,8 @@ open it at the step: rewind open 79e30c4b26eab8fe 3321</code></pre>
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind check <span class="option">--epoch</span> <span class="number">1790985600</span> <span class="option">--property</span> <span class="string">'no-read-while-written=*.conf'</span> github:fzakaria/rewindvm#config-reload <span class="operator">|</span> grep <span class="option">-E</span> <span class="string">'decides it|failing run'</span></span>
 schedule 1 violates no-read-while-written; finding the step that decides it
-step 3345 decides it: a request to switch threads there makes the run violate no-read-while-written
-failing run violates no-read-while-written: step 3357: process 140 (config) opened /build/config-reload/app.conf for reading while process 139 (config), which opened it for writing at step 3345, had not closed it</code></pre>
+step 3586 decides it: a request to switch threads there makes the run violate no-read-while-written
+failing run violates no-read-while-written: step 3591: process 140 (config) opened /build/config-reload/app.conf for reading while process 139 (config), which opened it for writing at step 3586, had not closed it</code></pre>
         <p>
           <code>--property</code> replaces the default, and you can repeat it to judge runs by
           several properties. Rewind includes these:
@@ -218,7 +218,7 @@ failing run violates no-read-while-written: step 3357: process 140 (config) open
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind check <span class="option">--epoch</span> <span class="number">1790985600</span> <span class="option">--schedules</span> <span class="number">0</span> github:fzakaria/rewindvm#bank</span>
 ...
-schedule   0: <span class="ansi-green">exited:0</span>             4508 steps  2ffd6b62eb30  run 5702447f1921447e  <span class="ansi-green">holds</span>
+schedule   0: <span class="ansi-green">exited:0</span>             4519 steps  2ffd6b62eb30  run 057754363e88c28d  <span class="ansi-green">holds</span>
 <span class="ansi-yellow">never true in any run: sometimes "deposits-concurrent"</span>
 <span class="ansi-green">every property held under the one schedule tried</span></code></pre>
         <p>
@@ -228,12 +228,12 @@ schedule   0: <span class="ansi-green">exited:0</span>             4508 steps  2
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind check <span class="option">--epoch</span> <span class="number">1790985600</span> github:fzakaria/rewindvm#bank <span class="operator">|</span> grep <span class="option">-E</span> <span class="string">'decides it|passing:|failing:|failing run violates sdk|^true in'</span></span>
-true in 16 of 17 runs that checked it: sometimes "deposits-concurrent"
+true in 15 of 17 runs that checked it: sometimes "deposits-concurrent"
 schedule 1 violates same-outcome, sdk; finding the step that decides it
-step 3356 decides it: a request to switch threads there makes the run violate same-outcome, sdk
-passing: run 5702447f1921447e, schedule 0
-failing: run 1974248cec60cfda, schedule 1 over steps 3356..3357
-failing run violates sdk: step 3396: always "balance-adds-up" failed: balance 390, expected 400</code></pre>
+step 3360 decides it: a request to switch threads there makes the run violate same-outcome, sdk
+passing: run 057754363e88c28d, schedule 0
+failing: run ae14759639ab54a4, schedule 1 over steps 3360..3361
+failing run violates sdk: step 3403: always "balance-adds-up" failed: balance 360, expected 400</code></pre>
         <p>
           Outside Rewind the SDK's calls do nothing, so they can stay in the program. The
           <a href="https://github.com/fzakaria/rewindvm/tree/main/sdk">SDK</a> has a small library
@@ -283,10 +283,10 @@ failing run violates sdk: step 3396: always "balance-adds-up" failed: balance 39
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind check <span class="option">--epoch</span> <span class="number">1790985600</span> .#bank <span class="operator">|</span> grep <span class="option">-E</span> <span class="string">'^true in|^every property'</span></span>
 rewind: packing 62 store paths for bank-0.1.0
-true in 61 of 65 runs that checked it: sometimes "deposits-concurrent"
+true in 60 of 65 runs that checked it: sometimes "deposits-concurrent"
 every property held under all 65 schedules</code></pre>
         <p>
-          The balance adds up in all 65 runs, and in 61 of them both tellers were mid-deposit at
+          The balance adds up in all 65 runs, and in 60 of them both tellers were mid-deposit at
           once, so the search made them contend for the lock and the lock held. Without the
           <code>sometimes</code>, a clean search could also mean the tellers never overlapped.
         </p>
@@ -313,11 +313,11 @@ every property held under all 65 schedules</code></pre>
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind check <span class="option">--epoch</span> <span class="number">1790985600</span> <span class="option">--seeds</span> <span class="number">8</span> <span class="option">--schedules</span> <span class="number">0</span> github:fzakaria/rewindvm#hash-order <span class="operator">|</span> grep <span class="option">-E</span> <span class="string">'^seed|decides it|passing:|failing:'</span></span>
 rewind: packing 67 store paths for hash-order-0.1.0
-seed  0 schedule   0: exited:0             4698 steps  83f239c2e313  run 9ddc005fa5bb6480
-seed  1 schedule   0: exited:2             3596 steps    run d677b7b118161490
+seed  0 schedule   0: exited:0             4707 steps  83f239c2e313  run fdb78956486983d5
+seed  1 schedule   0: exited:2             3606 steps    run 2f7fff7304151911
 seed 1 decides it: under schedule 0, seed 0 passes and seed 1 fails
-passing: run 9ddc005fa5bb6480, seed 0, schedule 0
-failing: run d677b7b118161490, seed 1, schedule 0</code></pre>
+passing: run fdb78956486983d5, seed 0, schedule 0
+failing: run 2f7fff7304151911, seed 1, schedule 0</code></pre>
         <p>
           Seed 1 puts the tags in the other order and the test fails. With
           <code>--schedules</code> above 0, check also perturbs the schedule under each seed, so one
@@ -332,7 +332,7 @@ failing: run d677b7b118161490, seed 1, schedule 0</code></pre>
         <p>Open the failing <code>bank</code> run beside the passing one, at the assertion:</p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind open 1974248c <span class="number">3396</span> <span class="option">--compare</span> 5702447f</span></code></pre>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind open ae147596 <span class="number">3403</span> <span class="option">--compare</span> <span class="number">05775436</span></span></code></pre>
         <figure class="shot">
           <picture>
             <source srcset="../img/app-assertion.webp" type="image/webp" />
@@ -341,11 +341,11 @@ failing: run d677b7b118161490, seed 1, schedule 0</code></pre>
               width="1440"
               height="900"
               loading="lazy"
-              alt='The app zoomed in around step 3396 of the failing bank run: a red mark above the track where always "balance-adds-up" failed, the test&#x27;s span under the track in red, and the event card naming it'
+              alt='The app zoomed in around step 3403 of the failing bank run: a red mark above the track where always "balance-adds-up" failed, the test&#x27;s span under the track in red, and the event card naming it'
             />
           </picture>
           <figcaption>
-            The app zoomed in around step 3396 of the failing bank run: a red mark above the track
+            The app zoomed in around step 3403 of the failing bank run: a red mark above the track
             where always &quot;balance-adds-up&quot; failed, the test&#x27;s span under the track in
             red, and the event card naming it
           </figcaption>

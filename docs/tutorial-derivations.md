@@ -70,21 +70,24 @@ derivation's builder inside Rewind and receives its outputs as usual. The
 
 ```console
 $ nix build --no-link --print-out-paths --impure -f stamp.nix
-/nix/store/qmagps0zkg63ac8bzs8hfv1vmav60x56-stamp-0.1.0
+...
+/nix/store/kamhwi6kmqj0y3s7kz46afrw2kah3m6n-stamp-0.1.0
 
 $ $(nix build --no-link --print-out-paths --impure -f stamp.nix)/bin/stamp
-build 4ce9bd9b-a9df-4eb0-968c-cae21737b552 at 2026-10-03T00:00:00Z
+...
+build 353dda9f-1143-4548-9a60-a961dc181945 at 2026-10-03T00:00:00Z
 ```
 
 Now rebuild it:
 
 ```console
 $ nix build -L --no-link --impure -f stamp.nix --rebuild
+...
 checking outputs of '/nix/store/...-stamp-0.1.0.drv'...
 ...
-stamp> gcc -O1 -Wall -DBUILD_ID='"4ce9bd9b-a9df-4eb0-968c-cae21737b552"' -DBUILT_AT='"2026-10-03T00:00:00Z"' -o stamp stamp.c
+stamp> gcc -O1 -Wall -DBUILD_ID='"353dda9f-1143-4548-9a60-a961dc181945"' -DBUILT_AT='"2026-10-03T00:00:00Z"' -o stamp stamp.c
 ...
-stamp> rewind: run 774ae03cac203e36 exited:0 after 4296 steps, 0.021s virtual, 0.677s wall (poweroff)
+stamp> rewind: run f864cf827414c782 exited:0 after 4299 steps, 0.021s virtual, 0.507s wall (poweroff)
 ```
 
 `--rebuild` passes. The program still reads the clock and the kernel's
@@ -104,10 +107,11 @@ Change the epoch to midnight on 2025-06-15:
 $ sed -i 's/1790985600/1749945600/' stamp.nix
 $ nix build --no-link --print-out-paths --impure -f stamp.nix
 ...
-/nix/store/2h3qpbl40h2yi6m7z6a49dmg4ffwhli5-stamp-0.1.0
+/nix/store/xww0r7mqd7sxvgqbdfxsjnxh1c752nhs-stamp-0.1.0
 
 $ $(nix build --no-link --print-out-paths --impure -f stamp.nix)/bin/stamp
-build 9332c115-745f-4d61-b6e3-95f52d97852b at 2025-06-15T00:00:00Z
+...
+build 3abd3873-04a1-4984-ae0a-7111128006c3 at 2025-06-15T00:00:00Z
 ```
 
 The new output has its own store path and timestamp. Rebuilding the original
