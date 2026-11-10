@@ -29,7 +29,7 @@ use crate::family::{
 };
 use crate::history::History;
 use crate::model::{LogFilter, Motion};
-use crate::request::{Request, Requests};
+use crate::request::{Finished, Readings, Request, Requests, Reread};
 use crate::run::{Origin, Replays, Session, short_id};
 use crate::search::Index;
 use crate::selection::Surface;
@@ -300,6 +300,8 @@ pub struct Scrubber {
     /// Where requests to the engine and other background work get their
     /// numbers (see `crate::request`).
     pub(super) requests: Requests,
+    /// The scans of the engine's runs, one at a time.
+    runs_readings: Readings,
     /// What files held at steps, as the engine said, by the file's version.
     pub(super) file_answers: Answers<FileKey, FileAtStep>,
     /// What directories held at steps, as the engine said.
@@ -460,6 +462,7 @@ impl Scrubber {
             opening: None,
             importing: None,
             requests: Requests::default(),
+            runs_readings: Readings::default(),
             file_answers: Answers::default(),
             dir_answers: Answers::default(),
             place_answers: Answers::default(),
@@ -732,13 +735,25 @@ impl Scrubber {
         cx.notify();
     }
 
-    /// Reads the engine's runs in the background, for the families the
-    /// empty state lists and the family of the run on screen.
+    /// Reads the engine's runs in the background after they changed, for
+    /// the families the empty state lists and the family of the run on
+    /// screen.
     pub(super) fn reload_runs(&mut self, cx: &mut Context<Self>) {
+        self.read_runs(Reread::Changed, cx);
+    }
+
+    /// Reads the engine's runs in the background, one scan at a time. A
+    /// scan reads every run's manifest, so a scan asked for while one runs
+    /// starts none; a scan the runs changed under is dropped and made
+    /// again, so a scan from before a delete is never the one shown.
+    fn read_runs(&mut self, why: Reread, cx: &mut Context<Self>) {
         // The browser has no engine's runs to read.
         if cfg!(target_family = "wasm") {
             return;
         }
+        let Some(request) = self.runs_readings.ask(why, &mut self.requests) else {
+            return;
+        };
         let read = cx.background_executor().spawn(async move {
             crate::engine::runs_dir()
                 .map(|dir| scan(&dir))
@@ -746,7 +761,11 @@ impl Scrubber {
         });
         cx.spawn(async move |this, cx| {
             let runs = read.await;
-            let _ = this.update(cx, |this, cx| this.apply_runs(runs, cx));
+            let _ = this.update(cx, |this, cx| match this.runs_readings.finished(request) {
+                Finished::Show => this.apply_runs(runs, cx),
+                Finished::ReadAgain => this.read_runs(Reread::Changed, cx),
+                Finished::Drop => {}
+            });
         })
         .detach();
     }
@@ -791,7 +810,7 @@ impl Scrubber {
                         this.runs.watching = false;
                         return false;
                     }
-                    this.reload_runs(cx);
+                    this.read_runs(Reread::Poll, cx);
                     true
                 });
                 if !matches!(more, Ok(true)) {
