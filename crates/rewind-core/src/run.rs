@@ -249,6 +249,8 @@ impl ProgressLine {
 /// next record the run made, keeping the step of the first that differs:
 /// a record with other bytes, at another step, or that the run never made.
 /// A replay that went another way reaches its step in a different machine.
+/// A record the run made and the replay did not is found once the replay
+/// is where it got to ([`Checked::never_made`]).
 struct Checked<'a> {
     inner: &'a mut dyn Observer,
     made: std::vec::IntoIter<(u64, Vec<u8>)>,
@@ -263,6 +265,40 @@ impl<'a> Checked<'a> {
             inner,
             made: made.into_iter(),
             differs_at: None,
+        }
+    }
+
+    /// The step of the first record the run made at or before `through`
+    /// that the replay has not made, when the replay has made every record
+    /// of the steps through `through` it will make: a run whose replay left
+    /// one out went another way there. None when `through` names no step.
+    fn never_made(&self, through: Option<u64>) -> Option<u64> {
+        let (next, _) = self.made.as_slice().first()?;
+        through.is_some_and(|t| *next <= t).then_some(*next)
+    }
+}
+
+/// Where a replay toward a step of a run got to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Arrival {
+    /// At the step.
+    Reached,
+    /// Paused short of the step, which only its observer asks for.
+    Cancelled,
+    /// Short of the step for good: its machine stopped there.
+    StoppedShort,
+}
+
+impl Arrival {
+    /// How a replay toward step `target` that ended as `outcome` with its
+    /// machine at step `at` arrived.
+    fn of(outcome: Outcome, at: u64, target: u64) -> Arrival {
+        if at == target {
+            return Arrival::Reached;
+        }
+        match outcome {
+            Outcome::Paused => Arrival::Cancelled,
+            Outcome::Stopped(_) | Outcome::Debug(_) => Arrival::StoppedShort,
         }
     }
 }
@@ -1150,9 +1186,32 @@ impl Run {
         machine.restore_in_place(&chain, &crate::keyframes::ReadPages(store), self.records()?)
     }
 
+    /// The last step whose records a replay paused at `step` has made in
+    /// full, None when that is no step. A triple fault and the wall-clock
+    /// limit end a run after its last step without a step of their own,
+    /// and what the trace takes then, its pending context switches among
+    /// them, is written at the last step, where a paused replay has not
+    /// ended.
+    fn made_by(&self, step: u64) -> Option<u64> {
+        use rewind_trace::stop::Stop as Stopped;
+        let ended_between_steps_at = self
+            .manifest
+            .outcome
+            .as_ref()
+            .filter(|o| matches!(o.stop, Stopped::TripleFault | Stopped::TimedOut(_)))
+            .map(|o| o.step);
+        if ended_between_steps_at == Some(step) {
+            return step.checked_sub(1);
+        }
+        Some(step)
+    }
+
     /// A machine at `step` of this run: the latest keyframe at or before
     /// it, restored, and run forward to the step. Events on the way go to
-    /// `obs`. With `Keep::Keyframe`, keyframes are kept on the way, each
+    /// `obs`, and a replay `obs` stops on the way gives the machine where
+    /// it got to. A replay that ends before the step any other way is an
+    /// error, as is one that left out a record the run made on the way.
+    /// With `Keep::Keyframe`, keyframes are kept on the way, each
     /// after [`crate::keyframes::KEEP_EVERY`] of the guest's work, so a
     /// later look anywhere on the stretch replays little of it, and one at
     /// the step when the last one is far enough back (see
@@ -1242,6 +1301,21 @@ impl Run {
                 pace.kept();
             }
         };
+
+        // Every record the run made through the step the replay got to
+        // must have come: one left out means the replay went another way,
+        // as one that differs does.
+        if let Some(left_out) = checked.never_made(self.made_by(machine.step())) {
+            return Err(self.went_another_way(left_out));
+        }
+
+        // A machine that stopped before the step is not the machine asked
+        // for: the step is past the run's end, or the replay ended where
+        // the recording went on.
+        if Arrival::of(outcome, machine.step(), step) == Arrival::StoppedShort {
+            self.check_step(step)?;
+            return Err(self.went_another_way(machine.step()));
+        }
 
         // A keyframe at the step, when asked for, the machine got there,
         // and the keyframe it started from or last kept, or boot, is far
@@ -2210,6 +2284,83 @@ pub(crate) mod tests {
             feed(&[(3, vec![1]), (5, vec![2]), (9, vec![3]), (11, vec![4])]),
             Some(11)
         );
+    }
+
+    #[test]
+    fn a_record_the_replay_never_made_is_caught() {
+        // The run made records at steps 3, 5, 5 and 9. A replay that made
+        // the first two and got to step 4 has made every record through
+        // there. One that got to step 5 or 8 never made the second record
+        // of step 5, and the record at step 9 is still ahead of both. A
+        // replay that made all four has none left at any step.
+        let made = vec![(3, vec![1u8]), (5, vec![2]), (5, vec![3]), (9, vec![4])];
+        let never_made = |replayed: usize, through: Option<u64>| {
+            let mut ignore = rewind_vmm::Ignore;
+            let mut check = Checked::new(&mut ignore, made.clone());
+            for (step, record) in &made[..replayed] {
+                check.record(*step, record);
+            }
+            assert_eq!(check.differs_at, None);
+            check.never_made(through)
+        };
+        assert_eq!(never_made(2, Some(4)), None);
+        assert_eq!(never_made(2, Some(5)), Some(5));
+        assert_eq!(never_made(2, Some(8)), Some(5));
+        assert_eq!(never_made(3, Some(8)), None);
+        assert_eq!(never_made(3, Some(9)), Some(9));
+        assert_eq!(never_made(4, Some(u64::MAX)), None);
+        assert_eq!(never_made(0, None), None);
+    }
+
+    #[test]
+    fn a_replay_stopped_short_of_its_step_has_not_arrived() {
+        // A replay toward step 9: paused at 9 or stopped at 9, as at the
+        // run's last step, it reached the step. Paused at 7 its observer
+        // asked it to stop. Stopped at 7 its machine ended before the
+        // step.
+        const TARGET: u64 = 9;
+        let stopped = Outcome::Stopped(Stop::Stalled);
+        assert_eq!(Arrival::of(Outcome::Paused, 9, TARGET), Arrival::Reached);
+        assert_eq!(Arrival::of(stopped, 9, TARGET), Arrival::Reached);
+        assert_eq!(Arrival::of(Outcome::Paused, 7, TARGET), Arrival::Cancelled);
+        assert_eq!(Arrival::of(stopped, 7, TARGET), Arrival::StoppedShort);
+    }
+
+    #[test]
+    fn the_records_of_an_end_between_steps_are_not_a_paused_replays() {
+        // A run that a triple fault or its time limit ended at step 40: a
+        // replay paused at step 40 has not ended, and has made every
+        // record through step 39. At an earlier step, and at any step of a
+        // run that a step ended, a paused replay has made the records of
+        // its step.
+        let ended = |stop: rewind_trace::stop::Stop| {
+            let mut m = manifest("aaaa", "faulted", 1);
+            m.outcome = Some(RunOutcome {
+                stop,
+                step: 40,
+                virtual_ns: 0,
+                status: None,
+                wall_ms: 0,
+            });
+            Run {
+                dir: PathBuf::new(),
+                manifest: m,
+                records: OnceLock::new(),
+                trace: OnceLock::new(),
+            }
+        };
+        let faulted = ended(rewind_trace::stop::Stop::TripleFault);
+        assert_eq!(faulted.made_by(40), Some(39));
+        assert_eq!(faulted.made_by(39), Some(39));
+        let limited = ended(rewind_trace::stop::Stop::TimedOut(
+            rewind_trace::stop::Timeout {
+                since_exit_ms: 0,
+                doing: rewind_trace::stop::Doing::MakingExits,
+            },
+        ));
+        assert_eq!(limited.made_by(40), Some(39));
+        let idle = ended(rewind_trace::stop::Stop::Idle);
+        assert_eq!(idle.made_by(40), Some(40));
     }
 
     #[test]
