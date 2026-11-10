@@ -273,10 +273,11 @@ fn inexact_reason(vendor: &Vendor) -> &'static str {
 pub fn exit_time_warning(vendor: &Vendor) -> String {
     let why = inexact_reason(vendor);
     format!(
-        "recording with exit time: {why}. Computation will not move the VM's clock, \
-         and a thread that computes without system calls is not preempted. \
-         Fix it with `sudo rewind pmu enable` (until reboot), then `rewind pmu status`. \
-         Why: {DOCS_URL}"
+        "recording with exit time: {why}. Computation will not move the VM's clock, so a \
+         timer set during a long computation fires late. `sudo rewind pmu enable` (until \
+         reboot), then `rewind pmu status`, gives runs counter time, which makes the clock \
+         follow computation; with either clock a thread that computes without system calls \
+         keeps the CPU. Why: {DOCS_URL}"
     )
 }
 
@@ -563,6 +564,19 @@ mod tests {
         // No workaround exists, so the self-test decides.
         assert!(counter_usable(false, false, true));
         assert!(!counter_usable(false, false, false));
+    }
+
+    #[test]
+    fn the_exit_time_warning_offers_what_the_command_gives() {
+        // `sudo rewind pmu enable` gives counter time, which makes the
+        // clock follow computation; it does not preempt a thread that
+        // computes without system calls, so the warning must not offer
+        // the command as a fix for that. Builds the message for AMD.
+        let warning = exit_time_warning(&Vendor::Amd { family: 25 });
+        assert!(warning.contains("sudo rewind pmu enable"), "{warning}");
+        assert!(warning.contains("counter time"), "{warning}");
+        assert!(!warning.contains("not preempted"), "{warning}");
+        assert!(warning.contains("either clock"), "{warning}");
     }
 
     #[test]

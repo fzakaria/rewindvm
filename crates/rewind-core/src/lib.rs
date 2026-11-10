@@ -44,3 +44,32 @@ pub const VERSION: &str = env!("REWIND_VERSION");
 pub use run::{
     Echo, Execution, Keyframes, Manifest, Run, RunOutcome, Source, Spec, SpecExt, TimeLimit,
 };
+
+/// The error for a state the engine should never reach, such as a replay
+/// that stopped for a reason nothing asked for: `doing` says what was
+/// going on and `came_to` is the state, in its Rust form, for the bug
+/// report. A person cannot act on the state, so the message says the
+/// fault is Rewind's and asks for a report.
+pub fn internal_error(doing: &str, came_to: impl std::fmt::Debug) -> anyhow::Error {
+    anyhow::anyhow!(
+        "internal error: {doing} came to {came_to:?}. This is a gap in Rewind, not in the \
+         program: please report it with `rewind bugreport <run>`"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_internal_error_names_the_state_and_asks_for_a_report() {
+        // The message is built from what was going on and the state the
+        // engine came to, and sends the reader to rewind bugreport.
+        let error = internal_error("a single step replayed", Some(7));
+        assert_eq!(
+            error.to_string(),
+            "internal error: a single step replayed came to Some(7). This is a gap in Rewind, \
+             not in the program: please report it with `rewind bugreport <run>`"
+        );
+    }
+}

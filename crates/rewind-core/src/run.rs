@@ -1935,7 +1935,10 @@ fn stop_of(
 ) -> Result<rewind_trace::stop::Stop> {
     use rewind_trace::stop::{Doing, Stop as Stopped, Timeout};
     let Outcome::Stopped(stop) = outcome else {
-        bail!("the machine did not stop: {outcome:?}");
+        return Err(crate::internal_error(
+            "a run that should have stopped",
+            outcome,
+        ));
     };
     Ok(match stop {
         Stop::Guest(rewind_vmm::pv::GuestExit::PowerOff) => Stopped::PoweredOff,

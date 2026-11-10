@@ -764,7 +764,9 @@ impl Debuggee<'_> {
                 for i in 1..=n {
                     match self.machine.run(None, &mut Ignore)? {
                         Outcome::Debug(DebugStop::Step) => {}
-                        other => bail!("a single step replayed came to {other:?}"),
+                        other => {
+                            return Err(crate::internal_error("a single step replayed", other));
+                        }
                     }
                     self.listen(|| from.then(Move::Steps(i)))?;
                 }
@@ -796,7 +798,9 @@ impl Debuggee<'_> {
                             }
                             self.listen_between()?;
                         }
-                        other => bail!("a run to a trap replayed came to {other:?}"),
+                        other => {
+                            return Err(crate::internal_error("a run to a trap replayed", other));
+                        }
                     }
                 }
                 self.listen(|| from.then(mv))?;
@@ -807,7 +811,12 @@ impl Debuggee<'_> {
                 match self.machine.run(None, &mut Ignore)? {
                     Outcome::Debug(DebugStop::Branches) => {}
                     Outcome::Debug(DebugStop::PassedBranches) => return Err(Passed.into()),
-                    other => bail!("a run to a branch count replayed came to {other:?}"),
+                    other => {
+                        return Err(crate::internal_error(
+                            "a run to a branch count replayed",
+                            other,
+                        ));
+                    }
                 }
                 self.listen(|| from.then(mv))?;
             }
@@ -895,7 +904,12 @@ impl Debuggee<'_> {
                     self.machine.step() == step
                 }
                 (_, Outcome::Debug(DebugStop::Step | DebugStop::Watchpoint { .. })) => false,
-                (_, other) => bail!("stepping toward where gdb was came to {other:?}"),
+                (_, other) => {
+                    return Err(crate::internal_error(
+                        "stepping toward where gdb was",
+                        other,
+                    ));
+                }
             };
             if reached {
                 break;
@@ -968,7 +982,7 @@ impl Debuggee<'_> {
         self.machine.set_debug(Stepping::Yes, &[])?;
         match self.machine.run(None, &mut Ignore)? {
             Outcome::Debug(DebugStop::Step) => {}
-            other => bail!("a single step replayed came to {other:?}"),
+            other => return Err(crate::internal_error("a single step replayed", other)),
         }
         self.position = here.clone();
         Ok(match self.machine.skipped().last() {
@@ -1074,7 +1088,12 @@ impl Debuggee<'_> {
                                     self.note_breakpoint(&mut scan, address, boundary.clone())?;
                                     self.machine.pass_breakpoint()?;
                                 }
-                                other => bail!("a single step replayed came to {other:?}"),
+                                other => {
+                                    return Err(crate::internal_error(
+                                        "a single step replayed",
+                                        other,
+                                    ));
+                                }
                             }
                         }
                         self.listen(|| done.then(Move::Steps(j + 1)))?;
@@ -1091,7 +1110,7 @@ impl Debuggee<'_> {
                     let stop = loop {
                         let outcome = self.machine.run(None, &mut Ignore)?;
                         let Outcome::Debug(stop) = outcome else {
-                            bail!("a run to a trap replayed came to {outcome:?}");
+                            return Err(crate::internal_error("a run to a trap replayed", outcome));
                         };
                         if self.is_move_target(target, stop)? {
                             break stop;
@@ -1115,7 +1134,12 @@ impl Debuggee<'_> {
                             Outcome::Debug(DebugStop::Branches) => break,
                             Outcome::Debug(DebugStop::PassedBranches) => return Err(Passed.into()),
                             Outcome::Debug(stop) => self.note_hit(&mut scan, here.step, stop)?,
-                            other => bail!("a run to a branch count replayed came to {other:?}"),
+                            other => {
+                                return Err(crate::internal_error(
+                                    "a run to a branch count replayed",
+                                    other,
+                                ));
+                            }
                         }
                     }
                     self.listen(|| done.then(mv))?;
@@ -1220,7 +1244,7 @@ impl Debuggee<'_> {
                     self.listen_between()?;
                 }
             }
-            other => bail!("a replay with gdb's traps came to {other:?}"),
+            other => return Err(crate::internal_error("a replay with gdb's traps", other)),
         }
         Ok(())
     }

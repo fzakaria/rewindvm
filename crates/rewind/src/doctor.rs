@@ -203,7 +203,10 @@ fn gdb() -> Finding {
         return Finding::new(
             Level::Warn,
             "gdb",
-            "not on PATH; `rewind gdb` and `rewind where` need it",
+            format!(
+                "{} is not on PATH; `rewind gdb` and `rewind where` need it",
+                program.to_string_lossy()
+            ),
         );
     };
     let name = String::from_utf8_lossy(&version.stdout)
@@ -362,15 +365,17 @@ fn unreadable(runs: &[Unreadable]) -> Finding {
     if runs.len() > UNREADABLE_SHOWN {
         named.push_str(&format!(" and {} more", runs.len() - UNREADABLE_SHOWN));
     }
-    Finding::new(
-        Level::Warn,
-        "runs",
-        format!(
-            "{} runs have manifests another build of rewind wrote: {named}; `rewind remove <id>` \
-             removes one",
-            runs.len()
+    let text = match runs.len() {
+        1 => format!(
+            "1 run has a manifest another build of rewind wrote: {named}; `rewind remove <id>` \
+             removes it"
         ),
-    )
+        n => format!(
+            "{n} runs have manifests another build of rewind wrote: {named}; `rewind remove <id>` \
+             removes one"
+        ),
+    };
+    Finding::new(Level::Warn, "runs", text)
 }
 
 #[cfg(test)]
@@ -432,6 +437,14 @@ mod tests {
             "7 runs have manifests another build of rewind wrote: 0000000000000000, \
              0000000000000001, 0000000000000002, 0000000000000003, 0000000000000004 and 2 \
              more; `rewind remove <id>` removes one"
+        );
+
+        // One run is "1 run has", not "1 runs have".
+        let one = unreadable(&runs[..1]);
+        assert_eq!(
+            one.text,
+            "1 run has a manifest another build of rewind wrote: 0000000000000000; `rewind \
+             remove <id>` removes it"
         );
     }
 

@@ -1728,15 +1728,14 @@ pub(crate) struct MachineArgs {
     /// explores a different run.
     #[arg(long, default_value_t = 0)]
     seed: u64,
-    /// Asks the VM to reschedule at steps this seed picks, to explore other
-    /// thread interleavings.
+    /// The thread schedule to explore: a number that picks the steps the
+    /// VM reschedules its threads at. 0 is the unperturbed schedule.
     ///
     /// The inputs, --seed and --epoch stay as they are, but values programs
     /// draw from the kernel's randomness, such as ephemeral port numbers and
     /// where programs are loaded, can differ: the schedule decides which
     /// process draws first. `--kernel-args norandmaps` turns address
     /// randomization off, to tell an interleaving apart from a layout change.
-    /// 0 is the unperturbed schedule.
     #[arg(long, default_value_t = 0)]
     schedule: u64,
     /// The first step a reschedule may be asked at; before it the run is the

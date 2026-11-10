@@ -132,7 +132,7 @@ fn parse(drv: &Path, aterm: &[u8]) -> Result<Derivation> {
     for (out, output) in parsed.outputs() {
         let Some(path) = output.path(name, out)? else {
             bail!(
-                "output {out} of {name} has no fixed path; content-addressed derivations are not supported yet"
+                "output {out} of {name} has no fixed path; content-addressed derivations are not supported"
             );
         };
         outputs.push((out.clone(), PathBuf::from(path.to_absolute_path())));
@@ -154,7 +154,7 @@ fn parse(drv: &Path, aterm: &[u8]) -> Result<Derivation> {
     let mut input_drvs = Vec::new();
     for (path, input) in parsed.input_derivations() {
         if input.is_dynamic() {
-            bail!("{name} uses outputs of dynamic derivations, which are not supported yet");
+            bail!("{name} uses outputs of dynamic derivations, which are not supported");
         }
         input_drvs.push((
             PathBuf::from(path.to_absolute_path()),

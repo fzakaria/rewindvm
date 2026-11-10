@@ -357,7 +357,9 @@ pub fn run_to_access(machine: &mut Machine, pid: u32, step: u64, sought: Sought)
                     break true;
                 }
             }
-            Outcome::Debug(other) => bail!("looking for an access came to {other:?}"),
+            Outcome::Debug(other) => {
+                return Err(crate::internal_error("looking for an access", other));
+            }
             Outcome::Paused | Outcome::Stopped(_) => break false,
         }
     };
@@ -640,7 +642,9 @@ impl<'a> Window<'a> {
                         kept.push((access.step, replayed.seen), access);
                     }
                 }
-                Outcome::Debug(other) => bail!("a search for accesses came to {other:?}"),
+                Outcome::Debug(other) => {
+                    return Err(crate::internal_error("a search for accesses", other));
+                }
             }
         }
         self.machine.clear_debug()?;

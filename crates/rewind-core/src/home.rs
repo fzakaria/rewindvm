@@ -197,7 +197,11 @@ impl Guest {
     pub fn from_env() -> Result<Guest> {
         let var = |name: &str| {
             std::env::var_os(name).map(PathBuf::from).with_context(|| {
-                format!("{name} is not set; run rewind from its Nix package or `nix develop`")
+                format!(
+                    "{name} is not set; run rewind from its Nix package or `nix develop`, or \
+                     from the release's bin/rewind, the launcher that sets it (libexec/rewind \
+                     is the bare binary)"
+                )
             })
         };
         Ok(Guest {
