@@ -360,6 +360,7 @@ pub fn run_to_access(machine: &mut Machine, pid: u32, step: u64, sought: Sought)
             Outcome::Debug(other) => {
                 return Err(crate::internal_error("looking for an access", other));
             }
+            Outcome::Interrupted => bail!("looking for an access was interrupted"),
             Outcome::Paused | Outcome::Stopped(_) => break false,
         }
     };
@@ -628,6 +629,7 @@ impl<'a> Window<'a> {
                     report(progress);
                 }
                 Outcome::Stopped(_) => break,
+                Outcome::Interrupted => bail!("the search for accesses was interrupted"),
                 Outcome::Debug(DebugStop::Watchpoint { traps, .. }) => {
                     for mut access in self.hit(&accessed(watches, traps), &mut now)? {
                         access.hit = hits.next(access.value, access.step, access.kind);

@@ -428,6 +428,9 @@ fn finish(
         if let Outcome::Stopped(stop) = outcome {
             bail!("the VM {} before {what}", stopped(stop));
         }
+        if let Outcome::Interrupted = outcome {
+            bail!("the inspection was interrupted before {what}");
+        }
         if answer.pid.is_none() && machine.step() >= step + START_WITHIN_STEPS {
             bail!("the VM did not start the inspection within {START_WITHIN_STEPS} steps");
         }

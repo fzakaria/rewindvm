@@ -1992,9 +1992,12 @@ in
           -ex 'watch -l pair.fields.high' -ex continue -ex 'print $pc' -ex continue \
           -ex 'print $pc' -ex continue -ex 'print $pc' > pair 2>&1 || true
         cat pair
-        grep -A3 'watchpoint 1: -location pair.fields.low' pair | grep -q 'New value = 1'
-        grep -A3 'watchpoint 2: -location pair.fields.high' pair | grep -q 'New value = 2'
-        grep -A3 'watchpoint 2: -location pair.fields.high' pair | grep -q 'Old value = 2'
+        grep -A3 'watchpoint 1: -location pair.fields.low' pair > low
+        grep -q 'New value = 1' low
+        grep -A3 'watchpoint 2: -location pair.fields.high' pair > high
+        grep -q 'Old value = 0' high
+        grep -q 'New value = 2' high
+        grep -q 'Old value = 2' high
         grep -q 'New value = 5' pair
         grep '^\$[123] = ' pair | awk '{print $5}' > pcs
         test "$(wc -l < pcs)" = 3
@@ -2505,9 +2508,10 @@ in
   # the new page table and its record does not stop it. A session at the
   # step the message names stops in the new program. A Ctrl-C in a step back across 10 million
   # rounds of a loop stops it there, where gdb goes on. A Ctrl-C while a
-  # continue goes back to the stop before an exec is answered by that
-  # stop, and does not stop gdb's next command. Boots the VM, so it needs
-  # /dev/kvm.
+  # continue runs a loop that makes no exit stops it in the loop within a
+  # second, between two steps, where going back is refused until the
+  # fork reaches the next step, and SIGTERM stops a replay through the
+  # same loop. Boots the VM, so it needs /dev/kvm.
   gdb-reverse =
     pkgs.runCommand "rewind-gdb-reverse"
       {
@@ -3196,34 +3200,65 @@ in
         again reverse-stepi KILL killed-again
         grep -q 'gdb closed the connection while the fork ran backwards' killed-again
 
-        # A continue from the spin's write runs its loop, with no exit, to
-        # the exec, then goes back to the step's start, where it stops. A
-        # Ctrl-C half a second in reaches the fork as it goes back, and the
-        # stop before the exec answers it: the next continue is refused
-        # there, not stopped at once by the Ctrl-C, and a reverse-stepi
-        # moves. A session that hangs is cut short, and fails.
         rewind run -q --clock exits --name spin --root ${gdbRoot} -- /bin/spin > /dev/null
         spin=$(rewind events spin | grep 'write(1, "spin' | awk '{print $1}')
         exec=$(rewind events spin | grep 'execve("/bin/after"' | awk '{print $1}')
+
+        # SIGTERM, as the desktop app's Cancel sends it, stops a replay
+        # through the loop between two instructions: the command ends
+        # within a second, saying the replay was interrupted. It runs
+        # before any session keeps a keyframe near the loop, and the
+        # signal goes a moment after the replay says it began, so the
+        # replay is in the loop or on its way there.
+        rewind --progress json cat spin "$exec" /etc/hosts > /dev/null 2> cancelled &
+        cat=$!
+        for _ in $(seq 1 600); do grep -q replaying cancelled && break; sleep 0.1; done
+        grep -q replaying cancelled
+        sleep 0.3
+        began=$(date +%s%N)
+        kill -TERM "$cat"
+        wait "$cat" || true
+        took=$(( ($(date +%s%N) - began) / 1000000 ))
+        cat cancelled
+        echo "the replay ended $took ms after SIGTERM"
+        test "$took" -lt 1000
+        grep -q "to step $exec was interrupted at step" cancelled
+
+        # A continue from the spin's write runs its loop, which makes no
+        # exit for a second or two. A Ctrl-C half a second in stops the
+        # fork in the loop, within a second, where gdb reads the pc, in
+        # main. Stopped between two steps, the fork has no position to go
+        # back from: a reverse-stepi there says so and stays. The next
+        # continue runs on to the exec, then goes back to the step's
+        # start, where it stops; a continue is refused there, and a
+        # reverse-stepi moves. A session that hangs is cut short, and
+        # fails.
         rewind gdb spin "$spin" -- -batch -ex 'echo begin-forward\n' -ex continue \
-          -ex 'print $pc' -ex continue -ex 'print $pc' -ex reverse-stepi -ex 'print $pc' \
-          > spun 2>&1 &
+          -ex 'echo stopped-in-loop\n' -ex 'print $pc' -ex reverse-stepi -ex 'print $pc' \
+          -ex continue -ex 'print $pc' -ex continue -ex 'print $pc' -ex reverse-stepi \
+          -ex 'print $pc' > spun 2>&1 &
         parent=$!
         for _ in $(seq 1 600); do grep -q begin-forward spun && break; sleep 0.1; done
         grep -q begin-forward spun
         sleep 0.5
         kill -INT "$(pgrep -P "$parent" -x gdb)"
+        for _ in $(seq 1 10); do grep -q stopped-in-loop spun && break; sleep 0.1; done
+        grep -q stopped-in-loop spun
         timeout 120 tail --pid="$parent" -f /dev/null
         wait "$parent" || true
         cat spun
         said="process [0-9]* runs /bin/after at step $exec; this session debugs the program before it"
         test "$(grep -c "$said" spun)" = 2
-        test "$(grep -c 'received signal SIGINT' spun)" = 0
+        test "$(grep -c 'received signal SIGINT' spun)" = 1
+        test "$(grep -c 'Ctrl-C stopped the fork between two steps' spun)" = 1
         test "$(grep -c 'fatal error\|Remote connection closed' spun)" = 0
-        grep '^\$[123] = ' spun | sed 's/^\$[0-9]* = //' > pcs
-        test "$(wc -l < pcs)" = 3
+        grep '^\$[12345] = ' spun | sed 's/^\$[0-9]* = //' > pcs
+        test "$(wc -l < pcs)" = 5
+        test "$(sed -n 1p pcs | grep -c '<main+[0-9]*>$')" = 1
         test "$(sed -n 1p pcs)" = "$(sed -n 2p pcs)"
-        test "$(sed -n 2p pcs)" != "$(sed -n 3p pcs)"
+        test "$(sed -n 3p pcs)" = "$(sed -n 4p pcs)"
+        test "$(sed -n 1p pcs)" != "$(sed -n 3p pcs)"
+        test "$(sed -n 4p pcs)" != "$(sed -n 5p pcs)"
         touch $out
       '';
 

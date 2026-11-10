@@ -438,11 +438,24 @@ impl Command {
     }
 }
 
+/// How long a command has to end on its own after SIGTERM, which the
+/// desktop app's Cancel sends, stops its machines; and how it exits once
+/// that is over, as a process SIGTERM ended reads to a shell.
+const TERM_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+const TERM_EXIT: i32 = 128 + libc::SIGTERM;
+
 fn main() -> ExitCode {
     // Printing into a closed pipe, as `rewind ls | head` does, should end
     // the program quietly the way it ends any other Unix tool.
     // SAFETY: restoring a default signal disposition.
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+
+    // SIGTERM, as the desktop app's Cancel sends it, stops a machine
+    // between two instructions, where a guest computing without exits
+    // would otherwise run on, and the command ends as interrupted.
+    if let Err(e) = rewind_vmm::interrupt::stop_on_signal(libc::SIGTERM, TERM_GRACE, TERM_EXIT) {
+        eprintln!("rewind: installing the SIGTERM handler: {e}");
+    }
 
     // A check running many VMs at once opens more files than the usual
     // soft limit of 1024 allows.

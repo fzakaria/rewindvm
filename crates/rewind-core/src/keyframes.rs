@@ -789,9 +789,10 @@ impl Spacing {
 
 /// Runs a machine to the end, taking keyframes as it goes, or until the
 /// observer asks it to stop short of a stop, where it returns
-/// [`Outcome::Paused`] and can be called again to run on. `taking` says
-/// what the next keyframe is a delta from and when it is due, and carries
-/// over from one call to the next.
+/// [`Outcome::Paused`] and can be called again to run on, or until an
+/// interrupter stops it, where it returns [`Outcome::Interrupted`].
+/// `taking` says what the next keyframe is a delta from and when it is
+/// due, and carries over from one call to the next.
 pub fn run_with_keyframes(
     machine: &mut Machine,
     obs: &mut dyn Observer,
@@ -804,7 +805,7 @@ pub fn run_with_keyframes(
         // one is due.
         let from = Progress::of(machine);
         let outcome = machine.run(Some(taking.spacing.next_stop(from.step)), obs)?;
-        if let Outcome::Stopped(_) = outcome {
+        if let Outcome::Stopped(_) | Outcome::Interrupted = outcome {
             return Ok(outcome);
         }
         taking.spacing.ran(from, Progress::of(machine));

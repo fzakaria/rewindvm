@@ -314,7 +314,7 @@ impl Arrival {
             return Arrival::Reached;
         }
         match outcome {
-            Outcome::Paused => Arrival::Cancelled,
+            Outcome::Paused | Outcome::Interrupted => Arrival::Cancelled,
             Outcome::Stopped(_) | Outcome::Debug(_) => Arrival::StoppedShort,
         }
     }
@@ -1349,6 +1349,15 @@ impl Run {
             }
         };
 
+        // A replay stopped between two instructions is at no step.
+        if let Outcome::Interrupted = outcome {
+            bail!(
+                "replaying run {} to step {step} was interrupted at step {}",
+                self.manifest.id,
+                machine.step()
+            );
+        }
+
         // Every record the run made through the step the replay got to
         // must have come: one left out means the replay went another way,
         // as one that differs does.
@@ -1968,6 +1977,9 @@ fn stop_of(
 ) -> Result<rewind_trace::stop::Stop> {
     use rewind_trace::stop::{Doing, Stop as Stopped, Timeout};
     let Outcome::Stopped(stop) = outcome else {
+        if let Outcome::Interrupted = outcome {
+            bail!("the run was interrupted");
+        }
         return Err(crate::internal_error(
             "a run that should have stopped",
             outcome,

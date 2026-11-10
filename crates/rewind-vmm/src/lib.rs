@@ -15,6 +15,7 @@ pub mod boot;
 pub mod checkpoint;
 pub mod cpu;
 pub mod debug;
+pub mod interrupt;
 pub mod kvm;
 pub mod layout;
 pub mod memory;
@@ -35,6 +36,7 @@ use kvm_bindings::{
 };
 use kvm_ioctls::{Kvm, VcpuExit, VcpuFd, VmFd};
 
+pub use interrupt::Interrupter;
 use layout::*;
 use memory::Mapping;
 use pv::{Clock, GuestExit, Schedule};
@@ -248,6 +250,10 @@ const USER_DPL: u8 = 3;
 pub enum Outcome {
     /// The requested step was reached; the machine can run on from here.
     Paused,
+    /// An [`Interrupter`] stopped the machine between two instructions,
+    /// short of any exit: no step was taken and nothing recorded, and the
+    /// guest runs on from exactly there.
+    Interrupted,
     Stopped(Stop),
     /// A debugged machine hit a breakpoint or finished a single step
     /// (debug.rs); it can run on from here.
@@ -372,6 +378,18 @@ pub struct Machine {
     /// The stub instructions the last single step ran unstepped
     /// (debug.rs).
     pub(crate) skipped: Vec<u64>,
+    /// What an [`Interrupter`] of this machine shares with it
+    /// (interrupt.rs).
+    pub(crate) interrupt: std::sync::Arc<interrupt::Shared>,
+}
+
+impl Drop for Machine {
+    /// Forgets the vCPU's kvm_run page before the vCPU, and the page with
+    /// it, goes, so an interrupter that outlives the machine writes
+    /// nothing there, and the machine among the process's.
+    fn drop(&mut self) {
+        self.interrupt.forget();
+    }
 }
 
 /// Where a machine's memory started.
@@ -468,8 +486,9 @@ impl Machine {
             }
         };
 
-        let vcpu = vm.create_vcpu(0).context("creating the vCPU")?;
+        let mut vcpu = vm.create_vcpu(0).context("creating the vCPU")?;
         vcpu.set_cpuid2(&cpu::cpuid(&kvm, config.cpu)?)?;
+        let immediate_exit = std::ptr::addr_of_mut!(vcpu.get_kvm_run().immediate_exit);
 
         Ok(Machine {
             kvm,
@@ -511,6 +530,7 @@ impl Machine {
             exception_trap: None,
             stepped_from: 0,
             skipped: Vec::new(),
+            interrupt: interrupt::Shared::new(immediate_exit),
         })
     }
 
@@ -629,11 +649,19 @@ impl Machine {
     /// it inspects the process with before the fork it debugs goes on.
     pub fn run(&mut self, until: Option<u64>, obs: &mut dyn Observer) -> Result<Outcome> {
         self.resume_counting()?;
+        self.interrupt.entered();
         let outcome = self.run_counted(until, obs);
+        self.interrupt.left();
         let paused = self.pause_counting();
         let outcome = outcome?;
         paused?;
         Ok(outcome)
+    }
+
+    /// A way for another thread to stop this machine's run between two
+    /// instructions: `run` then returns [`Outcome::Interrupted`].
+    pub fn interrupter(&self) -> Interrupter {
+        Interrupter(self.interrupt.clone())
     }
 
     /// Counts again, and aims again at the timer the guest was running
@@ -706,6 +734,11 @@ impl Machine {
             }
             if let Some(stop) = self.close_in_on_branches()? {
                 return Ok(Outcome::Debug(stop));
+            }
+            // An interruption asked for before the guest runs, or while
+            // the machine was between runs.
+            if self.interrupt.take() {
+                return Ok(Outcome::Interrupted);
             }
             self.step_across_the_boundary()?;
 
@@ -790,6 +823,13 @@ impl Machine {
                 }
                 if preempted && until.is_some_and(|u| self.dev.step >= u) {
                     return Ok(Outcome::Paused);
+                }
+                // A signal pulled the vCPU out of the guest: an
+                // interrupter's, which stops the run here, between two
+                // instructions, or the watchdog's or the counter's, which
+                // the next round of the loop looks at.
+                if self.interrupt.take() {
+                    return Ok(Outcome::Interrupted);
                 }
                 continue;
             };

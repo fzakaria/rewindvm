@@ -465,6 +465,23 @@ Ctrl-C, in a first search or in a replay of one. A position's moves are a list e
 shares with the one it was made from, so the position after each of many hits
 in one step costs the same to make however many came before.
 
+Forwards, a Ctrl-C has to reach a guest that makes no exits, such as a loop
+spinning on a flag, where the run loop alone would never look. A thread of
+the session watches gdb's connection while the fork runs forwards and, at the
+first byte, interrupts the machine: it sets the `immediate_exit` flag in the
+vCPU's kvm_run page, which makes a KVM_RUN entered after it return at once,
+and signals the vCPU thread, which pulls one already in the guest out. The
+interruption is no exit of the guest's: the vCPU stops between two
+instructions, nothing reaches the trace, and the next run goes on from
+exactly there, so a debugged fork runs as it would have. The stop comes
+within a few milliseconds. The fork is then between two steps, at no position
+the run replays to, so going back is refused, saying so, until the fork
+reaches the next step's start. The desktop app's Cancel takes the same path:
+it sends the engine SIGTERM, which stops every machine the process has the
+same way instead of ending the process, and the command ends as interrupted.
+A process with no machine yet, or still alive two seconds later, is ended as
+SIGTERM would have ended it.
+
 `rewind blame RUN --at STEP EXPR` asks the same question as a watchpoint
 run backwards, who last wrote this value, without a debugger session, and the
 desktop app asks it when a value in the source panel is clicked. gdb, on a fork

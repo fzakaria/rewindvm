@@ -735,6 +735,10 @@ pub struct Debuggee<'h> {
     checkpoints: reverse::Checkpoints,
     /// Whether gdb changed the fork's registers or memory.
     altered: bool,
+    /// Whether gdb's Ctrl-C stopped the fork between two instructions,
+    /// short of any step, where the run has no position to replay to:
+    /// true until the fork reaches the next step's start.
+    lost: bool,
     /// gdb's connection, which running backwards looks at for Ctrl-C.
     listener: Listener,
     /// The step running backwards stops at: where the debugged process's
@@ -928,6 +932,7 @@ impl<'h> Debuggee<'h> {
             position,
             checkpoints: reverse::Checkpoints::new(),
             altered: false,
+            lost: false,
             listener: Listener::default(),
             began: 0,
             hits_of: None,
@@ -2031,7 +2036,8 @@ fn run_back_to(
 }
 
 /// Runs the fork for gdb in chunks, looking at the connection between
-/// them for a Ctrl-C.
+/// them for a Ctrl-C, and with the connection watched meanwhile, so a
+/// Ctrl-C stops a guest that makes no exits too.
 struct EventLoop<'h>(std::marker::PhantomData<&'h ()>);
 
 impl<'h> BlockingEventLoop for EventLoop<'h> {
@@ -2120,6 +2126,12 @@ impl<'h> BlockingEventLoop for EventLoop<'h> {
         let mut writes: Vec<KernelWrite> = Vec::new();
         let mut watching: Option<Watching> = None;
         let mut steps_left = 0;
+        // gdb's connection, watched on a thread of its own while the fork
+        // runs, so a Ctrl-C stops a guest that computes without exits.
+        let _watch = {
+            use std::os::fd::AsRawFd;
+            rewind_vmm::interrupt::FdWatch::start(conn.as_raw_fd(), target.machine.interrupter())
+        };
 
         loop {
             // Where the writes' thread is decides how the fork runs.
@@ -2385,9 +2397,28 @@ impl<'h> BlockingEventLoop for EventLoop<'h> {
                     return Ok(Event::TargetStopped(reason));
                 }
                 Outcome::Paused => target.arrived(None).map_err(target_error)?,
+                // The connection watch stopped the fork between two
+                // instructions for what gdb sent, which is read below. A
+                // connection that closed instead ends the session. The
+                // fork is at no position the run replays to until it
+                // reaches the next step's start.
+                Outcome::Interrupted => {
+                    target.lost = true;
+                    if conn
+                        .peek()
+                        .map_err(WaitForStopReasonError::Connection)?
+                        .is_none()
+                    {
+                        return Err(WaitForStopReasonError::Connection(std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            "gdb closed the connection while the fork ran",
+                        )));
+                    }
+                }
             }
 
-            // Between chunks: anything from gdb, a Ctrl-C most likely.
+            // Between chunks, or at an interruption: anything from gdb, a
+            // Ctrl-C most likely.
             if conn
                 .peek()
                 .map_err(WaitForStopReasonError::Connection)?

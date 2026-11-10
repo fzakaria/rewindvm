@@ -261,9 +261,9 @@ impl Machine {
         // ends: left set, every later run would return at once without
         // entering the guest. The exit borrows the vCPU, so the run's
         // result is kept in words until the flag is cleared.
-        self.vcpu.set_kvm_immediate_exit(1);
+        self.interrupt.set_immediate_exit(1);
         let ran = self.vcpu.run().map(|exit| format!("{exit:?}"));
-        self.vcpu.set_kvm_immediate_exit(0);
+        self.interrupt.set_immediate_exit(0);
 
         match ran {
             Err(e) if e.errno() == libc::EINTR => Ok(()),

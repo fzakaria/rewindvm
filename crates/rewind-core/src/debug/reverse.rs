@@ -503,6 +503,7 @@ impl Debuggee<'_> {
         let step = self.machine.step();
         if step != self.position.step {
             self.position = Position::start(step);
+            self.lost = false;
             if mv == Some(Move::Steps(1)) {
                 return Ok(());
             }
@@ -523,6 +524,13 @@ impl Debuggee<'_> {
             return Some(
                 "gdb changed the fork's registers or memory, so replaying the run cannot \
                  go back over what the fork did since"
+                    .into(),
+            );
+        }
+        if self.lost {
+            return Some(
+                "Ctrl-C stopped the fork between two steps, where replaying the run cannot \
+                 find it; continue or step to the next step's start to go back from there"
                     .into(),
             );
         }
@@ -1051,6 +1059,7 @@ impl Debuggee<'_> {
                 }
                 Outcome::Stopped(_) => return Ok(scan.last),
                 Outcome::Debug(stop) => self.note_hit(&mut scan, at, stop)?,
+                Outcome::Interrupted => bail!("a scan for hits was interrupted"),
             }
         }
         if end.is_some() {
