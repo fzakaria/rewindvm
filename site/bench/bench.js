@@ -53,6 +53,10 @@ const MILESTONES = [
     label: "v0.13.0",
     html: `Every context switch is an exit of its own, with a record naming the task that takes the CPU (${commit("08471c00")}), encoded in a few bytes each (${commit("b35d6052")}), and the guest's scheduler tick no longer reads the clock at every switch. A short run makes twice the steps and hello a sixth fewer. A check of the ping-pong program, where every token pass is now an exit, takes 38% more CPU; hello and check of the Nix build measured 8% and 9% faster, within the rounds' spread. The first run in a new home now checks the branch counter against a known answer before trusting it (${commit("2c0a676d")}), which is the whole of the 1.7 s more on echo-cold, and a run keeps 6 MiB more resident.`,
   },
+  {
+    label: "v0.15.0",
+    html: `rewind check starts its first batch of schedules once the unperturbed run has passed the job's start, beside that run instead of after it (${commit("6130d0ac")}). Check of the Nix build takes 27.9 s against 52.1 s, the time 0.3.0 cost and more, and peaks at 1462 MiB against 1227, since the unperturbed run and the batch are alive at once. The guest boots its uncompressed kernel (${commit("b29a6bdf")}) and skips rewriting every trace event's print format at boot (${commit("7e9dc4f5")}): echo takes 0.41 s against 0.83 s, cat in the middle of a run 0.40 s against 0.68 s, and check of the short program 1.30 s against 1.85 s. hello is 9% faster. A check's runs sharing one page store (${commit("cecb06c4")}) and 2 MiB pages for runs without keyframes (${commit("f8df2fed")}) measured no change here.`,
+  },
 ];
 
 // What each metric reads from a sample.
