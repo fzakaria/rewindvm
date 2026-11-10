@@ -799,6 +799,7 @@ mod tests {
     use crate::examples::{FAILING, PASSING, Until, manifest_of, trace_of, trace_until};
     use rewind_trace::manifest::EXECUTING_LOCK;
     use rewind_trace::verdict::{FailedAssertion, Reason};
+    use std::os::fd::AsRawFd;
 
     /// A run stopped at its time limit while computing in user space.
     fn hung_in_user_space() -> Stop {
@@ -902,7 +903,12 @@ mod tests {
             format!("run {id} is still running; it opens once it has finished")
         );
 
-        drop(lock);
+        // The lock is released by hand rather than by dropping the file:
+        // a child another test forks meanwhile inherits the descriptor and
+        // keeps the lock held until the child execs, so a dropped lock can
+        // still be held when the run is opened again.
+        // SAFETY: flock on a descriptor this test owns and keeps open.
+        assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_UN) }, 0);
         let interrupted = format!("{:#}", Run::open(&dir).err().unwrap());
         assert_eq!(
             interrupted,
