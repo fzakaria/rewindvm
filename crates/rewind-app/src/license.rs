@@ -314,6 +314,9 @@ impl License {
     }
 }
 
+/// What some editors put first in a UTF-8 file.
+const BYTE_ORDER_MARK: char = '\u{feff}';
+
 /// Characters some mail clients put in place of a space.
 const NO_BREAK_SPACES: [char; 2] = ['\u{a0}', '\u{202f}'];
 
@@ -364,9 +367,12 @@ fn classify(line: &str) -> Result<Line<'_>, LicenseError> {
 
 /// Reads a license block out of pasted text: anything around the BEGIN and
 /// END lines is ignored, as are CR line ends, spaces around lines, the
-/// quote marks of a reply, no-break spaces, and lines a mail client
-/// wrapped. Returns the license and its signature, unchecked.
+/// quote marks of a reply, no-break spaces, lines a mail client wrapped,
+/// and the byte order mark some editors save a file with. Returns the
+/// license and its signature, unchecked.
 pub fn parse(text: &str) -> Result<(License, Vec<u8>), LicenseError> {
+    // The mark is no space, so trimming the first line leaves it on.
+    let text = text.strip_prefix(BYTE_ORDER_MARK).unwrap_or(text);
     let lines: Vec<String> = text.lines().map(unquoted).collect();
     let begin = lines
         .iter()
@@ -494,7 +500,7 @@ pub fn license_path() -> Option<PathBuf> {
 pub enum Registration {
     Unregistered,
     Registered(License),
-    /// A license file is there but does not check out.
+    /// A license file is there but cannot be read or does not check out.
     Invalid(String),
 }
 
@@ -514,10 +520,23 @@ pub fn load() -> Registration {
     let Some(path) = license_path() else {
         return Registration::Unregistered;
     };
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return Registration::Unregistered;
+    load_from(&path, &PUBLIC_KEY)
+}
+
+/// Reads the license stored at `path` and checks it against
+/// `public_key`. No file there is an unregistered copy. A file that is
+/// there and cannot be read is not: the owner of a license whose file
+/// lost its permissions, or is not text, is told so instead of being
+/// shown as evaluating.
+pub fn load_from(path: &Path, public_key: &[u8; 32]) -> Registration {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Registration::Unregistered,
+        Err(e) => {
+            return Registration::Invalid(format!("{} could not be read: {e}", path.display()));
+        }
     };
-    match verify(&text) {
+    match verify_with(&text, public_key, REVOKED) {
         Ok(license) => Registration::Registered(license),
         Err(e) => Registration::Invalid(format!("{}: {e}", path.display())),
     }
@@ -873,6 +892,39 @@ mod tests {
             save_to(&path, "hello", &public()).unwrap_err().kind(),
             std::io::ErrorKind::InvalidData
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_stored_license_reads_past_a_byte_order_mark_or_says_it_does_not_read() {
+        // With no file the copy is unregistered. A license file an editor
+        // saved with a UTF-8 byte order mark before the BEGIN line checks
+        // out as the same file without one does. A file that is there and
+        // does not read, here a directory in the file's place, is not
+        // taken for no file: the registration names the path and says the
+        // file could not be read.
+        let dir = std::env::temp_dir().join(format!("rewind-app-license-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(LICENSE_FILE);
+        assert_eq!(load_from(&path, &public()), Registration::Unregistered);
+
+        let block = sample().sign(&test_key());
+        let marked = format!("\u{feff}{block}");
+        assert_eq!(verify_with(&marked, &public(), &[]).unwrap(), sample());
+        std::fs::write(&path, &marked).unwrap();
+        assert_eq!(
+            load_from(&path, &public()),
+            Registration::Registered(sample())
+        );
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let Registration::Invalid(why) = load_from(&path, &public()) else {
+            panic!("a file that does not read was taken for no file");
+        };
+        assert!(why.contains(LICENSE_FILE), "{why}");
+        assert!(why.contains("could not be read"), "{why}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
