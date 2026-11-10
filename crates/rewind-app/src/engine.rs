@@ -11,6 +11,7 @@
 //! the terminal pane runs them in a pty. The engine's environment,
 //! REWIND_HOME among it, is the app's.
 
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read};
 #[cfg(not(target_family = "wasm"))]
@@ -299,6 +300,13 @@ pub trait Engine: Send + Sync {
     /// The engine's version, as `rewind --version` prints it.
     fn version(&self) -> EngineResult<EngineVersion>;
 
+    /// Stops every engine command still running, as quitting does: a
+    /// fork, import, export, prune or remove would otherwise run on after
+    /// the app is gone. Export and import write beside their target and
+    /// rename at the end, so stopping them leaves nothing half written
+    /// under the target's name.
+    fn stop_all(&self) {}
+
     /// The command that opens an interactive shell inside a fork of `run`
     /// at `step`, in process `pid`'s root and working directory, or the
     /// job's when no process is given.
@@ -574,19 +582,45 @@ pub struct DifferingOutput {
 /// The engine as the `rewind` command line.
 pub struct CliEngine {
     program: OsString,
+    /// The process groups of the commands run to completion that are
+    /// still running, which `stop_all` stops when the app quits.
+    running: Mutex<HashSet<u32>>,
 }
 
 impl CliEngine {
     /// The `rewind` on PATH, or the command `REWIND_BIN` names.
     pub fn from_env() -> CliEngine {
         let program = std::env::var_os(PROGRAM_ENV).unwrap_or_else(|| DEFAULT_PROGRAM.into());
-        CliEngine { program }
+        CliEngine::new(program)
     }
 
     pub fn new(program: impl Into<OsString>) -> CliEngine {
         CliEngine {
             program: program.into(),
+            running: Mutex::new(HashSet::new()),
         }
+    }
+
+    /// Runs the engine with `args` to completion, in a process group of
+    /// its own that `stop_all` stops while the command runs, and gives
+    /// back what the command printed and how it exited. `command` is the
+    /// command line in words, for the error when the command did not
+    /// start.
+    fn run(&self, args: &[OsString], command: &str) -> EngineResult<std::process::Output> {
+        let child = self
+            .command()
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .own_group()
+            .spawn()
+            .map_err(|e| self.spawn_error(e, command))?;
+        let group = child.id();
+        self.running.lock().unwrap().insert(group);
+        let output = child.wait_with_output();
+        self.running.lock().unwrap().remove(&group);
+        output.map_err(|e| self.spawn_error(e, command))
     }
 
     /// The error for a command that did not start.
@@ -629,20 +663,7 @@ impl Engine for CliEngine {
             "--json".into(),
         ];
         let command = self.command_line(&args);
-        let output = self
-            .command()
-            .args(&args)
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|e| match e.kind() {
-                std::io::ErrorKind::NotFound => EngineError::Missing {
-                    program: self.program.to_string_lossy().into_owned(),
-                },
-                _ => EngineError::Failed {
-                    command: command.clone(),
-                    message: e.to_string(),
-                },
-            })?;
+        let output = self.run(&args, &command)?;
 
         // The fork's exit code is the forked job's, so a fork of a failing
         // build exits nonzero; the JSON on standard output is what says a
@@ -676,12 +697,7 @@ impl Engine for CliEngine {
         // rewind import <file> --json
         let args: [OsString; 3] = ["import".into(), file.into(), "--json".into()];
         let command = self.command_line(&args);
-        let output = self
-            .command()
-            .args(&args)
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|e| self.spawn_error(e, &command))?;
+        let output = self.run(&args, &command)?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         let imported = stdout
             .lines()
@@ -705,12 +721,7 @@ impl Engine for CliEngine {
             "--json".into(),
         ];
         let command = self.command_line(&args);
-        let output = self
-            .command()
-            .args(&args)
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|e| self.spawn_error(e, &command))?;
+        let output = self.run(&args, &command)?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         let removed = stdout
             .lines()
@@ -729,12 +740,7 @@ impl Engine for CliEngine {
         // rewind remove <run> --json
         let args: [OsString; 3] = ["remove".into(), run.into(), "--json".into()];
         let command = self.command_line(&args);
-        let output = self
-            .command()
-            .args(&args)
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|e| self.spawn_error(e, &command))?;
+        let output = self.run(&args, &command)?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         let removed = stdout
             .lines()
@@ -759,12 +765,7 @@ impl Engine for CliEngine {
             out.into(),
         ];
         let command = self.command_line(&args);
-        let output = self
-            .command()
-            .args(&args)
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|e| self.spawn_error(e, &command))?;
+        let output = self.run(&args, &command)?;
         if output.status.success() {
             return Ok(());
         }
@@ -775,12 +776,7 @@ impl Engine for CliEngine {
     fn version(&self) -> EngineResult<EngineVersion> {
         let args: [OsString; 1] = ["--version".into()];
         let command = self.command_line(&args);
-        let output = self
-            .command()
-            .args(&args)
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|e| self.spawn_error(e, &command))?;
+        let output = self.run(&args, &command)?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
         match EngineVersion::parse(&stdout) {
@@ -792,6 +788,13 @@ impl Engine for CliEngine {
                     .map(str::to_string)
                     .unwrap_or_else(|| output.status.to_string()),
             }),
+        }
+    }
+
+    fn stop_all(&self) {
+        let groups: Vec<u32> = self.running.lock().unwrap().drain().collect();
+        for group in groups {
+            stop_group(group);
         }
     }
 
@@ -1548,6 +1551,37 @@ mod tests {
         let result = call.join().unwrap();
         assert!(asked.elapsed() < GIVE_UP);
         assert!(matches!(result, Err(EngineError::Cancelled)), "{result:?}");
+        // SAFETY: signal 0 only asks whether the process exists.
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn quitting_stops_the_engine_commands_it_started() {
+        // A `rewind fork` that would take half a minute is still running
+        // when every command is stopped, as quitting stops them: the call
+        // returns within a few seconds and the engine's process is gone.
+        const GIVE_UP: std::time::Duration = std::time::Duration::from_secs(5);
+        let dir = temp_dir("stop-all");
+        let engine = Arc::new(slow_engine(&dir));
+        let call = {
+            let engine = engine.clone();
+            std::thread::spawn(move || engine.fork(Path::new("/run"), 5, 1))
+        };
+        let pid_file = dir.join("pid");
+        let pid: i32 = wait_for("the engine to start", || {
+            std::fs::read_to_string(&pid_file).ok()?.trim().parse().ok()
+        });
+
+        let asked = std::time::Instant::now();
+        engine.stop_all();
+        let result = call.join().unwrap();
+        assert!(
+            asked.elapsed() < GIVE_UP,
+            "the fork ran on for {:?}",
+            asked.elapsed()
+        );
+        assert!(result.is_err(), "{result:?}");
         // SAFETY: signal 0 only asks whether the process exists.
         assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
         std::fs::remove_dir_all(&dir).unwrap();

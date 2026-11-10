@@ -453,9 +453,11 @@ impl Scrubber {
         window.focus(&focus, cx);
 
         // Lookups still running when the app quits are stopped, as
-        // dropping the viewer and the source panel stops them.
+        // dropping the viewer and the source panel stops them, and so are
+        // the forks, imports, exports and removals the engine runs.
         let on_quit = cx.on_app_quit(|this: &mut Scrubber, _| {
             this.close_run_panels();
+            this.engine.stop_all();
             async {}
         });
         let recent_filter = cx.new(|cx| {
