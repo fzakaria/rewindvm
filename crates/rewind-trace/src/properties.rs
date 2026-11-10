@@ -7,7 +7,8 @@
 //! a run that passed: a file truncated in place is a bug whether or not a
 //! reader was unlucky enough to see it.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::ops::Bound;
 
 use crate::ending::ExitStatus;
 use crate::{EventKind, Process, Trace, signal_name};
@@ -31,6 +32,9 @@ const O_TRUNC: u32 = 0o1000;
 /// leaves behind: writing /dev/null is not writing outside the job's
 /// directories.
 const PSEUDO_DIRS: [&str; 3] = ["/dev", "/proc", "/sys"];
+
+/// What separates the components of a guest path.
+const PATH_SEPARATOR: char = '/';
 
 /// Where and why a run breaks a property.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -454,33 +458,84 @@ pub fn writes_within(trace: &Trace, dirs: &[String]) -> Option<Finding> {
 
 /// The files matching `glob` that the job's processes wrote and that were
 /// still there when the job exited, in the order first written: a file
-/// renamed into place counts by its new name, and one removed or renamed
-/// away does not count. Devices are not files.
+/// renamed into place counts by its new name, a file under a renamed
+/// directory counts by its name under the directory's new name, and one
+/// removed or renamed away does not count. Devices are not files.
 pub fn written_files(trace: &Trace, glob: &Glob) -> Vec<String> {
     let Some(job) = Job::of(trace) else {
         return Vec::new();
     };
     let pids = job.pids();
-    let wanted = |path: &str| !under(path, &PSEUDO_DIRS) && glob.matches(path);
-    let mut files: Vec<String> = Vec::new();
+    let is_file = |path: &str| !under(path, &PSEUDO_DIRS);
+
+    // Every file the job wrote that is still there, by path, with its
+    // place in the order first written. `glob` is applied at the end: a
+    // renamed directory can move a file to a name that matches.
+    let mut files: BTreeMap<String, usize> = BTreeMap::new();
+    let mut next_place = 0;
     for e in job_events(trace, &job) {
+        let by_job = pids.contains(&e.pid);
         match &e.kind {
-            EventKind::Open { path, .. } if pids.contains(&e.pid) && wanted(path) => {
-                if !files.contains(path) {
-                    files.push(path.clone());
-                }
+            EventKind::Open { path, .. } if by_job && is_file(path) => {
+                files.entry(path.clone()).or_insert(next_place);
+                next_place += 1;
             }
             EventKind::Rename { from, to } => {
-                files.retain(|f| f != from);
-                if pids.contains(&e.pid) && wanted(to) && !files.contains(to) {
-                    files.push(to.clone());
+                files.remove(from);
+
+                // A directory: each file under the old name is now under
+                // the new one, in its old place. The directory itself is
+                // not a file.
+                let moved = take_under(&mut files, from);
+                if !moved.is_empty() {
+                    for (path, place) in moved {
+                        let renamed = format!("{to}{}", &path[from.len()..]);
+                        if by_job && is_file(&renamed) {
+                            files.entry(renamed).or_insert(place);
+                        }
+                    }
+                    continue;
+                }
+
+                // A file, as far as the trace tells.
+                if by_job && is_file(to) {
+                    files.entry(to.clone()).or_insert(next_place);
+                    next_place += 1;
                 }
             }
-            EventKind::Unlink { path } => files.retain(|f| f != path),
+            EventKind::Unlink { path } => {
+                files.remove(path);
+                take_under(&mut files, path);
+            }
             _ => {}
         }
     }
-    files
+
+    // The files that match, in the order first written.
+    let mut left: Vec<(usize, String)> = files
+        .into_iter()
+        .filter(|(path, _)| glob.matches(path))
+        .map(|(path, place)| (place, path))
+        .collect();
+    left.sort_unstable();
+    left.into_iter().map(|(_, path)| path).collect()
+}
+
+/// Takes the entries of `files` whose paths are under directory `dir`
+/// out of `files`, and returns them.
+fn take_under(files: &mut BTreeMap<String, usize>, dir: &str) -> Vec<(String, usize)> {
+    // The paths under `dir` sort together, from `dir` with a separator
+    // after it.
+    let prefix = format!("{dir}{PATH_SEPARATOR}");
+    let paths: Vec<String> = files
+        .range::<str, _>((Bound::Included(prefix.as_str()), Bound::Unbounded))
+        .take_while(|(path, _)| path.starts_with(&prefix))
+        .map(|(path, _)| path.clone())
+        .collect();
+    paths
+        .into_iter()
+        .filter_map(|path| files.remove_entry(&path))
+        .collect()
 }
 
 /// Whether `path` is one of `dirs` or under one.
@@ -872,6 +927,56 @@ mod tests {
             vec![
                 "/build/reports/TEST-a.xml".to_string(),
                 "/build/reports/TEST-b.xml".to_string(),
+            ]
+        );
+    }
+
+    // A directory the job renamed, as stdenv's moveToOutput does: the
+    // files written under the old name are listed under the new one, in
+    // the order first written, also when only the new names match the
+    // pattern, and the directory is not listed as a file. A directory
+    // removed takes the files under it off the list.
+    #[test]
+    fn written_files_follow_a_renamed_directory() {
+        let rename = |step: u64, from: &str, to: &str| {
+            event(
+                step,
+                JOB,
+                EventKind::Rename {
+                    from: from.into(),
+                    to: to.into(),
+                },
+            )
+        };
+        let trace = job(vec![
+            open(100, JOB, "/out/include/a.h", CREATE),
+            open(110, JOB, "/out/lib/libx.so", CREATE),
+            open(120, JOB, "/out/include/sub/b.h", CREATE),
+            open(130, JOB, "/out/includes.txt", CREATE),
+            open(140, JOB, "/build/tmp/scratch", CREATE),
+            rename(150, "/out/include", "/dev-out/include"),
+            event(
+                160,
+                JOB,
+                EventKind::Unlink {
+                    path: "/build/tmp".into(),
+                },
+            ),
+        ]);
+        assert_eq!(
+            written_files(&trace, &Glob::new("**")),
+            vec![
+                "/dev-out/include/a.h".to_string(),
+                "/out/lib/libx.so".to_string(),
+                "/dev-out/include/sub/b.h".to_string(),
+                "/out/includes.txt".to_string(),
+            ]
+        );
+        assert_eq!(
+            written_files(&trace, &Glob::new("/dev-out/**")),
+            vec![
+                "/dev-out/include/a.h".to_string(),
+                "/dev-out/include/sub/b.h".to_string(),
             ]
         );
     }
