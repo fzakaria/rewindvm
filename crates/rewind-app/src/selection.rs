@@ -499,7 +499,7 @@ pub fn floor_boundary(text: &str, offset: usize) -> usize {
 }
 
 /// `range` cut to `text` and moved onto character boundaries.
-fn clamp_range(text: &str, range: Range<usize>) -> Range<usize> {
+pub fn clamp_range(text: &str, range: Range<usize>) -> Range<usize> {
     let start = floor_boundary(text, range.start);
     let end = floor_boundary(text, range.end).max(start);
     start..end

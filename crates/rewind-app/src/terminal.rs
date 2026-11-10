@@ -25,7 +25,7 @@ use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Rgb};
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 
 use crate::engine::CommandLine;
-use crate::selection::Lines;
+use crate::selection::{Lines, clamp_range};
 use crate::theme;
 
 /// How many lines of scrollback the terminal keeps.
@@ -271,14 +271,23 @@ impl Lines for Session {
 
     fn copied(&self, line: usize, range: Range<usize>) -> Option<String> {
         let text = self.line_text(line)?;
-        let end = range.end.min(text.len());
-        let start = range.start.min(end);
-        let part = &text[start..end];
-        Some(if end == text.len() {
-            part.trim_end().to_string()
-        } else {
-            part.to_string()
-        })
+        Some(copied_part(&text, range))
+    }
+}
+
+/// The part of a grid line's `text` that `range` copies. The range may be
+/// of a selection made before the command drew other text on the line, so
+/// the range is cut to the text and moved onto character boundaries first.
+/// A range that reaches the line's end copies without the blanks that fill
+/// the line out to the grid's width.
+fn copied_part(text: &str, range: Range<usize>) -> String {
+    let range = clamp_range(text, range);
+    let reaches_end = range.end == text.len();
+    let part = &text[range];
+    if reaches_end {
+        part.trim_end().to_string()
+    } else {
+        part.to_string()
     }
 }
 
@@ -738,6 +747,21 @@ mod tests {
                 b: 238
             }
         );
+    }
+
+    #[test]
+    fn a_stale_range_copies_whole_characters() {
+        // A selection made on one line's text and copied after the grid
+        // put other text on that line: offsets inside a character move
+        // back to the character's start, offsets past the end stop at the
+        // end, and a range that reaches the end drops the grid's blanks.
+        let text = "a\u{e9}\u{4e16}b   ";
+        assert_eq!(copied_part(text, 0..2), "a");
+        assert_eq!(copied_part(text, 2..5), "\u{e9}");
+        assert_eq!(copied_part(text, 1..6), "\u{e9}\u{4e16}");
+        assert_eq!(copied_part(text, 4..400), "\u{4e16}b");
+        assert_eq!(copied_part(text, 300..400), "");
+        assert_eq!(copied_part(text, 0..text.len()), "a\u{e9}\u{4e16}b");
     }
 
     /// Waits for `done` on the session, up to a few seconds, reading the

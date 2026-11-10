@@ -209,7 +209,10 @@ impl Scrubber {
             return;
         };
         match event {
-            Event::Wakeup | Event::MouseCursorDirty | Event::CursorBlinkingChange => {}
+            // The command drew on the grid: a selection made before now
+            // covers other text, so the selection is dropped.
+            Event::Wakeup => self.clear_selection_in(&[Surface::Terminal]),
+            Event::MouseCursorDirty | Event::CursorBlinkingChange => {}
             Event::Title(title) => pane.title = Some(title),
             Event::ResetTitle => pane.title = None,
             Event::PtyWrite(text) => pane.session.write(text.into_bytes()),
