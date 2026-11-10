@@ -235,7 +235,25 @@ pub(crate) struct Crossing {
     address: u64,
     register: usize,
     restore: Option<SavedFlags>,
+    /// The write watch the register was borrowed from, when it was one,
+    /// with its bytes as they were before the step.
+    borrowed: Option<BorrowedWatch>,
 }
+
+/// A write watch whose register holds the trap at the kernel's exception
+/// entry for a single step: the watch misses a write the stepped
+/// instruction makes, so the bytes it watches are read before the step,
+/// in the page table of `cr3`, and compared after.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct BorrowedWatch {
+    address: u64,
+    len: usize,
+    cr3: u64,
+    before: [u8; MAX_WATCH_LEN],
+}
+
+/// The most bytes one debug register watches.
+const MAX_WATCH_LEN: usize = 8;
 
 /// The flags an `iretq` frame held at `at`, a kernel stack address, before
 /// their resume flag was cleared.
@@ -429,6 +447,36 @@ fn entry_register(traps: &[Trap], at: u64) -> Option<usize> {
         return Some(traps.len());
     }
     traps.iter().rposition(|trap| *trap != Trap::Execute(at))
+}
+
+/// The debug register the trap at the kernel's exception entry takes for
+/// a single step from `at`, among the debugger's `traps`, with
+/// `crossing` the register a crossing holds: the first free one, else,
+/// with all four the debugger's, the last that is not the crossing's, a
+/// read-write watch or a breakpoint at `at`, borrowed for the step. A
+/// write watch borrowed misses a write the stepped instruction makes,
+/// which the machine finds by comparing the bytes it watches before and
+/// after ([`BorrowedWatch`]); a breakpoint elsewhere traps before an
+/// instruction, so a step that lands on it is one gdb sees land there. A
+/// read-write watch would miss a read, which nothing can find after, and
+/// a breakpoint at `at` keeps its register as at a `syscall`. None when
+/// every register is one of those.
+fn exception_register(traps: &[Trap], at: u64, crossing: Option<usize>) -> Option<usize> {
+    if let Some(free) = (traps.len()..MAX_TRAPS).find(|&register| Some(register) != crossing) {
+        return Some(free);
+    }
+    traps
+        .iter()
+        .rposition(|trap| {
+            !matches!(
+                trap,
+                Trap::Watch {
+                    access: Access::ReadWrite,
+                    ..
+                }
+            ) && *trap != Trap::Execute(at)
+        })
+        .filter(|register| Some(*register) != crossing)
 }
 
 /// What KVM traps for the debugger, the monitor and the int3s together:
@@ -746,10 +794,12 @@ impl Machine {
     /// register after the debugger's, or one of theirs borrowed until then
     /// ([`entry_register`], [`return_register`]). Any instruction may fault
     /// or meet an interrupt, so the kernel's exception entry is trapped too
-    /// while a register is free ([`Machine::exception_entry`]); no
-    /// debugger's is borrowed for it, since every step would take it. With
-    /// every register one the debugger cannot lend, the step runs on as it
-    /// did before.
+    /// ([`Machine::exception_entry`]), in a free register, else in one
+    /// borrowed from the debugger ([`exception_register`]): a step then
+    /// stops at the entry whether or not a register was free, as the
+    /// replay that goes back over it, with every register free, does.
+    /// With every register one the debugger cannot lend, the step runs on
+    /// through the handler.
     pub(crate) fn step_across_the_boundary(&mut self) -> Result<()> {
         if !self.single_stepping() {
             return Ok(());
@@ -779,7 +829,42 @@ impl Machine {
         if changed {
             self.apply_guest_debug()?;
         }
+
+        // A write watch the trap borrowed from: its bytes before this step,
+        // read anew for each step the trap stays set for.
+        if let Some(mut borrowed) = self.exception_trap.and_then(|trap| trap.borrowed) {
+            borrowed.cr3 = sregs.cr3;
+            self.read_virtual(borrowed.address, &mut borrowed.before[..borrowed.len])?;
+            if let Some(trap) = &mut self.exception_trap {
+                trap.borrowed = Some(borrowed);
+            }
+        }
         Ok(())
+    }
+
+    /// Whether the stepped instruction wrote the bytes of the write watch
+    /// the trap at the exception entry borrowed its register from, which
+    /// the register missed: the bytes differ from before the step, read in
+    /// the same page table. A step that moved to another page table, or
+    /// whose bytes cannot be read, wrote nothing the watch can see.
+    fn borrowed_watch_written(&self) -> Result<Option<(u64, usize)>> {
+        let Some(trap) = &self.exception_trap else {
+            return Ok(None);
+        };
+        let Some(borrowed) = &trap.borrowed else {
+            return Ok(None);
+        };
+        if self.vcpu.get_sregs()?.cr3 != borrowed.cr3 {
+            return Ok(None);
+        }
+        let mut after = [0u8; MAX_WATCH_LEN];
+        if self.read_virtual(borrowed.address, &mut after[..borrowed.len])? < borrowed.len {
+            return Ok(None);
+        }
+        if after[..borrowed.len] == borrowed.before[..borrowed.len] {
+            return Ok(None);
+        }
+        Ok(Some((borrowed.address, trap.register)))
     }
 
     /// Where a single step from user space at `regs`' pc enters the kernel,
@@ -804,21 +889,20 @@ impl Machine {
             address,
             register,
             restore: None,
+            borrowed: None,
         }))
     }
 
     /// Where a single step enters the kernel when its instruction faults
     /// or an interrupt comes first: the entry the IDT's stubs share, found
     /// from the page fault's stub ([`common_entry`]), else that stub, in
-    /// the first register past the debugger's and the crossing's. None
-    /// with no register free, before the kernel has set up its IDT, or at
-    /// the entry's first instruction, where the trap would come before the
-    /// instruction runs, again and again.
+    /// the register [`exception_register`] chooses. None with no register
+    /// to be had, before the kernel has set up its IDT, or at the entry's
+    /// first instruction, where the trap would come before the instruction
+    /// runs, again and again.
     fn exception_entry(&self, regs: &kvm_regs, sregs: &kvm_sregs) -> Result<Option<Crossing>> {
         let crossing = self.crossing.map(|crossing| crossing.register);
-        let Some(register) =
-            (self.debugger_traps().len()..MAX_TRAPS).find(|&register| Some(register) != crossing)
-        else {
+        let Some(register) = exception_register(self.debugger_traps(), regs.rip, crossing) else {
             return Ok(None);
         };
         let Some(address) = self.common_entry_address(sregs)? else {
@@ -827,10 +911,24 @@ impl Machine {
         if address == regs.rip {
             return Ok(None);
         }
+        let borrowed = match self.debugger_traps().get(register) {
+            Some(Trap::Watch {
+                address,
+                len,
+                access: Access::Write,
+            }) => Some(BorrowedWatch {
+                address: *address,
+                len: *len as usize,
+                cr3: sregs.cr3,
+                before: [0; MAX_WATCH_LEN],
+            }),
+            _ => None,
+        };
         Ok(Some(Crossing {
             address,
             register,
             restore: None,
+            borrowed,
         }))
     }
 
@@ -955,6 +1053,7 @@ impl Machine {
                 address: regs.rcx,
                 register,
                 restore: None,
+                borrowed: None,
             }));
         }
         if code[..IRETQ.len()] != IRETQ {
@@ -987,6 +1086,7 @@ impl Machine {
             address,
             register,
             restore,
+            borrowed: None,
         }))
     }
 
@@ -1120,6 +1220,16 @@ impl Machine {
         }
 
         match db_exit(dr6, self.debugger_traps(), debugger, machine) {
+            // A step's instruction may have written what the watch whose
+            // register the exception entry's trap borrowed watches.
+            DbExit::Stop(DebugStop::Step) => {
+                if let Some((address, register)) = self.borrowed_watch_written()? {
+                    let mut traps = TrapSet::default();
+                    traps.0 |= 1 << register;
+                    return Ok(Some(DebugStop::Watchpoint { address, traps }));
+                }
+                Ok(Some(DebugStop::Step))
+            }
             DbExit::Stop(stop) => Ok(Some(stop)),
             DbExit::Machine => Ok(None),
             DbExit::Stray => {
@@ -1620,6 +1730,7 @@ mod tests {
                 address: RETURN,
                 register,
                 restore: None,
+                borrowed: None,
             });
             let debug = guest_debug(
                 Some(&debugging),
@@ -1679,6 +1790,40 @@ mod tests {
             Trap::Execute(SYSCALL_AT),
         ];
         assert_eq!(entry_register(&here, SYSCALL_AT), Some(2));
+    }
+
+    /// The trap at the kernel's exception entry takes the first free
+    /// register that is not the crossing's, else, with all four the
+    /// debugger's, the last that is neither the crossing's, a read-write
+    /// watch nor a breakpoint at the step's instruction. Checked for a
+    /// breakpoint alone, with the register after it the crossing's, for
+    /// three breakpoints and a write watch, for four read-write watches,
+    /// and for a full set whose last is a breakpoint at the instruction
+    /// and whose eligible register is the crossing's.
+    #[test]
+    fn the_exception_entry_takes_a_register_from_a_full_set() {
+        const AT: u64 = 0x40_1893;
+        let breakpoint = Trap::Execute(0x40_1000);
+        let watch = |access| Trap::Watch {
+            address: 0x40_2000,
+            len: 8,
+            access,
+        };
+        assert_eq!(exception_register(&[breakpoint], AT, None), Some(1));
+        assert_eq!(exception_register(&[breakpoint], AT, Some(1)), Some(2));
+        let full = [breakpoint, breakpoint, breakpoint, watch(Access::Write)];
+        assert_eq!(exception_register(&full, AT, None), Some(3));
+        assert_eq!(exception_register(&full, AT, Some(3)), None);
+        let watches = [watch(Access::ReadWrite); MAX_TRAPS];
+        assert_eq!(exception_register(&watches, AT, None), None);
+        let here = [
+            watch(Access::ReadWrite),
+            breakpoint,
+            watch(Access::ReadWrite),
+            Trap::Execute(AT),
+        ];
+        assert_eq!(exception_register(&here, AT, None), Some(1));
+        assert_eq!(exception_register(&here, AT, Some(1)), None);
     }
 
     /// An IDT gate's handler address is split in three: bits 0 to 15 in
@@ -1951,6 +2096,7 @@ mod tests {
                 address: 0x2000,
                 register: 1,
                 restore: None,
+                borrowed: None,
             }],
             &none,
         )

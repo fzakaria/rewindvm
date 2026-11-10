@@ -39,7 +39,7 @@ let
     done
   '';
 
-  # A root of six static programs for gdb, built with their symbols: one
+  # A root of static programs for gdb, built with their symbols: one
   # prints, forks, and waits for its child; one forks a child that prints
   # and writes a global, then writes the same global twice itself; one
   # forks a child that sleeps before writing to a pipe, prints, and blocks
@@ -605,6 +605,26 @@ let
         EOF
         $CC -static -O1 -g -fdebug-prefix-map=$out/src=/src \
           -o $out/bin/ill $out/src/ill.c
+
+        # One program writes a line, then a byte into a page of its bss
+        # nothing has touched, which faults, then a global, then a line.
+        cat > $out/src/fault.c <<'EOF'
+        #include <unistd.h>
+
+        volatile int a, b, c, d;
+        volatile char fresh[3 * 4096];
+
+        int main(void)
+        {
+          write(1, "fault\n", 6);
+          fresh[4096] = 1;
+          a = 1;
+          write(1, "done\n", 5);
+          return 0;
+        }
+        EOF
+        $CC -static -O0 -g -fdebug-prefix-map=$out/src=/src \
+          -o $out/bin/fault $out/src/fault.c
       '';
 
   # A root with a static program in two files, like mylib: main hands a
@@ -3259,6 +3279,70 @@ in
         test "$(sed -n 3p pcs)" = "$(sed -n 4p pcs)"
         test "$(sed -n 1p pcs)" != "$(sed -n 3p pcs)"
         test "$(sed -n 4p pcs)" != "$(sed -n 5p pcs)"
+        touch $out
+      '';
+
+  # checks.gdb-fault: a single step across an instruction that page
+  # faults stops at the same place whether or not a debug register is
+  # free. With one watch set, the step stops at the fault's IDT stub,
+  # in the kernel, and steps back land where the steps forward were.
+  # With four watches set, every debug register gdb's, the same session
+  # prints the same pcs: the exception entry is trapped in a register
+  # borrowed for the step, as the replay that goes back from there
+  # traps it, rather than letting the step run on through the fault's
+  # handler to the instruction after. The pcs are the CPU's thread's,
+  # which the process's thread, stopped at the faulting instruction,
+  # does not show; the process's thread stays gdb's current one, since
+  # a step of the CPU's thread from a breakpoint the process's thread
+  # hit has gdb step the latter over the breakpoint first. Boots the
+  # VM, so it needs /dev/kvm.
+  gdb-fault =
+    pkgs.runCommand "rewind-gdb-fault"
+      {
+        nativeBuildInputs = [
+          rewind
+          gdb
+        ];
+        requiredSystemFeatures = [ "kvm" ];
+      }
+      ''
+        export REWIND_HOME=$TMPDIR/rewind
+        # No debuginfod server: without a network, each of gdb's questions
+        # to it waits out a timeout.
+        export REWIND_DEBUGINFOD=/nonexistent
+
+        rewind run -q --clock exits --name fault --root ${gdbRoot} -- /bin/fault > /dev/null
+        start=$(rewind events fault | grep 'write(1, "fault' | awk '{print $1}')
+        line=$(grep -n 'fresh\[4096\] = 1' ${gdbRoot}/src/fault.c | cut -d: -f1)
+
+        # The pcs a session prints: at the line's first instruction, at
+        # the store after one step, in the kernel after the step across
+        # the fault, then one step back and two steps back.
+        session() {
+          local out=$1
+          shift
+          # gdb keeps the registers of a thread it did not resume, and
+          # a step of the process's thread moves the CPU's too, so the
+          # cache is flushed before each read.
+          flush='maintenance flush register-cache'
+          pc='thread apply 1 print $pc'
+          rewind gdb fault "$start" -- -batch "$@" -ex "break fault.c:$line" -ex continue \
+            -ex "$flush" -ex "$pc" -ex stepi -ex "$flush" -ex "$pc" -ex stepi -ex "$flush" \
+            -ex "$pc" -ex reverse-stepi -ex "$flush" -ex "$pc" -ex reverse-stepi -ex "$flush" \
+            -ex "$pc" > "$out" 2>&1 || true
+          cat "$out"
+          test "$(grep -c 'left the recording\|SIGTRAP' "$out")" = 0
+          grep '^\$[12345] = ' "$out" | sed 's/^\$[0-9]* = //' > "$out.pcs"
+          test "$(wc -l < "$out.pcs")" = 5
+          test "$(sed -n 1p "$out.pcs" | grep -c '<main+[0-9]*>$')" = 1
+          test "$(sed -n 2p "$out.pcs" | grep -c '<main+[0-9]*>$')" = 1
+          test "$(sed -n 3p "$out.pcs" | grep -c '0xffffffff8')" = 1
+          test "$(sed -n 2p "$out.pcs")" = "$(sed -n 4p "$out.pcs")"
+          test "$(sed -n 1p "$out.pcs")" = "$(sed -n 5p "$out.pcs")"
+        }
+        session one -ex 'watch a'
+        session four -ex 'watch a' -ex 'watch b' -ex 'watch c' -ex 'watch d'
+        cmp one.pcs four.pcs
         touch $out
       '';
 

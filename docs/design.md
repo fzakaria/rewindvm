@@ -418,9 +418,18 @@ space. Exceptions and interrupts clear the flag on their way in too, and their
 handlers can make exits, as a fault's does when it records the signal or prints
 a segfault to the console. Every IDT stub but those of #DB, NMI, #DF and #MC
 calls one entry, Linux's error_entry, after a few instructions; the VMM finds it
-by decoding the page fault's stub, read from the IDT, and while a debug register
-is free, every single step traps it, so a fault or an interrupt, in user space
-or the kernel, stops the step there. The stub's few instructions run in that
+by decoding the page fault's stub, read from the IDT, and every single step
+traps it, so a fault or an interrupt, in user space or the kernel, stops the
+step there. The trap takes a free debug register, else one borrowed from gdb
+for the step: the last that is neither a read-write watch nor a breakpoint at
+the stepped instruction. A step then stops at the entry whether or not a
+register was free, as a replay that goes back over the step, with every
+register free, does; before the borrowing, a step with all four registers
+gdb's ran on through the fault's handler, and a step back landed in the wrong
+place. A write watch borrowed misses a write the stepped instruction makes,
+so its bytes are read before the step and compared after, and a change is
+reported as the watch's hit. With four read-write watches nothing can be
+borrowed, and the step runs on through the handler as before. The stub's few instructions run in that
 step unstepped; the VMM finds them from the return address the stub's call left
 and says which they were. One instruction back from the entry is the stub's
 call, reached from the boundary before the step by a run to a breakpoint there,
