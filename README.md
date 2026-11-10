@@ -33,36 +33,40 @@ was at any step, and fork it with a different thread interleaving from any
 point.
 
 ```console
-$ rewind check github:fzakaria/rewindvm#mylib
-schedule   0: exited:0       6169 steps  a9d703ba8977  run 6380bb57fcb451da
-schedule   1: exited:0       7202 steps  a9d703ba8977  run e5003a7041880029
-schedule   2: exited:0       7233 steps  a9d703ba8977  run 70416cb698a5d521
-...
-schedule   6: exited:2       5468 steps    run 1506c6347419c2d2
+$ rewind check --epoch 1790985600 github:fzakaria/rewindvm#mylib
+schedule   0: exited:0             6030 steps  a9d703ba8977  run 0a1dae14daee9820
+schedule   1: exited:0             7773 steps  a9d703ba8977  run eb388bf93ef00f21
+schedule   2: exited:0             7663 steps  a9d703ba8977  run 00555e83e6bab5fb
+schedule   3: exited:0             7930 steps  a9d703ba8977  run 6d888ae3d6e366b3
+schedule   4: exited:2             6285 steps    run c63ac15c205593ff
 ...
 
-schedule 6 ends differently from schedule 0; finding the step that decides it
-schedule 6 limited to steps 3629..5140 still ends differently
-step 5139 decides it: a request to switch threads there makes the run fail
+schedule 4 ends differently from schedule 0; finding the step that decides it
+schedule 4 limited to steps 4246..4826 still ends differently
+step 4825 decides it: a request to switch threads there makes the run fail
 
-passing: run 1989f6d02c080616, schedule 6 over steps 3629..5139
-failing: run 5c910df9774b38f2, schedule 6 over steps 3629..5140
-the two are the same run until step 5139
+passing: run 9ceb6f28d5ffd7ca, schedule 4 over steps 4246..4825
+failing: run aa6759a6362f43a2, schedule 4 over steps 4246..4826
+the two are the same run until step 4825
 
 where ./tests/test_pool_shutdown first behaves differently:
   ...
-  both           5150   166/174   write(1, "job 15 done: 42559\n")
-  failing        5153   166/174   SIGSEGV code=1 addr=0x108
-  failing        5155   166/166   SIGSEGV code=0 addr=0x0
-  passing        5151   166/174   write(1, "worker picked job 18\n")
-  passing        5162   166/173   write(1, "job 17 done: 43360\n")
+  both           4825   166/171   write(1, "job 17 done: 43360\n")
+  failing        4829   166/172   write(1, "job 18 done: 26744\n")
+  failing        4830   166/172   write(1, "worker picked job 19\n")
+  failing        4839   166/171   SIGSEGV code=1 addr=0x108
+  failing        4841   166/166   SIGSEGV code=0 addr=0x0
+  passing        4826   166/171   write(1, "worker picked job 19\n")
+  ...
 
-$ rewind events 5c910df9 | grep SIGSEGV
-      5153   166/174   SIGSEGV code=1 addr=0x108
+$ rewind events aa6759a6 --from 4825 --to 4841
+      4825   166/171   write(1, "job 17 done: 43360\n")
 ...
+      4839   166/171   SIGSEGV code=1 addr=0x108
+      4841   166/166   SIGSEGV code=0 addr=0x0
 
-$ rewind replay 5c910df9
-identical to the recording: 1713 events over 5192 steps
+$ rewind replay aa6759a6
+identical to the recording: 1693 events, 1148 context switches and 1476 read and write records over 4887 steps, and the whole machine at its 4 keyframes
 ```
 
 ## Install
