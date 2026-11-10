@@ -18,6 +18,7 @@ mod web {
 
     use anyhow::Result;
     use rewind_app::address::Address;
+    use rewind_app::archive;
     use rewind_app::engine::CliEngine;
     use rewind_app::run::{InMemoryOrigin, Run, Session};
     use rewind_app::ui::{self, Launch, RightColumn};
@@ -47,6 +48,38 @@ mod web {
             engine: Arc::new(CliEngine::from_env()),
         });
         page::fetch(&Address::parse(&query));
+    }
+
+    /// What the first bytes of an export hold, as [`export_prefix`] tells
+    /// the page: `archive::Prefix`, in a form wasm-bindgen hands to JS.
+    #[wasm_bindgen]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Prefix {
+        /// The run opens from the bytes.
+        Whole,
+        /// More of the export is needed.
+        Short,
+        /// The bytes are not an export, however many more come.
+        Broken,
+    }
+
+    impl From<archive::Prefix> for Prefix {
+        fn from(prefix: archive::Prefix) -> Prefix {
+            match prefix {
+                archive::Prefix::Whole => Prefix::Whole,
+                archive::Prefix::Short => Prefix::Short,
+                archive::Prefix::Broken => Prefix::Broken,
+            }
+        }
+    }
+
+    /// Whether `bytes`, the first bytes of an export the page is fetching
+    /// or reading, hold the run: the page stops reading once they do, so
+    /// the memory and inputs behind the trace in a replayable export
+    /// never come.
+    #[wasm_bindgen]
+    pub fn export_prefix(bytes: &[u8]) -> Prefix {
+        archive::prefix(bytes).into()
     }
 
     /// Opens the exports the page fetched for an address: `run` from

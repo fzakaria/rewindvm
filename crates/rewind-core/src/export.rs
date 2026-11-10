@@ -31,7 +31,7 @@ use crate::keyframes;
 use crate::run::{BOOKMARKS, MANIFEST, Manifest, Run, SpecExt, TRACE};
 pub use rewind_trace::export::Contents;
 use rewind_trace::export::{
-    COMPRESSION_LEVEL, IMAGE, INITRD, INPUTS_DIR, KERNEL, MAX_BOOKMARKS, Member, PAGES_DIR,
+    COMPRESSION_LEVEL, Flow, IMAGE, INITRD, INPUTS_DIR, KERNEL, MAX_BOOKMARKS, Member, PAGES_DIR,
 };
 
 const PAGE_SIZE: usize = 4096;
@@ -236,7 +236,7 @@ fn unpack_and_place(home: &Home, reader: impl Read, source: &str, staging: &Path
             if hex(&hash) != named {
                 bail!("page {named} in {source} does not match its contents");
             }
-            return Ok(());
+            return Ok(Flow::Continue);
         }
         let target = staging.join(path);
         if let Some(parent) = target.parent() {
@@ -244,7 +244,7 @@ fn unpack_and_place(home: &Home, reader: impl Read, source: &str, staging: &Path
         }
         let mut out = File::create(&target)?;
         std::io::copy(reader, &mut out)?;
-        Ok(())
+        Ok(Flow::Continue)
     })
     .with_context(|| format!("reading {source}"))?;
     if let Some(store) = &store {

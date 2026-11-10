@@ -19,7 +19,7 @@ use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
 use crate::bookmarks::{BOOKMARKS_FILE, MAX_BYTES as BOOKMARKS_MAX_BYTES};
-use rewind_trace::export::{self, Contents, Member};
+use rewind_trace::export::{self, Contents, Flow, Member};
 use rewind_trace::manifest::{MANIFEST, RunId, TRACE};
 
 /// The binary units sizes are said in.
@@ -277,13 +277,20 @@ impl MemberLimits {
 }
 
 /// Reads the manifest and trace of an export held in memory, without a
-/// disk to unpack them to, as the browser build opens exports.
+/// disk to unpack them to, as the browser build opens exports. The bytes
+/// may be the first bytes of the export alone, as far as [`prefix`] says
+/// they hold the run.
 pub fn read_bytes(bytes: &[u8]) -> Result<InMemory> {
-    read_bytes_within(bytes, MEMBER_LIMITS)
+    read_within(bytes, MEMBER_LIMITS)
 }
 
-/// Reads an export as [`read_bytes`] does, within `limits`.
-fn read_bytes_within(bytes: &[u8], limits: MemberLimits) -> Result<InMemory> {
+/// Reads an export as [`read_bytes`] does from `reader`, within `limits`.
+/// The read stops at the first member only a replay needs, once the
+/// manifest and the trace are in hand: an export puts those and the
+/// bookmarks first (crates/rewind-core/src/export.rs), so the keyframes,
+/// pages and inputs behind them, most of a replayable export, are never
+/// read.
+fn read_within(reader: impl Read, limits: MemberLimits) -> Result<InMemory> {
     let mut manifest = None;
     let mut trace = None;
     let mut bookmarks = None;
@@ -293,17 +300,25 @@ fn read_bytes_within(bytes: &[u8], limits: MemberLimits) -> Result<InMemory> {
     // skipped, and the members only replay needs are not read. A manifest
     // or trace past its limit refuses the export before any of the member
     // is read into memory.
-    let contents = export::walk(decompress(bytes)?, |path, member, size, reader| {
+    let contents = export::walk(decompress(reader)?, |path, member, size, reader| {
+        // The first member only a replay needs ends the read once the
+        // manifest and the trace are in hand.
+        if member.replay_only() && manifest.is_some() && trace.is_some() {
+            return Ok(Flow::Stop);
+        }
         let slot = match member {
             Member::Manifest => &mut manifest,
             Member::Trace => &mut trace,
             Member::Bookmarks if size <= BOOKMARKS_MAX_BYTES => &mut bookmarks,
-            _ => return Ok(()),
+            _ => return Ok(Flow::Continue),
         };
         let mut bytes = Vec::new();
         limits.reader(reader, path, size)?.read_to_end(&mut bytes)?;
+        if bytes.len() as u64 != size {
+            bail!("the archive's {} is cut short", path.display());
+        }
         *slot = Some(bytes);
-        anyhow::Ok(())
+        anyhow::Ok(Flow::Continue)
     })?;
     let manifest = manifest.with_context(|| format!("the archive has no {MANIFEST}"))?;
     let trace = trace.with_context(|| format!("the archive has no {TRACE}"))?;
@@ -313,6 +328,59 @@ fn read_bytes_within(bytes: &[u8], limits: MemberLimits) -> Result<InMemory> {
         bookmarks,
         replayable: contents == Contents::Replayable,
     })
+}
+
+/// What the first bytes of an export hold, for a page that reads an
+/// export only as far as the run needs (see [`read_within`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Prefix {
+    /// The run opens from the bytes: the manifest, the trace and the
+    /// bookmarks are in them, and so is the archive's end or the start of
+    /// the first member only a replay needs.
+    Whole,
+    /// The bytes end before that; more of the export is needed.
+    Short,
+    /// The bytes are not an export, however many more come.
+    Broken,
+}
+
+/// What `bytes`, the first bytes of an export, hold.
+pub fn prefix(bytes: &[u8]) -> Prefix {
+    let mut source = Source {
+        bytes,
+        at: 0,
+        exhausted: false,
+    };
+    match read_within(&mut source, MEMBER_LIMITS) {
+        Ok(_) => Prefix::Whole,
+        Err(_) if source.exhausted => Prefix::Short,
+        Err(_) => Prefix::Broken,
+    }
+}
+
+/// The first bytes of an export as the archive reader pulls them, which
+/// notes a read past their end: a read that fails after one ran out of
+/// bytes, and a read that fails before one found the bytes broken.
+struct Source<'a> {
+    bytes: &'a [u8],
+    at: usize,
+    exhausted: bool,
+}
+
+impl Read for Source<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        if self.at == self.bytes.len() {
+            self.exhausted = true;
+            return Ok(0);
+        }
+        let n = buf.len().min(self.bytes.len() - self.at);
+        buf[..n].copy_from_slice(&self.bytes[self.at..self.at + n]);
+        self.at += n;
+        Ok(n)
+    }
 }
 
 /// The tar archive inside an export's zstd frame.
@@ -375,20 +443,31 @@ fn unique() -> u64 {
 fn unpack(reader: impl Read, staging: &Path, limits: MemberLimits) -> Result<bool> {
     // The run's bookmarks come too, as a regular file no larger than the
     // engine writes. A manifest or trace past its limit refuses the export
-    // before any of the member is written to the cache.
+    // before any of the member is written to the cache. The first member
+    // only a replay needs ends the walk once the manifest and the trace
+    // are staged, as it ends the browser's read (see [`read_within`]).
+    let (mut has_manifest, mut has_trace) = (false, false);
     let contents = export::walk(decompress(reader)?, |path, member, size, reader| {
+        if member.replay_only() && has_manifest && has_trace {
+            return Ok(Flow::Stop);
+        }
         let wanted = match member {
             Member::Manifest | Member::Trace => true,
             Member::Bookmarks => size <= BOOKMARKS_MAX_BYTES,
             _ => false,
         };
         if !wanted {
-            return Ok(());
+            return Ok(Flow::Continue);
         }
-        let mut member = limits.reader(reader, path, size)?;
+        let mut bytes = limits.reader(reader, path, size)?;
         let mut out = File::create(staging.join(path))?;
-        io::copy(&mut member, &mut out)?;
-        anyhow::Ok(())
+        io::copy(&mut bytes, &mut out)?;
+        match member {
+            Member::Manifest => has_manifest = true,
+            Member::Trace => has_trace = true,
+            _ => {}
+        }
+        anyhow::Ok(Flow::Continue)
     })?;
     for name in [MANIFEST, TRACE] {
         if !staging.join(name).is_file() {
@@ -781,6 +860,97 @@ mod tests {
         assert!(read_bytes(b"not zstd").is_err());
     }
 
+    /// How much kernel the replayable export of the prefix test carries:
+    /// bytes no prefix needs, enough to span several zstd blocks.
+    const NOISE_BYTES: usize = 1 << 20;
+
+    #[test]
+    fn an_export_is_whole_once_its_trace_and_bookmarks_are_in() {
+        // A replayable export laid out as the engine lays one out: the
+        // manifest, the trace and the bookmarks, then a megabyte of kernel
+        // that opening the run never needs. The shortest prefix the run
+        // opens from is well under the whole and gives the same members,
+        // marked replayable; every shorter prefix asks for more, and none
+        // is taken for broken. A view export is whole only as a whole:
+        // its trace alone does not end it. Bytes that are not zstd are
+        // broken however many more would come.
+        let noise: Vec<u8> = (0..NOISE_BYTES)
+            .scan(1u32, |x, _| {
+                *x = x.wrapping_mul(1664525).wrapping_add(1013904223);
+                Some((*x >> 24) as u8)
+            })
+            .collect();
+        let manifest = br#"{"id": "3e7358ddd62c45d3"}"#;
+        let marks = br#"{"version": 1, "marks": []}"#;
+        let bytes = archive(&[
+            ("manifest.json", manifest),
+            ("trace.bin", b"trace"),
+            (BOOKMARKS_FILE, marks),
+            ("inputs/kernel", &noise),
+            ("pages/00ff", &[0u8; 4096]),
+        ]);
+
+        // The shortest whole prefix, by bisection: a prefix that holds
+        // what a shorter one holds is whole whenever the shorter one is.
+        let (mut short, mut whole) = (0, bytes.len());
+        assert_eq!(prefix(&bytes[..short]), Prefix::Short);
+        assert_eq!(prefix(&bytes[..whole]), Prefix::Whole);
+        while whole - short > 1 {
+            let mid = (short + whole) / 2;
+            match prefix(&bytes[..mid]) {
+                Prefix::Whole => whole = mid,
+                Prefix::Short => short = mid,
+                Prefix::Broken => panic!("a prefix of {mid} bytes was taken for broken"),
+            }
+        }
+        assert!(whole < bytes.len() / 4, "{whole} of {} bytes", bytes.len());
+        let read = read_bytes(&bytes[..whole]).unwrap();
+        assert_eq!(read.manifest, manifest);
+        assert_eq!(read.trace, b"trace");
+        assert_eq!(read.bookmarks.as_deref(), Some(&marks[..]));
+        assert!(read.replayable);
+        for n in [1, 4, 100, short] {
+            assert_eq!(prefix(&bytes[..n]), Prefix::Short, "{n} bytes");
+        }
+
+        let view = archive(&[("manifest.json", manifest), ("trace.bin", b"trace")]);
+        assert_eq!(prefix(&view), Prefix::Whole);
+        assert!(!read_bytes(&view).unwrap().replayable);
+        for n in [0, 4, view.len() / 2, view.len() - 1] {
+            assert_eq!(prefix(&view[..n]), Prefix::Short, "{n} bytes");
+        }
+        assert_eq!(prefix(b"plain text, and plenty of it"), Prefix::Broken);
+    }
+
+    #[test]
+    fn the_desktop_unpack_stops_where_the_browser_read_stops() {
+        // The desktop app unpacks the run from the shortest prefix the
+        // browser opens it from, so the kernel and pages behind the run
+        // are not decompressed, and still marks the export replayable. A
+        // view export cut short of its closing blocks is refused.
+        let manifest = br#"{"id": "5b2a77e0c1d94f08"}"#;
+        let bytes = archive(&[
+            ("manifest.json", manifest),
+            ("trace.bin", b"trace"),
+            ("inputs/kernel", &vec![9u8; NOISE_BYTES]),
+        ]);
+        let mut whole = bytes.len();
+        while prefix(&bytes[..whole - 1]) == Prefix::Whole {
+            whole -= 1;
+        }
+        assert!(whole < bytes.len(), "{whole} of {} bytes", bytes.len());
+
+        let dir = temp_dir("stops");
+        let unpacked = import_within(&bytes[..whole], &dir, MEMBER_LIMITS).unwrap();
+        assert!(unpacked.replayable);
+        assert_eq!(fs::read(unpacked.dir.join(TRACE)).unwrap(), b"trace");
+
+        let view = archive(&[("manifest.json", manifest), ("trace.bin", b"trace")]);
+        let cut = &view[..view.len() - 1];
+        assert!(import_within(cut, &dir, MEMBER_LIMITS).is_err());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn a_run_already_unpacked_is_reused() {
         // A second import of the same id keeps the first copy.
@@ -820,7 +990,7 @@ mod tests {
         let big_trace = archive(&[("manifest.json", manifest), ("trace.bin", b"123456789")]);
         let big_manifest = archive(&[("manifest.json", long_manifest), ("trace.bin", b"1")]);
 
-        assert_eq!(read_bytes_within(&fits, SMALL).unwrap().trace, b"12345678");
+        assert_eq!(read_within(&fits[..], SMALL).unwrap().trace, b"12345678");
         let dir = temp_dir("limits");
         let unpacked = import_within(&fits[..], &dir, SMALL).unwrap();
         fs::remove_dir_all(unpacked.dir).unwrap();
@@ -829,7 +999,7 @@ mod tests {
             (&big_trace, "trace.bin", "8 bytes"),
             (&big_manifest, "manifest.json", "32 bytes"),
         ] {
-            let read = read_bytes_within(bytes, SMALL).map(|_| ()).unwrap_err();
+            let read = read_within(&bytes[..], SMALL).map(|_| ()).unwrap_err();
             let unpacked = import_within(&bytes[..], &dir, SMALL).unwrap_err();
             for refused in [read, unpacked] {
                 let words = format!("{refused:#}");

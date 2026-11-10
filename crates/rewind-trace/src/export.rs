@@ -90,6 +90,9 @@ impl Member {
     }
 }
 
+/// A block of a tar archive. An archive ends in two blocks of zeros.
+pub const BLOCK: usize = 512;
+
 /// Why an export does not read.
 #[derive(Debug, thiserror::Error)]
 pub enum UnpackError<E: fmt::Debug + fmt::Display> {
@@ -99,6 +102,12 @@ pub enum UnpackError<E: fmt::Debug + fmt::Display> {
     UnsafePath(PathBuf),
     #[error("the archive holds {} as a {kind}, which no export does", .path.display())]
     NotAFile { path: PathBuf, kind: String },
+    /// The bytes end before the archive's closing blocks of zeros, as a
+    /// download that stopped part way ends.
+    #[error("the archive is cut short: {0}")]
+    CutShort(io::Error),
+    #[error("the archive does not end as a tar archive does")]
+    OddEnd,
     #[error("reading the archive: {0}")]
     Io(#[from] io::Error),
     /// What the reader of a member refused.
@@ -106,20 +115,36 @@ pub enum UnpackError<E: fmt::Debug + fmt::Display> {
     Refused(E),
 }
 
+/// What a taker of members tells [`walk`] after each one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Flow {
+    /// Hand over the next member.
+    Continue,
+    /// End the walk here: the taker has what it wants. Nothing after the
+    /// member is read, so bytes that end after it are not cut short.
+    Stop,
+}
+
 /// Walks the tar archive of an export, `tar` being the archive already
 /// decompressed, and hands each regular file to `take` with its path, what
-/// it is and its size. A member whose path is not plain names, or that is
-/// neither a regular file nor a directory, refuses the export: a link
-/// could point anywhere, and an entry under it would be written there.
-/// Returns what the export carries: replayable when any member only a
-/// replayable export has is in it.
+/// it is and its size; `take` says whether to go on. A member whose path
+/// is not plain names, or that is neither a regular file nor a directory,
+/// refuses the export: a link could point anywhere, and an entry under it
+/// would be written there. An archive walked to its end must end in its
+/// two blocks of zeros, or it is refused as cut short. Returns what the
+/// export carries: replayable when any member only a replayable export
+/// has is in it.
 pub fn walk<R: Read, E: fmt::Debug + fmt::Display>(
     tar: R,
-    mut take: impl FnMut(&Path, Member, u64, &mut dyn Read) -> Result<(), E>,
+    mut take: impl FnMut(&Path, Member, u64, &mut dyn Read) -> Result<Flow, E>,
 ) -> Result<Contents, UnpackError<E>> {
     let mut archive = tar::Archive::new(tar);
     let mut contents = Contents::View;
-    for entry in archive.entries().map_err(UnpackError::NotTar)? {
+    let mut entries = archive.entries().map_err(UnpackError::NotTar)?;
+    let flow = loop {
+        let Some(entry) = entries.next() else {
+            break Flow::Continue;
+        };
         let mut entry = entry?;
         let path = entry.path()?.into_owned();
         if path
@@ -145,7 +170,25 @@ pub fn walk<R: Read, E: fmt::Debug + fmt::Display>(
             continue;
         }
         let size = entry.size();
-        take(&path, member, size, &mut entry).map_err(UnpackError::Refused)?;
+        let flow = take(&path, member, size, &mut entry).map_err(UnpackError::Refused)?;
+        if flow == Flow::Stop {
+            break Flow::Stop;
+        }
+    };
+    if flow == Flow::Stop {
+        return Ok(contents);
+    }
+
+    // The tar reader ends the walk at the first block of zeros, and the
+    // same way where the bytes end on a member's edge; the second block
+    // of zeros tells an archive's end from bytes that end too soon.
+    let mut block = [0u8; BLOCK];
+    archive
+        .into_inner()
+        .read_exact(&mut block)
+        .map_err(UnpackError::CutShort)?;
+    if block.iter().any(|byte| *byte != 0) {
+        return Err(UnpackError::OddEnd);
     }
     Ok(contents)
 }
@@ -173,12 +216,12 @@ mod tests {
     /// archive carries.
     fn walked(tar: &[u8]) -> (Vec<(String, Member, Vec<u8>)>, Contents) {
         let mut seen = Vec::new();
-        let contents = walk(tar, |path, member, size, reader| -> Result<(), String> {
+        let contents = walk(tar, |path, member, size, reader| -> Result<Flow, String> {
             let mut bytes = Vec::new();
             reader.read_to_end(&mut bytes).unwrap();
             assert_eq!(bytes.len() as u64, size);
             seen.push((path.display().to_string(), member, bytes));
-            Ok(())
+            Ok(Flow::Continue)
         })
         .unwrap();
         (seen, contents)
@@ -265,6 +308,66 @@ mod tests {
     }
 
     #[test]
+    fn an_archive_cut_short_is_refused() {
+        // The tar reader ends the walk at the first block of zeros, and
+        // the same way where the bytes end on a member's edge. An archive
+        // whole to its last byte walks; the same archive cut at the edge
+        // of its last member, or after the first of its two closing
+        // blocks of zeros, is refused as cut short, and one whose second
+        // closing block is not zeros is refused as not ending as a tar
+        // archive does.
+        let whole = archive(&[("manifest.json", b"{}"), ("trace.bin", b"trace")]);
+        assert_eq!(walked(&whole).1, Contents::View);
+
+        let closing = 2 * BLOCK;
+        let at_member_edge = &whole[..whole.len() - closing];
+        let after_first_zeros = &whole[..whole.len() - BLOCK];
+        for cut in [at_member_edge, after_first_zeros] {
+            let err = walk(cut, |_, _, _, _| -> Result<Flow, String> {
+                Ok(Flow::Continue)
+            })
+            .unwrap_err();
+            assert!(matches!(err, UnpackError::CutShort(_)), "{err}");
+        }
+
+        let mut odd_end = whole.clone();
+        let last = odd_end.len() - 1;
+        odd_end[last] = 1;
+        let err = walk(&odd_end[..], |_, _, _, _| -> Result<Flow, String> {
+            Ok(Flow::Continue)
+        })
+        .unwrap_err();
+        assert!(matches!(err, UnpackError::OddEnd), "{err}");
+    }
+
+    #[test]
+    fn a_taker_that_stops_ends_the_walk_where_it_stops() {
+        // A view taker stops at the first member only a replay needs: the
+        // members after it are never handed over, and the bytes behind it
+        // may be missing, as they are from the start of a download. The
+        // export is replayable all the same.
+        let replayable = archive(&[
+            ("manifest.json", b"{}"),
+            ("trace.bin", b"trace"),
+            ("inputs/kernel", &[7u8; 4 * BLOCK]),
+            ("pages/00ff", &[0u8; 16]),
+        ]);
+        let kernel_at = 4 * BLOCK;
+        let start = &replayable[..kernel_at + BLOCK + BLOCK];
+        let mut seen = Vec::new();
+        let contents = walk(start, |_, member, _, _| -> Result<Flow, String> {
+            seen.push(member);
+            if member.replay_only() {
+                return Ok(Flow::Stop);
+            }
+            Ok(Flow::Continue)
+        })
+        .unwrap();
+        assert_eq!(contents, Contents::Replayable);
+        assert_eq!(seen, vec![Member::Manifest, Member::Trace, Member::Input]);
+    }
+
+    #[test]
     fn a_climbing_path_a_link_and_a_refused_member_stop_the_walk() {
         // A path with .., a symbolic link, and a member the taker refuses
         // each end the walk with an error that says which; bytes that are
@@ -279,7 +382,10 @@ mod tests {
             tar.append(&header, &b"x"[..]).unwrap();
             tar.into_inner().unwrap()
         };
-        let err = walk(&climbing[..], |_, _, _, _| -> Result<(), String> { Ok(()) }).unwrap_err();
+        let err = walk(&climbing[..], |_, _, _, _| -> Result<Flow, String> {
+            Ok(Flow::Continue)
+        })
+        .unwrap_err();
         assert!(matches!(err, UnpackError::UnsafePath(_)), "{err}");
         assert!(err.to_string().contains("../evil"), "{err}");
 
@@ -292,7 +398,10 @@ mod tests {
                 .unwrap();
             tar.into_inner().unwrap()
         };
-        let err = walk(&linked[..], |_, _, _, _| -> Result<(), String> { Ok(()) }).unwrap_err();
+        let err = walk(&linked[..], |_, _, _, _| -> Result<Flow, String> {
+            Ok(Flow::Continue)
+        })
+        .unwrap_err();
         assert!(matches!(err, UnpackError::NotAFile { .. }), "{err}");
         assert!(err.to_string().contains("trace.bin"), "{err}");
 
@@ -302,14 +411,14 @@ mod tests {
                 if member == Member::Trace {
                     return Err(format!("{} is too large", path.display()));
                 }
-                Ok(())
+                Ok(Flow::Continue)
             },
         )
         .unwrap_err();
         assert_eq!(refused.to_string(), "trace.bin is too large");
 
-        let err = walk(&b"plain text"[..], |_, _, _, _| -> Result<(), String> {
-            Ok(())
+        let err = walk(&b"plain text"[..], |_, _, _, _| -> Result<Flow, String> {
+            Ok(Flow::Continue)
         })
         .unwrap_err();
         assert!(

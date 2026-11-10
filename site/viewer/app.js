@@ -54,6 +54,16 @@ const APP_MIN_WIDTH = 960;
 const STOPPED_NOTE =
   "The viewer stopped on an error. Reload the page to start it again.";
 
+// How much of an export the page reads before it first asks the app
+// whether the bytes so far hold the run, and by how much the bytes grow
+// between one asking and the next. The manifest, the trace and the
+// bookmarks come first in an export, before the memory and inputs that
+// only a replay needs, which are most of a replayable export; asking at
+// each doubling reads a run for at most twice its bytes and a few
+// askings.
+const FIRST_PROBE_BYTES = 64 * 1024;
+const PROBE_GROWTH = 2;
+
 // The schemes of a page served securely and of a link that is not. A
 // browser refuses to fetch the second from the first, as mixed content,
 // and tells the page nothing of why.
@@ -197,11 +207,10 @@ function isMixedContent(url) {
   return !loopback;
 }
 
-// The bytes at a link, fetched whole. A server's error answer comes back
-// as its status, and a body that stops short as its status and what
-// happened; a fetch the browser refused, as a server without CORS headers
-// gets, as null.
-async function fetchBytes(url) {
+// The response to a fetch of a link. A server's error answer comes back
+// as its status; a fetch the browser refused, as a server without CORS
+// headers gets, as null.
+async function fetchLink(url) {
   let response;
   try {
     response = await fetch(new URL(url, location.href));
@@ -212,27 +221,131 @@ async function fetchBytes(url) {
   if (!response.ok) {
     return { answer };
   }
+  return { response, answer };
+}
+
+// The bytes at a link, fetched whole. A body that stops short comes back
+// as the server's status and what happened.
+async function fetchBytes(url) {
+  const fetched = await fetchLink(url);
+  if (!fetched.response) {
+    return fetched;
+  }
   try {
-    return { bytes: new Uint8Array(await response.arrayBuffer()) };
+    return { bytes: new Uint8Array(await fetched.response.arrayBuffer()) };
   } catch {
-    return { answer: `${answer}, ${DROPPED_ANSWER}` };
+    return { answer: `${fetched.answer}, ${DROPPED_ANSWER}` };
   }
 }
 
-// The export at a link: the link's bytes, or the .rwd file inside them
-// when they are a zip. A link the browser would refuse is not tried, and
-// a zip that is not opened comes back as the reason, both in the place of
-// a server's answer.
+// One array of the bytes in `chunks`.
+function joined(chunks) {
+  if (chunks.length === 1) {
+    return chunks[0];
+  }
+  const bytes = new Uint8Array(chunks.reduce((n, chunk) => n + chunk.length, 0));
+  let at = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, at);
+    at += chunk.length;
+  }
+  return bytes;
+}
+
+// Reads a run from `source`, which hands back the next bytes of an
+// export, or null at its end, and stops the read when told to. The read
+// goes on until the app says the bytes so far hold the run (see
+// FIRST_PROBE_BYTES), so the memory and inputs behind the trace in a
+// replayable export are never read; a source that ends first gives all
+// its bytes, for the app to say what they are. A zip is read whole, since
+// its directory is at its end.
+async function readRun(source) {
+  const chunks = [];
+  let length = 0;
+  let probeAt = FIRST_PROBE_BYTES;
+  for (;;) {
+    const chunk = await source.read(probeAt - length);
+    if (chunk === null) {
+      break;
+    }
+    chunks.push(chunk);
+    length += chunk.length;
+    if (length < probeAt) {
+      continue;
+    }
+    const bytes = joined(chunks);
+    chunks.length = 0;
+    chunks.push(bytes);
+    if (isZip(bytes)) {
+      probeAt = Infinity;
+      continue;
+    }
+    const prefix = callApp(() => web.export_prefix(bytes));
+    if (prefix === web.Prefix.Short) {
+      probeAt = length * PROBE_GROWTH;
+      continue;
+    }
+    await source.stop();
+    break;
+  }
+  return joined(chunks);
+}
+
+// A response's body as readRun reads one: the bytes as they arrive, and
+// a stop that ends the download.
+function streamed(body) {
+  const reader = body.getReader();
+  return {
+    read: async () => {
+      const { value, done } = await reader.read();
+      return done ? null : value;
+    },
+    stop: () => reader.cancel().catch(() => {}),
+  };
+}
+
+// A file as readRun reads one: a slice of the asked size at a time, so a
+// read that stops leaves the rest of the file on disk.
+function sliced(file) {
+  let at = 0;
+  return {
+    read: async (want) => {
+      if (at >= file.size) {
+        return null;
+      }
+      const end = Math.min(file.size, at + want);
+      const bytes = new Uint8Array(await file.slice(at, end).arrayBuffer());
+      at = end;
+      return bytes;
+    },
+    stop: async () => {},
+  };
+}
+
+// The export at a link: the link's bytes, as far as the run needs, or the
+// .rwd file inside them when they are a zip. A link the browser would
+// refuse is not tried, a body that stops short comes back as the server's
+// status and what happened, and a zip that is not opened comes back as
+// the reason, each in the place of a server's answer.
 async function fetchExport(url) {
   if (isMixedContent(url)) {
     return { answer: MIXED_ANSWER };
   }
-  const fetched = await fetchBytes(url);
-  if (!fetched.bytes || !isZip(fetched.bytes)) {
+  const fetched = await fetchLink(url);
+  if (!fetched.response) {
     return fetched;
   }
+  let bytes;
   try {
-    const inside = await rwdFromZip(fetched.bytes);
+    bytes = await readRun(streamed(fetched.response.body));
+  } catch {
+    return { answer: `${fetched.answer}, ${DROPPED_ANSWER}` };
+  }
+  if (!isZip(bytes)) {
+    return { bytes };
+  }
+  try {
+    const inside = await rwdFromZip(bytes);
     return { bytes: inside.bytes };
   } catch (error) {
     if (error instanceof ZipRefusal) {
@@ -269,12 +382,13 @@ async function fetchRuns(url, compare, step) {
   );
 }
 
-// Hands a picked or dropped file to the app, read in the browser. A zip
-// is opened as the .rwd file inside it. A file that comes while the app
-// loads is held until the app is on screen. The app numbers the read
-// when it starts, so of two files, or a file and a fetch, the one asked
-// for last wins however their bytes arrive; the token says which read
-// the bytes, or the reason there are none, belong to.
+// Hands a picked or dropped file to the app, read in the browser as far
+// as the run needs. A zip is opened as the .rwd file inside it. A file
+// that comes while the app loads is held until the app is on screen. The
+// app numbers the read when it starts, so of two files, or a file and a
+// fetch, the one asked for last wins however their bytes arrive; the
+// token says which read the bytes, or the reason there are none, belong
+// to.
 async function openFile(file) {
   if (phase === Phase.Starting) {
     heldFile = file;
@@ -287,7 +401,7 @@ async function openFile(file) {
   // file was removed after it was picked.
   let bytes;
   try {
-    bytes = new Uint8Array(await file.arrayBuffer());
+    bytes = await readRun(sliced(file));
   } catch {
     callApp(() =>
       web.unread_file(
