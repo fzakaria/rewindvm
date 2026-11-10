@@ -5,12 +5,13 @@
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use rewind_core::run::{
-    BASE_CMDLINE, DEFAULT_CORES, DEFAULT_QUANTUM, MAX_CORES, RestoreStore, Start, Store,
-    default_epoch,
+    BASE_CMDLINE, DEFAULT_CORES, DEFAULT_QUANTUM, Handoff, LateLimit, Live, MAX_CORES,
+    RestoreStore, Start, Store, default_epoch,
 };
 use rewind_core::{
     Echo, Execution, Guest, Home, Keyframes, Run, Source, Spec, TimeLimit, compare, image, nix,
@@ -415,8 +416,9 @@ fn fork_window(
     let how = Execution {
         echo: Echo::Quiet,
         keyframes: keyframes_for(machine),
-        limit: time_limit(machine.timeout),
+        limit: time_limit(machine.timeout, machine.late_timeout.as_ref()),
         store: RestoreStore::Shared(store),
+        handoff: None,
     };
     Run::execute(
         home,
@@ -489,11 +491,28 @@ pub(crate) fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
     let label = |seed: u64, key: u64, schedule: u64| run_label(varies, seed, key, schedule);
     let name = |seed: u64, key: u64, schedule: u64| run_name(varies, seed, key, schedule);
 
-    // The unperturbed run, and how every other run is made. A recorded
+    // The page store every other run restores its start out of, opened
+    // once, before the unperturbed run, which the first batch of other runs
+    // starts beside. The unperturbed run's keyframes are past the store's
+    // sorted segments, so a store of each run's own read the index's
+    // unsorted tail into a map of its own: 160 ms and 49 MiB a run on this
+    // project's laptop.
+    let store = Store::open(&home.store())?;
+
+    // A property that reads a run's files where its job exited forks the
+    // run there, so each other run takes a keyframe there, which the
+    // fork restores instead of replaying the run from boot. The
+    // properties given say so before the unperturbed run has finished.
+    if property::reads_files_at_exit(&properties) {
+        machine.exit_keyframe = ExitKeyframe::Take;
+    }
+
+    // The unperturbed run, how every other run is made, and the first
+    // seed's first batch of schedules when it ran alongside. A recorded
     // run is the unperturbed run, and each schedule forks it.
     let guest;
     let prepared;
-    let (base, subject, inputs) = match run {
+    let (base, subject, inputs, mut first_batch) = match run {
         Some(what) => {
             let base = Run::find(home, &what)?;
             if base.manifest.outcome.is_none() {
@@ -513,7 +532,7 @@ pub(crate) fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
                 run: Box::new(Run::open(&base.dir)?),
                 reseed: None,
             };
-            (base, subject, None)
+            (base, subject, None, None)
         }
         None => {
             guest = Guest::from_env()?;
@@ -541,15 +560,56 @@ pub(crate) fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
                     seeds * (schedules + 1) + dirents
                 ));
             }
-            let base = execute(
-                home,
-                &guest,
-                &prepared,
-                &with_keyframes(&machine),
-                Start::Boot,
-                Announce::No,
-                RestoreStore::Own,
-            )?;
+            let started = with_keyframes(&machine);
+            let first = |shares: Shares| {
+                execute(
+                    home,
+                    &guest,
+                    &prepared,
+                    &started,
+                    Start::Boot,
+                    Announce::No,
+                    shares,
+                )
+            };
+            let (base, first_batch) = match batch_alongside(0, dirents, schedules) {
+                Alongside::No => (first(Shares::ALONE)?, None),
+
+                // The first batch starts once the unperturbed run hands
+                // off, and gets the time limit the unperturbed run's time
+                // decides once it has finished, as every later run does.
+                Alongside::Yes => {
+                    let late = LateLimit::new();
+                    let batch_machine = MachineArgs {
+                        late_timeout: machine.timeout.is_none().then(|| late.clone()),
+                        ..machine.clone()
+                    };
+                    let batch = |live: Arc<Live>| {
+                        let from = live.job_start().max(user_from);
+                        let windows = first_windows(schedules, jobs, from, user_until);
+                        let subject = Subject::Job {
+                            guest: &guest,
+                            prepared: &prepared,
+                            start: Start::Live(live),
+                        };
+                        (
+                            from,
+                            subject.try_all(home, &batch_machine, &windows, &store),
+                        )
+                    };
+
+                    // An unperturbed run that failed stops the batch at
+                    // once: the search ends with its error.
+                    let finished = |base: &Result<Run>| {
+                        late.set(match base {
+                            Ok(base) => Duration::from_secs(check_timeout(base)),
+                            Err(_) => Duration::ZERO,
+                        })
+                    };
+                    let (base, batch) = with_first_batch(user_from, first, batch, finished);
+                    (base?, batch)
+                }
+            };
 
             // Every other run is the unperturbed run until its schedule
             // starts, so it starts at the unperturbed run's latest keyframe
@@ -560,15 +620,9 @@ pub(crate) fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
                 prepared: &prepared,
                 start: Start::After(base.manifest.id.clone()),
             };
-            (base, subject, Some((&guest, &prepared)))
+            (base, subject, Some((&guest, &prepared)), first_batch)
         }
     };
-    // The page store every other run restores its start out of, opened
-    // once. The unperturbed run's keyframes are past the store's sorted
-    // segments, so a store of each run's own read the index's unsorted
-    // tail into a map of its own: 160 ms and 49 MiB a run on this
-    // project's laptop.
-    let store = Store::open(&home.store())?;
 
     // The first seed is the unperturbed run's own: --seed for a job, and
     // whatever a recorded run was recorded with.
@@ -612,9 +666,7 @@ pub(crate) fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
     // generous multiple of schedule 0's time and then ends as
     // timed-out, instead of holding up the whole search.
     if machine.timeout.is_none() {
-        let base_wall = base.manifest.outcome.as_ref().map_or(0, |o| o.wall_ms);
-        let limit = Duration::from_millis(base_wall * CHECK_TIMEOUT_FACTOR).max(CHECK_TIMEOUT_MIN);
-        machine.timeout = Some(limit.as_secs());
+        machine.timeout = Some(check_timeout(&base));
     }
 
     // When the unperturbed run is the one that fails, the schedules
@@ -635,13 +687,6 @@ pub(crate) fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
         !base_holds
     };
     let differs_by = |violations: &[Violation]| violations.is_empty() != base_holds;
-
-    // A property that reads a run's files where its job exited forks the
-    // run there, so each other run takes a keyframe there, which the
-    // fork restores instead of replaying the run from boot.
-    if judge.reads_files_at_exit() {
-        machine.exit_keyframe = ExitKeyframe::Take;
-    }
 
     // Each seed's unperturbed run and how its perturbed schedules are
     // made, the first seed's being the unperturbed run itself.
@@ -708,6 +753,13 @@ pub(crate) fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
         }
         let seed = first_seed + i;
 
+        // The seed's first batch of schedules when it ran alongside the
+        // seed's unperturbed run, with the step its windows start at.
+        let mut precomputed = match i {
+            0 => first_batch.take(),
+            _ => None,
+        };
+
         // Another seed's unperturbed run, from boot, judged as any other
         // run: a seed alone can decide how a run ends.
         if i > 0 {
@@ -733,10 +785,30 @@ pub(crate) fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
                         from: reseed.step,
                         until: u64::MAX,
                     };
-                    let seed_base = fork_window(home, run, &machine, window, Some(&reseed), &store);
                     let subject = Subject::Run {
                         run: Box::new(Run::open(&run.dir)?),
-                        reseed: Some(reseed),
+                        reseed: Some(reseed.clone()),
+                    };
+
+                    // The seed's forks start from the recorded run, not
+                    // from the seed's unperturbed run, so the first batch
+                    // of them starts right away beside it.
+                    let fork = || fork_window(home, run, &machine, window, Some(&reseed), &store);
+                    let seed_base = match batch_alongside(i, dirents, schedules) {
+                        Alongside::No => fork(),
+                        Alongside::Yes => std::thread::scope(|scope| {
+                            let from = reseed.step;
+                            let windows = first_windows(schedules, jobs, from, user_until);
+                            let subject = &subject;
+                            let seed_machine = &seed_machine;
+                            let store = &store;
+                            let batch = scope.spawn(move || {
+                                (from, subject.try_all(home, seed_machine, &windows, store))
+                            });
+                            let seed_base = fork();
+                            precomputed = Some(batch.join().expect("a batch's thread panicked"));
+                            seed_base
+                        }),
                     };
                     (seed_base, subject)
                 }
@@ -749,15 +821,40 @@ pub(crate) fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
                     } else {
                         seed_machine.clone()
                     };
-                    let seed_base = execute(
-                        home,
-                        guest,
-                        prepared,
-                        &started,
-                        Start::Boot,
-                        Announce::No,
-                        RestoreStore::Own,
-                    );
+                    let first = |shares: Shares| {
+                        execute(
+                            home,
+                            guest,
+                            prepared,
+                            &started,
+                            Start::Boot,
+                            Announce::No,
+                            shares,
+                        )
+                    };
+
+                    // The seed's first batch starts once the seed's
+                    // unperturbed run hands off. The time limit is known
+                    // by now.
+                    let seed_base = match batch_alongside(i, dirents, schedules) {
+                        Alongside::No => first(Shares::ALONE),
+                        Alongside::Yes => {
+                            let batch = |live: Arc<Live>| {
+                                let from = live.job_start().max(user_from);
+                                let windows = first_windows(schedules, jobs, from, user_until);
+                                let subject = Subject::Job {
+                                    guest,
+                                    prepared,
+                                    start: Start::Live(live),
+                                };
+                                (from, subject.try_all(home, &seed_machine, &windows, &store))
+                            };
+                            let (seed_base, batch) =
+                                with_first_batch(user_from, first, batch, |_| {});
+                            precomputed = batch;
+                            seed_base
+                        }
+                    };
                     let subject = match &seed_base {
                         Ok(b) => Subject::Job {
                             guest,
@@ -823,7 +920,19 @@ pub(crate) fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
                 batch[0],
                 batch[batch.len() - 1]
             ));
-            let runs = s.subject.try_all(home, &s.machine, &windows, &store);
+            // The first batch may have run already, alongside the seed's
+            // unperturbed run, over the same windows.
+            let runs = match precomputed.take() {
+                Some((from, runs)) => {
+                    anyhow::ensure!(
+                        from == s.start,
+                        "seed {seed}'s first schedules started at step {from}, and its unperturbed run's job at step {}",
+                        s.start
+                    );
+                    runs
+                }
+                None => s.subject.try_all(home, &s.machine, &windows, &store),
+            };
             let judged = runs.and_then(|runs| judge_all(&judge, runs));
             clear_status();
             for (run, violations) in judged? {
@@ -1397,6 +1506,83 @@ impl<'a> Seeded<'a> {
     }
 }
 
+/// Whether a seed's first batch of schedules starts alongside the seed's
+/// unperturbed run, before that run has finished.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Alongside {
+    Yes,
+    No,
+}
+
+/// Whether the seed at `index` among a search's seeds starts its first
+/// batch of `schedules` alongside its unperturbed run. Not when it has no
+/// schedules to try, and not for the first seed when the search tries
+/// `dirents` directory orders: their runs come between that seed's
+/// unperturbed run and its schedules, and may end the search first.
+fn batch_alongside(index: u64, dirents: u64, schedules: u64) -> Alongside {
+    if schedules == 0 || (index == 0 && dirents > 0) {
+        return Alongside::No;
+    }
+    Alongside::Yes
+}
+
+/// The windows of a seed's first batch: schedules 1 to `jobs`, of
+/// `schedules`, each perturbing from `from` until `until`, as the search's
+/// batches take them in order.
+fn first_windows(schedules: u64, jobs: usize, from: u64, until: u64) -> Vec<Window> {
+    (1..=schedules)
+        .take(jobs)
+        .map(|seed| Window { seed, from, until })
+        .collect()
+}
+
+/// The time limit `rewind check` gives each run after `base` without
+/// --timeout, in seconds: CHECK_TIMEOUT_FACTOR times `base`'s wall-clock
+/// time, and at least CHECK_TIMEOUT_MIN.
+fn check_timeout(base: &Run) -> u64 {
+    let base_wall = base.manifest.outcome.as_ref().map_or(0, |o| o.wall_ms);
+    Duration::from_millis(base_wall * CHECK_TIMEOUT_FACTOR)
+        .max(CHECK_TIMEOUT_MIN)
+        .as_secs()
+}
+
+/// The run a seed's schedules start from, executed by `first`, and its
+/// first batch of schedules, executed by `batch` alongside it: from the
+/// [`Live`] the run hands off once it has passed the step they start
+/// perturbing at, `from` or the job's start, while the run goes on.
+/// `finished` is told how the run ended as soon as it has, before the
+/// batch has. A run that never hands off, as one that ends before that
+/// step, leaves the batch unstarted: None.
+fn with_first_batch<T: Send>(
+    from: u64,
+    first: impl FnOnce(Shares) -> Result<Run> + Send,
+    batch: impl FnOnce(Arc<Live>) -> T + Send,
+    finished: impl FnOnce(&Result<Run>),
+) -> (Result<Run>, Option<T>) {
+    let (to, handed) = mpsc::channel();
+    let handoff = Handoff::new(from, to);
+    std::thread::scope(|scope| {
+        // The run's thread owns the handoff, so the channel closes once
+        // the run ends, and a handoff that never came is not waited for.
+        let run = scope.spawn(move || {
+            first(Shares {
+                store: RestoreStore::Own,
+                handoff: Some(&handoff),
+            })
+        });
+        let batch = handed
+            .recv()
+            .ok()
+            .map(|live| scope.spawn(move || batch(live)));
+
+        // The run first, so `finished` hears of it while the batch goes on.
+        let run = run.join().expect("the unperturbed run's thread panicked");
+        finished(&run);
+        let batch = batch.map(|b| b.join().expect("a batch's thread panicked"));
+        (run, batch)
+    })
+}
+
 /// A run a search tried, and whether its verdict differs from the
 /// unperturbed run's.
 struct Judged {
@@ -1591,8 +1777,9 @@ pub(crate) fn fork(home: &Home, args: ForkArgs) -> Result<ExitCode> {
     let how = Execution {
         echo,
         keyframes: Keyframes::Take,
-        limit: time_limit(timeout),
+        limit: time_limit(timeout, None),
         store: RestoreStore::Own,
+        handoff: None,
     };
     let child = Run::execute(
         home,
@@ -1851,6 +2038,11 @@ pub(crate) struct MachineArgs {
     /// times as long as schedule 0 took, and at least a minute.
     #[arg(long, value_name = "SECONDS")]
     timeout: Option<u64>,
+    /// The time limit rewind check gives runs it starts before schedule 0
+    /// has finished, without --timeout: set once schedule 0 has finished,
+    /// to what `timeout` is set to then.
+    #[arg(skip)]
+    late_timeout: Option<LateLimit>,
     /// Extra kernel command line arguments; `loglevel=7` shows the kernel's
     /// messages in the trace.
     #[arg(long, default_value = "")]
@@ -2036,7 +2228,7 @@ pub(super) fn run_workload(
         &machine,
         Start::Boot,
         announce,
-        RestoreStore::Own,
+        Shares::ALONE,
     )
 }
 
@@ -2200,9 +2392,25 @@ enum Announce {
     No,
 }
 
+/// What a run shares with the runs executing beside it: the page store it
+/// restores the keyframe it starts from out of, and, for a run others
+/// start from, where it hands them off while it goes on.
+#[derive(Clone, Copy)]
+struct Shares<'a> {
+    store: RestoreStore<'a>,
+    handoff: Option<&'a Handoff>,
+}
+
+impl Shares<'_> {
+    /// A run executing alone: a store of its own, and no handoff.
+    const ALONE: Shares<'static> = Shares {
+        store: RestoreStore::Own,
+        handoff: None,
+    };
+}
+
 /// Executes the workload `prepared` under `machine`'s options, started as
-/// `start` says, restoring the keyframe it starts from, if any, out of
-/// `store`.
+/// `start` says, sharing what `shares` says with the runs beside it.
 fn execute(
     home: &Home,
     guest: &Guest,
@@ -2210,7 +2418,7 @@ fn execute(
     machine: &MachineArgs,
     start: Start,
     announce: Announce,
-    store: RestoreStore,
+    shares: Shares,
 ) -> Result<Run> {
     let cpu = machine
         .resolved_cpu
@@ -2255,8 +2463,9 @@ fn execute(
     let how = Execution {
         echo,
         keyframes: keyframes_for(machine),
-        limit: time_limit(machine.timeout),
-        store,
+        limit: time_limit(machine.timeout, machine.late_timeout.as_ref()),
+        store: shares.store,
+        handoff: shares.handoff,
     };
     let run = Run::execute(
         home,
@@ -2290,7 +2499,10 @@ fn execute_all(
             .map(|m| {
                 let start = start.clone();
                 scope.spawn(move || {
-                    let shared = RestoreStore::Shared(store);
+                    let shared = Shares {
+                        store: RestoreStore::Shared(store),
+                        handoff: None,
+                    };
                     execute(home, guest, prepared, &m, start, Announce::No, shared)
                 })
             })
@@ -2396,11 +2608,13 @@ fn where_lines(threads: &[(locate::Involved, u64, Result<Located>)]) -> Vec<Stri
     lines
 }
 
-/// The time limit `--timeout` sets, in seconds, if given.
-fn time_limit(timeout: Option<u64>) -> TimeLimit {
-    match timeout {
-        Some(secs) => TimeLimit::Wall(Duration::from_secs(secs)),
-        None => TimeLimit::None,
+/// The time limit `--timeout` sets, in seconds, if given, or else the
+/// limit `late` will be once set.
+fn time_limit(timeout: Option<u64>, late: Option<&LateLimit>) -> TimeLimit {
+    match (timeout, late) {
+        (Some(secs), _) => TimeLimit::Wall(Duration::from_secs(secs)),
+        (None, Some(late)) => TimeLimit::Late(late.clone()),
+        (None, None) => TimeLimit::None,
     }
 }
 
@@ -2555,6 +2769,46 @@ pub(super) fn exit_status(run: &Run) -> ExitCode {
 mod tests {
     // How a run echoes, from its flags and where its output goes.
     use super::*;
+
+    /// Which seeds' first batch of schedules a search starts alongside the
+    /// seed's unperturbed run: every seed's with schedules to try, except
+    /// the first seed's when directory orders are tried, whose runs come
+    /// between that seed's unperturbed run and its schedules and may end
+    /// the search first.
+    #[test]
+    fn a_first_batch_starts_alongside_its_run_unless_dirents_come_between() {
+        const FIRST_SEED: u64 = 0;
+        const OTHER_SEED: u64 = 1;
+        const SCHEDULES: u64 = 8;
+        const DIRENTS: u64 = 4;
+        assert_eq!(batch_alongside(FIRST_SEED, 0, SCHEDULES), Alongside::Yes);
+        assert_eq!(
+            batch_alongside(FIRST_SEED, DIRENTS, SCHEDULES),
+            Alongside::No
+        );
+        assert_eq!(batch_alongside(FIRST_SEED, 0, 0), Alongside::No);
+        assert_eq!(
+            batch_alongside(OTHER_SEED, DIRENTS, SCHEDULES),
+            Alongside::Yes
+        );
+        assert_eq!(batch_alongside(OTHER_SEED, 0, 0), Alongside::No);
+    }
+
+    /// The windows of a seed's first batch are the serial search's first
+    /// batch: the first `jobs` schedules, each from the start given to
+    /// the end the user gave.
+    #[test]
+    fn a_first_batch_holds_the_first_jobs_schedules() {
+        const JOBS: usize = 4;
+        const FROM: u64 = 900;
+        const UNTIL: u64 = 5000;
+        let windows = first_windows(10, JOBS, FROM, UNTIL);
+        let seeds: Vec<u64> = windows.iter().map(|w| w.seed).collect();
+        assert_eq!(seeds, [1, 2, 3, 4]);
+        assert!(windows.iter().all(|w| w.from == FROM && w.until == UNTIL));
+        assert_eq!(first_windows(2, JOBS, FROM, UNTIL).len(), 2);
+        assert!(first_windows(0, JOBS, FROM, UNTIL).is_empty());
+    }
 
     /// The lines that say where the threads of a failure were, which check
     /// prints after the narrowing, to standard error with --json: a heading,

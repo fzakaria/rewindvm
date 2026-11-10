@@ -41,6 +41,7 @@ use layout::*;
 use memory::Mapping;
 use pv::{Clock, GuestExit, Schedule};
 pub use rewind_trace::machine::{ClockSource, CounterEvent, CpuModel, Extras, Preemption};
+pub use watchdog::{Deadline, LateLimit};
 
 /// The memory slot of guest RAM, and of the input image.
 pub(crate) const SLOT_RAM: u32 = 0;
@@ -358,7 +359,7 @@ pub struct Machine {
     /// int3 the debugger had written into memory (debug.rs).
     pub(crate) int3s: debug::Int3s,
     /// When to stop the machine, however far it has got.
-    pub(crate) deadline: Option<std::time::Instant>,
+    pub(crate) deadline: Option<Deadline>,
     /// When the guest last exited, while a deadline is watched: how long it
     /// has gone without one says whether it is stuck computing.
     pub(crate) last_exit: std::time::Instant,
@@ -630,7 +631,14 @@ impl Machine {
     /// the guest is then, even computing without exits. The thread that
     /// calls [`Machine::run`] is the one stopped.
     pub fn set_deadline(&mut self, deadline: Option<std::time::Instant>) {
-        self.deadline = deadline;
+        self.deadline = deadline.map(Deadline::At);
+    }
+
+    /// Stops the machine with [`Stop::TimedOut`] `limit` after `from`, as
+    /// [`Machine::set_deadline`] does, once another thread sets the limit.
+    /// Until then the machine runs with no deadline.
+    pub fn set_late_deadline(&mut self, from: std::time::Instant, limit: LateLimit) {
+        self.deadline = Some(Deadline::Late { from, limit });
     }
 
     /// Writes the switches still pending as a batch at the machine's
@@ -727,7 +735,7 @@ impl Machine {
 
         // A deadline is watched only while this thread is in here, so no
         // signal reaches it once it has left.
-        let watchdog = self.deadline.map(watchdog::Watchdog::start);
+        let watchdog = self.deadline.clone().map(watchdog::Watchdog::start);
         let expired = watchdog.as_ref().map(|w| w.expired());
         self.last_exit = std::time::Instant::now();
 

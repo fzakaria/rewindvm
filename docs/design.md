@@ -1311,7 +1311,14 @@ nothing.
 
 1. Runs the unperturbed schedule.
 2. Runs perturbed schedules, starting the window at the step the job
-   started, until one's verdict differs from schedule 0's. By default a run
+   started, until one's verdict differs from schedule 0's. The first batch
+   of them, as many as `--jobs`, starts while schedule 0 goes on: once
+   schedule 0 has passed the job's start, it makes the keyframe the batch
+   starts from durable and lists it, and hands the batch its trace up to
+   there, the switches pending at that keyframe included. Each later seed's
+   unperturbed run does the same for that seed's first batch. The search
+   still reads the runs in the order it would have made them one after
+   another, so what it prints is the same. By default a run
    is judged by its exit status and output hashes against schedule 0's;
    `--property` judges it by what a correct run is (see
    [Properties](#properties-seeds-and-the-sdk)). A schedule can make a program loop forever, so each run gets ten

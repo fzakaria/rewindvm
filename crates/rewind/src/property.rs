@@ -295,14 +295,6 @@ impl<'a> Judge<'a> {
         self.properties == [Property::SameOutcome]
     }
 
-    /// Whether a property reads a run's files where its job exited: junit
-    /// reads its reports there, and a script is given that step.
-    pub(crate) fn reads_files_at_exit(&self) -> bool {
-        self.properties
-            .iter()
-            .any(|p| matches!(p, Property::Junit(_) | Property::Script(_)))
-    }
-
     /// The properties, as the command line names them.
     pub(crate) fn properties(&self) -> &[Property] {
         &self.properties
@@ -642,6 +634,16 @@ impl Coverage {
 /// Whether `run` wrote any SDK mark, so the search judges them.
 pub(crate) fn writes_sdk_marks(run: &Run) -> Result<bool> {
     Ok(run.trace()?.sdk_marks().next().is_some())
+}
+
+/// Whether one of `properties` reads a run's files where its job exited:
+/// junit reads its reports there, and a script is given that step.
+/// `rewind check` asks before the unperturbed run has finished, to start
+/// other runs alongside it that take a keyframe there.
+pub(crate) fn reads_files_at_exit(properties: &[Property]) -> bool {
+    properties
+        .iter()
+        .any(|p| matches!(p, Property::Junit(_) | Property::Script(_)))
 }
 
 /// How `run` ended, as a run's line says it, from its manifest.

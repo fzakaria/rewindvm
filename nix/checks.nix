@@ -967,6 +967,76 @@ let
           -o $out/bin/race race.c
       '';
 
+  # A root with race.c's race made slow: after the race, two threads pass
+  # a byte back and forth through pipes, a context switch and so a step
+  # each way, past the window of 4096 steps whose switches a run writes in
+  # one batch, which the runs that start from it read before they start.
+  # Then a loop without exits, its length the first argument, so the run
+  # takes seconds after it hands off to them.
+  slowRaceRoot =
+    pkgs.runCommand "rewind-slow-race-root"
+      {
+        nativeBuildInputs = [ pkgs.pkgsStatic.stdenv.cc ];
+      }
+      ''
+        mkdir -p $out/bin
+        cat > slowrace.c <<'EOF'
+        #include <pthread.h>
+        #include <stdio.h>
+        #include <stdlib.h>
+        #include <unistd.h>
+
+        #define WORKERS 2
+        #define ADDS 10
+        #define PASSES 3000
+
+        static long total;
+        static int ping[2], pong[2];
+
+        static void *add(void *arg)
+        {
+          for (int i = 0; i < ADDS; i++) {
+            long seen = total;
+            write(1, ".", 1);
+            total = seen + 1;
+          }
+          return 0;
+        }
+
+        static void *echo(void *arg)
+        {
+          char c;
+          while (read(ping[0], &c, 1) == 1)
+            write(pong[1], &c, 1);
+          return 0;
+        }
+
+        int main(int argc, char **argv)
+        {
+          pthread_t t[WORKERS], echoer;
+          long spins = argc > 1 ? atol(argv[1]) : 0;
+          char c = 'x';
+
+          for (int i = 0; i < WORKERS; i++)
+            pthread_create(&t[i], 0, add, 0);
+          for (int i = 0; i < WORKERS; i++)
+            pthread_join(t[i], 0);
+          pipe(ping);
+          pipe(pong);
+          pthread_create(&echoer, 0, echo, 0);
+          for (int i = 0; i < PASSES; i++) {
+            write(ping[1], &c, 1);
+            read(pong[0], &c, 1);
+          }
+          for (volatile long i = 0; i < spins; i++)
+            ;
+          dprintf(1, "\ntotal %ld\n", total);
+          return total != WORKERS * ADDS;
+        }
+        EOF
+        $CC -static -O1 -pthread -o $out/bin/slowrace slowrace.c
+      '';
+
   # A root with a static program whose two threads add to a total with an
   # atomic load and a separate atomic store, making no system call between
   # them. Without points the guest never switches threads there, so no
@@ -3781,6 +3851,102 @@ in
         # Options that make another run than the one named are refused.
         if rewind check --run race --mem 2048 2> refused; then exit 1; fi
         grep -q -- '--mem' refused
+        touch $out
+      '';
+
+  # checks.check-overlap: `rewind check` starts a seed's first batch of
+  # schedules while the seed's unperturbed run goes on, once that run has
+  # passed the job's start, and the search ends as if the batch had
+  # waited. A slow race, whose unperturbed run takes seconds after the
+  # job's start: in a fresh home, each run of the first batch is created
+  # seconds before its unperturbed run ends. The same search again in the
+  # same home is the order before this change: each unperturbed run keeps
+  # the keyframes it took and takes none, so it hands off nothing, and the
+  # batch waits for it to end. The two searches print the same, byte for
+  # byte: every run of a sweep with --all, and the default search with
+  # its narrowing, with one seed and with two. Boots the VM, so it needs
+  # /dev/kvm.
+  check-overlap =
+    pkgs.runCommand "rewind-check-overlap"
+      {
+        nativeBuildInputs = [
+          rewind
+          pkgs.jq
+        ];
+        requiredSystemFeatures = [ "kvm" ];
+      }
+      ''
+        # Iterations of the slow race's loop without exits: about eight
+        # seconds on a current CPU.
+        spins=30000000000
+        check() {
+          rewind check -j 4 --clock exits --schedules 8 "$@" \
+            --root ${slowRaceRoot} -- /bin/slowrace "$spins"
+        }
+
+        # A run's manifest by its index among the runs in a check's JSON.
+        manifest() { echo "$(jq -r ".schedules[$2].dir" "$1")/manifest.json"; }
+
+        # The second the unperturbed run at index $2 of the check's JSON $1
+        # ended in, at the earliest: it started in its created second.
+        ended() { jq '.created + (.outcome.wall_ms / 1000 | floor)' "$(manifest "$1" "$2")"; }
+
+        # The indexes of seed $2's first batch in the check's JSON $1.
+        batch() { jq -r --argjson seed "$2" '[.schedules | to_entries[]
+          | select(.value.seed == $seed and .value.schedule != 0) | .key][:4][]' "$1"; }
+
+        # Each run of seed $3's first batch was created at least two
+        # seconds before seed $3's unperturbed run, at index $2, ended.
+        overlapped() {
+          end=$(ended "$1" "$2")
+          test -n "$(batch "$1" "$3")"
+          for i in $(batch "$1" "$3"); do
+            created=$(jq .created "$(manifest "$1" "$i")")
+            echo "seed $3 schedule run $i created at $created, its unperturbed run ended at $end"
+            test "$created" -lt "$((end - 2))"
+          done
+        }
+
+        # Each run of seed $3's first batch was created once seed $3's
+        # unperturbed run, at index $2, had ended.
+        waited() {
+          end=$(ended "$1" "$2")
+          for i in $(batch "$1" "$3"); do
+            test "$(jq .created "$(manifest "$1" "$i")")" -ge "$end"
+          done
+        }
+
+        # The sweep, overlapped and then in order, with schedules that end
+        # differently, which the search below then finds.
+        export REWIND_HOME=$TMPDIR/sweep
+        check --all --no-narrow --json > overlapped.json || true
+        jq -e '.tried == 8 and .differing > 0' overlapped.json
+        seed=$(jq '.schedules[0].seed' overlapped.json)
+        overlapped overlapped.json 0 "$seed"
+        check --all --no-narrow --json > ordered.json || true
+        waited ordered.json 0 "$seed"
+        cmp overlapped.json ordered.json
+
+        # The search, which stops at the first schedule that ends
+        # differently and narrows it.
+        export REWIND_HOME=$TMPDIR/search
+        if check > found.overlapped; then exit 1; fi
+        if check > found.ordered; then exit 1; fi
+        cat found.overlapped
+        grep -q ' decides it: ' found.overlapped
+        cmp found.overlapped found.ordered
+
+        # Two seeds: the second seed's first batch starts beside its own
+        # unperturbed run.
+        export REWIND_HOME=$TMPDIR/seeds
+        check --seeds 2 --all --no-narrow --json > seeds.overlapped.json || true
+        second=$(jq '[.schedules[].seed] | unique | .[1]' seeds.overlapped.json)
+        at=$(jq --argjson seed "$second" '.schedules | to_entries[]
+          | select(.value.seed == $seed and .value.schedule == 0) | .key' seeds.overlapped.json)
+        overlapped seeds.overlapped.json 0 "$seed"
+        overlapped seeds.overlapped.json "$at" "$second"
+        check --seeds 2 --all --no-narrow --json > seeds.ordered.json || true
+        cmp seeds.overlapped.json seeds.ordered.json
         touch $out
       '';
 

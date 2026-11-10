@@ -788,28 +788,32 @@ impl Spacing {
 }
 
 /// Runs a machine to the end, taking keyframes as it goes, or until the
-/// observer asks it to stop short of a stop, where it returns
-/// [`Outcome::Paused`] and can be called again to run on, or until an
-/// interrupter stops it, where it returns [`Outcome::Interrupted`].
-/// `taking` says what the next keyframe is a delta from and when it is
-/// due, and carries over from one call to the next.
+/// observer asks it to stop short of a stop, or until step `pause_at`, if
+/// given, where it returns [`Outcome::Paused`] and can be called again to
+/// run on, or until an interrupter stops it, where it returns
+/// [`Outcome::Interrupted`]. `taking` says what the next keyframe is a
+/// delta from and when it is due, and carries over from one call to the
+/// next.
 pub fn run_with_keyframes(
     machine: &mut Machine,
     obs: &mut dyn Observer,
     run_dir: &Path,
     store: &mut Store,
     taking: &mut Taking,
+    pause_at: Option<u64>,
 ) -> Result<Outcome> {
     loop {
-        // A stretch to the next stop, which takes a keyframe only once
-        // one is due.
+        // A stretch to the next stop, or to `pause_at` if that comes
+        // first, which takes a keyframe only once one is due.
         let from = Progress::of(machine);
-        let outcome = machine.run(Some(taking.spacing.next_stop(from.step)), obs)?;
+        let next = taking.spacing.next_stop(from.step);
+        let until = pause_at.map_or(next, |at| next.min(at));
+        let outcome = machine.run(Some(until), obs)?;
         if let Outcome::Stopped(_) | Outcome::Interrupted = outcome {
             return Ok(outcome);
         }
         taking.spacing.ran(from, Progress::of(machine));
-        if obs.stop() {
+        if obs.stop() || pause_at.is_some_and(|at| machine.step() >= at) {
             return Ok(outcome);
         }
         if !taking.spacing.due() {

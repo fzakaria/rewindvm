@@ -8,7 +8,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock, mpsc};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
@@ -17,6 +17,7 @@ pub use rewind_store::Store;
 use rewind_trace::schedule::Timer;
 use rewind_trace::stop::StalledThread;
 use rewind_trace::{Event, EventKind, Trace, TraceWriter};
+pub use rewind_vmm::LateLimit;
 use rewind_vmm::{Config, DirtyLog, Machine, Observer, Outcome, Stop};
 use serde::{Deserialize, Serialize};
 
@@ -160,10 +161,14 @@ pub enum Start {
     /// share, without being its fork: the runs `rewind check` makes match
     /// its unperturbed run up to where their schedules start.
     After(RunId),
+    /// As [`Start::After`], from a run still executing, as far as that
+    /// run had got when it handed off: `rewind check` starts its other
+    /// schedules while the unperturbed run goes on.
+    Live(Arc<Live>),
 }
 
 /// How long a run may take on the host.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub enum TimeLimit {
     /// As long as it takes.
     None,
@@ -171,15 +176,91 @@ pub enum TimeLimit {
     /// then ends as [`Stop::TimedOut`], which is the host's doing: the same
     /// run may finish on a faster host.
     Wall(Duration),
+    /// As [`TimeLimit::Wall`], with the time decided after the run
+    /// started, by another thread: `rewind check` gives each other run a
+    /// multiple of the unperturbed run's time, and starts some of them
+    /// before the unperturbed run has finished.
+    Late(LateLimit),
 }
 
 /// How to execute a run, none of which changes what the run is.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Execution<'a> {
     pub echo: Echo,
     pub keyframes: Keyframes,
     pub limit: TimeLimit,
     pub store: RestoreStore<'a>,
+    /// Where a run that takes keyframes hands the runs that start from it
+    /// what they need, once it has it, while it goes on.
+    pub handoff: Option<&'a Handoff>,
+}
+
+/// Where a run that takes keyframes sends the runs that start from it a
+/// [`Live`] of itself, once it has passed the step they start perturbing
+/// at: the step init reports the job's start at, or `from`, whichever is
+/// later. A run that never reaches that step, or takes no keyframes,
+/// sends nothing.
+#[derive(Debug)]
+pub struct Handoff {
+    from: u64,
+    to: mpsc::Sender<Arc<Live>>,
+}
+
+impl Handoff {
+    pub fn new(from: u64, to: mpsc::Sender<Arc<Live>>) -> Handoff {
+        Handoff { from, to }
+    }
+}
+
+/// A run still executing, as the runs that start from it read it: its
+/// manifest and directory, the step init reported the job's start at,
+/// and the step it had reached, `past`. Every keyframe the run took
+/// before `past` is listed, its pages durable, and `records` holds its
+/// trace before `past`.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Live {
+    manifest: Manifest,
+    dir: PathBuf,
+    job_start: u64,
+    past: u64,
+    records: Arc<Vec<(u64, Vec<u8>)>>,
+}
+
+impl Live {
+    pub fn id(&self) -> &RunId {
+        &self.manifest.id
+    }
+
+    /// The step init reported the job's start at.
+    pub fn job_start(&self) -> u64 {
+        self.job_start
+    }
+}
+
+/// The step a run writes the batch of context switches pending at step
+/// `at` in: the first step of the next window.
+fn switches_written_by(at: u64) -> u64 {
+    const WINDOW: u64 = rewind_trace::switches::WINDOW;
+    at.saturating_add(WINDOW - at % WINDOW)
+}
+
+/// The first step a run covers its forks at: forks that share its steps
+/// through `through` and start from its keyframe at `base`, or from boot
+/// without one. See [`live_covers`].
+fn handoff_step(through: u64, base: Option<u64>) -> u64 {
+    let past_shared = through.saturating_add(1);
+    match base {
+        Some(base) => past_shared.max(switches_written_by(base).saturating_add(1)),
+        None => past_shared,
+    }
+}
+
+/// Whether a run still executing at step `past` covers a fork that shares
+/// its steps up to `through` and starts from its keyframe at `base`: the
+/// run has listed every keyframe up to `through`, and recorded the batch
+/// of switches pending at `base`.
+fn live_covers(base: u64, through: u64, past: u64) -> bool {
+    through < past && switches_written_by(base) < past
 }
 
 /// The page store a run reads the keyframe it starts from out of.
@@ -345,7 +426,7 @@ impl Observer for Checked<'_> {
 }
 
 /// Collects the trace as it arrives and echoes output if asked.
-struct Recorder {
+struct Recorder<'a> {
     trace: TraceWriter<fs::File>,
     echo: Echo,
     progress: ProgressLine,
@@ -353,12 +434,124 @@ struct Recorder {
     error: Option<anyhow::Error>,
     /// Whether the machine pauses once init reports the job's exit.
     pause_at_exit: bool,
+    /// A handoff still to come, and what the recorder keeps for it.
+    handing: Option<Handing<'a>>,
 }
 
-impl Observer for Recorder {
+/// What a recorder keeps for a handoff still to come: the trace's records
+/// so far, the step init reported the job's start at once it has, and the
+/// step of the last record.
+struct Handing<'a> {
+    to: &'a Handoff,
+    records: Vec<(u64, Vec<u8>)>,
+    job_start: Option<u64>,
+    last_step: u64,
+    /// The step to hand off at, once the run has passed the step its
+    /// forks start perturbing at and knows the keyframe they start from.
+    at: Option<u64>,
+}
+
+impl<'a> Handing<'a> {
+    fn new(to: &'a Handoff) -> Handing<'a> {
+        Handing {
+            to,
+            records: Vec::new(),
+            job_start: None,
+            last_step: 0,
+            at: None,
+        }
+    }
+
+    /// The last step the forks share with the run, once the job has
+    /// started: the step before the later of the job's start and `from`.
+    fn through(&self) -> Option<u64> {
+        let start = self.job_start?.max(self.to.from);
+        Some(start.saturating_sub(1))
+    }
+}
+
+impl Recorder<'_> {
+    /// Whether the machine has passed init's report of the job's exit,
+    /// where it pauses for a keyframe there.
+    fn exit_due(&self) -> bool {
+        self.pause_at_exit && self.status.is_some()
+    }
+
+    /// Whether the machine, at step `at`, has passed the last step the
+    /// forks share with the run, with no step to hand off at yet: every
+    /// keyframe they may start from is taken by then.
+    fn aim_due(&self, at: u64) -> bool {
+        self.handing
+            .as_ref()
+            .is_some_and(|h| h.at.is_none() && h.through().is_some_and(|through| at > through))
+    }
+
+    /// The step the machine pauses at for the handoff: the step to hand
+    /// off at, once known, or the step after the last the forks share,
+    /// once the job has started. The trace's records reach the recorder in
+    /// batches, so the step of the last record lags the machine's.
+    fn pause_at(&self) -> Option<u64> {
+        let handing = self.handing.as_ref()?;
+        handing
+            .at
+            .or_else(|| handing.through().map(|t| t.saturating_add(1)))
+    }
+
+    /// Sets the step to hand off at from the steps of every keyframe the
+    /// run has taken, once the machine has passed the steps the forks
+    /// share with the run.
+    fn aim_handoff(&mut self, keyframes: &[u64]) {
+        let Some(handing) = &mut self.handing else {
+            return;
+        };
+        let Some(through) = handing.through() else {
+            return;
+        };
+        let base = fork_base(keyframes, through, None);
+        handing.at = Some(handoff_step(through, base));
+    }
+
+    /// Whether the machine, at step `at`, has reached the step it hands
+    /// off at.
+    fn handoff_due(&self, at: u64) -> bool {
+        self.handing
+            .as_ref()
+            .is_some_and(|h| h.at.is_some_and(|handoff| at >= handoff))
+    }
+
+    /// Sends the handoff a [`Live`] of the run in `dir`, which `manifest`
+    /// describes, with its machine at step `past`; once only. The caller
+    /// has listed every keyframe the run took and made it durable.
+    fn hand_off(&mut self, manifest: &Manifest, dir: &Path, past: u64) {
+        let Some(handing) = self.handing.take() else {
+            return;
+        };
+        let Some(job_start) = handing.job_start else {
+            return;
+        };
+        let mut records = handing.records;
+        records.retain(|(step, _)| *step < past);
+        let live = Live {
+            manifest: manifest.clone(),
+            dir: dir.to_path_buf(),
+            job_start,
+            past,
+            records: Arc::new(records),
+        };
+
+        // A search that has stopped listening has no use for the run.
+        let _ = handing.to.to.send(Arc::new(live));
+    }
+}
+
+impl Observer for Recorder<'_> {
     fn record(&mut self, step: u64, record: &[u8]) {
         if let Err(e) = self.trace.record(step, record) {
             self.error.get_or_insert(e.into());
+        }
+        if let Some(handing) = &mut self.handing {
+            handing.records.push((step, record.to_vec()));
+            handing.last_step = step;
         }
         if self.echo == Echo::Progress
             && let Some(line) = self.progress.at(step, Instant::now())
@@ -376,17 +569,25 @@ impl Observer for Recorder {
                     _ => std::io::stdout().write_all(bytes),
                 };
             }
-            EventKind::Mark { .. } => {
-                if let Some(rewind_init::Mark::Exit { status }) = event.init_mark() {
-                    self.status = Some(status);
+            EventKind::Mark { .. } => match event.init_mark() {
+                Some(rewind_init::Mark::Exit { status }) => self.status = Some(status),
+                Some(rewind_init::Mark::Start) => {
+                    if let Some(handing) = &mut self.handing {
+                        handing.job_start.get_or_insert(step);
+                    }
                 }
-            }
+                _ => {}
+            },
             _ => {}
         }
     }
 
+    /// The machine stops at init's report of the job's exit, when asked
+    /// to, and at init's report of the job's start, when the forks to hand
+    /// off to share no step after it.
     fn stop(&self) -> bool {
-        self.pause_at_exit && self.status.is_some()
+        let last_step = self.handing.as_ref().map_or(0, |h| h.last_step);
+        self.exit_due() || self.aim_due(last_step)
     }
 }
 
@@ -754,9 +955,10 @@ impl Run {
         how: Execution,
     ) -> Result<Run> {
         let (parent, start_from) = match start {
-            Start::Boot => (None, None),
-            Start::Fork { parent, step } => (Some(Parent { run: parent, step }), None),
-            Start::After(run) => (None, Some(run)),
+            Start::Boot => (None, StartFrom::Parent),
+            Start::Fork { parent, step } => (Some(Parent { run: parent, step }), StartFrom::Parent),
+            Start::After(run) => (None, StartFrom::Recorded(run)),
+            Start::Live(live) => (None, StartFrom::Live(live)),
         };
         let manifest = Manifest {
             version: MANIFEST_VERSION,
@@ -773,7 +975,7 @@ impl Run {
             first_difference: None,
             recorded_by: crate::VERSION.to_string(),
         };
-        Run::execute_manifest(home, manifest, start_from.as_ref(), how)
+        Run::execute_manifest(home, manifest, &start_from, how)
     }
 
     /// Executes the run `manifest` describes, filling in how it ended,
@@ -781,7 +983,7 @@ impl Run {
     fn execute_manifest(
         home: &Home,
         mut manifest: Manifest,
-        start_from: Option<&RunId>,
+        start_from: &StartFrom,
         how: Execution,
     ) -> Result<Run> {
         let Execution {
@@ -789,6 +991,7 @@ impl Run {
             keyframes,
             limit,
             store: restore_store,
+            handoff,
         } = how;
         let dir = home.runs().join(&manifest.id);
 
@@ -911,6 +1114,9 @@ impl Run {
         }
         drop(registering);
 
+        // A run that keeps an earlier execution's keyframes takes none,
+        // so it hands off nothing: the runs that start from it read those
+        // keyframes once it has finished.
         let (new_trace, trace_file) = NewTrace::create(&dir)?;
         let mut recorder = Recorder {
             trace: TraceWriter::new(trace_file),
@@ -919,6 +1125,9 @@ impl Run {
             status: None,
             error: None,
             pause_at_exit: false,
+            handing: handoff
+                .filter(|_| keyframes == Keyframes::Take)
+                .map(Handing::new),
         };
 
         // A run restored at its parent's keyframe begins its trace with
@@ -928,8 +1137,10 @@ impl Run {
                 recorder.record(*step, record);
             }
         }
-        if let TimeLimit::Wall(limit) = limit {
-            machine.set_deadline(Some(start + limit));
+        match limit {
+            TimeLimit::None => {}
+            TimeLimit::Wall(limit) => machine.set_deadline(Some(start + limit)),
+            TimeLimit::Late(limit) => machine.set_late_deadline(start, limit),
         }
 
         let outcome = match keyframes {
@@ -971,24 +1182,58 @@ impl Run {
                 // exited before the shared step has passed its exit.
                 let mut taking = crate::keyframes::Taking::new(&dir, parent, memory)?;
                 recorder.pause_at_exit = recorder.status.is_none();
+                let pause_at = recorder.pause_at();
                 let mut outcome = crate::keyframes::run_with_keyframes(
                     &mut machine,
                     &mut recorder,
                     &dir,
                     store,
                     &mut taking,
+                    pause_at,
                 )?;
-                if let Outcome::Paused = outcome {
-                    recorder.pause_at_exit = false;
-                    if taking.parent != Some(machine.step()) {
-                        taking.take(&mut machine, &dir, store)?;
+                while let Outcome::Paused = outcome {
+                    let exit = recorder.exit_due();
+                    let aim = recorder.aim_due(machine.step());
+                    if !exit && !aim && !recorder.handoff_due(machine.step()) {
+                        break;
                     }
+
+                    // The keyframe where init reports the job's exit.
+                    if exit {
+                        recorder.pause_at_exit = false;
+                        if taking.parent != Some(machine.step()) {
+                            taking.take(&mut machine, &dir, store)?;
+                        }
+                    }
+
+                    // Past the steps the runs that start from this one
+                    // share with it, every keyframe they may start from is
+                    // taken: listed, they say where to hand off.
+                    if aim {
+                        taking.flush(store)?;
+                        let listed = crate::keyframes::Layers::open(
+                            &dir,
+                            manifest.shared_keyframes.as_ref(),
+                        )?;
+                        recorder.aim_handoff(&listed.steps());
+                    }
+
+                    // The runs that start from this one, once every
+                    // keyframe they may start from is listed and durable,
+                    // and the switches pending at the one they start from
+                    // are recorded.
+                    if recorder.handoff_due(machine.step()) {
+                        taking.flush(store)?;
+                        recorder.hand_off(&manifest, &dir, machine.step());
+                    }
+                    let pause_at = recorder.pause_at();
                     outcome = crate::keyframes::run_with_keyframes(
                         &mut machine,
                         &mut recorder,
                         &dir,
                         store,
                         &mut taking,
+                        pause_at,
                     )?;
                 }
 
@@ -1103,6 +1348,7 @@ impl Run {
             status: None,
             error: None,
             pause_at_exit: false,
+            handing: None,
         };
         let mut machine = Machine::boot(&self.manifest.spec.config()?, DirtyLog::On)?;
         machine.run(self.replay_end(), &mut recorder)?;
@@ -1182,8 +1428,9 @@ impl Run {
             keyframes: Keyframes::Take,
             limit,
             store: RestoreStore::Own,
+            handoff: None,
         };
-        Run::execute_manifest(home, manifest, None, how)
+        Run::execute_manifest(home, manifest, &StartFrom::Parent, how)
     }
 
     /// Whether the exit that made `step` armed the guest's timer, which
@@ -1502,6 +1749,7 @@ impl Run {
             status: None,
             error: None,
             pause_at_exit: false,
+            handing: None,
         };
         let mut machine = match start {
             Some(kf) => self.machine_at(home, kf, Keep::Nothing, &mut recorder)?,
@@ -1854,6 +2102,15 @@ fn now() -> u64 {
         .as_secs()
 }
 
+/// The run an execution starts from, when it shares its start with one:
+/// its parent, if it is a fork, or a run it was told to start from,
+/// recorded or still executing.
+enum StartFrom {
+    Parent,
+    Recorded(RunId),
+    Live(Arc<Live>),
+}
+
 /// How a run starts at the keyframe of a run it shares its start with, its
 /// parent or one it was told to start from, rather than at boot.
 struct Shortcut {
@@ -1867,7 +2124,7 @@ struct Shortcut {
     /// The parent's trace, record by record, and how many of its records
     /// are at or before the keyframe: the prefix this run's trace begins
     /// with.
-    records: Vec<(u64, Vec<u8>)>,
+    records: Arc<Vec<(u64, Vec<u8>)>>,
     prefix: usize,
     /// The directory a keyframe at the last shared step belongs in.
     owner: PathBuf,
@@ -1878,8 +2135,12 @@ impl Shortcut {
     /// or else its parent, is here, shares steps with it, and has a
     /// keyframe among them. Anything missing or unreadable means starting
     /// from boot, which is never wrong.
-    fn find(home: &Home, manifest: &Manifest, start_from: Option<&RunId>) -> Option<Shortcut> {
-        let parent_id = start_from.or(manifest.parent.as_ref().map(|p| &p.run))?;
+    fn find(home: &Home, manifest: &Manifest, start_from: &StartFrom) -> Option<Shortcut> {
+        let parent_id = match start_from {
+            StartFrom::Live(live) => return Shortcut::of_live(manifest, live),
+            StartFrom::Recorded(id) => id,
+            StartFrom::Parent => &manifest.parent.as_ref()?.run,
+        };
         if *parent_id == manifest.id {
             return None;
         }
@@ -1896,7 +2157,7 @@ impl Shortcut {
         let layers = parent.keyframes().ok()?;
         let base = fork_base(&layers.steps(), through, parent.replay_end())?;
         let chain = layers.chain(base).ok()?;
-        let records = rewind_trace::records(&parent.dir.join(TRACE)).ok()?;
+        let records = Arc::new(rewind_trace::records(&parent.dir.join(TRACE)).ok()?);
         let prefix = records.partition_point(|(step, _)| *step <= base);
         Some(Shortcut {
             shared: crate::keyframes::Shared {
@@ -1906,6 +2167,38 @@ impl Shortcut {
             base,
             chain,
             records,
+            prefix,
+            owner: layers.owner(through).to_path_buf(),
+        })
+    }
+
+    /// The shortcut for the run `manifest` describes from `live`, a run
+    /// still executing, when the two share steps and `live` covers them:
+    /// the keyframe they start from is listed, and so is every record up
+    /// to it and the switches pending there. A run `live` does not cover
+    /// starts from boot, which is never wrong.
+    fn of_live(manifest: &Manifest, live: &Live) -> Option<Shortcut> {
+        let through = live.manifest.spec.same_through(&manifest.spec)?;
+        if through == u64::MAX {
+            return None;
+        }
+        let layers =
+            crate::keyframes::Layers::open(&live.dir, live.manifest.shared_keyframes.as_ref())
+                .ok()?;
+        let base = fork_base(&layers.steps(), through, None)?;
+        if !live_covers(base, through, live.past) {
+            return None;
+        }
+        let chain = layers.chain(base).ok()?;
+        let prefix = live.records.partition_point(|(step, _)| *step <= base);
+        Some(Shortcut {
+            shared: crate::keyframes::Shared {
+                run: live.manifest.id.clone(),
+                through,
+            },
+            base,
+            chain,
+            records: Arc::clone(&live.records),
             prefix,
             owner: layers.owner(through).to_path_buf(),
         })
@@ -2150,7 +2443,7 @@ pub(crate) mod tests {
         // an import of a run already here takes it twice.
         let dir = std::env::temp_dir().join(format!("rewind-relock-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
-        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let spawning = {
             let stop = stop.clone();
             std::thread::spawn(move || {
@@ -2319,6 +2612,39 @@ pub(crate) mod tests {
         assert_eq!(fork_base(&STEPS, 250, Some(300)), Some(200));
         assert_eq!(fork_base(&STEPS, 50, None), None);
         assert_eq!(fork_base(&STEPS, 300, Some(100)), None);
+    }
+
+    #[test]
+    fn a_live_run_covers_a_fork_once_past_its_keyframes_and_pending_switches() {
+        // A run still executing, at step `past`, has listed every keyframe
+        // before `past` and recorded its trace before `past`. A fork that
+        // shares steps up to `through`, from the keyframe at `base`, needs
+        // the keyframes up to `through` and the switch batch written at the
+        // first window boundary after `base`.
+        const WINDOW: u64 = rewind_trace::switches::WINDOW;
+        assert!(live_covers(100, 200, WINDOW + 1));
+        assert!(!live_covers(100, 200, WINDOW));
+        assert!(!live_covers(100, 5000, 5000));
+        assert!(live_covers(WINDOW, WINDOW + 10, 2 * WINDOW + 1));
+        assert!(!live_covers(WINDOW, WINDOW + 10, 2 * WINDOW));
+    }
+
+    #[test]
+    fn a_run_hands_off_at_the_first_step_that_covers_its_forks() {
+        // A run's forks share its steps through `through` and start from
+        // its latest keyframe at or before then, or from boot without one.
+        // The run hands off at the first step that covers them: past
+        // `through`, and past the switch batch pending at the keyframe. A
+        // step earlier does not cover them.
+        const WINDOW: u64 = rewind_trace::switches::WINDOW;
+        for through in [5, WINDOW - 1, WINDOW, 3 * WINDOW + 7] {
+            for base in [0, through / 2, through] {
+                let at = handoff_step(through, Some(base));
+                assert!(live_covers(base, through, at), "{through} {base}");
+                assert!(!live_covers(base, through, at - 1), "{through} {base}");
+            }
+            assert_eq!(handoff_step(through, None), through + 1);
+        }
     }
 
     #[test]
@@ -3108,6 +3434,7 @@ pub(crate) mod tests {
                     keyframes: Keyframes::Take,
                     limit: TimeLimit::None,
                     store: RestoreStore::Own,
+                    handoff: None,
                 },
             );
             assert!(fork.is_err());
@@ -3175,6 +3502,7 @@ pub(crate) mod tests {
                     keyframes: Keyframes::Skip,
                     limit: TimeLimit::None,
                     store,
+                    handoff: None,
                 },
             )
         };

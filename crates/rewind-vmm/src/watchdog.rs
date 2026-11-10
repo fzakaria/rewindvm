@@ -5,9 +5,9 @@
 //! machine expired and signals the vCPU thread, which pulls it out of
 //! KVM_RUN to see the mark.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::sync::{Arc, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -17,6 +17,50 @@ use crate::pmu::{install_signal_handler, overflow_signal};
 /// waiting: a signal that lands just before the thread enters KVM_RUN is
 /// handled outside it and does not pull it out.
 const RESIGNAL: Duration = Duration::from_millis(50);
+
+/// How often a watchdog whose limit is not set yet looks again.
+const UNSET_POLL: Duration = Duration::from_millis(100);
+
+/// A time limit another thread decides after the runs it bounds have
+/// started, shared with them. Until it is set, a run under it has no
+/// deadline. The first limit set is the one that holds.
+#[derive(Clone, Debug, Default)]
+pub struct LateLimit(Arc<OnceLock<Duration>>);
+
+impl LateLimit {
+    pub fn new() -> LateLimit {
+        LateLimit::default()
+    }
+
+    /// Sets the limit, unless an earlier call set it.
+    pub fn set(&self, limit: Duration) {
+        let _ = self.0.set(limit);
+    }
+
+    /// The limit, once set.
+    pub fn get(&self) -> Option<Duration> {
+        self.0.get().copied()
+    }
+}
+
+/// When a machine's run stops as timed out.
+#[derive(Clone, Debug)]
+pub enum Deadline {
+    /// At this instant.
+    At(Instant),
+    /// `limit` after `from`, once another thread sets the limit.
+    Late { from: Instant, limit: LateLimit },
+}
+
+impl Deadline {
+    /// The instant the run stops at, once known.
+    fn when(&self) -> Option<Instant> {
+        match self {
+            Deadline::At(at) => Some(*at),
+            Deadline::Late { from, limit } => limit.get().map(|l| *from + l),
+        }
+    }
+}
 
 /// A thread to signal. pthread_t is a number with glibc and a pointer with
 /// musl, which the static release build uses, and a pointer is not Send.
@@ -48,7 +92,7 @@ pub(crate) struct Watchdog {
 
 impl Watchdog {
     /// Watches the calling thread until `deadline`.
-    pub(crate) fn start(deadline: Instant) -> Watchdog {
+    pub(crate) fn start(deadline: Deadline) -> Watchdog {
         install_signal_handler();
         let expired = Arc::new(AtomicBool::new(false));
         // SAFETY: pthread_self has no preconditions.
@@ -56,9 +100,18 @@ impl Watchdog {
         let (stop, stopped) = mpsc::channel::<()>();
         let mark = expired.clone();
         let thread = std::thread::spawn(move || {
-            let wait = deadline.saturating_duration_since(Instant::now());
-            if stopped.recv_timeout(wait) != Err(RecvTimeoutError::Timeout) {
-                return;
+            // To the deadline, looking again every UNSET_POLL while a late
+            // limit is not set.
+            loop {
+                let now = Instant::now();
+                let wait = match deadline.when() {
+                    Some(at) if at <= now => break,
+                    Some(at) => at - now,
+                    None => UNSET_POLL,
+                };
+                if stopped.recv_timeout(wait) != Err(RecvTimeoutError::Timeout) {
+                    return;
+                }
             }
             mark.store(true, Ordering::Relaxed);
             loop {
@@ -100,7 +153,7 @@ mod tests {
     fn a_blocked_thread_is_woken_at_the_deadline() {
         let deadline = Instant::now() + Duration::from_millis(200);
         let blocked = std::thread::spawn(move || {
-            let watchdog = Watchdog::start(deadline);
+            let watchdog = Watchdog::start(Deadline::At(deadline));
             let expired = watchdog.expired();
             assert!(!expired.load(Ordering::Relaxed));
             while !expired.load(Ordering::Relaxed) {
@@ -114,5 +167,39 @@ mod tests {
         // Generous, so a loaded build machine does not fail it; a thread the
         // watchdog never woke would not get here at all.
         assert!(woke < deadline + Duration::from_secs(60));
+    }
+
+    // A watchdog whose limit is not set yet leaves its thread alone. Once
+    // another thread sets the limit, the watchdog wakes its thread at the
+    // limit from the instant the deadline counts from, and not before.
+    #[test]
+    fn a_limit_set_later_wakes_the_thread_at_that_limit() {
+        const UNSET_FOR: Duration = Duration::from_millis(300);
+        const LIMIT: Duration = Duration::from_millis(500);
+        let from = Instant::now();
+        let limit = LateLimit::new();
+        let deadline = Deadline::Late {
+            from,
+            limit: limit.clone(),
+        };
+        let blocked = std::thread::spawn(move || {
+            let watchdog = Watchdog::start(deadline);
+            let expired = watchdog.expired();
+            while !expired.load(Ordering::Relaxed) {
+                // SAFETY: pause has no preconditions; a signal ends it.
+                unsafe { libc::pause() };
+            }
+            Instant::now()
+        });
+
+        // Unset, the limit wakes no one.
+        std::thread::sleep(UNSET_FOR);
+        assert!(!blocked.is_finished());
+
+        // Set, the limit counts from `from`, not from when it was set.
+        limit.set(LIMIT);
+        let woke = blocked.join().unwrap();
+        assert!(woke >= from + LIMIT);
+        assert!(woke < from + LIMIT + Duration::from_secs(60));
     }
 }
