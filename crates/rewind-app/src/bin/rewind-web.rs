@@ -116,6 +116,16 @@ mod web {
         });
     }
 
+    /// Says the page could not read the file `name` it started under
+    /// `token`, or could not take an export out of it: `why` is the
+    /// page's reason, shown as it is. Without this call the app would
+    /// show the read as still going.
+    #[wasm_bindgen]
+    pub fn unread_file(name: String, why: String, token: Option<u32>) {
+        let request = page::file_read(token);
+        page::deliver(Delivery::Unread { name, why, request });
+    }
+
     /// Says the page could not fetch `url`: the server's answer, or None
     /// when the browser got none.
     #[wasm_bindgen]

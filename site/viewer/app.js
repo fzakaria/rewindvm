@@ -151,13 +151,14 @@ function showStopped(error) {
   status.hidden = false;
 }
 
-// Calls into the app. A call that throws is the app's code stopping.
+// Calls into the app and gives back what the call returns. A call that
+// throws is the app's code stopping.
 function callApp(call) {
   if (phase !== Phase.Running) {
     return;
   }
   try {
-    call();
+    return call();
   } catch (error) {
     showStopped(error);
   }
@@ -270,13 +271,17 @@ async function fetchRuns(url, compare, step) {
 
 // Hands a picked or dropped file to the app, read in the browser. A zip
 // is opened as the .rwd file inside it. A file that comes while the app
-// loads is held until the app is on screen.
+// loads is held until the app is on screen. The app numbers the read
+// when it starts, so of two files, or a file and a fetch, the one asked
+// for last wins however their bytes arrive; the token says which read
+// the bytes, or the reason there are none, belong to.
 async function openFile(file) {
   if (phase === Phase.Starting) {
     heldFile = file;
     return;
   }
   say(null);
+  const token = callApp(() => web.begin_file(file.name));
 
   // The file's bytes, which the browser can fail to read, as when the
   // file was removed after it was picked.
@@ -284,13 +289,19 @@ async function openFile(file) {
   try {
     bytes = new Uint8Array(await file.arrayBuffer());
   } catch {
-    say(`The browser could not read ${file.name}.`);
+    callApp(() =>
+      web.unread_file(
+        file.name,
+        `The browser could not read ${file.name}.`,
+        token,
+      ),
+    );
     return;
   }
 
   // A plain export goes to the app as it is.
   if (!isZip(bytes)) {
-    callApp(() => web.open_file(file.name, bytes));
+    callApp(() => web.open_file(file.name, bytes, token));
     return;
   }
 
@@ -300,12 +311,14 @@ async function openFile(file) {
     inside = await rwdFromZip(bytes);
   } catch (error) {
     if (error instanceof ZipRefusal) {
-      say(`${file.name} is ${error.reason}.`);
+      callApp(() =>
+        web.unread_file(file.name, `${file.name} is ${error.reason}.`, token),
+      );
       return;
     }
     throw error;
   }
-  callApp(() => web.open_file(inside.name, inside.bytes));
+  callApp(() => web.open_file(inside.name, inside.bytes, token));
 }
 
 // The address follows what is on screen once the playhead rests, without
