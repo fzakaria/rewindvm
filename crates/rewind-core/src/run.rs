@@ -1012,6 +1012,7 @@ impl Run {
         };
         let mut machine = Machine::boot(&self.manifest.spec.config()?)?;
         machine.run(self.replay_end(), &mut recorder)?;
+        self.end_replay(&mut machine, &mut recorder);
         recorder.trace.finish()?;
         let records = rewind_trace::records(tmp.path())?;
         let again = Trace::decode(&records)?;
@@ -1030,6 +1031,19 @@ impl Run {
             .as_ref()
             .filter(|o| o.stop.timeout().is_some())
             .map(|o| o.step)
+    }
+
+    /// Ends the trace of a replay as the recording's ended, when `machine`
+    /// is paused at the step where the wall-clock limit stopped the
+    /// recording: the recording wrote its pending context switches there,
+    /// and the replay's guest, which did not stop, has not written the
+    /// replay's. A replay whose guest stopped by itself has ended its own
+    /// trace.
+    fn end_replay(&self, machine: &mut Machine, obs: &mut dyn Observer) {
+        if self.replay_end() != Some(machine.step()) {
+            return;
+        }
+        machine.finish_switches(obs);
     }
 
     /// Where the run's keyframes are, its own and the ones it shares.
@@ -1382,6 +1396,7 @@ impl Run {
             watch.at_keyframe(&mut machine)?;
         }
         machine.run(self.replay_end(), &mut recorder)?;
+        self.end_replay(&mut machine, &mut recorder);
         recorder.trace.finish()?;
         // The replay's own records, read against the run's up to the
         // keyframe, and both sides' switches after it: the replay writes
@@ -1750,7 +1765,7 @@ impl Shortcut {
             return None;
         }
         let layers = parent.keyframes().ok()?;
-        let base = layers.steps().into_iter().rfind(|s| *s <= through)?;
+        let base = fork_base(&layers.steps(), through, parent.replay_end())?;
         let chain = layers.chain(base).ok()?;
         let records = rewind_trace::records(&parent.dir.join(TRACE)).ok()?;
         let prefix = records.partition_point(|(step, _)| *step <= base);
@@ -1766,6 +1781,21 @@ impl Shortcut {
             owner: layers.owner(through).to_path_buf(),
         })
     }
+}
+
+/// The keyframe a run starts from, among its parent's keyframes at
+/// `steps`: the latest at or before `through`, the last step the two
+/// share. `host_stopped_at` is the step the wall-clock limit stopped the
+/// parent's recording at, if the limit did, and no keyframe from that step
+/// on is taken. The parent's trace ends its context switches there, and a
+/// run that goes on from that step has them still pending, which
+/// [`rewind_trace::switches::Encoder::resume`] reads only from a batch
+/// written after the keyframe.
+fn fork_base(steps: &[u64], through: u64, host_stopped_at: Option<u64>) -> Option<u64> {
+    steps
+        .iter()
+        .copied()
+        .rfind(|s| *s <= through && host_stopped_at.is_none_or(|end| *s < end))
 }
 
 /// A guest that went this long without an exit before its time limit was
@@ -2139,6 +2169,21 @@ pub(crate) mod tests {
         ))));
         assert!(!keeps_recording(Some(&ended(timed_out))));
         assert!(!keeps_recording(None));
+    }
+
+    #[test]
+    fn a_fork_starts_before_the_step_a_time_limit_stopped_its_parent_at() {
+        // Keyframes at 100, 200 and 300. A fork sharing 250 steps starts
+        // at 200 and one sharing every step at 300. With the parent
+        // stopped by its time limit at 300, a fork sharing every step
+        // starts at 200, and one sharing fewer steps starts where it did.
+        const STEPS: [u64; 3] = [100, 200, 300];
+        assert_eq!(fork_base(&STEPS, 250, None), Some(200));
+        assert_eq!(fork_base(&STEPS, u64::MAX - 1, None), Some(300));
+        assert_eq!(fork_base(&STEPS, u64::MAX - 1, Some(300)), Some(200));
+        assert_eq!(fork_base(&STEPS, 250, Some(300)), Some(200));
+        assert_eq!(fork_base(&STEPS, 50, None), None);
+        assert_eq!(fork_base(&STEPS, 300, Some(100)), None);
     }
 
     #[test]

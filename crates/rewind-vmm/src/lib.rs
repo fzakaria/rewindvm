@@ -572,6 +572,15 @@ impl Machine {
         self.deadline = deadline;
     }
 
+    /// Writes the switches still pending as a batch at the machine's
+    /// step, as a machine that stops there writes them. For a replay
+    /// paused at the step where the host's time limit stopped its
+    /// recording: the replay's guest has not stopped, and the recording's
+    /// trace ends with that batch. Nothing when no switch is pending.
+    pub fn finish_switches(&mut self, obs: &mut dyn Observer) {
+        self.dev.finish_switches(obs);
+    }
+
     /// Where the vCPU is now, and how long since the guest last exited.
     fn stall(&self) -> Result<Stall> {
         let rip = self.vcpu.get_regs()?.rip;
@@ -726,12 +735,11 @@ impl Machine {
                 Err(e) => return Err(e).context("KVM_RUN"),
             };
 
-            // A machine that stopped without a step, as a triple fault
-            // stops it, ends its trace here.
-            if let (None, Some(stop)) = (counted, self.dev.stop) {
-                self.dev.end_trace(stop, obs)?;
-            }
+            // A machine that stopped ends its trace here, whether a step
+            // stopped it, as an exit or a stall does, or no step did, as a
+            // triple fault.
             if let Some(stop) = self.dev.stop {
+                self.dev.end_trace(stop, obs)?;
                 return Ok(Outcome::Stopped(stop));
             }
             if counted.is_some() && self.deadline.is_some() {
@@ -1121,7 +1129,6 @@ impl Devices {
                 }
             }
             pv::PORT_EXIT => {
-                self.finish_switches(obs);
                 self.stop = Some(Stop::Guest(GuestExit::from_port(value)));
             }
             pv::PORT_SETUP => {
@@ -1159,21 +1166,23 @@ impl Devices {
         }
     }
 
-    /// Ends the trace of a machine that stopped as `stop` without a step
-    /// of its own. The trace holds what the inputs decide up to the last
-    /// step, so a replay that pauses at that step makes the same trace.
+    /// Ends the trace of a machine that stopped as `stop`, whichever way
+    /// a machine stops. The trace holds what the inputs decide up to the
+    /// last step, so a replay that pauses at that step and finishes its
+    /// switches ([`Machine::finish_switches`]) makes the same trace.
     fn end_trace(&mut self, stop: Stop, obs: &mut dyn Observer) -> Result<()> {
-        // The time limit lands wherever the host's signal finds the guest
-        // between two exits. How many records the guest had buffered by
-        // then is the host's doing, so the trace leaves them out.
-        if matches!(stop, Stop::TimedOut(_)) {
-            return Ok(());
+        // A guest that stopped by itself did so at the same instruction in
+        // every execution, so the trace takes what the guest buffered since
+        // the last step. The time limit lands wherever the host's signal
+        // finds the guest between two exits. How many records the guest
+        // had buffered by then is the host's doing, so the trace leaves
+        // them out.
+        if !matches!(stop, Stop::TimedOut(_)) {
+            self.drain_io(obs)?;
         }
 
-        // A guest that stopped by itself did so at the same instruction in
-        // every execution: the trace takes what the guest buffered since
-        // the last step, and the switches still pending.
-        self.drain_io(obs)?;
+        // Every pending switch was a step at or before the last one,
+        // whatever stopped the machine.
         self.finish_switches(obs);
         Ok(())
     }
@@ -1465,6 +1474,101 @@ mod tests {
         let log = rewind_trace::io_records::decode(&kept.0).unwrap();
         assert_eq!(log.records.len(), 1);
         assert!(kept.0.iter().all(|(step, _)| *step == 12));
+    }
+
+    /// A switch record as the guest lays one out, to the thread `tid`.
+    fn guest_switch(tid: u32) -> Vec<u8> {
+        const SWITCH_KIND: u16 = 14;
+        const TASK_PID: u32 = 40;
+        const TASK_NAME: &[u8] = b"worker\0";
+        let mut r = Vec::new();
+        r.extend_from_slice(&((pv::RECORD_HEADER + TASK_NAME.len()) as u32).to_le_bytes());
+        r.extend_from_slice(&SWITCH_KIND.to_le_bytes());
+        r.extend_from_slice(&0u16.to_le_bytes());
+        r.extend_from_slice(&TASK_PID.to_le_bytes());
+        r.extend_from_slice(&tid.to_le_bytes());
+        r.extend_from_slice(&0u32.to_le_bytes());
+        r.extend_from_slice(TASK_NAME);
+        r
+    }
+
+    /// Devices whose guest switched to a thread at each of `steps`, with
+    /// the switches still pending and the machine at the last of them.
+    fn devices_with_pending_switches(steps: &[u64]) -> Devices {
+        let mut dev = devices(0);
+        dev.switches = Some(rewind_trace::switches::Encoder::new());
+        let pointer = (IO_BUF as u32).to_le_bytes();
+        let mut kept = Kept::default();
+        for (i, step) in steps.iter().enumerate() {
+            dev.step = *step;
+            dev.ram.write(IO_BUF, &guest_switch(i as u32)).unwrap();
+            dev.io_out(pv::PORT_EMIT, &pointer, &mut kept).unwrap();
+        }
+        assert!(kept.0.is_empty());
+        dev
+    }
+
+    /// The steps of the switches in the batches among `records`.
+    fn switch_steps(records: &[(u64, Vec<u8>)]) -> Vec<u64> {
+        let mut decoder = rewind_trace::switches::Decoder::default();
+        let mut switches = Vec::new();
+        for (step, record) in records {
+            assert!(rewind_trace::switches::is_batch(record));
+            decoder.decode(*step, record, &mut switches).unwrap();
+        }
+        switches.iter().map(|s| s.step).collect()
+    }
+
+    #[test]
+    fn every_stop_writes_the_pending_switches() {
+        // Switches at steps 3 and 5 still pending, and a machine that
+        // stops at step 6 each way a machine stops: a guest exit, a stall
+        // at the idle port, a triple fault and the time limit. Each trace
+        // ends with one batch at step 6 holding both switches.
+        const SWITCHED_AT: [u64; 2] = [3, 5];
+        const STOPPED_AT: u64 = 6;
+        let exit_port = |port: u16| {
+            let mut dev = devices_with_pending_switches(&SWITCHED_AT);
+            dev.step = STOPPED_AT;
+            let mut kept = Kept::default();
+            dev.io_out(port, &0u32.to_le_bytes(), &mut kept).unwrap();
+            (dev, kept)
+        };
+        let (exited, kept_exit) = exit_port(pv::PORT_EXIT);
+        let (stalled, kept_stall) = exit_port(pv::PORT_IDLE);
+        assert_eq!(stalled.stop, Some(Stop::Stalled));
+        let mut faulted = devices_with_pending_switches(&SWITCHED_AT);
+        faulted.step = STOPPED_AT;
+        faulted.stop = Some(Stop::TripleFault);
+        let mut limited = devices_with_pending_switches(&SWITCHED_AT);
+        limited.step = STOPPED_AT;
+        limited.stop = Some(timed_out());
+
+        for (mut dev, mut kept) in [
+            (exited, kept_exit),
+            (stalled, kept_stall),
+            (faulted, Kept::default()),
+            (limited, Kept::default()),
+        ] {
+            let stop = dev.stop.unwrap();
+            dev.end_trace(stop, &mut kept).unwrap();
+            assert_eq!(kept.0.len(), 1, "{stop:?}");
+            assert_eq!(kept.0[0].0, STOPPED_AT, "{stop:?}");
+            assert_eq!(switch_steps(&kept.0), SWITCHED_AT, "{stop:?}");
+        }
+    }
+
+    #[test]
+    fn a_trace_is_ended_once() {
+        // A replay ends its trace where the recording's time limit fell,
+        // and a machine that stopped has ended its own: ending a trace
+        // again writes no second batch.
+        let mut dev = devices_with_pending_switches(&[3]);
+        let mut kept = Kept::default();
+        dev.finish_switches(&mut kept);
+        dev.end_trace(Stop::Stalled, &mut kept).unwrap();
+        dev.finish_switches(&mut kept);
+        assert_eq!(kept.0.len(), 1);
     }
 
     #[test]
