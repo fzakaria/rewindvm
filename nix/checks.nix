@@ -1093,6 +1093,24 @@ let
         $CC -static -O1 -g -pthread -o $out/bin/leader leader.c
       '';
 
+  # A root with nixpkgs' coreutils, copied into the root's /nix/store with
+  # its closure, beside busybox's shell, for checks.file-events: cp opens
+  # the directory it copies into with O_PATH and opens the copy relative
+  # to that descriptor. /var/run is a link to /run, as on most systems.
+  coreutilsRoot =
+    let
+      closure = pkgs.closureInfo { rootPaths = [ pkgs.coreutils ]; };
+    in
+    pkgs.runCommand "rewind-coreutils-root" { } ''
+      mkdir -p $out/bin $out/nix/store $out/run $out/var $out/tmp
+      while read -r path; do
+        cp -a "$path" $out/nix/store/
+      done < ${closure}/store-paths
+      cp ${pkgs.pkgsStatic.busybox}/bin/busybox $out/bin/
+      ln -s busybox $out/bin/sh
+      ln -s ../run $out/var/run
+    '';
+
   # Background jobs racing through a pipe, the kernel's RNG, and a sleep:
   # everything that would differ between two runs of an ordinary VM.
   workload = ''
@@ -4742,6 +4760,61 @@ in
         end=$(rewind ls --json | sed -n 's/.*"name":"tsc",.*"steps":\([0-9]*\).*/\1/p')
         printf '/bin/tsc enable; exit\n' | rewind shell tsc "$end" | tee shell
         grep -q 'mode 2 tsc' shell
+        touch $out
+      '';
+
+  # checks.file-events: every file event names its file one way, the
+  # path the kernel resolves, whatever the program passed. cp's open
+  # relative to a directory it opened with O_PATH is reported, as is an
+  # openat2; a file written as /var/run/x.pid, where /var/run links to
+  # /run, is opened, closed and removed as /run/x.pid, so its open and
+  # its close match and single-writer sees one writer where there was
+  # one; a relative rename names both paths from the working directory;
+  # and an open, unlink or rename that failed is no event. Boots the VM,
+  # so it needs /dev/kvm.
+  file-events =
+    pkgs.runCommand "rewind-file-events"
+      {
+        nativeBuildInputs = [ rewind ];
+        requiredSystemFeatures = [ "kvm" ];
+      }
+      ''
+        export REWIND_HOME=$TMPDIR/rewind
+        cp=${pkgs.coreutils}/bin/cp
+        rewind run -q --clock exits --name files --root ${coreutilsRoot} -- sh -c "
+          echo hello > /tmp/new.c
+          mkdir /tmp/dir
+          $cp /tmp/new.c /tmp/dir/
+          echo pid > /var/run/x.pid
+          rm /var/run/x.pid
+          cd /tmp && mv new.c moved.c
+          sh -c 'echo x > /nope/file' 2> /dev/null
+          rm /nope/gone 2> /dev/null
+          mv /nope/a /nope/b 2> /dev/null
+          exit 0"
+        rewind events files | tee events
+        grep -q 'open("/tmp/dir/new.c"' events
+        grep -q 'close("/tmp/dir/new.c"' events
+        grep -q 'open("/run/x.pid"' events
+        grep -q 'close("/run/x.pid"' events
+        grep -q 'unlink("/run/x.pid"' events
+        grep -q 'rename("/tmp/new.c", "/tmp/moved.c")' events
+        test "$(grep -c 'var/run' events)" = 0
+        test "$(grep -c '/nope' events)" = 0
+
+        # One writer at a time of a file named through the link, and
+        # through it and directly: a conflict only when the second opens
+        # while the first still holds it.
+        prop() {
+          rewind check -j 2 --clock exits --schedules 1 --all --no-narrow \
+            --property 'single-writer=*.pid' --root ${coreutilsRoot} -- sh -c "$1" > out
+          status=$?
+          cat out
+          return $status
+        }
+        prop '(echo a > /var/run/x.pid; sleep 1) & wait; (echo b > /run/x.pid) & wait'
+        if prop '(exec 3>> /var/run/x.pid; echo a >&3; sleep 2) & (sleep 1; echo b >> /run/x.pid) & wait'; then exit 1; fi
+        grep -q 'opened /run/x.pid for writing while process' out
         touch $out
       '';
 

@@ -120,7 +120,7 @@ diff -ruN a/arch/x86/kernel/cpu/Makefile b/arch/x86/kernel/cpu/Makefile
 diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 --- a/arch/x86/kernel/cpu/rewind.c	1969-12-31 16:00:00.000000000 -0800
 +++ b/arch/x86/kernel/cpu/rewind.c	1969-12-31 16:00:00.000000000 -0800
-@@ -0,0 +1,1484 @@
+@@ -0,0 +1,1504 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Rewind VM guest platform.
@@ -166,6 +166,7 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +#include <linux/miscdevice.h>
 +#include <linux/mm.h>
 +#include <linux/mutex.h>
++#include <linux/namei.h>
 +#include <linux/pm.h>
 +#include <linux/poll.h>
 +#include <linux/random.h>
@@ -1068,105 +1069,129 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 + */
 +static DEFINE_MUTEX(rewind_path_lock);
 +static char rewind_path_a[PATH_MAX], rewind_path_b[PATH_MAX];
-+static char rewind_path_arg[PATH_MAX];
++static char rewind_path_arg[PATH_MAX], rewind_path_dir[PATH_MAX];
 +
 +/*
-+ * Drops "." components and applies ".." ones to an absolute path, in
-+ * place. Lexical, like a reader would: a ".." after a symlink names the
-+ * link's parent here, where the kernel follows the link.
++ * A path the kernel names an open file by, without the " (deleted)" it
++ * adds once the file is unlinked, so it matches the path it was opened by.
 + */
-+static void rewind_normalize_path(char *path)
++static void rewind_strip_deleted(char *path)
 +{
-+	char *out = path, *in = path;
++	static const char deleted[] = " (deleted)";
++	size_t len = strlen(path), tail = sizeof(deleted) - 1;
 +
-+	while (*in) {
-+		char *end;
-+		size_t len;
-+
-+		while (*in == '/')
-+			in++;
-+		end = strchrnul(in, '/');
-+		len = end - in;
-+
-+		if (len == 0 || (len == 1 && in[0] == '.')) {
-+			/* Nothing to keep. */
-+		} else if (len == 2 && in[0] == '.' && in[1] == '.') {
-+			while (out > path && *--out != '/')
-+				;
-+		} else {
-+			*out++ = '/';
-+			memmove(out, in, len);
-+			out += len;
-+		}
-+		in = end;
-+	}
-+	if (out == path)
-+		*out++ = '/';
-+	*out = '\0';
++	if (len > tail && !strcmp(path + len - tail, deleted))
++		path[len - tail] = '\0';
 +}
 +
 +/*
-+ * A path argument as an absolute path in the process's root. A relative
-+ * path is joined to the directory it is relative to, the working directory
-+ * or the one dfd names, so the file can be found again after the process
-+ * has moved or exited. False when the path cannot be read or resolved.
++ * A path argument as the kernel resolves it, in the process's root, so
++ * that every event names a file the one way d_path names an open file,
++ * which the open, close and read-open events use. The directory part is
++ * looked up, links followed, so /var/run/x.pid where /var/run is a link
++ * to /run is /run/x.pid, and a ".." after a link goes where the kernel
++ * went. The last component is kept as given, since the entry it names
++ * is gone by the time an unlink or a rename is reported. A relative
++ * path starts from the working directory or the directory dfd names,
++ * which may have been opened with O_PATH, as coreutils opens the
++ * directory it copies into. False when the path cannot be read or the
++ * directory cannot be found.
 + */
 +static bool rewind_user_path(char *dst, int dfd, unsigned long src)
 +{
-+	char *rel = rewind_path_arg;
-+	struct path base;
-+	struct file *dir;
++	char *rel = rewind_path_arg, *dirs = rewind_path_dir;
++	char *last, *at;
++	struct path base, dir;
++	struct file *file;
 +	size_t len;
-+	char *at;
 +	long n;
 +
 +	n = strncpy_from_user(rel, (const char __user *)src, PATH_MAX);
 +	if (n <= 0 || n >= PATH_MAX)
 +		return false;
-+	if (rel[0] == '/') {
-+		strscpy(dst, rel, PATH_MAX);
-+		rewind_normalize_path(dst);
-+		return true;
++
++	/* Trailing slashes name the same entry; the last slash splits it off. */
++	while (n > 1 && rel[n - 1] == '/')
++		rel[--n] = '\0';
++	last = strrchr(rel, '/');
++	if (last)
++		*last++ = '\0';
++	else
++		last = rel;
++	if (!*last)
++		return false;
++
++	/* The directory part as an absolute path, before it is looked up. */
++	if (rel[0] == '/' || last == rel + 1) {
++		/* An absolute path: its directory, or the root when it has none. */
++		strscpy(dirs, last == rel + 1 ? "/" : rel, PATH_MAX);
++	} else {
++		if (dfd == AT_FDCWD) {
++			get_fs_pwd(current->fs, &base);
++		} else {
++			file = fget_raw(dfd);
++			if (!file)
++				return false;
++			base = file->f_path;
++			path_get(&base);
++			fput(file);
++		}
++		at = d_path(&base, dirs, PATH_MAX);
++		path_put(&base);
++		if (IS_ERR(at))
++			return false;
++		len = strlen(at);
++		memmove(dirs, at, len + 1);
++		if (last != rel) {
++			if (len + 1 + strlen(rel) >= PATH_MAX)
++				return false;
++			dirs[len++] = '/';
++			strscpy(dirs + len, rel, PATH_MAX - len);
++		}
 +	}
 +
-+	/* The directory the path is relative to. */
-+	if (dfd == AT_FDCWD) {
-+		get_fs_pwd(current->fs, &base);
-+	} else {
-+		dir = fget(dfd);
-+		if (!dir)
-+			return false;
-+		base = dir->f_path;
-+		path_get(&base);
-+		fput(dir);
-+	}
-+	at = d_path(&base, dst, PATH_MAX);
-+	path_put(&base);
++	/* The directory as the kernel finds it, then the entry. */
++	if (kern_path(dirs, LOOKUP_FOLLOW | LOOKUP_DIRECTORY, &dir))
++		return false;
++	at = d_path(&dir, dst, PATH_MAX);
++	path_put(&dir);
 +	if (IS_ERR(at))
 +		return false;
-+
-+	/* The directory, a slash, then the path, without . and .. parts. */
 +	len = strlen(at);
 +	memmove(dst, at, len + 1);
-+	if (len + 1 + strlen(rel) >= PATH_MAX)
++	if (len == 1)
++		len = 0;
++	if (len + 1 + strlen(last) >= PATH_MAX)
 +		return false;
 +	dst[len++] = '/';
-+	strscpy(dst + len, rel, PATH_MAX - len);
-+	rewind_normalize_path(dst);
++	strscpy(dst + len, last, PATH_MAX - len);
 +	return true;
 +}
 +
-+static void rewind_report_open(int dfd, unsigned long path,
-+			       unsigned long flags)
++/*
++ * An open that can change a file, for writing or with O_CREAT or
++ * O_TRUNC, named by the file the call opened, descriptor fd: the path
++ * the kernel names it by, as the close event names it, whatever path and
++ * directory descriptor the call gave, O_PATH ones included.
++ */
++static void rewind_report_open(long fd, unsigned long flags)
 +{
++	struct file *file;
++	char *path;
++
 +	/* Only opens that can change a file are interesting. */
 +	if ((flags & O_ACCMODE) == O_RDONLY && !(flags & (O_CREAT | O_TRUNC)))
 +		return;
-+	if (!rewind_user_path(rewind_path_a, dfd, path))
++	file = fget(fd);
++	if (!file)
 +		return;
-+
-+	rewind_emit(REWIND_EV_OPEN, 0, current->tgid, current->pid, flags,
-+		    rewind_path_a, strlen(rewind_path_a), NULL, 0);
++	path = d_path(&file->f_path, rewind_path_a, PATH_MAX);
++	if (!IS_ERR(path)) {
++		rewind_strip_deleted(path);
++		rewind_emit(REWIND_EV_OPEN, 0, current->tgid, current->pid,
++			    flags, path, strlen(path), NULL, 0);
++	}
++	fput(file);
 +}
 +
 +static void rewind_report_unlink(int dfd, unsigned long path)
@@ -1188,19 +1213,6 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +	rewind_emit(REWIND_EV_RENAME, 0, current->tgid, current->pid, 0,
 +		    rewind_path_a, strlen(rewind_path_a) + 1,
 +		    rewind_path_b, strlen(rewind_path_b));
-+}
-+
-+/*
-+ * A path the kernel names an open file by, without the " (deleted)" it
-+ * adds once the file is unlinked, so it matches the path it was opened by.
-+ */
-+static void rewind_strip_deleted(char *path)
-+{
-+	static const char deleted[] = " (deleted)";
-+	size_t len = strlen(path), tail = sizeof(deleted) - 1;
-+
-+	if (len > tail && !strcmp(path + len - tail, deleted))
-+		path[len - tail] = '\0';
 +}
 +
 +/*
@@ -1262,22 +1274,30 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +
 +/*
 + * Opens for writing, unlinks and renames that succeeded, once they have:
-+ * one that failed changed no file. The registers still hold the call's
-+ * arguments, so the path is read as it was passed.
++ * one that failed changed no file. An open is named by the file it
++ * opened, `ret` being its descriptor, with the flags the call gave, which
++ * the registers still hold; an unlink or a rename by its arguments, read
++ * as they were passed.
 + */
-+static void rewind_report_changes(struct pt_regs *regs, long id)
++static void rewind_report_changes(struct pt_regs *regs, long id, long ret)
 +{
++	u64 how_flags;
++
 +	mutex_lock(&rewind_path_lock);
 +	switch (id) {
 +	case __NR_open:
-+		rewind_report_open(AT_FDCWD, regs->di, regs->si);
++		rewind_report_open(ret, regs->si);
 +		break;
 +	case __NR_openat:
-+		rewind_report_open(regs->di, regs->si, regs->dx);
++		rewind_report_open(ret, regs->dx);
++		break;
++	case __NR_openat2:
++		/* The flags lead the struct open_how the call was given. */
++		if (!get_user(how_flags, (u64 __user *)regs->dx))
++			rewind_report_open(ret, how_flags);
 +		break;
 +	case __NR_creat:
-+		rewind_report_open(AT_FDCWD, regs->di,
-+				   O_CREAT | O_WRONLY | O_TRUNC);
++		rewind_report_open(ret, O_CREAT | O_WRONLY | O_TRUNC);
 +		break;
 +	case __NR_unlink:
 +		rewind_report_unlink(AT_FDCWD, regs->di);
@@ -1312,7 +1332,7 @@ diff -ruN a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 +
 +	if (ret < 0 || in_ia32_syscall())
 +		return;
-+	rewind_report_changes(regs, id);
++	rewind_report_changes(regs, id, ret);
 +
 +	if (id != __NR_open && id != __NR_openat && id != __NR_openat2)
 +		return;

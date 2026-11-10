@@ -11,7 +11,7 @@
   *   - a terminal for the workload's output, as nix-daemon gives a
   *     builder, whose writes join the event stream,
   *   - the CPU count the affinity system calls report, which may exceed the
-@@ -97,9 +101,10 @@
+@@ -99,9 +103,10 @@
   * The version of the interface between this kernel and the monitor: the
   * ports, the records and struct rewind_shared. The kernel writes it into
   * rewind_shared.interface before setup, and a monitor that speaks another
@@ -24,7 +24,7 @@
  
  /* Values written to REWIND_PORT_EXIT. */
  enum rewind_exit {
-@@ -122,6 +127,11 @@
+@@ -124,6 +129,11 @@
  	REWIND_EV_MARK = 10,	/* payload: text written to /dev/rewind */
  	REWIND_EV_READ_OPEN = 11, /* aux: open flags; payload: path */
  	REWIND_EV_CLOSE = 12,	/* payload: path */
@@ -36,7 +36,7 @@
  };
  
  #define REWIND_FLAG_THREAD	BIT(0)
-@@ -211,6 +221,17 @@
+@@ -213,6 +223,17 @@
  	 * at the step a fork given another seed starts from.
  	 */
  	u8 reseed[32];
@@ -54,7 +54,7 @@
  };
  
  /* Reasons for an interrupt, in rewind_shared.pending. */
-@@ -233,6 +254,68 @@
+@@ -235,6 +256,68 @@
  static u8 rewind_buf[REWIND_RECORD_MAX] __aligned(PAGE_SIZE);
  
  /*
@@ -123,7 +123,7 @@
   * Write one record to the monitor. The record is assembled in a single
   * static buffer with interrupts off: the vCPU is the only CPU, and nothing
   * in this kernel raises an NMI, so nothing else can touch the buffer
-@@ -728,6 +811,8 @@
+@@ -747,6 +830,8 @@
  	rewind_running = true;
  	rewind_publish_tasks();
  	rewind_shared.interface = REWIND_INTERFACE;
@@ -131,8 +131,8 @@
 +	rewind_shared.io_size = REWIND_IO_BUF_SIZE;
  	outl(__pa_symbol(&rewind_shared), REWIND_PORT_SETUP);
  
- 	sysvec_install(HYPERVISOR_CALLBACK_VECTOR, sysvec_rewind_callback);
-@@ -1109,11 +1194,99 @@
+ 	/*
+@@ -1150,11 +1235,98 @@
  }
  
  /*
@@ -224,17 +224,16 @@
 +
 +/*
   * Opens for writing, unlinks and renames that succeeded, once they have:
-  * one that failed changed no file. The registers still hold the call's
-- * arguments, so the path is read as it was passed.
-+ * arguments, so the path is read as it was passed. An open that
-+ * succeeded also gets its open record, `ret` being its descriptor.
+  * one that failed changed no file. An open is named by the file it
+  * opened, `ret` being its descriptor, with the flags the call gave, which
+- * the registers still hold; an unlink or a rename by its arguments, read
+- * as they were passed.
++ * the registers still hold, and also gets its open record; an unlink or
++ * a rename is named by its arguments, read as they were passed.
   */
--static void rewind_report_changes(struct pt_regs *regs, long id)
-+static void rewind_report_changes(struct pt_regs *regs, long id, long ret)
+ static void rewind_report_changes(struct pt_regs *regs, long id, long ret)
  {
- 	mutex_lock(&rewind_path_lock);
- 	switch (id) {
-@@ -1141,15 +1314,23 @@
+@@ -1190,15 +1362,23 @@
  		rewind_report_rename(regs->di, regs->si, regs->dx, regs->r10);
  		break;
  	}
@@ -263,12 +262,10 @@
   */
  static void rewind_probe_sys_exit(void *data, struct pt_regs *regs, long ret)
  {
-@@ -1160,7 +1341,9 @@
- 
+@@ -1210,6 +1390,8 @@
  	if (ret < 0 || in_ia32_syscall())
  		return;
--	rewind_report_changes(regs, id);
-+	rewind_report_changes(regs, id, ret);
+ 	rewind_report_changes(regs, id, ret);
 +	if (ret > 0)
 +		rewind_io_write(regs, id, ret);
  
