@@ -2,8 +2,9 @@
 // header links people follow, how far down the home page they get, which
 // Buy button they press, which install command they copy, and the sale
 // itself when Stripe sends the buyer back to the thank-you page. Every page
-// loads gtag.js from Google next to this file. The desktop app and the
-// engine send nothing anywhere; this is the website only.
+// but the viewer loads gtag.js from Google next to this file; the viewer's
+// address can hold a private link (site/viewer/index.html). The desktop app
+// and the engine have no analytics; this is the website only.
 (() => {
   "use strict";
 
