@@ -2,13 +2,16 @@
 //!
 //! A `.rwd` file is a tar archive compressed with zstd. It always holds the
 //! run's `manifest.json` and `trace.bin`, which is everything the scrubber
-//! needs to show the run, and the desktop app's bookmarks of the run when
-//! it has any. A replayable export adds what another machine
-//! needs to run it again: the keyframes, the pages they use, the input
-//! image, and the guest kernel and initramfs the run booted.
+//! needs to show the run, `summary.txt`, the run in plain text as `rewind
+//! summary` prints it, for a person or a program without the scrubber, and
+//! the desktop app's bookmarks of the run when it has any. A replayable
+//! export adds what another machine needs to run it again: the keyframes,
+//! the pages they use, the input image, and the guest kernel and initramfs
+//! the run booted.
 //!
 //! ```text
 //! manifest.json
+//! summary.txt
 //! trace.bin
 //! bookmarks.json               when the run has bookmarks
 //! keyframes/<step>.kf          replayable only
@@ -33,6 +36,7 @@ pub use rewind_trace::export::Contents;
 use rewind_trace::export::{
     COMPRESSION_LEVEL, Flow, IMAGE, INITRD, INPUTS_DIR, KERNEL, MAX_BOOKMARKS, Member, PAGES_DIR,
 };
+use rewind_trace::summary::{self, Recording, SUMMARY};
 
 const PAGE_SIZE: usize = 4096;
 
@@ -75,6 +79,11 @@ fn write_export(home: &Home, run: &Run, contents: Contents, file: File) -> Resul
     let mut manifest = run.manifest.clone();
     manifest.shared_keyframes = None;
     append_bytes(&mut tar, MANIFEST, &serde_json::to_vec_pretty(&manifest)?)?;
+
+    // The run in plain text, the bytes `rewind summary` prints, early in
+    // the archive for a reader that stops after it.
+    let said = summary::summary(Recording::of(&run.manifest, run.trace()?), None);
+    append_bytes(&mut tar, SUMMARY, said.as_bytes())?;
     tar.append_path_with_name(run.dir.join(TRACE), TRACE)?;
 
     // The app's bookmarks, within the size an import takes.
@@ -497,6 +506,12 @@ mod tests {
         blake3::hash(bytes).to_hex().to_string()
     }
 
+    /// The bytes of a trace with no records: a run an export summarizes
+    /// needs a trace that reads.
+    fn empty_trace() -> Vec<u8> {
+        rewind_trace::TraceWriter::new(Vec::new()).finish().unwrap()
+    }
+
     #[test]
     fn a_run_exported_and_imported_elsewhere_arrives_whole() {
         // A finished run with bookmarks, its inputs on disk, and a keyframe
@@ -516,11 +531,11 @@ mod tests {
         m.spec.kernel = inputs.join("kernel");
         m.spec.initrd = inputs.join("initrd");
         m.id = m.spec.id();
-        m.trace_hash = Some(blake3_hex(b"trace"));
+        m.trace_hash = Some(blake3_hex(&empty_trace()));
         let dir = from.runs().join(&m.id);
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join(MANIFEST), serde_json::to_vec_pretty(&m).unwrap()).unwrap();
-        fs::write(dir.join(TRACE), b"trace").unwrap();
+        fs::write(dir.join(TRACE), empty_trace()).unwrap();
         fs::write(dir.join(BOOKMARKS), br#"[{"step":3,"note":"here"}]"#).unwrap();
 
         let page = vec![7u8; PAGE_SIZE];
@@ -543,7 +558,7 @@ mod tests {
         let got = import(&to, &file).unwrap();
         assert_eq!(got.manifest.id, m.id);
         assert_eq!(got.manifest.outcome, m.outcome);
-        assert_eq!(fs::read(got.dir.join(TRACE)).unwrap(), b"trace");
+        assert_eq!(fs::read(got.dir.join(TRACE)).unwrap(), empty_trace());
         assert_eq!(
             fs::read(got.dir.join(BOOKMARKS)).unwrap(),
             fs::read(dir.join(BOOKMARKS)).unwrap()
@@ -564,7 +579,7 @@ mod tests {
         let file = from.root().join("view.rwd");
         export(&from, &run, Contents::View, &file).unwrap();
         let got = import(&view, &file).unwrap();
-        assert_eq!(fs::read(got.dir.join(TRACE)).unwrap(), b"trace");
+        assert_eq!(fs::read(got.dir.join(TRACE)).unwrap(), empty_trace());
         assert!(got.dir.join(BOOKMARKS).is_file());
         assert!(got.keyframes().unwrap().steps().is_empty());
         assert_eq!(got.manifest.spec.kernel, m.spec.kernel);
@@ -586,7 +601,7 @@ mod tests {
         let mut m: Manifest = serde_json::from_slice(&finished(ID)).unwrap();
         m.spec.kernel = home.root().join("no-such-kernel");
         fs::write(dir.join(MANIFEST), serde_json::to_vec_pretty(&m).unwrap()).unwrap();
-        fs::write(dir.join(TRACE), b"trace").unwrap();
+        fs::write(dir.join(TRACE), empty_trace()).unwrap();
         let run = Run::open(&dir).unwrap();
 
         let out_dir = home.root().join("exports");
@@ -621,11 +636,11 @@ mod tests {
         m.spec.kernel = given.join("kernel");
         m.spec.initrd = given.join("initrd");
         m.id = m.spec.id();
-        m.trace_hash = Some(blake3_hex(b"trace"));
+        m.trace_hash = Some(blake3_hex(&empty_trace()));
         let dir = home.runs().join(&m.id);
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join(MANIFEST), serde_json::to_vec_pretty(&m).unwrap()).unwrap();
-        fs::write(dir.join(TRACE), b"trace").unwrap();
+        fs::write(dir.join(TRACE), empty_trace()).unwrap();
         Run::open(&dir).unwrap()
     }
 
@@ -897,7 +912,7 @@ mod tests {
         let dir = from.runs().join(ID);
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join(MANIFEST), finished(ID)).unwrap();
-        fs::write(dir.join(TRACE), b"trace").unwrap();
+        fs::write(dir.join(TRACE), empty_trace()).unwrap();
         let bookmarks = br#"[{"step":5,"note":"here"}]"#;
         fs::write(dir.join(BOOKMARKS), bookmarks).unwrap();
         let out = from.root().join("run.rwd");
@@ -907,6 +922,49 @@ mod tests {
         assert_eq!(fs::read(run.dir.join(BOOKMARKS)).unwrap(), bookmarks);
         fs::remove_dir_all(from.root()).unwrap();
         fs::remove_dir_all(to.root()).unwrap();
+    }
+
+    /// The bytes of the member `name` of the export `file`, if it has one.
+    fn member(file: &Path, name: &str) -> Option<Vec<u8>> {
+        let decoder = zstd::Decoder::new(File::open(file).unwrap()).unwrap();
+        let mut found = None;
+        rewind_trace::export::walk(decoder, |path, _, _, reader| -> Result<Flow, String> {
+            if path == Path::new(name) {
+                let mut bytes = Vec::new();
+                reader.read_to_end(&mut bytes).unwrap();
+                found = Some(bytes);
+            }
+            Ok(Flow::Continue)
+        })
+        .unwrap();
+        found
+    }
+
+    #[test]
+    fn an_export_carries_the_runs_summary() {
+        // A run that exited 2, exported to view and to replay: each export
+        // holds summary.txt, the run's summary as `rewind summary` makes
+        // it from the manifest and the trace, which names the verdict.
+        let home = home("summary");
+        let mut m: Manifest = serde_json::from_slice(&finished(ID)).unwrap();
+        let outcome = m.outcome.as_mut().unwrap();
+        outcome.status = Some(2 << 8);
+        m.verdict = rewind_trace::verdict::Verdict::Failed {
+            reasons: vec![rewind_trace::verdict::Reason::Exited { code: 2 }],
+        };
+        let dir = home.runs().join(ID);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(MANIFEST), serde_json::to_vec_pretty(&m).unwrap()).unwrap();
+        fs::write(dir.join(TRACE), empty_trace()).unwrap();
+        let run = Run::open(&dir).unwrap();
+        let expected = summary::summary(Recording::of(&m, run.trace().unwrap()), None);
+        assert!(expected.contains("exited with status 2"), "{expected}");
+
+        let out = home.root().join("run.rwd");
+        export(&home, &run, Contents::View, &out).unwrap();
+        let carried = member(&out, SUMMARY).expect("the export has no summary.txt");
+        assert_eq!(String::from_utf8(carried).unwrap(), expected);
+        fs::remove_dir_all(home.root()).unwrap();
     }
 
     #[test]

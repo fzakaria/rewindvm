@@ -868,7 +868,13 @@ outputs an exit of 0 did not create, and the SDK assertions the job broke.
 The engine judges the run once, as it ends, in `rewind_trace::verdict`;
 `rewind ls`, `check` and `show`, the desktop app and the browser viewer
 read the field and judge nothing themselves, so a job that breaks an
-`always` assertion and exits 0 is failed in each of them. A run that has
+`always` assertion and exits 0 is failed in each of them. `rewind
+summary` says the verdict in plain text, with the step the run failed
+on, the one the app's failure marker sits at (`rewind_trace::failing`
+finds both), and the job's last lines of output. Every export carries
+the same text as `summary.txt`, for a person or a program without the
+app, and the browser viewer shows it on a screen too narrow for the
+app. A run that has
 not ended has the verdict `unfinished`, and whether a process is still
 executing it is told by its executing lock. A manifest also records
 `trace_hash`, the BLAKE3 hash of

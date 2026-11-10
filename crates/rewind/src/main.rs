@@ -45,7 +45,8 @@ const STEP_LONG_HELP: &str = "A step of the run: how many times the VM had stopp
     long_about = "Run Linux workloads in a deterministic VM, then scrub, rewind and fork them.\n\n\
         A command that could not do what was asked, as for a run that does not exist, exits 2. \
         The commands that compare or check exit 1 for what they found: diff, replay and blame \
-        when the runs differ, check when a run fails, doctor when this machine cannot record. \
+        when the runs differ, check and summary when a run fails, doctor when this machine \
+        cannot record. \
         run, nix and fork exit with the job's own status, as a shell reports a child."
 )]
 struct Cli {
@@ -261,6 +262,13 @@ enum Command {
     /// commands name the epoch, which by default is the start of the day a
     /// run is made, so the same command a day later makes another run.
     Show(cmd::view::ShowArgs),
+    /// Whether a run passed and why not, in plain text: how it ended, the
+    /// step it failed on, its last lines of output, and with --compare
+    /// where it parts from another run.
+    ///
+    /// The same text every export of the run carries as summary.txt.
+    /// Exits 1 when the run failed.
+    Summary(cmd::view::SummaryArgs),
     /// Print a run's output, up to a step.
     Log(cmd::view::LogArgs),
     /// Show the processes alive at a step.
@@ -391,6 +399,7 @@ impl Command {
             | Command::Doctor
             | Command::Ls(_)
             | Command::Show(_)
+            | Command::Summary(_)
             | Command::Log(_)
             | Command::Ps(_)
             | Command::Events(_)
@@ -429,6 +438,7 @@ impl Command {
             | Command::Doctor
             | Command::Ls(_)
             | Command::Show(_)
+            | Command::Summary(_)
             | Command::Log(_)
             | Command::Ps(_)
             | Command::Events(_)
@@ -530,6 +540,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Import(args) => cmd::transfer::import(&home, args),
         Command::Ls(args) => cmd::view::ls(&home, args),
         Command::Show(args) => cmd::view::show(&home, args),
+        Command::Summary(args) => cmd::view::summary(&home, args),
         Command::Log(args) => cmd::view::log(&home, args),
         Command::Ps(args) => cmd::view::ps(&home, args),
         Command::Events(args) => cmd::view::events(&home, args),
@@ -566,6 +577,8 @@ mod tests {
             "rewind ps abc",
             "rewind events abc --from 1 --to 5",
             "rewind replay abc --from 5",
+            "rewind summary abc",
+            "rewind summary abc --compare def",
         ] {
             assert!(parses(line), "{line}");
         }
@@ -668,6 +681,7 @@ mod tests {
         }
         for line in [
             "rewind ls",
+            "rewind summary abc --compare def",
             "rewind log abc",
             "rewind ps abc",
             "rewind events abc",

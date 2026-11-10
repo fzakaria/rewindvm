@@ -82,6 +82,17 @@ mod web {
         archive::prefix(bytes).into()
     }
 
+    /// The summary of the run in the export `run`, compared with the
+    /// export `compare` when the page fetched one, as `rewind summary`
+    /// prints it: what the page shows in place of the app on a screen too
+    /// narrow for it. The page calls this without [`start`], so the app's
+    /// window never opens. An export that does not read gives the reason,
+    /// for the page to show instead.
+    #[wasm_bindgen]
+    pub fn summary(run: &[u8], compare: Option<Vec<u8>>) -> Result<String, String> {
+        archive::summary(run, compare.as_deref()).map_err(|e| format!("{e:#}"))
+    }
+
     /// Opens the exports the page fetched: `run` from `url`, compared with
     /// `compare` from `compare_url`, on the view the address that asked
     /// for the fetch names.

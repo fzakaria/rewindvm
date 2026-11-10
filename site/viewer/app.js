@@ -15,8 +15,9 @@
 
 import { ZipRefusal, isZip, rwdFromZip } from "./zip.js";
 
-// The app's module, loaded only once the frame is wide enough for it, so a
-// phone never downloads it.
+// The app's module, loaded once the frame is wide enough for the app, or
+// on a narrower screen to summarize the run a link names. A phone opening
+// the page without a link never downloads it.
 let web = null;
 
 // Where the app is: not asked for yet, loading, on screen, or stopped by
@@ -53,6 +54,11 @@ const ADDRESS_DELAY_MS = 300;
 // started scrolls sideways.
 const APP_MIN_WIDTH = 960;
 
+// What the page says while it reads the run to summarize, and before the
+// reason it could not.
+const SUMMARY_READING = "Reading the recording\u2026";
+const SUMMARY_UNREAD = "The recording did not open here:";
+
 // What the page says once the app's code has stopped.
 const STOPPED_NOTE =
   "The viewer stopped on an error. Reload the page to start it again.";
@@ -87,6 +93,7 @@ const DROPPED_ANSWER = "then the connection dropped";
 
 const header = document.getElementById("site-header");
 const narrowNote = document.getElementById("viewer-narrow");
+const summaryBox = document.getElementById("viewer-summary");
 const app = document.getElementById("viewer-app");
 const frame = document.getElementById("viewer-frame");
 const status = document.getElementById("viewer-status");
@@ -246,7 +253,9 @@ function joined(chunks) {
   if (chunks.length === 1) {
     return chunks[0];
   }
-  const bytes = new Uint8Array(chunks.reduce((n, chunk) => n + chunk.length, 0));
+  const bytes = new Uint8Array(
+    chunks.reduce((n, chunk) => n + chunk.length, 0),
+  );
   let at = 0;
   for (const chunk of chunks) {
     bytes.set(chunk, at);
@@ -255,14 +264,19 @@ function joined(chunks) {
   return bytes;
 }
 
+// Whether the first bytes of an export end before the run does, as the
+// running app's code says through the page's call into it.
+const appNeedsMore = (bytes) =>
+  callApp(() => web.export_prefix(bytes)) === web.Prefix.Short;
+
 // Reads a run from `source`, which hands back the next bytes of an
 // export, or null at its end, and stops the read when told to. The read
-// goes on until the app says the bytes so far hold the run (see
-// FIRST_PROBE_BYTES), so the memory and inputs behind the trace in a
-// replayable export are never read; a source that ends first gives all
-// its bytes, for the app to say what they are. A zip is read whole, since
-// its directory is at its end.
-async function readRun(source) {
+// goes on until `needsMore`, which asks the app's code, says the bytes so
+// far hold the run (see FIRST_PROBE_BYTES), so the memory and inputs behind the trace
+// in a replayable export are never read; a source that ends first gives
+// all its bytes, for the app to say what they are. A zip is read whole,
+// since its directory is at its end.
+async function readRun(source, needsMore) {
   const chunks = [];
   let length = 0;
   let probeAt = FIRST_PROBE_BYTES;
@@ -283,8 +297,7 @@ async function readRun(source) {
       probeAt = Infinity;
       continue;
     }
-    const prefix = callApp(() => web.export_prefix(bytes));
-    if (prefix === web.Prefix.Short) {
+    if (needsMore(bytes)) {
       probeAt = length * PROBE_GROWTH;
       continue;
     }
@@ -329,8 +342,9 @@ function sliced(file) {
 // .rwd file inside them when they are a zip. A link the browser would
 // refuse is not tried, a body that stops short comes back as the server's
 // status and what happened, and a zip that is not opened comes back as
-// the reason, each in the place of a server's answer.
-async function fetchExport(url) {
+// the reason, each in the place of a server's answer. `needsMore` is as
+// readRun takes it.
+async function fetchExport(url, needsMore) {
   if (isMixedContent(url)) {
     return { answer: MIXED_ANSWER };
   }
@@ -340,7 +354,7 @@ async function fetchExport(url) {
   }
   let bytes;
   try {
-    bytes = await readRun(streamed(fetched.response.body));
+    bytes = await readRun(streamed(fetched.response.body), needsMore);
   } catch {
     return { answer: `${fetched.answer}, ${DROPPED_ANSWER}` };
   }
@@ -364,8 +378,8 @@ async function fetchExport(url) {
 async function fetchRuns(url, compare) {
   say(null);
   const [run, other] = await Promise.all([
-    fetchExport(url),
-    compare ? fetchExport(compare) : null,
+    fetchExport(url, appNeedsMore),
+    compare ? fetchExport(compare, appNeedsMore) : null,
   ]);
   if (!run.bytes) {
     callApp(() => web.unfetched(url, run.answer ?? undefined));
@@ -399,7 +413,7 @@ async function openFile(file) {
   // file was removed after it was picked.
   let bytes;
   try {
-    bytes = await readRun(sliced(file));
+    bytes = await readRun(sliced(file), appNeedsMore);
   } catch {
     callApp(() =>
       web.unread_file(
@@ -522,10 +536,9 @@ async function startApp() {
   phase = Phase.Starting;
   try {
     const [module, ...fonts] = await Promise.all([
-      import("./pkg/rewind-web.js"),
+      loadModule(),
       ...FONTS.map(fetchFont),
     ]);
-    await module.default();
     for (const font of fonts) {
       if (font) {
         module.add_font(font);
@@ -553,13 +566,65 @@ async function startApp() {
   }
 }
 
+// The app's module, loaded and set up, without starting the app: what the
+// app needs before start, and all the summary needs.
+async function loadModule() {
+  const module = await import("./pkg/rewind-web.js");
+  await module.default();
+  return module;
+}
+
+// On a screen too narrow for the app, the run the page's link names, in
+// plain text below the note: the export's summary.txt, or the summary the
+// app's code makes from its manifest and trace, beside the compared run
+// when the link names one. Only the bytes the run needs are fetched, as
+// the app fetches them. Anything that goes wrong is said in the summary's
+// place.
+async function showSummary() {
+  const query = new URLSearchParams(location.search);
+  const url = query.get("url");
+  if (!url) {
+    return;
+  }
+  const compare = query.get("compare");
+  summaryBox.textContent = SUMMARY_READING;
+  summaryBox.hidden = false;
+  try {
+    const module = await loadModule();
+    const needsMore = (bytes) =>
+      module.export_prefix(bytes) === module.Prefix.Short;
+    const [run, other] = await Promise.all([
+      fetchExport(url, needsMore),
+      compare ? fetchExport(compare, needsMore) : null,
+    ]);
+    const missing = [
+      [url, run],
+      [compare, other],
+    ].find(([, got]) => got && !got.bytes);
+    if (missing) {
+      const [link, got] = missing;
+      summaryBox.textContent = `${SUMMARY_UNREAD} ${link} answered ${got.answer ?? "nothing"}.`;
+      return;
+    }
+    summaryBox.textContent = module.summary(run.bytes, other?.bytes);
+  } catch (error) {
+    summaryBox.textContent = `${SUMMARY_UNREAD} ${error}`;
+  }
+}
+
 // The app starts once the frame is as wide as its narrowest layout: at
 // once on a computer, or when a narrow window is widened. Until then the
-// note says why it is not there.
+// note says why it is not there, above the summary of the run the link
+// names.
+let summarized = false;
 const watchWidth = new ResizeObserver(() => {
   if (app.clientWidth < APP_MIN_WIDTH) {
     narrowNote.hidden = false;
     status.hidden = true;
+    if (!summarized) {
+      summarized = true;
+      showSummary();
+    }
     return;
   }
   watchWidth.disconnect();

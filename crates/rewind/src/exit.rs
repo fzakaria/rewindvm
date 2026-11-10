@@ -11,8 +11,8 @@ use std::process::ExitCode;
 
 /// The command did its job, and what it found is the answer "no": `diff`,
 /// `replay` and `blame` saw the runs differ, `check` saw a run fail,
-/// `doctor` found a machine that cannot record, and `pmu status` a
-/// counter runs cannot use.
+/// `summary` was asked about a run that failed, `doctor` found a machine
+/// that cannot record, and `pmu status` a counter runs cannot use.
 pub(crate) const DIFFERS: u8 = 1;
 
 /// The command could not do its job: a run that does not exist, a step

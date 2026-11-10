@@ -10,10 +10,10 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
-use rewind_trace::ending::ExitStatus;
+use rewind_trace::failing::{self, Stopped};
 use rewind_trace::sdk::{SdkMark, TestResult};
 use rewind_trace::switches::Switch;
-use rewind_trace::{Event, EventKind, JobExit, Life, Process, Trace, signal};
+use rewind_trace::{Event, EventKind, JobExit, Life, Process, Trace};
 
 use crate::shown_line::{Pen, shown};
 
@@ -275,40 +275,8 @@ pub enum FileTone {
     Output,
 }
 
-/// Why the app calls a run failed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FailureKind {
-    /// A crash signal was delivered.
-    Signal { signo: u32, addr: u64 },
-    /// A process exited with a nonzero exit_code.
-    Exit { status: u32 },
-    /// The machine stopped before the job exited: at its time limit, or
-    /// by a fault.
-    Stopped,
-    /// The job exited 0, but an assertion it made with the Rewind SDK did
-    /// not hold: an `always` failed or an `unreachable` was reached.
-    Assertion,
-}
-
-/// How a run's machine stopped, as far as finding its failure goes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Stopped {
-    /// Any way but its guest powering off, such as at its time limit.
-    Abnormally,
-    /// By its guest powering off, or not known.
-    Otherwise,
-}
-
-/// The step a run failed on, and how.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Failure {
-    pub step: u64,
-    pub pid: u32,
-    pub tid: u32,
-    /// The index of the failing event in the trace.
-    pub index: usize,
-    pub kind: FailureKind,
-}
+/// Where a run failed and how, found as `rewind summary` finds it.
+pub use rewind_trace::failing::{Failure, FailureKind};
 
 /// A way to move the playhead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -465,10 +433,7 @@ impl Timeline {
             .last_step()
             .max(last_switch)
             .max(total_hint.unwrap_or(0));
-        let stopped = match stop {
-            Some(stop) if !stop.is_clean() => Stopped::Abnormally,
-            _ => Stopped::Otherwise,
-        };
+        let stopped = Stopped::of(stop);
         let output_lines = output_lines(&trace);
         let all_lines = merge_by_step(&output_lines, &console_lines(&trace));
         let phases = phase_spans(&trace, &output_lines, total);
@@ -478,7 +443,7 @@ impl Timeline {
         let dirs = directories(&files);
         let job_exit = trace.job_exit();
         let job_start = trace.job_start();
-        let failure = find_failure(&trace, job_exit, total, stopped, None);
+        let failure = failing::find(&trace, job_exit, total, stopped, None);
         let (assertions, tests) = sdk_findings(&trace);
 
         // Command names for event descriptions, one per life of a pid.
@@ -514,7 +479,7 @@ impl Timeline {
     /// the run has alone.
     pub fn fail_past(&mut self, shared: Option<u64>) {
         let find =
-            |shared| find_failure(&self.trace, self.job_exit, self.total, self.stopped, shared);
+            |shared| failing::find(&self.trace, self.job_exit, self.total, self.stopped, shared);
         self.failure = shared.and_then(|s| find(Some(s))).or_else(|| find(None));
     }
 
@@ -1013,160 +978,6 @@ fn short_phase_name(name: &str) -> String {
     }
 }
 
-/// Where the run failed. A job whose init reports status 0 did not fail.
-/// Otherwise the first crash signal is the failure, and without one, the
-/// start of the chain of nonzero exits that ended the run: from the last
-/// process to exit nonzero, down through the child it exited after. When
-/// a signal killed that child, such as SIGPIPE, the failure is the signal
-/// reaching it rather than its exit. A signal or exit before step
-/// `shared`, which a passing run made too, is not the failure.
-fn find_failure(
-    trace: &Trace,
-    job_exit: Option<JobExit>,
-    total: u64,
-    stopped: Stopped,
-    shared: Option<u64>,
-) -> Option<Failure> {
-    // A job that exited 0 failed only where an assertion it made did not
-    // hold, as `rewind check`'s sdk property judges it.
-    let made_too = |step: u64| shared.is_some_and(|s| step < s);
-    if job_exit.is_some_and(|j| j.status == 0) {
-        let until = job_exit.map_or(u64::MAX, |j| j.step);
-        return trace.events.iter().enumerate().find_map(|(index, e)| {
-            if e.step > until || made_too(e.step) {
-                return None;
-            }
-            let broke = matches!(
-                e.sdk_mark()?,
-                SdkMark::Always { held: false, .. } | SdkMark::Unreachable { .. }
-            );
-            broke.then_some(Failure {
-                step: e.step,
-                pid: e.pid,
-                tid: e.tid,
-                index,
-                kind: FailureKind::Assertion,
-            })
-        });
-    }
-
-    // Only what happened up to the job's exit, when init reported one:
-    // after it, init tears down what the job left running, and those
-    // processes die by its hand, not the job's failure.
-    let until = job_exit.map_or(u64::MAX, |j| j.step);
-
-    // A crash signal anywhere wins: the exits after it are its
-    // consequences.
-    let signal = trace.events.iter().enumerate().find_map(|(index, e)| {
-        if e.step > until || made_too(e.step) {
-            return None;
-        }
-        let EventKind::Signal { signo, addr, .. } = e.kind else {
-            return None;
-        };
-        if !signal::FATAL.contains(&signo) {
-            return None;
-        }
-        Some(Failure {
-            step: e.step,
-            pid: e.pid,
-            tid: e.tid,
-            index,
-            kind: FailureKind::Signal { signo, addr },
-        })
-    });
-    if signal.is_some() {
-        return signal;
-    }
-
-    // A machine that stopped before the job exited failed where it
-    // stopped: the nonzero exits along the way did not end the job. The
-    // failing event is the last one the run made.
-    if stopped == Stopped::Abnormally && job_exit.is_none() {
-        let (index, last) = trace.events.iter().enumerate().next_back()?;
-        return Some(Failure {
-            step: total,
-            pid: last.pid,
-            tid: last.tid,
-            index,
-            kind: FailureKind::Stopped,
-        });
-    }
-
-    // Processes that exited nonzero; threads are left out, since a
-    // thread's exit_code says nothing about its process.
-    let procs = trace.processes();
-    let failed: Vec<&rewind_trace::Process> = procs
-        .iter()
-        .filter(|p| p.end.is_some_and(|end| end <= until && !made_too(end)))
-        .filter(|p| p.status.is_some_and(|s| s != 0))
-        .collect();
-
-    // Walk down from the last nonzero exit to the child it followed.
-    let mut current = *failed.iter().max_by_key(|p| p.end)?;
-    loop {
-        let cause = failed
-            .iter()
-            .filter(|c| c.parent_life == Some(current.life()) && c.end <= current.end)
-            .max_by_key(|c| c.end);
-        match cause {
-            Some(c) => current = c,
-            None => break,
-        }
-    }
-
-    // A process a signal killed, such as a writer killed by SIGPIPE when
-    // the reader of its pipe exited, failed where the signal reached it:
-    // its exit only follows from that.
-    let status = ExitStatus::from_raw(current.status.unwrap_or_default());
-    let end = current.end?;
-    if let ExitStatus::Signal {
-        signo: killed_by, ..
-    } = status
-    {
-        let delivered = trace
-            .events
-            .iter()
-            .enumerate()
-            .rev()
-            .find_map(|(index, e)| {
-                if e.pid != current.pid || e.step > end {
-                    return None;
-                }
-                let EventKind::Signal { signo, addr, .. } = e.kind else {
-                    return None;
-                };
-                (signo == killed_by).then_some(Failure {
-                    step: e.step,
-                    pid: e.pid,
-                    tid: e.tid,
-                    index,
-                    kind: FailureKind::Signal { signo, addr },
-                })
-            });
-        if delivered.is_some() {
-            return delivered;
-        }
-    }
-
-    // Otherwise the failure is that process's exit event.
-    let step = end;
-    let index = trace.events.iter().position(|e| {
-        e.step == step
-            && e.pid == current.pid
-            && matches!(e.kind, EventKind::Exit { thread: false, .. })
-    })?;
-    Some(Failure {
-        step,
-        pid: current.pid,
-        tid: current.pid,
-        index,
-        kind: FailureKind::Exit {
-            status: current.status.unwrap_or_default(),
-        },
-    })
-}
-
 /// Opens for writing, unlinks and renames, and init's output marks, in
 /// step order. Device files are left out.
 fn file_events(trace: &Trace) -> Vec<FileEvent> {
@@ -1378,7 +1189,7 @@ pub(crate) mod tests {
     // guest would report, indexes them, and checks one answer the UI asks
     // for per frame.
     use super::*;
-    use rewind_trace::Event;
+    use rewind_trace::{Event, signal};
 
     pub(crate) fn ev(step: u64, pid: u32, tid: u32, kind: EventKind) -> Event {
         Event {

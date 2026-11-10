@@ -53,14 +53,16 @@
       .viewer-frame.running {
         min-width: 960px;
       }
-      /* In place of the app when the window is too narrow for it. */
+      /* In place of the app when the window is too narrow for it. A long
+         summary scrolls inside the frame from its top. */
       .viewer-narrow {
         position: absolute;
         inset: 0;
         display: grid;
-        place-content: center;
+        place-content: safe center;
         gap: 12px;
         padding: 24px;
+        overflow-y: auto;
         text-align: center;
         color: var(--soft);
       }
@@ -70,6 +72,24 @@
       .viewer-narrow p {
         margin: 0;
         max-width: 28em;
+      }
+      /* The run the link names, in plain text, as rewind summary prints
+         it: wrapped to the screen, so the page never scrolls sideways. */
+      .viewer-summary {
+        margin: 0;
+        padding: 12px 14px;
+        max-width: 48em;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: var(--panel);
+        color: var(--text);
+        font: 0.8rem/1.5 var(--mono);
+        text-align: left;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+      .viewer-summary[hidden] {
+        display: none;
       }
       .viewer-status {
         position: absolute;
@@ -182,6 +202,8 @@
             <p>
               The viewer is the desktop app's window and needs a screen at least 960 pixels wide.
             </p>
+            <!-- The run the link names, in plain text, which app.js fills. -->
+            <pre class="viewer-summary" id="viewer-summary" hidden></pre>
             <p>
               Open this link on a computer, or
               <a href="../case-studies/nix-gc-closure-sigpipe.html#video">watch the 2:24 demo</a>.

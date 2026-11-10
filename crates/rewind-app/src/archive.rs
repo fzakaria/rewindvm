@@ -1,7 +1,8 @@
 //! Exported runs: `.rwd` files.
 //!
 //! `rewind export` writes a run as one file: a tar archive compressed with
-//! zstd holding `manifest.json`, `trace.bin` and any `bookmarks.json`, and
+//! zstd holding `manifest.json`, `summary.txt`, `trace.bin` and any
+//! `bookmarks.json`, and
 //! for a replayable export also keyframes, memory pages and the run's
 //! inputs (see crates/rewind-core/src/export.rs). The scrubber needs only
 //! the manifest, the trace and the bookmarks, so the app unpacks those into
@@ -19,8 +20,10 @@ use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
 use crate::bookmarks::{BOOKMARKS_FILE, MAX_BYTES as BOOKMARKS_MAX_BYTES};
+use rewind_trace::Trace;
 use rewind_trace::export::{self, Contents, Flow, Member};
-use rewind_trace::manifest::{MANIFEST, RunId, TRACE};
+use rewind_trace::manifest::{MANIFEST, Manifest, RunId, TRACE};
+use rewind_trace::summary::{self, Recording, SUMMARY};
 
 /// The binary units sizes are said in.
 const KIBIBYTE: u64 = 1 << 10;
@@ -216,6 +219,8 @@ pub fn download(url: &str) -> Result<PathBuf> {
 pub struct InMemory {
     pub manifest: Vec<u8>,
     pub trace: Vec<u8>,
+    /// The run in plain text, when the export carries its summary.txt.
+    pub summary: Option<Vec<u8>>,
     /// The bookmarks the desktop app made, when the export carries them.
     pub bookmarks: Option<Vec<u8>>,
     /// Whether it holds the keyframes, pages and inputs replay needs.
@@ -293,10 +298,11 @@ pub fn read_bytes(bytes: &[u8]) -> Result<InMemory> {
 fn read_within(reader: impl Read, limits: MemberLimits) -> Result<InMemory> {
     let mut manifest = None;
     let mut trace = None;
+    let mut summary = None;
     let mut bookmarks = None;
 
-    // The manifest, the trace and the bookmarks, as a regular file no
-    // larger than the engine writes, are kept; every other member is
+    // The manifest, the trace, and the summary and the bookmarks as
+    // regular files no larger than the engine writes, are kept; every other member is
     // skipped, and the members only replay needs are not read. A manifest
     // or trace past its limit refuses the export before any of the member
     // is read into memory.
@@ -309,6 +315,7 @@ fn read_within(reader: impl Read, limits: MemberLimits) -> Result<InMemory> {
         let slot = match member {
             Member::Manifest => &mut manifest,
             Member::Trace => &mut trace,
+            Member::Summary if size <= export::MAX_SUMMARY => &mut summary,
             Member::Bookmarks if size <= BOOKMARKS_MAX_BYTES => &mut bookmarks,
             _ => return Ok(Flow::Continue),
         };
@@ -325,9 +332,39 @@ fn read_within(reader: impl Read, limits: MemberLimits) -> Result<InMemory> {
     Ok(InMemory {
         manifest,
         trace,
+        summary,
         bookmarks,
         replayable: contents == Contents::Replayable,
     })
+}
+
+/// The summary of the run in the export `run`, as `rewind summary` prints
+/// it, for the browser viewer on a screen too narrow for the app: the
+/// export's summary.txt when it carries one, else the summary made from
+/// its manifest and trace. Given `compare`, another export, the summary
+/// is made from both, with where the runs part.
+pub fn summary(run: &[u8], compare: Option<&[u8]>) -> Result<String> {
+    let run = read_bytes(run)?;
+    if compare.is_none()
+        && let Some(said) = &run.summary
+    {
+        return String::from_utf8(said.clone())
+            .with_context(|| format!("the archive's {SUMMARY} is not text"));
+    }
+
+    // Made here as the engine makes it, from the manifest and the trace.
+    let parsed = |export: &InMemory| -> Result<(Manifest, Trace)> {
+        let manifest = Manifest::parse(&export.manifest)
+            .with_context(|| format!("reading the archive's {MANIFEST}"))?;
+        let trace = Trace::from_bytes(&export.trace)
+            .with_context(|| format!("reading the archive's {TRACE}"))?;
+        Ok((manifest, trace))
+    };
+    let (manifest, trace) = parsed(&run)?;
+    let other = compare.map(read_bytes).transpose()?;
+    let other = other.as_ref().map(parsed).transpose()?;
+    let other = other.as_ref().map(|(m, t)| Recording::of(m, t));
+    Ok(summary::summary(Recording::of(&manifest, &trace), other))
 }
 
 /// What the first bytes of an export hold, for a page that reads an
@@ -858,6 +895,46 @@ mod tests {
         let no_trace = archive(&[("manifest.json", b"{}")]);
         assert!(read_bytes(&no_trace).is_err());
         assert!(read_bytes(b"not zstd").is_err());
+    }
+
+    #[test]
+    fn a_summary_is_the_exports_own_or_made_from_its_run() {
+        // The failing example's manifest and trace, packed with a summary
+        // and without one. With one, the viewer's summary is the file as
+        // it is; without, it is made from the manifest and the trace, as
+        // the engine makes it. Beside the passing example, it is made from
+        // both and says where they part.
+        let failing = read_bytes(crate::examples::FAILING).unwrap();
+        let passing = read_bytes(crate::examples::PASSING).unwrap();
+        let packed = |summary: Option<&[u8]>| {
+            let mut entries: Vec<(&str, &[u8])> = vec![("manifest.json", &failing.manifest)];
+            if let Some(summary) = summary {
+                entries.push((SUMMARY, summary));
+            }
+            entries.push(("trace.bin", &failing.trace));
+            archive(&entries)
+        };
+        let carried = summary(&packed(Some(b"as the engine wrote it\n")), None).unwrap();
+        assert_eq!(carried, "as the engine wrote it\n");
+
+        let made = summary(&packed(None), None).unwrap();
+        let manifest = Manifest::parse(&failing.manifest).unwrap();
+        let trace = Trace::from_bytes(&failing.trace).unwrap();
+        assert_eq!(
+            made,
+            summary::summary(Recording::of(&manifest, &trace), None)
+        );
+        assert!(made.contains("verdict: failed"), "{made}");
+        assert!(made.contains("failing step: "), "{made}");
+
+        let pass = archive(&[
+            ("manifest.json", &passing.manifest),
+            ("trace.bin", &passing.trace),
+        ]);
+        let compared = summary(&packed(Some(b"ignored\n")), Some(&pass)).unwrap();
+        assert!(compared.starts_with(&made), "{compared}");
+        assert!(compared.contains("the runs part at step "), "{compared}");
+        assert!(summary(b"not zstd", None).is_err());
     }
 
     /// How much kernel the replayable export of the prefix test carries:

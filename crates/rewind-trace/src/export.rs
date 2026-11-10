@@ -1,6 +1,6 @@
 //! A `.rwd` export: a zstd-compressed tar of a run's directory. Every
-//! export carries the manifest and trace, and the bookmarks the desktop
-//! app made; a replayable one also carries the keyframes, the pages they
+//! export carries the manifest and trace, the run's summary in plain text,
+//! and the bookmarks the desktop app made; a replayable one also carries the keyframes, the pages they
 //! name and the VM's inputs. `rewind export` writes them, and `rewind
 //! import` and the app read them through [`walk`].
 
@@ -9,6 +9,7 @@ use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 
 use crate::manifest::{BOOKMARKS, KEYFRAMES_DIR, MANIFEST, TRACE};
+use crate::summary::SUMMARY;
 
 /// The file extension of an export.
 pub const EXTENSION: &str = "rwd";
@@ -33,6 +34,10 @@ pub const REPLAY_DIRS: [&str; 3] = [KEYFRAMES_DIR, PAGES_DIR, INPUTS_DIR];
 /// far below this, so a larger file is not a run's.
 pub const MAX_BOOKMARKS: u64 = 1 << 20;
 
+/// The most bytes of summary a reader takes from an export: a summary is
+/// a few dozen lines of at most a few kilobytes each, far below this.
+pub const MAX_SUMMARY: u64 = 1 << 20;
+
 /// What an export carries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Contents {
@@ -48,6 +53,8 @@ pub enum Contents {
 pub enum Member {
     Manifest,
     Trace,
+    /// The run in plain text, as `rewind summary` prints it.
+    Summary,
     /// The desktop app's bookmarks.
     Bookmarks,
     /// A keyframe, or the mark that the run took keyframes as it executed.
@@ -68,6 +75,9 @@ impl Member {
         }
         if path == Path::new(TRACE) {
             return Member::Trace;
+        }
+        if path == Path::new(SUMMARY) {
+            return Member::Summary;
         }
         if path == Path::new(BOOKMARKS) {
             return Member::Bookmarks;
@@ -229,13 +239,14 @@ mod tests {
 
     #[test]
     fn members_come_out_in_order_each_named_for_what_it_is() {
-        // A view export's three members, then one of each kind a
+        // A view export's four members, then one of each kind a
         // replayable export adds and one no export writes: each is handed
         // over with its bytes, and the replay members make the export
         // replayable.
         let view = archive(&[
             ("trace.bin", b"trace"),
             ("manifest.json", b"{}"),
+            ("summary.txt", b"run"),
             ("bookmarks.json", b"[]"),
         ]);
         let (seen, contents) = walked(&view);
@@ -249,6 +260,7 @@ mod tests {
                     Member::Manifest,
                     b"{}".to_vec()
                 ),
+                ("summary.txt".to_string(), Member::Summary, b"run".to_vec()),
                 (
                     "bookmarks.json".to_string(),
                     Member::Bookmarks,

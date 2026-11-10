@@ -5,9 +5,9 @@ use std::time::Duration;
 
 use rewind_core::Run;
 use rewind_core::compare::{Comparison, Source, Verdict};
-use rewind_trace::ending::{self, ExitStatus};
+use rewind_trace::ending;
 use rewind_trace::manifest::Manifest;
-use rewind_trace::{Divergence, Event, EventKind, Trace, signal_name};
+use rewind_trace::{Divergence, Event, Trace};
 
 use crate::color::{Paint, Same, Style};
 
@@ -292,43 +292,7 @@ pub(crate) fn seed_words(spec: &rewind_core::Spec) -> String {
 
 /// One event, in the syscall-ish notation the scrubber uses.
 pub(crate) fn event(e: &Event) -> String {
-    let what = match &e.kind {
-        EventKind::Console { text } => format!("console {:?}", text.trim_end()),
-        EventKind::Output { fd, bytes } => {
-            format!("write({fd}, {:?})", String::from_utf8_lossy(bytes))
-        }
-        EventKind::Exec { filename, argv, .. } => {
-            format!("execve({filename:?}, {argv:?})")
-        }
-        EventKind::Fork { child, thread } => {
-            let how = if *thread {
-                "clone(CLONE_THREAD)"
-            } else {
-                "fork()"
-            };
-            format!("{how} = {child}")
-        }
-        EventKind::Exit {
-            status: s,
-            comm,
-            thread,
-        } => {
-            let who = if *thread { "thread exit" } else { "exit_group" };
-            format!("{who}({comm}) {}", ExitStatus::from_raw(*s))
-        }
-        EventKind::Signal { signo, code, addr } => {
-            format!("{} code={code} addr={addr:#x}", signal_name(*signo))
-        }
-        EventKind::Open { path, flags } => format!("open({path:?}, {flags:#o})"),
-        EventKind::Unlink { path } => format!("unlink({path:?})"),
-        EventKind::Rename { from, to } => format!("rename({from:?}, {to:?})"),
-        EventKind::Mark { text } => format!("mark {text:?}"),
-        EventKind::ReadOpen { path, flags } => {
-            format!("open({path:?}, {flags:#o}) while it is being written")
-        }
-        EventKind::Close { path } => format!("close({path:?})"),
-        EventKind::Unknown { kind, data } => format!("record kind {kind}, {} bytes", data.len()),
-    };
+    let what = e.kind.words();
     format!("{:>10} {:>5}/{:<5} {what}", e.step, e.pid, e.tid)
 }
 
@@ -490,6 +454,7 @@ pub(crate) fn divergence(left: &Trace, right: &Trace, paint: Paint) -> String {
 mod tests {
     // The words runs, schedules and outputs are printed in.
     use super::*;
+    use rewind_trace::EventKind;
 
     use crate::reproduce::tests::{job, spec};
 

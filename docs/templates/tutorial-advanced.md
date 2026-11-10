@@ -688,7 +688,8 @@ A replayable export carries the keyframes, the image and the VM's kernel, and
 replays on any machine with the same CPU vendor. Without `--replayable` it is
 the events alone, {{small}}: enough to read and to scrub in the app, whose
 Export button writes the replayable kind. Both kinds carry the run's
-bookmarks.
+bookmarks, and `summary.txt`, the run in plain text as `rewind summary`
+prints it: the verdict, the failing step and the last lines of output.
 
 The other machine also needs the features of the run's CPU model. A run
 without `--cpu` gets `v3`, whose features include ERMS, the fast `rep movsb`

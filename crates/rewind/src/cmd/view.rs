@@ -1,12 +1,14 @@
 //! The `rewind` subcommands that read recorded runs: listing them, the
-//! commands that make them, their output, processes and events, comparing
-//! and replaying them, and opening them in the desktop app.
+//! commands that make them, their output, processes and events, a summary
+//! of them, comparing and replaying them, and opening them in the desktop
+//! app.
 
 use std::process::ExitCode;
 
 use anyhow::{Result, bail};
 use rewind_core::{Guest, Home, Run, image};
 use rewind_trace::Part;
+use rewind_trace::summary::{self, Recording};
 
 use crate::color::{self, Same};
 use crate::exit;
@@ -223,6 +225,35 @@ pub(crate) fn show(home: &Home, args: ShowArgs) -> Result<ExitCode> {
     }
     for (id, _, line) in &commands {
         println!("{line}  # {id}");
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// The arguments of `rewind summary`.
+#[derive(clap::Args)]
+pub(crate) struct SummaryArgs {
+    #[arg(help = RUN_HELP, long_help = RUN_LONG_HELP)]
+    pub(crate) run: String,
+    /// Another run, to say where the two part and what each did there.
+    #[arg(long, value_name = "RUN")]
+    pub(crate) compare: Option<String>,
+}
+
+pub(crate) fn summary(home: &Home, args: SummaryArgs) -> Result<ExitCode> {
+    let SummaryArgs { run, compare } = args;
+    let run = Run::find(home, &run)?;
+    let other = compare.map(|other| Run::find(home, &other)).transpose()?;
+
+    // The summary is plain text, the same bytes an export of the run
+    // carries, so it is never colored.
+    let this = Recording::of(&run.manifest, run.trace()?);
+    let other = match &other {
+        Some(other) => Some(Recording::of(&other.manifest, other.trace()?)),
+        None => None,
+    };
+    print!("{}", summary::summary(this, other));
+    if run.manifest.verdict.failed() {
+        return Ok(ExitCode::from(exit::DIFFERS));
     }
     Ok(ExitCode::SUCCESS)
 }

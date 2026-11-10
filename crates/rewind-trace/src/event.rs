@@ -147,6 +147,55 @@ impl EventKind {
     }
 }
 
+impl EventKind {
+    /// What the event did, in words, as `rewind events` and `rewind
+    /// summary` print it: `write(1, "done\n")`, `exit_group(cc) exited:2`.
+    pub fn words(&self) -> String {
+        match self {
+            EventKind::Console { text } => format!("console {:?}", text.trim_end()),
+            EventKind::Output { fd, bytes } => {
+                format!("write({fd}, {:?})", String::from_utf8_lossy(bytes))
+            }
+            EventKind::Exec { filename, argv, .. } => {
+                format!("execve({filename:?}, {argv:?})")
+            }
+            EventKind::Fork { child, thread } => {
+                let how = if *thread {
+                    "clone(CLONE_THREAD)"
+                } else {
+                    "fork()"
+                };
+                format!("{how} = {child}")
+            }
+            EventKind::Exit {
+                status,
+                comm,
+                thread,
+            } => {
+                let who = if *thread { "thread exit" } else { "exit_group" };
+                format!(
+                    "{who}({comm}) {}",
+                    crate::ending::ExitStatus::from_raw(*status)
+                )
+            }
+            EventKind::Signal { signo, code, addr } => {
+                format!("{} code={code} addr={addr:#x}", signal_name(*signo))
+            }
+            EventKind::Open { path, flags } => format!("open({path:?}, {flags:#o})"),
+            EventKind::Unlink { path } => format!("unlink({path:?})"),
+            EventKind::Rename { from, to } => format!("rename({from:?}, {to:?})"),
+            EventKind::Mark { text } => format!("mark {text:?}"),
+            EventKind::ReadOpen { path, flags } => {
+                format!("open({path:?}, {flags:#o}) while it is being written")
+            }
+            EventKind::Close { path } => format!("close({path:?})"),
+            EventKind::Unknown { kind, data } => {
+                format!("record kind {kind}, {} bytes", data.len())
+            }
+        }
+    }
+}
+
 impl Event {
     /// The mark this event is when init wrote it: a mark from init's pid
     /// that reads as one of init's. The job can write the same words, and

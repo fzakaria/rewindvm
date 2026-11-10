@@ -3964,6 +3964,88 @@ in
         touch $out
       '';
 
+  # checks.summary: `rewind summary` and the summary.txt every export
+  # carries. A job in the busybox root prints two lines, then a third that
+  # says "three" and exits 2 when the run's seed gives it a low random
+  # byte, or says "four" and exits 0. Seeds are tried until one run of
+  # each kind is found. The failing run's summary says it failed and why,
+  # names the failing step and its process, and shows the lines without
+  # the job's color; the command exits 1, and its output is the export's
+  # summary.txt byte for byte. The passing run's exits 0, and beside it
+  # the failing run's says where the two part and what each wrote there.
+  # A run that does not exist exits 2. Boots the VM, so it needs /dev/kvm.
+  summary =
+    pkgs.runCommand "rewind-summary"
+      {
+        nativeBuildInputs = [
+          rewind
+          pkgs.zstd
+        ];
+        requiredSystemFeatures = [ "kvm" ];
+      }
+      ''
+        export REWIND_HOME=$TMPDIR/rewind
+        job='b=$(od -An -N1 -tu1 /dev/urandom); echo one; echo two
+          if [ $b -lt 128 ]; then printf "\033[31mthree\033[0m\n"; exit 2; fi; echo four'
+        failing= passing=
+        for seed in $(seq 1 16); do
+          rewind run -q --epoch 1790985600 --seed $seed --name s$seed --root ${busyboxRoot} \
+            -- sh -c "$job" > /dev/null || true
+          if rewind summary s$seed > /dev/null; then
+            passing=''${passing:-s$seed}
+          else
+            failing=''${failing:-s$seed}
+          fi
+          if [ -n "$failing" ] && [ -n "$passing" ]; then break; fi
+        done
+        echo "failing run $failing, passing run $passing"
+        test -n "$failing" && test -n "$passing"
+
+        status=0
+        rewind summary $failing > cli.txt || status=$?
+        cat cli.txt
+        test "$status" = 1
+        grep -qx 'verdict: failed' cli.txt
+        grep -qx '  exited with status 2' cli.txt
+        grep -q '^ended: exited:2 at step [0-9]* (poweroff)$' cli.txt
+        grep -q '^failing step: [0-9]*, in process [0-9]* (sh), thread [0-9]*: exit_group(sh) exited:2$' cli.txt
+        grep -qx 'output (3 lines):' cli.txt
+        grep -qx '  three' cli.txt
+        if grep -q "$(printf '\033')" cli.txt; then exit 1; fi
+
+        # The export carries the same bytes as summary.txt, in a view
+        # export and a replayable one alike.
+        rewind export $failing -o failing.rwd
+        rewind export $failing --replayable -o replayable.rwd
+        for export in failing.rwd replayable.rwd; do
+          zstd -dc $export | tar -xO summary.txt > file.txt
+          cmp cli.txt file.txt
+        done
+
+        # A run that passed exits 0 and has no failing step; beside it, the
+        # failing run's summary is its own, then where the two part and
+        # what each wrote there.
+        rewind summary $passing > passed.txt
+        cat passed.txt
+        grep -qx 'verdict: passed' passed.txt
+        if grep -q '^failing step' passed.txt; then exit 1; fi
+        status=0
+        rewind summary $failing --compare $passing > compared.txt || status=$?
+        cat compared.txt
+        test "$status" = 1
+        head -n "$(wc -l < cli.txt)" compared.txt | cmp - cli.txt
+        grep -q "^compared with run [0-9a-f]*: $passing\$" compared.txt
+        grep -q '^the runs part at step [0-9]* here and step [0-9]* there' compared.txt
+        grep -q '^  here:  .*three' compared.txt
+        grep -q '^  there: .*four' compared.txt
+
+        status=0
+        rewind summary nonesuch 2> missing || status=$?
+        test "$status" = 2
+        grep -q 'no run matches' missing
+        touch $out
+      '';
+
   # checks.trace-properties: the properties `rewind check --property`
   # decides from the trace alone, each on a shell job in the busybox root
   # that breaks it, and on one that does not: a child killed by SIGSEGV
