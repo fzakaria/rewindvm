@@ -886,6 +886,24 @@ impl Symbols {
         &self.session.dir
     }
 
+    /// The name a file gdb found at `path` here, a frame's source file or
+    /// program, has for a reader with no access to this machine: its path
+    /// in the VM for a file written to the session's directory, and the
+    /// name the program's DWARF gives a source file the debuginfod client
+    /// fetched into its cache under the home directory. `dwarf` is the
+    /// name gdb's symbol table gives a source file. Any other path is the
+    /// file's own.
+    pub(crate) fn name_in_vm(&self, path: &str, dwarf: Option<&str>) -> String {
+        let path = Path::new(path);
+        if path.starts_with(self.dir()) {
+            return path_in_vm(path, self.dir()).display().to_string();
+        }
+        if let Some(name) = crate::debuginfod_client::source_name(path, dwarf) {
+            return name;
+        }
+        path.display().to_string()
+    }
+
     /// The process's programs and libraries by their build IDs, which the
     /// debuginfod client asks for them by. A file with no build ID is left
     /// out.
@@ -1911,7 +1929,7 @@ fn listed_by_gdb(files: &[&SymbolFile]) -> Option<Vec<Vec<String>>> {
 /// The path a symbol file had in the VM: its path under `dir` when it was
 /// written there, else its own path. The vDSO is no file in the VM, and
 /// keeps the name the VM's map gives it.
-pub(crate) fn path_in_vm(file: &Path, dir: &Path) -> PathBuf {
+fn path_in_vm(file: &Path, dir: &Path) -> PathBuf {
     match file.strip_prefix(dir) {
         Ok(inside) if inside == Path::new(rewind_core::maps::VDSO) => inside.to_path_buf(),
         Ok(inside) => Path::new("/").join(inside),

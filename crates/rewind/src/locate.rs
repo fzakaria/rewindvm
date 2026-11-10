@@ -330,23 +330,22 @@ fn walk(
     let mut frames = walked.frames.unwrap_or_default();
 
     // Each source file, read while the session's copies are here, then
-    // every path, the files' own too, as the VM had it.
+    // every path, the files' own too, as the VM had it or the DWARF names
+    // it.
     let chosen = chosen(&frames);
     let files = source_files(&frames, &JSON_LIMITS, |path| {
         std::fs::read_to_string(path).ok()
     });
-    let in_vm = |path: &String| {
-        gdb::path_in_vm(std::path::Path::new(path), symbols.dir())
-            .display()
-            .to_string()
-    };
-    for frame in &mut frames {
-        frame.fullname = frame.fullname.as_ref().map(in_vm);
-        frame.object = frame.object.as_ref().map(in_vm);
-    }
+    let renamed = rename_in_vm(&mut frames, symbols);
     let files = files
         .into_iter()
-        .map(|(path, file)| (in_vm(&path), file))
+        .map(|(path, file)| {
+            let name = renamed
+                .get(&path)
+                .cloned()
+                .unwrap_or_else(|| symbols.name_in_vm(&path, None));
+            (name, file)
+        })
         .collect();
 
     let located = Located {
@@ -360,6 +359,25 @@ fn walk(
         files,
     };
     Ok((located, gdb))
+}
+
+/// Gives each of `frames`' source files and programs the name it has for a
+/// reader with no access to this machine, as [`Symbols::name_in_vm`] names
+/// it, and returns each source file's name by its path here.
+fn rename_in_vm(frames: &mut [Frame], symbols: &Symbols) -> BTreeMap<String, String> {
+    let mut renamed = BTreeMap::new();
+    for frame in frames {
+        if let Some(path) = frame.fullname.take() {
+            let name = symbols.name_in_vm(&path, frame.file.as_deref());
+            renamed.insert(path, name.clone());
+            frame.fullname = Some(name);
+        }
+        frame.object = frame
+            .object
+            .as_ref()
+            .map(|path| symbols.name_in_vm(path, None));
+    }
+    renamed
 }
 
 /// What `gdb` printed in a session on `debuggee` that sources the script
@@ -461,13 +479,8 @@ pub(crate) fn threads_at(
         bail!("gdb could not walk the threads: {error}");
     }
 
-    // Each path as the VM had it, a line's text read while the session's
-    // copy of its file is here.
-    let in_vm = |path: &String| {
-        gdb::path_in_vm(std::path::Path::new(path), symbols.dir())
-            .display()
-            .to_string()
-    };
+    // Each path as the VM had it or the DWARF names it, a line's text read
+    // while the session's copy of its file is here.
     let threads = answer
         .threads
         .unwrap_or_default()
@@ -477,10 +490,7 @@ pub(crate) fn threads_at(
                 (_, Some(error)) => Err(error),
                 (frames, None) => {
                     let mut frames = frames.unwrap_or_default();
-                    for frame in &mut frames {
-                        frame.fullname = frame.fullname.as_ref().map(in_vm);
-                        frame.object = frame.object.as_ref().map(in_vm);
-                    }
+                    rename_in_vm(&mut frames, symbols);
                     let chosen = chosen(&frames);
                     Ok((frames, chosen))
                 }

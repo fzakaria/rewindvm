@@ -3,6 +3,7 @@
 mod answers;
 mod cmd;
 mod color;
+mod debuginfod_client;
 mod diff_files;
 mod doctor;
 mod downloads;

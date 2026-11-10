@@ -689,9 +689,62 @@ let
           -o $out/bin/pool main.c pool.c
       '';
 
+  # The source of checks.answers' thread, which neither the VM nor the
+  # machine has: its DWARF names it /served/worker.c, and only the
+  # debuginfod server answersServer serves it.
+  answersServed = pkgs.writeTextDir "served/worker.c" ''
+    #include <stdio.h>
+
+    void *worker(void *arg)
+    {
+      printf("worker wrote the report\n"); /* the write */
+      fflush(stdout);
+      return arg;
+    }
+  '';
+
+  # A debuginfod server for checks.answers, started as `rewind gdb`
+  # starts nixseparatedebuginfod2, on the socket handed to it as
+  # descriptor 3: it serves each source file answersServed has, by the
+  # path the DWARF gives it, and nothing else.
+  answersServer = pkgs.writeScript "rewind-answers-debuginfod" ''
+    #!${pkgs.python3}/bin/python3
+    import http.server
+    import os
+    import socket
+    import urllib.parse
+
+    ROOT = "${answersServed}"
+    LISTEN_FD = 3
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            parts = self.path.split("/", 4)
+            if len(parts) == 5 and parts[1] == "buildid" and parts[3] == "source":
+                path = os.path.join(ROOT, urllib.parse.unquote(parts[4]).lstrip("/"))
+                if os.path.isfile(path):
+                    with open(path, "rb") as f:
+                        data = f.read()
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
+            self.send_error(404)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler, bind_and_activate=False)
+    server.socket.close()
+    server.socket = socket.socket(fileno=LISTEN_FD)
+    server.serve_forever()
+  '';
+
   # A root for checks.answers: a program, built with its symbols, that
   # writes a report to /tmp, starts a thread that prints, joins it, and
-  # exits 3.
+  # exits 3. The thread's source is answersServed's, compiled outside the
+  # root.
   answersRoot =
     pkgs.runCommand "rewind-answers-root"
       {
@@ -705,12 +758,7 @@ let
         #include <pthread.h>
         #include <stdio.h>
 
-        static void *worker(void *arg)
-        {
-          printf("worker wrote the report\n"); /* the write */
-          fflush(stdout);
-          return arg;
-        }
+        void *worker(void *arg);
 
         int main(void)
         {
@@ -724,8 +772,10 @@ let
           return 3;
         }
         EOF
+        cp -r ${answersServed}/served $TMPDIR/served
         $CC -static -O1 -g -pthread -fdebug-prefix-map=$out/src=/src \
-          -o $out/bin/report report.c
+          -fdebug-prefix-map=$TMPDIR/served=/served -Wl,--build-id \
+          -o $out/bin/report report.c $TMPDIR/served/worker.c
       '';
 
   # The path and bytes of the report answersRoot's program writes, and
@@ -743,8 +793,11 @@ let
   # at the failing step and at the bookmark: the thread at the bookmark
   # is located in its function, as `rewind where` locates it, and the
   # report reads back from its member whole at the failing step. An
-  # export without --with-answers carries no answers. The output holds
-  # the export, for checks.answers-app. Boots the VM, so it needs
+  # export without --with-answers carries no answers. The thread's source
+  # comes from a debuginfod server into the client's cache under the home
+  # directory; the export, and `rewind where --json`, name it as its
+  # DWARF does and name no path under the home directories. The output
+  # holds the export, for checks.answers-app. Boots the VM, so it needs
   # /dev/kvm.
   answersExport =
     pkgs.runCommand "rewind-answers"
@@ -759,9 +812,14 @@ let
       }
       ''
         export REWIND_HOME=$TMPDIR/rewind
-        # No debuginfod server: without a network, each of gdb's questions
-        # to it waits out a timeout.
-        export REWIND_DEBUGINFOD=/nonexistent
+        # gdb's debuginfod client keeps what it fetches in the home
+        # directory's cache, as on a person's machine.
+        export HOME=$TMPDIR/home
+        export XDG_CACHE_HOME=$HOME/.cache
+        mkdir -p $XDG_CACHE_HOME
+        # A debuginfod server of the thread's source alone: without a
+        # network, each of gdb's questions to another waits out a timeout.
+        export REWIND_DEBUGINFOD=${answersServer}
 
         rewind run -q --clock exits --name report --root ${answersRoot} -- /bin/report || true
         step=$(rewind events report | grep 'write(1, "worker' | awk '{print $1}')
@@ -793,6 +851,26 @@ let
             | .member' answers.json)
         printf '${answersReport.bytes}' > expected
         zstd -dc $out/report.rwd | tar -xO "$member" | cmp - expected
+
+        # The thread's source, fetched into the client's cache, by the
+        # name its DWARF gives it, with its text; and no path under the
+        # home directories, in the export or in `rewind where --json`.
+        rewind where report "$step" --json > where.json
+        for answer in answers.json where.json; do
+          jq -r '.. | objects | select(has("frames") and has("chosen") and .chosen != null)
+            | .frames[.chosen].fullname' $answer
+          jq -e --arg function ${answersReport.function} \
+            '[.. | objects | select(has("frames") and has("chosen"))
+              | select(.chosen != null and .frames[.chosen].function == $function)]
+            | length > 0 and all(.[]; .frames[.chosen].fullname == "/served/worker.c"
+              and (.files["/served/worker.c"].text | contains("worker wrote the report")))' $answer
+          for home in "$HOME" "$XDG_CACHE_HOME" "$REWIND_HOME" debuginfod_client; do
+            if grep -F "$home" $answer; then
+              echo "$answer names $home"
+              exit 1
+            fi
+          done
+        done
       '';
 
   # A root for checks.where-idle: a program built from 200 source files
