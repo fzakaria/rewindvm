@@ -13,7 +13,8 @@
 //! first instruction whose result differs is the cause. This works when
 //! the source gives a different answer each time it is read, as `rdrand`
 //! does. A source that differs only sometimes is tried again, `tries`
-//! times.
+//! times: a try counts when its two copies differ and the two then
+//! single-stepped through the step differ again.
 //!
 //! The two copies capture their machines the same way at the same places,
 //! so whatever a capture does to a machine it does to both.
@@ -117,6 +118,33 @@ pub enum Bisected {
     /// gave the same answer to both, as one decided by this host but
     /// fixed on it does.
     Agreed { bracket: Bracket, tries: u32 },
+    /// Two copies differed after `step`, on the last try that found a
+    /// step, and the two then single-stepped through that step agreed: the
+    /// source differs only sometimes, and no try caught it both times.
+    Intermittent {
+        bracket: Bracket,
+        step: u64,
+        tries: u32,
+    },
+}
+
+/// What one try of a bisect came to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Try {
+    /// The two copies agreed over the whole bracket.
+    Agreed,
+    /// Two copies differed after this step, and the two single-stepped
+    /// through the step did not: the difference did not come back.
+    NotAgain(u64),
+    /// The first step after which the copies differ, and where within it.
+    Found { step: u64, within: WithinStep },
+}
+
+/// Whether two copies differ where each stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Differ {
+    Yes,
+    No,
 }
 
 /// Keeps the records a copy makes, with their steps.
@@ -281,10 +309,32 @@ fn first_step(run: &Run, home: &Home, bracket: Bracket) -> Result<Option<u64>> {
     Ok(None)
 }
 
+/// What single-stepped copies that reached the exit ending the step show:
+/// a difference at the exit, in `state` and `pages`, when the copies
+/// differ there, and None when they do not. Copies that agree after the
+/// step show no difference to place, whatever an earlier pair showed.
+fn at_the_exit(
+    instructions: u64,
+    differ: Differ,
+    state: Vec<StateDifference>,
+    pages: Vec<u32>,
+) -> Option<WithinStep> {
+    if differ == Differ::No {
+        return None;
+    }
+    Some(WithinStep::AtTheExit {
+        instructions,
+        state,
+        pages,
+    })
+}
+
 /// Where within `step` the two copies first differ: both are brought to
 /// the step before, captured as the search captured them, and single-
-/// stepped side by side.
-fn within_step(run: &Run, home: &Home, bracket: Bracket, step: u64) -> Result<WithinStep> {
+/// stepped side by side. None when these two copies agree through the
+/// step: the difference the search found with another pair did not come
+/// back.
+fn within_step(run: &Run, home: &Home, bracket: Bracket, step: u64) -> Result<Option<WithinStep>> {
     let start = bracket.from.unwrap_or(0);
     let (mut a, mut b) = pair(run, home, bracket)?;
 
@@ -322,7 +372,7 @@ fn within_step(run: &Run, home: &Home, bracket: Bracket, step: u64) -> Result<Wi
             let registers = register_differences(&a.machine, &b.machine)?;
             if !registers.is_empty() {
                 let (pid, process) = process_on_cpu(&a.machine);
-                return Ok(WithinStep::Instruction(Instruction {
+                return Ok(Some(WithinStep::Instruction(Instruction {
                     rip,
                     mode,
                     pid,
@@ -331,32 +381,29 @@ fn within_step(run: &Run, home: &Home, bracket: Bracket, step: u64) -> Result<Wi
                     bytes,
                     registers,
                     index,
-                }));
+                })));
             }
             if index >= INSTRUCTION_BUDGET {
-                return Ok(WithinStep::OutOfBudget {
+                return Ok(Some(WithinStep::OutOfBudget {
                     instructions: index,
-                });
+                }));
             }
             continue;
         }
 
-        // The exit that ends the step, in one copy or both.
+        // The exit that ends the step, in one copy or both. The copies
+        // differ after it only if these two do: the pair the search found
+        // the step with is gone.
         a.machine.set_debug(Stepping::No, &[])?;
         b.machine.set_debug(Stepping::No, &[])?;
-        let reached = (a.run_to(step)?, b.run_to(step)?);
-        if reached.0 {
-            a.capture()?;
-        }
-        if reached.1 {
-            b.capture()?;
-        }
+        let reached = both_to(&mut a, &mut b, step)?;
+        let after = if differ(&a, &b, reached)? {
+            Differ::Yes
+        } else {
+            Differ::No
+        };
         let (state, pages) = differences(&a, &b)?;
-        return Ok(WithinStep::AtTheExit {
-            instructions: index,
-            state,
-            pages,
-        });
+        return Ok(at_the_exit(index, after, state, pages));
     }
 }
 
@@ -385,23 +432,53 @@ pub fn bracket_of(replayed: &crate::run::Replayed) -> Option<Bracket> {
 }
 
 /// Bisects `bracket` of `run`, trying up to `tries` times for copies that
-/// differ.
+/// differ, and that differ again when single-stepped through the step.
 pub fn bisect(run: &Run, home: &Home, bracket: Bracket, tries: u32) -> Result<Bisected> {
-    let tries = tries.max(1);
-    for attempt in 1..=tries {
+    each_try(bracket, tries, || {
         let Some(step) = first_step(run, home, bracket)? else {
-            continue;
+            return Ok(Try::Agreed);
         };
         let within = within_step(run, home, bracket, step)
             .with_context(|| format!("single-stepping step {step}"))?;
-        return Ok(Bisected::Found {
+        Ok(match within {
+            Some(within) => Try::Found { step, within },
+            None => Try::NotAgain(step),
+        })
+    })
+}
+
+/// Makes up to `tries` tries of `attempt`, at least one, until one finds
+/// the step. With none found, the answer is that a difference came and
+/// went, at the last step a try saw one at, or that every try agreed.
+fn each_try(
+    bracket: Bracket,
+    tries: u32,
+    mut attempt: impl FnMut() -> Result<Try>,
+) -> Result<Bisected> {
+    let tries = tries.max(1);
+    let mut not_again = None;
+    for made in 1..=tries {
+        match attempt()? {
+            Try::Agreed => {}
+            Try::NotAgain(step) => not_again = Some(step),
+            Try::Found { step, within } => {
+                return Ok(Bisected::Found {
+                    bracket,
+                    step,
+                    within,
+                    tries: made,
+                });
+            }
+        }
+    }
+    Ok(match not_again {
+        Some(step) => Bisected::Intermittent {
             bracket,
             step,
-            within,
-            tries: attempt,
-        });
-    }
-    Ok(Bisected::Agreed { bracket, tries })
+            tries,
+        },
+        None => Bisected::Agreed { bracket, tries },
+    })
 }
 
 /// RFLAGS' trap flag, which single-stepping sets.
@@ -509,6 +586,95 @@ mod tests {
     // The instructions single-stepping must give TF to, decoded from the
     // bytes a compiler and the kernel's entry code emit.
     use super::*;
+
+    /// A bracket for tests of how tries are spent.
+    const BRACKET: Bracket = Bracket {
+        from: Some(256),
+        to: 512,
+    };
+
+    /// A found instruction's stand-in: a step that ran out of budget.
+    fn found(step: u64) -> Try {
+        Try::Found {
+            step,
+            within: WithinStep::OutOfBudget { instructions: 1 },
+        }
+    }
+
+    /// Spends tries on `outcomes`, one per try, in order.
+    fn spend(tries: u32, outcomes: Vec<Try>) -> Bisected {
+        let mut outcomes = outcomes.into_iter();
+        let attempt = || Ok(outcomes.next().expect("a try past the outcomes given"));
+        each_try(BRACKET, tries, attempt).unwrap()
+    }
+
+    #[test]
+    fn a_difference_that_does_not_come_back_takes_another_try() {
+        // A try whose single-stepped copies agreed found nothing, and the
+        // next try is used: one that finds the step is the answer, with
+        // the try it took. When no try finds it, the search says a
+        // difference came and went, with the last step one showed at. A
+        // search whose tries all agreed says that instead.
+        assert_eq!(
+            spend(3, vec![Try::NotAgain(300), found(301)]),
+            Bisected::Found {
+                bracket: BRACKET,
+                step: 301,
+                within: WithinStep::OutOfBudget { instructions: 1 },
+                tries: 2,
+            }
+        );
+        assert_eq!(
+            spend(3, vec![Try::NotAgain(300), Try::Agreed, Try::NotAgain(305)]),
+            Bisected::Intermittent {
+                bracket: BRACKET,
+                step: 305,
+                tries: 3,
+            }
+        );
+        assert_eq!(
+            spend(2, vec![Try::NotAgain(300), Try::Agreed]),
+            Bisected::Intermittent {
+                bracket: BRACKET,
+                step: 300,
+                tries: 2,
+            }
+        );
+        assert_eq!(
+            spend(2, vec![Try::Agreed, Try::Agreed]),
+            Bisected::Agreed {
+                bracket: BRACKET,
+                tries: 2,
+            }
+        );
+        assert_eq!(
+            spend(0, vec![found(301)]),
+            Bisected::Found {
+                bracket: BRACKET,
+                step: 301,
+                within: WithinStep::OutOfBudget { instructions: 1 },
+                tries: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn copies_that_agree_after_the_exit_found_nothing() {
+        // Single-stepped copies that reached the exit and do not differ
+        // after it are no finding. Ones that differ are a difference at
+        // the exit, with the state and pages that show it.
+        const INSTRUCTIONS: u64 = 40;
+        const PAGE: u32 = 7;
+        assert_eq!(at_the_exit(INSTRUCTIONS, Differ::No, vec![], vec![]), None);
+        assert_eq!(
+            at_the_exit(INSTRUCTIONS, Differ::Yes, vec![], vec![PAGE]),
+            Some(WithinStep::AtTheExit {
+                instructions: INSTRUCTIONS,
+                state: vec![],
+                pages: vec![PAGE],
+            })
+        );
+    }
 
     #[test]
     fn the_instructions_that_load_rflags_are_told_apart() {

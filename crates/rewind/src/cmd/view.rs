@@ -627,6 +627,22 @@ fn bisect_words(
             );
             return out;
         }
+        Bisected::Intermittent {
+            bracket,
+            step,
+            tries,
+        } => {
+            let _ = writeln!(
+                out,
+                "\n{}: two replays from {} differed after step {step}, and the two then \
+                 single-stepped through that step agreed, in {tries} {}. The source differs \
+                 only some of the times it is read; more --tries may catch it twice.",
+                paint.verdict(Same::Yes, "no instruction found"),
+                from_words(bracket.from),
+                if *tries == 1 { "try" } else { "tries" }
+            );
+            return out;
+        }
         Bisected::Found {
             bracket,
             step,
