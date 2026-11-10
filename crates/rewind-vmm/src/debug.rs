@@ -558,6 +558,24 @@ pub(crate) enum Approach {
     Stepping,
 }
 
+impl Approach {
+    /// The approach from here with `left` branches to go to the count,
+    /// more than none, and how many branches from now to arm the
+    /// counter's interrupt for, if it is to be armed: `margin` short of
+    /// the count while the count is further off than that, and single
+    /// steps from there. An armed interrupt is armed again, for the count
+    /// as it is now: the interrupt fires once, and one that came early, as
+    /// on a hybrid host when the thread moved to another kind of core,
+    /// would leave the guest running unwatched to its next exit.
+    fn closer(self, left: u64, margin: u64) -> (Approach, Option<u64>) {
+        match self {
+            Approach::Stepping => (Approach::Stepping, None),
+            Approach::Far | Approach::Armed if left <= margin => (Approach::Stepping, None),
+            Approach::Far | Approach::Armed => (Approach::Armed, Some(left - margin)),
+        }
+    }
+}
+
 impl Machine {
     /// Turns debugging on with these traps, one per debug address register,
     /// stepping one instruction at a time when asked. With debugging on,
@@ -659,8 +677,8 @@ impl Machine {
 
     /// Closes in on the debugger's branch count before the guest runs:
     /// the stop once the count is reached or passed, else the counter's
-    /// interrupt armed a margin short of it, or single steps within the
-    /// margin.
+    /// interrupt armed a margin short of it, each time the guest is about
+    /// to run that far off, or single steps within the margin.
     pub(crate) fn close_in_on_branches(&mut self) -> Result<Option<DebugStop>> {
         let (Some(stop), Some(work)) = (self.branch_stop, &mut self.work) else {
             return Ok(None);
@@ -676,14 +694,10 @@ impl Machine {
             }));
         }
         let left = stop.target - count;
-        let approach = match stop.approach {
-            Approach::Far if left > stop.margin => {
-                work.overflow.arm(left - stop.margin)?;
-                Approach::Armed
-            }
-            Approach::Far | Approach::Armed if left <= stop.margin => Approach::Stepping,
-            same => same,
-        };
+        let (approach, arm_for) = stop.approach.closer(left, stop.margin);
+        if let Some(branches) = arm_for {
+            work.overflow.arm(branches)?;
+        }
         if approach != stop.approach {
             self.branch_stop = Some(BranchStop { approach, ..stop });
             if approach == Approach::Stepping {
@@ -1469,6 +1483,34 @@ mod tests {
     // Reads and writes split at page boundaries, where the next page may
     // map somewhere else entirely.
     use super::*;
+
+    #[test]
+    fn an_early_counter_interrupt_is_armed_again() {
+        // A stop 10,000 branches off with a margin of 512: far from it,
+        // the interrupt is armed 512 short. An interrupt that came early,
+        // with 6,000 still to go, as when the thread changed kind of core
+        // on a hybrid host, is armed again 512 short, since the interrupt
+        // fires once. Within the margin the machine single-steps, armed
+        // or not, and keeps stepping.
+        const MARGIN: u64 = 512;
+        assert_eq!(
+            Approach::Far.closer(10_000, MARGIN),
+            (Approach::Armed, Some(9_488))
+        );
+        assert_eq!(
+            Approach::Armed.closer(6_000, MARGIN),
+            (Approach::Armed, Some(5_488))
+        );
+        assert_eq!(
+            Approach::Armed.closer(MARGIN, MARGIN),
+            (Approach::Stepping, None)
+        );
+        assert_eq!(Approach::Far.closer(1, MARGIN), (Approach::Stepping, None));
+        assert_eq!(
+            Approach::Stepping.closer(3, MARGIN),
+            (Approach::Stepping, None)
+        );
+    }
 
     /// DR7 for a breakpoint and two watchpoints, encoded by hand from the
     /// Intel SDM's layout: each register's enable bit, then its condition
