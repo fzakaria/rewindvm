@@ -29,7 +29,7 @@
     </header>
     <main class="wrap prose">
       <h1>Privacy policy</h1>
-      <p class="note">Last updated October 2, 2026.</p>
+      <p class="note">Last updated November 9, 2026.</p>
       <p>
         Rewind VM is made by <a href="https://lunchtimesurf.com/">Lunch Time Surf LLC</a>, a
         California limited liability company based in Santa Cruz ("we"). This policy covers this
@@ -44,7 +44,17 @@
         embeds a YouTube video; these see the usual details of any web request.
       </p>
       <p class="promise">
-        Only the website does this. The engine, the command line and the desktop app send nothing.
+        Only the website does this. The engine, the command line and the desktop app send nothing to
+        us.
+      </p>
+      <p>
+        They make requests only to servers you name, to the binary caches your Nix is configured
+        with and to cache.nixos.org. <code>rewind nix</code> runs Nix to fetch a build's inputs,
+        then asks those binary caches whether each holds the same output, logging in with your netrc
+        entry where a cache has one. <code>rewind gdb</code>, and the other commands and app panels
+        that show source code, download debug information and source files from cache.nixos.org,
+        from those binary caches and from any debuginfod servers you have set.
+        <code>rewind import</code> and the app download a recording from a link you give them.
       </p>
 
       <h2>Your runs stay on your machine</h2>
