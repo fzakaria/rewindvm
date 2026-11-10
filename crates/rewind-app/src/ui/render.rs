@@ -1916,8 +1916,12 @@ impl Scrubber {
                         .text_color(rgb(theme::SOFT))
                         .child(line(i + 1, mapped(text).shown))
                 }));
+            // A notice lies over the panels: a press on the notice or on
+            // one of its buttons is the notice's alone, and does not also
+            // click the row or the list under the notice.
             stack = stack.child(
                 div()
+                    .occlude()
                     .flex()
                     .flex_col()
                     .gap(px(size::CARD_GAP / 2.0))
