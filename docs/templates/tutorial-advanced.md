@@ -512,6 +512,24 @@ $ rewind diff {{passing|short}} {{failing|short}} --json | jq -c '.divergence | 
 
 <!-- assert: grep -q '"left_step":[0-9]*,"right_step":[0-9]*' {{out:json}} -->
 
+## Give a run to an agent
+
+`rewind summary` prints a run as plain text: the verdict and every reason
+it failed, how it ended, the failing step with its process and thread, the
+last 20 lines of output, and with `--compare`, the step where two runs part
+and what each did there. It exits 0 for a passed run, 1 for a failed one
+and 2 when it could not read the run. A coding agent or a CI job can read a
+failure from it without the app, and every export carries the same text as
+`summary.txt`.
+
+```console run name=summary show=:6,-6: elide
+$ rewind summary {{failing|short}} --compare {{passing|short}}
+```
+
+<!-- assert: grep -q '^verdict: failed' {{out:summary}} -->
+<!-- assert: grep -q '^failing step: ' {{out:summary}} -->
+<!-- assert: grep -q '^the runs part at step ' {{out:summary}} -->
+
 ## Judge runs by properties
 
 By default `check` fails a run that ends differently from schedule 0.
