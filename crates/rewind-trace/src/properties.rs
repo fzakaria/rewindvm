@@ -193,11 +193,12 @@ pub fn no_crash(trace: &Trace) -> Option<Finding> {
 /// no server, background task or child left running. Init stops what is
 /// left with SIGKILL once the main process exits, before it marks the
 /// job's exit, so a process that outlived the main process is one the
-/// job left behind.
+/// job left behind. A main process that never exited, in a run that
+/// stopped first, was outlived by nothing, so such a run has no finding.
 pub fn no_orphans(trace: &Trace) -> Option<Finding> {
     let job = Job::of(trace)?;
     let (main, rest) = job.processes.split_first()?;
-    let main_end = main.end.unwrap_or(job.exit);
+    let main_end = main.end?;
     rest.iter()
         .filter(|p| p.end.is_none_or(|end| end > main_end))
         .map(|p| Finding {
@@ -707,6 +708,26 @@ mod tests {
 
         let tidy = job(vec![fork(100, JOB, 41), exit(500, 41, 0)]);
         assert_eq!(no_orphans(&tidy), None);
+    }
+
+    // A run that stopped while the job's main process was still running,
+    // as one that timed out does: the trace has neither that process's
+    // exit nor init's mark of the job's exit. Nothing outlived the main
+    // process, so its child, running too, is no orphan.
+    #[test]
+    fn a_main_process_that_never_exited_leaves_no_orphans() {
+        let trace = Trace {
+            events: vec![
+                mark(10, "rewind-start"),
+                fork(11, 1, JOB),
+                exec(12, JOB, "/bin/sh"),
+                fork(100, JOB, 41),
+                exec(101, 41, "/bin/server"),
+                open(110, 41, "/build/server.log", CREATE),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(no_orphans(&trace), None);
     }
 
     // Two live processes with one file open for writing break
