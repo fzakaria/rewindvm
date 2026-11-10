@@ -246,14 +246,19 @@ impl Machine {
     /// instruction, as a keyframe or a checkpoint keeps it. Does nothing
     /// when no exit is pending.
     pub fn complete_pending_exit(&mut self) -> Result<()> {
+        // immediate_exit is set for this one run only, however the run
+        // ends: left set, every later run would return at once without
+        // entering the guest. The exit borrows the vCPU, so the run's
+        // result is kept in words until the flag is cleared.
         self.vcpu.set_kvm_immediate_exit(1);
-        match self.vcpu.run() {
-            Err(e) if e.errno() == libc::EINTR => {}
-            Err(e) => return Err(e).context("completing the pending exit"),
-            Ok(exit) => bail!("the vCPU ran while completing an exit: {exit:?}"),
-        }
+        let ran = self.vcpu.run().map(|exit| format!("{exit:?}"));
         self.vcpu.set_kvm_immediate_exit(0);
-        Ok(())
+
+        match ran {
+            Err(e) if e.errno() == libc::EINTR => Ok(()),
+            Err(e) => Err(e).context("completing the pending exit"),
+            Ok(exit) => bail!("the vCPU ran while completing an exit: {exit}"),
+        }
     }
 
     /// The vCPU's state, the interrupt controllers' and the monitor's.
