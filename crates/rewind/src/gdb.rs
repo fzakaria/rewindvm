@@ -24,6 +24,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode, Stdio};
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use rewind_core::debuginfod_cache;
@@ -152,7 +153,7 @@ pub(crate) fn gdb(
         (None, None) => None,
         _ => thread.map(|(pid, _)| pid),
     };
-    let mut symbols = Symbols::load(home, run, step, pid, Kernel::Load, Say::Aloud)?;
+    let mut symbols = Symbols::load(home, run, step, pid, Kernel::Load, Say::Aloud, Server::Own)?;
     // gdb can run the fork backwards, by replaying the run.
     let history = rewind_core::debug::RunHistory { home, run };
     let mut debuggee =
@@ -718,13 +719,38 @@ pub(crate) struct Symbols {
     session: Session,
     kernel: KernelSymbols,
     process: Process,
-    debuginfod: Option<Debuginfod>,
+    debuginfod: Option<Arc<Debuginfod>>,
+}
+
+/// The debuginfod server a session's gdb asks for DWARF and sources.
+#[derive(Clone)]
+pub(crate) enum Server {
+    /// A server of the session's own, started for it.
+    Own,
+    /// A server sessions running side by side share, so each file is
+    /// fetched once; None when it could not be started.
+    Shared(Option<Arc<Debuginfod>>),
+}
+
+impl Server {
+    /// A server for sessions to share.
+    pub(crate) fn shared(home: &Home) -> Server {
+        Server::Shared(Debuginfod::start(home).map(Arc::new))
+    }
+
+    /// The server a session asks: its own, started now, or the shared one.
+    fn for_session(self, home: &Home) -> Option<Arc<Debuginfod>> {
+        match self {
+            Server::Own => Debuginfod::start(home).map(Arc::new),
+            Server::Shared(server) => server,
+        }
+    }
 }
 
 impl Symbols {
     /// The symbols for process `pid` at `step` of `run`, or when None the
     /// process running there, with the kernel's when `kernel` says so,
-    /// saying what they are as `say` says.
+    /// saying what they are as `say` says, and gdb asking `server`.
     pub(crate) fn load(
         home: &Home,
         run: &Run,
@@ -732,6 +758,7 @@ impl Symbols {
         pid: Option<u32>,
         kernel: Kernel,
         say: Say,
+        server: Server,
     ) -> Result<Symbols> {
         let kernel = match kernel {
             Kernel::Load => KernelSymbols::find(run),
@@ -740,7 +767,7 @@ impl Symbols {
         let session = Session::new(home)?;
         let answer = rewind_core::inspect::running(home, run, step, pid);
         let process = debugged_process(answer, home, run, step, pid, &session.dir, say);
-        let debuginfod = Debuginfod::start(home);
+        let debuginfod = server.for_session(home);
         Ok(Symbols {
             session,
             kernel,
@@ -758,11 +785,12 @@ impl Symbols {
         (step, machine): (u64, &mut rewind_vmm::Machine),
         pid: u32,
         say: Say,
+        server: Server,
     ) -> Result<Symbols> {
         let session = Session::new(home)?;
         let answer = rewind_core::inspect::running_on(home, machine, step, Some(pid));
         let process = debugged_process(answer, home, run, step, Some(pid), &session.dir, say);
-        let debuginfod = Debuginfod::start(home);
+        let debuginfod = server.for_session(home);
         Ok(Symbols {
             session,
             kernel: KernelSymbols::none(),
@@ -2181,8 +2209,8 @@ fn store_root(path: &Path) -> Option<PathBuf> {
     Some(Path::new(NIX_STORE).join(first))
 }
 
-/// A debuginfod server for one gdb session, stopped when dropped.
-struct Debuginfod {
+/// A debuginfod server for gdb sessions, stopped when dropped.
+pub(crate) struct Debuginfod {
     child: Child,
     url: String,
     /// The server's cache directory, let go once the server is stopped.

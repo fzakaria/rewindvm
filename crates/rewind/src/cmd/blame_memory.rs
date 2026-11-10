@@ -25,7 +25,7 @@ use rewind_trace::blamed::{
 use rewind_trace::located::{Frame, ValueClass};
 use rewind_trace::searching::{Phase, Searching};
 
-use crate::gdb::{self, KeptGdb, Loaded, Needs, Say, Symbols};
+use crate::gdb::{self, KeptGdb, Loaded, Needs, Say, Server, Symbols};
 use crate::locate::{self, Pick, PlaceAt};
 use crate::progress::Format;
 
@@ -495,7 +495,14 @@ fn context_at_step(
             GdbFrom::Kept(kept.gdb)
         }
         (None, _) => {
-            let symbols = Symbols::load_on(home, run, (step, &mut machine), pid, Say::Aloud)?;
+            let symbols = Symbols::load_on(
+                home,
+                run,
+                (step, &mut machine),
+                pid,
+                Say::Aloud,
+                Server::Own,
+            )?;
             GdbFrom::Loaded(symbols)
         }
     };
@@ -522,7 +529,7 @@ fn context_at_step(
         GdbFrom::Kept(gdb) => gdb,
         GdbFrom::Loaded(symbols) => KeptGdb::start(symbols, &debuggee, Say::Aloud)?,
     };
-    let at = locate::threads_at(&mut debuggee, &mut gdb, (&tids, pcs))?;
+    let at = locate::threads_at(&mut debuggee, &mut gdb, (&tids, pcs), locate::Walk::Bare)?;
     let threads = at
         .threads
         .into_iter()

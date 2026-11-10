@@ -796,7 +796,8 @@ let
   # export without --with-answers carries no answers. The thread's source
   # comes from a debuginfod server into the client's cache under the home
   # directory; the export, and `rewind where --json`, name it as its
-  # DWARF does and name no path under the home directories. The output
+  # DWARF does and name no path under the home directories. The answers
+  # are the same worked on one at a time as four at a time. The output
   # holds the export, for checks.answers-app. Boots the VM, so it needs
   # /dev/kvm.
   answersExport =
@@ -870,6 +871,16 @@ let
               exit 1
             fi
           done
+        done
+
+        # The same answers, worked on one at a time and four at a time.
+        mkdir answers-default
+        zstd -dc $out/report.rwd | tar -x -C answers-default --wildcards 'answers*'
+        for workers in 1 4; do
+          REWIND_ANSWER_WORKERS=$workers rewind export report --with-answers -o workers-$workers.rwd
+          mkdir answers-$workers
+          zstd -dc workers-$workers.rwd | tar -x -C answers-$workers --wildcards 'answers*'
+          diff -r answers-default answers-$workers
         done
       '';
 

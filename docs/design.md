@@ -895,7 +895,13 @@ A file is kept to its first MiB and the files to 32 MiB between them,
 and the index says what was cut or left out. A source file gdb fetched
 through debuginfod is named as the program's DWARF names it, not by its
 place in the client's cache under the exporter's home directory. The
-browser viewer, which has no engine, reads files and source at those steps through
+threads of each process at a step are walked from one fork in one gdb
+session, and the processes and each step's files are answered side by
+side, as many at once as half the cores and no more than the GiB of
+free memory (`REWIND_ANSWER_WORKERS` sets the number), with one
+debuginfod server for every session; the answers go back in step order,
+so the export is the same however many ran at once. The browser viewer,
+which has no engine, reads files and source at those steps through
 `packed::Answering`, an engine that answers from the export and hands
 every other question on; at other steps it says the desktop app does
 it. Source and file contents say more of a job than a trace does, so a

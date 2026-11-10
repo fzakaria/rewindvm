@@ -7,8 +7,8 @@
 # With $rewind_expressions also set, to a file of JSON listing expressions,
 # each frame carries what each evaluates to there.
 # With $rewind_threads set, to a file of JSON with thread ids and
-# addresses, the object lists each thread's frames, without their
-# variables, and the place of each address.
+# addresses, the object lists each thread's frames, with their variables
+# when the file asks for them, and the place of each address.
 # With $rewind_address set, gdb has only the symbol files, and the object
 # names the function or variable, source line and file the address is in.
 
@@ -449,10 +449,16 @@ def read_json(variable):
 
 
 def threads_and_places(asked):
-    """Each thread's frames, bare, and each address's place."""
+    """Each thread's frames, bare unless asked for their variables, and
+    each address's place. A thread gdb cannot walk says why, and the rest
+    are still walked."""
+    bare = not asked.get("variables", False)
     threads = []
     for tid in asked.get("tids", []):
-        walked = frames_of(int(tid), bare=True)
+        try:
+            walked = frames_of(int(tid), bare=bare)
+        except gdb.error as e:
+            walked = {"error": str(e)}
         walked["tid"] = int(tid)
         threads.append(walked)
     places = [place_of(int(a, 16)) for a in asked.get("addresses", [])]

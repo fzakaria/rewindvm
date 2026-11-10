@@ -20,7 +20,7 @@ use rewind_trace::ending::ExitStatus;
 use rewind_trace::located::{Extent, Frame, Located, SourceFile};
 use serde::Deserialize;
 
-use crate::gdb::{self, KeptGdb, Kernel, Needs, Output, Say, Symbols};
+use crate::gdb::{self, KeptGdb, Kernel, Needs, Output, Say, Server, Symbols};
 
 /// The gdb script, written to the session's directory for gdb to source,
 /// and the start of the line it answers on.
@@ -193,7 +193,14 @@ pub(crate) fn located_keeping(
     // The process's files as they were mapped where the thread is looked
     // at: a library loaded earlier in the step is mapped by the access.
     let moment = run_to(&mut machine, pid, step, after)?;
-    let symbols = Symbols::load_on(home, run, (step, &mut machine), pid, Say::Aloud)?;
+    let symbols = Symbols::load_on(
+        home,
+        run,
+        (step, &mut machine),
+        pid,
+        Say::Aloud,
+        Server::Own,
+    )?;
     walk(run, step, machine, symbols, (pid, tid), (asked, moment))
 }
 
@@ -239,12 +246,27 @@ pub(crate) fn fork_and_symbols(
 ) -> Result<(rewind_vmm::Machine, Symbols, Moment)> {
     std::thread::scope(|scope| {
         let symbols = scope.spawn(|| match after {
-            None => Symbols::load(home, run, step, Some(pid), Kernel::Skip, Say::Aloud),
+            None => Symbols::load(
+                home,
+                run,
+                step,
+                Some(pid),
+                Kernel::Skip,
+                Say::Aloud,
+                Server::Own,
+            ),
             Some(_) => {
                 let keep = rewind_core::run::Keep::Keyframe;
                 let mut machine = run.machine_at(home, step, keep, &mut rewind_vmm::Ignore)?;
                 run_to(&mut machine, pid, step, after)?;
-                Symbols::load_on(home, run, (step, &mut machine), pid, Say::Aloud)
+                Symbols::load_on(
+                    home,
+                    run,
+                    (step, &mut machine),
+                    pid,
+                    Say::Aloud,
+                    Server::Own,
+                )
             }
         });
         let machine = gdb::fork(home, run, step, needs).and_then(|mut machine| {
@@ -322,13 +344,25 @@ fn walk(
         crate::color::stderr().prefix()
     );
     let printed = script_session(&mut gdb, &mut debuggee, commands)?;
-    let symbols = gdb.symbols();
     let walked: Walked = script_answer(&printed)?;
     if let Some(error) = walked.error {
         bail!("gdb could not walk thread {tid}'s stack: {error}");
     }
-    let mut frames = walked.frames.unwrap_or_default();
+    let frames = walked.frames.unwrap_or_default();
+    let located = located_from(run, step, (pid, tid), frames, gdb.symbols())?;
+    Ok((located, gdb))
+}
 
+/// Where thread `tid` of process `pid` was at `step` of `run`, from the
+/// frames gdb walked with `symbols`: the frames, the one in the program's
+/// own code, and their source.
+fn located_from(
+    run: &Run,
+    step: u64,
+    (pid, tid): (u32, u32),
+    mut frames: Vec<Frame>,
+    symbols: &Symbols,
+) -> Result<Located> {
     // Each source file, read while the session's copies are here, then
     // every path, the files' own too, as the VM had it or the DWARF names
     // it.
@@ -348,7 +382,7 @@ fn walk(
         })
         .collect();
 
-    let located = Located {
+    Ok(Located {
         run: run.manifest.id.to_string(),
         step,
         pid,
@@ -357,8 +391,66 @@ fn walk(
         frames,
         chosen,
         files,
-    };
-    Ok((located, gdb))
+    })
+}
+
+/// Where each of threads `tids` of process `pid` was at `step` of `run`,
+/// as [`located`] says for each, from one fork and one gdb session that
+/// walks them all: a thread gdb could not walk says why. A process whose
+/// exit is at the step is looked at an earlier step, as [`located`] looks
+/// at it. gdb asks `server` for DWARF and sources.
+pub(crate) fn located_threads(
+    home: &Home,
+    run: &Run,
+    step: u64,
+    (pid, tids): (u32, &[u32]),
+    server: Server,
+) -> Result<Vec<(u32, Result<Located>)>> {
+    let alive = alive_step(run.trace()?, step, pid);
+    if alive != step {
+        eprintln!(
+            "{} process {pid} exits at step {step}, its memory gone; \
+             looking at step {alive}, while it still had it",
+            crate::color::stderr().prefix()
+        );
+    }
+    let step = alive;
+
+    // One fork, which the symbols are read on and gdb connects to.
+    let needs = Needs::Tasks("`rewind where` cannot find threads".into());
+    let mut machine = gdb::fork(home, run, step, needs)?;
+    let symbols = Symbols::load_on(home, run, (step, &mut machine), pid, Say::Aloud, server)?;
+    let scope = rewind_core::debug::Scope::Process(pid);
+    let mut debuggee = gdb::debuggee(run, step, machine, scope)?;
+    let mut gdb = KeptGdb::start(symbols, &debuggee, Say::Aloud)?;
+
+    // Every thread's frames, with their variables, from one session.
+    eprintln!(
+        "{} walking the stacks of {} threads of process {pid} at step {step} in gdb",
+        crate::color::stderr().prefix(),
+        tids.len()
+    );
+    let (walked, _) = walk_threads(&mut debuggee, &mut gdb, (tids, &[]), Walk::WithVariables)?;
+    let located = walked
+        .into_iter()
+        .map(|t| {
+            let tid = t.tid;
+            let located = match (t.frames, t.error) {
+                (_, Some(error)) => Err(anyhow::anyhow!(
+                    "gdb could not walk thread {tid}'s stack: {error}"
+                )),
+                (frames, None) => located_from(
+                    run,
+                    step,
+                    (pid, tid),
+                    frames.unwrap_or_default(),
+                    gdb.symbols(),
+                ),
+            };
+            (tid, located)
+        })
+        .collect();
+    Ok(located)
 }
 
 /// Gives each of `frames`' source files and programs the name it has for a
@@ -433,9 +525,8 @@ struct WalkedThread {
 /// Where threads of a process were at a step, and where addresses are in
 /// its code, from one gdb session on a fork there.
 pub(crate) struct ThreadsAt {
-    /// Each thread's frames, innermost first, without their variables,
-    /// and the index of the one in the program's own code; an error for
-    /// one gdb could not walk.
+    /// Each thread's frames, innermost first, and the index of the one in
+    /// the program's own code; an error for one gdb could not walk.
     pub(crate) threads: Vec<(u32, ThreadFrames)>,
     /// Each address's place, with its source line's text when gdb found
     /// the file.
@@ -455,35 +546,32 @@ pub(crate) struct PlaceAt {
     pub(crate) text: Option<String>,
 }
 
+/// How much of each frame a walk of threads lists.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Walk {
+    /// Where the frame is, without its variables.
+    Bare,
+    /// Where the frame is, its arguments and locals, and the expressions
+    /// on the lines around its line, as `rewind where` lists them.
+    WithVariables,
+}
+
 /// Threads `tids` of the debugged process, and the places of `addresses`
 /// in its code, from a session of `gdb`, which has the process's symbols,
-/// on `debuggee`, a fork at a step. Paths are as the VM had them.
+/// on `debuggee`, a fork at a step, each frame listed as `walk` says.
+/// Paths are as the VM had them.
 pub(crate) fn threads_at(
     debuggee: &mut rewind_core::debug::Debuggee<'_>,
     gdb: &mut KeptGdb,
     (tids, addresses): (&[u32], &[u64]),
+    walk: Walk,
 ) -> Result<ThreadsAt> {
-    // What the script is asked, written for it to read.
-    let asked = gdb.symbols().dir().join(THREADS_NAME);
-    let addresses: Vec<String> = addresses.iter().map(|a| format!("{a:#x}")).collect();
-    std::fs::write(
-        &asked,
-        serde_json::to_string(&serde_json::json!({ "tids": tids, "addresses": addresses }))?,
-    )
-    .context("writing the threads for gdb")?;
-    let commands = vec![gdb_string("rewind_threads", &asked)];
-    let printed = script_session(gdb, debuggee, commands)?;
+    let (walked, places) = walk_threads(debuggee, gdb, (tids, addresses), walk)?;
     let symbols = gdb.symbols();
-    let answer: ThreadsAndPlaces = script_answer(&printed)?;
-    if let Some(error) = answer.error {
-        bail!("gdb could not walk the threads: {error}");
-    }
 
     // Each path as the VM had it or the DWARF names it, a line's text read
     // while the session's copy of its file is here.
-    let threads = answer
-        .threads
-        .unwrap_or_default()
+    let threads = walked
         .into_iter()
         .map(|t| {
             let walked = match (t.frames, t.error) {
@@ -498,9 +586,7 @@ pub(crate) fn threads_at(
             (t.tid, walked)
         })
         .collect();
-    let places = answer
-        .places
-        .unwrap_or_default()
+    let places = places
         .into_iter()
         .map(|p| {
             let text = match (&p.fullname, p.line) {
@@ -518,6 +604,41 @@ pub(crate) fn threads_at(
         })
         .collect();
     Ok(ThreadsAt { threads, places })
+}
+
+/// What the script prints for threads `tids` and `addresses`, asked in a
+/// session of `gdb` on `debuggee`, each frame listed as `walk` says: each
+/// thread's frames, with paths as this machine has them, and each
+/// address's place.
+fn walk_threads(
+    debuggee: &mut rewind_core::debug::Debuggee<'_>,
+    gdb: &mut KeptGdb,
+    (tids, addresses): (&[u32], &[u64]),
+    walk: Walk,
+) -> Result<(Vec<WalkedThread>, Vec<Place>)> {
+    // What the script is asked, written for it to read.
+    let asked = gdb.symbols().dir().join(THREADS_NAME);
+    let addresses: Vec<String> = addresses.iter().map(|a| format!("{a:#x}")).collect();
+    let variables = walk == Walk::WithVariables;
+    std::fs::write(
+        &asked,
+        serde_json::to_string(&serde_json::json!({
+            "tids": tids,
+            "addresses": addresses,
+            "variables": variables,
+        }))?,
+    )
+    .context("writing the threads for gdb")?;
+    let commands = vec![gdb_string("rewind_threads", &asked)];
+    let printed = script_session(gdb, debuggee, commands)?;
+    let answer: ThreadsAndPlaces = script_answer(&printed)?;
+    if let Some(error) = answer.error {
+        bail!("gdb could not walk the threads: {error}");
+    }
+    Ok((
+        answer.threads.unwrap_or_default(),
+        answer.places.unwrap_or_default(),
+    ))
 }
 
 /// What the gdb script prints for an address: the function it is in and
@@ -540,7 +661,15 @@ struct Place {
 /// Where `address` is in the code process `pid` had mapped at `step` of
 /// `run`. gdb reads the symbol files alone, with no fork to connect to.
 fn place(home: &Home, run: &Run, step: u64, pid: u32, address: u64) -> Result<Place> {
-    let symbols = Symbols::load(home, run, step, Some(pid), Kernel::Skip, Say::Nothing)?;
+    let symbols = Symbols::load(
+        home,
+        run,
+        step,
+        Some(pid),
+        Kernel::Skip,
+        Say::Nothing,
+        Server::Own,
+    )?;
     let script = symbols.dir().join(SCRIPT_NAME);
     std::fs::write(&script, SCRIPT).context("writing the gdb script")?;
     let mut args = symbols.arguments(None);
