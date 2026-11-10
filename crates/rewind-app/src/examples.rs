@@ -193,8 +193,8 @@ mod tests {
                 "This run failed and the passing run did not.",
                 "The two runs are identical until step 4,758. There, Rewind asks the kernel to switch threads and pauses the running thread for 640 µs in this run only.",
                 "test_pool_shutdown did the same things in the same order in both runs until step 4,770.",
-                "Then in this run, thread 7 of test_pool_shutdown exits.",
-                "In the passing run, thread 6 of test_pool_shutdown writes \"worker picked job 18\" to stdout.",
+                "Then in this run, thread 166/172 of test_pool_shutdown exits.",
+                "In the passing run, thread 166/171 of test_pool_shutdown writes \"worker picked job 18\" to stdout.",
             ]
         );
     }

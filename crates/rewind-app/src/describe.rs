@@ -412,13 +412,16 @@ pub fn difference(
     }
 }
 
-/// Who did something: a thread of the compared program, or a process.
+/// Who did something: a thread of the compared program, or a process. A
+/// thread is named by its pid/tid in its own run, as the rest of the app
+/// names it; its number in the program only says whether it is the
+/// program's first thread.
 fn subject(party: Party, program: Option<&str>, name_of: &dyn Fn(u32) -> Option<String>) -> String {
     const MAIN_THREAD: usize = 0;
     let event = party.event;
     match (program, party.thread) {
         (Some(program), Some(MAIN_THREAD)) => program.to_string(),
-        (Some(program), Some(n)) => format!("thread {} of {program}", n + 1),
+        (Some(program), Some(_)) => format!("thread {}/{} of {program}", event.pid, event.tid),
         _ => {
             let name = name_of(event.pid).unwrap_or_else(|| format!("pid {}", event.pid));
             if event.tid == event.pid {
@@ -775,19 +778,27 @@ mod tests {
 
     #[test]
     fn a_divergence_reads_as_what_each_run_did_next() {
-        // A crash in one run against a thread exit in the other names the
-        // threads by their number in the program; two writes of different
-        // text say that the text is what differs.
-        let crash = ev(EventKind::Signal {
-            signo: 11,
-            code: 1,
-            addr: 0x108,
-        });
-        let exit = ev(EventKind::Exit {
-            status: 0,
-            comm: "pool".into(),
-            thread: true,
-        });
+        // A crash in one run against a thread exit in the other names each
+        // thread by its pid/tid, as the rest of the app does; two writes of
+        // different text say that the text is what differs.
+        // Threads 9 and 8 of process 7, the program's third and second.
+        let on_thread = |tid, kind| Event { tid, ..ev(kind) };
+        let crash = on_thread(
+            9,
+            EventKind::Signal {
+                signo: 11,
+                code: 1,
+                addr: 0x108,
+            },
+        );
+        let exit = on_thread(
+            8,
+            EventKind::Exit {
+                status: 0,
+                comm: "pool".into(),
+                thread: true,
+            },
+        );
         let nobody = |_| None;
         let d = difference(
             Some(Party {
@@ -803,16 +814,19 @@ mod tests {
         );
         assert_eq!(
             d.here,
-            "thread 3 of pool-test gets SIGSEGV at address 0x108"
+            "thread 7/9 of pool-test gets SIGSEGV at address 0x108"
         );
-        assert_eq!(d.there, "thread 2 of pool-test exits");
+        assert_eq!(d.there, "thread 7/8 of pool-test exits");
         assert_eq!(d.detail, None);
 
         let write = |text: &str| {
-            ev(EventKind::Output {
-                fd: 1,
-                bytes: text.as_bytes().to_vec(),
-            })
+            on_thread(
+                8,
+                EventKind::Output {
+                    fd: 1,
+                    bytes: text.as_bytes().to_vec(),
+                },
+            )
         };
         let (a, b) = (write("job 17 done\n"), write("job 16 done\n"));
         let party = |event| Party {
@@ -822,7 +836,7 @@ mod tests {
         let d = difference(Some(party(&a)), Some(party(&b)), Some("pool-test"), &nobody);
         assert_eq!(
             d.here,
-            "thread 2 of pool-test writes \"job 17 done\" to stdout"
+            "thread 7/8 of pool-test writes \"job 17 done\" to stdout"
         );
         assert_eq!(
             d.detail.as_deref(),
