@@ -78,6 +78,13 @@ fn counter_msr(index: u32) -> bool {
     COUNTER_MSRS.iter().any(|range| range.contains(&index))
 }
 
+/// Whether an MSR is one the comparison leaves out because the guest
+/// cannot read it: a performance counter's, or one of the host's time
+/// that [`IGNORED`] names.
+pub(crate) fn host_only_msr(index: u32) -> bool {
+    counter_msr(index) || ignored(&msr_name(index))
+}
+
 /// The x86 MSRs a keyframe holds that have names worth showing.
 const MSR_NAMES: &[(u32, &str)] = &[
     (0x10, "TSC"),

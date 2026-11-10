@@ -384,7 +384,8 @@ impl Machine {
         devices: &DeviceState,
     ) -> Result<()> {
         // The vCPU, in the order Firecracker restores it: the MSRs after
-        // the local APIC, the pending events last.
+        // the local APIC, the pending events last. Of the MSRs, the ones
+        // this host's KVM can hold (see [`msrs_to_restore`]).
         let c = cpu;
         let v = &self.vcpu;
         v.set_mp_state(unpod::<kvm_mp_state>(&c.mp_state)?)?;
@@ -395,10 +396,10 @@ impl Machine {
         v.set_xcrs(&unpod::<kvm_xcrs>(&c.xcrs)?)?;
         v.set_debug_regs(&unpod::<kvm_debugregs>(&c.debugregs)?)?;
         v.set_lapic(&unpod::<kvm_lapic_state>(&c.lapic)?)?;
-        let entries: Vec<kvm_msr_entry> = c
-            .msrs
-            .iter()
-            .map(|&(index, data)| kvm_msr_entry {
+        let listed = self.kvm.get_msr_index_list()?;
+        let entries: Vec<kvm_msr_entry> = msrs_to_restore(&c.msrs, listed.as_slice())
+            .into_iter()
+            .map(|(index, data)| kvm_msr_entry {
                 index,
                 data,
                 ..Default::default()
@@ -408,9 +409,10 @@ impl Machine {
         let n = v.set_msrs(&msrs)?;
         if n != entries.len() {
             bail!(
-                "KVM took {n} of {} MSRs; the next was {:#x}",
+                "KVM took {n} of {} MSRs; the next was {}, recorded as {:#x}",
                 entries.len(),
-                entries[n].index
+                crate::state::msr_name(entries[n].index),
+                entries[n].data
             );
         }
         v.set_vcpu_events(&unpod::<kvm_vcpu_events>(&c.events)?)?;
@@ -526,10 +528,68 @@ pub(crate) fn final_pages<'k>(
         .collect())
 }
 
+/// The MSRs of `recorded`, a keyframe's, that a restore sets on a host
+/// whose KVM lists `listed`. A keyframe holds every MSR the recording
+/// host's KVM listed, and which those are depends on the host's CPU. One
+/// this host's KVM does not list is left out when the keyframe holds it as
+/// 0, the value a vCPU that never had it stands for, and when the guest
+/// cannot read it at all ([`crate::state::host_only_msr`]). Any other
+/// stays, for KVM to take or to refuse by name: the guest may have read
+/// its value.
+fn msrs_to_restore(recorded: &[(u32, u64)], listed: &[u32]) -> Vec<(u32, u64)> {
+    recorded
+        .iter()
+        .copied()
+        .filter(|(index, data)| {
+            listed.contains(index) || !(*data == 0 || crate::state::host_only_msr(*index))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     // Keyframe chains as restoring reads them, with no VM.
     use super::*;
+
+    #[test]
+    fn a_restore_leaves_out_msrs_only_the_recording_host_had() {
+        // A keyframe from a Zen 4, whose KVM lists the PerfMonV2 controls,
+        // restored where KVM lists neither them nor an MSR the keyframe
+        // holds as 0: both are left out, as is an unlisted counter with a
+        // value, which the VM never counts with, and unlisted host time.
+        // What this host lists is set as recorded, zero or not. An
+        // unlisted MSR with a value the guest could read stays, for KVM
+        // to refuse by name.
+        const PERFMON_V2_STATUS: u32 = 0xc000_0300;
+        const PERF_CTL0: u32 = 0xc001_0000;
+        const HYPERV_TSC_FREQUENCY: u32 = 0x4000_0022;
+        const LSTAR: u32 = 0xc000_0082;
+        const TSC_AUX: u32 = 0xc000_0103;
+        const UNKNOWN_ZERO: u32 = 0x1234;
+        const UNKNOWN_SET: u32 = 0x1235;
+        let recorded = [
+            (LSTAR, 0xffff_ffff_8100_0000),
+            (TSC_AUX, 0),
+            (PERFMON_V2_STATUS, 0),
+            (PERF_CTL0, 0x43_00c2),
+            (HYPERV_TSC_FREQUENCY, 3_294_861_576),
+            (UNKNOWN_ZERO, 0),
+            (UNKNOWN_SET, 7),
+        ];
+        let zen3 = [LSTAR, TSC_AUX];
+        assert_eq!(
+            msrs_to_restore(&recorded, &zen3),
+            [
+                (LSTAR, 0xffff_ffff_8100_0000),
+                (TSC_AUX, 0),
+                (UNKNOWN_SET, 7)
+            ]
+        );
+
+        // On the recording host every MSR is listed, and all are set.
+        let zen4: Vec<u32> = recorded.iter().map(|(index, _)| *index).collect();
+        assert_eq!(msrs_to_restore(&recorded, &zen4), recorded);
+    }
 
     /// A keyframe whose vCPU has `regs`, `msrs` and every other structure
     /// at KVM's zero value, for tests of what reads its state by name.
