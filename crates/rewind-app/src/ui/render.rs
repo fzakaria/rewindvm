@@ -2120,7 +2120,15 @@ impl Scrubber {
     fn render_recent(&self, cx: &mut Context<Self>) -> Div {
         let now = crate::clock::now();
         let query = self.recent_filter.read(cx).text().to_string();
-        let shown: Vec<&Family> = self.recent.iter().filter(|f| f.matches(&query)).collect();
+        // Each row keeps its family's index in the list, not a copy of
+        // the family: a family holds every one of its runs, thousands for
+        // a checked one, and the rows are built again every frame.
+        let shown: Vec<(usize, &Family)> = self
+            .recent
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.matches(&query))
+            .collect();
         let filter = div()
             .p(px(size::NOTICE_PAD / 2.0))
             .rounded(px(size::RADIUS_BUTTON))
@@ -2139,7 +2147,7 @@ impl Scrubber {
             .flex_col()
             .max_h(px(size::RECENT_MAX_HEIGHT))
             .overflow_y_scroll();
-        for (i, family) in shown.into_iter().enumerate() {
+        for (i, family) in shown {
             let base = family.base();
             let (headline, failed) = family.headline();
             let headline_tone = if failed {
@@ -2152,7 +2160,6 @@ impl Scrubber {
                 .map(crate::describe::ago)
                 .unwrap_or_default();
             let summary = (family.runs.len() > 1).then(|| family.summary());
-            let family = family.clone();
             rows = rows.child(
                 div()
                     .id(SharedString::from(format!("recent-{i}")))
@@ -2211,7 +2218,14 @@ impl Scrubber {
                             .text_color(rgb(theme::MUTED))
                             .child(when),
                     )
-                    .on_click(cx.listener(move |this, _, _, cx| this.open_family(&family, cx))),
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        // The list may have been read again since the
+                        // row was drawn.
+                        let Some(family) = this.recent.get(i).cloned() else {
+                            return;
+                        };
+                        this.open_family(&family, cx);
+                    })),
             );
         }
         card(theme::PANEL, theme::LINE)

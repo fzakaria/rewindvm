@@ -996,12 +996,15 @@ impl Scrubber {
                 "No events: the thread ran without writing, opening or forking.",
             ));
         }
+        // The events are in step order, so each listed step's event is
+        // found by bisection, not by a walk from the first event.
         let trace = &run.timeline.trace;
         for step in events.iter().take(MAX_SLICE_EVENTS) {
+            let at = trace.events.partition_point(|e| e.step < *step);
             let text = trace
                 .events
-                .iter()
-                .find(|e| e.step == *step)
+                .get(at)
+                .filter(|e| e.step == *step)
                 .map(|e| describe::describe(e).text)
                 .unwrap_or_default();
             lines.push(mapped(&format!("{:>7}  {text}", thousands(*step))));

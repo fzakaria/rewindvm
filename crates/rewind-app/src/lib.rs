@@ -23,6 +23,8 @@ pub mod diff_view;
 pub mod engine;
 pub mod examples;
 pub mod family;
+#[cfg(test)]
+mod frame_cost;
 pub mod history;
 pub mod jobs;
 pub mod lanes;

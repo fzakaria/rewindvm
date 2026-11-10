@@ -236,6 +236,19 @@ fn below(path: &str, dir: &str) -> bool {
         .is_some_and(|rest| rest.starts_with(PATH_SEPARATOR))
 }
 
+/// Every directory some file event's path is below, without a trailing
+/// slash: "/out" and "/out/bin" for "/out/bin/shuffle", and "" for the
+/// root, as `below` names it. Output lines are not files.
+fn directories(files: &[FileEvent]) -> HashSet<String> {
+    let mut dirs = HashSet::new();
+    for file in files.iter().filter(|f| f.op != FileOp::Output) {
+        for (at, _) in file.path.match_indices(PATH_SEPARATOR) {
+            dirs.insert(file.path[..at].to_string());
+        }
+    }
+    dirs
+}
+
 /// What separates the names of a path.
 const PATH_SEPARATOR: char = '/';
 
@@ -344,6 +357,9 @@ pub struct Timeline {
     /// The processes the rows were made from, in the trace's own order.
     pub procs: Vec<Process>,
     pub files: Vec<FileEvent>,
+    /// Every directory a file event's path is below, for telling a
+    /// directory from a file.
+    dirs: HashSet<String>,
     pub failure: Option<Failure>,
     /// How the run's machine stopped, which finding the failure again needs.
     stopped: Stopped,
@@ -459,6 +475,7 @@ impl Timeline {
         let procs = trace.processes();
         let rows = process_rows(&trace, &procs);
         let files = file_events(&trace);
+        let dirs = directories(&files);
         let job_exit = trace.job_exit();
         let job_start = trace.job_start();
         let failure = find_failure(&trace, job_exit, total, stopped, None);
@@ -479,6 +496,7 @@ impl Timeline {
             rows,
             procs,
             files,
+            dirs,
             failure,
             stopped,
             job_exit,
@@ -519,12 +537,10 @@ impl Timeline {
     }
 
     /// Whether the trace has a file below `dir` at any step, which makes
-    /// `dir` a directory of the run.
+    /// `dir` a directory of the run. A lookup in the directories indexed
+    /// once: the Files list asks for every row it draws, every frame.
     pub fn has_files_under(&self, dir: &str) -> bool {
-        let dir = dir.trim_end_matches(PATH_SEPARATOR);
-        self.files
-            .iter()
-            .any(|f| f.op != FileOp::Output && below(&f.path, dir))
+        self.dirs.contains(dir.trim_end_matches(PATH_SEPARATOR))
     }
 
     /// Whether the trace has no event that writes `path` or renames a
@@ -1943,9 +1959,12 @@ pub(crate) mod tests {
             ]
         );
         assert_eq!(t.files_under("/out/", 60), t.files_under("/out", 60));
+        assert!(t.has_files_under("/"));
         assert!(t.has_files_under("/out"));
+        assert!(t.has_files_under("/out/"));
         assert!(t.has_files_under("/out/bin"));
         assert!(!t.has_files_under("/out/bin/shuffle"));
+        assert!(!t.has_files_under("/ou"));
         assert!(!t.has_files_under("/nix"));
 
         // No event writes a directory; each file has one.
