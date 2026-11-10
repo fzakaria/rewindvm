@@ -50,9 +50,14 @@ pub fn from_dir(dir: &Path, out: &Path) -> Result<()> {
     if !dir.is_dir() {
         bail!("{} is not a directory", dir.display());
     }
+
+    // mkfs.erofs takes a source that is not itself a directory for an
+    // image to rebuild from, a symlink to a directory included, so the
+    // directory goes in by its own path.
+    let dir = fs::canonicalize(dir).with_context(|| format!("resolving {}", dir.display()))?;
     let status = mkfs_erofs()
         .arg(out)
-        .arg(dir)
+        .arg(&dir)
         .status()
         .context("running mkfs.erofs; is erofs-utils on PATH?")?;
     if !status.success() {
@@ -303,6 +308,28 @@ mod tests {
         place(&tmp, &image).unwrap();
         assert_eq!(fs::read(&image).unwrap(), b"new");
         assert!(!tmp.exists());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_symlink_to_a_directory_packs_the_directory() {
+        // A root given as a symlink to a directory, as a Nix output often
+        // is, makes the same image as the directory itself. Builds both
+        // and compares their bytes; mkfs.erofs alone reads a symlink
+        // source as an image to rebuild from and fails.
+        let dir = std::env::temp_dir().join(format!("rewind-symlink-root-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let tree = dir.join("tree");
+        fs::create_dir_all(tree.join("bin")).unwrap();
+        fs::write(tree.join("bin/hello"), b"hello").unwrap();
+        let link = dir.join("link");
+        std::os::unix::fs::symlink(&tree, &link).unwrap();
+
+        let direct = dir.join("direct.erofs");
+        let through = dir.join("through.erofs");
+        from_dir(&tree, &direct).unwrap();
+        from_dir(&link, &through).unwrap();
+        assert_eq!(fs::read(&direct).unwrap(), fs::read(&through).unwrap());
         fs::remove_dir_all(&dir).unwrap();
     }
 
