@@ -1035,7 +1035,10 @@ programs.rewind.amdBranchCounterWorkaround = <span class="kw">true</span>;</code
             A loop that spins without a system call is never interrupted. Locks, sleeps and I/O are
             fine.
           </li>
-          <li>A run replays on other recent machines with the same CPU vendor, Intel or AMD.</li>
+          <li>
+            A run made on an AMD machine replays on other AMD machines from Zen 2 on, and not on
+            Intel. Replay from one Intel machine to another has not been tried.
+          </li>
           <li>No network, other than loopback.</li>
         </ul>
       </section>
