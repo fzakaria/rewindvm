@@ -2928,7 +2928,10 @@ in
           if ! rewind run -q --clock "$clock" --name "int3-$clock" --root ${gdbRoot} -- /bin/int3 \
             > run 2>&1; then
             cat run
-            grep -q 'perf_event_open' run
+            # Counter time is refused where the counter does not open, and
+            # where an AMD counter is inexact because the sandbox does not
+            # show rr's workaround; exit time ran above either way.
+            grep -q -e 'perf_event_open' -e 'needs an exact branch counter' run
             echo "skipped counter time: this machine's branch counter cannot drive it"
             continue
           fi
@@ -3040,7 +3043,10 @@ in
           if ! rewind run -q --clock "$clock" --name "reverse-$clock" --root ${gdbRoot} \
             -- /bin/reverse > run 2>&1; then
             cat run
-            grep -q 'perf_event_open' run
+            # Counter time is refused where the counter does not open, and
+            # where an AMD counter is inexact because the sandbox does not
+            # show rr's workaround; exit time ran above either way.
+            grep -q -e 'perf_event_open' -e 'needs an exact branch counter' run
             echo "skipped counter time: this machine's branch counter cannot drive it"
             continue
           fi
