@@ -24,9 +24,14 @@ use crate::source::{AfterAccess, Located, Thread};
 use crate::sweep::Checked;
 use crate::viewer::FetchedAll;
 
-/// What the viewer says, after the steps an export answers, of a look at
-/// any other step.
+/// What the app says, after the steps an export answers, of a look at
+/// any other step: in the browser viewer, that the desktop app replays
+/// there; in the desktop app, which opens a trace-only export with its
+/// answers, that the replayable export does.
+#[cfg(target_family = "wasm")]
 const ELSEWHERE: &str = "At other steps, reading files and the source is in the desktop app.";
+#[cfg(not(target_family = "wasm"))]
+const ELSEWHERE: &str = "At other steps, open the run's replayable export, the -replayable.rwd file, to read files and the source.";
 
 /// `steps` in words, as a sentence lists them: "step 719", "steps 719
 /// and 731", "steps 1, 2 and 3".
@@ -389,6 +394,9 @@ mod tests {
             "{elsewhere}"
         );
         assert!(elsewhere.contains(ELSEWHERE), "{elsewhere}");
+        // The desktop app, which these tests are built as, does not send
+        // the reader to itself.
+        assert!(!elsewhere.contains("desktop app"), "{elsewhere}");
         let failed = locate(&engine, STEP, PID + 1).unwrap_err().to_string();
         assert!(failed.contains("no symbols"), "{failed}");
         let absent = locate(&engine, STEP, PID + 2).unwrap_err().to_string();
