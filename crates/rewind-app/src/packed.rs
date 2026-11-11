@@ -454,6 +454,26 @@ mod tests {
         assert!(plain.answers.is_none());
     }
 
+    #[test]
+    fn answers_come_with_a_run_opened_from_a_file() {
+        // As the desktop app opens an export: the file is unpacked into
+        // the cache and the run opened from there, and the trace-only
+        // export's answers come with it, as they do in the browser.
+        use crate::run::Run;
+        let cache = crate::archive::test_cache();
+        let dir = cache.join(format!("answers-file-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("run.rwd");
+        std::fs::write(&file, export_with_answers()).unwrap();
+        let run = Run::open(&file).unwrap();
+        assert!(run.answers_at(STEP) && !run.answers_at(STEP + 1));
+
+        // An export without answers opens with none.
+        let plain = dir.join("plain.rwd");
+        std::fs::write(&plain, crate::examples::FAILING).unwrap();
+        assert!(Run::open(&plain).unwrap().answers.is_none());
+    }
+
     /// What checks.answers-app hands the test below: an export `rewind
     /// export --with-answers` wrote of a job that wrote a file and then
     /// failed, the file's path and bytes, and the function a bookmarked

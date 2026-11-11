@@ -305,9 +305,7 @@ fn read_within(reader: impl Read, limits: MemberLimits) -> Result<InMemory> {
     let mut trace = None;
     let mut summary = None;
     let mut bookmarks = None;
-    let mut answers_index = None;
-    let mut answered: HashMap<String, Vec<u8>> = HashMap::new();
-    let mut answered_bytes = 0u64;
+    let mut answers = AnswerMembers::default();
 
     // The manifest, the trace, and the summary and the bookmarks as
     // regular files no larger than the engine writes, are kept; every other member is
@@ -320,22 +318,8 @@ fn read_within(reader: impl Read, limits: MemberLimits) -> Result<InMemory> {
         if member.replay_only() && manifest.is_some() && trace.is_some() {
             return Ok(Flow::Stop);
         }
-        // A file the answers carry, within the limits an export packs
-        // them in, so a small archive cannot claim more.
-        if member == Member::Answer {
-            if size > answers::FILE_BYTES || answered_bytes + size > answers::TOTAL_BYTES {
-                bail!(
-                    "the archive's {} would take its answers past what an export carries",
-                    path.display()
-                );
-            }
-            let mut bytes = Vec::new();
-            reader.take(size).read_to_end(&mut bytes)?;
-            if bytes.len() as u64 != size {
-                bail!("the archive's {} is cut short", path.display());
-            }
-            answered_bytes += size;
-            answered.insert(path.to_string_lossy().into_owned(), bytes);
+        // The answers' index and the files they carry.
+        if answers.take(path, member, size, reader)? {
             return Ok(Flow::Continue);
         }
         let slot = match member {
@@ -343,7 +327,6 @@ fn read_within(reader: impl Read, limits: MemberLimits) -> Result<InMemory> {
             Member::Trace => &mut trace,
             Member::Summary if size <= export::MAX_SUMMARY => &mut summary,
             Member::Bookmarks if size <= BOOKMARKS_MAX_BYTES => &mut bookmarks,
-            Member::Answers if size <= answers::MAX_INDEX => &mut answers_index,
             _ => return Ok(Flow::Continue),
         };
         let mut bytes = Vec::new();
@@ -356,10 +339,7 @@ fn read_within(reader: impl Read, limits: MemberLimits) -> Result<InMemory> {
     })?;
     let manifest = manifest.with_context(|| format!("the archive has no {MANIFEST}"))?;
     let trace = trace.with_context(|| format!("the archive has no {TRACE}"))?;
-    let answers = answers_index
-        .map(|index| Carried::read(&index, answered))
-        .transpose()
-        .with_context(|| format!("reading the archive's {}", answers::ANSWERS))?;
+    let answers = answers.finish()?;
     Ok(InMemory {
         manifest,
         trace,
@@ -368,6 +348,85 @@ fn read_within(reader: impl Read, limits: MemberLimits) -> Result<InMemory> {
         answers,
         replayable: contents == Contents::Replayable,
     })
+}
+
+/// The answers an export carries, gathered member by member as an export
+/// is walked: the index, and each file the answers hold, within the
+/// limits an export packs them in, so a small archive cannot claim more.
+#[derive(Default)]
+struct AnswerMembers {
+    index: Option<Vec<u8>>,
+    files: HashMap<String, Vec<u8>>,
+    file_bytes: u64,
+}
+
+impl AnswerMembers {
+    /// Keeps the member at `path`, `size` bytes long, when it is part of
+    /// the answers, and says whether it was.
+    fn take(
+        &mut self,
+        path: &Path,
+        member: Member,
+        size: u64,
+        reader: &mut dyn Read,
+    ) -> Result<bool> {
+        match member {
+            Member::Answers if size <= answers::MAX_INDEX => {
+                self.index = Some(read_member(reader, path, size)?);
+            }
+            Member::Answer => {
+                if size > answers::FILE_BYTES || self.file_bytes + size > answers::TOTAL_BYTES {
+                    bail!(
+                        "the archive's {} would take its answers past what an export carries",
+                        path.display()
+                    );
+                }
+                let bytes = read_member(reader, path, size)?;
+                self.file_bytes += size;
+                self.files
+                    .insert(path.to_string_lossy().into_owned(), bytes);
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    /// The answers, when the export carried an index of them.
+    fn finish(self) -> Result<Option<Carried>> {
+        self.index
+            .map(|index| Carried::read(&index, self.files))
+            .transpose()
+            .with_context(|| format!("reading the archive's {}", answers::ANSWERS))
+    }
+}
+
+/// The `size` bytes of the member at `path`, refused when the archive
+/// ends before them.
+fn read_member(reader: &mut dyn Read, path: &Path, size: u64) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    reader.take(size).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 != size {
+        bail!("the archive's {} is cut short", path.display());
+    }
+    Ok(bytes)
+}
+
+/// The answers the export file at `path` carries, read without the trace,
+/// for the desktop app, which unpacks only the manifest, the trace and
+/// the bookmarks. The read stops at the first member only a replay needs:
+/// an export writes its answers before those.
+pub fn read_answers(path: &Path) -> Result<Option<Carried>> {
+    let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let mut answers = AnswerMembers::default();
+    export::walk(decompress(file)?, |path, member, size, reader| {
+        if member.replay_only() {
+            return Ok(Flow::Stop);
+        }
+        answers.take(path, member, size, reader)?;
+        anyhow::Ok(Flow::Continue)
+    })
+    .with_context(|| format!("reading the answers in {}", path.display()))?;
+    answers.finish()
 }
 
 /// The summary of the run in the export `run`, as `rewind summary` prints

@@ -104,12 +104,21 @@ impl Run {
         };
         if let Some(file) = file {
             let unpacked = archive::import_file(&file)?;
+            // A trace-only export's answers stand in for replay at the
+            // steps they answer, as in the browser. A replayable export
+            // replays at every step, so its answers are left in the file.
+            let answers = match unpacked.replayable {
+                true => None,
+                false => archive::read_answers(&file)?,
+            };
             let export = Export {
                 source: path.to_path_buf(),
                 file,
                 replayable: unpacked.replayable,
             };
-            return Run::open_at(&unpacked.dir, Origin::Export(export));
+            let mut run = Run::open_at(&unpacked.dir, Origin::Export(export))?;
+            run.answers = answers.map(Arc::new);
+            return Ok(run);
         }
         let origin = if path.is_dir() {
             Origin::Local
