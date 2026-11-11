@@ -844,7 +844,8 @@ keyframes. With `--seeds`, only the first seed runs under the keys.
 ~/.local/share/rewind/
   runs/<id>/manifest.json     inputs, what they describe, parent, outcome, verdict
   runs/<id>/trace.bin         every record, each prefixed with its step
-  runs/<id>/keyframes/*.kf    keyframes, by step
+  runs/<id>/keyframes/*.kf    keyframes the run's recording took, by step
+  runs/<id>/keyframes/kept/   keyframes kept by looks and by forks, by step
   images/2/*.erofs            input images, by content
   store/                      the page store
   cache/sources/<id>/         source files read out of a run's VM
@@ -1002,7 +1003,10 @@ at step 5060 replayed 3621 steps from the keyframe at 1439 in 0.28 s on each for
 keeping the keyframe took 0.1 s. The keyframe holds the pages written since
 the one restored and goes where a fork's shared keyframe goes (see
 [Forks](#forks)), written under that run's executing lock with the page store
-open, so `rewind gc` waits. A run recorded without keyframes, as most of the
+open, so `rewind gc` waits. A kept keyframe is in the run's `keyframes/kept/`
+directory, apart from the ones its recording took: it is a cache for seeks in
+this home and no part of the recording, and a replayable export leaves it out
+(see [Exports](#exports)). A run recorded without keyframes, as most of the
 runs `rewind check` makes are, counts boot as its keyframe at step 0, so the
 first look inside it more than 512 steps in keeps a full keyframe, every page
 that is not zero. In a run of 5947 steps that rewrites 64 MB of files, the
@@ -1175,8 +1179,10 @@ on. A reseed parts the fork from its parent at its step, as a schedule does,
 and a fork of the fork keeps the reseeds before its own step.
 
 Rewind takes one keyframe at the last shared step and puts it in the
-directory of the earliest run that has that step in common with the fork,
-where every later fork at the same step finds it and restores from it. A
+`keyframes/kept/` directory of the earliest run that has that step in common
+with the fork, where every later fork at the same step finds it and restores
+from it. That run's recording did not take it, so the run's own export leaves
+it out, as it leaves out a look's. A
 fork's own keyframes then hold only what it wrote after its step. How far two
 runs agree comes from their schedules: a seed's choice at a step depends on
 the seed and the step alone, so two runs part at the first step only one of
@@ -1207,11 +1213,23 @@ step costs a little less than it did before. Each further fork at that step cost
 its trace and what it wrote after.
 
 A finished run's keyframes are never replaced, since other runs may read them;
-running the same inputs again leaves them as they are. A replayable export
-copies every keyframe a run reads into the archive as the run's own and drops
-`shared_keyframes`, so it imports and replays where the parent is not. A fork
-whose parent is gone cannot reach its shared keyframes, and seeking in it
-fails with the id of the run it needs; `rewind replay` from boot still works.
+running the same inputs again leaves them as they are. A fork whose parent is
+gone cannot reach its shared keyframes, and seeking in it fails with the id of
+the run it needs; `rewind replay` from boot still works.
+
+### Exports
+
+A replayable export carries the keyframes the run's recording took, the ones
+each run it shares keyframes with took up to the step where the two part, the
+keyframe at that step, and every keyframe those are deltas from, all as the
+run's own, and drops `shared_keyframes`, so it imports and replays where the
+parent is not. A kept keyframe goes in only when one of those is a delta from
+it, as the keyframe a fork takes where it parts is when the fork started from
+a look's. Looks add none, so two exports of one run are the same bytes
+whatever was looked at in between. Before kept keyframes were set apart, a
+replayable export of a failing mylib run was 193,909,188 bytes, and
+195,683,088 after `rewind cat` at step 3000 kept a keyframe there. An imported
+run's keyframes are all its recording's.
 
 ### Removing runs
 

@@ -8,8 +8,9 @@
 //! written with answers carries what a replay found at the run's failing
 //! step, its broken assertions and its bookmarks (see
 //! [`rewind_trace::answers`]). A replayable export adds what another
-//! machine needs to run it again: the keyframes, the pages they use, the
-//! input image, and the guest kernel and initramfs the run booted.
+//! machine needs to run it again: the keyframes its recording took (see
+//! [`keyframes::Layers::recording`]), the pages they use, the input image,
+//! and the guest kernel and initramfs the run booted.
 //!
 //! ```text
 //! manifest.json
@@ -152,20 +153,27 @@ fn write_export(
                 .with_context(|| format!("adding the image {}", image.display()))?;
         }
 
-        // Every keyframe the run can seek from, wherever it is kept, and
-        // every page any of them names, once.
+        // The keyframes the run's recording took or starts from, wherever
+        // they are, and every page any of them names, once. Keyframes
+        // kept where something looked inside the run, or where a fork
+        // parted from it, stay here, so two exports of the run are the
+        // same bytes whatever was looked at or forked.
         let store = Store::open(&home.store())?;
         let layers = run.keyframes()?;
+        let mut loaded = keyframes::Loaded::default();
         let mut hashes: BTreeSet<Hash> = BTreeSet::new();
-        for step in layers.steps() {
+        for step in layers.recording(&mut loaded)? {
             let name = format!("{}/{step:016}.kf", keyframes::DIR);
             let from = layers
                 .path(step)
                 .with_context(|| format!("keyframe {step} of run {}", run.manifest.id))?;
             tar.append_path_with_name(&from, &name)?;
-            for (_, hash) in layers.load(step)?.pages {
-                if hash != ZERO_PAGE {
-                    hashes.insert(hash);
+            let kf = loaded
+                .get(step)
+                .expect("the recording's keyframes are read");
+            for (_, hash) in &kf.pages {
+                if *hash != ZERO_PAGE {
+                    hashes.insert(*hash);
                 }
             }
         }
@@ -629,6 +637,74 @@ mod tests {
         for home in [from, to, view] {
             fs::remove_dir_all(home.root()).unwrap();
         }
+    }
+
+    /// The names of the keyframe members of the export at `file`, in
+    /// archive order.
+    fn keyframe_members(file: &Path) -> Vec<String> {
+        let bytes = zstd::decode_all(&fs::read(file).unwrap()[..]).unwrap();
+        let mut archive = tar::Archive::new(&bytes[..]);
+        archive
+            .entries()
+            .unwrap()
+            .map(|entry| entry.unwrap().path().unwrap().display().to_string())
+            .filter(|name| name.starts_with(keyframes::DIR))
+            .collect()
+    }
+
+    #[test]
+    fn a_replayable_export_carries_only_the_keyframes_the_recording_took() {
+        // A run recorded with keyframes at 256 and 4819 is exported to
+        // replay, then a look keeps a keyframe at 3000 over the one at 256,
+        // as `rewind cat` at step 3000 does, and the run is exported again.
+        // The second export carries the recording's keyframes and marker
+        // alone and is the first's bytes, and the run still seeks from all
+        // three keyframes here.
+        let home = home("recorded-only");
+        let run = replayable_run(&home, "looked-at");
+        let page = vec![7u8; PAGE_SIZE];
+        let hash = {
+            let mut store = Store::open(&home.store()).unwrap();
+            let hash = store.put(&page).unwrap();
+            store.sync().unwrap();
+            hash
+        };
+        let at = |step: u64, parent: Option<u64>| {
+            let mut kf = rewind_vmm::snapshot::Keyframe::default();
+            kf.step = step;
+            kf.parent = parent;
+            kf.pages = vec![(step as u32, hash)];
+            kf
+        };
+        keyframes::save(&run.dir, &at(256, None)).unwrap();
+        keyframes::save(&run.dir, &at(4819, Some(256))).unwrap();
+        keyframes::mark_taken(&run.dir).unwrap();
+
+        // The export before the look.
+        let before = home.root().join("before.rwd");
+        export(&home, &run, Contents::Replayable, &before).unwrap();
+
+        // The look, then the export after it.
+        keyframes::keep(&run.dir, &at(3000, Some(256))).unwrap();
+        let after = home.root().join("after.rwd");
+        export(&home, &run, Contents::Replayable, &after).unwrap();
+
+        assert_eq!(
+            keyframe_members(&after),
+            [
+                "keyframes/0000000000000256.kf",
+                "keyframes/0000000000004819.kf",
+                "keyframes/taken",
+            ]
+        );
+        assert!(
+            fs::read(&before).unwrap() == fs::read(&after).unwrap(),
+            "the look changed the export's bytes"
+        );
+        let layers = run.keyframes().unwrap();
+        assert_eq!(layers.steps(), [256, 3000, 4819]);
+        assert_eq!(layers.chain(3000).unwrap().len(), 2);
+        fs::remove_dir_all(home.root()).unwrap();
     }
 
     #[test]

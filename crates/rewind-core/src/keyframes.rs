@@ -6,7 +6,7 @@
 //! keyframe at or before it and runs forward from there, so no seek costs
 //! much more than one interval.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -143,13 +143,43 @@ fn decode_pages(bytes: &[u8]) -> Result<Vec<(u32, [u8; 32])>> {
         .collect())
 }
 
+/// The subdirectory of a run's keyframe directory holding the keyframes
+/// the run's recording did not take: ones kept where something looked
+/// inside the run, and ones a run that shares keyframes with it took
+/// where the two part. They are a cache for seeking. A replayable export
+/// carries one only when a keyframe it carries is a delta from it.
+pub const KEPT: &str = "kept";
+
+/// The file a keyframe the run's recording took at `step` is in.
 fn path(run_dir: &Path, step: u64) -> PathBuf {
     run_dir.join(DIR).join(format!("{step:016}.{EXTENSION}"))
 }
 
+/// The file a keyframe kept in the run at `step` is in.
+fn kept_path(run_dir: &Path, step: u64) -> PathBuf {
+    run_dir
+        .join(DIR)
+        .join(KEPT)
+        .join(format!("{step:016}.{EXTENSION}"))
+}
+
+/// The file holding the run's keyframe at `step`, recorded or kept.
+fn find(run_dir: &Path, step: u64) -> Option<PathBuf> {
+    [path(run_dir, step), kept_path(run_dir, step)]
+        .into_iter()
+        .find(|p| p.exists())
+}
+
+/// Saves `kf` as a keyframe the recording of the run in `run_dir` took.
 pub fn save(run_dir: &Path, kf: &Keyframe) -> Result<()> {
     fs::create_dir_all(run_dir.join(DIR))?;
     crate::image::write_atomic(&path(run_dir, kf.step), &encode(kf)?)
+}
+
+/// Saves `kf` as a keyframe kept in the run in `run_dir` (see [`KEPT`]).
+pub fn keep(run_dir: &Path, kf: &Keyframe) -> Result<()> {
+    fs::create_dir_all(run_dir.join(DIR).join(KEPT))?;
+    crate::image::write_atomic(&kept_path(run_dir, kf.step), &encode(kf)?)
 }
 
 /// What a run's own keyframe directory holds.
@@ -166,8 +196,8 @@ pub enum Own {
 
 /// The file in a run's keyframe directory whose presence says the run took
 /// its keyframes as it executed, from where it started to where it ended.
-/// A run without it has keyframes only where something looked inside it,
-/// as `rewind check`'s runs have where their job exited.
+/// A run without it has keyframes only where its job exited, as `rewind
+/// check`'s runs have, or where something looked inside it.
 pub const TAKEN: &str = "taken";
 
 /// Records that the run in `run_dir` took its keyframes as it executed.
@@ -188,8 +218,8 @@ pub fn own_state(run_dir: &Path) -> Own {
         return Own::None;
     }
     let reads = |step: &u64| {
-        fs::read(path(run_dir, *step))
-            .ok()
+        find(run_dir, *step)
+            .and_then(|p| fs::read(p).ok())
             .and_then(|b| decode(&b).ok())
             .is_some()
     };
@@ -200,9 +230,24 @@ pub fn own_state(run_dir: &Path) -> Own {
     }
 }
 
-/// A run's own keyframe steps, in order.
+/// A run's own keyframe steps, recorded and kept, in order.
 fn own_steps(run_dir: &Path) -> Vec<u64> {
-    let mut steps: Vec<u64> = fs::read_dir(run_dir.join(DIR))
+    let mut steps = recorded_steps(run_dir);
+    steps.extend(steps_in(&run_dir.join(DIR).join(KEPT)));
+    steps.sort_unstable();
+    steps.dedup();
+    steps
+}
+
+/// The steps of the keyframes a run's recording took and its own
+/// directory holds, in order.
+fn recorded_steps(run_dir: &Path) -> Vec<u64> {
+    steps_in(&run_dir.join(DIR))
+}
+
+/// The steps of the keyframe files in `dir`, in order.
+fn steps_in(dir: &Path) -> Vec<u64> {
+    let mut steps: Vec<u64> = fs::read_dir(dir)
         .into_iter()
         .flatten()
         .filter_map(|e| e.ok())
@@ -301,8 +346,15 @@ impl Layers {
         self.layers
             .iter()
             .filter(|l| step <= l.through)
-            .map(|l| path(&l.dir, step))
-            .find(|p| p.exists())
+            .find_map(|l| find(&l.dir, step))
+    }
+
+    /// The index of the layer whose directory holds the keyframe at
+    /// `step`, if the run has one there.
+    fn holder(&self, step: u64) -> Option<usize> {
+        self.layers
+            .iter()
+            .position(|l| step <= l.through && find(&l.dir, step).is_some())
     }
 
     /// The directory of the run that owns `step`: the earliest run that
@@ -327,13 +379,37 @@ impl Layers {
         let Some(parent) = parent else {
             return true;
         };
-        let layer_of = |dir: &Path| self.layers.iter().position(|l| l.dir == dir);
-        let owner = layer_of(self.owner(step));
-        let holder = self
-            .path(parent)
-            .and_then(|p| p.parent()?.parent().map(Path::to_path_buf))
-            .and_then(|dir| layer_of(&dir));
+        let owner = self.layers.iter().position(|l| l.dir == self.owner(step));
+        let holder = self.holder(parent);
         matches!((owner, holder), (Some(owner), Some(holder)) if holder >= owner)
+    }
+
+    /// The steps of the keyframes a replayable export of the run carries,
+    /// in order: the ones its recording took, the ones each run it shares
+    /// keyframes with took up to the step the two part, the keyframe at
+    /// that step, and every keyframe the chains of those name, read into
+    /// `loaded`. A kept keyframe is among them only when one of the others
+    /// is a delta from it, as the keyframe a fork takes where it parts may
+    /// be, so a look inside any of the runs adds none.
+    pub fn recording(&self, loaded: &mut Loaded) -> Result<Vec<u64>> {
+        // The keyframes the recordings took, and the one at each step
+        // where two of the runs part.
+        let mut seeds = BTreeSet::new();
+        for (index, layer) in self.layers.iter().enumerate() {
+            let recorded = recorded_steps(&layer.dir);
+            seeds.extend(recorded.into_iter().filter(|s| *s <= layer.through));
+            let parts_here = index > 0 && self.path(layer.through).is_some();
+            if parts_here {
+                seeds.insert(layer.through);
+            }
+        }
+
+        // Every keyframe those are deltas from, back to a full one.
+        let mut steps = BTreeSet::new();
+        for seed in seeds {
+            steps.extend(self.chain_loaded(seed, loaded)?.iter().map(|k| k.step));
+        }
+        Ok(steps.into_iter().collect())
     }
 
     pub fn load(&self, step: u64) -> Result<Keyframe> {
@@ -376,6 +452,13 @@ impl Layers {
 #[derive(Debug, Default)]
 pub struct Loaded {
     by_step: HashMap<u64, Keyframe>,
+}
+
+impl Loaded {
+    /// The keyframe at `step`, if one has been read.
+    pub fn get(&self, step: u64) -> Option<&Keyframe> {
+        self.by_step.get(&step)
+    }
 }
 
 impl Layers {
@@ -929,23 +1012,25 @@ impl Taking {
 }
 
 /// Removes the keyframes left under temporary names in `run_dir` by
-/// executions that are gone, which never flushed them.
+/// executions and looks that are gone, which never finished writing
+/// them, among the recorded keyframes and the kept ones.
 fn remove_unflushed(run_dir: &Path) -> Result<()> {
-    let dir = run_dir.join(DIR);
-    let entries = match fs::read_dir(&dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
-    };
-    for entry in entries {
-        let path = entry?.path();
-        let Some(pid) = crate::image::temp_writer(&path) else {
-            continue;
+    for dir in [run_dir.join(DIR), run_dir.join(DIR).join(KEPT)] {
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
         };
-        if crate::gc::alive(pid) {
-            continue;
+        for entry in entries {
+            let path = entry?.path();
+            let Some(pid) = crate::image::temp_writer(&path) else {
+                continue;
+            };
+            if crate::gc::alive(pid) {
+                continue;
+            }
+            fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
         }
-        fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
     }
     Ok(())
 }
@@ -1295,6 +1380,69 @@ mod tests {
         assert!(layers.owner_reads(2000, None));
         assert!(layers.owner_reads(3500, Some(3000)));
         assert!(layers.owner_reads(3500, Some(1200)));
+    }
+
+    #[test]
+    fn a_kept_keyframe_counts_where_it_is_kept() {
+        // c shares through 2400 with p. p keeps a keyframe at 1500 and c
+        // one at 2800, as looks do: c sees both among its steps, finds each
+        // in the directory it was kept in, and p reads the one at 1500, so
+        // a keyframe kept in p may be a delta from it.
+        let runs = runs("kept");
+        let p = run(&runs, "p", &[1200], None);
+        let c = run(&runs, "c", &[3000], share("p", 2400));
+        let at = |step: u64, parent: Option<u64>| {
+            let mut kf = Keyframe::default();
+            kf.step = step;
+            kf.parent = parent;
+            kf
+        };
+        keep(&p, &at(1500, Some(1200))).unwrap();
+        keep(&c, &at(2800, Some(1500))).unwrap();
+        let layers = Layers::open(&c, share("p", 2400).as_ref()).unwrap();
+        assert_eq!(layers.steps(), vec![1200, 1500, 2800, 3000]);
+        assert_eq!(layers.path(1500), Some(kept_path(&p, 1500)));
+        assert_eq!(layers.path(2800), Some(kept_path(&c, 2800)));
+        assert!(layers.owner_reads(2000, Some(1500)));
+        assert!(!layers.owner_reads(2000, Some(2800)));
+        fs::remove_dir_all(&runs).unwrap();
+    }
+
+    #[test]
+    fn a_recording_s_keyframes_leave_out_the_ones_looks_kept() {
+        // p recorded keyframes at 256 and 1200 and kept one at 1800 for a
+        // look. Its fork c started from that keyframe, took one at 2400,
+        // where the two part, which p keeps, and recorded one at 3000.
+        // Looks then kept one at 2000 in p and one at 3500 in c. The
+        // recording of p is its own two keyframes; the recording of c is
+        // p's two, the 1800 its keyframe at 2400 is a delta from, that
+        // one, and its own, without either later look's.
+        let runs = runs("recording");
+        let p = run(&runs, "p", &[], None);
+        let c = run(&runs, "c", &[], share("p", 2400));
+        let at = |step: u64, parent: Option<u64>| {
+            let mut kf = Keyframe::default();
+            kf.step = step;
+            kf.parent = parent;
+            kf
+        };
+        save(&p, &at(256, None)).unwrap();
+        save(&p, &at(1200, Some(256))).unwrap();
+        keep(&p, &at(1800, Some(1200))).unwrap();
+        keep(&p, &at(2400, Some(1800))).unwrap();
+        save(&c, &at(3000, Some(2400))).unwrap();
+        keep(&p, &at(2000, Some(1800))).unwrap();
+        keep(&c, &at(3500, Some(3000))).unwrap();
+
+        let mut loaded = Loaded::default();
+        let alone = Layers::open(&p, None).unwrap();
+        assert_eq!(alone.recording(&mut loaded).unwrap(), vec![256, 1200]);
+        let fork = Layers::open(&c, share("p", 2400).as_ref()).unwrap();
+        assert_eq!(
+            fork.recording(&mut loaded).unwrap(),
+            vec![256, 1200, 1800, 2400, 3000]
+        );
+        fs::remove_dir_all(&runs).unwrap();
     }
 
     #[test]

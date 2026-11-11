@@ -378,38 +378,42 @@ fn cached_images(home: &Home) -> Result<Vec<PathBuf>> {
 /// Every page a keyframe in the home names, and how many keyframe files
 /// do not read back. A fork reads keyframes from the directories of the
 /// runs it shares them with, so every run directory's keyframes count,
-/// read one file at a time.
+/// the recorded ones and the kept ones, read one file at a time.
 fn live_pages(home: &Home) -> Result<(PageSet, usize)> {
     let mut live = PageSet::default();
     let mut unreadable = 0;
     for dir in run_dirs(home)? {
-        let keyframes = dir.join(crate::keyframes::DIR);
-        let entries = match fs::read_dir(&keyframes) {
-            Ok(entries) => entries,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => {
-                return Err(e).with_context(|| format!("reading {}", keyframes.display()));
-            }
-        };
-        for entry in entries {
-            let path = entry?.path();
-            let is_keyframe = path
-                .extension()
-                .is_some_and(|e| e == crate::keyframes::EXTENSION);
-            if !is_keyframe {
-                continue;
-            }
-            let bytes = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
-            let Ok(kf) = crate::keyframes::decode(&bytes) else {
-                unreadable += 1;
-                continue;
+        let recorded = dir.join(crate::keyframes::DIR);
+        let kept = recorded.join(crate::keyframes::KEPT);
+        for keyframes in [recorded, kept] {
+            let entries = match fs::read_dir(&keyframes) {
+                Ok(entries) => entries,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => {
+                    return Err(e).with_context(|| format!("reading {}", keyframes.display()));
+                }
             };
-            live.extend(
-                kf.pages
-                    .into_iter()
-                    .map(|(_, hash)| hash)
-                    .filter(|hash| *hash != ZERO_PAGE),
-            );
+            for entry in entries {
+                let path = entry?.path();
+                let is_keyframe = path
+                    .extension()
+                    .is_some_and(|e| e == crate::keyframes::EXTENSION);
+                if !is_keyframe {
+                    continue;
+                }
+                let bytes =
+                    fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+                let Ok(kf) = crate::keyframes::decode(&bytes) else {
+                    unreadable += 1;
+                    continue;
+                };
+                live.extend(
+                    kf.pages
+                        .into_iter()
+                        .map(|(_, hash)| hash)
+                        .filter(|hash| *hash != ZERO_PAGE),
+                );
+            }
         }
     }
     Ok((live, unreadable))
@@ -608,9 +612,10 @@ mod tests {
     #[test]
     fn pages_no_keyframe_names_go() {
         // r names pages 0 and 1, and its fork f reads r's keyframes and
-        // names page 2 in its own. Pages 3 and 4 are named by no keyframe
-        // and go; a keyframe that does not read back keeps nothing and is
-        // counted. A dry run counts the same and removes nothing.
+        // names page 2 in its own and page 3 in one kept where something
+        // looked inside f. Page 4 is named by no keyframe and goes; a
+        // keyframe that does not read back keeps nothing and is counted.
+        // A dry run counts the same and removes nothing.
         let home = home("pages");
         let hashes = pages(&home, &[1, 2, 3, 4, 5]);
         run(
@@ -625,9 +630,14 @@ mod tests {
             b"old",
         )
         .unwrap();
+        let mut looked = Keyframe::default();
+        looked.step = 1500;
+        looked.parent = Some(1024);
+        looked.pages = vec![(0, hashes[3])];
+        crate::keyframes::keep(&fork, &looked).unwrap();
 
         let planned = settled(&home, Act::DryRun);
-        assert_eq!(planned.pages.pages, 2);
+        assert_eq!(planned.pages.pages, 1);
         assert!(planned.pages.bytes > 0);
         assert_eq!(planned.unreadable_keyframes, 1);
         assert!(Store::open(&home.store()).unwrap().contains(&hashes[4]));
@@ -636,10 +646,9 @@ mod tests {
         assert_eq!(collected.pages, planned.pages);
         let store = Store::open(&home.store()).unwrap();
         let mut out = vec![0u8; PAGE];
-        for hash in &hashes[..3] {
+        for hash in &hashes[..4] {
             store.get(hash, &mut out).unwrap();
         }
-        assert!(!store.contains(&hashes[3]));
         assert!(!store.contains(&hashes[4]));
         drop(store);
         fs::remove_dir_all(home.root()).unwrap();

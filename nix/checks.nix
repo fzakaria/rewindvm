@@ -1504,20 +1504,31 @@ in
         # writes apart, so a run of 3,000 writes has one only at step 256.
         rewind run -q --name long --root ${busyboxRoot} -- sh -c 'for i in $(seq 3000); do echo $i; done'
         long=$(dirname "$(grep -l '"name": "long"' $REWIND_HOME/runs/*/manifest.json)")
-        keyframes() { ls "$long/keyframes" | sed 's/\.kf$//; s/^0*//'; }
+        keyframes() { find "$long/keyframes" -name '*.kf' -printf '%f\n' | sed 's/\.kf$//; s/^0*//' | sort -n; }
         end=$(rewind events long | grep 'mark "rewind-exit ' | awk '{print $1}')
         far=$( (keyframes; echo "$end") | sort -n | awk -v end="$end" \
           'NR > 1 && $1 - last > 600 && last + 600 < end { print last + 600; exit } { last = $1 }')
         echo "looking at step ''${far:-none} of long, keyframes: $(keyframes | tr '\n' ' ')"
         test -n "$far"
         count=$(keyframes | wc -l)
+        rewind export long --replayable -o long-before.rwd
         rewind cat long "$far" /bin/busybox > /dev/null
         test "$(keyframes | wc -l)" = $((count + 1))
         keyframes > kept
         grep -qx "$far" kept
+        test -e "$long/keyframes/kept/$(printf %016d "$far").kf"
         rewind cat long "$far" /bin/busybox > /dev/null
         test "$(keyframes | wc -l)" = $((count + 1))
         rewind replay long --from "$far" | grep "^identical to the recording from the keyframe at step $far "
+
+        # The keyframe a look kept is a cache for this home's seeks and
+        # never part of the recording, so a replayable export after the
+        # looks is the export before them byte for byte, and it imports
+        # and replays elsewhere.
+        rewind export long --replayable -o long-after.rwd
+        cmp long-before.rwd long-after.rwd
+        REWIND_HOME=$TMPDIR/long-elsewhere rewind import long-after.rwd
+        REWIND_HOME=$TMPDIR/long-elsewhere rewind replay long | grep '^identical'
 
         rewind run -q --name b --seed 1 --root ${busyboxRoot} -- sh -c '${workload}'
         # rewind diff exits 1 for runs that differ, 0 for identical ones.
@@ -1549,6 +1560,7 @@ in
         manifest() { echo "$REWIND_HOME/runs/$1/manifest.json"; }
         # The step a run ended at, the run named by its id or its name.
         end() { rewind ls --json | sed -n "s/.*\"\(id\|name\)\":\"$1\",.*\"steps\":\([0-9]*\).*/\2/p"; }
+        rewind export a --replayable -o a-before.rwd
         fork=$(rewind fork a 400 --schedule 3 --json | id)
         grep -q '"shared_keyframes": {' "$(manifest $fork)"
         grep -q '"trace_hash": "' "$(manifest $fork)"
@@ -1576,6 +1588,12 @@ in
         rewind export --replayable -o fork2.rwd $fork2
         REWIND_HOME=$TMPDIR/elsewhere rewind import fork2.rwd
         REWIND_HOME=$TMPDIR/elsewhere rewind replay $fork2 --from 300 | grep '^identical'
+
+        # The keyframe a fork takes where it parts from its parent is the
+        # fork's, kept beside the parent's own: the parent's replayable
+        # export is the same bytes after the forks as before them.
+        rewind export a --replayable -o a-after.rwd
+        cmp a-before.rwd a-after.rwd
 
         # Without its parent, a fork says which run it needs.
         mv $REWIND_HOME/runs/$fork $TMPDIR/away
@@ -1661,17 +1679,20 @@ in
         # A look far into a run recorded without keyframes, as rewind
         # check records most of its runs, keeps a keyframe on the way
         # after each ten seconds of the guest's work, as well as one at
-        # its step. The run replays exactly from one kept on the way, and
-        # the kept keyframes are the run's like any other: removing the
-        # run and collecting takes their pages with it. Two million writes
-        # are about two million steps, some 44 s of work at 22 us a step.
+        # its step, all among the run's kept keyframes, since its
+        # recording took none. The run replays exactly from one kept on the
+        # way, and the kept keyframes are the run's like any other:
+        # removing the run and collecting takes their pages with it. Two
+        # million writes are about two million steps, some 44 s of work at
+        # 22 us a step.
         bare_writes='for i in $(seq 2000000); do echo $i; done'
         rewind run -q --no-keyframes --name bare --root ${busyboxRoot} -- sh -c "$bare_writes"
         bare=$(dirname "$(grep -l '"name": "bare"' $REWIND_HOME/runs/*/manifest.json)")
         test ! -e "$bare/keyframes"
         end=$(rewind events bare | grep 'mark "rewind-exit ' | awk '{print $1}')
         rewind cat bare "$end" /bin/busybox > /dev/null
-        bare_keyframes() { ls "$bare/keyframes" | grep '\.kf$' | sed 's/\.kf$//; s/^0*//'; }
+        bare_keyframes() { ls "$bare/keyframes/kept" | grep '\.kf$' | sed 's/\.kf$//; s/^0*//'; }
+        test -z "$(ls "$bare/keyframes" | grep '\.kf$')"
         echo "a look at step $end of bare kept keyframes at: $(bare_keyframes | tr '\n' ' ')"
         test "$(bare_keyframes | wc -l)" -ge 2
         test "$(bare_keyframes | tail -1)" = "$end"

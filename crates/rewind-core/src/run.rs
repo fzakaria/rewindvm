@@ -1195,6 +1195,9 @@ impl Run {
                 // A keyframe at the last shared step goes to the run that
                 // owns it, where every fork made at this step finds it, and
                 // this run's own keyframes hold only what it wrote after.
+                // The owner's recording did not take the keyframe, so the
+                // owner keeps it beside its own and exports it only with
+                // the runs that part from it there.
                 if let Some(s) = shortcut.as_ref().filter(|s| s.base < s.shared.through)
                     && let Outcome::Paused = machine.run(Some(s.shared.through), &mut recorder)?
                 {
@@ -1205,7 +1208,7 @@ impl Run {
                     // The pages first, durably, then the keyframe naming
                     // them.
                     store.sync()?;
-                    if crate::keyframes::save(&s.owner, &kf).is_err() {
+                    if crate::keyframes::keep(&s.owner, &kf).is_err() {
                         crate::keyframes::save(&dir, &kf)?;
                     }
                     parent = Some(kf.step);
@@ -1691,9 +1694,10 @@ impl Run {
     }
 
     /// Saves a keyframe of `machine`, at a step of this run it reached
-    /// from the keyframe `base` names, or from boot, in the directory of
-    /// the run that owns the step, where every fork made there finds it
-    /// (see [`crate::keyframes::Layers::owner`]). Its pages are the ones
+    /// from the keyframe `base` names, or from boot, among the kept
+    /// keyframes of the run that owns the step, where every fork made
+    /// there finds it (see [`crate::keyframes::Layers::owner`]) and no
+    /// export of the run carries it (see [`crate::keyframes::KEPT`]). Its pages are the ones
     /// written since that keyframe, or from boot every non-zero page, put
     /// in the page store, which `base` opens if it has not yet. True when
     /// the keyframe was kept, and `base` then names it.
@@ -1745,7 +1749,7 @@ impl Run {
         let mut kf = machine.keyframe(&mut crate::keyframes::StorePages(store), base.step)?;
         memory.trim(kf.parent, &mut kf.pages)?;
         store.sync()?;
-        crate::keyframes::save(&owner, &kf)
+        crate::keyframes::keep(&owner, &kf)
             .with_context(|| format!("keeping a keyframe at step {step} in {}", owner.display()))?;
         base.step = Some(step);
         Ok(true)
