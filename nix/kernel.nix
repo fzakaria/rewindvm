@@ -43,6 +43,9 @@ let
     # for tracefs readers in a boot step that took more than half of a
     # short run's guest time
     ../guest/linux/rewind-trace.patch
+    # The file events' path lock taken only by the system calls that
+    # report a file event, not by every one that returns
+    ../guest/linux/rewind-path-lock.patch
   ];
 in
 pkgs.stdenv.mkDerivation {

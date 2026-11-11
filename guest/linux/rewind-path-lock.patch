@@ -1,0 +1,31 @@
+diff --git a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
+index 939bf35de..fc1a5845b 100644
+--- a/arch/x86/kernel/cpu/rewind.c
++++ b/arch/x86/kernel/cpu/rewind.c
+@@ -1398,6 +1398,26 @@ static void rewind_report_changes(struct pt_regs *regs, long id, long ret)
+ {
+ 	u64 how_flags;
+ 
++	/*
++	 * Only these calls report anything; every other system call returns
++	 * without the lock, so threads that share nothing do not wait on
++	 * one another here.
++	 */
++	switch (id) {
++	case __NR_open:
++	case __NR_openat:
++	case __NR_openat2:
++	case __NR_creat:
++	case __NR_unlink:
++	case __NR_unlinkat:
++	case __NR_rename:
++	case __NR_renameat:
++	case __NR_renameat2:
++		break;
++	default:
++		return;
++	}
++
+ 	mutex_lock(&rewind_path_lock);
+ 	switch (id) {
+ 	case __NR_open:
