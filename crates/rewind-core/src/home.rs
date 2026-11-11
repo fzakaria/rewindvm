@@ -71,21 +71,39 @@ pub struct Home {
     root: PathBuf,
 }
 
+/// The variable naming the data directory the default home is under.
+const ENV_XDG_DATA: &str = "XDG_DATA_HOME";
+
+/// The user's home directory, under which the data directory is when
+/// XDG_DATA_HOME names none.
+const ENV_USER_HOME: &str = "HOME";
+
+/// The data directory under the user's home, as the XDG spec defaults it.
+const USER_DATA_DIR: &str = ".local/share";
+
+/// The default home's directory under the data directory.
+const DEFAULT_HOME_DIR: &str = "rewind";
+
+/// Where the home is: REWIND_HOME, else rewind under XDG_DATA_HOME, else
+/// under ~/.local/share, each variable read through `var`. A variable set
+/// to nothing counts as unset, as the XDG spec has it: an empty path would
+/// otherwise name the working directory, and a script whose variable was
+/// never set would make a home wherever it runs.
+fn root_from(var: impl Fn(&str) -> Option<std::ffi::OsString>) -> Result<PathBuf> {
+    let set = |name: &str| var(name).filter(|value| !value.is_empty());
+    if let Some(dir) = set(ENV_HOME) {
+        return Ok(PathBuf::from(dir));
+    }
+    let data = set(ENV_XDG_DATA)
+        .map(PathBuf::from)
+        .or_else(|| set(ENV_USER_HOME).map(|h| Path::new(&h).join(USER_DATA_DIR)))
+        .context("neither XDG_DATA_HOME nor HOME is set")?;
+    Ok(data.join(DEFAULT_HOME_DIR))
+}
+
 impl Home {
     pub fn open() -> Result<Home> {
-        let root = match std::env::var_os(ENV_HOME) {
-            Some(dir) => PathBuf::from(dir),
-            None => {
-                let data = std::env::var_os("XDG_DATA_HOME")
-                    .map(PathBuf::from)
-                    .or_else(|| {
-                        std::env::var_os("HOME").map(|h| Path::new(&h).join(".local/share"))
-                    })
-                    .context("neither XDG_DATA_HOME nor HOME is set")?;
-                data.join("rewind")
-            }
-        };
-        Home::at(root)
+        Home::at(root_from(|name| std::env::var_os(name))?)
     }
 
     /// The home in `root`, made if it is not there yet.
@@ -253,5 +271,48 @@ impl Guest {
             initrd: var(ENV_INITRD)?,
             kernel_debug: std::env::var_os(ENV_KERNEL_DEBUG).map(PathBuf::from),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Where the home is, from the environment as a lookup the test gives,
+    // so no test sets the process's own variables.
+    use super::*;
+    use std::ffi::OsString;
+
+    /// A lookup that answers the variables in `set` and no others.
+    fn vars(set: &[(&str, &str)]) -> impl Fn(&str) -> Option<OsString> {
+        let set: Vec<(String, OsString)> = set
+            .iter()
+            .map(|(k, v)| (k.to_string(), OsString::from(v)))
+            .collect();
+        move |name| set.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone())
+    }
+
+    #[test]
+    fn an_empty_variable_counts_as_unset() {
+        // REWIND_HOME and XDG_DATA_HOME set to nothing, as a script with an
+        // unset variable writes them: the home is the default under HOME,
+        // not the working directory an empty path would name.
+        let lookup = vars(&[("REWIND_HOME", ""), ("XDG_DATA_HOME", ""), ("HOME", "/h")]);
+        assert_eq!(
+            root_from(lookup).unwrap(),
+            PathBuf::from("/h/.local/share/rewind")
+        );
+    }
+
+    #[test]
+    fn rewind_home_then_xdg_data_home_then_home() {
+        // Each variable that names a directory wins over the ones after it.
+        let all = vars(&[
+            ("REWIND_HOME", "/r"),
+            ("XDG_DATA_HOME", "/x"),
+            ("HOME", "/h"),
+        ]);
+        assert_eq!(root_from(all).unwrap(), PathBuf::from("/r"));
+        let data = vars(&[("XDG_DATA_HOME", "/x"), ("HOME", "/h")]);
+        assert_eq!(root_from(data).unwrap(), PathBuf::from("/x/rewind"));
+        assert!(root_from(vars(&[("HOME", "")])).is_err());
     }
 }

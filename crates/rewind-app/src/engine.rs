@@ -44,6 +44,8 @@ const RUNS_DIR: &str = "runs";
 const DEFAULT_HOME_DIR: &str = "rewind";
 const XDG_DATA_ENV: &str = "XDG_DATA_HOME";
 const HOME_FALLBACK_DATA: &str = ".local/share";
+/// The user's home directory, which the data directory falls back under.
+const USER_HOME_ENV: &str = "HOME";
 
 /// Why an engine call did not do what was asked, in words for a notice.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1243,10 +1245,11 @@ fn locate_run(id: &str, parent: &Path) -> Option<PathBuf> {
     if let Some(runs) = parent.parent() {
         candidates.push(runs.join(id));
     }
-    if let Some(home) = std::env::var_os(HOME_ENV) {
+    let set = |name: &str| set_var(|n| std::env::var_os(n), name);
+    if let Some(home) = set(HOME_ENV) {
         candidates.push(PathBuf::from(home).join(RUNS_DIR).join(id));
     }
-    if let Some(data) = default_home() {
+    if let Some(data) = default_home_from(|n| std::env::var_os(n)) {
         candidates.push(data.join(RUNS_DIR).join(id));
     }
     candidates
@@ -1257,18 +1260,30 @@ fn locate_run(id: &str, parent: &Path) -> Option<PathBuf> {
 /// The directory the engine keeps its runs in: under REWIND_HOME when it
 /// is set, else under the default home.
 pub fn runs_dir() -> Option<PathBuf> {
-    let home = std::env::var_os(HOME_ENV)
+    Some(home_from(|n| std::env::var_os(n))?.join(RUNS_DIR))
+}
+
+/// The variable `name` through `var`, when it names something: one set to
+/// nothing counts as unset, as the engine and the XDG spec read it, since
+/// an empty path would name the working directory.
+fn set_var(var: impl Fn(&str) -> Option<OsString>, name: &str) -> Option<OsString> {
+    var(name).filter(|value| !value.is_empty())
+}
+
+/// The engine's home, from the variables `var` gives: REWIND_HOME when it
+/// is set, else the default home.
+fn home_from(var: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    set_var(&var, HOME_ENV)
         .map(PathBuf::from)
-        .or_else(default_home)?;
-    Some(home.join(RUNS_DIR))
+        .or_else(|| default_home_from(&var))
 }
 
 /// The engine's home when REWIND_HOME is not set: rewind under the XDG
-/// data directory.
-fn default_home() -> Option<PathBuf> {
-    let data = std::env::var_os(XDG_DATA_ENV)
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(HOME_FALLBACK_DATA)))?;
+/// data directory, else under ~/.local/share.
+fn default_home_from(var: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    let data = set_var(&var, XDG_DATA_ENV).map(PathBuf::from).or_else(|| {
+        set_var(&var, USER_HOME_ENV).map(|h| PathBuf::from(h).join(HOME_FALLBACK_DATA))
+    })?;
     Some(data.join(DEFAULT_HOME_DIR))
 }
 
@@ -1334,6 +1349,22 @@ mod tests {
     // written to a temporary directory play `rewind`, and a name that does
     // not exist plays a machine without it.
     use super::*;
+
+    #[test]
+    fn an_empty_home_variable_counts_as_unset() {
+        // REWIND_HOME and XDG_DATA_HOME set to nothing, through a lookup
+        // the test gives: the home is the default under HOME, as the
+        // engine finds it, not the working directory.
+        let lookup = |name: &str| match name {
+            HOME_ENV | XDG_DATA_ENV => Some(std::ffi::OsString::new()),
+            USER_HOME_ENV => Some("/h".into()),
+            _ => None,
+        };
+        assert_eq!(
+            home_from(lookup),
+            Some(PathBuf::from("/h/.local/share/rewind"))
+        );
+    }
 
     #[test]
     fn the_engine_s_version_line_is_read_with_or_without_a_commit() {
