@@ -25,3 +25,5 @@
 
 [Nix build reference](nix-builds.md): machine settings, runtime identity,
 the external builder, and exporting a recorded build's files.
+
+[Notes](notes/README.md): dated audits, reviews and design investigations.
