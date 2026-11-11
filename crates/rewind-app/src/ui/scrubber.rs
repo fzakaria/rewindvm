@@ -92,6 +92,25 @@ fn cli_not_installed_body(program: &str) -> String {
 /// Why a run the engine is still executing does not open.
 const STILL_RUNNING: &str = "Its trace is written when it finishes, which for a fork takes about as long as the run it was forked from did.";
 
+/// What a click on a run of the Runs list does when the list holds the
+/// session's own runs, read from memory rather than a home.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OwnRunClick {
+    /// The compared run was clicked: it takes the screen.
+    ShowCompared,
+    /// The run on screen was clicked: it stays.
+    OnScreen,
+}
+
+/// What a click on the run at `clicked` does, in a session showing the run
+/// at `shown` compared with the one at `compared`, if any.
+fn own_run_click(shown: &Path, compared: Option<&Path>, clicked: &Path) -> OwnRunClick {
+    if compared == Some(clicked) && clicked != shown {
+        return OwnRunClick::ShowCompared;
+    }
+    OwnRunClick::OnScreen
+}
+
 /// How often the Runs panel is read again while a run in it is running.
 const RUNNING_POLL: Duration = Duration::from_secs(1);
 
@@ -908,17 +927,16 @@ impl Scrubber {
             );
             return;
         }
-        if self
-            .session
-            .as_ref()
-            .is_some_and(|s| s.run.origin == Origin::Example)
-        {
-            self.notify_user(
-                NoticeTone::Info,
-                "The example's runs are on screen already",
-                "This is the failing run, compared with the passing one. Record runs of your own to browse and fork them here.",
-                cx,
-            );
+        // The example's runs, and in the browser every session's, are the
+        // session's own and are not on disk: the click swaps to the
+        // compared run, or keeps the run on screen.
+        let in_memory =
+            |s: &Session| s.run.origin == Origin::Example || cfg!(target_family = "wasm");
+        if let Some(session) = self.session.as_ref().filter(|s| in_memory(s)) {
+            let compared = session.other.as_ref().map(|o| o.path.as_path());
+            if own_run_click(&session.run.path, compared, &run.dir) == OwnRunClick::ShowCompared {
+                self.show_other_run(None, cx);
+            }
             return;
         }
         // The chosen comparison holds, except against the run itself.
@@ -2290,6 +2308,25 @@ fn next_fork_schedule(family: Option<&Family>, id: &str, pending: &[ForkMark]) -
 mod tests {
     // What the scrubber decides about a run, with no window.
     use super::*;
+
+    #[test]
+    fn a_session_s_own_run_clicked_in_the_runs_list_is_shown_from_memory() {
+        // In the browser, and for the desktop's example, the Runs list holds
+        // the session's two runs, named by their files. A click on the
+        // compared run swaps to it, one on the run on screen keeps it, and
+        // neither opens anything from disk.
+        let shown = Path::new("mylib-fail.rwd");
+        let compared = Path::new("mylib-pass.rwd");
+        assert_eq!(
+            own_run_click(shown, Some(compared), compared),
+            OwnRunClick::ShowCompared
+        );
+        assert_eq!(
+            own_run_click(shown, Some(compared), shown),
+            OwnRunClick::OnScreen
+        );
+        assert_eq!(own_run_click(shown, None, shown), OwnRunClick::OnScreen);
+    }
 
     #[test]
     fn the_same_run_shown_again_keeps_the_place_and_drops_the_rest() {
