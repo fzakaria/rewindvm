@@ -163,13 +163,15 @@ impl Edge {
     }
 }
 
-/// An edge being dragged: which, where the pointer was pressed, and the
-/// sizes then.
+/// An edge being dragged: which, where the pointer was pressed, the sizes
+/// then, and for the source panel's lists how many pixels the file was
+/// drawn over its least height then.
 #[derive(Clone, Copy, Debug)]
 pub struct Drag {
     pub edge: Edge,
     pub from: Point<Pixels>,
     pub splits: Splits,
+    pub file_spare: Option<f32>,
 }
 
 /// Where the areas the edges divide were last painted, which turns a
@@ -184,6 +186,11 @@ pub struct Measured {
     pub session: Cell<Option<Bounds<Pixels>>>,
     /// The source panel, title to frame list.
     pub source: Cell<Option<Bounds<Pixels>>>,
+    /// The source panel's file area, and its variables and frame lists,
+    /// as tall as the panel's layout left them.
+    pub source_file: Cell<Option<Bounds<Pixels>>>,
+    pub variables: Cell<Option<Bounds<Pixels>>>,
+    pub frames: Cell<Option<Bounds<Pixels>>>,
     /// The Threads tab's plot, the width its lanes span.
     pub lanes_plot: Cell<Option<Bounds<Pixels>>>,
 }
@@ -203,13 +210,15 @@ const LIST_MIN: f32 = MIN_LIST;
 pub(super) const SOURCE_FILE_MIN: f32 = MIN_PANEL;
 
 /// The height of one of the source panel's lists after its top edge moves
-/// `moved` pixels down from where it was `start` high, when `room` pixels
-/// of the panel are left to it once the panel has been painted: the
-/// panel's height less the other list's.
-pub fn list_height(start: f32, moved: f32, room: Option<f32>) -> f32 {
-    let height = (start - moved).max(LIST_MIN);
-    match room {
-        Some(room) => height.min((room - SOURCE_FILE_MIN).max(LIST_MIN)),
+/// `moved` pixels down from where it was drawn `start` high, when the file
+/// above was drawn `spare` pixels taller than its least, once the panel
+/// has been painted. The list grows only by what the file can give up,
+/// and shrinks to LIST_MIN, or not at all when a short panel already drew
+/// it under that.
+pub fn list_height(start: f32, moved: f32, spare: Option<f32>) -> f32 {
+    let height = (start - moved).max(LIST_MIN.min(start));
+    match spare {
+        Some(spare) => height.min(start + spare.max(0.0)),
         None => height,
     }
 }
@@ -255,10 +264,17 @@ pub fn grip(edge: Edge, cx: &mut Context<Scrubber>) -> Stateful<Div> {
                 this.reset_edge(edge, cx);
                 return;
             }
+            this.list_heights_as_drawn(edge);
+            let file_spare = this
+                .measured
+                .source_file
+                .get()
+                .map(|b| f32::from(b.size.height) - SOURCE_FILE_MIN);
             this.split_drag = Some(Drag {
                 edge,
                 from: e.position,
                 splits: this.splits,
+                file_spare,
             });
         }),
     )
@@ -282,6 +298,24 @@ pub fn measure(
 }
 
 impl Scrubber {
+    /// Takes the source panel's lists at the heights they were drawn, when
+    /// `edge` is one of theirs: a short panel draws them shorter than they
+    /// were dragged, and a drag that started from the dragged heights
+    /// would move nothing until it passed what was drawn.
+    fn list_heights_as_drawn(&mut self, edge: Edge) {
+        if !matches!(edge, Edge::Variables | Edge::Frames) {
+            return;
+        }
+        let drawn =
+            |slot: &Cell<Option<Bounds<Pixels>>>| slot.get().map(|b| f32::from(b.size.height));
+        if let Some(height) = drawn(&self.measured.variables) {
+            self.splits.variables = height;
+        }
+        if let Some(height) = drawn(&self.measured.frames) {
+            self.splits.frames = height;
+        }
+    }
+
     /// Moves the edge being dragged to the pointer at `at`.
     pub(super) fn drag_edge(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
         let Some(drag) = self.split_drag else {
@@ -342,17 +376,13 @@ impl Scrubber {
                     self.splits.terminal = share.clamp(TERMINAL_MIN, TERMINAL_MAX);
                 }
             }
-            // Each of the source panel's lists leaves the file its least
-            // height past the other list.
+            // Each of the source panel's lists grows by what the file
+            // above it has over its least height, as the drag began.
             Edge::Variables => {
-                let panel = self.measured.source.get().map(|b| f32::from(b.size.height));
-                let room = panel.map(|p| p - start.frames);
-                self.splits.variables = list_height(start.variables, dy, room);
+                self.splits.variables = list_height(start.variables, dy, drag.file_spare);
             }
             Edge::Frames => {
-                let panel = self.measured.source.get().map(|b| f32::from(b.size.height));
-                let room = panel.map(|p| p - start.variables);
-                self.splits.frames = list_height(start.frames, dy, room);
+                self.splits.frames = list_height(start.frames, dy, drag.file_spare);
             }
         }
         cx.notify();
@@ -449,17 +479,28 @@ mod tests {
 
     #[test]
     fn a_source_list_follows_its_edge_and_leaves_the_file_room() {
-        // Dragged up 50 pixels from 88 high it is 138; down past its least
-        // height it stops there; up past what leaves the file its least
-        // in the 500 pixels left to it it stops short; with the panel not
-        // yet painted only the least height holds.
-        assert_eq!(list_height(88.0, -50.0, Some(500.0)), 138.0);
-        assert_eq!(list_height(88.0, 200.0, Some(500.0)), LIST_MIN);
-        assert_eq!(
-            list_height(88.0, -900.0, Some(500.0)),
-            500.0 - SOURCE_FILE_MIN
-        );
+        // Heights in pixels as drawn, the file 50 pixels over its least.
+        // Dragged up 30 pixels from 88 high the list is 118; up 900 it
+        // stops at 138, where the file is at its least; down past its
+        // least height it stops there; with the panel not yet painted
+        // only the least height holds.
+        assert_eq!(list_height(88.0, -30.0, Some(50.0)), 118.0);
+        assert_eq!(list_height(88.0, -900.0, Some(50.0)), 138.0);
+        assert_eq!(list_height(88.0, 200.0, Some(50.0)), LIST_MIN);
         assert_eq!(list_height(88.0, -900.0, None), 988.0);
+    }
+
+    #[test]
+    fn a_list_a_short_panel_shrank_stays_where_the_file_leaves_it() {
+        // A list drawn one row high, under LIST_MIN, with the file at its
+        // least: dragged up it cannot take from the file, and dragged down
+        // it keeps its row rather than jump to LIST_MIN. Once the file
+        // has 50 pixels over its least, a drag up takes them.
+        let row = size::LOG_ROW_HEIGHT;
+        assert_eq!(list_height(row, -30.0, Some(0.0)), row);
+        assert_eq!(list_height(row, 30.0, Some(0.0)), row);
+        assert_eq!(list_height(row, -30.0, Some(50.0)), row + 30.0);
+        assert_eq!(list_height(row, -90.0, Some(50.0)), row + 50.0);
     }
 
     #[test]

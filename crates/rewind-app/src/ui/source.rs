@@ -22,7 +22,7 @@ use std::ops::Range;
 use futures::StreamExt;
 use gpui::{
     AnyElement, Context, CursorStyle, Div, MouseButton, Role, ScrollStrategy, SharedString,
-    UniformListScrollHandle, div, prelude::*, px, relative, rgb, uniform_list,
+    Stateful, UniformListScrollHandle, div, prelude::*, px, relative, rgb, uniform_list,
 };
 
 use crate::answers::PlaceKey;
@@ -685,8 +685,12 @@ impl Scrubber {
         // height of its own to give up past its least, so in a short
         // panel the two lists shrink, down to their least, rather than
         // cover the file.
-        let variables = located.map(|_| self.render_variables(frame_shown, cx).opacity(dim));
-        let frames = located.map(|located| self.render_frames(located, at, cx).opacity(dim));
+        let variables = located
+            .map(|_| self.render_variables(frame_shown, dim, cx))
+            .unwrap_or_default();
+        let frames = located
+            .map(|located| self.render_frames(located, at, dim, cx))
+            .unwrap_or_default();
 
         Some(
             div()
@@ -710,6 +714,7 @@ impl Scrubber {
                         .flex_basis(relative(0.0))
                         .min_h(px(SOURCE_FILE_MIN))
                         .overflow_hidden()
+                        .child(measure(|m| &m.source_file, &self.measured))
                         .opacity(dim)
                         .cursor(CursorStyle::IBeam)
                         .font_family(mono)
@@ -890,7 +895,12 @@ impl Scrubber {
     /// that scrolls, as high as its top edge was dragged or a short panel
     /// leaves it. A frame gdb named no variables in, as a frame without
     /// DWARF, says so.
-    fn render_variables(&self, frame: Option<&Frame>, cx: &mut Context<Self>) -> Div {
+    fn render_variables(
+        &self,
+        frame: Option<&Frame>,
+        dim: f32,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
         let registry = self.selecting.registry.clone();
         let selected = self.selected_range(Surface::Variables);
         let lines = frame.map(variable_lines).unwrap_or_default();
@@ -977,6 +987,7 @@ impl Scrubber {
         });
         let list = div()
             .id("source-variables")
+            .relative()
             .flex()
             .flex_col()
             .flex_basis(px(self.splits.variables))
@@ -984,6 +995,7 @@ impl Scrubber {
             .min_h(px(LIST_SHRUNK))
             .overflow_y_scroll()
             .cursor(CursorStyle::IBeam)
+            .child(measure(|m| &m.variables, &self.measured))
             .when(empty, |list| {
                 list.child(
                     div()
@@ -997,58 +1009,56 @@ impl Scrubber {
             })
             .children(rows);
         let list = selects(list, Surface::Variables, cx);
-        self.list_section("VARIABLES", list, Edge::Variables, cx)
+        self.list_section("VARIABLES", list, Edge::Variables, dim, cx)
     }
 
-    /// One of the lists under the file, under its heading, with the grip
-    /// that drags its top edge. The heading and the list are clipped to
-    /// what the panel leaves the section, so a panel too short for both
-    /// lists cuts each short rather than draw one over the other. The grip
-    /// reaches above the section's top edge, outside the clip.
+    /// One of the lists under the file: its heading, which carries the
+    /// grip that drags the list's top edge, and the list, `dim` as the
+    /// file is. The two are children of the panel itself, so in a panel
+    /// too short for everything at its least only the lists shrink, and
+    /// what is still left over runs off the panel's bottom rather than
+    /// being cut from each list in turn.
     fn list_section(
         &self,
         heading: &'static str,
-        list: impl IntoElement,
+        list: Stateful<Div>,
         edge: Edge,
+        dim: f32,
         cx: &mut Context<Self>,
-    ) -> Div {
-        let clipped = div()
-            .flex()
-            .flex_col()
-            .flex_grow(layout::FILL)
-            .min_h_0()
-            .overflow_hidden()
-            .pt(px(size::CARD_GAP))
-            .pb(px(size::LIST_PAD_Y))
-            .font_family(self.fonts.mono.clone())
-            .text_size(px(size::TEXT_MONO))
-            .child(
-                div()
-                    .px(px(size::PANEL_PAD_X))
-                    .pb(px(size::CARD_GAP))
-                    .font_family(self.fonts.ui.clone())
-                    .text_size(px(size::TEXT_SMALL))
-                    .text_color(rgb(theme::MUTED))
-                    .child(heading),
-            )
-            .child(list);
-        div()
+    ) -> Vec<AnyElement> {
+        let heading = div()
             .relative()
-            .flex()
-            .flex_col()
-            .flex_shrink(layout::SHRINK)
-            .min_h_0()
+            .flex_none()
+            .px(px(size::PANEL_PAD_X))
+            .pt(px(size::CARD_GAP))
+            .pb(px(size::CARD_GAP))
             .border_t_1()
             .border_color(rgb(theme::LINE_SOFT))
-            .child(clipped)
-            .child(grip(edge, cx))
+            .font_family(self.fonts.ui.clone())
+            .text_size(px(size::TEXT_SMALL))
+            .text_color(rgb(theme::MUTED))
+            .opacity(dim)
+            .child(heading)
+            .child(grip(edge, cx));
+        let list = list
+            .mb(px(size::LIST_PAD_Y))
+            .font_family(self.fonts.mono.clone())
+            .text_size(px(size::TEXT_MONO))
+            .opacity(dim);
+        vec![heading.into_any_element(), list.into_any_element()]
     }
 
     /// The thread's frames, innermost first, the one whose source is
     /// shown marked: each frame's level, function and place, in a list of
     /// its own that scrolls, as high as its top edge was dragged or a
     /// short panel leaves it. Clicking a row shows that frame's source.
-    fn render_frames(&self, located: &Located, at: Option<usize>, cx: &mut Context<Self>) -> Div {
+    fn render_frames(
+        &self,
+        located: &Located,
+        at: Option<usize>,
+        dim: f32,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
         let row = |i: usize, frame: &Frame| {
             let shown = at == Some(i);
             let (name_color, place_color) = if shown {
@@ -1103,12 +1113,14 @@ impl Scrubber {
         };
         let list = div()
             .id("source-frames")
+            .relative()
             .flex()
             .flex_col()
             .flex_basis(px(self.splits.frames))
             .flex_shrink(layout::SHRINK)
             .min_h(px(LIST_SHRUNK))
             .overflow_y_scroll()
+            .child(measure(|m| &m.frames, &self.measured))
             .children(
                 located
                     .frames
@@ -1116,7 +1128,7 @@ impl Scrubber {
                     .enumerate()
                     .map(|(i, frame)| row(i, frame)),
             );
-        self.list_section("FRAMES", list, Edge::Frames, cx)
+        self.list_section("FRAMES", list, Edge::Frames, dim, cx)
     }
 }
 
