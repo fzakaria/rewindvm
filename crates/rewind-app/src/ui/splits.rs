@@ -24,8 +24,8 @@ use crate::ui::scrubber::Scrubber;
 
 /// How the panels share the window: the three columns' flex weights, the
 /// process tree's and the files' weights in their column, the terminal
-/// pane's share of the height, and the heights in pixels of the source
-/// panel's variables list and frame list.
+/// pane's share of the height, the heights in pixels of the source
+/// panel's variables list and frame list, and whether those were dragged.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Splits {
     pub log: f32,
@@ -36,6 +36,29 @@ pub struct Splits {
     pub terminal: f32,
     pub variables: f32,
     pub frames: f32,
+    pub lists: ListSizing,
+}
+
+/// Who set the source panel's list heights, which decides what gives way
+/// in a panel too short for the lists and the file.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ListSizing {
+    /// The defaults: the file keeps SOURCE_FILE_MIN and the lists shrink.
+    #[default]
+    Automatic,
+    /// A drag: the lists keep their heights and the file shrinks, down to
+    /// SOURCE_FILE_DRAGGED_MIN.
+    Dragged,
+}
+
+impl ListSizing {
+    /// The least height the file is drawn at.
+    pub fn file_least(self) -> f32 {
+        match self {
+            ListSizing::Automatic => SOURCE_FILE_MIN,
+            ListSizing::Dragged => SOURCE_FILE_DRAGGED_MIN,
+        }
+    }
 }
 
 impl Default for Splits {
@@ -49,6 +72,7 @@ impl Default for Splits {
             terminal: layout::TERMINAL_SHARE,
             variables: layout::VARIABLES_HEIGHT,
             frames: layout::FRAMES_HEIGHT,
+            lists: ListSizing::Automatic,
         }
     }
 }
@@ -109,6 +133,7 @@ impl Splits {
             } else {
                 start.frames
             },
+            lists: saved.lists,
         }
     }
 
@@ -202,21 +227,24 @@ const MIN_LIST: f32 = 60.0;
 const TERMINAL_MIN: f32 = 0.15;
 const TERMINAL_MAX: f32 = 0.8;
 
-/// The least height of the source panel's variables and frame lists a
-/// drag leaves, and the least of the source panel they leave the file
-/// above them, which the panel's layout also holds however short the
-/// window.
-const LIST_MIN: f32 = MIN_LIST;
-pub(super) const SOURCE_FILE_MIN: f32 = MIN_PANEL;
+/// The least height of the source panel's variables and frame lists, one
+/// row, which a drag and a short panel both leave them; and the least the
+/// panel's layout leaves the file above them before any list edge is
+/// dragged, however short the window.
+pub(super) const LIST_MIN: f32 = size::LOG_ROW_HEIGHT;
+const SOURCE_FILE_MIN: f32 = MIN_PANEL;
+
+/// The least height of the source file once a list edge was dragged:
+/// three lines, so a short panel still leaves the lists room to drag.
+const SOURCE_FILE_DRAGGED_MIN: f32 = 3.0 * size::LOG_ROW_HEIGHT;
 
 /// The height of one of the source panel's lists after its top edge moves
 /// `moved` pixels down from where it was drawn `start` high, when the file
 /// above was drawn `spare` pixels taller than its least, once the panel
 /// has been painted. The list grows only by what the file can give up,
-/// and shrinks to LIST_MIN, or not at all when a short panel already drew
-/// it under that.
+/// and shrinks to LIST_MIN.
 pub fn list_height(start: f32, moved: f32, spare: Option<f32>) -> f32 {
-    let height = (start - moved).max(LIST_MIN.min(start));
+    let height = (start - moved).max(LIST_MIN);
     match spare {
         Some(spare) => height.min(start + spare.max(0.0)),
         None => height,
@@ -269,7 +297,7 @@ pub fn grip(edge: Edge, cx: &mut Context<Scrubber>) -> Stateful<Div> {
                 .measured
                 .source_file
                 .get()
-                .map(|b| f32::from(b.size.height) - SOURCE_FILE_MIN);
+                .map(|b| f32::from(b.size.height) - this.splits.lists.file_least());
             this.split_drag = Some(Drag {
                 edge,
                 from: e.position,
@@ -298,10 +326,11 @@ pub fn measure(
 }
 
 impl Scrubber {
-    /// Takes the source panel's lists at the heights they were drawn, when
-    /// `edge` is one of theirs: a short panel draws them shorter than they
-    /// were dragged, and a drag that started from the dragged heights
-    /// would move nothing until it passed what was drawn.
+    /// Takes the source panel's lists at the heights they were drawn, and
+    /// as dragged from now on, when `edge` is one of theirs: a short panel
+    /// draws them shorter than they were dragged, and a drag that started
+    /// from the dragged heights would move nothing until it passed what
+    /// was drawn.
     fn list_heights_as_drawn(&mut self, edge: Edge) {
         if !matches!(edge, Edge::Variables | Edge::Frames) {
             return;
@@ -314,6 +343,7 @@ impl Scrubber {
         if let Some(height) = drawn(&self.measured.frames) {
             self.splits.frames = height;
         }
+        self.splits.lists = ListSizing::Dragged;
     }
 
     /// Moves the edge being dragged to the pointer at `at`.
@@ -391,8 +421,15 @@ impl Scrubber {
     /// Ends dragging an edge, if one was dragged, and keeps the shares it
     /// left for the next launch.
     pub(super) fn end_edge_drag(&mut self) {
-        if self.split_drag.take().is_some() {
-            self.keep_splits();
+        let Some(drag) = self.split_drag.take() else {
+            return;
+        };
+        self.keep_splits();
+
+        // A list's drag changes how many of the file's lines are on
+        // screen, so the frame's line is brought back to the middle.
+        if matches!(drag.edge, Edge::Variables | Edge::Frames) {
+            self.centre_shown_line();
         }
     }
 
@@ -414,8 +451,14 @@ impl Scrubber {
                 (self.splits.procs, self.splits.files) = (start.procs, start.files);
             }
             Edge::Terminal => self.splits.terminal = start.terminal,
-            Edge::Variables => self.splits.variables = start.variables,
-            Edge::Frames => self.splits.frames = start.frames,
+            Edge::Variables => {
+                self.splits.variables = start.variables;
+                self.splits.lists = ListSizing::Automatic;
+            }
+            Edge::Frames => {
+                self.splits.frames = start.frames;
+                self.splits.lists = ListSizing::Automatic;
+            }
         }
         self.keep_splits();
         cx.notify();
@@ -457,6 +500,7 @@ mod tests {
         let moved = Splits {
             log: 2.0,
             terminal: 0.5,
+            lists: ListSizing::Dragged,
             ..Splits::default()
         };
         moved.save(&path).unwrap();
@@ -491,16 +535,27 @@ mod tests {
     }
 
     #[test]
-    fn a_list_a_short_panel_shrank_stays_where_the_file_leaves_it() {
-        // A list drawn one row high, under LIST_MIN, with the file at its
-        // least: dragged up it cannot take from the file, and dragged down
-        // it keeps its row rather than jump to LIST_MIN. Once the file
-        // has 50 pixels over its least, a drag up takes them.
+    fn a_dragged_list_may_take_the_file_below_its_preferred_height() {
+        // Before a drag the file keeps SOURCE_FILE_MIN and the lists give
+        // way; once a list edge is dragged, the file gives way down to
+        // its least, so a short panel still has room to drag in.
+        assert_eq!(ListSizing::Automatic.file_least(), SOURCE_FILE_MIN);
+        assert!(ListSizing::Dragged.file_least() < SOURCE_FILE_MIN);
+        assert_eq!(Splits::default().lists, ListSizing::Automatic);
+    }
+
+    #[test]
+    fn a_list_in_a_short_panel_drags_between_one_row_and_the_files_spare() {
+        // A list drawn one row high with the file at its least: dragged
+        // up it cannot take from the file, and dragged down it keeps its
+        // row. Once the file has 50 pixels over its least, a drag up takes
+        // them. A list drawn two rows high drags back down to one.
         let row = size::LOG_ROW_HEIGHT;
         assert_eq!(list_height(row, -30.0, Some(0.0)), row);
         assert_eq!(list_height(row, 30.0, Some(0.0)), row);
         assert_eq!(list_height(row, -30.0, Some(50.0)), row + 30.0);
         assert_eq!(list_height(row, -90.0, Some(50.0)), row + 50.0);
+        assert_eq!(list_height(2.0 * row, 30.0, Some(0.0)), row);
     }
 
     #[test]

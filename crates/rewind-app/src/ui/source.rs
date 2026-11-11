@@ -44,7 +44,7 @@ use crate::ui::icons::Icon;
 use crate::ui::scrubber::{Replay, Scrubber, replay_unavailable};
 use crate::ui::selectable::{colored, selectable, selects, viewer_line};
 use crate::ui::sideways::{shifted, sideways_layer};
-use crate::ui::splits::{Edge, SOURCE_FILE_MIN, grip, measure};
+use crate::ui::splits::{Edge, LIST_MIN, grip, measure};
 use crate::ui::tabs::RightTab;
 use crate::ui::waiting::waiting_block;
 use crate::ui::widgets::{icon, panel_title};
@@ -83,11 +83,6 @@ const STALE_OPACITY: f32 = 0.45;
 const VALUE_AFTER: &str = " = ";
 const ARGUMENT_MARKER: &str = "arg";
 const NO_VARIABLES: &str = "no arguments or locals";
-
-/// The least the variables and frame lists shrink to in a panel too short
-/// for their dragged heights and the file's least: one row each, so both
-/// stay in sight under the file.
-const LIST_SHRUNK: f32 = size::LOG_ROW_HEIGHT;
 
 /// What marks the frame whose source is shown in the frame list.
 const SHOWN_MARKER: &str = "\u{25b8}";
@@ -471,7 +466,7 @@ impl Scrubber {
     }
 
     /// Scrolls the shown file so the shown frame's line is in the middle.
-    fn centre_shown_line(&self) {
+    pub(super) fn centre_shown_line(&self) {
         let Some(panel) = &self.shown.source else {
             return;
         };
@@ -684,7 +679,8 @@ impl Scrubber {
         // each as high as its top edge was dragged. The file area has no
         // height of its own to give up past its least, so in a short
         // panel the two lists shrink, down to their least, rather than
-        // cover the file.
+        // cover the file. That least is lower once a list edge was
+        // dragged, so a short panel still has room to drag in.
         let variables = located
             .map(|_| self.render_variables(frame_shown, dim, cx))
             .unwrap_or_default();
@@ -712,7 +708,7 @@ impl Scrubber {
                         .flex_col()
                         .flex_grow(layout::FILL)
                         .flex_basis(relative(0.0))
-                        .min_h(px(SOURCE_FILE_MIN))
+                        .min_h(px(self.splits.lists.file_least()))
                         .overflow_hidden()
                         .child(measure(|m| &m.source_file, &self.measured))
                         .opacity(dim)
@@ -992,7 +988,7 @@ impl Scrubber {
             .flex_col()
             .flex_basis(px(self.splits.variables))
             .flex_shrink(layout::SHRINK)
-            .min_h(px(LIST_SHRUNK))
+            .min_h(px(LIST_MIN))
             .overflow_y_scroll()
             .cursor(CursorStyle::IBeam)
             .child(measure(|m| &m.variables, &self.measured))
@@ -1118,7 +1114,7 @@ impl Scrubber {
             .flex_col()
             .flex_basis(px(self.splits.frames))
             .flex_shrink(layout::SHRINK)
-            .min_h(px(LIST_SHRUNK))
+            .min_h(px(LIST_MIN))
             .overflow_y_scroll()
             .child(measure(|m| &m.frames, &self.measured))
             .children(
