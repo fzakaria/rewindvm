@@ -44,7 +44,7 @@ use crate::ui::icons::Icon;
 use crate::ui::scrubber::{Replay, Scrubber, replay_unavailable};
 use crate::ui::selectable::{colored, selectable, selects, viewer_line};
 use crate::ui::sideways::{shifted, sideways_layer};
-use crate::ui::splits::{Edge, grip, measure};
+use crate::ui::splits::{Edge, SOURCE_FILE_MIN, grip, measure};
 use crate::ui::tabs::RightTab;
 use crate::ui::waiting::waiting_block;
 use crate::ui::widgets::{icon, panel_title};
@@ -83,6 +83,11 @@ const STALE_OPACITY: f32 = 0.45;
 const VALUE_AFTER: &str = " = ";
 const ARGUMENT_MARKER: &str = "arg";
 const NO_VARIABLES: &str = "no arguments or locals";
+
+/// The least the variables and frame lists shrink to in a panel too short
+/// for their dragged heights and the file's least: one row each, so both
+/// stay in sight under the file.
+const LIST_SHRUNK: f32 = size::LOG_ROW_HEIGHT;
 
 /// What marks the frame whose source is shown in the frame list.
 const SHOWN_MARKER: &str = "\u{25b8}";
@@ -676,7 +681,10 @@ impl Scrubber {
 
         // The shown frame's variables, then the frame list, pinned under
         // the file area so they stay in reach however small the window,
-        // each as high as its top edge was dragged.
+        // each as high as its top edge was dragged. The file area has no
+        // height of its own to give up past its least, so in a short
+        // panel the two lists shrink, down to their least, rather than
+        // cover the file.
         let variables = located.map(|_| self.render_variables(frame_shown, cx).opacity(dim));
         let frames = located.map(|located| self.render_frames(located, at, cx).opacity(dim));
 
@@ -699,7 +707,9 @@ impl Scrubber {
                         .flex()
                         .flex_col()
                         .flex_grow(layout::FILL)
-                        .min_h_0()
+                        .flex_basis(relative(0.0))
+                        .min_h(px(SOURCE_FILE_MIN))
+                        .overflow_hidden()
                         .opacity(dim)
                         .cursor(CursorStyle::IBeam)
                         .font_family(mono)
@@ -877,8 +887,9 @@ impl Scrubber {
 
     /// `frame`'s arguments, then its locals, each `name = value` with its
     /// name colored and each argument marked as one, in a list of its own
-    /// that scrolls, as high as its top edge was dragged. A frame gdb
-    /// named no variables in, as a frame without DWARF, says so.
+    /// that scrolls, as high as its top edge was dragged or a short panel
+    /// leaves it. A frame gdb named no variables in, as a frame without
+    /// DWARF, says so.
     fn render_variables(&self, frame: Option<&Frame>, cx: &mut Context<Self>) -> Div {
         let registry = self.selecting.registry.clone();
         let selected = self.selected_range(Surface::Variables);
@@ -968,7 +979,9 @@ impl Scrubber {
             .id("source-variables")
             .flex()
             .flex_col()
-            .h(px(self.splits.variables))
+            .flex_basis(px(self.splits.variables))
+            .flex_shrink(layout::SHRINK)
+            .min_h(px(LIST_SHRUNK))
             .overflow_y_scroll()
             .cursor(CursorStyle::IBeam)
             .when(empty, |list| {
@@ -983,15 +996,30 @@ impl Scrubber {
                 )
             })
             .children(rows);
-        div()
-            .relative()
+        let list = selects(list, Surface::Variables, cx);
+        self.list_section("VARIABLES", list, Edge::Variables, cx)
+    }
+
+    /// One of the lists under the file, under its heading, with the grip
+    /// that drags its top edge. The heading and the list are clipped to
+    /// what the panel leaves the section, so a panel too short for both
+    /// lists cuts each short rather than draw one over the other. The grip
+    /// reaches above the section's top edge, outside the clip.
+    fn list_section(
+        &self,
+        heading: &'static str,
+        list: impl IntoElement,
+        edge: Edge,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let clipped = div()
             .flex()
             .flex_col()
-            .flex_none()
+            .flex_grow(layout::FILL)
+            .min_h_0()
+            .overflow_hidden()
             .pt(px(size::CARD_GAP))
             .pb(px(size::LIST_PAD_Y))
-            .border_t_1()
-            .border_color(rgb(theme::LINE_SOFT))
             .font_family(self.fonts.mono.clone())
             .text_size(px(size::TEXT_MONO))
             .child(
@@ -1001,16 +1029,25 @@ impl Scrubber {
                     .font_family(self.fonts.ui.clone())
                     .text_size(px(size::TEXT_SMALL))
                     .text_color(rgb(theme::MUTED))
-                    .child("VARIABLES"),
+                    .child(heading),
             )
-            .child(selects(list, Surface::Variables, cx))
-            .child(grip(Edge::Variables, cx))
+            .child(list);
+        div()
+            .relative()
+            .flex()
+            .flex_col()
+            .flex_shrink(layout::SHRINK)
+            .min_h_0()
+            .border_t_1()
+            .border_color(rgb(theme::LINE_SOFT))
+            .child(clipped)
+            .child(grip(edge, cx))
     }
 
     /// The thread's frames, innermost first, the one whose source is
     /// shown marked: each frame's level, function and place, in a list of
-    /// its own that scrolls, as high as its top edge was dragged. Clicking
-    /// a row shows that frame's source.
+    /// its own that scrolls, as high as its top edge was dragged or a
+    /// short panel leaves it. Clicking a row shows that frame's source.
     fn render_frames(&self, located: &Located, at: Option<usize>, cx: &mut Context<Self>) -> Div {
         let row = |i: usize, frame: &Frame| {
             let shown = at == Some(i);
@@ -1064,42 +1101,22 @@ impl Scrubber {
                         .child(frame.place_label()),
                 )
         };
-        div()
-            .relative()
+        let list = div()
+            .id("source-frames")
             .flex()
             .flex_col()
-            .flex_none()
-            .pt(px(size::CARD_GAP))
-            .pb(px(size::LIST_PAD_Y))
-            .border_t_1()
-            .border_color(rgb(theme::LINE_SOFT))
-            .font_family(self.fonts.mono.clone())
-            .text_size(px(size::TEXT_MONO))
-            .child(
-                div()
-                    .px(px(size::PANEL_PAD_X))
-                    .pb(px(size::CARD_GAP))
-                    .font_family(self.fonts.ui.clone())
-                    .text_size(px(size::TEXT_SMALL))
-                    .text_color(rgb(theme::MUTED))
-                    .child("FRAMES"),
-            )
-            .child(
-                div()
-                    .id("source-frames")
-                    .flex()
-                    .flex_col()
-                    .h(px(self.splits.frames))
-                    .overflow_y_scroll()
-                    .children(
-                        located
-                            .frames
-                            .iter()
-                            .enumerate()
-                            .map(|(i, frame)| row(i, frame)),
-                    ),
-            )
-            .child(grip(Edge::Frames, cx))
+            .flex_basis(px(self.splits.frames))
+            .flex_shrink(layout::SHRINK)
+            .min_h(px(LIST_SHRUNK))
+            .overflow_y_scroll()
+            .children(
+                located
+                    .frames
+                    .iter()
+                    .enumerate()
+                    .map(|(i, frame)| row(i, frame)),
+            );
+        self.list_section("FRAMES", list, Edge::Frames, cx)
     }
 }
 

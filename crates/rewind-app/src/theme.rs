@@ -300,6 +300,9 @@ pub mod size {
 pub mod layout {
     /// A flex item that grows to fill free space.
     pub const FILL: f32 = 1.0;
+    /// A flex item that gives up its size, down to its least, when its
+    /// container is short of space.
+    pub const SHRINK: f32 = 1.0;
     /// The build log's share of the panel row against 1 for each of the
     /// other two panels.
     pub const LOG_FLEX: f32 = 1.5;

@@ -195,10 +195,12 @@ const MIN_LIST: f32 = 60.0;
 const TERMINAL_MIN: f32 = 0.15;
 const TERMINAL_MAX: f32 = 0.8;
 
-/// The least height of the source panel's variables and frame lists, and
-/// the least of the source panel they leave the file above them.
+/// The least height of the source panel's variables and frame lists a
+/// drag leaves, and the least of the source panel they leave the file
+/// above them, which the panel's layout also holds however short the
+/// window.
 const LIST_MIN: f32 = MIN_LIST;
-const SOURCE_FILE_MIN: f32 = MIN_PANEL;
+pub(super) const SOURCE_FILE_MIN: f32 = MIN_PANEL;
 
 /// The height of one of the source panel's lists after its top edge moves
 /// `moved` pixels down from where it was `start` high, when `room` pixels
