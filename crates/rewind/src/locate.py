@@ -282,7 +282,10 @@ def source_lines(fullname, line, function):
         return []
     first = line - LINES_ABOVE
     begins = max(first, 1)
-    if function is not None and function.line:
+    # gdb gives an inlined function's symbol the line it was called from,
+    # which can be past the frame's line; that line is no start of the
+    # function, so the lines above are taken as for a frame without one.
+    if function is not None and function.line and function.line <= line:
         first = max(first, function.line)
         begins = min(function.line, begins)
     first = max(first, 1)

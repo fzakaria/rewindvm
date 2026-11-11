@@ -3879,6 +3879,67 @@ in
   # words of the write's comment out. The main thread, off the CPU then, waits in
   # pool_run's join, called from main, whose struct reads as main set it
   # and is in memory. Boots the VM, so it needs /dev/kvm.
+  # checks.where-inlined: the gdb script of `rewind where` names the
+  # expressions on an inlined function's lines. gdb gives an inlined
+  # function's symbol the line it was called from, below the function's own
+  # lines when the caller comes later in the file, as glibc's futex waits
+  # are inlined. A program stopped in such a function under gdb sources
+  # the script, and the inlined frame must list the argument on its line.
+  # Runs the program natively, so it needs no VM.
+  where-inlined =
+    let
+      source = pkgs.writeText "inlined.c" ''
+        #include <stdio.h>
+
+        static volatile int word = 7;
+
+        static inline __attribute__((always_inline)) int
+        waits (volatile int *futex_word, int op)
+        {
+          int seen = *futex_word;
+          __asm__ volatile ("nop" ::: "memory"); /* the wait */
+          return seen + futex_word[0] + op;
+        }
+
+        __attribute__((noinline)) int
+        caller (int op)
+        {
+          return waits (&word, op) * 2;
+        }
+
+        int
+        main (void)
+        {
+          printf ("%d\n", caller (3));
+          return 0;
+        }
+      '';
+    in
+    pkgs.runCommandCC "rewind-where-inlined"
+      {
+        nativeBuildInputs = [
+          gdb
+          pkgs.jq
+        ];
+      }
+      ''
+        cp ${source} inlined.c
+        cc -O2 -g -o inlined inlined.c
+        line=$(grep -n 'the wait' inlined.c | cut -d: -f1)
+        gdb -q -batch -nx \
+          -ex 'set disable-randomization off' \
+          -ex "break inlined.c:$line" -ex run \
+          -ex 'python gdb.set_convenience_variable("rewind_tid", gdb.selected_thread().ptid[1])' \
+          -ex 'source ${../crates/rewind/src/locate.py}' \
+          ./inlined > out 2>&1 || true
+        sed -n 's/^rewind-where: //p' out > where.json
+        cat out
+        jq -e '.frames[0].function == "waits"' where.json
+        jq -e --argjson line "$((line + 1))" '.frames[0].expressions
+          | any(.text == "futex_word" and .line == $line)' where.json
+        touch $out
+      '';
+
   where =
     pkgs.runCommand "rewind-where"
       {
