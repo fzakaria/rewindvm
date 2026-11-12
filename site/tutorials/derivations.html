@@ -143,7 +143,7 @@ inRewind {
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> nix build <span class="option">--no-link</span> <span class="option">--print-out-paths</span> <span class="option">--impure</span> <span class="option">-f</span> stamp.nix</span>
 ...
-/nix/store/kamhwi6kmqj0y3s7kz46afrw2kah3m6n-stamp-0.1.0
+/nix/store/2cwn1vf1hwvpvknrxbwp6f9zqx2mbjyp-stamp-0.1.0
 
 <span class="cmd"><span class="prompt">$</span> <span class="operator">$(</span>nix build <span class="option">--no-link</span> <span class="option">--print-out-paths</span> <span class="option">--impure</span> <span class="option">-f</span> stamp.nix<span class="operator">)</span>/bin/stamp</span>
 ...
@@ -157,7 +157,7 @@ checking outputs of '/nix/store/...-stamp-0.1.0.drv'...
 ...
 stamp&gt; gcc -O1 -Wall -DBUILD_ID='"353dda9f-1143-4548-9a60-a961dc181945"' -DBUILT_AT='"2026-10-03T00:00:00Z"' -o stamp stamp.c
 ...
-stamp&gt; rewind: run f864cf827414c782 exited:0 after 4299 steps, 0.021s virtual, 0.507s wall (poweroff)</code></pre>
+stamp&gt; rewind: run 9b40e0866cd69c06 exited:0 after 4299 steps, 0.021s virtual, 0.733s wall (poweroff)</code></pre>
         <p>
           <code>--rebuild</code> passes. The program still reads the clock and the kernel's random
           pool, but both builds see the same values. You can replace <code>stamp</code> with your
@@ -181,7 +181,7 @@ stamp&gt; rewind: run f864cf827414c782 exited:0 after 4299 steps, 0.021s virtual
         ><code><span class="cmd"><span class="prompt">$</span> sed <span class="option">-i</span> <span class="string">'s/1790985600/1749945600/'</span> stamp.nix</span>
 <span class="cmd"><span class="prompt">$</span> nix build <span class="option">--no-link</span> <span class="option">--print-out-paths</span> <span class="option">--impure</span> <span class="option">-f</span> stamp.nix</span>
 ...
-/nix/store/xww0r7mqd7sxvgqbdfxsjnxh1c752nhs-stamp-0.1.0
+/nix/store/v9skz4001zgi43vnqp4xj6h4a0mhvqjl-stamp-0.1.0
 
 <span class="cmd"><span class="prompt">$</span> <span class="operator">$(</span>nix build <span class="option">--no-link</span> <span class="option">--print-out-paths</span> <span class="option">--impure</span> <span class="option">-f</span> stamp.nix<span class="operator">)</span>/bin/stamp</span>
 ...

@@ -71,7 +71,7 @@ derivation's builder inside Rewind and receives its outputs as usual. The
 ```console
 $ nix build --no-link --print-out-paths --impure -f stamp.nix
 ...
-/nix/store/kamhwi6kmqj0y3s7kz46afrw2kah3m6n-stamp-0.1.0
+/nix/store/2cwn1vf1hwvpvknrxbwp6f9zqx2mbjyp-stamp-0.1.0
 
 $ $(nix build --no-link --print-out-paths --impure -f stamp.nix)/bin/stamp
 ...
@@ -87,7 +87,7 @@ checking outputs of '/nix/store/...-stamp-0.1.0.drv'...
 ...
 stamp> gcc -O1 -Wall -DBUILD_ID='"353dda9f-1143-4548-9a60-a961dc181945"' -DBUILT_AT='"2026-10-03T00:00:00Z"' -o stamp stamp.c
 ...
-stamp> rewind: run f864cf827414c782 exited:0 after 4299 steps, 0.021s virtual, 0.507s wall (poweroff)
+stamp> rewind: run 9b40e0866cd69c06 exited:0 after 4299 steps, 0.021s virtual, 0.733s wall (poweroff)
 ```
 
 `--rebuild` passes. The program still reads the clock and the kernel's
@@ -107,7 +107,7 @@ Change the epoch to midnight on 2025-06-15:
 $ sed -i 's/1790985600/1749945600/' stamp.nix
 $ nix build --no-link --print-out-paths --impure -f stamp.nix
 ...
-/nix/store/xww0r7mqd7sxvgqbdfxsjnxh1c752nhs-stamp-0.1.0
+/nix/store/v9skz4001zgi43vnqp4xj6h4a0mhvqjl-stamp-0.1.0
 
 $ $(nix build --no-link --print-out-paths --impure -f stamp.nix)/bin/stamp
 ...
