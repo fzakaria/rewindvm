@@ -21,6 +21,7 @@ pub mod answers;
 pub mod blamed;
 pub mod compare;
 pub mod contents;
+pub mod critical;
 pub mod ending;
 mod event;
 pub mod export;
