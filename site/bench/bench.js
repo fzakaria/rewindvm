@@ -57,6 +57,10 @@ const MILESTONES = [
     label: "v0.15.0",
     html: `rewind check starts its first batch of schedules once the unperturbed run has passed the job's start, beside that run instead of after it (${commit("6130d0ac")}). Check of the Nix build takes 27.9 s against 52.1 s, the time 0.3.0 cost and more, and peaks at 1462 MiB against 1227, since the unperturbed run and the batch are alive at once. The guest boots its uncompressed kernel (${commit("b29a6bdf")}) and skips rewriting every trace event's print format at boot (${commit("7e9dc4f5")}): echo takes 0.41 s against 0.83 s, cat in the middle of a run 0.40 s against 0.68 s, and check of the short program 1.30 s against 1.85 s. hello is 9% faster. A check's runs sharing one page store (${commit("cecb06c4")}) and 2 MiB pages for runs without keyframes (${commit("f8df2fed")}) measured no change here.`,
   },
+  {
+    label: "v0.16.0",
+    html: `Each context switch also names the thread that left the CPU, and every wakeup is a record of its own, for rewind time's critical path (${commit("0ecf3643")}). A hello run without keyframes takes 3.5 MB against 3.3 MB, and makes about 1,170 fewer steps; no workload's time changed beyond the rounds' spread but cat in the middle of a run, 0.43 s against 0.40 s.`,
+  },
 ];
 
 // What each metric reads from a sample.
