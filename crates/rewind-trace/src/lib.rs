@@ -72,6 +72,9 @@ pub struct Trace {
     /// each step on ([`switches`]). A run recorded by a guest kernel from
     /// before switches were recorded has none.
     pub switches: Vec<switches::Switch>,
+    /// Every wakeup, in step order: which thread was made runnable and
+    /// what did it ([`switches::Wake`]). None before guest interface 7.
+    pub wakes: Vec<switches::Wake>,
 }
 
 /// One life of a pid: the pid, and the step the trace first saw it, the
@@ -283,19 +286,24 @@ impl Trace {
         let invalid = |e: DecodeError| io::Error::new(io::ErrorKind::InvalidData, e);
         let mut events = Vec::with_capacity(records.len());
         let mut switches = Vec::new();
+        let mut wakes = Vec::new();
         for (step, record) in records {
             if io_records::is_io(record) {
                 continue;
             }
             if switches::is_batch(record) {
                 decoder
-                    .decode(*step, record, &mut switches)
+                    .decode(*step, record, &mut switches, &mut wakes)
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
                 continue;
             }
             events.push(Event::decode(*step, record).map_err(invalid)?);
         }
-        Ok(Trace { events, switches })
+        Ok(Trace {
+            events,
+            switches,
+            wakes,
+        })
     }
 
     /// The last step anything happened on.
@@ -579,6 +587,12 @@ impl Trace {
                 .iter()
                 .filter(|s| s.step > step)
                 .cloned()
+                .collect(),
+            wakes: self
+                .wakes
+                .iter()
+                .filter(|w| w.step > step)
+                .copied()
                 .collect(),
         }
     }
@@ -1639,6 +1653,7 @@ mod tests {
             tid,
             memory: true,
             name: name.into(),
+            ..Default::default()
         };
         let mut a = sample();
         a.switches = vec![switch(2, 4, "sh"), switch(5, 5, "sh"), switch(9, 4, "sh")];
@@ -1678,6 +1693,7 @@ mod tests {
                 tid: 1,
                 memory: true,
                 name: "init".into(),
+                ..Default::default()
             },
             switches::Switch {
                 step: 8,
@@ -1685,6 +1701,7 @@ mod tests {
                 tid: 0,
                 memory: false,
                 name: "swapper/0".into(),
+                ..Default::default()
             },
         ];
         let after = a.after(5);
@@ -1994,7 +2011,7 @@ mod tests {
         guest.extend_from_slice(&0u64.to_le_bytes());
         guest.extend_from_slice(&9u32.to_le_bytes());
         let mut records = vec![(42, mark)];
-        for r in io_records::Encoder::new().encode(&guest, 0) {
+        for r in io_records::Encoder::new().encode(0, &guest, 0, &mut Vec::new()) {
             records.push((42, r));
         }
 

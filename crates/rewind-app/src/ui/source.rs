@@ -1243,6 +1243,7 @@ mod tests {
         const RUNNER: u32 = 42;
         let timeline = Timeline::new(
             Trace {
+                wakes: Vec::new(),
                 events: vec![Event {
                     step: WRITE,
                     pid: PID,
@@ -1258,6 +1259,7 @@ mod tests {
                     tid: RUNNER,
                     memory: true,
                     name: "worker".into(),
+                    ..Default::default()
                 }],
             },
             Some(SWITCH + 1),
@@ -1297,6 +1299,7 @@ mod tests {
         for pid in [IDLE_PID, KERNEL_PID] {
             let timeline = Timeline::new(
                 Trace {
+                    wakes: Vec::new(),
                     events: vec![Event {
                         step: WRITE,
                         pid: USER_PID,
@@ -1312,6 +1315,7 @@ mod tests {
                         tid: pid,
                         memory: false,
                         name: "kernel".into(),
+                        ..Default::default()
                     }],
                 },
                 None,

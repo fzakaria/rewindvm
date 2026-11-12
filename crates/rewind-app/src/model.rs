@@ -2143,6 +2143,7 @@ pub(crate) mod tests {
         use rewind_trace::switches::Switch;
         let t = Timeline::new(
             Trace {
+                wakes: Vec::new(),
                 events: vec![
                     exec(1, 1, &["parent"]),
                     fork(2, 1, 2, false),
@@ -2157,6 +2158,7 @@ pub(crate) mod tests {
                         tid: 3,
                         memory: true,
                         name: "worker".into(),
+                        ..Default::default()
                     },
                     Switch {
                         step: 7,
@@ -2164,6 +2166,7 @@ pub(crate) mod tests {
                         tid: 0,
                         memory: false,
                         name: "swapper".into(),
+                        ..Default::default()
                     },
                     Switch {
                         step: 9,
@@ -2171,6 +2174,7 @@ pub(crate) mod tests {
                         tid: 20,
                         memory: false,
                         name: "kworker".into(),
+                        ..Default::default()
                     },
                     Switch {
                         step: 12,
@@ -2178,6 +2182,7 @@ pub(crate) mod tests {
                         tid: 2,
                         memory: true,
                         name: "child".into(),
+                        ..Default::default()
                     },
                 ],
             },

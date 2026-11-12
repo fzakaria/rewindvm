@@ -46,6 +46,9 @@ let
     # The file events' path lock taken only by the system calls that
     # report a file event, not by every one that returns
     ../guest/linux/rewind-path-lock.patch
+    # For rewind time: why the thread that left the CPU left it, and a
+    # wake record for every wakeup, in the buffer the monitor drains
+    ../guest/linux/rewind-time.patch
   ];
 in
 pkgs.stdenv.mkDerivation {

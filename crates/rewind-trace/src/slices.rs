@@ -181,6 +181,7 @@ mod held_over_tests {
             tid,
             memory,
             name: name.into(),
+            ..Default::default()
         }
     }
 

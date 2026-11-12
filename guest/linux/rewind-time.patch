@@ -1,0 +1,266 @@
+diff --git a/arch/x86/include/asm/hypervisor.h b/arch/x86/include/asm/hypervisor.h
+index bea536f58..1b1c9e3b1 100644
+--- a/arch/x86/include/asm/hypervisor.h
++++ b/arch/x86/include/asm/hypervisor.h
+@@ -83,7 +83,7 @@ void rewind_remember_cpus(struct task_struct *p, const struct cpumask *mask);
+ void rewind_report_cpus(const struct task_struct *p, struct cpumask *mask);
+ const struct cpumask *rewind_fold_cpus(const struct cpumask *mask);
+ void rewind_yield(void);
+-void rewind_switch(struct task_struct *next);
++void rewind_switch(struct task_struct *next, struct task_struct *prev);
+ #endif
+ extern enum x86_hypervisor_type x86_hyper_type;
+ extern void init_hypervisor_platform(void);
+diff --git a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
+index fc1a5845b..9d0897f36 100644
+--- a/arch/x86/kernel/cpu/rewind.c
++++ b/arch/x86/kernel/cpu/rewind.c
+@@ -111,9 +111,12 @@
+  * switch. Interface 6 changed what the records say, not their form: a
+  * file event names the path the kernel resolved, a crash is reported
+  * once, RDTSC traps in every task, idle follows any held interrupt, and
+- * a process exits when its last thread does.
++ * a process exits when its last thread does. Interface 7 added to each
++ * switch record the thread that left the CPU, whether it could still run
++ * and the system call it was in, and a wake record to the read and write
++ * records' buffer.
+  */
+-#define REWIND_INTERFACE	6
++#define REWIND_INTERFACE	7
+ 
+ /* Values written to REWIND_PORT_EXIT. */
+ enum rewind_exit {
+@@ -141,12 +144,19 @@ enum rewind_kind {
+ 	 * and write records under in the trace, after it drains them.
+ 	 */
+ 	REWIND_EV_IO = 13,
+-	REWIND_EV_SWITCH = 14,	/* the task now on the CPU; payload: comm */
++	REWIND_EV_SWITCH = 14,	/* the task now on the CPU; aux: the thread
++				 * that left it; payload: s32 its system
++				 * call or -1, then comm */
+ };
+ 
+ #define REWIND_FLAG_THREAD	BIT(0)
+ /* On a switch record: the task has no memory of its own. */
+ #define REWIND_FLAG_NO_MEMORY	BIT(1)
++/*
++ * On a switch record: the task that left the CPU could still run, so it
++ * was preempted or yielded rather than blocked.
++ */
++#define REWIND_FLAG_PREV_RUNNABLE	BIT(2)
+ 
+ /*
+  * One record, as the monitor reads it out of guest memory. len covers the
+@@ -279,6 +289,24 @@ enum rewind_io_kind {
+ 	REWIND_IO_WRITE = 1,		/* data: u64 pos, u32 count */
+ 	REWIND_IO_READ_OPEN = 2,	/* data: path */
+ 	REWIND_IO_WRITE_OPEN = 3,	/* data: path */
++	/*
++	 * A thread made runnable. tid is the woken thread; ino and dev are
++	 * 0; data: u32 the waking thread, 0 in an interrupt, and u8 how,
++	 * one of enum rewind_wake_how. 4 is the monitor's, for records lost.
++	 */
++	REWIND_IO_WAKE = 5,
++};
++
++/* What woke a thread, in a wake record. */
++enum rewind_wake_how {
++	REWIND_WAKE_TASK = 0,		/* a thread, by a system call */
++	REWIND_WAKE_HARDIRQ = 1,	/* an interrupt: a timer firing */
++	REWIND_WAKE_SOFTIRQ = 2,	/* a timer list entry or other softirq */
++	/*
++	 * A thread waiting for one of this file's own locks, handed it by
++	 * the thread that let it go: a wait the workload did not make.
++	 */
++	REWIND_WAKE_PLATFORM = 3,
+ };
+ 
+ struct rewind_io_record {
+@@ -297,10 +325,9 @@ static u8 rewind_io_buf[REWIND_IO_BUF_SIZE] __aligned(PAGE_SIZE);
+  * Appends one record. Interrupts are off, and io_head moves only once the
+  * record is whole, so the monitor never sees a record half written.
+  */
+-static void rewind_io_append(u8 kind, struct file *file, const void *data,
+-			     size_t len)
++static void rewind_io_append_raw(u8 kind, u32 tid, u64 ino, u32 dev,
++				 const void *data, size_t len)
+ {
+-	struct inode *inode = file_inode(file);
+ 	struct rewind_io_record *rec;
+ 	unsigned long irqflags;
+ 	u32 head, size;
+@@ -319,14 +346,24 @@ static void rewind_io_append(u8 kind, struct file *file, const void *data,
+ 	rec->len = size;
+ 	rec->kind = kind;
+ 	rec->pad = 0;
+-	rec->tid = current->pid;
+-	rec->ino = inode->i_ino;
+-	rec->dev = inode->i_sb->s_dev;
++	rec->tid = tid;
++	rec->ino = ino;
++	rec->dev = dev;
+ 	memcpy(rec->data, data, len);
+ 	WRITE_ONCE(rewind_shared.io_head, head + size);
+ 	local_irq_restore(irqflags);
+ }
+ 
++/* Appends one record about `file`, made by the current thread. */
++static void rewind_io_append(u8 kind, struct file *file, const void *data,
++			     size_t len)
++{
++	struct inode *inode = file_inode(file);
++
++	rewind_io_append_raw(kind, current->pid, inode->i_ino,
++			     inode->i_sb->s_dev, data, len);
++}
++
+ /*
+  * Write one record to the monitor. The record is assembled in a single
+  * static buffer with interrupts off: the vCPU is the only CPU, and nothing
+@@ -1020,14 +1057,72 @@ static void rewind_probe_fork(void *data, struct task_struct *parent,
+  * exit_mm(), or one of the kernel's own, has no memory and no program,
+  * which the flag says.
+  */
+-void rewind_switch(struct task_struct *next)
++void rewind_switch(struct task_struct *next, struct task_struct *prev)
+ {
+ 	u16 flags = next->mm ? 0 : REWIND_FLAG_NO_MEMORY;
++	s32 syscall = -1;
++
++	if (!rewind_running)
++		return;
++
++	/*
++	 * The task that left the CPU: still queued, and not only waiting out
++	 * a delayed dequeue, means it was preempted or yielded; otherwise it
++	 * blocked. A program's task that blocked did so in a system call,
++	 * which orig_ax names; a preempted one may have been interrupted
++	 * anywhere, and orig_ax then holds an interrupt's vector instead.
++	 */
++	if (prev->on_rq && !prev->se.sched_delayed)
++		flags |= REWIND_FLAG_PREV_RUNNABLE;
++	else if (prev->mm)
++		syscall = task_pt_regs(prev)->orig_ax;
++	rewind_emit(REWIND_EV_SWITCH, flags, next->tgid, next->pid, prev->pid,
++		    &syscall, sizeof(syscall),
++		    next->comm, strnlen(next->comm, TASK_COMM_LEN));
++}
++
++/*
++ * Set while this file lets one of its own locks go, so a wake that hands
++ * the lock to a waiting thread is told apart from the workload's own.
++ * One CPU, so a plain flag does.
++ */
++static bool rewind_releasing;
++
++static void rewind_unlock(struct mutex *lock)
++{
++	WRITE_ONCE(rewind_releasing, true);
++	mutex_unlock(lock);
++	WRITE_ONCE(rewind_releasing, false);
++}
++
++/*
++ * Every wakeup, from the sched_waking tracepoint: which thread was made
++ * runnable and what did it, appended to the read and write records'
++ * buffer so it costs no exit and moves no step.
++ */
++static void rewind_probe_waking(void *data, struct task_struct *p)
++{
++	struct {
++		u32 waker;
++		u8 how;
++	} __packed w;
+ 
+ 	if (!rewind_running)
+ 		return;
+-	rewind_emit(REWIND_EV_SWITCH, flags, next->tgid, next->pid, 0,
+-		    next->comm, strnlen(next->comm, TASK_COMM_LEN), NULL, 0);
++	if (READ_ONCE(rewind_releasing)) {
++		w.waker = current->pid;
++		w.how = REWIND_WAKE_PLATFORM;
++	} else if (in_hardirq()) {
++		w.waker = 0;
++		w.how = REWIND_WAKE_HARDIRQ;
++	} else if (in_serving_softirq()) {
++		w.waker = 0;
++		w.how = REWIND_WAKE_SOFTIRQ;
++	} else {
++		w.waker = current->pid;
++		w.how = REWIND_WAKE_TASK;
++	}
++	rewind_io_append_raw(REWIND_IO_WAKE, p->pid, 0, 0, &w, sizeof(w));
+ }
+ 
+ static void rewind_probe_exit(void *data, struct task_struct *p,
+@@ -1291,12 +1386,12 @@ static void rewind_probe_sys_enter(void *data, struct pt_regs *regs, long id)
+ 	if (id == __NR_close) {
+ 		mutex_lock(&rewind_path_lock);
+ 		rewind_report_close(regs->di);
+-		mutex_unlock(&rewind_path_lock);
++		rewind_unlock(&rewind_path_lock);
+ 	} else if ((id == __NR_dup2 || id == __NR_dup3) &&
+ 		   regs->di != regs->si) {
+ 		mutex_lock(&rewind_path_lock);
+ 		rewind_report_close(regs->si);
+-		mutex_unlock(&rewind_path_lock);
++		rewind_unlock(&rewind_path_lock);
+ 	}
+ }
+ 
+@@ -1456,7 +1551,7 @@ static void rewind_report_changes(struct pt_regs *regs, long id, long ret)
+ 		rewind_io_open(ret);
+ 		break;
+ 	}
+-	mutex_unlock(&rewind_path_lock);
++	rewind_unlock(&rewind_path_lock);
+ }
+ 
+ /*
+@@ -1495,7 +1590,7 @@ static void rewind_probe_sys_exit(void *data, struct pt_regs *regs, long ret)
+ 				    current->pid, file->f_flags, path,
+ 				    strlen(path), NULL, 0);
+ 		}
+-		mutex_unlock(&rewind_path_lock);
++		rewind_unlock(&rewind_path_lock);
+ 	}
+ 	fput(file);
+ }
+@@ -1520,14 +1615,14 @@ static ssize_t rewind_write(struct file *file, const char __user *ubuf,
+ 		size_t n = min(len - done, sizeof(rewind_bounce));
+ 
+ 		if (copy_from_user(rewind_bounce, ubuf + done, n)) {
+-			mutex_unlock(&rewind_write_lock);
++			rewind_unlock(&rewind_write_lock);
+ 			return done ? done : -EFAULT;
+ 		}
+ 		rewind_emit(kind, 0, current->tgid, current->pid, aux,
+ 			    rewind_bounce, n, NULL, 0);
+ 		done += n;
+ 	}
+-	mutex_unlock(&rewind_write_lock);
++	rewind_unlock(&rewind_write_lock);
+ 	return done;
+ }
+ 
+@@ -1763,6 +1858,7 @@ static int __init rewind_events_init(void)
+ 	WARN_ON(register_trace_sched_process_exec(rewind_probe_exec, NULL));
+ 	WARN_ON(register_trace_sched_process_fork(rewind_probe_fork, NULL));
+ 	WARN_ON(register_trace_sched_process_exit(rewind_probe_exit, NULL));
++	WARN_ON(register_trace_sched_waking(rewind_probe_waking, NULL));
+ 	WARN_ON(register_trace_signal_deliver(rewind_probe_signal, NULL));
+ 	WARN_ON(register_trace_sys_enter(rewind_probe_sys_enter, NULL));
+ 	WARN_ON(register_trace_sys_exit(rewind_probe_sys_exit, NULL));
+diff --git a/kernel/sched/core.c b/kernel/sched/core.c
+index 5b8691dd9..c2333f2ff 100644
+--- a/kernel/sched/core.c
++++ b/kernel/sched/core.c
+@@ -5386,7 +5386,7 @@ static struct rq *finish_task_switch(struct task_struct *prev)
+ 	finish_lock_switch(rq);
+ #ifdef CONFIG_REWIND_GUEST
+ 	/* The switch is an exit: the monitor and the trace see every one. */
+-	rewind_switch(current);
++	rewind_switch(current, prev);
+ #endif
+ 	finish_arch_post_lock_switch();
+ 	kcov_finish_switch(current);

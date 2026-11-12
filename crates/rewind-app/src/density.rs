@@ -80,6 +80,7 @@ mod tests {
             tid: 5,
             memory: true,
             name: "five".into(),
+            ..Default::default()
         }
     }
 

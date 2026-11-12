@@ -156,8 +156,10 @@ pub const SHARED_TASKS: u64 = (SHARED_STALL_NS + 4).next_multiple_of(8);
 /// the shared page, after the task layout, before it sends setup; a kernel
 /// from before rewind 1.0 wrote none, and the field reads 0. Version 6
 /// changed what a kernel records at an event, not the form: a kernel of
-/// any other version is refused, and its runs are recorded again.
-pub const INTERFACE_VERSION: u32 = 6;
+/// any other version is refused, and its runs are recorded again. Version
+/// 7 added to the switch record why the task that left the CPU left it,
+/// and the wake records in the read and write records' buffer.
+pub const INTERFACE_VERSION: u32 = 7;
 pub const SHARED_INTERFACE: u64 = SHARED_TASKS + 8 * TASK_LAYOUT_FIELDS as u64;
 
 /// Where a task off the CPU saved its user FS and GS bases, as offsets in
@@ -333,7 +335,7 @@ mod interface_tests {
     /// one of the interface before is told to record again.
     #[test]
     fn the_monitor_runs_only_its_own_interface() {
-        assert_eq!(INTERFACE_VERSION, 6);
+        assert_eq!(INTERFACE_VERSION, 7);
         check_interface(INTERFACE_VERSION).unwrap();
         let none = format!("{:#}", check_interface(0).unwrap_err());
         assert!(none.contains("before rewind 1.0"), "{none}");

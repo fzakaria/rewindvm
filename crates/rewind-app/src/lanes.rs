@@ -459,6 +459,7 @@ mod tests {
             tid,
             memory,
             name: name.into(),
+            ..Default::default()
         };
         let switches = [
             switch(10, 34, 34, true, "bash"),

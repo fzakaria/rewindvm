@@ -296,7 +296,7 @@ fn files_at(
 ) -> Vec<(String, Result<Vec<u8>, LeftOutWhy>)> {
     let by_then = Trace {
         events: trace.until(step).to_vec(),
-        switches: Vec::new(),
+        ..Default::default()
     };
     let paths = written_files(&by_then, &Glob::new(EVERY_FILE));
     if paths.is_empty() {

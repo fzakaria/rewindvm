@@ -21,6 +21,10 @@
 //! run, as a restored keyframe does, starts from the records up to it
 //! ([`Encoder::resume`]).
 //!
+//! The guest's buffer also holds its wake records, each time a thread was
+//! made runnable; the encoder hands them back to the monitor, which
+//! stores them with the context switches ([`crate::switches`]).
+//!
 //! A record the guest's buffer had no room for is lost, and counted: the
 //! trace says how many were lost at the step they would have been taken,
 //! so a reader knows its view of that stretch is partial.
@@ -28,6 +32,7 @@
 use std::collections::HashMap;
 
 use crate::event::{HEADER_LEN, RECORD_MAX};
+use crate::switches::{Wake, WakeHow};
 use crate::{Divergence, Part};
 
 /// The trace record kind read and write records are stored under. The
@@ -60,6 +65,8 @@ mod kind {
     pub(super) const WRITE_OPEN: u8 = 3;
     /// The trace's alone: records the guest had no room for.
     pub(super) const LOST: u8 = 4;
+    /// The guest's alone: a wake, which the trace keeps with the switches.
+    pub(super) const WAKE: u8 = 5;
 }
 
 /// The bits of an encoded record's first byte: its kind, and whether its
@@ -211,12 +218,20 @@ impl Encoder {
     }
 
     /// The trace records, each at most [`RECORD_MAX`] bytes with its
-    /// header, for `buffered`, the guest's buffer as it stood at a step,
+    /// header, for `buffered`, the guest's buffer as it stood at `step`,
     /// and `lost`, how many records it had no room for since the step
-    /// before. None when there is nothing to record. A record the buffer
-    /// holds that does not read, which only a broken guest writes, ends
-    /// the reading and counts as lost with the rest.
-    pub fn encode(&mut self, buffered: &[u8], lost: u32) -> Vec<Vec<u8>> {
+    /// before. None when there is nothing to record. The buffer's wake
+    /// records go to `wakes`, at `step` and with no time, which the
+    /// monitor gives them, for the switches' encoder. A
+    /// record the buffer holds that does not read, which only a broken
+    /// guest writes, ends the reading and counts as lost with the rest.
+    pub fn encode(
+        &mut self,
+        step: u64,
+        buffered: &[u8],
+        lost: u32,
+        wakes: &mut Vec<Wake>,
+    ) -> Vec<Vec<u8>> {
         let mut payloads: Vec<Vec<u8>> = Vec::new();
         let mut entry = Vec::new();
         let mut lost = lost;
@@ -229,6 +244,13 @@ impl Encoder {
                 break;
             };
             rest = &rest[guest.len..];
+            if guest.kind == kind::WAKE {
+                match guest.wake(step) {
+                    Some(wake) => wakes.push(wake),
+                    None => lost = lost.saturating_add(1),
+                }
+                continue;
+            }
             entry.clear();
             if !self.tables.encode(&guest, &mut entry) {
                 lost = lost.saturating_add(1);
@@ -281,6 +303,22 @@ struct GuestRecord<'a> {
 }
 
 impl<'a> GuestRecord<'a> {
+    /// A wake record's wake, taken at `step`: the woken thread, then the
+    /// waker and how. None when it does not read.
+    fn wake(&self, step: u64) -> Option<Wake> {
+        const WAKE_DATA: usize = 5;
+        if self.data.len() < WAKE_DATA {
+            return None;
+        }
+        Some(Wake {
+            step,
+            ns: 0,
+            tid: self.tid,
+            waker: u32::from_le_bytes(self.data[0..4].try_into().expect("four bytes")),
+            how: WakeHow::from_guest(self.data[4])?,
+        })
+    }
+
     /// The record at the start of `buf`, or None when its header is cut
     /// off or its length is not one a record has.
     fn parse(buf: &'a [u8]) -> Option<GuestRecord<'a>> {
@@ -329,6 +367,7 @@ impl Tables {
         if guest.kind == kind::WRITE && guest.data.len() < WRITE_DATA {
             return false;
         }
+
         if guest.tid == self.tid {
             out.push(guest.kind | SAME_THREAD);
         } else {
@@ -639,8 +678,9 @@ mod tests {
     fn encode_all(drains: &[(u64, Vec<u8>)]) -> Vec<(u64, Vec<u8>)> {
         let mut encoder = Encoder::new();
         let mut out = Vec::new();
+        let mut wakes = Vec::new();
         for (step, buffered) in drains {
-            for r in encoder.encode(buffered, 0) {
+            for r in encoder.encode(*step, buffered, 0, &mut wakes) {
                 out.push((*step, r));
             }
         }
@@ -688,6 +728,51 @@ mod tests {
         assert!(log.records.iter().all(|r| r.step == 12));
     }
 
+    fn wake(tid: u32, waker: u32, how: u8) -> Vec<u8> {
+        let mut data = waker.to_le_bytes().to_vec();
+        data.push(how);
+        guest(kind::WAKE, tid, 0, &data)
+    }
+
+    #[test]
+    fn wake_records_go_to_the_switches_not_the_trace() {
+        // A worker wakes main through a futex between two writes, and a
+        // timer wakes a sleeper: the wakes come back, at the step, for the
+        // switches' encoder, and the writes alone are trace records. A
+        // how the guest does not define is counted as lost.
+        let buffered = [
+            wake(41, 42, 0),
+            write(40, 9, 0, 10),
+            wake(43, 0, 1),
+            wake(44, 0, 9),
+        ]
+        .concat();
+        let mut wakes = Vec::new();
+        let records = Encoder::new().encode(7, &buffered, 0, &mut wakes);
+        assert_eq!(
+            wakes,
+            vec![
+                Wake {
+                    step: 7,
+                    ns: 0,
+                    tid: 41,
+                    waker: 42,
+                    how: WakeHow::Task
+                },
+                Wake {
+                    step: 7,
+                    ns: 0,
+                    tid: 43,
+                    waker: 0,
+                    how: WakeHow::Hardirq
+                },
+            ]
+        );
+        let log = decode(&records.into_iter().map(|r| (7, r)).collect::<Vec<_>>()).unwrap();
+        assert_eq!(log.records.len(), 2);
+        assert_eq!(log.lost(), 1);
+    }
+
     #[test]
     fn a_path_is_stored_once() {
         // The same path opened at two steps: its bytes appear once in
@@ -711,7 +796,7 @@ mod tests {
         // how many it lost, at the same step.
         let mut encoder = Encoder::new();
         let records: Vec<(u64, Vec<u8>)> = encoder
-            .encode(&write(1, 2, 0, 4), 3)
+            .encode(0, &write(1, 2, 0, 4), 3, &mut Vec::new())
             .into_iter()
             .map(|r| (20, r))
             .collect();
@@ -724,7 +809,7 @@ mod tests {
     fn an_empty_buffer_makes_no_record() {
         // A step the guest buffered nothing before, and lost nothing,
         // adds nothing to the trace.
-        assert!(Encoder::new().encode(&[], 0).is_empty());
+        assert!(Encoder::new().encode(0, &[], 0, &mut Vec::new()).is_empty());
     }
 
     #[test]
@@ -750,7 +835,7 @@ mod tests {
         let whole = encode_all(&drains);
         let prefix: Vec<(u64, Vec<u8>)> = whole.iter().filter(|(s, _)| *s <= 9).cloned().collect();
         let mut resumed = Encoder::resume(&prefix).unwrap();
-        let tail = resumed.encode(&drains[2].1, 0);
+        let tail = resumed.encode(drains[2].0, &drains[2].1, 0, &mut Vec::new());
         let expected: Vec<Vec<u8>> = whole
             .iter()
             .filter(|(s, _)| *s == 14)

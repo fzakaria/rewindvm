@@ -643,6 +643,7 @@ mod tests {
             tid: 42,
             memory: true,
             name: "worker".into(),
+            ..Default::default()
         };
         assert_eq!(describe_switch(&record), "Switched to thread 40/42 worker");
         record.memory = false;

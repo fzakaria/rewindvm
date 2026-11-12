@@ -392,6 +392,7 @@ mod tests {
             flags: 0o1101,
         };
         let trace = Trace {
+            wakes: Vec::new(),
             events: vec![
                 event(
                     10,
@@ -444,6 +445,7 @@ mod tests {
                     tid: 1,
                     memory: true,
                     name: "init".into(),
+                    ..Default::default()
                 },
                 Switch {
                     step: 19,
@@ -451,6 +453,7 @@ mod tests {
                     tid: 5,
                     memory: true,
                     name: "five".into(),
+                    ..Default::default()
                 },
                 Switch {
                     step: 35,
@@ -458,6 +461,7 @@ mod tests {
                     tid: 2,
                     memory: false,
                     name: "kworker".into(),
+                    ..Default::default()
                 },
                 Switch {
                     step: 79,
@@ -465,6 +469,7 @@ mod tests {
                     tid: 0,
                     memory: false,
                     name: "swapper".into(),
+                    ..Default::default()
                 },
                 Switch {
                     step: 90,
@@ -472,6 +477,7 @@ mod tests {
                     tid: 1,
                     memory: true,
                     name: "init".into(),
+                    ..Default::default()
                 },
             ],
         };
@@ -552,6 +558,7 @@ mod tests {
             tid: 7,
             memory: true,
             name: "five".into(),
+            ..Default::default()
         };
         assert_eq!(
             Stride::following_switch(&t, &worker),

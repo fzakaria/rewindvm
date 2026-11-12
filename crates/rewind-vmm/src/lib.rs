@@ -1254,20 +1254,22 @@ impl Devices {
     /// Writes the switches pending from an earlier window of steps as a
     /// batch at this step, ahead of anything else the step records.
     fn flush_switches(&mut self, obs: &mut dyn Observer) {
-        if let Some(encoder) = self.switches.as_mut()
-            && let Some(batch) = encoder.at_step(self.step)
-        {
-            obs.record(self.step, &batch);
+        // The clock is still as the step before left it, which is the time
+        // of that step's switch.
+        if let Some(encoder) = self.switches.as_mut() {
+            for batch in encoder.at_step(self.step, self.clock.now) {
+                obs.record(self.step, &batch);
+            }
         }
     }
 
     /// Writes the switches still pending at the run's end as a batch at
     /// this step.
     fn finish_switches(&mut self, obs: &mut dyn Observer) {
-        if let Some(encoder) = self.switches.as_mut()
-            && let Some(batch) = encoder.finish()
-        {
-            obs.record(self.step, &batch);
+        if let Some(encoder) = self.switches.as_mut() {
+            for batch in encoder.finish(self.clock.now) {
+                obs.record(self.step, &batch);
+            }
         }
     }
 
@@ -1326,8 +1328,20 @@ impl Devices {
         self.ram
             .write(shared + pv::SHARED_IO_LOST, &0u32.to_le_bytes())?;
 
-        for record in encoder.encode(&buffered, lost) {
+        let mut wakes = Vec::new();
+        for record in encoder.encode(self.step, &buffered, lost, &mut wakes) {
             obs.record(self.step, &record);
+        }
+
+        // The wakes join the switches' pending batch, which is written
+        // first when it had no room for one.
+        if let Some(switches) = self.switches.as_mut() {
+            for wake in &mut wakes {
+                wake.ns = self.clock.now;
+                if let Some(batch) = switches.add_wake(wake) {
+                    obs.record(self.step, &batch);
+                }
+            }
         }
         Ok(())
     }
@@ -1420,12 +1434,16 @@ mod tests {
         let mut dev = devices(0);
         dev.switches = Some(rewind_trace::switches::Encoder::new());
         let mut record = Vec::new();
-        record.extend_from_slice(&((pv::RECORD_HEADER + TASK_NAME.len()) as u32).to_le_bytes());
+        // The header, the system call the task before blocked in (none),
+        // then the task's name.
+        const NO_SYSCALL: i32 = -1;
+        record.extend_from_slice(&((pv::RECORD_HEADER + 4 + TASK_NAME.len()) as u32).to_le_bytes());
         record.extend_from_slice(&SWITCH_KIND.to_le_bytes());
         record.extend_from_slice(&0u16.to_le_bytes());
         record.extend_from_slice(&TASK_PID.to_le_bytes());
         record.extend_from_slice(&TASK_TID.to_le_bytes());
         record.extend_from_slice(&0u32.to_le_bytes());
+        record.extend_from_slice(&NO_SYSCALL.to_le_bytes());
         record.extend_from_slice(TASK_NAME);
         dev.ram.write(IO_BUF, &record).unwrap();
         let pointer = (IO_BUF as u32).to_le_bytes();
@@ -1618,12 +1636,16 @@ mod tests {
         const TASK_PID: u32 = 40;
         const TASK_NAME: &[u8] = b"worker\0";
         let mut r = Vec::new();
-        r.extend_from_slice(&((pv::RECORD_HEADER + TASK_NAME.len()) as u32).to_le_bytes());
+        // The header, the system call the task before blocked in (none),
+        // then the task's name.
+        const NO_SYSCALL: i32 = -1;
+        r.extend_from_slice(&((pv::RECORD_HEADER + 4 + TASK_NAME.len()) as u32).to_le_bytes());
         r.extend_from_slice(&SWITCH_KIND.to_le_bytes());
         r.extend_from_slice(&0u16.to_le_bytes());
         r.extend_from_slice(&TASK_PID.to_le_bytes());
         r.extend_from_slice(&tid.to_le_bytes());
         r.extend_from_slice(&0u32.to_le_bytes());
+        r.extend_from_slice(&NO_SYSCALL.to_le_bytes());
         r.extend_from_slice(TASK_NAME);
         r
     }
@@ -1650,7 +1672,9 @@ mod tests {
         let mut switches = Vec::new();
         for (step, record) in records {
             assert!(rewind_trace::switches::is_batch(record));
-            decoder.decode(*step, record, &mut switches).unwrap();
+            decoder
+                .decode(*step, record, &mut switches, &mut Vec::new())
+                .unwrap();
         }
         switches.iter().map(|s| s.step).collect()
     }
