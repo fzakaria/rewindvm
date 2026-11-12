@@ -1,4 +1,10 @@
-# TODO: preempting a guest that computes without exits
+---
+date: 2026-10-03
+kind: design
+revision: 9b340c53
+---
+
+# Preempting a guest that computes without exits
 
 Not built. `--experimental-preempt` exists but is hidden, slow and
 unreliable, and nothing here is on the site. Two designs have been tried.
@@ -16,7 +22,7 @@ and what the second design still needs, for whoever picks it up.
 
 A guest gets the CPU taken away only at a step: virtual time moves at
 exits, so a thread that computes without system calls is never interrupted
-(see Limits in [design.md](design.md)). A thread that spins waiting for
+(see Limits in [design.md](../design.md)). A thread that spins waiting for
 another hangs the run. The case that started this is Go: at `GOMAXPROCS`
 above 1, which `--cores` above 1 sets by default, its garbage collector's
 `bgsweep` spins in user space on the sweep lock

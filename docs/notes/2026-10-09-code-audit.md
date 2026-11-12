@@ -206,7 +206,7 @@ error. Include migration between supported cores. Saturation was not reproduced
 during this audit.
 
 The Intel event-selection problem is already described in
-[preemption.md](../preemption.md#intel): a single encoding is used across CPU
+[preemption.md](2026-10-03-preemption.md#intel): a single encoding is used across CPU
 families that need different events. Treat CPU model/core-type selection and
 affinity as part of this work, not as a newly discovered issue.
 
@@ -232,7 +232,7 @@ guest-visible CPUID contract and counter semantics. Validate the fingerprint
 before replay or keyframe restoration. Separate recording provenance, such as a
 build version, from the explicit contract that defines compatible execution.
 Persist any preemption tuning that affects results; the margin issue is already
-documented in `preemption.md`.
+documented in `2026-10-03-preemption.md`.
 
 Acceptance test: synthetic AMD/Intel CPUID fixtures and differing Host features
 must produce distinct compatibility identities or explicit refusal. Then validate
@@ -386,7 +386,7 @@ algorithm.
    limit used during recording does not automatically bound `replay()` or seeking.
    Add an operation budget and structured stopped/canceled/diverged results, then
    propagate those through the CLI and desktop engine. Include the known
-   computation-without-exits workload from `preemption.md`.
+   computation-without-exits workload from `2026-10-03-preemption.md`.
 4. Test invariants across components. Useful properties include "every published
    keyframe resolves", "a rejected import leaves the prior run replayable", and
    "concurrent read operations do not mutate each other's state". Add these at

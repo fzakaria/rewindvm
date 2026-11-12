@@ -1,3 +1,9 @@
+---
+date: 2026-11-09
+kind: design
+revision: 67e6cdbf
+---
+
 # Deterministic multicore builds
 
 Start with independent build actions in separate single-vCPU Rewind VMs.
@@ -8,19 +14,19 @@ measurements were made during this investigation.
 
 ## Current constraints
 
-[Machine](../crates/rewind-vmm/src/lib.rs) owns one `VcpuFd` and creates
-CPU 0. The [guest kernel](../guest/linux/config) disables SMP; the Rewind
+[Machine](../../crates/rewind-vmm/src/lib.rs) owns one `VcpuFd` and creates
+CPU 0. The [guest kernel](../../guest/linux/config) disables SMP; the Rewind
 platform requires `!SMP` and protects shared record buffers by disabling
-interrupts on the sole CPU. `cores` in [nix/lib.nix](../nix/lib.nix) changes
+interrupts on the sole CPU. `cores` in [nix/lib.nix](../../nix/lib.nix) changes
 the reported CPU count and `NIX_BUILD_CORES`, while execution stays on one
 vCPU.
 
 Sequential exits give devices and trace records a defined order. The
-[clock](../crates/rewind-vmm/src/pv.rs) has one timer, and
-[snapshots](../crates/rewind-vmm/src/snapshot.rs) capture one CPU plus the
+[clock](../../crates/rewind-vmm/src/pv.rs) has one timer, and
+[snapshots](../../crates/rewind-vmm/src/snapshot.rs) capture one CPU plus the
 global device state. Debugging and restoration use the same global steps.
 
-The counter skid described in [preemption.md](preemption.md) is a problem
+The counter skid described in [preemption.md](2026-10-03-preemption.md) is a problem
 with stopping at an exact point. Even with exact preemption, concurrent
 CPUs can observe different shared-memory access orders between exits.
 A race-free program can append results in different orders when
@@ -117,7 +123,7 @@ What it costs:
   CPU today.
 - It does not run anything faster.
 - User code that spins waiting for another thread still hangs unless
-  preemption exists (see [preemption.md](preemption.md)).
+  preemption exists (see [preemption.md](2026-10-03-preemption.md)).
 
 The review's estimate was four to six weeks, with every recorded format
 changing. The recommendation was to wait until preemption is settled and

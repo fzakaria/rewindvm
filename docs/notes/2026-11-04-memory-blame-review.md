@@ -815,7 +815,7 @@ shorter debugging workflow.
 
 Preemption and compiler-assisted scheduling are separate research work. They can
 increase the set of bugs Rewind can find, which may matter more than another
-restore optimization, but [preemption.md](../preemption.md) records current correctness
+restore optimization, but [preemption.md](2026-10-03-preemption.md) records current correctness
 and runtime obstacles. Do not enable the experimental path by default or promise
 multicore/weak-memory coverage from a single executing vCPU. Seek a concrete
 customer failure blocked by the current scheduling boundaries before committing
