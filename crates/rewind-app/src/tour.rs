@@ -17,6 +17,8 @@ pub enum Anchor {
     DivergenceButton,
     ForkButton,
     RunsPill,
+    /// The two figures at the head of the Time tab.
+    TimeHead,
 }
 
 /// The tab of the right column a stop points into.
@@ -24,6 +26,7 @@ pub enum Anchor {
 pub enum Column {
     AtStep,
     Runs,
+    Time,
 }
 
 impl Anchor {
@@ -32,6 +35,7 @@ impl Anchor {
         match self {
             Anchor::EventCard => Some(Column::AtStep),
             Anchor::RunsPill => Some(Column::Runs),
+            Anchor::TimeHead => Some(Column::Time),
             Anchor::Timeline
             | Anchor::FailureButton
             | Anchor::DivergenceButton
@@ -68,12 +72,35 @@ pub enum Needs {
     Divergence,
     /// Other runs of the same build, for the Runs panel.
     Family,
+    /// Wake records, which the Time tab reads the critical path from.
+    Wakes,
+}
+
+/// What the run on screen has that some stops need.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RunHas {
+    pub failure: bool,
+    pub divergence: bool,
+    pub family: bool,
+    pub wakes: bool,
+}
+
+impl RunHas {
+    /// A run with everything, for which every stop makes sense.
+    pub fn all() -> RunHas {
+        RunHas {
+            failure: true,
+            divergence: true,
+            family: true,
+            wakes: true,
+        }
+    }
 }
 
 /// The phase the first stop starts the playhead at.
 const CHECK_PHASE: &str = "check";
 
-pub const STOPS: [Stop; 6] = [
+pub const STOPS: [Stop; 7] = [
     Stop {
         anchor: Anchor::Timeline,
         title: "The whole run",
@@ -116,19 +143,27 @@ pub const STOPS: [Stop; 6] = [
         playhead: Playhead::Divergence,
         needs: Needs::Family,
     },
+    Stop {
+        anchor: Anchor::TimeHead,
+        title: "Where the time went",
+        body: "The Time tab, or w, shows how long the run took on the VM's one CPU and its critical path: the least it could take on any number of CPUs, the longest chain of work that each waited for the one before. The flame graph is that path by process, computing warm and asleep blue, and the list under it says what would make the run finish sooner. Click a frame to go to it; a sleep or a stretch of computing shows its source line, with gdb a click away.",
+        playhead: Playhead::CheckPhase,
+        needs: Needs::Wakes,
+    },
 ];
 
-/// The stops that make sense for a run: without a failure or a compared
-/// run, the stops about them are left out.
-pub fn stops_for(has_failure: bool, has_divergence: bool, has_family: bool) -> Vec<Stop> {
+/// The stops that make sense for a run: without a failure, a compared
+/// run, other runs or wake records, the stops about them are left out.
+pub fn stops_for(has: RunHas) -> Vec<Stop> {
     STOPS
         .iter()
         .copied()
         .filter(|s| match s.needs {
             Needs::Nothing => true,
-            Needs::Failure => has_failure,
-            Needs::Divergence => has_divergence,
-            Needs::Family => has_family,
+            Needs::Failure => has.failure,
+            Needs::Divergence => has.divergence,
+            Needs::Family => has.family,
+            Needs::Wakes => has.wakes,
         })
         .collect()
 }
@@ -267,6 +302,7 @@ mod tests {
     fn a_stop_in_the_right_column_opens_its_tab() {
         assert_eq!(Anchor::EventCard.column(), Some(Column::AtStep));
         assert_eq!(Anchor::RunsPill.column(), Some(Column::Runs));
+        assert_eq!(Anchor::TimeHead.column(), Some(Column::Time));
         for anchor in [
             Anchor::Timeline,
             Anchor::FailureButton,
@@ -279,18 +315,31 @@ mod tests {
 
     #[test]
     fn stops_that_do_not_apply_are_left_out() {
-        // Without a failure, a comparison or other runs only the timeline
-        // and fork stops remain; with all three, all six; with only other
-        // runs, the Runs stop joins the two.
+        // Without a failure, a comparison, other runs or wakes only the
+        // timeline and fork stops remain; with all four, every stop; with
+        // only other runs, the Runs stop joins the two, and with only
+        // wakes, the Time stop.
         let anchors = |stops: Vec<Stop>| stops.iter().map(|s| s.anchor).collect::<Vec<_>>();
         assert_eq!(
-            anchors(stops_for(false, false, false)),
+            anchors(stops_for(RunHas::default())),
             vec![Anchor::Timeline, Anchor::ForkButton]
         );
-        assert_eq!(stops_for(true, true, true).len(), STOPS.len());
+        assert_eq!(stops_for(RunHas::all()).len(), STOPS.len());
+        let family = RunHas {
+            family: true,
+            ..RunHas::default()
+        };
         assert_eq!(
-            anchors(stops_for(false, false, true)),
+            anchors(stops_for(family)),
             vec![Anchor::Timeline, Anchor::ForkButton, Anchor::RunsPill]
+        );
+        let wakes = RunHas {
+            wakes: true,
+            ..RunHas::default()
+        };
+        assert_eq!(
+            anchors(stops_for(wakes)),
+            vec![Anchor::Timeline, Anchor::ForkButton, Anchor::TimeHead]
         );
     }
 
@@ -308,7 +357,7 @@ mod tests {
     #[test]
     fn next_and_back_stay_inside_the_tour() {
         // Back on the first stop stays; next on the last stop finishes.
-        let mut tour = Tour::new(stops_for(true, true, true));
+        let mut tour = Tour::new(stops_for(RunHas::all()));
         tour.back();
         assert!(tour.is_first());
         for _ in 1..STOPS.len() {
@@ -316,6 +365,6 @@ mod tests {
         }
         assert!(tour.is_last());
         assert_eq!(tour.advance(), Advance::Finished);
-        assert_eq!(tour.current().unwrap().anchor, Anchor::RunsPill);
+        assert_eq!(tour.current().unwrap().anchor, Anchor::TimeHead);
     }
 }

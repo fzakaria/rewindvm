@@ -58,6 +58,7 @@ use crate::time::{
     own_pick, paint_order, phase_blocks, phase_steps, pick_marks, playhead_frame, playhead_on_path,
     segments, skipped_frames, sooner, spot_of, stretch_at, waits, where_lines,
 };
+use crate::tour::Anchor;
 use crate::ui::render::color_only;
 use crate::ui::scrubber::{Aim, Replay, Scrubber};
 use crate::ui::selectable::{Registry, SelectableText, selectable, selects};
@@ -322,6 +323,14 @@ impl Scrubber {
             (Some(_), RightTab::Time) => self.close_time(cx),
             (Some(_), _) => self.select_tab(RightTab::Time, cx),
             (None, _) => self.open_time(cx),
+        }
+    }
+
+    /// Shows the tab, opening it when it is not open.
+    pub(super) fn show_time(&mut self, cx: &mut Context<Self>) {
+        match self.time {
+            Some(_) => self.select_tab(RightTab::Time, cx),
+            None => self.open_time(cx),
         }
     }
 
@@ -955,6 +964,7 @@ impl Scrubber {
                     .text_color(rgb(theme::SOFT))
                     .child(text_line(panel, registry, states_line(tree))),
             );
+        let head = self.with_callout(head, Anchor::TimeHead, cx);
         selects(head, Surface::Time, cx)
     }
 

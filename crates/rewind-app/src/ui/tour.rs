@@ -90,11 +90,12 @@ impl Scrubber {
             self.explore_example(TourStart::Always, window, cx);
             return;
         };
-        let stops = tour::stops_for(
-            session.run.timeline.failure.is_some(),
-            session.divergence_step().is_some(),
-            self.runs.family.as_ref().is_some_and(|f| f.runs.len() > 1),
-        );
+        let stops = tour::stops_for(tour::RunHas {
+            failure: session.run.timeline.failure.is_some(),
+            divergence: session.divergence_step().is_some(),
+            family: self.runs.family.as_ref().is_some_and(|f| f.runs.len() > 1),
+            wakes: !session.run.timeline.trace.wakes.is_empty(),
+        });
         self.shown.tour = Some(Tour::new(stops));
         self.show_tour_stop(cx);
         window.focus(&self.tour_focus, cx);
@@ -121,6 +122,7 @@ impl Scrubber {
                 self.right_tab = crate::ui::tabs::RightTab::Runs;
                 self.runs_tab = true;
             }
+            Some(tour::Column::Time) => self.show_time(cx),
             None => {}
         }
         self.go_to(step, cx);
