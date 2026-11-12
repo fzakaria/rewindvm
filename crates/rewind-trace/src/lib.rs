@@ -32,6 +32,7 @@ pub mod io_records;
 pub mod located;
 pub mod machine;
 pub mod manifest;
+pub mod perfetto;
 pub mod properties;
 pub mod prune;
 pub mod replaying;
@@ -42,10 +43,12 @@ pub mod slices;
 pub mod stop;
 pub mod summary;
 pub mod switches;
+pub mod time_report;
 pub mod verdict;
 pub mod writes;
 
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::Path;
 
@@ -623,8 +626,10 @@ impl Trace {
     /// signal first, then those that exited non-zero, each in order.
     fn failures(&self) -> Vec<(Vec<String>, Ending)> {
         let procs = self.processes();
+        let by_pid = ByPid::new(&procs);
         let argv_of = |pid: u32, step: u64| {
-            process_among(&procs, pid, step)
+            by_pid
+                .at(pid, step)
                 .filter(|p| !p.argv.is_empty())
                 .map(|p| p.argv.clone())
         };
@@ -707,7 +712,15 @@ impl Trace {
 /// it, else the first after it, as [`Trace::process_at`] finds it. For
 /// readers that keep the list and resolve many pids against it.
 pub fn process_among(procs: &[Process], pid: u32, step: u64) -> Option<&Process> {
-    let with_pid = procs.iter().filter(|p| p.pid == pid);
+    life_at(procs.iter().filter(|p| p.pid == pid), step)
+}
+
+/// Of the lives `with_pid` of one pid, the one alive at `step`, else the
+/// nearest before it, else the first after it.
+fn life_at<'a>(
+    with_pid: impl Iterator<Item = &'a Process> + Clone,
+    step: u64,
+) -> Option<&'a Process> {
     if let Some(alive) = with_pid.clone().find(|p| p.alive_at(step)) {
         return Some(alive);
     }
@@ -716,6 +729,31 @@ pub fn process_among(procs: &[Process], pid: u32, step: u64) -> Option<&Process>
         .filter(|p| p.start <= step)
         .max_by_key(|p| p.start);
     before.or_else(|| with_pid.min_by_key(|p| p.start))
+}
+
+/// The processes of a run by pid, for readers that resolve a pid at a
+/// step for every one of many runs or events: [`process_among`] reads
+/// the whole list each time, and this reads only the pid's lives.
+#[derive(Debug)]
+pub struct ByPid<'a> {
+    lives: HashMap<u32, Vec<&'a Process>>,
+}
+
+impl<'a> ByPid<'a> {
+    pub fn new(procs: &'a [Process]) -> ByPid<'a> {
+        let mut lives: HashMap<u32, Vec<&'a Process>> = HashMap::new();
+        for p in procs {
+            lives.entry(p.pid).or_default().push(p);
+        }
+        ByPid { lives }
+    }
+
+    /// The process that had id `pid` at `step`, as [`process_among`]
+    /// finds it.
+    pub fn at(&self, pid: u32, step: u64) -> Option<&'a Process> {
+        let lives = self.lives.get(&pid)?;
+        life_at(lives.iter().copied(), step)
+    }
 }
 
 /// The signals a crash is made of.
@@ -1199,6 +1237,33 @@ mod tests {
         assert!(trace.process_at(5, 2).unwrap().alive_at(2));
         assert!(!trace.process_at(5, 4).unwrap().alive_at(4));
         assert_eq!(trace.process_at(9, 2), None);
+    }
+
+    #[test]
+    fn the_pid_index_finds_what_a_scan_finds() {
+        // Process 5 lives twice, from step 1 to 3 and from step 6, beside
+        // process 4 from step 2: at every step, for each pid and one the
+        // run never had, the index names the process a scan of the whole
+        // list names.
+        let (fork, exec, exit) = (fork_of, exec_of, exit_of);
+        let trace = Trace {
+            events: vec![
+                fork(1, 5),
+                fork(2, 4),
+                exec(2, 5, "first"),
+                exit(3, 5),
+                fork(6, 5),
+                exec(7, 5, "second"),
+            ],
+            ..Default::default()
+        };
+        let procs = trace.processes();
+        let index = ByPid::new(&procs);
+        for pid in [4, 5, 9] {
+            for step in 0..10 {
+                assert_eq!(index.at(pid, step), process_among(&procs, pid, step));
+            }
+        }
     }
 
     #[test]

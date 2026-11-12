@@ -9,5 +9,6 @@ pub(crate) mod inspect;
 pub(crate) mod record;
 pub(crate) mod remove;
 pub(crate) mod setup;
+pub(crate) mod time;
 pub(crate) mod transfer;
 pub(crate) mod view;

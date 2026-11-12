@@ -232,6 +232,18 @@ enum Command {
     /// window. A slice starts at its switch, the step before the task's
     /// first event. Takes a run recorded by a kernel that records switches.
     Threads(cmd::inspect::ThreadsArgs),
+    /// Where a run's time went, and what would make it finish sooner.
+    ///
+    /// Finds the job's longest chain of work: what it would still take
+    /// with as many CPUs as it has threads, since every process and thread
+    /// on the chain waited for the one before it. For each process on the
+    /// chain, each program run more than once on it, and each sleep on a
+    /// timer, prints how long it took and how long the job would still
+    /// take, at least, if it took no time. Work off the chain can get
+    /// faster without the job finishing sooner. Read from the trace, with
+    /// nothing replayed. Takes a run recorded with counter time by a
+    /// kernel that records wakes.
+    Time(cmd::time::TimeArgs),
     /// Open a run in the desktop app, at a step and beside another run.
     ///
     /// Starts rewind-app, from PATH or REWIND_APP, on the run's directory.
@@ -403,6 +415,7 @@ impl Command {
             | Command::Ls(_)
             | Command::Show(_)
             | Command::Summary(_)
+            | Command::Time(_)
             | Command::Log(_)
             | Command::Ps(_)
             | Command::Events(_)
@@ -442,6 +455,7 @@ impl Command {
             | Command::Ls(_)
             | Command::Show(_)
             | Command::Summary(_)
+            | Command::Time(_)
             | Command::Log(_)
             | Command::Ps(_)
             | Command::Events(_)
@@ -544,6 +558,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Ls(args) => cmd::view::ls(&home, args),
         Command::Show(args) => cmd::view::show(&home, args),
         Command::Summary(args) => cmd::view::summary(&home, args),
+        Command::Time(args) => cmd::time::time(&home, args),
         Command::Log(args) => cmd::view::log(&home, args),
         Command::Ps(args) => cmd::view::ps(&home, args),
         Command::Events(args) => cmd::view::events(&home, args),

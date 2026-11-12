@@ -298,6 +298,19 @@ impl Graph {
         self.prev[run]
     }
 
+    /// The step `piece` of a chain starts on: its run's first for
+    /// computing, and for a sleep the step its thread left the CPU on,
+    /// the end of the thread's run before the one the sleep came before.
+    pub fn piece_step(&self, piece: &Piece) -> u64 {
+        let run = &self.runs[piece.run];
+        match piece.kind {
+            PieceKind::Compute => run.start_step,
+            PieceKind::Sleep { .. } => self
+                .before(piece.run)
+                .map_or(run.start_step, |b| self.runs[b].end_step),
+        }
+    }
+
     /// The runs of thread `tid`, in order.
     pub fn runs_of(&self, tid: u32) -> &[usize] {
         self.by_thread.get(&tid).map_or(&[], Vec::as_slice)
@@ -618,6 +631,7 @@ impl Zero for Sleeps<'_> {
 /// programs: the pid alive at the run's start.
 pub fn lives(graph: &Graph, trace: &Trace) -> Vec<Option<Life>> {
     let procs = trace.processes();
+    let by_pid = crate::ByPid::new(&procs);
     graph
         .runs
         .iter()
@@ -625,7 +639,7 @@ pub fn lives(graph: &Graph, trace: &Trace) -> Vec<Option<Life>> {
             if r.is_idle() {
                 return None;
             }
-            crate::process_among(&procs, r.pid, r.start_step).map(|p| p.life())
+            by_pid.at(r.pid, r.start_step).map(|p| p.life())
         })
         .collect()
 }
@@ -853,5 +867,25 @@ mod tests {
         assert_eq!(g.finish(&Sleeps(&|_, _| true)), 20);
         // Its computing alone, without the sleep: 100.
         assert_eq!(g.finish(&Computing(&|_, _| true)), 100);
+    }
+
+    #[test]
+    fn a_sleep_starts_where_its_thread_fell_asleep() {
+        // One thread computes from step 0 to 10, sleeps 100 on a timer and
+        // computes from 110 to 120. The pieces start at steps 0, 10 and
+        // 110: the sleep where the thread left the CPU, not at the run it
+        // woke for.
+        let runs = vec![run(1, 0, 10, false), run(1, 110, 120, false)];
+        let starts = vec![
+            Start::Boot,
+            Start::Timer {
+                ns: 100,
+                syscall: Some(230),
+            },
+        ];
+        let g = graph(runs, starts);
+        let chain = g.chain(&Nothing);
+        let steps: Vec<u64> = chain.pieces.iter().map(|p| g.piece_step(p)).collect();
+        assert_eq!(steps, vec![0, 10, 110]);
     }
 }
