@@ -1,5 +1,6 @@
 //! The tabs over the right column: "At this step", the Runs panel, the
-//! bookmarks, the file viewer, the source panel and the threads. Each shows in the column's whole
+//! bookmarks, the file viewer, the source panel, the threads and where the
+//! run's time went. Each shows in the column's whole
 //! height when chosen, so none takes another's place or squeezes a fourth
 //! column into the window. The file, the source and the runs close back to
 //! "At this step", by their x or Escape, and the runs pill opens the runs
@@ -41,6 +42,8 @@ pub enum RightTab {
     Source,
     /// A lane per thread over a window of steps.
     Threads,
+    /// The run's longest chain of work, and what would make it sooner.
+    Time,
 }
 
 #[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
@@ -56,7 +59,8 @@ impl RightTab {
             | RightTab::Runs
             | RightTab::File
             | RightTab::FileDiff
-            | RightTab::Source => None,
+            | RightTab::Source
+            | RightTab::Time => None,
         }
     }
 
@@ -85,6 +89,7 @@ impl Scrubber {
             RightTab::FileDiff => self.file_diff_playhead_moved(cx),
             RightTab::Source => self.source_playhead_moved(cx),
             RightTab::Threads => self.lanes_playhead_moved(cx),
+            RightTab::Time => self.ensure_time(cx),
             RightTab::AtStep | RightTab::Compare | RightTab::Runs | RightTab::Bookmarks => {}
         }
         cx.notify();
@@ -98,6 +103,7 @@ impl Scrubber {
             RightTab::FileDiff => self.close_file_diff(cx),
             RightTab::Source => self.close_source(cx),
             RightTab::Threads => self.close_lanes(cx),
+            RightTab::Time => self.close_time(cx),
             RightTab::Runs => {
                 self.runs_tab = false;
                 if self.right_tab == RightTab::Runs {
@@ -141,6 +147,9 @@ impl Scrubber {
         if self.lanes.is_some() {
             tabs.push(RightTab::Threads);
         }
+        if self.time.is_some() {
+            tabs.push(RightTab::Time);
+        }
         tabs
     }
 
@@ -169,6 +178,7 @@ impl Scrubber {
                 .unwrap_or_default(),
             RightTab::Source => "Source".to_string(),
             RightTab::Threads => "Threads".to_string(),
+            RightTab::Time => "Time".to_string(),
             RightTab::Bookmarks => format!("Bookmarks \u{b7} {}", self.shown.bookmarks.len()),
         }
     }
@@ -249,6 +259,7 @@ mod tests {
             RightTab::File,
             RightTab::FileDiff,
             RightTab::Source,
+            RightTab::Time,
         ] {
             assert_eq!(tab.linked(), None, "{tab:?}");
         }

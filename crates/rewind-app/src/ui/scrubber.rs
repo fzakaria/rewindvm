@@ -47,6 +47,7 @@ use crate::ui::splits::{Drag, Measured, Splits};
 use crate::ui::step_entry::StepEntry;
 use crate::ui::tabs::RightTab;
 use crate::ui::terminal::{PaneKind, TerminalPane};
+use crate::ui::time::Place;
 use crate::ui::viewer::FileViewer;
 use crate::ui::widgets::Fonts;
 use crate::ui::{Launch, RightColumn};
@@ -421,6 +422,10 @@ pub struct Scrubber {
     pub(super) blames: crate::ui::blame::Blames,
     /// The Threads tab, while it is open.
     pub(super) lanes: Option<crate::ui::lanes::LanesPanel>,
+    /// The Time tab, while it is open.
+    pub(super) time: Option<crate::ui::time::TimePanel>,
+    /// The chains and reports of the runs the Time tab was opened on.
+    pub(super) times: crate::ui::time::Times,
     /// The latest check from a step, running or done, of the run on
     /// screen or of one shown before. Its card shows only with its run.
     pub(super) sweep: Option<crate::ui::sweep::Sweep>,
@@ -459,7 +464,7 @@ pub struct Scrubber {
 /// a field of the scrubber reset by hand in `show` was not.
 pub(super) struct Shown {
     /// The steps the playhead jumped from, for Back and Forward.
-    pub(super) history: History,
+    pub(super) history: History<Place>,
     /// What Previous and Next stop at.
     pub(super) stride: Stride,
     /// The steps the timeline is zoomed in on; None shows the whole run.
@@ -618,6 +623,8 @@ impl Scrubber {
             exporting: None,
             blames: Default::default(),
             lanes: None,
+            time: None,
+            times: Default::default(),
             sweep: None,
             here_action: crate::sweep::HereAction::Fork,
             toolbar: Rc::default(),
@@ -712,7 +719,7 @@ impl Scrubber {
         }
         self.step = start;
         let keeps = match self.right_tab {
-            RightTab::Runs | RightTab::Bookmarks | RightTab::Threads => true,
+            RightTab::Runs | RightTab::Bookmarks | RightTab::Threads | RightTab::Time => true,
             RightTab::Compare => session.other.is_some(),
             RightTab::AtStep | RightTab::File | RightTab::FileDiff | RightTab::Source => false,
         };
@@ -753,6 +760,7 @@ impl Scrubber {
             self.bring_in(file, cx);
         }
         self.lanes_session_changed();
+        self.time_session_changed(cx);
         self.reload_runs(cx);
         cx.notify();
     }
@@ -1209,6 +1217,7 @@ impl Scrubber {
         self.shown.file_diff = None;
         self.shown.source = None;
         self.lanes = None;
+        self.time = None;
         self.sweep = None;
         self.shown.search = None;
         self.shown.bookmark_editor = None;
@@ -1389,7 +1398,11 @@ impl Scrubber {
             RightTab::FileDiff => self.file_diff_playhead_moved(cx),
             RightTab::Source => self.source_playhead_moved(cx),
             RightTab::Threads => self.lanes_playhead_moved(cx),
-            RightTab::AtStep | RightTab::Compare | RightTab::Runs | RightTab::Bookmarks => {}
+            RightTab::AtStep
+            | RightTab::Compare
+            | RightTab::Runs
+            | RightTab::Bookmarks
+            | RightTab::Time => {}
         }
         cx.notify();
     }
@@ -1400,7 +1413,8 @@ impl Scrubber {
             return;
         };
         let step = step.min(session.run.timeline.total);
-        self.shown.history.jumped(self.step, step);
+        let (from, to) = (self.place_at(self.step), self.place_at(step));
+        self.shown.history.jumped(from, to);
         self.go_to(step, cx);
     }
 
@@ -1440,6 +1454,7 @@ impl Scrubber {
             tab: self.right_tab,
             picked: self.shown.picked_row.is_some(),
             terminal: self.terminal.is_some(),
+            time_inside: self.time_inside(),
         };
         match escape_closes(open) {
             Some(Closable::Menu) => {
@@ -1448,6 +1463,7 @@ impl Scrubber {
                 self.close_here_menu(cx);
             }
             Some(Closable::Blame) => self.close_blame(true, cx),
+            Some(Closable::Out) => self.time_out(cx),
             Some(Closable::Tab(tab)) => self.close_tab(tab, cx),
             Some(Closable::Pick) => self.pick_row(None, cx),
             Some(Closable::Terminal) => self.close_terminal(window, cx),
@@ -1458,16 +1474,18 @@ impl Scrubber {
 
     /// Moves the playhead back to the step it last jumped from.
     pub(super) fn go_back(&mut self, cx: &mut Context<Self>) {
-        if let Some(step) = self.shown.history.back(self.step) {
-            self.go_to(step, cx);
+        if let Some(place) = self.shown.history.back(self.place_at(self.step)) {
+            self.go_to(place.step, cx);
+            self.time_restore(place, cx);
         }
         cx.notify();
     }
 
     /// Moves the playhead forward to the step Back last left.
     pub(super) fn go_forward(&mut self, cx: &mut Context<Self>) {
-        if let Some(step) = self.shown.history.forward(self.step) {
-            self.go_to(step, cx);
+        if let Some(place) = self.shown.history.forward(self.place_at(self.step)) {
+            self.go_to(place.step, cx);
+            self.time_restore(place, cx);
         }
         cx.notify();
     }
@@ -2155,6 +2173,8 @@ struct Open {
     /// Whether a row of the process tree is picked, its card showing.
     picked: bool,
     terminal: bool,
+    /// Whether the Time tab shows a process gone into.
+    time_inside: bool,
 }
 
 /// What Escape closes.
@@ -2163,6 +2183,8 @@ enum Closable {
     Menu,
     /// The blame popover, which stops its search if it still runs.
     Blame,
+    /// One process back out, in the Time tab.
+    Out,
     Tab(RightTab),
     /// The picked row's card, which gives way to the last event's.
     Pick,
@@ -2170,8 +2192,8 @@ enum Closable {
 }
 
 /// What one press of Escape closes: the nearest thing open, from the
-/// menu over everything and the blame popover, through the file, source
-/// or runs tab on screen
+/// menu over everything and the blame popover, through the process gone
+/// into in the Time tab, the file, source or runs tab on screen
 /// and the picked process's card, to the terminal pane under the panels.
 fn escape_closes(open: Open) -> Option<Closable> {
     if open.menu {
@@ -2179,6 +2201,9 @@ fn escape_closes(open: Open) -> Option<Closable> {
     }
     if open.blame {
         return Some(Closable::Blame);
+    }
+    if open.tab == RightTab::Time && open.time_inside {
+        return Some(Closable::Out);
     }
     if open.tab != RightTab::AtStep {
         return Some(Closable::Tab(open.tab));
@@ -2334,7 +2359,7 @@ mod tests {
         // followed log, shown again: the history, zoom and picked row
         // carry over to the fresh state, and the followed log does not.
         let mut previous = Shown::fresh(Bookmarks::default());
-        previous.history.jumped(10, 500);
+        previous.history.jumped(Place::at(10), Place::at(500));
         previous.view = Some(View { lo: 100, hi: 900 });
         previous.picked_row = Some(crate::proc_card::Pick {
             pid: 7,
@@ -2355,14 +2380,16 @@ mod tests {
     fn escape_closes_the_nearest_thing_first() {
         // With everything open, Escape takes the menu first, then the
         // blame popover, then the tab on screen unless it is "At this
-        // step", then the picked process's card, then the terminal pane;
-        // with nothing open it closes nothing.
+        // step", the Time tab only once it is back out at the job, then
+        // the picked process's card, then the terminal pane; with nothing
+        // open it closes nothing.
         let all = Open {
             menu: true,
             blame: true,
             tab: RightTab::File,
             picked: true,
             terminal: true,
+            time_inside: true,
         };
         assert_eq!(escape_closes(all), Some(Closable::Menu));
         let blame = Open { menu: false, ..all };
@@ -2377,6 +2404,16 @@ mod tests {
             ..tabs
         };
         assert_eq!(escape_closes(runs), Some(Closable::Tab(RightTab::Runs)));
+        let inside = Open {
+            tab: RightTab::Time,
+            ..tabs
+        };
+        assert_eq!(escape_closes(inside), Some(Closable::Out));
+        let job = Open {
+            time_inside: false,
+            ..inside
+        };
+        assert_eq!(escape_closes(job), Some(Closable::Tab(RightTab::Time)));
         let picked = Open {
             tab: RightTab::AtStep,
             ..tabs

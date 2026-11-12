@@ -49,6 +49,8 @@ pub enum Surface {
     /// A column of the two-run file view's rows: one run's side, so a
     /// selection stays in one copy, or the one column.
     FileDiff(Column),
+    /// The Time tab's figures, flame graph and card.
+    Time,
 }
 
 /// A place in a surface's text: a line and a byte offset into it, always
@@ -599,19 +601,31 @@ impl DrawnText {
     }
 }
 
-/// The line of a surface a pointer at height `y` is on, from the lines
-/// drawn on screen as (line, top, bottom). A pointer between two lines or
-/// past the drawn ones takes the nearest, so a drag that leaves a list
-/// keeps selecting to its edge.
-pub fn nearest_line(drawn: &[(usize, f32, f32)], y: f32) -> Option<usize> {
+/// Where a line of a surface was drawn on screen.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Span {
+    pub line: usize,
+    pub left: f32,
+    pub right: f32,
+    pub top: f32,
+    pub bottom: f32,
+}
+
+/// The line of a surface a pointer at (`x`, `y`) is on, from the lines
+/// drawn on screen. A pointer between two lines or past the drawn ones
+/// takes the nearest, so a drag that leaves a list keeps selecting to its
+/// edge. Lines side by side at the pointer's height, as a flame graph
+/// draws them, go by the nearest across.
+pub fn nearest_line(drawn: &[Span], x: f32, y: f32) -> Option<usize> {
     drawn
         .iter()
         .min_by(|a, b| {
-            distance(y, a.1, a.2)
-                .total_cmp(&distance(y, b.1, b.2))
-                .then(a.0.cmp(&b.0))
+            distance(y, a.top, a.bottom)
+                .total_cmp(&distance(y, b.top, b.bottom))
+                .then(distance(x, a.left, a.right).total_cmp(&distance(x, b.left, b.right)))
+                .then(a.line.cmp(&b.line))
         })
-        .map(|&(line, _, _)| line)
+        .map(|span| span.line)
 }
 
 fn distance(y: f32, top: f32, bottom: f32) -> f32 {
@@ -867,15 +881,43 @@ mod tests {
         assert_eq!(DrawnText::new("same", "same", "\u{2026}").text_offset(2), 2);
     }
 
+    /// A line drawn from `left` to `right` and `top` to `bottom`.
+    fn span(line: usize, left: f32, right: f32, top: f32, bottom: f32) -> Span {
+        Span {
+            line,
+            left,
+            right,
+            top,
+            bottom,
+        }
+    }
+
     #[test]
     fn a_pointer_takes_the_nearest_drawn_line() {
         // Rows 22 pixels tall from y 100; above the first and below the
         // last row the edge rows are taken.
-        let drawn = [(7, 100.0, 122.0), (8, 122.0, 144.0), (9, 144.0, 166.0)];
-        assert_eq!(nearest_line(&drawn, 130.0), Some(8));
-        assert_eq!(nearest_line(&drawn, 20.0), Some(7));
-        assert_eq!(nearest_line(&drawn, 900.0), Some(9));
-        assert_eq!(nearest_line(&[], 1.0), None);
+        let row = |line, top| span(line, 0.0, 300.0, top, top + 22.0);
+        let drawn = [row(7, 100.0), row(8, 122.0), row(9, 144.0)];
+        assert_eq!(nearest_line(&drawn, 10.0, 130.0), Some(8));
+        assert_eq!(nearest_line(&drawn, 10.0, 20.0), Some(7));
+        assert_eq!(nearest_line(&drawn, 10.0, 900.0), Some(9));
+        assert_eq!(nearest_line(&[], 10.0, 1.0), None);
+    }
+
+    #[test]
+    fn lines_side_by_side_go_by_the_pointer_across() {
+        // Two frames of a flame graph on one row, 0-100 and 100-300, and
+        // a frame under them: a pointer on the row takes the frame it is
+        // over, and past the row's end the nearer one.
+        let drawn = [
+            span(1, 0.0, 100.0, 0.0, 18.0),
+            span(2, 100.0, 300.0, 0.0, 18.0),
+            span(3, 0.0, 300.0, 19.0, 37.0),
+        ];
+        assert_eq!(nearest_line(&drawn, 50.0, 9.0), Some(1));
+        assert_eq!(nearest_line(&drawn, 150.0, 9.0), Some(2));
+        assert_eq!(nearest_line(&drawn, 400.0, 9.0), Some(2));
+        assert_eq!(nearest_line(&drawn, 150.0, 30.0), Some(3));
     }
 
     #[test]

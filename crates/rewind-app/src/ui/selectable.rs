@@ -21,7 +21,9 @@ use gpui::{
 use crate::describe::short_store_paths_mapped;
 use crate::diff_view::ColumnLines;
 use crate::family::{Folds, RowKind};
-use crate::selection::{DrawnText, Lines, Mapped, Pos, Selection, Surface, Unit, nearest_line};
+use crate::selection::{
+    DrawnText, Lines, Mapped, Pos, Selection, Span, Surface, Unit, nearest_line,
+};
 use crate::theme::{self, size};
 use crate::ui::scrubber::Scrubber;
 use crate::viewer::{TabbedLines, expand_tabs};
@@ -61,18 +63,18 @@ impl Registry {
     /// the character boundary nearest the pointer along it.
     pub fn hit(&self, surface: Surface, at: Point<Pixels>) -> Option<Pos> {
         let drawn = self.0.borrow();
-        let spans: Vec<(usize, f32, f32)> = drawn
+        let spans: Vec<Span> = drawn
             .iter()
             .filter(|d| d.surface == surface)
-            .map(|d| {
-                (
-                    d.line,
-                    f32::from(d.bounds.top()),
-                    f32::from(d.bounds.bottom()),
-                )
+            .map(|d| Span {
+                line: d.line,
+                left: f32::from(d.bounds.left()),
+                right: f32::from(d.bounds.right()),
+                top: f32::from(d.bounds.top()),
+                bottom: f32::from(d.bounds.bottom()),
             })
             .collect();
-        let line = nearest_line(&spans, f32::from(at.y))?;
+        let line = nearest_line(&spans, f32::from(at.x), f32::from(at.y))?;
         let entry = drawn
             .iter()
             .find(|d| d.surface == surface && d.line == line)?;
@@ -491,6 +493,7 @@ impl Scrubber {
             Surface::Compare => self.compare_lines(),
             Surface::Lanes => self.lanes_lines(),
             Surface::Variables => self.variables_lines(),
+            Surface::Time => self.time_lines(),
             Surface::Log
             | Surface::Viewer
             | Surface::Source

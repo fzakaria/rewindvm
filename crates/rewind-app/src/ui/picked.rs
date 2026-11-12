@@ -72,6 +72,12 @@ impl Scrubber {
         if after == before {
             return;
         }
+
+        // While the Time tab shows, a process on the path is picked in its
+        // graph and the tab stays; any other row shows its card.
+        if click == RowClick::Plain && self.time_takes(row, cx) {
+            return;
+        }
         self.pick_row(after.picked, cx);
     }
 

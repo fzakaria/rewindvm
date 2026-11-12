@@ -35,6 +35,7 @@ mod sweep;
 mod tabs;
 #[cfg_attr(target_family = "wasm", path = "terminal_web.rs")]
 mod terminal;
+mod time;
 mod toolbar;
 mod tour;
 mod viewer;
@@ -86,6 +87,7 @@ actions!(
         ForkHere,
         ToggleSource,
         ToggleThreads,
+        ToggleTime,
         OpenRun,
         EnterLicense,
         PasteLicense,
@@ -315,6 +317,7 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-/", ShowShortcuts, Some(SHORTCUTS_CONTEXT)),
         KeyBinding::new("s", ToggleSource, context),
         KeyBinding::new("t", ToggleThreads, context),
+        KeyBinding::new("w", ToggleTime, context),
         KeyBinding::new("ctrl-c", CopySelection, context),
         KeyBinding::new("ctrl-a", SelectAll, context),
         KeyBinding::new("ctrl-c", CopySelection, Some(LICENSE_CONTEXT)),

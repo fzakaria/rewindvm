@@ -307,6 +307,9 @@ pub mod layout {
     /// other two panels.
     pub const LOG_FLEX: f32 = 1.5;
     pub const SIDE_FLEX: f32 = 1.0;
+    /// The Time tab's share against 1 for each side column: its flame
+    /// graph needs the width more than the log does while it shows.
+    pub const TIME_FLEX: f32 = 3.0;
     /// A phase needs at least this share of the run to carry its label.
     pub const LABEL_MIN_SHARE: f32 = 0.05;
     /// About this many tick marks along the timeline.

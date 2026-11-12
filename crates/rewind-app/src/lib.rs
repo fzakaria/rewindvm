@@ -3,7 +3,8 @@
 //! The model (`model`, `describe`, `run`) turns a trace into tables the UI
 //! reads per frame; `ui` draws them with GPUI; `engine` runs the engine's
 //! commands for the actions that need the machine itself, whose answers
-//! `viewer` and `source` lay out, and `syntax` highlights; `terminal` runs
+//! `viewer` and `source` lay out, and `syntax` highlights; `time` lays out
+//! the Time tab's report of where the run's time went; `terminal` runs
 //! the shell and gdb in a pty; `selection` is the text selection over every
 //! text surface; `request` numbers background work so a late answer is
 //! told apart, and `jobs` runs the engine's calls, which wait on a child
@@ -49,6 +50,7 @@ pub mod syntax;
 #[cfg(not(target_family = "wasm"))]
 pub mod terminal;
 pub mod theme;
+pub mod time;
 pub mod tour;
 pub mod ui;
 pub mod view;

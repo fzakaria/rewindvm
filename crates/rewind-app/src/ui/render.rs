@@ -40,7 +40,8 @@ use crate::ui::{
     AddBookmark, CloseNearest, CopySelection, EnterLicense, ForkHere, GoBack, GoForward, GoToEnd,
     GoToStart, GoToStep, JumpToDivergence, JumpToFailure, KEY_CONTEXT, NextEvent, NextPhase,
     OpenRun, OpenSearch, PreviousEvent, PreviousPhase, SelectAll, ShowOtherRun, ShowShortcuts,
-    StartTour, StepBack, StepForward, ToggleSource, ToggleThreads, ZoomIn, ZoomOut, ZoomReset,
+    StartTour, StepBack, StepForward, ToggleSource, ToggleThreads, ToggleTime, ZoomIn, ZoomOut,
+    ZoomReset,
 };
 
 /// Header labels are cut to this many characters.
@@ -114,6 +115,7 @@ impl Render for Scrubber {
             .on_action(cx.listener(|this, _: &ForkHere, _, cx| this.fork_here(cx)))
             .on_action(cx.listener(|this, _: &ToggleSource, _, cx| this.toggle_source(cx)))
             .on_action(cx.listener(|this, _: &ToggleThreads, _, cx| this.toggle_lanes(cx)))
+            .on_action(cx.listener(|this, _: &ToggleTime, _, cx| this.toggle_time(cx)))
             .on_action(cx.listener(|this, _: &OpenRun, _, cx| this.prompt_open(cx)))
             .on_action(cx.listener(|this, _: &EnterLicense, window, cx| {
                 this.open_license_dialog(window, cx)
@@ -218,12 +220,19 @@ impl Scrubber {
             RightTab::FileDiff => self.render_file_diff(cx),
             RightTab::Source => self.render_source(cx),
             RightTab::Threads => self.render_lanes(cx),
+            RightTab::Time => {
+                let height = f32::from(window.viewport_size().height);
+                self.render_time(crate::ui::time::TimeLayout::for_height(height), cx)
+            }
             RightTab::Runs => self.runs.family.as_ref().map(|f| self.render_runs(f, cx)),
             RightTab::Bookmarks => Some(self.render_bookmarks_panel(cx)),
             RightTab::Compare => Some(self.render_compare(cx)),
             RightTab::AtStep => None,
         };
         let (panel, right_flex) = match chosen {
+            Some(panel) if self.right_tab == RightTab::Time => {
+                (panel, splits.right * layout::TIME_FLEX / layout::SIDE_FLEX)
+            }
             Some(panel) => (panel, wide),
             None => (self.render_at_step(cx), splits.right),
         };
@@ -1809,7 +1818,17 @@ impl Scrubber {
                             .tooltip(tooltip(THREADS_NOTE))
                             .on_click(cx.listener(|this, _, _, cx| this.toggle_lanes(cx))),
                     )
-                    .children(self.render_copy_link(&inspect, cx)),
+                    .child(
+                        inspect("time", "Show time".into(), Availability::Enabled)
+                            .tooltip(tooltip(TIME_NOTE))
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_time(cx))),
+                    ),
+            )
+            // The browser viewer's Copy link, on a row of its own so no row
+            // holds more than two buttons.
+            .children(
+                self.render_copy_link(&inspect, cx)
+                    .map(|copy| div().flex().gap(px(size::CARD_GAP)).child(copy)),
             );
         // The buttons stay at the foot of the column however long the
         // cards above them grow, which scroll instead.
@@ -2060,7 +2079,7 @@ impl Scrubber {
 
 #[cfg(not(target_family = "wasm"))]
 impl Scrubber {
-    /// The desktop app has no link to copy: nothing beside Show threads.
+    /// The desktop app has no link to copy: no Copy link row.
     fn render_copy_link(
         &self,
         _inspect: &dyn Fn(&'static str, String, Availability) -> gpui::Stateful<Div>,
@@ -2072,7 +2091,7 @@ impl Scrubber {
 
 #[cfg(target_family = "wasm")]
 impl Scrubber {
-    /// The browser viewer's Copy link button, beside Show threads, made
+    /// The browser viewer's Copy link button, on a row of its own, made
     /// with `inspect` as the other Inspect buttons are. It can be pressed
     /// while there is a link to what is on screen: not for a run opened
     /// from a file.
@@ -2529,6 +2548,7 @@ const FORK_NOTE: &str = "Fork from here: runs this run again from the playhead u
 const FORWARD_NOTE: &str =
     "Forward again, after Back. Key: Alt+Right, or the mouse's forward button.";
 const EXPORT_NOTE: &str = "Writes this run to one .rwd file, with the keyframes and inputs another machine needs to open, replay and fork it.";
+const TIME_NOTE: &str = "Where the run's time went: its longest chain of work, which no number of CPUs makes shorter, and what would make the job finish sooner, as rewind time says it. Key: w.";
 const THREADS_NOTE: &str = "A lane per thread over a window of steps, a bar where the thread held the CPU, beside the compared run's. The lanes are read from the context switches each run recorded. Key: t.";
 
 /// The amber button's note when it checks from here.
@@ -2788,7 +2808,7 @@ pub(super) fn card_title(color: u32) -> Div {
 }
 
 /// A highlight that only colors text.
-fn color_only(color: u32) -> HighlightStyle {
+pub(super) fn color_only(color: u32) -> HighlightStyle {
     HighlightStyle {
         color: Some(rgb(color).into()),
         ..Default::default()

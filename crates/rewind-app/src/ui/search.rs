@@ -131,7 +131,8 @@ impl Scrubber {
         let Some(search) = self.shown.search.take() else {
             return;
         };
-        self.shown.history.jumped(search.origin, self.step);
+        let (from, to) = (self.place_at(search.origin), self.place_at(self.step));
+        self.shown.history.jumped(from, to);
         window.focus(&self.focus, cx);
         cx.notify();
     }
