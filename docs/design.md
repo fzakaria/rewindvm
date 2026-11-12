@@ -677,7 +677,9 @@ shared page, and the monitor runs a kernel of its own version only. Version
 4 added these records, version 5 the record at every context switch (see
 [Exploring interleavings](#exploring-interleavings)), and version 6
 changed what the records say: a file event names the path the kernel
-resolved, a crash is reported once, and RDTSC traps in every task. A run
+resolved, a crash is reported once, and RDTSC traps in every task.
+Version 7 added the thread a switch takes the CPU from and a record for
+every wakeup (see [Where the time went](#where-the-time-went)). A run
 recorded with an older kernel is recorded again.
 
 ### The CPU model
@@ -1602,6 +1604,17 @@ table is consulted, never copied, per switch: a copy per switch cost a
 hello build under four schedules at once 17 times its wall time in the
 static release, where every allocation takes musl's one malloc lock.
 
+Since interface 7 a switch record also names the task that left the CPU,
+whether it was still runnable, and the system call it was in, and the
+guest writes a wake record from the `sched_waking` tracepoint into the
+read and write buffer for every wakeup: the task woken, and the task that
+woke it or the interrupt it came from. The monitor stamps each switch with
+the virtual time its step left and moves the wakes into the switch
+batches, format 2, each with its time. Together they say who waited for
+whom, which is what [Where the time went](#where-the-time-went) reads.
+They made the traces of five Nix builds 6 to 8% larger, and libuv's, whose
+test suite wakes thousands of timers, 18%.
+
 Before interface 5, switches were not recorded, and `rewind threads`
 replayed the window one step at a time, reading `current_task` from guest
 memory at each exit. That saw a switch only when an exit followed it, and
@@ -1635,6 +1648,39 @@ Three earlier designs did not work, and why is worth keeping.
   nearly every step turns out to be needed. The window's last step already
   gives two runs that differ by one perturbation, at no cost.
 
+## Where the time went
+
+`rewind time` and the app's Time tab read where a run's time went from its
+trace, with nothing replayed (`rewind_trace::critical` and
+`rewind_trace::time_report`). Each thread's time on the one vCPU is cut
+into runs at its switches, and each run starts for one reason: the thread
+was ready and waited for the CPU, a timer it slept on fired, another
+thread woke it, or it was forked. The critical path is the longest chain
+of runs and the waits between them from the job's start to its end,
+following each start back to what it waited for, with a CPU for every
+thread, so a wait for the CPU alone costs nothing on it. No number of
+CPUs runs the job in less. A sleep is on the path only if the job waited
+for it, so the threads sleeping at any moment that nothing waits for, most
+of them, never show up.
+
+How much sooner the run would finish without a part, a process, every
+process of one program, or one process's sleeps in one call, is worked out
+by giving that part's runs or timer sleeps no time and finding the longest
+chain again. That is less than the part's time on the path whenever other
+work ran beside it, since the next longest chain takes over: libuv's
+compile of `test-fs.c` holds 2.10 s of the path but is worth 1.76 s,
+because make's next compile also waited for two others. The graph keeps
+each thread's runs in the order they were recorded, so a what-if does not
+move work that a faster part would have let start earlier.
+
+The times are on the run's clock, which with counter time
+([pmu.md](pmu.md)) advances with the branches the guest's programs retire
+and the timers they sleep on. Work in the kernel, such as starting a
+process, costs almost nothing on it. A run on exit time, where computing
+takes no time at all, has no report. `--folded` writes the path as
+Brendan Gregg's folded stacks and `--perfetto` writes every process's
+switches and wakes as a Perfetto trace.
+
 ## Limits
 
 - **CPU-bound threads are not preempted.** A thread gives up the CPU only at
@@ -1661,6 +1707,12 @@ Three earlier designs did not work, and why is worth keeping.
 - **One vCPU.** Threads interleave but never run at the same instant, even
   with `--cores` reporting more CPUs. Throughput comes from running many
   machines at once: `check` runs one per core.
+- **Where the time went is on the VM's clock.** `rewind time` counts the
+  branches programs retire and the timers they sleep on, not the host's
+  wall time, so starting a process is nearly free and a lock is never
+  contended without preemption. It says which work the run waited on and
+  what taking it away saves, not how long the job takes on a particular
+  machine.
 - **The CPU vendor is part of the input.** The fixed CPU model keeps the
   host's vendor, since Intel and AMD differ in ways CPUID cannot hide, so a
   run made on AMD replays on any AMD host from Zen 2 on but not on Intel,

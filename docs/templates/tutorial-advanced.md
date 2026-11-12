@@ -389,6 +389,42 @@ Go programs see the extra CPUs too, and Go's garbage collector can then
 spin waiting for a thread that never runs. Run them with `GOGC=off` if they
 fit in the VM's memory.
 
+## See where the time went
+
+`rewind time` reads where a run's time went from its trace. The first
+number is how long the run took on the VM's one CPU. The second is its
+critical path: the longest chain of work in which each part waited for the
+one before, which is the least the run can take on any number of CPUs.
+
+```console run name=time show=:4,-17:-5
+$ rewind time {{cores_run|short}}
+```
+
+<!-- capture took: (\S+ m?s)  elapsed -->
+<!-- capture chain: (\S+ m?s)  critical path -->
+<!-- assert: grep -q 'critical path: the least it can take on any number of CPUs' {{out:time}} -->
+<!-- assert: grep -q '^What would shorten it' {{out:time}} -->
+
+The build took {{took}} and its critical path is {{chain}}: more CPUs could
+save at most the difference, since mylib's Makefile is run without `-j`
+and make compiles one file at a time. Each
+row under "What would shorten it" is how much sooner the run would finish
+if that part took no time, worked out by taking it out of the recorded
+chain and finding the longest chain again. `--in PID` shows one process
+the same way, with the `rewind where` command for the source line its time
+starts at. `--folded` writes the path as folded stacks for flamegraph.pl
+or speedscope, and `--perfetto F` writes every process on a timeline for
+ui.perfetto.dev.
+
+In the app, the Time tab, or w, shows the same with the path as a flame
+graph, computing warm and asleep blue. Clicking a frame moves the playhead
+to it; a sleep or a stretch of computing shows its source line, with the
+source panel and gdb a click away.
+
+<!-- screenshot site/img/app-time: {{home}}/runs/{{cores_run}} ;; key w ;; wait 6 -->
+
+![The app's Time tab on the four-CPU build of mylib: the elapsed time and the critical path, the path as a bar and as a flame graph of processes, and what would make it finish sooner](../site/img/app-time.png)
+
 ## Steer the perturbation
 
 <!-- set fork_from: d={{work}}/fork-search; rm -rf $d; mkdir -p $d; for x in runs store cache; do cp -a {{home}}/$x $d/; done; ln -s {{home}}/images $d/images; for back in 100 80 60 40 30 20 10; do s=$(( {{crash_step}} - back )); mixed=$(for k in 1 2 3 4; do REWIND_HOME=$d rewind fork {{failing}} $s --schedule $k --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])'; done | python3 -c 'import sys; s=[int(l) != 0 for l in sys.stdin]; print(int(any(s) and not all(s)))'); if [ "$mixed" = 1 ]; then echo $s; break; fi; done; rm -rf $d -->

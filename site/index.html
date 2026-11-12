@@ -369,6 +369,15 @@
             <button
               type="button"
               role="tab"
+              id="tab-time"
+              aria-controls="show-time"
+              aria-selected="false"
+            >
+              <span class="shots-name">Time</span>
+            </button>
+            <button
+              type="button"
+              role="tab"
               id="tab-kernel"
               aria-controls="show-kernel"
               aria-selected="false"
@@ -639,6 +648,30 @@
 
             <div
               class="shots-panel zoomed"
+              id="show-time"
+              role="tabpanel"
+              aria-labelledby="tab-time"
+              hidden
+            >
+              <div class="tour-frame">
+                <a class="tour-link" href="img/app-time.png">
+                  <picture>
+                    <source srcset="img/app-time.webp" type="image/webp" />
+                    <img
+                      src="img/app-time.png"
+                      width="1440"
+                      height="900"
+                      loading="lazy"
+                      alt="The app's Time tab: the build's elapsed time and critical path, the path as a flame graph of processes, and what would make it finish sooner. Opens the full-size image."
+                    />
+                  </picture>
+                </a>
+              </div>
+              <p>Where the build's time went, and what would make it finish sooner.</p>
+            </div>
+
+            <div
+              class="shots-panel zoomed"
               id="show-kernel"
               role="tabpanel"
               aria-labelledby="tab-kernel"
@@ -841,8 +874,8 @@
             <h3>Advanced features</h3>
             <p>
               Short recipes: which thread held the CPU, watchpoints, the kernel's side of a crash,
-              tools inside the VM, more CPUs, counting the schedules that fail from a step, and
-              sharing a failing run.
+              tools inside the VM, more CPUs, where the time went, counting the schedules that fail
+              from a step, and sharing a failing run.
             </p>
             <span class="card-link">Read the tutorial &rarr;</span>
           </a>

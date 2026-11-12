@@ -190,6 +190,11 @@ $ rewind where <run> <step> --tid <tid> --json
 # which thread held the CPU at each step of a window, from the run's context switches
 $ rewind threads <run> --from <step> --to <step>
 
+# where a run's time went: its critical path, the least it can take on any
+# number of CPUs, and what would make it finish sooner; --in for one process
+$ rewind time <run>
+$ rewind time <run> --in <pid>
+
 # branch a run at a step under another schedule or seed, or replay it exactly
 $ rewind fork <run> <step> --schedule 2
 $ rewind fork <run> <step> --seed 7
