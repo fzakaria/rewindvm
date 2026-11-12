@@ -206,31 +206,30 @@ $ rewind check --where --epoch {{epoch}} {{flake}} 2>/dev/null | sed -n '/^where
 ```
 
 <!-- capture held_tid: \d+/(\d+) +worker \(src/pool.c:75\), on the CPU at the deciding step -->
-<!-- capture diff_step: (\d+) +\d+/\d+ +start_thread \([^)]*\), at the first event that differs -->
-<!-- capture diff_tid: \d+/(\d+) +start_thread \([^)]*\), at the first event that differs -->
+<!-- capture diff_step: (\d+) +\d+/\d+ +worker \(src/pool.c:75\), at the first event that differs -->
+<!-- capture diff_tid: \d+/(\d+) +worker \(src/pool.c:75\), at the first event that differs -->
 <!-- assert: test {{held_tid}} = {{crash_tid}} && test {{diff_tid}} != {{crash_tid}} && test {{diff_step}} -lt {{crash_step}} -->
-<!-- assert: rewind events {{failing}} --from {{diff_step}} --to {{diff_step}} | grep -qE '{{pid}}/{{diff_tid}} +thread exit\(test_pool_shutd\) exited:0' -->
-<!-- assert: test {{blame_step}} -gt {{deciding}} && test {{blame_step}} -lt {{diff_step}} -->
+<!-- assert: rewind events {{failing}} --from {{diff_step}} --to {{diff_step}} | grep -qE '{{pid}}/{{diff_tid}} +write\(1, "job [0-9]+ done' -->
+<!-- assert: test {{blame_step}} -gt {{diff_step}} && test {{blame_step}} -lt {{crash_step}} -->
 <!-- assert: grep -qE "^  thread {{diff_tid}}  pool.c:45  run_job" {{out:blame}} -->
-<!-- set other_job: rewind events {{failing}} --to {{diff_step}} | grep -oE '{{pid}}/{{diff_tid}} +write\(1, "worker picked job [0-9]+' | tail -1 | grep -oE '[0-9]+$' -->
+<!-- set diff_job: rewind events {{failing}} --from {{diff_step}} --to {{diff_step}} | grep -oE 'job [0-9]+ done' | grep -oE '[0-9]+' -->
+<!-- set other_job: rewind events {{failing}} --from {{diff_step}} --to {{crash_step}} | grep -oE '{{pid}}/{{diff_tid}} +write\(1, "worker picked job [0-9]+' | head -1 | grep -oE '[0-9]+$' -->
 <!-- set next_pick: rewind events {{passing}} --from {{deciding}} | grep -m1 -E '{{pid}}/{{crash_tid}} +write\(1, "worker picked job' | awk '{print $1}' -->
 <!-- set next_job: rewind events {{passing}} --from {{next_pick}} --to {{next_pick}} | grep -oE 'worker picked job [0-9]+' | grep -oE '[0-9]+$' -->
-<!-- set passing_exit: rewind events {{passing}} --from {{deciding}} | grep -m1 -E '{{pid}}/{{diff_tid}} +thread exit' | awk '{print $1}' -->
-<!-- assert: test -n "{{other_job}}" && test -n "{{next_job}}" && test {{next_pick}} -lt {{passing_exit}} -->
+<!-- assert: test -n "{{diff_job}}" && test -n "{{other_job}}" && test "{{other_job}}" = "{{next_job}}" -->
 <!-- set late_gap: echo $(( {{crash_step}} - {{diff_step}} )) -->
 
 The first event that differs is the other worker, thread {{diff_tid}},
-exiting: it is in `start_thread`, glibc's code around a thread's function, on
-its way out. With thread {{crash_tid}} held at the deciding step, the main
-thread shuts the pool down, nulling the queue at step {{blame_step}}. The
-other worker was in job
-{{other_job}}'s wait then, as blame showed; it finds the pool stopping, skips
-the count, and returns. In the passing run thread {{crash_tid}} counts job
-{{crash_job}} and picks job {{next_job}} before the shutdown, and the other
-worker exits after that, at step {{passing_exit}}. That is the cause showing
-up before the symptom: the held thread's fault at line 77, which `rewind
-where` showed at the top of this page, comes {{late_gap}} steps later, at step
-{{crash_step}}.
+reporting job {{diff_job}} on the same line, 75. With thread {{crash_tid}}
+held at the deciding step before it counts job {{crash_job}}, thread
+{{diff_tid}} counts its own job and picks job {{other_job}}, the one thread
+{{crash_tid}} picks in the passing run. The main thread then shuts the pool
+down, nulling the queue at step {{blame_step}} while thread {{diff_tid}} runs
+job {{other_job}}, as blame showed. In the passing run thread {{crash_tid}}
+counts job {{crash_job}} and picks job {{next_job}} first, at step
+{{next_pick}}. That is the cause showing up before the symptom: the held
+thread's fault at line 77, which `rewind where` showed at the top of this
+page, comes {{late_gap}} steps later, at step {{crash_step}}.
 
 In the app, the deciding step is a dashed blue mark on the timeline, before
 the solid one where the runs' events first differ. Zoomed in around the crash:
@@ -521,7 +520,7 @@ comes back:
 
 <!-- screenshot site/img/app-compare-tab: {{home}}/runs/{{failing}} --compare {{home}}/runs/{{passing}} ;; key d ;; click 1153 242 ;; wait 2 -->
 
-![The app's Compare tab: the writes both runs made before they part, then the other worker's exit in the failing run beside the passing run's write, and the failing run's SIGSEGV a few events below, each run's text in full with what differs in amber](../site/img/app-compare-tab.png)
+![The app's Compare tab: the writes both runs made before they part, then the other worker's report of its job in the failing run beside the passing run's pick of the next one, and the failing run's SIGSEGV a few events below, each run's text in full with what differs in amber](../site/img/app-compare-tab.png)
 
 ## Script it
 

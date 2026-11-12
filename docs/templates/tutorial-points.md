@@ -70,47 +70,54 @@ $ rewind check --epoch {{epoch}} .#counter | grep -E 'decides it|passing:|failin
 <!-- assert: grep -qE 'failing run violates sdk: step [0-9]+: always "hits-add-up" failed: 1?[0-9] hits, expected 20' {{out:found}} -->
 
 <!-- set from: echo $(( {{deciding}} - 2 )) -->
-<!-- set to: echo $(( {{deciding}} + 2 )) -->
+<!-- set to: echo $(( {{deciding}} + 15 )) -->
 
 The run violates `same-outcome` too, since the job's build fails where
-schedule 0's passed. Step {{deciding}} is a point: one thread has read the
-count and not stored it, and the switch there lets the other thread count
-every hit it has before the store lands. `rewind threads` shows which
-thread held the CPU around the point, in the failing run and in the
-passing one it was forked from:
+schedule 0's passed. `rewind threads` shows which thread held the CPU from
+just before the deciding step, in the failing run and in the passing one it
+was forked from:
 
 ```console run name=threads
 $ rewind threads {{failing|short}} --from {{from}} --to {{to}}
 ```
 
-<!-- set other_thread: tail -1 {{out:threads}} | awk '{print $3}' -->
-<!-- set switch_step: tail -1 {{out:threads}} | awk '{print $1}' -->
-<!-- assert: test "$(wc -l < {{out:threads}})" -ge 2 -->
+<!-- set cut_thread: sed -n 2p {{out:threads}} | awk '{print $3}' -->
+<!-- set cut_step: sed -n 2p {{out:threads}} | awk '{print $1}' -->
+<!-- set other_thread: awk -v cut={{cut_thread}} -v main=$(sed -n 1p {{out:threads}} | awk '{print $3}') '$3 != cut && $3 != main && $4 == "counter" {print $3; exit}' {{out:threads}} -->
+<!-- set switch_step: awk -v t={{other_thread}} '$3 == t {print $1; exit}' {{out:threads}} -->
+<!-- assert: sed -n 2p {{out:threads}} | awk '{exit !($1 == $2)}' -->
+<!-- assert: test -n "{{other_thread}}" && test {{switch_step}} -gt {{cut_step}} -->
+<!-- assert: rewind events {{failing}} | grep -E 'thread exit\(counter\)' | head -1 | grep -q ' {{other_thread}} ' -->
 
 ```console run name=threads_passing
 $ rewind threads {{passing|short}} --from {{from}} --to {{to}}
 ```
 
-<!-- assert: test "$(wc -l < {{out:threads_passing}})" -eq 1 -->
+<!-- assert: sed -n 2p {{out:threads_passing}} | awk -v t={{cut_thread}} '{exit !($3 == t && $2 > $1)}' -->
+<!-- assert: rewind events {{passing}} | grep -E 'thread exit\(counter\)' | head -1 | grep -q ' {{cut_thread}} ' -->
 
-Thread {{other_thread}} takes the CPU at step {{switch_step}} of the
-failing run, and not in the passing one. Open the failing run beside the
-passing one, at the point, with the thread lanes shown and zoomed in on
-the window around it:
+In the passing run thread {{cut_thread}} takes the CPU at step {{cut_step}}
+and keeps it until it has counted its hits and exits. In the failing run the
+switch at step {{deciding}} gives it one step, to its first point: it has
+read the count and not stored it. Thread {{other_thread}} then takes the CPU
+at step {{switch_step}} and counts every one of its hits, and when thread
+{{cut_thread}} gets the CPU back it stores the count it read, over all of
+them. Open the failing run beside the passing one, at the point, with the
+thread lanes shown and zoomed in on the window around it:
 
 ```console
 $ rewind open {{failing|short}} {{deciding}} --compare {{passing|short}}
 ```
 
-<!-- screenshot site/img/app-point: {{home}}/runs/{{failing}} --compare {{home}}/runs/{{passing}} --step {{deciding}} ;; key plus ;; key plus ;; key plus ;; key plus ;; key plus ;; key plus ;; key plus ;; key plus ;; click 1236 860 ;; click 1058 338 ;; click 1371 338 ;; wait 2 -->
+<!-- screenshot site/img/app-point: {{home}}/runs/{{failing}} --compare {{home}}/runs/{{passing}} --step {{deciding}} ;; key plus ;; key plus ;; key plus ;; key plus ;; key plus ;; key plus ;; key plus ;; key plus ;; key t ;; wait 2 ;; click 1060 327 ;; click 1372 327 ;; wait 2 -->
 
-![The app at step {{deciding}} of the failing counter run, compared with the passing one, with the Threads panel open: a lane per thread, the playhead at the point, and the other counter thread on the CPU from step {{switch_step}}](../site/img/app-point.png)
+![The app at step {{deciding}} of the failing counter run, compared with the passing one, with the Threads panel open: a lane per thread, the playhead at the deciding step, thread {{cut_thread}} on the CPU for one step and the other counter thread from step {{switch_step}}](../site/img/app-point.png)
 
 The Threads panel has a lane per thread, with the stretches each held the
 CPU: the failing run's above, the passing run's in blue under them. In the
-failing run, the other `counter` thread's lane starts right after the
-playhead and runs until its hits are counted; in the passing run, the first
-thread keeps the CPU through the window.
+failing run, thread {{cut_thread}}'s lane stops after one step and the other
+`counter` thread's lane runs until its hits are counted; in the passing run,
+thread {{cut_thread}} keeps the CPU until it is done.
 
 ## Check the fix
 
