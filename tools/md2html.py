@@ -111,7 +111,7 @@ DEVENV_FIGURE = """<div class="tour tour-article">
             width="1440"
             height="900"
             loading="lazy"
-            alt="The Rewind desktop app on the failing devenv run at step 1,671, compared with the passing run afe1eafc: the build log stops at running 1 test, SIGCHLD has reached thread 41, and the runs are the same until step 1,668. Opens the full-size image."
+            alt="The Rewind desktop app on the failing devenv run at step 1,671, compared with the passing run fe6ae6b0: the build log stops at running 1 test, SIGCHLD has reached thread 41, and the runs are the same until step 1,668. Opens the full-size image."
           />
         </picture>
       </a>
@@ -121,7 +121,7 @@ DEVENV_FIGURE = """<div class="tour tour-article">
       <button type="button" class="pin pin-4" style="left: 97.2%; top: 44.6%" aria-label="4: where the runs part">4</button>
     </div>
     <figcaption>
-      The app on the failing run 9e2b0a09 at step 1,671, compared with the passing run afe1eafc.
+      The app on the failing run 67f04961 at step 1,671, compared with the passing run fe6ae6b0.
     </figcaption>
   </figure>
   <ol class="tour-cards">

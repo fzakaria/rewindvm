@@ -190,10 +190,10 @@ assertion `left == right` failed
   left: ["line1", "line2"]
  right: ["line1", "line2", "line3"]
 ...
-<span class="ansi-dim">rewind:</span> run 20a2be3f118191eb <span class="ansi-red">exited:101</span> after 1600 steps, 0.036s virtual, 0.279s wall (poweroff)</code></pre>
+<span class="ansi-dim">rewind:</span> run 230ba7e931ea8ec4 <span class="ansi-red">exited:101</span> after 1600 steps, 0.036s virtual, 0.205s wall (poweroff)</code></pre>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind replay 20a2be3f</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind replay 230ba7e9</span>
 <span class="ansi-green">identical</span> to the recording: 762 events, 491 context switches and 145 read and write records over 1600 steps, and the whole machine at its 2 keyframes</code></pre>
         <p>The task printed three lines and devenv kept two, as in the issue.</p>
       </section>
@@ -205,20 +205,20 @@ assertion `left == right` failed
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind check <span class="option">--epoch</span> <span class="number">1791936000</span> <span class="option">--seed</span> <span class="number">13</span> <span class="option">--all</span> <span class="option">--schedules</span> <span class="number">256</span> <span class="string">'github:fzakaria/rewindvm?dir=examples/case-studies#devenv-last-lines-before-2296'</span></span>
-schedule   0: <span class="ansi-red">exited:101</span>           1600 steps    run 20a2be3f118191eb
-schedule   1: <span class="ansi-red">exited:101</span>           1751 steps    run 89bd2038ded573a3
-schedule   2: <span class="ansi-red">exited:101</span>           1713 steps    run f2e848c47966ad36
-schedule   3: <span class="ansi-red">exited:101</span>           1761 steps    run c6d34680e29755b8
+schedule   0: <span class="ansi-red">exited:101</span>           1600 steps    run 230ba7e931ea8ec4
+schedule   1: <span class="ansi-red">exited:101</span>           1751 steps    run 6c2f93943964d948
+schedule   2: <span class="ansi-red">exited:101</span>           1713 steps    run 146f201a539da99b
+schedule   3: <span class="ansi-red">exited:101</span>           1767 steps    run 66afd840e890cee8
 ...
-schedule 256: <span class="ansi-red">exited:101</span>           1739 steps    run 990c8554f8789c4e
-<span class="ansi-red">schedule 0 failed; 34 of 256 other schedules ended differently</span>
+schedule 256: <span class="ansi-red">exited:101</span>           1739 steps    run e166dd14f3e4745c
+<span class="ansi-red">schedule 0 failed; 36 of 256 other schedules ended differently</span>
 
 schedule 5 passes where schedule 0 fails; finding the step that decides it
 schedule 5 limited to steps 803..1669 still ends differently
 step 1668 decides it: a request to switch threads there makes the run pass
 
-<span class="ansi-blue">passing</span>: run afe1eafcba1b52c4, schedule 5 over steps 803..1669
-<span class="ansi-yellow">failing</span>: run 9e2b0a092c75cd35, schedule 5 over steps 803..1668
+<span class="ansi-blue">passing</span>: run fe6ae6b097854fd1, schedule 5 over steps 803..1669
+<span class="ansi-yellow">failing</span>: run 67f04961e78f96f3, schedule 5 over steps 803..1668
 the two are the same run until step 1668
 
 where /nix/store/195dbbvj5h0yq9f4vnp833dsbgxpp8w0-devenv-tasks-tests-1.10.1/bin/devenv-tasks-tests test_failed_task_keeps_last_lines first behaves differently:
@@ -234,9 +234,9 @@ where /nix/store/195dbbvj5h0yq9f4vnp833dsbgxpp8w0-devenv-tasks-tests-1.10.1/bin/
   <span class="ansi-blue">passing</span>        1695    40/41    close("/build/devenv_task_output8TEwnR.json")
   <span class="ansi-blue">passing</span>        1705    40/41    unlink("/build/scriptiikovq.sh")
 
-open both in the desktop app: rewind open 9e2b0a092c75cd35 1671 --compare afe1eafcba1b52c4</code></pre>
+open both in the desktop app: rewind open 67f04961e78f96f3 1671 --compare fe6ae6b097854fd1</code></pre>
         <p>
-          223 of 257 runs fail, each keeping <code>["line1", "line2"]</code>. The narrowed pair's
+          221 of 257 runs fail, each keeping <code>["line1", "line2"]</code>. The narrowed pair's
           calls part where the test learns that the task's shell has exited: in the failing run
           SIGCHLD reaches it at step 1671, and in the passing run the first call that differs is the
           close of the child's pidfd, at step 1692, with no SIGCHLD before it. What differs is when
@@ -252,7 +252,7 @@ open both in the desktop app: rewind open 9e2b0a092c75cd35 1671 --compare afe1ea
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind threads 9e2b0a092c75cd35 <span class="option">--from</span> <span class="number">1652</span> <span class="option">--to</span> <span class="number">1700</span></span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind threads 67f04961e78f96f3 <span class="option">--from</span> <span class="number">1652</span> <span class="option">--to</span> <span class="number">1700</span></span>
       1652       1655          idle  swapper/0
       1656       1656         40/41  tests::test_fai
       1657       1657         40/42  sqlx-sqlite-wor
@@ -266,7 +266,7 @@ open both in the desktop app: rewind open 9e2b0a092c75cd35 1671 --compare afe1ea
       1697       1698     kernel 11  ksoftirqd/0
       1699       1700         40/40  devenv-tasks-te
 
-<span class="cmd"><span class="prompt">$</span> rewind threads afe1eafcba1b52c4 <span class="option">--from</span> <span class="number">1652</span> <span class="option">--to</span> <span class="number">1700</span></span>
+<span class="cmd"><span class="prompt">$</span> rewind threads fe6ae6b097854fd1 <span class="option">--from</span> <span class="number">1652</span> <span class="option">--to</span> <span class="number">1700</span></span>
       1652       1655          idle  swapper/0
       1656       1656         40/41  tests::test_fai
       1657       1657         40/42  sqlx-sqlite-wor
@@ -309,14 +309,14 @@ open both in the desktop app: rewind open 9e2b0a092c75cd35 1671 --compare afe1ea
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind check <span class="option">--run</span> 20a2be3f <span class="option">--schedule-from</span> <span class="number">1525</span> <span class="option">--schedules</span> <span class="number">64</span> <span class="option">--all</span> <span class="option">--no-narrow</span></span>
-schedule   0: <span class="ansi-red">exited:101</span>           1600 steps    run 20a2be3f118191eb
-schedule   1: <span class="ansi-red">exited:101</span>           1654 steps    run 40ee9017aa0e267f
-schedule   2: <span class="ansi-green">exited:0</span>             1688 steps  <span class="ansi-red">77ac62e2629d</span>  run 097da648985ba834
-schedule   3: <span class="ansi-red">exited:101</span>           1631 steps    run 81ffc67ac14d1fdb
+        ><code><span class="cmd"><span class="prompt">$</span> rewind check <span class="option">--run</span> 230ba7e9 <span class="option">--schedule-from</span> <span class="number">1525</span> <span class="option">--schedules</span> <span class="number">64</span> <span class="option">--all</span> <span class="option">--no-narrow</span></span>
+schedule   0: <span class="ansi-red">exited:101</span>           1600 steps    run 230ba7e931ea8ec4
+schedule   1: <span class="ansi-red">exited:101</span>           1630 steps    run acdb5c5caadce513
+schedule   2: <span class="ansi-green">exited:0</span>             1688 steps  <span class="ansi-red">77ac62e2629d</span>  run 432cbc695b04d820
+schedule   3: <span class="ansi-red">exited:101</span>           1633 steps    run 70b7b2d54b9decb0
 ...
-schedule  64: <span class="ansi-green">exited:0</span>             1657 steps  <span class="ansi-red">77ac62e2629d</span>  run 5cf59ac396d049ef
-<span class="ansi-red">run 20a2be3f118191eb failed; 15 of 64 other schedules ended differently</span></code></pre>
+schedule  64: <span class="ansi-green">exited:0</span>             1658 steps  <span class="ansi-red">77ac62e2629d</span>  run 5ac6b02254a25084
+<span class="ansi-red">run 230ba7e931ea8ec4 failed; 15 of 64 other schedules ended differently</span></code></pre>
       </section>
 
       <section class="step">
@@ -326,7 +326,7 @@ schedule  64: <span class="ansi-green">exited:0</span>             1657 steps  <
         <p>The events of schedule 0's run around the task:</p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind events 20a2be3f <span class="option">--from</span> <span class="number">1517</span> <span class="option">--to</span> <span class="number">1537</span></span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind events 230ba7e9 <span class="option">--from</span> <span class="number">1517</span> <span class="option">--to</span> <span class="number">1537</span></span>
       1522    40/41    open("/build/devenv_task_outputV6VMHR.json", 0o2000302)
       1525    40/41    fork() = 43
       1529    43/43    execve("/build/script0nv27Q.sh", ["/bin/sh", "/build/script0nv27Q.sh"])
@@ -348,7 +348,7 @@ schedule  64: <span class="ansi-green">exited:0</span>             1657 steps  <
                     width="1440"
                     height="900"
                     loading="lazy"
-                    alt="The Rewind desktop app on the failing devenv run at step 1,671, compared with the passing run afe1eafc: the build log stops at running 1 test, SIGCHLD has reached thread 41, and the runs are the same until step 1,668. Opens the full-size image."
+                    alt="The Rewind desktop app on the failing devenv run at step 1,671, compared with the passing run fe6ae6b0: the build log stops at running 1 test, SIGCHLD has reached thread 41, and the runs are the same until step 1,668. Opens the full-size image."
                   />
                 </picture>
               </a>
@@ -386,8 +386,8 @@ schedule  64: <span class="ansi-green">exited:0</span>             1657 steps  <
               </button>
             </div>
             <figcaption>
-              The app on the failing run 9e2b0a09 at step 1,671, compared with the passing run
-              afe1eafc.
+              The app on the failing run 67f04961 at step 1,671, compared with the passing run
+              fe6ae6b0.
             </figcaption>
           </figure>
           <ol class="tour-cards">
@@ -420,10 +420,10 @@ schedule  64: <span class="ansi-green">exited:0</span>             1657 steps  <
         </div>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind gdb 20a2be3f <span class="number">1522</span> -- <span class="option">-batch</span> <span class="option">-ex</span> <span class="string">'break read if $rdi == 13'</span> <span class="option">-ex</span> <span class="string">'break task_state.rs:409'</span> <span class="option">-ex</span> continue <span class="option">-ex</span> <span class="string">'set $buf = $rsi'</span> <span class="option">-ex</span> finish <span class="option">-ex</span> <span class="string">'x/s $buf'</span> <span class="option">-ex</span> <span class="string">'delete 1'</span> <span class="option">-ex</span> continue</span>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind gdb 230ba7e9 <span class="number">1522</span> -- <span class="option">-batch</span> <span class="option">-ex</span> <span class="string">'break read if $rdi == 13'</span> <span class="option">-ex</span> <span class="string">'break task_state.rs:409'</span> <span class="option">-ex</span> continue <span class="option">-ex</span> <span class="string">'set $buf = $rsi'</span> <span class="option">-ex</span> finish <span class="option">-ex</span> <span class="string">'x/s $buf'</span> <span class="option">-ex</span> <span class="string">'delete 1'</span> <span class="option">-ex</span> continue</span>
 <span class="ansi-dim">rewind:</span> step 1522 ran in process 40; loading symbols for 5 of its files
 <span class="ansi-dim">rewind:</span> source files for /nix/store/195dbbvj5h0yq9f4vnp833dsbgxpp8w0-devenv-tasks-tests-1.10.1 from /nix/store/hs2328bm8f7s0cq77jjjgdlcqrc13mhm-source
-<span class="ansi-dim">rewind:</span> gdb at step 1522 of 20a2be3f118191eb
+<span class="ansi-dim">rewind:</span> gdb at step 1522 of 230ba7e931ea8ec4
 Downloading 1.72 M separate debug info for /nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libm.so.6...
 Downloading 4.35 M separate debug info for /nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6...
 Downloading 658.16 K separate debug info for /nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/ld-linux-x86-64.so.2...
@@ -503,9 +503,9 @@ Thread 3 hit Breakpoint 2.1, devenv_tasks::task_state::{impl#1}::run::{async_fn#
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind check <span class="option">--epoch</span> <span class="number">1791936000</span> <span class="option">--seed</span> <span class="number">13</span> <span class="option">--all</span> <span class="option">--schedules</span> <span class="number">256</span> <span class="string">'github:fzakaria/rewindvm?dir=examples/case-studies#devenv-last-lines-2296'</span></span>
 <span class="ansi-dim">rewind:</span> packing 57 store paths for devenv-tasks-test-last-lines-2296
-schedule   0: <span class="ansi-green">exited:0</span>             1624 steps  77ac62e2629d  run 9787f72121c4c6f0
-schedule   1: <span class="ansi-green">exited:0</span>             1778 steps  77ac62e2629d  run e1995e8af57583fe
-schedule   2: <span class="ansi-green">exited:0</span>             1746 steps  77ac62e2629d  run bd514fb83eeedfb1
+schedule   0: <span class="ansi-green">exited:0</span>             1624 steps  77ac62e2629d  run 96f10c325bdf2eaa
+schedule   1: <span class="ansi-green">exited:0</span>             1773 steps  77ac62e2629d  run ddcd81c627b7d07f
+schedule   2: <span class="ansi-green">exited:0</span>             1746 steps  77ac62e2629d  run ee86169159e9c438
 ...
 <span class="ansi-green">0 of 256 other schedules ended differently</span>
 <span class="ansi-green">same result under all 257 schedules</span></code></pre>
@@ -529,7 +529,7 @@ schedule   2: <span class="ansi-green">exited:0</span>             1746 steps  7
               href="https://github.com/fzakaria/rewindvm/releases/download/case-studies/devenv-task-output-race.rwd"
               >devenv-task-output-race.rwd</a
             >
-            (12.7 KB), the trace, for <code>rewind events</code>, <code>rewind log</code> and the
+            (13.7 KB), the trace, for <code>rewind events</code>, <code>rewind log</code> and the
             app; the <a href="../viewer/?url=examples/devenv-task-output-race.rwd">viewer</a> opens
             it in a browser.
           </li>
@@ -538,15 +538,15 @@ schedule   2: <span class="ansi-green">exited:0</span>             1746 steps  7
               href="https://github.com/fzakaria/rewindvm/releases/download/case-studies/devenv-task-output-race-replayable.rwd"
               >devenv-task-output-race-replayable.rwd</a
             >
-            (179.0 MB), with the kernel, input image and keyframes, for <code>rewind replay</code>,
+            (178.6 MB), with the kernel, input image and keyframes, for <code>rewind replay</code>,
             <code>rewind gdb</code> and <code>rewind shell</code>.
           </li>
         </ul>
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind import https://github.com/fzakaria/rewindvm/releases/download/case-studies/devenv-task-output-race-replayable.rwd</span>
-<span class="cmd"><span class="prompt">$</span> rewind replay 20a2be3f</span>
-<span class="cmd"><span class="prompt">$</span> rewind gdb 20a2be3f <span class="number">1522</span></span>
+<span class="cmd"><span class="prompt">$</span> rewind replay 230ba7e9</span>
+<span class="cmd"><span class="prompt">$</span> rewind gdb 230ba7e9 <span class="number">1522</span></span>
 <span class="cmd"><span class="prompt">$</span> rewind-app https://github.com/fzakaria/rewindvm/releases/download/case-studies/devenv-task-output-race.rwd</span></code></pre>
       </section>
 

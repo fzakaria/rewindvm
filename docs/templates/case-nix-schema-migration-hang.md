@@ -2,7 +2,7 @@
 
 <!-- let epoch = 1791936000 -->
 <!-- let flake = github:fzakaria/rewindvm?dir=examples/case-studies -->
-<!-- let schedule = 226 -->
+<!-- let schedule = 52 -->
 
 A Nix master build from April 2026 could hang when several `nix` commands
 opened a new store at once, printing `SQLite database ... is busy` every ten
@@ -62,14 +62,15 @@ $ rewind check --epoch {{epoch}} --all --schedules 256 '{{flake}}#nix-concurrent
 <!-- capture deciding: step (\d+) decides it -->
 <!-- capture narrowed_run: failing: run (\w+) -->
 <!-- set first_nix: rewind events {{narrowed_run}} | grep -m1 -E 'execve\(".*/bin/nix", \["nix", "build"' | awk '{print $1}' -->
-<!-- assert: test {{deciding}} -lt {{first_nix}} && rewind threads {{narrowed_run}} --from {{deciding}} --to {{deciding}} | awk '{print $4}' | grep -qx cp -->
+<!-- assert: test {{deciding}} -gt {{first_nix}} && rewind threads {{narrowed_run}} --from {{deciding}} --to {{deciding}} | awk '{print $4}' | grep -qx nix -->
+<!-- assert: rewind events {{narrowed_run}} --from {{deciding}} --to {{deciding}} | grep -qE '/var/nix/db/schema"' -->
 
 Schedule 0 passes and {{nfails}} of the other 256 fail. The step that decides
-schedule {{narrowed}}, {{deciding}}, falls while the build is still copying its
-sources with `cp`, long before the test starts its first `nix build` at step
-{{first_nix}}: one switch there moves every step after it, and the six `nix`
-processes race from the moment they start. On the host the test passed 51 of
-51 runs.
+schedule {{narrowed}}, {{deciding}}, falls inside the race, after the test
+starts its first `nix build` at step {{first_nix}}: one `nix` process is
+opening the store's schema file there, and a single switch at that moment
+decides whether all six get through the migrations. On the host the test
+passed 51 of 51 runs.
 
 ## What the failing run shows
 
