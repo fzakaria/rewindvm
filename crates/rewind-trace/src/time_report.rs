@@ -865,21 +865,22 @@ impl Timing {
             // What it waited for on the chain, by the thread that woke it:
             // another of its threads, or a process outside what it started,
             // whose wait for its own children the started rows already show.
-            let mut waits: BTreeMap<(u32, Option<u32>), (u64, usize, u64)> = BTreeMap::new();
+            let mut waits: BTreeMap<WaitKey, (u64, usize, u64)> = BTreeMap::new();
             for hop in chain.hops.iter().filter(|h| ours(h.waiter)) {
                 if lives[hop.waker].is_some_and(|l| under.contains(&l)) {
                     continue;
                 }
                 let waker = graph.runs[hop.waker].tid;
-                let e = waits.entry((waker, hop.syscall)).or_default();
+                let e = waits
+                    .entry((waker, lives[hop.waker], hop.syscall))
+                    .or_default();
                 e.0 += hop.blocked_ns;
                 e.1 += 1;
                 if e.2 == 0 {
                     e.2 = graph.runs[hop.waiter].start_step;
                 }
             }
-            for ((waker, syscall), (ns, count, step)) in waits {
-                let waker_life = lives_of_tid(graph, lives, waker);
+            for ((waker, waker_life, syscall), (ns, count, step)) in waits {
                 let whom = match waker_life {
                     Some(l) if l == life => format!("thread {waker}"),
                     Some(l) => self.names.process(l),
@@ -1211,10 +1212,9 @@ fn runs_in(lives: &[Option<Life>], group: &HashSet<Life>) -> Vec<bool> {
         .collect()
 }
 
-/// The process a thread belonged to when it last ran.
-fn lives_of_tid(graph: &Graph, lives: &[Option<Life>], tid: u32) -> Option<Life> {
-    graph.runs_of(tid).last().and_then(|&i| lives[i])
-}
+/// What a process waited for on the chain: the waker's thread id and
+/// process, and the system call the process blocked in.
+type WaitKey = (u32, Option<Life>, Option<u32>);
 
 /// A process's sleeps that are nearly all of its time on the chain say
 /// the same thing as the process's own row: they become that row's

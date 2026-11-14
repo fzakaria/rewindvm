@@ -11,6 +11,19 @@
 //! ended its sleep, or another thread woke it at a point in that thread's
 //! own run.
 //!
+//! A thread that waits for another to exit does not always block: a join
+//! of a thread already done, or a wait for a child already a zombie,
+//! returns without a wakeup to record. So every exit is a point the
+//! thread that would wait for it starts after: for a thread, its
+//! process's main thread, which joins it; for a process, the thread that
+//! forked it, which reaps it. A waiter that never waited makes the chain
+//! longer than it is, by work the run did in the order recorded; a wait
+//! missed would make it shorter than the work the run needed.
+//!
+//! The kernel gives a thread id out again once its thread has exited, so
+//! a thread is one life of an id, from the fork that made it: a run is
+//! never the next of a run of an earlier thread with the same id.
+//!
 //! The VM has one CPU, so the run as recorded is the work of every thread
 //! laid end to end. The chain this module finds is the one the run would
 //! still take with as many CPUs as it has threads: every wait for the CPU
@@ -166,8 +179,13 @@ pub struct Graph {
     pub starts: Vec<Start>,
     /// Each run's thread's run before it, by index.
     prev: Vec<Option<usize>>,
-    /// Each thread's runs, in order.
-    by_thread: HashMap<u32, Vec<usize>>,
+    /// Each thread's runs, in order, by its life.
+    by_thread: HashMap<ThreadLife, Vec<usize>>,
+    /// Each thread id's forks, which tell its lives apart.
+    forks: Forks,
+    /// The exits each run starts after, by index: each the exiting thread
+    /// and the clock at its exit.
+    after: Vec<Vec<(u32, u64)>>,
     /// The job's start and end, as runs and times on the clock.
     pub job_start: (usize, u64),
     pub job_end: (usize, u64),
@@ -193,26 +211,34 @@ impl Graph {
         }
         let runs = runs_of(switches, trace.last_step(), end_ns);
 
-        // Each thread's runs, and the run before each.
-        let mut by_thread: HashMap<u32, Vec<usize>> = HashMap::new();
+        // Every fork of each thread id, at its time.
+        let clock = Clock { runs: &runs };
+        let mut forks = Forks::default();
+        for e in &trace.events {
+            if let EventKind::Fork { child, .. } = e.kind {
+                forks.0.entry(child).or_default().push(ForkAt {
+                    step: e.step,
+                    ns: clock.at(e.step),
+                    parent: e.tid,
+                });
+            }
+        }
+
+        // Each thread's runs, and the run before each in the same life.
+        let mut by_thread: HashMap<ThreadLife, Vec<usize>> = HashMap::new();
         let mut prev = vec![None; runs.len()];
         for (i, run) in runs.iter().enumerate() {
             if run.is_idle() {
                 continue;
             }
-            let list = by_thread.entry(run.tid).or_default();
+            let list = by_thread
+                .entry(forks.at_step(run.tid, run.start_step))
+                .or_default();
             prev[i] = list.last().copied();
             list.push(i);
         }
 
-        // Forks by child, and wakes by woken thread, at their times.
-        let clock = Clock { runs: &runs };
-        let mut forks: HashMap<u32, (u32, u64)> = HashMap::new();
-        for e in &trace.events {
-            if let EventKind::Fork { child, .. } = e.kind {
-                forks.entry(child).or_insert((e.tid, clock.at(e.step)));
-            }
-        }
+        // Wakes by woken thread, at their times.
         let mut wakes: HashMap<u32, Vec<(u64, u64, u32, WakeHow)>> = HashMap::new();
         for w in &trace.wakes {
             wakes
@@ -228,8 +254,11 @@ impl Graph {
                 continue;
             }
             let Some(before) = prev[i] else {
-                starts[i] = match forks.get(&run.tid) {
-                    Some(&(parent, at)) => Start::Forked { parent, at },
+                starts[i] = match forks.of(forks.at_step(run.tid, run.start_step)) {
+                    Some(f) => Start::Forked {
+                        parent: f.parent,
+                        at: f.ns,
+                    },
                     None => Start::Boot,
                 };
                 continue;
@@ -253,7 +282,7 @@ impl Graph {
                 // A wait for Rewind's own guest code is not the workload's.
                 None | Some((_, _, _, WakeHow::Platform)) => Start::Ready,
                 Some((_, at, waker, WakeHow::Task)) => {
-                    match through_kernel(&runs, &by_thread, &starts, waker, at) {
+                    match through_kernel(&runs, &by_thread, &forks, &starts, waker, at) {
                         Some((waker, at)) => Start::Woken {
                             waker,
                             at,
@@ -272,6 +301,32 @@ impl Graph {
             };
         }
 
+        // The exits each run starts after: a thread's exit for its
+        // process's main thread's next run, a process's for the next run
+        // of the thread that forked it.
+        let mut after = vec![Vec::new(); runs.len()];
+        for e in &trace.events {
+            let EventKind::Exit { thread, .. } = e.kind else {
+                continue;
+            };
+            let waiter = match thread {
+                true if e.tid == e.pid => continue,
+                true => e.pid,
+                false => match forks.of(forks.at_step(e.pid, e.step)) {
+                    Some(f) => f.parent,
+                    None => continue,
+                },
+            };
+            let Some(list) = by_thread.get(&forks.at_step(waiter, e.step)) else {
+                continue;
+            };
+            let next = list.partition_point(|&j| runs[j].start_step <= e.step);
+            let Some(&next) = list.get(next) else {
+                continue;
+            };
+            after[next].push((e.tid, clock.at(e.step)));
+        }
+
         // The job's start and end, from init's marks.
         let (Some(start), Some(end)) = (trace.job_start(), trace.job_exit()) else {
             return Err(TimeError::NoJob);
@@ -283,6 +338,8 @@ impl Graph {
             starts,
             prev,
             by_thread,
+            forks,
+            after,
             job_start,
             job_end,
         })
@@ -309,11 +366,6 @@ impl Graph {
                 .before(piece.run)
                 .map_or(run.start_step, |b| self.runs[b].end_step),
         }
-    }
-
-    /// The runs of thread `tid`, in order.
-    pub fn runs_of(&self, tid: u32) -> &[usize] {
-        self.by_thread.get(&tid).map_or(&[], Vec::as_slice)
     }
 
     /// The chain from the job's start to its end with `zero` taking no
@@ -432,7 +484,7 @@ impl Graph {
             // had on the old one: inside one of its runs, scaled to what
             // that run takes now.
             let point = |es: &[u64], tid: u32, at: u64| -> Option<(usize, u64)> {
-                let list = self.by_thread.get(&tid)?;
+                let list = self.by_thread.get(&self.forks.at_ns(tid, at))?;
                 let k = list.partition_point(|&j| self.runs[j].start_ns <= at);
                 let j = list[k.checked_sub(1)?];
                 let r = &self.runs[j];
@@ -452,7 +504,7 @@ impl Graph {
                 ))
             };
 
-            let (start, why) = match self.starts[i] {
+            let (mut start, mut why) = match self.starts[i] {
                 Start::Boot => (0, Bound::Boot),
                 Start::Forked { parent, at } => match point(&es, parent, at) {
                     Some((j, t)) => (t, Bound::Other { run: j, at }),
@@ -471,6 +523,16 @@ impl Graph {
                     }
                 }
             };
+
+            // No sooner than the exits it would have waited for.
+            for &(tid, at) in &self.after[i] {
+                if let Some((j, t)) = point(&es, tid, at)
+                    && t > start
+                {
+                    start = t;
+                    why = Bound::Other { run: j, at };
+                }
+            }
             es[i] = start;
             bound[i] = why;
         }
@@ -492,13 +554,14 @@ const KERNEL_HOPS: usize = 8;
 /// are already known.
 fn through_kernel(
     runs: &[Run],
-    by_thread: &HashMap<u32, Vec<usize>>,
+    by_thread: &HashMap<ThreadLife, Vec<usize>>,
+    forks: &Forks,
     starts: &[Start],
     mut waker: u32,
     mut at: u64,
 ) -> Option<(u32, u64)> {
     for _ in 0..KERNEL_HOPS {
-        let list = by_thread.get(&waker)?;
+        let list = by_thread.get(&forks.at_ns(waker, at))?;
         let k = list.partition_point(|&j| runs[j].start_ns <= at);
         let run = list[k.checked_sub(1)?];
         if runs[run].memory {
@@ -538,6 +601,50 @@ fn runs_of(switches: &[Switch], last_step: u64, end_ns: u64) -> Vec<Run> {
         });
     }
     runs
+}
+
+/// One life of a thread id: the id, and how many forks of it came
+/// before, 0 for a thread there from boot.
+type ThreadLife = (u32, usize);
+
+/// A fork of a thread: its step, the clock then, and the thread that
+/// forked it.
+#[derive(Clone, Copy, Debug)]
+struct ForkAt {
+    step: u64,
+    ns: u64,
+    parent: u32,
+}
+
+/// Every fork of each thread id, in order, which tell the id's lives
+/// apart.
+#[derive(Clone, Debug, Default)]
+struct Forks(HashMap<u32, Vec<ForkAt>>);
+
+impl Forks {
+    /// The life of `tid` at `step`: after every fork of it before.
+    fn at_step(&self, tid: u32, step: u64) -> ThreadLife {
+        let before = self
+            .0
+            .get(&tid)
+            .map_or(0, |list| list.partition_point(|f| f.step < step));
+        (tid, before)
+    }
+
+    /// The life of `tid` at `ns` on the clock.
+    fn at_ns(&self, tid: u32, ns: u64) -> ThreadLife {
+        let before = self
+            .0
+            .get(&tid)
+            .map_or(0, |list| list.partition_point(|f| f.ns < ns));
+        (tid, before)
+    }
+
+    /// The fork that began `life`; None for a thread there from boot.
+    fn of(&self, life: ThreadLife) -> Option<ForkAt> {
+        let index = life.1.checked_sub(1)?;
+        self.0.get(&life.0)?.get(index).copied()
+    }
 }
 
 /// Times on the clock for steps: a step inside a run is placed between
@@ -708,23 +815,189 @@ mod tests {
     /// A graph from runs and starts, the job from the first run's start to
     /// the last run's end.
     fn graph(runs: Vec<Run>, starts: Vec<Start>) -> Graph {
-        let mut by_thread: HashMap<u32, Vec<usize>> = HashMap::new();
+        let mut by_thread: HashMap<ThreadLife, Vec<usize>> = HashMap::new();
         let mut prev = vec![None; runs.len()];
         for (i, r) in runs.iter().enumerate() {
-            let list = by_thread.entry(r.tid).or_default();
+            let list = by_thread.entry((r.tid, 0)).or_default();
             prev[i] = list.last().copied();
             list.push(i);
         }
         let last = runs.len() - 1;
         let end = runs[last].end_ns;
+        let after = vec![Vec::new(); runs.len()];
         Graph {
             runs,
             starts,
             prev,
             by_thread,
+            forks: Forks::default(),
+            after,
             job_start: (0, 0),
             job_end: (last, end),
         }
+    }
+
+    /// A switch at `step` to thread `tid` of process `pid`, the clock one
+    /// past the step. The thread that left blocked in `left_in`, or was
+    /// still runnable when that is None.
+    fn switch(step: u64, pid: u32, tid: u32, left_in: Option<u32>) -> Switch {
+        Switch {
+            step,
+            pid,
+            tid,
+            memory: pid != 0,
+            name: "t".into(),
+            ns: step + 1,
+            prev_runnable: left_in.is_none(),
+            prev_syscall: left_in,
+        }
+    }
+
+    /// An event of thread `tid` of process `pid` at `step`.
+    fn event(step: u64, pid: u32, tid: u32, kind: EventKind) -> crate::Event {
+        crate::Event {
+            step,
+            pid,
+            tid,
+            kind,
+        }
+    }
+
+    /// Init's job mark at `step`: the job's start, or its exit.
+    fn job_mark(step: u64, text: &str) -> crate::Event {
+        event(
+            step,
+            1,
+            1,
+            EventKind::Mark {
+                text: text.to_string(),
+            },
+        )
+    }
+
+    /// A wake of `tid` by thread `waker` at `step`, the clock one past it.
+    fn task_wake(step: u64, tid: u32, waker: u32) -> crate::switches::Wake {
+        crate::switches::Wake {
+            step,
+            ns: step + 1,
+            tid,
+            waker,
+            how: WakeHow::Task,
+        }
+    }
+
+    /// The exit of thread `tid` of process `pid` at `step`.
+    fn exit(step: u64, pid: u32, tid: u32, thread: bool) -> crate::Event {
+        event(
+            step,
+            pid,
+            tid,
+            EventKind::Exit {
+                status: 0,
+                comm: "t".into(),
+                thread,
+            },
+        )
+    }
+
+    /// The fork of `child` by thread `tid` of process `pid` at `step`.
+    fn fork(step: u64, pid: u32, tid: u32, child: u32, thread: bool) -> crate::Event {
+        event(step, pid, tid, EventKind::Fork { child, thread })
+    }
+
+    /// Init's main thread (1) starts threads 2 and 3 and joins 3 first. On
+    /// the one CPU thread 2 computes 100 steps and exits while main is
+    /// blocked in the join, waking nobody; thread 3 computes 10, and its
+    /// exit wakes main, whose join of thread 2 finds it done and does not
+    /// block. Both threads were joined, so the job waited for both.
+    fn joined_after_exit() -> Trace {
+        Trace {
+            events: vec![
+                job_mark(1, "rewind-start"),
+                fork(3, 1, 1, 2, true),
+                fork(4, 1, 1, 3, true),
+                exit(104, 1, 2, true),
+                exit(114, 1, 3, true),
+                job_mark(119, "rewind-exit 0"),
+            ],
+            switches: vec![
+                switch(0, 1, 1, None),
+                switch(5, 1, 2, Some(202)),
+                switch(105, 1, 3, Some(60)),
+                switch(115, 1, 1, Some(60)),
+                switch(120, 0, 0, Some(60)),
+            ],
+            wakes: vec![task_wake(114, 1, 3)],
+        }
+    }
+
+    #[test]
+    fn a_join_that_finds_its_thread_done_still_waits_for_it() {
+        // The chain is main up to the forks, thread 2's computing up to
+        // its exit a step before its run ends, 99 of its 100, and main
+        // after, where following wakes alone finds thread 3's 10 and
+        // misses thread 2.
+        let trace = joined_after_exit();
+        let g = Graph::new(&trace, 121).unwrap();
+        let chain = g.chain(&Nothing);
+        let long: u64 = chain
+            .pieces
+            .iter()
+            .filter(|p| g.runs[p.run].tid == 2)
+            .map(|p| p.ns)
+            .sum();
+        assert_eq!(long, 99);
+        assert!(chain.ns >= 99, "chain {}", chain.ns);
+
+        // Without thread 2 the chain is thread 3's instead.
+        let without = g.finish(&Threads(&|_, r| r.tid == 2));
+        assert!(without < 30, "without thread 2: {without}");
+    }
+
+    /// Init (1) forks a child at step 5 and waits for it; the child runs
+    /// from 10 to 20 and its exit wakes init. Init forks a second child at
+    /// 45, pid `second`, which runs from 50 to 60 and wakes init again.
+    fn two_children(second: u32) -> Trace {
+        Trace {
+            events: vec![
+                job_mark(1, "rewind-start"),
+                fork(5, 1, 1, 2, false),
+                exit(19, 2, 2, false),
+                fork(45, 1, 1, second, false),
+                exit(59, second, second, false),
+                job_mark(69, "rewind-exit 0"),
+            ],
+            switches: vec![
+                switch(0, 1, 1, None),
+                switch(10, 2, 2, Some(61)),
+                switch(20, 1, 1, Some(60)),
+                switch(50, second, second, Some(61)),
+                switch(60, 1, 1, Some(60)),
+                switch(70, 0, 0, Some(60)),
+            ],
+            wakes: vec![task_wake(19, 1, 2), task_wake(59, 1, second)],
+        }
+    }
+
+    #[test]
+    fn a_reused_thread_id_starts_a_life_of_its_own() {
+        // The second child given pid 2 again is forked, not the first
+        // child running on: the chain and its pieces are the same as with
+        // pid 3.
+        let fresh = two_children(3);
+        let reused = two_children(2);
+        let g_fresh = Graph::new(&fresh, 71).unwrap();
+        let g_reused = Graph::new(&reused, 71).unwrap();
+        assert_eq!(g_reused.chain(&Nothing).ns, g_fresh.chain(&Nothing).ns);
+        assert!(matches!(
+            g_reused.starts[3],
+            Start::Forked { parent: 1, .. }
+        ));
+        assert_eq!(g_reused.before(3), None);
+        assert_eq!(
+            g_reused.finish(&Computing(&|i, _| i == 3)),
+            g_fresh.finish(&Computing(&|i, _| i == 3))
+        );
     }
 
     #[test]
@@ -829,19 +1102,15 @@ mod tests {
                 syscall: None,
             },
         ];
-        let mut by_thread: HashMap<u32, Vec<usize>> = HashMap::new();
+        let mut by_thread: HashMap<ThreadLife, Vec<usize>> = HashMap::new();
         for (i, r) in runs.iter().enumerate() {
-            by_thread.entry(r.tid).or_default().push(i);
+            by_thread.entry((r.tid, 0)).or_default().push(i);
         }
-        assert_eq!(through_kernel(&runs, &by_thread, &starts, 9, 50), None);
-        assert_eq!(
-            through_kernel(&runs, &by_thread, &starts, 9, 70),
-            Some((1, 65))
-        );
-        assert_eq!(
-            through_kernel(&runs, &by_thread, &starts, 1, 5),
-            Some((1, 5))
-        );
+        let forks = Forks::default();
+        let wake = |waker, at| through_kernel(&runs, &by_thread, &forks, &starts, waker, at);
+        assert_eq!(wake(9, 50), None);
+        assert_eq!(wake(9, 70), Some((1, 65)));
+        assert_eq!(wake(1, 5), Some((1, 5)));
     }
 
     #[test]
