@@ -11,7 +11,7 @@
 use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
 
 use crate::critical::{
-    self, Chain, Computing, Graph, Nothing, PieceKind, Sleeps, Start, Threads, TimeError,
+    self, Chain, Computing, Graph, Nothing, Piece, PieceKind, Sleeps, Start, Threads, TimeError,
     syscall_name,
 };
 use crate::io_records::{Io, IoLog};
@@ -359,6 +359,9 @@ const STARTED_SHOWN: usize = 6;
 /// What stdenv prints at the start of each phase of a Nix build.
 const PHASE_MARKER: &str = "Running phase: ";
 
+/// What the folded stacks call the job's time before its first phase.
+pub const BEFORE_PHASES: &str = "before the phases";
+
 /// A run read for timing: its graph, its chain on enough CPUs, and what
 /// to call its processes.
 #[derive(Debug)]
@@ -388,6 +391,8 @@ pub struct Report {
     /// Computing that is not on the chain.
     pub off_chain_ns: u64,
     pub phases: Vec<Phase>,
+    /// The path before the first phase, from the job's start.
+    pub before_phases_ns: u64,
     /// What would make the job sooner, soonest first.
     pub rows: Vec<Row>,
 }
@@ -556,26 +561,27 @@ impl Timing {
             .map(|p| p.ns)
             .sum();
 
-        // The chain by phase.
+        // The chain by phase, each piece split where a phase begins.
+        let mut on_phase = vec![0u64; self.phases.len()];
+        let mut before_phases_ns = 0;
+        for piece in &chain.pieces {
+            for (phase, ns) in self.by_phase(piece) {
+                match phase {
+                    Some(i) => on_phase[i] += ns,
+                    None => before_phases_ns += ns,
+                }
+            }
+        }
         let phases = self
             .phases
             .iter()
             .enumerate()
             .map(|(i, (name, from, step))| {
                 let to = self.phases.get(i + 1).map_or(end, |(_, t, _)| *t);
-                let on_chain_ns = chain
-                    .pieces
-                    .iter()
-                    .filter(|p| {
-                        let at = graph.runs[p.run].start_ns;
-                        at >= *from && at < to
-                    })
-                    .map(|p| p.ns)
-                    .sum();
                 Phase {
                     name: name.clone(),
                     took_ns: to.saturating_sub(*from),
-                    on_chain_ns,
+                    on_chain_ns: on_phase[i],
                     step: *step,
                 }
             })
@@ -677,6 +683,7 @@ impl Timing {
             chain_ns: chain.ns,
             off_chain_ns: work_ns.saturating_sub(on_compute),
             phases,
+            before_phases_ns,
             rows,
         }
     }
@@ -960,16 +967,11 @@ impl Timing {
     }
 
     /// The critical path as a tree of processes, under `root` or the
-    /// whole of it, and of the pieces whose run began within `steps` or
-    /// all of them: each process's time on the path with everything it
+    /// whole of it, and within phase `phase` or all of it: each process's
+    /// time on the path with everything it
     /// started, its own time by state, and its children, as many as
     /// `budget` gives lines.
-    pub fn path_tree(
-        &self,
-        root: Option<Life>,
-        steps: Option<std::ops::Range<u64>>,
-        budget: Budget,
-    ) -> PathTree {
+    pub fn path_tree(&self, root: Option<Life>, phase: Option<usize>, budget: Budget) -> PathTree {
         let under: Option<HashSet<Life>> = root.map(|r| {
             let mut all: HashSet<Life> = self.descendants(r).into_iter().collect();
             all.insert(r);
@@ -980,9 +982,18 @@ impl Timing {
         let mut states: BTreeMap<State, u64> = BTreeMap::new();
         for piece in &self.chain.pieces {
             let run = &self.graph.runs[piece.run];
-            if let Some(steps) = &steps
-                && !steps.contains(&run.start_step)
-            {
+
+            // Within a phase, the part of the piece in it.
+            let ns = match phase {
+                Some(i) => self
+                    .by_phase(piece)
+                    .into_iter()
+                    .filter(|(p, _)| *p == Some(i))
+                    .map(|(_, ns)| ns)
+                    .sum(),
+                None => piece.ns,
+            };
+            if ns == 0 {
                 continue;
             }
             let life = self.lives[piece.run];
@@ -994,6 +1005,7 @@ impl Timing {
 
             // A sleep is looked at where its thread fell asleep; computing
             // where its run began.
+            // A piece begun before the phase is looked at from its start.
             let (state, step) = match piece.kind {
                 PieceKind::Compute => (State::Computing, run.start_step),
                 PieceKind::Sleep { syscall } => (
@@ -1001,15 +1013,19 @@ impl Timing {
                     self.fell_asleep(piece.run),
                 ),
             };
-            *states.entry(state.clone()).or_default() += piece.ns;
+            let step = match phase.and_then(|i| self.phases.get(i)) {
+                Some((_, _, begins)) => step.max(*begins),
+                None => step,
+            };
+            *states.entry(state.clone()).or_default() += ns;
             let Some(life) = life else {
-                kernel_ns += piece.ns;
+                kernel_ns += ns;
                 continue;
             };
             pieces.push(OnPath {
                 life,
                 state,
-                ns: piece.ns,
+                ns,
                 tid: run.tid,
                 step,
             });
@@ -1044,14 +1060,7 @@ impl Timing {
     pub fn folded(&self) -> Vec<(String, u64)> {
         let mut totals: BTreeMap<String, u64> = BTreeMap::new();
         for piece in &self.chain.pieces {
-            let run = &self.graph.runs[piece.run];
-            let phase = self
-                .phases
-                .iter()
-                .rev()
-                .find(|(_, _, step)| *step <= run.start_step)
-                .map_or("before the phases", |(name, _, _)| name.as_str());
-            let mut frames = vec![phase.to_string()];
+            let mut frames = vec![String::new()];
             match self.lives[piece.run] {
                 Some(life) => {
                     let mut line = vec![life];
@@ -1073,7 +1082,15 @@ impl Timing {
                 PieceKind::Compute => "computing".to_string(),
                 PieceKind::Sleep { syscall } => format!("asleep in {}", call_name(syscall)),
             });
-            *totals.entry(frames.join(";")).or_default() += piece.ns;
+
+            // The piece under each phase it is in, its first frame.
+            for (phase, ns) in self.by_phase(piece) {
+                frames[0] = match phase {
+                    Some(i) => self.phases[i].0.clone(),
+                    None => BEFORE_PHASES.to_string(),
+                };
+                *totals.entry(frames.join(";")).or_default() += ns;
+            }
         }
         totals.into_iter().collect()
     }
@@ -1168,6 +1185,28 @@ impl Timing {
 
     /// The step a sleep before run `run` began on: where its thread left
     /// the CPU.
+    /// How much of `piece` is in each phase, by where it lies on the
+    /// clock as recorded: None for the part before the first phase. A run
+    /// can go on past a phase's marker, and a sleep can span one.
+    fn by_phase(&self, piece: &Piece) -> Vec<(Option<usize>, u64)> {
+        let (from, to) = (piece.from_ns, piece.from_ns + piece.ns);
+        let overlap = |a: u64, b: u64| to.min(b).saturating_sub(from.max(a));
+        let mut out = Vec::new();
+        let first = self.phases.first().map_or(u64::MAX, |p| p.1);
+        let before = overlap(0, first);
+        if before > 0 {
+            out.push((None, before));
+        }
+        for (i, (_, begins, _)) in self.phases.iter().enumerate() {
+            let ends = self.phases.get(i + 1).map_or(u64::MAX, |p| p.1);
+            let ns = overlap(*begins, ends);
+            if ns > 0 {
+                out.push((Some(i), ns));
+            }
+        }
+        out
+    }
+
     fn fell_asleep(&self, run: usize) -> u64 {
         self.graph
             .before(run)
@@ -1471,6 +1510,116 @@ mod tests {
         assert_eq!(share(10, 10), "100%");
         assert_eq!(share(5, 10), "50%");
         assert_eq!(share(5, 0), "0%");
+    }
+
+    /// Init's line of output at `step`, as a phase's marker is.
+    fn says(step: u64, line: &str) -> crate::Event {
+        critical::tests::event(
+            step,
+            1,
+            1,
+            EventKind::Output {
+                fd: 1,
+                bytes: format!("{line}\n").into_bytes(),
+            },
+        )
+    }
+
+    /// The path in each phase, by the report, by the phase's own tree and
+    /// by the folded stacks, the time before the phases first.
+    fn by_phase(timing: &Timing) -> Vec<(u64, u64, u64)> {
+        let report = timing.report();
+        let folded = timing.folded();
+        let in_folded = |name: &str| -> u64 {
+            folded
+                .iter()
+                .filter(|(stack, _)| stack.split(';').next() == Some(name))
+                .map(|(_, ns)| ns)
+                .sum()
+        };
+        let mut out = vec![(
+            report.before_phases_ns,
+            report.before_phases_ns,
+            in_folded(BEFORE_PHASES),
+        )];
+        for (i, p) in report.phases.iter().enumerate() {
+            let tree = timing.path_tree(None, Some(i), Budget::Whole);
+            out.push((p.on_chain_ns, tree.ns, in_folded(&p.name)));
+        }
+        out
+    }
+
+    #[test]
+    fn a_run_on_the_cpu_through_two_phases_counts_in_each() {
+        // Init computes from step 0 to 100, the clock one past the step;
+        // its job runs from step 1 to 90, and it prints buildPhase at 10
+        // and checkPhase at 50. One run spans both phases: 9 ns are before
+        // them and 40 in each, by the report, the trees and the stacks.
+        let c = |step, pid, tid, left| critical::tests::switch(step, pid, tid, left);
+        let trace = Trace {
+            events: vec![
+                critical::tests::job_mark(1, "rewind-start"),
+                says(10, "Running phase: buildPhase"),
+                says(50, "Running phase: checkPhase"),
+                critical::tests::job_mark(90, "rewind-exit 0"),
+            ],
+            switches: vec![c(0, 1, 1, None), c(100, 0, 0, Some(60))],
+            wakes: vec![],
+        };
+        let timing = Timing::new(&trace, &IoLog::default(), 101).unwrap();
+        assert_eq!(
+            by_phase(&timing),
+            vec![(9, 9, 9), (40, 40, 40), (40, 40, 40)]
+        );
+    }
+
+    #[test]
+    fn a_sleep_across_a_phases_start_counts_in_each() {
+        // Init computes from step 0 to 5 and, after process 2 runs to
+        // 10, from 10 to 20; it sleeps in clock_nanosleep until a timer at
+        // 50 and computes to 60. Its job runs from step 1 to 59, the clock
+        // one past the step. Process 2, off the path, prints buildPhase at
+        // the end of its first run and checkPhase at 25, while init
+        // sleeps. The path is 4 before the phases, 10 computing and 5
+        // asleep in buildPhase, and 25 asleep and 9 computing in
+        // checkPhase.
+        let c = |step, pid, tid, left| critical::tests::switch(step, pid, tid, left);
+        let mut build = says(10, "Running phase: buildPhase");
+        build.pid = 2;
+        build.tid = 2;
+        let mut check = says(25, "Running phase: checkPhase");
+        check.pid = 2;
+        check.tid = 2;
+        let trace = Trace {
+            events: vec![
+                critical::tests::job_mark(1, "rewind-start"),
+                build,
+                check,
+                critical::tests::job_mark(59, "rewind-exit 0"),
+            ],
+            switches: vec![
+                c(0, 1, 1, None),
+                c(5, 2, 2, None),
+                c(10, 1, 1, None),
+                c(20, 2, 2, Some(230)),
+                c(30, 0, 0, Some(230)),
+                c(50, 1, 1, Some(60)),
+                c(60, 0, 0, Some(60)),
+            ],
+            wakes: vec![crate::switches::Wake {
+                step: 50,
+                ns: 51,
+                tid: 1,
+                waker: 0,
+                how: crate::switches::WakeHow::Hardirq,
+            }],
+        };
+        let timing = Timing::new(&trace, &IoLog::default(), 61).unwrap();
+        assert_eq!(timing.chain.ns, 53);
+        assert_eq!(
+            by_phase(&timing),
+            vec![(4, 4, 4), (15, 15, 15), (34, 34, 34)]
+        );
     }
 
     #[test]

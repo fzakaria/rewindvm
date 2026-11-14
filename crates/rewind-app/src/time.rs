@@ -169,12 +169,9 @@ pub fn compute(
     let stretches = timing.stretches();
     let tree = timing.path_tree(None, None, Budget::Whole);
 
-    // Each phase runs from its first step to the next phase's.
-    let phase_trees = report
-        .phases
-        .iter()
-        .enumerate()
-        .map(|(i, _)| timing.path_tree(None, Some(phase_steps(&report.phases, i)), Budget::Whole))
+    // Each phase's tree, of the path between its marker and the next.
+    let phase_trees = (0..report.phases.len())
+        .map(|i| timing.path_tree(None, Some(i), Budget::Whole))
         .collect();
     let programs: std::collections::BTreeSet<String> = timing
         .lives

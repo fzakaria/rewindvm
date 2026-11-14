@@ -137,6 +137,9 @@ pub struct Piece {
     pub kind: PieceKind,
     /// How long it is on the chain, in nanoseconds.
     pub ns: u64,
+    /// Where it starts on the clock as recorded: where its computing began
+    /// in the run, or where its thread fell asleep.
+    pub from_ns: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -390,14 +393,18 @@ impl Graph {
         while let Some((run, at)) = cursor {
             // The job's first run counts only from the job's start.
             let mut ns = length(run, at);
+            let mut from_ns = self.runs[run].start_ns;
             if run == self.job_start.0 {
-                ns = ns.saturating_sub(length(run, self.job_start.1));
+                let before = length(run, self.job_start.1);
+                ns = ns.saturating_sub(before);
+                from_ns += before;
             }
             if ns > 0 {
                 pieces.push(Piece {
                     run,
                     kind: PieceKind::Compute,
                     ns,
+                    from_ns,
                 });
             }
             if run == self.job_start.0 {
@@ -415,6 +422,7 @@ impl Graph {
                             run,
                             kind: PieceKind::Sleep { syscall },
                             ns: sleep,
+                            from_ns: self.runs[before].end_ns,
                         });
                     }
                     Some((before, self.runs[before].end_ns))
@@ -840,7 +848,7 @@ pub(crate) mod tests {
     /// A switch at `step` to thread `tid` of process `pid`, the clock one
     /// past the step. The thread that left blocked in `left_in`, or was
     /// still runnable when that is None.
-    fn switch(step: u64, pid: u32, tid: u32, left_in: Option<u32>) -> Switch {
+    pub(crate) fn switch(step: u64, pid: u32, tid: u32, left_in: Option<u32>) -> Switch {
         Switch {
             step,
             pid,
@@ -854,7 +862,7 @@ pub(crate) mod tests {
     }
 
     /// An event of thread `tid` of process `pid` at `step`.
-    fn event(step: u64, pid: u32, tid: u32, kind: EventKind) -> crate::Event {
+    pub(crate) fn event(step: u64, pid: u32, tid: u32, kind: EventKind) -> crate::Event {
         crate::Event {
             step,
             pid,
@@ -864,7 +872,7 @@ pub(crate) mod tests {
     }
 
     /// Init's job mark at `step`: the job's start, or its exit.
-    fn job_mark(step: u64, text: &str) -> crate::Event {
+    pub(crate) fn job_mark(step: u64, text: &str) -> crate::Event {
         event(
             step,
             1,
@@ -876,7 +884,7 @@ pub(crate) mod tests {
     }
 
     /// A wake of `tid` by thread `waker` at `step`, the clock one past it.
-    fn task_wake(step: u64, tid: u32, waker: u32) -> crate::switches::Wake {
+    pub(crate) fn task_wake(step: u64, tid: u32, waker: u32) -> crate::switches::Wake {
         crate::switches::Wake {
             step,
             ns: step + 1,

@@ -9,7 +9,7 @@ use rewind_core::{Home, Run};
 use rewind_trace::critical::TimeError;
 use rewind_trace::machine::ClockSource;
 use rewind_trace::time_report::{
-    Budget, PathNode, PathTree, Row, RowKind, State, TREE_SHARE, Timing, share,
+    BEFORE_PHASES, Budget, PathNode, PathTree, Row, RowKind, State, TREE_SHARE, Timing, share,
 };
 
 use crate::{RUN_HELP, RUN_LONG_HELP};
@@ -147,19 +147,30 @@ fn print_job(timing: &Timing, name: &str, limit: usize, run: &str) {
         println!();
         println!("The critical path by phase");
         let min_ns = (chain as f64 * TREE_SHARE) as u64;
-        let (big, small): (Vec<_>, Vec<_>) =
-            report.phases.iter().partition(|p| p.on_chain_ns >= min_ns);
-        let width = big.iter().map(|p| p.name.len()).max().unwrap_or(0);
-        for p in &big {
+
+        // The job's time before its first phase is a line of its own.
+        let mut lines: Vec<(&str, u64)> = Vec::new();
+        if report.before_phases_ns > 0 {
+            lines.push((BEFORE_PHASES, report.before_phases_ns));
+        }
+        lines.extend(
+            report
+                .phases
+                .iter()
+                .map(|p| (p.name.as_str(), p.on_chain_ns)),
+        );
+        let (big, small): (Vec<_>, Vec<_>) = lines.iter().partition(|(_, ns)| *ns >= min_ns);
+        let width = big.iter().map(|(name, _)| name.len()).max().unwrap_or(0);
+        for (name, ns) in &big {
             println!(
                 "  {:>8}  {:<width$}  {}",
-                fmt_ns(p.on_chain_ns),
-                p.name,
-                bar(p.on_chain_ns, chain)
+                fmt_ns(*ns),
+                name,
+                bar(*ns, chain)
             );
         }
         if !small.is_empty() {
-            let ns: u64 = small.iter().map(|p| p.on_chain_ns).sum();
+            let ns: u64 = small.iter().map(|(_, ns)| ns).sum();
             println!("  {:>8}  {} other phases", fmt_ns(ns), small.len());
         }
     }
