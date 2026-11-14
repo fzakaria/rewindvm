@@ -609,8 +609,10 @@ function renderMachine() {
     )
     .filter(Boolean);
   const rounds = Math.max(...recs.map((r) => r.rounds));
+  // The clock a busy core ran at, which records before 0.16.0 did not keep.
+  const clock = m.clock_mhz ? `, a busy core at ${m.clock_mhz} MHz` : "";
   document.getElementById("machine").textContent =
-    `${recs.length} builds on ${machines.join(", ")}: ${m.cpu}, ${m.cores} threads, ${m.memory_gib} GiB, Linux ${m.kernel}. ` +
+    `${recs.length} builds on ${machines.join(", ")}: ${m.cpu}, ${m.cores} threads${clock}, ${m.memory_gib} GiB, Linux ${m.kernel}. ` +
     `Up to ${rounds} rounds each. The machine is shared: its load average ran ${Math.min(...loads).toFixed(0)} to ${Math.max(...loads).toFixed(0)} while these were measured.`;
 }
 

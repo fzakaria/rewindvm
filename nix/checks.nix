@@ -1454,6 +1454,14 @@ in
     touch $out
   '';
 
+  # The benchmark refuses records at another clock than its history's
+  # and keeps to the NUMA nodes it is told to (tools/bench.py).
+  bench-guards = pkgs.runCommand "rewind-bench-guards" { nativeBuildInputs = [ pkgs.python3 ]; } ''
+    cp -r ${../tools} tools
+    python3 -m unittest discover -s tools -p 'test_bench.py'
+    touch $out
+  '';
+
   # The claim everything else rests on: a run replays exactly, from boot
   # and from a keyframe, and a different seed makes a different run. Needs
   # /dev/kvm in the build sandbox, which the kvm system feature provides.

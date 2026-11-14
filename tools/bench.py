@@ -41,6 +41,17 @@ model every release accepts on a host without ERMS, and the clock that
 every release can be told to use. Numbers from different machines are
 not comparable, so a record names its machine and compare refuses to mix
 them.
+
+Clock: one machine is not one speed. leviathan came back from a kernel
+update boosting a busy core to 3.5 GHz, and every workload ran a third
+faster. Its records up to 0.16.0 were taken at its nominal 2.45 GHz:
+0.15.0, measured again with boost off, came within 3% of its record. A
+record keeps the clock a busy core of the measured nodes ran at, and run
+refuses to add records at a clock more than a few percent from the
+newest record of the same host, unless --new-clock says the change is
+meant. Pin the clock on the nodes the benchmark uses by writing 0 to
+each of their CPUs' /sys/devices/system/cpu/cpufreq/policyN/boost, and
+keep the benchmark there with --nodes.
 """
 
 import argparse
@@ -106,6 +117,14 @@ PINGPONG_PASSES = 2000
 CAT_AT = 0.95
 # A keyframe's file name ends in this; the directory also holds a marker.
 KEYFRAME_SUFFIX = ".kf"
+
+# How far apart two clock readings may be and still be one clock: a busy
+# core reads a percent or two under its nominal clock from moment to
+# moment, and a boost is tens of percent.
+CLOCK_TOLERANCE = 0.05
+# How long a core spins before its clock is read, so it has left idle.
+CLOCK_SPIN_SECONDS = 1
+KHZ_PER_MHZ = 1000
 
 # GNU time's fields: wall, user and system seconds, peak RSS in KiB.
 TIME_FORMAT = "%e %U %S %M"
@@ -432,27 +451,115 @@ def numa_nodes():
     return nodes
 
 
+def pick_nodes(nodes, wanted):
+    """The nodes --nodes names, a comma-separated list of node numbers,
+    in the machine's order; every node when it names none."""
+    if wanted is None:
+        return nodes
+    numbers = {int(n) for n in wanted.split(",")}
+    known = {node for node, _ in nodes}
+    missing = sorted(numbers - known)
+    if missing:
+        sys.exit(
+            f"--nodes {wanted}: this machine has no node {', '.join(map(str, missing))}; "
+            f"it has {', '.join(map(str, sorted(known)))}"
+        )
+    return [(node, cpus) for node, cpus in nodes if node in numbers]
+
+
+def busy_clock(cpu):
+    """The clock one CPU runs at while busy, in MHz, read from cpufreq
+    while a loop spins on it; None on a machine without cpufreq."""
+    path = f"/sys/devices/system/cpu/cpu{cpu}/cpufreq/scaling_cur_freq"
+    if not os.path.exists(path):
+        return None
+    spin = subprocess.Popen(
+        ["taskset", "-c", str(cpu), "sh", "-c", "while :; do :; done"]
+    )
+    try:
+        time.sleep(CLOCK_SPIN_SECONDS)
+        with open(path) as f:
+            khz = int(f.read())
+    finally:
+        spin.kill()
+        spin.wait()
+    return round(khz / KHZ_PER_MHZ)
+
+
+def measure_clock(nodes):
+    """The clock a busy core of the nodes runs at, in MHz, from the first
+    CPU of each; None without cpufreq. Nodes at different clocks would
+    measure builds at different speeds by where each round landed, so
+    the run stops."""
+    clocks = {}
+    for node, cpus in nodes:
+        clock = busy_clock(expand_cpulist(cpus)[0])
+        if clock is None:
+            return None
+        clocks[node] = clock
+
+    # Every node must run at one clock, within the tolerance.
+    slowest = min(clocks.values())
+    fastest = max(clocks.values())
+    if (fastest - slowest) / slowest > CLOCK_TOLERANCE:
+        listed = ", ".join(f"node {n} at {mhz} MHz" for n, mhz in clocks.items())
+        sys.exit(
+            f"the nodes run at different clocks ({listed}); pin one clock on "
+            "the nodes the benchmark uses and name them with --nodes"
+        )
+    return statistics.median_low(clocks.values())
+
+
+def clock_mismatch(records, host, clock_mhz):
+    """The newest record from this host that says its clock, when that
+    clock differs from clock_mhz by more than CLOCK_TOLERANCE; None when
+    they agree or there is nothing to compare."""
+    if clock_mhz is None:
+        return None
+    known = [
+        r
+        for r in records
+        if r["machine"]["host"] == host and r["machine"].get("clock_mhz")
+    ]
+    if not known:
+        return None
+    newest = max(known, key=lambda r: r["measured"])
+    before = newest["machine"]["clock_mhz"]
+    if abs(clock_mhz - before) / before <= CLOCK_TOLERANCE:
+        return None
+    return newest
+
+
 class Nodes:
     """Hands each task the NUMA node whose CPUs were idlest over the
-    last second, among those no other task holds. The machine may be
-    shared, and a node another job has moved onto would slow whichever
-    build ran there; picking at each task's start follows the idle
-    nodes as they move."""
+    last second, among those no other task holds and those --nodes
+    names. The machine may be shared, and a node another job has moved
+    onto would slow whichever build ran there; picking at each task's
+    start follows the idle nodes as they move."""
 
-    def __init__(self, count):
-        self.nodes = numa_nodes()
+    def __init__(self, count, wanted):
+        every = numa_nodes()
+        self.nodes = pick_nodes(every, wanted)
+        # A machine of one node, or none, has nothing to pin to.
+        self.pinned = len(every) > 1
         self.held = set()
         self.lock = threading.Lock()
-        if len(self.nodes) > 1 and count > len(self.nodes):
+        if self.pinned and count > len(self.nodes):
             sys.exit(
-                f"--workers {count}: this machine has {len(self.nodes)} NUMA nodes"
+                f"--workers {count}: the benchmark has {len(self.nodes)} NUMA nodes"
             )
 
     def take(self):
         with self.lock:
-            # One node, or none: nothing to pick between.
-            if len(self.nodes) <= 1:
+            if not self.pinned:
                 return Worker(None, None)
+
+            # One node left: nothing to pick between.
+            free = [node for node in self.nodes if node[0] not in self.held]
+            if len(free) == 1:
+                node, cpus = free[0]
+                self.held.add(node)
+                return Worker(node, cpus)
 
             before = busy_jiffies()
             time.sleep(1)
@@ -465,7 +572,6 @@ class Nodes:
                     total += after[cpu][1] - before[cpu][1]
                 return used / total if total else 0
 
-            free = [node for node in self.nodes if node[0] not in self.held]
             node, cpus = min(free, key=lambda node: load(node[1]))
             self.held.add(node)
             return Worker(node, cpus)
@@ -724,7 +830,9 @@ def git_info(repo, rev):
     return {"commit": commit, "date": date, "subject": subject}
 
 
-def machine():
+def machine(clock_mhz):
+    """The machine a record was measured on, with the clock a busy core
+    of its measured nodes ran at (measure_clock)."""
     cpu = None
     with open("/proc/cpuinfo") as f:
         for line in f:
@@ -739,6 +847,7 @@ def machine():
         "cores": os.cpu_count(),
         "memory_gib": memory_gib,
         "kernel": platform.release(),
+        "clock_mhz": clock_mhz,
     }
 
 
@@ -784,12 +893,27 @@ def cmd_run(args):
 
     history = load_history(args.history)
     log = args.history + ".log"
-    host = machine()
-    nodes = Nodes(args.workers)
+    nodes = Nodes(args.workers, args.nodes)
+    host = machine(measure_clock(nodes.nodes))
+    clock = f"{host['clock_mhz']} MHz" if host["clock_mhz"] else "an unknown clock"
     print(
-        f"measuring on {host['host']} ({host['cpu']}), {args.workers} at once",
+        f"measuring on {host['host']} ({host['cpu']}) at {clock}, {args.workers} at once",
         flush=True,
     )
+
+    # Records at another clock than the history's would be drawn beside
+    # them as if the builds had changed. The records about to be measured
+    # again do not count, since they are replaced.
+    labels = {build.label for build in builds}
+    others = [r for r in history["records"] if r["label"] not in labels]
+    mismatch = clock_mismatch(others, host["host"], host["clock_mhz"])
+    if mismatch and not args.new_clock:
+        sys.exit(
+            f"{host['host']} runs at {host['clock_mhz']} MHz, and {mismatch['label']} "
+            f"in {args.history} was measured at {mismatch['machine']['clock_mhz']} MHz; "
+            "pin the clock it had (see the description: python3 tools/bench.py --help), "
+            "or pass --new-clock to measure anyway"
+        )
 
     # One record per build, measured afresh: an earlier record of the
     # same label is replaced. With --only, the earlier record is kept and
@@ -933,6 +1057,13 @@ def cmd_compare(args):
         sys.exit(
             f"{args.base} was measured on {base['machine']['host']}, {args.head} on {head['machine']['host']}"
         )
+    if clock_mismatch(
+        [base], head["machine"]["host"], head["machine"].get("clock_mhz")
+    ):
+        sys.exit(
+            f"{args.base} was measured at {base['machine']['clock_mhz']} MHz, "
+            f"{args.head} at {head['machine']['clock_mhz']} MHz"
+        )
 
     print(f"{'workload':<12}" + "".join(f"{title:>26}" for _, title in COMPARED))
     for workload in WORKLOADS:
@@ -995,6 +1126,15 @@ def main():
         type=int,
         default=DEFAULT_WORKERS,
         help="NUMA nodes to measure on at once",
+    )
+    run.add_argument(
+        "--nodes",
+        help="comma-separated NUMA nodes to measure on, such as those whose clock is pinned",
+    )
+    run.add_argument(
+        "--new-clock",
+        action="store_true",
+        help="measure although the clock differs from the history's newest record",
     )
     run.add_argument("--only", help="comma-separated workloads, in the order given")
     run.add_argument(
