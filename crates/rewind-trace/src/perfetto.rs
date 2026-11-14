@@ -355,26 +355,22 @@ pub fn trace(trace: &Trace, timing: &Timing) -> Vec<u8> {
     out.0
 }
 
-/// The chain's pieces where they happened on the one CPU, merged where
-/// one process's pieces follow each other: a sleep is the stretch before
-/// its run, a piece of computing the start of its run.
+/// The chain's pieces where they happened on the one CPU: computing from
+/// where it began in its run, a sleep from where its thread fell asleep.
+/// Pieces of one process in one state merge only where one ends as the
+/// next begins, so a slice never spans work another thread did between.
 fn chain_on_the_timeline(timing: &Timing) -> Vec<(u64, u64, String)> {
-    let graph = &timing.graph;
     let mut out: Vec<(u64, u64, String)> = Vec::new();
     let mut last: Option<(Option<crate::Life>, bool)> = None;
     for piece in &timing.chain.pieces {
-        let run = &graph.runs[piece.run];
         let sleeping = matches!(piece.kind, PieceKind::Sleep { .. });
-        let (from, to) = if sleeping {
-            (run.start_ns.saturating_sub(piece.ns), run.start_ns)
-        } else {
-            (run.start_ns, run.start_ns + piece.ns)
-        };
+        let (from, to) = (piece.from_ns, piece.from_ns + piece.ns);
         let life = timing.lives[piece.run];
         if last == Some((life, sleeping))
             && let Some(prev) = out.last_mut()
+            && prev.1 == from
         {
-            prev.1 = prev.1.max(to);
+            prev.1 = to;
             continue;
         }
         let who = life.map_or_else(|| "the kernel".to_string(), |l| timing.name(l));
@@ -403,5 +399,62 @@ mod tests {
         let mut m = Msg::default();
         m.uint(1, 150).str(2, "hi");
         assert_eq!(m.0, vec![0x08, 0x96, 0x01, 0x12, 0x02, b'h', b'i']);
+    }
+
+    /// The chain's slices of `trace`, run to the clock at `end_ns`, as
+    /// where each starts and ends.
+    fn slices(trace: &Trace, end_ns: u64) -> Vec<(u64, u64)> {
+        let timing = Timing::new(trace, &crate::io_records::IoLog::default(), end_ns).unwrap();
+        chain_on_the_timeline(&timing)
+            .into_iter()
+            .map(|(from, to, _)| (from, to))
+            .collect()
+    }
+
+    #[test]
+    fn a_preempted_process_is_two_slices_with_the_other_work_between() {
+        // Init computes from step 0 to 10, is preempted while process 2
+        // runs to 40, and computes again to 60; the clock is one past the
+        // step and the job runs from step 1 to 59. Init's two stretches
+        // are two slices, 2 to 11 and 41 to 60, not one across process 2.
+        use crate::critical::tests::{job_mark, switch};
+        let trace = Trace {
+            events: vec![job_mark(1, "rewind-start"), job_mark(59, "rewind-exit 0")],
+            switches: vec![
+                switch(0, 1, 1, None),
+                switch(10, 2, 2, None),
+                switch(40, 1, 1, Some(60)),
+                switch(60, 0, 0, Some(60)),
+            ],
+            wakes: vec![],
+        };
+        assert_eq!(slices(&trace, 61), vec![(2, 11), (41, 60)]);
+    }
+
+    #[test]
+    fn a_sleep_is_where_it_was_and_not_where_its_thread_next_ran() {
+        // Init computes from step 0 to 10 and sleeps in clock_nanosleep;
+        // a timer wakes it at step 20, but process 2 holds the CPU until
+        // 50, and init computes from 50 to 60. The sleep is 11 to 21, from
+        // where init fell asleep to the timer, not the 10 before step 50.
+        use crate::critical::tests::{job_mark, switch};
+        let trace = Trace {
+            events: vec![job_mark(1, "rewind-start"), job_mark(59, "rewind-exit 0")],
+            switches: vec![
+                switch(0, 1, 1, None),
+                switch(10, 0, 0, Some(230)),
+                switch(20, 2, 2, None),
+                switch(50, 1, 1, None),
+                switch(60, 0, 0, Some(60)),
+            ],
+            wakes: vec![crate::switches::Wake {
+                step: 20,
+                ns: 21,
+                tid: 1,
+                waker: 0,
+                how: crate::switches::WakeHow::Hardirq,
+            }],
+        };
+        assert_eq!(slices(&trace, 61), vec![(2, 11), (11, 21), (51, 60)]);
     }
 }
