@@ -16,3 +16,4 @@ kept changing after that day gives the last commit that changed it.
 | 2026-11-04 | review | `7481c985` | [Memory blame review and handoff](2026-11-04-memory-blame-review.md)       |
 | 2026-11-09 | review | `a552c79d` | [Review of Rewind 0.14.0](2026-11-09-review-0.14.0.md)                     |
 | 2026-11-09 | design | `67e6cdbf` | [Deterministic multicore builds](2026-11-09-multicore.md)                  |
+| 2026-11-13 | audit  | `bf1cfa9f` | [Release audit of Rewind 0.16.0](2026-11-13-release-audit-0.16.0.md)       |
