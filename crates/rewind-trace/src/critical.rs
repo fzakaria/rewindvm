@@ -791,7 +791,7 @@ pub fn syscall_name(nr: u32) -> Option<&'static str> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     // The chain through runs built by hand: two threads, one waking the
     // other, and a timer sleep, checked against what each wait allows.
     use super::*;
@@ -910,7 +910,7 @@ mod tests {
     /// blocked in the join, waking nobody; thread 3 computes 10, and its
     /// exit wakes main, whose join of thread 2 finds it done and does not
     /// block. Both threads were joined, so the job waited for both.
-    fn joined_after_exit() -> Trace {
+    pub(crate) fn joined_after_exit() -> Trace {
         Trace {
             events: vec![
                 job_mark(1, "rewind-start"),

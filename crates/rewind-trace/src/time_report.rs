@@ -431,6 +431,9 @@ pub struct Row {
     pub life: Option<Life>,
     /// The step the part is first on the chain, to go to.
     pub step: Option<u64>,
+    /// The thread `step` is in, so a look at the step looks at the
+    /// thread the row is about and not its process's main thread.
+    pub tid: Option<u32>,
 }
 
 impl Row {
@@ -580,24 +583,23 @@ impl Timing {
 
         // The processes, programs and sleeps the chain spends the most in.
         let mut on_chain: HashMap<Life, u64> = HashMap::new();
-        let mut first_step: HashMap<Life, u64> = HashMap::new();
+        let mut first_step: HashMap<Life, (u64, u32)> = HashMap::new();
         let mut sleeps: HashMap<(Life, Option<u32>), (u64, usize)> = HashMap::new();
-        let mut sleep_step: HashMap<(Life, Option<u32>), u64> = HashMap::new();
+        let mut sleep_step: HashMap<(Life, Option<u32>), (u64, u32)> = HashMap::new();
         for piece in &chain.pieces {
             let Some(life) = lives[piece.run] else {
                 continue;
             };
+            let run = &graph.runs[piece.run];
             *on_chain.entry(life).or_default() += piece.ns;
-            first_step
-                .entry(life)
-                .or_insert(graph.runs[piece.run].start_step);
+            first_step.entry(life).or_insert((run.start_step, run.tid));
             if let PieceKind::Sleep { syscall } = piece.kind {
                 let entry = sleeps.entry((life, syscall)).or_default();
                 entry.0 += piece.ns;
                 entry.1 += 1;
                 sleep_step
                     .entry((life, syscall))
-                    .or_insert_with(|| self.fell_asleep(piece.run));
+                    .or_insert_with(|| (self.fell_asleep(piece.run), run.tid));
             }
         }
 
@@ -610,7 +612,8 @@ impl Timing {
                 on_chain_ns: ns,
                 without_ns: Some(graph.finish(&Threads(&|i, _| lives[i] == Some(life)))),
                 life: Some(life),
-                step: first_step.get(&life).copied(),
+                step: first_step.get(&life).map(|f| f.0),
+                tid: first_step.get(&life).map(|f| f.1),
             });
         }
         let mut programs: HashMap<String, (u64, usize)> = HashMap::new();
@@ -640,6 +643,7 @@ impl Timing {
                 },
                 life: None,
                 step: None,
+                tid: None,
             });
         }
         let sleep_ns: HashMap<(Life, Option<u32>), u64> =
@@ -661,7 +665,8 @@ impl Timing {
                         && matches!(graph.starts[i], Start::Timer { syscall: s, .. } if s == syscall)
                 }))),
                 life: Some(life),
-                step: sleep_step.get(&(life, syscall)).copied(),
+                step: sleep_step.get(&(life, syscall)).map(|f| f.0),
+                tid: sleep_step.get(&(life, syscall)).map(|f| f.1),
             });
         }
         fold_sleeps(&mut rows);
@@ -703,13 +708,14 @@ impl Timing {
         let tree_runs = runs_in(lives, &tree);
 
         let mut on: HashMap<Life, u64> = HashMap::new();
-        let mut first_step: HashMap<Life, u64> = HashMap::new();
+        let mut first_step: HashMap<Life, (u64, u32)> = HashMap::new();
         for p in &chain.pieces {
             if let Some(l) = lives[p.run]
                 && below.contains(&l)
             {
+                let run = &graph.runs[p.run];
                 *on.entry(l).or_default() += p.ns;
-                first_step.entry(l).or_insert(graph.runs[p.run].start_step);
+                first_step.entry(l).or_insert((run.start_step, run.tid));
             }
         }
 
@@ -729,6 +735,7 @@ impl Timing {
             without_ns: Some(graph.finish(&Threads(&|i, _| tree_runs[i]))),
             life: None,
             step: None,
+            tid: None,
         }];
 
         // The programs it started, those run more than once as a group.
@@ -759,6 +766,7 @@ impl Timing {
                 },
                 life: None,
                 step: None,
+                tid: None,
             });
         }
 
@@ -771,7 +779,8 @@ impl Timing {
                 on_chain_ns: ns,
                 without_ns: Some(graph.finish(&Threads(&|i, _| lives[i] == Some(l)))),
                 life: Some(l),
-                step: first_step.get(&l).copied(),
+                step: first_step.get(&l).map(|f| f.0),
+                tid: first_step.get(&l).map(|f| f.1),
             });
         }
         sort(&mut rows);
@@ -784,12 +793,12 @@ impl Timing {
     pub fn inside(&self, life: Life) -> Inside {
         let (graph, chain, lives) = (&self.graph, &self.chain, &self.lives);
         let mine = |i: usize| lives[i] == Some(life);
-        let first = |pred: &dyn Fn(usize) -> bool| -> Option<u64> {
+        let first = |pred: &dyn Fn(usize) -> bool| -> Option<(u64, u32)> {
             chain
                 .pieces
                 .iter()
                 .find(|p| pred(p.run))
-                .map(|p| graph.runs[p.run].start_step)
+                .map(|p| (graph.runs[p.run].start_step, graph.runs[p.run].tid))
         };
 
         let under: HashSet<Life> = self.descendants(life).into_iter().collect();
@@ -824,7 +833,8 @@ impl Timing {
                     .sum(),
                 without_ns: Some(graph.finish(&Computing(&|i, _| ours(i)))),
                 life: None,
-                step: first(&ours),
+                step: first(&ours).map(|f| f.0),
+                tid: Some(tid),
             });
 
             // Its sleeps on the chain, by system call.
@@ -859,6 +869,7 @@ impl Timing {
                     }))),
                     life: None,
                     step: Some(step),
+                    tid: Some(tid),
                 });
             }
 
@@ -898,6 +909,7 @@ impl Timing {
                     without_ns: None,
                     life: waker_life.filter(|&l| l != life),
                     step: Some(step),
+                    tid: Some(tid),
                 });
             }
         }
@@ -927,7 +939,8 @@ impl Timing {
                     .sum(),
                 without_ns: Some(graph.finish(&Sleeps(&|i, _| mine(i)))),
                 life: None,
-                step: first(&mine),
+                step: first(&mine).map(|f| f.0),
+                tid: first(&mine).map(|f| f.1),
             });
         }
         sort(&mut rows);
@@ -1458,6 +1471,24 @@ mod tests {
         assert_eq!(share(10, 10), "100%");
         assert_eq!(share(5, 10), "50%");
         assert_eq!(share(5, 0), "0%");
+    }
+
+    #[test]
+    fn a_threads_row_looks_at_that_thread() {
+        // Init's main thread joins two workers; the worker that computes
+        // 100 steps is on the path. Its computing row is at the step its
+        // run starts and names thread 2, so a look at the step looks at
+        // the worker and not at main, blocked in its join there.
+        let trace = critical::tests::joined_after_exit();
+        let timing = Timing::new(&trace, &IoLog::default(), 121).unwrap();
+        let life = Life { pid: 1, start: 0 };
+        let inside = timing.inside(life);
+        let worker = inside
+            .rows
+            .iter()
+            .find(|r| r.kind == RowKind::Thread { tid: 2 })
+            .unwrap();
+        assert_eq!((worker.step, worker.tid), (Some(5), Some(2)));
     }
 
     /// A piece of the path on thread 1 at `step`.

@@ -1057,6 +1057,7 @@ mod tests {
             without_ns,
             life: Some(life(7)),
             step: Some(1),
+            tid: Some(7),
         }
     }
 

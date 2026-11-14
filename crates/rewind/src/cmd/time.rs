@@ -264,7 +264,7 @@ fn print_inside(timing: &Timing, life: rewind_trace::Life, run: &str, limit: usi
     {
         let pid = r.life.map_or(life.pid, |l| l.pid);
         closer(
-            &format!("rewind where {run} {step} --pid {pid}"),
+            &where_command(run, step, pid, r.tid),
             "the source line the first row's time starts at",
         );
     }
@@ -278,6 +278,16 @@ fn print_inside(timing: &Timing, life: rewind_trace::Life, run: &str, limit: usi
         &format!("rewind time {run} --perfetto F"),
         "every process on a timeline",
     );
+}
+
+/// The `rewind where` command for `step` in process `pid`, on thread
+/// `tid` when that is not the process's main thread, which `rewind where`
+/// looks at by default.
+fn where_command(run: &str, step: u64, pid: u32, tid: Option<u32>) -> String {
+    match tid {
+        Some(tid) if tid != pid => format!("rewind where {run} {step} --pid {pid} --tid {tid}"),
+        _ => format!("rewind where {run} {step} --pid {pid}"),
+    }
 }
 
 /// A command to look closer with, and what it shows.
@@ -501,6 +511,24 @@ mod tests {
     // The pieces of a line of output: durations at their precision, and
     // bars to scale.
     use super::*;
+
+    #[test]
+    fn a_look_at_a_workers_step_names_the_worker() {
+        // A row about thread 35 of process 34 looks at thread 35; one about
+        // the main thread, or about no thread, needs no --tid.
+        assert_eq!(
+            where_command("f899f0c5", 737, 34, Some(35)),
+            "rewind where f899f0c5 737 --pid 34 --tid 35"
+        );
+        assert_eq!(
+            where_command("f899f0c5", 737, 34, Some(34)),
+            "rewind where f899f0c5 737 --pid 34"
+        );
+        assert_eq!(
+            where_command("f899f0c5", 737, 34, None),
+            "rewind where f899f0c5 737 --pid 34"
+        );
+    }
 
     #[test]
     fn durations_read_at_a_precision_that_suits_them() {
