@@ -1655,21 +1655,32 @@ trace, with nothing replayed (`rewind_trace::critical` and
 `rewind_trace::time_report`). Each thread's time on the one vCPU is cut
 into runs at its switches, and each run starts for one reason: the thread
 was ready and waited for the CPU, a timer it slept on fired, another
-thread woke it, or it was forked. The critical path is the longest chain
-of runs and the waits between them from the job's start to its end,
-following each start back to what it waited for, with a CPU for every
-thread, so a wait for the CPU alone costs nothing on it. No number of
-CPUs runs the job in less. A sleep is on the path only if the job waited
-for it, so the threads sleeping at any moment that nothing waits for, most
-of them, never show up.
+thread woke it, or it was forked. A wait for an exit does not always
+block: a join of a thread already done, or a wait for a child already a
+zombie, returns with no wakeup to record. So each run also starts no
+sooner than the exits it would have waited for: a thread's, for its
+process's main thread's next run, and a process's, for the next run of
+the thread that forked it. The critical path is the longest chain of runs
+and the waits between them from the job's start to its end, following each
+start back to what it waited for, with a CPU for every thread, so a wait
+for the CPU alone costs nothing on it. No number of CPUs runs the job in
+less, as far as wakes, forks and exits say what waited for what: a thread
+that waits by spinning on memory or by polling a file is not seen to
+wait. A parent that never waited for its child is taken to have waited,
+which can only lengthen the path within the order the run was recorded
+in. A sleep is on the path only if the job waited for it, so the threads
+sleeping at any moment that nothing waits for, most of them, never show
+up.
 
 How much sooner the run would finish without a part, a process, every
 process of one program, or one process's sleeps in one call, is worked out
 by giving that part's runs or timer sleeps no time and finding the longest
 chain again. That is less than the part's time on the path whenever other
 work ran beside it, since the next longest chain takes over: libuv's
-compile of `test-fs.c` holds 2.10 s of the path but is worth 1.76 s,
-because make's next compile also waited for two others. The graph keeps
+compile of `test-fs.c` holds 2.10 s of the path but is worth 1.62 s,
+because make's next compile also waited for others. The rows are separate
+what-ifs, not a breakdown: two of them can count the same work, and their
+savings do not add up. The graph keeps
 each thread's runs in the order they were recorded, so a what-if does not
 move work that a faster part would have let start earlier.
 
@@ -1677,9 +1688,12 @@ The times are on the run's clock, which with counter time
 ([pmu.md](pmu.md)) advances with the branches the guest's programs retire
 and the timers they sleep on. Work in the kernel, such as starting a
 process, costs almost nothing on it. A run on exit time, where computing
-takes no time at all, has no report. `--folded` writes the path as
-Brendan Gregg's folded stacks and `--perfetto` writes every process's
-switches and wakes as a Perfetto trace.
+takes no time at all, has no report. A phase's share of the path is the
+path between its marker and the next, with a run or a sleep that crosses a
+marker split there, and the path before the first phase counted on its
+own. `--folded` writes the path as Brendan Gregg's folded stacks and
+`--perfetto` writes every process's switches and wakes as a Perfetto
+trace.
 
 ## Limits
 
@@ -1712,7 +1726,10 @@ switches and wakes as a Perfetto trace.
   wall time, so starting a process is nearly free and a lock is never
   contended without preemption. It says which work the run waited on and
   what taking it away saves, not how long the job takes on a particular
-  machine.
+  machine: a change that cuts cache misses without retiring fewer
+  branches is faster on a host and no shorter on this clock. The source
+  line the Time tab shows for a stretch of computing is where the stretch
+  began, not the function that spent it.
 - **The CPU vendor is part of the input.** The fixed CPU model keeps the
   host's vendor, since Intel and AMD differ in ways CPUID cannot hide, so a
   run made on AMD replays on any AMD host from Zen 2 on but not on Intel,
