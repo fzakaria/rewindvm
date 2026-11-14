@@ -158,24 +158,23 @@ fn write_export(
         // kept where something looked inside the run, or where a fork
         // parted from it, stay here, so two exports of the run are the
         // same bytes whatever was looked at or forked.
+        // Each keyframe is read once, for the pages it names, and not held.
         let store = Store::open(&home.store())?;
         let layers = run.keyframes()?;
-        let mut loaded = keyframes::Loaded::default();
         let mut hashes: BTreeSet<Hash> = BTreeSet::new();
-        for step in layers.recording(&mut loaded)? {
-            let name = format!("{}/{step:016}.kf", keyframes::DIR);
-            let from = layers
-                .path(step)
-                .with_context(|| format!("keyframe {step} of run {}", run.manifest.id))?;
-            tar.append_path_with_name(&from, &name)?;
-            let kf = loaded
-                .get(step)
-                .expect("the recording's keyframes are read");
+        let steps = layers.recording(|kf| {
             for (_, hash) in &kf.pages {
                 if *hash != ZERO_PAGE {
                     hashes.insert(*hash);
                 }
             }
+        })?;
+        for step in steps {
+            let name = format!("{}/{step:016}.kf", keyframes::DIR);
+            let from = layers
+                .path(step)
+                .with_context(|| format!("keyframe {step} of run {}", run.manifest.id))?;
+            tar.append_path_with_name(&from, &name)?;
         }
         // Whether the run took them as it executed goes with them.
         if keyframes::taken(&run.dir) {

@@ -387,11 +387,11 @@ impl Layers {
     /// The steps of the keyframes a replayable export of the run carries,
     /// in order: the ones its recording took, the ones each run it shares
     /// keyframes with took up to the step the two part, the keyframe at
-    /// that step, and every keyframe the chains of those name, read into
-    /// `loaded`. A kept keyframe is among them only when one of the others
+    /// that step, and every keyframe the chains of those name, each read
+    /// once and handed to `visit` and not kept. A kept keyframe is among them only when one of the others
     /// is a delta from it, as the keyframe a fork takes where it parts may
     /// be, so a look inside any of the runs adds none.
-    pub fn recording(&self, loaded: &mut Loaded) -> Result<Vec<u64>> {
+    pub fn recording(&self, mut visit: impl FnMut(&Keyframe)) -> Result<Vec<u64>> {
         // The keyframes the recordings took, and the one at each step
         // where two of the runs part.
         let mut seeds = BTreeSet::new();
@@ -404,10 +404,30 @@ impl Layers {
             }
         }
 
-        // Every keyframe those are deltas from, back to a full one.
+        // Every keyframe those are deltas from, back to a full one. Each
+        // is read once and handed to `visit`: a walk back from a seed ends
+        // at a keyframe a walk before it read, so a recording of N
+        // keyframes in one chain is N reads and not N(N+1)/2.
         let mut steps = BTreeSet::new();
         for seed in seeds {
-            steps.extend(self.chain_loaded(seed, loaded)?.iter().map(|k| k.step));
+            let mut at = Some(seed);
+            while let Some(this) = at {
+                if !steps.insert(this) {
+                    break;
+                }
+                let kf = self.load(this)?;
+                if let Some(parent) = kf.parent
+                    && parent >= this
+                {
+                    bail!(
+                        "the keyframe at step {this} of run {} names step {parent} as its parent, \
+                         which is not before it",
+                        self.layers[0].dir.display()
+                    );
+                }
+                visit(&kf);
+                at = kf.parent;
+            }
         }
         Ok(steps.into_iter().collect())
     }
@@ -1434,14 +1454,36 @@ mod tests {
         keep(&p, &at(2000, Some(1800))).unwrap();
         keep(&c, &at(3500, Some(3000))).unwrap();
 
-        let mut loaded = Loaded::default();
         let alone = Layers::open(&p, None).unwrap();
-        assert_eq!(alone.recording(&mut loaded).unwrap(), vec![256, 1200]);
+        assert_eq!(alone.recording(|_| {}).unwrap(), vec![256, 1200]);
         let fork = Layers::open(&c, share("p", 2400).as_ref()).unwrap();
         assert_eq!(
-            fork.recording(&mut loaded).unwrap(),
+            fork.recording(|_| {}).unwrap(),
             vec![256, 1200, 1800, 2400, 3000]
         );
+        fs::remove_dir_all(&runs).unwrap();
+    }
+
+    #[test]
+    fn a_long_recording_reads_each_keyframe_once() {
+        // A recording of 300 keyframes, each a delta from the one before
+        // back to a full one at step 1: finding the export's keyframes
+        // reads each once, 300 reads, where following every keyframe's
+        // chain back to the full one read 45,150.
+        const KEYFRAMES: u64 = 300;
+        let runs = runs("long-recording");
+        let p = run(&runs, "p", &[], None);
+        for step in 1..=KEYFRAMES {
+            let mut kf = Keyframe::default();
+            kf.step = step;
+            kf.parent = (step > 1).then(|| step - 1);
+            save(&p, &kf).unwrap();
+        }
+        let layers = Layers::open(&p, None).unwrap();
+        let mut reads = 0;
+        let steps = layers.recording(|_| reads += 1).unwrap();
+        assert_eq!(steps, (1..=KEYFRAMES).collect::<Vec<u64>>());
+        assert_eq!(reads, KEYFRAMES);
         fs::remove_dir_all(&runs).unwrap();
     }
 
