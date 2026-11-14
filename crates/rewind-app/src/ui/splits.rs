@@ -36,6 +36,8 @@ pub struct Splits {
     pub terminal: f32,
     pub variables: f32,
     pub frames: f32,
+    /// Automatic in a layout saved before the lists could be dragged.
+    #[serde(default)]
     pub lists: ListSizing,
 }
 
@@ -487,6 +489,27 @@ mod tests {
         assert!((a / 3.5 * 700.0 - 400.0).abs() < 0.01);
         let (a, _) = shift(1.5, 1.0, 3.5, 700.0, -500.0, 100.0);
         assert!((a / 3.5 * 700.0 - 100.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_layout_saved_before_the_lists_could_be_dragged_is_kept() {
+        // A layout 0.15.0 saved, without who set the list heights: its
+        // shares read back as saved, with the lists sized automatically,
+        // and a layout with dragged lists reads back dragged.
+        let old = r#"{"log":2,"middle":1,"right":1,"procs":1,"files":1,"terminal":0.3,"variables":200,"frames":140}"#;
+        let read = Splits::parse(Some(old));
+        assert_eq!(
+            (read.log, read.terminal, read.variables, read.frames),
+            (2.0, 0.3, 200.0, 140.0)
+        );
+        assert_eq!(read.lists, ListSizing::Automatic);
+
+        let dragged = Splits {
+            lists: ListSizing::Dragged,
+            ..read
+        };
+        let text = serde_json::to_string(&dragged).unwrap();
+        assert_eq!(Splits::parse(Some(&text)), dragged);
     }
 
     #[test]
