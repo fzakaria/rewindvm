@@ -14,6 +14,46 @@ creates no wakeup edge and the graph loses a required dependency.
 All seven findings below were open at revision `bf1cfa9f`. This audit changed no
 production code.
 
+## Outcome
+
+Gone through on 2026-11-13. Each finding was reproduced before it was fixed,
+with a test that failed first; each fix is its own commit after the audit's.
+
+| ID  | Reproduced                                                                                                                                                                                                         | Fixed in   | What changed                                                                                                                                                                                                                                                |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A1  | Re-recorded the joined-worker program with the 0.16.0 tag: run `f899f0c5`, path 2.2 ms. On the libuv build, 217 process exits came before a parent's run with no wake and 1,382 before one woken by another thread | `b378bffa` | Every exit is a point the waiter starts after: a thread's for its process's main thread, a process's for the thread that forked it. The program's path is 100 ms, libuv's 50.0 s where it was 47.4 s. No guest change: the trace already records every exit |
+| A2  | The two-children trace: 56 ns with a fresh pid, 52 ns with pid 2 again                                                                                                                                             | `b378bffa` | Runs grouped by the life of their thread id, from the fork that made it; a process's waits name the waker's life                                                                                                                                            |
+| A3  | `rewind where f899f0c5 737 --pid 34` showed thread 34 in `pthread_join`; `--tid 35` the worker                                                                                                                     | `4caa68e2` | A row carries the thread its step is in; the command adds `--tid` when that is not the main thread                                                                                                                                                          |
+| A4  | The audit's fixture: phases `[0, 0]`, and folded stacks put all 89 ns before the phases                                                                                                                            | `0985c599` | Each piece knows where it starts on the recorded clock and is split at phase markers in the totals, the folded stacks and the app's phase trees; the report counts the path before the first phase                                                          |
+| A5  | A preempted process came out as one slice, 1 to 60 ns; a sleep at 41 to 51 ns where it was 11 to 21                                                                                                                | `d699ae56` | Slices start where their piece did and merge only where one ends as the next begins                                                                                                                                                                         |
+| A6  | A 300-keyframe chain: 45,150 visits                                                                                                                                                                                | `fdc81d27` | A walk stops at a keyframe already read: 300 visits; the export keeps page hashes, not decoded keyframes. The audit's timings were not re-measured                                                                                                          |
+| A7  | The 0.15.0 layout read back as the defaults                                                                                                                                                                        | `39c68fc0` | `lists` defaults to automatic when absent                                                                                                                                                                                                                   |
+
+On the release's claims: `docs/design.md` now says the path is the least the
+run can take as far as wakes, forks and exits say what waited for what, that
+the "What would shorten it" rows are separate what-ifs, and that a computing
+stretch's source line is where it began (`b1143520`). The release notes say
+0.16.0 cannot read a trace recorded by 0.15.0: importing v0.15.0's bundled
+`mylib-fail.rwd` and running `rewind events` stops at "the switches at step 4096
+are in format 1; this build reads 2", as the audit found.
+
+The benchmark medians quoted below matched `site/bench/history.json`, and the
+notes' "every other workload is within 0.15.0's spread" was wrong: echo
+(0.45 s), spawn (1.10 s) and check-nix (28.26 s) were past 0.15.0's slowest
+round. That 0.16.0 record ran at a load of 9 to 14, where 0.15.0's ran at
+about 4. Measured again beside 0.15.0 on a quiet leviathan, `check` takes
+1.06 s against 1.03 s and every 0.16.0 median falls in 0.15.0's range.
+
+leviathan's reboot for that run brought a kernel that boosts a busy core to
+3.5 GHz, where every earlier record was taken at the nominal 2.45 GHz; every
+workload ran a third faster. 0.15.0, measured again on a NUMA node with boost
+off, came within 5% of its record, so the history stands. The new 0.16.0
+record was taken the same way at load 3 (`8aa31030`): no workload changed
+beyond the rounds' spread, `check` takes 1.35 s against 1.30 s and `cat` in
+the middle of a run 0.43 s against 0.40 s. A record now keeps the clock it ran
+at, and `tools/bench.py run` refuses a clock more than 5% from the newest
+record's (`e8e1d3c4`).
+
 ## Scope and evidence
 
 Reviewed the 28 commits from v0.15.0 (`c3a7c769`) through `bf1cfa9f`, with a clean
@@ -28,17 +68,17 @@ published on 2026-11-12. Code locations below refer to the reviewed revision.
 
 Validation on nyx:
 
-| Check | Result |
-| --- | --- |
-| `nix develop -c cargo test --workspace -q` | 770 passed, including one doc test |
-| `nix develop .#app -c cargo test --manifest-path crates/rewind-app/Cargo.toml --lib -q` | 424 passed, two ignored |
-| `nix flake check --no-build` | Passed evaluation; did not build the integration checks |
-| KVM recording and replay of `sleep 0.1` | Identical: 189 events, 423 context switches and three read/write records over 779 steps |
-| KVM recording of the joined-worker reproduction | Confirmed A1; gdb inspection confirmed A3 |
-| Synthetic graph probes | A2 and A4 failed their assertions |
-| Decoding exported Perfetto track events | Both A5 interval assertions failed |
-| Deserializing a 0.15 layout with the current type definitions | Confirmed A7 |
-| Optimized keyframe traversal probe | Measured A6's scaling |
+| Check                                                                                   | Result                                                                                  |
+| --------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| `nix develop -c cargo test --workspace -q`                                              | 770 passed, including one doc test                                                      |
+| `nix develop .#app -c cargo test --manifest-path crates/rewind-app/Cargo.toml --lib -q` | 424 passed, two ignored                                                                 |
+| `nix flake check --no-build`                                                            | Passed evaluation; did not build the integration checks                                 |
+| KVM recording and replay of `sleep 0.1`                                                 | Identical: 189 events, 423 context switches and three read/write records over 779 steps |
+| KVM recording of the joined-worker reproduction                                         | Confirmed A1; gdb inspection confirmed A3                                               |
+| Synthetic graph probes                                                                  | A2 and A4 failed their assertions                                                       |
+| Decoding exported Perfetto track events                                                 | Both A5 interval assertions failed                                                      |
+| Deserializing a 0.15 layout with the current type definitions                           | Confirmed A7                                                                            |
+| Optimized keyframe traversal probe                                                      | Measured A6's scaling                                                                   |
 
 The VM probes used an isolated `REWIND_HOME` under
 `/tmp/rewind-release-review/home`. The joined-worker run used the AMD retired
@@ -57,15 +97,15 @@ P1 blocks the release's stated timing behavior. P2 covers incorrect answers or
 scaling problems to repair before relying on the feature for larger recordings.
 P3 is a smaller upgrade regression.
 
-| ID | Priority | Finding | Evidence |
-| --- | --- | --- | --- |
-| A1 | P1 | Completed joins disappear from the critical path | KVM recording and graph assertion |
-| A2 | P2 | Reused thread IDs connect unrelated lifetimes | Synthetic trace assertion |
-| A3 | P2 | The suggested source command selects the wrong thread | CLI output and gdb JSON |
-| A4 | P2 | Phase totals drop work across phase boundaries | Synthetic trace assertion |
-| A5 | P2 | Perfetto merges CPU gaps and shifts sleep intervals | Exported track events |
-| A6 | P2 | Replayable export repeatedly walks complete ancestry | Optimized timing probe and code |
-| A7 | P3 | Upgrading resets saved panel layouts | Deserialization assertion |
+| ID  | Priority | Finding                                               | Evidence                          |
+| --- | -------- | ----------------------------------------------------- | --------------------------------- |
+| A1  | P1       | Completed joins disappear from the critical path      | KVM recording and graph assertion |
+| A2  | P2       | Reused thread IDs connect unrelated lifetimes         | Synthetic trace assertion         |
+| A3  | P2       | The suggested source command selects the wrong thread | CLI output and gdb JSON           |
+| A4  | P2       | Phase totals drop work across phase boundaries        | Synthetic trace assertion         |
+| A5  | P2       | Perfetto merges CPU gaps and shifts sleep intervals   | Exported track events             |
+| A6  | P2       | Replayable export repeatedly walks complete ancestry  | Optimized timing probe and code   |
+| A7  | P3       | Upgrading resets saved panel layouts                  | Deserialization assertion         |
 
 ## A1. Preserve dependencies on completed joins
 
@@ -85,11 +125,11 @@ already exited when main reaches its join.
 
 The recorded run `f899f0c55e1dabf7`, named `review-joins-sleep`, produced:
 
-| Quantity | Observed value |
-| --- | --- |
+| Quantity                         | Observed value |
+| -------------------------------- | -------------- |
 | Job elapsed time on the VM clock | 102,341,916 ns |
-| Long worker's total computing | 100,070,112 ns |
-| Reported critical path | 2,233,842 ns |
+| Long worker's total computing    | 100,070,112 ns |
+| Reported critical path           | 2,233,842 ns   |
 
 The CLI rounds the last number to 2.2 ms. Its per-thread shortening table names
 thread 36's computing and sleeps, while the required 100 ms worker is absent.
@@ -127,13 +167,13 @@ work and dependencies are otherwise identical.
 
 The fixture uses these switches; each switch's clock is `step + 1`:
 
-| Step | Incoming TID | Syscall the outgoing thread blocked in |
-| --- | --- | --- |
-| 0 | 1 | None |
-| 10 | 2 | `wait4` |
-| 20 | 1 | None |
-| 50 | 3, or reused 2 | `wait4` |
-| 60 | 1 | None |
+| Step | Incoming TID   | Syscall the outgoing thread blocked in |
+| ---- | -------------- | -------------------------------------- |
+| 0    | 1              | None                                   |
+| 10   | 2              | `wait4`                                |
+| 20   | 1              | None                                   |
+| 50   | 3, or reused 2 | `wait4`                                |
+| 60   | 1              | None                                   |
 
 Init's job marks are at steps 1 and 69, and the final clock is 71 ns. Init forks
 the first child at step 5 and the second at step 45. The children exit at steps
@@ -189,8 +229,7 @@ the run that resumes afterward, which is not the interval the sleep occupied.
 
 The synthetic reproduction has init on the CPU from step/time `(0, 1)` until
 the idle switch at `(100, 101)`. Its job marks are at steps 1 and 90. It prints
-`Running phase: buildPhase` at step 10 and `Running phase: checkPhase` at step
-50. Both phase durations are 40 ns under the graph's own clock interpolation,
+`Running phase: buildPhase` at step 10 and `Running phase: checkPhase` at step 50. Both phase durations are 40 ns under the graph's own clock interpolation,
 but both report `on_chain_ns: 0` because the CPU run started before either
 phase. The assertion expecting `[40, 40]` receives `[0, 0]`.
 
@@ -249,10 +288,10 @@ are the mean of three further calls using that cache, with optimized release
 libraries and thin LTO. They exclude file creation and initial loading.
 
 | Recorded keyframes | Time per cached scan |
-| --- | --- |
-| 1,000 | 21 ms |
-| 2,000 | 88 ms |
-| 4,000 | 380 ms |
+| ------------------ | -------------------- |
+| 1,000              | 21 ms                |
+| 2,000              | 88 ms                |
+| 4,000              | 380 ms               |
 
 Doubling the chain produces about four times the traversal cost. The export
 also retains every decoded keyframe, including its page vector, until the
@@ -282,7 +321,16 @@ The probe extracted the current `Splits` and `ListSizing` definitions and tried
 to deserialize this valid old layout:
 
 ```json
-{"log":2,"middle":1,"right":1,"procs":1,"files":1,"terminal":0.3,"variables":200,"frames":140}
+{
+  "log": 2,
+  "middle": 1,
+  "right": 1,
+  "procs": 1,
+  "files": 1,
+  "terminal": 0.3,
+  "variables": 200,
+  "frames": 140
+}
 ```
 
 Repair: add `#[serde(default)]` to `lists`, using `ListSizing::Automatic` when
@@ -298,11 +346,11 @@ rounds for each release on leviathan, an AMD EPYC 7763 host with 256 logical
 CPUs, 251 GiB of memory and kernel 6.18.44. These are existing measurements,
 separate from the keyframe probe on nyx.
 
-| Workload | v0.15.0 median wall time | v0.16.0 median wall time |
-| --- | --- | --- |
-| GNU hello build | 22.89 s | 22.93 s |
-| Replay | 21.80 s | 21.80 s |
-| Schedule exploration (`check`) | 1.30 s | 1.44 s |
+| Workload                       | v0.15.0 median wall time | v0.16.0 median wall time |
+| ------------------------------ | ------------------------ | ------------------------ |
+| GNU hello build                | 22.89 s                  | 22.93 s                  |
+| Replay                         | 21.80 s                  | 21.80 s                  |
+| Schedule exploration (`check`) | 1.30 s                   | 1.44 s                   |
 
 The build and replay medians change little. The exploration median rises by
 about 10.8%; repeat that measurement before attributing the change to wakeup
