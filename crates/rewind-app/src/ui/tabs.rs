@@ -55,12 +55,12 @@ impl RightTab {
             RightTab::Compare => Some(Tab::Compare),
             RightTab::Bookmarks => Some(Tab::Bookmarks),
             RightTab::Threads => Some(Tab::Threads),
+            RightTab::Time => Some(Tab::Time),
             RightTab::AtStep
             | RightTab::Runs
             | RightTab::File
             | RightTab::FileDiff
-            | RightTab::Source
-            | RightTab::Time => None,
+            | RightTab::Source => None,
         }
     }
 
@@ -70,6 +70,7 @@ impl RightTab {
             Tab::Compare => RightTab::Compare,
             Tab::Bookmarks => RightTab::Bookmarks,
             Tab::Threads => RightTab::Threads,
+            Tab::Time => RightTab::Time,
         }
     }
 }
@@ -245,11 +246,16 @@ mod tests {
 
     #[test]
     fn a_link_names_the_tabs_the_viewer_opens_from_the_recording() {
-        // The compare, bookmarks and threads tabs go into a link and come
-        // back as themselves. The file, source and runs tabs need the
+        // The compare, bookmarks, threads and time tabs go into a link and
+        // come back as themselves. The file, source and runs tabs need the
         // machine, and "At this step" is what a link without a tab shows,
         // so none of them is named.
-        for tab in [RightTab::Compare, RightTab::Bookmarks, RightTab::Threads] {
+        for tab in [
+            RightTab::Compare,
+            RightTab::Bookmarks,
+            RightTab::Threads,
+            RightTab::Time,
+        ] {
             let named = tab.linked().expect("named in a link");
             assert_eq!(RightTab::from_link(named), tab);
         }
@@ -259,7 +265,6 @@ mod tests {
             RightTab::File,
             RightTab::FileDiff,
             RightTab::Source,
-            RightTab::Time,
         ] {
             assert_eq!(tab.linked(), None, "{tab:?}");
         }

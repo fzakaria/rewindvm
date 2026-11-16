@@ -126,6 +126,7 @@ impl Scrubber {
         }
         match address.tab.map(RightTab::from_link) {
             Some(RightTab::Threads) => self.open_lanes(cx),
+            Some(RightTab::Time) => self.show_time(cx),
             Some(RightTab::Compare) if compared => self.select_tab(RightTab::Compare, cx),
             Some(RightTab::Bookmarks) => self.select_tab(RightTab::Bookmarks, cx),
             _ => {}

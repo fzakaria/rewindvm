@@ -23,6 +23,8 @@ pub enum Tab {
     Compare,
     Bookmarks,
     Threads,
+    /// The run's critical path, which the viewer works out on opening it.
+    Time,
 }
 
 impl Tab {
@@ -32,12 +34,13 @@ impl Tab {
             Tab::Compare => "compare",
             Tab::Bookmarks => "bookmarks",
             Tab::Threads => "threads",
+            Tab::Time => "time",
         }
     }
 
     /// The tab an address names, if a link can name it.
     pub fn parse(name: &str) -> Option<Tab> {
-        [Tab::Compare, Tab::Bookmarks, Tab::Threads]
+        [Tab::Compare, Tab::Bookmarks, Tab::Threads, Tab::Time]
             .into_iter()
             .find(|tab| tab.name() == name)
     }
@@ -472,7 +475,7 @@ mod tests {
         );
         let odd = Address::parse("?url=a.rwd&tab=file&thread=main");
         assert_eq!((odd.tab, odd.thread), (None, None));
-        for tab in [Tab::Compare, Tab::Bookmarks, Tab::Threads] {
+        for tab in [Tab::Compare, Tab::Bookmarks, Tab::Threads, Tab::Time] {
             assert_eq!(Tab::parse(tab.name()), Some(tab));
         }
     }
