@@ -29,6 +29,7 @@ pub mod failing;
 pub mod failure;
 pub mod file_diff;
 pub mod io_records;
+pub mod lines;
 pub mod located;
 pub mod machine;
 pub mod manifest;
@@ -55,6 +56,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 pub use event::{DecodeError, Event, EventKind, HEADER_LEN, RECORD_MAX, signal_name};
+pub use lines::Line;
 /// Init's marks, which every trace holds, for readers that do not depend
 /// on the init themselves.
 pub use rewind_init::Mark;
@@ -247,16 +249,6 @@ pub struct JobExit {
     pub step: u64,
     /// The job's wait status.
     pub status: i32,
-}
-
-/// A line of output, reassembled from the writes that made it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Line {
-    /// The step the line was completed on.
-    pub step: u64,
-    pub pid: u32,
-    pub fd: u32,
-    pub text: String,
 }
 
 impl Trace {
@@ -523,27 +515,28 @@ impl Trace {
     }
 
     /// Output lines completed by `step`, both streams interleaved in the
-    /// order they were written. A write without a trailing newline is held
-    /// until the rest of its line arrives, as a terminal would show it.
+    /// order of their steps. A write without a trailing newline is held
+    /// until the rest of its line arrives. What a process wrote after its
+    /// last newline is a line from the step the process exits on, or for
+    /// a process the trace outlives, from the trace's last step; the line
+    /// has the step of its last write.
     pub fn lines_until(&self, step: u64) -> Vec<Line> {
         let mut lines = Vec::new();
-        let mut pending: BTreeMap<(u32, u32), String> = BTreeMap::new();
+        let mut assembler = lines::Lines::default();
         for e in self.until(step) {
-            let EventKind::Output { fd, bytes } = &e.kind else {
-                continue;
-            };
-            let buf = pending.entry((e.pid, *fd)).or_default();
-            buf.push_str(&String::from_utf8_lossy(bytes));
-            while let Some(nl) = buf.find('\n') {
-                let text: String = buf.drain(..=nl).collect();
-                lines.push(Line {
-                    step: e.step,
-                    pid: e.pid,
-                    fd: *fd,
-                    text: text.trim_end_matches('\n').to_string(),
-                });
-            }
+            assembler.event(e, &mut |line| lines.push(line));
         }
+
+        // A playhead at the trace's end or past it has seen every write
+        // there is.
+        if step >= self.last_step() {
+            assembler.end(&mut |line| lines.push(line));
+        }
+
+        // A line without a newline has the step of its last write, which
+        // may be before the lines other processes finished while its
+        // writer was still running.
+        lines.sort_by_key(|line| line.step);
         lines
     }
 
@@ -1690,6 +1683,119 @@ mod tests {
         let lines = t.lines_until(7);
         assert_eq!(lines[1].text, "compiling");
         assert_eq!(lines[1].step, 7);
+    }
+
+    /// The file descriptors of standard output and standard error.
+    const STDOUT_FD: u32 = 1;
+    const STDERR_FD: u32 = 2;
+
+    /// A write to standard error at `step`, as `out` is one to standard
+    /// output.
+    fn err(step: u64, pid: u32, text: &str) -> Event {
+        ev(
+            step,
+            pid,
+            pid,
+            EventKind::Output {
+                fd: STDERR_FD,
+                bytes: text.as_bytes().to_vec(),
+            },
+        )
+    }
+
+    // Tests that the last thing a failing job wrote is in its log though
+    // no newline ended it. Process 2 writes a line, then a diagnostic
+    // without a newline to standard error, and exits while process 1 goes
+    // on: the diagnostic is a line from the exit on, with the step and
+    // stream of its write, and is no line before then.
+    #[test]
+    fn a_final_write_without_a_newline_is_a_line_once_its_writer_exits() {
+        let t = Trace {
+            events: vec![
+                out(1, 2, "first\n"),
+                err(2, 2, "reason: out of space"),
+                exit_of(3, 2),
+                out(4, 1, "later\n"),
+            ],
+            ..Default::default()
+        };
+
+        // A playhead before the final write, then on it, shows the first
+        // line alone: the writer may yet finish the line.
+        assert_eq!(t.lines_until(1).len(), 1);
+        assert_eq!(t.lines_until(2).len(), 1);
+
+        // From the exit on, the diagnostic is a line.
+        let lines = t.lines_until(3);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[1].text, "reason: out of space");
+        assert_eq!(
+            (lines[1].step, lines[1].pid, lines[1].fd),
+            (2, 2, STDERR_FD)
+        );
+
+        // The whole log keeps the lines in the order of their steps.
+        let texts: Vec<String> = t
+            .lines_until(u64::MAX)
+            .into_iter()
+            .map(|l| l.text)
+            .collect();
+        assert_eq!(texts, ["first", "reason: out of space", "later"]);
+    }
+
+    // Tests that what two streams had written when the trace ended, with
+    // no exit to end either, are lines in the order of their last writes.
+    // Standard output's fragment is written first and finished last, so
+    // it comes after standard error's, and neither is a line at a
+    // playhead before the trace's end.
+    #[test]
+    fn fragments_left_when_the_trace_ends_come_in_the_order_of_their_last_writes() {
+        let t = Trace {
+            events: vec![out(1, 1, "prog"), err(2, 1, "warn"), out(3, 1, "ress")],
+            ..Default::default()
+        };
+
+        assert_eq!(t.lines_until(2), vec![]);
+
+        let lines = t.lines_until(3);
+        let shown: Vec<(u64, u32, &str)> = lines
+            .iter()
+            .map(|l| (l.step, l.fd, l.text.as_str()))
+            .collect();
+        assert_eq!(shown, [(2, STDERR_FD, "warn"), (3, STDOUT_FD, "progress")]);
+    }
+
+    // Tests that a character whose bytes two writes split reads as the
+    // character. The bytes of a line with a two-byte character are cut at
+    // every place into two writes, and each pair must make the line one
+    // write makes.
+    #[test]
+    fn a_character_split_between_two_writes_is_whole_in_its_line() {
+        const LINE: &str = "caf\u{e9}\n";
+        let event = |step: u64, bytes: &[u8]| {
+            ev(
+                step,
+                1,
+                1,
+                EventKind::Output {
+                    fd: STDOUT_FD,
+                    bytes: bytes.to_vec(),
+                },
+            )
+        };
+        for cut in 1..LINE.len() {
+            let (head, tail) = LINE.as_bytes().split_at(cut);
+            let t = Trace {
+                events: vec![event(1, head), event(2, tail)],
+                ..Default::default()
+            };
+            let texts: Vec<String> = t
+                .lines_until(u64::MAX)
+                .into_iter()
+                .map(|l| l.text)
+                .collect();
+            assert_eq!(texts, ["caf\u{e9}"], "cut after byte {cut}");
+        }
     }
 
     #[test]
