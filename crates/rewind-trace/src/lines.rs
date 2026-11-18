@@ -31,16 +31,28 @@ pub struct Line {
     pub text: String,
 }
 
+/// How far [`read`] got in a trace file's records.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reached {
+    /// An event past the step asked for, so the trace has that step.
+    Past,
+    /// The end of the records. The step is the last event's, or 0 for
+    /// records that hold no event.
+    End(u64),
+}
+
 /// Hands `emit` the lines of a trace file's records that are complete by
 /// the step `until`, the lines [`crate::Trace::lines_until`] gives in the
 /// same order, each as soon as the records complete it. No record is
 /// taken after the first event past `until`, so the lines of a run's
 /// first steps cost reading the run's first records and not its trace.
+/// Says how far the records were read, which tells a caller whether
+/// `until` is past the trace's end without the trace being read twice.
 pub fn read(
     records: impl IntoIterator<Item = io::Result<(u64, Vec<u8>)>>,
     until: u64,
     emit: &mut impl FnMut(Line),
-) -> io::Result<()> {
+) -> io::Result<Reached> {
     let mut lines = Lines::default();
     let mut last_event = 0;
     for record in records {
@@ -52,7 +64,7 @@ pub fn read(
             continue;
         }
         if step > until {
-            return Ok(());
+            return Ok(Reached::Past);
         }
         let event = Event::decode(step, &record)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -60,7 +72,7 @@ pub fn read(
         last_event = step;
     }
     lines.end(last_event, emit);
-    Ok(())
+    Ok(Reached::End(last_event))
 }
 
 /// What one stream has written since its last newline.

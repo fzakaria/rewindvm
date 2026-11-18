@@ -15,6 +15,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use rewind_init::Job;
 pub use rewind_store::Store;
+use rewind_trace::lines::Reached;
 use rewind_trace::schedule::Timer;
 use rewind_trace::stop::StalledThread;
 use rewind_trace::{Event, EventKind, Line, Records, Trace, TraceWriter};
@@ -913,7 +914,11 @@ impl Run {
     /// `step`, when the run reached it. A step past the end is refused
     /// rather than taken as the end: a fork there would be the run again.
     pub fn check_step(&self, step: u64) -> Result<u64> {
-        let last = self.last_step()?;
+        self.check_step_by(step, self.last_step()?)
+    }
+
+    /// `step`, when a run whose last step is `last` reached it.
+    fn check_step_by(&self, step: u64, last: u64) -> Result<u64> {
         if step > last {
             bail!(
                 "run {} ends at step {last}, so step {step} is past its end",
@@ -941,18 +946,38 @@ impl Run {
     }
 
     /// Hands `emit` the run's output lines that are complete by the step
-    /// `until`, each as soon as the trace file's records complete it
-    /// ([`rewind_trace::lines::read`]). The file is read only as far as
-    /// the first event past `until`, and neither its records nor the
-    /// lines are kept: a long run's first lines cost reading its first
-    /// records, and a whole log takes the memory of one line at a time.
-    pub fn output_lines(&self, until: u64, emit: &mut impl FnMut(Line)) -> Result<()> {
+    /// `until`, or with none all of them, each as soon as the trace
+    /// file's records complete it ([`rewind_trace::lines::read`]). The
+    /// file is read only as far as the first event past `until`, and
+    /// neither its records nor the lines are kept: a long run's first
+    /// lines cost reading its first records, and a whole log takes the
+    /// memory of one line at a time. A step past the run's end is
+    /// refused, as [`Run::check_step`] refuses it.
+    pub fn output_lines(&self, until: Option<u64>, emit: &mut impl FnMut(Line)) -> Result<()> {
+        // A finished run's manifest has its last step, so a step past
+        // the end is refused before anything is read.
+        let finished = self.manifest.outcome.as_ref();
+        if let (Some(step), Some(outcome)) = (until, finished) {
+            self.check_step_by(step, outcome.step)?;
+        }
+
         let path = self.dir.join(TRACE);
-        let mut read = || -> std::io::Result<()> {
+        let mut read = || -> std::io::Result<Reached> {
             let file = BufReader::new(fs::File::open(&path)?);
-            rewind_trace::lines::read(Records::new(file)?, until, emit)
+            rewind_trace::lines::read(Records::new(file)?, until.unwrap_or(u64::MAX), emit)
         };
-        read().with_context(|| format!("reading {}", path.display()))
+        let reached = read().with_context(|| format!("reading {}", path.display()))?;
+
+        // An unfinished run ends at its last event, which only the end
+        // of its records gives. An event past the step proves the run
+        // reached the step without the rest being read.
+        if finished.is_some() {
+            return Ok(());
+        }
+        if let (Some(step), Reached::End(last)) = (until, reached) {
+            self.check_step_by(step, last)?;
+        }
+        Ok(())
     }
 
     /// The step process `pid`'s memory began at by `step`: its last exec
@@ -3323,15 +3348,78 @@ pub(crate) mod tests {
         let runs = runs_dir("output-lines");
         let dir = write_run(&runs, &manifest("r", "r", 0), &[3, 5, 9], b"a\n");
         let run = Run::open(&dir).unwrap();
-        let steps_until = |until: u64| {
+        let steps_until = |until: Option<u64>| {
             let mut steps = Vec::new();
             run.output_lines(until, &mut |line| steps.push(line.step))
                 .unwrap();
             steps
         };
 
-        assert_eq!(steps_until(5), [3, 5]);
-        assert_eq!(steps_until(u64::MAX), [3, 5, 9]);
+        assert_eq!(steps_until(Some(5)), [3, 5]);
+        assert_eq!(steps_until(None), [3, 5, 9]);
+        fs::remove_dir_all(&runs).unwrap();
+    }
+
+    #[test]
+    fn a_finished_run_s_log_goes_to_the_step_its_machine_stopped_on() {
+        // Tests that output_lines() takes a finished run's end from its
+        // outcome and not from its last event. The run's last write is at
+        // step 9 and its machine stopped at step 10: the lines up to step
+        // 10 are all three, and step 11 is refused with nothing read.
+        const STOPPED_AT: u64 = 10;
+        let runs = runs_dir("output-lines-finished");
+        let mut finished = manifest("r", "r", 0);
+        finished.outcome = Some(RunOutcome {
+            stop: rewind_trace::stop::Stop::PoweredOff,
+            step: STOPPED_AT,
+            virtual_ns: 0,
+            status: Some(0),
+            wall_ms: 0,
+        });
+        let dir = write_run(&runs, &finished, &[3, 5, 9], b"a\n");
+        let run = Run::open(&dir).unwrap();
+
+        let mut steps = Vec::new();
+        run.output_lines(Some(STOPPED_AT), &mut |line| steps.push(line.step))
+            .unwrap();
+        assert_eq!(steps, [3, 5, 9]);
+
+        let mut lines_read = 0;
+        let past = run.output_lines(Some(STOPPED_AT + 1), &mut |_| lines_read += 1);
+        assert!(past.is_err());
+        assert_eq!(lines_read, 0);
+        fs::remove_dir_all(&runs).unwrap();
+    }
+
+    #[test]
+    fn an_unfinished_run_s_first_lines_are_read_without_its_whole_trace() {
+        // Tests that output_lines() up to a step of a run with no outcome,
+        // one still executing or interrupted, reads the trace file as far
+        // as the step and does not decode the trace to learn where the
+        // run ends. The run has writes at steps 3, 5 and 9: the lines up
+        // to step 5 come, and the run holds neither its trace nor its
+        // records after. A step past the last event is refused once the
+        // records run out.
+        let runs = runs_dir("output-lines-unfinished");
+        let dir = write_run(&runs, &manifest("r", "r", 0), &[3, 5, 9], b"a\n");
+        let run = Run::open(&dir).unwrap();
+        assert!(run.manifest.outcome.is_none());
+
+        let mut steps = Vec::new();
+        run.output_lines(Some(5), &mut |line| steps.push(line.step))
+            .unwrap();
+        assert_eq!(steps, [3, 5]);
+        assert!(run.trace.get().is_none() && run.records.get().is_none());
+
+        let past = run.output_lines(Some(10), &mut |_| {}).unwrap_err();
+        assert_eq!(
+            past.to_string(),
+            format!(
+                "run {} ends at step 9, so step 10 is past its end",
+                run.manifest.id
+            )
+        );
+        assert!(run.trace.get().is_none() && run.records.get().is_none());
         fs::remove_dir_all(&runs).unwrap();
     }
 

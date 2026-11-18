@@ -273,12 +273,11 @@ pub(crate) struct LogArgs {
 pub(crate) fn log(home: &Home, args: LogArgs) -> Result<ExitCode> {
     let LogArgs { run, step, steps } = args;
     let run = Run::find(home, &run)?;
-    let until = step.map(|s| run.check_step(s)).transpose()?;
 
     // Each line is printed as the trace file's records complete it, so
     // the log of a run's first steps reads the run's first records, and
     // no log is held in memory whole.
-    run.output_lines(until.unwrap_or(u64::MAX), &mut |line| {
+    run.output_lines(step, &mut |line| {
         if steps {
             println!("{:>10} {:>5}  {}", line.step, line.pid, line.text);
         } else {
