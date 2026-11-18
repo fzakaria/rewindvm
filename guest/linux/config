@@ -86,8 +86,14 @@ CONFIG_PREEMPT_LAZY=y
 # armed as the machine idle for good, and that timer would keep such a
 # run going forever. The run's own --kernel-args come after this line
 # and can turn the look back on.
+#
+# The guest has no swap and its memory is small, so the default heuristic
+# overcommit refuses a large mapping that a build touches only in part, such
+# as a 4 GiB thread stack. `vm.overcommit_memory=1` lets the mapping through.
+# A build that touches more memory than the guest has still stops, by the OOM
+# killer.
 CONFIG_CMDLINE_BOOL=y
-CONFIG_CMDLINE="sysctl.vm.compaction_proactiveness=0"
+CONFIG_CMDLINE="sysctl.vm.compaction_proactiveness=0 sysctl.vm.overcommit_memory=1"
 
 # No display, no sound, no USB. The virtual terminal and input layers stay:
 # they are only optional under CONFIG_EXPERT, and with no keyboard and no
