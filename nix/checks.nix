@@ -2301,6 +2301,92 @@ in
       touch $out
     '';
 
+  # checks.in-rewind-containers: a NixOS test that defines `containers`
+  # but no `nodes` builds in `inRewind`. Its derivation asks for
+  # uid-range, so the job runs as root and the test driver starts each
+  # container with systemd-nspawn. Two containers share a bridge through
+  # veth devices. The server's firewall, in nf_tables, lets port 80 in and
+  # rejects port 81, where nginx also listens. The client reaches port 80
+  # and is refused on port 81. CI advertises only `kvm`, so a test prelude
+  # selects the vendor and puts uid-range in the environment that the
+  # description is made from, as Nix gives it to a builder that has the
+  # feature. The clock is exit time, which needs no counter. Boots the VM,
+  # so it needs /dev/kvm.
+  in-rewind-containers =
+    let
+      inherit (pkgs) lib;
+      machine = {
+        epoch = 1790985600;
+        clock = "exits";
+        mem = 3072;
+      };
+      flags = "--epoch 1790985600 --seed 0 --schedule 0 --cpu v3-compat --clock exits --cores 1 --mem 3072";
+
+      prelude = pkgs.writeText "in-rewind-containers-prelude.sh" ''
+        case $(${lib.getExe pkgs.gawk} -F': ' '/^vendor_id/ { print $2; exit }' /proc/cpuinfo) in
+          AuthenticAMD) vendor=amd ;;
+          GenuineIntel) vendor=intel ;;
+          *) echo "unsupported test CPU vendor" >&2; exit 1 ;;
+        esac
+        export rewindFlags="${flags} --vendor $vendor"
+        export requiredSystemFeatures="nixos-test uid-range"
+        exec "$@"
+      '';
+
+      test = pkgs.testers.runNixOSTest {
+        name = "rewind-in-rewind-containers";
+        containers = {
+          server = {
+            networking.nftables.enable = true;
+            networking.firewall = {
+              allowedTCPPorts = [ 80 ];
+              rejectPackets = true;
+            };
+            services.nginx = {
+              enable = true;
+              virtualHosts.default = {
+                listen = [
+                  {
+                    addr = "0.0.0.0";
+                    port = 80;
+                  }
+                  {
+                    addr = "0.0.0.0";
+                    port = 81;
+                  }
+                ];
+                locations."/".return = "200 'served'";
+              };
+            };
+          };
+          client = {
+            environment.systemPackages = [ pkgs.curl ];
+          };
+        };
+        testScript = ''
+          start_all()
+          server.wait_for_unit("nginx.service")
+          server.wait_for_open_port(81)
+          assert "tcp dport 80 accept" in server.succeed("nft list ruleset")
+          client.wait_for_unit("multi-user.target")
+          assert client.succeed("curl --fail --silent http://server/") == "served"
+          client.fail("curl --fail --silent --max-time 5 http://server:81/")
+        '';
+      };
+
+      wrapped = rewindLib.inRewind machine test.config.rawTestDerivation;
+    in
+    assert wrapped.rewindFlags == "${flags} --vendor amd";
+    assert lib.elem "uid-range" wrapped.requiredSystemFeatures;
+    lib.overrideDerivation wrapped (attrs: {
+      requiredSystemFeatures = [ "kvm" ];
+      args = [
+        prelude
+        pkgs.runtimeShell
+      ]
+      ++ attrs.args;
+    });
+
   # checks.external-builder: Nix hands a build for the platform
   # x86_64-rewind-<vendor> to `rewind build --external-builder`, and takes
   # the output the command copied into the store. A Nix inside the check
