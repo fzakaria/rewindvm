@@ -132,10 +132,16 @@ impl Run {
         Run::open_at(path, origin)
     }
 
-    /// Opens an example run compiled into the app.
+    /// Opens an example run compiled into the app, with the answers its
+    /// export carries: no engine can replay the example, so the answers
+    /// are what the file viewer and the Source panel show of it.
     pub fn open_example(bytes: &[u8]) -> Result<Run> {
         let dir = archive::import_bytes(bytes)?.dir;
-        Run::open_at(&dir, Origin::Example)
+        let mut run = Run::open_at(&dir, Origin::Example)?;
+        run.answers = archive::answers_of(bytes)
+            .context("reading the example's answers")?
+            .map(Arc::new);
+        Ok(run)
     }
 
     /// Opens an export held in memory, without unpacking it to disk, as

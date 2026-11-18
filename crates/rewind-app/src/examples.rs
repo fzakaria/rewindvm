@@ -5,7 +5,10 @@
 //! tutorial's mylib build (docs/tutorial-nix.md): one where
 //! test_pool_shutdown crashes under a perturbed thread schedule, and the
 //! passing run it is compared with, the same schedule without the step that
-//! decides the crash, so the two are the same run until that step.
+//! decides the crash, so the two are the same run until that step. They
+//! are the exports the site's viewer opens (site/viewer/examples), written
+//! with answers: where each thread was and what the job's files held at
+//! the steps that matter, which the app shows with no engine to replay.
 
 use anyhow::Result;
 
@@ -152,6 +155,63 @@ mod tests {
             (flipped.step, flipped.here, flipped.there),
             (split.step, split.there, split.here)
         );
+    }
+
+    #[test]
+    fn the_example_answers_where_its_threads_were_and_what_its_files_held() {
+        // Tests that the example the app opens carries the answers its
+        // export on the site carries, on a machine with no rewind
+        // command. Opens the example as the desktop app does and asks the
+        // engine the scrubber gives its panes, at the step of the crash:
+        // a thread the export recorded is located, and a file the job
+        // had written by then reads back with the size the export says
+        // the file had.
+        use crate::engine::{Cancel, CliEngine, Engine, FileAtStep};
+        use crate::packed::Answering;
+        use crate::source::Thread;
+        use std::sync::Arc;
+        const NO_COMMAND: &str = "/nonexistent/rewind";
+        crate::archive::test_cache();
+        let session = open().unwrap();
+        let run = &session.run;
+        let crash = run.timeline.failure.unwrap().step;
+        assert!(run.answers_at(crash), "no answers at step {crash}");
+
+        let answers = run.answers.clone().unwrap();
+        let answered = answers.at(crash).unwrap();
+        let engine = Answering::new(
+            run.path.clone(),
+            answers.clone(),
+            Arc::new(CliEngine::new(NO_COMMAND)),
+        );
+
+        let thread = answered.threads.first().expect("a thread is recorded");
+        let located = engine.locate(
+            &run.path,
+            crash,
+            Thread::Of {
+                pid: thread.pid,
+                tid: thread.tid,
+            },
+            None,
+            &Cancel::default(),
+            &mut |_| {},
+        );
+        assert!(located.is_ok(), "{located:?}");
+
+        let file = answered.files.first().expect("a file is carried");
+        let read = engine.cat(
+            &run.path,
+            crash,
+            None,
+            &file.path,
+            &Cancel::default(),
+            &mut |_| {},
+        );
+        let Ok(FileAtStep::Exists { bytes, .. }) = read else {
+            panic!("{} does not read: {read:?}", file.path);
+        };
+        assert_eq!(bytes.len() as u64, file.size);
     }
 
     #[test]

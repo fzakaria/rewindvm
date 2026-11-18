@@ -409,15 +409,29 @@ mod tests {
     /// An export of the failing example's manifest and trace with the
     /// answers of [`packed`], in the order `rewind export` writes them.
     fn export_with_answers() -> Vec<u8> {
+        export_of(Some(packed()))
+    }
+
+    /// An export of the failing example's manifest and trace alone, as
+    /// `rewind export` writes one without answers.
+    fn export_without_answers() -> Vec<u8> {
+        export_of(None)
+    }
+
+    /// An export of the failing example's manifest and trace, and of
+    /// `answers` when there are some. The example's own answers are
+    /// left out.
+    fn export_of(answers: Option<Carried>) -> Vec<u8> {
         let example = crate::archive::read_bytes(crate::examples::FAILING).unwrap();
-        let answers = packed();
-        let index = serde_json::to_vec(&answers.answers).unwrap();
         let mut entries: Vec<(String, Vec<u8>)> = vec![
             ("manifest.json".into(), example.manifest),
             ("trace.bin".into(), example.trace),
-            (rewind_trace::answers::ANSWERS.into(), index),
         ];
-        entries.extend(answers.contents);
+        if let Some(answers) = answers {
+            let index = serde_json::to_vec(&answers.answers).unwrap();
+            entries.push((rewind_trace::answers::ANSWERS.into(), index));
+            entries.extend(answers.contents);
+        }
         let mut tar = tar::Builder::new(Vec::new());
         for (name, data) in &entries {
             let mut header = tar::Header::new_gnu();
@@ -456,7 +470,7 @@ mod tests {
         // An export without answers opens with none.
         let plain = Run::open_bytes(
             "plain.rwd",
-            crate::examples::FAILING,
+            &export_without_answers(),
             InMemoryOrigin::Export,
         )
         .unwrap();
@@ -479,7 +493,7 @@ mod tests {
 
         // An export without answers opens with none.
         let plain = dir.join("plain.rwd");
-        std::fs::write(&plain, crate::examples::FAILING).unwrap();
+        std::fs::write(&plain, export_without_answers()).unwrap();
         assert!(Run::open(&plain).unwrap().answers.is_none());
     }
 

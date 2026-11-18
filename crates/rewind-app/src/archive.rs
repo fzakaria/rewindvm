@@ -482,15 +482,21 @@ fn read_member(reader: &mut dyn Read, path: &Path, size: u64) -> Result<Vec<u8>>
 /// an export writes its answers before those.
 pub fn read_answers(path: &Path) -> Result<Option<Carried>> {
     let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    answers_of(file).with_context(|| format!("reading the answers in {}", path.display()))
+}
+
+/// The answers the export read from `reader` carries, as
+/// [`read_answers`] reads a file's: for an export the app holds in
+/// memory and unpacks into the cache, as it does its example.
+pub fn answers_of(reader: impl Read) -> Result<Option<Carried>> {
     let mut answers = AnswerMembers::default();
-    export::walk(decompress(file)?, |path, member, size, reader| {
+    export::walk(decompress(reader)?, |path, member, size, reader| {
         if member.replay_only() {
             return Ok(Flow::Stop);
         }
         answers.take(path, member, size, reader)?;
         anyhow::Ok(Flow::Continue)
-    })
-    .with_context(|| format!("reading the answers in {}", path.display()))?;
+    })?;
     answers.finish()
 }
 
