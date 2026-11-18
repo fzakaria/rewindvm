@@ -142,6 +142,10 @@ fn run() -> Result<()> {
 
     mount("proc", "/proc", "proc", 0, "")?;
     mount("sysfs", "/sys", "sysfs", 0, "")?;
+    // The cgroup hierarchy, where systemd looks for it. nix-daemon gives
+    // one to a build that asks for uid-range, which runs as root and can
+    // start containers with systemd-nspawn.
+    mount("cgroup2", "/sys/fs/cgroup", "cgroup2", 0, "")?;
     report_cpus()?;
     mkdir("/dev/pts")?;
     mount("devpts", "/dev/pts", "devpts", 0, "ptmxmode=0666,mode=0620")?;

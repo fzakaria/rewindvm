@@ -32,6 +32,16 @@ pub const HOMELESS: &str = "/homeless-shelter";
 pub const BUILDER_UID: u32 = 1000;
 pub const BUILDER_GID: u32 = 100;
 
+/// The system feature with which a derivation asks for a range of ids
+/// that starts at 0. In its sandbox nix-daemon runs such a builder as
+/// root, with a cgroup hierarchy of its own, so that the builder can start
+/// containers: the NixOS test driver starts each container of a test with
+/// systemd-nspawn.
+const UID_RANGE_FEATURE: &str = "uid-range";
+
+/// The attribute that names the system features a derivation asks for.
+const REQUIRED_FEATURES_ATTRIBUTE: &str = "requiredSystemFeatures";
+
 /// The files a structured-attributes build reads its attributes from, in
 /// the build directory, and the variables that name them.
 const ATTRS_SH: &str = StructuredAttrsFiles::SHELL_FILE_NAME;
@@ -555,14 +565,19 @@ impl Build {
             .map_or(self.builder.clone(), |n| n.to_string_lossy().into_owned());
         let mut argv = vec![name];
         argv.extend(self.args.iter().cloned());
+        let (uid, gid) = if self.required_features().contains(UID_RANGE_FEATURE) {
+            (0, 0)
+        } else {
+            (BUILDER_UID, BUILDER_GID)
+        };
 
         Job {
             program: Some(self.builder.clone()),
             argv,
             env: self.env.clone().into_iter().collect(),
             cwd: BUILD_DIR.into(),
-            uid: BUILDER_UID,
-            gid: BUILDER_GID,
+            uid,
+            gid,
             hostname: "localhost".into(),
             root: Root::Store,
             // nix-daemon gives a builder a pseudoterminal for its output.
@@ -578,6 +593,32 @@ impl Build {
 }
 
 impl Build {
+    /// The system features the derivation asks for: a list in its
+    /// structured attributes, or else words in its environment.
+    pub fn required_features(&self) -> BTreeSet<String> {
+        let attrs = self.env.get(ATTRS_JSON_VAR).and_then(|path| {
+            let file = self.files.iter().find(|f| &f.path == path)?;
+            serde_json::from_str::<Value>(&file.contents).ok()
+        });
+        match attrs {
+            Some(attrs) => attrs
+                .get(REQUIRED_FEATURES_ATTRIBUTE)
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect(),
+            None => self
+                .env
+                .get(REQUIRED_FEATURES_ATTRIBUTE)
+                .into_iter()
+                .flat_map(|words| words.split_whitespace())
+                .map(str::to_string)
+                .collect(),
+        }
+    }
+
     /// Tells the build it may use `cores` cores, in place of what its
     /// environment says. A description's count is nix-daemon's own: the
     /// cores of whichever machine picked the build up, which no
@@ -994,6 +1035,42 @@ mod tests {
         assert_eq!(job.program.as_deref(), Some("/bin/sh"));
         assert_eq!(job.argv, vec!["sh", "-e", "builder.sh"]);
         assert_eq!(job.outputs, vec![FIXTURE_OUT.to_string()]);
+    }
+
+    #[test]
+    fn job_runs_as_the_build_user() {
+        // nix-daemon runs a builder as nixbld, uid 1000 and gid 100 in the
+        // sandbox, unless it asks for uid-range.
+        let ids = job(&sample(), &no_graphs(), 1).unwrap();
+        assert_eq!((ids.uid, ids.gid), (BUILDER_UID, BUILDER_GID));
+        let drv = parse(
+            Path::new(FIXTURE_DRV),
+            &fixture(&[("requiredSystemFeatures", "kvm nixos-test")]),
+        )
+        .unwrap();
+        let ids = job(&drv, &no_graphs(), 1).unwrap();
+        assert_eq!((ids.uid, ids.gid), (BUILDER_UID, BUILDER_GID));
+    }
+
+    #[test]
+    fn uid_range_runs_the_job_as_root() {
+        // A build that asks for uid-range runs as root, as in nix-daemon's
+        // sandbox, so that the NixOS test driver can start containers. A
+        // derivation names its features in a word list in its environment,
+        // or in a list in its structured attributes.
+        let drv = parse(
+            Path::new(FIXTURE_DRV),
+            &fixture(&[("requiredSystemFeatures", "nixos-test uid-range")]),
+        )
+        .unwrap();
+        let ids = job(&drv, &no_graphs(), 1).unwrap();
+        assert_eq!((ids.uid, ids.gid), (0, 0));
+
+        let drv = sample_structured(json!({
+            "requiredSystemFeatures": ["nixos-test", "uid-range"],
+        }));
+        let ids = job(&drv, &no_graphs(), 1).unwrap();
+        assert_eq!((ids.uid, ids.gid), (0, 0));
     }
 
     #[test]
