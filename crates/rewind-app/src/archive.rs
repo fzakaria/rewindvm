@@ -235,24 +235,42 @@ fn download_within(url: &str, limits: DownloadLimits) -> Result<PathBuf> {
 }
 
 /// The response headers by which a server names the version of the file
-/// it sends.
+/// it sends: a tag for the file's content, and the time the file last
+/// changed.
 #[cfg(not(target_family = "wasm"))]
-const VERSION_HEADERS: [&str; 2] = ["etag", "last-modified"];
+const TAG_HEADER: &str = "etag";
+#[cfg(not(target_family = "wasm"))]
+const CHANGED_HEADER: &str = "last-modified";
+
+/// The response header that says when the response was sent.
+#[cfg(not(target_family = "wasm"))]
+const SENT_HEADER: &str = "date";
 
 /// What the name of the file that notes a download's version ends in.
 /// The file is beside the download, named after it, and hidden.
 #[cfg(not(target_family = "wasm"))]
 const VERSION_SUFFIX: &str = ".version";
 
-/// The version of its file a response names: each of [`VERSION_HEADERS`]
-/// the response has, on a line of its own. None for a response with
-/// neither.
+/// The version of its file a response names: its tag and the time its
+/// file last changed, each on a line of its own. None for a response
+/// that names no version.
+///
+/// The time a file changed is in whole seconds, so a file changed twice
+/// in one second has one time for both versions. The time names a
+/// version once its second is over: when the response says it was sent
+/// at another time. The server writes both times in one format, so the
+/// two are the same second when they are the same text. A response that
+/// does not say when it was sent leaves its file's time out.
 #[cfg(not(target_family = "wasm"))]
 fn version_of(headers: &ureq::http::HeaderMap) -> Option<String> {
-    let version: String = VERSION_HEADERS
-        .iter()
-        .filter_map(|name| Some((name, headers.get(*name)?.to_str().ok()?)))
-        .map(|(name, value)| format!("{name}: {value}\n"))
+    let value = |name: &str| headers.get(name)?.to_str().ok();
+    let tag = value(TAG_HEADER);
+    let sent = value(SENT_HEADER);
+    let changed = value(CHANGED_HEADER).filter(|changed| sent.is_some_and(|sent| sent != *changed));
+
+    let version: String = [(TAG_HEADER, tag), (CHANGED_HEADER, changed)]
+        .into_iter()
+        .filter_map(|(name, value)| Some(format!("{name}: {}\n", value?)))
         .collect();
     (!version.is_empty()).then_some(version)
 }
@@ -848,7 +866,8 @@ mod tests {
         // server has then. One URL serves AAAA and then BBBB, the same
         // length: once with no header that names the file's version,
         // once with an ETag that changes, and once with a Last-Modified
-        // date that changes. Each second download returns BBBB.
+        // date that changes, each response sent the day after its file
+        // changed. Each second download returns BBBB.
         super::test_cache();
         const UNNAMED: &[(&str, &[u8])] = &[("", b"AAAA"), ("", b"BBBB")];
         const TAGGED: &[(&str, &[u8])] = &[
@@ -856,8 +875,16 @@ mod tests {
             ("ETag: \"two\"\r\n", b"BBBB"),
         ];
         const DATED: &[(&str, &[u8])] = &[
-            ("Last-Modified: Mon, 16 Nov 2026 10:00:00 GMT\r\n", b"AAAA"),
-            ("Last-Modified: Tue, 17 Nov 2026 10:00:00 GMT\r\n", b"BBBB"),
+            (
+                "Last-Modified: Mon, 16 Nov 2026 10:00:00 GMT\r\n\
+                 Date: Tue, 17 Nov 2026 10:00:00 GMT\r\n",
+                b"AAAA",
+            ),
+            (
+                "Last-Modified: Tue, 17 Nov 2026 10:00:00 GMT\r\n\
+                 Date: Wed, 18 Nov 2026 10:00:00 GMT\r\n",
+                b"BBBB",
+            ),
         ];
         for responses in [UNNAMED, TAGGED, DATED] {
             let url = format!("http://127.0.0.1:{}/run.rwd", serve_in_turn(responses));
@@ -879,6 +906,33 @@ mod tests {
             ("ETag: \"one\"\r\n", b"BBBB"),
         ];
         let url = format!("http://127.0.0.1:{}/run.rwd", serve_in_turn(RESPONSES));
+        assert_eq!(fs::read(download(&url).unwrap()).unwrap(), b"AAAA");
+        assert_eq!(fs::read(download(&url).unwrap()).unwrap(), b"AAAA");
+    }
+
+    #[test]
+    fn a_date_names_a_version_only_after_its_second_has_passed() {
+        // Tests when a Last-Modified date alone lets a download be kept.
+        // A file changed twice in one second has one date for both
+        // versions, so a response sent in the second its file was changed
+        // in names no version: one URL serves AAAA and then BBBB, both
+        // changed and sent at 10:00:00, and the second download returns
+        // BBBB. A response sent a second after the change names one:
+        // with the same bodies sent at 10:00:01, the second download
+        // returns the AAAA already here.
+        super::test_cache();
+        const SAME_SECOND: &str = "Last-Modified: Mon, 16 Nov 2026 10:00:00 GMT\r\n\
+                                   Date: Mon, 16 Nov 2026 10:00:00 GMT\r\n";
+        const A_SECOND_ON: &str = "Last-Modified: Mon, 16 Nov 2026 10:00:00 GMT\r\n\
+                                   Date: Mon, 16 Nov 2026 10:00:01 GMT\r\n";
+        const UNSETTLED: &[(&str, &[u8])] = &[(SAME_SECOND, b"AAAA"), (SAME_SECOND, b"BBBB")];
+        const SETTLED: &[(&str, &[u8])] = &[(A_SECOND_ON, b"AAAA"), (A_SECOND_ON, b"BBBB")];
+
+        let url = format!("http://127.0.0.1:{}/run.rwd", serve_in_turn(UNSETTLED));
+        assert_eq!(fs::read(download(&url).unwrap()).unwrap(), b"AAAA");
+        assert_eq!(fs::read(download(&url).unwrap()).unwrap(), b"BBBB");
+
+        let url = format!("http://127.0.0.1:{}/run.rwd", serve_in_turn(SETTLED));
         assert_eq!(fs::read(download(&url).unwrap()).unwrap(), b"AAAA");
         assert_eq!(fs::read(download(&url).unwrap()).unwrap(), b"AAAA");
     }
