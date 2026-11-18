@@ -39,10 +39,10 @@
 //! the kernel's own work, starting a process among it, counts for little.
 //! A wake's time is the clock when the monitor took it, at the end of the
 //! stretch between two exits it happened in, and an exit's is the clock
-//! at the switch that took its thread off the CPU for good. A fork is an
-//! event, and events have steps and no times: a fork is placed inside its
-//! run in proportion to the steps, which is early for a thread that
-//! computed for long without a step before it forked.
+//! at the switch that took its thread off the CPU for good. A fork and the
+//! marks that start and end the job are events, and an event has the
+//! clock the monitor stamped it with: the clock after the step the event
+//! was made on, which counts what its thread computed up to it.
 
 use std::collections::HashMap;
 
@@ -219,14 +219,13 @@ impl Graph {
         }
         let runs = runs_of(switches, trace.last_step(), end_ns);
 
-        // Every fork of each thread id, at its time.
-        let clock = Clock { runs: &runs };
+        // Every fork of each thread id, at the clock of its event.
         let mut forks = Forks::default();
         for e in &trace.events {
             if let EventKind::Fork { child, .. } = e.kind {
                 forks.0.entry(child).or_default().push(ForkAt {
                     step: e.step,
-                    ns: clock.at(e.step),
+                    ns: e.ns,
                     parent: e.tid,
                 });
             }
@@ -354,12 +353,18 @@ impl Graph {
             after[next].push((e.tid, over.end_ns));
         }
 
-        // The job's start and end, from init's marks.
+        // The job's start and end, from init's marks: the run each mark
+        // was made in, and the clock of the mark.
         let (Some(start), Some(end)) = (trace.job_start(), trace.job_exit()) else {
             return Err(TimeError::NoJob);
         };
-        let job_start = clock.point(start);
-        let job_end = clock.point(end.step);
+        let mark = |step: u64| -> Option<(usize, u64)> {
+            let event = trace.event_at(step)?;
+            Some((run_at(&runs, step), event.ns))
+        };
+        let (Some(job_start), Some(job_end)) = (mark(start), mark(end.step)) else {
+            return Err(TimeError::NoJob);
+        };
         Ok(Graph {
             runs,
             starts,
@@ -370,11 +375,6 @@ impl Graph {
             job_start,
             job_end,
         })
-    }
-
-    /// The clock at `step`, placed inside the run it was taken in.
-    pub fn time_at(&self, step: u64) -> u64 {
-        Clock { runs: &self.runs }.at(step)
     }
 
     /// The run of the same thread before run `run`, if any.
@@ -679,36 +679,11 @@ impl Forks {
     }
 }
 
-/// Times on the clock for steps: a step inside a run is placed between
-/// the run's start and end in proportion to its steps.
-struct Clock<'a> {
-    runs: &'a [Run],
-}
-
-impl Clock<'_> {
-    /// The run a step was taken in: the last that started before it.
-    fn run_at(&self, step: u64) -> usize {
-        self.runs
-            .partition_point(|r| r.start_step < step)
-            .saturating_sub(1)
-    }
-
-    fn at(&self, step: u64) -> u64 {
-        self.point(step).1
-    }
-
-    /// The run a step was taken in, and its time.
-    fn point(&self, step: u64) -> (usize, u64) {
-        let i = self.run_at(step);
-        let r = &self.runs[i];
-        let steps = r.end_step.saturating_sub(r.start_step);
-        if steps == 0 {
-            return (i, r.start_ns);
-        }
-        let into = step.clamp(r.start_step, r.end_step) - r.start_step;
-        let ns = u128::from(r.ns()) * u128::from(into) / u128::from(steps);
-        (i, r.start_ns + ns as u64)
-    }
+/// The run of `runs` a step was taken in: the last that started before
+/// the step.
+fn run_at(runs: &[Run], step: u64) -> usize {
+    runs.partition_point(|r| r.start_step < step)
+        .saturating_sub(1)
 }
 
 /// Zeroes every run, and every timer wait, of a set of threads.
@@ -896,6 +871,12 @@ pub(crate) mod tests {
         }
     }
 
+    /// `event` at `ns` on the clock, for a job whose clock is not one past
+    /// its steps.
+    fn clocked(event: crate::Event, ns: u64) -> crate::Event {
+        crate::Event { ns, ..event }
+    }
+
     /// Init's job mark at `step`: the job's start, or its exit.
     pub(crate) fn job_mark(step: u64, text: &str) -> crate::Event {
         event(
@@ -1031,14 +1012,21 @@ pub(crate) mod tests {
             ..task_wake(step, tid, waker)
         };
 
+        // The clock at each event: a step after the one before, and for
+        // an exit, after its thread's computing too.
+        let child_exits = child_runs + child_work + STEP_NS;
+        let job_exits = job_runs + PIPE_PARENT_WORK + STEP_NS;
         Trace {
             events: vec![
-                job_mark(1, "rewind-start"),
-                fork(3, 1, 1, PIPE_PARENT, false),
-                fork(12, PIPE_PARENT, PIPE_PARENT, PIPE_CHILD, false),
-                exit(21, PIPE_CHILD, PIPE_CHILD, false),
-                exit(31, PIPE_PARENT, PIPE_PARENT, false),
-                job_mark(52, "rewind-exit 0"),
+                clocked(job_mark(1, "rewind-start"), STEP_NS),
+                clocked(fork(3, 1, 1, PIPE_PARENT, false), 3 * STEP_NS),
+                clocked(
+                    fork(12, PIPE_PARENT, PIPE_PARENT, PIPE_CHILD, false),
+                    job_forked + 2 * STEP_NS,
+                ),
+                clocked(exit(21, PIPE_CHILD, PIPE_CHILD, false), child_exits),
+                clocked(exit(31, PIPE_PARENT, PIPE_PARENT, false), job_exits),
+                clocked(job_mark(52, "rewind-exit 0"), child_exited + 8 * STEP_NS),
             ],
             switches: vec![
                 at(0, 1, None, 0),
@@ -1097,6 +1085,113 @@ pub(crate) mod tests {
                 "child work {child_work}: without the child {without}"
             );
         }
+    }
+
+    /// The process a fork job runs and the child it forks, and how long
+    /// each computes: the job before it forks, the child before it exits.
+    const FORK_PARENT: u32 = 34;
+    const FORK_CHILD: u32 = 35;
+    const FORK_PARENT_WORK: u64 = 60_000;
+    const FORK_CHILD_WORK: u64 = 40_000;
+
+    /// A job that computes and then forks. Init (1) forks the job, which
+    /// computes for [`FORK_PARENT_WORK`], forks a child and waits for it.
+    /// The child computes for [`FORK_CHILD_WORK`] and exits, which wakes
+    /// the job, and the job exits, which wakes init.
+    ///
+    /// The clock is not the steps: the job's computing is all before its
+    /// fork, which is the first of the eleven steps of its first run.
+    fn fork_job() -> Trace {
+        /// What the clock moves for a step.
+        const STEP_NS: u64 = 5;
+        /// The system calls the threads block in.
+        const EXIT: u32 = 60;
+        const WAIT4: u32 = 61;
+
+        // The clock at each switch and event.
+        let job_runs = 10 * STEP_NS;
+        let job_forks = job_runs + FORK_PARENT_WORK + STEP_NS;
+        let job_waits = job_forks + 10 * STEP_NS;
+        let child_exits = job_waits + FORK_CHILD_WORK + STEP_NS;
+        let child_gone = child_exits + 10 * STEP_NS;
+        let job_exits = child_gone + STEP_NS;
+        let job_gone = job_exits + 10 * STEP_NS;
+        let job_ends = job_gone + 7 * STEP_NS;
+        let machine_idle = job_gone + 12 * STEP_NS;
+        let at = |step: u64, pid: u32, left_in: Option<u32>, ns: u64| Switch {
+            ns,
+            ..switch(step, pid, pid, left_in)
+        };
+        let wake = |step: u64, ns: u64, tid: u32, waker: u32| crate::switches::Wake {
+            ns,
+            ..task_wake(step, tid, waker)
+        };
+
+        Trace {
+            events: vec![
+                clocked(job_mark(1, "rewind-start"), STEP_NS),
+                clocked(fork(3, 1, 1, FORK_PARENT, false), 3 * STEP_NS),
+                clocked(
+                    fork(11, FORK_PARENT, FORK_PARENT, FORK_CHILD, false),
+                    job_forks,
+                ),
+                clocked(exit(22, FORK_CHILD, FORK_CHILD, false), child_exits),
+                clocked(exit(33, FORK_PARENT, FORK_PARENT, false), job_exits),
+                clocked(job_mark(50, "rewind-exit 0"), job_ends),
+            ],
+            switches: vec![
+                at(0, 1, None, 0),
+                at(10, FORK_PARENT, Some(WAIT4), job_runs),
+                at(21, FORK_CHILD, Some(WAIT4), job_waits),
+                at(32, FORK_PARENT, Some(EXIT), child_gone),
+                at(43, 1, Some(EXIT), job_gone),
+                at(55, 0, Some(EXIT), machine_idle),
+            ],
+            wakes: vec![
+                wake(32, child_gone, FORK_PARENT, FORK_CHILD),
+                wake(43, job_gone, 1, FORK_PARENT),
+            ],
+        }
+    }
+
+    #[test]
+    fn a_thread_s_computing_before_it_forks_is_before_its_child() {
+        // Tests that a child starts when its parent forked it, by the
+        // clock of the fork, and not where the fork's step falls among
+        // the steps of its parent's run. The job of fork_job computes for
+        // 60,000, then forks a child that computes for 40,000 and waits
+        // for it. The child cannot start before the job has computed, so
+        // the chain holds the job's computing and then the child's:
+        // 100,000 at least, 60,000 of it the job's and 40,000 the
+        // child's.
+        let trace = fork_job();
+        let end_ns = trace.switches.last().unwrap().ns;
+        let g = Graph::new(&trace, end_ns).unwrap();
+        let chain = g.chain(&Nothing);
+        let on_chain = |tid: u32| -> u64 {
+            chain
+                .pieces
+                .iter()
+                .filter(|p| g.runs[p.run].tid == tid)
+                .map(|p| p.ns)
+                .sum()
+        };
+
+        assert!(
+            chain.ns >= FORK_PARENT_WORK + FORK_CHILD_WORK,
+            "the chain is {}",
+            chain.ns
+        );
+        assert!(
+            on_chain(FORK_PARENT) >= FORK_PARENT_WORK,
+            "the job has {} on the chain",
+            on_chain(FORK_PARENT)
+        );
+        assert!(
+            on_chain(FORK_CHILD) >= FORK_CHILD_WORK,
+            "the child has {} on the chain",
+            on_chain(FORK_CHILD)
+        );
     }
 
     /// Init (1) forks a child at step 5 and waits for it; the child runs

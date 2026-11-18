@@ -248,7 +248,7 @@ pub fn trace(trace: &Trace, timing: &Timing) -> Vec<u8> {
         });
     }
     for e in &trace.events {
-        let ns = graph.time_at(e.step);
+        let ns = e.ns;
         let name = |tid: u32| comm.get(&tid).cloned().unwrap_or_default();
         let (event_field, body) = match &e.kind {
             EventKind::Fork { child, .. } => {
@@ -326,11 +326,8 @@ pub fn trace(trace: &Trace, timing: &Timing) -> Vec<u8> {
     let report = timing.report();
     let end = graph.job_end.1;
     for (i, p) in report.phases.iter().enumerate() {
-        let from = graph.time_at(p.step);
-        let to = report
-            .phases
-            .get(i + 1)
-            .map_or(end, |next| graph.time_at(next.step));
+        let from = p.from_ns;
+        let to = report.phases.get(i + 1).map_or(end, |next| next.from_ns);
         slices.push((PHASE_TRACK, from, to, p.name.clone()));
     }
     for (track, from, to, label) in slices {

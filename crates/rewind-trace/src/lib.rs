@@ -310,6 +310,12 @@ impl Trace {
         self.events.last().map_or(0, |e| e.step)
     }
 
+    /// The event made on `step`, if the step made one.
+    pub fn event_at(&self, step: u64) -> Option<&Event> {
+        let at = self.events.partition_point(|e| e.step < step);
+        self.events.get(at).filter(|e| e.step == step)
+    }
+
     /// The index of the first event after `step`.
     pub fn index_after(&self, step: u64) -> usize {
         self.events.partition_point(|e| e.step <= step)

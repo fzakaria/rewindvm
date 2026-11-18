@@ -1064,6 +1064,7 @@ mod tests {
             took_ns: on_chain_ns,
             on_chain_ns,
             step: 0,
+            from_ns: 0,
         }
     }
 

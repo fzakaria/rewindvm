@@ -400,8 +400,10 @@ pub struct Phase {
     pub name: String,
     pub took_ns: u64,
     pub on_chain_ns: u64,
-    /// The step the phase began on.
+    /// The step the phase began on, and the clock then: those of the
+    /// line that names the phase.
     pub step: u64,
+    pub from_ns: u64,
 }
 
 /// One process from the inside.
@@ -524,7 +526,7 @@ impl Timing {
             };
             for line in String::from_utf8_lossy(bytes).lines() {
                 if let Some(phase) = line.strip_prefix(PHASE_MARKER) {
-                    phases.push((phase.trim().to_string(), graph.time_at(e.step), e.step));
+                    phases.push((phase.trim().to_string(), e.ns, e.step));
                 }
             }
         }
@@ -568,6 +570,7 @@ impl Timing {
                     took_ns: to.saturating_sub(*from),
                     on_chain_ns: on_phase[i],
                     step: *step,
+                    from_ns: *from,
                 }
             })
             .collect();

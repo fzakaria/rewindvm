@@ -933,9 +933,10 @@ The guest cannot stamp the clock itself, since the clock is the monitor's.
 The monitor holds an event until the event's step has moved the clock and
 stamps it then, so the clock is as the step left it and counts what the
 guest computed up to the event. A thread can compute for a long time between
-two steps, so a step alone does not say when its event happened. A replay
-compares the records it makes with the recording's, so the clock at every
-event is checked with everything else.
+two steps, so a step alone does not say when its event happened. `rewind
+time` reads the clock of forks, of the job's start and end, and of the lines
+that begin a build's phases. A replay compares the records it makes with the
+recording's, so the clock at every event is checked with everything else.
 
 The guest gives a pid out again once its process has exited, so a pid alone
 does not name a process for the whole run. A life of a pid, `Life` in
