@@ -968,12 +968,7 @@ impl Timing {
 
             // Within a phase, the part of the piece in it.
             let ns = match phase {
-                Some(i) => self
-                    .by_phase(piece)
-                    .into_iter()
-                    .filter(|(p, _)| *p == Some(i))
-                    .map(|(_, ns)| ns)
-                    .sum(),
+                Some(i) => self.in_phase(piece, i),
                 None => piece.ns,
             };
             if ns == 0 {
@@ -1166,8 +1161,6 @@ impl Timing {
         all.first().copied()
     }
 
-    /// The step a sleep before run `run` began on: where its thread left
-    /// the CPU.
     /// How much of `piece` is in each phase, by where it lies on the
     /// clock as recorded: None for the part before the first phase. A run
     /// can go on past a phase's marker, and a sleep can span one.
@@ -1180,9 +1173,8 @@ impl Timing {
         if before > 0 {
             out.push((None, before));
         }
-        for (i, (_, begins, _)) in self.phases.iter().enumerate() {
-            let ends = self.phases.get(i + 1).map_or(u64::MAX, |p| p.1);
-            let ns = overlap(*begins, ends);
+        for i in 0..self.phases.len() {
+            let ns = self.in_phase(piece, i);
             if ns > 0 {
                 out.push((Some(i), ns));
             }
@@ -1190,6 +1182,22 @@ impl Timing {
         out
     }
 
+    /// How much of `piece` is in phase `phase`: between the phase's
+    /// marker and the next phase's, or for the last phase, from its
+    /// marker on. One phase's part of a piece is worked out from that
+    /// phase alone, so a tree of one phase does not look at the others.
+    /// No part of a piece is in a phase the job has not.
+    fn in_phase(&self, piece: &Piece, phase: usize) -> u64 {
+        let Some(&(_, begins, _)) = self.phases.get(phase) else {
+            return 0;
+        };
+        let ends = self.phases.get(phase + 1).map_or(u64::MAX, |next| next.1);
+        let (from, to) = (piece.from_ns, piece.from_ns + piece.ns);
+        to.min(ends).saturating_sub(from.max(begins))
+    }
+
+    /// The step a sleep before run `run` began on: where its thread left
+    /// the CPU.
     fn fell_asleep(&self, run: usize) -> u64 {
         self.graph
             .before(run)
@@ -1553,6 +1561,35 @@ mod tests {
         assert_eq!(
             by_phase(&timing),
             vec![(9, 9, 9), (40, 40, 40), (40, 40, 40)]
+        );
+    }
+
+    #[test]
+    fn a_tree_of_a_phase_the_job_has_not_is_empty() {
+        // Tests that asking for the path in a phase past the job's last
+        // gives a tree of no time and does not panic. Init computes from
+        // step 0 to 100 and its job prints one phase, buildPhase: the
+        // tree of phase 0 holds the path from the marker on, and the tree
+        // of phase 1, which the job has not, holds nothing.
+        const NO_SUCH_PHASE: usize = 1;
+        let c = |step, pid, tid, left| critical::tests::switch(step, pid, tid, left);
+        let trace = Trace {
+            events: vec![
+                critical::tests::job_mark(1, "rewind-start"),
+                says(10, "Running phase: buildPhase"),
+                critical::tests::job_mark(90, "rewind-exit 0"),
+            ],
+            switches: vec![c(0, 1, 1, None), c(100, 0, 0, Some(60))],
+            wakes: vec![],
+        };
+        let timing = Timing::new(&trace, &IoLog::default(), 101).unwrap();
+
+        assert_eq!(timing.path_tree(None, Some(0), Budget::Whole).ns, 80);
+        assert_eq!(
+            timing
+                .path_tree(None, Some(NO_SUCH_PHASE), Budget::Whole)
+                .ns,
+            0
         );
     }
 
