@@ -776,7 +776,7 @@ rewind: packing 21 store paths for --with
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind nix <span class="option">--cores</span> <span class="number">4</span> <span class="option">--epoch</span> <span class="number">1790985600</span> github:fzakaria/rewindvm#mylib</span>
 ...
-<span class="ansi-dim">rewind:</span> run bcfdbe3e6f571c9d <span class="ansi-green">exited:0</span> after 6035 steps, 0.215s virtual, 0.449s wall (poweroff)
+<span class="ansi-dim">rewind:</span> run bcfdbe3e6f571c9d <span class="ansi-green">exited:0</span> after 6035 steps, 0.215s virtual, 0.442s wall (poweroff)
 /nix/store/f6a9gy362szw6nxx3ikrklr8glr6rdln-mylib-0.3.0 a9d703ba89774f3d  <span class="ansi-green">matches your store, rewindvm.cachix.org</span></code></pre>
         <pre
           class="console"
@@ -807,7 +807,7 @@ rewind: packing 21 store paths for --with
         ><code><span class="cmd"><span class="prompt">$</span> rewind time bcfdbe3e</span>
 mylib-0.3.0
     212 ms  elapsed on the VM's one CPU
-    196 ms  critical path: the least it can take on any number of CPUs
+    200 ms  critical path: the least it can take on any number of CPUs
             98% computing, 2% asleep (clock_nanosleep 4.4 ms)
 ...
 What would shorten it
@@ -824,7 +824,7 @@ What would shorten it
     7.1 ms      142  bash binutils-wrapper-2.46/bin/ld -plugin gcc-16.2.0/libexec/gcc/x86_64…
 ...</code></pre>
         <p>
-          The build took 212 ms and its critical path is 196 ms: more CPUs could save at most the
+          The build took 212 ms and its critical path is 200 ms: more CPUs could save at most the
           difference, since mylib's Makefile is run without <code>-j</code> and make compiles one
           file at a time. Each row under "What would shorten it" is how much sooner the run would
           finish if that part took no time, worked out by taking it out of the recorded chain and
@@ -868,22 +868,22 @@ What would shorten it
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind fork 11d4fbb7 <span class="number">4882</span> <span class="option">--schedule</span> <span class="number">1</span> <span class="option">--quiet</span></span>
-<span class="ansi-dim">rewind:</span> run d15f07f44c78cafd <span class="ansi-red">exited:2</span> after 5042 steps, 0.201s virtual, 0.098s wall (poweroff)
+<span class="ansi-dim">rewind:</span> run d15f07f44c78cafd <span class="ansi-red">exited:2</span> after 5042 steps, 0.201s virtual, 0.138s wall (poweroff)
 <span class="ansi-dim">rewind:</span> the fork <span class="ansi-red">first differs from its parent</span> at step 4983
 <span class="ansi-dim">rewind:</span> open it beside its parent in the desktop app: rewind open d15f07f44c78cafd 4983 --compare 11d4fbb7f2b822f5
 
 <span class="cmd"><span class="prompt">$</span> rewind fork 11d4fbb7 <span class="number">4882</span> <span class="option">--schedule</span> <span class="number">2</span> <span class="option">--quiet</span></span>
-<span class="ansi-dim">rewind:</span> run b7ef4034e1af387b <span class="ansi-green">exited:0</span> after 6539 steps, 0.220s virtual, 0.125s wall (poweroff)
+<span class="ansi-dim">rewind:</span> run b7ef4034e1af387b <span class="ansi-green">exited:0</span> after 6539 steps, 0.220s virtual, 0.127s wall (poweroff)
 <span class="ansi-dim">rewind:</span> the fork <span class="ansi-red">first differs from its parent</span> at step 4884
 <span class="ansi-dim">rewind:</span> open it beside its parent in the desktop app: rewind open b7ef4034e1af387b 4884 --compare 11d4fbb7f2b822f5
 
 <span class="cmd"><span class="prompt">$</span> rewind fork 11d4fbb7 <span class="number">4882</span> <span class="option">--schedule</span> <span class="number">3</span> <span class="option">--quiet</span></span>
-<span class="ansi-dim">rewind:</span> run 77ef349e4669aa96 <span class="ansi-green">exited:0</span> after 6546 steps, 0.223s virtual, 0.109s wall (poweroff)
+<span class="ansi-dim">rewind:</span> run 77ef349e4669aa96 <span class="ansi-green">exited:0</span> after 6546 steps, 0.223s virtual, 0.114s wall (poweroff)
 <span class="ansi-dim">rewind:</span> the fork <span class="ansi-red">first differs from its parent</span> at step 4884
 <span class="ansi-dim">rewind:</span> open it beside its parent in the desktop app: rewind open 77ef349e4669aa96 4884 --compare 11d4fbb7f2b822f5
 
 <span class="cmd"><span class="prompt">$</span> rewind fork 11d4fbb7 <span class="number">4882</span> <span class="option">--schedule</span> <span class="number">4</span> <span class="option">--quiet</span></span>
-<span class="ansi-dim">rewind:</span> run f894f67b4e595e10 <span class="ansi-green">exited:0</span> after 6509 steps, 0.221s virtual, 0.112s wall (poweroff)
+<span class="ansi-dim">rewind:</span> run f894f67b4e595e10 <span class="ansi-green">exited:0</span> after 6509 steps, 0.221s virtual, 0.114s wall (poweroff)
 <span class="ansi-dim">rewind:</span> the fork <span class="ansi-red">first differs from its parent</span> at step 4888
 <span class="ansi-dim">rewind:</span> open it beside its parent in the desktop app: rewind open f894f67b4e595e10 4888 --compare 11d4fbb7f2b822f5</code></pre>
         <p>
@@ -966,7 +966,7 @@ rewind fork 11d4fbb7f2b822f5 4882 --schedule 4  # f894f67b4e595e10</code></pre>
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind show 11d4fbb7 <span class="operator">|</span> tail <span class="option">-1</span> <span class="operator">|</span> sh</span>
 ...
-rewind: run 11d4fbb7f2b822f5 exited:2 after 5029 steps, 0.201s virtual, 0.375s wall (poweroff)</code></pre>
+rewind: run 11d4fbb7f2b822f5 exited:2 after 5029 steps, 0.201s virtual, 0.377s wall (poweroff)</code></pre>
       </section>
 
       <section class="step">
@@ -1300,13 +1300,13 @@ schedule  16: <span class="ansi-green">exited:0</span>             6577 steps  a
 schedule 7 ends differently from schedule 0; finding the step that decides it
 schedule 7 limited to steps 712..781 still ends differently
 step 780 decides it: a request to switch threads and a 20.48 ms pause of the running thread there makes the run fail
-passing: run ca155290f6c7af16, schedule 7 over steps 712..780, stalls up to 50 ms
-failing: run b4cb380411800d3e, schedule 7 over steps 712..781, stalls up to 50 ms</code></pre>
+passing: run bd8f872358f91577, schedule 7 over steps 712..780, stalls up to 50 ms
+failing: run b702f0252a69816a, schedule 7 over steps 712..781, stalls up to 50 ms</code></pre>
         <p>
           The same steps stall, one step in 128, but each stall picks one of the doublings of 10 µs
           up to the maximum, 14 of them for 50 ms, so fewer stalls are short. How often a race turns
           up then depends on how long it needs a thread held: 32 schedules of mylib crash 9 times by
-          default and 5 times with <code>--stall-max 100ms</code>, in 3.1 s and 3.1 s. A stall is
+          default and 5 times with <code>--stall-max 100ms</code>, in 3.0 s and 3.0 s. A stall is
           virtual time, so the guest's clock moves further, and a program's own timeouts see the
           extra time. The maximum is part of each run's spec, so <code>rewind show</code>, a replay
           and a fork of the run keep the maximum, and a run made without the flag keeps its id. A
@@ -1476,7 +1476,7 @@ runs will use counter time</code></pre>
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind run <span class="option">--root</span> spin <span class="option">--timeout</span> <span class="number">5</span> <span class="option">--name</span> spin -- /bin/spin</span>
-<span class="ansi-dim">rewind:</span> run b61a7c70a6a9a88f <span class="ansi-red">timed-out</span> after 719 steps, 0.004s virtual, 5.018s wall (timed out computing without exits for 4.9s, in user space in main+15 (spin.c:2), process 34 (spin))</code></pre>
+<span class="ansi-dim">rewind:</span> run 2814f76449693d48 <span class="ansi-red">timed-out</span> after 719 steps, 0.004s virtual, 5.010s wall (timed out computing without exits for 4.9s, in user space in main+15 (spin.c:2), process 34 (spin))</code></pre>
         <p>
           A run that timed out while still making exits was slow rather than stuck, and says so.
           <code>rewind check</code> gives each perturbed schedule ten times as long as schedule 0
@@ -1489,7 +1489,7 @@ runs will use counter time</code></pre>
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind ls <span class="option">--status</span> timed-out</span>
-b61a7c70a6a9a88f  <span class="ansi-red">timed-out</span>          719 steps  spin</code></pre>
+2814f76449693d48  <span class="ansi-red">timed-out</span>          719 steps  spin</code></pre>
       </section>
 
       <section class="step">
