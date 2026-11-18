@@ -16,9 +16,11 @@
 //! returns without a wakeup to record. So every exit is a point the
 //! thread that would wait for it starts after: for a thread, its
 //! process's main thread, which joins it; for a process, the thread that
-//! forked it, which reaps it. A waiter that never waited makes the chain
-//! longer than it is, by work the run did in the order recorded; a wait
-//! missed would make it shorter than the work the run needed.
+//! forked it, which reaps it. The point is where the exiting thread left
+//! the CPU for the last time, and the waiter's first run from then on is
+//! the one that starts after it. A waiter that never waited makes the
+//! chain longer than it is, by work the run did in the order recorded; a
+//! wait missed would make it shorter than the work the run needed.
 //!
 //! The kernel gives a thread id out again once its thread has exited, so
 //! a thread is one life of an id, from the fork that made it: a run is
@@ -36,8 +38,11 @@
 //! What the clock counts is user-mode work and a fixed time per exit, so
 //! the kernel's own work, starting a process among it, counts for little.
 //! A wake's time is the clock when the monitor took it, at the end of the
-//! stretch between two exits it happened in; a fork's, which is an event,
-//! is placed inside its run in proportion to the steps.
+//! stretch between two exits it happened in, and an exit's is the clock
+//! at the switch that took its thread off the CPU for good. A fork is an
+//! event, and events have steps and no times: a fork is placed inside its
+//! run in proportion to the steps, which is early for a thread that
+//! computed for long without a step before it forked.
 
 use std::collections::HashMap;
 
@@ -304,9 +309,9 @@ impl Graph {
             };
         }
 
-        // The exits each run starts after: a thread's exit for its
-        // process's main thread's next run, a process's for the next run
-        // of the thread that forked it.
+        // The exits each run starts after: a thread's exit for a run of
+        // its process's main thread, a process's for a run of the thread
+        // that forked it.
         let mut after = vec![Vec::new(); runs.len()];
         for e in &trace.events {
             let EventKind::Exit { thread, .. } = e.kind else {
@@ -320,14 +325,33 @@ impl Graph {
                     None => continue,
                 },
             };
+
+            // The exit is over when its thread leaves the CPU for the
+            // last time, which the switches give on the clock. The exit's
+            // event is no measure of it: a thread that computed up to its
+            // exit takes its first step there, and the steps of the exit
+            // itself follow, so the event is near the start of the run's
+            // steps and near the end of the run's time.
+            let exiting = by_thread
+                .get(&forks.at_step(e.tid, e.step))
+                .and_then(|list| list.last());
+            let Some(&exiting) = exiting else {
+                continue;
+            };
+            let over = &runs[exiting];
+
+            // The waiter's first run from then on is the first that can
+            // have found the thread gone. A thread taken off the CPU in
+            // the middle of its exit is not gone yet for the runs the
+            // waiter has meanwhile.
             let Some(list) = by_thread.get(&forks.at_step(waiter, e.step)) else {
                 continue;
             };
-            let next = list.partition_point(|&j| runs[j].start_step <= e.step);
+            let next = list.partition_point(|&j| runs[j].start_step < over.end_step);
             let Some(&next) = list.get(next) else {
                 continue;
             };
-            after[next].push((e.tid, clock.at(e.step)));
+            after[next].push((e.tid, over.end_ns));
         }
 
         // The job's start and end, from init's marks.
@@ -942,9 +966,9 @@ pub(crate) mod tests {
     #[test]
     fn a_join_that_finds_its_thread_done_still_waits_for_it() {
         // The chain is main up to the forks, thread 2's computing up to
-        // its exit a step before its run ends, 99 of its 100, and main
-        // after, where following wakes alone finds thread 3's 10 and
-        // misses thread 2.
+        // where it left the CPU for good, all 100 of it, and main after,
+        // where following wakes alone finds thread 3's 10 and misses
+        // thread 2.
         let trace = joined_after_exit();
         let g = Graph::new(&trace, 121).unwrap();
         let chain = g.chain(&Nothing);
@@ -954,12 +978,124 @@ pub(crate) mod tests {
             .filter(|p| g.runs[p.run].tid == 2)
             .map(|p| p.ns)
             .sum();
-        assert_eq!(long, 99);
-        assert!(chain.ns >= 99, "chain {}", chain.ns);
+        assert_eq!(long, 100);
+        assert!(chain.ns >= 100, "chain {}", chain.ns);
 
         // Without thread 2 the chain is thread 3's instead.
         let without = g.finish(&Threads(&|_, r| r.tid == 2));
         assert!(without < 30, "without thread 2: {without}");
+    }
+
+    /// The pids of the job [`pipe_job`] runs and of the child the job
+    /// forks.
+    const PIPE_PARENT: u32 = 34;
+    const PIPE_CHILD: u32 = 35;
+
+    /// How long the parent of [`pipe_job`] computes before it exits.
+    const PIPE_PARENT_WORK: u64 = 60_000;
+
+    /// A job as `rewind run` recorded one. Init (1) forks the job, which
+    /// forks a child and blocks reading a pipe. The child writes the pipe,
+    /// which wakes the job, computes for `child_work` and exits; the job
+    /// then computes for [`PIPE_PARENT_WORK`] and exits, and never waits
+    /// for the child. Init reaps both.
+    ///
+    /// The clock is not the steps: a thread that computes takes no step
+    /// until its exit, which is the first of the ten steps its last run
+    /// has. The child is taken off the CPU before its exit is over, as the
+    /// recorded one was, and finishes exiting after the job has exited.
+    fn pipe_job(child_work: u64) -> Trace {
+        /// What the clock moves for a step.
+        const STEP_NS: u64 = 5;
+        /// The system calls the threads block in.
+        const READ: u32 = 0;
+        const EXIT: u32 = 60;
+        const WAIT4: u32 = 61;
+
+        // The clock at each switch: every step takes STEP_NS, and the
+        // computing is all before the first step of the run it is in.
+        let job_forked = 10 * STEP_NS;
+        let child_runs = 20 * STEP_NS;
+        let job_runs = child_runs + child_work + 10 * STEP_NS;
+        let job_exited = job_runs + PIPE_PARENT_WORK + 11 * STEP_NS;
+        let child_resumes = job_exited + 2 * STEP_NS;
+        let child_exited = child_resumes + STEP_NS;
+        let machine_idle = child_exited + 11 * STEP_NS;
+        let at = |step: u64, pid: u32, left_in: Option<u32>, ns: u64| Switch {
+            ns,
+            ..switch(step, pid, pid, left_in)
+        };
+        let wake = |step: u64, ns: u64, tid: u32, waker: u32| crate::switches::Wake {
+            ns,
+            ..task_wake(step, tid, waker)
+        };
+
+        Trace {
+            events: vec![
+                job_mark(1, "rewind-start"),
+                fork(3, 1, 1, PIPE_PARENT, false),
+                fork(12, PIPE_PARENT, PIPE_PARENT, PIPE_CHILD, false),
+                exit(21, PIPE_CHILD, PIPE_CHILD, false),
+                exit(31, PIPE_PARENT, PIPE_PARENT, false),
+                job_mark(52, "rewind-exit 0"),
+            ],
+            switches: vec![
+                at(0, 1, None, 0),
+                at(10, PIPE_PARENT, Some(WAIT4), job_forked),
+                at(20, PIPE_CHILD, Some(READ), child_runs),
+                at(30, PIPE_PARENT, None, job_runs),
+                at(41, 1, Some(EXIT), job_exited),
+                at(43, PIPE_CHILD, Some(WAIT4), child_resumes),
+                at(44, 1, Some(EXIT), child_exited),
+                at(55, 0, Some(EXIT), machine_idle),
+            ],
+            wakes: vec![
+                wake(11, job_forked + STEP_NS, 1, PIPE_PARENT),
+                wake(21, child_runs, PIPE_PARENT, PIPE_CHILD),
+                wake(44, child_exited, 1, PIPE_CHILD),
+            ],
+        }
+    }
+
+    #[test]
+    fn a_thread_s_computing_before_its_exit_is_on_the_chain() {
+        // Tests that work a thread did before exiting counts though the
+        // exit is among the first steps of the thread's last run. The
+        // job of pipe_job must finish its own computing whatever its
+        // child does, and never waits for the child. So with a child that
+        // computes nothing and with one that computes for 40,000, the
+        // chain holds all of the job's computing, read from the switch
+        // records, and is shorter than the job's and the child's
+        // computing end to end.
+        const CHILD_WORK: u64 = 40_000;
+        for child_work in [0, CHILD_WORK] {
+            let trace = pipe_job(child_work);
+            let end_ns = trace.switches.last().unwrap().ns;
+            let g = Graph::new(&trace, end_ns).unwrap();
+            let chain = g.chain(&Nothing);
+            let of_parent: u64 = chain
+                .pieces
+                .iter()
+                .filter(|p| g.runs[p.run].tid == PIPE_PARENT)
+                .map(|p| p.ns)
+                .sum();
+            assert!(
+                of_parent >= PIPE_PARENT_WORK,
+                "child work {child_work}: the job has {of_parent} on the chain"
+            );
+            assert!(
+                (PIPE_PARENT_WORK..PIPE_PARENT_WORK + CHILD_WORK).contains(&chain.ns),
+                "child work {child_work}: chain {}",
+                chain.ns
+            );
+
+            // Without the child's computing the job still takes its own.
+            let without = g.finish(&Threads(&|_, r| r.tid == PIPE_CHILD));
+            assert!(
+                without >= PIPE_PARENT_WORK,
+                "child work {child_work}: without the child {without}"
+            );
+        }
     }
 
     /// Init (1) forks a child at step 5 and waits for it; the child runs
