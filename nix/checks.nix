@@ -1462,6 +1462,25 @@ in
     touch $out
   '';
 
+  # The installer the site serves leaves the installed command and app a
+  # pair from one release when a download fails part way through an
+  # upgrade (site/install).
+  install-script =
+    pkgs.runCommand "rewind-install-script"
+      {
+        nativeBuildInputs = [
+          pkgs.python3
+          pkgs.curl
+        ];
+      }
+      ''
+        cp -r ${../tools} tools
+        mkdir site
+        cp ${../site/install} site/install
+        python3 -m unittest discover -s tools -p 'test_install.py'
+        touch $out
+      '';
+
   # The claim everything else rests on: a run replays exactly, from boot
   # and from a keyframe, and a different seed makes a different run. Needs
   # /dev/kvm in the build sandbox, which the kvm system feature provides.

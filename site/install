@@ -43,29 +43,50 @@ else
   fail "needs curl or wget"
 fi
 
-# Each tarball unpacks to a directory of its own name, so a new release
-# replaces the old one whole.
-install_tarball() {
+# Every tarball asked for is downloaded and unpacked into one staging
+# directory before anything installed is touched. A download that fails
+# or is cut short stops the script there, with the installed command and
+# app still the pair they were. The staging directory goes when the
+# script ends, however the script ends.
+mkdir -p "$INSTALL_DIR" "$BIN_DIR"
+staging=$(mktemp -d "$INSTALL_DIR/.install.XXXXXX")
+trap 'rm -rf "$staging"' EXIT
+trap 'exit 1' HUP INT TERM
+
+stage_tarball() {
   name=$1
   say "downloading $name"
-  staging=$(mktemp -d "$INSTALL_DIR/.install.XXXXXX")
   fetch "$RELEASE_URL/$name.tar.gz" | tar -xz -C "$staging"
-  rm -rf "${INSTALL_DIR:?}/$name"
-  mv "$staging/$name" "$INSTALL_DIR/$name"
-  rmdir "$staging"
+  [ -d "$staging/$name" ] || fail "$name.tar.gz did not unpack to $name"
 }
 
-mkdir -p "$INSTALL_DIR" "$BIN_DIR"
-install_tarball "$CLI"
+# Each tarball unpacks to a directory of its own name, so a new release
+# replaces the old one whole.
+install_staged() {
+  name=$1
+  rm -rf "${INSTALL_DIR:?}/$name"
+  mv "$staging/$name" "$INSTALL_DIR/$name"
+}
+
+# The downloads first, every one of them.
+stage_tarball "$CLI"
+if [ "${REWIND_WITH_DEBUG:-}" = 1 ]; then
+  stage_tarball "$DEBUG"
+fi
+if [ "${REWIND_NO_APP:-}" != 1 ]; then
+  stage_tarball "$APP"
+fi
+
+install_staged "$CLI"
 ln -sf "$INSTALL_DIR/$CLI/bin/rewind" "$BIN_DIR/rewind"
 
 # The kernel's debug symbols go next to the command, where its launcher
 # looks for them.
 if [ "${REWIND_WITH_DEBUG:-}" = 1 ]; then
-  install_tarball "$DEBUG"
+  install_staged "$DEBUG"
 fi
 if [ "${REWIND_NO_APP:-}" != 1 ]; then
-  install_tarball "$APP"
+  install_staged "$APP"
   ln -sf "$INSTALL_DIR/$APP/bin/rewind-app" "$BIN_DIR/rewind-app"
 
   # The desktop entry and icon, so the app is in the desktop's launcher.
