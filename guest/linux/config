@@ -109,6 +109,10 @@ CONFIG_VETH=y
 CONFIG_BRIDGE=y
 CONFIG_TUN=y
 
+# User namespaces, for a systemd unit with `PrivateUsers=` in such a
+# container. Without them, the unit fails at step USER.
+CONFIG_USER_NS=y
+
 # The NixOS firewall in such a container. `iptables-nft` changes rules
 # into nf_tables expressions. For a match that it cannot change, such as
 # rpfilter, it uses the xtables match through NFT_COMPAT. The legacy

@@ -2307,11 +2307,12 @@ in
   # container with systemd-nspawn. Two containers share a bridge through
   # veth devices. The server's firewall, in nf_tables, lets port 80 in and
   # rejects port 81, where nginx also listens. The client reaches port 80
-  # and is refused on port 81. CI advertises only `kvm`, so a test prelude
-  # selects the vendor and puts uid-range in the environment that the
-  # description is made from, as Nix gives it to a builder that has the
-  # feature. The clock is exit time, which needs no counter. Boots the VM,
-  # so it needs /dev/kvm.
+  # and is refused on port 81. A unit in the client with `PrivateUsers=`
+  # starts, so the guest has user namespaces. CI advertises only `kvm`, so
+  # a test prelude selects the vendor and puts uid-range in the environment
+  # that the description is made from, as Nix gives it to a builder that
+  # has the feature. The clock is exit time, which needs no counter. Boots
+  # the VM, so it needs /dev/kvm.
   in-rewind-containers =
     let
       inherit (pkgs) lib;
@@ -2361,6 +2362,15 @@ in
           };
           client = {
             environment.systemPackages = [ pkgs.curl ];
+            systemd.services.private-users = {
+              wantedBy = [ "multi-user.target" ];
+              serviceConfig = {
+                Type = "oneshot";
+                RemainAfterExit = true;
+                PrivateUsers = true;
+                ExecStart = "${pkgs.coreutils}/bin/true";
+              };
+            };
           };
         };
         testScript = ''
@@ -2369,6 +2379,7 @@ in
           server.wait_for_open_port(81)
           assert "tcp dport 80 accept" in server.succeed("nft list ruleset")
           client.wait_for_unit("multi-user.target")
+          client.wait_for_unit("private-users.service")
           assert client.succeed("curl --fail --silent http://server/") == "served"
           client.fail("curl --fail --silent --max-time 5 http://server:81/")
         '';
