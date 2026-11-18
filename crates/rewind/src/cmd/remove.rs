@@ -146,6 +146,11 @@ pub(crate) fn gc(home: &Home, args: GcArgs) -> Result<ExitCode> {
             .iter()
             .map(|i| serde_json::json!({ "path": i.path, "bytes": i.bytes }))
             .collect();
+        let source_caches: Vec<&std::path::Path> = garbage
+            .source_caches
+            .iter()
+            .map(|c| c.path.as_path())
+            .collect();
         let debuginfod_caches: Vec<serde_json::Value> = garbage
             .debuginfod_caches
             .iter()
@@ -160,7 +165,7 @@ pub(crate) fn gc(home: &Home, args: GcArgs) -> Result<ExitCode> {
             "{}",
             serde_json::json!({
                 "images": images,
-                "source_caches": garbage.source_caches,
+                "source_caches": source_caches,
                 "debuginfod_caches": debuginfod_caches,
                 "leftovers": leftovers,
                 "pages": garbage.pages.pages,
@@ -183,7 +188,11 @@ pub(crate) fn gc(home: &Home, args: GcArgs) -> Result<ExitCode> {
         );
     }
     for cache in &garbage.source_caches {
-        println!("{verb} {}", cache.display());
+        println!(
+            "{verb} {} ({})",
+            cache.path.display(),
+            show::size(cache.bytes)
+        );
     }
     for cache in &garbage.debuginfod_caches {
         println!(

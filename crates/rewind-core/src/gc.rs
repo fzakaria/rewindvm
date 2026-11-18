@@ -53,12 +53,20 @@ pub struct Garbage {
     /// are not kept for them.
     pub unreadable_keyframes: usize,
     /// The source file caches of runs that are no longer in the home.
-    pub source_caches: Vec<PathBuf>,
+    pub source_caches: Vec<SourceCacheOrphan>,
     /// The debuginfod servers' caches no session holds.
     pub debuginfod_caches: Vec<crate::debuginfod_cache::Unused>,
     /// What rewind processes that are gone left half made: temporary
     /// files in the image directories and import staging directories.
     pub leftovers: Vec<Leftover>,
+}
+
+/// The source file cache of a run that is no longer in the home.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceCacheOrphan {
+    pub path: PathBuf,
+    /// The disk space the cache's files take.
+    pub bytes: u64,
 }
 
 /// A file or directory a rewind process that is gone left half made.
@@ -69,9 +77,18 @@ pub struct Leftover {
 }
 
 impl Garbage {
-    /// The bytes the images, pages, debuginfod caches and leftovers take.
+    /// The bytes the images, pages, source file caches, debuginfod caches
+    /// and leftovers take.
     pub fn bytes(&self) -> u64 {
-        self.image_bytes() + self.pages.bytes + self.debuginfod_bytes() + self.leftover_bytes()
+        self.image_bytes()
+            + self.pages.bytes
+            + self.source_cache_bytes()
+            + self.debuginfod_bytes()
+            + self.leftover_bytes()
+    }
+
+    pub fn source_cache_bytes(&self) -> u64 {
+        self.source_caches.iter().map(|c| c.bytes).sum()
     }
 
     pub fn leftover_bytes(&self) -> u64 {
@@ -171,7 +188,8 @@ pub fn collect(home: &Home, act: Act) -> Result<Garbage> {
                 .with_context(|| format!("removing {}", image.path.display()))?;
         }
         for cache in &source_caches {
-            fs::remove_dir_all(cache).with_context(|| format!("removing {}", cache.display()))?;
+            fs::remove_dir_all(&cache.path)
+                .with_context(|| format!("removing {}", cache.path.display()))?;
         }
         for leftover in &leftovers {
             let path = &leftover.path;
@@ -196,7 +214,7 @@ pub fn collect(home: &Home, act: Act) -> Result<Garbage> {
 
 /// The source file caches whose run is not in the home, removed or
 /// imported elsewhere before `rewind remove` took its cache with it.
-fn orphan_source_caches(home: &Home) -> Result<Vec<PathBuf>> {
+fn orphan_source_caches(home: &Home) -> Result<Vec<SourceCacheOrphan>> {
     let entries = match fs::read_dir(home.source_cache()) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -208,9 +226,11 @@ fn orphan_source_caches(home: &Home) -> Result<Vec<PathBuf>> {
         if home.runs().join(entry.file_name()).is_dir() {
             continue;
         }
-        orphans.push(entry.path());
+        let path = entry.path();
+        let bytes = crate::home::bytes_under(&path);
+        orphans.push(SourceCacheOrphan { path, bytes });
     }
-    orphans.sort();
+    orphans.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(orphans)
 }
 
@@ -658,7 +678,9 @@ mod tests {
     fn source_caches_of_runs_that_are_gone_go() {
         // Runs r and gone each had source files cached, and gone's
         // directory was since removed: gone's cache goes, r's stays, and a
-        // dry run names the one and removes nothing.
+        // dry run names the one and removes nothing. The dry run and the
+        // removal both count the disk space gone's cache takes in the
+        // bytes they free.
         use crate::source_cache::{Entry, SourceCache, Version};
         let home = home("source-caches");
         run(&home, "r", None, &[]);
@@ -669,13 +691,20 @@ mod tests {
                 .unwrap();
         }
         let gone = home.source_cache().join("gone");
+        let orphan = SourceCacheOrphan {
+            path: gone.clone(),
+            bytes: crate::home::bytes_under(&gone),
+        };
+        assert!(orphan.bytes > 0);
 
         let planned = settled(&home, Act::DryRun);
-        assert_eq!(planned.source_caches, vec![gone.clone()]);
+        assert_eq!(planned.source_caches, vec![orphan.clone()]);
+        assert_eq!(planned.bytes(), orphan.bytes);
         assert!(gone.exists());
 
         let collected = settled(&home, Act::Remove);
-        assert_eq!(collected.source_caches, vec![gone.clone()]);
+        assert_eq!(collected.source_caches, vec![orphan.clone()]);
+        assert_eq!(collected.bytes(), orphan.bytes);
         assert!(!gone.exists());
         let kept = SourceCache::of(&home, "r").get(Version::Original, "/src/a.c");
         assert_eq!(kept, Some(file));
