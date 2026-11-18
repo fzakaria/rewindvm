@@ -1454,6 +1454,36 @@ in
     touch $out
   '';
 
+  # The site's tutorial and case study pages are rendered from the
+  # Markdown in docs/ and its color transcripts (tools/md2html.py), then
+  # formatted, and both the Markdown and the pages are checked in. A
+  # tutorial recorded again without its page rendered again leaves the
+  # site showing the output of the recording before. Renders the pages
+  # over a copy of the tree, formats them as `nix fmt` does
+  # (nix/formatter.nix), and fails when a page differs from the one
+  # checked in.
+  site-pages =
+    pkgs.runCommand "rewind-site-pages"
+      {
+        nativeBuildInputs = [
+          pkgs.python3
+          pkgs.prettier
+        ];
+      }
+      ''
+        cp -r ${../.} tree
+        chmod -R u+w tree
+        cp -r tree/site checked-in
+        python3 tree/tools/md2html.py
+        find tree/site -name '*.html' -exec prettier --write --print-width 100 {} + >/dev/null
+        if ! diff -r checked-in tree/site; then
+          echo "a page under site/ is not what its Markdown renders to;" \
+            "run tools/md2html.py and nix fmt" >&2
+          exit 1
+        fi
+        touch $out
+      '';
+
   # The benchmark refuses records at another clock than its history's
   # and keeps to the NUMA nodes it is told to (tools/bench.py).
   bench-guards = pkgs.runCommand "rewind-bench-guards" { nativeBuildInputs = [ pkgs.python3 ]; } ''
