@@ -117,9 +117,12 @@ pub fn is_url(path: &Path) -> bool {
 }
 
 /// Downloads an export from `url` into the downloads directory and
-/// returns the file. A file of the same length already downloaded from
-/// the same URL is taken as that download, so opening a URL twice
-/// fetches it once.
+/// returns the file. A file already downloaded from the same URL is
+/// taken as that download while the server names the same version of the
+/// file, by its ETag or Last-Modified header, so opening a URL twice
+/// fetches it once. A URL whose file was replaced, as a CI job replaces
+/// its latest artifact, is downloaded again, and so is every file of a
+/// server that sends neither header.
 #[cfg(not(target_family = "wasm"))]
 pub fn download(url: &str) -> Result<PathBuf> {
     download_within(url, DOWNLOAD_LIMITS)
@@ -188,8 +191,17 @@ fn download_within(url: &str, limits: DownloadLimits) -> Result<PathBuf> {
     if length.is_some_and(|length| length > limits.bytes) {
         return Err(too_large());
     }
+
+    // The file already downloaded is the server's file while the server
+    // names the same version of it. A length alone does not say so: two
+    // exports can be the same size. A server that names no version gives
+    // nothing to compare, and its file is downloaded again.
+    let version = version_of(response.headers());
+    let noted = dir.join(format!(".{name}{VERSION_SUFFIX}"));
     let have = fs::metadata(&file).ok().map(|m| m.len());
-    if length.is_some() && have == length {
+    let same_length = have.is_some() && length.is_none_or(|length| have == Some(length));
+    let same_version = version.is_some() && fs::read_to_string(&noted).ok() == version;
+    if same_length && same_version {
         return Ok(file);
     }
 
@@ -199,15 +211,50 @@ fn download_within(url: &str, limits: DownloadLimits) -> Result<PathBuf> {
     let partial = dir.join(format!(".{name}.{}-{}", std::process::id(), unique()));
     let mut body = response.into_body().into_reader().take(limits.bytes + 1);
     let written = File::create(&partial).and_then(|mut out| io::copy(&mut body, &mut out));
+
+    // The note of the old file's version goes before the new file takes
+    // the old one's place, and the new file's version is noted after, so
+    // a download cut off between the two leaves a file with no version
+    // noted, which the next download replaces.
     let kept = match written {
         Ok(bytes) if bytes > limits.bytes => Err(too_large()),
-        Ok(_) => fs::rename(&partial, &file).with_context(|| format!("downloading {url}")),
+        Ok(_) => {
+            let _ = fs::remove_file(&noted);
+            fs::rename(&partial, &file).with_context(|| format!("downloading {url}"))
+        }
         Err(e) => Err(e).with_context(|| format!("downloading {url}")),
     };
     if kept.is_err() {
         let _ = fs::remove_file(&partial);
+        return kept.map(|()| file);
     }
-    kept.map(|()| file)
+    if let Some(version) = version {
+        let _ = fs::write(&noted, version);
+    }
+    Ok(file)
+}
+
+/// The response headers by which a server names the version of the file
+/// it sends.
+#[cfg(not(target_family = "wasm"))]
+const VERSION_HEADERS: [&str; 2] = ["etag", "last-modified"];
+
+/// What the name of the file that notes a download's version ends in.
+/// The file is beside the download, named after it, and hidden.
+#[cfg(not(target_family = "wasm"))]
+const VERSION_SUFFIX: &str = ".version";
+
+/// The version of its file a response names: each of [`VERSION_HEADERS`]
+/// the response has, on a line of its own. None for a response with
+/// neither.
+#[cfg(not(target_family = "wasm"))]
+fn version_of(headers: &ureq::http::HeaderMap) -> Option<String> {
+    let version: String = VERSION_HEADERS
+        .iter()
+        .filter_map(|name| Some((name, headers.get(*name)?.to_str().ok()?)))
+        .map(|(name, value)| format!("{name}: {value}\n"))
+        .collect();
+    (!version.is_empty()).then_some(version)
 }
 
 /// The browser build has no disk to download to: the page fetches an
@@ -773,6 +820,67 @@ mod tests {
             }
         });
         port
+    }
+
+    /// Serves each connection to a local port the next of `responses`,
+    /// and the last of them from then on, and returns the port. Each
+    /// response is the headers to send after the status line and the
+    /// body.
+    fn serve_in_turn(responses: &'static [(&'static str, &'static [u8])]) -> u16 {
+        use std::io::Write;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let served = AtomicUsize::new(0);
+        serve(move |stream| {
+            let turn = served.fetch_add(1, Ordering::SeqCst);
+            let (headers, body) = responses[turn.min(responses.len() - 1)];
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n{headers}Connection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(body);
+        })
+    }
+
+    #[test]
+    fn a_url_whose_file_changed_is_downloaded_again() {
+        // Tests that opening a URL a second time gives the file the
+        // server has then. One URL serves AAAA and then BBBB, the same
+        // length: once with no header that names the file's version,
+        // once with an ETag that changes, and once with a Last-Modified
+        // date that changes. Each second download returns BBBB.
+        super::test_cache();
+        const UNNAMED: &[(&str, &[u8])] = &[("", b"AAAA"), ("", b"BBBB")];
+        const TAGGED: &[(&str, &[u8])] = &[
+            ("ETag: \"one\"\r\n", b"AAAA"),
+            ("ETag: \"two\"\r\n", b"BBBB"),
+        ];
+        const DATED: &[(&str, &[u8])] = &[
+            ("Last-Modified: Mon, 16 Nov 2026 10:00:00 GMT\r\n", b"AAAA"),
+            ("Last-Modified: Tue, 17 Nov 2026 10:00:00 GMT\r\n", b"BBBB"),
+        ];
+        for responses in [UNNAMED, TAGGED, DATED] {
+            let url = format!("http://127.0.0.1:{}/run.rwd", serve_in_turn(responses));
+            assert_eq!(fs::read(download(&url).unwrap()).unwrap(), b"AAAA");
+            assert_eq!(fs::read(download(&url).unwrap()).unwrap(), b"BBBB");
+        }
+    }
+
+    #[test]
+    fn a_url_whose_file_is_the_same_version_is_downloaded_once() {
+        // Tests that a file the server still names by the same ETag is
+        // not downloaded again. The server answers the second request
+        // with the first one's ETag and length but another body, which a
+        // download that read the body would return: the second download
+        // returns the first one's bytes.
+        super::test_cache();
+        const RESPONSES: &[(&str, &[u8])] = &[
+            ("ETag: \"one\"\r\n", b"AAAA"),
+            ("ETag: \"one\"\r\n", b"BBBB"),
+        ];
+        let url = format!("http://127.0.0.1:{}/run.rwd", serve_in_turn(RESPONSES));
+        assert_eq!(fs::read(download(&url).unwrap()).unwrap(), b"AAAA");
+        assert_eq!(fs::read(download(&url).unwrap()).unwrap(), b"AAAA");
     }
 
     /// Limits for the tests: short waits, and room for 8 bytes.
