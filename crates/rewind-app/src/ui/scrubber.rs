@@ -2355,7 +2355,7 @@ mod tests {
         let passing = open(crate::examples::PASSING);
         let id_of = |run: &crate::run::Run| run.id().expect("an export has a manifest").to_string();
         let (failing_id, passing_id) = (id_of(&failing), id_of(&passing));
-        assert_eq!(failing.path, passing.path);
+        assert_eq!(failing.opened_from(), passing.opened_from());
 
         // The failing run is on screen: its own row keeps it, the passing
         // run's row swaps.

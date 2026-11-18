@@ -223,11 +223,11 @@ impl Scrubber {
         let address = &self.address_bar.address;
         let run = match &address.url {
             Some(url) => absolute_url(url),
-            None => session.run.path.display().to_string(),
+            None => session.run.opened_from().display().to_string(),
         };
         let compare = match (&address.compare, &session.other) {
             (Some(url), _) => Some(absolute_url(url)),
-            (None, Some(other)) => Some(other.path.display().to_string()),
+            (None, Some(other)) => Some(other.opened_from().display().to_string()),
             (None, None) => None,
         };
         Some(desktop_command(&run, compare.as_deref(), self.step, right))

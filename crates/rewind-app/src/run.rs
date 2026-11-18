@@ -60,7 +60,11 @@ pub enum InMemoryOrigin {
 
 pub struct Run {
     /// The path the run is read from: its directory, or its trace file. An
-    /// export's is the directory it was unpacked into.
+    /// export's is the directory it was unpacked into. An export opened
+    /// from memory is read from no path and has a stand-in no other run
+    /// has, since the panels keep what they work out for a run under the
+    /// run's path: the run's id, then the name the export was opened
+    /// under.
     pub path: PathBuf,
     pub origin: Origin,
     /// What the engine recorded of the run; None for a bare trace, and for
@@ -135,16 +139,16 @@ impl Run {
     }
 
     /// Opens an export held in memory, without unpacking it to disk, as
-    /// the browser build opens the exports its page fetched. `name` stands
-    /// in for the path the run was read from.
+    /// the browser build opens the exports its page fetched. `name` is
+    /// what the export was opened from, a file's name or a URL's.
     pub fn open_bytes(name: &str, bytes: &[u8], origin: InMemoryOrigin) -> Result<Run> {
         let export = archive::read_bytes(bytes).with_context(|| format!("reading {name}"))?;
-        let path = PathBuf::from(name);
+        let opened_from = PathBuf::from(name);
         let origin = match origin {
             InMemoryOrigin::Example => Origin::Example,
             InMemoryOrigin::Export => Origin::Export(Export {
-                source: path.clone(),
-                file: path.clone(),
+                source: opened_from.clone(),
+                file: opened_from.clone(),
                 replayable: export.replayable,
             }),
         };
@@ -154,6 +158,16 @@ impl Run {
         let (manifest, manifest_warning) = match Manifest::parse(&export.manifest) {
             Ok(m) => (Some(m), None),
             Err(e) => (None, Some(format!("{e:#}"))),
+        };
+
+        // Two exports are often opened under one name, as two CI
+        // artifacts both named run.rwd are, so the name alone would give
+        // two runs one path. The run's id in front tells them apart. An
+        // export whose manifest did not parse has no id and keeps the
+        // name alone.
+        let path = match &manifest {
+            Some(manifest) => Path::new(manifest.id.as_str()).join(&opened_from),
+            None => opened_from,
         };
         let (trace, io) = rewind_trace::records_from(&export.trace[..])
             .and_then(|records| decode(&records))
@@ -248,6 +262,15 @@ impl Run {
             Source::Nix { drv, .. } => drv.clone(),
             Source::Build { .. } => m.name.clone(),
             Source::Image { .. } => m.spec.job.argv.join(" "),
+        }
+    }
+
+    /// What the run was opened from, as a person would name it: an
+    /// export's file or URL, else the run's path.
+    pub fn opened_from(&self) -> &Path {
+        match &self.origin {
+            Origin::Export(export) => &export.source,
+            Origin::Local | Origin::TraceFile | Origin::Example => &self.path,
         }
     }
 
@@ -822,6 +845,33 @@ mod tests {
     use rewind_trace::manifest::EXECUTING_LOCK;
     use rewind_trace::verdict::{FailedAssertion, Reason};
     use std::os::fd::AsRawFd;
+
+    #[test]
+    fn two_exports_opened_from_memory_under_one_name_have_paths_of_their_own() {
+        // Tests that two exports opened from memory under one file name,
+        // as two CI artifacts named run.rwd are in the browser, do not
+        // share a path. The Time tab, the Source panel, the file viewer
+        // and blame each keep what they worked out for a run under the
+        // run's path, so a shared path shows one run's answers for the
+        // other. Opens the failing and passing example exports as
+        // run.rwd: the paths differ, each still ends in the name, and
+        // each export says the name alone is where it was opened from.
+        const NAME: &str = "run.rwd";
+        let open = |bytes: &[u8]| Run::open_bytes(NAME, bytes, InMemoryOrigin::Export).unwrap();
+        let (failing, passing) = (open(FAILING), open(PASSING));
+
+        assert_ne!(failing.path, passing.path);
+        for run in [&failing, &passing] {
+            assert_eq!(run.path.file_name().unwrap(), NAME);
+            let Origin::Export(export) = &run.origin else {
+                panic!("an export opened from memory is an export");
+            };
+            assert_eq!(export.source, Path::new(NAME));
+        }
+
+        // The same export opened twice is one run, with one path.
+        assert_eq!(open(FAILING).path, failing.path);
+    }
 
     /// A run stopped at its time limit while computing in user space.
     fn hung_in_user_space() -> Stop {

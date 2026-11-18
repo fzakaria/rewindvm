@@ -444,8 +444,9 @@ mod tests {
             run.answers.clone().unwrap(),
             Arc::new(CliEngine::new("/nonexistent/rewind")),
         );
+        let opened_as = run.path.to_str().expect("the run's path is text");
         assert_eq!(
-            cat(&engine, "run.rwd", STEP, "/build/out.log"),
+            cat(&engine, opened_as, STEP, "/build/out.log"),
             Ok(FileAtStep::Exists {
                 bytes: b"ok\n".to_vec(),
                 complete: FetchedAll::Yes
