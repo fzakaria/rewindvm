@@ -383,13 +383,10 @@ pub struct Timing {
 /// The job as a whole.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Report {
-    /// The job's time on the VM's one CPU, and how much of it computing.
+    /// The job's time on the VM's one CPU.
     pub took_ns: u64,
-    pub work_ns: u64,
     /// The least it could take on enough CPUs: its longest chain.
     pub chain_ns: u64,
-    /// Computing that is not on the chain.
-    pub off_chain_ns: u64,
     pub phases: Vec<Phase>,
     /// The path before the first phase, from the job's start.
     pub before_phases_ns: u64,
@@ -548,18 +545,6 @@ impl Timing {
     pub fn report(&self) -> Report {
         let (graph, chain, lives) = (&self.graph, &self.chain, &self.lives);
         let (start, end) = (graph.job_start.1, graph.job_end.1);
-        let work_ns: u64 = graph
-            .runs
-            .iter()
-            .filter(|r| !r.is_idle() && r.start_ns >= start && r.end_ns <= end)
-            .map(|r| r.ns())
-            .sum();
-        let on_compute: u64 = chain
-            .pieces
-            .iter()
-            .filter(|p| p.kind == PieceKind::Compute)
-            .map(|p| p.ns)
-            .sum();
 
         // The chain by phase, each piece split where a phase begins.
         let mut on_phase = vec![0u64; self.phases.len()];
@@ -679,9 +664,7 @@ impl Timing {
         sort(&mut rows);
         Report {
             took_ns: end.saturating_sub(start),
-            work_ns,
             chain_ns: chain.ns,
-            off_chain_ns: work_ns.saturating_sub(on_compute),
             phases,
             before_phases_ns,
             rows,
