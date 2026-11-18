@@ -517,9 +517,8 @@ impl Trace {
     /// Output lines completed by `step`, both streams interleaved in the
     /// order of their steps. A write without a trailing newline is held
     /// until the rest of its line arrives. What a process wrote after its
-    /// last newline is a line from the step the process exits on, or for
-    /// a process the trace outlives, from the trace's last step; the line
-    /// has the step of its last write.
+    /// last newline is a line of the step the process exits on, or for a
+    /// process the trace outlives, of the trace's last step.
     pub fn lines_until(&self, step: u64) -> Vec<Line> {
         let mut lines = Vec::new();
         let mut assembler = lines::Lines::default();
@@ -529,14 +528,10 @@ impl Trace {
 
         // A playhead at the trace's end or past it has seen every write
         // there is.
-        if step >= self.last_step() {
-            assembler.end(&mut |line| lines.push(line));
+        let last = self.last_step();
+        if step >= last {
+            assembler.end(last, &mut |line| lines.push(line));
         }
-
-        // A line without a newline has the step of its last write, which
-        // may be before the lines other processes finished while its
-        // writer was still running.
-        lines.sort_by_key(|line| line.step);
         lines
     }
 
@@ -1787,8 +1782,8 @@ mod tests {
     // Tests that the last thing a failing job wrote is in its log though
     // no newline ended it. Process 2 writes a line, then a diagnostic
     // without a newline to standard error, and exits while process 1 goes
-    // on: the diagnostic is a line from the exit on, with the step and
-    // stream of its write, and is no line before then.
+    // on: the diagnostic is a line from the exit on, with the step of the
+    // exit and the stream of its write, and is no line before then.
     #[test]
     fn a_final_write_without_a_newline_is_a_line_once_its_writer_exits() {
         let t = Trace {
@@ -1812,7 +1807,7 @@ mod tests {
         assert_eq!(lines[1].text, "reason: out of space");
         assert_eq!(
             (lines[1].step, lines[1].pid, lines[1].fd),
-            (2, 2, STDERR_FD)
+            (3, 2, STDERR_FD)
         );
 
         // The whole log keeps the lines in the order of their steps.
@@ -1825,10 +1820,10 @@ mod tests {
     }
 
     // Tests that what two streams had written when the trace ended, with
-    // no exit to end either, are lines in the order of their last writes.
-    // Standard output's fragment is written first and finished last, so
-    // it comes after standard error's, and neither is a line at a
-    // playhead before the trace's end.
+    // no exit to end either, are lines of the trace's last step in the
+    // order of their last writes. Standard output's fragment is written
+    // first and finished last, so it comes after standard error's, and
+    // neither is a line at a playhead before the trace's end.
     #[test]
     fn fragments_left_when_the_trace_ends_come_in_the_order_of_their_last_writes() {
         let t = Trace {
@@ -1843,7 +1838,7 @@ mod tests {
             .iter()
             .map(|l| (l.step, l.fd, l.text.as_str()))
             .collect();
-        assert_eq!(shown, [(2, STDERR_FD, "warn"), (3, STDOUT_FD, "progress")]);
+        assert_eq!(shown, [(3, STDERR_FD, "warn"), (3, STDOUT_FD, "progress")]);
     }
 
     // Tests that a character whose bytes two writes split reads as the

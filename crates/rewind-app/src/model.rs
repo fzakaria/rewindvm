@@ -1313,6 +1313,39 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_line_no_newline_ended_is_in_the_log_from_its_writer_s_exit() {
+        // Tests that the log at a playhead holds the lines `rewind log`
+        // prints up to that step. Process 34 writes `first` with no
+        // newline at step 1, process 35 writes a whole line at step 2,
+        // and process 34 exits at step 3: `first` is no line at steps 1
+        // and 2, and from step 3 is the log's second line, on step 3.
+        let events = vec![
+            out(1, 34, 34, "first"),
+            out(2, 35, 35, "second\n"),
+            exit(3, 34, 34, 0, "sh", false),
+        ];
+        let t = Timeline::new(
+            Trace {
+                events,
+                ..Default::default()
+            },
+            None,
+            None,
+        );
+
+        let counts: Vec<usize> = (1..=3)
+            .map(|step| t.line_count_at(LogFilter::Output, step))
+            .collect();
+        assert_eq!(counts, [0, 1, 2]);
+        let lines: Vec<(u64, &str)> = t
+            .lines(LogFilter::Output)
+            .iter()
+            .map(|line| (line.step, line.text.as_str()))
+            .collect();
+        assert_eq!(lines, [(2, "second"), (3, "first")]);
+    }
+
+    #[test]
     fn log_lines_are_counted_by_step_and_toned() {
         // Line counts come from a binary search over the precomputed lines,
         // and each line's tone follows its stream and text.
