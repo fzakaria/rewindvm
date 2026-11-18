@@ -4403,7 +4403,7 @@ in
 
         # The epoch, pinned: by default it is today's date in UTC, and two
         # searches either side of midnight would boot different machines.
-        epoch=1767744000
+        epoch=1768089600
         check() {
           rewind check -j 4 --clock exits --epoch "$epoch" --schedules 8 "$@" \
             --root ${slowRaceRoot} -- /bin/slowrace "$spins"
