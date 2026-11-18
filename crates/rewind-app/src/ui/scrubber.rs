@@ -103,10 +103,14 @@ enum OwnRunClick {
     OnScreen,
 }
 
-/// What a click on the run at `clicked` does, in a session showing the run
-/// at `shown` compared with the one at `compared`, if any.
-fn own_run_click(shown: &Path, compared: Option<&Path>, clicked: &Path) -> OwnRunClick {
-    if compared == Some(clicked) && clicked != shown {
+/// What a click on the Runs list's row for the run with the id `clicked`
+/// does, in a `session` whose own runs the list holds. The runs are told
+/// apart by their ids and not by their paths: in the browser a run's path
+/// is the last part of its URL, which two artifacts named run.rwd share.
+fn own_run_click(session: &Session, clicked: &str) -> OwnRunClick {
+    let is_clicked = |run: &crate::run::Run| run.id().is_some_and(|id| id == clicked);
+    let compared_clicked = session.other.as_ref().is_some_and(is_clicked);
+    if compared_clicked && !is_clicked(&session.run) {
         return OwnRunClick::ShowCompared;
     }
     OwnRunClick::OnScreen
@@ -941,8 +945,7 @@ impl Scrubber {
         let in_memory =
             |s: &Session| s.run.origin == Origin::Example || cfg!(target_family = "wasm");
         if let Some(session) = self.session.as_ref().filter(|s| in_memory(s)) {
-            let compared = session.other.as_ref().map(|o| o.path.as_path());
-            if own_run_click(&session.run.path, compared, &run.dir) == OwnRunClick::ShowCompared {
+            if own_run_click(session, &run.id) == OwnRunClick::ShowCompared {
                 self.show_other_run(None, cx);
             }
             return;
@@ -2335,22 +2338,45 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_session_s_own_run_clicked_in_the_runs_list_is_shown_from_memory() {
-        // In the browser, and for the desktop's example, the Runs list holds
-        // the session's two runs, named by their files. A click on the
-        // compared run swaps to it, one on the run on screen keeps it, and
-        // neither opens anything from disk.
-        let shown = Path::new("mylib-fail.rwd");
-        let compared = Path::new("mylib-pass.rwd");
+    fn two_own_runs_with_one_file_name_are_told_apart_by_their_ids() {
+        // In the browser, and for the desktop's example, the Runs list
+        // holds the session's two runs. Tests that a click on the compared
+        // run swaps to it, and one on the run on screen keeps it, when
+        // both runs were opened under the same file name, as two CI
+        // artifacts named run.rwd are in the browser. Opens the failing
+        // and passing example exports from memory under one name, clicks
+        // each row by the id the Runs list gives it, and swaps as the
+        // click asks.
+        const NAME: &str = "run.rwd";
+        let open = |bytes: &[u8]| {
+            crate::run::Run::open_bytes(NAME, bytes, crate::run::InMemoryOrigin::Export).unwrap()
+        };
+        let failing = open(crate::examples::FAILING);
+        let passing = open(crate::examples::PASSING);
+        let id_of = |run: &crate::run::Run| run.id().expect("an export has a manifest").to_string();
+        let (failing_id, passing_id) = (id_of(&failing), id_of(&passing));
+        assert_eq!(failing.path, passing.path);
+
+        // The failing run is on screen: its own row keeps it, the passing
+        // run's row swaps.
+        let session = Session::new(failing, Some(passing));
+        assert_eq!(own_run_click(&session, &failing_id), OwnRunClick::OnScreen);
         assert_eq!(
-            own_run_click(shown, Some(compared), compared),
+            own_run_click(&session, &passing_id),
             OwnRunClick::ShowCompared
         );
+
+        // Swapped, the failing run's row swaps back.
+        let session = session.swapped();
+        assert_eq!(own_run_click(&session, &passing_id), OwnRunClick::OnScreen);
         assert_eq!(
-            own_run_click(shown, Some(compared), shown),
-            OwnRunClick::OnScreen
+            own_run_click(&session, &failing_id),
+            OwnRunClick::ShowCompared
         );
-        assert_eq!(own_run_click(shown, None, shown), OwnRunClick::OnScreen);
+
+        // A run shown alone stays on screen.
+        let alone = Session::new(open(crate::examples::FAILING), None);
+        assert_eq!(own_run_click(&alone, &failing_id), OwnRunClick::OnScreen);
     }
 
     #[test]
