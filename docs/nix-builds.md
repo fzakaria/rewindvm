@@ -53,9 +53,10 @@ hierarchy at `/sys/fs/cgroup`, and its kernel has veth, bridge and TUN
 devices. Thus a builder can start containers with `systemd-nspawn`, for
 example a NixOS test that defines `containers` but no `nodes`.
 
-The guest kernel has no nftables, so in such a container a firewall that
-uses `iptables-nft` does not start. Nix runs a `uid-range` derivation
-only on a machine whose `system-features` include `uid-range`.
+The guest kernel has nf_tables, so the NixOS firewall works in such a
+container, with `iptables-nft` or with `networking.nftables`. It has no
+legacy iptables tables. Nix runs a `uid-range` derivation only on a
+machine whose `system-features` include `uid-range`.
 
 ## The builder wrapper
 
