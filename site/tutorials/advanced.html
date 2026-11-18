@@ -1426,12 +1426,12 @@ e20758b82c63ae48  <span class="ansi-red">exited:2</span>          5037 steps  my
         <p>
           The other machine also needs the features of the run's CPU model. A run without
           <code>--cpu</code> gets <code>v3</code>, whose features include ERMS, the fast
-          <code>rep movsb</code> flag. On a host that lacks only ERMS it gets
-          <code>v3-compat</code> instead, the same CPU with ERMS hidden, and rewind prints a line
-          saying so. A <code>v3</code> run needs a host with ERMS, and a <code>v3-compat</code> run
-          replays on hosts with or without it. A replay on a host without the model's features names
-          what is missing and where the run replays, and <code>rewind doctor</code> says which model
-          a run gets on a machine.
+          <code>rep movsb</code> flag, and PREFETCHW. On a host that lacks only ERMS or PREFETCHW,
+          such as a Haswell host, it gets <code>v3-compat</code> instead, the same CPU with both
+          hidden, and rewind prints a line saying so. A <code>v3</code> run needs a host with both,
+          and a <code>v3-compat</code> run replays on hosts with or without them. A replay on a host
+          without the model's features names what is missing and where the run replays, and
+          <code>rewind doctor</code> says which model a run gets on a machine.
         </p>
       </section>
 
