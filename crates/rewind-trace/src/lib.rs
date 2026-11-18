@@ -825,49 +825,76 @@ pub fn records(path: &Path) -> io::Result<Vec<(u64, Vec<u8>)>> {
 
 /// The records of a trace file's bytes as `r` reads them, as [`records`]
 /// returns them.
-pub fn records_from(mut r: impl Read) -> io::Result<Vec<(u64, Vec<u8>)>> {
-    let mut records = Vec::new();
-    let cut_off = |e: &io::Error| e.kind() == io::ErrorKind::UnexpectedEof;
+pub fn records_from(r: impl Read) -> io::Result<Vec<(u64, Vec<u8>)>> {
+    Records::new(r)?.collect()
+}
 
-    // The format first; a file cut off before its header is whole has no
-    // records yet.
-    let mut header = [0u8; TRACE_HEADER_LEN];
-    match r.read_exact(&mut header) {
-        Ok(()) => {}
-        Err(e) if cut_off(&e) => return Ok(records),
-        Err(e) => return Err(e),
-    }
-    let (magic, version) = header.split_at(TRACE_MAGIC.len());
-    if magic != TRACE_MAGIC {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "not a trace this build of rewind reads: traces written before rewind 1.0 \
-             name no format",
-        ));
-    }
-    let version = u32::from_le_bytes(version.try_into().expect("four bytes"));
-    if version != TRACE_VERSION {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "a trace of format {version}; this build of rewind reads format {TRACE_VERSION}"
-            ),
-        ));
-    }
+/// A trace file's records, each read from the file's bytes when the
+/// record is asked for, so that a reader that stops early reads no more
+/// of the file than the records it took. [`records_from`] collects them
+/// all. A trace cut off mid-record ends at its last whole record.
+#[derive(Debug)]
+pub struct Records<R> {
+    reader: R,
+    /// Whether the records have run out, or reading one failed.
+    ended: bool,
+}
 
-    loop {
-        let mut step = [0u8; 8];
-        match r.read_exact(&mut step) {
+impl<R: Read> Records<R> {
+    /// Reads the header that names the trace's format, and refuses a
+    /// format this build does not read.
+    pub fn new(mut reader: R) -> io::Result<Self> {
+        // The format first; a file cut off before its header is whole has
+        // no records yet.
+        let mut header = [0u8; TRACE_HEADER_LEN];
+        match reader.read_exact(&mut header) {
             Ok(()) => {}
-            Err(e) if cut_off(&e) => break,
+            Err(e) if cut_off(&e) => {
+                return Ok(Records {
+                    reader,
+                    ended: true,
+                });
+            }
+            Err(e) => return Err(e),
+        }
+        let (magic, version) = header.split_at(TRACE_MAGIC.len());
+        if magic != TRACE_MAGIC {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "not a trace this build of rewind reads: traces written before rewind 1.0 \
+                 name no format",
+            ));
+        }
+        let version = u32::from_le_bytes(version.try_into().expect("four bytes"));
+        if version != TRACE_VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "a trace of format {version}; this build of rewind reads format {TRACE_VERSION}"
+                ),
+            ));
+        }
+        Ok(Records {
+            reader,
+            ended: false,
+        })
+    }
+
+    /// The next record and its step, or None where the file ends or is
+    /// cut off.
+    fn read(&mut self) -> io::Result<Option<(u64, Vec<u8>)>> {
+        let mut step = [0u8; 8];
+        match self.reader.read_exact(&mut step) {
+            Ok(()) => {}
+            Err(e) if cut_off(&e) => return Ok(None),
             Err(e) => return Err(e),
         }
 
         // Each record starts with its own length.
         let mut len = [0u8; 4];
-        match r.read_exact(&mut len) {
+        match self.reader.read_exact(&mut len) {
             Ok(()) => {}
-            Err(e) if cut_off(&e) => break,
+            Err(e) if cut_off(&e) => return Ok(None),
             Err(e) => return Err(e),
         }
         // A length no record has is corruption, not a cut-off end, and is
@@ -881,14 +908,32 @@ pub fn records_from(mut r: impl Read) -> io::Result<Vec<(u64, Vec<u8>)>> {
         }
         let mut record = vec![0u8; len];
         record[..4].copy_from_slice(&(len as u32).to_le_bytes());
-        match r.read_exact(&mut record[4..]) {
+        match self.reader.read_exact(&mut record[4..]) {
             Ok(()) => {}
-            Err(e) if cut_off(&e) => break,
+            Err(e) if cut_off(&e) => return Ok(None),
             Err(e) => return Err(e),
         }
-        records.push((u64::from_le_bytes(step), record));
+        Ok(Some((u64::from_le_bytes(step), record)))
     }
-    Ok(records)
+}
+
+impl<R: Read> Iterator for Records<R> {
+    type Item = io::Result<(u64, Vec<u8>)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.ended {
+            return None;
+        }
+        let record = self.read();
+        self.ended = !matches!(record, Ok(Some(_)));
+        record.transpose()
+    }
+}
+
+/// Whether a read failed because the file ended before what was asked of
+/// it, as a trace does whose writer was killed.
+fn cut_off(e: &io::Error) -> bool {
+    e.kind() == io::ErrorKind::UnexpectedEof
 }
 
 /// Appends events to a trace file as the guest emits them, after the
@@ -1016,6 +1061,42 @@ mod partial_tests {
             assert_eq!(err.kind(), io::ErrorKind::InvalidData, "length {bad_len}");
         }
         std::fs::remove_file(&path).unwrap();
+    }
+
+    // Tests that the record reader reads the file only as far as the
+    // records taken from it. A trace of three records is read through a
+    // reader that counts the bytes asked of it: taking the first record
+    // reads the header and that record, and nothing of the other two.
+    #[test]
+    fn the_record_reader_reads_no_further_than_the_records_taken() {
+        struct Counting<'a> {
+            bytes: &'a [u8],
+            read: usize,
+        }
+        impl Read for Counting<'_> {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                let n = self.bytes.read(buf)?;
+                self.read += n;
+                Ok(n)
+            }
+        }
+
+        let mut record = (HEADER_LEN as u32).to_le_bytes().to_vec();
+        record.resize(HEADER_LEN, 0);
+        let mut writer = TraceWriter::new(Vec::new());
+        for step in [3, 5, 7] {
+            writer.record(step, &record).unwrap();
+        }
+        let bytes = writer.finish().unwrap();
+
+        let mut reader = Counting {
+            bytes: &bytes,
+            read: 0,
+        };
+        let first = Records::new(&mut reader).unwrap().next();
+        assert_eq!(first.unwrap().unwrap(), (3, record.clone()));
+        let step_len = size_of::<u64>();
+        assert_eq!(reader.read, TRACE_HEADER_LEN + step_len + record.len());
     }
 
     #[test]

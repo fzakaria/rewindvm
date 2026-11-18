@@ -7,6 +7,7 @@
 //! inputs again and checking the trace comes out the same.
 
 use std::fs;
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, mpsc};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -16,7 +17,7 @@ use rewind_init::Job;
 pub use rewind_store::Store;
 use rewind_trace::schedule::Timer;
 use rewind_trace::stop::StalledThread;
-use rewind_trace::{Event, EventKind, Trace, TraceWriter};
+use rewind_trace::{Event, EventKind, Line, Records, Trace, TraceWriter};
 pub use rewind_vmm::LateLimit;
 use rewind_vmm::{Config, DirtyLog, Machine, Observer, Outcome, Stop};
 use serde::{Deserialize, Serialize};
@@ -937,6 +938,21 @@ impl Run {
         let trace = Trace::decode(self.records()?)
             .with_context(|| format!("reading {}", path.display()))?;
         Ok(self.trace.get_or_init(|| trace))
+    }
+
+    /// Hands `emit` the run's output lines that are complete by the step
+    /// `until`, each as soon as the trace file's records complete it
+    /// ([`rewind_trace::lines::read`]). The file is read only as far as
+    /// the first event past `until`, and neither its records nor the
+    /// lines are kept: a long run's first lines cost reading its first
+    /// records, and a whole log takes the memory of one line at a time.
+    pub fn output_lines(&self, until: u64, emit: &mut impl FnMut(Line)) -> Result<()> {
+        let path = self.dir.join(TRACE);
+        let mut read = || -> std::io::Result<()> {
+            let file = BufReader::new(fs::File::open(&path)?);
+            rewind_trace::lines::read(Records::new(file)?, until, emit)
+        };
+        read().with_context(|| format!("reading {}", path.display()))
     }
 
     /// The step process `pid`'s memory began at by `step`: its last exec
@@ -3295,6 +3311,27 @@ pub(crate) mod tests {
         assert_eq!(run.records().unwrap().len(), 3);
         assert_eq!(run.records_after(4).unwrap().len(), 2);
         assert_eq!(Run::open(&dir).unwrap().trace().unwrap().events.len(), 1);
+        fs::remove_dir_all(&runs).unwrap();
+    }
+
+    #[test]
+    fn a_run_reads_its_output_lines_from_its_trace_file() {
+        // Tests that output_lines() reads a run's lines from its trace
+        // file up to a step. Writes a trace of three one-line writes,
+        // then asks for the lines up to the second write's step and for
+        // them all.
+        let runs = runs_dir("output-lines");
+        let dir = write_run(&runs, &manifest("r", "r", 0), &[3, 5, 9], b"a\n");
+        let run = Run::open(&dir).unwrap();
+        let steps_until = |until: u64| {
+            let mut steps = Vec::new();
+            run.output_lines(until, &mut |line| steps.push(line.step))
+                .unwrap();
+            steps
+        };
+
+        assert_eq!(steps_until(5), [3, 5]);
+        assert_eq!(steps_until(u64::MAX), [3, 5, 9]);
         fs::remove_dir_all(&runs).unwrap();
     }
 

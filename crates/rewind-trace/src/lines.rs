@@ -7,8 +7,9 @@
 //! or when the trace ends. The bytes become text once the line is whole.
 
 use std::collections::BTreeMap;
+use std::io;
 
-use crate::{Event, EventKind};
+use crate::{Event, EventKind, io_records, switches};
 
 /// The byte that ends a line.
 const NEWLINE: u8 = b'\n';
@@ -22,6 +23,38 @@ pub struct Line {
     pub pid: u32,
     pub fd: u32,
     pub text: String,
+}
+
+/// Hands `emit` the lines of a trace file's records that are complete by
+/// the step `until`, as [`crate::Trace::lines_until`] counts them, each
+/// as soon as the records complete it. No record is taken after the first
+/// event past `until`, so the lines of a run's first steps cost reading
+/// the run's first records and not its trace. A line no newline ended
+/// comes when its writer exits or the records run out, which may be after
+/// lines with later steps.
+pub fn read(
+    records: impl IntoIterator<Item = io::Result<(u64, Vec<u8>)>>,
+    until: u64,
+    emit: &mut impl FnMut(Line),
+) -> io::Result<()> {
+    let mut lines = Lines::default();
+    for record in records {
+        let (step, record) = record?;
+
+        // The read and write records and the batches of switches are not
+        // events, and hold no output.
+        if io_records::is_io(&record) || switches::is_batch(&record) {
+            continue;
+        }
+        if step > until {
+            return Ok(());
+        }
+        let event = Event::decode(step, &record)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        lines.event(&event, emit);
+    }
+    lines.end(emit);
+    Ok(())
 }
 
 /// What one stream has written since its last newline.
@@ -116,5 +149,83 @@ impl Lines {
                 text: String::from_utf8_lossy(&fragment.bytes).into_owned(),
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Lines read from a trace file's records one at a time, as `rewind
+    // log` reads them: reading stops at the first event past the step
+    // asked for, and a line no newline ended is read when the records run
+    // out and not before.
+    use std::cell::Cell;
+    use std::io;
+
+    use super::*;
+    use crate::HEADER_LEN;
+
+    /// The kind of the record of a write to standard output or error.
+    const OUTPUT_KIND: u16 = 2;
+    const STDOUT_FD: u32 = 1;
+    /// The process every record in these tests is written by.
+    const PID: u32 = 7;
+
+    /// The record of process [`PID`] writing `text` to standard output.
+    fn output(text: &str) -> Vec<u8> {
+        let len = (HEADER_LEN + text.len()) as u32;
+        let mut record = Vec::new();
+        record.extend_from_slice(&len.to_le_bytes());
+        record.extend_from_slice(&OUTPUT_KIND.to_le_bytes());
+        record.extend_from_slice(&0u16.to_le_bytes());
+        record.extend_from_slice(&PID.to_le_bytes());
+        record.extend_from_slice(&PID.to_le_bytes());
+        record.extend_from_slice(&STDOUT_FD.to_le_bytes());
+        record.extend_from_slice(text.as_bytes());
+        record
+    }
+
+    /// The texts of the lines `read` makes of `records` up to `until`.
+    fn texts(records: impl IntoIterator<Item = (u64, Vec<u8>)>, until: u64) -> Vec<String> {
+        let mut texts = Vec::new();
+        read(
+            records.into_iter().map(io::Result::Ok),
+            until,
+            &mut |line| texts.push(line.text),
+        )
+        .unwrap();
+        texts
+    }
+
+    // Tests that reading lines up to a step takes no record after the
+    // first event past the step. A thousand one-line writes are handed
+    // out by an iterator that counts what is taken from it: asking for
+    // the lines up to step 2 gives two lines and takes three records.
+    #[test]
+    fn reading_up_to_a_step_stops_at_the_first_later_event() {
+        const WRITES: u64 = 1000;
+        const UNTIL: u64 = 2;
+        let taken = Cell::new(0u64);
+        let records = (1..=WRITES).map(|step| {
+            taken.set(taken.get() + 1);
+            (step, output(&format!("line {step}\n")))
+        });
+
+        assert_eq!(texts(records, UNTIL), ["line 1", "line 2"]);
+        assert_eq!(taken.get(), UNTIL + 1);
+    }
+
+    // Tests that a line no newline ended is read when the records run
+    // out, and is not read by a step before the last write. The records
+    // are one whole line and then a write without a newline.
+    #[test]
+    fn an_unfinished_line_is_read_once_the_records_run_out() {
+        let records = || [(1, output("first\n")), (2, output("reason: out of space"))];
+
+        assert_eq!(texts(records(), 1), ["first"]);
+        assert_eq!(texts(records(), 2), ["first", "reason: out of space"]);
+        assert_eq!(
+            texts(records(), u64::MAX),
+            ["first", "reason: out of space"]
+        );
     }
 }
