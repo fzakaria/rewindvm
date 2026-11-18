@@ -5,7 +5,7 @@
 #
 # The command and the desktop app are unpacked under ~/.local/share/rewind
 # and linked into ~/.local/bin. Running it again replaces both with the
-# latest release. Settings, all optional:
+# latest release, the two together. Settings, all optional:
 #
 #   REWIND_INSTALL_DIR  where the tarballs are unpacked (~/.local/share/rewind)
 #   REWIND_BIN_DIR      where rewind and rewind-app are linked (~/.local/bin)
@@ -43,32 +43,38 @@ else
   fail "needs curl or wget"
 fi
 
-# Every tarball asked for is downloaded and unpacked into one staging
-# directory before anything installed is touched. A download that fails
-# or is cut short stops the script there, with the installed command and
-# app still the pair they were. The staging directory goes when the
-# script ends, however the script ends.
-mkdir -p "$INSTALL_DIR" "$BIN_DIR"
-staging=$(mktemp -d "$INSTALL_DIR/.install.XXXXXX")
-trap 'rm -rf "$staging"' EXIT
+# Each run of the script unpacks a release into a directory of its own
+# under releases/, and the link `current` names the release in use. The
+# launchers in BIN_DIR and the desktop entry go through that link, so
+# renaming a new link over it switches the command and the app to the new
+# release in one step. Until then nothing installed is touched: a
+# download that fails or is cut short, or a link that cannot be made,
+# stops the script with the command and the app still the pair they were.
+RELEASES=$INSTALL_DIR/releases
+CURRENT=$INSTALL_DIR/current
+mkdir -p "$RELEASES" "$BIN_DIR"
+release=$(mktemp -d "$RELEASES/XXXXXX")
+new_current=
+
+# A release that was not switched to goes when the script ends, however
+# the script ends, and so does a link that was made and not renamed.
+cleanup() {
+  [ -z "$release" ] || rm -rf "$release"
+  [ -z "$new_current" ] || rm -f "$new_current"
+}
+trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 
+# Each tarball unpacks to a directory of its own name inside the release.
 stage_tarball() {
   name=$1
   say "downloading $name"
-  fetch "$RELEASE_URL/$name.tar.gz" | tar -xz -C "$staging"
-  [ -d "$staging/$name" ] || fail "$name.tar.gz did not unpack to $name"
+  fetch "$RELEASE_URL/$name.tar.gz" | tar -xz -C "$release"
+  [ -d "$release/$name" ] || fail "$name.tar.gz did not unpack to $name"
 }
 
-# Each tarball unpacks to a directory of its own name, so a new release
-# replaces the old one whole.
-install_staged() {
-  name=$1
-  rm -rf "${INSTALL_DIR:?}/$name"
-  mv "$staging/$name" "$INSTALL_DIR/$name"
-}
-
-# The downloads first, every one of them.
+# The downloads first, every one of them. The kernel's debug symbols
+# unpack next to the command, where its launcher looks for them.
 stage_tarball "$CLI"
 if [ "${REWIND_WITH_DEBUG:-}" = 1 ]; then
   stage_tarball "$DEBUG"
@@ -77,28 +83,44 @@ if [ "${REWIND_NO_APP:-}" != 1 ]; then
   stage_tarball "$APP"
 fi
 
-install_staged "$CLI"
-ln -sf "$INSTALL_DIR/$CLI/bin/rewind" "$BIN_DIR/rewind"
-
-# The kernel's debug symbols go next to the command, where its launcher
-# looks for them.
-if [ "${REWIND_WITH_DEBUG:-}" = 1 ]; then
-  install_staged "$DEBUG"
-fi
+# The desktop entry and icon, so the app is in the desktop's launcher.
+# The entry names the app by its path: a desktop session's PATH often
+# lacks BIN_DIR.
+share=${XDG_DATA_HOME:-$HOME/.local/share}
+entry=surf.lunchtime.Rewind.desktop
 if [ "${REWIND_NO_APP:-}" != 1 ]; then
-  install_staged "$APP"
-  ln -sf "$INSTALL_DIR/$APP/bin/rewind-app" "$BIN_DIR/rewind-app"
-
-  # The desktop entry and icon, so the app is in the desktop's launcher.
-  # The entry names the app by its path: a desktop session's PATH often
-  # lacks BIN_DIR.
-  share=${XDG_DATA_HOME:-$HOME/.local/share}
-  entry=surf.lunchtime.Rewind.desktop
   mkdir -p "$share/applications" "$share/icons/hicolor"
-  sed "s|^Exec=rewind-app|Exec=$INSTALL_DIR/$APP/bin/rewind-app|" \
-    "$INSTALL_DIR/$APP/share/applications/$entry" >"$share/applications/$entry"
-  cp -R "$INSTALL_DIR/$APP/share/icons/hicolor/." "$share/icons/hicolor/"
+  sed "s|^Exec=rewind-app|Exec=$CURRENT/$APP/bin/rewind-app|" \
+    "$release/$APP/share/applications/$entry" >"$share/applications/$entry"
+  cp -R "$release/$APP/share/icons/hicolor/." "$share/icons/hicolor/"
 fi
+
+# The switch: a new link made beside `current` and renamed over it.
+new_current=$INSTALL_DIR/.current.$$
+ln -s "releases/${release##*/}" "$new_current"
+mv -T "$new_current" "$CURRENT"
+in_use=$release
+release=
+new_current=
+
+# The launchers go through `current`, so an upgrade finds them already
+# right and writes nothing here. A first install makes them.
+link_launcher() {
+  target=$CURRENT/$1
+  link=$BIN_DIR/${1##*/}
+  [ "$(readlink "$link" 2>/dev/null)" = "$target" ] || ln -sf "$target" "$link"
+}
+link_launcher "$CLI/bin/rewind"
+if [ "${REWIND_NO_APP:-}" != 1 ]; then
+  link_launcher "$APP/bin/rewind-app"
+fi
+
+# The releases that were in use before go, and so do the directories of
+# an install made before releases were kept apart.
+for old in "$RELEASES"/*; do
+  [ "$old" = "$in_use" ] || rm -rf "$old"
+done
+rm -rf "${INSTALL_DIR:?}/$CLI" "${INSTALL_DIR:?}/$APP" "${INSTALL_DIR:?}/$DEBUG"
 
 say "installed into $INSTALL_DIR, linked from $BIN_DIR"
 

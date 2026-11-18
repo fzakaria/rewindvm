@@ -22,12 +22,14 @@ CLI = "rewind-x86_64-linux"
 APP = "rewind-app-x86_64-linux"
 DESKTOP_ENTRY = "surf.lunchtime.Rewind.desktop"
 
-# The staging directories the installer unpacks into, which none should
-# outlive the installer.
-STAGING_GLOB = ".install.*"
+# The directory under the install directory that holds one directory per
+# release, and the link beside it that names the release in use.
+RELEASES = "releases"
+CURRENT = "current"
 
 EXECUTABLE = 0o755
 DIRECTORY = 0o755
+READ_ONLY = 0o555
 
 
 def add_file(tar, name, text, mode=0o644):
@@ -68,8 +70,11 @@ class Install(unittest.TestCase):
     # The installer run against releases in a temporary directory. What
     # is installed is read back by running the two linked launchers.
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        root = Path(self.tmp.name)
+        # The temporary directory goes after every other cleanup, so one
+        # that gives a directory its permissions back finds it there.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
         self.releases = root / "releases"
         self.install_dir = root / "share" / "rewind"
         self.bin_dir = root / "bin"
@@ -82,9 +87,6 @@ class Install(unittest.TestCase):
             "REWIND_INSTALL_DIR": str(self.install_dir),
             "REWIND_BIN_DIR": str(self.bin_dir),
         }
-
-    def tearDown(self):
-        self.tmp.cleanup()
 
     def install(self):
         # The installer's exit status.
@@ -104,7 +106,16 @@ class Install(unittest.TestCase):
         return release("rewind"), release("rewind-app")
 
     def staging_left(self):
-        return list(self.install_dir.glob(STAGING_GLOB))
+        # What the installer left that is not the release in use: a
+        # release that was never switched to, or one that was replaced.
+        in_use = (self.install_dir / CURRENT).resolve()
+        releases = (self.install_dir / RELEASES).iterdir()
+        return [release for release in releases if release.resolve() != in_use]
+
+    def make_read_only(self, directory):
+        # `directory` takes no new entries until the test is over.
+        directory.chmod(READ_ONLY)
+        self.addCleanup(directory.chmod, DIRECTORY)
 
     def test_an_install_links_the_command_and_the_app(self):
         # A first install of release one: both launchers run and say one,
@@ -124,6 +135,62 @@ class Install(unittest.TestCase):
         write_app(self.releases, "two")
         self.assertEqual(self.install(), 0)
         self.assertEqual(self.installed(), ("two", "two"))
+        self.assertEqual(self.staging_left(), [])
+
+    def test_an_upgrade_that_cannot_switch_changes_nothing(self):
+        # Release one installed, then an upgrade to release two with the
+        # install directory read-only, so both tarballs download and
+        # unpack but the link that names the release in use cannot be
+        # replaced. The installer fails, the command and the app are both
+        # still release one, and release two's directory is gone.
+        write_cli(self.releases, "one")
+        write_app(self.releases, "one")
+        self.assertEqual(self.install(), 0)
+        write_cli(self.releases, "two")
+        write_app(self.releases, "two")
+        self.make_read_only(self.install_dir)
+        self.assertNotEqual(self.install(), 0)
+        self.assertEqual(self.installed(), ("one", "one"))
+        self.assertEqual(self.staging_left(), [])
+
+    def test_an_upgrade_needs_no_new_launcher_links(self):
+        # Release one installed, then an upgrade to release two with the
+        # directory of the launcher links read-only. The links name the
+        # release in use and not a release, so the upgrade writes none:
+        # the installer succeeds and both launchers say two.
+        write_cli(self.releases, "one")
+        write_app(self.releases, "one")
+        self.assertEqual(self.install(), 0)
+        write_cli(self.releases, "two")
+        write_app(self.releases, "two")
+        self.make_read_only(self.bin_dir)
+        self.assertEqual(self.install(), 0)
+        self.assertEqual(self.installed(), ("two", "two"))
+
+    def test_an_install_from_before_releases_is_replaced(self):
+        # An install made before the installer kept releases: the command
+        # and the app each in a directory of the install directory, with
+        # the launcher links naming those. Installing release one over it
+        # leaves both launchers saying one and neither old directory.
+        old = tempfile.TemporaryDirectory()
+        self.addCleanup(old.cleanup)
+        write_cli(Path(old.name), "old")
+        write_app(Path(old.name), "old")
+        self.install_dir.mkdir(parents=True)
+        self.bin_dir.mkdir()
+        for name, program in ((CLI, "rewind"), (APP, "rewind-app")):
+            with tarfile.open(Path(old.name) / f"{name}.tar.gz") as tar:
+                tar.extractall(self.install_dir, filter="data")
+            target = self.install_dir / name / "bin" / program
+            (self.bin_dir / program).symlink_to(target)
+        self.assertEqual(self.installed(), ("old", "old"))
+
+        write_cli(self.releases, "one")
+        write_app(self.releases, "one")
+        self.assertEqual(self.install(), 0)
+        self.assertEqual(self.installed(), ("one", "one"))
+        self.assertFalse((self.install_dir / CLI).exists())
+        self.assertFalse((self.install_dir / APP).exists())
 
     def test_an_upgrade_whose_second_download_fails_changes_nothing(self):
         # Release one installed, then an upgrade to release two whose app
