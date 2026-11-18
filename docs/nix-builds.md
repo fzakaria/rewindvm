@@ -44,6 +44,19 @@ so `REWIND_KERNEL` and `REWIND_INITRD` overrides cannot change a pinned
 build. Those overrides still work for interactive commands such as
 `rewind run`.
 
+## Containers
+
+A derivation that names `uid-range` in `requiredSystemFeatures` runs as
+root (uid 0, gid 0) in the VM, in place of the usual build user. This
+matches the sandbox that Nix gives such a build. The guest has a cgroup2
+hierarchy at `/sys/fs/cgroup`, and its kernel has veth, bridge and TUN
+devices. Thus a builder can start containers with `systemd-nspawn`, for
+example a NixOS test that defines `containers` but no `nodes`.
+
+The guest kernel has no nftables, so in such a container a firewall that
+uses `iptables-nft` does not start. Nix runs a `uid-range` derivation
+only on a machine whose `system-features` include `uid-range`.
+
 ## The builder wrapper
 
 `inRewind machine drv` replaces `drv`'s builder with a script that starts

@@ -100,3 +100,11 @@ CONFIG_CMDLINE="sysctl.vm.compaction_proactiveness=0"
 # of it.
 CONFIG_DEBUG_INFO_DWARF5=y
 CONFIG_GDB_SCRIPTS=y
+
+# NixOS tests with containers: the test driver runs each container with
+# systemd-nspawn in a network namespace of its own, joined to a bridge per
+# VLAN by a veth pair, and links the bridge to the VMs' VDE switch through
+# a TAP device.
+CONFIG_VETH=y
+CONFIG_BRIDGE=y
+CONFIG_TUN=y

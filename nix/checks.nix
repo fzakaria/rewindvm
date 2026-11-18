@@ -4298,7 +4298,7 @@ in
         # to the built-in one needs another epoch that draws that way.
         export REWIND_HOME=$TMPDIR/dropped
         dropped() {
-          rewind check -j 4 --clock exits --epoch 1767744000 --cpu v3-compat \
+          rewind check -j 4 --clock exits --epoch 1768262400 --cpu v3-compat \
             --all --no-narrow --json "$@" --root ${slowRaceRoot} -- /bin/slowrace "$spins" random
         }
 
