@@ -361,6 +361,7 @@ mod tests {
     fn event(step: u64, pid: u32, tid: u32, kind: EventKind) -> Event {
         Event {
             step,
+            ns: step + 1,
             pid,
             tid,
             kind,

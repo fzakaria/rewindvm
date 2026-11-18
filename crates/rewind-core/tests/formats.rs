@@ -60,6 +60,10 @@ const SAMPLES: &[(&str, &str)] = &[
         "trace-1.bin",
         "5c4753ae7fe3ee9005df25ae8a09a9fd731c92c99c0383dd413f903ba7638017",
     ),
+    (
+        "trace-2.bin",
+        "703a11e6ba881a86371055053adee1ed4030862ee5e198c9e250b4c7f378b47d",
+    ),
 ];
 
 /// The environment variable that has the tests write the samples they

@@ -55,7 +55,10 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-pub use event::{DecodeError, Event, EventKind, HEADER_LEN, RECORD_MAX, signal_name};
+pub use event::{
+    CLOCK_LEN, DecodeError, EVENT_HEADER_LEN, Event, EventKind, HEADER_LEN, RECORD_MAX,
+    TRACE_RECORD_MAX, signal_name, stamp_into, stamped,
+};
 pub use lines::Line;
 /// Init's marks, which every trace holds, for readers that do not depend
 /// on the init themselves.
@@ -807,7 +810,7 @@ impl ProgramDivergence {
 /// What a trace file starts with: this magic, then the version of its
 /// format as a little-endian u32. Its records follow.
 pub const TRACE_MAGIC: &[u8; 8] = b"rwtrace\0";
-pub const TRACE_VERSION: u32 = 1;
+pub const TRACE_VERSION: u32 = 2;
 const TRACE_HEADER_LEN: usize = TRACE_MAGIC.len() + 4;
 
 /// A trace file's records as the guest wrote them, each with its step,
@@ -895,7 +898,7 @@ impl<R: Read> Records<R> {
         // A length no record has is corruption, not a cut-off end, and is
         // refused before anything is read or allocated for it.
         let len = u32::from_le_bytes(len) as usize;
-        if !(HEADER_LEN..=RECORD_MAX).contains(&len) {
+        if !(HEADER_LEN..=TRACE_RECORD_MAX).contains(&len) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("a record of {len} bytes, which no record is"),
@@ -1043,7 +1046,7 @@ mod partial_tests {
             r.resize(len as usize, 0);
             r
         };
-        for bad_len in [u32::MAX, RECORD_MAX as u32 + 1, HEADER_LEN as u32 - 1] {
+        for bad_len in [u32::MAX, TRACE_RECORD_MAX as u32 + 1, HEADER_LEN as u32 - 1] {
             let mut writer = TraceWriter::new(std::fs::File::create(&path).unwrap());
             writer.record(3, &record(HEADER_LEN as u32)).unwrap();
             let mut bytes = writer.finish().unwrap();
@@ -1131,6 +1134,7 @@ mod tests {
     fn ev(step: u64, pid: u32, tid: u32, kind: EventKind) -> Event {
         Event {
             step,
+            ns: step + 1,
             pid,
             tid,
             kind,
@@ -1976,7 +1980,7 @@ mod tests {
         record.extend_from_slice(&10u16.to_le_bytes());
         record.extend_from_slice(&[0u8; 14]);
         record.extend_from_slice(b"hi\n");
-        w.record(99, &record).unwrap();
+        w.record(99, &stamped(&record, 100)).unwrap();
         let bytes = w.finish().unwrap();
 
         let dir = std::env::temp_dir().join(format!("rewind-trace-{}", std::process::id()));
@@ -1984,7 +1988,7 @@ mod tests {
         let t = Trace::read(&dir).unwrap();
         std::fs::remove_file(&dir).unwrap();
         assert_eq!(t.events.len(), 1);
-        assert_eq!(t.events[0].step, 99);
+        assert_eq!((t.events[0].step, t.events[0].ns), (99, 100));
         assert_eq!(t.events[0].kind, EventKind::Mark { text: "hi".into() });
     }
 
@@ -2232,7 +2236,7 @@ mod tests {
         record.extend_from_slice(&10u16.to_le_bytes());
         record.extend_from_slice(&[0u8; 14]);
         record.extend_from_slice(b"hi\n");
-        w.record(42, &record).unwrap();
+        w.record(42, &stamped(&record, 43)).unwrap();
         let bytes = w.finish().unwrap();
 
         let t = Trace::from_bytes(&bytes).unwrap();
@@ -2258,7 +2262,7 @@ mod tests {
         guest.extend_from_slice(&[0u8; 12]);
         guest.extend_from_slice(&0u64.to_le_bytes());
         guest.extend_from_slice(&9u32.to_le_bytes());
-        let mut records = vec![(42, mark)];
+        let mut records = vec![(42, stamped(&mark, 43))];
         for r in io_records::Encoder::new().encode(0, &guest, 0, &mut Vec::new()) {
             records.push((42, r));
         }

@@ -484,6 +484,7 @@ mod tests {
         use rewind_trace::{Event, EventKind};
         let mark = |step| Event {
             step,
+            ns: step + 1,
             pid: 1,
             tid: 1,
             kind: EventKind::Mark { text: "x".into() },
@@ -653,6 +654,7 @@ mod tests {
     fn write(step: u64, pid: u32, text: &str) -> Event {
         Event {
             step,
+            ns: step + 1,
             pid,
             tid: pid,
             kind: EventKind::Output {

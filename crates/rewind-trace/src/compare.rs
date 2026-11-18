@@ -153,6 +153,7 @@ mod tests {
     fn write(step: u64, tid: u32, text: &str) -> Event {
         Event {
             step,
+            ns: step + 1,
             pid: 4,
             tid,
             kind: EventKind::Output {
@@ -192,6 +193,7 @@ mod tests {
             vec![
                 Event {
                     step: 1,
+                    ns: 2,
                     pid: 1,
                     tid: 1,
                     kind: EventKind::Fork {
@@ -201,6 +203,7 @@ mod tests {
                 },
                 Event {
                     step: 2,
+                    ns: 3,
                     pid,
                     tid: pid,
                     kind: EventKind::Exec {

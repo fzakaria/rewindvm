@@ -889,6 +889,7 @@ pub(crate) mod tests {
     pub(crate) fn event(step: u64, pid: u32, tid: u32, kind: EventKind) -> crate::Event {
         crate::Event {
             step,
+            ns: step + 1,
             pid,
             tid,
             kind,

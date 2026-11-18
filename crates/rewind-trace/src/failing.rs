@@ -225,6 +225,7 @@ mod tests {
     fn a_process_fails_at_its_last_thread_s_exit() {
         let event = |step, pid, tid, kind| Event {
             step,
+            ns: step + 1,
             pid,
             tid,
             kind,

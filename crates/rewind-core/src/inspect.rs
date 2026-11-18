@@ -609,6 +609,12 @@ mod tests {
     const KIND_OUTPUT: u16 = 2;
     const KIND_MARK: u16 = 10;
 
+    /// The clock the records of these tests are stamped with: no answer
+    /// depends on when a record was made.
+    const NS: u64 = 0;
+
+    /// A record as a trace holds one: laid out as the guest writes it,
+    /// then stamped with the clock.
     fn record(kind: u16, pid: u32, aux: u32, payload: &[u8]) -> Vec<u8> {
         let mut r = Vec::new();
         r.extend_from_slice(&((HEADER + payload.len()) as u32).to_le_bytes());
@@ -618,7 +624,7 @@ mod tests {
         r.extend_from_slice(&pid.to_le_bytes());
         r.extend_from_slice(&aux.to_le_bytes());
         r.extend_from_slice(payload);
-        r
+        rewind_trace::stamped(&r, NS)
     }
 
     fn mark(pid: u32, mark: Mark) -> Vec<u8> {

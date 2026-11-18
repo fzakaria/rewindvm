@@ -181,6 +181,7 @@ mod tests {
     fn write(step: u64, pid: u32, text: &str) -> Event {
         Event {
             step,
+            ns: step + 1,
             pid,
             tid: pid,
             kind: EventKind::Output {
@@ -218,6 +219,7 @@ mod tests {
         // at 30 only init.
         let event = |step, pid, kind| Event {
             step,
+            ns: step + 1,
             pid,
             tid: pid,
             kind,

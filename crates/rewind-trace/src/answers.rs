@@ -612,6 +612,7 @@ mod tests {
         // step; not init, not thread 8, and not kthreadd's child 3.
         let event = |step, pid, tid, kind| Event {
             step,
+            ns: step + 1,
             pid,
             tid,
             kind,
@@ -668,6 +669,7 @@ mod tests {
         // alone is. Builds the trace by hand.
         let event = |step, tid, kind| Event {
             step,
+            ns: step + 1,
             pid: 7,
             tid,
             kind,
@@ -697,6 +699,7 @@ mod tests {
             events: vec![
                 Event {
                     step: 1,
+                    ns: 2,
                     pid: 1,
                     tid: 1,
                     kind: EventKind::Fork {

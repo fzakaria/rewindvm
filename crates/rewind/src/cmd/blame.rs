@@ -1844,6 +1844,7 @@ mod tests {
     fn built() -> Trace {
         let open = |step, pid, path: &str| Event {
             step,
+            ns: step + 1,
             pid,
             tid: pid,
             kind: EventKind::Open {
@@ -1902,6 +1903,7 @@ mod tests {
         const TEMPORARY: u32 = 4;
         let open = |step, pid, path: &str| Event {
             step,
+            ns: step + 1,
             pid,
             tid: pid,
             kind: EventKind::Open {
@@ -1915,6 +1917,7 @@ mod tests {
                 open(20, 20, "/out/.copyFile20-1.tmp"),
                 Event {
                     step: 23,
+                    ns: 24,
                     pid: 20,
                     tid: 20,
                     kind: EventKind::Rename {
@@ -2138,6 +2141,7 @@ mod tests {
     fn redirected_then_execd() -> (Trace, IoLog, Writer) {
         let event = |step, kind| Event {
             step,
+            ns: step + 1,
             pid: 34,
             tid: 34,
             kind,
@@ -2293,6 +2297,7 @@ mod tests {
     fn notes_ref(second_write: u64) -> Trace {
         let event = |step, pid, kind| Event {
             step,
+            ns: step + 1,
             pid,
             tid: pid,
             kind,

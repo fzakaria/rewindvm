@@ -3241,7 +3241,8 @@ pub(crate) mod tests {
         dir
     }
 
-    /// Writes `dir`'s trace: one write of `text` at each of `steps`.
+    /// Writes `dir`'s trace: one write of `text` at each of `steps`, each
+    /// stamped with a clock one past its step.
     fn write_trace(dir: &Path, steps: &[u64], text: &[u8]) {
         const OUTPUT: u16 = 2;
         const STDOUT: u32 = 1;
@@ -3256,7 +3257,8 @@ pub(crate) mod tests {
         record.extend_from_slice(text);
         let mut writer = TraceWriter::new(fs::File::create(dir.join(TRACE)).unwrap());
         for step in steps {
-            writer.record(*step, &record).unwrap();
+            let stamped = rewind_trace::stamped(&record, *step + 1);
+            writer.record(*step, &stamped).unwrap();
         }
         writer.finish().unwrap();
     }

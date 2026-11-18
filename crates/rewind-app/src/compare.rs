@@ -184,6 +184,7 @@ mod tests {
     fn write(step: u64, tid: u32, text: &str) -> Event {
         Event {
             step,
+            ns: step + 1,
             pid: 4,
             tid,
             kind: EventKind::Output {

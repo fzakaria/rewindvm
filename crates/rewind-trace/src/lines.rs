@@ -190,7 +190,12 @@ mod tests {
     /// process.
     const PID: u32 = 7;
 
-    /// A record of kind `kind` from process `pid`'s main thread.
+    /// The clock every record in these tests is stamped with: no line
+    /// depends on when it was written.
+    const NS: u64 = 0;
+
+    /// A record of kind `kind` from process `pid`'s main thread, as a
+    /// trace holds one.
     fn record(kind: u16, pid: u32, aux: u32, data: &[u8]) -> Vec<u8> {
         let len = (HEADER_LEN + data.len()) as u32;
         let mut record = Vec::new();
@@ -201,7 +206,7 @@ mod tests {
         record.extend_from_slice(&pid.to_le_bytes());
         record.extend_from_slice(&aux.to_le_bytes());
         record.extend_from_slice(data);
-        record
+        crate::stamped(&record, NS)
     }
 
     /// The record of process `pid` writing `text` to standard output.

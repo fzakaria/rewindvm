@@ -263,6 +263,7 @@ mod tests {
     fn timeline() -> Timeline {
         let out = |step, text: &str| Event {
             step,
+            ns: step + 1,
             pid: 1,
             tid: 1,
             kind: EventKind::Output {
@@ -275,6 +276,7 @@ mod tests {
             out(50, "Running phase: checkPhase\n"),
             Event {
                 step: 80,
+                ns: 81,
                 pid: 2,
                 tid: 3,
                 kind: EventKind::Signal {

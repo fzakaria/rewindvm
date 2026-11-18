@@ -626,6 +626,7 @@ mod tests {
     fn ev(kind: EventKind) -> Event {
         Event {
             step: 1,
+            ns: 2,
             pid: 7,
             tid: 7,
             kind,

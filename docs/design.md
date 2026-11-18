@@ -921,11 +921,21 @@ every other question on; at other steps it says the desktop app does
 it. Source and file contents say more of a job than a trace does, so a
 plain export carries none.
 
-`trace.bin` is a sequence of events. Each is its step as eight little-endian
-bytes, followed by the record exactly as the guest wrote it. `rewind-trace`
-reads it and answers the scrubber's questions: which processes were alive at a
-step, what they had printed, which files they had written, which build phase
-it was, and where two runs first differ.
+`trace.bin` is a sequence of records. Each is its step as eight little-endian
+bytes, followed by the record. An event's record is as the guest wrote it,
+with the VM's clock put in after its 20-byte header: eight little-endian
+bytes of nanoseconds since boot, and the record's length the longer for
+them. `rewind-trace` reads it and answers the scrubber's questions: which
+processes were alive at a step, what they had printed, which files they had
+written, which build phase it was, and where two runs first differ.
+
+The guest cannot stamp the clock itself, since the clock is the monitor's.
+The monitor holds an event until the event's step has moved the clock and
+stamps it then, so the clock is as the step left it and counts what the
+guest computed up to the event. A thread can compute for a long time between
+two steps, so a step alone does not say when its event happened. A replay
+compares the records it makes with the recording's, so the clock at every
+event is checked with everything else.
 
 The guest gives a pid out again once its process has exited, so a pid alone
 does not name a process for the whole run. A life of a pid, `Life` in
@@ -948,7 +958,8 @@ varints. Decoding a record needs the records before it, so a machine
 restored from a keyframe first reads the trace up to the keyframe to go on
 encoding the same way. The records are not events: the scrubber and the app
 never see them, and traces without them, from older runs, read as before.
-A trace's format version stays 1, since the framing did not change.
+They left the trace's format version at 1, since the framing did not
+change. The clock in an event's record made the version 2.
 
 The records cost 190 KB on a neatvnc build, whose trace was 424 KB before
 (+45%), and 2.0 MB on a sagittarius build, whose trace was 7.08 MB

@@ -3063,7 +3063,12 @@ mod tests {
     const EXEC_RECORD: u16 = 3;
     const OUTPUT_RECORD: u16 = 2;
 
-    /// A record laid out the way the guest kernel writes one.
+    /// The clock the records of these tests are stamped with: finding an
+    /// exec does not depend on when a record was made.
+    const NS: u64 = 0;
+
+    /// A record as a trace holds one: laid out the way the guest kernel
+    /// writes it, then stamped with the clock.
     fn guest_record(kind: u16, pid: u32, data: &[u8]) -> Vec<u8> {
         let mut r = Vec::new();
         let len = (rewind_trace::HEADER_LEN + data.len()) as u32;
@@ -3074,7 +3079,7 @@ mod tests {
             r.extend_from_slice(&word.to_le_bytes());
         }
         r.extend_from_slice(data);
-        r
+        rewind_trace::stamped(&r, NS)
     }
 
     /// An exec is found in the debugged process's records alone, by the

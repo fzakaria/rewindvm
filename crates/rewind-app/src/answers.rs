@@ -137,6 +137,7 @@ mod tests {
         // key.
         let event = |step, pid, kind| Event {
             step,
+            ns: step + 1,
             pid,
             tid: pid,
             kind,

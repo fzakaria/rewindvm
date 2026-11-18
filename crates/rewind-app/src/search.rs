@@ -212,6 +212,7 @@ mod tests {
     fn timeline() -> Timeline {
         let event = |step, pid, kind| Event {
             step,
+            ns: step + 1,
             pid,
             tid: pid,
             kind,
@@ -341,6 +342,7 @@ mod tests {
         let mut t = timeline().trace;
         t.events.push(Event {
             step: 40,
+            ns: 41,
             pid: 9,
             tid: 9,
             kind: EventKind::Open {

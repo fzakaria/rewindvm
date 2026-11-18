@@ -1557,6 +1557,7 @@ mod tests {
         // leaves the process its memory, and any other step stays.
         let event = |step, pid, tid, kind| rewind_trace::Event {
             step,
+            ns: step + 1,
             pid,
             tid,
             kind,
@@ -1599,6 +1600,7 @@ mod tests {
     fn a_killed_process_is_looked_at_its_last_event() {
         let event = |step, pid, kind| rewind_trace::Event {
             step,
+            ns: step + 1,
             pid,
             tid: pid,
             kind,
@@ -1644,6 +1646,7 @@ mod tests {
     fn a_crashed_process_is_looked_at_before_its_threads_exit() {
         let event = |step, tid, kind| rewind_trace::Event {
             step,
+            ns: step + 1,
             pid: 34,
             tid,
             kind,
@@ -1678,6 +1681,7 @@ mod tests {
     fn the_thread_is_the_event_s_unless_given() {
         let write = |step, pid, tid| rewind_trace::Event {
             step,
+            ns: step + 1,
             pid,
             tid,
             kind: rewind_trace::EventKind::Output {

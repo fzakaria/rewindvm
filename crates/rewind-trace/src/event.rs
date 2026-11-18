@@ -3,14 +3,63 @@
 //! The guest kernel writes one record per event (see rewind_emit in
 //! guest/linux/rewind-guest.patch): a 20 byte header of length, kind, flags,
 //! pid, tid and a kind-specific `aux` word, then a payload.
+//!
+//! The guest has no clock of its own to put in a record: the VM's clock
+//! is the monitor's. The monitor stamps each event's record with the
+//! clock before the record goes into the trace ([`stamped`]), so an event
+//! in a trace says when it happened as well as on which step. A thread
+//! can compute for a long time between two steps, so the step alone does
+//! not say when.
 
 use serde::{Deserialize, Serialize};
 
+/// The header the guest writes at the start of every record.
 pub const HEADER_LEN: usize = 20;
+
+/// The bytes of the clock the monitor stamps into an event's record,
+/// between the guest's header and the payload.
+pub const CLOCK_LEN: usize = 8;
+
+/// The header of an event's record in a trace: the guest's, then the
+/// clock.
+pub const EVENT_HEADER_LEN: usize = HEADER_LEN + CLOCK_LEN;
+
+/// Where a record's length is, and how many bytes the length takes.
+const LENGTH_AT: usize = 0;
+const LENGTH_LEN: usize = 4;
+
+/// The record of an event as a trace holds it: `record`, which the guest
+/// wrote, with `ns`, the VM's clock when the event happened, after its
+/// header, and its length the longer for it.
+///
+/// `record` is at least a header, as the monitor has checked of every
+/// record it takes from the guest.
+pub fn stamped(record: &[u8], ns: u64) -> Vec<u8> {
+    let mut out = Vec::new();
+    stamp_into(record, ns, &mut out);
+    out
+}
+
+/// Makes `out` the record [`stamped`] gives of `record` and `ns`, in the
+/// memory `out` already has when that is enough: the monitor stamps a
+/// record at every event and keeps one buffer for them all.
+pub fn stamp_into(record: &[u8], ns: u64, out: &mut Vec<u8>) {
+    let (header, payload) = record.split_at(HEADER_LEN);
+    let len = (record.len() + CLOCK_LEN) as u32;
+    out.clear();
+    out.extend_from_slice(header);
+    out.extend_from_slice(&ns.to_le_bytes());
+    out.extend_from_slice(payload);
+    out[LENGTH_AT..LENGTH_AT + LENGTH_LEN].copy_from_slice(&len.to_le_bytes());
+}
 
 /// The longest record the guest writes, header included: its
 /// REWIND_RECORD_MAX, which the monitor holds it to.
 pub const RECORD_MAX: usize = 8192;
+
+/// The longest record a trace holds: the guest's longest, with the clock
+/// the monitor stamps into an event's.
+pub const TRACE_RECORD_MAX: usize = RECORD_MAX + CLOCK_LEN;
 
 /// Record kinds, as numbered by the guest.
 mod kind {
@@ -36,6 +85,10 @@ const FLAG_THREAD: u16 = 1;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Event {
     pub step: u64,
+    /// The VM's clock, in nanoseconds since boot, when the event
+    /// happened: the clock as the event's step left it, so the work its
+    /// thread did up to the event is before it.
+    pub ns: u64,
     /// The thread group (process) id.
     pub pid: u32,
     /// The thread id.
@@ -210,9 +263,10 @@ impl Event {
         rewind_init::Mark::parse(text)
     }
 
-    /// Decodes one record as the guest wrote it.
+    /// Decodes one event's record as a trace holds it: as the guest
+    /// wrote it, with the clock the monitor stamped in.
     pub fn decode(step: u64, record: &[u8]) -> Result<Event, DecodeError> {
-        if record.len() < HEADER_LEN {
+        if record.len() < EVENT_HEADER_LEN {
             return Err(DecodeError::Short(record.len()));
         }
         let u16_at = |at: usize| u16::from_le_bytes([record[at], record[at + 1]]);
@@ -231,7 +285,12 @@ impl Event {
         let pid = u32_at(8);
         let tid = u32_at(12);
         let aux = u32_at(16);
-        let data = &record[HEADER_LEN..];
+        let ns = u64::from_le_bytes(
+            record[HEADER_LEN..EVENT_HEADER_LEN]
+                .try_into()
+                .expect("eight bytes"),
+        );
+        let data = &record[EVENT_HEADER_LEN..];
         let thread = flags & FLAG_THREAD != 0;
 
         let kind = match kind {
@@ -302,6 +361,7 @@ impl Event {
         };
         Ok(Event {
             step,
+            ns,
             pid,
             tid,
             kind,
@@ -343,7 +403,11 @@ mod tests {
     // the events they describe, and malformed ones are refused.
     use super::*;
 
-    fn record(kind: u16, flags: u16, pid: u32, tid: u32, aux: u32, data: &[u8]) -> Vec<u8> {
+    /// The clock the records of these tests are stamped with.
+    const NS: u64 = 5_000_000_123;
+
+    /// A record as the guest lays one out.
+    fn guest_record(kind: u16, flags: u16, pid: u32, tid: u32, aux: u32, data: &[u8]) -> Vec<u8> {
         let mut r = Vec::new();
         r.extend_from_slice(&((HEADER_LEN + data.len()) as u32).to_le_bytes());
         r.extend_from_slice(&kind.to_le_bytes());
@@ -353,6 +417,47 @@ mod tests {
         r.extend_from_slice(&aux.to_le_bytes());
         r.extend_from_slice(data);
         r
+    }
+
+    /// A record as the trace holds one: the guest's, stamped with [`NS`].
+    fn record(kind: u16, flags: u16, pid: u32, tid: u32, aux: u32, data: &[u8]) -> Vec<u8> {
+        stamped(&guest_record(kind, flags, pid, tid, aux, data), NS)
+    }
+
+    // Tests that an event has the clock the monitor stamped its record
+    // with, and that the stamp leaves the rest of the record as the guest
+    // wrote it. A write of three bytes is stamped: the record is eight
+    // bytes longer and says so, and decodes to the write, at the clock.
+    #[test]
+    fn an_event_has_the_clock_its_record_was_stamped_with() {
+        const OUTPUT: u16 = 2;
+        const STDERR: u32 = 2;
+        let guest = guest_record(OUTPUT, 0, 7, 8, STDERR, b"abc");
+        let stamped = stamped(&guest, NS);
+        assert_eq!(stamped.len(), guest.len() + CLOCK_LEN);
+
+        let event = Event::decode(42, &stamped).unwrap();
+        assert_eq!((event.step, event.ns, event.pid, event.tid), (42, NS, 7, 8));
+        assert_eq!(
+            event.kind,
+            EventKind::Output {
+                fd: STDERR,
+                bytes: b"abc".to_vec()
+            }
+        );
+    }
+
+    // Tests that a record the guest wrote, with no clock stamped in, is
+    // refused when it is too short to hold one: a mark with no text is a
+    // header alone.
+    #[test]
+    fn a_record_without_a_clock_is_refused() {
+        const MARK: u16 = 10;
+        let guest = guest_record(MARK, 0, 1, 1, 0, b"");
+        assert_eq!(
+            Event::decode(1, &guest),
+            Err(DecodeError::Short(guest.len()))
+        );
     }
 
     #[test]

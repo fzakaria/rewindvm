@@ -934,6 +934,7 @@ mod tests {
         // first.so rebuilt where it was, between the two steps.
         let rebuilt = rewind_trace::Event {
             step: BEGAN + 2,
+            ns: BEGAN + 2 + 1,
             pid: PID + 1,
             tid: PID + 1,
             kind: rewind_trace::EventKind::Open {
@@ -949,6 +950,7 @@ mod tests {
     fn the_events_between_two_steps_include_both() {
         let mark = |step: u64| rewind_trace::Event {
             step,
+            ns: step + 1,
             pid: PID,
             tid: PID,
             kind: rewind_trace::EventKind::Mark { text: "m".into() },

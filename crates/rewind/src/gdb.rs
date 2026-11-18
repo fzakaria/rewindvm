@@ -2949,6 +2949,7 @@ mod tests {
     fn a_listed_library_rebuilt_where_it_was_is_seen_in_the_events() {
         let event = |kind: rewind_trace::EventKind| rewind_trace::Event {
             step: 1,
+            ns: 2,
             pid: 2,
             tid: 2,
             kind,

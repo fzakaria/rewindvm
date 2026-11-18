@@ -184,6 +184,7 @@ mod tests {
     fn mark(step: u64, pid: u32, text: &str) -> Event {
         Event {
             step,
+            ns: step + 1,
             pid,
             tid: pid,
             kind: EventKind::Mark { text: text.into() },

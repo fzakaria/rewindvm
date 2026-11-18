@@ -331,6 +331,12 @@ pub(crate) struct Devices {
     pub switches: Option<rewind_trace::switches::Encoder>,
     /// Scratch space reused for guest records emitted through the port.
     record_buffer: Vec<u8>,
+    /// Whether the record buffer holds an event the guest emitted on
+    /// this step, which is written once the step has moved the clock.
+    event_pending: bool,
+    /// Scratch space reused for an event's record with the clock stamped
+    /// in, as the trace holds it.
+    event_buffer: Vec<u8>,
 }
 
 pub struct Machine {
@@ -517,6 +523,8 @@ impl Machine {
                 io: None,
                 switches: None,
                 record_buffer: Vec::new(),
+                event_pending: false,
+                event_buffer: Vec::new(),
             },
             pmem,
             extras,
@@ -878,6 +886,7 @@ impl Machine {
                 *hash = (*hash ^ count).wrapping_mul(0x100_0000_01b3);
             }
             self.after_step(Quantum::Add)?;
+            self.dev.write_event(obs);
 
             if until.is_some_and(|u| self.dev.step >= u) || obs.stop() {
                 return Ok(Outcome::Paused);
@@ -1197,7 +1206,12 @@ impl Devices {
                     }
                     return Ok(());
                 }
-                obs.record(self.step, record);
+
+                // Any other record is an event, which waits in the record
+                // buffer for the clock of its step (write_event). Emitting
+                // a record is all this step does, so nothing else is
+                // written in between and nothing stops the machine.
+                self.event_pending = true;
             }
             pv::PORT_TIMER => {
                 let delta = value as u64;
@@ -1249,6 +1263,19 @@ impl Devices {
             _ => {}
         }
         Ok(())
+    }
+
+    /// Writes the event the guest emitted on this step, if it emitted
+    /// one, stamped with the clock. The run calls this once the step has
+    /// moved the clock, so the stamp is the clock as the step left it:
+    /// what the guest computed since the step before is counted in the
+    /// time of the event that ended it.
+    fn write_event(&mut self, obs: &mut dyn Observer) {
+        if !std::mem::take(&mut self.event_pending) {
+            return;
+        }
+        rewind_trace::stamp_into(&self.record_buffer, self.clock.now, &mut self.event_buffer);
+        obs.record(self.step, &self.event_buffer);
     }
 
     /// Writes the switches pending from an earlier window of steps as a
@@ -1525,6 +1552,8 @@ mod tests {
             io: Some(rewind_trace::io_records::Encoder::new()),
             switches: None,
             record_buffer: Vec::new(),
+            event_pending: false,
+            event_buffer: Vec::new(),
         }
     }
 
@@ -1578,6 +1607,57 @@ mod tests {
         fn record(&mut self, step: u64, record: &[u8]) {
             self.0.push((step, record.to_vec()));
         }
+    }
+
+    /// A mark record as the guest lays one out, from init.
+    fn guest_mark(text: &[u8]) -> Vec<u8> {
+        const MARK_KIND: u16 = 10;
+        const INIT: u32 = 1;
+        let mut r = Vec::new();
+        r.extend_from_slice(&((pv::RECORD_HEADER + text.len()) as u32).to_le_bytes());
+        r.extend_from_slice(&MARK_KIND.to_le_bytes());
+        r.extend_from_slice(&0u16.to_le_bytes());
+        r.extend_from_slice(&INIT.to_le_bytes());
+        r.extend_from_slice(&INIT.to_le_bytes());
+        r.extend_from_slice(&0u32.to_le_bytes());
+        r.extend_from_slice(text);
+        r
+    }
+
+    #[test]
+    fn an_event_goes_into_the_trace_with_the_clock_its_step_leaves() {
+        // Tests that an event's record is stamped with the clock after
+        // the event's step, which counts what the guest computed up to
+        // the event, and not with the clock the step began at. The guest
+        // emits a mark at step 7 with the clock at 1,000: nothing is
+        // recorded yet. The step then moves the clock to 6,000, as the
+        // guest's branches since the step before do, and the event is
+        // written: one record at step 7, a mark at 6,000. Writing again
+        // writes nothing.
+        const STEP: u64 = 7;
+        const BEGAN_AT: u64 = 1_000;
+        const LEFT_AT: u64 = 6_000;
+        let mut dev = devices(BEGAN_AT);
+        dev.step = STEP;
+        dev.ram.write(IO_BUF, &guest_mark(b"hello")).unwrap();
+        let pointer = (IO_BUF as u32).to_le_bytes();
+        let mut kept = Kept::default();
+        dev.io_out(pv::PORT_EMIT, &pointer, &mut kept).unwrap();
+        assert!(kept.0.is_empty());
+
+        dev.clock.now = LEFT_AT;
+        dev.write_event(&mut kept);
+        dev.write_event(&mut kept);
+        assert_eq!(kept.0.len(), 1);
+        let (step, record) = &kept.0[0];
+        let event = rewind_trace::Event::decode(*step, record).unwrap();
+        assert_eq!((event.step, event.ns), (STEP, LEFT_AT));
+        assert_eq!(
+            event.kind,
+            rewind_trace::EventKind::Mark {
+                text: "hello".into()
+            }
+        );
     }
 
     #[test]

@@ -1246,6 +1246,7 @@ mod tests {
                 wakes: Vec::new(),
                 events: vec![Event {
                     step: WRITE,
+                    ns: WRITE + 1,
                     pid: PID,
                     tid: WRITER,
                     kind: EventKind::Output {
@@ -1302,6 +1303,7 @@ mod tests {
                     wakes: Vec::new(),
                     events: vec![Event {
                         step: WRITE,
+                        ns: WRITE + 1,
                         pid: USER_PID,
                         tid: USER_PID,
                         kind: EventKind::Output {
