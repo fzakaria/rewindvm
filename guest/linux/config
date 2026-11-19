@@ -117,6 +117,14 @@ CONFIG_TUN=y
 # and the unit fails at step USER.
 CONFIG_USER_NS=y
 
+# The device controller of cgroup v2 is a BPF program. An OCI runtime such
+# as `crun` attaches one to each container that it starts, as `podman` in a
+# NixOS test does. Without BPF, the container does not start. The JIT stays
+# off, so the kernel runs the program in its interpreter.
+CONFIG_BPF_SYSCALL=y
+CONFIG_CGROUP_BPF=y
+# CONFIG_BPF_JIT is not set
+
 # The NixOS firewall in such a container. `iptables-nft` changes rules
 # into nf_tables expressions. For a match that it cannot change, such as
 # rpfilter, it uses the xtables match through NFT_COMPAT.
