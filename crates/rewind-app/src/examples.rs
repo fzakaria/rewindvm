@@ -251,10 +251,10 @@ mod tests {
             lines,
             vec![
                 "This run failed and the passing run did not.",
-                "The two runs are identical until step 4,968. There, Rewind asks the kernel to switch threads in this run only.",
-                "test_pool_shutdown did the same things in the same order in both runs until step 4,972.",
-                "Then in this run, thread 166/173 of test_pool_shutdown writes \"job 18 done: 26744\" to stdout.",
-                "In the passing run, thread 166/174 of test_pool_shutdown writes \"worker picked job 19\" to stdout.",
+                "The two runs are identical until step 4,977. There, Rewind asks the kernel to switch threads in this run only.",
+                "test_pool_shutdown did the same things in the same order in both runs until step 4,981.",
+                "Then in this run, thread 166/169 of test_pool_shutdown writes \"job 16 done: 5986\" to stdout.",
+                "In the passing run, thread 166/170 of test_pool_shutdown writes \"worker picked job 17\" to stdout.",
                 "Both write to the same stream; the text differs.",
             ]
         );
