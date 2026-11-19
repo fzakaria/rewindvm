@@ -28,6 +28,15 @@ let
   # start containers in.
   uidRange = "uid-range";
 
+  # Whether `drv` asks for the uid-range sandbox, as a NixOS test with
+  # containers does. The VM gives `drv`'s builder that sandbox whatever the
+  # host's Nix can do, so both routes move the request from the features
+  # the host must have to the `rewindSandbox` attribute.
+  uidRangeAsked = drv: lib.elem uidRange (drv.drvAttrs.requiredSystemFeatures or [ ]);
+
+  # The features `drv` asks of the host, less uid-range.
+  hostFeatures = drv: lib.remove uidRange (drv.drvAttrs.requiredSystemFeatures or [ ]);
+
   # The machine's arguments, with the defaults of the ones left out.
   machineOf =
     {
@@ -111,10 +120,6 @@ in
     let
       machine = machineOf args;
 
-      # Whether `drv` asks for the uid-range sandbox, as a NixOS test with
-      # containers does.
-      uidRangeAsked = lib.elem uidRange (drv.drvAttrs.requiredSystemFeatures or [ ]);
-
       # Every store path `drv` names, in one file, so the file's closure
       # is the closure `drv`'s builder may read.
       inputs = pkgs.writeText "${drv.name}-inputs" (builtins.toJSON drv.drvAttrs);
@@ -140,11 +145,11 @@ in
       # (`programs.rewind.systemFeature` in the NixOS module). The VM gives
       # `drv`'s builder the uid-range sandbox, so the host needs no
       # uid-range of its own: `rewindSandbox` asks the VM for the sandbox.
-      requiredSystemFeatures = lib.remove uidRange (drv.drvAttrs.requiredSystemFeatures or [ ]) ++ [
+      requiredSystemFeatures = hostFeatures drv ++ [
         "kvm"
         "rewind-${machine.vendor}"
       ];
-      ${if uidRangeAsked then "rewindSandbox" else null} = uidRange;
+      ${if uidRangeAsked drv then "rewindSandbox" else null} = uidRange;
 
       # The machine, and the vendor for `rewind build` to hold the builder
       # to, whatever its Nix says.
@@ -157,7 +162,10 @@ in
   # build for that platform to the program its external-builders setting
   # names, `rewind build --external-builder`, with no sandbox of its own
   # around the VM. `rewindRuntime` pins the Rewind package, including its
-  # kernel and initrd. The configured external builder must match.
+  # kernel and initrd. The configured external builder must match. A
+  # derivation that asks for uid-range asks the VM for it in
+  # `rewindSandbox` instead, as `inRewind`'s does; other derivations keep
+  # their features as they are.
   onRewind =
     args: drv:
     let
@@ -167,5 +175,7 @@ in
       system = "x86_64-rewind-${machine.vendor}";
       rewindFlags = flagsOf machine;
       rewindRuntime = toString rewind;
+      ${if uidRangeAsked drv then "requiredSystemFeatures" else null} = hostFeatures drv;
+      ${if uidRangeAsked drv then "rewindSandbox" else null} = uidRange;
     });
 }

@@ -64,12 +64,10 @@ firewall works in such a container with `iptables-nft` or with
 `networking.nftables`. The kernel also keeps x86_64_defconfig's legacy
 iptables filter table.
 
-`inRewind` takes `uid-range` out of the features the host must have and
-names the sandbox in the `rewindSandbox` attribute, since the VM gives
-the sandbox whatever the host's Nix can do. The host needs neither
-auto-allocate-uids nor `uid-range` in its `system-features`. `onRewind`
-leaves the derivation's features as they are, so Nix hands such a
-derivation only to a machine whose `system-features` include `uid-range`.
+`inRewind` and `onRewind` take `uid-range` out of the features the host
+must have and name the sandbox in the `rewindSandbox` attribute, since
+the VM gives the sandbox whatever the host's Nix can do. The host needs
+neither auto-allocate-uids nor `uid-range` in its `system-features`.
 
 ## The builder wrapper
 
