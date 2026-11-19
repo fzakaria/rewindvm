@@ -2062,6 +2062,125 @@ in
         touch $out
       '';
 
+  # checks.high-ram: a guest of 4 GiB, whose RAM goes on past the MMIO hole
+  # at 3 GiB from 4 GiB, sees nearly all of it. A program fills 512 MiB,
+  # one word in each page, which the kernel takes from the RAM above 4 GiB
+  # first, as /proc/self/pagemap shows; writes 3,000 dots; and checks every
+  # page again. The run replays from boot, and from a keyframe a look keeps
+  # after the fill, which restores the filled pages above the hole. The
+  # guest boots without the bounce buffer a kernel with high RAM keeps for
+  # devices, since the machine has none. Boots the VM, so it needs
+  # /dev/kvm.
+  high-ram =
+    let
+      root =
+        pkgs.runCommand "rewind-high-ram-root" { nativeBuildInputs = [ pkgs.pkgsStatic.stdenv.cc ]; }
+          ''
+            mkdir -p $out/bin
+            cp ${pkgs.pkgsStatic.busybox}/bin/busybox $out/bin/
+            for tool in sh grep dmesg; do
+              ln -s busybox $out/bin/$tool
+            done
+            cat > fill.c <<'EOF'
+            #include <fcntl.h>
+            #include <stdint.h>
+            #include <stdio.h>
+            #include <stdlib.h>
+            #include <sys/mman.h>
+            #include <unistd.h>
+
+            #define PAGE 4096
+            #define PAGES_PER_MIB 256
+            /* The first page frame at 4 GiB. */
+            #define HIGH_FRAME (1ull << 20)
+            /* A pagemap entry's frame number, bits 0 to 54. */
+            #define FRAME_MASK ((1ull << 55) - 1)
+            #define DOTS 3000
+
+            /* A word that differs between neighboring pages. */
+            static uint64_t mark(size_t page)
+            {
+              return page % 251 + 1;
+            }
+
+            int main(int argc, char **argv)
+            {
+              size_t pages = strtoull(argv[1], 0, 10) * PAGES_PER_MIB;
+              uint64_t *p = mmap(0, pages * PAGE, PROT_READ | PROT_WRITE,
+                                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+              if (p == MAP_FAILED) {
+                return 2;
+              }
+              for (size_t i = 0; i < pages; i++) {
+                p[i * PAGE / 8] = mark(i);
+              }
+
+              /* Where the kernel put each page. */
+              uint64_t *frames = malloc(pages * 8);
+              int pagemap = open("/proc/self/pagemap", O_RDONLY);
+              off_t at = (uintptr_t)p / PAGE * 8;
+              if (pread(pagemap, frames, pages * 8, at) != (ssize_t)(pages * 8)) {
+                return 3;
+              }
+              size_t high = 0;
+              for (size_t i = 0; i < pages; i++) {
+                if ((frames[i] & FRAME_MASK) >= HIGH_FRAME) {
+                  high++;
+                }
+              }
+              printf("filled %zu pages, %zu of them high\n", pages, high);
+              fflush(stdout);
+
+              /* Steps after the fill, for a look to keep a keyframe at. */
+              for (int i = 0; i < DOTS; i++) {
+                write(1, ".", 1);
+              }
+              write(1, "\n", 1);
+
+              size_t lost = 0;
+              for (size_t i = 0; i < pages; i++) {
+                if (p[i * PAGE / 8] != mark(i)) {
+                  lost++;
+                }
+              }
+              printf("%zu pages lost\n", lost);
+              return lost != 0;
+            }
+            EOF
+            $CC -static -O1 -o $out/bin/fill fill.c
+          '';
+    in
+    pkgs.runCommand "rewind-high-ram"
+      {
+        nativeBuildInputs = [ rewind ];
+        requiredSystemFeatures = [ "kvm" ];
+      }
+      ''
+        export REWIND_HOME=$TMPDIR/rewind
+        rewind run -q --name high --mem 4096 --root ${root} -- \
+          sh -c 'grep MemTotal /proc/meminfo; dmesg | grep "software IO TLB"; fill 512'
+        rewind log high | tee high
+
+        # 4 GiB less the kernel's own: more than 3.9 GiB, with no 64 MiB
+        # bounce buffer taken out of it.
+        total=$(awk '/^MemTotal:/ { print $2 }' high)
+        test "$total" -gt 3900000
+        if grep -q 'software IO TLB: mapped' high; then exit 1; fi
+        high=$(sed -n 's/^filled 131072 pages, \([0-9]*\) of them high$/\1/p' high)
+        test "$high" -gt 0
+        grep -qx '0 pages lost' high
+
+        rewind replay high | grep '^identical'
+
+        # A look 1,000 steps before the job's exit, among the dots, keeps
+        # a keyframe there, which holds the filled pages.
+        end=$(rewind events high | grep 'mark "rewind-exit ' | awk '{print $1}')
+        far=$((end - 1000))
+        rewind cat high "$far" /bin/busybox > /dev/null
+        rewind replay high --from "$far" | grep "^identical to the recording from the keyframe at step $far "
+        touch $out
+      '';
+
   # checks.inspect: looking inside a recorded run at a step. A file read
   # before and after it is written, a shell that reads it, a directory
   # listed and archived, and gdb stopping at a breakpoint in the VM's
