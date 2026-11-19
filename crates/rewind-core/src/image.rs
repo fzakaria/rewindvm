@@ -27,10 +27,17 @@ const SOURCE_DATE_EPOCH: &str = "SOURCE_DATE_EPOCH";
 /// The timestamp every file in an image carries.
 const MTIME: &str = "1";
 
+/// The compression of the file data. The guest kernel has
+/// `CONFIG_EROFS_FS_ZIP`, which reads LZ4. An image of a store closure
+/// is approximately 55 percent of the closure size, and the guest
+/// decompresses a block only when it reads it.
+const COMPRESSOR: &str = "lz4hc";
+
 /// The mkfs.erofs flags that make an image a function of its files.
 fn mkfs_erofs() -> Command {
     let mut cmd = Command::new("mkfs.erofs");
     cmd.args(["--quiet", "--all-root", "--ignore-mtime", "-x-1"])
+        .arg(format!("-z{COMPRESSOR}"))
         .arg(format!("-T{MTIME}"))
         .arg(format!("-U{UUID}"))
         .env_remove(SOURCE_DATE_EPOCH);
