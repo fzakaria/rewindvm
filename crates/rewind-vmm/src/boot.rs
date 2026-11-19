@@ -81,6 +81,15 @@ const INITRD_ADDR_MAX: u64 = 0x7fff_ffff;
 /// setup_data type: a random seed the kernel credits to its RNG.
 const SETUP_RNG_SEED: u32 = 9;
 
+/// The kernel argument that keeps a guest with RAM past 4 GiB from
+/// reserving 64 MiB of its RAM below 4 GiB as a bounce buffer for devices
+/// that cannot reach the high RAM. The machine has no device that DMAs,
+/// so the buffer would only take RAM from the guest: a guest of 3073 MiB
+/// had 67 MiB less free than one of 3072 MiB. The kernel keeps the buffer
+/// off once it reads the argument, wherever it is on the command line,
+/// even when a later swiotlb= asks for one.
+const NO_BOUNCE_BUFFER: &str = "swiotlb=noforce";
+
 /// e820 entry types.
 #[derive(Clone, Copy, Debug)]
 #[repr(u32)]
@@ -252,11 +261,16 @@ pub fn load(ram: &mut Mapping, spec: &BootSpec) -> Result<u64> {
         write_u32(&mut params, bp::RAMDISK_SIZE, initrd_len as u32);
     }
 
-    // The command line, NUL terminated.
-    if spec.cmdline.len() >= CMDLINE_MAX {
+    // The command line, NUL terminated. A guest with RAM past 4 GiB is
+    // told, ahead of the spec's arguments, to reserve no bounce buffer.
+    let cmdline = match ram_parts(ram.len() as u64) {
+        [_, (_, 0)] => spec.cmdline.to_owned(),
+        _ => format!("{NO_BOUNCE_BUFFER} {}", spec.cmdline),
+    };
+    if cmdline.len() >= CMDLINE_MAX {
         bail!("kernel command line is longer than {CMDLINE_MAX} bytes");
     }
-    let mut cmdline = spec.cmdline.as_bytes().to_vec();
+    let mut cmdline = cmdline.into_bytes();
     cmdline.push(0);
     ram.write(CMDLINE, &cmdline)?;
     write_u32(&mut params, bp::CMD_LINE_PTR, CMDLINE as u32);
@@ -510,5 +524,32 @@ mod tests {
                 (pmem_start(span), 2 << 20, E820::Pram as u32),
             ]
         );
+    }
+
+    /// The command line `load` wrote, without its NUL.
+    fn cmdline_of(ram: &Mapping) -> String {
+        let mut params = vec![0u8; bp::SIZE];
+        ram.read(BOOT_PARAMS, &mut params).unwrap();
+        let mut cmdline = vec![0u8; read_u32(&params, bp::CMDLINE_SIZE) as usize - 1];
+        ram.read(CMDLINE, &mut cmdline).unwrap();
+        String::from_utf8(cmdline).unwrap()
+    }
+
+    /// A guest with RAM past 4 GiB boots told to reserve no bounce buffer,
+    /// ahead of the spec's own arguments; a guest without high RAM boots
+    /// with the spec's command line alone.
+    /// Loads a kernel into RAM of each kind and reads the command line
+    /// back.
+    #[test]
+    fn high_ram_boots_without_a_bounce_buffer() {
+        let kernel = kernel();
+
+        let mut high = Mapping::anonymous(ram_span(5 << 30) as usize).unwrap();
+        load(&mut high, &spec(&kernel, &[])).unwrap();
+        assert_eq!(cmdline_of(&high), "swiotlb=noforce console=ttyS0");
+
+        let mut low = Mapping::anonymous(RAM).unwrap();
+        load(&mut low, &spec(&kernel, &[])).unwrap();
+        assert_eq!(cmdline_of(&low), "console=ttyS0");
     }
 }
