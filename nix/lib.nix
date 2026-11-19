@@ -51,8 +51,8 @@ let
       # VM, counted by the builder's branch counter ("branches"), or
       # nothing ("exits").
       clock ? "branches",
-      # The CPU the VM sees: x86-64-v3 ("v3"), or the same without ERMS
-      # ("v3-compat"), which every machine that can show v3 can show.
+      # The CPU the VM sees: x86-64-v3 ("v3"), or the same without ERMS and
+      # PREFETCHW ("v3-compat"), which every machine that can show v3 can show.
       cpu ? "v3-compat",
       # The CPU vendor of the machines the derivation builds on.
       vendor ? "amd",

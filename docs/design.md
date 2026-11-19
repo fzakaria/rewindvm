@@ -691,20 +691,22 @@ therefore takes different steps on another. By default the guest sees a fixed
 CPU instead of the host's:
 
 - x86-64-v3 features (AVX2, BMI, FMA, MOVBE), plus AES, PCLMULQDQ, ERMS,
-  FSGSBASE and INVPCID;
+  PREFETCHW, FSGSBASE and INVPCID;
 - no AVX-512, SHA, protection keys or speculation control bits;
 - an XSAVE area of exactly x87, SSE and AVX state;
 - a fixed family, model and brand string per vendor, fixed cache sizes, and
   39 physical and 48 virtual address bits.
 
 That is `--cpu v3`. Not every x86-64-v3 host shows ERMS, the fast `rep movsb`
-flag: an EPYC 7763 (Zen 3) host was found with every other bit but not ERMS.
-`--cpu v3-compat` is the same CPU with ERMS hidden and a brand string of its
-own. glibc and the kernel copy memory differently without ERMS, so the same
-inputs make a different run under each model. A run that names neither picks
-`v3` where the host has the whole baseline, and `v3-compat`, with a line saying
-so, where the host lacks only ERMS. A `v3-compat` run replays on hosts with or
-without ERMS, and a `v3` run only on hosts with it. A host that lacks any other
+flag, and PREFETCHW, the prefetch for a write: an EPYC 7763 (Zen 3) host was
+found with every other bit but not ERMS, and Intel shows PREFETCHW only from
+Broadwell on, thus not on Haswell. `--cpu v3-compat` is the same CPU with ERMS
+and PREFETCHW hidden and a brand string of its own. glibc and the kernel copy
+memory differently without ERMS, so the same inputs make a different run under
+each model. A run that names neither picks `v3` where the host has the whole
+baseline, and `v3-compat`, with a line saying so, where the host lacks only ERMS
+or PREFETCHW. A `v3-compat` run replays on hosts with or without them, and a
+`v3` run only on hosts with both. A host that lacks any other
 bit refuses both models and names the missing bits. A replay, fork, shell or
 gdb session of a recorded run on a host without its model's features is refused
 with the model, the missing bits and where the run replays instead, since its
@@ -1748,8 +1750,8 @@ trace.
 - **The CPU vendor is part of the input.** The fixed CPU model keeps the
   host's vendor, since Intel and AMD differ in ways CPUID cannot hide, so a
   run made on AMD replays on any AMD host from Zen 2 on but not on Intel,
-  and the other way around. A `v3` run also needs a host that shows ERMS;
-  a `v3-compat` run does not.
+  and the other way around. A `v3` run also needs a host that shows ERMS
+  and PREFETCHW; a `v3-compat` run does not.
 - **User-space RDRAND and RDSEED** still work on AMD if a program executes
   them without checking CPUID. KVM does not let the monitor trap them. Hardly
   any program does this; `rewind replay` finds the machine differs where one

@@ -15,7 +15,7 @@ Both functions accept the same settings:
 | `seed`     | `0`           | Seed of the kernel's randomness                                |
 | `schedule` | `0`           | Thread schedule; 0 is the unperturbed schedule                 |
 | `clock`    | `"branches"`  | `"branches"` counts guest work; `"exits"` advances at VM exits |
-| `cpu`      | `"v3-compat"` | `"v3"`, or v3 without ERMS for hosts that lack that feature    |
+| `cpu`      | `"v3-compat"` | `"v3"`, or v3 less ERMS and PREFETCHW, for hosts lacking them  |
 | `vendor`   | `"amd"`       | CPU vendor of the builder: `"amd"` or `"intel"`                |
 | `cores`    | `1`           | Reported CPU count and `NIX_BUILD_CORES`                       |
 | `mem`      | `1024`        | Guest memory in MiB, including build files, at most 32 GiB     |
