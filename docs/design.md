@@ -744,10 +744,12 @@ land in the same run directory.
 
 The input image is erofs, built by `mkfs.erofs` with everything pinned that
 could differ between two builds of the same files: owners, timestamps, the
-UUID and the order of entries. It is mapped into guest physical memory at
-4 GiB and described to the kernel as legacy persistent memory, so the guest
-sees `/dev/pmem0` and mounts it without any disk emulation. The image never
-enters a keyframe; it is an input, named by its hash.
+UUID and the order of entries. Its file data is compressed with lz4hc, which
+the guest kernel decompresses a block at a time as it reads. It is mapped
+into guest physical memory at 4 GiB and described to the kernel as legacy
+persistent memory, so the guest sees `/dev/pmem0` and mounts it without any
+disk emulation. The image never enters a keyframe; it is an input, named by
+its hash.
 
 The job travels as a second cpio archive appended to the initramfs, which the
 kernel unpacks over the first. It holds `/rewind/job.json`: argv, environment,
@@ -848,7 +850,7 @@ keyframes. With `--seeds`, only the first seed runs under the keys.
   runs/<id>/trace.bin         every record, each prefixed with its step
   runs/<id>/keyframes/*.kf    keyframes the run's recording took, by step
   runs/<id>/keyframes/kept/   keyframes kept by looks and by forks, by step
-  images/2/*.erofs            input images, by content
+  images/3/*.erofs            input images, by content
   store/                      the page store
   cache/sources/<id>/         source files read out of a run's VM
   cache/runs.json             each run's name and age, for finding one
