@@ -18,8 +18,9 @@ pub const ENV_KERNEL_DEBUG: &str = "REWIND_KERNEL_DEBUG";
 
 /// How images are built, for the directory they are cached in: 2 since
 /// image builds ignore SOURCE_DATE_EPOCH, which before then made an image
-/// built in a Nix development shell differ from one built outside.
-const IMAGES: &str = "2";
+/// built in a Nix development shell differ from one built outside; 3 since
+/// image builds compress the file data.
+const IMAGES: &str = "3";
 
 /// Overrides the data directory, which is otherwise under XDG_DATA_HOME.
 pub const ENV_HOME: &str = "REWIND_HOME";
