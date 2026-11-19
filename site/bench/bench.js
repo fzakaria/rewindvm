@@ -61,6 +61,10 @@ const MILESTONES = [
     label: "v0.16.0",
     html: `Each context switch also names the thread that left the CPU, and every wakeup is a record of its own, for rewind time's critical path (${commit("0ecf3643")}). A hello run without keyframes takes 3.5 MB against 3.3 MB, and makes about 1,170 fewer steps; no workload's time changed beyond the rounds' spread but cat in the middle of a run, 0.43 s against 0.40 s.`,
   },
+  {
+    label: "v0.17.0",
+    html: `Each event in the trace carries the VM's clock (${commit("db5da6d7")}), and the guest kernel gains nf_tables, the bridge and user namespaces for containers (${commit("05854533")}, ${commit("efaa759f")}). A boot makes 4 more steps and a hello run without keyframes takes 3.7 MB against 3.5 MB. No workload's time changed beyond the rounds' spread. Rounds 4 and 5 ran at a load of 20 to 50, which gives echo its 0.50 s median: the quiet rounds took 0.40 to 0.42 s.`,
+  },
 ];
 
 // What each metric reads from a sample.
