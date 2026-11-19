@@ -1418,6 +1418,40 @@ let
   languagesRoot = import ./gdb-languages { inherit pkgs; };
   # The Rewind SDK's libraries in use, for checks.sdk-languages.
   sdkLanguages = import ./sdk-languages { inherit pkgs; };
+
+  # `drv` rewritten by `inRewind` for `machine`, built by CI, for
+  # checks.in-rewind and checks.in-rewind-containers. `flags` is the
+  # machine as `rewindFlags` holds one, without the vendor. CI advertises
+  # only `kvm`. The checks' builders check vendor-independent answers, so a
+  # test prelude selects the builder's actual vendor. Production
+  # derivations keep the vendor selected at evaluation.
+  inRewindForCI =
+    { machine, flags }:
+    drv:
+    let
+      inherit (pkgs) lib;
+      selectVendor = pkgs.writeText "in-rewind-check-vendor.sh" ''
+        case $(${lib.getExe pkgs.gawk} -F': ' '/^vendor_id/ { print $2; exit }' /proc/cpuinfo) in
+          AuthenticAMD) vendor=amd ;;
+          GenuineIntel) vendor=intel ;;
+          *) echo "unsupported test CPU vendor" >&2; exit 1 ;;
+        esac
+        export rewindFlags="${flags} --vendor $vendor"
+        exec "$@"
+      '';
+      wrapped = rewindLib.inRewind machine drv;
+    in
+    assert wrapped.rewindFlags == "${flags} --vendor amd";
+    assert wrapped.rewindRuntime == toString rewind;
+    assert lib.elem "rewind-amd" wrapped.requiredSystemFeatures;
+    lib.overrideDerivation wrapped (attrs: {
+      requiredSystemFeatures = [ "kvm" ];
+      args = [
+        selectVendor
+        pkgs.runtimeShell
+      ]
+      ++ attrs.args;
+    });
 in
 {
   home-on-nfs = import ./home-on-nfs.nix {
@@ -2198,35 +2232,7 @@ in
       # The machine as `rewindFlags` holds one.
       flags = "--epoch 1790985600 --seed 0 --schedule 0 --cpu v3-compat --clock exits --cores 1 --mem 1024";
 
-      # CI advertises only `kvm`. These fixtures check vendor-independent
-      # answers, so a test prelude selects the builder's actual vendor.
-      # Production derivations keep the vendor selected at evaluation.
-      selectVendor = pkgs.writeText "in-rewind-check-vendor.sh" ''
-        case $(${lib.getExe pkgs.gawk} -F': ' '/^vendor_id/ { print $2; exit }' /proc/cpuinfo) in
-          AuthenticAMD) vendor=amd ;;
-          GenuineIntel) vendor=intel ;;
-          *) echo "unsupported test CPU vendor" >&2; exit 1 ;;
-        esac
-        export rewindFlags="${flags} --vendor $vendor"
-        exec "$@"
-      '';
-
-      inRewind =
-        drv:
-        let
-          wrapped = rewindLib.inRewind machine drv;
-        in
-        assert wrapped.rewindFlags == "${flags} --vendor amd";
-        assert wrapped.rewindRuntime == toString rewind;
-        assert lib.elem "rewind-amd" wrapped.requiredSystemFeatures;
-        lib.overrideDerivation wrapped (attrs: {
-          requiredSystemFeatures = [ "kvm" ];
-          args = [
-            selectVendor
-            pkgs.runtimeShell
-          ]
-          ++ attrs.args;
-        });
+      inRewind = inRewindForCI { inherit machine flags; };
 
       plain = inRewind (
         pkgs.runCommand "rewind-in-rewind-plain"
@@ -2303,16 +2309,19 @@ in
 
   # checks.in-rewind-containers: a NixOS test that defines `containers`
   # but no `nodes` builds in `inRewind`. Its derivation asks for
-  # uid-range, so the job runs as root and the test driver starts each
-  # container with systemd-nspawn. Two containers share a bridge through
-  # veth devices. The server's firewall, in nf_tables, lets port 80 in and
-  # rejects port 81, where nginx also listens. The client reaches port 80
-  # and is refused on port 81. A unit in the client with `PrivateUsers=`
-  # starts, so the guest has user namespaces. CI advertises only `kvm`, so
-  # a test prelude selects the vendor and puts uid-range in the environment
-  # that the description is made from, as Nix gives it to a builder that
-  # has the feature. The clock is exit time, which needs no counter. Boots
-  # the VM, so it needs /dev/kvm.
+  # uid-range, which `inRewind` takes out of the features the host must
+  # have and passes to the VM in `rewindSandbox`. The test driver runs as
+  # root of a user namespace that maps 65536 ids from 872415232, as
+  # nix-daemon maps them, and can neither write a sysctl nor open the
+  # Rewind console, which belong to init. It starts each container with
+  # systemd-nspawn in a cgroup of its own. Two containers share a bridge
+  # through veth devices. The server's firewall, in nf_tables, lets port 80
+  # in and rejects port 81, where nginx also listens. The client reaches
+  # port 80, and curl is refused on port 81 (exit 7) rather than timed out
+  # (exit 28), which a dropped packet would give. A unit in the client
+  # with `PrivateUsers=` starts, so the guest has user namespaces. The
+  # clock is exit time, which needs no counter. Boots the VM, so it needs
+  # /dev/kvm.
   in-rewind-containers =
     let
       inherit (pkgs) lib;
@@ -2322,17 +2331,6 @@ in
         mem = 3072;
       };
       flags = "--epoch 1790985600 --seed 0 --schedule 0 --cpu v3-compat --clock exits --cores 1 --mem 3072";
-
-      prelude = pkgs.writeText "in-rewind-containers-prelude.sh" ''
-        case $(${lib.getExe pkgs.gawk} -F': ' '/^vendor_id/ { print $2; exit }' /proc/cpuinfo) in
-          AuthenticAMD) vendor=amd ;;
-          GenuineIntel) vendor=intel ;;
-          *) echo "unsupported test CPU vendor" >&2; exit 1 ;;
-        esac
-        export rewindFlags="${flags} --vendor $vendor"
-        export requiredSystemFeatures="nixos-test uid-range"
-        exec "$@"
-      '';
 
       test = pkgs.testers.runNixOSTest {
         name = "rewind-in-rewind-containers";
@@ -2374,6 +2372,20 @@ in
           };
         };
         testScript = ''
+          import os
+
+          # The driver's sandbox: root of its own user namespace, with
+          # nix-daemon's map, and no power over init's sysctls or devices.
+          assert os.getuid() == 0
+          with open("/proc/self/uid_map") as f:
+              assert f.read().split() == ["0", "872415232", "65536"]
+          try:
+              open("/proc/sys/vm/compaction_proactiveness", "w").close()
+              raise AssertionError("the driver wrote a sysctl of the guest")
+          except PermissionError:
+              pass
+          assert not os.access("/dev/rewind-console", os.W_OK)
+
           start_all()
           server.wait_for_unit("nginx.service")
           server.wait_for_open_port(81)
@@ -2381,22 +2393,18 @@ in
           client.wait_for_unit("multi-user.target")
           client.wait_for_unit("private-users.service")
           assert client.succeed("curl --fail --silent http://server/") == "served"
-          client.fail("curl --fail --silent --max-time 5 http://server:81/")
+          refused, _ = client.execute("curl --silent --max-time 5 http://server:81/")
+          assert refused == 7, f"curl on the closed port exited {refused}"
         '';
       };
 
-      wrapped = rewindLib.inRewind machine test.config.rawTestDerivation;
+      derivation = test.config.rawTestDerivation;
+      wrapped = rewindLib.inRewind machine derivation;
     in
-    assert wrapped.rewindFlags == "${flags} --vendor amd";
-    assert lib.elem "uid-range" wrapped.requiredSystemFeatures;
-    lib.overrideDerivation wrapped (attrs: {
-      requiredSystemFeatures = [ "kvm" ];
-      args = [
-        prelude
-        pkgs.runtimeShell
-      ]
-      ++ attrs.args;
-    });
+    assert lib.elem "uid-range" derivation.requiredSystemFeatures;
+    assert !(lib.elem "uid-range" wrapped.requiredSystemFeatures);
+    assert wrapped.rewindSandbox == "uid-range";
+    inRewindForCI { inherit machine flags; } derivation;
 
   # checks.external-builder: Nix hands a build for the platform
   # x86_64-rewind-<vendor> to `rewind build --external-builder`, and takes

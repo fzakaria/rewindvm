@@ -59,6 +59,7 @@
         <ol>
           <li><a href="#machine-settings">Machine settings</a></li>
           <li><a href="#runtime-identity">Runtime identity</a></li>
+          <li><a href="#containers">Containers</a></li>
           <li><a href="#the-builder-wrapper">The builder wrapper</a></li>
           <li><a href="#the-external-builder">The external builder</a></li>
           <li>
@@ -159,6 +160,37 @@
           that package, so <code>REWIND_KERNEL</code> and <code>REWIND_INITRD</code> overrides
           cannot change a pinned build. Those overrides still work for interactive commands such as
           <code>rewind run</code>.
+        </p>
+      </section>
+
+      <section class="step">
+        <h2 id="containers"><a class="anchor" href="#containers">Containers</a></h2>
+        <p>
+          A derivation that names <code>uid-range</code> in <code>requiredSystemFeatures</code> gets
+          the sandbox nix-daemon gives such a build. Its builder runs in user, mount, network,
+          cgroup and PID namespaces of its own, as PID 1 of the PID namespace, in a root it owns.
+          The user namespace maps 65536 ids, starting at 872415232 outside, as nix-daemon's
+          auto-allocate-uids does, and the builder is uid 0 and gid 0 inside it. The builder owns a
+          cgroup and sees it at <code>/sys/fs/cgroup</code>. It is root only over its own
+          namespaces: it cannot remount the guest's store, write the guest's sysctls or open
+          Rewind's devices. Other builds run as the build user in init's namespaces, and their guest
+          has no cgroup hierarchy mounted.
+        </p>
+        <p>
+          The guest kernel has user namespaces, veth, bridge and TUN devices, and nf_tables. Thus a
+          builder can start containers with <code>systemd-nspawn</code>, for example a NixOS test
+          that defines <code>containers</code> but no <code>nodes</code>. The NixOS firewall works
+          in such a container with <code>iptables-nft</code> or with
+          <code>networking.nftables</code>. The kernel also keeps x86_64_defconfig's legacy iptables
+          filter table.
+        </p>
+        <p>
+          <code>inRewind</code> takes <code>uid-range</code> out of the features the host must have
+          and names the sandbox in the <code>rewindSandbox</code> attribute, since the VM gives the
+          sandbox whatever the host's Nix can do. The host needs neither auto-allocate-uids nor
+          <code>uid-range</code> in its <code>system-features</code>. <code>onRewind</code> leaves
+          the derivation's features as they are, so Nix hands such a derivation only to a machine
+          whose <code>system-features</code> include <code>uid-range</code>.
         </p>
       </section>
 

@@ -23,6 +23,11 @@ let
     "intel"
   ];
 
+  # The system feature with which a derivation asks for nix-daemon's
+  # uid-range sandbox: root of namespaces of its own, with a cgroup it can
+  # start containers in.
+  uidRange = "uid-range";
+
   # The machine's arguments, with the defaults of the ones left out.
   machineOf =
     {
@@ -106,6 +111,10 @@ in
     let
       machine = machineOf args;
 
+      # Whether `drv` asks for the uid-range sandbox, as a NixOS test with
+      # containers does.
+      uidRangeAsked = lib.elem uidRange (drv.drvAttrs.requiredSystemFeatures or [ ]);
+
       # Every store path `drv` names, in one file, so the file's closure
       # is the closure `drv`'s builder may read.
       inputs = pkgs.writeText "${drv.name}-inputs" (builtins.toJSON drv.drvAttrs);
@@ -128,11 +137,14 @@ in
       ++ (drv.drvAttrs.args or [ ]);
 
       # A builder with KVM whose Nix says its CPU is this vendor's
-      # (`programs.rewind.systemFeature` in the NixOS module).
-      requiredSystemFeatures = (drv.drvAttrs.requiredSystemFeatures or [ ]) ++ [
+      # (`programs.rewind.systemFeature` in the NixOS module). The VM gives
+      # `drv`'s builder the uid-range sandbox, so the host needs no
+      # uid-range of its own: `rewindSandbox` asks the VM for the sandbox.
+      requiredSystemFeatures = lib.remove uidRange (drv.drvAttrs.requiredSystemFeatures or [ ]) ++ [
         "kvm"
         "rewind-${machine.vendor}"
       ];
+      ${if uidRangeAsked then "rewindSandbox" else null} = uidRange;
 
       # The machine, and the vendor for `rewind build` to hold the builder
       # to, whatever its Nix says.
