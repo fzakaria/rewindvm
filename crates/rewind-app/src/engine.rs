@@ -1495,22 +1495,27 @@ mod tests {
         dir
     }
 
-    /// Runs an engine call, again if the stand-in script was busy: a test
-    /// running in parallel may fork while the script is still open for
-    /// writing, and exec then fails with ETXTBSY for a moment.
-    fn retrying<T>(call: impl Fn() -> EngineResult<T>) -> EngineResult<T> {
-        const ATTEMPTS: usize = 20;
-        const PAUSE: std::time::Duration = std::time::Duration::from_millis(50);
-        const BUSY: &str = "Text file busy";
-        for _ in 1..ATTEMPTS {
-            match call() {
-                Err(EngineError::Failed { message, .. }) if message.contains(BUSY) => {
-                    std::thread::sleep(PAUSE)
-                }
-                other => return other,
-            }
-        }
-        call()
+    /// Writes `text` to `script`, executable, for a stand-in engine. `cp`
+    /// writes the script, and this process never opens it for writing: a
+    /// test running in parallel that forks while this process holds a
+    /// file open for writing hands its child that file until the child
+    /// execs, and an exec of the file fails with ETXTBSY meanwhile.
+    fn write_stand_in(script: &Path, text: &str) {
+        let draft = script.with_extension("draft");
+        std::fs::write(&draft, text).unwrap();
+        std::fs::set_permissions(&draft, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let copied = std::process::Command::new("cp")
+            .arg(&draft)
+            .arg(script)
+            .status()
+            .unwrap();
+        assert!(
+            copied.success(),
+            "cp {} {}",
+            draft.display(),
+            script.display()
+        );
+        std::fs::remove_file(&draft).unwrap();
     }
 
     /// A stand-in engine: a script that writes its arguments to `args`,
@@ -1519,12 +1524,13 @@ mod tests {
     /// and exits `code`.
     fn fake_engine(dir: &Path, stdout: &str, stderr: &str, code: i32) -> CliEngine {
         let script = dir.join("rewind");
-        std::fs::write(
+        write_stand_in(
             &script,
-            format!("#!/bin/sh\nprintf '%s\\n' \"$*\" > \"{dir}/args\"\nprintf '%s' \"${PROGRESS_ENV}\" > \"{dir}/progress\"\nprintf '%s' \"${ERRORS_ENV}\" > \"{dir}/errors\"\nprintf '{stdout}'\nprintf '{stderr}' >&2\nexit {code}\n", dir = dir.display()),
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"{dir}/args\"\nprintf '%s' \"${PROGRESS_ENV}\" > \"{dir}/progress\"\nprintf '%s' \"${ERRORS_ENV}\" > \"{dir}/errors\"\nprintf '{stdout}'\nprintf '{stderr}' >&2\nexit {code}\n",
+                dir = dir.display()
+            ),
+        );
         CliEngine::new(script)
     }
 
@@ -1546,15 +1552,13 @@ mod tests {
     /// then waits half a minute, as a lookup on a long run does.
     fn slow_engine(dir: &Path) -> CliEngine {
         let script = dir.join("rewind");
-        std::fs::write(
+        write_stand_in(
             &script,
-            format!(
+            &format!(
                 "#!/bin/sh\necho $$ > \"{}/pid\"\nexec sleep 30\n",
                 dir.display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         CliEngine::new(script)
     }
 
@@ -1567,21 +1571,17 @@ mod tests {
         let dir = temp_dir("cancel");
         let engine = slow_engine(&dir);
         let cancel = Cancel::default();
-        // The lookup is tried again while the stand-in script is busy, as
-        // a test running in parallel can hold it open for a moment.
         let call = {
             let cancel = cancel.clone();
             std::thread::spawn(move || {
-                retrying(|| {
-                    engine.cat(
-                        Path::new("/run"),
-                        5,
-                        None,
-                        "/etc/hosts",
-                        &cancel,
-                        &mut |_| {},
-                    )
-                })
+                engine.cat(
+                    Path::new("/run"),
+                    5,
+                    None,
+                    "/etc/hosts",
+                    &cancel,
+                    &mut |_| {},
+                )
             })
         };
         let pid_file = dir.join("pid");
@@ -1607,11 +1607,9 @@ mod tests {
         const GIVE_UP: std::time::Duration = std::time::Duration::from_secs(5);
         let dir = temp_dir("stop-all");
         let engine = Arc::new(slow_engine(&dir));
-        // The fork is tried again while the stand-in script is busy, as a
-        // test running in parallel can hold it open for a moment.
         let call = {
             let engine = engine.clone();
-            std::thread::spawn(move || retrying(|| engine.fork(Path::new("/run"), 5, 1)))
+            std::thread::spawn(move || engine.fork(Path::new("/run"), 5, 1))
         };
         let pid_file = dir.join("pid");
         let pid: i32 = wait_for("the engine to start", || {
@@ -1676,7 +1674,7 @@ mod tests {
             runs.join("abc123").display()
         );
         let engine = fake_engine(&dir, &json, "", 2);
-        let forked = retrying(|| engine.fork(&runs.join("parent"), 3480, 3)).unwrap();
+        let forked = engine.fork(&runs.join("parent"), 3480, 3).unwrap();
         assert_eq!(forked.id, "abc123");
         assert_eq!(forked.dir, runs.join("abc123"));
         assert_eq!(
@@ -1693,7 +1691,7 @@ mod tests {
         // No finished line: the last thing on standard error is the reason.
         let dir = temp_dir("refused");
         let engine = fake_engine(&dir, "", "rewind: schedule 0 is the unperturbed run\\n", 1);
-        let err = retrying(|| engine.fork(&dir, 1, 0)).unwrap_err();
+        let err = engine.fork(&dir, 1, 0).unwrap_err();
         let EngineError::Failed { message, .. } = err else {
             panic!("{err:?}");
         };
@@ -1710,7 +1708,7 @@ mod tests {
         let json =
             r#"{"id":"e8e7","dir":"/home/me/.local/share/rewind/runs/e8e7","replayable":true}\n"#;
         let engine = fake_engine(&dir, json, "", 0);
-        let imported = retrying(|| engine.import(&file)).unwrap();
+        let imported = engine.import(&file).unwrap();
         assert_eq!(
             imported,
             Imported {
@@ -1729,7 +1727,7 @@ mod tests {
         // A failed import prints no run, and its reason on standard error.
         let dir = temp_dir("import-refused");
         let engine = fake_engine(&dir, "", "rewind: run.rwd: not a zstd stream\n", 1);
-        let err = retrying(|| engine.import(&dir.join("run.rwd"))).unwrap_err();
+        let err = engine.import(&dir.join("run.rwd")).unwrap_err();
         let EngineError::Failed { message, .. } = err else {
             panic!("{err:?}");
         };
@@ -1744,7 +1742,7 @@ mod tests {
         let dir = temp_dir("prune");
         let run = dir.join("base");
         let engine = fake_engine(&dir, r#"["dup1","dup2"]\n"#, "", 0);
-        let removed = retrying(|| engine.prune_identical(&run)).unwrap();
+        let removed = engine.prune_identical(&run).unwrap();
         assert_eq!(removed, vec!["dup1".to_string(), "dup2".to_string()]);
         let args = std::fs::read_to_string(dir.join("args")).unwrap();
         assert_eq!(
@@ -1761,13 +1759,13 @@ mod tests {
         let dir = temp_dir("remove");
         let run = dir.join("fork");
         let engine = fake_engine(&dir, r#"{"removed":["fork","grandfork"]}\n"#, "", 0);
-        let removed = retrying(|| engine.remove(&run)).unwrap();
+        let removed = engine.remove(&run).unwrap();
         assert_eq!(removed, vec!["fork".to_string(), "grandfork".to_string()]);
         let args = std::fs::read_to_string(dir.join("args")).unwrap();
         assert_eq!(args.trim(), format!("remove {} --json", run.display()));
 
         let refusing = fake_engine(&dir, "", "rewind: run y reads its keyframes from fork\n", 1);
-        let err = retrying(|| refusing.remove(&run)).unwrap_err();
+        let err = refusing.remove(&run).unwrap_err();
         assert!(err.to_string().contains("reads its keyframes"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -1779,7 +1777,7 @@ mod tests {
         let dir = temp_dir("export");
         let (run, out) = (dir.join("run"), dir.join("out.rwd"));
         let engine = fake_engine(&dir, "", "rewind: wrote out.rwd (3.1 MB)\\n", 0);
-        retrying(|| engine.export(&run, &out)).unwrap();
+        engine.export(&run, &out).unwrap();
         let args = std::fs::read_to_string(dir.join("args")).unwrap();
         assert_eq!(
             args.trim(),
@@ -1787,7 +1785,7 @@ mod tests {
         );
 
         let engine = fake_engine(&dir, "", "rewind: no keyframes for this run\\n", 1);
-        let err = retrying(|| engine.export(&run, &out)).unwrap_err();
+        let err = engine.export(&run, &out).unwrap_err();
         let EngineError::Failed { message, .. } = err else {
             panic!("{err:?}");
         };
@@ -1844,8 +1842,8 @@ mod tests {
             (crate::blame::AccessKind::Write, 1, "--after-write"),
             (crate::blame::AccessKind::Read, 3, "--after-access"),
         ] {
-            retrying(|| {
-                engine.locate(
+            engine
+                .locate(
                     &run,
                     4_768,
                     thread,
@@ -1853,8 +1851,7 @@ mod tests {
                     &Cancel::default(),
                     &mut |_| {},
                 )
-            })
-            .unwrap();
+                .unwrap();
             let args = std::fs::read_to_string(dir.join("args")).unwrap();
             assert_eq!(
                 args.trim(),
@@ -1877,9 +1874,9 @@ mod tests {
         let json = r#"{"run":"r","step":5060,"pid":166,"tid":174,"process":"test_pool_shutdown","frames":[{"level":0,"function":"worker","file":"src/pool.c","fullname":null,"line":77,"pc":"0x55bfaf437437","object":"/build/mylib/tests/test_pool_shutdown","arguments":[],"locals":[],"expressions":[],"evaluated":[]}],"chosen":0,"files":{}}\n"#;
         let engine = fake_engine(&dir, json, "rewind: walking the stack in gdb\n", 0);
         let thread = Thread::Of { pid: 166, tid: 174 };
-        let located =
-            retrying(|| engine.locate(&run, 5_060, thread, None, &Cancel::default(), &mut |_| {}))
-                .unwrap();
+        let located = engine
+            .locate(&run, 5_060, thread, None, &Cancel::default(), &mut |_| {})
+            .unwrap();
         assert_eq!(
             located.chosen_frame().unwrap().place_label(),
             "src/pool.c:77"
@@ -1892,8 +1889,8 @@ mod tests {
 
         // At a step of the kernel's own, the engine picks the thread on
         // the CPU, so the arguments name none.
-        retrying(|| {
-            engine.locate(
+        engine
+            .locate(
                 &run,
                 5_061,
                 Thread::OnTheCpu,
@@ -1901,16 +1898,15 @@ mod tests {
                 &Cancel::default(),
                 &mut |_| {},
             )
-        })
-        .unwrap();
+            .unwrap();
         let args = std::fs::read_to_string(dir.join("args")).unwrap();
         assert_eq!(args.trim(), format!("where {} 5061 --json", run.display()));
 
         let refusing = fake_engine(&dir, "", "rewind: no process 166 at this step\n", 1);
         let thread = Thread::Of { pid: 166, tid: 166 };
-        let err =
-            retrying(|| refusing.locate(&run, 10, thread, None, &Cancel::default(), &mut |_| {}))
-                .unwrap_err();
+        let err = refusing
+            .locate(&run, 10, thread, None, &Cancel::default(), &mut |_| {})
+            .unwrap_err();
         let EngineError::Failed { message, .. } = err else {
             panic!("{err:?}");
         };
@@ -1929,28 +1925,26 @@ mod tests {
         let run = dir.join("run");
         let go = dir.join("go");
         let script = dir.join("rewind");
-        std::fs::write(
+        write_stand_in(
             &script,
-            format!(
+            &format!(
                 "#!/bin/sh\nprintf 'rewind: downloading debug info for libc.so.6; first time only\\n' >&2\n\
                  i=0; while [ ! -e '{go}' ] && [ $i -lt 500 ]; do sleep 0.01; i=$((i + 1)); done\n\
                  [ -e '{go}' ] || exit 1\n\
                  printf '%s\\n' '{{\"run\":\"r\",\"step\":1,\"pid\":2,\"tid\":2,\"process\":\"p\",\"frames\":[],\"chosen\":null,\"files\":{{}}}}'\n",
                 go = go.display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let engine = CliEngine::new(script);
 
         let said = std::cell::RefCell::new(Vec::new());
-        let located = retrying(|| {
+        let located = {
             let thread = Thread::Of { pid: 2, tid: 2 };
             engine.locate(&run, 1, thread, None, &Cancel::default(), &mut |line| {
                 said.borrow_mut().push(line.to_string());
                 std::fs::write(&go, "").unwrap();
             })
-        })
+        }
         .unwrap();
         assert_eq!(located.process, "p");
         assert_eq!(
@@ -1971,12 +1965,11 @@ mod tests {
         let json = r#"{"schedules":[{"id":"base","dir":"/runs/base","seed":0,"schedule":0,"ending":"exited:2","differs":false,"violations":[]},{"id":"a","dir":"/runs/a","seed":0,"schedule":1,"ending":"exited:0","differs":true,"violations":[]}],"tried":1,"differing":1,"sometimes_never":[],"schedule_0_failed":true,"narrowed":null}\n"#;
         let engine = fake_engine(&dir, json, "schedule   1: exited:0\n", 1);
         let said = std::cell::RefCell::new(Vec::new());
-        let checked = retrying(|| {
-            engine.check_from(&run, 4_200, 1, 4, &Cancel::default(), &mut |line| {
+        let checked = engine
+            .check_from(&run, 4_200, 1, 4, &Cancel::default(), &mut |line| {
                 said.borrow_mut().push(line.to_string())
             })
-        })
-        .unwrap();
+            .unwrap();
         assert_eq!(checked.differing, 1);
         assert_eq!(checked.forks()[0].id, "a");
         assert!(said.borrow().iter().any(|l| l == "schedule   1: exited:0"));
@@ -1990,7 +1983,8 @@ mod tests {
         );
 
         let refusing = fake_engine(&dir, "", "rewind: run abc has not finished\n", 1);
-        let err = retrying(|| refusing.check_from(&run, 1, 1, 1, &Cancel::default(), &mut |_| {}))
+        let err = refusing
+            .check_from(&run, 1, 1, 1, &Cancel::default(), &mut |_| {})
             .unwrap_err();
         let EngineError::Failed { message, .. } = err else {
             panic!("{err:?}");
@@ -2008,9 +2002,9 @@ mod tests {
         let json = r#"{"differ":[{"differing_bytes":16,"first_byte":216,"left_size":407,"path":"/out/neatvnc.pc","right_size":407}],"left":"a","right":"b","same":4}\n"#;
         let engine = fake_engine(&dir, json, "", 1);
         let (this, other) = (dir.join("a"), dir.join("b"));
-        let outputs =
-            retrying(|| engine.differing_outputs(&this, &other, &Cancel::default(), &mut |_| {}))
-                .unwrap();
+        let outputs = engine
+            .differing_outputs(&this, &other, &Cancel::default(), &mut |_| {})
+            .unwrap();
         assert_eq!(outputs.same, 4);
         assert_eq!(
             outputs.differ,
@@ -2028,9 +2022,9 @@ mod tests {
         assert_eq!(asked, rewind_trace::replaying::PROGRESS_JSON);
 
         let engine = fake_engine(&dir, "", "rewind: no run a\n", 1);
-        let err =
-            retrying(|| engine.differing_outputs(&this, &other, &Cancel::default(), &mut |_| {}))
-                .unwrap_err();
+        let err = engine
+            .differing_outputs(&this, &other, &Cancel::default(), &mut |_| {})
+            .unwrap_err();
         assert!(matches!(err, EngineError::Failed { .. }), "{err:?}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -2046,9 +2040,9 @@ mod tests {
         let go = dir.join("go");
         let line = r#"{"replaying":{"run":"r","from":0,"at":10,"to":20,"elapsed_ms":900}}"#;
         let script = dir.join("rewind");
-        std::fs::write(
+        write_stand_in(
             &script,
-            format!(
+            &format!(
                 "#!/bin/sh\nprintf '%s' \"${PROGRESS_ENV}\" > '{dir}/progress'\n\
                  printf '%s\\n' '{line}' >&2\n\
                  i=0; while [ ! -e '{go}' ] && [ $i -lt 500 ]; do sleep 0.01; i=$((i + 1)); done\n\
@@ -2057,14 +2051,12 @@ mod tests {
                 dir = dir.display(),
                 go = go.display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let engine = CliEngine::new(script);
 
         let said = std::cell::RefCell::new(Vec::new());
-        let read = retrying(|| {
-            engine.cat(
+        let read = engine
+            .cat(
                 &dir.join("run"),
                 20,
                 None,
@@ -2075,8 +2067,7 @@ mod tests {
                     std::fs::write(&go, "").unwrap();
                 },
             )
-        })
-        .unwrap();
+            .unwrap();
         assert_eq!(
             read,
             FileAtStep::Exists {
@@ -2099,19 +2090,17 @@ mod tests {
         const GIVE_UP: std::time::Duration = std::time::Duration::from_secs(5);
         let dir = temp_dir("cat-long");
         let script = dir.join("rewind");
-        std::fs::write(
+        write_stand_in(
             &script,
-            format!(
+            &format!(
                 "#!/bin/sh\nhead -c {} /dev/zero\nexec sleep 30\n",
                 viewer::MAX_SHOWN + 10
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let engine = CliEngine::new(script);
         let asked = std::time::Instant::now();
-        let read = retrying(|| {
-            engine.cat(
+        let read = engine
+            .cat(
                 &dir.join("run"),
                 1,
                 None,
@@ -2119,8 +2108,7 @@ mod tests {
                 &Cancel::default(),
                 &mut |_| {},
             )
-        })
-        .unwrap();
+            .unwrap();
         assert!(asked.elapsed() < GIVE_UP);
         assert_eq!(
             read,
@@ -2147,7 +2135,7 @@ mod tests {
         );
         let engine = fake_engine(&dir, lines, "", 0);
         let list = |engine: &CliEngine, pid| {
-            retrying(|| engine.list(&run, 66_651, pid, "/out", &Cancel::default(), &mut |_| {}))
+            engine.list(&run, 66_651, pid, "/out", &Cancel::default(), &mut |_| {})
         };
         let DirAtStep::Listed(listing) = list(&engine, Some(40)).unwrap() else {
             panic!("no listing");
@@ -2179,9 +2167,9 @@ mod tests {
     /// told, and that appends the command asked to `asked` in `dir`.
     fn looking_engine(dir: &Path, files: (&str, i32), cat: (&str, i32)) -> CliEngine {
         let script = dir.join("rewind");
-        std::fs::write(
+        write_stand_in(
             &script,
-            format!(
+            &format!(
                 "#!/bin/sh\nprintf '%s\\n' \"$1\" >> \"{dir}/asked\"\n\
                  case \"$1\" in\n\
                  files) printf '{}'; [ {} = 1 ] && echo 'rewind: no listing' >&2; exit {};;\n\
@@ -2194,9 +2182,7 @@ mod tests {
                 cat.1,
                 dir = dir.display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         CliEngine::new(script)
     }
 
@@ -2219,7 +2205,7 @@ mod tests {
                 pid: None,
                 path: "/out".to_string(),
             };
-            let looked = retrying(|| look(engine, &at, expect, &Cancel::default(), &mut |_| {}));
+            let looked = look(engine, &at, expect, &Cancel::default(), &mut |_| {});
             let asked = std::fs::read_to_string(dir.join("asked")).unwrap_or_default();
             (
                 looked,
@@ -2286,8 +2272,8 @@ mod tests {
         let dir = temp_dir("cat");
         let run = dir.join("run");
         let engine = fake_engine(&dir, "CFLAGS = -O1\\n", "", 0);
-        let read = retrying(|| {
-            engine.cat(
+        let read = engine
+            .cat(
                 &run,
                 3_795,
                 Some(174),
@@ -2295,8 +2281,7 @@ mod tests {
                 &Cancel::default(),
                 &mut |_| {},
             )
-        })
-        .unwrap();
+            .unwrap();
         assert_eq!(
             read,
             FileAtStep::Exists {
@@ -2308,8 +2293,8 @@ mod tests {
         assert!(args.contains("cat") && args.contains("3795 /build/Makefile --pid 174"));
 
         let engine = fake_engine(&dir, "", "rewind: no such file then\\n", 3);
-        let read = retrying(|| {
-            engine.cat(
+        let read = engine
+            .cat(
                 &run,
                 10,
                 None,
@@ -2317,18 +2302,19 @@ mod tests {
                 &Cancel::default(),
                 &mut |_| {},
             )
-        })
-        .unwrap();
+            .unwrap();
         assert_eq!(read, FileAtStep::Missing);
 
         // Exit status 4 is a path that named a directory.
         let engine = fake_engine(&dir, "", "rewind: /out is a directory at step 10\\n", 4);
-        let read = retrying(|| engine.cat(&run, 10, None, "/out", &Cancel::default(), &mut |_| {}))
+        let read = engine
+            .cat(&run, 10, None, "/out", &Cancel::default(), &mut |_| {})
             .unwrap();
         assert_eq!(read, FileAtStep::Directory);
 
         let engine = fake_engine(&dir, "", "rewind: no keyframes for this run\\n", 1);
-        let err = retrying(|| engine.cat(&run, 10, None, "/x", &Cancel::default(), &mut |_| {}))
+        let err = engine
+            .cat(&run, 10, None, "/x", &Cancel::default(), &mut |_| {})
             .unwrap_err();
         let EngineError::Failed { message, .. } = err else {
             panic!("{err:?}");
@@ -2344,8 +2330,8 @@ mod tests {
         let dir = temp_dir("cat-went-another-way");
         let line = r#"{"error":{"kind":"went_another_way","run":"9d540a70aa11bb22","step":506,"message":"replaying run 9d540a70aa11bb22 went another way at step 506"}}"#;
         let engine = fake_engine(&dir, "", &format!("{line}\\n"), 1);
-        let err = retrying(|| {
-            engine.cat(
+        let err = engine
+            .cat(
                 &dir.join("run"),
                 900,
                 None,
@@ -2353,8 +2339,7 @@ mod tests {
                 &Cancel::default(),
                 &mut |_| {},
             )
-        })
-        .unwrap_err();
+            .unwrap_err();
         assert!(goes_another_way(&err), "{err:?}");
         let EngineError::WentAnotherWay { step, .. } = err else {
             panic!("{err:?}");
