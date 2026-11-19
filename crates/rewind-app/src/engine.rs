@@ -613,6 +613,9 @@ impl CliEngine {
     /// command line in words, for the error when the command did not
     /// start.
     fn run(&self, args: &[OsString], command: &str) -> EngineResult<std::process::Output> {
+        // The command starts and its group is noted under one lock, so a
+        // `stop_all` that comes once the command runs finds its group.
+        let mut running = self.running.lock().unwrap();
         let child = self
             .command()
             .args(args)
@@ -623,7 +626,8 @@ impl CliEngine {
             .spawn()
             .map_err(|e| self.spawn_error(e, command))?;
         let group = child.id();
-        self.running.lock().unwrap().insert(group);
+        running.insert(group);
+        drop(running);
         let output = child.wait_with_output();
         self.running.lock().unwrap().remove(&group);
         output.map_err(|e| self.spawn_error(e, command))
