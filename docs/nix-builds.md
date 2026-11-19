@@ -18,7 +18,7 @@ Both functions accept the same settings:
 | `cpu`      | `"v3-compat"` | `"v3"`, or v3 without ERMS for hosts that lack that feature    |
 | `vendor`   | `"amd"`       | CPU vendor of the builder: `"amd"` or `"intel"`                |
 | `cores`    | `1`           | Reported CPU count and `NIX_BUILD_CORES`                       |
-| `mem`      | `1024`        | Guest memory in MiB, including build files                     |
+| `mem`      | `1024`        | Guest memory in MiB, including build files, at most 32 GiB     |
 
 Counter time requires an exact branch counter. On AMD, the NixOS option
 `programs.rewind.amdBranchCounterWorkaround = true` enables the counter

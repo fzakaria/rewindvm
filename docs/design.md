@@ -746,7 +746,8 @@ The input image is erofs, built by `mkfs.erofs` with everything pinned that
 could differ between two builds of the same files: owners, timestamps, the
 UUID and the order of entries. Its file data is compressed with lz4, which
 the guest kernel decompresses a block at a time as it reads. It is mapped
-into guest physical memory at 4 GiB and described to the kernel as legacy
+into guest physical memory at 4 GiB, or at the first GiB after the guest RAM
+when that RAM goes past 3 GiB, and described to the kernel as legacy
 persistent memory, so the guest sees `/dev/pmem0` and mounts it without any
 disk emulation. The image never enters a keyframe; it is an input, named by
 its hash.
