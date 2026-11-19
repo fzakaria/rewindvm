@@ -2,7 +2,7 @@
 
 <!-- let epoch = 1791936000 -->
 <!-- let flake = github:fzakaria/rewindvm?dir=examples/case-studies -->
-<!-- let schedule = 52 -->
+<!-- let schedule = 13 -->
 
 A Nix master build from April 2026 could hang when several `nix` commands
 opened a new store at once, printing `SQLite database ... is busy` every ten
@@ -63,12 +63,13 @@ $ rewind check --epoch {{epoch}} --all --schedules 256 '{{flake}}#nix-concurrent
 <!-- capture narrowed_run: failing: run (\w+) -->
 <!-- set first_nix: rewind events {{narrowed_run}} | grep -m1 -E 'execve\(".*/bin/nix", \["nix", "build"' | awk '{print $1}' -->
 <!-- assert: test {{deciding}} -gt {{first_nix}} && rewind threads {{narrowed_run}} --from {{deciding}} --to {{deciding}} | awk '{print $4}' | grep -qx nix -->
-<!-- assert: rewind events {{narrowed_run}} --from {{deciding}} --to {{deciding}} | grep -qE '/var/nix/db/schema"' -->
+<!-- set deciding_pid: rewind threads {{narrowed_run}} --from {{deciding}} --to {{deciding}} | awk '{print $3}' | cut -d/ -f1 -->
+<!-- assert: rewind where {{narrowed_run}} {{deciding}} --pid {{deciding_pid}} 2>/dev/null | grep -q 'sqlite3VdbeExec' -->
 
 Schedule 0 passes and {{nfails}} of the other 256 fail. The step that decides
 schedule {{narrowed}}, {{deciding}}, falls inside the race, after the test
 starts its first `nix build` at step {{first_nix}}: one `nix` process is
-opening the store's schema file there, and a single switch at that moment
+executing an SQLite statement there, and a single switch at that moment
 decides whether all six get through the migrations. On the host the test
 passed 51 of 51 runs.
 
