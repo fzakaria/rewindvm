@@ -18,8 +18,8 @@ use std::process::{Command, Stdio};
 use rewind_init::{
     IMAGE_ROOT, INSPECT_ARG, InspectRequest, InspectStatus, JOB_PATH, Job, Listed, ListedAll,
     ListedKind, Listing, MAX_LISTED, MAX_TREE_NAME, Mark, Output, Probe, RESIZE_ESCAPE, RESIZE_LEN,
-    RESIZE_TAG, RUNNING_ENV, Root, SECTION_MAPS, SECTION_PID, SELFTEST_ARG, TreeEntry, nar_hash,
-    section_header,
+    RESIZE_TAG, RUNNING_ENV, Root, SECTION_MAPS, SECTION_PID, SELFTEST_ARG, Sandbox, TreeEntry,
+    UID_RANGE_COUNT, UID_RANGE_FIRST, nar_hash, section_header,
 };
 
 /// The image the monitor maps as persistent memory.
@@ -142,10 +142,6 @@ fn run() -> Result<()> {
 
     mount("proc", "/proc", "proc", 0, "")?;
     mount("sysfs", "/sys", "sysfs", 0, "")?;
-    // The cgroup hierarchy, where systemd looks for it. nix-daemon gives
-    // one to a build that asks for uid-range, which runs as root and can
-    // start containers with systemd-nspawn.
-    mount("cgroup2", "/sys/fs/cgroup", "cgroup2", 0, "")?;
     report_cpus()?;
     mkdir("/dev/pts")?;
     mount("devpts", "/dev/pts", "devpts", 0, "ptmxmode=0666,mode=0620")?;
@@ -179,10 +175,14 @@ fn run() -> Result<()> {
         Root::Initramfs => "/",
     };
 
+    let (uid, gid) = job.host_ids();
     for f in &job.files {
         let path = within(root, &f.path);
         fs::write(&path, &f.contents).map_err(|e| format!("writing {}: {e}", f.path))?;
-        chown(&path.to_string_lossy(), job.uid, job.gid)?;
+        chown(&path.to_string_lossy(), uid, gid)?;
+    }
+    if job.sandbox == Sandbox::UidRange {
+        prepare_uid_range(&job)?;
     }
 
     mark(&Mark::Start);
@@ -223,11 +223,13 @@ fn store_root(job: &Job) -> Result<()> {
     )?;
 
     // The builder writes its outputs straight into the store, as it does
-    // in the sandbox, where the store is group-writable by nixbld.
-    chown("/nix/store", 0, job.gid)?;
+    // in the sandbox, where the store is group-writable by the builder's
+    // group: nixbld, or root of a uid-range build's namespace.
+    let (uid, gid) = job.host_ids();
+    chown("/nix/store", 0, gid)?;
     chmod("/nix/store", 0o1775)?;
     mkdir(&job.cwd)?;
-    chown(&job.cwd, job.uid, job.gid)?;
+    chown(&job.cwd, uid, gid)?;
     chmod(&job.cwd, 0o700)?;
     Ok(())
 }
@@ -310,14 +312,17 @@ fn spawn_and_reap(job: &Job, root: &str) -> Result<i32> {
         .stdout(stdout)
         .stderr(stderr);
 
-    // In the child: into the root, then the working directory, then the
-    // job's identity, in that order, since a chroot needs root and the
-    // working directory is inside it. The strings are made before the fork.
+    // In the child: into the job's own namespaces when it has any, then
+    // into the root, then the working directory, then the job's identity,
+    // in that order, since a chroot needs root and the working directory
+    // is inside it. The strings are made before the fork.
     let root_c = CString::new(root).map_err(|e| e.to_string())?;
     let cwd_c = CString::new(job.cwd.as_str()).map_err(|e| e.to_string())?;
     let (uid, gid) = (job.uid, job.gid);
+    let sandbox = job.sandbox;
     // SAFETY: chroot, chdir, setgroups, setgid, setuid and setsid are
-    // async-signal-safe, and the pointers outlive the call.
+    // async-signal-safe, and the pointers outlive the call. init has no
+    // other thread, so enter_uid_range may allocate after the fork.
     unsafe {
         cmd.pre_exec(move || {
             let check = |rc: libc::c_int| {
@@ -327,6 +332,9 @@ fn spawn_and_reap(job: &Job, root: &str) -> Result<i32> {
                     Err(std::io::Error::last_os_error())
                 }
             };
+            if sandbox == Sandbox::UidRange {
+                enter_uid_range()?;
+            }
             check(libc::chroot(root_c.as_ptr()))?;
             check(libc::chdir(cwd_c.as_ptr()))?;
             check(libc::setgroups(0, std::ptr::null()))?;
@@ -359,6 +367,211 @@ fn spawn_and_reap(job: &Job, root: &str) -> Result<i32> {
         }
     }
     main_status.ok_or_else(|| "the job's main process was never reaped".to_string())
+}
+
+/// The cgroup a [`Sandbox::UidRange`] job runs in, under the hierarchy
+/// init mounts for it. nix-daemon gives such a build a cgroup of its own,
+/// in which systemd-nspawn starts each container.
+const JOB_CGROUP: &str = "/sys/fs/cgroup/build";
+
+/// The files of a cgroup its owner writes to move processes into it.
+const CGROUP_MEMBERS: [&str; 2] = ["cgroup.procs", "cgroup.threads"];
+
+/// Where a [`Sandbox::UidRange`] job's root is mounted, in its own mount
+/// namespace: a tmpfs the job owns, as nix-daemon gives such a build a
+/// chroot it owns. The NixOS test driver makes /run, /var and files in
+/// /etc there.
+const SANDBOX_ROOT: &str = "/rewind/sandbox";
+
+/// The directories of init's root a [`Sandbox::UidRange`] job's root
+/// holds as they are: the store, the devices and kernel filesystems, the
+/// build and scratch directories, and the sandbox shell.
+const SANDBOX_BINDS: [&str; 7] = ["/nix", "/dev", "/proc", "/sys", "/build", "/tmp", "/bin"];
+
+/// The files of init's /etc a [`Sandbox::UidRange`] job's root holds
+/// copies of, in an /etc the job owns.
+const SANDBOX_ETC: [&str; 3] = ["/etc/passwd", "/etc/group", "/etc/hosts"];
+
+/// Makes what a [`Sandbox::UidRange`] job needs from init: the place its
+/// root is mounted on, and the cgroup hierarchy with a cgroup the job's
+/// user owns, as nix-daemon makes one for such a build. Only such a job
+/// gets a cgroup hierarchy, so every other run sees no more than it did
+/// before.
+fn prepare_uid_range(job: &Job) -> Result<()> {
+    mkdir(SANDBOX_ROOT)?;
+    mount("cgroup2", "/sys/fs/cgroup", "cgroup2", 0, "")?;
+    mkdir(JOB_CGROUP)?;
+
+    // The job's root owns its cgroup's directory and membership files, but
+    // not the files that set limits or turn controllers on.
+    let (uid, gid) = job.host_ids();
+    chown(JOB_CGROUP, uid, gid)?;
+    for file in CGROUP_MEMBERS {
+        chown(&format!("{JOB_CGROUP}/{file}"), uid, gid)?;
+    }
+    Ok(())
+}
+
+/// The namespaces a [`Sandbox::UidRange`] job runs in, made by the job's
+/// process before it executes the job, as nix-daemon makes them for a
+/// build that asks for uid-range. The process joins the cgroup init made
+/// for it, then unshares user, mount, network, cgroup and PID namespaces.
+/// A helper forked before the unshare maps the ids from outside, since a
+/// map of more than one id needs privilege in the parent namespace, which
+/// the process gave up. The process becomes root, then forks the job's
+/// process proper, which is PID 1 of the new PID namespace, as a builder
+/// is in nix-daemon's sandbox, and waits for it (see [`wait_and_pass_on`]).
+/// systemd finds its cgroup through PID 1's. The job's process puts a
+/// proc of its PID namespace on /proc, a sysfs of its network namespace
+/// on /sys and its own cgroup on /sys/fs/cgroup, brings up its loopback
+/// device, and changes its root to one it owns.
+fn enter_uid_range() -> std::io::Result<()> {
+    let check = |rc: libc::c_int, what: &str| {
+        if rc == 0 {
+            Ok(())
+        } else {
+            let e = std::io::Error::last_os_error();
+            Err(std::io::Error::new(e.kind(), format!("{what}: {e}")))
+        }
+    };
+
+    // Into the job's cgroup while still in init's cgroup namespace, so the
+    // cgroup is the root of the namespace unshared below.
+    fs::write(format!("{JOB_CGROUP}/cgroup.procs"), "0")?;
+
+    // The helper waits for one byte, the sign that the namespaces exist,
+    // then writes the maps of its parent, the job's process.
+    let mut fds = [0; 2];
+    // SAFETY: a valid out array of two descriptors.
+    check(unsafe { libc::pipe(fds.as_mut_ptr()) }, "pipe")?;
+    let [read_end, write_end] = fds;
+    // SAFETY: init has no other thread, so the helper may run Rust code.
+    let helper = unsafe { libc::fork() };
+    if helper < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if helper == 0 {
+        // SAFETY: the descriptors are this process's own.
+        let status = unsafe {
+            libc::close(write_end);
+            let mut byte = 0u8;
+            let ready = libc::read(read_end, (&raw mut byte).cast(), 1) == 1;
+            let parent = libc::getppid();
+            let map = format!("0 {UID_RANGE_FIRST} {UID_RANGE_COUNT}");
+            let mapped = ready
+                && fs::write(format!("/proc/{parent}/uid_map"), &map).is_ok()
+                && fs::write(format!("/proc/{parent}/gid_map"), &map).is_ok();
+            if mapped { 0 } else { 1 }
+        };
+        // SAFETY: the helper ends without running the parent's exit code.
+        unsafe { libc::_exit(status) };
+    }
+
+    // The namespaces, then the go-ahead to the helper, then its answer.
+    // SAFETY: plain system calls on this process's own descriptors.
+    unsafe {
+        libc::close(read_end);
+        check(
+            libc::unshare(
+                libc::CLONE_NEWUSER
+                    | libc::CLONE_NEWNS
+                    | libc::CLONE_NEWNET
+                    | libc::CLONE_NEWCGROUP
+                    | libc::CLONE_NEWPID,
+            ),
+            "unsharing the job's namespaces",
+        )?;
+        let byte = 1u8;
+        libc::write(write_end, (&raw const byte).cast(), 1);
+        libc::close(write_end);
+        let mut status = 0;
+        libc::waitpid(helper, &mut status, 0);
+        if !(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0) {
+            return Err(std::io::Error::other("mapping the job's ids"));
+        }
+        check(
+            libc::setresgid(0, 0, 0),
+            "becoming the namespace's root group",
+        )?;
+        check(libc::setresuid(0, 0, 0), "becoming the namespace's root")?;
+    }
+
+    // The job's process proper, the first of the new PID namespace.
+    // SAFETY: init has no other thread, so the child may run Rust code.
+    let job = unsafe { libc::fork() };
+    if job < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if job > 0 {
+        wait_and_pass_on(job);
+    }
+
+    // The job's own mounts: none of them reaches init's mount namespace.
+    mount_io("none", "/", "", libc::MS_REC | libc::MS_PRIVATE, "")?;
+    mount_io("proc", "/proc", "proc", 0, "")?;
+    mount_io("sysfs", "/sys", "sysfs", 0, "")?;
+    mount_io("cgroup2", "/sys/fs/cgroup", "cgroup2", 0, "")?;
+    loopback_up().map_err(std::io::Error::other)?;
+
+    // A root the job owns, with init's directories bound in and copies of
+    // init's /etc files, then into it. init's own root stays as it was.
+    // The root is moved onto / before the chroot, as switch_root does, so
+    // the job's root is its mount namespace's root: the kernel refuses a
+    // user namespace to a chrooted process, and setns into a container's
+    // mount namespace lands on that namespace's root.
+    mount_io("tmpfs", SANDBOX_ROOT, "tmpfs", 0, "mode=0755")?;
+    for dir in SANDBOX_BINDS {
+        let target = format!("{SANDBOX_ROOT}{dir}");
+        fs::create_dir_all(&target)?;
+        mount_io(dir, &target, "", libc::MS_BIND | libc::MS_REC, "")?;
+    }
+    fs::create_dir_all(format!("{SANDBOX_ROOT}/etc"))?;
+    for file in SANDBOX_ETC {
+        fs::copy(file, format!("{SANDBOX_ROOT}{file}"))?;
+    }
+    std::env::set_current_dir(SANDBOX_ROOT)?;
+    mount_io(".", "/", "", libc::MS_MOVE, "")?;
+    // SAFETY: a valid NUL-terminated path.
+    let rc = unsafe { libc::chroot(c".".as_ptr()) };
+    check(rc, "entering the job's root")?;
+    std::env::set_current_dir("/")
+}
+
+/// The process init started for a [`Sandbox::UidRange`] job, once it has
+/// forked the job's process proper, PID `job` here and PID 1 of the job's
+/// PID namespace: waits for that process and ends as it ended, so init
+/// reaps the job's status from the process it started. The process keeps
+/// only its standard descriptors, so the one that tells the spawner the
+/// job executed closes when the job's process executes.
+fn wait_and_pass_on(job: libc::pid_t) -> ! {
+    // SAFETY: closes this process's own descriptors, waits for its own
+    // child, and ends the process without running the spawner's code.
+    unsafe {
+        libc::syscall(libc::SYS_close_range, STDERR_FD + 1, u32::MAX, 0);
+        let mut status = 0;
+        while libc::waitpid(job, &mut status, 0) < 0 {}
+        if libc::WIFSIGNALED(status) {
+            let signal = libc::WTERMSIG(status);
+            libc::signal(signal, libc::SIG_DFL);
+            libc::kill(libc::getpid(), signal);
+        }
+        libc::_exit(libc::WEXITSTATUS(status))
+    }
+}
+
+/// The highest of the standard descriptors.
+const STDERR_FD: u32 = 2;
+
+/// [`mount`] for the job's process before it executes, whose errors are
+/// I/O errors.
+fn mount_io(
+    source: &str,
+    target: &str,
+    fstype: &str,
+    flags: libc::c_ulong,
+    data: &str,
+) -> std::io::Result<()> {
+    mount(source, target, fstype, flags, data).map_err(std::io::Error::other)
 }
 
 /// The counter self-test's workload: threads adding to one atomic with
@@ -1648,8 +1861,9 @@ fn open_terminal(path: &str, job: &Job) -> Result<File> {
         .custom_flags(libc::O_NOCTTY)
         .open(path)
         .map_err(|e| format!("opening {path}: {e}"))?;
+    let (uid, gid) = job.host_ids();
     // SAFETY: changes the owner of the open file's device node.
-    let rc = unsafe { libc::fchown(file.as_raw_fd(), job.uid, job.gid) };
+    let rc = unsafe { libc::fchown(file.as_raw_fd(), uid, gid) };
     if rc != 0 {
         return Err(format!(
             "giving {path} to the job: {}",
@@ -1780,6 +1994,7 @@ mod tests {
             files: vec![],
             outputs: vec![],
             output: Output::Terminal,
+            sandbox: Sandbox::Shared,
         };
         assert_eq!(
             resolve(&job, "/").unwrap(),

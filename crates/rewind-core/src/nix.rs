@@ -20,7 +20,7 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 use nix_derivation::store_path::hash_placeholder;
 use nix_derivation::{NixHash, StorePath, StructuredAttrsFiles, nixbase32};
-use rewind_init::{Job, JobFile, Output, Root};
+use rewind_init::{Job, JobFile, Output, Root, Sandbox};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -32,15 +32,26 @@ pub const HOMELESS: &str = "/homeless-shelter";
 pub const BUILDER_UID: u32 = 1000;
 pub const BUILDER_GID: u32 = 100;
 
+/// The ids of a builder in nix-daemon's uid-range sandbox: root, inside a
+/// user namespace of its own.
+pub const ROOT_UID: u32 = 0;
+pub const ROOT_GID: u32 = 0;
+
 /// The system feature with which a derivation asks for a range of ids
-/// that starts at 0. In its sandbox nix-daemon runs such a builder as
-/// root, with a cgroup hierarchy of its own, so that the builder can start
-/// containers: the NixOS test driver starts each container of a test with
-/// systemd-nspawn.
-const UID_RANGE_FEATURE: &str = "uid-range";
+/// that starts at 0. nix-daemon runs such a builder as root of a user
+/// namespace of its own, with a cgroup it owns, so that the builder can
+/// start containers: the NixOS test driver starts each container of a
+/// test with systemd-nspawn.
+pub const UID_RANGE_FEATURE: &str = "uid-range";
 
 /// The attribute that names the system features a derivation asks for.
 const REQUIRED_FEATURES_ATTRIBUTE: &str = "requiredSystemFeatures";
+
+/// The attribute in which `inRewind` (nix/lib.nix) names the sandbox the
+/// derivation's own builder runs in, when it took the feature that asks
+/// for the sandbox out of the features the host must have: the VM gives
+/// the sandbox, whatever the host's Nix can.
+pub const SANDBOX_ATTRIBUTE: &str = "rewindSandbox";
 
 /// The files a structured-attributes build reads its attributes from, in
 /// the build directory, and the variables that name them.
@@ -488,6 +499,8 @@ pub struct Build {
     pub inputs: Vec<PathBuf>,
     /// Output names and their store paths.
     pub outputs: Vec<(String, PathBuf)>,
+    /// The namespaces the builder runs in.
+    pub sandbox: Sandbox,
 }
 
 /// The build of `drv` as nix-daemon would describe it, with the
@@ -515,6 +528,9 @@ pub fn describe(
         Some(_) => structured_files(drv, graphs, &mut env)?,
         None => env_files(drv, graphs, &mut env),
     };
+
+    let structured = drv.parsed.structured_attrs();
+    let sandbox = sandbox(&env, |name| structured?.get(name))?;
 
     for var in ["NIX_BUILD_TOP", "TMPDIR", "TEMPDIR", "TMP", "TEMP", "PWD"] {
         env.insert(var.into(), BUILD_DIR.into());
@@ -551,6 +567,7 @@ pub fn describe(
         files,
         inputs,
         outputs: drv.outputs.clone(),
+        sandbox,
     })
 }
 
@@ -565,10 +582,9 @@ impl Build {
             .map_or(self.builder.clone(), |n| n.to_string_lossy().into_owned());
         let mut argv = vec![name];
         argv.extend(self.args.iter().cloned());
-        let (uid, gid) = if self.required_features().contains(UID_RANGE_FEATURE) {
-            (0, 0)
-        } else {
-            (BUILDER_UID, BUILDER_GID)
+        let (uid, gid) = match self.sandbox {
+            Sandbox::Shared => (BUILDER_UID, BUILDER_GID),
+            Sandbox::UidRange => (ROOT_UID, ROOT_GID),
         };
 
         Job {
@@ -588,37 +604,12 @@ impl Build {
                 .iter()
                 .map(|(_, p)| p.to_string_lossy().into_owned())
                 .collect(),
+            sandbox: self.sandbox,
         }
     }
 }
 
 impl Build {
-    /// The system features the derivation asks for: a list in its
-    /// structured attributes, or else words in its environment.
-    pub fn required_features(&self) -> BTreeSet<String> {
-        let attrs = self.env.get(ATTRS_JSON_VAR).and_then(|path| {
-            let file = self.files.iter().find(|f| &f.path == path)?;
-            serde_json::from_str::<Value>(&file.contents).ok()
-        });
-        match attrs {
-            Some(attrs) => attrs
-                .get(REQUIRED_FEATURES_ATTRIBUTE)
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect(),
-            None => self
-                .env
-                .get(REQUIRED_FEATURES_ATTRIBUTE)
-                .into_iter()
-                .flat_map(|words| words.split_whitespace())
-                .map(str::to_string)
-                .collect(),
-        }
-    }
-
     /// Tells the build it may use `cores` cores, in place of what its
     /// environment says. A description's count is nix-daemon's own: the
     /// cores of whichever machine picked the build up, which no
@@ -626,6 +617,43 @@ impl Build {
     pub fn set_cores(&mut self, cores: u32) {
         self.env.insert(BUILD_CORES_VAR.into(), cores.to_string());
     }
+}
+
+/// The sandbox a build's builder runs in, from the derivation's
+/// attributes: `env` holds them, or with structured attributes `attr`
+/// finds them. nix-daemon's uid-range sandbox when the derivation asks for
+/// `uid-range` or `inRewind` noted that it did, and init's own namespaces
+/// otherwise.
+fn sandbox<'a>(
+    env: &BTreeMap<String, String>,
+    attr: impl Fn(&str) -> Option<&'a Value>,
+) -> Result<Sandbox> {
+    // The sandbox `inRewind` names, in place of a feature the host lacks.
+    let named = match env.get(SANDBOX_ATTRIBUTE) {
+        Some(value) => Some(value.as_str()),
+        None => attr(SANDBOX_ATTRIBUTE).and_then(Value::as_str),
+    };
+    match named {
+        Some(UID_RANGE_FEATURE) => return Ok(Sandbox::UidRange),
+        Some(other) => bail!(
+            "{SANDBOX_ATTRIBUTE} is {other:?}, and rewind knows only the {UID_RANGE_FEATURE:?} sandbox"
+        ),
+        None => {}
+    }
+
+    // The features the derivation asks for: words in its environment, or
+    // a list in its structured attributes.
+    let asks = match env.get(REQUIRED_FEATURES_ATTRIBUTE) {
+        Some(words) => words.split_whitespace().any(|w| w == UID_RANGE_FEATURE),
+        None => attr(REQUIRED_FEATURES_ATTRIBUTE)
+            .and_then(Value::as_array)
+            .is_some_and(|list| list.iter().any(|f| f.as_str() == Some(UID_RANGE_FEATURE))),
+    };
+    Ok(if asks {
+        Sandbox::UidRange
+    } else {
+        Sandbox::Shared
+    })
 }
 
 /// The version of nix-daemon's build description this reads.
@@ -723,13 +751,15 @@ impl Description {
         // The structured attributes nix-daemon wrote, which also hold the
         // derivation's name when the environment does not.
         let attrs_file = env.get(ATTRS_JSON_VAR);
-        let attrs = match files.iter().find(|f| Some(&f.path) == attrs_file) {
+        let attrs: Option<Value> = match files.iter().find(|f| Some(&f.path) == attrs_file) {
             Some(file) => Some(
                 serde_json::from_str(&file.contents)
                     .with_context(|| format!("parsing {}", file.path))?,
             ),
             None => None,
         };
+
+        let sandbox = sandbox(&env, |name| attrs.as_ref()?.get(name))?;
 
         let mut description = Description {
             build: Build {
@@ -740,6 +770,7 @@ impl Description {
                 files,
                 inputs,
                 outputs,
+                sandbox,
             },
             system: text("system")?.to_string(),
             real_store: PathBuf::from(text("realStoreDir")?),
@@ -1039,38 +1070,81 @@ mod tests {
 
     #[test]
     fn job_runs_as_the_build_user() {
-        // nix-daemon runs a builder as nixbld, uid 1000 and gid 100 in the
-        // sandbox, unless it asks for uid-range.
-        let ids = job(&sample(), &no_graphs(), 1).unwrap();
-        assert_eq!((ids.uid, ids.gid), (BUILDER_UID, BUILDER_GID));
+        // nix-daemon runs a builder as nixbld, uid 1000 and gid 100, in
+        // init's namespaces, unless the derivation asks for uid-range.
+        // Features other than uid-range change nothing.
+        let built = job(&sample(), &no_graphs(), 1).unwrap();
+        assert_eq!((built.uid, built.gid), (BUILDER_UID, BUILDER_GID));
+        assert_eq!(built.sandbox, Sandbox::Shared);
         let drv = parse(
             Path::new(FIXTURE_DRV),
             &fixture(&[("requiredSystemFeatures", "kvm nixos-test")]),
         )
         .unwrap();
-        let ids = job(&drv, &no_graphs(), 1).unwrap();
-        assert_eq!((ids.uid, ids.gid), (BUILDER_UID, BUILDER_GID));
+        let built = job(&drv, &no_graphs(), 1).unwrap();
+        assert_eq!((built.uid, built.gid), (BUILDER_UID, BUILDER_GID));
+        assert_eq!(built.sandbox, Sandbox::Shared);
     }
 
     #[test]
-    fn uid_range_runs_the_job_as_root() {
-        // A build that asks for uid-range runs as root, as in nix-daemon's
-        // sandbox, so that the NixOS test driver can start containers. A
-        // derivation names its features in a word list in its environment,
-        // or in a list in its structured attributes.
+    fn uid_range_runs_the_job_as_root_of_its_namespace() {
+        // A derivation that asks for uid-range gets nix-daemon's uid-range
+        // sandbox: root of namespaces of its own, so that the NixOS test
+        // driver can start containers. A derivation names its features in
+        // a word list in its environment, or in a list in its structured
+        // attributes.
         let drv = parse(
             Path::new(FIXTURE_DRV),
             &fixture(&[("requiredSystemFeatures", "nixos-test uid-range")]),
         )
         .unwrap();
-        let ids = job(&drv, &no_graphs(), 1).unwrap();
-        assert_eq!((ids.uid, ids.gid), (0, 0));
+        let built = job(&drv, &no_graphs(), 1).unwrap();
+        assert_eq!((built.uid, built.gid), (ROOT_UID, ROOT_GID));
+        assert_eq!(built.sandbox, Sandbox::UidRange);
 
         let drv = sample_structured(json!({
             "requiredSystemFeatures": ["nixos-test", "uid-range"],
         }));
-        let ids = job(&drv, &no_graphs(), 1).unwrap();
-        assert_eq!((ids.uid, ids.gid), (0, 0));
+        let built = job(&drv, &no_graphs(), 1).unwrap();
+        assert_eq!((built.uid, built.gid), (ROOT_UID, ROOT_GID));
+        assert_eq!(built.sandbox, Sandbox::UidRange);
+    }
+
+    #[test]
+    fn in_rewind_names_the_sandbox_in_its_own_attribute() {
+        // inRewind takes uid-range out of the features the host must have
+        // and names the sandbox in rewindSandbox, in the environment or in
+        // the structured attributes. A sandbox rewind does not know is
+        // refused rather than run as some other sandbox.
+        let drv = parse(
+            Path::new(FIXTURE_DRV),
+            &fixture(&[
+                ("requiredSystemFeatures", "kvm rewind-amd"),
+                (SANDBOX_ATTRIBUTE, UID_RANGE_FEATURE),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(
+            job(&drv, &no_graphs(), 1).unwrap().sandbox,
+            Sandbox::UidRange
+        );
+
+        let drv = sample_structured(json!({
+            "requiredSystemFeatures": ["kvm"],
+            "rewindSandbox": "uid-range",
+        }));
+        assert_eq!(
+            job(&drv, &no_graphs(), 1).unwrap().sandbox,
+            Sandbox::UidRange
+        );
+
+        let drv = parse(
+            Path::new(FIXTURE_DRV),
+            &fixture(&[(SANDBOX_ATTRIBUTE, "nested-vm")]),
+        )
+        .unwrap();
+        let err = format!("{:#}", job(&drv, &no_graphs(), 1).unwrap_err());
+        assert!(err.contains("\"nested-vm\""), "{err}");
     }
 
     #[test]
@@ -1367,6 +1441,47 @@ mod tests {
         assert_eq!(structured.attribute("outputs"), None);
         assert_eq!(structured.build.files.len(), 1);
         assert_eq!(structured.build.files[0].path, "/build/.attrs.json");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_description_runs_a_uid_range_build_in_its_sandbox() {
+        // nix-daemon describes a build that asks for uid-range with the
+        // feature in its environment, or in the .attrs.json it wrote, and
+        // inRewind's builder describes one with rewindSandbox. Each of the
+        // three descriptions makes a job in the uid-range sandbox, and the
+        // build with none of them a job in init's namespaces.
+        let dir = build_directory("uid-range");
+        let mut build = describe(&sample(), Vec::new(), &no_graphs(), 1).unwrap();
+        build.files.clear();
+        let sandbox = |build: &Build| {
+            Description::parse(&description_json(build, &dir))
+                .unwrap()
+                .build
+                .job()
+                .sandbox
+        };
+        assert_eq!(sandbox(&build), Sandbox::Shared);
+
+        build.env.insert(
+            REQUIRED_FEATURES_ATTRIBUTE.into(),
+            format!("nixos-test {UID_RANGE_FEATURE}"),
+        );
+        assert_eq!(sandbox(&build), Sandbox::UidRange);
+        build.env.remove(REQUIRED_FEATURES_ATTRIBUTE);
+
+        build
+            .env
+            .insert(SANDBOX_ATTRIBUTE.into(), UID_RANGE_FEATURE.into());
+        assert_eq!(sandbox(&build), Sandbox::UidRange);
+        build.env.remove(SANDBOX_ATTRIBUTE);
+
+        let attrs = json!({"requiredSystemFeatures": [UID_RANGE_FEATURE], "outputs": ["out"]});
+        std::fs::write(dir.join(".attrs.json"), attrs.to_string()).unwrap();
+        build
+            .env
+            .insert("NIX_ATTRS_JSON_FILE".into(), "/build/.attrs.json".into());
+        assert_eq!(sandbox(&build), Sandbox::UidRange);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

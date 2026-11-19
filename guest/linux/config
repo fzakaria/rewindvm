@@ -1,6 +1,8 @@
 # Kernel configuration for the Rewind guest, merged over x86_64_defconfig by
-# nix/kernel.nix. Everything here serves one of two ends: the run must be
-# deterministic, and a boot should cost as few exits as possible.
+# nix/kernel.nix. Most of it serves one of two ends: the run must be
+# deterministic, and a boot should cost as few exits as possible. The rest
+# is what a job needs of the kernel: debug information for `rewind gdb`,
+# and namespaces and networking for builds that start containers.
 
 # One vCPU, and a uniprocessor kernel: no other CPU to race with, and
 # spinlocks compile away, so nothing in the kernel ever spins waiting on
@@ -109,15 +111,18 @@ CONFIG_VETH=y
 CONFIG_BRIDGE=y
 CONFIG_TUN=y
 
-# User namespaces, for a systemd unit with `PrivateUsers=` in such a
-# container. Without them, the unit fails at step USER.
+# User namespaces: init runs a build that asks for uid-range in one of
+# its own, as nix-daemon does, and a systemd unit with `PrivateUsers=` in
+# such a container makes another. Without them, the build cannot start,
+# and the unit fails at step USER.
 CONFIG_USER_NS=y
 
 # The NixOS firewall in such a container. `iptables-nft` changes rules
 # into nf_tables expressions. For a match that it cannot change, such as
-# rpfilter, it uses the xtables match through NFT_COMPAT. The legacy
-# iptables tables are not necessary. `networking.nftables` uses the FIB
-# and reject expressions directly.
+# rpfilter, it uses the xtables match through NFT_COMPAT.
+# `networking.nftables` uses the FIB and reject expressions directly.
+# x86_64_defconfig already has the legacy iptables filter table, which
+# neither needs.
 CONFIG_NETFILTER_ADVANCED=y
 CONFIG_NF_TABLES=y
 CONFIG_NF_TABLES_INET=y
