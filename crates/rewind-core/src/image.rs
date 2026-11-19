@@ -29,15 +29,19 @@ const MTIME: &str = "1";
 
 /// The compression of the file data. The guest kernel has
 /// `CONFIG_EROFS_FS_ZIP`, which reads LZ4. An image of a store closure
-/// is approximately 55 percent of the closure size, and the guest
+/// is approximately 56 percent of the closure size, and the guest
 /// decompresses a block only when it reads it.
+///
+/// lz4, not lz4hc: on a closure of 433 MB, lz4 took 0.9 s of CPU for an
+/// image of 246 MB, and lz4hc took 8.7 s for 221 MB. An image 10 percent
+/// smaller is not worth ten times the CPU on every new closure.
 ///
 /// mkfs.erofs compresses a file in 16 MiB segments on worker threads, the
 /// same segments for any number of workers, so the image is the same on
 /// a machine with any number of CPUs. A mkfs.erofs built without threads
 /// compresses each file whole and makes a different image of the same
 /// files.
-const COMPRESSOR: &str = "lz4hc";
+const COMPRESSOR: &str = "lz4";
 
 /// The mkfs.erofs flags that make an image a function of its files.
 fn mkfs_erofs() -> Command {
