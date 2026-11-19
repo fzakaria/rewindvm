@@ -67,11 +67,11 @@ deterministic virtual machine:
 $ rewind nix --epoch 1790985600 github:fzakaria/rewindvm#mylib
 rewind: packing 62 store paths for mylib-0.3.0
 ...
-rewind: run 631eccb8b884c543 exited:0 after 6029 steps, 0.215s virtual, 0.637s wall (poweroff)
+rewind: run 2e7b45d21f14f92a exited:0 after 6032 steps, 0.215s virtual, 0.560s wall (poweroff)
 /nix/store/f6a9gy362szw6nxx3ikrklr8glr6rdln-mylib-0.3.0 a9d703ba89774f3d  matches your store, rewindvm.cachix.org
 ```
 
-It passes, in the same 6029 steps every time. A step is a point
+It passes, in the same 6032 steps every time. A step is a point
 where the VM stops and hands control to Rewind, such as a system call that
 reports a file or a process; steps number a run's events and are where you
 look inside it. `--epoch` fixes the
@@ -86,68 +86,68 @@ in which a build ends differently:
 
 ```console
 $ rewind check --epoch 1790985600 github:fzakaria/rewindvm#mylib
-schedule   0: exited:0             6029 steps  a9d703ba8977  run 631eccb8b884c543
-schedule   1: exited:2             5364 steps    run 9fccda14e210e3fc
-schedule   2: exited:0             7531 steps  a9d703ba8977  run ef15dc11b4faec58
-schedule   3: exited:0             7805 steps  a9d703ba8977  run 738949862947fdf0
-schedule   4: exited:0             7794 steps  a9d703ba8977  run 0ed44e064c81907c
-schedule   5: exited:0             7623 steps  a9d703ba8977  run 369dfd1a991983fd
-schedule   6: exited:0             7619 steps  a9d703ba8977  run 96754451c2fd0381
-schedule   7: exited:0             7643 steps  a9d703ba8977  run e83d73ccda2d7099
-schedule   8: exited:2             5842 steps    run a3ee4417684ac3a9
-schedule   9: exited:2             5377 steps    run 9b22abccbb510e75
-schedule  10: exited:0             7564 steps  a9d703ba8977  run 19f15f3eb578490b
-schedule  11: exited:2             6150 steps    run 56079885561e2364
-schedule  12: exited:0             7780 steps  a9d703ba8977  run df981a51b11ecaa7
-schedule  13: exited:2             5953 steps    run 524f666c28d69310
-schedule  14: exited:2             6270 steps    run e247fda3d0f2ed2c
-schedule  15: exited:0             7813 steps  a9d703ba8977  run 4416879da8882a17
-schedule  16: exited:0             7612 steps  a9d703ba8977  run 1686d4df28d14b77
+schedule   0: exited:0             6032 steps  a9d703ba8977  run 2e7b45d21f14f92a
+schedule   1: exited:0             7672 steps  a9d703ba8977  run f5dc521e34f746e3
+schedule   2: exited:0             7750 steps  a9d703ba8977  run d8ea017d8bd5dfb7
+schedule   3: exited:0             7717 steps  a9d703ba8977  run 5ff7f8d540856b29
+schedule   4: exited:0             7825 steps  a9d703ba8977  run e80bf3a0d2bfc7e1
+schedule   5: exited:0             7596 steps  a9d703ba8977  run e81c0935eccbb782
+schedule   6: exited:0             7712 steps  a9d703ba8977  run 40756ae5bcb7786c
+schedule   7: exited:2             5623 steps    run 80bd50ab329cdc81
+schedule   8: exited:2             5868 steps    run f18e5729b99a4c37
+schedule   9: exited:2             5377 steps    run 0c8112e693c6b6f3
+schedule  10: exited:0             7604 steps  a9d703ba8977  run 4319d426f9987050
+schedule  11: exited:0             7539 steps  a9d703ba8977  run 21c750ea15832690
+schedule  12: exited:0             7792 steps  a9d703ba8977  run 74396e73842310df
+schedule  13: exited:0             7724 steps  a9d703ba8977  run 6424cff4fe42b9e5
+schedule  14: exited:0             7708 steps  a9d703ba8977  run 979e1318d22cf998
+schedule  15: exited:2             6210 steps    run 30c5faffb6771e0e
+schedule  16: exited:0             7660 steps  a9d703ba8977  run c54083d3beb665a2
 
-schedule 1 ends differently from schedule 0; finding the step that decides it
-schedule 1 limited to steps 4784..4969 still ends differently
-step 4968 decides it: a request to switch threads there makes the run fail
+schedule 7 ends differently from schedule 0; finding the step that decides it
+schedule 7 limited to steps 2818..4978 still ends differently
+step 4977 decides it: a request to switch threads there makes the run fail
 
-passing: run c2edb2940353d54f, schedule 1 over steps 4784..4968
-failing: run 11d4fbb7f2b822f5, schedule 1 over steps 4784..4969
-the two are the same run until step 4968
+passing: run 6a609b9c1faefbc8, schedule 7 over steps 2818..4977
+failing: run e20758b82c63ae48, schedule 7 over steps 2818..4978
+the two are the same run until step 4977
 
 where ./tests/test_pool_shutdown first behaves differently:
-  both           4956   166/173   write(1, "job 15 done: 42559\n")
-  both           4957   166/173   write(1, "worker picked job 18\n")
-  both           4968   166/174   write(1, "job 17 done: 43360\n")
-  failing        4972   166/173   write(1, "job 18 done: 26744\n")
-  failing        4973   166/173   write(1, "worker picked job 19\n")
-  failing        4982   166/174   SIGSEGV code=1 addr=0x108
-  failing        4989   166/174   thread exit(test_pool_shutd) killed:SIGSEGV
-  passing        4969   166/174   write(1, "worker picked job 19\n")
-  passing        4975   166/173   write(1, "job 18 done: 26744\n")
-  passing        4976   166/173   write(1, "worker picked job 20\n")
-  passing        4989   166/174   thread exit(test_pool_shutd) exited:0
+  both           4963   166/169   write(1, "job 15 done: 42559\n")
+  both           4964   166/169   write(1, "worker picked job 16\n")
+  both           4977   166/170   write(1, "job 14 done: 39906\n")
+  failing        4981   166/169   write(1, "job 16 done: 5986\n")
+  failing        4982   166/169   write(1, "worker picked job 17\n")
+  failing        4992   166/170   SIGSEGV code=1 addr=0x108
+  failing        4999   166/170   thread exit(test_pool_shutd) killed:SIGSEGV
+  passing        4978   166/170   write(1, "worker picked job 17\n")
+  passing        4986   166/169   thread exit(test_pool_shutd) exited:0
+  passing        4998   166/170   thread exit(test_pool_shutd) exited:0
+  passing        5001   166/166   write(1, "round 1: ok\n")
 
-open both in the desktop app: rewind open 11d4fbb7f2b822f5 4972 --compare c2edb2940353d54f
+open both in the desktop app: rewind open e20758b82c63ae48 4981 --compare 6a609b9c1faefbc8
 ```
 
-Schedules 1, 8, 9, 11, 13 and 14 fail. `check` narrows schedule 1's failure to one step, 4968. The passing run perturbs the same steps less that one, so the two
-runs are the same until 4968, and only the failing one gets
-a request to switch threads there. The search took 12 seconds.
+Schedules 7, 8, 9 and 15 fail. `check` narrows schedule 7's failure to one step, 4977. The passing run perturbs the same steps less that one, so the two
+runs are the same until 4977, and only the failing one gets
+a request to switch threads there. The search took 8 seconds.
 
 The last block shows where the test's own events then differ. The first
 difference is the cause, showing up before the symptom. At the deciding step
-thread 174 has reported job 17 and has yet to count
+thread 170 has reported job 14 and has yet to count
 it, which a worker does outside the lock. In the failing run it is held
-there: at step 4972 the other worker, thread 173, reports
-job 18 and goes on to pick job 19, the test sees half the
-jobs done and shuts the pool down, and thread 174 counts its
+there: at step 4981 the other worker, thread 169, reports
+job 16 and goes on to pick job 17, the test sees half the
+jobs done and shuts the pool down, and thread 170 counts its
 job through the queue the shutdown freed. In the passing run thread
-174 counts job 17 and picks job 19 first.
-Thread 174's SIGSEGV comes 10 steps later, at step 4982.
+170 counts job 14 and picks job 17 first.
+Thread 170's SIGSEGV comes 11 steps later, at step 4992.
 
 `--all` tries every schedule, which measures how flaky a build is:
 
 ```console
 $ rewind check --all --epoch 1790985600 github:fzakaria/rewindvm#mylib | grep 'ended differently'
-18 of 64 other schedules ended differently
+17 of 64 other schedules ended differently
 ```
 
 ## Look at the failure
@@ -155,19 +155,19 @@ $ rewind check --all --epoch 1790985600 github:fzakaria/rewindvm#mylib | grep 'e
 The failing run keeps every event with its step:
 
 ```console
-$ rewind log 11d4fbb7 --steps | tail -4
-      4972   166  job 18 done: 26744
-      4973   166  worker picked job 19
-      5000   162  /nix/store/...-bash-5.3p15/bin/bash: line 1:   166 Segmentation fault         ./$t
-      5004   161  make: *** [Makefile:18: check] Error 1
+$ rewind log e20758b8 --steps | tail -4
+      4981   166  job 16 done: 5986
+      4982   166  worker picked job 17
+      5010   162  /nix/store/...-bash-5.3p15/bin/bash: line 1:   166 Segmentation fault         ./$t
+      5014   161  make: *** [Makefile:18: check] Error 1
 
-$ rewind events 11d4fbb7 --from 4968 --to 4984
-      4968   166/174   write(1, "job 17 done: 43360\n")
-      4972   166/173   write(1, "job 18 done: 26744\n")
-      4973   166/173   write(1, "worker picked job 19\n")
-      4980     0/0     console "[    0.200335] test_pool_shutd[174]: segfault at 108 ip 000055c06fa1d437 sp 00007fda39950e10 error 6 in test_pool_shutdown[1437,55c06fa1d000+1000] likely on CPU 0 (core 0, socket 0)"
-      4981     0/0     console "[    0.200340] Code: fa 48 8d 35 2a 0c 00 00 bf 02 00 00 00 b8 00 00 00 00 e8 ac fc ff ff 48 8b 05 b5 2b 00 00 48 8b 38 e8 8d fc ff ff 49 8b 46 58 <83> 80 08 01 00 00 01 e9 b5 fe ff ff 55 48 89 e5 41 54 53 be 78 00"
-      4982   166/174   SIGSEGV code=1 addr=0x108
+$ rewind events e20758b8 --from 4977 --to 4994
+      4977   166/170   write(1, "job 14 done: 39906\n")
+      4981   166/169   write(1, "job 16 done: 5986\n")
+      4982   166/169   write(1, "worker picked job 17\n")
+      4990     0/0     console "[    0.204005] test_pool_shutd[170]: segfault at 108 ip 000055c06fa1d437 sp 00007fda39950e10 error 6 in test_pool_shutdown[1437,55c06fa1d000+1000] likely on CPU 0 (core 0, socket 0)"
+      4991     0/0     console "[    0.204010] Code: fa 48 8d 35 2a 0c 00 00 bf 02 00 00 00 b8 00 00 00 00 e8 ac fc ff ff 48 8b 05 b5 2b 00 00 48 8b 38 e8 8d fc ff ff 49 8b 46 58 <83> 80 08 01 00 00 01 e9 b5 fe ff ff 55 48 89 e5 41 54 53 be 78 00"
+      4992   166/170   SIGSEGV code=1 addr=0x108
 ```
 
 The kernel's report marks the faulting instruction, `<83> 80 08 01 00 00 01`:
@@ -175,23 +175,23 @@ The kernel's report marks the faulting instruction, `<83> 80 08 01 00 00 01`:
 null. The processes alive at the crash:
 
 ```console
-$ rewind ps 11d4fbb7 4982
+$ rewind ps e20758b8 4992
      1 /init
     34   bash -e /nix/store/...-source-stdenv.sh /nix/store/...-default-builder.sh
    161     make SHELL=/nix/store/...-bash-5.3p15/bin/bash PREFIX=$(out) VERBOSE=y check
    162       /nix/store/...-bash-5.3p15/bin/bash -c for t in tests/test_pool_basic tests/test_pool_shutdown; do echo "running $t"; ./$t || exit 1; done
    166         ./tests/test_pool_shutdown
-   173           (thread)
-   174           (thread)
+   169           (thread)
+   170           (thread)
 ```
 
 ## Look inside the VM
 
 `rewind cat`, `rewind shell` and `rewind gdb` work on a throwaway fork of the
-run at a step. At the SIGSEGV, step 4982:
+run at a step. At the SIGSEGV, step 4992:
 
 ```console
-$ rewind cat 11d4fbb7 4982 src/pool.c --pid 166 | sed -n '/^void pool_shutdown/,/^}/p'
+$ rewind cat e20758b8 4992 src/pool.c --pid 166 | sed -n '/^void pool_shutdown/,/^}/p'
 void pool_shutdown(struct pool *p)
 {
 	pthread_mutex_lock(&p->lock);
@@ -210,29 +210,29 @@ void pool_shutdown(struct pool *p)
 	free(p);
 }
 
-$ printf 'pwd; ls; exit\n' | rewind shell 11d4fbb7 4982 --pid 166
-rewind: a shell at step 4982 of 11d4fbb7f2b822f5; exit it to leave
+$ printf 'pwd; ls; exit\n' | rewind shell e20758b8 4992 --pid 166
+rewind: a shell at step 4992 of e20758b82c63ae48; exit it to leave
 [rewind] /build/mylib # pwd; ls; exit
 /build/mylib
 Containerfile  Makefile  libmylib.a  src  tests
 ```
 
 `rewind gdb` loads the symbols of the VM's kernel and of the process running
-at the step. From step 4968, thread 174's last write,
+at the step. From step 4977, thread 170's last write,
 continue to the line that faulted:
 
 ```console
-$ rewind gdb 11d4fbb7 4968 -- -batch -ex 'break src/pool.c:77 if p->queue == 0' -ex continue -ex 'bt 3' -ex 'p p->queue' -ex list
-rewind: step 4968 ran in process 166; loading symbols for 4 of its files
+$ rewind gdb e20758b8 4977 -- -batch -ex 'break src/pool.c:77 if p->queue == 0' -ex continue -ex 'bt 3' -ex 'p p->queue' -ex list
+rewind: step 4977 ran in process 166; loading symbols for 4 of its files
 rewind: fetched 3 source files from the VM
-rewind: gdb at step 4968 of 11d4fbb7f2b822f5
+rewind: gdb at step 4977 of e20758b82c63ae48
 Downloading 10.70 K separate debug info for /nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libpthread.so.0...
 Downloading 4.35 M separate debug info for /nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6...
 Downloading 658.16 K separate debug info for /nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/ld-linux-x86-64.so.2...
 Downloading 3.12 K source file /build/linux-7.2.8/./arch/x86/include/asm/irqflags.h...
 arch_local_irq_restore (flags=518) at ./arch/x86/include/asm/irqflags.h:146
 146		return !(flags & X86_EFLAGS_IF);
-[Switching to thread 4 (Thread 1.174)]
+[Switching to thread 4 (Thread 1.170)]
 Downloading 1.79 K source file /build/glibc-2.44/nptl/../sysdeps/unix/sysv/linux/x86_64/syscall_cancel.S...
 #0  __syscall_cancel_arch () at ../sysdeps/unix/sysv/linux/x86_64/syscall_cancel.S:56
 56		ret
@@ -264,11 +264,11 @@ type into.
 ## Replay it
 
 ```console
-$ rewind replay 11d4fbb7
-identical to the recording: 1730 events, 1147 context switches and 1476 read and write records over 5029 steps, and the whole machine at its 4 keyframes
+$ rewind replay e20758b8
+identical to the recording: 1646 events, 1399 context switches and 1476 read and write records over 5037 steps, and the whole machine at its 4 keyframes
 
-$ rewind replay 11d4fbb7 --from 4784
-identical to the recording from the keyframe at step 256 to the end, and the whole machine at its 3 keyframes (0.53s)
+$ rewind replay e20758b8 --from 2818
+identical to the recording from the keyframe at step 256 to the end, and the whole machine at its 3 keyframes (0.40s)
 ```
 
 `--from` starts at the nearest keyframe before the step. A keyframe is a copy
@@ -281,29 +281,29 @@ machine with the same CPU vendor that has the features of the run's CPU model.
 A fork is its parent up to a step, then another schedule:
 
 ```console
-$ rewind fork 631eccb8 4784 --schedule 1 --quiet
-rewind: run fac516809f2a33ea exited:2 after 5042 steps, 0.201s virtual, 0.056s wall (poweroff)
-rewind: the fork first differs from its parent at step 4788
-rewind: open it beside its parent in the desktop app: rewind open fac516809f2a33ea 4788 --compare 631eccb8b884c543
+$ rewind fork 2e7b45d2 2818 --schedule 1 --quiet
+rewind: run 14219c78cadede42 exited:2 after 4802 steps, 0.201s virtual, 0.176s wall (poweroff)
+rewind: the fork first differs from its parent at step 2824
+rewind: open it beside its parent in the desktop app: rewind open 14219c78cadede42 2824 --compare 2e7b45d21f14f92a
 
-$ rewind fork 631eccb8 4784 --schedule 2 --quiet
-rewind: run 1fcbc0bd80fc7f25 exited:0 after 6562 steps, 0.219s virtual, 0.100s wall (poweroff)
-rewind: the fork first differs from its parent at step 4798
-rewind: open it beside its parent in the desktop app: rewind open 1fcbc0bd80fc7f25 4798 --compare 631eccb8b884c543
+$ rewind fork 2e7b45d2 2818 --schedule 2 --quiet
+rewind: run 833681b7d0b0ac7b exited:0 after 7081 steps, 0.227s virtual, 0.231s wall (poweroff)
+rewind: the fork first differs from its parent at step 2866
+rewind: open it beside its parent in the desktop app: rewind open 833681b7d0b0ac7b 2866 --compare 2e7b45d21f14f92a
 
-$ rewind fork 631eccb8 4784 --schedule 3 --quiet
-rewind: run 955fc449fa964017 exited:0 after 6593 steps, 0.224s virtual, 0.100s wall (poweroff)
-rewind: the fork first differs from its parent at step 4798
-rewind: open it beside its parent in the desktop app: rewind open 955fc449fa964017 4798 --compare 631eccb8b884c543
+$ rewind fork 2e7b45d2 2818 --schedule 3 --quiet
+rewind: run 3e20ad3124957f71 exited:0 after 7240 steps, 0.230s virtual, 0.224s wall (poweroff)
+rewind: the fork first differs from its parent at step 2827
+rewind: open it beside its parent in the desktop app: rewind open 3e20ad3124957f71 2827 --compare 2e7b45d21f14f92a
 
-$ rewind fork 631eccb8 4784 --schedule 4 --quiet
-rewind: run 44e9c34aaf2bd992 exited:0 after 6485 steps, 0.219s virtual, 0.100s wall (poweroff)
-rewind: the fork first differs from its parent at step 4788
-rewind: open it beside its parent in the desktop app: rewind open 44e9c34aaf2bd992 4788 --compare 631eccb8b884c543
+$ rewind fork 2e7b45d2 2818 --schedule 4 --quiet
+rewind: run 0fd7901aeeaa203f exited:0 after 7235 steps, 0.233s virtual, 0.226s wall (poweroff)
+rewind: the fork first differs from its parent at step 2833
+rewind: open it beside its parent in the desktop app: rewind open 0fd7901aeeaa203f 2833 --compare 2e7b45d21f14f92a
 ```
 
-From step 4784 of the schedule 0 build, schedule 1 crashes and schedules 2, 3 and 4 pass. Of schedules
-1 to 32 from that step, 4 crash. `check --run` asks many
+From step 2818 of the schedule 0 build, schedule 1 crashes and schedules 2, 3 and 4 pass. Of schedules
+1 to 32 from that step, 11 crash. `check --run` asks many
 schedules at once; the
 [advanced tutorial](tutorial-advanced.md#count-the-schedules-that-fail-from-a-step)
 shows it.
@@ -313,14 +313,14 @@ shows it.
 The desktop app shows a run on a timeline: drag the playhead to any step for
 the output, processes, files and event there, jump to the failure or to where
 the run left the passing one, and fork from the playhead. Opened on `check`'s
-two runs, a dashed blue mark on the timeline is step 4968, where only
+two runs, a dashed blue mark on the timeline is step 4977, where only
 the failing run gets a request to switch threads.
 
 ```console
-$ rewind-app ~/.local/share/rewind/runs/11d4fbb7f2b822f5 --compare ~/.local/share/rewind/runs/c2edb2940353d54f
+$ rewind-app ~/.local/share/rewind/runs/e20758b82c63ae48 --compare ~/.local/share/rewind/runs/6a609b9c1faefbc8
 ```
 
-Press f to jump to the failure at step 4982, then s to open the
+Press f to jump to the failure at step 4992, then s to open the
 source panel. After a few seconds it shows `worker` at `src/pool.c:77`, with
 `p->queue->completed++;` marked: the line that read the queue after
 `pool_shutdown` had set it to NULL. The t key shows which thread held the CPU
@@ -377,7 +377,7 @@ $ rewind check --all --epoch 1790985600 .#mylib
 same result under all 65 schedules
 ```
 
-Before the fix, 18 of the same 64 schedules crashed.
+Before the fix, 17 of the same 64 schedules crashed.
 
 ## Limits
 

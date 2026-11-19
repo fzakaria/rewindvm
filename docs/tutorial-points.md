@@ -22,7 +22,7 @@ run by the `sdk` property. Under 64 schedules, every run holds:
 ```console
 $ rewind check --epoch 1790985600 github:fzakaria/rewindvm#counter
 ...
-schedule  64: exited:0             5787 steps  e3f96e451c97  run 3274bd1fbbaabe26  holds
+schedule  64: exited:0             5743 steps  e3f96e451c97  run c50269911b4a8615  holds
 every property held under all 65 schedules
 ```
 
@@ -68,54 +68,52 @@ that decides it:
 $ rewind check --epoch 1790985600 .#counter | grep -E 'decides it|passing:|failing:|failing run violates sdk'
 rewind: packing 62 store paths for counter-0.1.0
 schedule 1 violates same-outcome, sdk; finding the step that decides it
-step 3345 decides it: a request to switch threads there makes the run violate same-outcome, sdk
-passing: run ba1e23cc213e205a, schedule 1 over steps 3328..3345
-failing: run 50c73b8ed3ec43b1, schedule 1 over steps 3328..3346
-failing run violates sdk: step 3377: always "hits-add-up" failed: 10 hits, expected 20
+step 3398 decides it: a request to switch threads there makes the run violate same-outcome, sdk
+passing: run 614cde005bc0c11d, schedule 1 over steps 3175..3398
+failing: run 26a8b34107904461, schedule 1 over steps 3175..3399
+failing run violates sdk: step 3424: always "hits-add-up" failed: 10 hits, expected 20
 ```
 
 The run violates `same-outcome` too, since the job's build fails where
 schedule 0's passed. `rewind threads` shows which thread held the CPU from
-just before the deciding step, in the failing run and in the passing one it
-was forked from:
+the stretch the deciding step falls in, in the failing run and in the
+passing one it was forked from:
 
 ```console
-$ rewind threads 50c73b8e --from 3343 --to 3360
-      3343       3345       139/139  counter
-      3346       3346       139/140  counter
-      3347       3347       139/139  counter
-      3348       3360       139/141  counter
+$ rewind threads 26a8b341 --from 3390 --to 3413
+      3390       3399       139/140  counter
+      3400       3412       139/141  counter
+      3413       3413     kernel 11  ksoftirqd/0
 ```
 
 ```console
-$ rewind threads ba1e23cc --from 3343 --to 3360
-      3343       3345       139/139  counter
-      3346       3356       139/140  counter
-      3357       3358     kernel 11  ksoftirqd/0
-      3359       3359       139/139  counter
-      3360       3360       139/141  counter
+$ rewind threads 614cde00 --from 3390 --to 3413
+      3390       3401       139/140  counter
+      3402       3403     kernel 11  ksoftirqd/0
+      3404       3405       139/139  counter
+      3406       3413       139/141  counter
 ```
 
-In the passing run thread 139/140 takes the CPU at step 3346
+In the passing run thread 139/140 takes the CPU at step 3390
 and keeps it until it has counted its hits and exits. In the failing run the
-switch at step 3345 gives it one step, to its first point: it has
+switch at step 3398 gives it one step, to its first point: it has
 read the count and not stored it. Thread 139/141 then takes the CPU
-at step 3348 and counts every one of its hits, and when thread
+at step 3400 and counts every one of its hits, and when thread
 139/140 gets the CPU back it stores the count it read, over all of
 them. Open the failing run beside the passing one, at the point, with the
 thread lanes shown and zoomed in on the window around it:
 
 ```console
-$ rewind open 50c73b8e 3345 --compare ba1e23cc
+$ rewind open 26a8b341 3398 --compare 614cde00
 ```
 
-![The app at step 3345 of the failing counter run, compared with the passing one, with the Threads panel open: a lane per thread, the playhead at the deciding step, thread 139/140 on the CPU for one step and the other counter thread from step 3348](../site/img/app-point.png)
+![The app at step 3398 of the failing counter run, compared with the passing one, with the Threads panel open: a lane per thread, the playhead at the deciding step, thread 139/140 on the CPU until one step past it and the other counter thread from step 3400](../site/img/app-point.png)
 
 The Threads panel has a lane per thread, with the stretches each held the
 CPU: the failing run's above, the passing run's in blue under them. In the
-failing run, thread 139/140's lane stops after one step and the other
-`counter` thread's lane runs until its hits are counted; in the passing run,
-thread 139/140 keeps the CPU until it is done.
+failing run, thread 139/140's lane stops one step past the deciding
+step and the other `counter` thread's lane runs until its hits are counted;
+in the passing run, thread 139/140 keeps the CPU until it is done.
 
 ## Check the fix
 
