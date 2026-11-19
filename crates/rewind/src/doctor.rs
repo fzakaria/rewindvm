@@ -164,9 +164,9 @@ fn cpu_finding(default: &DefaultModel) -> Finding {
         DefaultModel::V3Compat => Finding::new(
             Level::Ok,
             "cpu",
-            "runs without --cpu get v3-compat: this CPU lacks ERMS (leaf 7 EBX bit 9), which v3 \
-             needs; v3-compat runs replay on hosts with or without ERMS, and v3 runs do not \
-             replay here",
+            "runs without --cpu get v3-compat: this CPU lacks ERMS (leaf 7 EBX bit 9) or \
+             PREFETCHW (leaf 0x80000001 ECX bit 8), which v3 needs; v3-compat runs replay on \
+             hosts with or without them, and v3 runs do not replay here",
         ),
         DefaultModel::HostOnly { lacking } => Finding::new(
             Level::Warn,
@@ -464,9 +464,9 @@ mod tests {
         assert_eq!(compat.level, Level::Ok);
         assert_eq!(
             compat.text,
-            "runs without --cpu get v3-compat: this CPU lacks ERMS (leaf 7 EBX bit 9), which v3 \
-             needs; v3-compat runs replay on hosts with or without ERMS, and v3 runs do not \
-             replay here"
+            "runs without --cpu get v3-compat: this CPU lacks ERMS (leaf 7 EBX bit 9) or \
+             PREFETCHW (leaf 0x80000001 ECX bit 8), which v3 needs; v3-compat runs replay on \
+             hosts with or without them, and v3 runs do not replay here"
         );
         let host_only = cpu_finding(&DefaultModel::HostOnly {
             lacking: "leaf 7 EBX bits 0x220".into(),

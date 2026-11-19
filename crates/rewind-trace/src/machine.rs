@@ -18,10 +18,11 @@ pub enum CpuModel {
     /// across machines.
     #[default]
     V3,
-    /// The V3 model with ERMS (fast REP MOVSB/STOSB) hidden, for hosts
-    /// that lack ERMS, such as an EPYC 7763 (Zen 3) host whose CPUID does
-    /// not show it. Everything else is the V3 model's, so a run made this
-    /// way replays on hosts with or without ERMS. A V3Compat run is not a
+    /// The V3 model with ERMS (fast REP MOVSB/STOSB) and PREFETCHW
+    /// hidden, for hosts that lack them, such as an EPYC 7763 (Zen 3) host
+    /// whose CPUID does not show ERMS, or a Haswell host, which does not
+    /// show PREFETCHW. Everything else is the V3 model's, so a run made
+    /// this way replays on hosts with or without them. A V3Compat run is not a
     /// V3 run: the guest sees a different CPU, so the same inputs make a
     /// different run.
     V3Compat,
@@ -107,7 +108,7 @@ mod tests {
     fn every_cpu_model_round_trips_under_its_manifest_name() {
         // The names are what existing manifests hold, so they must not
         // change: "v3" and "host" are in every run made so far, and
-        // "v3_compat" is the v3 model without ERMS.
+        // "v3_compat" is the v3 model without ERMS and PREFETCHW.
         for (model, name) in [
             (CpuModel::Host, "\"host\""),
             (CpuModel::V3, "\"v3\""),

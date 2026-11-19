@@ -1993,7 +1993,7 @@ mod dirty_log_tests {
     /// pages instead of answering with none, so a keyframe or checkpoint
     /// asked of one fails loudly. The machine shows the guest the CPU
     /// model a run that asks for none gets on this host: v3, or v3-compat
-    /// on a host without ERMS. Needs /dev/kvm; without one the test says
+    /// on a host without ERMS or PREFETCHW. Needs /dev/kvm; without one the test says
     /// so and passes.
     #[test]
     fn a_machine_without_the_dirty_log_refuses_to_list_dirty_pages() {

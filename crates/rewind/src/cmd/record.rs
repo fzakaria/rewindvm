@@ -2007,7 +2007,7 @@ enum ClockArg {
 enum CpuArg {
     /// A fixed x86-64-v3 CPU, the same on every host that has its features.
     V3,
-    /// The v3 CPU without ERMS, for hosts that lack ERMS.
+    /// The v3 CPU without ERMS and PREFETCHW, for hosts that lack them.
     V3Compat,
     /// This machine's own features.
     Host,
@@ -2024,14 +2024,14 @@ impl From<CpuArg> for rewind_vmm::CpuModel {
 }
 
 /// What a run without --cpu says on a host that gets the v3-compat model.
-const V3_COMPAT_NOTICE: &str = "this CPU lacks ERMS (fast REP MOVSB), which --cpu v3 needs, \
-     so runs use --cpu v3-compat, which is v3 without ERMS and replays on hosts with or \
-     without ERMS";
+const V3_COMPAT_NOTICE: &str = "this CPU lacks ERMS (fast REP MOVSB) or PREFETCHW, which \
+     --cpu v3 needs, so runs use --cpu v3-compat, which is v3 without ERMS and PREFETCHW and \
+     replays on hosts with or without them";
 
 /// The CPU model a run shows the guest. A model given with --cpu is checked
 /// against this host now, before a Nix closure is packed for minutes. With
 /// none given, the model is v3, or v3-compat with a line saying so where
-/// this host lacks only ERMS.
+/// this host lacks only ERMS or PREFETCHW.
 fn resolve_cpu(arg: Option<CpuArg>) -> Result<rewind_vmm::CpuModel> {
     let kvm = rewind_vmm::kvm::open()?;
 
@@ -2084,10 +2084,11 @@ pub(crate) struct MachineArgs {
     #[arg(long, value_name = "DURATION", default_value_t = StallMax::default())]
     stall_max: StallMax,
     /// The CPU the VM sees: a fixed x86-64-v3 model that replays on any
-    /// machine supporting it, the same model without ERMS, or this
+    /// machine supporting it, the same model without ERMS and PREFETCHW, or this
     /// machine's own features.
     ///
-    /// Defaults to v3, or to v3-compat on a machine that lacks only ERMS.
+    /// Defaults to v3, or to v3-compat on a machine that lacks only ERMS or
+    /// PREFETCHW.
     #[arg(long, value_enum)]
     cpu: Option<CpuArg>,
     /// The CPU model `cpu` resolved to, once per command.
