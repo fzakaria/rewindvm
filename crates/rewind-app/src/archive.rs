@@ -153,9 +153,68 @@ const DOWNLOAD_LIMITS: DownloadLimits = DownloadLimits {
     bytes: 16 * GIBIBYTE,
 };
 
-/// Downloads `url` as [`download`] does, within `limits`.
+/// Downloads `url` as [`download`] does, within `limits`, with signals
+/// kept off the downloading thread. ureq gives every socket read a
+/// timeout, and the kernel does not restart such a read that a signal
+/// interrupts, even for a handler installed with SA_RESTART: ureq passes
+/// EINTR on as an error. The terminal pane's SIGCHLD handler runs whenever
+/// a shell's child exits, and a signal sent to the process goes to a
+/// thread that does not block it.
 #[cfg(not(target_family = "wasm"))]
 fn download_within(url: &str, limits: DownloadLimits) -> Result<PathBuf> {
+    let _blocked = SignalsBlocked::new();
+    download_unblocked(url, limits)
+}
+
+/// The signals a thread cannot leave for another: the ones its own
+/// faults raise.
+#[cfg(not(target_family = "wasm"))]
+const FAULT_SIGNALS: [libc::c_int; 5] = [
+    libc::SIGSEGV,
+    libc::SIGBUS,
+    libc::SIGFPE,
+    libc::SIGILL,
+    libc::SIGTRAP,
+];
+
+/// Blocks on the calling thread every signal but [`FAULT_SIGNALS`] while
+/// it lives, and gives the thread its old mask back when dropped. A
+/// signal sent to the thread itself waits until then. The raw pointer
+/// keeps the guard on the thread whose mask it saved.
+#[cfg(not(target_family = "wasm"))]
+struct SignalsBlocked(libc::sigset_t, std::marker::PhantomData<*const ()>);
+
+#[cfg(not(target_family = "wasm"))]
+impl SignalsBlocked {
+    fn new() -> SignalsBlocked {
+        // SAFETY: the sets are initialised by sigfillset and
+        // pthread_sigmask before they are read, and changing the calling
+        // thread's own mask touches no other thread.
+        unsafe {
+            let mut blocked: libc::sigset_t = std::mem::zeroed();
+            libc::sigfillset(&mut blocked);
+            for signal in FAULT_SIGNALS {
+                libc::sigdelset(&mut blocked, signal);
+            }
+            let mut old: libc::sigset_t = std::mem::zeroed();
+            libc::pthread_sigmask(libc::SIG_BLOCK, &blocked, &mut old);
+            SignalsBlocked(old, std::marker::PhantomData)
+        }
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+impl Drop for SignalsBlocked {
+    fn drop(&mut self) {
+        // SAFETY: restores the mask `new` saved, on the thread that saved
+        // it, since the guard cannot move to another thread.
+        unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &self.0, std::ptr::null_mut()) };
+    }
+}
+
+/// Downloads `url` within `limits`, on a thread whose signals are blocked.
+#[cfg(not(target_family = "wasm"))]
+fn download_unblocked(url: &str, limits: DownloadLimits) -> Result<PathBuf> {
     // Each URL gets a directory of its own, so two URLs whose files share
     // a name never pass for each other.
     let dir = downloads_dir()
@@ -989,6 +1048,65 @@ mod tests {
             );
             assert_eq!(downloaded(&url), Vec::<PathBuf>::new());
         }
+    }
+
+    #[test]
+    fn a_download_that_a_signal_interrupts_goes_on() {
+        // A server that waits before the headers and again before the
+        // body, while another thread sends the downloading thread a
+        // signal every few milliseconds. The handler is installed with
+        // SA_RESTART, as signal-hook installs the terminal pane's SIGCHLD
+        // handler, and the kernel still does not restart a socket read
+        // that has a timeout. The file arrives whole.
+        use std::io::Write;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        const PAUSE: Duration = Duration::from_millis(200);
+        const EVERY: Duration = Duration::from_millis(5);
+        extern "C" fn ignore(_: libc::c_int) {}
+        super::test_cache();
+
+        // SAFETY: installs a handler that does nothing for a signal no
+        // other test sends.
+        unsafe {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = ignore as *const () as usize;
+            action.sa_flags = libc::SA_RESTART;
+            assert_eq!(
+                libc::sigaction(libc::SIGUSR1, &action, std::ptr::null_mut()),
+                0
+            );
+        }
+        let port = serve(|stream| {
+            std::thread::sleep(PAUSE);
+            let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\n");
+            let _ = stream.flush();
+            std::thread::sleep(PAUSE);
+            let _ = stream.write_all(b"01234567");
+        });
+        let url = format!("http://127.0.0.1:{port}/signalled.rwd");
+
+        // The download, on a thread whose id the signalling thread is told.
+        let (tell, told) = std::sync::mpsc::channel();
+        let done = std::sync::Arc::new(AtomicBool::new(false));
+        let download = {
+            let done = done.clone();
+            std::thread::spawn(move || {
+                // SAFETY: pthread_self has no preconditions.
+                tell.send(unsafe { libc::pthread_self() }).unwrap();
+                let file = download_within(&url, TEST_LIMITS);
+                done.store(true, Ordering::SeqCst);
+                file
+            })
+        };
+        let thread = told.recv().unwrap();
+        while !done.load(Ordering::SeqCst) {
+            // SAFETY: the thread is alive until `done` is set, and joined
+            // only after this loop.
+            unsafe { libc::pthread_kill(thread, libc::SIGUSR1) };
+            std::thread::sleep(EVERY);
+        }
+        let file = download.join().unwrap().unwrap();
+        assert_eq!(fs::read(file).unwrap(), b"01234567");
     }
 
     #[test]
