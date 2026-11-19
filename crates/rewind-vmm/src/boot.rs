@@ -197,17 +197,16 @@ pub fn load(ram: &mut Mapping, spec: &BootSpec) -> Result<u64> {
     // RAM; the kernel's zero-filled tail is written as zeros, since the
     // RAM a rewind restores from may hold an earlier boot there.
     let mut kernel_end = 0;
+    let low = ram.len().min(RAM_MAX as usize);
     for segment in &image.segments {
         let end = segment
             .paddr
             .checked_add(segment.memsz)
-            .filter(|end| segment.paddr >= RAM_START && *end <= ram.len() as u64)
+            .filter(|end| segment.paddr >= RAM_START && *end <= low as u64)
             .with_context(|| {
                 format!(
-                    "kernel segment at {:#x} of {} bytes does not fit in RAM of {} bytes",
-                    segment.paddr,
-                    segment.memsz,
-                    ram.len()
+                    "kernel segment at {:#x} of {} bytes does not fit in low RAM of {} bytes",
+                    segment.paddr, segment.memsz, low
                 )
             })?;
         ram.write(
@@ -274,15 +273,20 @@ pub fn load(ram: &mut Mapping, spec: &BootSpec) -> Result<u64> {
     ram.write(SETUP_DATA, &setup)?;
     params[bp::SETUP_DATA..bp::SETUP_DATA + 8].copy_from_slice(&SETUP_DATA.to_le_bytes());
 
-    // The memory map: conventional memory, RAM from 1 MiB up, and the
-    // input image as persistent memory at 4 GiB.
+    // The memory map: conventional memory, RAM from 1 MiB up to the MMIO
+    // hole and from 4 GiB on past it, and the input image as persistent
+    // memory after that (`pmem_start`).
+    let [(_, low), (high_start, high)] = ram_parts(ram.len() as u64);
     let mut e820 = vec![
         (0, EBDA_START, E820::Ram),
         (EBDA_START, RAM_START - EBDA_START, E820::Reserved),
-        (RAM_START, ram.len() as u64 - RAM_START, E820::Ram),
+        (RAM_START, low - RAM_START, E820::Ram),
     ];
+    if high > 0 {
+        e820.push((high_start, high, E820::Ram));
+    }
     if spec.pmem_len > 0 {
-        e820.push((PMEM_START, spec.pmem_len, E820::Pram));
+        e820.push((pmem_start(ram.len() as u64), spec.pmem_len, E820::Pram));
     }
     if spec.extras_len > 0 {
         e820.push((EXTRAS_START, spec.extras_len, E820::Pram));
@@ -468,6 +472,43 @@ mod tests {
         assert!(
             format!("{err:#}").contains("does not fit in RAM"),
             "{err:#}"
+        );
+    }
+
+    /// The memory map entries `load` wrote, as (address, size, kind).
+    fn e820_entries(ram: &Mapping) -> Vec<(u64, u64, u32)> {
+        let mut params = vec![0u8; bp::SIZE];
+        ram.read(BOOT_PARAMS, &mut params).unwrap();
+        (0..params[bp::E820_ENTRIES] as usize)
+            .map(|i| {
+                let at = bp::E820_TABLE + i * 20;
+                (
+                    u64::from_le_bytes(params[at..at + 8].try_into().unwrap()),
+                    u64::from_le_bytes(params[at + 8..at + 16].try_into().unwrap()),
+                    read_u32(&params, at + 16),
+                )
+            })
+            .collect()
+    }
+
+    /// RAM past the MMIO hole is in the memory map in two parts, around
+    /// the hole, and the input image after the second.
+    #[test]
+    fn high_ram_is_mapped_around_the_hole() {
+        let span = ram_span(5 << 30);
+        let mut ram = Mapping::anonymous(span as usize).unwrap();
+        let kernel = kernel();
+        let mut spec = spec(&kernel, &[]);
+        spec.pmem_len = 2 << 20;
+        load(&mut ram, &spec).unwrap();
+        let entries = e820_entries(&ram);
+        assert_eq!(
+            entries[2..],
+            [
+                (RAM_START, RAM_MAX - RAM_START, E820::Ram as u32),
+                (HIGH_RAM_START, 2 << 30, E820::Ram as u32),
+                (pmem_start(span), 2 << 20, E820::Pram as u32),
+            ]
         );
     }
 }

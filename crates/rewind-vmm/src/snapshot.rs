@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::layout::PAGE_SIZE;
 use crate::pv::Clock;
-use crate::{Config, DirtyLog, Machine, SLOT_RAM};
+use crate::{Config, DirtyLog, Machine};
 
 /// Where keyframe pages go: a content-addressed page store.
 pub trait Pages {
@@ -362,7 +362,7 @@ impl Machine {
         // Start the dirty log, when there is one, afresh from the restored
         // memory.
         if m.dirty_log == DirtyLog::On {
-            m.vm.get_dirty_log(SLOT_RAM, m.dev.ram.len())?;
+            crate::read_dirty_log(&m.vm, m.dev.ram.len())?;
         }
 
         m.apply_state(&last.cpu, &last.irqchips, &last.devices)?;

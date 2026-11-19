@@ -43,10 +43,39 @@ use pv::{Clock, GuestExit, Schedule};
 pub use rewind_trace::machine::{ClockSource, CounterEvent, CpuModel, Extras, Preemption};
 pub use watchdog::{Deadline, LateLimit};
 
-/// The memory slot of guest RAM, and of the input image.
-pub(crate) const SLOT_RAM: u32 = 0;
+/// The memory slots of guest RAM below and above the MMIO hole, and of the
+/// input image.
+const SLOT_RAM: u32 = 0;
 const SLOT_PMEM: u32 = 1;
 const SLOT_EXTRAS: u32 = 2;
+const SLOT_RAM_HIGH: u32 = 3;
+
+/// The KVM slots of guest RAM of span `span` ([`ram_span`]), as (slot,
+/// (start, length)) pairs, without the high slot when it is empty.
+fn ram_slots(span: usize) -> impl Iterator<Item = (u32, (u64, u64))> {
+    [SLOT_RAM, SLOT_RAM_HIGH]
+        .into_iter()
+        .zip(ram_parts(span as u64))
+        .filter(|&(_, (_, len))| len > 0)
+}
+
+/// Reads, and so clears, the dirty log of guest RAM of span `span`: the
+/// written pages, as page numbers from guest physical address 0.
+pub(crate) fn read_dirty_log(vm: &VmFd, span: usize) -> Result<Vec<usize>> {
+    let mut pages = Vec::new();
+    for (slot, (start, len)) in ram_slots(span) {
+        let dirty = vm
+            .get_dirty_log(slot, len as usize)
+            .context("reading the dirty log")?;
+        let first = (start / PAGE_SIZE as u64) as usize;
+        pages.extend(
+            (0..len as usize / PAGE_SIZE)
+                .filter(|&i| dirty[i / 64] & (1 << (i % 64)) != 0)
+                .map(|i| first + i),
+        );
+    }
+    Ok(pages)
+}
 
 /// Where KVM places the TSS the vCPU needs for real-mode emulation. Any
 /// three pages the guest never uses; this is the address other monitors use.
@@ -428,8 +457,8 @@ impl Machine {
     /// Creates the VM with its memory and devices, but no guest state:
     /// either [`Machine::boot`] or a snapshot restore supplies that.
     fn create(config: &Config, dirty_log: DirtyLog) -> Result<Machine> {
-        if config.mem_bytes > RAM_MAX || config.mem_bytes < (64 << 20) {
-            bail!("VM memory must be between 64 MiB and {} MiB", RAM_MAX >> 20);
+        if config.mem_bytes > MEM_MAX || config.mem_bytes < (64 << 20) {
+            bail!("VM memory must be between 64 MiB and {} MiB", MEM_MAX >> 20);
         }
 
         let kvm = kvm::open()?;
@@ -439,32 +468,42 @@ impl Machine {
             .context("creating the in-kernel interrupt controller")?;
         kvm::turn_off_counters(&vm)?;
 
-        let ram = Mapping::anonymous(config.mem_bytes as usize)?;
+        // The mapping is indexed by guest physical address, so it spans the
+        // MMIO hole too when the RAM goes above it (`ram_span`). The guest
+        // never touches the hole, so it costs no host memory.
+        let ram = Mapping::anonymous(ram_span(config.mem_bytes) as usize)?;
         // Huge pages make restores faster where the host has them; RAM
         // works the same without, so a refusal is no error.
         let _advice = ram.prefer_huge_pages();
-        // SAFETY: the mapping outlives the VM (both live in Machine, and the
-        // VM is dropped first), and nothing else maps this range.
-        unsafe {
-            vm.set_user_memory_region(kvm_userspace_memory_region {
-                slot: SLOT_RAM,
-                flags: dirty_log.slot_flags(),
-                guest_phys_addr: 0,
-                memory_size: ram.len() as u64,
-                userspace_addr: ram.host_addr(),
-            })?;
+        for (slot, (start, len)) in ram_slots(ram.len()) {
+            // SAFETY: the mapping outlives the VM (both live in Machine, and
+            // the VM is dropped first), nothing else maps this range, and
+            // `start + len` is inside the mapping.
+            unsafe {
+                vm.set_user_memory_region(kvm_userspace_memory_region {
+                    slot,
+                    flags: dirty_log.slot_flags(),
+                    guest_phys_addr: start,
+                    memory_size: len,
+                    userspace_addr: ram.host_addr() + start,
+                })?;
+            }
         }
 
         let pmem = match &config.image {
             Some(path) => {
                 let image = Mapping::file(path, PMEM_ALIGN)?;
+                let start = pmem_start(ram.len() as u64);
+                if start + image.len() as u64 > EXTRAS_START {
+                    bail!("the image does not fit below the extras slot");
+                }
                 // SAFETY: as above; the slot is read-only, so guest writes
                 // arrive as MMIO exits instead of reaching the file.
                 unsafe {
                     vm.set_user_memory_region(kvm_userspace_memory_region {
                         slot: SLOT_PMEM,
                         flags: KVM_MEM_READONLY,
-                        guest_phys_addr: PMEM_START,
+                        guest_phys_addr: start,
                         memory_size: image.len() as u64,
                         userspace_addr: image.host_addr(),
                     })?;

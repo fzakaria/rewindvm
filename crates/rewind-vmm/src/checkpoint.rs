@@ -178,13 +178,7 @@ impl Machine {
         if self.dirty_log == crate::DirtyLog::Off {
             bail!("the machine runs without a dirty log");
         }
-        let dirty = self
-            .vm
-            .get_dirty_log(crate::SLOT_RAM, self.dev.ram.len())
-            .context("reading the dirty log")?;
-        let pages: Vec<usize> = (0..self.dev.ram.len() / PAGE_SIZE)
-            .filter(|&i| dirty[i / 64] & (1 << (i % 64)) != 0)
-            .collect();
+        let pages = crate::read_dirty_log(&self.vm, self.dev.ram.len())?;
         self.checkpoints
             .since
             .extend(pages.iter().map(|&i| i as Page));
@@ -380,7 +374,7 @@ impl Machine {
         // The checkpoints were over the old origin; the dirty log starts
         // afresh from the keyframe's memory.
         self.checkpoints = Checkpoints::default();
-        self.vm.get_dirty_log(crate::SLOT_RAM, self.dev.ram.len())?;
+        crate::read_dirty_log(&self.vm, self.dev.ram.len())?;
         self.apply_state(&last.cpu, &last.irqchips, &last.devices)?;
         self.resume_records(trace, last.devices.step)?;
         Ok(())
