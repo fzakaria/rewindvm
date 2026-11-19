@@ -1659,18 +1659,35 @@ fn with_first_batch<T: Send>(
     batch: impl FnOnce(Arc<Live>) -> T + Send,
     finished: impl FnOnce(&Result<Run>),
 ) -> (Result<Run>, Option<T>) {
-    let (to, handed) = mpsc::channel();
-    let handoff = Handoff::new(from, to);
-    std::thread::scope(|scope| {
-        // The run's thread owns the handoff, so the channel closes once
-        // the run ends, and a handoff that never came is not waited for.
-        let run = scope.spawn(move || {
+    alongside(
+        move |to| {
+            let handoff = Handoff::new(from, to);
             first(Shares {
                 store: RestoreStore::Own,
                 handoff: Some(&handoff),
                 created: None,
             })
-        });
+        },
+        batch,
+        finished,
+    )
+}
+
+/// `first` on a thread of its own, given the sender of a handoff, and
+/// `batch` on another, started with what `first` sends as soon as it
+/// does, while `first` goes on. `finished` is told what `first` returned
+/// as soon as it has, before the batch has ended. A `first` that sends
+/// nothing leaves the batch unstarted: None.
+fn alongside<L: Send, R: Send, T: Send>(
+    first: impl FnOnce(mpsc::Sender<L>) -> R + Send,
+    batch: impl FnOnce(L) -> T + Send,
+    finished: impl FnOnce(&R),
+) -> (R, Option<T>) {
+    let (to, handed) = mpsc::channel();
+    std::thread::scope(|scope| {
+        // The run's thread owns the sender, so the channel closes once
+        // the run ends, and a handoff that never came is not waited for.
+        let run = scope.spawn(move || first(to));
         let batch = handed
             .recv()
             .ok()
@@ -2903,6 +2920,65 @@ mod tests {
             Alongside::Yes
         );
         assert_eq!(batch_alongside(OTHER_SEED, 0, 0), Alongside::No);
+    }
+
+    /// How long a test of `alongside` waits for the other side before it
+    /// takes the side as never coming.
+    const ALONGSIDE_WAIT: Duration = Duration::from_secs(10);
+
+    /// A batch starts while the run that hands it off goes on: the run
+    /// hands off and then waits for the batch to say it has started,
+    /// which it could not if the batch waited for the run to end.
+    #[test]
+    fn a_batch_starts_while_its_run_goes_on() {
+        const HANDED: u64 = 7;
+        let (started, heard) = mpsc::channel();
+        let (run, batch) = alongside(
+            move |handoff: mpsc::Sender<u64>| {
+                handoff.send(HANDED).unwrap();
+                heard.recv_timeout(ALONGSIDE_WAIT).is_ok()
+            },
+            move |handed| {
+                started.send(()).unwrap();
+                handed
+            },
+            |_| {},
+        );
+        assert!(run, "the batch did not start until the run ended");
+        assert_eq!(batch, Some(HANDED));
+    }
+
+    /// A run that ends without handing off leaves the batch unstarted,
+    /// and the search does not wait for a handoff that cannot come.
+    #[test]
+    fn a_run_that_never_hands_off_starts_no_batch() {
+        const ENDED: &str = "ended";
+        let (run, batch) = alongside(
+            |_handoff: mpsc::Sender<u64>| ENDED,
+            |_| panic!("a batch started with no handoff"),
+            |_| {},
+        );
+        assert_eq!(run, ENDED);
+        assert_eq!(batch, None::<()>);
+    }
+
+    /// `finished` hears how the run ended while the batch still goes on,
+    /// as the batch's time limit needs: the batch waits to hear from
+    /// `finished` before it ends.
+    #[test]
+    fn finished_hears_of_the_run_before_the_batch_ends() {
+        const OUTCOME: u32 = 3;
+        let (told, hears) = mpsc::channel();
+        let (run, batch) = alongside(
+            |handoff: mpsc::Sender<()>| {
+                handoff.send(()).unwrap();
+                OUTCOME
+            },
+            move |()| hears.recv_timeout(ALONGSIDE_WAIT),
+            |run| told.send(*run).unwrap(),
+        );
+        assert_eq!(run, OUTCOME);
+        assert_eq!(batch, Some(Ok(OUTCOME)));
     }
 
     /// The windows of a seed's first batch are the serial search's first

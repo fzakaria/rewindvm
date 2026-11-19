@@ -1056,25 +1056,23 @@ let
           -o $out/bin/race race.c
       '';
 
-  # A root with race.c's race made slow: after the race, two threads pass
-  # a byte back and forth through pipes, a context switch and so a step
+  # A root with race.c's race and a handoff after it: two threads pass a
+  # byte back and forth through pipes, a context switch and so a step
   # each way, past the window of 4096 steps whose switches a run writes in
   # one batch, which the runs that start from it read before they start.
-  # Then a loop without exits, its length the first argument, so the run
-  # takes seconds after it hands off to them. With `random` as its second
-  # argument, the program then exits 2 when a byte from getrandom is odd,
-  # so the run's seed alone decides how it ends.
-  slowRaceRoot =
-    pkgs.runCommand "rewind-slow-race-root"
+  # The run hands off to them there. With `random` as its argument, the
+  # program then exits 2 when a byte from getrandom is odd, so the run's
+  # seed alone decides how it ends.
+  handoffRaceRoot =
+    pkgs.runCommand "rewind-handoff-race-root"
       {
         nativeBuildInputs = [ pkgs.pkgsStatic.stdenv.cc ];
       }
       ''
         mkdir -p $out/bin
-        cat > slowrace.c <<'EOF'
+        cat > handoffrace.c <<'EOF'
         #include <pthread.h>
         #include <stdio.h>
-        #include <stdlib.h>
         #include <string.h>
         #include <sys/random.h>
         #include <unistd.h>
@@ -1100,21 +1098,23 @@ let
         static void *echo(void *arg)
         {
           char c;
-          while (read(ping[0], &c, 1) == 1)
+          while (read(ping[0], &c, 1) == 1) {
             write(pong[1], &c, 1);
+          }
           return 0;
         }
 
         int main(int argc, char **argv)
         {
           pthread_t t[WORKERS], echoer;
-          long spins = argc > 1 ? atol(argv[1]) : 0;
           char c = 'x';
 
-          for (int i = 0; i < WORKERS; i++)
+          for (int i = 0; i < WORKERS; i++) {
             pthread_create(&t[i], 0, add, 0);
-          for (int i = 0; i < WORKERS; i++)
+          }
+          for (int i = 0; i < WORKERS; i++) {
             pthread_join(t[i], 0);
+          }
           pipe(ping);
           pipe(pong);
           pthread_create(&echoer, 0, echo, 0);
@@ -1122,20 +1122,19 @@ let
             write(ping[1], &c, 1);
             read(pong[0], &c, 1);
           }
-          for (volatile long i = 0; i < spins; i++)
-            ;
           dprintf(1, "\ntotal %ld\n", total);
-          if (argc > 2 && strcmp(argv[2], "random") == 0) {
+          if (argc > 1 && strcmp(argv[1], "random") == 0) {
             unsigned char draw = 0;
             getrandom(&draw, 1, 0);
             dprintf(1, "draw %u\n", draw);
-            if (draw & 1)
+            if (draw & 1) {
               return ODD_DRAW;
+            }
           }
           return total != WORKERS * ADDS;
         }
         EOF
-        $CC -static -O1 -pthread -o $out/bin/slowrace slowrace.c
+        $CC -static -O1 -pthread -o $out/bin/handoffrace handoffrace.c
       '';
 
   # A root with a static program whose two threads add to a total with an
@@ -4538,17 +4537,20 @@ in
   # checks.check-overlap: `rewind check` starts a seed's first batch of
   # schedules while the seed's unperturbed run goes on, once that run has
   # passed the job's start, and the search ends as if the batch had
-  # waited. A slow race, whose unperturbed run takes seconds after the
-  # job's start: in a fresh home, each run of the first batch is created
-  # seconds before its unperturbed run ends. The same search again in the
-  # same home is the order before this change: each unperturbed run keeps
-  # the keyframes it took and takes none, so it hands off nothing, and the
-  # batch waits for it to end. The two searches print the same, byte for
-  # byte: every run of a sweep with --all, and the default search with
-  # its narrowing, with one seed and with two. A later seed's batch that
-  # the search drops, since that seed's unperturbed run ends differently,
-  # leaves none of the runs it made, and keeps the runs it found already
-  # there under the same ids. Boots the VM, so it needs /dev/kvm.
+  # waited. In a fresh home each unperturbed run hands off to its batch.
+  # The same search again in the same home is the order before this
+  # change: each unperturbed run keeps the keyframes it took and takes
+  # none, so it hands off nothing, and the batch waits for it to end. The
+  # two searches print the same, byte for byte: every run of a sweep with
+  # --all, and the default search with its narrowing, with one seed and
+  # with two. A later seed's batch that the search drops, since that
+  # seed's unperturbed run ends differently, leaves none of the runs it
+  # made and keeps the runs it found already there under the same ids.
+  # It executed one of those again, which the search does only for a
+  # batch a handoff started. That a batch starts while its run goes on is
+  # held by the tests of `alongside` in crates/rewind/src/cmd/record.rs,
+  # so the runs here need take no time after the handoff. Boots the VM, so
+  # it needs /dev/kvm.
   check-overlap =
     pkgs.runCommand "rewind-check-overlap"
       {
@@ -4559,59 +4561,23 @@ in
         requiredSystemFeatures = [ "kvm" ];
       }
       ''
-        # Iterations of the slow race's loop without exits: about eight
-        # seconds on a current CPU.
-        spins=30000000000
-
         # The epoch, pinned: by default it is today's date in UTC, and two
         # searches either side of midnight would boot different machines.
-        epoch=1768089600
+        epoch=1767744000
         check() {
           rewind check -j 4 --clock exits --epoch "$epoch" --schedules 8 "$@" \
-            --root ${slowRaceRoot} -- /bin/slowrace "$spins"
+            --root ${handoffRaceRoot} -- /bin/handoffrace
         }
 
         # A run's manifest by its index among the runs in a check's JSON.
         manifest() { echo "$(jq -r ".schedules[$2].dir" "$1")/manifest.json"; }
-
-        # The second the unperturbed run at index $2 of the check's JSON $1
-        # ended in, at the earliest: it started in its created second.
-        ended() { jq '.created + (.outcome.wall_ms / 1000 | floor)' "$(manifest "$1" "$2")"; }
-
-        # The indexes of seed $2's first batch in the check's JSON $1.
-        batch() { jq -r --argjson seed "$2" '[.schedules | to_entries[]
-          | select(.value.seed == $seed and .value.schedule != 0) | .key][:4][]' "$1"; }
-
-        # Each run of seed $3's first batch was created at least two
-        # seconds before seed $3's unperturbed run, at index $2, ended.
-        overlapped() {
-          end=$(ended "$1" "$2")
-          test -n "$(batch "$1" "$3")"
-          for i in $(batch "$1" "$3"); do
-            created=$(jq .created "$(manifest "$1" "$i")")
-            echo "seed $3 schedule run $i created at $created, its unperturbed run ended at $end"
-            test "$created" -lt "$((end - 2))"
-          done
-        }
-
-        # Each run of seed $3's first batch was created once seed $3's
-        # unperturbed run, at index $2, had ended.
-        waited() {
-          end=$(ended "$1" "$2")
-          for i in $(batch "$1" "$3"); do
-            test "$(jq .created "$(manifest "$1" "$i")")" -ge "$end"
-          done
-        }
 
         # The sweep, overlapped and then in order, with schedules that end
         # differently, which the search below then finds.
         export REWIND_HOME=$TMPDIR/sweep
         check --all --no-narrow --json > overlapped.json || true
         jq -e '.tried == 8 and .differing > 0' overlapped.json
-        seed=$(jq '.schedules[0].seed' overlapped.json)
-        overlapped overlapped.json 0 "$seed"
         check --all --no-narrow --json > ordered.json || true
-        waited ordered.json 0 "$seed"
         cmp overlapped.json ordered.json
 
         # The search, which stops at the first schedule that ends
@@ -4627,45 +4593,70 @@ in
         # unperturbed run.
         export REWIND_HOME=$TMPDIR/seeds
         check --seeds 2 --all --no-narrow --json > seeds.overlapped.json || true
-        second=$(jq '[.schedules[].seed] | unique | .[1]' seeds.overlapped.json)
-        at=$(jq --argjson seed "$second" '.schedules | to_entries[]
-          | select(.value.seed == $seed and .value.schedule == 0) | .key' seeds.overlapped.json)
-        overlapped seeds.overlapped.json 0 "$seed"
-        overlapped seeds.overlapped.json "$at" "$second"
         check --seeds 2 --all --no-narrow --json > seeds.ordered.json || true
         cmp seeds.overlapped.json seeds.ordered.json
 
-        # A dropped batch: with the epoch and CPU pinned, the job draws an
-        # even byte under seed 0 and an odd one under seed 1, so seed 1's
-        # unperturbed run ends differently, after its first batch started
-        # beside it. The search reports that run and none of the batch.
-        # The guest kernel mixes its command line into the RNG, so a change
-        # to the built-in one needs another epoch that draws that way.
+        # A dropped batch: the job draws an even byte under one seed and an
+        # odd one under the next, so the second seed's unperturbed run ends
+        # differently, after its first batch started beside it. The search
+        # reports that run and none of the batch.
         export REWIND_HOME=$TMPDIR/dropped
         dropped() {
           rewind check -j 4 --clock exits --epoch "$epoch" --cpu v3-compat \
-            --all --no-narrow --json "$@" --root ${slowRaceRoot} -- /bin/slowrace "$spins" random
+            --all --no-narrow --json "$@" --root ${handoffRaceRoot} -- /bin/handoffrace random
         }
 
-        # Seed 1's schedules 1 and 2, made first: the batch makes runs with
-        # their ids. Seed 1's unperturbed run goes, so the search executes
-        # it afresh and it hands off to the batch.
-        dropped --seed 1 --schedules 2 > earlier.json || true
+        # Which seeds draw that way depends on the guest kernel and its
+        # built-in command line, which the kernel mixes into its RNG, so
+        # the check finds the first such pair rather than naming one. The
+        # job's exit status gives its draw: handoffrace's ODD_DRAW for an
+        # odd byte, 0 for an even one. The probes run in a home of their
+        # own.
+        evenDraw=0
+        oddDraw=2
+        probedSeeds=32
+        draw() {
+          status=0
+          REWIND_HOME=$TMPDIR/draws rewind run -q --clock exits --epoch "$epoch" --cpu v3-compat \
+            --seed "$1" --root ${handoffRaceRoot} -- /bin/handoffrace random > /dev/null || status=$?
+          echo "$status"
+        }
+        evenSeed=""
+        for candidate in $(seq 0 $((probedSeeds - 1))); do
+          if [ "$(draw "$candidate")" != "$evenDraw" ]; then
+            continue
+          fi
+          if [ "$(draw $((candidate + 1)))" = "$oddDraw" ]; then
+            evenSeed=$candidate
+            break
+          fi
+        done
+        test -n "$evenSeed"
+        oddSeed=$((evenSeed + 1))
+        echo "seed $evenSeed draws even and seed $oddSeed odd"
+
+        # Seed $oddSeed's schedules 1 and 2, made first: the batch makes
+        # runs with their ids. Seed $oddSeed's unperturbed run goes, so the
+        # search executes it afresh and it hands off to the batch.
+        dropped --seed "$oddSeed" --schedules 2 > earlier.json || true
         rewind remove "$(basename "$(jq -r '.schedules[0].dir' earlier.json)")"
         ls $REWIND_HOME/runs | sort > before
         test "$(wc -l < before)" = 2
         was=$(jq .created "$(manifest earlier.json 1)")
 
-        dropped --seed 0 --seeds 2 --schedules 4 > dropped.json || true
-        jq -e '[.schedules[] | select(.seed == 1)] | length == 1 and .[0].differs' dropped.json
-        at=$(jq '.schedules | to_entries[] | select(.value.seed == 1) | .key' dropped.json)
+        # A run's created time is in seconds, so a run executed again a
+        # second later is created later.
+        sleep 1
+        dropped --seed "$evenSeed" --seeds 2 --schedules 4 > dropped.json || true
+        jq -e --argjson seed "$oddSeed" \
+          '[.schedules[] | select(.seed == $seed)] | length == 1 and .[0].differs' dropped.json
 
-        # The batch started seconds before seed 1's unperturbed run ended:
-        # it executed schedule 1's run again then.
+        # The batch executed schedule 1's run again. Without a handoff the
+        # search would have tried none of seed $oddSeed's schedules, since
+        # its unperturbed run ends differently.
         now=$(jq .created "$(manifest earlier.json 1)")
-        echo "schedule 1's run created at $was, again at $now; seed 1's run ended at $(ended dropped.json "$at")"
+        echo "schedule 1's run created at $was, again at $now"
         test "$now" -gt "$was"
-        test "$now" -lt "$(($(ended dropped.json "$at") - 2))"
 
         # The runs are the ones made before and the ones reported: the
         # batch's own runs are gone, and the two it found stay.
