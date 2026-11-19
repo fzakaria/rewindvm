@@ -392,6 +392,54 @@ pub struct Job {
     pub outputs: Vec<String>,
     /// What the job's standard output and error are.
     pub output: Output,
+    /// The namespaces the job runs in. A job in init's own namespaces
+    /// writes no `sandbox` field, so its job file, and with it every such
+    /// run, stays as it was before sandboxes existed.
+    #[serde(default, skip_serializing_if = "Sandbox::is_shared")]
+    pub sandbox: Sandbox,
+}
+
+/// The namespaces a job runs in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Sandbox {
+    /// init's own namespaces, as the job's `uid` and `gid`.
+    #[default]
+    Shared,
+    /// The sandbox nix-daemon gives a derivation that asks for
+    /// `uid-range`: user, mount, network and cgroup namespaces of the
+    /// job's own. The user namespace maps [`UID_RANGE_COUNT`] ids, from
+    /// [`UID_RANGE_FIRST`] outside, so the job's root is root only over
+    /// its own namespaces. The job owns a cgroup, in which it can start
+    /// containers.
+    UidRange,
+}
+
+impl Sandbox {
+    pub fn is_shared(&self) -> bool {
+        *self == Sandbox::Shared
+    }
+}
+
+/// The first id outside a [`Sandbox::UidRange`] job's user namespace that
+/// the job's ids map to: nix-daemon's default `start-id` for
+/// auto-allocate-uids.
+pub const UID_RANGE_FIRST: u32 = 872_415_232;
+
+/// How many ids a [`Sandbox::UidRange`] job's user namespace maps, as many
+/// as nix-daemon maps for a derivation that asks for `uid-range`.
+pub const UID_RANGE_COUNT: u32 = 65_536;
+
+impl Job {
+    /// The job's user and group as init sees them: the job's own ids, or
+    /// for a job in a [`Sandbox::UidRange`] namespace, the ids they map to
+    /// outside it.
+    pub fn host_ids(&self) -> (u32, u32) {
+        match self.sandbox {
+            Sandbox::Shared => (self.uid, self.gid),
+            Sandbox::UidRange => (UID_RANGE_FIRST + self.uid, UID_RANGE_FIRST + self.gid),
+        }
+    }
 }
 
 /// What a job's standard output and error are. Programs ask: one whose
@@ -1070,6 +1118,53 @@ mod tests {
             size,
             target: target.to_vec(),
         }
+    }
+
+    /// A job of uid 0 in the sandbox `sandbox`, with nothing else set.
+    fn root_job(sandbox: Sandbox) -> Job {
+        Job {
+            program: None,
+            argv: vec!["true".into()],
+            env: Vec::new(),
+            cwd: "/".into(),
+            uid: 0,
+            gid: 0,
+            hostname: "localhost".into(),
+            root: Root::Store,
+            files: Vec::new(),
+            outputs: Vec::new(),
+            output: Output::Plain,
+            sandbox,
+        }
+    }
+
+    #[test]
+    fn a_shared_job_file_names_no_sandbox() {
+        // A job in init's namespaces is written without a sandbox field,
+        // so its job file, and every run made of it, stays the same, and a
+        // job file without the field reads back as such a job. A uid-range
+        // job names its sandbox and reads back with it.
+        let shared = root_job(Sandbox::Shared);
+        let json = serde_json::to_value(&shared).unwrap();
+        assert!(json.get("sandbox").is_none(), "{json}");
+        assert_eq!(serde_json::from_value::<Job>(json).unwrap(), shared);
+
+        let uid_range = root_job(Sandbox::UidRange);
+        let json = serde_json::to_value(&uid_range).unwrap();
+        assert_eq!(json["sandbox"], "uid_range");
+        assert_eq!(serde_json::from_value::<Job>(json).unwrap(), uid_range);
+    }
+
+    #[test]
+    fn a_uid_range_job_is_owned_by_its_mapped_ids() {
+        // init gives files and the terminal to the job's ids as they are
+        // outside its namespaces: the same ids for a shared job, and root
+        // of a uid-range job maps to the first id of the range.
+        assert_eq!(root_job(Sandbox::Shared).host_ids(), (0, 0));
+        assert_eq!(
+            root_job(Sandbox::UidRange).host_ids(),
+            (UID_RANGE_FIRST, UID_RANGE_FIRST)
+        );
     }
 
     #[test]
