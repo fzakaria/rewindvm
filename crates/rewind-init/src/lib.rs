@@ -860,6 +860,33 @@ impl TreeReader {
     }
 }
 
+/// How init makes a store path of `rewind shell --with`'s extras slot
+/// appear in the store of the view the shell starts in.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Placement {
+    /// A store path that is a symlink, made again with the same target. A
+    /// bind mount would follow the link from where the slot is mounted,
+    /// where its target, another store path, is not.
+    Link(std::path::PathBuf),
+    /// A directory, bind-mounted over one made for it.
+    Directory,
+    /// A file, bind-mounted over an empty one made for it.
+    File,
+}
+
+/// How the store path at `source` is placed in a view's store: what it
+/// is itself, without following a symlink.
+pub fn placement(source: &std::path::Path) -> std::io::Result<Placement> {
+    let meta = std::fs::symlink_metadata(source)?;
+    if meta.file_type().is_symlink() {
+        return Ok(Placement::Link(std::fs::read_link(source)?));
+    }
+    if meta.is_dir() {
+        return Ok(Placement::Directory);
+    }
+    Ok(Placement::File)
+}
+
 /// How the input image becomes the job's filesystem.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -880,6 +907,28 @@ mod tests {
     // Sections written one after another and read back, and an answer cut
     // short in the middle of one.
     use super::*;
+
+    #[test]
+    fn an_extra_store_path_is_placed_as_what_it_is_not_what_it_names() {
+        // A directory, a file, and a symlink to a store path that is not
+        // there, as `binutils-wrapper`'s man output links to binutils'
+        // own: the link is made again with its target, since a bind mount
+        // would follow it to a path the extras slot holds elsewhere.
+        let dir = std::env::temp_dir().join(format!("rewind-extras-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("dir")).unwrap();
+        std::fs::write(dir.join("file"), "").unwrap();
+        let elsewhere = "/nix/store/aqqy8dlac5hm5p45qvmmp1624j4x1cm1-binutils-2.46-man";
+        std::os::unix::fs::symlink(elsewhere, dir.join("link")).unwrap();
+
+        assert_eq!(placement(&dir.join("dir")).unwrap(), Placement::Directory);
+        assert_eq!(placement(&dir.join("file")).unwrap(), Placement::File);
+        assert_eq!(
+            placement(&dir.join("link")).unwrap(),
+            Placement::Link(std::path::PathBuf::from(elsewhere))
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     #[cfg(feature = "nar")]

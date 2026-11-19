@@ -17,9 +17,9 @@ use std::process::{Command, Stdio};
 
 use rewind_init::{
     IMAGE_ROOT, INSPECT_ARG, InspectRequest, InspectStatus, JOB_PATH, Job, Listed, ListedAll,
-    ListedKind, Listing, MAX_LISTED, MAX_TREE_NAME, Mark, Output, Probe, RESIZE_ESCAPE, RESIZE_LEN,
-    RESIZE_TAG, RUNNING_ENV, Root, SECTION_MAPS, SECTION_PID, SELFTEST_ARG, Sandbox, TreeEntry,
-    UID_RANGE_COUNT, UID_RANGE_FIRST, nar_hash, section_header,
+    ListedKind, Listing, MAX_LISTED, MAX_TREE_NAME, Mark, Output, Placement, Probe, RESIZE_ESCAPE,
+    RESIZE_LEN, RESIZE_TAG, RUNNING_ENV, Root, SECTION_MAPS, SECTION_PID, SELFTEST_ARG, Sandbox,
+    TreeEntry, UID_RANGE_COUNT, UID_RANGE_FIRST, nar_hash, placement, section_header,
 };
 
 /// The image the monitor maps as persistent memory.
@@ -1472,13 +1472,22 @@ fn mount_extras(root: &str, job: &Job) -> Result<()> {
             continue;
         }
         let source = Path::new(EXTRAS_MOUNT).join(&name);
+        let placed =
+            placement(&source).map_err(|e| format!("reading {}: {e}", source.display()))?;
         let (source, target) = (source.display().to_string(), target.display().to_string());
-        // A store path can be a single file; a bind mount needs a file to
-        // cover it then.
-        if Path::new(&source).is_dir() {
-            mkdir(&target)?;
-        } else {
-            fs::write(&target, b"").map_err(|e| format!("creating {target}: {e}"))?;
+
+        // A store path that is a symlink is made again; a directory or a
+        // file is bind-mounted over one made to cover it.
+        match placed {
+            Placement::Link(to) => {
+                symlink(&to, &target)
+                    .map_err(|e| format!("linking {target} to {}: {e}", to.display()))?;
+                continue;
+            }
+            Placement::Directory => mkdir(&target)?,
+            Placement::File => {
+                fs::write(&target, b"").map_err(|e| format!("creating {target}: {e}"))?;
+            }
         }
         mount(&source, &target, "", libc::MS_BIND, "")?;
     }
