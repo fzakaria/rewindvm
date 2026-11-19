@@ -4377,8 +4377,12 @@ in
         # Iterations of the slow race's loop without exits: about eight
         # seconds on a current CPU.
         spins=30000000000
+
+        # The epoch, pinned: by default it is today's date in UTC, and two
+        # searches either side of midnight would boot different machines.
+        epoch=1767744000
         check() {
-          rewind check -j 4 --clock exits --schedules 8 "$@" \
+          rewind check -j 4 --clock exits --epoch "$epoch" --schedules 8 "$@" \
             --root ${slowRaceRoot} -- /bin/slowrace "$spins"
         }
 
@@ -4454,7 +4458,7 @@ in
         # to the built-in one needs another epoch that draws that way.
         export REWIND_HOME=$TMPDIR/dropped
         dropped() {
-          rewind check -j 4 --clock exits --epoch 1767744000 --cpu v3-compat \
+          rewind check -j 4 --clock exits --epoch "$epoch" --cpu v3-compat \
             --all --no-narrow --json "$@" --root ${slowRaceRoot} -- /bin/slowrace "$spins" random
         }
 
