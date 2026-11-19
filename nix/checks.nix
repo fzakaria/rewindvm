@@ -1319,6 +1319,49 @@ let
           -o $out/bin/pexit pexit.c
       '';
 
+  # A root with /bin/bigstack, which starts a thread with a stack of 4 GiB,
+  # four times the memory of a default VM, and joins it, for
+  # checks.overcommit. The thread touches only the top of its stack.
+  bigStackRoot =
+    pkgs.runCommand "rewind-big-stack-root"
+      {
+        nativeBuildInputs = [ pkgs.pkgsStatic.stdenv.cc ];
+      }
+      ''
+        mkdir -p $out/bin $out/src
+        cd $out/src
+        cat > bigstack.c <<'EOF'
+        #include <pthread.h>
+        #include <stdio.h>
+        #include <string.h>
+
+        static void *worker(void *arg)
+        {
+          (void)arg;
+          puts("thread ran");
+          return 0;
+        }
+
+        int main(void)
+        {
+          pthread_attr_t attr;
+          pthread_t thread;
+          int err;
+
+          pthread_attr_init(&attr);
+          pthread_attr_setstacksize(&attr, 4UL << 30);
+          err = pthread_create(&thread, &attr, worker, 0);
+          if (err != 0) {
+            printf("pthread_create: %s\n", strerror(err));
+            return 1;
+          }
+          pthread_join(thread, 0);
+          return 0;
+        }
+        EOF
+        $CC -static -O1 -pthread -o $out/bin/bigstack bigstack.c
+      '';
+
   # A root with nixpkgs' coreutils, copied into the root's /nix/store with
   # its closure and linked into /bin, beside busybox's shell, for
   # checks.file-events: cp opens the directory it copies into with O_PATH
@@ -5733,6 +5776,25 @@ in
         prop '(echo a > /var/run/x.pid; sleep 1) & wait; (echo b > /run/x.pid) & wait'
         if prop '(exec 3>> /var/run/x.pid; echo a >&3; sleep 2) & (sleep 1; echo b >> /run/x.pid) & wait'; then exit 1; fi
         grep -q 'opened /run/x.pid for writing while process' out
+        touch $out
+      '';
+
+  # checks.overcommit: a mapping larger than the VM's memory, which a
+  # program touches only in part, is let through. /bin/bigstack
+  # (bigStackRoot) starts a thread with a stack of 4 GiB in a VM of 1 GiB,
+  # and the thread runs. Boots the VM, so it needs /dev/kvm.
+  overcommit =
+    pkgs.runCommand "rewind-overcommit"
+      {
+        nativeBuildInputs = [ rewind ];
+        requiredSystemFeatures = [ "kvm" ];
+      }
+      ''
+        export REWIND_HOME=$TMPDIR/rewind
+        rewind run -q --clock exits --mem 1024 --name big --root ${bigStackRoot} -- /bin/bigstack
+        rewind log big | tee log
+        grep -qx 'thread ran' log
+        rewind replay big | grep '^identical'
         touch $out
       '';
 
