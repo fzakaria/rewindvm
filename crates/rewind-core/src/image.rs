@@ -85,6 +85,22 @@ pub fn from_tar(tar: &Path, out: &Path) -> Result<()> {
 /// files: /nix/store itself, or the directory a store kept somewhere else
 /// has them in.
 pub fn from_store_paths(store: &Path, paths: &[PathBuf], out: &Path) -> Result<()> {
+    let list = scratch_beside(out, "list");
+    let built = pack_store_paths(store, paths, &list, out);
+    let _ = fs::remove_file(&list);
+
+    // A failed pack leaves no image behind. mkfs.erofs makes a whole
+    // image of a stream that tar cut short, and a mkfs.erofs that fails
+    // part way leaves the file data it buffered in the image file.
+    if built.is_err() {
+        let _ = fs::remove_file(out);
+    }
+    built
+}
+
+/// Packs the store paths `paths` into the image `out`, with tar reading
+/// their names from the scratch file `list`.
+fn pack_store_paths(store: &Path, paths: &[PathBuf], list: &Path, out: &Path) -> Result<()> {
     let mut names: Vec<String> = paths
         .iter()
         .map(|p| {
@@ -98,10 +114,13 @@ pub fn from_store_paths(store: &Path, paths: &[PathBuf], out: &Path) -> Result<(
 
     // tar reads the names from a file, since a closure can hold thousands
     // of them.
-    let list = scratch_beside(out, "list");
-    fs::write(&list, names.join("\n") + "\n")?;
-    // tar writes to a pipe that mkfs.erofs reads, so the build needs disk
-    // for the image only, not for a tar of the closure too.
+    fs::write(list, names.join("\n") + "\n")?;
+
+    // tar writes to a pipe that mkfs.erofs reads, so the build needs no
+    // disk for a tar of the closure. mkfs.erofs still copies the file data
+    // it reads from the pipe into a buffer past the end of the image file
+    // before it lays the data out, so the build needs disk for about twice
+    // the closure.
     let mut tar = tar_command()
         .args(["--create", "--file", "-", "--directory"])
         .arg(store)
@@ -114,7 +133,7 @@ pub fn from_store_paths(store: &Path, paths: &[PathBuf], out: &Path) -> Result<(
             "--format=gnu",
             "--files-from",
         ])
-        .arg(&list)
+        .arg(list)
         .stdout(Stdio::piped())
         .spawn()
         .context("running tar")?;
@@ -127,7 +146,7 @@ pub fn from_store_paths(store: &Path, paths: &[PathBuf], out: &Path) -> Result<(
         .context("running mkfs.erofs; is erofs-utils on PATH?");
     // Wait for tar also when mkfs.erofs fails, so that no zombie stays.
     let tarred = tar.wait().context("waiting for tar");
-    let _ = fs::remove_file(&list);
+
     // A failed mkfs.erofs stops tar with `SIGPIPE`, so tell its failure first.
     if !mkfs?.success() {
         bail!("mkfs.erofs failed on the store paths");
@@ -340,6 +359,33 @@ mod tests {
         from_dir(&tree, &direct).unwrap();
         from_dir(&link, &through).unwrap();
         assert_eq!(fs::read(&direct).unwrap(), fs::read(&through).unwrap());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_failed_pack_leaves_no_files() {
+        // A closure that names a path the store does not have: tar packs
+        // the other path and fails, while mkfs.erofs makes a whole image
+        // of what tar wrote. Packs such a closure from a made-up store
+        // and checks that the pack fails and leaves neither the image nor
+        // the name list beside it.
+        let dir = std::env::temp_dir().join(format!("rewind-failed-pack-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let store = dir.join("store");
+        let present = "aaaa-present";
+        fs::create_dir_all(store.join(present)).unwrap();
+        fs::write(store.join(present).join("file"), b"present").unwrap();
+        let images = dir.join("images");
+        fs::create_dir_all(&images).unwrap();
+
+        let tmp = temp_beside(&images.join("store-x.erofs"));
+        let paths = [
+            Path::new("/nix/store").join(present),
+            PathBuf::from("/nix/store/bbbb-missing"),
+        ];
+        assert!(from_store_paths(&store, &paths, &tmp).is_err());
+        let left: Vec<_> = fs::read_dir(&images).unwrap().collect();
+        assert!(left.is_empty(), "{left:?}");
         fs::remove_dir_all(&dir).unwrap();
     }
 
