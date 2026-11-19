@@ -3836,11 +3836,33 @@ in
         # Under exit time, a reverse-stepi from the last write single-steps
         # the whole loop before it, 10 million rounds, and a reverse-continue
         # to a watch on the sum stops at each of its 10 million writes.
-        # Ctrl-C two seconds into either stops it in the loop, where gdb can
-        # read the pc, step forwards and back again to the same pc. gdb
-        # killed in either ends the session at once.
+        # Ctrl-C two seconds of CPU time into either stops it in the loop,
+        # where gdb can read the pc, step forwards and back again to the
+        # same pc. gdb killed in either ends the session at once.
         rewind run -q --clock exits --name slow --root ${gdbRoot} -- /bin/slow > /dev/null
         done=$(rewind events slow | grep 'write(1, "done' | awk '{print $1}')
+
+        # Waits until the session $1 and its children have used $2 tenths
+        # of a second of CPU time more, or the session has ended. A wait
+        # on the clock alone ends early on a loaded machine, before the
+        # fork has come back to the loop's start.
+        ticks_per_second=100
+        spend() {
+          local before
+          before=$(cpu_ticks "$1")
+          while kill -0 "$1" 2> /dev/null \
+            && [ $(($(cpu_ticks "$1") - before)) -lt $(($2 * ticks_per_second / 10)) ]; do
+            sleep 0.05
+          done
+        }
+        cpu_ticks() {
+          local total=0 pid
+          for pid in "$1" $(pgrep -P "$1"); do
+            total=$((total + $(awk '{print $14 + $15}' "/proc/$pid/stat" 2> /dev/null || echo 0)))
+          done
+          echo "$total"
+        }
+
         interrupt() {
           local signal=$1 out=$2
           shift 2
@@ -3849,7 +3871,7 @@ in
             -ex reverse-stepi -ex 'print $pc' > "$out" 2>&1 &
           local parent=$!
           for _ in $(seq 1 600); do grep -q begin-reverse "$out" && break; sleep 0.1; done
-          sleep 2
+          spend "$parent" 20
           kill "-$signal" "$(pgrep -P "$parent" -x gdb)"
 
           # The stop, or the session's end, within 10 s of the signal.
@@ -3875,11 +3897,12 @@ in
         done
 
         # A reverse-continue to the watch on the sum, stopped by Ctrl-C six
-        # seconds in, leaves the fork past the writes it went through. The
-        # next reverse-stepi or reverse-continue replays those writes; Ctrl-C
-        # half a second into it stops it within a second, in the loop, where
-        # gdb reads the sum and steps forwards and back to the same pc. gdb
-        # killed in it ends the session within a second.
+        # seconds of CPU time in, leaves the fork past the writes it went
+        # through. The next reverse-stepi or reverse-continue replays those
+        # writes; Ctrl-C half a second of CPU time into it stops it within a
+        # second, in the loop, where gdb reads the sum and steps forwards
+        # and back to the same pc. gdb killed in it ends the session within
+        # a second.
         again() {
           local second=$1 signal=$2 out=$3
           rewind gdb slow "$done" -- -batch -ex 'thread 2' -ex 'watch -l sum' \
@@ -3890,11 +3913,11 @@ in
           local gdb
           for _ in $(seq 1 600); do grep -q begin-reverse "$out" && break; sleep 0.1; done
           gdb=$(pgrep -P "$parent" -x gdb)
-          sleep 6
+          spend "$parent" 60
           kill -INT "$gdb"
           for _ in $(seq 1 100); do grep -q begin-again "$out" && break; sleep 0.1; done
           grep -q begin-again "$out"
-          sleep 0.5
+          spend "$parent" 5
           kill "-$signal" "$gdb"
 
           # The second stop, or the session's end, within 1 s of the signal.
