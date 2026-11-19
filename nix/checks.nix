@@ -2414,10 +2414,30 @@ in
   # a static busybox, writes the date, which is the epoch's day. The check
   # holds Nix's side of the handover: the description's form, and the line
   # Nix waits for before it reads the build's log. A CPU of neither vendor
-  # skips the check and says so. Boots the VM, so it needs /dev/kvm.
+  # skips the check and says so. A derivation that asks for uid-range
+  # is refused by that Nix, whose system-features lack it. `onRewind`
+  # moves the request into `rewindSandbox`, and the same Nix then builds
+  # the derivation with the VM's uid-range sandbox: the builder is root of
+  # a user namespace that maps 65536 ids from 872415232. Boots the VM, so
+  # it needs /dev/kvm.
   external-builder =
     let
+      inherit (pkgs) lib;
       busybox = pkgs.pkgsStatic.busybox;
+
+      # `onRewind` of a derivation that asks for uid-range, as a NixOS
+      # test with containers does. The day derivation below writes the
+      # same attributes for the vendor of the check's CPU.
+      asking = derivation {
+        name = "asks-for-uid-range";
+        system = "x86_64-linux";
+        builder = "${busybox}/bin/busybox";
+        requiredSystemFeatures = [
+          "uid-range"
+          "big-parallel"
+        ];
+      };
+      moved = rewindLib.onRewind { epoch = 1790985600; } asking;
       closure = pkgs.closureInfo {
         rootPaths = [
           busybox
@@ -2425,6 +2445,10 @@ in
         ];
       };
     in
+    assert moved.requiredSystemFeatures == [ "big-parallel" ];
+    assert moved.rewindSandbox == "uid-range";
+    assert !(rewindLib.onRewind { epoch = 1790985600; } pkgs.hello ? rewindSandbox);
+    assert !(rewindLib.onRewind { epoch = 1790985600; } pkgs.hello).drvAttrs ? requiredSystemFeatures;
     pkgs.runCommand "rewind-external-builder"
       {
         nativeBuildInputs = [
@@ -2451,16 +2475,29 @@ in
         xargs -I{} cp -a {} $store/nix/store/ < ${closure}/store-paths
         nix-store --store $store --load-db < ${closure}/registration
 
+        # The day derivation, or with `sandbox` the attributes `onRewind`
+        # gives a derivation that asks for uid-range (or, with `features`,
+        # the request left as it was) and a builder that writes its ids.
         cat > day.nix <<EOF
-        { runtime ? builtins.storePath ${rewind} }:
-        derivation {
+        {
+          runtime ? builtins.storePath ${rewind},
+          sandbox ? null,
+          features ? [ ],
+        }:
+        let
+          busybox = "\''${builtins.storePath ${busybox}}/bin/busybox";
+          day = "echo the builder ran; \''${busybox} date -u +%F > \\\$out";
+          ids = "\''${busybox} id -u > \\\$out; \''${busybox} cat /proc/self/uid_map >> \\\$out";
+        in
+        derivation ({
           name = "day";
           system = "x86_64-rewind-$vendor";
-          builder = "\''${builtins.storePath ${busybox}}/bin/busybox";
-          args = [ "sh" "-c" "echo the builder ran; \''${builtins.storePath ${busybox}}/bin/busybox date -u +%F > \\\$out" ];
+          builder = busybox;
+          args = [ "sh" "-c" (if sandbox == null && features == [ ] then day else ids) ];
           rewindFlags = "--epoch 1790985600 --cpu v3-compat --clock exits";
           rewindRuntime = runtime;
-        }
+          requiredSystemFeatures = features;
+        } // (if sandbox == null then { } else { rewindSandbox = sandbox; }))
         EOF
         build_day() {
           nix-build day.nix --store $store --no-out-link \
@@ -2485,6 +2522,20 @@ in
         grep -q 'requires Rewind package' mismatch
         grep -q 'configured builder is ${rewind}' mismatch
         if grep -q 'the builder ran' mismatch; then exit 1; fi
+
+        # A derivation that asks this Nix for uid-range is refused.
+        if build_day --arg features '[ "uid-range" ]' > asked-out 2> asked; then
+          echo "built a derivation that asks for uid-range" >&2
+          exit 1
+        fi
+        cat asked
+        grep -q 'uid-range' asked
+
+        # As `onRewind` writes the request, the VM gives the sandbox.
+        sandboxed=$(build_day --argstr sandbox ${moved.rewindSandbox} 2> log) || { cat log; exit 1; }
+        cat $store$sandboxed
+        test "$(head -n 1 $store$sandboxed)" = 0
+        test "$(tail -n 1 $store$sandboxed | tr -s ' ' | sed 's/^ //')" = "0 872415232 65536"
         touch $out
       '';
 

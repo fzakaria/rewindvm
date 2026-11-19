@@ -185,12 +185,11 @@
           filter table.
         </p>
         <p>
-          <code>inRewind</code> takes <code>uid-range</code> out of the features the host must have
-          and names the sandbox in the <code>rewindSandbox</code> attribute, since the VM gives the
-          sandbox whatever the host's Nix can do. The host needs neither auto-allocate-uids nor
-          <code>uid-range</code> in its <code>system-features</code>. <code>onRewind</code> leaves
-          the derivation's features as they are, so Nix hands such a derivation only to a machine
-          whose <code>system-features</code> include <code>uid-range</code>.
+          <code>inRewind</code> and <code>onRewind</code> take <code>uid-range</code> out of the
+          features the host must have and name the sandbox in the
+          <code>rewindSandbox</code> attribute, since the VM gives the sandbox whatever the host's
+          Nix can do. The host needs neither auto-allocate-uids nor <code>uid-range</code> in its
+          <code>system-features</code>.
         </p>
       </section>
 

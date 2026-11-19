@@ -628,7 +628,8 @@ fn sandbox<'a>(
     env: &BTreeMap<String, String>,
     attr: impl Fn(&str) -> Option<&'a Value>,
 ) -> Result<Sandbox> {
-    // The sandbox `inRewind` names, in place of a feature the host lacks.
+    // The sandbox `inRewind` or `onRewind` names, in place of a feature
+    // the host lacks.
     let named = match env.get(SANDBOX_ATTRIBUTE) {
         Some(value) => Some(value.as_str()),
         None => attr(SANDBOX_ATTRIBUTE).and_then(Value::as_str),
