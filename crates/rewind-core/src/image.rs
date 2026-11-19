@@ -100,12 +100,10 @@ pub fn from_store_paths(store: &Path, paths: &[PathBuf], out: &Path) -> Result<(
     // of them.
     let list = scratch_beside(out, "list");
     fs::write(&list, names.join("\n") + "\n")?;
-    let tar = scratch_beside(out, "tar");
-
-    let status = tar_command()
-        .args(["--create", "--file"])
-        .arg(&tar)
-        .arg("--directory")
+    // tar writes to a pipe that mkfs.erofs reads, so the build needs disk
+    // for the image only, not for a tar of the closure too.
+    let mut tar = tar_command()
+        .args(["--create", "--file", "-", "--directory"])
         .arg(store)
         .args([
             "--sort=name",
@@ -117,16 +115,27 @@ pub fn from_store_paths(store: &Path, paths: &[PathBuf], out: &Path) -> Result<(
             "--files-from",
         ])
         .arg(&list)
-        .stdout(Stdio::null())
-        .status()
+        .stdout(Stdio::piped())
+        .spawn()
         .context("running tar")?;
-    if !status.success() {
+    let stream = tar.stdout.take().context("taking the stdout of tar")?;
+    let mkfs = mkfs_erofs()
+        .arg("--tar=f")
+        .arg(out)
+        .stdin(stream)
+        .status()
+        .context("running mkfs.erofs; is erofs-utils on PATH?");
+    // Wait for tar also when mkfs.erofs fails, so that no zombie stays.
+    let tarred = tar.wait().context("waiting for tar");
+    let _ = fs::remove_file(&list);
+    // A failed mkfs.erofs stops tar with `SIGPIPE`, so tell its failure first.
+    if !mkfs?.success() {
+        bail!("mkfs.erofs failed on the store paths");
+    }
+    if !tarred?.success() {
         bail!("tar failed on the store paths");
     }
-    let built = from_tar(&tar, out);
-    let _ = fs::remove_file(&tar);
-    let _ = fs::remove_file(&list);
-    built
+    Ok(())
 }
 
 /// A scratch file for building the image at `out`, named after all of
@@ -265,15 +274,16 @@ mod tests {
     fn writers_of_one_image_build_from_their_own_scratch_files() {
         // Two writers of the same store image, as two rewind check
         // processes packing one closure are, each get a temporary name;
-        // the tar and name list built from each must differ too, or one
-        // writer deletes the tar the other's mkfs.erofs is reading.
+        // the name list built from each must differ too, or one writer
+        // deletes the list the other's tar is reading.
         let image = Path::new("/home/images/store-abc.erofs");
         let first = temp_beside(image);
         let second = temp_beside(image);
-        for kind in ["tar", "list"] {
-            assert_ne!(scratch_beside(&first, kind), scratch_beside(&second, kind));
-            assert!(is_temp_beside(image, &scratch_beside(&first, kind)));
-        }
+        assert_ne!(
+            scratch_beside(&first, "list"),
+            scratch_beside(&second, "list")
+        );
+        assert!(is_temp_beside(image, &scratch_beside(&first, "list")));
     }
 
     #[test]
@@ -285,7 +295,7 @@ mod tests {
         let tmp = temp_beside(image);
         let here = Some(std::process::id());
         assert_eq!(temp_writer(&tmp), here);
-        assert_eq!(temp_writer(&scratch_beside(&tmp, "tar")), here);
+        assert_eq!(temp_writer(&scratch_beside(&tmp, "list")), here);
         assert_eq!(temp_writer(Path::new("/images/root.tmp-41-7")), Some(41));
         assert_eq!(temp_writer(image), None);
         assert_eq!(temp_writer(Path::new("/images/root.tmp")), None);
