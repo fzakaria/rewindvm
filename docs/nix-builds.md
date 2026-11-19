@@ -46,17 +46,30 @@ build. Those overrides still work for interactive commands such as
 
 ## Containers
 
-A derivation that names `uid-range` in `requiredSystemFeatures` runs as
-root (uid 0, gid 0) in the VM, in place of the usual build user. This
-matches the sandbox that Nix gives such a build. The guest has a cgroup2
-hierarchy at `/sys/fs/cgroup`, and its kernel has veth, bridge and TUN
-devices. Thus a builder can start containers with `systemd-nspawn`, for
-example a NixOS test that defines `containers` but no `nodes`.
+A derivation that names `uid-range` in `requiredSystemFeatures` gets the
+sandbox nix-daemon gives such a build. Its builder runs in user, mount,
+network, cgroup and PID namespaces of its own, as PID 1 of the PID
+namespace, in a root it owns. The user namespace maps 65536 ids,
+starting at 872415232 outside, as nix-daemon's auto-allocate-uids does,
+and the builder is uid 0 and gid 0 inside it. The builder owns a cgroup
+and sees it at `/sys/fs/cgroup`. It is root only over its own
+namespaces: it cannot remount the guest's store, write the guest's
+sysctls or open Rewind's devices. Other builds run as the build user in
+init's namespaces, and their guest has no cgroup hierarchy mounted.
 
-The guest kernel has nf_tables, so the NixOS firewall works in such a
-container, with `iptables-nft` or with `networking.nftables`. It has no
-legacy iptables tables. Nix runs a `uid-range` derivation only on a
-machine whose `system-features` include `uid-range`.
+The guest kernel has user namespaces, veth, bridge and TUN devices, and
+nf_tables. Thus a builder can start containers with `systemd-nspawn`, for
+example a NixOS test that defines `containers` but no `nodes`. The NixOS
+firewall works in such a container with `iptables-nft` or with
+`networking.nftables`. The kernel also keeps x86_64_defconfig's legacy
+iptables filter table.
+
+`inRewind` takes `uid-range` out of the features the host must have and
+names the sandbox in the `rewindSandbox` attribute, since the VM gives
+the sandbox whatever the host's Nix can do. The host needs neither
+auto-allocate-uids nor `uid-range` in its `system-features`. `onRewind`
+leaves the derivation's features as they are, so Nix hands such a
+derivation only to a machine whose `system-features` include `uid-range`.
 
 ## The builder wrapper
 
