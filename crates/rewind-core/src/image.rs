@@ -31,6 +31,12 @@ const MTIME: &str = "1";
 /// `CONFIG_EROFS_FS_ZIP`, which reads LZ4. An image of a store closure
 /// is approximately 55 percent of the closure size, and the guest
 /// decompresses a block only when it reads it.
+///
+/// mkfs.erofs compresses a file in 16 MiB segments on worker threads, the
+/// same segments for any number of workers, so the image is the same on
+/// a machine with any number of CPUs. A mkfs.erofs built without threads
+/// compresses each file whole and makes a different image of the same
+/// files.
 const COMPRESSOR: &str = "lz4hc";
 
 /// The mkfs.erofs flags that make an image a function of its files.
@@ -408,5 +414,26 @@ mod tests {
         let manifest = Path::new("/runs/abc/manifest.json");
         assert!(!is_temp_beside(trace, &temp_beside(manifest)));
         assert!(!is_temp_beside(trace, Path::new("/runs/abc/trace.tmp")));
+    }
+
+    #[test]
+    fn an_image_holds_its_file_data_compressed() {
+        // A file of one repeated line packs into an image smaller than
+        // half the file, which an image of the data uncompressed cannot
+        // be. Packs a 1 MiB file and compares the image's size with it.
+        const FILE_BYTES: usize = 1 << 20;
+        let dir = std::env::temp_dir().join(format!("rewind-compressed-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let tree = dir.join("tree");
+        fs::create_dir_all(&tree).unwrap();
+        let line = b"the same line, again and again\n";
+        let data: Vec<u8> = line.iter().copied().cycle().take(FILE_BYTES).collect();
+        fs::write(tree.join("repeated"), &data).unwrap();
+
+        let image = dir.join("tree.erofs");
+        from_dir(&tree, &image).unwrap();
+        let size = fs::metadata(&image).unwrap().len();
+        assert!(size < FILE_BYTES as u64 / 2, "{size} bytes");
+        fs::remove_dir_all(&dir).unwrap();
     }
 }
