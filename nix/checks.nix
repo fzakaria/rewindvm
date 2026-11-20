@@ -2406,6 +2406,12 @@ in
             test "$NIX_BUILD_CORES" = 1
             test "$(id -u):$(id -g)" = 1000:100
             test "$PWD" = /build
+            # The directory above the build directory is dated by the VM's
+            # clock, as the root nix-daemon makes for a build is, and not by
+            # the initramfs, whose entries are all one second after the
+            # epoch. stdenv counts a source file toward SOURCE_DATE_EPOCH
+            # only when the file is not newer than that directory.
+            test "$(stat -c %Y "$NIX_BUILD_TOP/..")" -ge 1790985600
             test "$(cat "$textPath")" = "passed as a file"
             mkdir -p $out/bin $out/empty
             date -u +%F > $out/date

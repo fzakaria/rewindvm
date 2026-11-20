@@ -1955,12 +1955,6 @@ fn mount(source: &str, target: &str, fstype: &str, flags: libc::c_ulong, data: &
     Ok(())
 }
 
-/// The modification time, in seconds after the epoch, that nix/guest.nix
-/// gives every entry of the initramfs, its root directory included, so
-/// that the initramfs is the same wherever it is built.
-#[cfg(test)]
-const PACKED_MTIME_SECONDS: u64 = 1;
-
 /// Gives the job's root directory the time on the VM's clock, which is
 /// the run's epoch at boot and the same in every replay.
 ///
@@ -2354,6 +2348,11 @@ mod tests {
         assert!(take_typed(&mut pending, |c, r| sizes.push((c, r))).is_empty());
         assert_eq!(sizes, [(80, 24)]);
     }
+
+    /// The modification time, in seconds after the epoch, that
+    /// nix/guest.nix gives every entry of the initramfs, its root directory
+    /// included, so that the initramfs is the same wherever it is built.
+    const PACKED_MTIME_SECONDS: u64 = 1;
 
     /// A job's root is given the time of the VM's clock. Makes a directory,
     /// sets its modification time to one second after the epoch, as the

@@ -20,6 +20,12 @@ Both functions accept the same settings:
 | `cores`    | `1`           | Reported CPU count and `NIX_BUILD_CORES`                       |
 | `mem`      | `1024`        | Guest memory in MiB, including build files, at most 32 GiB     |
 
+Choose an epoch later than the newest file in the sources. stdenv takes
+`SOURCE_DATE_EPOCH` from the newest source file that is not newer than the
+build's root directory, and the root directory carries the VM's clock. A
+source file dated after the epoch is therefore not counted, as a file the
+build generated is not.
+
 Counter time requires an exact branch counter. On AMD, the NixOS option
 `programs.rewind.amdBranchCounterWorkaround = true` enables the counter
 and makes its marker available in Nix's sandbox. On another distribution,

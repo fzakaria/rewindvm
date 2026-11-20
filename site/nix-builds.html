@@ -130,6 +130,12 @@
           </table>
         </div>
         <p>
+          Choose an epoch later than the newest file in the sources. stdenv takes
+          <code>SOURCE_DATE_EPOCH</code> from the newest source file that is not newer than the
+          build's root directory, and the root directory carries the VM's clock. A source file dated
+          after the epoch is therefore not counted, as a file the build generated is not.
+        </p>
+        <p>
           Counter time requires an exact branch counter. On AMD, the NixOS option
           <code>programs.rewind.amdBranchCounterWorkaround = true</code> enables the counter and
           makes its marker available in Nix's sandbox. On another distribution, run
