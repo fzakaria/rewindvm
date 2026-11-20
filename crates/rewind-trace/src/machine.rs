@@ -22,9 +22,9 @@ pub enum CpuModel {
     /// hidden, for hosts that lack them, such as an EPYC 7763 (Zen 3) host
     /// whose CPUID does not show ERMS, or a Haswell host, which does not
     /// show PREFETCHW. Everything else is the V3 model's, so a run made
-    /// this way replays on hosts with or without them. A V3Compat run is not a
-    /// V3 run: the guest sees a different CPU, so the same inputs make a
-    /// different run.
+    /// this way replays on hosts with or without them. A V3Compat run is
+    /// not a V3 run: the guest sees a different CPU, so the same inputs
+    /// make a different run.
     V3Compat,
 }
 

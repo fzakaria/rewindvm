@@ -197,7 +197,9 @@ pub enum DefaultModel {
     /// The host has the whole x86-64-v3 baseline.
     V3,
     /// The host lacks ERMS, PREFETCHW or both, and nothing else.
-    V3Compat,
+    /// `lacking` names the bits the host lacks, as "ERMS (leaf 7 EBX bit
+    /// 9)", joined by "and" where the host lacks both.
+    V3Compat { lacking: String },
     /// The host lacks a bit that v3-compat shows the guest, so only
     /// `--cpu host` records there.
     /// `lacking` names the missing bits, as "leaf 7 EBX bits 0x220".
@@ -210,7 +212,7 @@ impl DefaultModel {
     pub fn model(&self) -> Result<CpuModel> {
         match self {
             DefaultModel::V3 => Ok(CpuModel::V3),
-            DefaultModel::V3Compat => Ok(CpuModel::V3Compat),
+            DefaultModel::V3Compat { .. } => Ok(CpuModel::V3Compat),
             DefaultModel::HostOnly { lacking } => {
                 anyhow::bail!("this CPU lacks the x86-64-v3 model's {lacking}; run with --cpu host")
             }
@@ -482,7 +484,8 @@ fn classify(host: &[kvm_cpuid_entry2]) -> Result<DefaultModel> {
         return Ok(DefaultModel::V3);
     }
     if lacking.lacking(Features::COMPAT_HIDDEN) == Features::NONE {
-        return Ok(DefaultModel::V3Compat);
+        let (_, named) = compat_named(lacking);
+        return Ok(DefaultModel::V3Compat { lacking: named });
     }
 
     // The host lacks a bit that neither fixed model hides.
@@ -858,21 +861,32 @@ mod tests {
 
     #[test]
     fn the_default_model_follows_what_the_host_lacks() {
-        // Hosts: one with the whole baseline gets v3, one without ERMS, one
-        // without PREFETCHW and one without both get v3-compat, and one
-        // without ERMS and AVX2 gets only the
-        // host model, with both missing bits named. A run that asks for no
-        // model is refused on that last host, which says to use --cpu host.
+        // Hosts: one with the whole baseline gets v3. One without ERMS, one
+        // without PREFETCHW and one without both get v3-compat, each with
+        // the bits that host lacks named and no others. One without ERMS
+        // and AVX2 gets only the host model, with both missing bits named.
+        // A run that asks for no model is refused on that last host, which
+        // says to use --cpu host.
         const AVX2: u32 = 1 << 5;
         assert_eq!(classify(&host(NOTHING)).unwrap(), DefaultModel::V3);
-        assert_eq!(classify(&host(ERMS_ONLY)).unwrap(), DefaultModel::V3Compat);
+        let without_erms = classify(&host(ERMS_ONLY)).unwrap();
+        assert_eq!(
+            without_erms,
+            DefaultModel::V3Compat {
+                lacking: "ERMS (leaf 7 EBX bit 9)".into()
+            }
+        );
         assert_eq!(
             classify(&host(PREFETCHW_ONLY)).unwrap(),
-            DefaultModel::V3Compat
+            DefaultModel::V3Compat {
+                lacking: "PREFETCHW (leaf 0x80000001 ECX bit 8)".into()
+            }
         );
         assert_eq!(
             classify(&host(Features::COMPAT_HIDDEN)).unwrap(),
-            DefaultModel::V3Compat
+            DefaultModel::V3Compat {
+                lacking: "ERMS (leaf 7 EBX bit 9) and PREFETCHW (leaf 0x80000001 ECX bit 8)".into()
+            }
         );
         let lacking = Features {
             leaf7_ebx: ERMS | AVX2,
@@ -886,7 +900,7 @@ mod tests {
             }
         );
         assert_eq!(DefaultModel::V3.model().unwrap(), CpuModel::V3);
-        assert_eq!(DefaultModel::V3Compat.model().unwrap(), CpuModel::V3Compat);
+        assert_eq!(without_erms.model().unwrap(), CpuModel::V3Compat);
         let refused = host_only.model().unwrap_err().to_string();
         assert_eq!(
             refused,
@@ -930,6 +944,47 @@ mod tests {
         );
         supports(&haswell, CpuModel::V3Compat, RunKind::New).unwrap();
         supports(&haswell, CpuModel::V3Compat, RunKind::Recorded).unwrap();
+    }
+
+    #[test]
+    fn v3_on_a_host_without_either_names_both() {
+        // A host that shows neither ERMS nor PREFETCHW. Asking for v3
+        // there refuses and names both bits, joined by "and".
+        let refused = supports(&host(Features::COMPAT_HIDDEN), CpuModel::V3, RunKind::New)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            refused,
+            "this CPU lacks ERMS (leaf 7 EBX bit 9) and PREFETCHW (leaf 0x80000001 ECX bit 8), \
+             which the x86-64-v3 model shows the guest; run with --cpu v3-compat, the same \
+             model without ERMS and PREFETCHW, or --cpu host"
+        );
+    }
+
+    #[test]
+    fn a_recorded_v3_run_without_prefetchw_says_where_it_replays() {
+        // A recorded v3 run's machine built on a host that lacks only
+        // PREFETCHW, and on one that lacks ERMS too: the refusal names the
+        // bits that host lacks, and says to replay on a host with them.
+        let refused = baseline(&host(PREFETCHW_ONLY), CpuModel::V3)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            refused,
+            "this v3 run needs a CPU with PREFETCHW (leaf 0x80000001 ECX bit 8), which this \
+             CPU lacks; replay it on a host with PREFETCHW. Recording it again here with \
+             --cpu v3-compat or --cpu host makes a different run"
+        );
+        let refused = baseline(&host(Features::COMPAT_HIDDEN), CpuModel::V3)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            refused,
+            "this v3 run needs a CPU with ERMS (leaf 7 EBX bit 9) and PREFETCHW (leaf \
+             0x80000001 ECX bit 8), which this CPU lacks; replay it on a host with ERMS and \
+             PREFETCHW. Recording it again here with --cpu v3-compat or --cpu host makes a \
+             different run"
+        );
     }
 
     #[test]

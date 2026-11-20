@@ -2024,9 +2024,14 @@ impl From<CpuArg> for rewind_vmm::CpuModel {
 }
 
 /// What a run without --cpu says on a host that gets the v3-compat model.
-const V3_COMPAT_NOTICE: &str = "this CPU lacks ERMS (fast REP MOVSB) or PREFETCHW, which \
-     --cpu v3 needs, so runs use --cpu v3-compat, which is v3 without ERMS and PREFETCHW and \
-     replays on hosts with or without them";
+/// `lacking` names the bits of the v3 model the host does not show, as
+/// "ERMS (leaf 7 EBX bit 9)".
+fn v3_compat_notice(lacking: &str) -> String {
+    format!(
+        "this CPU lacks {lacking}, which --cpu v3 needs, so runs use --cpu v3-compat, which is \
+         v3 without ERMS and PREFETCHW and replays on hosts with or without them"
+    )
+}
 
 /// The CPU model a run shows the guest. A model given with --cpu is checked
 /// against this host now, before a Nix closure is packed for minutes. With
@@ -2042,12 +2047,14 @@ fn resolve_cpu(arg: Option<CpuArg>) -> Result<rewind_vmm::CpuModel> {
         return Ok(model);
     }
 
-    // No model asked for: the one this host's features allow.
-    let model = rewind_vmm::cpu::default_model(&kvm)?;
-    if model == rewind_vmm::CpuModel::V3Compat {
-        eprintln!("{} {V3_COMPAT_NOTICE}", color::stderr().prefix());
+    // No model asked for: the one this host's features allow, with a line
+    // naming what the host lacks where that model is v3-compat.
+    let default = rewind_vmm::cpu::default_for(&kvm)?;
+    if let rewind_vmm::cpu::DefaultModel::V3Compat { lacking } = &default {
+        let notice = v3_compat_notice(lacking);
+        eprintln!("{} {notice}", color::stderr().prefix());
     }
-    Ok(model)
+    default.model()
 }
 
 /// The machine options every way of starting a run shares.
@@ -2084,8 +2091,8 @@ pub(crate) struct MachineArgs {
     #[arg(long, value_name = "DURATION", default_value_t = StallMax::default())]
     stall_max: StallMax,
     /// The CPU the VM sees: a fixed x86-64-v3 model that replays on any
-    /// machine supporting it, the same model without ERMS and PREFETCHW, or this
-    /// machine's own features.
+    /// machine supporting it, the same model without ERMS and PREFETCHW,
+    /// or this machine's own features.
     ///
     /// Defaults to v3, or to v3-compat on a machine that lacks only ERMS or
     /// PREFETCHW.
@@ -2898,6 +2905,20 @@ pub(super) fn exit_status(run: &Run) -> ExitCode {
 mod tests {
     // How a run echoes, from its flags and where its output goes.
     use super::*;
+
+    #[test]
+    fn the_v3_compat_notice_names_what_this_cpu_lacks() {
+        // The line a run without --cpu prints on a host that gets
+        // v3-compat, for a host that lacks ERMS alone: the notice names
+        // ERMS as what the CPU lacks, and both hidden bits only as what
+        // the model leaves out.
+        assert_eq!(
+            v3_compat_notice("ERMS (leaf 7 EBX bit 9)"),
+            "this CPU lacks ERMS (leaf 7 EBX bit 9), which --cpu v3 needs, so runs use --cpu \
+             v3-compat, which is v3 without ERMS and PREFETCHW and replays on hosts with or \
+             without them"
+        );
+    }
 
     /// Which seeds' first batch of schedules a search starts alongside the
     /// seed's unperturbed run: every seed's with schedules to try, except
