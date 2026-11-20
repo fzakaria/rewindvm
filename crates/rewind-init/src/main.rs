@@ -181,6 +181,7 @@ fn run() -> Result<()> {
         fs::write(&path, &f.contents).map_err(|e| format!("writing {}: {e}", f.path))?;
         chown(&path.to_string_lossy(), uid, gid)?;
     }
+    date_root(root)?;
     if job.sandbox == Sandbox::UidRange {
         prepare_uid_range(&job)?;
     }
@@ -1954,6 +1955,29 @@ fn mount(source: &str, target: &str, fstype: &str, flags: libc::c_ulong, data: &
     Ok(())
 }
 
+/// The modification time, in seconds after the epoch, that nix/guest.nix
+/// gives every entry of the initramfs, its root directory included, so
+/// that the initramfs is the same wherever it is built.
+#[cfg(test)]
+const PACKED_MTIME_SECONDS: u64 = 1;
+
+/// Gives the job's root directory the time on the VM's clock, which is
+/// the run's epoch at boot and the same in every replay.
+///
+/// A Nix build's root is a directory nix-daemon made a moment before the
+/// build started, and a build can tell: the stdenv hook that picks
+/// SOURCE_DATE_EPOCH counts only the source files that are not newer than
+/// the directory above the build directory. Against a root packed with a
+/// time of one second no source file counts, the date stays at stdenv's
+/// default of 1980, and whatever the build stamps with it, a wheel's zip
+/// entries or Perl's perllocal.pod, differs from what Nix builds.
+fn date_root(root: &str) -> Result<()> {
+    let now = std::time::SystemTime::now();
+    File::open(root)
+        .and_then(|directory| directory.set_modified(now))
+        .map_err(|e| format!("dating {root}: {e}"))
+}
+
 fn mkdir(path: &str) -> Result<()> {
     fs::create_dir_all(path).map_err(|e| format!("creating {path}: {e}"))
 }
@@ -2329,5 +2353,26 @@ mod tests {
         pending.extend_from_slice(&message[3..]);
         assert!(take_typed(&mut pending, |c, r| sizes.push((c, r))).is_empty());
         assert_eq!(sizes, [(80, 24)]);
+    }
+
+    /// A job's root is given the time of the VM's clock. Makes a directory,
+    /// sets its modification time to one second after the epoch, as the
+    /// initramfs has every entry, dates it, and reads the time back: it
+    /// is no longer the packed one and is not ahead of the clock.
+    #[test]
+    fn a_root_is_dated_by_the_clock_and_not_by_the_initramfs() {
+        let root = std::env::temp_dir().join(format!("rewind-init-date-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let packed = std::time::UNIX_EPOCH + std::time::Duration::from_secs(PACKED_MTIME_SECONDS);
+        File::open(&root).unwrap().set_modified(packed).unwrap();
+        assert_eq!(fs::metadata(&root).unwrap().modified().unwrap(), packed);
+
+        let before = std::time::SystemTime::now();
+        date_root(&root.to_string_lossy()).unwrap();
+        let dated = fs::metadata(&root).unwrap().modified().unwrap();
+        assert!(dated >= before);
+        assert!(dated <= std::time::SystemTime::now());
+        fs::remove_dir_all(&root).unwrap();
     }
 }
