@@ -127,6 +127,16 @@ function clearStatus() {
 // than the app, a sideways swipe scrolls the frame instead of reaching
 // the app.
 function adopt(node) {
+  // A node the app has taken off the body again stays off the page. In a
+  // browser without WebGPU, such as Firefox on Linux, the app appends a
+  // canvas, removes that canvas and appends another for WebGL2, and the
+  // observer hears of all three at once. The removed canvas is as large
+  // as the frame and nothing draws on it, so in the frame it would push
+  // the canvas the app draws on out of sight.
+  if (node.parentElement !== document.body) {
+    return;
+  }
+
   if (node instanceof HTMLCanvasElement) {
     frame.appendChild(node);
     clearStatus();
@@ -136,10 +146,8 @@ function adopt(node) {
     }
     return;
   }
-  if (
-    node instanceof HTMLParagraphElement &&
-    node.parentElement === document.body
-  ) {
+
+  if (node instanceof HTMLParagraphElement) {
     clearStatus();
     frame.appendChild(node);
   }

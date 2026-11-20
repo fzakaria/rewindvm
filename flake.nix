@@ -288,6 +288,7 @@
             kernel
             guest
             gdb
+            site
             ;
           inherit releaseDate;
           module = self.nixosModules.default;

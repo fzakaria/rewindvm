@@ -8,6 +8,7 @@
   kernel,
   guest,
   gdb,
+  site,
   module,
   rewindLib,
 }:
@@ -1557,6 +1558,39 @@ in
             "run tools/md2html.py and nix fmt" >&2
           exit 1
         fi
+        touch $out
+      '';
+
+  # checks.viewer-firefox: the viewer shows the app in Firefox, which on
+  # Linux has no WebGPU, so the app draws through WebGL2 on a second
+  # canvas after taking its first one off the page. Serves the built site
+  # on a loopback port, opens an example in Firefox, and fails unless the
+  # viewer's frame holds one canvas that fills the frame
+  # (tools/check-viewer-firefox.py). Firefox runs in a window on Xvfb and
+  # draws WebGL2 in software through Mesa: headless Firefox finds no
+  # WebGL2 in the sandbox, which has no GPU driver. The sandbox has no
+  # driver directory either, so the check names Mesa's.
+  viewer-firefox =
+    pkgs.runCommand "rewind-viewer-firefox"
+      {
+        nativeBuildInputs = [
+          pkgs.firefox
+          pkgs.geckodriver
+          pkgs.xvfb-run
+          (pkgs.python3.withPackages (p: [ p.selenium ]))
+        ];
+        LIBGL_ALWAYS_SOFTWARE = "1";
+        LIBGL_DRIVERS_PATH = "${pkgs.mesa}/lib/dri";
+        __EGL_VENDOR_LIBRARY_FILENAMES = "${pkgs.mesa}/share/glvnd/egl_vendor.d/50_mesa.json";
+        LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
+          pkgs.mesa
+          pkgs.libglvnd
+        ];
+      }
+      ''
+        export HOME=$TMPDIR
+        xvfb-run -a -s "-screen 0 1600x1000x24" \
+          python3 ${../tools/check-viewer-firefox.py} --window ${site}
         touch $out
       '';
 
