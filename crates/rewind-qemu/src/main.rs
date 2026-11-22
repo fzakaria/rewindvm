@@ -19,6 +19,8 @@ use clap::{Parser, ValueEnum};
 use rewind_core::run::{Run, SpecExt};
 use rewind_trace::machine::{ClockSource, CpuModel, Extras};
 use rewind_trace::step_log::{self, Stop};
+
+mod schedule;
 use rewind_trace::{Event, Trace, TraceWriter};
 
 #[derive(Parser, Debug)]
@@ -84,9 +86,6 @@ fn main() -> Result<()> {
     if spec.clock != ClockSource::Exits {
         bail!("the run's clock counts branches; only runs with --clock exits replay here");
     }
-    if spec.schedule != 0 || !spec.inherited_schedules.is_empty() || !spec.reseeds.is_empty() {
-        bail!("the run's schedule is perturbed; only the unperturbed schedule replays here");
-    }
     let vendor = match args.vendor {
         Some(v) => v,
         None => Vendor::of_host()?,
@@ -128,6 +127,20 @@ fn main() -> Result<()> {
     );
     if let Some(image) = &config.image {
         write!(machine, ",image={}", image.display())?;
+    }
+
+    // The steps the schedule perturbs, through the recording's last.
+    let last = run
+        .manifest
+        .outcome
+        .as_ref()
+        .map(|o| o.step)
+        .context("the run has not ended; replay a run that has")?;
+    let schedule = schedule::encode(&config.schedule, last);
+    if schedule.len() > schedule::MAGIC.len() {
+        let path = work.join("schedule");
+        std::fs::write(&path, &schedule)?;
+        write!(machine, ",schedule={}", path.display())?;
     }
 
     let started = Instant::now();
