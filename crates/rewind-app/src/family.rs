@@ -292,6 +292,9 @@ pub struct Row {
     pub apart: Option<String>,
     pub graph: Graph,
     pub kind: RowKind,
+    /// For a row that folds runs, the ids of the runs it stands for; none
+    /// for a run's row.
+    pub stands_for: Vec<String>,
 }
 
 /// What a Runs panel row is.
@@ -690,7 +693,7 @@ impl Family {
             }
         }
         let mut folded: HashSet<&str> = HashSet::new();
-        let mut placeholders: Vec<(RunEntry, RowKind)> = Vec::new();
+        let mut placeholders: Vec<(RunEntry, RowKind, Vec<&str>)> = Vec::new();
         for (under, (folds, runs)) in groups {
             if runs.len() < MIN_FOLD {
                 continue;
@@ -699,7 +702,7 @@ impl Family {
             let kind = if fold.as_ref().is_some_and(|f| f.unfolded.contains(under)) {
                 RowKind::Unfolded { count, folds }
             } else {
-                folded.extend(runs);
+                folded.extend(runs.iter().copied());
                 RowKind::Folded { count, folds }
             };
             let Some(under) = by_id.get(under).copied() else {
@@ -710,7 +713,7 @@ impl Family {
                 trace_hash: None,
                 ..under.clone()
             };
-            placeholders.push((placeholder, kind));
+            placeholders.push((placeholder, kind, runs));
         }
 
         let mut children: HashMap<&str, Vec<&RunEntry>> = HashMap::new();
@@ -753,8 +756,8 @@ impl Family {
         // Each folding row comes first among the runs from boot under the
         // run its runs are under, after the real forks, so it stays where
         // it is as it opens and closes.
-        let mut stands_for: HashMap<&str, (&RunEntry, RowKind)> = HashMap::new();
-        for (placeholder, kind) in &placeholders {
+        let mut stands_for: HashMap<&str, (&RunEntry, RowKind, &[&str])> = HashMap::new();
+        for (placeholder, kind, runs) in &placeholders {
             let Some(under) = placeholder
                 .id
                 .strip_suffix(FOLD_ID_SUFFIX)
@@ -768,7 +771,7 @@ impl Family {
                 .position(|r| r.parent.is_none())
                 .unwrap_or(list.len());
             list.insert(at, placeholder);
-            stands_for.insert(placeholder.id.as_str(), (under, *kind));
+            stands_for.insert(placeholder.id.as_str(), (under, *kind, runs));
         }
 
         // Depth first, each row tagged with the root it is under and its
@@ -826,7 +829,7 @@ impl Family {
         order
             .into_iter()
             .map(|(run, depth, _, graph)| {
-                if let Some((under, kind)) = stands_for.get(run.id.as_str()) {
+                if let Some((under, kind, runs)) = stands_for.get(run.id.as_str()) {
                     return Row {
                         run: (*under).clone(),
                         depth,
@@ -834,6 +837,7 @@ impl Family {
                         apart: None,
                         graph,
                         kind: *kind,
+                        stands_for: runs.iter().map(ToString::to_string).collect(),
                     };
                 }
                 let identical_to = repeats.get(&run.id).map(|r| r.same_as.clone());
@@ -844,6 +848,7 @@ impl Family {
                     apart: apart(run),
                     graph,
                     kind: RowKind::Run,
+                    stands_for: Vec::new(),
                 }
             })
             .collect()
@@ -1873,6 +1878,16 @@ mod tests {
         );
         let w1 = f.runs.iter().find(|r| r.id == "w1").unwrap();
         assert_eq!(f.tree_parent(w1).map(|r| r.id.as_str()), Some("r"));
+
+        // Each folding row names the runs it stands for, for the step
+        // axis to draw; a run's row names none.
+        let mut hidden = rows[3].stands_for.clone();
+        hidden.sort();
+        assert_eq!(hidden, vec!["w1", "w2", "w3"]);
+        let mut ended = rows[1].stands_for.clone();
+        ended.sort();
+        assert_eq!(ended, vec!["s6", "s7"]);
+        assert!(rows[0].stands_for.is_empty());
 
         // Unfolded, every window is there after the row that folds them.
         let open = HashSet::from(["s5".to_string()]);

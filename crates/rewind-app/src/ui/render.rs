@@ -16,7 +16,7 @@ use gpui::{
 
 use crate::describe::{self, EventTone, short_store_paths, thousands};
 use crate::family::{Family, Progress, Row, RowKind as RunsRowKind, RunEntry};
-use crate::family_axis::Track;
+use crate::family_axis::{Cluster, Track};
 use crate::model::{FileOp, FileTone, LogFilter, Motion, RowKind, Tone};
 use crate::proc_card::Pick;
 use crate::run::{Agreement, Session, Verdict, short_id};
@@ -26,7 +26,9 @@ use crate::theme::{self, layout, size};
 use crate::tour::Anchor;
 use crate::ui::ansi::penned;
 use crate::ui::chrome::client_tiling;
-use crate::ui::family_axis::{LABEL_WIDTH as STEPS_LABEL_WIDTH, other_layout, track_cell};
+use crate::ui::family_axis::{
+    LABEL_WIDTH as STEPS_LABEL_WIDTH, cluster_cell, other_layout, track_cell,
+};
 use crate::ui::icons::Icon;
 use crate::ui::runs::Layout as RunsLayout;
 use crate::ui::scrubber::{ForkState, NoticeAction, NoticeTone, Scrub, Scrubber};
@@ -2459,10 +2461,27 @@ impl Scrubber {
                                 } else {
                                     row.detail()
                                 };
-                                let track = if is_run {
-                                    Track::of(&row.run, this.runs.parted(&row.run), axis)
+                                // A run's track, or for a folded row the
+                                // ends and program marks of the runs it
+                                // hides.
+                                let cell = if is_run {
+                                    let track =
+                                        Track::of(&row.run, this.runs.parted(&row.run), axis);
+                                    track_cell(track, row.run.failed, axis.at(playhead))
+                                        .into_any_element()
                                 } else {
-                                    Track::default()
+                                    let hidden = match row.kind {
+                                        RunsRowKind::Folded { .. } => row.stands_for.as_slice(),
+                                        RunsRowKind::Run | RunsRowKind::Unfolded { .. } => &[],
+                                    };
+                                    let runs = this
+                                        .runs
+                                        .family
+                                        .iter()
+                                        .flat_map(|f| &f.runs)
+                                        .filter(|r| hidden.contains(&r.id));
+                                    let cluster = Cluster::of(runs, |r| this.runs.parted(r), axis);
+                                    cluster_cell(cluster, axis.at(playhead)).into_any_element()
                                 };
                                 d.tooltip(tooltip(note))
                                     .on_scroll_wheel(cx.listener(
@@ -2489,7 +2508,7 @@ impl Scrubber {
                                                     .child(id),
                                             ),
                                     )
-                                    .child(track_cell(track, row.run.failed, axis.at(playhead)))
+                                    .child(cell)
                             })
                             // Ctrl and Shift pick runs; a plain press goes on
                             // to start a text selection.

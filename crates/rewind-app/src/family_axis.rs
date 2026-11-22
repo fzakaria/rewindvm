@@ -163,6 +163,55 @@ impl Track {
     }
 }
 
+/// Where a run a folding row hides ended, across the window.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct End {
+    pub at: f32,
+    pub failed: bool,
+}
+
+/// What a folding row draws over a window for the runs it hides: a mark
+/// where each ended, and one where each one's failing program first
+/// behaves differently, so the spread of a schedule's runs shows without
+/// a row for each.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Cluster {
+    pub ends: Vec<End>,
+    pub behaves: Vec<f32>,
+}
+
+impl Cluster {
+    /// The marks of `runs` over `window`, with what is known of where
+    /// each parts from `parted`. A run that has not ended, and a mark
+    /// outside the window, draw nothing.
+    pub fn of<'a>(
+        runs: impl IntoIterator<Item = &'a RunEntry>,
+        parted: impl Fn(&RunEntry) -> Parted,
+        window: Window,
+    ) -> Cluster {
+        let mut cluster = Cluster::default();
+        for run in runs {
+            let Some(last) = run.last_step else {
+                continue;
+            };
+            if let Some(at) = window.at(last) {
+                cluster.ends.push(End {
+                    at,
+                    failed: run.failed,
+                });
+            }
+            let behaves = match parted(run) {
+                Parted::Known(p) => p.behaves,
+                Parted::Root | Parted::Unknown => None,
+            };
+            cluster
+                .behaves
+                .extend(behaves.and_then(|step| window.at(step)));
+        }
+        cluster
+    }
+}
+
 /// Whether `window` shows every step of runs whose longest ends at `last`.
 pub fn shows_every_step(window: Window, last: u64) -> bool {
     window.from() == 0 && window.to() >= last
@@ -410,6 +459,40 @@ mod tests {
         );
         assert!(shows_every_step(whole, last));
         assert!(!shows_every_step(part, last));
+    }
+
+    #[test]
+    fn a_folding_row_marks_where_each_run_it_hides_ends_and_its_program_differs() {
+        // Two hidden runs: one passed and ended at 60, one failed and
+        // ended at 90 with its program differing at 70. A run past the
+        // window, and one that has not ended, draw nothing.
+        let mut passed = run("p", None, 3);
+        passed.last_step = Some(60);
+        let mut failed = run("f", None, 4);
+        failed.failed = true;
+        let mut later = run("l", None, 5);
+        later.last_step = Some(500);
+        let mut running = run("r", None, 6);
+        running.last_step = None;
+        let parted = |r: &RunEntry| match r.id.as_str() {
+            "f" => known(Some(PARTS), Some(70)),
+            _ => known(Some(PARTS), None),
+        };
+        let cluster = Cluster::of([&passed, &failed, &later, &running], parted, window());
+        assert_eq!(
+            cluster.ends,
+            vec![
+                End {
+                    at: at(60),
+                    failed: false
+                },
+                End {
+                    at: at(LAST),
+                    failed: true
+                }
+            ]
+        );
+        assert_eq!(cluster.behaves, vec![at(70)]);
     }
 
     #[test]

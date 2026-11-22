@@ -21,7 +21,7 @@ use rewind_trace::manifest::TRACE;
 
 use crate::describe::thousands;
 use crate::family::RunEntry;
-use crate::family_axis::{Parted, ToPlayhead, Track, partings, shows_every_step};
+use crate::family_axis::{Cluster, Parted, ToPlayhead, Track, partings, shows_every_step};
 use crate::lanes::{MIN_HALF, Window};
 use crate::theme::{self, size};
 use crate::ui::bookmarks::link;
@@ -62,6 +62,11 @@ const MACHINE_MARK: f32 = 7.0;
 const END_MARK: f32 = 7.0;
 const BEHAVES_WIDTH: f32 = 2.0;
 const PLAYHEAD_WIDTH: f32 = 1.0;
+
+/// The marks a folding row draws for the runs it hides: smaller than a
+/// run's end, and see-through, so where many fall together reads darker.
+const CLUSTER_MARK: f32 = 5.0;
+const CLUSTER_OPACITY: f32 = 0.55;
 
 /// The narrowest the band of perturbed steps is drawn: wider than the
 /// mark where the machine first differs, which sits inside a narrow
@@ -543,6 +548,59 @@ pub(super) fn track_cell(track: Track, failed: bool, playhead: Option<f32>) -> i
                 let dot = mark(at, END_MARK, END_MARK);
                 let radius = if failed { px(1.0) } else { px(END_MARK / 2.0) };
                 window.paint_quad(fill(dot, rgb(own_color)).corner_radii(radius));
+            }
+
+            // The playhead, top to bottom.
+            if let Some(at) = playhead {
+                let line = gpui::Bounds::new(
+                    point(x(at), bounds.top()),
+                    gpui::size(px(PLAYHEAD_WIDTH), bounds.size.height),
+                );
+                window.paint_quad(fill(line, rgb(theme::AMBER)));
+            }
+        },
+    )
+    .flex_grow(theme::layout::FILL)
+    .min_w_0()
+    .h_full()
+}
+
+/// A folding row's track: a small mark where each run it hides ended,
+/// green for a run that passed and red for one that failed, and a tick
+/// where each one's failing program first behaves differently, faint
+/// enough that a pile of them reads as where the runs gather.
+pub(super) fn cluster_cell(cluster: Cluster, playhead: Option<f32>) -> impl IntoElement {
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            let width = bounds.size.width;
+            let x = |fraction: f32| bounds.left() + width * fraction;
+            let mid = bounds.top() + bounds.size.height / 2.0;
+            let mark = |at: f32, w: f32, h: f32| {
+                let (w, h): (Pixels, Pixels) = (px(w), px(h));
+                gpui::Bounds::new(point(x(at) - w / 2.0, mid - h / 2.0), gpui::size(w, h))
+            };
+
+            // Each program mark, then each end over them.
+            for at in &cluster.behaves {
+                window.paint_quad(fill(
+                    mark(*at, BEHAVES_WIDTH, BEHAVES_HEIGHT),
+                    rgb(theme::RED_SOFT).opacity(CLUSTER_OPACITY),
+                ));
+            }
+            for end in &cluster.ends {
+                let color = if end.failed {
+                    theme::RED
+                } else {
+                    theme::GREEN_SOFT
+                };
+                window.paint_quad(
+                    fill(
+                        mark(end.at, CLUSTER_MARK, CLUSTER_MARK),
+                        rgb(color).opacity(CLUSTER_OPACITY),
+                    )
+                    .corner_radii(px(CLUSTER_MARK / 2.0)),
+                );
             }
 
             // The playhead, top to bottom.
