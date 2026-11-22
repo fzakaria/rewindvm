@@ -9,34 +9,34 @@ and in the desktop app. They use the Nix tutorial's runs and install.
 ```console
 $ rewind check --epoch 1790985600 github:fzakaria/rewindvm#mylib | grep -E 'ends differently|limited to|decides it|passing:|failing:|same run until|open both'
 rewind: packing 62 store paths for mylib-0.3.0
-schedule 7 ends differently from schedule 0; finding the step that decides it
-schedule 7 limited to steps 2818..4978 still ends differently
-step 4977 decides it: a request to switch threads there makes the run fail
-passing: run 6a609b9c1faefbc8, schedule 7 over steps 2818..4977
-failing: run e20758b82c63ae48, schedule 7 over steps 2818..4978
-the two are the same run until step 4977
-open both in the desktop app: rewind open e20758b82c63ae48 4981 --compare 6a609b9c1faefbc8
+schedule 8 ends differently from schedule 0; finding the step that decides it
+schedule 8 limited to steps 4677..4706 still ends differently
+step 4705 decides it: a request to switch threads there makes the run fail
+passing: run 104fa1e36e7f41a5, schedule 8 over steps 4677..4705
+failing: run fc9482dea85f64ec, schedule 8 over steps 4677..4706
+the two are the same run until step 4705
+open both in the desktop app: rewind open fc9482dea85f64ec 4711 --compare 104fa1e36e7f41a5
 ```
 
-The failing run crashes at step 4992.
+The failing run crashes at step 4711.
 
 ## Find the line a thread was on
 
 `rewind where` names the line of the program's own code a thread was on at a
 step, skipping the C library and, in Rust, the standard library and
-dependencies. By default it picks the thread of the step's event; at 4992
+dependencies. By default it picks the thread of the step's event; at 4711
 that is the worker that segfaulted:
 
 ```console
-$ rewind where e20758b8 4992
-rewind: process 166 at step 4992; loading symbols for 4 of its files
+$ rewind where fc9482de 4711
+rewind: process 166 at step 4711; loading symbols for 4 of its files
 rewind: fetched 3 source files from the VM
-rewind: walking thread 170's stack in gdb
+rewind: walking thread 172's stack in gdb
 rewind: downloading debug info for libc.so.6; first time only
 rewind: downloading debug info for libpthread.so.0; first time only
 rewind: downloading debug info for ld-linux-x86-64.so.2; first time only
 rewind: downloading source files of libc.so.6; each one only once
-process 166 (test_pool_shutdown), thread 170, at step 4992
+process 166 (test_pool_shutdown), thread 172, at step 4711
 #0 worker (src/pool.c:77)
       75  			printf("job %d done: %ld\n", job, result & 0xffff);
       76  			fflush(stdout);
@@ -44,29 +44,29 @@ process 166 (test_pool_shutdown), thread 170, at step 4992
       78  		}
       79  	}
 arguments:
-  arg = 0x55c074530010
+  arg = 0x5641c70ff010
 locals:
   q = <optimized out>
-  job = 14
-  result = -804966335788770334
-  p = 0x55c074530010
+  job = 16
+  result = 4092430570737637218
+  p = 0x5641c70ff010
 called from #1 start_thread (pthread_create.c:454)
 called from #2 __GI___clone3 (../sysdeps/unix/sysv/linux/x86_64/clone3.S:78)
 ```
 
 Under the source come the frame's arguments and locals, as gdb's `info args`
-and `info locals` print them: the worker had just reported job 14.
+and `info locals` print them: the worker had just reported job 16.
 
-`--tid` picks another thread, on the CPU or not. At step 4992, where
+`--tid` picks another thread, on the CPU or not. At step 4711, where
 the worker faults, the main thread is waiting to join the workers:
 
 ```console
-$ rewind where e20758b8 4992 --tid 166
-rewind: process 166 at step 4992; loading symbols for 4 of its files
+$ rewind where fc9482de 4711 --tid 166
+rewind: process 166 at step 4711; loading symbols for 4 of its files
 rewind: read 3 source files fetched from the VM earlier
 rewind: walking thread 166's stack in gdb
 rewind: downloading source files of libc.so.6; each one only once
-process 166 (test_pool_shutdown), thread 166, at step 4992
+process 166 (test_pool_shutdown), thread 166, at step 4711
 #7 pool_shutdown (src/pool.c:128)
      126
      127  	for (int i = 0; i < POOL_WORKERS; i++)
@@ -74,7 +74,7 @@ process 166 (test_pool_shutdown), thread 166, at step 4992
      129  	pthread_cond_destroy(&p->ready);
      130  	pthread_mutex_destroy(&p->lock);
 arguments:
-  p = 0x55c074530010
+  p = 0x5641c70ff010
 locals:
   i = 0
 called from #8 main (tests/test_pool_shutdown.c:24)
@@ -86,17 +86,17 @@ and which one was chosen. For every frame of every thread, ask gdb for all
 the stacks of the process:
 
 ```console
-$ rewind gdb e20758b8 4992 --pid 166 -- -batch -ex 'thread apply all bt' 2>/dev/null | grep -E '^Thread|src/|tests/'
-#0  0x000055c06fa1d437 in worker (arg=0x55c074530010) at src/pool.c:77
-Thread 4 (Thread 1.170 (test_pool_shutd, on the CPU)):
-#0  0x000055c06fa1d437 in worker (arg=0x55c074530010) at src/pool.c:77
-Thread 3 (Thread 1.169 (test_pool_shutd)):
-#5  0x000055c06fa1d3a9 in run_job (job=17) at src/pool.c:45
-#6  worker (arg=0x55c074530010) at src/pool.c:73
+$ rewind gdb fc9482de 4711 --pid 166 -- -batch -ex 'thread apply all bt' 2>/dev/null | grep -E '^Thread|src/|tests/'
+#0  0x000056419dcc2437 in worker (arg=0x5641c70ff010) at src/pool.c:77
+Thread 4 (Thread 1.172 (test_pool_shutd, on the CPU)):
+#0  0x000056419dcc2437 in worker (arg=0x5641c70ff010) at src/pool.c:77
+Thread 3 (Thread 1.171 (test_pool_shutd)):
+#5  0x000056419dcc23a9 in run_job (job=17) at src/pool.c:45
+#6  worker (arg=0x5641c70ff010) at src/pool.c:73
 Thread 2 (Thread 1.166 (test_pool_shutd)):
-#7  0x000055c06fa1d5b3 in pool_shutdown (p=p@entry=0x55c074530010) at src/pool.c:128
-#8  0x000055c06fa1d272 in main () at tests/test_pool_shutdown.c:24
-Thread 1 (Thread 1.4194305 (the CPU, in test_pool_shutd 170)):
+#7  0x000056419dcc25b3 in pool_shutdown (p=p@entry=0x5641c70ff010) at src/pool.c:128
+#8  0x000056419dcc2272 in main () at tests/test_pool_shutdown.c:24
+Thread 1 (Thread 1.4194305 (the CPU, in test_pool_shutd 172)):
 ```
 
 `rewind gdb` starts in the thread `rewind where` looks at, in its innermost
@@ -105,16 +105,16 @@ frame. `--tid` and `--frame` start it elsewhere, with frames numbered as
 `pool_shutdown` has already set the queue to NULL:
 
 ```console
-$ rewind gdb e20758b8 4992 --tid 166 --frame 7 -- -batch -ex 'p p->queue'
-rewind: process 166 at step 4992; loading symbols for 4 of its files
+$ rewind gdb fc9482de 4711 --tid 166 --frame 7 -- -batch -ex 'p p->queue'
+rewind: process 166 at step 4711; loading symbols for 4 of its files
 rewind: read 3 source files fetched from the VM earlier
-rewind: gdb at step 4992 of e20758b82c63ae48
+rewind: gdb at step 4711 of fc9482dea85f64ec
 arch_local_irq_restore (flags=6) at ./arch/x86/include/asm/irqflags.h:146
 146		return !(flags & X86_EFLAGS_IF);
 [Switching to thread 2 (Thread 1.166)]
 #0  __syscall_cancel_arch () at ../sysdeps/unix/sysv/linux/x86_64/syscall_cancel.S:56
 56		ret
-#7  0x000055c06fa1d5b3 in pool_shutdown (p=p@entry=0x55c074530010) at src/pool.c:128
+#7  0x000056419dcc25b3 in pool_shutdown (p=p@entry=0x5641c70ff010) at src/pool.c:128
 128			pthread_join(p->workers[i], NULL);
 $1 = (struct queue *) 0x0
 [Inferior 1 (process 1) detached]
@@ -129,7 +129,7 @@ with the frame's variables and the thread's frames below it; click a frame to
 see its line and variables instead. The panel follows the playhead, and each
 new step takes a few seconds since it forks the run.
 
-![The app's source panel at step 4992 of the failing run: worker at src/pool.c:77 with p->queue->completed++ marked and the values that can be blamed underlined, the worker's arguments and locals, and the frames worker, start_thread and clone3 below](../site/img/app-source.png)
+![The app's source panel at step 4711 of the failing run: worker at src/pool.c:77 with p->queue->completed++ marked and the values that can be blamed underlined, the worker's arguments and locals, and the frames worker, start_thread and clone3 below](../site/img/app-source.png)
 
 ## Find who wrote a value
 
@@ -140,42 +140,42 @@ stretch of the run before the step, with that address in the CPU's debug
 registers. If the stretch holds no write, it tries the stretch before that:
 
 ```console
-$ rewind blame e20758b8 --at 4992 'p->queue'
-rewind: process 166 at step 4992; loading symbols for 4 of its files
+$ rewind blame fc9482de --at 4711 'p->queue'
+rewind: process 166 at step 4711; loading symbols for 4 of its files
 rewind: read 3 source files fetched from the VM earlier
-rewind: walking thread 170's stack in gdb
-p->queue = 0x0   8 bytes at 0x55c074530068, thread 170, pool.c:77
+rewind: walking thread 172's stack in gdb
+p->queue = 0x0   8 bytes at 0x5641c70ff068, thread 172, pool.c:77
 
-last written at step 4987 by thread 166 (test_pool_shutd)
+last written at step 4706 by thread 166 (test_pool_shutd)
   pool.c:125  pool_shutdown  p->queue = NULL;
-  was 0x55c074530090
+  was 0x5641c70ff090
 
-other threads just after the write, in step 4987:
-  thread 169  pool.c:45  run_job  __syscall_cancel_arch
-  thread 170  pool.c:75  worker  __GI___lll_lock_wake_private
+other threads just after the write, in step 4706:
+  thread 171  pool.c:45  run_job  __syscall_cancel_arch
+  thread 172  pool.c:75  worker  __syscall_cancel_arch
 
-searched back to step 4454, 1 keyframe window, 1 write, 0.6s
+searched back to step 4070, 1 keyframe window, 1 write, 0.6s
 ```
 
 The main thread set `p->queue` to NULL on line 125, in `pool_shutdown`. It did
-so at step 4987, 5 steps before the crash. blame also
+so at step 4706, 5 steps before the crash. blame also
 prints the value before the write.
 
 The last part shows where the other threads were just after the write. Thread
-170 is the worker that crashes later. It was on line 75, printing. It
+172 is the worker that crashes later. It was on line 75, printing. It
 had already passed the check of `p->stopping` on line 74.
 
 A step runs from one exit of the VM to the next, so a step can cover many
-lines of the program. At the start of step 4987, the main thread had
+lines of the program. At the start of step 4706, the main thread had
 not yet called `pool_shutdown`. `rewind where --after-write` looks just after
 the write itself, with the address and size blame printed:
 
 ```console
-$ rewind where e20758b8 4987 --tid 166 --after-write 0x55c074530068 --size 8
-rewind: process 166 at step 4987; loading symbols for 4 of its files
+$ rewind where fc9482de 4706 --tid 166 --after-write 0x5641c70ff068 --size 8
+rewind: process 166 at step 4706; loading symbols for 4 of its files
 rewind: read 3 source files fetched from the VM earlier
 rewind: walking thread 166's stack in gdb
-process 166 (test_pool_shutdown), thread 166, at step 4987, just after its write of the 8 bytes at 0x55c074530068
+process 166 (test_pool_shutdown), thread 166, at step 4706, just after its write of the 8 bytes at 0x5641c70ff068
 #0 pool_shutdown (src/pool.c:125)
      123  	/* The bug: the queue goes before the workers are joined. */
      124  	free(p->queue);
@@ -183,7 +183,7 @@ process 166 (test_pool_shutdown), thread 166, at step 4987, just after its write
      126
      127  	for (int i = 0; i < POOL_WORKERS; i++)
 arguments:
-  p = 0x55c074530010
+  p = 0x5641c70ff010
 locals:
   i = 0
 called from #1 main (tests/test_pool_shutdown.c:24)
@@ -203,31 +203,35 @@ with `--since`. Here it searches the last 40 steps. The output below keeps only
 lines 74 and 77 of the worker and lines 119 and 125 of `pool_shutdown`:
 
 ```console
-$ rewind blame e20758b8 --at 4992 'p->stopping' 'p->queue' --reads --since 4952
+$ rewind blame fc9482de --at 4711 'p->stopping' 'p->queue' --reads --since 4671
 ...
   step  thread           access  value               where
 ...
-  4962  169 test_pool_shutd read    0                   pool.c:74  worker  if (!p->stopping) {  p->stopping
-  4963  169 test_pool_shutd read    0x55c074530090      pool.c:77  worker  p->queue->completed++;  p->queue
+  4680  171 test_pool_shutd read    0                   pool.c:74  worker  if (!p->stopping) {  p->stopping
+  4681  171 test_pool_shutd read    0x5641c70ff090      pool.c:77  worker  p->queue->completed++;  p->queue
 ...
-  4976  170 test_pool_shutd read    0                   pool.c:74  worker  if (!p->stopping) {  p->stopping
-  4978  169 test_pool_shutd read    0                   pool.c:74  worker  if (!p->stopping) {  p->stopping
-  4981  169 test_pool_shutd read    0x55c074530090      pool.c:77  worker  p->queue->completed++;  p->queue
+  4691  172 test_pool_shutd read    0                   pool.c:74  worker  if (!p->stopping) {  p->stopping
+  4692  172 test_pool_shutd read    0x5641c70ff090      pool.c:77  worker  p->queue->completed++;  p->queue
 ...
-  4987  166 test_pool_shutd write   1                   pool.c:119  pool_shutdown  p->stopping = 1;  p->stopping
+  4696  171 test_pool_shutd read    0                   pool.c:74  worker  if (!p->stopping) {  p->stopping
+  4697  171 test_pool_shutd read    0x5641c70ff090      pool.c:77  worker  p->queue->completed++;  p->queue
 ...
-  4987  166 test_pool_shutd write   0x0                 pool.c:125  pool_shutdown  p->queue = NULL;  p->queue
-  4989  170 test_pool_shutd read    0x0                 pool.c:77  worker  p->queue->completed++;  p->queue
+  4704  172 test_pool_shutd read    0                   pool.c:74  worker  if (!p->stopping) {  p->stopping
 ...
-searched back to step 4952, 2 keyframe windows, 2 writes, 13 reads, 0.6s
+  4706  166 test_pool_shutd write   1                   pool.c:119  pool_shutdown  p->stopping = 1;  p->stopping
+...
+  4706  166 test_pool_shutd write   0x0                 pool.c:125  pool_shutdown  p->queue = NULL;  p->queue
+  4708  172 test_pool_shutd read    0x0                 pool.c:77  worker  p->queue->completed++;  p->queue
+...
+searched back to step 4671, 2 keyframe windows, 2 writes, 17 reads, 0.6s
 ```
 
 Read in order, the rows show the race:
 
-1. Thread 170 reads `p->stopping` as 0 on line 74. So it goes on to
+1. Thread 172 reads `p->stopping` as 0 on line 74. So it goes on to
    count its job.
 2. The main thread sets `p->stopping` to 1, then sets `p->queue` to NULL.
-3. Thread 170 reads `p->queue` on line 77 and gets NULL.
+3. Thread 172 reads `p->queue` on line 77 and gets NULL.
 
 The worker does not hold the lock between line 74 and line 77. Nothing stops
 the main thread from running in between.
@@ -245,23 +249,22 @@ with one lane per thread, or blame the write before this one. The popover moves
 by its top line. At the step where the run failed, the panel
 starts searching for the failing line's values before you click.
 
-![The app's source panel at step 4992 with the answer for p->queue: it became 0x0 at step 4987, written by the main thread in pool_shutdown at pool.c:125, p->queue = NULL, with the value before it, buttons to go to the write, show the reads and blame the earlier value, and where the other threads were](../site/img/app-blame.png)
+![The app's source panel at step 4711 with the answer for p->queue: it became 0x0 at step 4706, written by the main thread in pool_shutdown at pool.c:125, p->queue = NULL, with the value before it, buttons to go to the write, show the reads and blame the earlier value, and where the other threads were](../site/img/app-blame.png)
 
 ## Find the step that decides it
 
-`check` names step 4977 as the one that decides it. Its passing run is the
+`check` names step 4705 as the one that decides it. Its passing run is the
 same schedule without that step, so the two runs are the same machine until
-4977, where only the failing run gets a request to switch threads, and everything
+4705, where only the failing run gets a request to switch threads, and everything
 they do differently follows from it. `rewind where` names the thread that was
 on the CPU there:
 
 ```console
-$ rewind where e20758b8 4977
-rewind: process 166 at step 4977; loading symbols for 4 of its files
+$ rewind where fc9482de 4705
+rewind: process 166 at step 4705; loading symbols for 4 of its files
 rewind: read 3 source files fetched from the VM earlier
-rewind: walking thread 170's stack in gdb
-rewind: downloading source files of libc.so.6; each one only once
-process 166 (test_pool_shutdown), thread 170, at step 4977
+rewind: walking thread 172's stack in gdb
+process 166 (test_pool_shutdown), thread 172, at step 4705
 #14 worker (src/pool.c:75)
       73  		long result = run_job(job);
       74  		if (!p->stopping) {
@@ -269,22 +272,22 @@ process 166 (test_pool_shutdown), thread 170, at step 4977
       76  			fflush(stdout);
       77  			p->queue->completed++;
 arguments:
-  arg = 0x55c074530010
+  arg = 0x5641c70ff010
 locals:
   q = <optimized out>
-  job = 14
-  result = -804966335788770334
-  p = 0x55c074530010
+  job = 16
+  result = 4092430570737637218
+  p = 0x5641c70ff010
 called from #15 start_thread (pthread_create.c:454)
 called from #16 __GI___clone3 (../sysdeps/unix/sysv/linux/x86_64/clone3.S:78)
 ```
 
 A worker checks `p->stopping` without the lock, prints its job, and then
 counts it through `p->queue`, which `pool_shutdown` frees. At step
-4977 the worker has made its check and is printing; a request to switch threads
+4705 the worker has made its check and is printing; a request to switch threads
 there holds it before the count. The test's main thread runs meanwhile, sees
 half the jobs done, and shuts the pool down, setting the queue to NULL, and
-the worker faults on it 15 steps later. Without that step's
+the worker faults on it 6 steps later. Without that step's
 perturbation, the worker counts first and the test passes.
 
 `check --where` looks up both threads itself: the one on the CPU at the
@@ -294,25 +297,22 @@ lookup forks the run and starts gdb, so it is opt-in:
 ```console
 $ rewind check --where --epoch 1790985600 github:fzakaria/rewindvm#mylib 2>/dev/null | sed -n '/^where the threads were/,/first event that differs$/p'
 where the threads were:
-        4977   166/170   worker (src/pool.c:75), on the CPU at the deciding step
-        4981   166/169   worker (src/pool.c:75), at the first event that differs
+        4705   166/172   worker (src/pool.c:75), on the CPU at the deciding step
+        4711   166/172   worker (src/pool.c:77), at the first event that differs
 ```
 
-The first event that differs is the other worker, thread 169,
-reporting job 16 on the same line, 75. With thread 170
-held at the deciding step before it counts job 14, thread
-169 counts its own job and picks job 17, the one thread
-170 picks in the passing run. The main thread then shuts the pool
-down, nulling the queue at step 4987 while thread 169 runs
-job 17, as blame showed. In the passing run thread 170
-counts job 14 and picks job 17 first, at step 4978. That is the cause showing up before the symptom: the held
-thread's fault at line 77, which `rewind where` showed at the top of this
-page, comes 11 steps later, at step 4992.
+Both lines name thread 172. At the deciding step it is on line 75,
+printing, and the first event that differs is its own fault on line 77, at
+step 4711. In between, the failing run's processes make no event:
+the main thread sets the queue to NULL at step 4706, as blame
+showed, and waits in `pthread_join`. In the passing run thread 172
+keeps the CPU past the deciding step, counts job 16 and picks job
+18 at step 4706.
 
 In the app, the deciding step is a dashed blue mark on the timeline, before
 the solid one where the runs' events first differ. Zoomed in around the crash:
 
-![The app zoomed in around the crash: a dashed blue mark at step 4977 on the timeline, a solid one at step 4981 where the events first differ, the crash after them, and the divergence card saying the two runs are identical until step 4977, where only this run gets a request to switch threads](../site/img/app-decides.png)
+![The app zoomed in around the crash: a dashed blue mark at step 4705 on the timeline, a solid one at step 4711, the crash, where the events first differ, and the divergence card saying the two runs are identical until step 4705, where only this run gets a request to switch threads](../site/img/app-decides.png)
 
 ## See which thread held the CPU
 
@@ -322,31 +322,25 @@ the CPU over a window of steps, a line per stretch. Around the deciding step,
 in both runs:
 
 ```console
-$ rewind threads e20758b8 --from 4968 --to 4992
-      4968       4974          idle  swapper/0
-      4975       4975       166/166  test_pool_shutd
-      4976       4977       166/170  test_pool_shutd
-      4978       4978       166/169  test_pool_shutd
-      4979       4979       166/170  test_pool_shutd
-      4980       4986       166/169  test_pool_shutd
-      4987       4988       166/166  test_pool_shutd
-      4989       4992       166/170  test_pool_shutd
+$ rewind threads fc9482de --from 4696 --to 4711
+      4696       4703       166/171  test_pool_shutd
+      4704       4705       166/172  test_pool_shutd
+      4706       4706       166/166  test_pool_shutd
+      4707       4707       166/171  test_pool_shutd
+      4708       4711       166/172  test_pool_shutd
 ```
 
 ```console
-$ rewind threads 6a609b9c --from 4968 --to 4992
-      4968       4974          idle  swapper/0
-      4975       4975       166/166  test_pool_shutd
-      4976       4982       166/170  test_pool_shutd
-      4983       4983       166/166  test_pool_shutd
-      4984       4986       166/169  test_pool_shutd
-      4987       4987       166/166  test_pool_shutd
-      4988       4988     kernel 11  ksoftirqd/0
-      4989       4992          idle  swapper/0
+$ rewind threads 104fa1e3 --from 4696 --to 4711
+      4696       4703       166/171  test_pool_shutd
+      4704       4707       166/172  test_pool_shutd
+      4708       4708       166/171  test_pool_shutd
+      4709       4709       166/166  test_pool_shutd
+      4710       4711          idle  swapper/0
 ```
 
-The lines match up to step 4977. From there the threads take the CPU in
-another order, and in the failing run thread 170 holds it at the crash.
+The lines match up to step 4705. From there the threads take the CPU in
+another order, and in the failing run thread 172 holds it at the crash.
 Every switch is a step, so no stretch is too short to appear.
 
 In the app, the t key opens the Threads tab: a lane per thread around where
@@ -365,37 +359,37 @@ A watchpoint finds who freed the queue the crash reads. Break in a worker so
 `p` is in scope, watch `p->queue`, and continue:
 
 ```console
-$ rewind gdb e20758b8 4942 -- -batch -ex 'break src/pool.c:74' -ex continue -ex 'watch -l p->queue' -ex 'delete 1' -ex continue -ex 'bt 2' -ex 'break src/pool.c:77 if p->queue == 0' -ex continue -ex 'bt 1'
-rewind: step 4942 ran in process 166; loading symbols for 4 of its files
+$ rewind gdb fc9482de 4663 -- -batch -ex 'break src/pool.c:74' -ex continue -ex 'watch -l p->queue' -ex 'delete 1' -ex continue -ex 'bt 2' -ex 'break src/pool.c:77 if p->queue == 0' -ex continue -ex 'bt 1'
+rewind: step 4663 ran in process 166; loading symbols for 4 of its files
 rewind: read 3 source files fetched from the VM earlier
-rewind: gdb at step 4942 of e20758b82c63ae48
+rewind: gdb at step 4663 of fc9482dea85f64ec
 arch_local_irq_restore (flags=518) at ./arch/x86/include/asm/irqflags.h:146
 146		return !(flags & X86_EFLAGS_IF);
-[Switching to thread 4 (Thread 1.170)]
+[Switching to thread 3 (Thread 1.171)]
 #0  __syscall_cancel_arch () at ../sysdeps/unix/sysv/linux/x86_64/syscall_cancel.S:56
 56		ret
-Breakpoint 1 at 0x55c06fa1d3a9: file src/pool.c, line 74.
-[Switching to Thread 1.169]
+Breakpoint 1 at 0x56419dcc23a9: file src/pool.c, line 74.
+[Switching to Thread 1.172]
 
-Thread 3 hit Breakpoint 1, worker (arg=0x55c074530010) at src/pool.c:74
+Thread 4 hit Breakpoint 1, worker (arg=0x5641c70ff010) at src/pool.c:74
 74			if (!p->stopping) {
 Hardware watchpoint 2: -location p->queue
 [Switching to Thread 1.166]
 
 Thread 2 hit Hardware watchpoint 2: -location p->queue
 
-Old value = (struct queue *) 0x55c074530090
+Old value = (struct queue *) 0x5641c70ff090
 New value = (struct queue *) 0x0
-pool_shutdown (p=p@entry=0x55c074530010) at src/pool.c:128
+pool_shutdown (p=p@entry=0x5641c70ff010) at src/pool.c:128
 128			pthread_join(p->workers[i], NULL);
-#0  pool_shutdown (p=p@entry=0x55c074530010) at src/pool.c:128
-#1  0x000055c06fa1d272 in main () at tests/test_pool_shutdown.c:24
-Breakpoint 3 at 0x55c06fa1d433: file src/pool.c, line 77.
-[Switching to Thread 1.170]
+#0  pool_shutdown (p=p@entry=0x5641c70ff010) at src/pool.c:128
+#1  0x000056419dcc2272 in main () at tests/test_pool_shutdown.c:24
+Breakpoint 3 at 0x56419dcc2433: file src/pool.c, line 77.
+[Switching to Thread 1.172]
 
-Thread 4 hit Breakpoint 3, worker (arg=0x55c074530010) at src/pool.c:77
+Thread 4 hit Breakpoint 3, worker (arg=0x5641c70ff010) at src/pool.c:77
 77				p->queue->completed++;
-#0  worker (arg=0x55c074530010) at src/pool.c:77
+#0  worker (arg=0x5641c70ff010) at src/pool.c:77
 [Inferior 1 (process 1) detached]
 ```
 
@@ -415,14 +409,14 @@ fork backwards. From the crash itself, watch the pointer the worker read and
 run back to the last write to it:
 
 ```console
-$ rewind gdb e20758b8 4992 -- -batch -ex 'watch -l p->queue' -ex reverse-continue -ex 'bt 2'
-rewind: step 4992 ran in process 166; loading symbols for 4 of its files
+$ rewind gdb fc9482de 4711 -- -batch -ex 'watch -l p->queue' -ex reverse-continue -ex 'bt 2'
+rewind: step 4711 ran in process 166; loading symbols for 4 of its files
 rewind: read 3 source files fetched from the VM earlier
-rewind: gdb at step 4992 of e20758b82c63ae48
+rewind: gdb at step 4711 of fc9482dea85f64ec
 arch_local_irq_restore (flags=6) at ./arch/x86/include/asm/irqflags.h:146
 146		return !(flags & X86_EFLAGS_IF);
-[Switching to thread 4 (Thread 1.170)]
-#0  0x000055c06fa1d437 in worker (arg=0x55c074530010) at src/pool.c:77
+[Switching to thread 4 (Thread 1.172)]
+#0  0x000056419dcc2437 in worker (arg=0x5641c70ff010) at src/pool.c:77
 77				p->queue->completed++;
 Hardware watchpoint 1: -location p->queue
 [Switching to Thread 1.166]
@@ -430,11 +424,11 @@ Hardware watchpoint 1: -location p->queue
 Thread 2 hit Hardware watchpoint 1: -location p->queue
 
 Old value = (struct queue *) 0x0
-New value = (struct queue *) 0x55c074530090
-pool_shutdown (p=p@entry=0x55c074530010) at src/pool.c:125
+New value = (struct queue *) 0x5641c70ff090
+pool_shutdown (p=p@entry=0x5641c70ff010) at src/pool.c:125
 125		p->queue = NULL;
-#0  pool_shutdown (p=p@entry=0x55c074530010) at src/pool.c:125
-#1  0x000055c06fa1d272 in main () at tests/test_pool_shutdown.c:24
+#0  pool_shutdown (p=p@entry=0x5641c70ff010) at src/pool.c:125
+#1  0x000056419dcc2272 in main () at tests/test_pool_shutdown.c:24
 [Inferior 1 (process 1) detached]
 ```
 
@@ -451,13 +445,13 @@ the way. A fork whose memory or registers gdb changed cannot go back.
 SIGSEGV, and use its own gdb scripts:
 
 ```console
-$ rewind gdb e20758b8 4977 -- -batch -ex 'break force_sig_fault' -ex continue -ex 'bt 4' -ex 'pipe lx-ps | tail -4' -ex 'pipe lx-dmesg | tail -2'
-rewind: step 4977 ran in process 166; loading symbols for 4 of its files
+$ rewind gdb fc9482de 4705 -- -batch -ex 'break force_sig_fault' -ex continue -ex 'bt 4' -ex 'pipe lx-ps | tail -4' -ex 'pipe lx-dmesg | tail -2'
+rewind: step 4705 ran in process 166; loading symbols for 4 of its files
 rewind: read 3 source files fetched from the VM earlier
-rewind: gdb at step 4977 of e20758b82c63ae48
+rewind: gdb at step 4705 of fc9482dea85f64ec
 arch_local_irq_restore (flags=518) at ./arch/x86/include/asm/irqflags.h:146
 146		return !(flags & X86_EFLAGS_IF);
-[Switching to thread 4 (Thread 1.170)]
+[Switching to thread 4 (Thread 1.172)]
 #0  __syscall_cancel_arch () at ../sysdeps/unix/sysv/linux/x86_64/syscall_cancel.S:56
 56		ret
 Downloading 133.41 K source file /build/linux-7.2.8/kernel/signal.c...
@@ -467,15 +461,15 @@ Breakpoint 1 at 0xffffffff812c4b70: file kernel/signal.c, line 1757.
 Thread 1 hit Breakpoint 1, force_sig_fault (sig=11, code=1, addr=0x108) at kernel/signal.c:1757
 1757	{
 #0  force_sig_fault (sig=11, code=1, addr=0x108) at kernel/signal.c:1757
-#1  0xffffffff81eea4d0 in handle_page_fault (regs=0xffffc900001dbf58, error_code=6, address=264) at arch/x86/mm/fault.c:1483
-#2  exc_page_fault (regs=0xffffc900001dbf58, error_code=6) at arch/x86/mm/fault.c:1536
+#1  0xffffffff81eea4d0 in handle_page_fault (regs=0xffffc900001e3f58, error_code=6, address=264) at arch/x86/mm/fault.c:1483
+#2  exc_page_fault (regs=0xffffc900001e3f58, error_code=6) at arch/x86/mm/fault.c:1536
 #3  0xffffffff810012a6 in asm_exc_page_fault () at ./arch/x86/include/asm/idtentry.h:595
 0xffff888003811f80  162  bash
-0xffff888003bdde80  166  test_pool_shutd
-0xffff888003810fc0  169  test_pool_shutd
-0xffff888003bdcec0  170  test_pool_shutd
-[    0.204005] test_pool_shutd[170]: segfault at 108 ip 000055c06fa1d437 sp 00007fda39950e10 error 6 in test_pool_shutdown[1437,55c06fa1d000+1000] likely on CPU 0 (core 0, socket 0)
-[    0.204010] Code: fa 48 8d 35 2a 0c 00 00 bf 02 00 00 00 b8 00 00 00 00 e8 ac fc ff ff 48 8b 05 b5 2b 00 00 48 8b 38 e8 8d fc ff ff 49 8b 46 58 <83> 80 08 01 00 00 01 e9 b5 fe ff ff 55 48 89 e5 41 54 53 be 78 00
+0xffff888003c14ec0  166  test_pool_shutd
+0xffff888003810fc0  171  test_pool_shutd
+0xffff888003c16e40  172  test_pool_shutd
+[    0.198019] test_pool_shutd[172]: segfault at 108 ip 000056419dcc2437 sp 00007fe55f6cbe10 error 6 in test_pool_shutdown[1437,56419dcc2000+1000] likely on CPU 0 (core 0, socket 0)
+[    0.198024] Code: fa 48 8d 35 2a 0c 00 00 bf 02 00 00 00 b8 00 00 00 00 e8 ac fc ff ff 48 8b 05 b5 2b 00 00 48 8b 38 e8 8d fc ff ff 49 8b 46 58 <83> 80 08 01 00 00 01 e9 b5 fe ff ff 55 48 89 e5 41 54 53 be 78 00
 [Inferior 1 (process 1) detached]
 ```
 
@@ -491,10 +485,10 @@ messages beside the program's with kernel console on:
 prints the command line that loads the same symbols:
 
 ```console
-$ rewind gdb e20758b8 4992 --listen 127.0.0.1:1234
-rewind: step 4992 ran in process 166; loading symbols for 4 of its files
+$ rewind gdb fc9482de 4711 --listen 127.0.0.1:1234
+rewind: step 4711 ran in process 166; loading symbols for 4 of its files
 rewind: read 3 source files fetched from the VM earlier
-rewind: gdb at step 4992 of e20758b82c63ae48; connect with: gdb -q -iex 'add-auto-load-safe-path /nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25' -iex 'set debuginfod enabled on' -iex 'set debuginfod urls http://127.0.0. ...
+rewind: gdb at step 4711 of fc9482dea85f64ec; connect with: gdb -q -iex 'add-auto-load-safe-path /nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25' -iex 'set debuginfod enabled on' -iex 'set debuginfod urls http://127.0.0. ...
 ```
 
 ## Bring tools into the VM
@@ -503,9 +497,9 @@ rewind: gdb at step 4992 of e20758b82c63ae48; connect with: gdb -q -iex 'add-aut
 run. Here binutils disassembles the faulting instruction:
 
 ```console
-$ printf 'objdump -d --no-show-raw-insn --start-address=0x142c --stop-address=0x143e tests/test_pool_shutdown | tail -4; exit\n' | rewind shell e20758b8 4992 --pid 166 --with nixpkgs#binutils
+$ printf 'objdump -d --no-show-raw-insn --start-address=0x142c --stop-address=0x143e tests/test_pool_shutdown | tail -4; exit\n' | rewind shell fc9482de 4711 --pid 166 --with nixpkgs#binutils
 rewind: packing 21 store paths for --with
-rewind: a shell at step 4992 of e20758b82c63ae48; exit it to leave
+rewind: a shell at step 4711 of fc9482dea85f64ec; exit it to leave
 [rewind] /build/mylib # objdump -d --no-show-raw-insn --start-address=0x142c --stop-address=0x143e tests/test_pool_shutdown | tail -4; exit
     142c:	mov    (%rax),%edi
     142e:	call   10c0 <fflush@plt>
@@ -516,7 +510,7 @@ rewind: a shell at step 4992 of e20758b82c63ae48; exit it to leave
 In the app, Open shell starts a shell at the playhead in the terminal pane,
 in the crashing process's working directory:
 
-![The app's shell pane at step 4992 of the failing run, in /build/mylib, after pwd and ls tests](../site/img/app-shell.png)
+![The app's shell pane at step 4711 of the failing run, in /build/mylib, after pwd and ls tests](../site/img/app-shell.png)
 
 ## Give programs more CPUs
 
@@ -527,13 +521,13 @@ interleave on the one vCPU:
 ```console
 $ rewind nix --cores 4 --epoch 1790985600 github:fzakaria/rewindvm#mylib
 ...
-rewind: run 2d8d15fd39c67d2e exited:0 after 6033 steps, 0.215s virtual, 0.442s wall (poweroff)
-/nix/store/f6a9gy362szw6nxx3ikrklr8glr6rdln-mylib-0.3.0 a9d703ba89774f3d  matches rewindvm.cachix.org
+rewind: run d08ca83e53608e25 exited:0 after 6037 steps, 0.215s virtual, 1.204s wall (poweroff)
+/nix/store/f6a9gy362szw6nxx3ikrklr8glr6rdln-mylib-0.3.0 a9d703ba89774f3d  matches your store, rewindvm.cachix.org
 ```
 
 ```console
-$ printf 'nproc; echo $NIX_BUILD_CORES; exit\n' | rewind shell 2d8d15fd 2688 --pid 110
-rewind: a shell at step 2688 of 2d8d15fd39c67d2e; exit it to leave
+$ printf 'nproc; echo $NIX_BUILD_CORES; exit\n' | rewind shell d08ca83e 2689 --pid 110
+rewind: a shell at step 2689 of d08ca83e53608e25; exit it to leave
 [rewind] /build/mylib # nproc; echo $NIX_BUILD_CORES; exit
 4
 4
@@ -551,7 +545,7 @@ critical path: the longest chain of work in which each part waited for the
 one before, which is the least the run can take on any number of CPUs.
 
 ```console
-$ rewind time 2d8d15fd
+$ rewind time d08ca83e
 mylib-0.3.0
     212 ms  elapsed on the VM's one CPU
     205 ms  critical path: the least it can take on any number of CPUs
@@ -596,25 +590,25 @@ source panel and gdb a click away.
 `rewind fork` asks which schedules fail from a given step:
 
 ```console
-$ rewind fork e20758b8 4892 --schedule 1 --quiet
-rewind: run 31a3965755540384 exited:2 after 5324 steps, 0.208s virtual, 0.105s wall (poweroff)
-rewind: the fork first differs from its parent at step 4923
-rewind: open it beside its parent in the desktop app: rewind open 31a3965755540384 4923 --compare e20758b82c63ae48
+$ rewind fork fc9482de 4411 --schedule 1 --quiet
+rewind: run be8a7095cad191ba exited:0 after 6611 steps, 0.222s virtual, 0.391s wall (poweroff)
+rewind: the fork first differs from its parent at step 4435
+rewind: open it beside its parent in the desktop app: rewind open be8a7095cad191ba 4435 --compare fc9482dea85f64ec
 
-$ rewind fork e20758b8 4892 --schedule 2 --quiet
-rewind: run 154b30d3a0384957 exited:0 after 7021 steps, 0.227s virtual, 0.112s wall (poweroff)
-rewind: the fork first differs from its parent at step 4926
-rewind: open it beside its parent in the desktop app: rewind open 154b30d3a0384957 4926 --compare e20758b82c63ae48
+$ rewind fork fc9482de 4411 --schedule 2 --quiet
+rewind: run a337e712ef67f2f8 exited:0 after 6534 steps, 0.220s virtual, 0.235s wall (poweroff)
+rewind: the fork first differs from its parent at step 4436
+rewind: open it beside its parent in the desktop app: rewind open a337e712ef67f2f8 4436 --compare fc9482dea85f64ec
 
-$ rewind fork e20758b8 4892 --schedule 3 --quiet
-rewind: run 5a61400513c562da exited:0 after 7176 steps, 0.232s virtual, 0.110s wall (poweroff)
-rewind: the fork first differs from its parent at step 4927
-rewind: open it beside its parent in the desktop app: rewind open 5a61400513c562da 4927 --compare e20758b82c63ae48
+$ rewind fork fc9482de 4411 --schedule 3 --quiet
+rewind: run ff0935ec337e2e1d exited:0 after 6696 steps, 0.225s virtual, 0.249s wall (poweroff)
+rewind: the fork first differs from its parent at step 4436
+rewind: open it beside its parent in the desktop app: rewind open ff0935ec337e2e1d 4436 --compare fc9482dea85f64ec
 
-$ rewind fork e20758b8 4892 --schedule 4 --quiet
-rewind: run 32b30a2780fc9e23 exited:0 after 7050 steps, 0.230s virtual, 0.111s wall (poweroff)
-rewind: the fork first differs from its parent at step 4901
-rewind: open it beside its parent in the desktop app: rewind open 32b30a2780fc9e23 4901 --compare e20758b82c63ae48
+$ rewind fork fc9482de 4411 --schedule 4 --quiet
+rewind: run 9c04c180836a933a exited:2 after 4828 steps, 0.200s virtual, 0.102s wall (poweroff)
+rewind: the fork first differs from its parent at step 4436
+rewind: open it beside its parent in the desktop app: rewind open 9c04c180836a933a 4436 --compare fc9482dea85f64ec
 ```
 
 The app's Runs tab, or the runs pill in its header, shows every run of the
@@ -634,12 +628,12 @@ and `@2`, `@3` and on for the ones before it, by name, or by directory.
 
 ```console
 $ rewind ls -n 3
-32b30a2780fc9e23  exited:0          7050 steps  mylib-0.3.0 (fork of e20758b82c63ae48 at 4892, schedule 4)
-5a61400513c562da  exited:0          7176 steps  mylib-0.3.0 (fork of e20758b82c63ae48 at 4892, schedule 3)
-154b30d3a0384957  exited:0          7021 steps  mylib-0.3.0 (fork of e20758b82c63ae48 at 4892, schedule 2)
+9c04c180836a933a  exited:2          4828 steps  mylib-0.3.0 (fork of fc9482dea85f64ec at 4411, schedule 4)
+ff0935ec337e2e1d  exited:0          6696 steps  mylib-0.3.0 (fork of fc9482dea85f64ec at 4411, schedule 3)
+a337e712ef67f2f8  exited:0          6534 steps  mylib-0.3.0 (fork of fc9482dea85f64ec at 4411, schedule 2)
 
-$ rewind ls --forks-of e20758b8 --status failed
-31a3965755540384  exited:2          5324 steps  mylib-0.3.0 (fork of e20758b82c63ae48 at 4892, schedule 1)
+$ rewind ls --forks-of fc9482de --status failed
+9c04c180836a933a  exited:2          4828 steps  mylib-0.3.0 (fork of fc9482dea85f64ec at 4411, schedule 4)
 ```
 
 `--name` and `--since` (`30m`, `2h`, `7d` or a date) filter too.
@@ -648,7 +642,7 @@ $ rewind ls --forks-of e20758b8 --status failed
 `check` and `fork` print the command that opens what they made:
 
 ```console
-$ rewind open e20758b8 4992 --compare 6a609b9c
+$ rewind open fc9482de 4711 --compare 104fa1e3
 ```
 
 ## Rebuild a run exactly
@@ -662,18 +656,18 @@ schedule 4 fork:
 
 ```console
 $ rewind show @
-32b30a2780fc9e23  exited:0          7050 steps  mylib-0.3.0 (fork of e20758b82c63ae48 at 4892, schedule 4)
+9c04c180836a933a  exited:2          4828 steps  mylib-0.3.0 (fork of fc9482dea85f64ec at 4411, schedule 4)
 ...
-rewind nix /nix/store/...-mylib-0.3.0.drv --epoch 1790985600 --schedule 7 --schedule-from 2818 --schedule-until 4978 --cpu v3 --clock branches --name mylib-0.3.0  # e20758b82c63ae48
-rewind fork e20758b82c63ae48 4892 --schedule 4  # 32b30a2780fc9e23
+rewind nix /nix/store/...-mylib-0.3.0.drv --epoch 1790985600 --schedule 8 --schedule-from 4677 --schedule-until 4706 --cpu v3 --clock branches --name mylib-0.3.0  # fc9482dea85f64ec
+rewind fork fc9482dea85f64ec 4411 --schedule 4  # 9c04c180836a933a
 ```
 
 The failing run's command makes it again, with the same id:
 
 ```console
-$ rewind show e20758b8 | tail -1 | sh
+$ rewind show fc9482de | tail -1 | sh
 ...
-rewind: run e20758b82c63ae48 exited:2 after 5037 steps, 0.204s virtual, 0.377s wall (poweroff)
+rewind: run fc9482dea85f64ec exited:2 after 4756 steps, 0.198s virtual, 0.434s wall (poweroff)
 ```
 
 ## Compare any two runs
@@ -682,19 +676,19 @@ rewind: run e20758b82c63ae48 exited:2 after 5037 steps, 0.204s virtual, 0.377s w
 the failing program's:
 
 ```console
-$ rewind diff 6a609b9c e20758b8
-first difference at event 1622: step 4978 on the left, step 4981 on the right
-  both        4963   166/169   write(1, "job 15 done: 42559\n")
-  both        4964   166/169   write(1, "worker picked job 16\n")
-  both        4977   166/170   write(1, "job 14 done: 39906\n")
-  left        4978   166/170   write(1, "worker picked job 17\n")
-  left        4986   166/169   thread exit(test_pool_shutd) exited:0
-  left        4998   166/170   thread exit(test_pool_shutd) exited:0
-  left        5001   166/166   write(1, "round 1: ok\n")
-  right       4981   166/169   write(1, "job 16 done: 5986\n")
-  right       4982   166/169   write(1, "worker picked job 17\n")
-  right       4990     0/0     console "[    0.204005] test_pool_shutd[170]: segfault at 108 ip 000055c06fa1d437 sp 00007fda39950e10 error 6 in test_pool_shutdown[1437,55c06fa1d000+1000] likely on CPU 0 (core 0, socket 0)"
-  right       4991     0/0     console "[    0.204010] Code: fa 48 8d 35 2a 0c 00 00 bf 02 00 00 00 b8 00 00 00 00 e8 ac fc ff ff 48 8b 05 b5 2b 00 00 48 8b 38 e8 8d fc ff ff 49 8b 46 58 <83> 80 08 01 00 00 01 e9 b5 fe ff ff 55 48 89 e5 41 54 53 be 78 00"
+$ rewind diff 104fa1e3 fc9482de
+first difference at event 1665: step 4706 on the left, step 4709 on the right
+  both        4697   166/171   write(1, "job 15 done: 42559\n")
+  both        4698   166/171   write(1, "worker picked job 17\n")
+  both        4705   166/172   write(1, "job 16 done: 5986\n")
+  left        4706   166/172   write(1, "worker picked job 18\n")
+  left        4719   166/171   thread exit(test_pool_shutd) exited:0
+  left        4724   166/172   thread exit(test_pool_shutd) exited:0
+  left        4727   166/166   write(1, "round 2: ok\n")
+  right       4709     0/0     console "[    0.198019] test_pool_shutd[172]: segfault at 108 ip 000056419dcc2437 sp 00007fe55f6cbe10 error 6 in test_pool_shutdown[1437,56419dcc2000+1000] likely on CPU 0 (core 0, socket 0)"
+  right       4710     0/0     console "[    0.198024] Code: fa 48 8d 35 2a 0c 00 00 bf 02 00 00 00 b8 00 00 00 00 e8 ac fc ff ff 48 8b 05 b5 2b 00 00 48 8b 38 e8 8d fc ff ff 49 8b 46 58 <83> 80 08 01 00 00 01 e9 b5 fe ff ff 55 48 89 e5 41 54 53 be 78 00"
+  right       4711   166/172   SIGSEGV code=1 addr=0x108
+  right       4718   166/172   thread exit(test_pool_shutd) killed:SIGSEGV
 ```
 
 In the app, any run compared with another shows where they part, on the
@@ -715,11 +709,11 @@ comes back:
 it, so a shell loop can ask which schedules fail from a step:
 
 ```console
-$ for s in 5 6 7 8; do rewind fork e20758b8 4892 --schedule $s --quiet 2>/dev/null; echo "schedule $s: exit $?"; done
+$ for s in 5 6 7 8; do rewind fork fc9482de 4411 --schedule $s --quiet 2>/dev/null; echo "schedule $s: exit $?"; done
 schedule 5: exit 0
-schedule 6: exit 2
+schedule 6: exit 0
 schedule 7: exit 2
-schedule 8: exit 0
+schedule 8: exit 2
 ```
 
 The other commands answer a question with their exit status:
@@ -740,13 +734,13 @@ print JSON for a program to read in place of their text: one object, or from
 `schedules`, with the properties the run violated under `violations`.
 
 ```console
-$ rewind ls --forks-of e20758b8 --status failed --json | jq -r .id
-1b7eb9b2f8c8f287
-8d6497cd10c90990
-31a3965755540384
+$ rewind ls --forks-of fc9482de --status failed --json | jq -r .id
+71514a0526c526a5
+cfd4501672f76b33
+9c04c180836a933a
 
-$ rewind diff 6a609b9c e20758b8 --json | jq -c '.divergence | {left_step, right_step}'
-{"left_step":4978,"right_step":4981}
+$ rewind diff 104fa1e3 fc9482de --json | jq -c '.divergence | {left_step, right_step}'
+{"left_step":4706,"right_step":4709}
 ```
 
 ## Give a run to an agent
@@ -760,20 +754,20 @@ failure from it without the app, and every export carries the same text as
 `summary.txt`.
 
 ```console
-$ rewind summary e20758b8 --compare 6a609b9c
-run e20758b82c63ae48: mylib-0.3.0
+$ rewind summary fc9482de --compare 104fa1e3
+run fc9482dea85f64ec: mylib-0.3.0
 verdict: failed
   exited with status 2
-ended: exited:2 at step 5037 (poweroff)
-failing step: 4992, in process 166 (test_pool_shutdown), thread 170: SIGSEGV delivered, fault address 0x108
-output (the last 20 of 108 lines):
+ended: exited:2 at step 4756 (poweroff)
+failing step: 4711, in process 166 (test_pool_shutdown), thread 172: SIGSEGV delivered, fault address 0x108
+output (the last 20 of 141 lines):
 ...
-compared with run 6a609b9c1faefbc8: mylib-0.3.0
+compared with run 104fa1e36e7f41a5: mylib-0.3.0
   verdict: passed
-  ended: exited:0 at step 6528 (poweroff)
-the runs part at step 4981 here and step 4978 there, in the events of ./tests/test_pool_shutdown
-  here:  process 166 (test_pool_shutdown), thread 169: write(1, "job 16 done: 5986\n")
-  there: process 166 (test_pool_shutdown), thread 170: write(1, "worker picked job 17\n")
+  ended: exited:0 at step 6029 (poweroff)
+the runs part at step 4711 here and step 4706 there, in the events of ./tests/test_pool_shutdown
+  here:  process 166 (test_pool_shutdown), thread 172: SIGSEGV code=1 addr=0x108
+  there: process 166 (test_pool_shutdown), thread 172: write(1, "worker picked job 18\n")
 ```
 
 ## Judge runs by properties
@@ -809,8 +803,8 @@ exit 1
 $ rewind check --epoch 1790985600 --property script=./adds-up.sh github:fzakaria/rewindvm#bank | grep -E 'decides it|failing run violates adds-up'
 rewind: packing 62 store paths for bank-0.1.0
 schedule 1 violates adds-up, sdk; finding the step that decides it
-step 3357 decides it: a request to switch threads there makes the run violate adds-up, sdk
-failing run violates adds-up: balance 390, expected 400
+step 3360 decides it: a request to switch threads there makes the run violate adds-up, sdk
+failing run violates adds-up: balance 360, expected 400
 ```
 
 `--properties` reads properties from a file, one a line, so a repository
@@ -825,7 +819,7 @@ script=adds-up.sh
 
 $ rewind check --epoch 1790985600 --properties rewind.properties github:fzakaria/rewindvm#bank | grep 'decides it'
 schedule 1 violates adds-up, sdk; finding the step that decides it
-step 3357 decides it: a request to switch threads there makes the run violate adds-up, sdk
+step 3360 decides it: a request to switch threads there makes the run violate adds-up, sdk
 ```
 
 ## Count the schedules that fail from a step
@@ -835,28 +829,28 @@ fork at `--schedule-from`, with the run itself as schedule 0. `--no-narrow`
 stops at the count. From the deciding step of the passing run:
 
 ```console
-$ rewind check --run 6a609b9c --schedule-from 4977 --schedules 16 --all --no-narrow
-schedule   0: exited:0             6528 steps  a9d703ba8977  run 6a609b9c1faefbc8
-schedule   1: exited:2             5045 steps    run 2da8aef95f58ed1c
-schedule   2: exited:0             6999 steps  a9d703ba8977  run 23982c2308947737
-schedule   3: exited:2             5051 steps    run 1fa8016c30b2dc4e
-schedule   4: exited:0             7096 steps  a9d703ba8977  run 4c5f615a35d54108
-schedule   5: exited:0             6987 steps  a9d703ba8977  run 1009d5915ca52552
-schedule   6: exited:0             7087 steps  a9d703ba8977  run 128417e6e6b1eb46
-schedule   7: exited:2             5043 steps    run b834f8bcccf4e4fb
-schedule   8: exited:0             7088 steps  a9d703ba8977  run 2bba6fa85987de82
-schedule   9: exited:0             6948 steps  a9d703ba8977  run 8a3491f03e9baa19
-schedule  10: exited:2             5043 steps    run 3ba7d6de801b1bd4
-schedule  11: exited:0             7040 steps  a9d703ba8977  run 95e2a8f08fd1986e
-schedule  12: exited:0             7158 steps  a9d703ba8977  run a48530d4c8af504b
-schedule  13: exited:0             7038 steps  a9d703ba8977  run e32dc22ebb19ffa0
-schedule  14: exited:0             7079 steps  a9d703ba8977  run 98150b12f8b6c611
-schedule  15: exited:2             5040 steps    run eea86ab4c81f6176
-schedule  16: exited:2             5049 steps    run e1b60d6852674558
-6 of 16 other schedules ended differently
+$ rewind check --run 104fa1e3 --schedule-from 4705 --schedules 16 --all --no-narrow
+schedule   0: exited:0             6029 steps  a9d703ba8977  run 104fa1e36e7f41a5
+schedule   1: exited:0             6574 steps  a9d703ba8977  run d0353b987d7e0801
+schedule   2: exited:2             4766 steps    run 4a2439e9e0bdd612
+schedule   3: exited:0             6638 steps  a9d703ba8977  run 25c2b6e82410bce3
+schedule   4: exited:0             6516 steps  a9d703ba8977  run 2977e0524ec02f47
+schedule   5: exited:2             4777 steps    run 337cd32727435e7e
+schedule   6: exited:0             6565 steps  a9d703ba8977  run 7d9a8156ffa270f6
+schedule   7: exited:0             6508 steps  a9d703ba8977  run 08afb658140b7247
+schedule   8: exited:2             4764 steps    run 2d72202701ce4004
+schedule   9: exited:0             6401 steps  a9d703ba8977  run 27398a9918fc6444
+schedule  10: exited:0             6454 steps  a9d703ba8977  run 408328e667697330
+schedule  11: exited:0             6496 steps  a9d703ba8977  run 1a8d4527a7d60597
+schedule  12: exited:0             6525 steps  a9d703ba8977  run 9ad6865cec18cd36
+schedule  13: exited:0             6458 steps  a9d703ba8977  run 2b6202115d7243f5
+schedule  14: exited:0             6507 steps  a9d703ba8977  run bdb82168ab081fea
+schedule  15: exited:2             4765 steps    run 1eac639deae1687a
+schedule  16: exited:2             4754 steps    run 4f347c3cc2a063f2
+5 of 16 other schedules ended differently
 ```
 
-6 of the 16 crash. Without `--no-narrow`, `check --run` narrows the first of
+5 of the 16 crash. Without `--no-narrow`, `check --run` narrows the first of
 them to the step that decides it, as for a build.
 
 In the app, the chevron beside Fork from here turns it into Check from here,
@@ -864,7 +858,7 @@ which runs the schedules from the playhead and fills a cell per schedule:
 grey for ended as this run did, blue for differently. Pick a cell to compare
 with or open its run:
 
-![The app after Check from here at step 4977 of the passing run: a card counting how the 16 schedules ended, a cell per schedule, the first picked with its run and Compare and Open](../site/img/app-check.png)
+![The app after Check from here at step 4705 of the passing run: a card counting how the 16 schedules ended, a cell per schedule, the first picked with its run and Compare and Open](../site/img/app-check.png)
 
 ## Hold a task off the CPU for longer
 
@@ -892,17 +886,17 @@ up to 1 s:
 ```console
 $ rewind check --root ready --stall-max 50ms -- /bin/ready | grep -E 'ends differently|limited to|decides it|passing:|failing:'
 schedule 5 ends differently from schedule 0; finding the step that decides it
-schedule 5 limited to steps 787..788 still ends differently
+schedule 5 limited to steps 721..788 still ends differently
 step 787 decides it: a 40.96 ms pause of the running thread there makes the run fail
-passing: run 3479ddf3369a0786, schedule 0
-failing: run a63379752ad0aaba, schedule 5 over steps 787..788, stalls up to 50 ms
+passing: run 2caf66f75b1a5315, schedule 5 over steps 721..787, stalls up to 50 ms
+failing: run 4f60704624872cb7, schedule 5 over steps 721..788, stalls up to 50 ms
 ```
 
 The same steps stall, one step in 128, but each stall picks one of the
 doublings of 10 µs up to the maximum, 14 of them for 50 ms, so fewer stalls
 are short. How often a race turns up then depends on how long it needs a
-thread held: 32 schedules of mylib crash 8 times by default and
-2 times with `--stall-max 100ms`, in 3.0 s and 3.0 s. A stall is virtual time, so the guest's clock
+thread held: 32 schedules of mylib crash 5 times by default and
+6 times with `--stall-max 100ms`, in 3.6 s and 3.4 s. A stall is virtual time, so the guest's clock
 moves further, and a program's own timeouts see the extra time. The maximum is
 part of each run's spec, so `rewind show`, a replay and a fork of the run keep
 the maximum, and a run made without the flag keeps its id. A fork's own
@@ -924,9 +918,9 @@ $ rewind nix -q --epoch 1790985600 --name hash-order github:fzakaria/rewindvm#ha
 
 ```console
 $ rewind check --run hash-order --seeds 8 --schedules 0 | grep -E 'decides it|passing:|failing:'
-seed 2 decides it: under schedule 0, seed 0 passes and seed 2 fails
-passing: run 6d8e37f286966443, seed 0, schedule 0
-failing: run aae1d6a86be614d5, seed 2 from step 713, schedule 0
+seed 3 decides it: under schedule 0, seed 0 passes and seed 3 fails
+passing: run bdafc954b5d2175a, seed 0, schedule 0
+failing: run 030b78b0bacf10ba, seed 3 from step 714, schedule 0
 ```
 
 ## List directories in another order
@@ -962,19 +956,19 @@ zoom the timeline. The ? key lists them all:
 ## Hand a failure to someone else
 
 ```console
-$ rewind export e20758b8 --replayable -o crash.rwd
-rewind: wrote crash.rwd (194.8 MB)
+$ rewind export fc9482de --replayable -o crash.rwd
+rewind: wrote crash.rwd (231.3 MB)
 
 $ REWIND_HOME=elsewhere rewind import crash.rwd
-e20758b82c63ae48  exited:2          5037 steps  mylib-0.3.0
+fc9482dea85f64ec  exited:2          4756 steps  mylib-0.3.0
 
-$ REWIND_HOME=elsewhere rewind replay e20758b8
-identical to the recording: 1646 events, 1399 context switches and 1476 read and write records over 5037 steps, and the whole machine at its 2 keyframes
+$ REWIND_HOME=elsewhere rewind replay fc9482de
+identical to the recording: 1687 events, 1076 context switches and 1476 read and write records over 4756 steps, and the whole machine at its 2 keyframes
 ```
 
 A replayable export carries the keyframes, the image and the VM's kernel, and
 replays on any machine with the same CPU vendor. Without `--replayable` it is
-the events alone, 37.0 KB: enough to read and to scrub in the app, whose
+the events alone, 35.3 KB: enough to read and to scrub in the app, whose
 Export button writes the replayable kind. Both kinds carry the run's
 bookmarks, and `summary.txt`, the run in plain text as `rewind summary`
 prints it: the verdict, the failing step and the last lines of output. With
@@ -1003,7 +997,7 @@ probe branches: 3000000 branches, as built
 probe locked: 2000000 branches, as built
 probe not-branches: 1000000 branches, as built
 probe exits: 8192 branches, as built
-self-test: 58072275 and 58072275 branches, exact at every step
+self-test: 58072638 and 58072638 branches, exact at every step
 runs will use counter time
 ```
 
@@ -1028,7 +1022,7 @@ $ nix shell nixpkgs#pkgsStatic.stdenv.cc -c x86_64-unknown-linux-musl-cc -static
 
 ```console
 $ rewind run --root spin --timeout 5 --name spin -- /bin/spin
-rewind: run b9d96e55b3741144 timed-out after 723 steps, 0.004s virtual, 5.010s wall (timed out computing without exits for 4.9s, in user space in main+15 (spin.c:2), process 34 (spin))
+rewind: run 1c2dbf3184ea0600 timed-out after 724 steps, 0.004s virtual, 5.010s wall (timed out computing without exits for 4.9s, in user space in main+15 (spin.c:2), process 34 (spin))
 ```
 
 A run that timed out while still making exits was slow rather than stuck, and
@@ -1041,7 +1035,7 @@ included. `--status timed-out` lists the runs that timed out:
 
 ```console
 $ rewind ls --status timed-out
-b9d96e55b3741144  timed-out          723 steps  spin
+1c2dbf3184ea0600  timed-out          724 steps  spin
 ```
 
 ## Keep the run directory tidy
@@ -1050,12 +1044,12 @@ Runs live under `~/.local/share/rewind`, or `REWIND_HOME`:
 
 ```console
 $ REWIND_HOME=elsewhere rewind ls
-154b30d3a0384957  exited:0          7021 steps  mylib-0.3.0 (fork of e20758b82c63ae48 at 4892, schedule 2)
-31a3965755540384  exited:2          5324 steps  mylib-0.3.0 (fork of e20758b82c63ae48 at 4892, schedule 1)
-e20758b82c63ae48  exited:2          5037 steps  mylib-0.3.0
+a337e712ef67f2f8  exited:0          6534 steps  mylib-0.3.0 (fork of fc9482dea85f64ec at 4411, schedule 2)
+be8a7095cad191ba  exited:0          6611 steps  mylib-0.3.0 (fork of fc9482dea85f64ec at 4411, schedule 1)
+fc9482dea85f64ec  exited:2          4756 steps  mylib-0.3.0
 
-$ REWIND_HOME=elsewhere rewind remove 154b30d3
-removed 154b30d3a0384957
+$ REWIND_HOME=elsewhere rewind remove a337e712
+removed a337e712ef67f2f8
 rewind: `rewind gc` removes the pages no run uses any more
 ```
 

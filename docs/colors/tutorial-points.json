@@ -1,6 +1,6 @@
 [
  {
-  "text": "$ rewind check --epoch 1790985600 github:fzakaria/rewindvm#counter\n...\nschedule  64: exited:0             5743 steps  e3f96e451c97  run c50269911b4a8615  holds\nevery property held under all 65 schedules",
+  "text": "$ rewind check --epoch 1790985600 github:fzakaria/rewindvm#counter\n...\nschedule  64: exited:0             5802 steps  e3f96e451c97  run 4732bb5fa08c09e8  holds\nevery property held under all 65 schedules",
   "spans": [
    [
     2,

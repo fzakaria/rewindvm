@@ -84,7 +84,7 @@
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> rewind check <span class="option">--epoch</span> <span class="number">1790985600</span> github:fzakaria/rewindvm#counter</span>
 ...
-schedule  64: <span class="ansi-green">exited:0</span>             5743 steps  e3f96e451c97  run c50269911b4a8615  <span class="ansi-green">holds</span>
+schedule  64: <span class="ansi-green">exited:0</span>             5802 steps  e3f96e451c97  run 4732bb5fa08c09e8  <span class="ansi-green">holds</span>
 <span class="ansi-green">every property held under all 65 schedules</span></code></pre>
         <p>
           The threads do race. On a multicore host they run at the same instant, and one hit in a
@@ -195,10 +195,10 @@ schedule  64: <span class="ansi-green">exited:0</span>             5743 steps  e
         ><code><span class="cmd"><span class="prompt">$</span> rewind check <span class="option">--epoch</span> <span class="number">1790985600</span> .#counter <span class="operator">|</span> grep <span class="option">-E</span> <span class="string">'decides it|passing:|failing:|failing run violates sdk'</span></span>
 rewind: packing 62 store paths for counter-0.1.0
 schedule 1 violates same-outcome, sdk; finding the step that decides it
-step 3398 decides it: a request to switch threads there makes the run violate same-outcome, sdk
-passing: run 614cde005bc0c11d, schedule 1 over steps 3175..3398
-failing: run 26a8b34107904461, schedule 1 over steps 3175..3399
-failing run violates sdk: step 3424: always "hits-add-up" failed: 10 hits, expected 20</code></pre>
+step 3345 decides it: a request to switch threads there makes the run violate same-outcome, sdk
+passing: run 410295418cbaf73e, schedule 0
+failing: run f4274e60fe2ef22b, schedule 1 over steps 3345..3346
+failing run violates sdk: step 3375: always "hits-add-up" failed: 10 hits, expected 20</code></pre>
         <p>
           The run violates <code>same-outcome</code> too, since the job's build fails where schedule
           0's passed. <code>rewind threads</code> shows which thread held the CPU from the stretch
@@ -206,29 +206,27 @@ failing run violates sdk: step 3424: always "hits-add-up" failed: 10 hits, expec
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind threads 26a8b341 <span class="option">--from</span> <span class="number">3390</span> <span class="option">--to</span> <span class="number">3413</span></span>
-      3390       3399       139/140  counter
-      3400       3412       139/141  counter
-      3413       3413     kernel 11  ksoftirqd/0</code></pre>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind threads f4274e60 <span class="option">--from</span> <span class="number">3338</span> <span class="option">--to</span> <span class="number">3360</span></span>
+      3338       3346       139/140  counter
+      3347       3359       139/141  counter
+      3360       3360     kernel 11  ksoftirqd/0</code></pre>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind threads 614cde00 <span class="option">--from</span> <span class="number">3390</span> <span class="option">--to</span> <span class="number">3413</span></span>
-      3390       3401       139/140  counter
-      3402       3403     kernel 11  ksoftirqd/0
-      3404       3405       139/139  counter
-      3406       3413       139/141  counter</code></pre>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind threads <span class="number">41029541</span> <span class="option">--from</span> <span class="number">3338</span> <span class="option">--to</span> <span class="number">3360</span></span>
+      3338       3351       139/140  counter
+      3352       3360       139/141  counter</code></pre>
         <p>
-          In the passing run thread 139/140 takes the CPU at step 3390 and keeps it until it has
-          counted its hits and exits. In the failing run the switch at step 3398 gives it one step,
+          In the passing run thread 139/140 takes the CPU at step 3338 and keeps it until it has
+          counted its hits and exits. In the failing run the switch at step 3345 gives it one step,
           to its first point: it has read the count and not stored it. Thread 139/141 then takes the
-          CPU at step 3400 and counts every one of its hits, and when thread 139/140 gets the CPU
+          CPU at step 3347 and counts every one of its hits, and when thread 139/140 gets the CPU
           back it stores the count it read, over all of them. Open the failing run beside the
           passing one, at the point, with the thread lanes shown and zoomed in on the window around
           it:
         </p>
         <pre
           class="console"
-        ><code><span class="cmd"><span class="prompt">$</span> rewind open 26a8b341 <span class="number">3398</span> <span class="option">--compare</span> 614cde00</span></code></pre>
+        ><code><span class="cmd"><span class="prompt">$</span> rewind open f4274e60 <span class="number">3345</span> <span class="option">--compare</span> <span class="number">41029541</span></span></code></pre>
         <figure class="shot">
           <picture>
             <source srcset="../img/app-point.webp" type="image/webp" />
@@ -237,13 +235,13 @@ failing run violates sdk: step 3424: always "hits-add-up" failed: 10 hits, expec
               width="1440"
               height="900"
               loading="lazy"
-              alt="The app at step 3398 of the failing counter run, compared with the passing one, with the Threads panel open: a lane per thread, the playhead at the deciding step, thread 139/140 on the CPU until one step past it and the other counter thread from step 3400"
+              alt="The app at step 3345 of the failing counter run, compared with the passing one, with the Threads panel open: a lane per thread, the playhead at the deciding step, thread 139/140 on the CPU until one step past it and the other counter thread from step 3347"
             />
           </picture>
           <figcaption>
-            The app at step 3398 of the failing counter run, compared with the passing one, with the
+            The app at step 3345 of the failing counter run, compared with the passing one, with the
             Threads panel open: a lane per thread, the playhead at the deciding step, thread 139/140
-            on the CPU until one step past it and the other counter thread from step 3400
+            on the CPU until one step past it and the other counter thread from step 3347
           </figcaption>
         </figure>
         <p>

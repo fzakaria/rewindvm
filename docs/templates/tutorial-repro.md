@@ -177,7 +177,7 @@ Each key builds another output. The index is the file that changed:
 $ rewind diff --file /build/plugins/plugins.txt {{key1|short}} {{key2|short}}
 ```
 
-<!-- assert: rewind cat {{stock}} {{stock_steps}} /build/plugins/plugins.txt | tail -n +2 | tr '\n' ' ' | grep -qx 'sharpen rotate resize crop blur ' -->
+<!-- assert: rewind cat {{stock}} {{stock_steps}} /build/plugins/plugins.txt | tail -n +2 | tr '\n' ' ' | grep -qx 'crop sharpen blur rotate resize ' -->
 <!-- assert: rewind cat {{key1}} {{key1_steps}} /build/plugins/plugins.txt | tail -n +2 | tr '\n' ' ' | grep -qx 'sharpen crop blur rotate resize ' -->
 <!-- assert: rewind cat {{key2}} {{key2_steps}} /build/plugins/plugins.txt | tail -n +2 | tr '\n' ' ' | grep -qx 'sharpen resize crop rotate blur ' -->
 

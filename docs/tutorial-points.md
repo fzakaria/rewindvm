@@ -22,7 +22,7 @@ run by the `sdk` property. Under 64 schedules, every run holds:
 ```console
 $ rewind check --epoch 1790985600 github:fzakaria/rewindvm#counter
 ...
-schedule  64: exited:0             5743 steps  e3f96e451c97  run c50269911b4a8615  holds
+schedule  64: exited:0             5802 steps  e3f96e451c97  run 4732bb5fa08c09e8  holds
 every property held under all 65 schedules
 ```
 
@@ -68,10 +68,10 @@ that decides it:
 $ rewind check --epoch 1790985600 .#counter | grep -E 'decides it|passing:|failing:|failing run violates sdk'
 rewind: packing 62 store paths for counter-0.1.0
 schedule 1 violates same-outcome, sdk; finding the step that decides it
-step 3398 decides it: a request to switch threads there makes the run violate same-outcome, sdk
-passing: run 614cde005bc0c11d, schedule 1 over steps 3175..3398
-failing: run 26a8b34107904461, schedule 1 over steps 3175..3399
-failing run violates sdk: step 3424: always "hits-add-up" failed: 10 hits, expected 20
+step 3345 decides it: a request to switch threads there makes the run violate same-outcome, sdk
+passing: run 410295418cbaf73e, schedule 0
+failing: run f4274e60fe2ef22b, schedule 1 over steps 3345..3346
+failing run violates sdk: step 3375: always "hits-add-up" failed: 10 hits, expected 20
 ```
 
 The run violates `same-outcome` too, since the job's build fails where
@@ -80,34 +80,32 @@ the stretch the deciding step falls in, in the failing run and in the
 passing one it was forked from:
 
 ```console
-$ rewind threads 26a8b341 --from 3390 --to 3413
-      3390       3399       139/140  counter
-      3400       3412       139/141  counter
-      3413       3413     kernel 11  ksoftirqd/0
+$ rewind threads f4274e60 --from 3338 --to 3360
+      3338       3346       139/140  counter
+      3347       3359       139/141  counter
+      3360       3360     kernel 11  ksoftirqd/0
 ```
 
 ```console
-$ rewind threads 614cde00 --from 3390 --to 3413
-      3390       3401       139/140  counter
-      3402       3403     kernel 11  ksoftirqd/0
-      3404       3405       139/139  counter
-      3406       3413       139/141  counter
+$ rewind threads 41029541 --from 3338 --to 3360
+      3338       3351       139/140  counter
+      3352       3360       139/141  counter
 ```
 
-In the passing run thread 139/140 takes the CPU at step 3390
+In the passing run thread 139/140 takes the CPU at step 3338
 and keeps it until it has counted its hits and exits. In the failing run the
-switch at step 3398 gives it one step, to its first point: it has
+switch at step 3345 gives it one step, to its first point: it has
 read the count and not stored it. Thread 139/141 then takes the CPU
-at step 3400 and counts every one of its hits, and when thread
+at step 3347 and counts every one of its hits, and when thread
 139/140 gets the CPU back it stores the count it read, over all of
 them. Open the failing run beside the passing one, at the point, with the
 thread lanes shown and zoomed in on the window around it:
 
 ```console
-$ rewind open 26a8b341 3398 --compare 614cde00
+$ rewind open f4274e60 3345 --compare 41029541
 ```
 
-![The app at step 3398 of the failing counter run, compared with the passing one, with the Threads panel open: a lane per thread, the playhead at the deciding step, thread 139/140 on the CPU until one step past it and the other counter thread from step 3400](../site/img/app-point.png)
+![The app at step 3345 of the failing counter run, compared with the passing one, with the Threads panel open: a lane per thread, the playhead at the deciding step, thread 139/140 on the CPU until one step past it and the other counter thread from step 3347](../site/img/app-point.png)
 
 The Threads panel has a lane per thread, with the stretches each held the
 CPU: the failing run's above, the passing run's in blue under them. In the

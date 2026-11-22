@@ -206,37 +206,29 @@ $ rewind check --where --epoch {{epoch}} {{flake}} 2>/dev/null | sed -n '/^where
 ```
 
 <!-- capture held_tid: \d+/(\d+) +worker \(src/pool.c:75\), on the CPU at the deciding step -->
-<!-- capture diff_step: (\d+) +\d+/\d+ +worker \(src/pool.c:75\), at the first event that differs -->
-<!-- capture diff_tid: \d+/(\d+) +worker \(src/pool.c:75\), at the first event that differs -->
-<!-- assert: test {{held_tid}} = {{crash_tid}} && test {{diff_tid}} != {{crash_tid}} && test {{diff_step}} -lt {{crash_step}} -->
-<!-- assert: rewind events {{failing}} --from {{diff_step}} --to {{diff_step}} | grep -qE '{{pid}}/{{diff_tid}} +write\(1, "job [0-9]+ done' -->
-<!-- assert: test {{blame_step}} -gt {{diff_step}} && test {{blame_step}} -lt {{crash_step}} -->
-<!-- assert: grep -qE "^  thread {{diff_tid}}  pool.c:45  run_job" {{out:blame}} -->
-<!-- set diff_job: rewind events {{failing}} --from {{diff_step}} --to {{diff_step}} | grep -oE 'job [0-9]+ done' | grep -oE '[0-9]+' -->
-<!-- set other_job: rewind events {{failing}} --from {{diff_step}} --to {{crash_step}} | grep -oE '{{pid}}/{{diff_tid}} +write\(1, "worker picked job [0-9]+' | head -1 | grep -oE '[0-9]+$' -->
+<!-- capture diff_step: (\d+) +\d+/\d+ +worker \(src/pool.c:77\), at the first event that differs -->
+<!-- capture diff_tid: \d+/(\d+) +worker \(src/pool.c:77\), at the first event that differs -->
+<!-- assert: test {{held_tid}} = {{crash_tid}} && test {{diff_tid}} = {{crash_tid}} && test {{diff_step}} = {{crash_step}} -->
+<!-- assert: test {{blame_step}} -gt {{deciding}} && test {{blame_step}} -lt {{crash_step}} -->
+<!-- assert: ! rewind events {{failing}} --from $(( {{deciding}} + 1 )) --to $(( {{crash_step}} - 1 )) | grep -qE " {{pid}}/[0-9]+ " -->
 <!-- set next_pick: rewind events {{passing}} --from {{deciding}} | grep -m1 -E '{{pid}}/{{crash_tid}} +write\(1, "worker picked job' | awk '{print $1}' -->
 <!-- set next_job: rewind events {{passing}} --from {{next_pick}} --to {{next_pick}} | grep -oE 'worker picked job [0-9]+' | grep -oE '[0-9]+$' -->
-<!-- assert: test -n "{{diff_job}}" && test -n "{{other_job}}" && test "{{other_job}}" = "{{next_job}}" -->
-<!-- set late_gap: echo $(( {{crash_step}} - {{diff_step}} )) -->
+<!-- assert: test -n "{{next_job}}" && test {{next_pick}} -lt {{crash_step}} -->
 
-The first event that differs is the other worker, thread {{diff_tid}},
-reporting job {{diff_job}} on the same line, 75. With thread {{crash_tid}}
-held at the deciding step before it counts job {{crash_job}}, thread
-{{diff_tid}} counts its own job and picks job {{other_job}}, the one thread
-{{crash_tid}} picks in the passing run. The main thread then shuts the pool
-down, nulling the queue at step {{blame_step}} while thread {{diff_tid}} runs
-job {{other_job}}, as blame showed. In the passing run thread {{crash_tid}}
-counts job {{crash_job}} and picks job {{next_job}} first, at step
-{{next_pick}}. That is the cause showing up before the symptom: the held
-thread's fault at line 77, which `rewind where` showed at the top of this
-page, comes {{late_gap}} steps later, at step {{crash_step}}.
+Both lines name thread {{crash_tid}}. At the deciding step it is on line 75,
+printing, and the first event that differs is its own fault on line 77, at
+step {{crash_step}}. In between, the failing run's processes make no event:
+the main thread sets the queue to NULL at step {{blame_step}}, as blame
+showed, and waits in `pthread_join`. In the passing run thread {{crash_tid}}
+keeps the CPU past the deciding step, counts job {{crash_job}} and picks job
+{{next_job}} at step {{next_pick}}.
 
 In the app, the deciding step is a dashed blue mark on the timeline, before
 the solid one where the runs' events first differ. Zoomed in around the crash:
 
 <!-- screenshot site/img/app-decides: {{home}}/runs/{{failing}} --compare {{home}}/runs/{{passing}} --step {{crash_step}} ;; key plus ;; key plus ;; key plus ;; key plus ;; key plus ;; key plus ;; key plus ;; key plus ;; key plus ;; key plus ;; key plus ;; key plus ;; key plus ;; key plus -->
 
-![The app zoomed in around the crash: a dashed blue mark at step {{deciding}} on the timeline, a solid one at step {{diff_step}} where the events first differ, the crash after them, and the divergence card saying the two runs are identical until step {{deciding}}, where only this run gets {{deciding_words}}](../site/img/app-decides.png)
+![The app zoomed in around the crash: a dashed blue mark at step {{deciding}} on the timeline, a solid one at step {{diff_step}}, the crash, where the events first differ, and the divergence card saying the two runs are identical until step {{deciding}}, where only this run gets {{deciding_words}}](../site/img/app-decides.png)
 
 ## See which thread held the CPU
 
@@ -426,7 +418,7 @@ source panel and gdb a click away.
 
 ## Steer the perturbation
 
-<!-- set fork_from: d={{work}}/fork-search; rm -rf $d; mkdir -p $d; for x in runs store cache; do cp -a {{home}}/$x $d/; done; ln -s {{home}}/images $d/images; for back in 100 80 60 40 30 20 10; do s=$(( {{crash_step}} - back )); mixed=$(for k in 1 2 3 4; do REWIND_HOME=$d rewind fork {{failing}} $s --schedule $k --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])'; done | python3 -c 'import sys; s=[int(l) != 0 for l in sys.stdin]; print(int(any(s) and not all(s)))'); if [ "$mixed" = 1 ]; then echo $s; break; fi; done; rm -rf $d -->
+<!-- set fork_from: d={{work}}/fork-search; rm -rf $d; mkdir -p $d; for x in runs store cache; do cp -a {{home}}/$x $d/; done; ln -s {{home}}/images $d/images; for back in 300 200 150 100 80 60 40 30 20 10; do s=$(( {{crash_step}} - back )); mixed=$(for k in 1 2 3 4; do REWIND_HOME=$d rewind fork {{failing}} $s --schedule $k --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])'; done | python3 -c 'import sys; s=[int(l) != 0 for l in sys.stdin]; print(int(any(s) and not all(s)))'); if [ "$mixed" = 1 ]; then echo $s; break; fi; done; rm -rf $d -->
 <!-- assert: test -n "{{fork_from}}" -->
 
 `check --schedules N` tries more or fewer schedules, `--all` all of them.

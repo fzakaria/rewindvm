@@ -107,35 +107,28 @@ $ rewind check --epoch {{epoch}} {{flake}}
 <!-- set failed_said: python3 -c 'import sys; s = sys.argv[1:]; print(f"Schedule {s[0]} fails" if len(s) == 1 else f"Schedules {", ".join(s[:-1])} and {s[-1]} fail")' {{failed}} -->
 <!-- assert: test {{check_seconds}} -lt 60 -->
 <!-- capture first_diff: \n  failing +(\d+) -->
-<!-- capture first_tid: \n  failing +\d+ +\d+/(\d+) -->
 <!-- capture check_crash: \n  failing +(\d+) +\d+/\d+ +SIGSEGV -->
 <!-- capture check_crash_tid: \n  failing +\d+ +\d+/(\d+) +SIGSEGV -->
-<!-- assert: test {{first_diff}} -lt {{check_crash}} && test {{first_tid}} != {{check_crash_tid}} -->
-<!-- capture fail_job: \n  failing +\d+ +\d+/\d+ +write\(1, "job (\d+) done -->
+<!-- assert: test {{first_diff}} = {{check_crash}} -->
 <!-- capture held_job: \n  both +{{deciding}} +\d+/{{check_crash_tid}} +write\(1, "job (\d+) done -->
-<!-- capture pass_job: \n  passing +\d+ +\d+/\d+ +write\(1, "worker picked job (\d+) -->
-<!-- assert: grep -m1 '^  failing' {{out:check}} | grep -qE ' [0-9]+/{{first_tid}} +write\(1, "job {{fail_job}} done' -->
-<!-- assert: grep -m1 '^  passing' {{out:check}} | grep -qE ' [0-9]+/{{check_crash_tid}} +write\(1, "worker picked job {{pass_job}}\\n' -->
-<!-- assert: grep '^  failing' {{out:check}} | grep -qE ' [0-9]+/{{first_tid}} +write\(1, "worker picked job {{pass_job}}\\n' -->
-<!-- assert: grep '^  failing' {{out:check}} | grep -qE ' [0-9]+/{{check_crash_tid}} +SIGSEGV code=1 addr=0x108' -->
-<!-- set check_gap: echo $(( {{check_crash}} - {{first_diff}} )) -->
+<!-- capture pass_pick: \n  passing +(\d+) +\d+/{{check_crash_tid}} +write\(1, "worker picked job \d+ -->
+<!-- capture pass_job: \n  passing +\d+ +\d+/{{check_crash_tid}} +write\(1, "worker picked job (\d+) -->
+<!-- assert: grep -m1 '^  passing' {{out:check}} | grep -qE ' {{pass_pick}} +[0-9]+/{{check_crash_tid}} +write\(1, "worker picked job {{pass_job}}\\n' -->
+<!-- assert: grep -m1 '^  failing' {{out:check}} | grep -qE ' [0-9]+/{{check_crash_tid}} +SIGSEGV code=1 addr=0x108' -->
 
 {{failed_said}}. `check` narrows schedule {{narrowed}}'s failure to one step,
 {{deciding}}. The passing run perturbs the same steps less that one, so the two
 runs are the same until {{deciding}}, and only the failing one gets
 {{deciding_words}} there. The search took {{check_seconds}} seconds.
 
-The last block shows where the test's own events then differ. The first
-difference is the cause, showing up before the symptom. At the deciding step
-thread {{check_crash_tid}} has reported job {{held_job}} and has yet to count
-it, which a worker does outside the lock. In the failing run it is held
-there: at step {{first_diff}} the other worker, thread {{first_tid}}, reports
-job {{fail_job}} and goes on to pick job {{pass_job}}, the test sees half the
-jobs done and shuts the pool down, and thread {{check_crash_tid}} counts its
-job through the queue the shutdown freed. In the passing run thread
-{{check_crash_tid}} counts job {{held_job}} and picks job {{pass_job}} first.
-Thread {{check_crash_tid}}'s SIGSEGV comes {{check_gap}} steps later, at step
-{{check_crash}}.
+The last block shows where the test's own events then differ. At the
+deciding step thread {{check_crash_tid}} has reported job {{held_job}} and has
+yet to count it, which a worker does outside the lock. In the failing run it
+is held there: the test sees half the jobs done and shuts the pool down,
+and the thread's next event is its SIGSEGV at step {{check_crash}}, when it
+counts its job through the queue the shutdown freed. In the passing run
+thread {{check_crash_tid}} counts job {{held_job}} and picks job {{pass_job}}
+at step {{pass_pick}}.
 
 `--all` tries every schedule, which measures how flaky a build is:
 

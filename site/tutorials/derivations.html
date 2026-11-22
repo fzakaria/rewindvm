@@ -142,19 +142,19 @@ inRewind {
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> nix build <span class="option">--no-link</span> <span class="option">--print-out-paths</span> <span class="option">--impure</span> <span class="option">-f</span> stamp.nix</span>
-/nix/store/kvr7c9vw1j29nnqw3y21n3q495cz00rr-stamp-0.1.0
+/nix/store/yxg5v0g43rd25dn4z160k4fy4v4lfask-stamp-0.1.0
 
 <span class="cmd"><span class="prompt">$</span> <span class="operator">$(</span>nix build <span class="option">--no-link</span> <span class="option">--print-out-paths</span> <span class="option">--impure</span> <span class="option">-f</span> stamp.nix<span class="operator">)</span>/bin/stamp</span>
-build 353dda9f-1143-4548-9a60-a961dc181945 at 2026-10-03T00:00:00Z</code></pre>
+build 63189a49-4c3a-482b-9763-dee6132a827c at 2026-10-03T00:00:00Z</code></pre>
         <p>Now rebuild it:</p>
         <pre
           class="console"
         ><code><span class="cmd"><span class="prompt">$</span> nix build <span class="option">-L</span> <span class="option">--no-link</span> <span class="option">--impure</span> <span class="option">-f</span> stamp.nix <span class="option">--rebuild</span></span>
 checking outputs of '/nix/store/...-stamp-0.1.0.drv'...
 ...
-stamp&gt; gcc -O1 -Wall -DBUILD_ID='"353dda9f-1143-4548-9a60-a961dc181945"' -DBUILT_AT='"2026-10-03T00:00:00Z"' -o stamp stamp.c
+stamp&gt; gcc -O1 -Wall -DBUILD_ID='"63189a49-4c3a-482b-9763-dee6132a827c"' -DBUILT_AT='"2026-10-03T00:00:00Z"' -o stamp stamp.c
 ...
-stamp&gt; rewind: run 73aaf174cfa00200 exited:0 after 4303 steps, 0.022s virtual, 0.429s wall (poweroff)</code></pre>
+stamp&gt; rewind: run 2bd8d9470d729fe0 exited:0 after 4306 steps, 0.022s virtual, 0.536s wall (poweroff)</code></pre>
         <p>
           <code>--rebuild</code> passes. The program still reads the clock and the kernel's random
           pool, but both builds see the same values. You can replace <code>stamp</code> with your
@@ -178,10 +178,10 @@ stamp&gt; rewind: run 73aaf174cfa00200 exited:0 after 4303 steps, 0.022s virtual
         ><code><span class="cmd"><span class="prompt">$</span> sed <span class="option">-i</span> <span class="string">'s/1790985600/1749945600/'</span> stamp.nix</span>
 <span class="cmd"><span class="prompt">$</span> nix build <span class="option">--no-link</span> <span class="option">--print-out-paths</span> <span class="option">--impure</span> <span class="option">-f</span> stamp.nix</span>
 ...
-/nix/store/6fl41sqzbkj5hhl0x62pfg88qf63kwyd-stamp-0.1.0
+/nix/store/64jwbpxcczpqsrgv1fns8cbz23yq22zh-stamp-0.1.0
 
 <span class="cmd"><span class="prompt">$</span> <span class="operator">$(</span>nix build <span class="option">--no-link</span> <span class="option">--print-out-paths</span> <span class="option">--impure</span> <span class="option">-f</span> stamp.nix<span class="operator">)</span>/bin/stamp</span>
-build 3abd3873-04a1-4984-ae0a-7111128006c3 at 2025-06-15T00:00:00Z</code></pre>
+build ef00bdcb-bcb7-4176-9733-d92d122a5726 at 2025-06-15T00:00:00Z</code></pre>
         <p>
           The new output has its own store path and timestamp. Rebuilding the original recipe still
           produces the original timestamp.
