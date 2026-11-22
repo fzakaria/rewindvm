@@ -18,9 +18,14 @@
 //! | 3   | Setup  | none: the guest named its shared page    |
 //! | 4   | Record | u64 clock once the step moved it, u32 length, the record |
 //! | 5   | End    | u8 why, u64 step, u64 clock              |
+//! | 6   | Resume | u64 step, u64 clock, u8 whether set up   |
 //!
 //! An Io entry after an End entry, the log's last, holds what the stop
-//! drained.
+//! drained. A machine started from a keyframe instead of from boot
+//! writes a Resume entry first, with the keyframe's step and clock and
+//! whether the guest had set up its shared page by then; the encoders
+//! then go on from the recording's trace up to that step, as rewind-vmm's
+//! do on a restore.
 
 use std::fmt;
 
@@ -35,6 +40,7 @@ const TAG_IO: u8 = 2;
 const TAG_SETUP: u8 = 3;
 const TAG_RECORD: u8 = 4;
 const TAG_END: u8 = 5;
+const TAG_RESUME: u8 = 6;
 
 /// Why the machine stopped, as the End entry says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -80,11 +86,30 @@ pub struct Encoded {
 #[derive(Debug, PartialEq, Eq)]
 pub enum LogError {
     Magic,
-    Truncated { at: usize },
-    Tag { at: usize, tag: u8 },
-    Stop { at: usize, why: u8 },
-    AfterEnd { at: usize },
-    Switch { step: u64, message: String },
+    Truncated {
+        at: usize,
+    },
+    Tag {
+        at: usize,
+        tag: u8,
+    },
+    Stop {
+        at: usize,
+        why: u8,
+    },
+    AfterEnd {
+        at: usize,
+    },
+    Switch {
+        step: u64,
+        message: String,
+    },
+    /// The recording's trace does not resume the encoders at the
+    /// keyframe's step.
+    Resume {
+        step: u64,
+        message: String,
+    },
 }
 
 impl fmt::Display for LogError {
@@ -111,6 +136,9 @@ impl fmt::Display for LogError {
                     f,
                     "the switch record at step {step} does not read: {message}"
                 )
+            }
+            LogError::Resume { step, message } => {
+                write!(f, "the trace does not resume at step {step}: {message}")
             }
         }
     }
@@ -236,8 +264,11 @@ impl Encoders {
 }
 
 /// The trace a step log makes: what rewind-vmm's observer would have
-/// been handed, step for step, by a machine that did the same.
-pub fn encode(log: &[u8]) -> Result<Encoded, LogError> {
+/// been handed, step for step, by a machine that did the same. A log of
+/// a machine started from a keyframe goes on from `trace`, the
+/// recording's whole trace, at the keyframe's step; a log from boot
+/// reads none of it.
+pub fn encode(log: &[u8], trace: &[(u64, Vec<u8>)]) -> Result<Encoded, LogError> {
     if !log.starts_with(MAGIC) {
         return Err(LogError::Magic);
     }
@@ -266,6 +297,22 @@ pub fn encode(log: &[u8]) -> Result<Encoded, LogError> {
                 let lost = r.u32()?;
                 let buffered = r.sized()?;
                 enc.io(step, ns, lost, buffered);
+            }
+            TAG_RESUME => {
+                step = r.u64()?;
+                ns = r.u64()?;
+                if r.u8()? != 0 {
+                    let resume = |message: String| LogError::Resume { step, message };
+                    let through = trace.partition_point(|(s, _)| *s <= step);
+                    enc.io = Some(
+                        io_records::Encoder::resume(&trace[..through])
+                            .map_err(|e| resume(e.to_string()))?,
+                    );
+                    enc.switches = Some(
+                        switches::Encoder::resume(trace, step)
+                            .map_err(|e| resume(e.to_string()))?,
+                    );
+                }
             }
             TAG_SETUP => {
                 enc.io = Some(io_records::Encoder::new());
@@ -344,6 +391,13 @@ mod tests {
             self.0.extend_from_slice(record);
             self
         }
+        fn resume(mut self, step: u64, ns: u64, set_up: bool) -> Log {
+            self.0.push(TAG_RESUME);
+            self.0.extend_from_slice(&step.to_le_bytes());
+            self.0.extend_from_slice(&ns.to_le_bytes());
+            self.0.push(u8::from(set_up));
+            self
+        }
         fn end(mut self, why: u8, step: u64, ns: u64) -> Log {
             self.0.push(TAG_END);
             self.0.push(why);
@@ -364,7 +418,7 @@ mod tests {
             .record(5000, &console)
             .step(2, 5000)
             .end(0, 2, 5000);
-        let encoded = encode(&log.0).unwrap();
+        let encoded = encode(&log.0, &[]).unwrap();
         assert_eq!(encoded.records, vec![(1, crate::stamped(&console, 5000))]);
         assert_eq!(encoded.end, Some((2, Stop::PowerOff)));
         assert_eq!(encoded.ns, 5000);
@@ -386,6 +440,7 @@ mod tests {
                 .record(5000, &switch)
                 .end(0, 1, 5000)
                 .0,
+            &[],
         )
         .unwrap();
         assert_eq!(before.records, vec![(1, crate::stamped(&switch, 5000))]);
@@ -401,6 +456,7 @@ mod tests {
                 .record(10_000, &switch)
                 .end(0, 2, 10_000)
                 .0,
+            &[],
         )
         .unwrap();
         assert_eq!(
@@ -409,21 +465,53 @@ mod tests {
         );
     }
 
+    /// A machine resumed after setup batches a switch, as its encoders go
+    /// on from the trace; one resumed before setup writes the switch as
+    /// an event, as a machine from boot would.
+    #[test]
+    fn a_resumed_machine_goes_on_from_the_trace() {
+        const KIND_SWITCH: u16 = 14;
+        let mut payload = (-1i32).to_le_bytes().to_vec();
+        payload.extend_from_slice(b"worker\0");
+        let switch = guest_record(KIND_SWITCH, &payload);
+        let log = |set_up| {
+            Log::new()
+                .resume(100, 500_000, set_up)
+                .step(101, 500_000)
+                .record(505_000, &switch)
+                .end(0, 101, 505_000)
+                .0
+        };
+
+        let mut expected = switches::Encoder::resume(&[], 100).unwrap();
+        expected.add(101, &switch).unwrap();
+        let batches: Vec<_> = expected
+            .finish(505_000)
+            .into_iter()
+            .map(|b| (101, b))
+            .collect();
+        assert_eq!(encode(&log(true), &[]).unwrap().records, batches);
+        assert_eq!(
+            encode(&log(false), &[]).unwrap().records,
+            vec![(101, crate::stamped(&switch, 505_000))]
+        );
+    }
+
     /// A log that is not one, one cut inside an entry, and one that goes
     /// on past its end are refused, each saying where.
     #[test]
     fn broken_logs_are_refused() {
-        assert_eq!(encode(b"nonsense"), Err(LogError::Magic));
+        assert_eq!(encode(b"nonsense", &[]), Err(LogError::Magic));
         let cut = Log::new().step(1, 0).0;
         assert_eq!(
-            encode(&cut[..cut.len() - 1]),
+            encode(&cut[..cut.len() - 1], &[]),
             Err(LogError::Truncated {
                 at: MAGIC.len() + 9
             })
         );
         let past = Log::new().end(0, 0, 0).step(1, 0).0;
         assert_eq!(
-            encode(&past),
+            encode(&past, &[]),
             Err(LogError::AfterEnd {
                 at: MAGIC.len() + 18
             })
