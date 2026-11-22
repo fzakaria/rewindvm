@@ -13,12 +13,12 @@ With inspect= and until=, the machine asks the guest at that step for
 an inspection, as rewind-vmm does for a forked machine, and stop-mark=
 stops it at the mark that ends the guest's answer.
 ---
- hw/i386/rewind.c         | 418 ++++++++++++++++++++++++++++++++++++++-
+ hw/i386/rewind.c         | 420 ++++++++++++++++++++++++++++++++++++++-
  include/hw/i386/rewind.h |   6 +
- 2 files changed, 417 insertions(+), 7 deletions(-)
+ 2 files changed, 419 insertions(+), 7 deletions(-)
 
 diff --git a/hw/i386/rewind.c b/hw/i386/rewind.c
-index 21b427d..448b6fd 100644
+index 21b427d..2d4bfe5 100644
 --- a/hw/i386/rewind.c
 +++ b/hw/i386/rewind.c
 @@ -105,6 +105,7 @@
@@ -141,7 +141,7 @@ index 21b427d..448b6fd 100644
          stop_machine(s, REWIND_STOP_STALLED);
      }
  }
-@@ -1411,6 +1474,326 @@ static void boot(RewindMachineState *s)
+@@ -1411,6 +1474,328 @@ static void boot(RewindMachineState *s)
      }
  }
  
@@ -413,7 +413,9 @@ index 21b427d..448b6fd 100644
 +        cpu_set_apic_tpr(s->cpu->apic_state, cr[4]);
 +    }
 +
++    /* XCR0 decides, with CR4, whether TCG decodes AVX at all. */
 +    env->xcr0 = state_u64(&r);
++    cpu_sync_avx_hflag(env);
 +    for (int i = 0; i < 4; i++) {
 +        env->dr[i] = state_u64(&r);
 +    }
@@ -468,7 +470,7 @@ index 21b427d..448b6fd 100644
  static void rewind_reset(void *opaque)
  {
      RewindMachineState *s = opaque;
-@@ -1419,6 +1802,10 @@ static void rewind_reset(void *opaque)
+@@ -1419,6 +1804,10 @@ static void rewind_reset(void *opaque)
      /* LINT0 as ExtINT and LINT1 as NMI, as cpu.rs setup_lapic leaves them. */
      apic->lvt[APIC_LVT_LINT0] = (apic->lvt[APIC_LVT_LINT0] & ~0x700) | (7 << 8);
      apic->lvt[APIC_LVT_LINT1] = (apic->lvt[APIC_LVT_LINT1] & ~0x700) | (4 << 8);
@@ -479,7 +481,7 @@ index 21b427d..448b6fd 100644
      boot(s);
  }
  
-@@ -1469,7 +1856,7 @@ static void parse_inputs(RewindMachineState *s)
+@@ -1469,7 +1858,7 @@ static void parse_inputs(RewindMachineState *s)
          error_report("rewind: the machine needs log=<path> for its step log");
          exit(1);
      }
@@ -488,7 +490,7 @@ index 21b427d..448b6fd 100644
          error_report("rewind: the machine needs -kernel <vmlinux>");
          exit(1);
      }
-@@ -1490,6 +1877,14 @@ static void rewind_machine_init(MachineState *ms)
+@@ -1490,6 +1879,14 @@ static void rewind_machine_init(MachineState *ms)
          exit(1);
      }
      log_bytes(s, REWIND_LOG_MAGIC, 8);
@@ -503,7 +505,7 @@ index 21b427d..448b6fd 100644
      if (s->schedule_path) {
          size_t len;
          uint8_t *file = read_file(s->schedule_path, &len);
-@@ -1597,6 +1992,9 @@ STR_PROP(vendor, "vendor")
+@@ -1597,6 +1994,9 @@ STR_PROP(vendor, "vendor")
  STR_PROP(image, "image")
  STR_PROP(log_path, "log")
  STR_PROP(schedule_path, "schedule")
@@ -513,7 +515,7 @@ index 21b427d..448b6fd 100644
  #undef STR_PROP
  
  static bool get_extras(Object *o, Error **e)
-@@ -1645,6 +2043,12 @@ static void rewind_machine_class_init(ObjectClass *oc, void *data)
+@@ -1645,6 +2045,12 @@ static void rewind_machine_class_init(ObjectClass *oc, void *data)
      object_class_property_add_str(oc, "log", get_log_path, set_log_path);
      object_class_property_add_str(oc, "schedule", get_schedule_path,
                                    set_schedule_path);
