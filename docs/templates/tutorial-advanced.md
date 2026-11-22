@@ -444,6 +444,18 @@ Fork from here forks the run at the playhead with the next schedule. Clicking
 a run opens it compared with the run it hangs under; right-clicking offers
 more.
 
+Show steps in the panel's title draws each run along its steps instead. A
+run is a thin line while it is still the run it hangs under, and thick from
+the step where it first differs. A blue band marks the steps its schedule
+perturbed, and a red tick marks where the program that failed in one of the
+two first did something different. A row that folds runs marks where each
+of them ended. The window opens around where the two runs on screen part,
+and clicking a run's line opens it at that step:
+
+<!-- screenshot site/img/app-runs-steps: {{home}}/runs/{{failing}} --compare {{home}}/runs/{{passing}} --step {{crash_step}} ;; click 785 27 ;; wait 3 ;; click 1398 280 ;; wait 5 -->
+
+![The Runs panel's step axis: the schedule 0 run whole, check's failing schedules thick from where each first differs with a tick where the test first did something different, and the forks of the failing run](../site/img/app-runs-steps.png)
+
 ## Find a run again
 
 A command takes a run by its id or a prefix of it, by `@` for the newest run
