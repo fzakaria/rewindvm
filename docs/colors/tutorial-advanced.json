@@ -99,7 +99,7 @@
   ]
  },
  {
-  "text": "$ rewind blame fc9482de --at 4711 'p->queue'\nrewind: process 166 at step 4711; loading symbols for 4 of its files\nrewind: read 3 source files fetched from the VM earlier\nrewind: walking thread 172's stack in gdb\np->queue = 0x0   8 bytes at 0x5641c70ff068, thread 172, pool.c:77\n\nlast written at step 4706 by thread 166 (test_pool_shutd)\n  pool.c:125  pool_shutdown  p->queue = NULL;\n  was 0x5641c70ff090\n\nother threads just after the write, in step 4706:\n  thread 171  pool.c:45  run_job  __syscall_cancel_arch\n  thread 172  pool.c:75  worker  __syscall_cancel_arch\n\nsearched back to step 4070, 1 keyframe window, 1 write, 0.6s",
+  "text": "$ rewind blame fc9482de --at 4711 'p->queue'\nrewind: process 166 at step 4711; loading symbols for 4 of its files\nrewind: read 3 source files fetched from the VM earlier\nrewind: walking thread 172's stack in gdb\np->queue = 0x0   8 bytes at 0x5641c70ff068, thread 172, pool.c:77\n\nlast written at step 4706 by thread 166 (test_pool_shutd)\n  pool.c:125  pool_shutdown  p->queue = NULL;\n  was 0x5641c70ff090\n\nother threads just after the write, in step 4706:\n  thread 171  pool.c:45  run_job  __syscall_cancel_arch\n  thread 172  pool.c:75  worker  __syscall_cancel_arch\n\nsearched back to step 4070, 1 keyframe window, 1 write, 0.7s",
   "spans": [
    [
     1,
@@ -271,7 +271,7 @@
   ]
  },
  {
-  "text": "$ rewind nix --cores 4 --epoch 1790985600 github:fzakaria/rewindvm#mylib\n...\nrewind: run d08ca83e53608e25 exited:0 after 6037 steps, 0.215s virtual, 1.204s wall (poweroff)\n/nix/store/f6a9gy362szw6nxx3ikrklr8glr6rdln-mylib-0.3.0 a9d703ba89774f3d  matches your store, rewindvm.cachix.org",
+  "text": "$ rewind nix --cores 4 --epoch 1790985600 github:fzakaria/rewindvm#mylib\n...\nrewind: run d08ca83e53608e25 exited:0 after 6037 steps, 0.215s virtual, 0.538s wall (poweroff)\n/nix/store/f6a9gy362szw6nxx3ikrklr8glr6rdln-mylib-0.3.0 a9d703ba89774f3d  matches your store, rewindvm.cachix.org",
   "spans": [
    [
     2,
@@ -305,7 +305,7 @@
   ]
  },
  {
-  "text": "$ rewind fork fc9482de 4411 --schedule 1 --quiet\nrewind: run be8a7095cad191ba exited:0 after 6611 steps, 0.222s virtual, 0.391s wall (poweroff)\nrewind: the fork first differs from its parent at step 4435\nrewind: open it beside its parent in the desktop app: rewind open be8a7095cad191ba 4435 --compare fc9482dea85f64ec\n\n$ rewind fork fc9482de 4411 --schedule 2 --quiet\nrewind: run a337e712ef67f2f8 exited:0 after 6534 steps, 0.220s virtual, 0.235s wall (poweroff)\nrewind: the fork first differs from its parent at step 4436\nrewind: open it beside its parent in the desktop app: rewind open a337e712ef67f2f8 4436 --compare fc9482dea85f64ec\n\n$ rewind fork fc9482de 4411 --schedule 3 --quiet\nrewind: run ff0935ec337e2e1d exited:0 after 6696 steps, 0.225s virtual, 0.249s wall (poweroff)\nrewind: the fork first differs from its parent at step 4436\nrewind: open it beside its parent in the desktop app: rewind open ff0935ec337e2e1d 4436 --compare fc9482dea85f64ec\n\n$ rewind fork fc9482de 4411 --schedule 4 --quiet\nrewind: run 9c04c180836a933a exited:2 after 4828 steps, 0.200s virtual, 0.102s wall (poweroff)\nrewind: the fork first differs from its parent at step 4436\nrewind: open it beside its parent in the desktop app: rewind open 9c04c180836a933a 4436 --compare fc9482dea85f64ec",
+  "text": "$ rewind fork fc9482de 4411 --schedule 1 --quiet\nrewind: run be8a7095cad191ba exited:0 after 6611 steps, 0.222s virtual, 0.164s wall (poweroff)\nrewind: the fork first differs from its parent at step 4435\nrewind: open it beside its parent in the desktop app: rewind open be8a7095cad191ba 4435 --compare fc9482dea85f64ec\n\n$ rewind fork fc9482de 4411 --schedule 2 --quiet\nrewind: run a337e712ef67f2f8 exited:0 after 6534 steps, 0.220s virtual, 0.127s wall (poweroff)\nrewind: the fork first differs from its parent at step 4436\nrewind: open it beside its parent in the desktop app: rewind open a337e712ef67f2f8 4436 --compare fc9482dea85f64ec\n\n$ rewind fork fc9482de 4411 --schedule 3 --quiet\nrewind: run ff0935ec337e2e1d exited:0 after 6696 steps, 0.225s virtual, 0.130s wall (poweroff)\nrewind: the fork first differs from its parent at step 4436\nrewind: open it beside its parent in the desktop app: rewind open ff0935ec337e2e1d 4436 --compare fc9482dea85f64ec\n\n$ rewind fork fc9482de 4411 --schedule 4 --quiet\nrewind: run 9c04c180836a933a exited:2 after 4828 steps, 0.200s virtual, 0.079s wall (poweroff)\nrewind: the fork first differs from its parent at step 4436\nrewind: open it beside its parent in the desktop app: rewind open 9c04c180836a933a 4436 --compare fc9482dea85f64ec",
   "spans": [
    [
     1,
@@ -653,7 +653,7 @@
   ]
  },
  {
-  "text": "$ rewind export fc9482de --replayable -o crash.rwd\nrewind: wrote crash.rwd (231.3 MB)\n\n$ REWIND_HOME=elsewhere rewind import crash.rwd\nfc9482dea85f64ec  exited:2          4756 steps  mylib-0.3.0\n\n$ REWIND_HOME=elsewhere rewind replay fc9482de\nidentical to the recording: 1687 events, 1076 context switches and 1476 read and write records over 4756 steps, and the whole machine at its 2 keyframes",
+  "text": "$ rewind export fc9482de --replayable -o crash.rwd\nrewind: wrote crash.rwd (231.4 MB)\n\n$ REWIND_HOME=elsewhere rewind import crash.rwd\nfc9482dea85f64ec  exited:2          4756 steps  mylib-0.3.0\n\n$ REWIND_HOME=elsewhere rewind replay fc9482de\nidentical to the recording: 1687 events, 1076 context switches and 1476 read and write records over 4756 steps, and the whole machine at its 2 keyframes",
   "spans": [
    [
     1,

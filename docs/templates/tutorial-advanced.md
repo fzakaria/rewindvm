@@ -454,7 +454,7 @@ and clicking a run's line opens it at that step:
 
 <!-- screenshot site/img/app-runs-steps: {{home}}/runs/{{failing}} --compare {{home}}/runs/{{passing}} --step {{crash_step}} ;; click 785 27 ;; wait 3 ;; click 1398 280 ;; wait 5 -->
 
-![The Runs panel's step axis: the schedule 0 run whole, check's failing schedules thick from where each first differs with a tick where the test first did something different, and the forks of the failing run](../site/img/app-runs-steps.png)
+![The Runs panel's step axis 400 steps either side of the crash: the recorded runs whole, check's failing schedules diverged long before, the pair check narrowed the failure to parting inside their window, and the forks of the failing run, each thick from where it first differs, the passing ones with a tick where the test first did something different](../site/img/app-runs-steps.png)
 
 ## Find a run again
 

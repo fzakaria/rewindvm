@@ -154,7 +154,7 @@ other threads just after the write, in step 4706:
   thread 171  pool.c:45  run_job  __syscall_cancel_arch
   thread 172  pool.c:75  worker  __syscall_cancel_arch
 
-searched back to step 4070, 1 keyframe window, 1 write, 0.6s
+searched back to step 4070, 1 keyframe window, 1 write, 0.7s
 ```
 
 The main thread set `p->queue` to NULL on line 125, in `pool_shutdown`. It did
@@ -223,7 +223,7 @@ $ rewind blame fc9482de --at 4711 'p->stopping' 'p->queue' --reads --since 4671
   4706  166 test_pool_shutd write   0x0                 pool.c:125  pool_shutdown  p->queue = NULL;  p->queue
   4708  172 test_pool_shutd read    0x0                 pool.c:77  worker  p->queue->completed++;  p->queue
 ...
-searched back to step 4671, 2 keyframe windows, 2 writes, 17 reads, 0.6s
+searched back to step 4671, 2 keyframe windows, 2 writes, 17 reads, 0.7s
 ```
 
 Read in order, the rows show the race:
@@ -521,7 +521,7 @@ interleave on the one vCPU:
 ```console
 $ rewind nix --cores 4 --epoch 1790985600 github:fzakaria/rewindvm#mylib
 ...
-rewind: run d08ca83e53608e25 exited:0 after 6037 steps, 0.215s virtual, 1.204s wall (poweroff)
+rewind: run d08ca83e53608e25 exited:0 after 6037 steps, 0.215s virtual, 0.538s wall (poweroff)
 /nix/store/f6a9gy362szw6nxx3ikrklr8glr6rdln-mylib-0.3.0 a9d703ba89774f3d  matches your store, rewindvm.cachix.org
 ```
 
@@ -591,22 +591,22 @@ source panel and gdb a click away.
 
 ```console
 $ rewind fork fc9482de 4411 --schedule 1 --quiet
-rewind: run be8a7095cad191ba exited:0 after 6611 steps, 0.222s virtual, 0.391s wall (poweroff)
+rewind: run be8a7095cad191ba exited:0 after 6611 steps, 0.222s virtual, 0.164s wall (poweroff)
 rewind: the fork first differs from its parent at step 4435
 rewind: open it beside its parent in the desktop app: rewind open be8a7095cad191ba 4435 --compare fc9482dea85f64ec
 
 $ rewind fork fc9482de 4411 --schedule 2 --quiet
-rewind: run a337e712ef67f2f8 exited:0 after 6534 steps, 0.220s virtual, 0.235s wall (poweroff)
+rewind: run a337e712ef67f2f8 exited:0 after 6534 steps, 0.220s virtual, 0.127s wall (poweroff)
 rewind: the fork first differs from its parent at step 4436
 rewind: open it beside its parent in the desktop app: rewind open a337e712ef67f2f8 4436 --compare fc9482dea85f64ec
 
 $ rewind fork fc9482de 4411 --schedule 3 --quiet
-rewind: run ff0935ec337e2e1d exited:0 after 6696 steps, 0.225s virtual, 0.249s wall (poweroff)
+rewind: run ff0935ec337e2e1d exited:0 after 6696 steps, 0.225s virtual, 0.130s wall (poweroff)
 rewind: the fork first differs from its parent at step 4436
 rewind: open it beside its parent in the desktop app: rewind open ff0935ec337e2e1d 4436 --compare fc9482dea85f64ec
 
 $ rewind fork fc9482de 4411 --schedule 4 --quiet
-rewind: run 9c04c180836a933a exited:2 after 4828 steps, 0.200s virtual, 0.102s wall (poweroff)
+rewind: run 9c04c180836a933a exited:2 after 4828 steps, 0.200s virtual, 0.079s wall (poweroff)
 rewind: the fork first differs from its parent at step 4436
 rewind: open it beside its parent in the desktop app: rewind open 9c04c180836a933a 4436 --compare fc9482dea85f64ec
 ```
@@ -619,6 +619,16 @@ build, with forks under the run and step they branched from:
 Fork from here forks the run at the playhead with the next schedule. Clicking
 a run opens it compared with the run it hangs under; right-clicking offers
 more.
+
+Show steps in the panel's title draws each run along its steps instead. A
+run is a thin line while it is still the run it hangs under, and thick from
+the step where it first differs. A blue band marks the steps its schedule
+perturbed, and a red tick marks where the program that failed in one of the
+two first did something different. A row that folds runs marks where each
+of them ended. The window opens around where the two runs on screen part,
+and clicking a run's line opens it at that step:
+
+![The Runs panel's step axis 400 steps either side of the crash: the recorded runs whole, check's failing schedules diverged long before, the pair check narrowed the failure to parting inside their window, and the forks of the failing run, each thick from where it first differs, the passing ones with a tick where the test first did something different](../site/img/app-runs-steps.png)
 
 ## Find a run again
 
@@ -667,7 +677,7 @@ The failing run's command makes it again, with the same id:
 ```console
 $ rewind show fc9482de | tail -1 | sh
 ...
-rewind: run fc9482dea85f64ec exited:2 after 4756 steps, 0.198s virtual, 0.434s wall (poweroff)
+rewind: run fc9482dea85f64ec exited:2 after 4756 steps, 0.198s virtual, 0.462s wall (poweroff)
 ```
 
 ## Compare any two runs
@@ -896,7 +906,7 @@ The same steps stall, one step in 128, but each stall picks one of the
 doublings of 10 µs up to the maximum, 14 of them for 50 ms, so fewer stalls
 are short. How often a race turns up then depends on how long it needs a
 thread held: 32 schedules of mylib crash 5 times by default and
-6 times with `--stall-max 100ms`, in 3.6 s and 3.4 s. A stall is virtual time, so the guest's clock
+6 times with `--stall-max 100ms`, in 3.6 s and 3.7 s. A stall is virtual time, so the guest's clock
 moves further, and a program's own timeouts see the extra time. The maximum is
 part of each run's spec, so `rewind show`, a replay and a fork of the run keep
 the maximum, and a run made without the flag keeps its id. A fork's own
@@ -957,7 +967,7 @@ zoom the timeline. The ? key lists them all:
 
 ```console
 $ rewind export fc9482de --replayable -o crash.rwd
-rewind: wrote crash.rwd (231.3 MB)
+rewind: wrote crash.rwd (231.4 MB)
 
 $ REWIND_HOME=elsewhere rewind import crash.rwd
 fc9482dea85f64ec  exited:2          4756 steps  mylib-0.3.0
@@ -968,7 +978,7 @@ identical to the recording: 1687 events, 1076 context switches and 1476 read and
 
 A replayable export carries the keyframes, the image and the VM's kernel, and
 replays on any machine with the same CPU vendor. Without `--replayable` it is
-the events alone, 35.3 KB: enough to read and to scrub in the app, whose
+the events alone, 35.5 KB: enough to read and to scrub in the app, whose
 Export button writes the replayable kind. Both kinds carry the run's
 bookmarks, and `summary.txt`, the run in plain text as `rewind summary`
 prints it: the verdict, the failing step and the last lines of output. With
