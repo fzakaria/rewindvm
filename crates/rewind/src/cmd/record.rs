@@ -2838,43 +2838,44 @@ fn print_compared(compared: &Compared) {
     }
 }
 
+/// What a root filesystem argument names, which says how its image is
+/// made.
+enum RootKind {
+    /// A directory tree.
+    Dir,
+    /// A tarball, such as `docker export` writes.
+    Tar,
+}
+
 /// Builds or reuses the erofs image for a root filesystem argument.
 fn root_image(home: &Home, root: &Path) -> Result<PathBuf> {
     if root.extension().is_some_and(|e| e == "erofs") {
         return Ok(root.to_path_buf());
     }
 
-    // A tarball's image is named after the tarball's hash, so checking a
-    // command under many schedules converts it once.
-    let cached = if root.is_file() {
+    // A tarball's image is named after the tarball's hash, and a
+    // directory's after the key of what its image holds, so checking a
+    // command under many schedules, or running it again, packs it once.
+    let (path, root_kind) = if root.is_dir() {
+        let key = image::dir_key(root)?;
+        let path = home.images().join(format!("dir-{}.erofs", &key[..32]));
+        (path, RootKind::Dir)
+    } else if root.is_file() {
         let key = image::hash_file(root)?;
         let path = home.images().join(format!("tar-{}.erofs", &key[..32]));
-        if path.exists() {
-            return Ok(path);
-        }
-        Some(path)
-    } else {
-        None
-    };
-
-    let tmp = image::temp_beside(&home.images().join("root.erofs"));
-    if root.is_dir() {
-        image::from_dir(root, &tmp)?;
-    } else if root.is_file() {
-        image::from_tar(root, &tmp)?;
+        (path, RootKind::Tar)
     } else {
         bail!("{} is neither a directory nor a file", root.display());
+    };
+    if path.exists() {
+        return Ok(path);
     }
 
-    // Directory images are named by their own contents, so the same tree
-    // twice is one file on disk.
-    let path = match cached {
-        Some(path) => path,
-        None => {
-            let hash = image::hash_file(&tmp)?;
-            home.images().join(format!("{}.erofs", &hash[..32]))
-        }
-    };
+    let tmp = image::temp_beside(&path);
+    match root_kind {
+        RootKind::Dir => image::from_dir(root, &tmp)?,
+        RootKind::Tar => image::from_tar(root, &tmp)?,
+    }
     image::place(&tmp, &path)?;
     Ok(path)
 }
@@ -2942,6 +2943,34 @@ mod tests {
             Alongside::Yes
         );
         assert_eq!(batch_alongside(OTHER_SEED, 0, 0), Alongside::No);
+    }
+
+    #[test]
+    fn a_directory_root_packs_once_until_it_changes() {
+        // A run of a directory root packs it into an image; a second run
+        // of the same tree uses that image as it is, without packing again,
+        // which the image's unchanged inode shows. A changed file gives
+        // another image.
+        use std::fs;
+        use std::os::unix::fs::MetadataExt;
+        let dir = std::env::temp_dir().join(format!("rewind-root-once-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let home = Home::at(dir.join("home")).unwrap();
+        fs::create_dir_all(home.images()).unwrap();
+        let tree = dir.join("root");
+        fs::create_dir_all(tree.join("bin")).unwrap();
+        fs::write(tree.join("bin/hello"), b"hello").unwrap();
+
+        let first = root_image(&home, &tree).unwrap();
+        let first_inode = fs::metadata(&first).unwrap().ino();
+        let again = root_image(&home, &tree).unwrap();
+        assert_eq!(again, first);
+        assert_eq!(fs::metadata(&again).unwrap().ino(), first_inode);
+
+        fs::write(tree.join("bin/hello"), b"hello, world").unwrap();
+        let changed = root_image(&home, &tree).unwrap();
+        assert_ne!(changed, first);
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     /// How long a test of `alongside` waits for the other side before it

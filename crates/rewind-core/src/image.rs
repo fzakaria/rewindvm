@@ -9,8 +9,11 @@
 //! over the timestamp they are given, and a Nix development shell sets it,
 //! so the commands that build images run without it.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -192,6 +195,109 @@ pub fn hash_file(path: &Path) -> Result<String> {
         .update_mmap(path)
         .with_context(|| format!("hashing {}", path.display()))?;
     Ok(hasher.finalize().to_hex().to_string())
+}
+
+/// The context BLAKE3 derives a directory's key under, so that a tree's
+/// key is never the hash of some file.
+const DIR_KEY_CONTEXT: &str = "rewind 2026-11-21 directory image key";
+
+/// A key for the image `from_dir` makes of `dir`, found without making
+/// it: the BLAKE3 hash of everything in the tree that mkfs.erofs puts in
+/// the image under `mkfs_erofs`'s flags. That is each entry's path from
+/// `dir`, its type and permission bits, a file's bytes, a symlink's
+/// target, a device's number, and which paths inside the tree are
+/// hardlinks of one file. Owners and times are left out, since the image
+/// gives every entry root and one time. Two trees with one key make one
+/// image, so a run of a directory root reuses the image of an unchanged
+/// tree, as a tarball's image is reused by the tarball's hash.
+///
+/// The key does not name mkfs.erofs's flags. A change to them makes other
+/// images of the same trees, so it comes with a new images directory, as
+/// for the tarball and store path keys.
+pub fn dir_key(dir: &Path) -> Result<String> {
+    let dir = fs::canonicalize(dir).with_context(|| format!("resolving {}", dir.display()))?;
+    let mut hasher = blake3::Hasher::new_derive_key(DIR_KEY_CONTEXT);
+    let mut first_paths = HashMap::new();
+
+    // The root directory's own mode goes in the image too.
+    let meta = fs::metadata(&dir).with_context(|| format!("reading {}", dir.display()))?;
+    hasher.update(&meta.mode().to_le_bytes());
+    hash_tree(&dir, Path::new(""), &mut hasher, &mut first_paths)?;
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
+/// Adds the entries of the directory `rel` under `root` to `hasher`, in
+/// name order and depth first, each with its whole path from `root`, so
+/// that no two trees give the same sequence. `first_paths` holds, for each
+/// file with more than one link, the first path the walk found it at.
+fn hash_tree(
+    root: &Path,
+    rel: &Path,
+    hasher: &mut blake3::Hasher,
+    first_paths: &mut HashMap<(u64, u64), PathBuf>,
+) -> Result<()> {
+    let here = root.join(rel);
+    let mut names = fs::read_dir(&here)
+        .with_context(|| format!("listing {}", here.display()))?
+        .map(|entry| entry.map(|e| e.file_name()))
+        .collect::<std::io::Result<Vec<_>>>()
+        .with_context(|| format!("listing {}", here.display()))?;
+    names.sort();
+
+    for name in names {
+        let rel = rel.join(&name);
+        let path = root.join(&rel);
+        let meta =
+            fs::symlink_metadata(&path).with_context(|| format!("reading {}", path.display()))?;
+
+        // The path and the mode, whose type bits tell a file from a
+        // directory, a symlink or a device.
+        hash_field(hasher, rel.as_os_str().as_bytes());
+        hasher.update(&meta.mode().to_le_bytes());
+
+        let kind = meta.file_type();
+        if kind.is_dir() {
+            hash_tree(root, &rel, hasher, first_paths)?;
+            continue;
+        }
+        if kind.is_symlink() {
+            let target =
+                fs::read_link(&path).with_context(|| format!("reading {}", path.display()))?;
+            hash_field(hasher, target.as_os_str().as_bytes());
+            continue;
+        }
+        if !kind.is_file() {
+            // A device's number; a FIFO or socket has none, and gives 0.
+            hasher.update(&meta.rdev().to_le_bytes());
+            continue;
+        }
+
+        // A second link to a file already seen is the first path's file
+        // in the image, so it adds that path and not the bytes again.
+        if meta.nlink() > 1 {
+            let inode = (meta.dev(), meta.ino());
+            if let Some(first) = first_paths.get(&inode) {
+                hash_field(hasher, first.as_os_str().as_bytes());
+                continue;
+            }
+            first_paths.insert(inode, rel.clone());
+        }
+
+        // A file's bytes, after its length, so the field ends where the
+        // next path starts.
+        hasher.update(&meta.len().to_le_bytes());
+        hasher
+            .update_mmap(&path)
+            .with_context(|| format!("hashing {}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// Adds a field of `bytes` to `hasher` after its length, so that where one
+/// field ends and the next begins is part of what is hashed.
+fn hash_field(hasher: &mut blake3::Hasher, bytes: &[u8]) {
+    hasher.update(&(bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
 }
 
 /// A name beside `path` to write it under before renaming it into place,
@@ -438,6 +544,103 @@ mod tests {
         from_dir(&tree, &image).unwrap();
         let size = fs::metadata(&image).unwrap().len();
         assert!(size < FILE_BYTES as u64 / 2, "{size} bytes");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A tree for the key tests: a file, an executable, a symlink, a
+    /// hardlink and an empty directory, written in the order `order`
+    /// names, so two calls with different orders make the same tree with
+    /// different inode numbers and times.
+    fn key_tree(root: &Path, order: &[&str]) {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        fs::create_dir_all(root.join("bin")).unwrap();
+        for part in order {
+            match *part {
+                "file" => fs::write(root.join("bin/data"), b"data").unwrap(),
+                "exe" => {
+                    fs::write(root.join("bin/run"), b"#!/bin/sh\n").unwrap();
+                    fs::set_permissions(root.join("bin/run"), fs::Permissions::from_mode(0o755))
+                        .unwrap();
+                }
+                "link" => symlink("run", root.join("bin/start")).unwrap(),
+                "empty" => fs::create_dir_all(root.join("var/empty")).unwrap(),
+                _ => unreachable!("{part}"),
+            }
+        }
+        fs::hard_link(root.join("bin/data"), root.join("bin/data2")).unwrap();
+    }
+
+    #[test]
+    fn one_tree_has_one_key_and_one_image() {
+        // Two copies of a tree, made in different orders a second apart,
+        // have different inode numbers and times, which the image leaves
+        // out. They have one key, and the images mkfs.erofs makes of them
+        // are byte for byte the same, so a key names an image.
+        let dir = std::env::temp_dir().join(format!("rewind-dir-key-same-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let first = dir.join("first");
+        let second = dir.join("second");
+        key_tree(&first, &["file", "exe", "link", "empty"]);
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        key_tree(&second, &["empty", "link", "exe", "file"]);
+
+        assert_eq!(dir_key(&first).unwrap(), dir_key(&second).unwrap());
+        let first_image = dir.join("first.erofs");
+        let second_image = dir.join("second.erofs");
+        from_dir(&first, &first_image).unwrap();
+        from_dir(&second, &second_image).unwrap();
+        assert_eq!(
+            fs::read(&first_image).unwrap(),
+            fs::read(&second_image).unwrap()
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_change_the_image_holds_changes_the_key() {
+        // Each change mkfs.erofs puts in an image gives the tree another
+        // key: a file's bytes, its mode, its name, a symlink's target, a
+        // hardlink made a copy, and an empty directory made an empty file.
+        // Makes a fresh tree for each change and compares its key with the
+        // unchanged tree's.
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let dir =
+            std::env::temp_dir().join(format!("rewind-dir-key-change-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let base = dir.join("base");
+        key_tree(&base, &["file", "exe", "link", "empty"]);
+        let base_key = dir_key(&base).unwrap();
+
+        type Change = fn(&Path);
+        let changes: [(&str, Change); 6] = [
+            ("bytes", |t| {
+                fs::write(t.join("bin/run"), b"#!/bin/bash\n").unwrap()
+            }),
+            ("mode", |t| {
+                fs::set_permissions(t.join("bin/run"), fs::Permissions::from_mode(0o700)).unwrap()
+            }),
+            ("name", |t| {
+                fs::rename(t.join("bin/run"), t.join("bin/walk")).unwrap()
+            }),
+            ("target", |t| {
+                fs::remove_file(t.join("bin/start")).unwrap();
+                symlink("data", t.join("bin/start")).unwrap();
+            }),
+            ("hardlink", |t| {
+                fs::remove_file(t.join("bin/data2")).unwrap();
+                fs::write(t.join("bin/data2"), b"data").unwrap();
+            }),
+            ("kind", |t| {
+                fs::remove_dir(t.join("var/empty")).unwrap();
+                fs::write(t.join("var/empty"), b"").unwrap();
+            }),
+        ];
+        for (name, change) in changes {
+            let tree = dir.join(name);
+            key_tree(&tree, &["file", "exe", "link", "empty"]);
+            change(&tree);
+            assert_ne!(dir_key(&tree).unwrap(), base_key, "{name}");
+        }
         fs::remove_dir_all(&dir).unwrap();
     }
 }
