@@ -95,6 +95,9 @@
           };
           # The desktop app built for the browser, the site's viewer.
           web = import ./nix/web.nix { inherit pkgs rust releaseDate; };
+          # The machine on QEMU's emulator, and the command that replays
+          # runs on it.
+          qemu = import ./nix/qemu.nix { inherit pkgs rust; };
         in
         {
           inherit
@@ -107,6 +110,7 @@
             rewind
             app
             web
+            qemu
             ;
           release = import ./nix/release.nix {
             inherit
@@ -154,6 +158,13 @@
 
           # the guest kernel with the Rewind platform (nix/kernel.nix)
           kernel = p.kernel;
+
+          # QEMU with Rewind's machine, GPL-2.0 (qemu/, nix/qemu.nix)
+          qemu = p.qemu.qemu;
+
+          # rewind-qemu, which replays exit-time runs on that QEMU
+          # (nix/qemu.nix)
+          qemu-replay = p.qemu.replay;
 
           # the same kernel's DWARF, by build ID, for `rewind gdb`
           kernel-debug = p.kernel.debug;

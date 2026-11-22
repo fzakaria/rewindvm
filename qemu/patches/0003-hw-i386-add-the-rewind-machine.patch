@@ -1,0 +1,1426 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Farid Zakaria <farid.m.zakaria@gmail.com>
+Date: Sat, 21 Nov 2026 17:36:50 -0800
+Subject: [PATCH 3/3] hw/i386: add the rewind machine
+
+Rewind VM's deterministic machine, as its KVM monitor rewind-vmm makes
+it: one vCPU of a fixed CPUID, a local APIC and nothing else, every
+port access a step, and the monitor's ports, clock and interrupt. What
+the guest reports goes to a step log that rewind encodes into its
+trace.
+---
+ configs/devices/i386-softmmu/default.mak |    1 +
+ hw/i386/Kconfig                          |    4 +
+ hw/i386/meson.build                      |    1 +
+ hw/i386/rewind.c                         | 1294 ++++++++++++++++++++++
+ include/hw/i386/rewind.h                 |   67 ++
+ 5 files changed, 1367 insertions(+)
+ create mode 100644 hw/i386/rewind.c
+ create mode 100644 include/hw/i386/rewind.h
+
+diff --git a/configs/devices/i386-softmmu/default.mak b/configs/devices/i386-softmmu/default.mak
+index 598c664..5c9451e 100644
+--- a/configs/devices/i386-softmmu/default.mak
++++ b/configs/devices/i386-softmmu/default.mak
+@@ -30,3 +30,4 @@ CONFIG_ISAPC=y
+ CONFIG_I440FX=y
+ CONFIG_Q35=y
+ CONFIG_MICROVM=y
++CONFIG_REWIND=y
+diff --git a/hw/i386/Kconfig b/hw/i386/Kconfig
+index 5585079..6322469 100644
+--- a/hw/i386/Kconfig
++++ b/hw/i386/Kconfig
+@@ -141,3 +141,7 @@ config XEN_EMU
+     bool
+     default y
+     depends on KVM && (I386 || X86_64)
++
++config REWIND
++    bool
++    select APIC
+diff --git a/hw/i386/meson.build b/hw/i386/meson.build
+index 369c6bf..25b9cb8 100644
+--- a/hw/i386/meson.build
++++ b/hw/i386/meson.build
+@@ -11,6 +11,7 @@ i386_ss.add(when: 'CONFIG_X86_IOMMU', if_true: files('x86-iommu.c'),
+                                       if_false: files('x86-iommu-stub.c'))
+ i386_ss.add(when: 'CONFIG_AMD_IOMMU', if_true: files('amd_iommu.c'))
+ i386_ss.add(when: 'CONFIG_I440FX', if_true: files('pc_piix.c'))
++i386_ss.add(when: 'CONFIG_REWIND', if_true: files('rewind.c'))
+ i386_ss.add(when: 'CONFIG_MICROVM', if_true: files('microvm.c', 'acpi-microvm.c', 'microvm-dt.c'))
+ i386_ss.add(when: 'CONFIG_Q35', if_true: files('pc_q35.c'))
+ i386_ss.add(when: 'CONFIG_VMMOUSE', if_true: files('vmmouse.c'))
+diff --git a/hw/i386/rewind.c b/hw/i386/rewind.c
+new file mode 100644
+index 0000000..93f257d
+--- /dev/null
++++ b/hw/i386/rewind.c
+@@ -0,0 +1,1294 @@
++/*
++ * Rewind VM's machine on TCG.
++ *
++ * Rewind (https://github.com/fzakaria/rewind) runs a Linux guest built
++ * with its platform patch on one KVM vCPU. Its monitor, rewind-vmm,
++ * never interrupts the guest: the vCPU runs until the guest itself
++ * exits with a port or MMIO access, and only then does the monitor move
++ * virtual time or send its one interrupt. A step is one such exit. This
++ * machine does the same on QEMU's emulator, so a run recorded on KVM
++ * replays here, step for step:
++ *
++ * - one vCPU with the CPUID rewind-vmm shows for --cpu v3 and v3-compat,
++ *   and a local APIC, with no PIT, HPET, PIC, I/O APIC or RTC;
++ * - vmlinux loaded where it was linked and entered in 64-bit mode, the
++ *   way rewind-vmm's boot.rs does it;
++ * - every port access a step, and the guest's ports with the monitor's
++ *   meaning: records, the virtual clock and its timer, idling and
++ *   stopping;
++ * - the input image as read-only persistent memory where rewind-vmm maps
++ *   it.
++ *
++ * What the guest reports goes to a step log (REWIND_LOG_* in rewind.h),
++ * which rewind's own trace encoders turn into trace.bin.
++ *
++ * Every constant below names its counterpart in crates/rewind-vmm.
++ *
++ * Copyright (c) 2026 Farid Zakaria
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "qemu/osdep.h"
++#include "qemu/error-report.h"
++#include "qemu/units.h"
++#include "qapi/error.h"
++#include "qapi/visitor.h"
++#include "exec/address-spaces.h"
++#include "exec/memory.h"
++#include "hw/boards.h"
++#include "hw/i386/apic.h"
++#include "hw/i386/apic_internal.h"
++#include "hw/i386/rewind.h"
++#include "hw/i386/x86.h"
++#include "sysemu/cpus.h"
++#include "sysemu/reset.h"
++#include "sysemu/runstate.h"
++#include "target/i386/cpu.h"
++
++/* Guest physical layout: crates/rewind-vmm/src/layout.rs. */
++#define REWIND_GDT          0x500
++#define REWIND_IDT          0x520
++#define REWIND_BOOT_STACK   0x8ff0
++#define REWIND_BOOT_PARAMS  0x7000
++#define REWIND_PML4         0x9000
++#define REWIND_PDPT         0xa000
++#define REWIND_PD           0xb000
++#define REWIND_CMDLINE      0x20000
++#define REWIND_CMDLINE_MAX  4096
++#define REWIND_SETUP_DATA   0x21000
++#define REWIND_EBDA_START   0x9fc00
++#define REWIND_RAM_START    0x100000
++#define REWIND_RAM_MAX      0xc0000000ULL
++#define REWIND_HIGH_RAM     0x100000000ULL
++#define REWIND_EXTRAS_START 0x4000000000ULL
++#define REWIND_EXTRAS_LEN   (64 * GiB)
++#define REWIND_APIC_BASE    0xfee00000ULL
++#define REWIND_VECTOR       0xf3
++#define REWIND_PAGE         4096
++
++/* The persistent memory region is sized in 2 MiB steps (lib.rs). */
++#define REWIND_PMEM_ALIGN   (2 * MiB)
++
++/* The ports: crates/rewind-vmm/src/pv.rs. */
++#define PORT_EMIT       0x5e0
++#define PORT_CLOCK      0x5e4
++#define PORT_TIMER      0x5ec
++#define PORT_IDLE       0x5f0
++#define PORT_EXIT       0x5f4
++#define PORT_SETUP      0x5f8
++#define PORT_COM1_LSR   0x3fd
++#define LSR_IDLE        0x60
++
++/* The shared page's fields (pv.rs). */
++#define SHARED_NOW          0
++#define SHARED_EPOCH        8
++#define SHARED_PENDING      16
++#define SHARED_REQUEST_LEN  20
++#define SHARED_REQUEST      24
++#define REQUEST_MAX         2048
++#define SHARED_INPUT_LEN    (SHARED_REQUEST + REQUEST_MAX)
++#define SHARED_INPUT        (SHARED_INPUT_LEN + 4)
++#define INPUT_MAX           1024
++#define SHARED_STALL_NS     (SHARED_INPUT + INPUT_MAX)
++#define SHARED_TASKS        ((SHARED_STALL_NS + 4 + 7) & ~7)
++#define TASK_LAYOUT_FIELDS  14
++#define SHARED_INTERFACE    (SHARED_TASKS + 8 * TASK_LAYOUT_FIELDS)
++#define SHARED_TASK_BASES   ((SHARED_INTERFACE + 4 + 7) & ~7)
++#define TASK_BASES_FIELDS   2
++#define SHARED_RESEED       (SHARED_TASK_BASES + 8 * TASK_BASES_FIELDS)
++#define RESEED_BYTES        32
++#define SHARED_IO_BUF       (SHARED_RESEED + RESEED_BYTES)
++#define SHARED_IO_SIZE      (SHARED_IO_BUF + 8)
++#define SHARED_IO_HEAD      (SHARED_IO_SIZE + 4)
++#define SHARED_IO_LOST      (SHARED_IO_HEAD + 4)
++#define IO_BUF_MAX          (1 << 20)
++
++#define PENDING_TIMER       (1 << 0)
++
++/* The interface this machine speaks, as pv.rs's INTERFACE_VERSION. */
++#define INTERFACE_VERSION   7
++
++/* A record's header and the largest record (rewind-trace event.rs). */
++#define RECORD_HEADER       20
++#define RECORD_MAX          8192
++
++/* The KVM in-kernel PIC's ports, which are no exit under rewind-vmm. */
++static const uint16_t pic_ports[] = { 0x20, 0x21, 0xa0, 0xa1, 0x4d0, 0x4d1 };
++
++/* The CPU models rewind-vmm shows the guest (cpu.rs). */
++typedef enum RewindCpuModel {
++    REWIND_CPU_V3,
++    REWIND_CPU_V3_COMPAT,
++} RewindCpuModel;
++
++/* The vendor a fixed model keeps from the host it was recorded on. */
++typedef enum RewindVendor {
++    REWIND_VENDOR_AMD,
++    REWIND_VENDOR_INTEL,
++} RewindVendor;
++
++/* One CPUID leaf, and whether its subleaf decides a match, as KVM's
++ * KVM_CPUID_FLAG_SIGNIFCANT_INDEX does. */
++typedef struct RewindLeaf {
++    uint32_t function;
++    uint32_t index;
++    bool indexed;
++    uint32_t eax, ebx, ecx, edx;
++} RewindLeaf;
++
++#define REWIND_LEAVES_MAX 24
++
++struct RewindMachineState {
++    X86MachineState parent;
++
++    /* Properties: the run's inputs that the command line does not say. */
++    char *seed_hex;
++    uint64_t epoch;
++    uint64_t quantum;
++    char *cpu_model;
++    char *vendor;
++    char *image;
++    bool extras;
++    char *log_path;
++    uint64_t until;
++
++    uint8_t seed[32];
++    RewindCpuModel model;
++    RewindVendor vendor_id;
++    RewindLeaf leaves[REWIND_LEAVES_MAX];
++    int nleaves;
++
++    MemoryRegion ram_low;
++    MemoryRegion ram_high;
++    MemoryRegion pmem;
++    uint64_t pmem_len;
++    MemoryRegion extras_mr;
++    MemoryRegion ports;
++    MemoryRegion mmio;
++
++    X86CPU *cpu;
++    FILE *log;
++
++    /* The monitor's devices (lib.rs Devices). */
++    uint64_t step;
++    uint64_t now;
++    bool armed;
++    uint64_t deadline;
++    bool have_shared;
++    uint64_t shared;
++    bool idle;
++    bool stopped;
++    uint8_t record[RECORD_MAX];
++    uint32_t record_len;
++    bool record_pending;
++    uint8_t *io_buf;
++};
++
++static RewindMachineState *rewind_machine;
++
++/* The step log. */
++
++static void log_bytes(RewindMachineState *s, const void *p, size_t n)
++{
++    if (fwrite(p, 1, n, s->log) != n) {
++        error_report("rewind: writing the step log: %s", strerror(errno));
++        exit(1);
++    }
++}
++
++static void log_u8(RewindMachineState *s, uint8_t v)
++{
++    log_bytes(s, &v, 1);
++}
++
++static void log_u32(RewindMachineState *s, uint32_t v)
++{
++    uint32_t le = cpu_to_le32(v);
++    log_bytes(s, &le, 4);
++}
++
++static void log_u64(RewindMachineState *s, uint64_t v)
++{
++    uint64_t le = cpu_to_le64(v);
++    log_bytes(s, &le, 8);
++}
++
++/* Guest memory. */
++
++static void ram_read(uint64_t addr, void *buf, size_t len)
++{
++    address_space_read(&address_space_memory, addr, MEMTXATTRS_UNSPECIFIED,
++                       buf, len);
++}
++
++static void ram_write(uint64_t addr, const void *buf, size_t len)
++{
++    address_space_write(&address_space_memory, addr, MEMTXATTRS_UNSPECIFIED,
++                        buf, len);
++}
++
++static uint32_t ram_u32(uint64_t addr)
++{
++    uint32_t v;
++    ram_read(addr, &v, 4);
++    return le32_to_cpu(v);
++}
++
++static void ram_put_u32(uint64_t addr, uint32_t v)
++{
++    v = cpu_to_le32(v);
++    ram_write(addr, &v, 4);
++}
++
++static void ram_put_u64(uint64_t addr, uint64_t v)
++{
++    v = cpu_to_le64(v);
++    ram_write(addr, &v, 8);
++}
++
++/* The machine's layout: layout.rs ram_span and pmem_start. */
++
++static uint64_t ram_span(uint64_t mem)
++{
++    return mem <= REWIND_RAM_MAX ? mem : REWIND_HIGH_RAM + (mem - REWIND_RAM_MAX);
++}
++
++static uint64_t ram_low_len(uint64_t span)
++{
++    return span <= REWIND_HIGH_RAM ? span : REWIND_RAM_MAX;
++}
++
++static uint64_t ram_high_len(uint64_t span)
++{
++    return span <= REWIND_HIGH_RAM ? 0 : span - REWIND_HIGH_RAM;
++}
++
++static uint64_t pmem_start(uint64_t span)
++{
++    if (span <= REWIND_HIGH_RAM) {
++        return REWIND_HIGH_RAM;
++    }
++    return ROUND_UP(span, 1 * GiB);
++}
++
++/* Stopping. */
++
++static void stop_machine(RewindMachineState *s, enum RewindStop why);
++
++/*
++ * Takes the read and write records the guest buffered since the step
++ * before into the log, and sets the buffer back to empty (lib.rs
++ * drain_io). Before setup the guest buffers none.
++ */
++static void drain_io(RewindMachineState *s)
++{
++    uint32_t head, lost, size, len;
++    uint64_t at;
++
++    if (!s->have_shared) {
++        return;
++    }
++    head = ram_u32(s->shared + SHARED_IO_HEAD);
++    lost = ram_u32(s->shared + SHARED_IO_LOST);
++    if (head == 0 && lost == 0) {
++        return;
++    }
++
++    /* The buffer, up to its fill, which the guest never sets past its size. */
++    size = ram_u32(s->shared + SHARED_IO_SIZE);
++    ram_read(s->shared + SHARED_IO_BUF, &at, 8);
++    at = le64_to_cpu(at);
++    len = MIN(MIN(head, size), IO_BUF_MAX);
++    ram_read(at, s->io_buf, len);
++    ram_put_u32(s->shared + SHARED_IO_HEAD, 0);
++    ram_put_u32(s->shared + SHARED_IO_LOST, 0);
++
++    log_u8(s, REWIND_LOG_IO);
++    log_u32(s, lost);
++    log_u32(s, len);
++    log_bytes(s, s->io_buf, len);
++}
++
++/* A step begins: the exit is counted, and the guest's records drained. */
++static void begin_step(RewindMachineState *s)
++{
++    s->step++;
++    log_u8(s, REWIND_LOG_STEP);
++    log_u64(s, s->step);
++    log_u64(s, s->now);
++    drain_io(s);
++}
++
++/*
++ * Whether the one local APIC takes an interrupt now, as KVM's does: only
++ * while it is enabled, in its base MSR and in its spurious vector
++ * register.
++ */
++static bool apic_accepts(RewindMachineState *s)
++{
++    APICCommonState *apic = APIC_COMMON(s->cpu->apic_state);
++
++    return (apic->apicbase & MSR_IA32_APICBASE_ENABLE) &&
++           (apic->spurious_vec & APIC_SV_ENABLE);
++}
++
++/*
++ * Records why in the shared page and sends the monitor's interrupt as an
++ * MSI to the local APIC (lib.rs inject). False when the guest has no
++ * shared page yet or its APIC is not accepting interrupts.
++ */
++static bool inject(RewindMachineState *s, uint32_t reasons)
++{
++    uint32_t pending;
++
++    if (!s->have_shared) {
++        return false;
++    }
++    pending = ram_u32(s->shared + SHARED_PENDING) | reasons;
++    ram_put_u32(s->shared + SHARED_PENDING, pending);
++    if (!apic_accepts(s)) {
++        return false;
++    }
++    address_space_stl_le(&address_space_memory, REWIND_APIC_BASE,
++                         REWIND_VECTOR, MEMTXATTRS_UNSPECIFIED, NULL);
++    s->idle = false;
++    return true;
++}
++
++/*
++ * Moves time for the step just taken and sends the interrupt if the timer
++ * is due (lib.rs after_step). The unperturbed schedule asks for no
++ * reschedule, stall or reseed.
++ */
++static void after_step(RewindMachineState *s)
++{
++    uint32_t reasons = 0;
++
++    s->now += s->quantum;
++    if (s->have_shared) {
++        ram_put_u64(s->shared + SHARED_NOW, s->now);
++    }
++    if (s->armed && s->now >= s->deadline) {
++        reasons |= PENDING_TIMER;
++    }
++    if (reasons && inject(s, reasons) && (reasons & PENDING_TIMER)) {
++        s->armed = false;
++    }
++}
++
++/*
++ * Ends the step: the event the guest emitted, stamped with the clock as
++ * the step left it, then a stall or the step asked to stop at.
++ */
++static void end_step(RewindMachineState *s)
++{
++    after_step(s);
++    if (s->record_pending) {
++        s->record_pending = false;
++        log_u8(s, REWIND_LOG_RECORD);
++        log_u64(s, s->now);
++        log_u32(s, s->record_len);
++        log_bytes(s, s->record, s->record_len);
++    }
++    if (s->until && s->step >= s->until) {
++        stop_machine(s, REWIND_STOP_PAUSED);
++        return;
++    }
++    if (s->idle) {
++        stop_machine(s, REWIND_STOP_STALLED);
++    }
++}
++
++static void stop_machine(RewindMachineState *s, enum RewindStop why)
++{
++    if (s->stopped) {
++        return;
++    }
++    s->stopped = true;
++
++    log_u8(s, REWIND_LOG_END);
++    log_u8(s, why);
++    log_u64(s, s->step);
++    log_u64(s, s->now);
++
++    /*
++     * A guest that stopped by itself takes what it buffered since the
++     * last step; a machine paused at a step does not (lib.rs end_trace
++     * and run.rs end_replay).
++     */
++    if (why != REWIND_STOP_PAUSED) {
++        drain_io(s);
++    }
++    fflush(s->log);
++
++    qemu_system_shutdown_request(SHUTDOWN_CAUSE_GUEST_SHUTDOWN);
++    if (current_cpu) {
++        cpu_exit(current_cpu);
++    }
++}
++
++/* The ports. */
++
++static bool is_pic_port(uint16_t port)
++{
++    for (size_t i = 0; i < ARRAY_SIZE(pic_ports); i++) {
++        if (pic_ports[i] == port) {
++            return true;
++        }
++    }
++    return false;
++}
++
++static void emit(RewindMachineState *s, uint64_t addr)
++{
++    uint32_t len = ram_u32(addr);
++
++    if (len < RECORD_HEADER || len > RECORD_MAX) {
++        error_report("rewind: VM record at step %" PRIu64 " has length %u",
++                     s->step, len);
++        exit(1);
++    }
++    ram_read(addr, s->record, len);
++    s->record_len = len;
++    s->record_pending = true;
++}
++
++static void setup(RewindMachineState *s, uint64_t shared)
++{
++    uint32_t interface = ram_u32(shared + SHARED_INTERFACE);
++
++    if (interface != INTERFACE_VERSION) {
++        error_report("rewind: the guest kernel speaks interface %u, and this "
++                     "machine speaks interface %u", interface,
++                     INTERFACE_VERSION);
++        exit(1);
++    }
++    ram_put_u64(shared + SHARED_EPOCH, s->epoch);
++    s->shared = shared;
++    s->have_shared = true;
++    log_u8(s, REWIND_LOG_SETUP);
++}
++
++static void io_out(RewindMachineState *s, uint16_t port, uint32_t value)
++{
++    switch (port) {
++    case PORT_EMIT:
++        emit(s, value);
++        break;
++    case PORT_TIMER:
++        s->armed = value != 0;
++        s->deadline = s->now + value;
++        break;
++    case PORT_IDLE:
++        /* The clock jumps to the armed timer; with none, the guest stalls. */
++        if (s->armed) {
++            s->now = MAX(s->now, s->deadline);
++        } else {
++            s->idle = true;
++        }
++        break;
++    case PORT_EXIT:
++        stop_machine(s, value == 0 ? REWIND_STOP_POWER_OFF :
++                        value == 1 ? REWIND_STOP_RESTART : REWIND_STOP_HALT);
++        break;
++    case PORT_SETUP:
++        setup(s, value);
++        break;
++    default:
++        break;
++    }
++}
++
++static uint64_t io_in(RewindMachineState *s, uint16_t port, unsigned size)
++{
++    uint64_t fill = size == 4 ? 0xffffffffULL : (1ULL << (size * 8)) - 1;
++
++    switch (port) {
++    case PORT_CLOCK:
++        if (!s->have_shared) {
++            error_report("rewind: the VM read the clock before setup");
++            exit(1);
++        }
++        ram_put_u64(s->shared + SHARED_NOW, s->now);
++        return (uint32_t)s->now & fill;
++    case PORT_COM1_LSR:
++        return LSR_IDLE;
++    default:
++        return fill;
++    }
++}
++
++static uint64_t ports_read(void *opaque, hwaddr addr, unsigned size)
++{
++    RewindMachineState *s = opaque;
++    uint64_t value;
++
++    if (is_pic_port(addr)) {
++        warn_report("rewind: the guest read PIC port 0x%x", (unsigned)addr);
++        return 0;
++    }
++    if (s->stopped) {
++        return 0;
++    }
++    begin_step(s);
++    value = io_in(s, addr, size);
++    end_step(s);
++    return value;
++}
++
++static void ports_write(void *opaque, hwaddr addr, uint64_t value,
++                        unsigned size)
++{
++    RewindMachineState *s = opaque;
++
++    if (is_pic_port(addr)) {
++        warn_report("rewind: the guest wrote PIC port 0x%x", (unsigned)addr);
++        return;
++    }
++    if (s->stopped) {
++        return;
++    }
++    begin_step(s);
++    io_out(s, addr, value);
++    if (s->stopped) {
++        return;
++    }
++    end_step(s);
++}
++
++static const MemoryRegionOps ports_ops = {
++    .read = ports_read,
++    .write = ports_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++    .valid = { .min_access_size = 1, .max_access_size = 4 },
++    .impl = { .min_access_size = 1, .max_access_size = 4 },
++};
++
++/*
++ * Memory where the machine has none: each access an exit and a step, as
++ * under KVM, reads all ones.
++ */
++static uint64_t mmio_read(void *opaque, hwaddr addr, unsigned size)
++{
++    RewindMachineState *s = opaque;
++
++    if (s->stopped) {
++        return 0;
++    }
++    begin_step(s);
++    end_step(s);
++    return size == 8 ? UINT64_MAX : (1ULL << (size * 8)) - 1;
++}
++
++static void mmio_write(void *opaque, hwaddr addr, uint64_t value,
++                       unsigned size)
++{
++    RewindMachineState *s = opaque;
++
++    if (s->stopped) {
++        return;
++    }
++    begin_step(s);
++    end_step(s);
++}
++
++static const MemoryRegionOps mmio_ops = {
++    .read = mmio_read,
++    .write = mmio_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++    .valid = { .min_access_size = 1, .max_access_size = 8 },
++    .impl = { .min_access_size = 1, .max_access_size = 8 },
++};
++
++/*
++ * The extras slot: read-only memory of zeros under KVM, so a read is no
++ * exit, and a write is one.
++ */
++static uint64_t extras_read(void *opaque, hwaddr addr, unsigned size)
++{
++    return 0;
++}
++
++static const MemoryRegionOps extras_ops = {
++    .read = extras_read,
++    .write = mmio_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++    .valid = { .min_access_size = 1, .max_access_size = 8 },
++    .impl = { .min_access_size = 1, .max_access_size = 8 },
++};
++
++/* The CPU model: cpu.rs baseline. */
++
++/* x86-64-v3, plus AES, PCLMULQDQ, ERMS, PREFETCHW, FSGSBASE and INVPCID. */
++#define V3_LEAF1_ECX     0x36d83203u
++#define V3_LEAF1_EDX     0x078bfbefu
++#define V3_LEAF7_EBX     0x000007a9u
++#define V3_EXT1_ECX      0x00000121u
++#define V3_EXT1_EDX      0x24100800u
++#define V3_XCR0          0x7u
++#define V3_XSAVE_SIZE    832u
++#define V3_XSAVE_LEAF1   1u
++#define V3_MAX_BASIC     0xdu
++#define V3_MAX_EXTENDED  0x80000008u
++#define V3_ADDRESS_BITS  0x3027u
++#define V3_SIG_AMD       0x00830f10u
++#define V3_SIG_INTEL     0x000306c3u
++#define V3_L1            0x20080140u
++#define V3_L2            0x02006140u
++#define V3_L3            0x00808140u
++#define ERMS             (1u << 9)
++#define PREFETCHW        (1u << 8)
++#define HYPERVISOR_BIT   (1u << 31)
++
++/* The AVX state component, which every x86-64-v3 CPU lays out alike. */
++#define AVX_SIZE         256u
++#define AVX_OFFSET       576u
++
++/* The legacy area and the XSAVE header, and the leaf 1 EBX the model shows:
++ * one logical processor, APIC ID 0, 64 byte cache lines. */
++#define XSAVE_LEGACY     576u
++#define LEAF1_EBX        ((1u << 16) | (8u << 8))
++
++#define OSXSAVE_BIT      (1u << 27)
++#define APIC_BIT         (1u << 9)
++
++static const char v3_brand[48] = "Rewind VM x86-64-v3 virtual CPU";
++static const char v3_compat_brand[48] = "Rewind VM x86-64-v3-compat virtual CPU";
++
++static void add_leaf(RewindMachineState *s, uint32_t function, uint32_t index,
++                     bool indexed, uint32_t eax, uint32_t ebx, uint32_t ecx,
++                     uint32_t edx)
++{
++    assert(s->nleaves < REWIND_LEAVES_MAX);
++    s->leaves[s->nleaves++] = (RewindLeaf) {
++        .function = function, .index = index, .indexed = indexed,
++        .eax = eax, .ebx = ebx, .ecx = ecx, .edx = edx,
++    };
++}
++
++static uint32_t word(const char *p)
++{
++    return ldl_le_p(p);
++}
++
++static void build_leaves(RewindMachineState *s)
++{
++    bool compat = s->model == REWIND_CPU_V3_COMPAT;
++    const char *brand = compat ? v3_compat_brand : v3_brand;
++    const char *vendor = s->vendor_id == REWIND_VENDOR_AMD ? "AuthenticAMD"
++                                                         : "GenuineIntel";
++    uint32_t v0 = word(vendor), v1 = word(vendor + 4), v2 = word(vendor + 8);
++    uint32_t leaf7_ebx = compat ? V3_LEAF7_EBX & ~ERMS : V3_LEAF7_EBX;
++    uint32_t ext1_ecx = compat ? V3_EXT1_ECX & ~PREFETCHW : V3_EXT1_ECX;
++    uint32_t sig = s->vendor_id == REWIND_VENDOR_AMD ? V3_SIG_AMD
++                                                     : V3_SIG_INTEL;
++
++    /* The vendor's words go ebx, edx, ecx: "Auth" "enti" "cAMD". */
++    add_leaf(s, 0, 0, false, V3_MAX_BASIC, v0, v2, v1);
++    add_leaf(s, 1, 0, false, sig, LEAF1_EBX, V3_LEAF1_ECX | HYPERVISOR_BIT,
++             V3_LEAF1_EDX);
++    add_leaf(s, 7, 0, true, 0, leaf7_ebx, 0, 0);
++    add_leaf(s, 0xd, 0, true, V3_XCR0, V3_XSAVE_SIZE, V3_XSAVE_SIZE, 0);
++    add_leaf(s, 0xd, 1, true, V3_XSAVE_LEAF1, 0, 0, 0);
++    add_leaf(s, 0x80000000, 0, false, V3_MAX_EXTENDED, v0, v2, v1);
++    add_leaf(s, 0x80000001, 0, false, 0, 0, ext1_ecx, V3_EXT1_EDX);
++    for (int i = 0; i < 3; i++) {
++        const char *b = brand + 16 * i;
++        add_leaf(s, 0x80000002 + i, 0, false, word(b), word(b + 4),
++                 word(b + 8), word(b + 12));
++    }
++    add_leaf(s, 0x80000005, 0, false, 0, 0, V3_L1, V3_L1);
++    add_leaf(s, 0x80000006, 0, false, 0, 0, V3_L2, V3_L3);
++    add_leaf(s, 0x80000008, 0, false, V3_ADDRESS_BITS, 0, 0, 0);
++    add_leaf(s, 0xd, 2, true, AVX_SIZE, AVX_OFFSET, 0, 0);
++    add_leaf(s, 0x40000000, 0, false, 0x40000001, word("Rewi"),
++             word("ndRe"), word("wind"));
++    add_leaf(s, 0x40000001, 0, false, 0, 0, 0, 0);
++}
++
++static const RewindLeaf *find_leaf(RewindMachineState *s, uint32_t function,
++                                   uint32_t index)
++{
++    for (int i = 0; i < s->nleaves; i++) {
++        const RewindLeaf *l = &s->leaves[i];
++        if (l->function == function && (!l->indexed || l->index == index)) {
++            return l;
++        }
++    }
++    return NULL;
++}
++
++/*
++ * The leaf KVM answers a function that has no entry with (arch/x86/kvm/
++ * cpuid.c get_out_of_range_cpuid_entry): nothing on AMD, and on Intel the
++ * highest basic leaf for a function past its class's highest.
++ */
++static const RewindLeaf *out_of_range(RewindMachineState *s,
++                                      uint32_t function, uint32_t index)
++{
++    const RewindLeaf *basic, *class;
++
++    if (s->vendor_id == REWIND_VENDOR_AMD) {
++        return NULL;
++    }
++    basic = find_leaf(s, 0, 0);
++    if (function >= 0x40000000 && function <= 0x4fffffff) {
++        class = find_leaf(s, function & 0xffffff00, 0);
++    } else if (function >= 0xc0000000) {
++        class = find_leaf(s, 0xc0000000, 0);
++    } else {
++        class = find_leaf(s, function & 0x80000000, 0);
++    }
++    if (class && function <= class->eax) {
++        return NULL;
++    }
++    return find_leaf(s, basic->eax, index);
++}
++
++/* The XSAVE area's size for the components in xcr0 (KVM's
++ * xstate_required_size, standard format). */
++static uint32_t xsave_size(uint64_t xcr0)
++{
++    return (xcr0 & XSTATE_YMM_MASK) ? AVX_OFFSET + AVX_SIZE : XSAVE_LEGACY;
++}
++
++/*
++ * CPUID as KVM answers it from rewind-vmm's table, with the bits KVM
++ * keeps up to date at run time (kvm_update_cpuid_runtime): OSXSAVE from
++ * CR4, the APIC bit from the APIC base MSR, and the XSAVE area's size for
++ * the enabled components.
++ */
++static void rewind_cpuid(CPUX86State *env, uint32_t function, uint32_t index,
++                         uint32_t *eax, uint32_t *ebx, uint32_t *ecx,
++                         uint32_t *edx)
++{
++    RewindMachineState *s = rewind_machine;
++    const RewindLeaf *l = find_leaf(s, function, index);
++
++    if (!l) {
++        l = out_of_range(s, function, index);
++    }
++    if (!l) {
++        *eax = *ebx = *ecx = *edx = 0;
++        return;
++    }
++    *eax = l->eax;
++    *ebx = l->ebx;
++    *ecx = l->ecx;
++    *edx = l->edx;
++    if (l->function == 1) {
++        *ecx = (*ecx & ~OSXSAVE_BIT) |
++               ((env->cr[4] & CR4_OSXSAVE_MASK) ? OSXSAVE_BIT : 0);
++        if (!(cpu_get_apic_base(env_archcpu(env)->apic_state) &
++              MSR_IA32_APICBASE_ENABLE)) {
++            *edx &= ~APIC_BIT;
++        }
++    }
++    if (l->function == 0xd && l->index == 0) {
++        *ebx = xsave_size(env->xcr0);
++    }
++}
++
++/*
++ * An MSR TCG has no case for. KVM refuses one it does not know with #GP,
++ * where TCG reads 0 and drops writes; the guest's rdmsr_safe then sees an
++ * MSR KVM never gave it.
++ */
++static bool rewind_unknown_msr(CPUX86State *env, uint32_t msr, bool write,
++                               uint64_t value)
++{
++    if (getenv("REWIND_QEMU_MSRS")) {
++        fprintf(stderr, "rewind: step %" PRIu64 " %s unknown MSR 0x%x = 0x%"
++                PRIx64 ": #GP\n", rewind_machine->step,
++                write ? "wrmsr" : "rdmsr", msr, value);
++    }
++    return true;
++}
++
++/*
++ * The feature words TCG decodes by: the model's leaves, so the emulator
++ * runs exactly the instructions the guest is told of.
++ */
++static void set_features(RewindMachineState *s, X86CPU *cpu)
++{
++    CPUX86State *env = &cpu->env;
++    const RewindLeaf *l1 = find_leaf(s, 1, 0);
++    const RewindLeaf *l7 = find_leaf(s, 7, 0);
++    const RewindLeaf *e1 = find_leaf(s, 0x80000001, 0);
++
++    memset(env->features, 0, sizeof(env->features));
++    env->features[FEAT_1_ECX] = l1->ecx;
++    env->features[FEAT_1_EDX] = l1->edx;
++    env->features[FEAT_7_0_EBX] = l7->ebx;
++    env->features[FEAT_8000_0001_ECX] = e1->ecx;
++    env->features[FEAT_8000_0001_EDX] = e1->edx;
++    env->features[FEAT_XSAVE] = CPUID_XSAVE_XSAVEOPT;
++}
++
++/*
++ * Virtual-8086 mode's extensions, which TCG does not emulate. A 64-bit
++ * kernel never enters virtual-8086 mode, so the guest only reads the bit.
++ */
++#define VME_BIT          (1u << 1)
++
++/* Each word the realized CPU lacks of what set_features asked for: TCG
++ * does not emulate it. */
++static void check_features(RewindMachineState *s, X86CPU *cpu)
++{
++    const struct { FeatureWord w; uint32_t want; const char *name; } words[] = {
++        { FEAT_1_ECX, find_leaf(s, 1, 0)->ecx, "leaf 1 ECX" },
++        { FEAT_1_EDX, find_leaf(s, 1, 0)->edx & ~VME_BIT, "leaf 1 EDX" },
++        { FEAT_7_0_EBX, find_leaf(s, 7, 0)->ebx, "leaf 7 EBX" },
++        { FEAT_8000_0001_ECX, find_leaf(s, 0x80000001, 0)->ecx,
++          "leaf 0x80000001 ECX" },
++        { FEAT_8000_0001_EDX, find_leaf(s, 0x80000001, 0)->edx,
++          "leaf 0x80000001 EDX" },
++        { FEAT_XSAVE, CPUID_XSAVE_XSAVEOPT, "leaf 0xd.1 EAX" },
++    };
++    bool missing = false;
++
++    for (size_t i = 0; i < ARRAY_SIZE(words); i++) {
++        uint32_t lacks = words[i].want & ~cpu->env.features[words[i].w];
++        if (lacks) {
++            error_report("rewind: TCG lacks the model's %s bits 0x%x",
++                         words[i].name, lacks);
++            missing = true;
++        }
++    }
++    if (missing) {
++        exit(1);
++    }
++}
++
++/* Boot: crates/rewind-vmm/src/boot.rs. */
++
++#define BP_E820_ENTRIES  0x1e8
++#define BP_BOOT_FLAG     0x1fe
++#define BP_HEADER_MAGIC  0x202
++#define BP_VERSION       0x206
++#define BP_LOADER        0x210
++#define BP_RAMDISK_IMAGE 0x218
++#define BP_RAMDISK_SIZE  0x21c
++#define BP_CMD_LINE_PTR  0x228
++#define BP_XLOADFLAGS    0x236
++#define BP_CMDLINE_SIZE  0x238
++#define BP_SETUP_DATA    0x250
++#define BP_E820_TABLE    0x2d0
++#define BP_SIZE          4096
++
++#define INITRD_ADDR_MAX  0x7fffffffULL
++#define SETUP_RNG_SEED   9
++#define E820_RAM         1
++#define E820_RESERVED    2
++#define E820_PRAM        12
++
++static const uint64_t gdt_entries[4] = {
++    0x0000000000000000ULL,
++    0x00af9b000000ffffULL,
++    0x00cf93000000ffffULL,
++    0x008f8b000000ffffULL,
++};
++
++static uint8_t *read_file(const char *path, size_t *len)
++{
++    gchar *data;
++    gsize n;
++    GError *err = NULL;
++
++    if (!g_file_get_contents(path, &data, &n, &err)) {
++        error_report("rewind: reading %s: %s", path, err->message);
++        exit(1);
++    }
++    *len = n;
++    return (uint8_t *)data;
++}
++
++/* Loads vmlinux's segments where they were linked; returns the entry. */
++static uint64_t load_kernel(RewindMachineState *s, const uint8_t *k,
++                            size_t len, uint64_t low, uint64_t *end)
++{
++    uint64_t phoff;
++    uint16_t phnum;
++
++    if (len < 64 || memcmp(k, "\x7f" "ELF", 4) || k[4] != 2 || k[5] != 1 ||
++        lduw_le_p(k + 18) != 62 || lduw_le_p(k + 54) != 56) {
++        error_report("rewind: the kernel is not an x86-64 vmlinux");
++        exit(1);
++    }
++    phoff = ldq_le_p(k + 32);
++    phnum = lduw_le_p(k + 56);
++    *end = 0;
++    for (int i = 0; i < phnum; i++) {
++        const uint8_t *ph = k + phoff + i * 56;
++        uint64_t off = ldq_le_p(ph + 8), paddr = ldq_le_p(ph + 24);
++        uint64_t filesz = ldq_le_p(ph + 32), memsz = ldq_le_p(ph + 40);
++
++        if (ldl_le_p(ph) != 1) {
++            continue;
++        }
++        if (off + filesz > len || paddr < REWIND_RAM_START ||
++            paddr + memsz > low) {
++            error_report("rewind: kernel segment at 0x%" PRIx64
++                         " does not fit", paddr);
++            exit(1);
++        }
++        ram_write(paddr, k + off, filesz);
++        *end = MAX(*end, paddr + memsz);
++    }
++    return ldq_le_p(k + 24);
++}
++
++static void boot(RewindMachineState *s)
++{
++    MachineState *ms = MACHINE(s);
++    uint64_t span = ram_span(ms->ram_size);
++    uint64_t low = ram_low_len(span), high = ram_high_len(span);
++    uint8_t params[BP_SIZE] = { 0 };
++    uint8_t *kernel, *initrd = NULL;
++    size_t kernel_len, initrd_len = 0;
++    uint64_t entry, kernel_end;
++    GString *cmdline = g_string_new(NULL);
++    int n = 0;
++
++    kernel = read_file(ms->kernel_filename, &kernel_len);
++    entry = load_kernel(s, kernel, kernel_len, low, &kernel_end);
++    g_free(kernel);
++
++    stw_le_p(params + BP_BOOT_FLAG, 0xaa55);
++    stl_le_p(params + BP_HEADER_MAGIC, 0x53726448);
++    stw_le_p(params + BP_VERSION, 0x020c);
++    stw_le_p(params + BP_XLOADFLAGS, 1);
++    params[BP_LOADER] = 0xff;
++
++    /* The initramfs, as high as the kernel allows, above the kernel. */
++    if (ms->initrd_filename) {
++        initrd = read_file(ms->initrd_filename, &initrd_len);
++    }
++    if (initrd_len) {
++        uint64_t top = MIN(INITRD_ADDR_MAX, span - 1) + 1;
++        uint64_t addr = (top - initrd_len) & ~(uint64_t)(REWIND_PAGE - 1);
++
++        if (initrd_len > top || addr < kernel_end) {
++            error_report("rewind: the initrd does not fit above the kernel");
++            exit(1);
++        }
++        ram_write(addr, initrd, initrd_len);
++        stl_le_p(params + BP_RAMDISK_IMAGE, addr);
++        stl_le_p(params + BP_RAMDISK_SIZE, initrd_len);
++    }
++    g_free(initrd);
++
++    /* The command line; a guest with RAM past 4 GiB keeps no bounce buffer. */
++    if (high) {
++        g_string_append(cmdline, "swiotlb=noforce ");
++    }
++    g_string_append(cmdline, ms->kernel_cmdline ? ms->kernel_cmdline : "");
++    if (cmdline->len >= REWIND_CMDLINE_MAX) {
++        error_report("rewind: the kernel command line is too long");
++        exit(1);
++    }
++    ram_write(REWIND_CMDLINE, cmdline->str, cmdline->len + 1);
++    stl_le_p(params + BP_CMD_LINE_PTR, REWIND_CMDLINE);
++    stl_le_p(params + BP_CMDLINE_SIZE, cmdline->len + 1);
++    g_string_free(cmdline, true);
++
++    /* The RNG seed, as the only setup_data entry. */
++    {
++        uint8_t setup[16 + 32] = { 0 };
++        stl_le_p(setup + 8, SETUP_RNG_SEED);
++        stl_le_p(setup + 12, sizeof(s->seed));
++        memcpy(setup + 16, s->seed, sizeof(s->seed));
++        ram_write(REWIND_SETUP_DATA, setup, sizeof(setup));
++        stq_le_p(params + BP_SETUP_DATA, REWIND_SETUP_DATA);
++    }
++
++    /* The memory map. */
++#define E820(a, l, t) do { \
++        uint8_t *e = params + BP_E820_TABLE + 20 * n++; \
++        stq_le_p(e, (a)); stq_le_p(e + 8, (l)); stl_le_p(e + 16, (t)); \
++    } while (0)
++    E820(0, REWIND_EBDA_START, E820_RAM);
++    E820(REWIND_EBDA_START, REWIND_RAM_START - REWIND_EBDA_START,
++         E820_RESERVED);
++    E820(REWIND_RAM_START, low - REWIND_RAM_START, E820_RAM);
++    if (high) {
++        E820(REWIND_HIGH_RAM, high, E820_RAM);
++    }
++    if (s->pmem_len) {
++        E820(pmem_start(span), s->pmem_len, E820_PRAM);
++    }
++    if (s->extras) {
++        E820(REWIND_EXTRAS_START, REWIND_EXTRAS_LEN, E820_PRAM);
++    }
++#undef E820
++    params[BP_E820_ENTRIES] = n;
++    ram_write(REWIND_BOOT_PARAMS, params, sizeof(params));
++
++    /* Identity page tables for the first gigabyte, and the boot GDT. */
++    ram_put_u64(REWIND_PML4, REWIND_PDPT | 3);
++    ram_put_u64(REWIND_PDPT, REWIND_PD | 3);
++    for (uint64_t i = 0; i < 512; i++) {
++        ram_put_u64(REWIND_PD + i * 8, (i << 21) | 3 | 0x80);
++    }
++    for (int i = 0; i < 4; i++) {
++        ram_put_u64(REWIND_GDT + i * 8, gdt_entries[i]);
++    }
++    ram_put_u64(REWIND_IDT, 0);
++
++    /* The vCPU in long mode at the entry: cpu.rs setup_*. */
++    {
++        CPUX86State *env = &s->cpu->env;
++        uint32_t code = DESC_P_MASK | DESC_S_MASK | DESC_CS_MASK |
++                        DESC_R_MASK | DESC_A_MASK | DESC_L_MASK | DESC_G_MASK;
++        uint32_t data = DESC_P_MASK | DESC_S_MASK | DESC_W_MASK |
++                        DESC_A_MASK | DESC_B_MASK | DESC_G_MASK;
++        uint32_t tss = DESC_P_MASK | (11 << DESC_TYPE_SHIFT) | DESC_G_MASK;
++
++        env->gdt.base = REWIND_GDT;
++        env->gdt.limit = 4 * 8 - 1;
++        env->idt.base = REWIND_IDT;
++        env->idt.limit = 7;
++        cpu_load_efer(env, MSR_EFER_LME | MSR_EFER_LMA);
++        cpu_x86_update_cr4(env, env->cr[4] | CR4_PAE_MASK);
++        cpu_x86_update_cr3(env, REWIND_PML4);
++        cpu_x86_update_cr0(env, env->cr[0] | CR0_PE_MASK | CR0_PG_MASK);
++        cpu_x86_load_seg_cache(env, R_CS, 0x8, 0, 0xffffffff, code);
++        for (int seg = R_ES; seg <= R_GS; seg++) {
++            if (seg != R_CS) {
++                cpu_x86_load_seg_cache(env, seg, 0x10, 0, 0xffffffff, data);
++            }
++        }
++        env->tr.selector = 0x18;
++        env->tr.base = 0;
++        env->tr.limit = 0xffffffff;
++        env->tr.flags = tss;
++        env->eflags = 0x2;
++        env->eip = entry;
++        env->regs[R_ESP] = REWIND_BOOT_STACK;
++        env->regs[R_EBP] = REWIND_BOOT_STACK;
++        env->regs[R_ESI] = REWIND_BOOT_PARAMS;
++        env->msr_ia32_misc_enable = 1;
++        env->mtrr_deftype = (1 << 11) | 6;
++        env->tsc = 0;
++    }
++}
++
++static void rewind_reset(void *opaque)
++{
++    RewindMachineState *s = opaque;
++    APICCommonState *apic = APIC_COMMON(s->cpu->apic_state);
++
++    /* LINT0 as ExtINT and LINT1 as NMI, as cpu.rs setup_lapic leaves them. */
++    apic->lvt[APIC_LVT_LINT0] = (apic->lvt[APIC_LVT_LINT0] & ~0x700) | (7 << 8);
++    apic->lvt[APIC_LVT_LINT1] = (apic->lvt[APIC_LVT_LINT1] & ~0x700) | (4 << 8);
++    boot(s);
++}
++
++static void rewind_shutdown(Notifier *n, void *opaque)
++{
++    RewindMachineState *s = rewind_machine;
++    ShutdownCause *cause = opaque;
++
++    /* A reset the guest did not ask for through its port is a triple fault. */
++    if (!s->stopped && *cause == SHUTDOWN_CAUSE_GUEST_RESET) {
++        stop_machine(s, REWIND_STOP_TRIPLE_FAULT);
++    }
++    if (s->log) {
++        fflush(s->log);
++    }
++}
++
++static Notifier rewind_shutdown_notifier = { .notify = rewind_shutdown };
++
++static void parse_inputs(RewindMachineState *s)
++{
++    if (!s->seed_hex || strlen(s->seed_hex) != 64) {
++        error_report("rewind: seed must be 64 hex digits");
++        exit(1);
++    }
++    for (int i = 0; i < 32; i++) {
++        char byte[3] = { s->seed_hex[2 * i], s->seed_hex[2 * i + 1], 0 };
++        s->seed[i] = strtoul(byte, NULL, 16);
++    }
++    if (!s->cpu_model || !strcmp(s->cpu_model, "v3")) {
++        s->model = REWIND_CPU_V3;
++    } else if (!strcmp(s->cpu_model, "v3-compat")) {
++        s->model = REWIND_CPU_V3_COMPAT;
++    } else {
++        error_report("rewind: cpu-model is v3 or v3-compat, not %s",
++                     s->cpu_model);
++        exit(1);
++    }
++    if (!s->vendor || !strcmp(s->vendor, "amd")) {
++        s->vendor_id = REWIND_VENDOR_AMD;
++    } else if (!strcmp(s->vendor, "intel")) {
++        s->vendor_id = REWIND_VENDOR_INTEL;
++    } else {
++        error_report("rewind: vendor is amd or intel, not %s", s->vendor);
++        exit(1);
++    }
++    if (!s->log_path) {
++        error_report("rewind: the machine needs log=<path> for its step log");
++        exit(1);
++    }
++    if (!MACHINE(s)->kernel_filename) {
++        error_report("rewind: the machine needs -kernel <vmlinux>");
++        exit(1);
++    }
++}
++
++static void rewind_machine_init(MachineState *ms)
++{
++    RewindMachineState *s = REWIND_MACHINE(ms);
++    MemoryRegion *sysmem = get_system_memory();
++    uint64_t span = ram_span(ms->ram_size);
++    Object *cpu;
++
++    rewind_machine = s;
++    parse_inputs(s);
++    s->log = fopen(s->log_path, "wb");
++    if (!s->log) {
++        error_report("rewind: opening %s: %s", s->log_path, strerror(errno));
++        exit(1);
++    }
++    log_bytes(s, REWIND_LOG_MAGIC, 8);
++    s->io_buf = g_malloc(IO_BUF_MAX);
++
++    /* RAM below the MMIO hole, and past 4 GiB the rest. */
++    memory_region_init_alias(&s->ram_low, OBJECT(s), "rewind.ram-low", ms->ram,
++                             0, ram_low_len(span));
++    memory_region_add_subregion(sysmem, 0, &s->ram_low);
++    if (ram_high_len(span)) {
++        memory_region_init_alias(&s->ram_high, OBJECT(s), "rewind.ram-high",
++                                 ms->ram, REWIND_RAM_MAX, ram_high_len(span));
++        memory_region_add_subregion(sysmem, REWIND_HIGH_RAM, &s->ram_high);
++    }
++
++    /* The input image, read-only, rounded up to 2 MiB with zeros. */
++    if (s->image) {
++        size_t len;
++        uint8_t *data = read_file(s->image, &len);
++
++        s->pmem_len = ROUND_UP(len, REWIND_PMEM_ALIGN);
++        memory_region_init_rom(&s->pmem, NULL, "rewind.pmem", s->pmem_len,
++                               &error_fatal);
++        memcpy(memory_region_get_ram_ptr(&s->pmem), data, len);
++        g_free(data);
++        memory_region_add_subregion(sysmem, pmem_start(span), &s->pmem);
++    }
++    if (s->extras) {
++        memory_region_init_io(&s->extras_mr, OBJECT(s), &extras_ops, s,
++                              "rewind.extras", REWIND_EXTRAS_LEN);
++        memory_region_add_subregion(sysmem, REWIND_EXTRAS_START, &s->extras_mr);
++    }
++
++    /* Every other address and every port is an exit. */
++    memory_region_init_io(&s->mmio, OBJECT(s), &mmio_ops, s, "rewind.mmio",
++                          UINT64_MAX);
++    memory_region_add_subregion_overlap(sysmem, 0, &s->mmio, -1000);
++    memory_region_init_io(&s->ports, OBJECT(s), &ports_ops, s, "rewind.ports",
++                          0x10000);
++    memory_region_add_subregion_overlap(get_system_io(), 0, &s->ports, -1000);
++
++    /* The one vCPU, shown the model and emulating no more of it. */
++    build_leaves(s);
++    cpu = object_new(ms->cpu_type);
++    object_property_set_uint(cpu, "apic-id", 0, &error_fatal);
++    object_property_set_str(cpu, "vendor",
++                            s->vendor_id == REWIND_VENDOR_AMD ? "AuthenticAMD"
++                                                              : "GenuineIntel",
++                            &error_fatal);
++    object_property_set_bool(cpu, "pmu", false, &error_fatal);
++    s->cpu = X86_CPU(cpu);
++    set_features(s, s->cpu);
++    qdev_realize(DEVICE(cpu), NULL, &error_fatal);
++    object_unref(cpu);
++    check_features(s, s->cpu);
++    x86_cpuid_hook = rewind_cpuid;
++    x86_unknown_msr_hook = rewind_unknown_msr;
++
++    qemu_register_reset(rewind_reset, s);
++    qemu_register_shutdown_notifier(&rewind_shutdown_notifier);
++}
++
++/* Properties. */
++
++#define STR_PROP(field, name)                                               \
++    static char *get_##field(Object *o, Error **e)                          \
++    {                                                                       \
++        return g_strdup(REWIND_MACHINE(o)->field);                          \
++    }                                                                       \
++    static void set_##field(Object *o, const char *v, Error **e)            \
++    {                                                                       \
++        g_free(REWIND_MACHINE(o)->field);                                   \
++        REWIND_MACHINE(o)->field = g_strdup(v);                             \
++    }
++STR_PROP(seed_hex, "seed")
++STR_PROP(cpu_model, "cpu-model")
++STR_PROP(vendor, "vendor")
++STR_PROP(image, "image")
++STR_PROP(log_path, "log")
++#undef STR_PROP
++
++static bool get_extras(Object *o, Error **e)
++{
++    return REWIND_MACHINE(o)->extras;
++}
++
++static void set_extras(Object *o, bool v, Error **e)
++{
++    REWIND_MACHINE(o)->extras = v;
++}
++
++static void rewind_machine_initfn(Object *obj)
++{
++    RewindMachineState *s = REWIND_MACHINE(obj);
++
++    s->quantum = 5000;
++    object_property_add_uint64_ptr(obj, "epoch", &s->epoch,
++                                   OBJ_PROP_FLAG_READWRITE);
++    object_property_add_uint64_ptr(obj, "quantum", &s->quantum,
++                                   OBJ_PROP_FLAG_READWRITE);
++    object_property_add_uint64_ptr(obj, "until", &s->until,
++                                   OBJ_PROP_FLAG_READWRITE);
++}
++
++static void rewind_machine_class_init(ObjectClass *oc, void *data)
++{
++    MachineClass *mc = MACHINE_CLASS(oc);
++
++    mc->init = rewind_machine_init;
++    mc->desc = "Rewind VM's deterministic machine";
++    mc->max_cpus = 1;
++    mc->no_floppy = 1;
++    mc->no_cdrom = 1;
++    mc->no_parallel = 1;
++    mc->no_serial = 1;
++    mc->default_cpu_type = X86_CPU_TYPE_NAME("qemu64");
++    mc->default_ram_id = "rewind.ram";
++    mc->default_ram_size = 1 * GiB;
++
++    object_class_property_add_str(oc, "seed", get_seed_hex, set_seed_hex);
++    object_class_property_add_str(oc, "cpu-model", get_cpu_model,
++                                  set_cpu_model);
++    object_class_property_add_str(oc, "vendor", get_vendor, set_vendor);
++    object_class_property_add_str(oc, "image", get_image, set_image);
++    object_class_property_add_str(oc, "log", get_log_path, set_log_path);
++    object_class_property_add_bool(oc, "extras", get_extras, set_extras);
++}
++
++static const TypeInfo rewind_machine_info = {
++    .name = TYPE_REWIND_MACHINE,
++    .parent = TYPE_X86_MACHINE,
++    .instance_size = sizeof(RewindMachineState),
++    .instance_init = rewind_machine_initfn,
++    .class_init = rewind_machine_class_init,
++};
++
++static void rewind_machine_register(void)
++{
++    type_register_static(&rewind_machine_info);
++}
++
++type_init(rewind_machine_register)
+diff --git a/include/hw/i386/rewind.h b/include/hw/i386/rewind.h
+new file mode 100644
+index 0000000..b2166d7
+--- /dev/null
++++ b/include/hw/i386/rewind.h
+@@ -0,0 +1,67 @@
++/*
++ * Rewind VM's machine on TCG: the deterministic machine of
++ * https://github.com/fzakaria/rewind, whose monitor runs on KVM, made a
++ * second time on QEMU's emulator so its runs replay without KVM.
++ *
++ * Copyright (c) 2026 Farid Zakaria
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#ifndef HW_I386_REWIND_H
++#define HW_I386_REWIND_H
++
++#include "hw/i386/x86.h"
++#include "qom/object.h"
++
++#define TYPE_REWIND_MACHINE MACHINE_TYPE_NAME("rewind")
++OBJECT_DECLARE_SIMPLE_TYPE(RewindMachineState, REWIND_MACHINE)
++
++/*
++ * The step log the machine writes, which rewind's trace encoder turns
++ * into trace.bin (crates/rewind-qemu). It starts with REWIND_LOG_MAGIC
++ * and then holds entries, each a tag byte and its fields, all little
++ * endian. The machine does what rewind-vmm does to the guest; the log
++ * carries what rewind-vmm hands its trace encoders, in the same order,
++ * so the encoders stay in one place, in Rust.
++ */
++#define REWIND_LOG_MAGIC "rwqlog1\0"
++
++enum RewindLogTag {
++    /*
++     * A step began: u64 step, u64 clock. Every step has one, written
++     * where rewind-vmm drains the guest's buffered records, with the
++     * clock as the step before left it.
++     */
++    REWIND_LOG_STEP = 1,
++    /*
++     * The guest's buffered read and write records at this step: u32
++     * lost, u32 length, then the bytes.
++     */
++    REWIND_LOG_IO = 2,
++    /* The guest named its shared page: the trace encoders start here. */
++    REWIND_LOG_SETUP = 3,
++    /*
++     * A record the guest wrote to the record port at this step: u64 the
++     * clock once the step moved it, u32 length, then the record.
++     */
++    REWIND_LOG_RECORD = 4,
++    /*
++     * The machine stopped: u8 why (enum RewindStop), u64 step, u64 clock.
++     * An IO entry after it, the log's last, holds what the stop drained.
++     */
++    REWIND_LOG_END = 5,
++};
++
++/* Why the machine stopped, as rewind-vmm's Stop and Outcome name it. */
++enum RewindStop {
++    REWIND_STOP_POWER_OFF = 0,
++    REWIND_STOP_RESTART = 1,
++    REWIND_STOP_HALT = 2,
++    REWIND_STOP_TRIPLE_FAULT = 3,
++    REWIND_STOP_STALLED = 4,
++    /* The step asked for with the until property was reached. */
++    REWIND_STOP_PAUSED = 5,
++};
++
++#endif

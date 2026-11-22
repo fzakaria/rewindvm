@@ -1,0 +1,154 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Farid Zakaria <farid.m.zakaria@gmail.com>
+Date: Sat, 21 Nov 2026 17:36:50 -0800
+Subject: [PATCH 1/3] target/i386: emulate INVPCID
+
+Linux flushes global TLB entries with INVPCID whenever CPUID shows it,
+PCID or not, and x86-64-v3 CPUs show it. TCG keeps no PCIDs, so each
+type invalidates what INVLPG or a CR3 write would.
+---
+ target/i386/cpu.c                    |  4 ----
+ target/i386/helper.h                 |  1 +
+ target/i386/tcg/decode-new.c.inc     |  3 +++
+ target/i386/tcg/decode-new.h         |  1 +
+ target/i386/tcg/emit.c.inc           |  7 ++++++
+ target/i386/tcg/sysemu/misc_helper.c | 34 ++++++++++++++++++++++++++++
+ target/i386/tcg/translate.c          |  1 +
+ 7 files changed, 47 insertions(+), 4 deletions(-)
+
+diff --git a/target/i386/cpu.c b/target/i386/cpu.c
+index cd16cb8..c2cd319 100644
+--- a/target/i386/cpu.c
++++ b/target/i386/cpu.c
+@@ -704,11 +704,7 @@ void x86_cpu_vendor_words2str(char *dst, uint32_t vendor1,
+ 
+ #define TCG_KVM_FEATURES 0
+ 
+-#if defined CONFIG_USER_ONLY
+ #define CPUID_7_0_EBX_KERNEL_FEATURES CPUID_7_0_EBX_INVPCID
+-#else
+-#define CPUID_7_0_EBX_KERNEL_FEATURES 0
+-#endif
+ #define TCG_7_0_EBX_FEATURES (CPUID_7_0_EBX_SMEP | CPUID_7_0_EBX_SMAP | \
+           CPUID_7_0_EBX_BMI1 | CPUID_7_0_EBX_BMI2 | CPUID_7_0_EBX_ADX | \
+           CPUID_7_0_EBX_PCOMMIT | CPUID_7_0_EBX_CLFLUSHOPT |            \
+diff --git a/target/i386/helper.h b/target/i386/helper.h
+index ac2b04a..53521f8 100644
+--- a/target/i386/helper.h
++++ b/target/i386/helper.h
+@@ -89,6 +89,7 @@ DEF_HELPER_2(vmsave, void, env, int)
+ DEF_HELPER_1(stgi, void, env)
+ DEF_HELPER_1(clgi, void, env)
+ DEF_HELPER_FLAGS_2(flush_page, TCG_CALL_NO_RWG, void, env, tl)
++DEF_HELPER_3(invpcid, void, env, tl, tl)
+ DEF_HELPER_FLAGS_2(hlt, TCG_CALL_NO_WG, noreturn, env, int)
+ DEF_HELPER_FLAGS_2(monitor, TCG_CALL_NO_WG, void, env, tl)
+ DEF_HELPER_FLAGS_2(mwait, TCG_CALL_NO_WG, noreturn, env, int)
+diff --git a/target/i386/tcg/decode-new.c.inc b/target/i386/tcg/decode-new.c.inc
+index 2bdbb1b..ea41574 100644
+--- a/target/i386/tcg/decode-new.c.inc
++++ b/target/i386/tcg/decode-new.c.inc
+@@ -480,6 +480,7 @@ static const X86OpEntry opcodes_0F38_00toEF[240] = {
+     [0x78] = X86_OP_ENTRY3(VPBROADCASTB,   V,x,  None,None, W,b,  vex6 chk(W0) cpuid(AVX2) p_66),
+     [0x79] = X86_OP_ENTRY3(VPBROADCASTW,   V,x,  None,None, W,w,  vex6 chk(W0) cpuid(AVX2) p_66),
+ 
++    [0x82] = X86_OP_ENTRY3(INVPCID,      None,None, G,d64, M,dq, chk(cpl0) cpuid(INVPCID) p_66),
+     [0x8c] = X86_OP_ENTRY3(VPMASKMOV,    V,x,  H,x, WM,x, vex6 cpuid(AVX2) p_66),
+     [0x8e] = X86_OP_ENTRY3(VPMASKMOV_st, M,x,  V,x, H,x,  vex6 cpuid(AVX2) p_66),
+ 
+@@ -1510,6 +1511,8 @@ static bool has_cpuid_feature(DisasContext *s, X86CPUIDFeature cpuid)
+ 
+     case X86_FEAT_ADX:
+         return (s->cpuid_7_0_ebx_features & CPUID_7_0_EBX_ADX);
++    case X86_FEAT_INVPCID:
++        return (s->cpuid_7_0_ebx_features & CPUID_7_0_EBX_INVPCID);
+     case X86_FEAT_BMI1:
+         return (s->cpuid_7_0_ebx_features & CPUID_7_0_EBX_BMI1);
+     case X86_FEAT_BMI2:
+diff --git a/target/i386/tcg/decode-new.h b/target/i386/tcg/decode-new.h
+index e6c904a..e8790ac 100644
+--- a/target/i386/tcg/decode-new.h
++++ b/target/i386/tcg/decode-new.h
+@@ -116,6 +116,7 @@ typedef enum X86CPUIDFeature {
+     X86_FEAT_SSE41,
+     X86_FEAT_SSE42,
+     X86_FEAT_SSE4A,
++    X86_FEAT_INVPCID,
+ } X86CPUIDFeature;
+ 
+ /* Execution flags */
+diff --git a/target/i386/tcg/emit.c.inc b/target/i386/tcg/emit.c.inc
+index 82da548..5e1fbd7 100644
+--- a/target/i386/tcg/emit.c.inc
++++ b/target/i386/tcg/emit.c.inc
+@@ -1234,6 +1234,13 @@ static void gen_INSERTQ_r(DisasContext *s, CPUX86State *env, X86DecodedInsn *dec
+     gen_helper_insertq_r(tcg_env, OP_PTR0, OP_PTR2);
+ }
+ 
++static void gen_INVPCID(DisasContext *s, CPUX86State *env, X86DecodedInsn *decode)
++{
++    /* The M operand is not loaded: A0 is the descriptor's address. */
++    gen_helper_invpcid(tcg_env, s->A0, s->T0);
++    s->base.is_jmp = DISAS_EOB_NEXT;
++}
++
+ static void gen_LDMXCSR(DisasContext *s, CPUX86State *env, X86DecodedInsn *decode)
+ {
+     tcg_gen_trunc_tl_i32(s->tmp2_i32, s->T1);
+diff --git a/target/i386/tcg/sysemu/misc_helper.c b/target/i386/tcg/sysemu/misc_helper.c
+index e1528b7..67d6058 100644
+--- a/target/i386/tcg/sysemu/misc_helper.c
++++ b/target/i386/tcg/sysemu/misc_helper.c
+@@ -471,6 +471,40 @@ void helper_rdmsr(CPUX86State *env)
+     env->regs[R_EDX] = (uint32_t)(val >> 32);
+ }
+ 
++/*
++ * INVPCID: TCG keeps no PCIDs, so with CR4.PCIDE clear every type
++ * invalidates what INVLPG or a CR3 write would. The checks are the SDM's.
++ */
++void helper_invpcid(CPUX86State *env, target_ulong addr, target_ulong type)
++{
++    uintptr_t ra = GETPC();
++    uint64_t pcid = cpu_ldq_data_ra(env, addr, ra);
++    uint64_t linear = cpu_ldq_data_ra(env, addr + 8, ra);
++    bool pcide = env->cr[4] & CR4_PCIDE_MASK;
++
++    if (type > 3 || pcid > 0xfff) {
++        raise_exception_ra(env, EXCP0D_GPF, ra);
++    }
++    switch (type) {
++    case 0:
++        if ((!pcide && pcid) ||
++            (int64_t)(linear << 16) >> 16 != (int64_t)linear) {
++            raise_exception_ra(env, EXCP0D_GPF, ra);
++        }
++        tlb_flush_page(env_cpu(env), linear);
++        break;
++    case 1:
++        if (!pcide && pcid) {
++            raise_exception_ra(env, EXCP0D_GPF, ra);
++        }
++        tlb_flush(env_cpu(env));
++        break;
++    default:
++        tlb_flush(env_cpu(env));
++        break;
++    }
++}
++
+ void helper_flush_page(CPUX86State *env, target_ulong addr)
+ {
+     tlb_flush_page(env_cpu(env), addr);
+diff --git a/target/i386/tcg/translate.c b/target/i386/tcg/translate.c
+index 037bc47..32c4a24 100644
+--- a/target/i386/tcg/translate.c
++++ b/target/i386/tcg/translate.c
+@@ -210,6 +210,7 @@ typedef struct DisasContext {
+ #ifdef CONFIG_USER_ONLY
+ STUB_HELPER(clgi, TCGv_env env)
+ STUB_HELPER(flush_page, TCGv_env env, TCGv addr)
++STUB_HELPER(invpcid, TCGv_env env, TCGv addr, TCGv type)
+ STUB_HELPER(hlt, TCGv_env env, TCGv_i32 pc_ofs)
+ STUB_HELPER(inb, TCGv ret, TCGv_env env, TCGv_i32 port)
+ STUB_HELPER(inw, TCGv ret, TCGv_env env, TCGv_i32 port)

@@ -1,0 +1,93 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Farid Zakaria <farid.m.zakaria@gmail.com>
+Date: Sat, 21 Nov 2026 17:36:50 -0800
+Subject: [PATCH 2/3] target/i386: let a machine answer CPUID and refuse
+ unknown MSRs
+
+A machine that must show the guest what another hypervisor shows can
+answer CPUID itself, and can refuse an MSR TCG has no case for with
+#GP, as KVM does, where TCG reads 0 and drops writes.
+---
+ target/i386/cpu.c                    |  8 ++++++++
+ target/i386/cpu.h                    | 15 +++++++++++++++
+ target/i386/tcg/sysemu/misc_helper.c |  8 ++++++++
+ 3 files changed, 31 insertions(+)
+
+diff --git a/target/i386/cpu.c b/target/i386/cpu.c
+index c2cd319..9d39a95 100644
+--- a/target/i386/cpu.c
++++ b/target/i386/cpu.c
+@@ -6004,6 +6004,9 @@ uint32_t cpu_x86_virtual_addr_width(CPUX86State *env)
+     }
+ }
+ 
++X86CPUIDHook x86_cpuid_hook;
++X86UnknownMSRHook x86_unknown_msr_hook;
++
+ void cpu_x86_cpuid(CPUX86State *env, uint32_t index, uint32_t count,
+                    uint32_t *eax, uint32_t *ebx,
+                    uint32_t *ecx, uint32_t *edx)
+@@ -6015,6 +6018,11 @@ void cpu_x86_cpuid(CPUX86State *env, uint32_t index, uint32_t count,
+     uint32_t signature[3];
+     X86CPUTopoInfo topo_info;
+ 
++    if (x86_cpuid_hook) {
++        x86_cpuid_hook(env, index, count, eax, ebx, ecx, edx);
++        return;
++    }
++
+     topo_info.dies_per_pkg = env->nr_dies;
+     topo_info.cores_per_die = cs->nr_cores / env->nr_dies;
+     topo_info.threads_per_core = cs->nr_threads;
+diff --git a/target/i386/cpu.h b/target/i386/cpu.h
+index ef987f3..4fa9815 100644
+--- a/target/i386/cpu.h
++++ b/target/i386/cpu.h
+@@ -2258,6 +2258,21 @@ static inline AddressSpace *cpu_addressspace(CPUState *cs, MemTxAttrs attrs)
+  * checks with cpuid bits?
+  */
+ void cpu_load_efer(CPUX86State *env, uint64_t val);
++
++/*
++ * A machine that answers CPUID itself sets x86_cpuid_hook, which then
++ * answers every CPUID the guest executes. A machine that refuses MSRs
++ * TCG has no case for sets x86_unknown_msr_hook, which returns true to
++ * raise #GP where TCG would read 0 or drop the write. hw/i386/rewind.c
++ * sets both, to answer as KVM does.
++ */
++typedef void (*X86CPUIDHook)(CPUX86State *env, uint32_t index,
++                             uint32_t count, uint32_t *eax, uint32_t *ebx,
++                             uint32_t *ecx, uint32_t *edx);
++typedef bool (*X86UnknownMSRHook)(CPUX86State *env, uint32_t msr,
++                                  bool write, uint64_t value);
++extern X86CPUIDHook x86_cpuid_hook;
++extern X86UnknownMSRHook x86_unknown_msr_hook;
+ uint8_t x86_ldub_phys(CPUState *cs, hwaddr addr);
+ uint32_t x86_lduw_phys(CPUState *cs, hwaddr addr);
+ uint32_t x86_ldl_phys(CPUState *cs, hwaddr addr);
+diff --git a/target/i386/tcg/sysemu/misc_helper.c b/target/i386/tcg/sysemu/misc_helper.c
+index 67d6058..7fbb622 100644
+--- a/target/i386/tcg/sysemu/misc_helper.c
++++ b/target/i386/tcg/sysemu/misc_helper.c
+@@ -300,6 +300,10 @@ void helper_wrmsr(CPUX86State *env)
+             }
+             break;
+         }
++        if (x86_unknown_msr_hook &&
++            x86_unknown_msr_hook(env, (uint32_t)env->regs[R_ECX], true, val)) {
++            goto error;
++        }
+         /* XXX: exception? */
+         break;
+     }
+@@ -463,6 +467,10 @@ void helper_rdmsr(CPUX86State *env)
+             val = env->mce_banks[offset];
+             break;
+         }
++        if (x86_unknown_msr_hook &&
++            x86_unknown_msr_hook(env, (uint32_t)env->regs[R_ECX], false, 0)) {
++            raise_exception_err_ra(env, EXCP0D_GPF, 0, GETPC());
++        }
+         /* XXX: exception? */
+         val = 0;
+         break;
