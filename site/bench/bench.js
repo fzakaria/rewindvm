@@ -65,6 +65,10 @@ const MILESTONES = [
     label: "v0.17.0",
     html: `Each event in the trace carries the VM's clock (${commit("db5da6d7")}), and the guest kernel gains nf_tables, the bridge and user namespaces for containers (${commit("05854533")}, ${commit("efaa759f")}). A boot makes 4 more steps and a hello run without keyframes takes 3.7 MB against 3.5 MB. No workload's time changed beyond the rounds' spread. Rounds 4 and 5 ran at a load of 20 to 50, which gives echo its 0.50 s median: the quiet rounds took 0.40 to 0.42 s.`,
   },
+  {
+    label: "v0.18.0",
+    html: `Images hold their file data compressed with lz4 (${commit("d362be1a")}): a hello run holds 314 MB against 416 MB, the images take 234 MB against 413 MB, and a first hello build spends 2.3 s more CPU packing its closure. A directory root is packed once until it changes (${commit("6b5f1554")}), where every run packed it again, so echo takes 0.37 s against 0.17.0's quiet rounds' 0.42 s, and a first run, which packs and compresses the root, 1.85 s against 1.71 s.`,
+  },
 ];
 
 // What each metric reads from a sample.
