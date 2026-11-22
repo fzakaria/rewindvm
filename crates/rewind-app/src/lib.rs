@@ -24,6 +24,7 @@ pub mod diff_view;
 pub mod engine;
 pub mod examples;
 pub mod family;
+pub mod family_axis;
 #[cfg(test)]
 mod frame_cost;
 pub mod history;

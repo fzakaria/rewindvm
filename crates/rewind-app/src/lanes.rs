@@ -218,9 +218,16 @@ impl Window {
     /// MIN_HALF and MAX_HALF. The window stops at step 0, so near the
     /// run's start the step under the pointer moves.
     pub fn zoomed(&self, fraction: f32, factor: f64) -> Window {
+        self.zoomed_within(fraction, factor, MAX_HALF)
+    }
+
+    /// The window as [`Window::zoomed`] makes it, with its half at most
+    /// `max_half`: the Runs panel's step axis zooms out to whole runs
+    /// longer than the lanes' widest window.
+    pub fn zoomed_within(&self, fraction: f32, factor: f64, max_half: u64) -> Window {
         let along = |half: u64| (fraction as f64 * (2 * half + 1) as f64).floor() as i64;
         let pointer = self.center - self.half as i64 + along(self.half);
-        let half = ((self.half as f64 * factor).round() as u64).clamp(MIN_HALF, MAX_HALF);
+        let half = ((self.half as f64 * factor).round() as u64).clamp(MIN_HALF, max_half);
         let center = pointer - along(half) + half as i64;
         Window { center, half }.from_step_0()
     }
@@ -578,6 +585,29 @@ mod tests {
         assert_eq!(wide.zoomed(0.5, 2.0).half, MAX_HALF);
         let early = Window { center: 8, half: 8 };
         assert_eq!(early.zoomed(1.0, 2.0).center, 16);
+    }
+
+    /// The Runs panel's step axis zooms out past the lanes' widest
+    /// window, to the half it is given, and no further.
+    #[test]
+    fn zooming_within_a_wider_bound_reaches_it() {
+        let wide = Window {
+            center: 9000,
+            half: MAX_HALF,
+        };
+        let whole_family = 3 * MAX_HALF;
+        assert_eq!(
+            wide.zoomed_within(0.5, 2.0, whole_family).half,
+            2 * MAX_HALF
+        );
+        assert_eq!(
+            wide.zoomed_within(0.5, 8.0, whole_family).half,
+            whole_family
+        );
+        assert_eq!(
+            wide.zoomed_within(0.5, 2.0, MAX_HALF),
+            wide.zoomed(0.5, 2.0)
+        );
     }
 
     /// Panning moves the center by a share of the window's width, and

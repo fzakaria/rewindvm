@@ -83,6 +83,8 @@ pub struct RunEntry {
     /// nor failed.
     pub passed: bool,
     pub first_difference: Option<u64>,
+    /// The step the run ended at; None until it has.
+    pub last_step: Option<u64>,
     pub trace_hash: Option<String>,
     pub progress: Progress,
     /// The run it reads keyframes from, and up to which step.
@@ -175,6 +177,7 @@ impl RunEntry {
             failed: verdict.failed(),
             passed: verdict.passed(),
             first_difference: manifest.first_difference,
+            last_step: manifest.outcome.as_ref().map(|o| o.step),
             trace_hash: manifest.trace_hash.clone(),
             progress,
             shares: manifest.shared_keyframes.as_ref().map(|s| Reads {
@@ -1104,6 +1107,8 @@ mod tests {
     /// The vCPUs a run has unless asked for more.
     const ONE_CORE: u64 = 1;
     const INPUTS: &str = "one core";
+    /// The step every run here ended at.
+    const LAST_STEP: u64 = 100;
 
     fn run(id: &str, parent: Option<(&str, u64)>, schedule: u64, ending: &str) -> RunEntry {
         RunEntry {
@@ -1120,6 +1125,7 @@ mod tests {
             failed: ending != "exited:0",
             passed: ending == "exited:0",
             first_difference: None,
+            last_step: Some(LAST_STEP),
             trace_hash: Some(format!("hash-{id}")),
             progress: Progress::Ended,
             shares: None,
