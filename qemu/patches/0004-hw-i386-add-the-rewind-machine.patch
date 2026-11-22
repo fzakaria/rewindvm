@@ -12,9 +12,9 @@ trace.
  configs/devices/i386-softmmu/default.mak |    1 +
  hw/i386/Kconfig                          |    4 +
  hw/i386/meson.build                      |    1 +
- hw/i386/rewind.c                         | 1584 ++++++++++++++++++++++
+ hw/i386/rewind.c                         | 1594 ++++++++++++++++++++++
  include/hw/i386/rewind.h                 |   67 +
- 5 files changed, 1657 insertions(+)
+ 5 files changed, 1667 insertions(+)
  create mode 100644 hw/i386/rewind.c
  create mode 100644 include/hw/i386/rewind.h
 
@@ -53,10 +53,10 @@ index 369c6bf..25b9cb8 100644
  i386_ss.add(when: 'CONFIG_VMMOUSE', if_true: files('vmmouse.c'))
 diff --git a/hw/i386/rewind.c b/hw/i386/rewind.c
 new file mode 100644
-index 0000000..20803b0
+index 0000000..9237a51
 --- /dev/null
 +++ b/hw/i386/rewind.c
-@@ -0,0 +1,1584 @@
+@@ -0,0 +1,1594 @@
 +/*
 + * Rewind VM's machine on TCG.
 + *
@@ -489,6 +489,16 @@ index 0000000..20803b0
 +        drain_io(s);
 +    }
 +    fflush(s->log);
++
++#ifdef __EMSCRIPTEN__
++    /*
++     * Under emscripten the main loop does not wake for the request below,
++     * so QEMU would never exit and the page never learn the machine has
++     * stopped. The step log is complete, so the machine exits here, which
++     * ends the runtime and calls the page's onExit.
++     */
++    exit(0);
++#endif
 +
 +    qemu_system_shutdown_request(SHUTDOWN_CAUSE_GUEST_SHUTDOWN);
 +    if (current_cpu) {
