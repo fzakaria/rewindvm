@@ -15,11 +15,6 @@
 // Where the engine's files are, beside this page.
 const ENGINE = new URL("qemu/out.js", import.meta.url).href;
 
-// Where the machine finds its files in emscripten's file system, as the
-// bundle's arguments name them.
-const DIR = "/rewind";
-const LOG = `${DIR}/steps.log`;
-
 // The placeholder the bundle's arguments hold for the step.
 const UNTIL = "{until}";
 
@@ -66,35 +61,34 @@ async function loadBundle(base) {
 }
 
 // Runs the machine on `files`, a map of names under /rewind to bytes,
-// with `args`, and resolves to its step log once it exits.
-async function runMachine(args, files) {
+// with `args`, in a worker of its own (replay-worker.js), and resolves to
+// its step log once it exits.
+function runMachine(args, files) {
   if (!crossOriginIsolated) {
-    throw new Error(
-      "the page is not cross-origin isolated, which the replay's threads need",
+    return Promise.reject(
+      new Error(
+        "the page is not cross-origin isolated, which the replay's threads need",
+      ),
     );
   }
-  const { default: init } = await import(ENGINE);
-  let exit;
-  const exited = new Promise((resolve) => (exit = resolve));
-  const mod = await init({
-    print: (line) => console.log(`replay: ${line}`),
-    printErr: (line) => console.log(`replay: ${line}`),
-    locateFile: (file) => new URL(`qemu/${file}`, import.meta.url).href,
-    mainScriptUrlOrBlob: ENGINE,
-    onExit: exit,
+  const worker = new Worker(new URL("replay-worker.js", import.meta.url), {
+    type: "module",
   });
-  mod.FS.mkdir(DIR);
-  for (const [name, bytes] of Object.entries(files)) {
-    if (bytes) {
-      mod.FS.writeFile(`${DIR}/${name}`, bytes);
-    }
-  }
-  mod.callMain(args);
-  const code = await exited;
-  if (code !== 0) {
-    throw new Error(`the machine exited with ${code}`);
-  }
-  return mod.FS.readFile(LOG);
+  return new Promise((resolve, reject) => {
+    worker.onmessage = ({ data }) => {
+      worker.terminate();
+      if (data.error) {
+        reject(new Error(data.error));
+        return;
+      }
+      resolve(data.log);
+    };
+    worker.onerror = (event) => {
+      worker.terminate();
+      reject(new Error(event.message));
+    };
+    worker.postMessage({ engine: ENGINE, args, files });
+  });
 }
 
 // Replays the export at `url` to `step` and asks the guest `request`;
