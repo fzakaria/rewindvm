@@ -334,6 +334,7 @@ mod tests {
             tab: Some(Tab::Threads),
             thread: Some(12),
             search: Some("deposit".into()),
+            file: None,
         };
         let mut fetches = Fetches::default();
         let started = fetches.start(&asked);

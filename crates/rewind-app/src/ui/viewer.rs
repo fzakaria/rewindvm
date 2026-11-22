@@ -334,12 +334,16 @@ impl Scrubber {
     /// in the browser: an export opened from a link, whose replay bundle
     /// the page looks for beside it. The page says when there is none.
     pub(super) fn browser_replays(&self) -> bool {
-        cfg!(target_family = "wasm")
-            && self.address_bar.address.url.is_some()
+        #[cfg(target_family = "wasm")]
+        return self.address_bar.address.url.is_some()
             && self
                 .session
                 .as_ref()
-                .is_some_and(|session| !session.run.records.is_empty())
+                .is_some_and(|session| !session.run.records.is_empty());
+
+        // The desktop app has an engine to read files with.
+        #[cfg(not(target_family = "wasm"))]
+        false
     }
 
     /// Shows the files the trace has under the viewer's path at the
