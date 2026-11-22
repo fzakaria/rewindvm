@@ -8,6 +8,7 @@ members = [
     "crates/rewind",
     "crates/rewind-core",
     "crates/rewind-mapped",
+    "crates/rewind-qemu",
     "crates/rewind-store",
     "crates/rewind-trace",
     "crates/rewind-vmm",

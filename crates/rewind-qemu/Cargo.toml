@@ -1,0 +1,21 @@
+[package]
+name = "rewind-qemu"
+description = "Replaying Rewind VM runs on the QEMU machine, without KVM"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "rewind-qemu"
+path = "src/main.rs"
+
+[dependencies]
+rewind-core = { path = "../rewind-core" }
+rewind-trace = { path = "../rewind-trace" }
+anyhow = "1"
+blake3 = "1"
+clap = { version = "4", features = ["derive", "env", "wrap_help"] }
+tempfile = "3"
