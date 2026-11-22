@@ -1,0 +1,912 @@
+diff -ruN a/tcg/tcg.c b/tcg/tcg.c
+--- a/tcg/tcg.c	2026-09-09 12:09:04.748837302 -0700
++++ b/tcg/tcg.c	2026-09-09 12:10:52.672897947 -0700
+@@ -476,6 +476,8 @@
+ __thread uint32_t target_helper_type_end[WASM_NUM_HELPER_FUNCS_MAX];
+ __thread uint32_t wasm_call_sites[WASM_MAX_CALL_SITES];
+ __thread uint32_t wasm_ncalls;
++__thread struct wasm_direct_site wasm_direct_sites[WASM_MAX_DIRECT_SITES];
++__thread uint32_t wasm_ndirect;
+ 
+ /*
+  * The registry describes one block: the helpers its body calls, by
+@@ -489,6 +491,7 @@
+     num_helper_funcs = 0;
+     target_helper_types_pos = 0;
+     wasm_ncalls = 0;
++    wasm_ndirect = 0;
+     memset(target_helper_funcs, -1, sizeof(target_helper_funcs));
+ }
+ __thread int wasm_block_idx;
+@@ -6281,7 +6284,10 @@
+ 
+     struct wasm_tb_hdr *wasm_hdr = (struct wasm_tb_hdr *)s->code_ptr;
+     memset(wasm_hdr, 0, sizeof(*wasm_hdr));
++    wasm_hdr->tb = (uint32_t)tb;
+     s->code_ptr += sizeof(*wasm_hdr);
++    /* the TB memory is not zeroed; no successor is cached yet */
++    memset(tb->wasm_jmp_fidx, 0, sizeof(tb->wasm_jmp_fidx));
+ 
+     uint8_t *code_begin = s->code_ptr;
+     s->code_ptr += 4; // placeholder for size
+@@ -6423,7 +6429,8 @@
+      * the block's import table so the assembler can relink it.
+      */
+     int types_padded = (target_helper_types_pos + 3) & ~3;
+-    int meta_len = num_helper_funcs * 8 + types_padded + wasm_ncalls * 4;
++    int meta_len = num_helper_funcs * 8 + types_padded + wasm_ncalls * 4
++        + wasm_ndirect * sizeof(struct wasm_direct_site);
+     if (unlikely(((void *)s->code_ptr + sub_buf_len + meta_len) > s->code_gen_highwater)) {
+         return -1;
+     }
+@@ -6437,6 +6444,7 @@
+     wasm_hdr->nhelpers = num_helper_funcs;
+     wasm_hdr->types_len = target_helper_types_pos;
+     wasm_hdr->ncalls = wasm_ncalls;
++    wasm_hdr->ndirect = wasm_ndirect;
+     memcpy(s->code_ptr, target_helper_funcs, num_helper_funcs * 4);
+     s->code_ptr += num_helper_funcs * 4;
+     memcpy(s->code_ptr, target_helper_type_end, num_helper_funcs * 4);
+@@ -6445,6 +6453,8 @@
+     s->code_ptr += types_padded;
+     memcpy(s->code_ptr, wasm_call_sites, wasm_ncalls * 4);
+     s->code_ptr += wasm_ncalls * 4;
++    memcpy(s->code_ptr, wasm_direct_sites, wasm_ndirect * sizeof(struct wasm_direct_site));
++    s->code_ptr += wasm_ndirect * sizeof(struct wasm_direct_site);
+ 
+     wasm32_block_translated((uint8_t *)wasm_hdr);
+ #endif
+diff -ruN a/tcg/wasm32/tcg-target.c.inc b/tcg/wasm32/tcg-target.c.inc
+--- a/tcg/wasm32/tcg-target.c.inc	2026-09-09 12:09:04.749629470 -0700
++++ b/tcg/wasm32/tcg-target.c.inc	2026-09-09 12:10:52.674291293 -0700
+@@ -270,14 +270,17 @@
+ 
+ #define BLOCK_PTR_IDX 16
+ 
++/* The two parameters, then the locals tcg_out_tb_start declares. */
+ #define CTX_IDX 0
+-#define TMP32_LOCAL_ENV_IDX 1
+-#define TMP32_LOCAL_0_IDX 2
+-#define TMP64_0_IDX 3
+-#define TMP64_1_IDX 4
+-#define TMP64_2_IDX 5
+-#define TMP64_3_IDX 6
+-#define TMP64_4_IDX 7
++#define MODE_IDX 1
++#define TMP32_LOCAL_ENV_IDX 2
++#define TMP32_LOCAL_0_IDX 3
++#define TMP32_LOCAL_1_IDX 4
++#define TMP64_0_IDX 5
++#define TMP64_1_IDX 6
++#define TMP64_2_IDX 7
++#define TMP64_3_IDX 8
++#define TMP64_4_IDX 9
+ 
+ __thread bool env_cached = false;
+ 
+@@ -463,7 +466,7 @@
+  * the globals base for every access. The only state that must survive a
+  * function exit is the unwind case, handled by the save area in ctx.
+  */
+-#define REG_LOCAL_BASE 8
++#define REG_LOCAL_BASE 10
+ 
+ static void tcg_wasm_out_op_global_get(TCGContext *s, uint8_t i)
+ {
+@@ -595,6 +598,30 @@
+ }
+ 
+ /*
++ * Fixed 5-byte LEB immediates the batch assembler rewrites in place
++ * (tcg/wasm32.c has the matching readers and writers). The signed form
++ * is for i32.const, whose top byte must carry the sign of bit 31.
++ */
++static void tcg_wasm_out_uleb5(TCGContext *s, uint32_t v)
++{
++    for (int i = 0; i < 4; i++) {
++        tcg_wasm_out8(s, (v & 0x7f) | 0x80);
++        v >>= 7;
++    }
++    tcg_wasm_out8(s, v & 0x7f);
++}
++
++static void tcg_wasm_out_sleb5(TCGContext *s, int32_t v)
++{
++    uint32_t u = (uint32_t)v;
++    for (int i = 0; i < 4; i++) {
++        tcg_wasm_out8(s, (u & 0x7f) | 0x80);
++        u >>= 7;
++    }
++    tcg_wasm_out8(s, (u & 0x0f) | (v < 0 ? 0x70 : 0));
++}
++
++/*
+  * A call names a helper by the block's local import index. The batch
+  * assembler rewrites that index when it links the body into a module,
+  * so the immediate is a fixed 5-byte LEB and its position is recorded.
+@@ -1508,6 +1535,110 @@
+     tcg_wasm_out_op_set_r_as_i64(s, retl, reth);
+ }
+ 
++/*
++ * 64x64->128 without a 128-bit multiplier: the low half is i64.mul,
++ * the high half is the sum of the four 32x32 cross products with the
++ * carry out of the middle word. Everything is computed into scratch
++ * locals before either output is written, since the outputs may alias
++ * the inputs. Without this the front end calls a helper per 64-bit
++ * multiply, and x86 emits one for every 64-bit imul to get the
++ * overflow flag.
++ */
++static void tcg_wasm_out_mul2_i64_high(TCGContext *s, TCGReg arg1, TCGReg arg2)
++{
++    // T0 = low word of arg1, T1 = high word, T2 and T3 the same for arg2
++    tcg_wasm_out_op_global_get_r(s, arg1);
++    tcg_wasm_out_op_i64_const(s, 0xffffffff);
++    tcg_wasm_out_op_i64_and(s);
++    tcg_wasm_out_op_local_set(s, TMP64_0_IDX);
++    tcg_wasm_out_op_global_get_r(s, arg1);
++    tcg_wasm_out_op_i64_const(s, 32);
++    tcg_wasm_out_op_i64_shr_u(s);
++    tcg_wasm_out_op_local_set(s, TMP64_1_IDX);
++    tcg_wasm_out_op_global_get_r(s, arg2);
++    tcg_wasm_out_op_i64_const(s, 0xffffffff);
++    tcg_wasm_out_op_i64_and(s);
++    tcg_wasm_out_op_local_set(s, TMP64_2_IDX);
++    tcg_wasm_out_op_global_get_r(s, arg2);
++    tcg_wasm_out_op_i64_const(s, 32);
++    tcg_wasm_out_op_i64_shr_u(s);
++    tcg_wasm_out_op_local_set(s, TMP64_3_IDX);
++
++    // T4 = the low half
++    tcg_wasm_out_op_global_get_r(s, arg1);
++    tcg_wasm_out_op_global_get_r(s, arg2);
++    tcg_wasm_out_op_i64_mul(s);
++    tcg_wasm_out_op_local_set(s, TMP64_4_IDX);
++
++    // carry = ((lo*lo >> 32) + (lo*hi & mask) + (hi*lo & mask)) >> 32
++    tcg_wasm_out_op_local_get(s, TMP64_0_IDX);
++    tcg_wasm_out_op_local_get(s, TMP64_2_IDX);
++    tcg_wasm_out_op_i64_mul(s);
++    tcg_wasm_out_op_i64_const(s, 32);
++    tcg_wasm_out_op_i64_shr_u(s);
++    tcg_wasm_out_op_local_get(s, TMP64_0_IDX);
++    tcg_wasm_out_op_local_get(s, TMP64_3_IDX);
++    tcg_wasm_out_op_i64_mul(s);
++    tcg_wasm_out_op_i64_const(s, 0xffffffff);
++    tcg_wasm_out_op_i64_and(s);
++    tcg_wasm_out_op_i64_add(s);
++    tcg_wasm_out_op_local_get(s, TMP64_1_IDX);
++    tcg_wasm_out_op_local_get(s, TMP64_2_IDX);
++    tcg_wasm_out_op_i64_mul(s);
++    tcg_wasm_out_op_i64_const(s, 0xffffffff);
++    tcg_wasm_out_op_i64_and(s);
++    tcg_wasm_out_op_i64_add(s);
++    tcg_wasm_out_op_i64_const(s, 32);
++    tcg_wasm_out_op_i64_shr_u(s);
++
++    // high = carry + hi*hi + (lo*hi >> 32) + (hi*lo >> 32)
++    tcg_wasm_out_op_local_get(s, TMP64_1_IDX);
++    tcg_wasm_out_op_local_get(s, TMP64_3_IDX);
++    tcg_wasm_out_op_i64_mul(s);
++    tcg_wasm_out_op_i64_add(s);
++    tcg_wasm_out_op_local_get(s, TMP64_0_IDX);
++    tcg_wasm_out_op_local_get(s, TMP64_3_IDX);
++    tcg_wasm_out_op_i64_mul(s);
++    tcg_wasm_out_op_i64_const(s, 32);
++    tcg_wasm_out_op_i64_shr_u(s);
++    tcg_wasm_out_op_i64_add(s);
++    tcg_wasm_out_op_local_get(s, TMP64_1_IDX);
++    tcg_wasm_out_op_local_get(s, TMP64_2_IDX);
++    tcg_wasm_out_op_i64_mul(s);
++    tcg_wasm_out_op_i64_const(s, 32);
++    tcg_wasm_out_op_i64_shr_u(s);
++    tcg_wasm_out_op_i64_add(s);
++}
++
++static void tcg_wasm_out_mulu2_i64(TCGContext *s, TCGReg retl, TCGReg reth, TCGReg arg1, TCGReg arg2)
++{
++    tcg_wasm_out_mul2_i64_high(s, arg1, arg2);
++    tcg_wasm_out_op_global_set_r(s, reth);
++    tcg_wasm_out_op_local_get(s, TMP64_4_IDX);
++    tcg_wasm_out_op_global_set_r(s, retl);
++}
++
++/* The signed high half: the unsigned one minus each negative input's partner. */
++static void tcg_wasm_out_muls2_i64(TCGContext *s, TCGReg retl, TCGReg reth, TCGReg arg1, TCGReg arg2)
++{
++    tcg_wasm_out_mul2_i64_high(s, arg1, arg2);
++    tcg_wasm_out_op_global_get_r(s, arg1);
++    tcg_wasm_out_op_i64_const(s, 63);
++    tcg_wasm_out_op_i64_shr_s(s);
++    tcg_wasm_out_op_global_get_r(s, arg2);
++    tcg_wasm_out_op_i64_and(s);
++    tcg_wasm_out_op_i64_sub(s);
++    tcg_wasm_out_op_global_get_r(s, arg2);
++    tcg_wasm_out_op_i64_const(s, 63);
++    tcg_wasm_out_op_i64_shr_s(s);
++    tcg_wasm_out_op_global_get_r(s, arg1);
++    tcg_wasm_out_op_i64_and(s);
++    tcg_wasm_out_op_i64_sub(s);
++    tcg_wasm_out_op_global_set_r(s, reth);
++    tcg_wasm_out_op_local_get(s, TMP64_4_IDX);
++    tcg_wasm_out_op_global_set_r(s, retl);
++}
++
+ static void tcg_wasm_out_muluh_i32(TCGContext *s, TCGReg ret, TCGReg arg1, TCGReg arg2)
+ {
+     tcg_wasm_out_op_global_get_r(s, arg1);
+@@ -1847,10 +1978,11 @@
+ }
+ 
+ /*
+- * Tail-call the compiled function of the block ctx.tb_ptr names. Leaves
+- * the function if that block has none. TMP32_LOCAL_0 holds the block.
++ * Tail-call the compiled function of the block ctx.tb_ptr names, with
++ * the given entry mode. Leaves the function if that block has none.
++ * TMP32_LOCAL_0 holds the block.
+  */
+-static void tcg_wasm_out_chain_or_return(TCGContext *s)
++static void tcg_wasm_out_chain_or_return(TCGContext *s, int mode)
+ {
+     if (!wasm_tail_calls_ok) {
+         // no tail calls here: the dispatcher runs the successor
+@@ -1865,6 +1997,7 @@
+     tcg_wasm_out_op_local_tee(s, TMP32_LOCAL_0_IDX);
+     tcg_wasm_out_op_if_noret(s);
+     tcg_wasm_out_op_local_get(s, CTX_IDX);
++    tcg_wasm_out_op_i32_const(s, mode);
+     tcg_wasm_out_op_local_get(s, TMP32_LOCAL_0_IDX);
+     tcg_wasm_out_op_return_call_indirect(s);
+     tcg_wasm_out_op_end(s);
+@@ -1879,6 +2012,12 @@
+     tcg_wasm_out_op_return(s);
+ }
+ 
++/*
++ * An indirect jump: `arg` holds what helper_lookup_tb_ptr found, the
++ * target block or NULL. The target being this block loops; NULL leaves
++ * for the dispatcher (which translates); otherwise the block tail-calls
++ * the target's compiled function, or leaves if it has none.
++ */
+ static void tcg_wasm_out_goto_ptr(TCGContext *s, TCGReg arg)
+ {
+     tcg_wasm_out_op_global_get_r(s, arg);
+@@ -1897,26 +2036,50 @@
+     tcg_wasm_out_op_local_get(s, CTX_IDX);
+     tcg_wasm_out_op_local_get(s, TMP32_LOCAL_0_IDX);
+     tcg_wasm_out_op_i32_store(s, 0, TB_PTR_OFF);
+-    tcg_wasm_out_ctx_i32_store_const(s, DO_INIT_OFF, 1);
+     // a found block that is compiled is entered directly
+     tcg_wasm_out_op_if_noret(s);
+-    tcg_wasm_out_chain_or_return(s);
++    tcg_wasm_out_chain_or_return(s, WASM_ENTRY_CHAIN);
+     tcg_wasm_out_op_end(s);
+     tcg_wasm_out_op_i32_const(s, 0);
+     tcg_wasm_out_op_return(s);
+ }
+ 
++/*
++ * The address of this block's cache slot for jump `which` on the running
++ * vCPU: the TB's row for that vCPU, whose offset ctx carries.
++ */
++static void tcg_wasm_out_jmp_fidx_slot_addr(TCGContext *s, int which)
++{
++    tcg_wasm_out_op_i32_const(s, (int32_t)(uintptr_t)&s->gen_tb->wasm_jmp_fidx[0][which]);
++    tcg_wasm_out_ctx_i32_load(s, JMP_FIDX_OFF_OFF);
++    tcg_wasm_out_op_i32_add(s);
++}
++
++/*
++ * A direct jump. The target block's address sits in the TB's
++ * jmp_target_addr slot (0 while unlinked, in which case the exit_tb
++ * that follows returns to the dispatcher, which links it). A linked
++ * target that is this block loops; otherwise the block tail-calls the
++ * target's compiled function.
++ *
++ * The function index comes from a cache slot beside jmp_target_addr in
++ * this block's own TB, so a transition reads one line the block already
++ * touches instead of the successor's header. An empty slot sends the
++ * block back to the dispatcher, which runs the target and fills the slot
++ * (fill_jmp_slot in tcg/wasm32.c, which also handles the race with a
++ * concurrent relink); the C side clears the slot when the jump is
++ * relinked, reset, or the successor's module is evicted. Keeping the
++ * miss path out of the generated code keeps every block smaller, and a
++ * jump misses once.
++ */
+ static void tcg_wasm_out_goto_tb(TCGContext *s, int which)
+ {
+     tcg_wasm_out_op_i32_const(s, (int32_t)get_jmp_target_addr(s, which));
+     tcg_wasm_out_op_i32_load(s, 0, 0);
+-    tcg_wasm_out_op_local_set(s, TMP32_LOCAL_0_IDX);
+-
+-    tcg_wasm_out_op_local_get(s, TMP32_LOCAL_0_IDX);
+-    tcg_wasm_out_op_i32_const(s, 0);
+-    tcg_wasm_out_op_i32_ne(s);
++    tcg_wasm_out_op_local_tee(s, TMP32_LOCAL_0_IDX);
+     tcg_wasm_out_op_if_noret(s);
+ 
++    // the target is this block: back to the top without leaving
+     tcg_wasm_out_op_local_get(s, TMP32_LOCAL_0_IDX);
+     tcg_wasm_out_ctx_i32_load(s, TB_PTR_OFF);
+     tcg_wasm_out_op_i32_eq(s);
+@@ -1925,15 +2088,54 @@
+     tcg_wasm_out_op_global_set(s, BLOCK_PTR_IDX);
+     tcg_wasm_out_op_br(s, 3); // br to the top of loop
+     tcg_wasm_out_op_end(s);
+-    
+-    // store jmp target address to buf
++
++    // hand the target to whoever runs it next
+     tcg_wasm_out_op_local_get(s, CTX_IDX);
+     tcg_wasm_out_op_local_get(s, TMP32_LOCAL_0_IDX);
+     tcg_wasm_out_op_i32_store(s, 0, TB_PTR_OFF);
+-    tcg_wasm_out_ctx_i32_store_const(s, DO_INIT_OFF, 1);
+ 
+-    // a compiled target is entered directly; otherwise the dispatcher runs it
+-    tcg_wasm_out_chain_or_return(s);
++    if (!wasm_tail_calls_ok) {
++        // no tail calls here: the dispatcher runs the successor
++        tcg_wasm_out_op_i32_const(s, 0);
++        tcg_wasm_out_op_return(s);
++        tcg_wasm_out_op_end(s);
++        return;
++    }
++
++    // a target in this block's own batch is called directly (see
++    // struct wasm_direct_site; the assembler fills both immediates)
++    tcg_debug_assert(wasm_ndirect < WASM_MAX_DIRECT_SITES);
++    struct wasm_direct_site *site = &wasm_direct_sites[wasm_ndirect++];
++    site->which = which;
++    tcg_wasm_out_op_local_get(s, TMP32_LOCAL_0_IDX);
++    tcg_wasm_out8(s, 0x41); // i32.const
++    site->addr_imm_off = cur_sub_buf_off_rel();
++    tcg_wasm_out_sleb5(s, WASM_DIRECT_NEVER);
++    tcg_wasm_out_op_i32_eq(s);
++    tcg_wasm_out_op_if_noret(s);
++    tcg_wasm_out_op_local_get(s, CTX_IDX);
++    tcg_wasm_out_op_i32_const(s, WASM_ENTRY_CHAIN);
++    tcg_wasm_out8(s, 0x12); // return_call
++    site->fidx_imm_off = cur_sub_buf_off_rel();
++    tcg_wasm_out_uleb5(s, 0);
++    tcg_wasm_out_op_end(s);
++
++    // the cached function index of the target
++    tcg_wasm_out_jmp_fidx_slot_addr(s, which);
++    tcg_wasm_out_op_i32_load(s, 0, 0);
++    tcg_wasm_out_op_local_tee(s, TMP32_LOCAL_1_IDX);
++    tcg_wasm_out_op_if_noret(s);
++    tcg_wasm_out_op_local_get(s, CTX_IDX);
++    tcg_wasm_out_op_i32_const(s, WASM_ENTRY_CHAIN);
++    tcg_wasm_out_op_local_get(s, TMP32_LOCAL_1_IDX);
++    tcg_wasm_out_op_return_call_indirect(s);
++    tcg_wasm_out_op_end(s);
++
++    // no index cached: the dispatcher runs the target and fills the slot
++    tcg_wasm_out_ctx_i32_store_const(s, MISS_TB_OFF, (int32_t)(uintptr_t)s->gen_tb);
++    tcg_wasm_out_ctx_i32_store_const(s, MISS_WHICH_OFF, which);
++    tcg_wasm_out_op_i32_const(s, 0);
++    tcg_wasm_out_op_return(s);
+     tcg_wasm_out_op_end(s);
+ }
+ 
+@@ -2217,10 +2419,21 @@
+     tcg_wasm_out_op_end(s);
+ }
+ 
++/*
++ * The jump itself is always indirect through jmp_target_addr, which
++ * tb_set_jmp_target has just written. What the generated code caches
++ * next to it, the successor's function index, is for the old target:
++ * clear it for every vCPU. Release order keeps the new target visible
++ * before the cleared cache is, which fill_jmp_slot (tcg/wasm32.c)
++ * relies on when it races with this.
++ */
+ void tb_target_set_jmp_target(const TranslationBlock *tb, int n,
+                               uintptr_t jmp_rx, uintptr_t jmp_rw)
+ {
+-    /* Always indirect, nothing to do */
++    TranslationBlock *rw = (TranslationBlock *)tb;
++    for (int c = 0; c < WASM_MAX_VCPUS; c++) {
++        qatomic_store_release(&rw->wasm_jmp_fidx[c][n], 0);
++    }
+ }
+ 
+ static uint8_t tcg_wasm_out_tlb_load(TCGContext *s, TCGReg addr, MemOpIdx oi, bool is_ld)
+@@ -3373,6 +3586,16 @@
+     tcg_tci_out_op_rrrr(s, opc, retl, reth, arg1, arg2);
+     tcg_wasm_out_muls2_i32(s, retl, reth, arg1, arg2);
+ }
++static void tcg_out_mulu2_i64(TCGContext *s, TCGOpcode opc, TCGReg retl, TCGReg reth, TCGReg arg1, TCGReg arg2)
++{
++    tcg_tci_out_op_rrrr(s, opc, retl, reth, arg1, arg2);
++    tcg_wasm_out_mulu2_i64(s, retl, reth, arg1, arg2);
++}
++static void tcg_out_muls2_i64(TCGContext *s, TCGOpcode opc, TCGReg retl, TCGReg reth, TCGReg arg1, TCGReg arg2)
++{
++    tcg_tci_out_op_rrrr(s, opc, retl, reth, arg1, arg2);
++    tcg_wasm_out_muls2_i64(s, retl, reth, arg1, arg2);
++}
+ 
+ static void tcg_out_bswap16_i32(TCGContext *s, TCGOpcode opc, TCGReg dest, TCGReg src, int flags)
+ {
+@@ -3850,6 +4073,12 @@
+     case INDEX_op_mulu2_i32:
+         tcg_out_mulu2_i32(s, opc, args[0], args[1], args[2], args[3]);
+         break;
++    case INDEX_op_muls2_i64:
++        tcg_out_muls2_i64(s, opc, args[0], args[1], args[2], args[3]);
++        break;
++    case INDEX_op_mulu2_i64:
++        tcg_out_mulu2_i64(s, opc, args[0], args[1], args[2], args[3]);
++        break;
+     default:
+         g_assert_not_reached();
+         break;
+@@ -3869,12 +4098,14 @@
+ }
+ 
+ /*
+- * Every block's function starts here. The locals: ctx's i32 cache and a
+- * scratch i32, five scratch i64s, then the sixteen guest registers and
+- * the block index (REG_LOCAL_BASE). env and the stack pointer are loaded
+- * from ctx on every entry. A fresh entry (do_init set) clears do_init
+- * and starts at block 0. A re-entry after an Asyncify unwind (do_init
+- * clear) first forwards to the block ctx.tb_ptr names if that is not
++ * Every block's function starts here. The parameters are ctx and the
++ * entry mode (WASM_ENTRY_CHAIN or _DISPATCH); the locals: ctx's i32
++ * cache and two scratch i32s, five scratch i64s, then the sixteen guest
++ * registers and the block index (REG_LOCAL_BASE). env and the stack
++ * pointer are loaded from ctx on every entry. A chained entry starts at
++ * block 0. A dispatcher entry with do_init set clears do_init and does
++ * the same. A re-entry after an Asyncify unwind (a dispatcher entry with
++ * do_init clear) first forwards to the block ctx.tb_ptr names if that is not
+  * this one -- chained execution may have tail-called on before the
+  * unwind, and the dispatcher rewinds into the function it originally
+  * called -- then reloads the registers and the block index from the
+@@ -3883,7 +4114,7 @@
+  */
+ static void tcg_out_tb_start(TCGContext *s)
+ {
+-    static const uint8_t locals[] = { 0x3, 0x2, 0x7f, 0x5, 0x7e, 0x11, 0x7e };
++    static const uint8_t locals[] = { 0x3, 0x3, 0x7f, 0x5, 0x7e, 0x11, 0x7e };
+     for (size_t i = 0; i < sizeof(locals); i++) {
+         tcg_wasm_out8(s, locals[i]);
+     }
+@@ -3895,6 +4126,13 @@
+     tcg_wasm_out_op_i64_extend_i32_u(s);
+     tcg_wasm_out_op_global_set(s, tcg_target_reg_index[TCG_REG_CALL_STACK]);
+ 
++    // a chained entry is always fresh: only the dispatcher can rewind
++    tcg_wasm_out_op_local_get(s, MODE_IDX);
++    tcg_wasm_out_op_if_noret(s);
++    tcg_wasm_out_op_i64_const(s, 0);
++    tcg_wasm_out_op_global_set(s, BLOCK_PTR_IDX);
++    tcg_wasm_out_op_else(s);
++
+     tcg_wasm_out_ctx_i32_load(s, DO_INIT_OFF);
+     tcg_wasm_out_op_if_noret(s);
+     tcg_wasm_out_ctx_i32_store_const(s, DO_INIT_OFF, 0);
+@@ -3910,7 +4148,7 @@
+         tcg_wasm_out_op_i32_const(s, (int32_t)(uintptr_t)s->code_buf);
+         tcg_wasm_out_op_i32_ne(s);
+         tcg_wasm_out_op_if_noret(s);
+-        tcg_wasm_out_chain_or_return(s);
++        tcg_wasm_out_chain_or_return(s, WASM_ENTRY_DISPATCH);
+         tcg_wasm_out_op_end(s);
+     }
+ 
+@@ -3924,6 +4162,7 @@
+     tcg_wasm_out_op_i64_load(s, 3, SAVE_BLOCK_PTR_OFF);
+     tcg_wasm_out_op_global_set(s, BLOCK_PTR_IDX);
+     tcg_wasm_out_op_end(s);
++    tcg_wasm_out_op_end(s);
+ 
+     tcg_wasm_out8(s, 0x02); tcg_wasm_out8(s, 0x40); // block: the unwind exit
+     tcg_wasm_out8(s, 0x03); tcg_wasm_out8(s, 0x40); // loop
+diff -ruN a/tcg/wasm32/tcg-target.h b/tcg/wasm32/tcg-target.h
+--- a/tcg/wasm32/tcg-target.h	2026-09-04 15:38:06.771531198 -0700
++++ b/tcg/wasm32/tcg-target.h	2026-09-09 11:54:32.571880393 -0700
+@@ -94,13 +94,13 @@
+ #define TCG_TARGET_HAS_rot_i64          1
+ #define TCG_TARGET_HAS_negsetcond_i64   0
+ #define TCG_TARGET_HAS_movcond_i64      1
+-#define TCG_TARGET_HAS_muls2_i64        0
++#define TCG_TARGET_HAS_muls2_i64        1
+ #define TCG_TARGET_HAS_add2_i32         1
+ #define TCG_TARGET_HAS_sub2_i32         1
+ #define TCG_TARGET_HAS_mulu2_i32        1
+ #define TCG_TARGET_HAS_add2_i64         1
+ #define TCG_TARGET_HAS_sub2_i64         1
+-#define TCG_TARGET_HAS_mulu2_i64        0
++#define TCG_TARGET_HAS_mulu2_i64        1
+ #define TCG_TARGET_HAS_muluh_i64        0
+ #define TCG_TARGET_HAS_mulsh_i64        0
+ 
+diff -ruN a/tcg/wasm32.c b/tcg/wasm32.c
+--- a/tcg/wasm32.c	2026-09-09 12:09:04.747639219 -0700
++++ b/tcg/wasm32.c	2026-09-09 12:10:52.673800502 -0700
+@@ -28,6 +28,7 @@
+ #include <string.h>
+ #include <emscripten.h>
+ #include <emscripten/threading.h>
++#include "exec/translation-block.h"
+ #include "wasm32.h"
+ 
+ __thread uintptr_t tci_tb_ptr;
+@@ -87,6 +88,8 @@
+ __thread uint32_t stat_flush_hot = 0;
+ __thread uint32_t stat_evictions = 0;
+ __thread uint32_t stat_body_bytes = 0;
++__thread uint32_t stat_direct_sites = 0;
++__thread uint32_t stat_direct_linked = 0;
+ 
+ EM_JS(int, instantiate_batch_js, (int bytes_ptr, int bytes_len, int nfuncs, int helpers_ptr, int nhelpers, int dump), {
+         // A copy rather than a view: the module keeps its own bytes and
+@@ -144,8 +147,8 @@
+         }
+ });
+ 
+-EM_JS(void, report_stats_js, (int batches, int blocks, int full, int hot, int evictions, int body_bytes), {
+-        console.log("wasm32 batches=" + batches + " blocks=" + blocks + " flush_full=" + full + " flush_hot=" + hot + " evictions=" + evictions + " body_bytes=" + body_bytes);
++EM_JS(void, report_stats_js, (int batches, int blocks, int full, int hot, int evictions, int body_bytes, int direct_sites, int direct_linked), {
++        console.log("wasm32 batches=" + batches + " blocks=" + blocks + " flush_full=" + full + " flush_hot=" + hot + " evictions=" + evictions + " body_bytes=" + body_bytes + " direct_sites=" + direct_sites + " direct_linked=" + direct_linked);
+ });
+ 
+ static uint8_t *put_leb(uint8_t *p, uint32_t v)
+@@ -177,7 +180,8 @@
+     return p + n;
+ }
+ 
+-static const uint8_t start_type[] = { 0x60, 0x01, 0x7f, 0x01, 0x7f };
++/* (ctx: i32, mode: i32) -> i32; see WASM_ENTRY_DISPATCH */
++static const uint8_t start_type[] = { 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f };
+ 
+ /*
+  * The union import table of one batch. A helper is identified by its
+@@ -224,6 +228,28 @@
+     p[4] = v & 0x7f;
+ }
+ 
++/* The signed form, for an i32.const immediate: byte 4 carries the sign of bit 31. */
++static void sleb5_write(uint8_t *p, int32_t v)
++{
++    uint32_t u = (uint32_t)v;
++    for (int i = 0; i < 4; i++) {
++        p[i] = (u & 0x7f) | 0x80;
++        u >>= 7;
++    }
++    p[4] = (u & 0x0f) | (v < 0 ? 0x70 : 0);
++}
++
++/* The index in pending_tb[] of the block whose header is `hdr`, or -1. */
++static int pending_index_of(uint32_t hdr)
++{
++    for (int i = 0; i < pending_n; i++) {
++        if (pending_tb[i] == hdr) {
++            return i;
++        }
++    }
++    return -1;
++}
++
+ /*
+  * Assemble the module for the pending blocks into a malloc'd buffer.
+  * Each block carries its own import table (see struct wasm_tb_hdr), so
+@@ -335,6 +361,32 @@
+             uint8_t *imm = body + calls[c];
+             leb5_write(imm, map[leb5_read(imm)]);
+         }
++
++        /*
++         * Direct tail calls: a goto_tb whose jump is linked, right now,
++         * to a block of this same batch gets that block's header address
++         * as its guard and its function index as the call. Anything
++         * else keeps a guard no target matches, so the generic path
++         * runs. The link may change later; the guard is what keeps a
++         * stale prediction harmless, and the whole batch is evicted at
++         * once, so the callee cannot go away before the caller.
++         */
++        const struct wasm_direct_site *direct =
++            (const struct wasm_direct_site *)(calls + hdr->ncalls);
++        const TranslationBlock *tb = (const TranslationBlock *)hdr->tb;
++        for (uint32_t d = 0; d < hdr->ndirect; d++) {
++            uint32_t target = qatomic_read(&tb->jmp_target_addr[direct[d].which]);
++            int j = target ? pending_index_of(target) : -1;
++            stat_direct_sites++;
++            if (j < 0) {
++                sleb5_write(body + direct[d].addr_imm_off, WASM_DIRECT_NEVER);
++                leb5_write(body + direct[d].fidx_imm_off, union_n + i);
++                continue;
++            }
++            stat_direct_linked++;
++            sleb5_write(body + direct[d].addr_imm_off, (int32_t)target);
++            leb5_write(body + direct[d].fidx_imm_off, union_n + j);
++        }
+         q += hdr->body_len;
+     }
+     p = put_section(p, 10, sec, q - sec);
+@@ -345,7 +397,34 @@
+     return buf;
+ }
+ 
+-static void evict_batches(int count)
++/*
++ * A block that chains to this one may have cached its function index
++ * in its own jump slot (TranslationBlock.wasm_jmp_fidx); the index is
++ * about to name nothing, so clear it in every predecessor. The
++ * predecessors are the TB's incoming jump list, walked under the same
++ * lock tb_jmp_unlink takes. Only this vCPU's row is touched: the
++ * other rows name other vCPUs' modules.
++ */
++static void forget_cached_fidx(struct wasm_tb_hdr *hdr)
++{
++    TranslationBlock *dest = (TranslationBlock *)hdr->tb;
++    qemu_spin_lock(&dest->jmp_lock);
++    uintptr_t link = dest->jmp_list_head;
++    while (link) {
++        TranslationBlock *tb = (TranslationBlock *)(link & ~(uintptr_t)1);
++        int n = link & 1;
++        qatomic_set(&tb->wasm_jmp_fidx[cur_core_num][n], 0);
++        link = tb->jmp_list_next[n];
++    }
++    qemu_spin_unlock(&dest->jmp_lock);
++}
++
++/*
++ * Drop the oldest modules. A whole-buffer flush passes forget=false:
++ * every TB is about to be discarded, so their jump lists are not worth
++ * walking, and the lists may be mid-teardown.
++ */
++static void evict_batches(int count, bool forget)
+ {
+     for (int k = 0; k < count && batch_count > 0; k++) {
+         struct batch_info *b = &batches[batch_begin];
+@@ -354,6 +433,9 @@
+             if (hdr->seq != b->seq[i]) {
+                 continue;
+             }
++            if (forget) {
++                forget_cached_fidx(hdr);
++            }
+             hdr->fidx[cur_core_num] = 0;
+             hdr->state[cur_core_num] = WASM_TB_NONE;
+             hdr->counter[cur_core_num] = 0;
+@@ -365,13 +447,40 @@
+     }
+ }
+ 
++void wasm32_report_stats(void);
++
++/*
++ * A block's direct jump found no cached function index for its target
++ * and came back here (ctx.miss_tb, ctx.miss_which). The target is the
++ * block about to run, `hdr`, and `fidx` its function if it is compiled.
++ * Cache that in the jump's slot, then make sure the jump still points at
++ * the target we looked at: another vCPU may have relinked it meanwhile,
++ * and tb_target_set_jmp_target writes the new target before it clears
++ * the slot, so rereading the target after our store (a full barrier
++ * between) catches every interleaving -- either their clear lands after
++ * our store, or we see their new target and clear it ourselves.
++ */
++static void fill_jmp_slot(TranslationBlock *src, uint32_t which,
++                          struct wasm_tb_hdr *target, int fidx)
++{
++    if (fidx == 0) {
++        return;
++    }
++    uint32_t *slot = &src->wasm_jmp_fidx[cur_core_num][which];
++    qatomic_set(slot, fidx);
++    smp_mb();
++    if (qatomic_read(&src->jmp_target_addr[which]) != (uintptr_t)target) {
++        qatomic_set(slot, 0);
++    }
++}
++
+ static void flush_pending(void)
+ {
+     if (pending_n == 0) {
+         return;
+     }
+     if (batch_count >= MAX_BATCH_ALIVE) {
+-        evict_batches(MAX_BATCH_ALIVE / 2);
++        evict_batches(MAX_BATCH_ALIVE / 2, true);
+     }
+ 
+     /* Blocks whose code address was reused since they were queued are gone. */
+@@ -408,6 +517,10 @@
+         }
+         batch_count++;
+         stat_batches++;
++        /* a line on the console every so often, for the profiles in docs/ */
++        if ((stat_batches & 255) == 0) {
++            wasm32_report_stats();
++        }
+         stat_blocks_compiled += pending_n;
+     }
+     pending_n = 0;
+@@ -447,7 +560,7 @@
+     if (!initdone) {
+         return;
+     }
+-    evict_batches(batch_count);
++    evict_batches(batch_count, false);
+     pending_n = 0;
+ }
+ 
+@@ -515,7 +628,8 @@
+ void wasm32_report_stats(void)
+ {
+     report_stats_js(stat_batches, stat_blocks_compiled, stat_flush_full,
+-                    stat_flush_hot, stat_evictions, stat_body_bytes);
++                    stat_flush_hot, stat_evictions, stat_body_bytes,
++                    stat_direct_sites, stat_direct_linked);
+ }
+ 
+ __thread struct wasmContext ctx = {
+@@ -537,7 +651,7 @@
+     ctx.unwinding = 1;
+ }
+ 
+-typedef uint32_t (*wasm_func_ptr)(struct wasmContext*);
++typedef uint32_t (*wasm_func_ptr)(struct wasmContext*, uint32_t mode);
+ 
+ int get_core_nums()
+ {
+@@ -556,6 +670,9 @@
+         ctx.stack128 = (uint64_t*)malloc(TCG_STATIC_CALL_ARGS_SIZE + TCG_STATIC_FRAME_SIZE);
+         ctx.tci_tb_ptr = (uint32_t*)&tci_tb_ptr;
+         ctx.fidx_off = offsetof(struct wasm_tb_hdr, fidx) + 4 * cur_core_num;
++        QEMU_BUILD_BUG_ON(ARRAY_SIZE(((TranslationBlock *)0)->wasm_jmp_fidx) != WASM_MAX_VCPUS);
++        ctx.jmp_fidx_off = sizeof(((TranslationBlock *)0)->wasm_jmp_fidx[0]) * cur_core_num;
++        ctx.miss_tb = 0;
+ #ifdef WASM32_FORCE_NO_TAIL_CALLS
+         wasm_tail_calls_ok = 0;
+ #else
+@@ -1620,14 +1737,24 @@
+ {
+     ctx.env = env;
+     ctx.tb_ptr = (uint32_t*)v_tb_ptr;
+-    ctx.do_init = 1;
+     while (true) {
+         trysleep();
+         struct wasm_tb_hdr *hdr = (struct wasm_tb_hdr *)ctx.tb_ptr;
+         uint32_t res;
+         int fidx = wasm_account(hdr);
++        if (ctx.miss_tb) {
++            fill_jmp_slot((TranslationBlock *)ctx.miss_tb, ctx.miss_which, hdr, fidx);
++            ctx.miss_tb = 0;
++        }
+         if (fidx > 0) {
+-            res = ((wasm_func_ptr)(fidx))(&ctx);
++            /*
++             * Set right before the call, so the function knows this is
++             * a fresh entry. On an Asyncify rewind this store is skipped
++             * with the rest of the non-call code, the function sees the
++             * clear it made on its first run, and takes its rewind path.
++             */
++            ctx.do_init = 1;
++            res = ((wasm_func_ptr)(fidx))(&ctx, WASM_ENTRY_DISPATCH);
+         } else {
+             res = tcg_qemu_tb_exec_tci(env);
+         }
+diff -ruN a/tcg/wasm32.h b/tcg/wasm32.h
+--- a/tcg/wasm32.h	2026-09-09 12:09:04.748387809 -0700
++++ b/tcg/wasm32.h	2026-09-09 12:10:52.670232693 -0700
+@@ -23,9 +23,15 @@
+     // 32: offset of this vCPU's fidx slot in a block header, so compiled
+     // code can find a successor's function and chain to it
+     uint32_t fidx_off;
+-    // 36
+-    uint32_t pad;
+-    // 40: where a block spills its register locals when a helper call
++    // 36: offset of this vCPU's row in a TranslationBlock's
++    // wasm_jmp_fidx, the cached successor function index per jump
++    uint32_t jmp_fidx_off;
++    // 40, 44: set by a block whose jump slot had no cached index before
++    // it returns to the dispatcher, which fills the slot (see
++    // fill_jmp_slot) -- the TB the jump is in and which of its two jumps
++    uint32_t miss_tb;
++    uint32_t miss_which;
++    // 48: where a block spills its register locals when a helper call
+     // unwinds, and reloads them from when the dispatcher rewinds into it
+     uint64_t save[15];
+ };
+@@ -39,7 +45,10 @@
+ #define STACK128_OFF 24
+ #define UNWINDING_OFF 28
+ #define FIDX_OFF_OFF 32
+-#define SAVE_OFF 40
++#define JMP_FIDX_OFF_OFF 36
++#define MISS_TB_OFF 40
++#define MISS_WHICH_OFF 44
++#define SAVE_OFF 48
+ #define SAVE_BLOCK_PTR_OFF (SAVE_OFF + 14 * 8)
+ 
+ /*
+@@ -68,21 +77,55 @@
+      * type_end[nhelpers] (cumulative end offsets into the type blob),
+      * then the type blob (types_len bytes, padded to 4), then
+      * call_off[ncalls], the body offsets of the 5-byte call immediates
+-     * that name a helper by the block's local index.
++     * that name a helper by the block's local index, then
++     * direct[ndirect] (struct wasm_direct_site): the guarded direct
++     * tail calls the assembler points at a successor in the same batch.
+      */
+     uint32_t meta_off;
+     uint32_t nhelpers;
+     uint32_t types_len;
+     uint32_t ncalls;
++    uint32_t ndirect;
++    uint32_t tb;                    /* the TranslationBlock this block belongs to */
+     uint32_t fidx[WASM_MAX_VCPUS];  /* table index of the compiled function, 0 = none */
+     int32_t counter[WASM_MAX_VCPUS];/* interpreter executions while waiting for a batch */
+     uint32_t state[WASM_MAX_VCPUS]; /* WASM_TB_NONE, _PENDING or _COMPILED */
+ };
+ 
++/*
++ * A goto_tb emits, before its generic path, a guard comparing the jump
++ * target against a 5-byte constant and a return_call with a 5-byte
++ * function index. Both are placeholders until the block is assembled
++ * into a batch: if the jump is linked then and its target is in the
++ * same batch, the assembler writes the target's header address and its
++ * function index, and the transition becomes a direct call. Otherwise
++ * the guard gets an address no target can have and never fires.
++ */
++struct wasm_direct_site {
++    uint32_t which;        /* the goto_tb slot, 0 or 1 */
++    uint32_t addr_imm_off; /* body offset of the i32.const immediate */
++    uint32_t fidx_imm_off; /* body offset of the return_call immediate */
++};
++#define WASM_MAX_DIRECT_SITES 2
++#define WASM_DIRECT_NEVER 1
++
+ #define WASM_TB_NONE 0
+ #define WASM_TB_PENDING 1
+ #define WASM_TB_COMPILED 2
+ 
++/*
++ * A block function takes (ctx, mode). The dispatcher passes
++ * WASM_ENTRY_DISPATCH and sets ctx.do_init first, so a function can
++ * tell a fresh dispatcher entry (do_init set) from an Asyncify rewind
++ * into it (do_init clear, since the function cleared it when it first
++ * ran). Chained entries pass WASM_ENTRY_CHAIN: a tail call is never a
++ * rewind, so those skip the do_init check and the store behind it.
++ * Forwarding a rewind to the block that was actually running passes
++ * WASM_ENTRY_DISPATCH so the target takes its rewind path.
++ */
++#define WASM_ENTRY_DISPATCH 0
++#define WASM_ENTRY_CHAIN 1
++
+ /* Blocks per module. */
+ #define WASM_BATCH_SIZE 64
+ 
+@@ -131,6 +174,8 @@
+ extern __thread uint32_t target_helper_type_end[WASM_NUM_HELPER_FUNCS_MAX];
+ extern __thread uint32_t wasm_call_sites[WASM_MAX_CALL_SITES];
+ extern __thread uint32_t wasm_ncalls;
++extern __thread struct wasm_direct_site wasm_direct_sites[WASM_MAX_DIRECT_SITES];
++extern __thread uint32_t wasm_ndirect;
+ void wasm_block_registry_reset(void);
+ 
+ #endif
+diff -ruN a/include/exec/translation-block.h b/include/exec/translation-block.h
+--- a/include/exec/translation-block.h	2026-09-04 15:38:06.171941171 -0700
++++ b/include/exec/translation-block.h	2026-09-09 12:10:52.661817363 -0700
+@@ -119,6 +119,17 @@
+     uint16_t jmp_reset_offset[2]; /* offset of original jump target */
+     uint16_t jmp_insn_offset[2];  /* offset of direct jump insn */
+     uintptr_t jmp_target_addr[2]; /* target address */
++#if defined(EMSCRIPTEN) && !defined(CONFIG_TCG_INTERPRETER)
++    /*
++     * The wasm backend's cache of the successor's compiled function, per
++     * vCPU and per jump: 0 until the block's generated code first
++     * chains through this jump, cleared whenever the jump is set or
++     * reset and when the successor's module is evicted. Next to
++     * jmp_target_addr so the jump reads both from one cache line
++     * instead of touching the successor's block header.
++     */
++    uint32_t wasm_jmp_fidx[4][2];
++#endif
+ 
+     /*
+      * Each TB has a NULL-terminated list (jmp_list_head) of incoming jumps.

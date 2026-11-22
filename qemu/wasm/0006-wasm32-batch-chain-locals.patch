@@ -1,0 +1,1484 @@
+--- a/tcg/wasm32.c	2026-09-04 15:38:06.770686133 -0700
++++ b/tcg/wasm32.c	2026-09-09 07:35:19.472970624 -0700
+@@ -38,170 +38,484 @@
+     return 0; //nop
+ }
+ 
+-EM_JS(int, instantiate_wasm, (), {
+-        const memory_v = new DataView(HEAP8.buffer);
++/*
++ * Batch compilation.
++ *
++ * Translated blocks are not compiled one module at a time. A block's
++ * wasm function body waits in the pending list, running in the
++ * interpreter meanwhile, until the list holds WASM_BATCH_SIZE blocks or
++* one of them has run WASM_HOT_WAIT more times. Then one module
++ * is assembled from all pending bodies, instantiated once, and every
++ * block learns the table index of its function. Each block carries its
++ * own helper import table, written by tcg.c next to the body, and the
++ * assembler relinks every body's calls into the module's union table;
++ * so blocks translated at any time can share one module.
++ */
++
++__thread bool initdone = false;
++__thread int cur_core_num = -1;
++int cur_core_num_max = 0;
+ 
+-        const tb_ptr = memory_v.getInt32(Module.__wasm32_tb.tb_ptr_ptr, true);
+-        const export_vec_size = memory_v.getInt32(tb_ptr + 4, true);
+-        const export_vec_begin = tb_ptr + 4 + 4;
+-
+-        const counter_vec_size = memory_v.getInt32(export_vec_begin + export_vec_size, true);
+-        const counter_vec_begin = export_vec_begin + export_vec_size + 4;
+-        
+-        const tmp_body_size = memory_v.getInt32(counter_vec_begin + counter_vec_size, true);
+-        const tmp_body_begin = counter_vec_begin + counter_vec_size + 4;
+-        const wasm_size = memory_v.getInt32(tmp_body_begin + tmp_body_size, true);
+-        const wasm_begin = tmp_body_begin + tmp_body_size + 4;
+-        const import_vec_size = memory_v.getInt32(wasm_begin + wasm_size, true);
+-        const import_vec_begin = wasm_begin + wasm_size + 4;
+-
+-        // Create a full copy of the bytes instead of a subarray view to fix Firefox compatibility
+-        // See: https://bugzilla.mozilla.org/show_bug.cgi?id=1965217
+-        const wasmBytes = new Uint8Array(HEAP8.slice(wasm_begin, wasm_begin + wasm_size));
+-        
+-        var helper = {};
+-        for (var i = 0; i < import_vec_size / 4; i++) {
+-            helper[i] = wasmTable.get(memory_v.getInt32(import_vec_begin + i * 4, true));
++/* Translation sequence numbers: a reused code address gets a new one. */
++__thread uint32_t wasm_seq_counter = 0;
++
++__thread uint32_t pending_tb[WASM_BATCH_SIZE];
++__thread uint32_t pending_seq[WASM_BATCH_SIZE];
++__thread int pending_n = 0;
++
++/* One compiled module and the blocks it serves, for eviction. */
++struct batch_info {
++    int fidx_base;
++    int n;
++    uint32_t tb[WASM_BATCH_SIZE];
++    uint32_t seq[WASM_BATCH_SIZE];
++};
++
++/*
++ * Live modules per vCPU before the oldest half is dropped. A batch
++ * holds up to 64 blocks, so this is on the order of 250k blocks.
++ */
++#define MAX_BATCH_ALIVE 4000
++__thread struct batch_info *batches;
++__thread int batch_begin = 0;
++__thread int batch_count = 0;
++
++/* Counters reported at exit for diagnosis. */
++__thread uint32_t stat_batches = 0;
++__thread uint32_t stat_blocks_compiled = 0;
++__thread uint32_t stat_flush_full = 0;
++__thread uint32_t stat_flush_hot = 0;
++__thread uint32_t stat_evictions = 0;
++__thread uint32_t stat_body_bytes = 0;
++
++EM_JS(int, instantiate_batch_js, (int bytes_ptr, int bytes_len, int nfuncs, int helpers_ptr, int nhelpers, int dump), {
++        // A copy rather than a view: the module keeps its own bytes and
++        // Firefox refuses a view into shared memory.
++        const bytes = new Uint8Array(HEAP8.buffer, bytes_ptr, bytes_len).slice();
++        if (dump) {
++            let s = "";
++            for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
++            console.log("WASMBATCH " + nfuncs + " " + btoa(s));
++        }
++        const helper = {};
++        for (let i = 0; i < nhelpers; i++) {
++            helper[i] = wasmTable.get(HEAP32[(helpers_ptr >> 2) + i]);
+         }
+-        const mod = new WebAssembly.Module(wasmBytes);
++        const mod = new WebAssembly.Module(bytes);
+         const inst = new WebAssembly.Instance(mod, {
+-                "env": {
+-                    "buffer": wasmMemory,
+-                        },
+-                    "helper": helper,
+-                        });
++            "env": { "buffer": wasmMemory, "table": wasmTable },
++            "helper": helper,
++        });
++        const base = wasmTable.length;
++        wasmTable.grow(nfuncs);
++        for (let i = 0; i < nfuncs; i++) {
++            wasmTable.set(base + i, inst.exports["f" + i]);
++        }
++        return base;
++});
+ 
+-        Module.__wasm32_tb.inst_gc_registry.register(inst, "instance");
++/*
++ * A three-instruction module whose only function tail-calls itself.
++ * validate() says whether this engine understands return_call at all.
++ */
++EM_JS(int, wasm_tail_calls_supported_js, (), {
++        try {
++            const bytes = new Uint8Array([
++                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
++                0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
++                0x03, 0x02, 0x01, 0x00,
++                0x0a, 0x06, 0x01, 0x04, 0x00, 0x12, 0x00, 0x0b,
++            ]);
++            if (WebAssembly.validate(bytes)) {
++                return 1;
++            }
++        } catch (e) {
++        }
++        console.warn("wasm32: this browser has no WebAssembly tail calls; "
++                     + "translated blocks will return through the dispatcher");
++        return 0;
++});
+ 
+-        const fidx = addFunction(inst.exports.start, 'ii');
++int wasm_tail_calls_ok = 0;
+ 
+-        return fidx;
++EM_JS(void, remove_batch_js, (int base, int n), {
++        for (let i = 0; i < n; i++) {
++            wasmTable.set(base + i, null);
++        }
+ });
+ 
+-__thread bool initdone = false;
+-__thread int cur_core_num = -1;
+-__thread int export_vec_off = -1;
+-__thread int counter_vec_off = -1;
+-__thread int all_cores_num = -1;
+-int cur_core_num_max = 0;
++EM_JS(void, report_stats_js, (int batches, int blocks, int full, int hot, int evictions, int body_bytes), {
++        console.log("wasm32 batches=" + batches + " blocks=" + blocks + " flush_full=" + full + " flush_hot=" + hot + " evictions=" + evictions + " body_bytes=" + body_bytes);
++});
+ 
+-EM_JS(void, remove_module_js, (), {
+-        const memory_v = new DataView(HEAP8.buffer);
+-        const remove_n = memory_v.getInt32(Module.__wasm32_tb.to_remove_instance_idx_ptr, true);
+-        for (var i = 0; i < remove_n * 4; i += 4) {
+-            removeFunction(memory_v.getInt32(Module.__wasm32_tb.to_remove_instance_ptr + i, true));
++static uint8_t *put_leb(uint8_t *p, uint32_t v)
++{
++    do {
++        uint8_t b = v & 0x7f;
++        v >>= 7;
++        if (v) {
++            b |= 0x80;
+         }
+-        memory_v.setInt32(Module.__wasm32_tb.to_remove_instance_idx_ptr, 0, true);
+-    });
++        *p++ = b;
++    } while (v);
++    return p;
++}
+ 
+-int instance_alive_global = 0;
+-__thread int instance_alive_local = 0;
+-__thread int instance_running_local = 0;
+-__thread uint32_t instance_garbage_collected_local = 0;
+-
+-struct instance_info {
+-    uint8_t *tb;
+-    int fidx;
+-};
++static uint8_t *put_section(uint8_t *p, uint8_t id, const uint8_t *body, uint32_t len)
++{
++    *p++ = id;
++    p = put_leb(p, len);
++    memcpy(p, body, len);
++    return p + len;
++}
+ 
+-#define MAX_INSTANCE_ALIVE 15000
+-#define INSTANCE_RUNNING_LEN MAX_INSTANCE_ALIVE
+-__thread struct instance_info instance_running[INSTANCE_RUNNING_LEN];
+-__thread int instance_running_begin = 0;
+-__thread int instance_running_end = 0;
++static uint8_t *put_name(uint8_t *p, const char *s)
++{
++    size_t n = strlen(s);
++    p = put_leb(p, n);
++    memcpy(p, s, n);
++    return p + n;
++}
+ 
+-#define TO_REMOVE_INSTANCE_SIZE 50000
+-__thread static int to_remove_instance[TO_REMOVE_INSTANCE_SIZE];
+-__thread static int to_remove_instance_idx = 0;
++static const uint8_t start_type[] = { 0x60, 0x01, 0x7f, 0x01, 0x7f };
+ 
+-static bool can_add_instance()
+-{
+-    return qatomic_read(&instance_alive_global) < MAX_INSTANCE_ALIVE;
++/*
++ * The union import table of one batch. A helper is identified by its
++ * QEMU function pointer and its type bytes; every block's local index
++ * maps onto one entry here.
++ */
++#define WASM_UNION_MAX 4096
++__thread uint32_t union_ptr[WASM_UNION_MAX];
++__thread const uint8_t *union_type[WASM_UNION_MAX];
++__thread uint32_t union_type_len[WASM_UNION_MAX];
++__thread int union_n;
++
++static int union_find_or_add(uint32_t ptr, const uint8_t *type, uint32_t len)
++{
++    for (int i = 0; i < union_n; i++) {
++        if (union_ptr[i] == ptr && union_type_len[i] == len
++            && memcmp(union_type[i], type, len) == 0) {
++            return i;
++        }
++    }
++    if (union_n >= WASM_UNION_MAX) {
++        printf("batch import table overflow\n"); fflush(stdout);
++        exit(1);
++    }
++    union_ptr[union_n] = ptr;
++    union_type[union_n] = type;
++    union_type_len[union_n] = len;
++    return union_n++;
+ }
+ 
+-static void inc_instance_local()
++/* Decode and re-encode the fixed 5-byte call immediates the emitter writes. */
++static uint32_t leb5_read(const uint8_t *p)
+ {
+-    instance_running_local++;
+-    instance_alive_local++;
++    return (p[0] & 0x7f) | ((p[1] & 0x7f) << 7) | ((p[2] & 0x7f) << 14)
++        | ((p[3] & 0x7f) << 21) | ((uint32_t)(p[4] & 0x7f) << 28);
+ }
+ 
+-static int instance_pending_gc_local()
++static void leb5_write(uint8_t *p, uint32_t v)
+ {
+-    return (instance_alive_local - instance_running_local);
++    for (int i = 0; i < 4; i++) {
++        p[i] = (v & 0x7f) | 0x80;
++        v >>= 7;
++    }
++    p[4] = v & 0x7f;
+ }
+ 
+-static void check_instance_garbage_collected()
++/*
++ * Assemble the module for the pending blocks into a malloc'd buffer.
++ * Each block carries its own import table (see struct wasm_tb_hdr), so
++ * blocks translated at any time can share one module: their tables are
++ * unioned, and each body's call immediates are rewritten from the
++ * block's local helper index to the union index.
++ */
++static uint8_t *assemble_batch(int *out_len)
+ {
+-    if (instance_garbage_collected_local > 0) {
+-        if (instance_garbage_collected_local > instance_pending_gc_local()) {
+-            printf("unexpected number of removed instances %d > %d",
+-                   instance_garbage_collected_local, instance_pending_gc_local()); fflush(stdout);
+-            exit(1);
++    union_n = 0;
++    size_t bodies = 0, types_total = 0;
++    for (int i = 0; i < pending_n; i++) {
++        struct wasm_tb_hdr *hdr = (struct wasm_tb_hdr *)pending_tb[i];
++        bodies += hdr->body_len + 8;
++        types_total += hdr->types_len;
++    }
++    size_t cap = 4096 + types_total + WASM_UNION_MAX * 24 + pending_n * 24 + bodies;
++    uint8_t *buf = malloc(cap);
++    uint8_t *sec = malloc(cap);
++    uint8_t *p = buf, *q;
++
++    /*
++     * First pass: build the union and, per block, a local-to-union map,
++     * so the type and import sections can be written before the code.
++     */
++    uint32_t *maps = malloc(sizeof(uint32_t) * (pending_n * WASM_NUM_HELPER_FUNCS_MAX + 1));
++    for (int i = 0; i < pending_n; i++) {
++        struct wasm_tb_hdr *hdr = (struct wasm_tb_hdr *)pending_tb[i];
++        const uint8_t *meta = (const uint8_t *)hdr + hdr->meta_off;
++        const uint32_t *hptr = (const uint32_t *)meta;
++        const uint32_t *tend = hptr + hdr->nhelpers;
++        const uint8_t *types = (const uint8_t *)(tend + hdr->nhelpers);
++        uint32_t *map = maps + i * WASM_NUM_HELPER_FUNCS_MAX;
++        uint32_t start = 0;
++        for (uint32_t h = 0; h < hdr->nhelpers; h++) {
++            map[h] = union_find_or_add(hptr[h], types + start, tend[h] - start);
++            start = tend[h];
+         }
+-        qatomic_sub(&instance_alive_global, instance_garbage_collected_local);
+-        instance_alive_local -= instance_garbage_collected_local;
+-        instance_garbage_collected_local = 0;
++    }
++
++    static const uint8_t magic[] = { 0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00 };
++    memcpy(p, magic, sizeof(magic));
++    p += sizeof(magic);
++
++    /* type: the block signature, then one per union helper */
++    q = put_leb(sec, 1 + union_n);
++    memcpy(q, start_type, sizeof(start_type));
++    q += sizeof(start_type);
++    for (int i = 0; i < union_n; i++) {
++        memcpy(q, union_type[i], union_type_len[i]);
++        q += union_type_len[i];
++    }
++    p = put_section(p, 1, sec, q - sec);
++
++    /* import: the memory, the function table (for chaining), the helpers */
++    q = put_leb(sec, 2 + union_n);
++    q = put_name(q, "env");
++    q = put_name(q, "buffer");
++    *q++ = 0x02;
++    *q++ = 0x03;
++    *q++ = 0x00;
++    q = put_leb(q, 65535);
++    q = put_name(q, "env");
++    q = put_name(q, "table");
++    *q++ = 0x01;
++    *q++ = 0x70;
++    *q++ = 0x00;
++    *q++ = 0x00;
++    for (int i = 0; i < union_n; i++) {
++        char name[16];
++        snprintf(name, sizeof(name), "%d", i);
++        q = put_name(q, "helper");
++        q = put_name(q, name);
++        *q++ = 0x00;
++        q = put_leb(q, i + 1);
++    }
++    p = put_section(p, 2, sec, q - sec);
++
++    /* function: every block has the start signature */
++    q = put_leb(sec, pending_n);
++    for (int i = 0; i < pending_n; i++) {
++        *q++ = 0;
++    }
++    p = put_section(p, 3, sec, q - sec);
++
++    /* export: f<i> for block i */
++    q = put_leb(sec, pending_n);
++    for (int i = 0; i < pending_n; i++) {
++        char name[16];
++        snprintf(name, sizeof(name), "f%d", i);
++        q = put_name(q, name);
++        *q++ = 0x00;
++        q = put_leb(q, union_n + i);
++    }
++    p = put_section(p, 7, sec, q - sec);
++
++    /* code: the bodies, calls relinked to the union */
++    q = put_leb(sec, pending_n);
++    for (int i = 0; i < pending_n; i++) {
++        struct wasm_tb_hdr *hdr = (struct wasm_tb_hdr *)pending_tb[i];
++        const uint8_t *meta = (const uint8_t *)hdr + hdr->meta_off;
++        const uint32_t *calls = (const uint32_t *)(meta + hdr->nhelpers * 8
++                                                   + ((hdr->types_len + 3) & ~3));
++        const uint32_t *map = maps + i * WASM_NUM_HELPER_FUNCS_MAX;
++        q = put_leb(q, hdr->body_len);
++        uint8_t *body = q;
++        memcpy(body, (const uint8_t *)hdr + hdr->body_off, hdr->body_len);
++        for (uint32_t c = 0; c < hdr->ncalls; c++) {
++            uint8_t *imm = body + calls[c];
++            leb5_write(imm, map[leb5_read(imm)]);
++        }
++        q += hdr->body_len;
++    }
++    p = put_section(p, 10, sec, q - sec);
++
++    free(maps);
++    free(sec);
++    *out_len = p - buf;
++    return buf;
++}
++
++static void evict_batches(int count)
++{
++    for (int k = 0; k < count && batch_count > 0; k++) {
++        struct batch_info *b = &batches[batch_begin];
++        for (int i = 0; i < b->n; i++) {
++            struct wasm_tb_hdr *hdr = (struct wasm_tb_hdr *)b->tb[i];
++            if (hdr->seq != b->seq[i]) {
++                continue;
++            }
++            hdr->fidx[cur_core_num] = 0;
++            hdr->state[cur_core_num] = WASM_TB_NONE;
++            hdr->counter[cur_core_num] = 0;
++        }
++        remove_batch_js(b->fidx_base, b->n);
++        batch_begin = (batch_begin + 1) % MAX_BATCH_ALIVE;
++        batch_count--;
++        stat_evictions++;
+     }
+ }
+ 
+-static void remove_instance_running_local()
++static void flush_pending(void)
+ {
+-    if (instance_pending_gc_local() > 0) {
++    if (pending_n == 0) {
+         return;
+     }
+-    int to_remove = instance_running_local / 2;
+-    for (int i = 0; i < to_remove; i++) {
+-        instance_running[instance_running_begin].tb = NULL;
+-        to_remove_instance[to_remove_instance_idx++] = instance_running[instance_running_begin].fidx;
+-        instance_running_local--;
+-        instance_running_begin = (instance_running_begin + 1)%INSTANCE_RUNNING_LEN;
++    if (batch_count >= MAX_BATCH_ALIVE) {
++        evict_batches(MAX_BATCH_ALIVE / 2);
++    }
++
++    /* Blocks whose code address was reused since they were queued are gone. */
++    int n = 0;
++    for (int i = 0; i < pending_n; i++) {
++        struct wasm_tb_hdr *hdr = (struct wasm_tb_hdr *)pending_tb[i];
++        if (hdr->seq != pending_seq[i] || hdr->body_len == 0) {
++            continue;
++        }
++        pending_tb[n] = pending_tb[i];
++        pending_seq[n] = pending_seq[i];
++        n++;
+     }
+-    if (to_remove_instance_idx > 0) {
+-        remove_module_js();
++    pending_n = n;
++    if (pending_n > 0) {
++        int len;
++        uint8_t *bytes = assemble_batch(&len);
++        int base = instantiate_batch_js((int)bytes, len, pending_n,
++                                        (int)union_ptr, union_n, 0);
++        for (int i = 0; i < pending_n; i++) {
++            stat_body_bytes += ((struct wasm_tb_hdr *)pending_tb[i])->body_len;
++        }
++        free(bytes);
++
++        struct batch_info *b = &batches[(batch_begin + batch_count) % MAX_BATCH_ALIVE];
++        b->fidx_base = base;
++        b->n = pending_n;
++        for (int i = 0; i < pending_n; i++) {
++            struct wasm_tb_hdr *hdr = (struct wasm_tb_hdr *)pending_tb[i];
++            hdr->fidx[cur_core_num] = base + i;
++            hdr->state[cur_core_num] = WASM_TB_COMPILED;
++            b->tb[i] = pending_tb[i];
++            b->seq[i] = pending_seq[i];
++        }
++        batch_count++;
++        stat_batches++;
++        stat_blocks_compiled += pending_n;
+     }
++    pending_n = 0;
+ }
+ 
+-static void add_instance_running_local(int fidx, void *tb_ptr)
++static void add_pending(struct wasm_tb_hdr *hdr)
+ {
+-    instance_running[instance_running_end].tb = tb_ptr;
+-    instance_running[instance_running_end].fidx = fidx;
+-
+-    int tb_export_ptr = (uint32_t)tb_ptr + export_vec_off;
+-    *(uint32_t*)tb_export_ptr = (uint32_t)(&(instance_running[instance_running_end]));
++    if (hdr->body_len == 0) {
++        return;
++    }
++    pending_tb[pending_n] = (uint32_t)hdr;
++    pending_seq[pending_n] = hdr->seq;
++    pending_n++;
++    hdr->state[cur_core_num] = WASM_TB_PENDING;
++    /* a full batch compiles at once, so warm blocks rarely wait */
++    if (pending_n >= WASM_BATCH_SIZE) {
++        stat_flush_full++;
++        flush_pending();
++    }
++}
+ 
+-    instance_running_end  = (instance_running_end+1)%INSTANCE_RUNNING_LEN;
+-    inc_instance_local();
+-    qatomic_inc(&instance_alive_global);
++void wasm32_block_translated(uint8_t *tb_ptr)
++{
++    /*
++     * Only record that the block exists and give it a fresh sequence
++     * number. It is not queued for compilation here: a block earns that
++     * by running WASM_WARMUP times (wasm_account), so code translated
++     * once and barely run is never compiled. The header was zeroed by
++     * the translator, so state, counter and fidx already say "none".
++     */
++    struct wasm_tb_hdr *hdr = (struct wasm_tb_hdr *)tb_ptr;
++    hdr->seq = ++wasm_seq_counter;
++}
+ 
++void wasm32_tb_flush(void)
++{
++    if (!initdone) {
++        return;
++    }
++    evict_batches(batch_count);
++    pending_n = 0;
+ }
+ 
+-static int get_instance_running_local(void *tb_ptr)
++/*
++ * The one place a block's execution is accounted. Returns the table
++ * index of its compiled function if one should run now, or 0 to run the
++ * block in the interpreter this time.
++ *
++ * A block is not compiled on sight. It runs in the interpreter, counting
++ * executions, until it has run WASM_WARMUP times; only then does it join
++ * the pending batch. This keeps genuinely cold code -- run a handful of
++ * times during start-up and never again -- out of the compiler, where a
++ * module construction would cost far more than interpreting it. A block
++ * that has proven warm compiles with up to WASM_BATCH_SIZE - 1 others in
++ * one module, so the per-block module and instance overhead is amortised.
++ */
++static inline int wasm_account(struct wasm_tb_hdr *hdr)
+ {
+-    int tb_export_ptr = (uint32_t)tb_ptr + export_vec_off;
+-    struct instance_info *elm = (struct instance_info *)(*(uint32_t*)tb_export_ptr);
+-    if (elm == NULL) {
+-        return 0;
++    int fidx = hdr->fidx[cur_core_num];
++    if (fidx != 0) {
++        return fidx;
++    }
++    uint32_t state = hdr->state[cur_core_num];
++    if (state == WASM_TB_NONE) {
++        if (++hdr->counter[cur_core_num] < WASM_WARMUP) {
++            return 0;
++        }
++        /* warm now: queue it, and take the compiled code if the batch filled */
++        add_pending(hdr);
++        return hdr->fidx[cur_core_num];
+     }
+-    if (elm->tb != tb_ptr) {
+-        *(uint32_t*)tb_export_ptr = 0;
+-        int tb_counter_ptr = (uint32_t)tb_ptr + counter_vec_off;
+-        *(uint32_t*)tb_counter_ptr = INSTANTIATE_NUM; // will be instanciated immediately
++    if (state == WASM_TB_PENDING) {
++        /*
++         * Queued but its batch has not filled. Interpret meanwhile, but
++         * do not let a lone warm block wait forever for company: once it
++         * has run WASM_HOT_WAIT times since queuing, compile the batch as
++         * it stands.
++         */
++        if (++hdr->counter[cur_core_num] >= WASM_WARMUP + WASM_HOT_WAIT) {
++            stat_flush_hot++;
++            flush_pending();
++            return hdr->fidx[cur_core_num];
++        }
+         return 0;
+     }
+-    return elm->fidx;
++    return 0;
+ }
+ 
+-#define MAX_EXEC_NUM 50000
+-__thread int exec_cnt = MAX_EXEC_NUM;
++/*
++ * The vCPU worker does not voluntarily yield during execution. Proxied
++ * syscalls and 9p already park it on the main thread through Atomics
++ * when they need to, and the guest's own idle path (the pty poll)
++ * returns control when there is nothing to run. An unconditional yield
++ * here would be an Asyncify stack unwind and rewind on a fixed timer --
++ * pure overhead on every workload, and heaviest on interpreter-bound
++ * start-up. The stock backend only yielded under cache backpressure;
++ * batching has no equivalent per-instance limit, so there is nothing to
++ * wait on. Stats are printed once, at the first guest quiescence.
++ */
++void wasm32_report_stats(void);
+ static inline void trysleep()
+ {
+-    if (--exec_cnt == 0) {
+-        if (!can_add_instance()) {
+-            emscripten_sleep(0); // return to the browser main loop
+-            check_instance_garbage_collected();
+-        }
+-        exec_cnt = MAX_EXEC_NUM;
+-    }
++}
++
++void wasm32_report_stats(void)
++{
++    report_stats_js(stat_batches, stat_blocks_compiled, stat_flush_full,
++                    stat_flush_hot, stat_evictions, stat_body_bytes);
+ }
+ 
+ __thread struct wasmContext ctx = {
+@@ -230,34 +544,24 @@
+     return emscripten_num_logical_cores();
+ }
+ 
+-EM_JS(void, init_wasm32_js, (int tb_ptr_ptr, int cur_core_num, int to_remove_instance_ptr, int to_remove_instance_idx_ptr, int instance_garbage_collected_ptr), {
+-        Module.__wasm32_tb = {
+-            tb_ptr_ptr: tb_ptr_ptr,
+-            cur_core_num: cur_core_num,
+-            to_remove_instance_ptr: to_remove_instance_ptr,
+-            to_remove_instance_idx_ptr: to_remove_instance_idx_ptr,
+-            instance_garbage_collected_ptr: instance_garbage_collected_ptr,
+-            inst_gc_registry: new FinalizationRegistry((i) => {
+-                    if (i == "instance") {
+-                        const memory_v = new DataView(HEAP8.buffer);
+-                        let v = memory_v.getInt32(Module.__wasm32_tb.instance_garbage_collected_ptr, true);
+-                        memory_v.setInt32(Module.__wasm32_tb.instance_garbage_collected_ptr, v + 1, true);
+-                    }
+-            })
+-        };
+-});
+-
+ void init_wasm32()
+ {
+     if (!initdone) {
+         cur_core_num = qatomic_fetch_inc(&cur_core_num_max);
+-        all_cores_num = get_core_nums();
+-        export_vec_off = 4 + 4 + cur_core_num * 4;
+-        counter_vec_off = 4 + 4 + all_cores_num * 4 + 4 + cur_core_num * 4;
++        if (cur_core_num >= WASM_MAX_VCPUS) {
++            printf("too many vCPU threads for the wasm backend\n"); fflush(stdout);
++            exit(1);
++        }
+         ctx.stack = (uint64_t*)malloc(TCG_STATIC_CALL_ARGS_SIZE + TCG_STATIC_FRAME_SIZE);
+         ctx.stack128 = (uint64_t*)malloc(TCG_STATIC_CALL_ARGS_SIZE + TCG_STATIC_FRAME_SIZE);
+         ctx.tci_tb_ptr = (uint32_t*)&tci_tb_ptr;
+-        init_wasm32_js((int)&ctx.tb_ptr, cur_core_num, (int)to_remove_instance, (int)&to_remove_instance_idx, (int)&instance_garbage_collected_local);
++        ctx.fidx_off = offsetof(struct wasm_tb_hdr, fidx) + 4 * cur_core_num;
++#ifdef WASM32_FORCE_NO_TAIL_CALLS
++        wasm_tail_calls_ok = 0;
++#else
++        wasm_tail_calls_ok = wasm_tail_calls_supported_js();
++#endif
++        batches = calloc(MAX_BATCH_ALIVE, sizeof(struct batch_info));
+         initdone = true;
+     }
+ }
+@@ -1224,11 +1528,8 @@
+             if (*(uint32_t **)ptr != 0) {
+                 tb_ptr = *(uint32_t **)ptr;
+                 ctx.tb_ptr = tb_ptr;
+-                int tb_counter_ptr = (uint32_t)tb_ptr + counter_vec_off;
+-                if ((*(int32_t*)tb_counter_ptr >= 0) && (*(int32_t*)tb_counter_ptr < INSTANTIATE_NUM)) {
+-                    *(int32_t*)tb_counter_ptr += 1;
+-                } else {
+-                    // enter to wasm TB
++                if (wasm_account((struct wasm_tb_hdr *)tb_ptr) != 0) {
++                    // a compiled function is ready; let the dispatcher call it
+                     return 0;
+                 }
+                 tb_ptr = (uint8_t*)tb_ptr + *(uint32_t*)tb_ptr;
+@@ -1245,11 +1546,8 @@
+             tb_ptr = ptr;
+ 
+             ctx.tb_ptr = tb_ptr;
+-            int tb_counter_ptr = (uint32_t)tb_ptr + counter_vec_off;
+-            if ((*(int32_t*)tb_counter_ptr >= 0) && (*(int32_t*)tb_counter_ptr < INSTANTIATE_NUM)) {
+-                *(int32_t*)tb_counter_ptr += 1;
+-            } else {
+-                // enter to wasm TB
++            if (wasm_account((struct wasm_tb_hdr *)tb_ptr) != 0) {
++                // a compiled function is ready; let the dispatcher call it
+                 return 0;
+             }
+             tb_ptr = (uint8_t*)tb_ptr + *(uint32_t*)tb_ptr;
+@@ -1325,22 +1623,13 @@
+     ctx.do_init = 1;
+     while (true) {
+         trysleep();
+-        int tb_counter_ptr = (uint32_t)ctx.tb_ptr + counter_vec_off;
++        struct wasm_tb_hdr *hdr = (struct wasm_tb_hdr *)ctx.tb_ptr;
+         uint32_t res;
+-        int fidx = get_instance_running_local(ctx.tb_ptr);
++        int fidx = wasm_account(hdr);
+         if (fidx > 0) {
+             res = ((wasm_func_ptr)(fidx))(&ctx);
+-        } else if (*(int32_t*)tb_counter_ptr < INSTANTIATE_NUM) {
+-            *(int32_t*)tb_counter_ptr += 1;
+-            res = tcg_qemu_tb_exec_tci(env);
+-        } else if (!can_add_instance()) {
+-            remove_instance_running_local();
+-            check_instance_garbage_collected();
+-            res = tcg_qemu_tb_exec_tci(env);
+         } else {
+-            int fidx = instantiate_wasm();
+-            add_instance_running_local(fidx, ctx.tb_ptr);
+-            res = ((wasm_func_ptr)(fidx))(&ctx);
++            res = tcg_qemu_tb_exec_tci(env);
+         }
+         if ((uint32_t)ctx.tb_ptr == 0) {
+             return res;
+--- a/tcg/wasm32.h	2026-09-04 15:38:06.770686133 -0700
++++ b/tcg/wasm32.h	2026-09-09 07:33:45.330756645 -0700
+@@ -1,6 +1,8 @@
+ #ifndef TCG_WASM32_H
+ #define TCG_WASM32_H
+ 
++#include <stdint.h>
++
+ struct wasmContext {
+     // 0
+     CPUArchState *env;
+@@ -18,6 +20,14 @@
+     uint64_t *stack128;
+     // 28
+     uint32_t unwinding;
++    // 32: offset of this vCPU's fidx slot in a block header, so compiled
++    // code can find a successor's function and chain to it
++    uint32_t fidx_off;
++    // 36
++    uint32_t pad;
++    // 40: where a block spills its register locals when a helper call
++    // unwinds, and reloads them from when the dispatcher rewinds into it
++    uint64_t save[15];
+ };
+ 
+ #define ENV_OFF 0
+@@ -28,6 +38,68 @@
+ #define DONE_FLAG_OFF 20
+ #define STACK128_OFF 24
+ #define UNWINDING_OFF 28
++#define FIDX_OFF_OFF 32
++#define SAVE_OFF 40
++#define SAVE_BLOCK_PTR_OFF (SAVE_OFF + 14 * 8)
++
++/*
++ * Every translated block starts with this header in the code buffer
++ * (tb->tc.ptr points at it). The TCI bytecode and the block's wasm
++ * function body follow it; the body is a complete function entry for
++ * the code section of a batch module (locals, prologue, code, end).
++ *
++ * Blocks are compiled in batches: one WebAssembly module carries the
++ * bodies of up to WASM_BATCH_SIZE blocks translated after each other,
++ * so a cold binary costs one module per batch rather than one per
++ * block, and its blocks are laid out next to each other in the
++ * browser's code space. The per-vCPU fields below record where each
++ * block's compiled function ended up.
++ */
++#define WASM_MAX_VCPUS 4
++
++struct wasm_tb_hdr {
++    uint32_t tci_code_off;          /* offset of the TCI code from this header */
++    uint32_t seq;                   /* translation sequence number, never reused */
++    uint32_t body_off;              /* offset of the wasm function body */
++    uint32_t body_len;
++    /*
++     * The block's own import table, so its body can be linked into any
++     * batch: helper_ptr[nhelpers] (QEMU function pointers), then
++     * type_end[nhelpers] (cumulative end offsets into the type blob),
++     * then the type blob (types_len bytes, padded to 4), then
++     * call_off[ncalls], the body offsets of the 5-byte call immediates
++     * that name a helper by the block's local index.
++     */
++    uint32_t meta_off;
++    uint32_t nhelpers;
++    uint32_t types_len;
++    uint32_t ncalls;
++    uint32_t fidx[WASM_MAX_VCPUS];  /* table index of the compiled function, 0 = none */
++    int32_t counter[WASM_MAX_VCPUS];/* interpreter executions while waiting for a batch */
++    uint32_t state[WASM_MAX_VCPUS]; /* WASM_TB_NONE, _PENDING or _COMPILED */
++};
++
++#define WASM_TB_NONE 0
++#define WASM_TB_PENDING 1
++#define WASM_TB_COMPILED 2
++
++/* Blocks per module. */
++#define WASM_BATCH_SIZE 64
++
++/*
++ * A block interprets until it has run WASM_WARMUP times, so code that
++ * runs only a handful of times during start-up is never compiled. Once
++ * warm it joins a batch; if its batch has not filled after a further
++ * WASM_HOT_WAIT executions, the batch compiles as it stands so a lone
++ * warm block does not wait forever for company.
++ */
++#define WASM_WARMUP 32
++#define WASM_HOT_WAIT 384
++
++/* The helper registry is per block; these bound one block's imports. */
++#define WASM_NUM_HELPER_FUNCS_MAX 400
++#define WASM_HELPER_ADDED_TYPES_SECTION_MAX 8192
++#define WASM_MAX_CALL_SITES 2048
+ 
+ void set_done_flag();
+ 
+@@ -37,6 +109,28 @@
+ 
+ void init_wasm32();
+ 
+-#define INSTANTIATE_NUM 1500
++/*
++ * Whether this browser validates WebAssembly tail calls. Set once at
++ * init; when false the emitter leaves every block through the C
++ * dispatcher instead of tail-calling its successor, which is correct
++ * on any engine and costs about what stage 1 of the rewrite measured.
++ */
++extern int wasm_tail_calls_ok;
++
++/* Called by tcg_gen_code once a block's body and metadata are in place. */
++void wasm32_block_translated(uint8_t *tb_ptr);
++
++/* Called when the whole code buffer is flushed: every block is gone. */
++void wasm32_tb_flush(void);
++
++/* The per-block helper registry, owned by tcg.c and reset per block. */
++extern __thread uint32_t num_helper_funcs;
++extern __thread uint32_t target_helper_funcs[WASM_NUM_HELPER_FUNCS_MAX];
++extern __thread uint8_t target_helper_types[WASM_HELPER_ADDED_TYPES_SECTION_MAX];
++extern __thread int target_helper_types_pos;
++extern __thread uint32_t target_helper_type_end[WASM_NUM_HELPER_FUNCS_MAX];
++extern __thread uint32_t wasm_call_sites[WASM_MAX_CALL_SITES];
++extern __thread uint32_t wasm_ncalls;
++void wasm_block_registry_reset(void);
+ 
+ #endif
+--- a/tcg/tcg.c	2026-09-04 15:38:06.768978013 -0700
++++ b/tcg/tcg.c	2026-09-09 06:36:25.896481214 -0700
+@@ -468,12 +468,29 @@
+     int block_idx;
+ };
+ 
+-#define WASM_NUM_HELPER_FUNCS_MAX 200
+-#define WASM_HELPER_ADDED_TYPES_SECTION_MAX 200
++#include "wasm32.h"
+ __thread uint32_t num_helper_funcs;
+ __thread uint32_t target_helper_funcs[WASM_NUM_HELPER_FUNCS_MAX];
+ __thread uint8_t target_helper_types[WASM_HELPER_ADDED_TYPES_SECTION_MAX];
+ __thread int target_helper_types_pos;
++__thread uint32_t target_helper_type_end[WASM_NUM_HELPER_FUNCS_MAX];
++__thread uint32_t wasm_call_sites[WASM_MAX_CALL_SITES];
++__thread uint32_t wasm_ncalls;
++
++/*
++ * The registry describes one block: the helpers its body calls, by
++ * local index, and where in the body those calls are. It is written
++ * next to the body when the block is done, so the batch assembler in
++ * tcg/wasm32.c can relink the body into whichever module the block
++ * ends up in, however long after translation that is.
++ */
++void wasm_block_registry_reset(void)
++{
++    num_helper_funcs = 0;
++    target_helper_types_pos = 0;
++    wasm_ncalls = 0;
++    memset(target_helper_funcs, -1, sizeof(target_helper_funcs));
++}
+ __thread int wasm_block_idx;
+ __thread struct label_placeholder block_ptr_placeholder[LABEL_MAX];
+ __thread int block_ptr_placeholder_idx_pos;
+@@ -523,6 +540,8 @@
+ {
+     target_helper_types_pos += i;
+     tcg_debug_assert(target_helper_types_pos <= WASM_HELPER_ADDED_TYPES_SECTION_MAX);
++    /* one type per registered helper, in registration order */
++    target_helper_type_end[num_helper_funcs - 1] = target_helper_types_pos;
+ }
+ 
+ static int wasm_register_helper_alloc_num(TCGContext *s)
+@@ -5972,146 +5991,6 @@
+ 
+ #if defined(EMSCRIPTEN) && !defined(CONFIG_TCG_INTERPRETER)
+ 
+-static const uint8_t mod_header_a[] = {
+-    0x0, 0x61, 0x73, 0x6d,               // magic
+-    0x01, 0x0, 0x0, 0x0,                 // version
+-    // type section
+-    0x01, 0x80, 0x80, 0x80, 0x80, 0x00,
+-    0x80, 0x80, 0x80, 0x80, 0x00,
+-    0x60,
+-    0x01, 0x7f,
+-    0x01, 0x7f,
+-    
+-};
+-static const uint8_t mod_header_b[] = {
+-    // import section
+-    0x02, 0x80, 0x80, 0x80, 0x80, 0x00,
+-    0x80, 0x80, 0x80, 0x80, 0x00,
+-    0x03, 0x65, 0x6e, 0x76,
+-    0x06, 0x62, 0x75, 0x66, 0x66, 0x65, 0x72,
+-    0x02, 0x03, 0x00, 0x80, 0x80, 0x80, 0x80, 0x00,
+-};
+-
+-static const uint8_t mod_header_c[] = {
+-    // function section
+-    0x03, 2, 1, 0x00,
+-    // global section
+-    0x06, 0x7e,
+-    25,
+-    0x7e, 0x01, 0x42, 0x00, 0x0b,
+-    0x7e, 0x01, 0x42, 0x00, 0x0b,
+-    0x7e, 0x01, 0x42, 0x00, 0x0b,
+-    0x7e, 0x01, 0x42, 0x00, 0x0b,
+-    0x7e, 0x01, 0x42, 0x00, 0x0b,
+-    0x7e, 0x01, 0x42, 0x00, 0x0b,
+-    0x7e, 0x01, 0x42, 0x00, 0x0b,
+-    0x7e, 0x01, 0x42, 0x00, 0x0b,
+-    0x7e, 0x01, 0x42, 0x00, 0x0b,
+-    0x7e, 0x01, 0x42, 0x00, 0x0b,
+-    0x7e, 0x01, 0x42, 0x00, 0x0b,
+-    0x7e, 0x01, 0x42, 0x00, 0x0b,
+-    0x7e, 0x01, 0x42, 0x00, 0x0b,
+-    0x7e, 0x01, 0x42, 0x00, 0x0b,
+-    0x7e, 0x01, 0x42, 0x00, 0x0b,
+-    0x7e, 0x01, 0x42, 0x00, 0x0b,
+-    0x7e, 0x01, 0x42, 0x00, 0x0b,
+-    0x7e, 0x01, 0x42, 0x00, 0x0b,
+-    0x7e, 0x01, 0x42, 0x00, 0x0b,
+-    0x7e, 0x01, 0x42, 0x00, 0x0b,
+-    0x7e, 0x01, 0x42, 0x00, 0x0b,
+-    0x7e, 0x01, 0x42, 0x00, 0x0b,
+-    0x7e, 0x01, 0x42, 0x00, 0x0b,
+-    0x7e, 0x01, 0x42, 0x00, 0x0b,
+-    0x7e, 0x01, 0x42, 0x00, 0x0b,
+-    // export section
+-    0x07, 13,
+-    1,
+-    0x05, 0x73, 0x74, 0x61, 0x72, 0x74,
+-    0x00, 0x80, 0x80, 0x80, 0x80, 0x00,
+-};
+-
+-static const uint8_t mod_header_d[] = {
+-    0x0a, 0x80, 0x80, 0x80, 0x80, 0x00,
+-    0x80, 0x80, 0x80, 0x80, 0x00,
+-    0x80, 0x80, 0x80, 0x80, 0x00,
+-
+-    0x2, 0x2, 0x7f, 0x5, 0x7e,
+-    
+-    // initialize the instance
+-    0x20, 0x0,               // local.get $ctx
+-    0x28, 0, DO_INIT_OFF,    // i32.load do_init_ptr
+-    0x41, 0,                 // i32.const 0
+-    0x47,                    // i32.ne
+-    0x04, 0x40,              // if
+-
+-    0x23, 14,                // global.get $env
+-    0x50,                    // i64.eqz
+-    0x04, 0x40,              // if
+-    // fundamental variables
+-    0x20, 0x0,               // local.get $ctx
+-    0x28, 0, ENV_OFF,        // i32.load env
+-    0xad,                    // extend
+-    0x24, 14,                // global.set $14
+-    0x20, 0x0,               // local.get $ctx
+-    0x28, 0, STACK_OFF,      // i32.load stack
+-    0xad,                    // extend
+-    0x24, 15,                // global.set $15
+-    0x0b,                    // end
+-
+-    0x20, 0x0,               // local.get $ctx
+-    0x41, 0x00,              // i32.const 0
+-    0x36, 0x00, DO_INIT_OFF, // i32.store do_init
+-    0x42, 0x00,              // i64.const 0
+-    0x24, 16,                // global.set $block_ptr
+-    0x0b,                    // end
+-
+-    0x03, 0x40,              // loop
+-    0x23, 16,                // global.get $block_ptr
+-    0x50,                    // i64.eqz
+-    0x04, 0x40,              // if
+-};
+-
+-static void write_wasm_type_section_size(TCGContext *s, void *header_a_ptr, uint32_t added) {
+-    uint32_t type_section_size = added + 10;
+-    fill_uint32_leb128((uintptr_t)header_a_ptr + 9, type_section_size);
+-    fill_uint32_leb128((uintptr_t)header_a_ptr + 14, num_helper_funcs + 1);
+-}
+-static void write_wasm_memory_size(TCGContext *s, void *header_b_ptr) {
+-    fill_uint32_leb128((uintptr_t)header_b_ptr + 25, (uint32_t)(~0) / 65536);
+-}
+-static void write_wasm_import_section_size(TCGContext *s, void *header_b_ptr, uint32_t added, uint32_t num_imported_funcs) {
+-    uint32_t import_section_size = 35 + added - 11;
+-    fill_uint32_leb128((uintptr_t)header_b_ptr + 1, import_section_size);
+-    fill_uint32_leb128((uintptr_t)header_b_ptr + 6, num_imported_funcs + 1/*buffer+helpers...*/);
+-}
+-static void write_wasm_export_section_size(TCGContext *s, void *header_c_ptr, uint32_t startidx) {
+-    fill_uint32_leb128((uintptr_t)header_c_ptr + 142, startidx);
+-}
+-static void write_wasm_code_size(TCGContext *s, void *header_d_ptr, int code_size, int code_nums) {
+-    code_size = code_size + 66;
+-    fill_uint32_leb128((uintptr_t)header_d_ptr + 1, code_size);
+-    fill_uint32_leb128((uintptr_t)header_d_ptr + 6, code_nums);
+-    fill_uint32_leb128((uintptr_t)header_d_ptr + 11, code_size - 10);
+-}
+-
+-uint8_t *tcg_out_import_entry(TCGContext *s, uint8_t* wasm_blob_ptr, int i, int typeidx)
+-{
+-    *wasm_blob_ptr++ = 6; // helper
+-    *wasm_blob_ptr++ = 0x68;
+-    *wasm_blob_ptr++ = 0x65;
+-    *wasm_blob_ptr++ = 0x6c;
+-    *wasm_blob_ptr++ = 0x70;
+-    *wasm_blob_ptr++ = 0x65;
+-    *wasm_blob_ptr++ = 0x72;
+-    char buf[100];
+-    int n = snprintf(buf, sizeof(buf), "%d", i);
+-    wasm_blob_ptr += write_uint32_leb128((uintptr_t)wasm_blob_ptr, n);
+-    memcpy(wasm_blob_ptr, buf, n);
+-    wasm_blob_ptr += n;
+-    *wasm_blob_ptr++ = 0x00;    //type(0)
+-    *wasm_blob_ptr++ = typeidx; //typeidx
+-    return wasm_blob_ptr;
+-}
+ 
+ #endif
+ 
+@@ -6395,33 +6274,18 @@
+ #if defined(EMSCRIPTEN) && !defined(CONFIG_TCG_INTERPRETER)
+     sub_buf_ptr = sub_buf;
+     tcg_out_init();
+-    num_helper_funcs = 0;
+     wasm_block_idx = 0;
+     block_ptr_placeholder_idx_pos = 0;
+-    target_helper_types_pos = 0;
+     memset(label_to_block, -1, LABEL_MAX);
+-    memset(target_helper_funcs, -1, WASM_NUM_HELPER_FUNCS_MAX);
++    wasm_block_registry_reset();
++
++    struct wasm_tb_hdr *wasm_hdr = (struct wasm_tb_hdr *)s->code_ptr;
++    memset(wasm_hdr, 0, sizeof(*wasm_hdr));
++    s->code_ptr += sizeof(*wasm_hdr);
+ 
+-    uint32_t *tci_code_off = (uint32_t*)s->code_ptr;
+-    s->code_ptr += 4;
+-    uint32_t *size_base = (uint32_t*)s->code_ptr;
+-    s->code_ptr += 4;
+-    uint32_t *export_vec_base = (uint32_t*)s->code_ptr;
+-    int export_size = get_core_nums() * 4;
+-    memset(s->code_ptr, 0, export_size);
+-    s->code_ptr += export_size;
+-    *size_base = export_size;
+-
+-    size_base = (uint32_t*)s->code_ptr;
+-    s->code_ptr += 4;
+-    int counter_size = get_core_nums() * 4;
+-    memset(s->code_ptr, 0, counter_size);
+-    s->code_ptr += counter_size;
+-    *size_base = counter_size;
+-    
+     uint8_t *code_begin = s->code_ptr;
+     s->code_ptr += 4; // placeholder for size
+-    *tci_code_off = s->code_ptr - s->code_buf;
++    wasm_hdr->tci_code_off = s->code_ptr - s->code_buf;
+ #endif
+ 
+ #ifdef TCG_TARGET_NEED_LDST_LABELS
+@@ -6533,10 +6397,7 @@
+ #endif
+ 
+ #if defined(EMSCRIPTEN) && !defined(CONFIG_TCG_INTERPRETER)
+-    tcg_sub_out8(s, 0x0b); //end if
+-    tcg_sub_out8(s, 0x0b); //end loop
+-    tcg_sub_out8(s, 0x0); // unreachable
+-    tcg_sub_out8(s, 0x0b); //end func
++    tcg_wasm_out_tb_end(s);
+ 
+     // fill blocks
+     for (int i = 0; i < block_ptr_placeholder_idx_pos; i++) {
+@@ -6552,80 +6413,40 @@
+     *(uint32_t *)code_begin = code_size;
+ 
+     int sub_buf_len = sub_buf_ptr - sub_buf;
+-    int wasm_body_size = sub_buf_len;
+-
+-    // write header
+-    uint8_t *wasm_blob_ptr = s->code_ptr;
+-    uint8_t *wasm_blob_ptr_base = s->code_ptr;
+-    wasm_blob_ptr += 4; // placeholder for size
+-
+-    if (unlikely(((void *)wasm_blob_ptr + sizeof(mod_header_a) + target_helper_types_pos) > s->code_gen_highwater)) {
+-        return -1;
+-    }
+-    uint8_t *header_a_base = wasm_blob_ptr;
+-    memcpy(wasm_blob_ptr, mod_header_a, sizeof(mod_header_a));
+-    wasm_blob_ptr += sizeof(mod_header_a);
+-    memcpy(wasm_blob_ptr, target_helper_types, target_helper_types_pos);
+-    wasm_blob_ptr += target_helper_types_pos;
+-    write_wasm_type_section_size(s, header_a_base, target_helper_types_pos);
+-    
+-    if (unlikely(((void *)wasm_blob_ptr + sizeof(mod_header_b)) > s->code_gen_highwater)) {
+-        return -1;
+-    }
+-    uint8_t *header_b_base = wasm_blob_ptr;
+-    memcpy(wasm_blob_ptr, mod_header_b, sizeof(mod_header_b));
+-    wasm_blob_ptr += sizeof(mod_header_b);
+-    uint8_t *header_b_adding_base = wasm_blob_ptr;
+-    for (int i = 0; i < num_helper_funcs; i++) {
+-        wasm_blob_ptr = tcg_out_import_entry(s, wasm_blob_ptr, i, i+1/*type0=start,1=helpers...*/);
+-    }
+-    write_wasm_import_section_size(s, header_b_base, (uint32_t)wasm_blob_ptr - (uint32_t)header_b_adding_base, num_helper_funcs);
+-    write_wasm_memory_size(s, header_b_base);
+-
+-    if (unlikely(((void *)wasm_blob_ptr + sizeof(mod_header_c)) > s->code_gen_highwater)) {
+-        return -1;
+-    }
+-    uint8_t *header_c_base = wasm_blob_ptr;
+-    memcpy(wasm_blob_ptr, mod_header_c, sizeof(mod_header_c));
+-    wasm_blob_ptr += sizeof(mod_header_c);
+-    write_wasm_export_section_size(s, header_c_base, num_helper_funcs);
+-
+-    if (unlikely(((void *)wasm_blob_ptr + sizeof(mod_header_d)) > s->code_gen_highwater)) {
+-        return -1;
+-    }
+-    uint8_t *header_d_ptr = wasm_blob_ptr;
+-    memcpy(wasm_blob_ptr, mod_header_d, sizeof(mod_header_d));
+-    wasm_blob_ptr += sizeof(mod_header_d);
+-    write_wasm_code_size(s, header_d_ptr, wasm_body_size, 1);
+-    s->code_ptr = wasm_blob_ptr;
+-
+-    // write body
+-    if (unlikely(((void *)s->code_ptr + sub_buf_len) > s->code_gen_highwater)) {
+-        return -1;
+-    }
+-    memcpy(s->code_ptr, sub_buf, sub_buf_len);
+-    s->code_ptr += sub_buf_len;
+-
+-    // write blob size
+     if (sub_buf_len > SUB_BUF_MAX) {
+         printf("sub too large sub_buf_len: %d\n", sub_buf_len); fflush(stdout);
+         exit(1);
+     }
+-    *(uint32_t *)wasm_blob_ptr_base = s->code_ptr - wasm_blob_ptr_base - 4;
+ 
+-    // record importing helper functions
+-    if (unlikely(((void *)s->code_ptr + 4 + num_helper_funcs * 4) > s->code_gen_highwater)) {
++    /*
++     * The function body, ready for a batch module's code section, then
++     * the block's import table so the assembler can relink it.
++     */
++    int types_padded = (target_helper_types_pos + 3) & ~3;
++    int meta_len = num_helper_funcs * 8 + types_padded + wasm_ncalls * 4;
++    if (unlikely(((void *)s->code_ptr + sub_buf_len + meta_len) > s->code_gen_highwater)) {
+         return -1;
+     }
+-    size_base = (uint32_t*)s->code_ptr;
+-    s->code_ptr += 4;
++    wasm_hdr->body_off = s->code_ptr - s->code_buf;
++    wasm_hdr->body_len = sub_buf_len;
++    memcpy(s->code_ptr, sub_buf, sub_buf_len);
++    s->code_ptr += sub_buf_len;
++
++    s->code_ptr = (uint8_t *)(((uintptr_t)s->code_ptr + 3) & ~(uintptr_t)3);
++    wasm_hdr->meta_off = s->code_ptr - s->code_buf;
++    wasm_hdr->nhelpers = num_helper_funcs;
++    wasm_hdr->types_len = target_helper_types_pos;
++    wasm_hdr->ncalls = wasm_ncalls;
+     memcpy(s->code_ptr, target_helper_funcs, num_helper_funcs * 4);
+     s->code_ptr += num_helper_funcs * 4;
+-    *size_base = num_helper_funcs * 4;
+-    
+-    if (unlikely((void *)s->code_ptr > s->code_gen_highwater)) {
+-        return -1;
+-    }
++    memcpy(s->code_ptr, target_helper_type_end, num_helper_funcs * 4);
++    s->code_ptr += num_helper_funcs * 4;
++    memcpy(s->code_ptr, target_helper_types, target_helper_types_pos);
++    s->code_ptr += types_padded;
++    memcpy(s->code_ptr, wasm_call_sites, wasm_ncalls * 4);
++    s->code_ptr += wasm_ncalls * 4;
++
++    wasm32_block_translated((uint8_t *)wasm_hdr);
+ #endif
+ 
+     return tcg_current_code_size(s);
+--- a/tcg/wasm32/tcg-target.c.inc	2026-09-09 07:37:51.793779095 -0700
++++ b/tcg/wasm32/tcg-target.c.inc	2026-09-09 07:33:45.332306031 -0700
+@@ -455,9 +455,19 @@
+     tcg_wasm_out_op_var(s, 0x22, i);
+ }
+ 
++/*
++ * The guest register file (R0..R15) and the block index live in function
++ * locals, not instance globals: TCG spills every global to env at block
++ * boundaries, so nothing has to outlive the function, and the baseline
++ * compiler keeps locals in registers or stack slots instead of reloading
++ * the globals base for every access. The only state that must survive a
++ * function exit is the unwind case, handled by the save area in ctx.
++ */
++#define REG_LOCAL_BASE 8
++
+ static void tcg_wasm_out_op_global_get(TCGContext *s, uint8_t i)
+ {
+-    tcg_wasm_out_op_var(s, 0x23, i);
++    tcg_wasm_out_op_var(s, 0x20, REG_LOCAL_BASE + i);
+ }
+ 
+ static void tcg_wasm_out_op_global_set(TCGContext *s, uint8_t i)
+@@ -465,7 +475,7 @@
+     if (i == tcg_target_reg_index[TCG_REG_R14]) {
+         env_cached = false;
+     }
+-    tcg_wasm_out_op_var(s, 0x24, i);
++    tcg_wasm_out_op_var(s, 0x21, REG_LOCAL_BASE + i);
+ }
+ 
+ static void tcg_wasm_out_op_global_get_r_i32(TCGContext *s, TCGReg r0)
+@@ -584,10 +594,24 @@
+     tcg_wasm_out8(s, 0x0f);
+ }
+ 
++/*
++ * A call names a helper by the block's local import index. The batch
++ * assembler rewrites that index when it links the body into a module,
++ * so the immediate is a fixed 5-byte LEB and its position is recorded.
++ */
+ static void tcg_wasm_out_op_call(TCGContext *s, uint32_t func_idx)
+ {
+     tcg_wasm_out8(s, 0x10);
+-    tcg_wasm_out_leb128_uint32_t(s, func_idx);
++    if (wasm_ncalls >= WASM_MAX_CALL_SITES) {
++        printf("too many helper calls in one block\n"); fflush(stdout);
++        exit(1);
++    }
++    wasm_call_sites[wasm_ncalls++] = cur_sub_buf_off_rel();
++    for (int i = 0; i < 4; i++) {
++        tcg_wasm_out8(s, (func_idx & 0x7f) | 0x80);
++        func_idx >>= 7;
++    }
++    tcg_wasm_out8(s, func_idx & 0x7f);
+ }
+ 
+ static void tcg_wasm_out_op_i64_extend_i32_u(TCGContext *s)
+@@ -1460,16 +1484,26 @@
+ 
+ static void tcg_wasm_out_mulu2_i32(TCGContext *s, TCGReg retl, TCGReg reth, TCGReg arg1, TCGReg arg2)
+ {
++    /* TCG i32 temporaries may retain arbitrary upper bits. */
+     tcg_wasm_out_op_global_get_r(s, arg1);
++    tcg_wasm_out_op_i32_wrap_i64(s);
++    tcg_wasm_out_op_i64_extend_i32_u(s);
+     tcg_wasm_out_op_global_get_r(s, arg2);
++    tcg_wasm_out_op_i32_wrap_i64(s);
++    tcg_wasm_out_op_i64_extend_i32_u(s);
+     tcg_wasm_out_op_i64_mul(s);
+     tcg_wasm_out_op_set_r_as_i64(s, retl, reth);
+ }
+ 
+ static void tcg_wasm_out_muls2_i32(TCGContext *s, TCGReg retl, TCGReg reth, TCGReg arg1, TCGReg arg2)
+ {
++    /* Signed multiplication extends bit 31, not the stale upper half. */
+     tcg_wasm_out_op_global_get_r(s, arg1);
++    tcg_wasm_out_op_i32_wrap_i64(s);
++    tcg_wasm_out_op_i64_extend_i32_s(s);
+     tcg_wasm_out_op_global_get_r(s, arg2);
++    tcg_wasm_out_op_i32_wrap_i64(s);
++    tcg_wasm_out_op_i64_extend_i32_s(s);
+     tcg_wasm_out_op_i64_mul(s);
+     tcg_wasm_out_op_set_r_as_i64(s, retl, reth);
+ }
+@@ -1805,6 +1839,39 @@
+     tcg_wasm_out_op_br_to_label(s, l, true);
+ }
+ 
++static void tcg_wasm_out_op_return_call_indirect(TCGContext *s)
++{
++    tcg_wasm_out8(s, 0x13); // return_call_indirect
++    tcg_wasm_out8(s, 0x00); // type 0: the block signature
++    tcg_wasm_out8(s, 0x00); // table 0: the main module's function table
++}
++
++/*
++ * Tail-call the compiled function of the block ctx.tb_ptr names. Leaves
++ * the function if that block has none. TMP32_LOCAL_0 holds the block.
++ */
++static void tcg_wasm_out_chain_or_return(TCGContext *s)
++{
++    if (!wasm_tail_calls_ok) {
++        // no tail calls here: the dispatcher runs the successor
++        tcg_wasm_out_op_i32_const(s, 0);
++        tcg_wasm_out_op_return(s);
++        return;
++    }
++    tcg_wasm_out_op_local_get(s, TMP32_LOCAL_0_IDX);
++    tcg_wasm_out_ctx_i32_load(s, FIDX_OFF_OFF);
++    tcg_wasm_out_op_i32_add(s);
++    tcg_wasm_out_op_i32_load(s, 0, 0);
++    tcg_wasm_out_op_local_tee(s, TMP32_LOCAL_0_IDX);
++    tcg_wasm_out_op_if_noret(s);
++    tcg_wasm_out_op_local_get(s, CTX_IDX);
++    tcg_wasm_out_op_local_get(s, TMP32_LOCAL_0_IDX);
++    tcg_wasm_out_op_return_call_indirect(s);
++    tcg_wasm_out_op_end(s);
++    tcg_wasm_out_op_i32_const(s, 0);
++    tcg_wasm_out_op_return(s);
++}
++
+ static void tcg_wasm_out_exit_tb(TCGContext *s, uintptr_t arg)
+ {
+     tcg_wasm_out_ctx_i32_store_const(s, TB_PTR_OFF, 0);
+@@ -1824,8 +1891,17 @@
+     tcg_wasm_out_op_br(s, 2); // br to the top of loop
+     tcg_wasm_out_op_end(s);
+ 
+-    tcg_wasm_out_ctx_i32_store_r(s, TB_PTR_OFF, arg);
++    tcg_wasm_out_op_global_get_r(s, arg);
++    tcg_wasm_out_op_i32_wrap_i64(s);
++    tcg_wasm_out_op_local_tee(s, TMP32_LOCAL_0_IDX);
++    tcg_wasm_out_op_local_get(s, CTX_IDX);
++    tcg_wasm_out_op_local_get(s, TMP32_LOCAL_0_IDX);
++    tcg_wasm_out_op_i32_store(s, 0, TB_PTR_OFF);
+     tcg_wasm_out_ctx_i32_store_const(s, DO_INIT_OFF, 1);
++    // a found block that is compiled is entered directly
++    tcg_wasm_out_op_if_noret(s);
++    tcg_wasm_out_chain_or_return(s);
++    tcg_wasm_out_op_end(s);
+     tcg_wasm_out_op_i32_const(s, 0);
+     tcg_wasm_out_op_return(s);
+ }
+@@ -1856,8 +1932,8 @@
+     tcg_wasm_out_op_i32_store(s, 0, TB_PTR_OFF);
+     tcg_wasm_out_ctx_i32_store_const(s, DO_INIT_OFF, 1);
+ 
+-    tcg_wasm_out_op_i32_const(s, 0);
+-    tcg_wasm_out_op_return(s);
++    // a compiled target is entered directly; otherwise the dispatcher runs it
++    tcg_wasm_out_chain_or_return(s);
+     tcg_wasm_out_op_end(s);
+ }
+ 
+@@ -2136,8 +2212,8 @@
+     tcg_wasm_out_ctx_i32_load(s, UNWINDING_OFF);
+     tcg_wasm_out_op_i32_eq(s);
+     tcg_wasm_out_op_if_noret(s);
+-    tcg_wasm_out_op_i32_const(s, 0);
+-    tcg_wasm_out_op_return(s);
++    // unwound inside the helper: spill the registers and leave
++    tcg_wasm_out_op_br(s, 3); // if, guard, loop, exit block
+     tcg_wasm_out_op_end(s);
+ }
+ 
+@@ -2384,8 +2460,8 @@
+     tcg_wasm_out_op_i32_eqz(s);
+ 
+     tcg_wasm_out_op_if_noret(s);
+-    tcg_wasm_out_op_i32_const(s, 0);
+-    tcg_wasm_out_op_return(s);
++    // the helper did not finish: unwound. Spill the registers and leave.
++    tcg_wasm_out_op_br(s, 4); // if, if, guard, loop, exit block
+     tcg_wasm_out_op_end(s);
+     tcg_wasm_out_op_end(s);
+ }
+@@ -2522,8 +2598,8 @@
+     tcg_wasm_out_ctx_i32_load(s, DONE_FLAG_OFF);
+     tcg_wasm_out_op_i32_eqz(s);
+     tcg_wasm_out_op_if_noret(s);
+-    tcg_wasm_out_op_i32_const(s, 0);
+-    tcg_wasm_out_op_return(s);
++    // the helper did not finish: unwound. Spill the registers and leave.
++    tcg_wasm_out_op_br(s, 4); // if, if, guard, loop, exit block
+     tcg_wasm_out_op_end(s);
+     tcg_wasm_out_op_end(s);
+ }
+@@ -3792,9 +3868,93 @@
+     return ct & TCG_CT_CONST;
+ }
+ 
++/*
++ * Every block's function starts here. The locals: ctx's i32 cache and a
++ * scratch i32, five scratch i64s, then the sixteen guest registers and
++ * the block index (REG_LOCAL_BASE). env and the stack pointer are loaded
++ * from ctx on every entry. A fresh entry (do_init set) clears do_init
++ * and starts at block 0. A re-entry after an Asyncify unwind (do_init
++ * clear) first forwards to the block ctx.tb_ptr names if that is not
++ * this one -- chained execution may have tail-called on before the
++ * unwind, and the dispatcher rewinds into the function it originally
++ * called -- then reloads the registers and the block index from the
++ * save area the unwind exit spilled them to. The whole loop sits in a
++ * block the unwind sites branch to; the code after it is the spill.
++ */
+ static void tcg_out_tb_start(TCGContext *s)
+ {
+-    /* nothing to do */
++    static const uint8_t locals[] = { 0x3, 0x2, 0x7f, 0x5, 0x7e, 0x11, 0x7e };
++    for (size_t i = 0; i < sizeof(locals); i++) {
++        tcg_wasm_out8(s, locals[i]);
++    }
++
++    tcg_wasm_out_ctx_i32_load(s, ENV_OFF);
++    tcg_wasm_out_op_i64_extend_i32_u(s);
++    tcg_wasm_out_op_global_set(s, tcg_target_reg_index[TCG_AREG0]);
++    tcg_wasm_out_ctx_i32_load(s, STACK_OFF);
++    tcg_wasm_out_op_i64_extend_i32_u(s);
++    tcg_wasm_out_op_global_set(s, tcg_target_reg_index[TCG_REG_CALL_STACK]);
++
++    tcg_wasm_out_ctx_i32_load(s, DO_INIT_OFF);
++    tcg_wasm_out_op_if_noret(s);
++    tcg_wasm_out_ctx_i32_store_const(s, DO_INIT_OFF, 0);
++    tcg_wasm_out_op_i64_const(s, 0);
++    tcg_wasm_out_op_global_set(s, BLOCK_PTR_IDX);
++    tcg_wasm_out_op_else(s);
++
++    // rewound: forward to the block that was running, if not this one.
++    // Without chaining the dispatcher always rewinds into the right one.
++    if (wasm_tail_calls_ok) {
++        tcg_wasm_out_ctx_i32_load(s, TB_PTR_OFF);
++        tcg_wasm_out_op_local_tee(s, TMP32_LOCAL_0_IDX);
++        tcg_wasm_out_op_i32_const(s, (int32_t)(uintptr_t)s->code_buf);
++        tcg_wasm_out_op_i32_ne(s);
++        tcg_wasm_out_op_if_noret(s);
++        tcg_wasm_out_chain_or_return(s);
++        tcg_wasm_out_op_end(s);
++    }
++
++    // then take the registers back from the save area
++    for (int r = 0; r < 14; r++) {
++        tcg_wasm_out_op_local_get(s, CTX_IDX);
++        tcg_wasm_out_op_i64_load(s, 3, SAVE_OFF + r * 8);
++        tcg_wasm_out_op_global_set(s, r);
++    }
++    tcg_wasm_out_op_local_get(s, CTX_IDX);
++    tcg_wasm_out_op_i64_load(s, 3, SAVE_BLOCK_PTR_OFF);
++    tcg_wasm_out_op_global_set(s, BLOCK_PTR_IDX);
++    tcg_wasm_out_op_end(s);
++
++    tcg_wasm_out8(s, 0x02); tcg_wasm_out8(s, 0x40); // block: the unwind exit
++    tcg_wasm_out8(s, 0x03); tcg_wasm_out8(s, 0x40); // loop
++    tcg_wasm_out_op_global_get(s, BLOCK_PTR_IDX);
++    tcg_wasm_out_op_i64_eqz(s);
++    tcg_wasm_out_op_if_noret(s);
++    env_cached = false;
++}
++
++/*
++ * The end of every block's function: close the guard, the loop and the
++ * exit block, then the spill that an unwind exit lands on. Normal exits
++ * return before reaching it.
++ */
++static void tcg_wasm_out_tb_end(TCGContext *s)
++{
++    tcg_wasm_out_op_end(s);   // end if (the last guard)
++    tcg_wasm_out_op_end(s);   // end loop
++    tcg_wasm_out8(s, 0x00);   // unreachable
++    tcg_wasm_out_op_end(s);   // end block
++
++    for (int r = 0; r < 14; r++) {
++        tcg_wasm_out_op_local_get(s, CTX_IDX);
++        tcg_wasm_out_op_global_get(s, r);
++        tcg_wasm_out_op_i64_store(s, 3, SAVE_OFF + r * 8);
++    }
++    tcg_wasm_out_op_local_get(s, CTX_IDX);
++    tcg_wasm_out_op_global_get(s, BLOCK_PTR_IDX);
++    tcg_wasm_out_op_i64_store(s, 3, SAVE_BLOCK_PTR_OFF);
++    tcg_wasm_out_op_i32_const(s, 0);
++    tcg_wasm_out_op_end(s);   // end func
+ }
+ 
+ bool tcg_target_has_memory_bswap(MemOp memop)
+--- a/accel/tcg/tb-maint.c	2026-09-04 15:38:05.799918214 -0700
++++ b/accel/tcg/tb-maint.c	2026-09-08 22:41:29.103157350 -0700
+@@ -755,6 +755,10 @@
+ #endif /* CONFIG_USER_ONLY */
+ 
+ /* flush all the translation blocks */
++#if defined(EMSCRIPTEN) && !defined(CONFIG_TCG_INTERPRETER)
++void wasm32_tb_flush(void);
++#endif
++
+ static void do_tb_flush(CPUState *cpu, run_on_cpu_data tb_flush_count)
+ {
+     bool did_flush = false;
+@@ -774,6 +778,10 @@
+     tb_remove_all();
+ 
+     tcg_region_reset_all();
++#if defined(EMSCRIPTEN) && !defined(CONFIG_TCG_INTERPRETER)
++    /* every compiled batch and every queued block referred to this buffer */
++    wasm32_tb_flush();
++#endif
+     /* XXX: flush processor icache at this point if cache flush is expensive */
+     qatomic_inc(&tb_ctx.tb_flush_count);
+ 

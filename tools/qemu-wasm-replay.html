@@ -1,0 +1,82 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>QEMU replay</title>
+<!--
+  Runs the browser build of Rewind's QEMU machine on a prepared run, for
+  tools/qemu-wasm-replay.py: fetches the files and QEMU's arguments under
+  /run/, puts them in emscripten's file system under /rewind, runs QEMU,
+  and posts the step log it wrote back to the server.
+-->
+<script type="module">
+  // Where the prepared files go in emscripten's file system, as
+  // rewind-qemu --prepare names them in args.json.
+  const DIR = "/rewind";
+  const INPUTS = ["vmlinux", "initrd", "image.erofs", "schedule"];
+  const LOG = `${DIR}/steps.log`;
+
+  const post = (path, body) => fetch(path, { method: "POST", body });
+  const say = (line) => {
+    console.log(line);
+    post("/console", line);
+  };
+
+  // Each input the prepared directory has; a run without an image or a
+  // schedule has no such file.
+  async function fetchInputs() {
+    const inputs = [];
+    for (const name of INPUTS) {
+      const response = await fetch(`/run/${name}`);
+      if (response.ok) {
+        inputs.push([name, new Uint8Array(await response.arrayBuffer())]);
+      }
+    }
+    return inputs;
+  }
+
+  async function main() {
+    const args = await (await fetch("/run/args.json")).json();
+    const inputs = await fetchInputs();
+    say(`fetched ${inputs.map(([n, b]) => `${n} ${b.length}`).join(", ")}`);
+
+    // QEMU exits when the machine stops; emscripten then calls onExit.
+    let exit;
+    const exited = new Promise((resolve) => (exit = resolve));
+    const { default: init } = await import("/engine/out.js");
+    const mod = await init({
+      print: say,
+      printErr: say,
+      locateFile: (file) => `/engine/${file}`,
+      mainScriptUrlOrBlob: new URL("/engine/out.js", location.href).href,
+      onExit: exit,
+    });
+
+    mod.FS.mkdir(DIR);
+    for (const [name, bytes] of inputs) {
+      mod.FS.writeFile(`${DIR}/${name}`, bytes);
+    }
+    inputs.length = 0;
+
+    // How far the machine has got, by the step log's size, every few
+    // seconds while it runs.
+    const PROGRESS_MS = 5000;
+    const progress = setInterval(() => {
+      try {
+        say(`step log ${mod.FS.stat(LOG).size} bytes`);
+      } catch (e) {
+        say(`no step log yet: ${e}`);
+      }
+    }, PROGRESS_MS);
+
+    const started = performance.now();
+    mod.callMain(args);
+    const code = await exited;
+    clearInterval(progress);
+    const ms = performance.now() - started;
+
+    const log = mod.FS.readFile(LOG);
+    await post("/log", log);
+    await post("/done", JSON.stringify({ exit: code, ms, log_bytes: log.length }));
+  }
+
+  main().catch((e) => post("/done", JSON.stringify({ error: String(e.stack ?? e) })));
+</script>

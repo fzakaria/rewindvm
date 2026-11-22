@@ -1,10 +1,14 @@
 The patches in this directory change QEMU, which is licensed under the GNU
 General Public License version 2 (SPDX: GPL-2.0-or-later for the files the
 patches add, GPL-2.0-only for QEMU as a whole). The patches are licensed
-the same way, apart from the rest of this repository, which is MIT. The
-QEMU they build is a separate program: the engine reads the step log it
-writes and shares no code with it. The text below is the one QEMU carries
-in COPYING.
+the same way, apart from the rest of this repository, which is MIT.
+patches/ adds Rewind's machine. wasm/ holds the qemu-wasm fork's
+WebAssembly backend speedups, copied from trynix
+(https://github.com/fzakaria/trynix, patches/), which the browser build
+applies first. The QEMU they build is a separate program: the engine
+reads the step log it writes and shares no code with it, and in a
+browser it runs as its own WebAssembly module apart from the app's. The
+text below is the one QEMU carries in COPYING.
 
 
 
