@@ -28,6 +28,7 @@ pub mod export;
 pub mod failing;
 pub mod failure;
 pub mod file_diff;
+pub mod inspected;
 pub mod io_records;
 pub mod lines;
 pub mod located;
