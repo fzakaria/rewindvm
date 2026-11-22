@@ -1,0 +1,545 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Farid Zakaria <farid.m.zakaria@gmail.com>
+Date: Sat, 21 Nov 2026 20:04:03 -0800
+Subject: [PATCH] hw/i386: rewind: start from a keyframe, and inspect at a step
+
+A replay need not boot: with state=, the machine loads a keyframe of
+the KVM machine in rewind-vmm's portable form, its registers, MSRs,
+local APIC, XSAVE area and memory, and the monitor's clock and timer,
+and goes on from its step. The step log starts with a Resume entry so
+the trace encoders go on from the recording's trace there.
+
+With inspect= and until=, the machine asks the guest at that step for
+an inspection, as rewind-vmm does for a forked machine, and stop-mark=
+stops it at the mark that ends the guest's answer.
+---
+ hw/i386/rewind.c         | 418 ++++++++++++++++++++++++++++++++++++++-
+ include/hw/i386/rewind.h |   6 +
+ 2 files changed, 417 insertions(+), 7 deletions(-)
+
+diff --git a/hw/i386/rewind.c b/hw/i386/rewind.c
+index 21b427d..448b6fd 100644
+--- a/hw/i386/rewind.c
++++ b/hw/i386/rewind.c
+@@ -105,6 +105,7 @@
+ #define IO_BUF_MAX          (1 << 20)
+ 
+ #define PENDING_TIMER       (1 << 0)
++#define PENDING_INSPECT     (1 << 2)
+ #define PENDING_STALL       (1 << 4)
+ #define PENDING_RESEED      (1 << 5)
+ 
+@@ -119,6 +120,11 @@
+ #define RECORD_HEADER       20
+ #define RECORD_MAX          8192
+ 
++/* A mark's record kind, the guest's REWIND_EV_MARK, and where a record
++ * keeps its kind. */
++#define KIND_MARK           10
++#define RECORD_KIND_AT      4
++
+ /* The KVM in-kernel PIC's ports, which are no exit under rewind-vmm. */
+ static const uint16_t pic_ports[] = { 0x20, 0x21, 0xa0, 0xa1, 0x4d0, 0x4d1 };
+ 
+@@ -159,6 +165,9 @@ struct RewindMachineState {
+     char *log_path;
+     char *schedule_path;
+     uint64_t until;
++    char *inspect_path;
++    char *stop_mark;
++    char *state_path;
+ 
+     uint8_t seed[32];
+     RewindCpuModel model;
+@@ -191,6 +200,16 @@ struct RewindMachineState {
+     bool record_pending;
+     uint8_t *io_buf;
+ 
++    /*
++     * An inspection asked for at the until step, instead of stopping
++     * there (lib.rs request_inspection): its request, whether it was
++     * sent, and whether its interrupt still waits for the APIC.
++     */
++    uint8_t *request;
++    size_t request_len;
++    bool inspection_sent;
++    bool inspect;
++
+     /* The schedule's entries, in step order, and the next one due. */
+     uint8_t *schedule;
+     size_t schedule_entries;
+@@ -435,9 +454,44 @@ static void after_step(RewindMachineState *s)
+         ram_write(s->shared + SHARED_RESEED, p.reseed, RESEED_BYTES);
+         reasons |= PENDING_RESEED;
+     }
+-    if (reasons && inject(s, reasons) && (reasons & PENDING_TIMER)) {
+-        s->armed = false;
++    if (s->inspect) {
++        reasons |= PENDING_INSPECT;
++    }
++    if (reasons && inject(s, reasons)) {
++        if (reasons & PENDING_TIMER) {
++            s->armed = false;
++        }
++        s->inspect = false;
++    }
++}
++
++/*
++ * Asks the guest for an inspection, as rewind-vmm's request_inspection
++ * does for a machine forked at this step: the request in the shared
++ * page, and its interrupt, which waits for the APIC if it must.
++ */
++static void request_inspection(RewindMachineState *s)
++{
++    if (!s->have_shared) {
++        error_report("rewind: the VM has not finished booting at step %"
++                     PRIu64, s->step);
++        exit(1);
+     }
++    ram_put_u32(s->shared + SHARED_REQUEST_LEN, s->request_len);
++    ram_write(s->shared + SHARED_REQUEST, s->request, s->request_len);
++    s->inspection_sent = true;
++    s->inspect = !inject(s, PENDING_INSPECT);
++}
++
++/* Whether the record just written is the mark that ends an inspection. */
++static bool ends_inspection(RewindMachineState *s)
++{
++    size_t mark = s->stop_mark ? strlen(s->stop_mark) : 0;
++
++    return s->inspection_sent && mark &&
++           lduw_le_p(s->record + RECORD_KIND_AT) == KIND_MARK &&
++           s->record_len >= RECORD_HEADER + mark &&
++           !memcmp(s->record + RECORD_HEADER, s->stop_mark, mark);
+ }
+ 
+ /*
+@@ -453,12 +507,21 @@ static void end_step(RewindMachineState *s)
+         log_u64(s, s->now);
+         log_u32(s, s->record_len);
+         log_bytes(s, s->record, s->record_len);
++        if (ends_inspection(s)) {
++            stop_machine(s, REWIND_STOP_PAUSED);
++            return;
++        }
+     }
+-    if (s->until && s->step >= s->until) {
+-        stop_machine(s, REWIND_STOP_PAUSED);
+-        return;
++    if (s->until && s->step == s->until) {
++        if (!s->request) {
++            stop_machine(s, REWIND_STOP_PAUSED);
++            return;
++        }
++        request_inspection(s);
+     }
+-    if (s->idle) {
++
++    /* A request waiting for the APIC wakes the guest as a timer would. */
++    if (s->idle && !s->inspect) {
+         stop_machine(s, REWIND_STOP_STALLED);
+     }
+ }
+@@ -1411,6 +1474,326 @@ static void boot(RewindMachineState *s)
+     }
+ }
+ 
++/*
++ * A keyframe in rewind-vmm's portable form (crates/rewind-vmm
++ * portable.rs): the machine at a step of its recording, which the
++ * machine starts from instead of booting.
++ */
++#define STATE_MAGIC     "rwqsta1\0"
++#define XSAVE_BYTES     4096
++#define LAPIC_BYTES     1024
++
++/* KVM's names for the MSRs a keyframe holds that TCG keeps in env. */
++#define MSR_STAR_IDX    0xc0000081
++#define MSR_LSTAR_IDX   0xc0000082
++#define MSR_CSTAR_IDX   0xc0000083
++#define MSR_FMASK_IDX   0xc0000084
++#define MSR_KGS_IDX     0xc0000102
++#define MSR_SYSENTER_ESP_IDX 0x175
++
++typedef struct StateReader {
++    const uint8_t *at;
++    const uint8_t *end;
++    const char *path;
++} StateReader;
++
++static const uint8_t *state_take(StateReader *r, size_t n)
++{
++    const uint8_t *at = r->at;
++
++    if (n > (size_t)(r->end - r->at)) {
++        error_report("rewind: %s ends early", r->path);
++        exit(1);
++    }
++    r->at += n;
++    return at;
++}
++
++static uint64_t state_u64(StateReader *r)
++{
++    return ldq_le_p(state_take(r, 8));
++}
++
++static uint32_t state_u32(StateReader *r)
++{
++    return ldl_le_p(state_take(r, 4));
++}
++
++/* An APIC register from a KVM register page: register n at n * 16. */
++static uint32_t lapic_reg(const uint8_t *page, int n)
++{
++    return ldl_le_p(page + n * 16);
++}
++
++/* The local APIC from its register page, as QEMU's KVM code reads one
++ * (hw/i386/kvm/apic.c kvm_get_apic_state). */
++static void load_lapic(RewindMachineState *s, const uint8_t *page)
++{
++    APICCommonState *a = APIC_COMMON(s->cpu->apic_state);
++
++    a->id = lapic_reg(page, 0x2) >> 24;
++    a->tpr = lapic_reg(page, 0x8);
++    a->arb_id = lapic_reg(page, 0x9);
++    a->log_dest = lapic_reg(page, 0xd) >> 24;
++    a->dest_mode = lapic_reg(page, 0xe) >> 28;
++    a->spurious_vec = lapic_reg(page, 0xf);
++    for (int i = 0; i < 8; i++) {
++        a->isr[i] = lapic_reg(page, 0x10 + i);
++        a->tmr[i] = lapic_reg(page, 0x18 + i);
++        a->irr[i] = lapic_reg(page, 0x20 + i);
++    }
++    a->esr = lapic_reg(page, 0x28);
++    a->icr[0] = lapic_reg(page, 0x30);
++    a->icr[1] = lapic_reg(page, 0x31);
++    for (int i = 0; i < APIC_LVT_NB; i++) {
++        a->lvt[i] = lapic_reg(page, 0x32 + i);
++    }
++    a->initial_count = lapic_reg(page, 0x38);
++    a->divide_conf = lapic_reg(page, 0x3e);
++    if (a->initial_count) {
++        /* The guest never arms the APIC's timer, which counts host time. */
++        error_report("rewind: the keyframe's APIC timer is armed");
++        exit(1);
++    }
++}
++
++/* An MSR a keyframe holds, into what keeps it here. */
++static void load_msr(RewindMachineState *s, uint32_t index, uint64_t value)
++{
++    CPUX86State *env = &s->cpu->env;
++
++    switch (index) {
++    case MSR_STAR_IDX:
++        env->star = value;
++        return;
++    case MSR_LSTAR_IDX:
++        env->lstar = value;
++        return;
++    case MSR_CSTAR_IDX:
++        env->cstar = value;
++        return;
++    case MSR_FMASK_IDX:
++        env->fmask = value;
++        return;
++    case MSR_KGS_IDX:
++        env->kernelgsbase = value;
++        return;
++    case MSR_SYSENTER_CS:
++        env->sysenter_cs = value;
++        return;
++    case MSR_SYSENTER_ESP_IDX:
++        env->sysenter_esp = value;
++        return;
++    case MSR_SYSENTER_EIP:
++        env->sysenter_eip = value;
++        return;
++    case MSR_PAT:
++        env->pat = value;
++        return;
++    case MSR_MISC_ENABLE:
++        env->msr_ia32_misc_enable = value;
++        return;
++    case MSR_MTRR_DEF_TYPE:
++        env->mtrr_deftype = value;
++        return;
++    case MSR_MTRR_FIX64K:
++        env->mtrr_fixed[0] = value;
++        return;
++    case MSR_MTRR_FIX16K_80000:
++    case MSR_MTRR_FIX16K_A0000:
++        env->mtrr_fixed[index - MSR_MTRR_FIX16K_80000 + 1] = value;
++        return;
++    case MSR_DE_CFG:
++        s->de_cfg = value;
++        return;
++    case MSR_K7_HWCR:
++        s->hwcr = value;
++        return;
++    case MSR_VM_HSAVE_INDEX:
++        s->vm_hsave = value;
++        return;
++    case MSR_TSC_ADJUST_INDEX:
++        s->tsc_adjust = value;
++        return;
++    case MSR_POWER_CTL:
++        s->power_ctl = value;
++        return;
++    case MSR_MCG_STATUS:
++        s->mcg_status = value;
++        return;
++    default:
++        break;
++    }
++    if (index >= MSR_MTRR_FIX4K_FIRST && index <= MSR_MTRR_FIX4K_LAST) {
++        env->mtrr_fixed[index - MSR_MTRR_FIX4K_FIRST + 3] = value;
++        return;
++    }
++    if (index >= MSR_MTRR_VAR_FIRST && index <= MSR_MTRR_VAR_LAST) {
++        int i = (index - MSR_MTRR_VAR_FIRST) / 2;
++        if ((index - MSR_MTRR_VAR_FIRST) % 2) {
++            env->mtrr_var[i].mask = value;
++        } else {
++            env->mtrr_var[i].base = value;
++        }
++        return;
++    }
++    if (index >= MSR_MC_FIRST && index < MSR_MC_FIRST + 4 * MCE_BANKS) {
++        s->mce_banks[index - MSR_MC_FIRST] = value;
++        return;
++    }
++
++    /* The rest, the TSC among them, the guest cannot read here, or reads
++     * as KVM answers them whatever the keyframe says. */
++    if (getenv("REWIND_QEMU_MSRS")) {
++        fprintf(stderr, "rewind: keyframe MSR 0x%x = 0x%" PRIx64 " left out\n",
++                index, value);
++    }
++}
++
++static void load_state(RewindMachineState *s)
++{
++    CPUX86State *env = &s->cpu->env;
++    size_t len;
++    uint8_t *file = read_file(s->state_path, &len);
++    StateReader r = { file, file + len, s->state_path };
++    uint64_t regs[18], cr[7];
++    static const int gpr[16] = {
++        R_EAX, R_EBX, R_ECX, R_EDX, R_ESI, R_EDI, R_ESP, R_EBP,
++        8, 9, 10, 11, 12, 13, 14, 15,
++    };
++    static const int segs[6] = { R_ES, R_CS, R_SS, R_DS, R_FS, R_GS };
++    uint64_t rflags, armed, shared_set;
++    uint32_t count;
++    const uint8_t *lapic, *xsave;
++
++    if (memcmp(state_take(&r, 8), STATE_MAGIC, 8)) {
++        error_report("rewind: %s is not a portable keyframe", s->state_path);
++        exit(1);
++    }
++
++    /* The monitor. */
++    s->step = state_u64(&r);
++    s->now = state_u64(&r);
++    armed = state_u64(&r);
++    s->deadline = state_u64(&r);
++    s->armed = armed != 0;
++    shared_set = state_u64(&r);
++    s->shared = state_u64(&r);
++    s->have_shared = shared_set != 0;
++    s->epoch = state_u64(&r);
++
++    /* Registers; the arithmetic flags live apart from eflags in TCG. */
++    for (int i = 0; i < 18; i++) {
++        regs[i] = state_u64(&r);
++    }
++    for (int i = 0; i < 16; i++) {
++        env->regs[gpr[i]] = regs[i];
++    }
++    env->eip = regs[16];
++    rflags = regs[17];
++    CC_SRC = rflags & (CC_O | CC_S | CC_Z | CC_A | CC_P | CC_C);
++    CC_OP = CC_OP_EFLAGS;
++    env->df = 1 - (2 * ((rflags >> 10) & 1));
++    env->eflags = rflags & ~(CC_O | CC_S | CC_Z | CC_A | CC_P | CC_C | DF_MASK);
++
++    /* Control registers before the segments, whose caches depend on the
++     * mode they set. */
++    {
++        const uint8_t *seg_at = state_take(&r, 8 * 24);
++        uint64_t gdt_base = state_u64(&r);
++        uint32_t gdt_limit = state_u32(&r);
++        uint64_t idt_base;
++        uint32_t idt_limit;
++
++        state_u32(&r);
++        idt_base = state_u64(&r);
++        idt_limit = state_u32(&r);
++        state_u32(&r);
++        for (int i = 0; i < 7; i++) {
++            cr[i] = state_u64(&r);
++        }
++        cpu_load_efer(env, cr[5]);
++        cpu_x86_update_cr4(env, cr[3]);
++        cpu_x86_update_cr3(env, cr[2]);
++        cpu_x86_update_cr0(env, cr[0]);
++        env->cr[2] = cr[1];
++        cpu_set_apic_base(s->cpu->apic_state, cr[6]);
++        env->gdt.base = gdt_base;
++        env->gdt.limit = gdt_limit;
++        env->idt.base = idt_base;
++        env->idt.limit = idt_limit;
++        for (int i = 0; i < 8; i++) {
++            const uint8_t *e = seg_at + 24 * i;
++            uint64_t base = ldq_le_p(e);
++            uint32_t limit = ldl_le_p(e + 8), selector = ldl_le_p(e + 12);
++            uint32_t flags = ldl_le_p(e + 16);
++            SegmentCache *sc = i == 6 ? &env->ldt : &env->tr;
++
++            if (i < 6) {
++                cpu_x86_load_seg_cache(env, segs[i], selector, base, limit,
++                                       flags);
++                continue;
++            }
++            sc->selector = selector;
++            sc->base = base;
++            sc->limit = limit;
++            sc->flags = flags;
++        }
++        cpu_set_apic_tpr(s->cpu->apic_state, cr[4]);
++    }
++
++    env->xcr0 = state_u64(&r);
++    for (int i = 0; i < 4; i++) {
++        env->dr[i] = state_u64(&r);
++    }
++    env->dr[6] = state_u64(&r);
++    env->dr[7] = state_u64(&r);
++    if (state_u32(&r)) {
++        env->hflags |= HF_INHIBIT_IRQ_MASK;
++    }
++    state_u32(&r);
++
++    lapic = state_take(&r, LAPIC_BYTES);
++    xsave = state_take(&r, XSAVE_BYTES);
++    x86_cpu_xrstor_all_areas(s->cpu, xsave, XSAVE_BYTES);
++
++    count = state_u32(&r);
++    for (uint32_t i = 0; i < count; i++) {
++        uint32_t index = state_u32(&r);
++        state_u32(&r);
++        load_msr(s, index, state_u64(&r));
++    }
++
++    /* After the base MSR and TPR, which reset parts of it. */
++    load_lapic(s, lapic);
++
++    count = state_u32(&r);
++    for (uint32_t i = 0; i < count; i++) {
++        uint64_t page = state_u32(&r);
++        ram_write(page * REWIND_PAGE, state_take(&r, REWIND_PAGE),
++                  REWIND_PAGE);
++    }
++    g_free(file);
++
++    /* The schedule goes on from the keyframe's step, and the step log
++     * tells the encoders where it starts. */
++    log_u8(s, REWIND_LOG_RESUME);
++    log_u64(s, s->step);
++    log_u64(s, s->now);
++    log_u8(s, s->have_shared);
++    apic_poll_irq(s->cpu->apic_state);
++
++    /* A read at the keyframe's own step asks before the guest runs. */
++    if (s->until && s->until < s->step) {
++        error_report("rewind: step %" PRIu64 " is before the keyframe's, %"
++                     PRIu64, s->until, s->step);
++        exit(1);
++    }
++    if (s->request && s->until == s->step) {
++        request_inspection(s);
++    }
++}
++
+ static void rewind_reset(void *opaque)
+ {
+     RewindMachineState *s = opaque;
+@@ -1419,6 +1802,10 @@ static void rewind_reset(void *opaque)
+     /* LINT0 as ExtINT and LINT1 as NMI, as cpu.rs setup_lapic leaves them. */
+     apic->lvt[APIC_LVT_LINT0] = (apic->lvt[APIC_LVT_LINT0] & ~0x700) | (7 << 8);
+     apic->lvt[APIC_LVT_LINT1] = (apic->lvt[APIC_LVT_LINT1] & ~0x700) | (4 << 8);
++    if (s->state_path) {
++        load_state(s);
++        return;
++    }
+     boot(s);
+ }
+ 
+@@ -1469,7 +1856,7 @@ static void parse_inputs(RewindMachineState *s)
+         error_report("rewind: the machine needs log=<path> for its step log");
+         exit(1);
+     }
+-    if (!MACHINE(s)->kernel_filename) {
++    if (!MACHINE(s)->kernel_filename && !s->state_path) {
+         error_report("rewind: the machine needs -kernel <vmlinux>");
+         exit(1);
+     }
+@@ -1490,6 +1877,14 @@ static void rewind_machine_init(MachineState *ms)
+         exit(1);
+     }
+     log_bytes(s, REWIND_LOG_MAGIC, 8);
++    if (s->inspect_path) {
++        s->request = read_file(s->inspect_path, &s->request_len);
++        if (s->request_len > REQUEST_MAX || !s->until) {
++            error_report("rewind: an inspection needs until= and a request "
++                         "of at most %d bytes", REQUEST_MAX);
++            exit(1);
++        }
++    }
+     if (s->schedule_path) {
+         size_t len;
+         uint8_t *file = read_file(s->schedule_path, &len);
+@@ -1597,6 +1992,9 @@ STR_PROP(vendor, "vendor")
+ STR_PROP(image, "image")
+ STR_PROP(log_path, "log")
+ STR_PROP(schedule_path, "schedule")
++STR_PROP(inspect_path, "inspect")
++STR_PROP(stop_mark, "stop-mark")
++STR_PROP(state_path, "state")
+ #undef STR_PROP
+ 
+ static bool get_extras(Object *o, Error **e)
+@@ -1645,6 +2043,12 @@ static void rewind_machine_class_init(ObjectClass *oc, void *data)
+     object_class_property_add_str(oc, "log", get_log_path, set_log_path);
+     object_class_property_add_str(oc, "schedule", get_schedule_path,
+                                   set_schedule_path);
++    object_class_property_add_str(oc, "inspect", get_inspect_path,
++                                  set_inspect_path);
++    object_class_property_add_str(oc, "stop-mark", get_stop_mark,
++                                  set_stop_mark);
++    object_class_property_add_str(oc, "state", get_state_path,
++                                  set_state_path);
+     object_class_property_add_bool(oc, "extras", get_extras, set_extras);
+ }
+ 
+diff --git a/include/hw/i386/rewind.h b/include/hw/i386/rewind.h
+index b2166d7..c294658 100644
+--- a/include/hw/i386/rewind.h
++++ b/include/hw/i386/rewind.h
+@@ -51,6 +51,12 @@ enum RewindLogTag {
+      * An IO entry after it, the log's last, holds what the stop drained.
+      */
+     REWIND_LOG_END = 5,
++    /*
++     * The machine starts from a keyframe, not from boot: u64 step, u64
++     * clock, u8 whether the guest had named its shared page. The first
++     * entry when there is one.
++     */
++    REWIND_LOG_RESUME = 6,
+ };
+ 
+ /* Why the machine stopped, as rewind-vmm's Stop and Outcome name it. */

@@ -734,6 +734,7 @@ dependencies = [
  "blake3",
  "clap",
  "rewind-core",
+ "rewind-init",
  "rewind-trace",
  "rewind-vmm",
  "tempfile",

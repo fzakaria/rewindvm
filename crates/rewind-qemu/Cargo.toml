@@ -14,6 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 rewind-core = { path = "../rewind-core" }
+rewind-init = { path = "../rewind-init", default-features = false }
 rewind-trace = { path = "../rewind-trace" }
 rewind-vmm = { path = "../rewind-vmm" }
 anyhow = "1"

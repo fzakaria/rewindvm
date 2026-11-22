@@ -51,7 +51,23 @@ struct Args {
     /// browser, instead of running QEMU.
     #[arg(long)]
     log: Option<PathBuf>,
+    /// Start from the run's latest keyframe at or before this step, made
+    /// by its recording or kept by a look, instead of from boot.
+    #[arg(long)]
+    from: Option<u64>,
+    /// Read this file as it was at step --at, as `rewind cat` does: the
+    /// machine runs to the step, asks the guest for the file and stops
+    /// once the guest has answered, and the file goes to standard output.
+    #[arg(long, requires = "at")]
+    cat: Option<String>,
+    /// The step to read --cat at.
+    #[arg(long)]
+    at: Option<u64>,
 }
+
+/// The mark the guest's inspecting process ends its answer with
+/// (rewind-init's Mark::InspectEnd), which stops the machine.
+const INSPECT_END_MARK: &str = "rewind-inspect-end";
 
 /// Where the browser build finds the files --prepare writes.
 const BROWSER_DIR: &str = "/rewind";
@@ -126,25 +142,73 @@ fn main() -> Result<()> {
         std::fs::write(work.join(SCHEDULE), &schedule)?;
     }
 
-    // A replay of a run the host's time limit stopped stops where it did.
-    let until = run
-        .manifest
-        .outcome
-        .as_ref()
-        .filter(|o| o.stop.timeout().is_some())
-        .map_or(0, |o| o.step);
+    // A replay of a run the host's time limit stopped stops where it did,
+    // and a read stops at its step to ask the guest.
+    let until = match args.at {
+        Some(at) => at,
+        None => run
+            .manifest
+            .outcome
+            .as_ref()
+            .filter(|o| o.stop.timeout().is_some())
+            .map_or(0, |o| o.step),
+    };
+    if let Some(path) = &args.cat {
+        let request = rewind_init::InspectRequest::Cat {
+            pid: None,
+            path: path.clone(),
+        };
+        let mut bytes = Vec::new();
+        for arg in request.args() {
+            bytes.extend_from_slice(arg.as_bytes());
+            bytes.push(0);
+        }
+        std::fs::write(work.join(REQUEST), bytes)?;
+    }
+    // The keyframe to start from, in the form the QEMU machine loads.
+    let resumed = match args.from {
+        Some(step) => {
+            let keyframes = run.keyframes()?;
+            let at = keyframes
+                .steps()
+                .into_iter()
+                .filter(|s| *s <= step)
+                .max()
+                .with_context(|| format!("the run has no keyframe at or before step {step}"))?;
+            let home = rewind_core::home::Home::open()?;
+            let store = rewind_core::run::Store::open(&home.store())?;
+            let chain = keyframes.chain(at)?;
+            let span = rewind_vmm::layout::ram_span(config.mem_bytes) as usize;
+            let state = rewind_vmm::portable::encode(
+                &chain,
+                &rewind_core::keyframes::ReadPages(&store),
+                span / rewind_vmm::layout::PAGE_SIZE,
+            )?;
+            std::fs::write(work.join(STATE), &state)?;
+            eprintln!(
+                "starting from the keyframe at step {at}, {} bytes",
+                state.len()
+            );
+            Some(at)
+        }
+        None => None,
+    };
     let launch = Launch {
         model,
         vendor,
         until,
         perturbed,
+        resumed: resumed.is_some(),
+        inspects: args.cat.is_some(),
         config: &config,
     };
 
     // For a browser: the files beside its arguments, which name them
     // where the page puts them.
     if let Some(dir) = &args.prepare {
-        link(&config.kernel, &dir.join(KERNEL))?;
+        if resumed.is_none() {
+            link(&config.kernel, &dir.join(KERNEL))?;
+        }
         if let Some(image) = &config.image {
             link(image, &dir.join(IMAGE))?;
         }
@@ -175,17 +239,44 @@ fn main() -> Result<()> {
             if !status.success() {
                 bail!("{} failed: {status}", args.qemu.display());
             }
-            println!("QEMU ran {:.2} s", wall.as_secs_f64());
+            eprintln!("QEMU ran {:.2} s", wall.as_secs_f64());
             work.join(LOG)
         }
     };
 
     // The trace, made by the encoders the KVM machine uses.
     let bytes = std::fs::read(&log).with_context(|| format!("reading {}", log.display()))?;
-    let encoded = step_log::encode(&bytes)?;
+    let encoded = step_log::encode(&bytes, run.records()?)?;
+
+    // A read answers with the file; its trace goes another way than the
+    // recording's from the step on, so there is nothing to compare.
+    if args.cat.is_some() {
+        let answer = rewind_trace::inspected::answer(&encoded.records)
+            .context("the machine stopped before the guest answered")?;
+        if answer.status != rewind_init::InspectStatus::Done {
+            bail!(
+                "the guest could not read the file ({:?}): {}",
+                answer.status,
+                String::from_utf8_lossy(&answer.stderr).trim()
+            );
+        }
+        use std::io::Write as _;
+        std::io::stdout().write_all(&answer.stdout)?;
+        return Ok(());
+    }
+
+    // From a keyframe, the replay's trace is the recording's up to it.
+    let mut records = match resumed {
+        Some(at) => {
+            let recorded = run.records()?;
+            recorded[..recorded.partition_point(|(s, _)| *s <= at)].to_vec()
+        }
+        None => Vec::new(),
+    };
+    records.extend(encoded.records.iter().cloned());
     let trace_path = work.join("trace.bin");
     let mut writer = TraceWriter::new(std::fs::File::create(&trace_path)?);
-    for (step, record) in &encoded.records {
+    for (step, record) in &records {
         writer.record(*step, record)?;
     }
     writer.finish()?;
@@ -207,7 +298,7 @@ fn main() -> Result<()> {
         Some(recorded) => println!("trace_hash {hash}, recording {recorded}"),
         None => println!("trace_hash {hash}; the recording has none"),
     }
-    report_divergence(run.trace()?, run.records()?, &encoded.records)?;
+    report_divergence(run.trace()?, run.records()?, &records)?;
     std::process::exit(1);
 }
 
@@ -217,6 +308,8 @@ const INITRD: &str = "initrd";
 const IMAGE: &str = "image.erofs";
 const SCHEDULE: &str = "schedule";
 const LOG: &str = "steps.log";
+const STATE: &str = "state";
+const REQUEST: &str = "request";
 
 /// What QEMU's arguments are made from.
 struct Launch<'a> {
@@ -224,6 +317,10 @@ struct Launch<'a> {
     vendor: Vendor,
     until: u64,
     perturbed: bool,
+    /// Whether the machine starts from a portable keyframe.
+    resumed: bool,
+    /// Whether the machine asks the guest for a file at the until step.
+    inspects: bool,
     config: &'a rewind_vmm::Config,
 }
 
@@ -254,7 +351,29 @@ impl Launch<'_> {
         if self.perturbed {
             let _ = write!(machine, ",schedule={}", path(SCHEDULE));
         }
-        [
+        if self.inspects {
+            let _ = write!(
+                machine,
+                ",inspect={},stop-mark={INSPECT_END_MARK}",
+                path(REQUEST)
+            );
+        }
+        // A machine from a keyframe boots nothing: its memory holds the
+        // kernel and the initrd's files.
+        let boot: Vec<String> = if self.resumed {
+            let _ = write!(machine, ",state={}", path(STATE));
+            Vec::new()
+        } else {
+            vec![
+                "-kernel".into(),
+                path(KERNEL),
+                "-initrd".into(),
+                path(INITRD),
+                "-append".into(),
+                config.cmdline.clone(),
+            ]
+        };
+        let mut args: Vec<String> = [
             "-machine",
             &machine,
             "-accel",
@@ -263,19 +382,15 @@ impl Launch<'_> {
             "1",
             "-m",
             &format!("{}M", config.mem_bytes >> 20),
-            "-kernel",
-            &path(KERNEL),
-            "-initrd",
-            &path(INITRD),
-            "-append",
-            &config.cmdline,
             "-nodefaults",
             "-display",
             "none",
             "-no-reboot",
         ]
         .map(str::to_string)
-        .to_vec()
+        .to_vec();
+        args.extend(boot);
+        args
     }
 }
 
