@@ -20,6 +20,7 @@ pub mod kvm;
 pub mod layout;
 pub mod memory;
 pub mod pmu;
+pub mod portable;
 pub mod pv;
 pub mod snapshot;
 pub mod state;
