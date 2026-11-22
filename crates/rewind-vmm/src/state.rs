@@ -95,6 +95,7 @@ const MSR_NAMES: &[(u32, &str)] = &[
     (0x175, "SYSENTER_ESP"),
     (0x176, "SYSENTER_EIP"),
     (0x277, "PAT"),
+    (0x345, "PERF_CAPABILITIES"),
     (0x6e0, "TSC_DEADLINE"),
     (0xc000_0080, "EFER"),
     (0xc000_0081, "STAR"),

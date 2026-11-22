@@ -722,6 +722,13 @@ need no protection from each other, and KVM still guards the host. With the
 fixed CPU, the mitigations the kernel had chosen more than doubled a build's
 time.
 
+KVM starts the MSRs that describe a CPU at the most the host supports, whatever
+the VM was given. `IA32_PERF_CAPABILITIES` describes counters the VM does not
+have, so the monitor sets it to 0 on a new vCPU, before a boot or a restore. On
+an Intel host KVM starts it at the host's LBR format and full-width counter
+bits. A Linux before 6.13 then refuses that same value for a vCPU without
+counters, so a keyframe that held it could not be restored.
+
 ### The monitor
 
 `rewind-vmm` is a few hundred lines on top of rust-vmm's `kvm-ioctls`. It

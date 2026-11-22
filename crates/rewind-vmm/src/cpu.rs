@@ -152,6 +152,63 @@ pub fn setup_msrs(vcpu: &VcpuFd) -> Result<()> {
     Ok(())
 }
 
+/// IA32_PERF_CAPABILITIES, which tells a guest what its performance
+/// counters can do.
+pub(crate) const IA32_PERF_CAPABILITIES: u32 = 0x345;
+
+/// The MSRs that describe the CPU to the guest, each with the value the
+/// VM's CPU has. KVM starts every one at the most the host supports,
+/// whatever the VM was given.
+///
+/// IA32_PERF_CAPABILITIES is 0: the VM has no counters (see
+/// kvm::turn_off_counters). On an Intel host KVM starts the MSR at the
+/// host's LBR format and full-width counter bits all the same, and a
+/// Linux before 6.13 refuses to be given any value but 0 for a vCPU
+/// without counters, the value it started the MSR at included. A
+/// keyframe would hold that value, and no restore could set it.
+const CAPABILITY_MSRS: &[(u32, u64)] = &[(IA32_PERF_CAPABILITIES, 0)];
+
+/// The MSRs of [`CAPABILITY_MSRS`] to set on a host whose KVM lists
+/// `listed`, with their values. A KVM that does not list one has no such
+/// MSR to set.
+fn capability_msrs(listed: &[u32]) -> Vec<(u32, u64)> {
+    CAPABILITY_MSRS
+        .iter()
+        .copied()
+        .filter(|(index, _)| listed.contains(index))
+        .collect()
+}
+
+/// Sets the MSRs that describe the CPU to what the VM's CPU has, on a
+/// vCPU that has not run: KVM takes no other value for them once the vCPU
+/// has. A machine that boots and one restored from a keyframe both start
+/// here, so a keyframe holds these values on every host.
+pub fn setup_capability_msrs(kvm: &Kvm, vcpu: &VcpuFd) -> Result<()> {
+    let listed = kvm.get_msr_index_list()?;
+    let entries: Vec<kvm_msr_entry> = capability_msrs(listed.as_slice())
+        .into_iter()
+        .map(|(index, data)| kvm_msr_entry {
+            index,
+            data,
+            ..Default::default()
+        })
+        .collect();
+    if entries.is_empty() {
+        return Ok(());
+    }
+
+    let msrs = Msrs::from_entries(&entries).context("building MSR list")?;
+    let n = vcpu.set_msrs(&msrs)?;
+    if n != entries.len() {
+        anyhow::bail!(
+            "KVM refused {} as {:#x} on a new vCPU",
+            crate::state::msr_name(entries[n].index),
+            entries[n].data
+        );
+    }
+    Ok(())
+}
+
 /// LINT0 as ExtINT and LINT1 as NMI, the way firmware leaves the local APIC
 /// for an operating system.
 pub fn setup_lapic(vcpu: &VcpuFd) -> Result<()> {
@@ -773,6 +830,19 @@ mod tests {
         ext1_ecx: PREFETCHW,
         ..NOTHING
     };
+
+    #[test]
+    fn a_vm_without_counters_reports_no_perf_capabilities() {
+        // Where KVM lists IA32_PERF_CAPABILITIES, a new vCPU's is set to
+        // 0, what a VM with no counters has. Where KVM does not list the
+        // MSR, nothing is set.
+        const LSTAR: u32 = 0xc000_0082;
+        assert_eq!(
+            capability_msrs(&[LSTAR, IA32_PERF_CAPABILITIES]),
+            [(IA32_PERF_CAPABILITIES, 0)]
+        );
+        assert_eq!(capability_msrs(&[LSTAR]), []);
+    }
 
     #[test]
     fn the_v3_model_is_pinned() {

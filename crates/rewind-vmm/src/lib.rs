@@ -539,6 +539,7 @@ impl Machine {
 
         let mut vcpu = vm.create_vcpu(0).context("creating the vCPU")?;
         vcpu.set_cpuid2(&cpu::cpuid(&kvm, config.cpu)?)?;
+        cpu::setup_capability_msrs(&kvm, &vcpu)?;
         let immediate_exit = std::ptr::addr_of_mut!(vcpu.get_kvm_run().immediate_exit);
 
         Ok(Machine {
@@ -1978,7 +1979,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod dirty_log_tests {
+mod machine_tests {
     use super::*;
 
     /// A machine without the dirty log registers its RAM without KVM's
@@ -1987,6 +1988,25 @@ mod dirty_log_tests {
     fn the_dirty_log_sets_the_ram_slots_flag() {
         assert_eq!(DirtyLog::On.slot_flags(), KVM_MEM_LOG_DIRTY_PAGES);
         assert_eq!(DirtyLog::Off.slot_flags(), 0);
+    }
+
+    /// The smallest machine, with no kernel, that shows the guest `cpu`.
+    fn config(cpu: CpuModel) -> Config {
+        Config {
+            kernel: PathBuf::new(),
+            initrd: Vec::new(),
+            image: None,
+            mem_bytes: 64 << 20,
+            cmdline: String::new(),
+            seed: [0; 32],
+            epoch: 0,
+            quantum: 1,
+            schedule: Schedule::default(),
+            cpu,
+            clock: ClockSource::Exits,
+            preemption: Preemption::AtExits,
+            extras: Extras::Absent,
+        }
     }
 
     /// A machine created without the dirty log refuses to list dirty
@@ -2001,26 +2021,43 @@ mod dirty_log_tests {
             eprintln!("skipped: /dev/kvm does not open");
             return;
         };
-        let config = Config {
-            kernel: PathBuf::new(),
-            initrd: Vec::new(),
-            image: None,
-            mem_bytes: 64 << 20,
-            cmdline: String::new(),
-            seed: [0; 32],
-            epoch: 0,
-            quantum: 1,
-            schedule: Schedule::default(),
-            cpu: cpu::default_model(&kvm).unwrap(),
-            clock: ClockSource::Exits,
-            preemption: Preemption::AtExits,
-            extras: Extras::Absent,
-        };
+        let config = config(cpu::default_model(&kvm).unwrap());
         let mut off = Machine::create(&config, DirtyLog::Off).unwrap();
         let err = off.dirty_pages().unwrap_err();
         assert!(err.to_string().contains("without a dirty log"), "{err}");
 
         let mut on = Machine::create(&config, DirtyLog::On).unwrap();
         assert!(on.dirty_pages().unwrap().is_empty());
+    }
+
+    /// A machine that has not run takes back the state read from it, and
+    /// its vCPU reports no performance counter capabilities, under the
+    /// default CPU model and the host's. A keyframe holds every MSR KVM
+    /// reads, and a restore sets each one, so an MSR that KVM starts at a
+    /// value it then refuses to be given fails every restore: an Intel
+    /// host's IA32_PERF_CAPABILITIES on a Linux before 6.13 is one. Needs
+    /// /dev/kvm; without one the test says so and passes.
+    #[test]
+    fn a_new_machine_takes_back_the_state_read_from_it() {
+        let Ok(kvm) = kvm::open() else {
+            eprintln!("skipped: /dev/kvm does not open");
+            return;
+        };
+        for model in [cpu::default_model(&kvm).unwrap(), CpuModel::Host] {
+            let mut m = Machine::create(&config(model), DirtyLog::Off).unwrap();
+            let (cpu, irqchips, devices) = m.state().unwrap();
+
+            // The VM has no counters, so the MSR is 0 wherever KVM reads it.
+            let capabilities = cpu
+                .msrs
+                .iter()
+                .find(|(index, _)| *index == cpu::IA32_PERF_CAPABILITIES);
+            if let Some((_, value)) = capabilities {
+                assert_eq!(*value, 0, "{model:?}");
+            }
+
+            m.apply_state(&cpu, &irqchips, &devices)
+                .unwrap_or_else(|e| panic!("{model:?}: {e:#}"));
+        }
     }
 }
