@@ -41,6 +41,7 @@ pub mod schedule;
 pub mod sdk;
 pub mod searching;
 pub mod slices;
+pub mod step_log;
 pub mod stop;
 pub mod summary;
 pub mod switches;
