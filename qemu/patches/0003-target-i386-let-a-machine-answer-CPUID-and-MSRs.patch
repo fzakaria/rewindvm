@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Farid Zakaria <farid.m.zakaria@gmail.com>
 Date: Sat, 21 Nov 2026 17:36:50 -0800
-Subject: [PATCH 2/3] target/i386: let a machine answer CPUID and MSRs
+Subject: [PATCH] target/i386: let a machine answer CPUID and MSRs
 
 A machine that must show the guest what another hypervisor shows can
 answer CPUID itself, and can see every RDMSR and WRMSR first: answer

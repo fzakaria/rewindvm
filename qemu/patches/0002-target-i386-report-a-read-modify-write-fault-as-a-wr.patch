@@ -1,0 +1,221 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Farid Zakaria <farid.m.zakaria@gmail.com>
+Date: Sat, 21 Nov 2026 19:32:12 -0800
+Subject: [PATCH] target/i386: report a read-modify-write fault as a write
+
+A CPU reads a read-modify-write instruction's memory destination for
+ownership, so a page fault there carries the W bit in its error code.
+TCG loads the destination with a plain load first, and the fault it
+raises says read. A guest that reports the error code, as Linux does
+for a segfault, then says another thing than it does on hardware:
+addl $1, 0x108(%rax) on a NULL pointer printed error 4 under TCG and
+error 6 under KVM.
+
+Unlocked ALU operations other than CMP, INC, DEC, NOT, NEG, the
+shifts and rotates, XADD, CMPXCHG and BTS, BTR and BTC now check the
+destination for a write before they load it. Locked forms use atomic
+operations, which already do.
+---
+ target/i386/helper.h          |  1 +
+ target/i386/tcg/misc_helper.c | 20 +++++++++++++
+ target/i386/tcg/translate.c   | 53 ++++++++++++++++++++++++++---------
+ 3 files changed, 61 insertions(+), 13 deletions(-)
+
+diff --git a/target/i386/helper.h b/target/i386/helper.h
+index 53521f8..8256321 100644
+--- a/target/i386/helper.h
++++ b/target/i386/helper.h
+@@ -94,6 +94,7 @@ DEF_HELPER_FLAGS_2(hlt, TCG_CALL_NO_WG, noreturn, env, int)
+ DEF_HELPER_FLAGS_2(monitor, TCG_CALL_NO_WG, void, env, tl)
+ DEF_HELPER_FLAGS_2(mwait, TCG_CALL_NO_WG, noreturn, env, int)
+ DEF_HELPER_1(rdmsr, void, env)
++DEF_HELPER_FLAGS_4(probe_rmw, TCG_CALL_NO_WG, void, env, tl, i32, i32)
+ DEF_HELPER_1(wrmsr, void, env)
+ DEF_HELPER_FLAGS_2(read_crN, TCG_CALL_NO_RWG, tl, env, int)
+ DEF_HELPER_FLAGS_3(write_crN, TCG_CALL_NO_RWG, void, env, int, tl)
+diff --git a/target/i386/tcg/misc_helper.c b/target/i386/tcg/misc_helper.c
+index babff06..a28a2d9 100644
+--- a/target/i386/tcg/misc_helper.c
++++ b/target/i386/tcg/misc_helper.c
+@@ -47,6 +47,26 @@ void helper_into(CPUX86State *env, int next_eip_addend)
+     }
+ }
+ 
++/*
++ * The write check of a read-modify-write instruction, before its load:
++ * a CPU reads the destination for ownership, so a fault there is a write
++ * fault, with the W bit in its error code, where TCG's load alone would
++ * report a read.
++ */
++void helper_probe_rmw(CPUX86State *env, target_ulong addr, uint32_t size,
++                      uint32_t mmu_idx)
++{
++    uintptr_t ra = GETPC();
++    target_ulong first = TARGET_PAGE_SIZE - (addr & ~TARGET_PAGE_MASK);
++
++    if (size <= first) {
++        probe_write(env, addr, size, mmu_idx, ra);
++        return;
++    }
++    probe_write(env, addr, first, mmu_idx, ra);
++    probe_write(env, addr + first, size - first, mmu_idx, ra);
++}
++
+ void helper_cpuid(CPUX86State *env)
+ {
+     uint32_t eax, ebx, ecx, edx;
+diff --git a/target/i386/tcg/translate.c b/target/i386/tcg/translate.c
+index 32c4a24..123308e 100644
+--- a/target/i386/tcg/translate.c
++++ b/target/i386/tcg/translate.c
+@@ -534,6 +534,17 @@ static inline void gen_op_ld_v(DisasContext *s, int idx, TCGv t0, TCGv a0)
+     tcg_gen_qemu_ld_tl(t0, a0, s->mem_index, idx | MO_LE);
+ }
+ 
++/*
++ * The load of a read-modify-write instruction's memory destination:
++ * checked for a write first, as the CPU does.
++ */
++static void gen_op_ld_rmw(DisasContext *s, int idx, TCGv t0, TCGv a0)
++{
++    gen_helper_probe_rmw(tcg_env, a0, tcg_constant_i32(1 << (idx & MO_SIZE)),
++                         tcg_constant_i32(s->mem_index));
++    gen_op_ld_v(s, idx, t0, a0);
++}
++
+ static inline void gen_op_st_v(DisasContext *s, int idx, TCGv t0, TCGv a0)
+ {
+     tcg_gen_qemu_st_tl(t0, a0, s->mem_index, idx | MO_LE);
+@@ -1489,7 +1500,11 @@ static void gen_op(DisasContext *s1, int op, MemOp ot, int d)
+         }
+         gen_op_mov_v_reg(s1, ot, s1->T0, d);
+     } else if (!(s1->prefix & PREFIX_LOCK)) {
+-        gen_op_ld_v(s1, ot, s1->T0, s1->A0);
++        if (op == OP_CMPL) {
++            gen_op_ld_v(s1, ot, s1->T0, s1->A0);
++        } else {
++            gen_op_ld_rmw(s1, ot, s1->T0, s1->A0);
++        }
+     }
+     switch(op) {
+     case OP_ADCL:
+@@ -1605,7 +1620,7 @@ static void gen_inc(DisasContext *s1, MemOp ot, int d, int c)
+         if (d != OR_TMP0) {
+             gen_op_mov_v_reg(s1, ot, s1->T0, d);
+         } else {
+-            gen_op_ld_v(s1, ot, s1->T0, s1->A0);
++            gen_op_ld_rmw(s1, ot, s1->T0, s1->A0);
+         }
+         tcg_gen_addi_tl(s1->T0, s1->T0, (c > 0 ? 1 : -1));
+         gen_op_st_rm_T0_A0(s1, ot, d);
+@@ -1665,7 +1680,7 @@ static void gen_shift_rm_T1(DisasContext *s, MemOp ot, int op1,
+ 
+     /* load */
+     if (op1 == OR_TMP0) {
+-        gen_op_ld_v(s, ot, s->T0, s->A0);
++        gen_op_ld_rmw(s, ot, s->T0, s->A0);
+     } else {
+         gen_op_mov_v_reg(s, ot, s->T0, op1);
+     }
+@@ -1701,7 +1716,7 @@ static void gen_shift_rm_im(DisasContext *s, MemOp ot, int op1, int op2,
+ 
+     /* load */
+     if (op1 == OR_TMP0)
+-        gen_op_ld_v(s, ot, s->T0, s->A0);
++        gen_op_ld_rmw(s, ot, s->T0, s->A0);
+     else
+         gen_op_mov_v_reg(s, ot, s->T0, op1);
+ 
+@@ -1741,7 +1756,7 @@ static void gen_rot_rm_T1(DisasContext *s, MemOp ot, int op1, int is_right)
+ 
+     /* load */
+     if (op1 == OR_TMP0) {
+-        gen_op_ld_v(s, ot, s->T0, s->A0);
++        gen_op_ld_rmw(s, ot, s->T0, s->A0);
+     } else {
+         gen_op_mov_v_reg(s, ot, s->T0, op1);
+     }
+@@ -1825,7 +1840,7 @@ static void gen_rot_rm_im(DisasContext *s, MemOp ot, int op1, int op2,
+ 
+     /* load */
+     if (op1 == OR_TMP0) {
+-        gen_op_ld_v(s, ot, s->T0, s->A0);
++        gen_op_ld_rmw(s, ot, s->T0, s->A0);
+     } else {
+         gen_op_mov_v_reg(s, ot, s->T0, op1);
+     }
+@@ -1903,7 +1918,7 @@ static void gen_rotc_rm_T1(DisasContext *s, MemOp ot, int op1,
+ 
+     /* load */
+     if (op1 == OR_TMP0)
+-        gen_op_ld_v(s, ot, s->T0, s->A0);
++        gen_op_ld_rmw(s, ot, s->T0, s->A0);
+     else
+         gen_op_mov_v_reg(s, ot, s->T0, op1);
+ 
+@@ -1959,7 +1974,7 @@ static void gen_shiftd_rm_T1(DisasContext *s, MemOp ot, int op1,
+ 
+     /* load */
+     if (op1 == OR_TMP0) {
+-        gen_op_ld_v(s, ot, s->T0, s->A0);
++        gen_op_ld_rmw(s, ot, s->T0, s->A0);
+     } else {
+         gen_op_mov_v_reg(s, ot, s->T0, op1);
+     }
+@@ -3347,7 +3362,11 @@ static bool disas_insn(DisasContext *s, CPUState *cpu)
+             /* For those below that handle locked memory, don't load here.  */
+             if (!(s->prefix & PREFIX_LOCK)
+                 || op != 2) {
+-                gen_op_ld_v(s, ot, s->T0, s->A0);
++                if (op == 2 || op == 3) {
++                    gen_op_ld_rmw(s, ot, s->T0, s->A0);
++                } else {
++                    gen_op_ld_v(s, ot, s->T0, s->A0);
++                }
+             }
+         } else {
+             gen_op_mov_v_reg(s, ot, s->T0, rm);
+@@ -3812,7 +3831,7 @@ static bool disas_insn(DisasContext *s, CPUState *cpu)
+                                             s->mem_index, ot | MO_LE);
+                 tcg_gen_add_tl(s->T0, s->T0, s->T1);
+             } else {
+-                gen_op_ld_v(s, ot, s->T1, s->A0);
++                gen_op_ld_rmw(s, ot, s->T1, s->A0);
+                 tcg_gen_add_tl(s->T0, s->T0, s->T1);
+                 gen_op_st_v(s, ot, s->T0, s->A0);
+             }
+@@ -3862,7 +3881,7 @@ static bool disas_insn(DisasContext *s, CPUState *cpu)
+                     tcg_gen_movcond_tl(TCG_COND_EQ, dest, oldv, cmpv, newv, dest);
+                 } else {
+                     gen_lea_modrm(env, s, modrm);
+-                    gen_op_ld_v(s, ot, oldv, s->A0);
++                    gen_op_ld_rmw(s, ot, oldv, s->A0);
+ 
+                     /*
+                      * Perform an unconditional store cycle like physical cpu;
+@@ -5287,7 +5306,11 @@ static bool disas_insn(DisasContext *s, CPUState *cpu)
+             s->rip_offset = 1;
+             gen_lea_modrm(env, s, modrm);
+             if (!(s->prefix & PREFIX_LOCK)) {
+-                gen_op_ld_v(s, ot, s->T0, s->A0);
++                if (op == 4) {
++                    gen_op_ld_v(s, ot, s->T0, s->A0);
++                } else {
++                    gen_op_ld_rmw(s, ot, s->T0, s->A0);
++                }
+             }
+         } else {
+             gen_op_mov_v_reg(s, ot, s->T0, rm);
+@@ -5326,7 +5349,11 @@ static bool disas_insn(DisasContext *s, CPUState *cpu)
+             tcg_gen_add_tl(s->A0, gen_lea_modrm_1(s, a, false), s->tmp0);
+             gen_lea_v_seg(s, s->aflag, s->A0, a.def_seg, s->override);
+             if (!(s->prefix & PREFIX_LOCK)) {
+-                gen_op_ld_v(s, ot, s->T0, s->A0);
++                if (op == 0) {
++                    gen_op_ld_v(s, ot, s->T0, s->A0);
++                } else {
++                    gen_op_ld_rmw(s, ot, s->T0, s->A0);
++                }
+             }
+         } else {
+             gen_op_mov_v_reg(s, ot, s->T0, rm);

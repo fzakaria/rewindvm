@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Farid Zakaria <farid.m.zakaria@gmail.com>
 Date: Sat, 21 Nov 2026 17:36:50 -0800
-Subject: [PATCH 3/3] hw/i386: add the rewind machine
+Subject: [PATCH] hw/i386: add the rewind machine
 
 Rewind VM's deterministic machine, as its KVM monitor rewind-vmm makes
 it: one vCPU of a fixed CPUID, a local APIC and nothing else, every
