@@ -218,10 +218,9 @@ mod tests {
     fn the_examples_show_a_crash_and_where_the_runs_part() {
         // The failing run fails with a SIGSEGV and the passing run passes.
         // The two are the same run until the deciding step, where their
-        // schedules part. Their events part after it and before the crash:
-        // one worker finishes its job where the passing run's other worker
-        // picks the next one, so the first difference is the cause and the
-        // crash comes later.
+        // schedules part. Their events part after it, at the crash: the
+        // failing run's held worker faults on the freed queue where the
+        // passing run's same worker picks its next job.
         crate::archive::test_cache();
         let session = open().unwrap();
 
@@ -240,7 +239,7 @@ mod tests {
         let divergence = session.divergence_step().unwrap();
         let split = session.split.as_ref().unwrap();
         assert!(split.step < divergence);
-        assert!(divergence < failure.step);
+        assert!(divergence <= failure.step);
 
         // In words: how each run ended, where the schedules part, and the
         // first thing test_pool_shutdown does differently.
@@ -251,11 +250,10 @@ mod tests {
             lines,
             vec![
                 "This run failed and the passing run did not.",
-                "The two runs are identical until step 4,977. There, Rewind asks the kernel to switch threads in this run only.",
-                "test_pool_shutdown did the same things in the same order in both runs until step 4,981.",
-                "Then in this run, thread 166/169 of test_pool_shutdown writes \"job 16 done: 5986\" to stdout.",
-                "In the passing run, thread 166/170 of test_pool_shutdown writes \"worker picked job 17\" to stdout.",
-                "Both write to the same stream; the text differs.",
+                "The two runs are identical until step 4,705. There, Rewind asks the kernel to switch threads in this run only.",
+                "test_pool_shutdown did the same things in the same order in both runs until step 4,711.",
+                "Then in this run, thread 166/172 of test_pool_shutdown gets SIGSEGV at address 0x108.",
+                "In the passing run, thread 166/172 of test_pool_shutdown writes \"worker picked job 18\" to stdout.",
             ]
         );
     }

@@ -1230,9 +1230,14 @@ mod tests {
     fn what_rewind_does_at_a_step_reads_as_a_verb() {
         // A schedule's step that asks for a reschedule, one that stalls,
         // one that does both, and one that does neither, each against its
-        // words.
-        let schedule = manifest_of(FAILING).spec.schedule();
-        let (from, until) = manifest_of(FAILING).spec.window().unwrap();
+        // words. The example's window can be a few dozen steps, too few to
+        // hold every kind, so the test widens the same schedule's window.
+        const WIDENED_STEPS: u64 = 10_000;
+        let mut spec = manifest_of(FAILING).spec;
+        let from = spec.schedule_from;
+        let until = from + WIDENED_STEPS;
+        spec.schedule_until = until;
+        let schedule = spec.schedule();
         let find = |preempts: bool, stalls: bool| {
             (from..until).find(|&s| {
                 schedule.preempt_at(s) == preempts && schedule.stall_at(s).is_some() == stalls
