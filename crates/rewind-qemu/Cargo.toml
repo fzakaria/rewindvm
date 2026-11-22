@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 rewind-core = { path = "../rewind-core" }
 rewind-trace = { path = "../rewind-trace" }
+rewind-vmm = { path = "../rewind-vmm" }
 anyhow = "1"
 blake3 = "1"
 clap = { version = "4", features = ["derive", "env", "wrap_help"] }

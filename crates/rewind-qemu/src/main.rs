@@ -41,7 +41,20 @@ struct Args {
     /// not given.
     #[arg(long)]
     work: Option<PathBuf>,
+    /// Write what a browser build of the machine needs into this
+    /// directory and stop: the kernel, the initrd, the image and the
+    /// schedule, linked or written there, and args.json, QEMU's
+    /// arguments with those files under /rewind.
+    #[arg(long, conflicts_with = "log")]
+    prepare: Option<PathBuf>,
+    /// Compare this step log, from a machine run elsewhere such as a
+    /// browser, instead of running QEMU.
+    #[arg(long)]
+    log: Option<PathBuf>,
 }
+
+/// Where the browser build finds the files --prepare writes.
+const BROWSER_DIR: &str = "/rewind";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum Vendor {
@@ -93,41 +106,12 @@ fn main() -> Result<()> {
 
     // The initrd with the job appended, as the KVM machine boots it.
     let config = spec.config()?;
-    let work = match &args.work {
-        Some(w) => w.clone(),
-        None => std::env::temp_dir().join(format!("rewind-qemu-{}", std::process::id())),
+    let work = match (&args.prepare, &args.work) {
+        (Some(dir), _) | (None, Some(dir)) => dir.clone(),
+        (None, None) => std::env::temp_dir().join(format!("rewind-qemu-{}", std::process::id())),
     };
     std::fs::create_dir_all(&work).with_context(|| format!("creating {}", work.display()))?;
-    let initrd = work.join("initrd");
-    std::fs::write(&initrd, &config.initrd)?;
-    let log = work.join("steps.log");
-
-    // A replay of a run the host's time limit stopped stops where it did.
-    let until = run
-        .manifest
-        .outcome
-        .as_ref()
-        .filter(|o| o.stop.timeout().is_some())
-        .map_or(0, |o| o.step);
-    let seed: String = config.seed.iter().fold(String::new(), |mut s, b| {
-        let _ = write!(s, "{b:02x}");
-        s
-    });
-    let mut machine = format!(
-        "rewind,seed={seed},epoch={},quantum={},cpu-model={model},vendor={},extras={},log={},until={until}",
-        config.epoch,
-        config.quantum,
-        vendor.name(),
-        if config.extras == Extras::Reserved {
-            "on"
-        } else {
-            "off"
-        },
-        log.display(),
-    );
-    if let Some(image) = &config.image {
-        write!(machine, ",image={}", image.display())?;
-    }
+    std::fs::write(work.join(INITRD), &config.initrd)?;
 
     // The steps the schedule perturbs, through the recording's last.
     let last = run
@@ -137,28 +121,64 @@ fn main() -> Result<()> {
         .map(|o| o.step)
         .context("the run has not ended; replay a run that has")?;
     let schedule = schedule::encode(&config.schedule, last);
-    if schedule.len() > schedule::MAGIC.len() {
-        let path = work.join("schedule");
-        std::fs::write(&path, &schedule)?;
-        write!(machine, ",schedule={}", path.display())?;
+    let perturbed = schedule.len() > schedule::MAGIC.len();
+    if perturbed {
+        std::fs::write(work.join(SCHEDULE), &schedule)?;
     }
 
-    let started = Instant::now();
-    let status = Command::new(&args.qemu)
-        .args(["-machine", &machine, "-accel", "tcg", "-smp", "1"])
-        .args(["-m", &format!("{}M", config.mem_bytes >> 20)])
-        .arg("-kernel")
-        .arg(&config.kernel)
-        .arg("-initrd")
-        .arg(&initrd)
-        .args(["-append", &config.cmdline])
-        .args(["-nodefaults", "-display", "none", "-no-reboot"])
-        .status()
-        .with_context(|| format!("starting {}", args.qemu.display()))?;
-    let wall = started.elapsed();
-    if !status.success() {
-        bail!("{} failed: {status}", args.qemu.display());
+    // A replay of a run the host's time limit stopped stops where it did.
+    let until = run
+        .manifest
+        .outcome
+        .as_ref()
+        .filter(|o| o.stop.timeout().is_some())
+        .map_or(0, |o| o.step);
+    let launch = Launch {
+        model,
+        vendor,
+        until,
+        perturbed,
+        config: &config,
+    };
+
+    // For a browser: the files beside its arguments, which name them
+    // where the page puts them.
+    if let Some(dir) = &args.prepare {
+        link(&config.kernel, &dir.join(KERNEL))?;
+        if let Some(image) = &config.image {
+            link(image, &dir.join(IMAGE))?;
+        }
+        let browser = launch.args(&|name: &str| format!("{BROWSER_DIR}/{name}"));
+        std::fs::write(dir.join("args.json"), json_strings(&browser))?;
+        println!("wrote {} for a browser", dir.display());
+        return Ok(());
     }
+
+    let log = match &args.log {
+        Some(log) => log.clone(),
+        None => {
+            let qemu_args = launch.args(&|name: &str| {
+                match (name, &config.image) {
+                    (KERNEL, _) => config.kernel.clone(),
+                    (IMAGE, Some(image)) => image.clone(),
+                    _ => work.join(name),
+                }
+                .display()
+                .to_string()
+            });
+            let started = Instant::now();
+            let status = Command::new(&args.qemu)
+                .args(&qemu_args)
+                .status()
+                .with_context(|| format!("starting {}", args.qemu.display()))?;
+            let wall = started.elapsed();
+            if !status.success() {
+                bail!("{} failed: {status}", args.qemu.display());
+            }
+            println!("QEMU ran {:.2} s", wall.as_secs_f64());
+            work.join(LOG)
+        }
+    };
 
     // The trace, made by the encoders the KVM machine uses.
     let bytes = std::fs::read(&log).with_context(|| format!("reading {}", log.display()))?;
@@ -175,10 +195,7 @@ fn main() -> Result<()> {
 
     let (steps, stop) = encoded.end.unwrap_or((0, Stop::Paused));
     println!(
-        "replayed {} steps in {:.2} s ({:.0} steps/s), stopped: {stop:?}, virtual {} ns",
-        steps,
-        wall.as_secs_f64(),
-        steps as f64 / wall.as_secs_f64(),
+        "replayed {steps} steps, stopped: {stop:?}, virtual {} ns",
         encoded.ns
     );
     println!("trace {}", trace_path.display());
@@ -192,6 +209,104 @@ fn main() -> Result<()> {
     }
     report_divergence(run.trace()?, run.records()?, &encoded.records)?;
     std::process::exit(1);
+}
+
+/// The files a replay boots and writes, by name in its work directory.
+const KERNEL: &str = "vmlinux";
+const INITRD: &str = "initrd";
+const IMAGE: &str = "image.erofs";
+const SCHEDULE: &str = "schedule";
+const LOG: &str = "steps.log";
+
+/// What QEMU's arguments are made from.
+struct Launch<'a> {
+    model: &'static str,
+    vendor: Vendor,
+    until: u64,
+    perturbed: bool,
+    config: &'a rewind_vmm::Config,
+}
+
+impl Launch<'_> {
+    /// qemu-system-x86_64's arguments, with each file named by `path`.
+    fn args(&self, path: &dyn Fn(&str) -> String) -> Vec<String> {
+        let config = self.config;
+        let seed: String = config.seed.iter().fold(String::new(), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        });
+        let extras = match config.extras {
+            Extras::Reserved => "on",
+            Extras::Absent => "off",
+        };
+        let mut machine = format!(
+            "rewind,seed={seed},epoch={},quantum={},cpu-model={},vendor={},extras={extras},log={},until={}",
+            config.epoch,
+            config.quantum,
+            self.model,
+            self.vendor.name(),
+            path(LOG),
+            self.until,
+        );
+        if config.image.is_some() {
+            let _ = write!(machine, ",image={}", path(IMAGE));
+        }
+        if self.perturbed {
+            let _ = write!(machine, ",schedule={}", path(SCHEDULE));
+        }
+        [
+            "-machine",
+            &machine,
+            "-accel",
+            "tcg",
+            "-smp",
+            "1",
+            "-m",
+            &format!("{}M", config.mem_bytes >> 20),
+            "-kernel",
+            &path(KERNEL),
+            "-initrd",
+            &path(INITRD),
+            "-append",
+            &config.cmdline,
+            "-nodefaults",
+            "-display",
+            "none",
+            "-no-reboot",
+        ]
+        .map(str::to_string)
+        .to_vec()
+    }
+}
+
+/// Links `to` at `at`, replacing what was there.
+fn link(to: &std::path::Path, at: &std::path::Path) -> Result<()> {
+    let _ = std::fs::remove_file(at);
+    std::os::unix::fs::symlink(to, at)
+        .with_context(|| format!("linking {} at {}", to.display(), at.display()))
+}
+
+/// `strings` as a JSON array.
+fn json_strings(strings: &[String]) -> String {
+    let quoted: Vec<String> = strings
+        .iter()
+        .map(|s| {
+            let mut q = String::from("\"");
+            for c in s.chars() {
+                match c {
+                    '"' => q.push_str("\\\""),
+                    '\\' => q.push_str("\\\\"),
+                    c if (c as u32) < 0x20 => {
+                        let _ = write!(q, "\\u{:04x}", c as u32);
+                    }
+                    c => q.push(c),
+                }
+            }
+            q.push('"');
+            q
+        })
+        .collect();
+    format!("[{}]\n", quoted.join(","))
 }
 
 /// Prints where the replay's trace first differs from the recording's,
