@@ -63,7 +63,17 @@ struct Args {
     /// The step to read --cat at.
     #[arg(long)]
     at: Option<u64>,
+    /// Write what the browser viewer needs to read files at any step of
+    /// the run into this directory and stop: each of the run's keyframes
+    /// in portable form, the image and the schedule linked or written
+    /// there, and manifest.json, which names them and holds QEMU's
+    /// arguments with placeholders for the step.
+    #[arg(long, conflicts_with_all = ["prepare", "log", "cat", "from"])]
+    bundle: Option<PathBuf>,
 }
+
+/// The placeholder in a bundle's arguments for the step to read at.
+const UNTIL_PLACEHOLDER: &str = "{until}";
 
 /// The mark the guest's inspecting process ends its answer with
 /// (rewind-init's Mark::InspectEnd), which stops the machine.
@@ -122,6 +132,10 @@ fn main() -> Result<()> {
 
     // The initrd with the job appended, as the KVM machine boots it.
     let config = spec.config()?;
+    if let Some(dir) = &args.bundle {
+        return bundle(&run, &config, model, vendor, dir);
+    }
+
     let work = match (&args.prepare, &args.work) {
         (Some(dir), _) | (None, Some(dir)) => dir.clone(),
         (None, None) => std::env::temp_dir().join(format!("rewind-qemu-{}", std::process::id())),
@@ -154,16 +168,10 @@ fn main() -> Result<()> {
             .map_or(0, |o| o.step),
     };
     if let Some(path) = &args.cat {
-        let request = rewind_init::InspectRequest::Cat {
-            pid: None,
-            path: path.clone(),
-        };
-        let mut bytes = Vec::new();
-        for arg in request.args() {
-            bytes.extend_from_slice(arg.as_bytes());
-            bytes.push(0);
-        }
-        std::fs::write(work.join(REQUEST), bytes)?;
+        std::fs::write(
+            work.join(REQUEST),
+            rewind_trace::inspected::cat_request(None, path),
+        )?;
     }
     // The keyframe to start from, in the form the QEMU machine loads.
     let resumed = match args.from {
@@ -196,7 +204,7 @@ fn main() -> Result<()> {
     let launch = Launch {
         model,
         vendor,
-        until,
+        until: until.to_string(),
         perturbed,
         resumed: resumed.is_some(),
         inspects: args.cat.is_some(),
@@ -315,7 +323,9 @@ const REQUEST: &str = "request";
 struct Launch<'a> {
     model: &'static str,
     vendor: Vendor,
-    until: u64,
+    /// The step to stop or inspect at, 0 for none, as the machine's
+    /// argument takes it: a number, or a placeholder a page fills in.
+    until: String,
     perturbed: bool,
     /// Whether the machine starts from a portable keyframe.
     resumed: bool,
@@ -392,6 +402,74 @@ impl Launch<'_> {
         args.extend(boot);
         args
     }
+}
+
+/// Writes the browser viewer's bundle for `run` into `dir`: the run's
+/// keyframes in portable form, the image and schedule, and manifest.json
+/// with QEMU's arguments, which start from a keyframe and read a file at
+/// the step the page fills in.
+fn bundle(
+    run: &Run,
+    config: &rewind_vmm::Config,
+    model: &'static str,
+    vendor: Vendor,
+    dir: &std::path::Path,
+) -> Result<()> {
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let last = run
+        .manifest
+        .outcome
+        .as_ref()
+        .map(|o| o.step)
+        .context("the run has not ended; bundle a run that has")?;
+    let schedule = schedule::encode(&config.schedule, last);
+    let perturbed = schedule.len() > schedule::MAGIC.len();
+    if perturbed {
+        std::fs::write(dir.join(SCHEDULE), &schedule)?;
+    }
+    if let Some(image) = &config.image {
+        link(image, &dir.join(IMAGE))?;
+    }
+
+    // Every keyframe, the recording's and the ones looks kept.
+    let keyframes = run.keyframes()?;
+    let home = rewind_core::home::Home::open()?;
+    let store = rewind_core::run::Store::open(&home.store())?;
+    let span = rewind_vmm::layout::ram_span(config.mem_bytes) as usize;
+    let mut steps = Vec::new();
+    for step in keyframes.steps() {
+        let chain = keyframes.chain(step)?;
+        let state = rewind_vmm::portable::encode(
+            &chain,
+            &rewind_core::keyframes::ReadPages(&store),
+            span / rewind_vmm::layout::PAGE_SIZE,
+        )?;
+        std::fs::write(dir.join(format!("{STATE}-{step}")), &state)?;
+        eprintln!("keyframe at step {step}: {} bytes", state.len());
+        steps.push(step);
+    }
+
+    let launch = Launch {
+        model,
+        vendor,
+        until: UNTIL_PLACEHOLDER.to_string(),
+        perturbed,
+        resumed: true,
+        inspects: true,
+        config,
+    };
+    let args = launch.args(&|name: &str| format!("{BROWSER_DIR}/{name}"));
+    let keyframes: Vec<String> = steps.iter().map(u64::to_string).collect();
+    let manifest = format!(
+        "{{\"args\":{},\"keyframes\":[{}],\"image\":{},\"schedule\":{}}}\n",
+        json_strings(&args).trim_end(),
+        keyframes.join(","),
+        config.image.is_some(),
+        perturbed,
+    );
+    std::fs::write(dir.join("manifest.json"), manifest)?;
+    eprintln!("wrote {}", dir.display());
+    Ok(())
 }
 
 /// Links `to` at `at`, replacing what was there.
