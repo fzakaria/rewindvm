@@ -3,15 +3,17 @@
 //! thin while its machine is still the machine of the run it is
 //! measured against, a fork's parent or the schedule 0 run a run from
 //! boot hangs under, and thick from the step where the machine first
-//! differs to its last step. A run is also marked where the program that
-//! failed in one of the two first behaves differently, the place
-//! `rewind check` prints.
+//! differs to its last step. When one of the two runs failed and the
+//! other did not, the run is also marked where the failing program first
+//! behaves differently, the place `rewind check` prints.
 //!
 //! Both places are read from the two runs' traces. On a family of 146
-//! runs `rewind check` made of mylib, reading every trace and comparing
-//! each run with the run it is measured against took 181 ms in all, so
-//! the panel works them out in the background when the axis opens and
-//! keeps them while the family grows.
+//! runs `rewind check` made of mylib, about 6,000 steps each, reading
+//! every trace and comparing each run with the run it is measured
+//! against took 181 ms in all; on 65 runs of GNU hello's Nix build,
+//! about 170,000 steps each and all passing, 1.5 s, nearly all of it
+//! reading the traces. The panel works them out in the background when
+//! the axis opens and keeps them while the family grows.
 //!
 //! After a run parts, its steps are its own: a step of two runs is the
 //! same moment only before either parts.
@@ -32,22 +34,69 @@ pub struct Parting {
     /// the two runs are the same machine to the end.
     pub machine: Option<u64>,
     /// The step of this run where the program that failed in one of the
-    /// two runs, and not in the other, first behaves differently.
+    /// two runs, and not in the other, first behaves differently. None
+    /// when the two runs end alike.
     pub behaves: Option<u64>,
+}
+
+/// Whether two runs end alike: both failing, or neither.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Endings {
+    Alike,
+    /// One run failed and the other did not, as the pair `rewind check`
+    /// reports.
+    Differ,
+}
+
+impl Endings {
+    pub fn of(run: &RunEntry, other: &RunEntry) -> Endings {
+        if run.failed == other.failed {
+            Endings::Alike
+        } else {
+            Endings::Differ
+        }
+    }
 }
 
 impl Parting {
     /// Where `run`, which ended at step `run_last`, parts from `against`,
     /// which ended at `against_last`.
-    pub fn of(run: &Trace, run_last: u64, against: &Trace, against_last: u64) -> Parting {
+    pub fn of(
+        run: &Trace,
+        run_last: u64,
+        against: &Trace,
+        against_last: u64,
+        endings: Endings,
+    ) -> Parting {
         // Record for record, as rewind diff compares two runs.
         let machine = against.divergence(run).map(|d| d.right_step);
 
+        // Two runs that end alike have no failing program to follow. A
+        // program inside either can still fail in one and not the other,
+        // as a configure probe of a Nix build does from schedule to
+        // schedule, and marking it would point at noise. Skipping the
+        // comparison is also most of the cost: on 64 runs of GNU hello's
+        // build, 170,000 steps each, it took 2.7 s of 3.6 s.
+        if endings == Endings::Alike {
+            return Parting {
+                machine,
+                behaves: None,
+            };
+        }
+
         // The failing program's own events, as rewind check compares the
-        // two runs it reports. A comparison that names no program compares
-        // every event, which tells only that the machine differs.
-        let compared = Comparison::of(run, run_last, against, against_last);
-        let behaves = compared.program.and(compared.point).map(|p| p.step);
+        // two runs it reports, when that program's events part. Without
+        // a program whose events part there is no mark: a comparison of
+        // every event tells only that the machine differs.
+        let program = run
+            .culprit_against(against)
+            .or_else(|| against.culprit_against(run))
+            .filter(|argv| run.divergence_in(against, argv).is_some());
+        let behaves = program.and_then(|argv| {
+            Comparison::about(run, run_last, against, against_last, Some(argv))
+                .point
+                .map(|p| p.step)
+        });
         Parting { machine, behaves }
     }
 }
@@ -90,7 +139,8 @@ pub fn partings<T: Borrow<Trace>>(
             let (Some(trace), Some(last)) = (read(run), run.last_step) else {
                 continue;
             };
-            let parting = Parting::of(trace.borrow(), last, other.borrow(), other_last);
+            let endings = Endings::of(run, against);
+            let parting = Parting::of(trace.borrow(), last, other.borrow(), other_last, endings);
             found.insert(run.id.clone(), parting);
         }
     }
@@ -459,7 +509,7 @@ mod tests {
         // behaves differently at 22.
         let base = test_run(&[(10, "one\n"), (20, "two\n")], 30, 0);
         let failing = test_run(&[(12, "one\n"), (22, "boom\n")], 32, 2 << 8);
-        let parting = Parting::of(&failing, 32, &base, 30);
+        let parting = Parting::of(&failing, 32, &base, 30, Endings::Differ);
         assert_eq!(parting.machine, Some(12));
         assert_eq!(parting.behaves, Some(22));
     }
@@ -471,19 +521,48 @@ mod tests {
         let base = test_run(&[(10, "one\n"), (20, "two\n")], 30, 0);
         let later = test_run(&[(12, "one\n"), (22, "two\n")], 32, 0);
         assert_eq!(
-            Parting::of(&later, 32, &base, 30),
+            Parting::of(&later, 32, &base, 30, Endings::Alike),
             Parting {
                 machine: Some(12),
                 behaves: None
             }
         );
         assert_eq!(
-            Parting::of(&base, 30, &base, 30),
+            Parting::of(&base, 30, &base, 30, Endings::Alike),
             Parting {
                 machine: None,
                 behaves: None
             }
         );
+    }
+
+    #[test]
+    fn runs_that_end_alike_get_no_program_mark_though_a_program_failed_in_one() {
+        // Both runs pass, as two schedules of a build do, but a program
+        // inside one exits 2 where the other's exited 0, as a configure
+        // probe can: the machine differs and no program mark is drawn.
+        let base = test_run(&[(10, "one\n"), (20, "two\n")], 30, 0);
+        let probe_failed = test_run(&[(12, "one\n"), (22, "boom\n")], 32, 2 << 8);
+        assert_eq!(
+            Parting::of(&probe_failed, 32, &base, 30, Endings::Alike),
+            Parting {
+                machine: Some(12),
+                behaves: None
+            }
+        );
+    }
+
+    #[test]
+    fn endings_differ_when_one_run_failed_and_the_other_did_not() {
+        // Two passing runs, and two failing ones, end alike.
+        let pass = run("p", None, 0);
+        let mut fail = run("f", None, 1);
+        fail.failed = true;
+        fail.passed = false;
+        assert_eq!(Endings::of(&pass, &pass), Endings::Alike);
+        assert_eq!(Endings::of(&fail, &fail), Endings::Alike);
+        assert_eq!(Endings::of(&fail, &pass), Endings::Differ);
+        assert_eq!(Endings::of(&pass, &fail), Endings::Differ);
     }
 
     #[test]
@@ -500,8 +579,10 @@ mod tests {
         base.last_step = Some(30);
         let mut fork = run("f", Some("base"), 1);
         fork.last_step = Some(32);
+        fork.failed = true;
         let mut check = run("check3", None, 3);
         check.last_step = Some(32);
+        check.failed = true;
         let family = Family {
             runs: vec![base, fork, check, run("known", Some("base"), 2), running],
         };
