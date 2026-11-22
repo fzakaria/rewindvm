@@ -3,13 +3,15 @@
 //! it, and its rows laid out once per change. Nothing here draws or needs
 //! a window, so the panel's decisions are tested without one.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 
 use gpui::UniformListScrollHandle;
 
 use crate::family::{Family, Progress, Row, RowKind, RunEntry};
+use crate::family_axis::{Parted, Parting};
+use crate::lanes::Window;
 use crate::memo::Memo;
 use crate::run::short_id;
 
@@ -38,8 +40,37 @@ pub struct Deletion {
     pub question: Option<String>,
 }
 
+/// How the Runs panel lays its runs out.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Layout {
+    /// A line of words for each run.
+    #[default]
+    List,
+    /// Each run drawn along its steps, on one axis for all.
+    Steps,
+}
+
+/// Whether the partings of the family's runs are being worked out.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Work {
+    #[default]
+    Idle,
+    Working,
+    /// Working, and the family changed since the work began, so it goes
+    /// again for the runs it did not have.
+    WorkingStale,
+}
+
 #[derive(Default)]
 pub struct RunsPanel {
+    pub layout: Layout,
+    /// The step axis's window, once the axis has opened.
+    pub axis: Option<Window>,
+    /// Where each run parts from the run it is measured against, by id,
+    /// as worked out so far. They stay while the family is read again: a
+    /// run's trace does not change once it has ended.
+    pub partings: HashMap<String, Parting>,
+    pub work: Work,
     /// The family of the run on screen: every run of its build, its forks
     /// among them.
     pub family: Option<Family>,
@@ -87,6 +118,45 @@ impl RunsPanel {
             Some(family) => family.rows_folded(&self.unfolded, &[shown, compared]),
             None => Vec::new(),
         })
+    }
+
+    /// What the step axis knows of where `run` parts: nothing to part
+    /// from for a run measured against no run, else its parting once
+    /// worked out.
+    pub fn parted(&self, run: &RunEntry) -> Parted {
+        let Some(family) = &self.family else {
+            return Parted::Unknown;
+        };
+        if family.tree_parent(run).is_none() {
+            return Parted::Root;
+        }
+        match self.partings.get(&run.id) {
+            Some(parting) => Parted::Known(*parting),
+            None => Parted::Unknown,
+        }
+    }
+
+    /// Whether a run that has ended, and its run to measure against, has
+    /// no parting worked out yet.
+    pub fn needs_partings(&self) -> bool {
+        let Some(family) = &self.family else {
+            return false;
+        };
+        family.runs.iter().any(|run| {
+            run.last_step.is_some()
+                && !self.partings.contains_key(&run.id)
+                && family
+                    .tree_parent(run)
+                    .is_some_and(|p| p.last_step.is_some())
+        })
+    }
+
+    /// The last step of the family's longest run that has ended.
+    pub fn longest(&self) -> u64 {
+        self.family
+            .as_ref()
+            .and_then(|f| f.runs.iter().filter_map(|r| r.last_step).max())
+            .unwrap_or(0)
     }
 
     /// Whether a process is executing any run of the family.
@@ -253,6 +323,7 @@ mod tests {
     // two forks of it, and a fork of the first fork.
     use super::*;
     use crate::family::Parent;
+    use crate::family_axis::{Parted, Parting};
 
     /// A run of the family with this id and parent, from the failing
     /// example's manifest.
@@ -334,6 +405,48 @@ mod tests {
         let mut picked = panel.picked.clone();
         picked.sort();
         assert_eq!(picked, vec!["f1", "f1a", "f2"]);
+    }
+
+    #[test]
+    fn the_step_axis_knows_each_runs_parting_once_worked_out() {
+        // base is measured against nothing. f1 is unknown until its
+        // parting is worked out; the partings stay when the family is
+        // read again, as it is while a check runs, and only runs not yet
+        // worked out are asked for again.
+        let mut panel = panel();
+        let family = panel.family.clone().unwrap();
+        let run = |id: &str| family.runs.iter().find(|r| r.id == id).unwrap().clone();
+        assert_eq!(panel.parted(&run("base")), Parted::Root);
+        assert_eq!(panel.parted(&run("f1")), Parted::Unknown);
+        assert!(panel.needs_partings());
+
+        let parting = Parting {
+            machine: Some(12),
+            behaves: None,
+        };
+        for id in ["f1", "f2", "f1a"] {
+            panel.partings.insert(id.to_string(), parting);
+        }
+        panel.set_family(Some(family.clone()));
+        assert_eq!(panel.parted(&run("f1")), Parted::Known(parting));
+        assert!(!panel.needs_partings());
+
+        let mut runs = family.runs.clone();
+        runs.push(entry("f3", Some("base")));
+        panel.set_family(Some(Family { runs }));
+        assert!(panel.needs_partings());
+    }
+
+    #[test]
+    fn the_step_axis_reaches_the_longest_run() {
+        // The axis is as long as the family's longest run; a run that has
+        // not ended adds nothing.
+        let mut panel = panel();
+        let mut runs = panel.family.as_ref().unwrap().runs.clone();
+        runs[1].last_step = Some(9000);
+        runs[2].last_step = None;
+        panel.set_family(Some(Family { runs }));
+        assert_eq!(panel.longest(), 9000);
     }
 
     #[test]
