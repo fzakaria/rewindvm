@@ -1,6 +1,6 @@
 [
  {
-  "text": "$ rewind check --epoch 1792627200 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-git-gc-closure'\nrewind: packing 217 store paths for nix-functional-gc-closure-2.36pre20260912_203f85b2\n...\nschedule  14: exited:1            64602 steps    run 8679777fcdbe572d\n...\n\nschedule 14 ends differently from schedule 0; finding the step that decides it\nschedule 14 limited to steps 712..64354 still ends differently\nstep 64353 decides it: a request to switch threads there makes the run fail\n\npassing: run f1847c57e08b4a5d, schedule 14 over steps 712..64353\nfailing: run c150b2dfda1a5b28, schedule 14 over steps 712..64354\nthe two are the same run until step 64353\n\nwhere /nix/store/10dxp0qxqxxsyiljrh2kp0xqhz6arhcx-bash-5.3p15/bin/bash -x -e -u -o pipefail gc-closure.sh first behaves differently:\n  both          64334   359/359   fork() = 478\n  both          64338   478/478   fork() = 479\n  both          64352   478/478   fork() = 480\n  failing       64392   479/479   SIGPIPE code=0 addr=0x0\n  failing       64393   479/479   exit_group(bash) killed:SIGPIPE\n  failing       64396   478/478   SIGCHLD code=1 addr=0x0\n  failing       64397   478/478   exit_group(bash) exited:141\n  passing       64355   479/479   exit_group(bash) exited:0\n  passing       64399   478/478   SIGCHLD code=1 addr=0x0\n  passing       64400   478/478   exit_group(bash) exited:0\n  passing       64404   359/359   SIGCHLD code=1 addr=0x0\n\nopen both in the desktop app: rewind open c150b2dfda1a5b28 64392 --compare f1847c57e08b4a5d",
+  "text": "$ rewind check --epoch 1793318400 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-git-gc-closure'\nrewind: packing 217 store paths for nix-functional-gc-closure-2.36pre20260912_203f85b2\n...\nschedule  37: exited:1            64518 steps    run f7284fdbab2fd66f\n...\n\nschedule 37 ends differently from schedule 0; finding the step that decides it\nschedule 37 limited to steps 723..64293 still ends differently\nstep 64292 decides it: a request to switch threads there makes the run fail\n\npassing: run 0f230238b8df849f, schedule 37 over steps 723..64292\nfailing: run ca143a58325125d2, schedule 37 over steps 723..64293\nthe two are the same run until step 64292\n\nwhere /nix/store/10dxp0qxqxxsyiljrh2kp0xqhz6arhcx-bash-5.3p15/bin/bash -x -e -u -o pipefail gc-closure.sh first behaves differently:\n  both          64283   359/359   fork() = 478\n  both          64287   478/478   fork() = 479\n  both          64290   478/478   fork() = 480\n  failing       64328   479/479   SIGPIPE code=0 addr=0x0\n  failing       64329   479/479   exit_group(bash) killed:SIGPIPE\n  failing       64332   478/478   SIGCHLD code=1 addr=0x0\n  failing       64333   478/478   exit_group(bash) exited:141\n  passing       64293   479/479   exit_group(bash) exited:0\n  passing       64322   478/478   SIGCHLD code=1 addr=0x0\n  passing       64323   478/478   exit_group(bash) exited:0\n  passing       64328   359/359   SIGCHLD code=1 addr=0x0\n\nopen both in the desktop app: rewind open ca143a58325125d2 64328 --compare 0f230238b8df849f",
   "spans": [
    [
     1,
@@ -77,7 +77,7 @@
   ]
  },
  {
-  "text": "$ rewind log c150b2df\n...\n++(gc-closure.sh:14) nix build -f dependencies2.nix input2_drv --no-link --print-out-paths\n...\n+(gc-closure.sh:14) input2=$'/build/nix-test/main/gc-closure/store/ij8qwx0m6dvpmggqmq8zmhbaiw6ym8pg-dependencies-input-2\\n/build/nix-test/main/gc-closure/store/hw6dm6rpyn ...\n++(gc-closure.sh:15) printf %s $'/build/nix-test/main/gc-closure/store/ij8qwx0m6dvpmggqmq8zmhbaiw6ym8pg-dependencies-input-2\\n/build/nix-test/main/gc-closure/store/hw6dm6 ...\n++(gc-closure.sh:15) head -n1\n+(gc-closure.sh:15) input2_out=/build/nix-test/main/gc-closure/store/ij8qwx0m6dvpmggqmq8zmhbaiw6ym8pg-dependencies-input-2\n...\n++(gc-closure.sh:14) nix build -f dependencies2.nix input2_drv --no-link --print-out-paths\n...\n+(gc-closure.sh:14) input2=$'/build/nix-test/main/gc-closure/store/ij8qwx0m6dvpmggqmq8zmhbaiw6ym8pg-dependencies-input-2\\n/build/nix-test/main/gc-closure/store/hw6dm6rpyn ...\n++(gc-closure.sh:15) head -n1\n++(gc-closure.sh:15) printf %s $'/build/nix-test/main/gc-closure/store/ij8qwx0m6dvpmggqmq8zmhbaiw6ym8pg-dependencies-input-2\\n/build/nix-test/main/gc-closure/store/hw6dm6 ...\n+(gc-closure.sh:15) input2_out=/build/nix-test/main/gc-closure/store/ij8qwx0m6dvpmggqmq8zmhbaiw6ym8pg-dependencies-input-2\n...\n1/1 main - nix-functional-tests:gc-closure FAIL             0.70s   (exit status 141 or signal 13 SIGPIPE)\n...",
+  "text": "$ rewind log ca143a58\n...\n++(gc-closure.sh:14) nix build -f dependencies2.nix input2_drv --no-link --print-out-paths\n...\n+(gc-closure.sh:14) input2=$'/build/nix-test/main/gc-closure/store/ij8qwx0m6dvpmggqmq8zmhbaiw6ym8pg-dependencies-input-2\\n/build/nix-test/main/gc-closure/store/hw6dm6rpyn ...\n++(gc-closure.sh:15) printf %s $'/build/nix-test/main/gc-closure/store/ij8qwx0m6dvpmggqmq8zmhbaiw6ym8pg-dependencies-input-2\\n/build/nix-test/main/gc-closure/store/hw6dm6 ...\n++(gc-closure.sh:15) head -n1\n+(gc-closure.sh:15) input2_out=/build/nix-test/main/gc-closure/store/ij8qwx0m6dvpmggqmq8zmhbaiw6ym8pg-dependencies-input-2\n...\n++(gc-closure.sh:14) nix build -f dependencies2.nix input2_drv --no-link --print-out-paths\n...\n+(gc-closure.sh:14) input2=$'/build/nix-test/main/gc-closure/store/ij8qwx0m6dvpmggqmq8zmhbaiw6ym8pg-dependencies-input-2\\n/build/nix-test/main/gc-closure/store/hw6dm6rpyn ...\n++(gc-closure.sh:15) head -n1\n++(gc-closure.sh:15) printf %s $'/build/nix-test/main/gc-closure/store/ij8qwx0m6dvpmggqmq8zmhbaiw6ym8pg-dependencies-input-2\\n/build/nix-test/main/gc-closure/store/hw6dm6 ...\n+(gc-closure.sh:15) input2_out=/build/nix-test/main/gc-closure/store/ij8qwx0m6dvpmggqmq8zmhbaiw6ym8pg-dependencies-input-2\n...\n1/1 main - nix-functional-tests:gc-closure FAIL             0.69s   (exit status 141 or signal 13 SIGPIPE)\n...",
   "spans": [
    [
     16,
@@ -88,7 +88,7 @@
   ]
  },
  {
-  "text": "$ rewind replay c150b2df\nidentical to the recording: 10279 events, 9708 context switches and 18611 read and write records over 64580 steps, and the whole machine at its 10 keyframes",
+  "text": "$ rewind replay ca143a58\nidentical to the recording: 10281 events, 9915 context switches and 18611 read and write records over 64502 steps, and the whole machine at its 11 keyframes",
   "spans": [
    [
     1,
@@ -99,7 +99,7 @@
   ]
  },
  {
-  "text": "$ rewind check --epoch 1792627200 --all --schedules 256 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-git-gc-closure'\nschedule   0: exited:0            79679 steps  a50a5ab6d992  run 5bdb3ab0bc90c8c0\nschedule   1: exited:0            93501 steps  a50a5ab6d992  run 157806c2025329bf\n...\nschedule  14: exited:1            64602 steps    run 8679777fcdbe572d\n...\nschedule  18: exited:1            43013 steps    run 7520644cccb59c7a\n...\n2 of 256 other schedules ended differently\n\nschedule 14 ends differently from schedule 0; finding the step that decides it\nschedule 14 limited to steps 712..64354 still ends differently\nstep 64353 decides it: a request to switch threads there makes the run fail\n\npassing: run f1847c57e08b4a5d, schedule 14 over steps 712..64353\nfailing: run c150b2dfda1a5b28, schedule 14 over steps 712..64354\nthe two are the same run until step 64353\n\nwhere /nix/store/10dxp0qxqxxsyiljrh2kp0xqhz6arhcx-bash-5.3p15/bin/bash -x -e -u -o pipefail gc-closure.sh first behaves differently:\n  both          64334   359/359   fork() = 478\n  both          64338   478/478   fork() = 479\n  both          64352   478/478   fork() = 480\n  failing       64392   479/479   SIGPIPE code=0 addr=0x0\n  failing       64393   479/479   exit_group(bash) killed:SIGPIPE\n  failing       64396   478/478   SIGCHLD code=1 addr=0x0\n  failing       64397   478/478   exit_group(bash) exited:141\n  passing       64355   479/479   exit_group(bash) exited:0\n  passing       64399   478/478   SIGCHLD code=1 addr=0x0\n  passing       64400   478/478   exit_group(bash) exited:0\n  passing       64404   359/359   SIGCHLD code=1 addr=0x0\n\nopen both in the desktop app: rewind open c150b2dfda1a5b28 64392 --compare f1847c57e08b4a5d",
+  "text": "$ rewind check --epoch 1793318400 --all --schedules 256 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-git-gc-closure'\nschedule   0: exited:0            79875 steps  a50a5ab6d992  run 5658330d0941ceae\nschedule   1: exited:0            94435 steps  a50a5ab6d992  run 5a1439405f1b0ce2\n...\nschedule  37: exited:1            64518 steps    run f7284fdbab2fd66f\n...\n1 of 256 other schedules ended differently\n\nschedule 37 ends differently from schedule 0; finding the step that decides it\nschedule 37 limited to steps 723..64293 still ends differently\nstep 64292 decides it: a request to switch threads there makes the run fail\n\npassing: run 0f230238b8df849f, schedule 37 over steps 723..64292\nfailing: run ca143a58325125d2, schedule 37 over steps 723..64293\nthe two are the same run until step 64292\n\nwhere /nix/store/10dxp0qxqxxsyiljrh2kp0xqhz6arhcx-bash-5.3p15/bin/bash -x -e -u -o pipefail gc-closure.sh first behaves differently:\n  both          64283   359/359   fork() = 478\n  both          64287   478/478   fork() = 479\n  both          64290   478/478   fork() = 480\n  failing       64328   479/479   SIGPIPE code=0 addr=0x0\n  failing       64329   479/479   exit_group(bash) killed:SIGPIPE\n  failing       64332   478/478   SIGCHLD code=1 addr=0x0\n  failing       64333   478/478   exit_group(bash) exited:141\n  passing       64293   479/479   exit_group(bash) exited:0\n  passing       64322   478/478   SIGCHLD code=1 addr=0x0\n  passing       64323   478/478   exit_group(bash) exited:0\n  passing       64328   359/359   SIGCHLD code=1 addr=0x0\n\nopen both in the desktop app: rewind open ca143a58325125d2 64328 --compare 0f230238b8df849f",
   "spans": [
    [
     1,
@@ -121,26 +121,32 @@
    ],
    [
     6,
-    14,
-    22,
-    "red"
-   ],
-   [
-    8,
     0,
     42,
     "red"
    ],
    [
-    14,
+    12,
     0,
     7,
     "blue"
    ],
    [
-    15,
+    13,
     0,
     7,
+    "yellow"
+   ],
+   [
+    20,
+    2,
+    9,
+    "yellow"
+   ],
+   [
+    21,
+    2,
+    9,
     "yellow"
    ],
    [
@@ -159,13 +165,13 @@
     24,
     2,
     9,
-    "yellow"
+    "blue"
    ],
    [
     25,
     2,
     9,
-    "yellow"
+    "blue"
    ],
    [
     26,
@@ -178,23 +184,11 @@
     2,
     9,
     "blue"
-   ],
-   [
-    28,
-    2,
-    9,
-    "blue"
-   ],
-   [
-    29,
-    2,
-    9,
-    "blue"
    ]
   ]
  },
  {
-  "text": "$ rewind check --run c150b2df --schedule-from 64338 --schedules 64 --all --no-narrow\nschedule   0: exited:1            64580 steps    run c150b2dfda1a5b28\nschedule   1: exited:0            93945 steps  a50a5ab6d992  run 191e55c8584e563c\nschedule   2: exited:0            93809 steps  a50a5ab6d992  run 93387cf771f66f65\n...\nschedule  14: exited:1            64602 steps    run c7ca73646ac0f681\n...\nschedule  64: exited:0            93917 steps  a50a5ab6d992  run 980dd0bce166f950\nrun c150b2dfda1a5b28 failed; 63 of 64 other schedules ended differently",
+  "text": "$ rewind check --run ca143a58 --schedule-from 64287 --schedules 64 --all --no-narrow\nschedule   0: exited:1            64502 steps    run ca143a58325125d2\nschedule   1: exited:0            93684 steps  a50a5ab6d992  run 05a809a96a687c11\nschedule   2: exited:0            93718 steps  a50a5ab6d992  run 2adbc7531d27f545\n...\nschedule  37: exited:1            64518 steps    run 4e9e0537fc2ed3b9\n...\nschedule  64: exited:0            94086 steps  a50a5ab6d992  run dba32f4c5a48242a\nrun ca143a58325125d2 failed; 63 of 64 other schedules ended differently",
   "spans": [
    [
     1,
@@ -253,7 +247,7 @@
   ]
  },
  {
-  "text": "$ rewind check --epoch 1792627200 --all --schedules 1024 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-gc-closure'\nrewind: packing 217 store paths for nix-functional-gc-closure-2.35.2\n...\nschedule 154: exited:1            81977 steps    run 7f4c63eefdb79b69\n...\nschedule 229: exited:1            42284 steps    run ea68ef404c97a3a7\n...\nschedule 524: exited:1            62925 steps    run 5fcbaba85fe7ff61\n...\nschedule 540: exited:1            41817 steps    run d4b55fbbf7e653f2\n...\nschedule 597: exited:1            82017 steps    run 4749fa9a8079583f\n...\nschedule 879: exited:1            63288 steps    run 14366dc173354094\n...\nschedule 975: exited:1            81916 steps    run 4fe36df4fd20b7b9\n...\n7 of 1024 other schedules ended differently\n...",
+  "text": "$ rewind check --epoch 1793318400 --all --schedules 1024 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-gc-closure'\nrewind: packing 217 store paths for nix-functional-gc-closure-2.35.2\n...\nschedule 196: exited:1            82660 steps    run a03d37e0a716aefa\n...\nschedule 650: exited:1            62884 steps    run 2a4579dc8e14fd70\n...\nschedule 741: exited:1            82209 steps    run 7e7ff2067ad9d371\n...\nschedule 904: exited:1            82121 steps    run cb695778aee3c5ad\n...\nschedule 935: exited:1            82500 steps    run 87be2b02f02e12a6\n...\n5 of 1024 other schedules ended differently\n...",
   "spans": [
    [
     1,
@@ -293,18 +287,6 @@
    ],
    [
     13,
-    14,
-    22,
-    "red"
-   ],
-   [
-    15,
-    14,
-    22,
-    "red"
-   ],
-   [
-    17,
     0,
     43,
     "red"
@@ -312,7 +294,7 @@
   ]
  },
  {
-  "text": "$ rewind check --epoch 1792627200 --all 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-git-gc-closure-fixed'\nschedule   0: exited:0            79660 steps  a50a5ab6d992  run c0dca173b49d423e\nschedule   1: exited:0            94278 steps  a50a5ab6d992  run 20811ad52ab2d244\n...\n0 of 64 other schedules ended differently\nsame result under all 65 schedules",
+  "text": "$ rewind check --epoch 1793318400 --all 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-git-gc-closure-fixed'\nschedule   0: exited:0            79680 steps  a50a5ab6d992  run f015240c164ff130\nschedule   1: exited:0            94146 steps  a50a5ab6d992  run 28db6f952bb16e0a\n...\n0 of 64 other schedules ended differently\nsame result under all 65 schedules",
   "spans": [
    [
     1,

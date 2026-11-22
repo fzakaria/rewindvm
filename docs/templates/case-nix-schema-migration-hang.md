@@ -2,7 +2,7 @@
 
 <!-- let epoch = 1791936000 -->
 <!-- let flake = github:fzakaria/rewindvm?dir=examples/case-studies -->
-<!-- let schedule = 13 -->
+<!-- let schedule = 9 -->
 
 A Nix master build from April 2026 could hang when several `nix` commands
 opened a new store at once, printing `SQLite database ... is busy` every ten

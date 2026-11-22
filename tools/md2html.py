@@ -111,7 +111,7 @@ DEVENV_FIGURE = """<div class="tour tour-article">
             width="1440"
             height="900"
             loading="lazy"
-            alt="The Rewind desktop app on the failing devenv run at step 1,595, compared with the passing run 92e70d96: the build log stops at running 1 test, SIGCHLD has reached thread 41, and the runs are the same until step 1,592. Opens the full-size image."
+            alt="The Rewind desktop app on the failing devenv run at step 1,583, compared with the passing run 16f1f17c: the build log stops at running 1 test, SIGCHLD has reached thread 41, and the runs are the same until step 1,580. Opens the full-size image."
           />
         </picture>
       </a>
@@ -121,13 +121,13 @@ DEVENV_FIGURE = """<div class="tour tour-article">
       <button type="button" class="pin pin-4" style="left: 97.2%; top: 44.6%" aria-label="4: where the runs part">4</button>
     </div>
     <figcaption>
-      The app on the failing run 7c84fb4d at step 1,595, compared with the passing run 92e70d96.
+      The app on the failing run 8660a9f4 at step 1,583, compared with the passing run 16f1f17c.
     </figcaption>
   </figure>
   <ol class="tour-cards">
     <li class="tour-card" id="tour-1" tabindex="0">
       <h3>The timeline</h3>
-      <p>Step 1,595 of 1,670, three steps after the one where only the passing run is asked to switch threads.</p>
+      <p>Step 1,583 of 1,649, three steps after the one where only the passing run is asked to switch threads.</p>
     </li>
     <li class="tour-card" id="tour-2" tabindex="0">
       <h3>Build log</h3>
@@ -139,7 +139,7 @@ DEVENV_FIGURE = """<div class="tour tour-article">
     </li>
     <li class="tour-card" id="tour-4" tabindex="0">
       <h3>Divergence</h3>
-      <p>The runs are the same until step 1,592, where only the passing run is asked to switch threads. This SIGCHLD is the first call that differs.</p>
+      <p>The runs are the same until step 1,580, where only the passing run is asked to switch threads. This SIGCHLD is the first call that differs.</p>
     </li>
   </ol>
 </div>

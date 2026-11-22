@@ -33,42 +33,42 @@ unperturbed run passes. `rewind check` runs the test under other thread
 schedules and stops at the first that ends differently:
 
 ```console
-$ rewind check --epoch 1792627200 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-git-gc-closure'
+$ rewind check --epoch 1793318400 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-git-gc-closure'
 rewind: packing 217 store paths for nix-functional-gc-closure-2.36pre20260912_203f85b2
 ...
-schedule  14: exited:1            64602 steps    run 8679777fcdbe572d
+schedule  37: exited:1            64518 steps    run f7284fdbab2fd66f
 ...
 
-schedule 14 ends differently from schedule 0; finding the step that decides it
-schedule 14 limited to steps 712..64354 still ends differently
-step 64353 decides it: a request to switch threads there makes the run fail
+schedule 37 ends differently from schedule 0; finding the step that decides it
+schedule 37 limited to steps 723..64293 still ends differently
+step 64292 decides it: a request to switch threads there makes the run fail
 
-passing: run f1847c57e08b4a5d, schedule 14 over steps 712..64353
-failing: run c150b2dfda1a5b28, schedule 14 over steps 712..64354
-the two are the same run until step 64353
+passing: run 0f230238b8df849f, schedule 37 over steps 723..64292
+failing: run ca143a58325125d2, schedule 37 over steps 723..64293
+the two are the same run until step 64292
 
 where /nix/store/10dxp0qxqxxsyiljrh2kp0xqhz6arhcx-bash-5.3p15/bin/bash -x -e -u -o pipefail gc-closure.sh first behaves differently:
-  both          64334   359/359   fork() = 478
-  both          64338   478/478   fork() = 479
-  both          64352   478/478   fork() = 480
-  failing       64392   479/479   SIGPIPE code=0 addr=0x0
-  failing       64393   479/479   exit_group(bash) killed:SIGPIPE
-  failing       64396   478/478   SIGCHLD code=1 addr=0x0
-  failing       64397   478/478   exit_group(bash) exited:141
-  passing       64355   479/479   exit_group(bash) exited:0
-  passing       64399   478/478   SIGCHLD code=1 addr=0x0
-  passing       64400   478/478   exit_group(bash) exited:0
-  passing       64404   359/359   SIGCHLD code=1 addr=0x0
+  both          64283   359/359   fork() = 478
+  both          64287   478/478   fork() = 479
+  both          64290   478/478   fork() = 480
+  failing       64328   479/479   SIGPIPE code=0 addr=0x0
+  failing       64329   479/479   exit_group(bash) killed:SIGPIPE
+  failing       64332   478/478   SIGCHLD code=1 addr=0x0
+  failing       64333   478/478   exit_group(bash) exited:141
+  passing       64293   479/479   exit_group(bash) exited:0
+  passing       64322   478/478   SIGCHLD code=1 addr=0x0
+  passing       64323   478/478   exit_group(bash) exited:0
+  passing       64328   359/359   SIGCHLD code=1 addr=0x0
 
-open both in the desktop app: rewind open c150b2dfda1a5b28 64392 --compare f1847c57e08b4a5d
+open both in the desktop app: rewind open ca143a58325125d2 64328 --compare 0f230238b8df849f
 ```
 
-Schedule 14 fails, and `check` narrows its perturbations to the one
-step that decides it, 64353. The failing run's log has the test's last
+Schedule 37 fails, and `check` narrows its perturbations to the one
+step that decides it, 64292. The failing run's log has the test's last
 lines:
 
 ```console
-$ rewind log c150b2df
+$ rewind log ca143a58
 ...
 ++(gc-closure.sh:14) nix build -f dependencies2.nix input2_drv --no-link --print-out-paths
 ...
@@ -84,13 +84,13 @@ $ rewind log c150b2df
 ++(gc-closure.sh:15) printf %s $'/build/nix-test/main/gc-closure/store/ij8qwx0m6dvpmggqmq8zmhbaiw6ym8pg-dependencies-input-2\n/build/nix-test/main/gc-closure/store/hw6dm6 ...
 +(gc-closure.sh:15) input2_out=/build/nix-test/main/gc-closure/store/ij8qwx0m6dvpmggqmq8zmhbaiw6ym8pg-dependencies-input-2
 ...
-1/1 main - nix-functional-tests:gc-closure FAIL             0.70s   (exit status 141 or signal 13 SIGPIPE)
+1/1 main - nix-functional-tests:gc-closure FAIL             0.69s   (exit status 141 or signal 13 SIGPIPE)
 ...
 ```
 
 ```console
-$ rewind replay c150b2df
-identical to the recording: 10279 events, 9708 context switches and 18611 read and write records over 64580 steps, and the whole machine at its 10 keyframes
+$ rewind replay ca143a58
+identical to the recording: 10281 events, 9915 context switches and 18611 read and write records over 64502 steps, and the whole machine at its 11 keyframes
 ```
 
 `input2_out` got the right value, and the test still died of signal 13.
@@ -100,23 +100,24 @@ identical to the recording: 10279 events, 9708 context switches and 18611 read a
 The events around the failure, and the processes just before it:
 
 ```console
-$ rewind events c150b2df --from 64317 --to 64417
-     64322   470/470   thread exit(nix) exited:0
-     64325   470/471   exit_group(nix) exited:0
-     64329   359/359   SIGCHLD code=1 addr=0x0
-     64334   359/359   fork() = 478
-     64338   478/478   fork() = 479
-     64352   478/478   fork() = 480
-     64357   480/480   execve("/nix/store/2gfxiwls9hbgwdwcy43mprchwsq36mg6-coreutils-9.11/bin/head", ["head", "-n1"])
-     64386   480/480   exit_group(head) exited:0
-     64392   479/479   SIGPIPE code=0 addr=0x0
-     64393   479/479   exit_group(bash) killed:SIGPIPE
-     64396   478/478   SIGCHLD code=1 addr=0x0
-     64397   478/478   exit_group(bash) exited:141
-     64401   359/359   SIGCHLD code=1 addr=0x0
-     64415   359/359   exit_group(bash) exited:141
+$ rewind events ca143a58 --from 64253 --to 64353
+     64254   470/470   close("/build/nix-test/main/gc-closure/store/ij8qwx0m6dvpmggqmq8zmhbaiw6ym8pg-dependencies-input-2.lock")
+     64264   470/470   thread exit(nix) exited:0
+     64268   470/471   exit_group(nix) exited:0
+     64270   359/359   SIGCHLD code=1 addr=0x0
+     64283   359/359   fork() = 478
+     64287   478/478   fork() = 479
+     64290   478/478   fork() = 480
+     64295   480/480   execve("/nix/store/2gfxiwls9hbgwdwcy43mprchwsq36mg6-coreutils-9.11/bin/head", ["head", "-n1"])
+     64309   480/480   exit_group(head) exited:0
+     64328   479/479   SIGPIPE code=0 addr=0x0
+     64329   479/479   exit_group(bash) killed:SIGPIPE
+     64332   478/478   SIGCHLD code=1 addr=0x0
+     64333   478/478   exit_group(bash) exited:141
+     64337   359/359   SIGCHLD code=1 addr=0x0
+     64351   359/359   exit_group(bash) exited:141
 
-$ rewind ps c150b2df 64363
+$ rewind ps ca143a58 64301
      1 /init
     34   bash -e /nix/store/l622p70vy8k5sh7y5wizi5f2mic6ynpg-source-stdenv.sh /nix/store/shkw4qm9qcw5sc5n1k5jznc83ny02r39-default-builder.sh
    358     /nix/store/lb41b0anx1f98y9y5s9mdv97gjgsq740-python3-3.14.7/bin/python3.14 /nix/store/r72868g8znkk4m8pmwsn3cf8v3h84mr0-meson-1.12.1/bin/meson test --no-rebuild --print-errorlogs gc-closure
@@ -136,29 +137,30 @@ exits 141.
 counts each process's writes:
 
 ```console
-$ for step in 64368 64386 64392; do echo "step $step"; rewind cat c150b2df $step /proc/479/io | grep -E '^(wchar|syscw)' | sed 's/^/  479 /'; rewind cat c150b2df $step /proc/480/io | grep -E '^(wchar|syscw)' | sed 's/^/  480 /'; done
-step 64368
+$ for step in 64306 64308 64328; do echo "step $step"; rewind cat ca143a58 $step /proc/479/io | grep -E '^(wchar|syscw)' | sed 's/^/  479 /'; rewind cat ca143a58 $step /proc/480/io | grep -E '^(wchar|syscw)' | sed 's/^/  480 /'; done
+step 64306
   479 wchar: 0
   479 syscw: 0
   480 wchar: 30
   480 syscw: 1
-step 64386
+step 64308
   479 wchar: 316
   479 syscw: 2
-  480 wchar: 122
-  480 syscw: 2
-step 64392
+  480 wchar: 30
+  480 syscw: 1
+step 64328
   479 wchar: 316
   479 syscw: 3
 rewind: /proc/480/io: no such file at this step
 ```
 
-The first write of each is its `bash -x` trace line. At 64368 only
-`head`'s has been made; `printf` has written nothing yet. By 64386
-`printf` has made its trace line and written the first store path, and
-`head` has echoed that store path, 92 bytes, and exited. At
-64392 `printf`'s third write adds no bytes: the pipe has no reader
-left.
+The first write of each is its `bash -x` trace line. At 64306 only
+`head`'s has been made; `printf` has written nothing yet. By 64308
+`printf` has made its trace line and written the first store path. In the
+next step, 64309, `head` echoes that store path, the
+92 bytes `input2_out` holds with its newline, and exits, so no
+step shows its count after the echo. At 64328 `printf`'s third write
+adds no bytes: the pipe has no reader left.
 
 ## Root cause
 
@@ -184,105 +186,98 @@ and `-e` ends the test.
 steps:
 
 ```console
-$ rewind threads c150b2df --from 64357 --to 64397
-     64357      64368       480/480  head
-     64369      64369       479/479  bash
-     64370      64382       358/358  meson
-     64383      64384     kernel 11  ksoftirqd/0
-     64385      64386       480/480  head
-     64387      64387     kernel 11  ksoftirqd/0
-     64388      64388       359/359  bash
-     64389      64389       478/478  bash
-     64390      64390     kernel 11  ksoftirqd/0
-     64391      64393       479/479  bash
-     64394      64394     kernel 11  ksoftirqd/0
-     64395      64397       478/478  bash
+$ rewind threads ca143a58 --from 64295 --to 64333
+     64295      64306       480/480  head
+     64307      64307       479/479  bash
+     64308      64309       480/480  head
+     64310      64321       358/358  meson
+     64322      64322     kernel 11  ksoftirqd/0
+     64323      64324       359/359  bash
+     64325      64325       478/478  bash
+     64326      64326     kernel 11  ksoftirqd/0
+     64327      64329       479/479  bash
+     64330      64330     kernel 11  ksoftirqd/0
+     64331      64333       478/478  bash
 ```
 
-`head` blocks in `read` by 64368. `printf` writes its trace line
-and the first store path at 64369, which wakes `head`. `head` runs at 64385 and exits,
-and `printf` only gets the CPU back at 64391; its next write, at
-64392, raises the SIGPIPE.
+`head` blocks in `read` by 64306. `printf` writes its trace line
+and the first store path at 64307, which wakes `head`. `head` runs at 64308 and exits,
+and `printf` only gets the CPU back at 64327; its next write, at
+64328, raises the SIGPIPE.
 
 ## How often it fails
 
 ```console
-$ rewind check --epoch 1792627200 --all --schedules 256 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-git-gc-closure'
-schedule   0: exited:0            79679 steps  a50a5ab6d992  run 5bdb3ab0bc90c8c0
-schedule   1: exited:0            93501 steps  a50a5ab6d992  run 157806c2025329bf
+$ rewind check --epoch 1793318400 --all --schedules 256 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-git-gc-closure'
+schedule   0: exited:0            79875 steps  a50a5ab6d992  run 5658330d0941ceae
+schedule   1: exited:0            94435 steps  a50a5ab6d992  run 5a1439405f1b0ce2
 ...
-schedule  14: exited:1            64602 steps    run 8679777fcdbe572d
+schedule  37: exited:1            64518 steps    run f7284fdbab2fd66f
 ...
-schedule  18: exited:1            43013 steps    run 7520644cccb59c7a
-...
-2 of 256 other schedules ended differently
+1 of 256 other schedules ended differently
 
-schedule 14 ends differently from schedule 0; finding the step that decides it
-schedule 14 limited to steps 712..64354 still ends differently
-step 64353 decides it: a request to switch threads there makes the run fail
+schedule 37 ends differently from schedule 0; finding the step that decides it
+schedule 37 limited to steps 723..64293 still ends differently
+step 64292 decides it: a request to switch threads there makes the run fail
 
-passing: run f1847c57e08b4a5d, schedule 14 over steps 712..64353
-failing: run c150b2dfda1a5b28, schedule 14 over steps 712..64354
-the two are the same run until step 64353
+passing: run 0f230238b8df849f, schedule 37 over steps 723..64292
+failing: run ca143a58325125d2, schedule 37 over steps 723..64293
+the two are the same run until step 64292
 
 where /nix/store/10dxp0qxqxxsyiljrh2kp0xqhz6arhcx-bash-5.3p15/bin/bash -x -e -u -o pipefail gc-closure.sh first behaves differently:
-  both          64334   359/359   fork() = 478
-  both          64338   478/478   fork() = 479
-  both          64352   478/478   fork() = 480
-  failing       64392   479/479   SIGPIPE code=0 addr=0x0
-  failing       64393   479/479   exit_group(bash) killed:SIGPIPE
-  failing       64396   478/478   SIGCHLD code=1 addr=0x0
-  failing       64397   478/478   exit_group(bash) exited:141
-  passing       64355   479/479   exit_group(bash) exited:0
-  passing       64399   478/478   SIGCHLD code=1 addr=0x0
-  passing       64400   478/478   exit_group(bash) exited:0
-  passing       64404   359/359   SIGCHLD code=1 addr=0x0
+  both          64283   359/359   fork() = 478
+  both          64287   478/478   fork() = 479
+  both          64290   478/478   fork() = 480
+  failing       64328   479/479   SIGPIPE code=0 addr=0x0
+  failing       64329   479/479   exit_group(bash) killed:SIGPIPE
+  failing       64332   478/478   SIGCHLD code=1 addr=0x0
+  failing       64333   478/478   exit_group(bash) exited:141
+  passing       64293   479/479   exit_group(bash) exited:0
+  passing       64322   478/478   SIGCHLD code=1 addr=0x0
+  passing       64323   478/478   exit_group(bash) exited:0
+  passing       64328   359/359   SIGCHLD code=1 addr=0x0
 
-open both in the desktop app: rewind open c150b2dfda1a5b28 64392 --compare f1847c57e08b4a5d
+open both in the desktop app: rewind open ca143a58325125d2 64328 --compare 0f230238b8df849f
 ```
 
-2 of the 257 schedules fail, 14 and 18; the other 255 pass, the unperturbed one among them.
+Only schedule 37 of the 257 fails; the other 256 pass, the unperturbed one among them.
 
 ```console
-$ rewind check --run c150b2df --schedule-from 64338 --schedules 64 --all --no-narrow
-schedule   0: exited:1            64580 steps    run c150b2dfda1a5b28
-schedule   1: exited:0            93945 steps  a50a5ab6d992  run 191e55c8584e563c
-schedule   2: exited:0            93809 steps  a50a5ab6d992  run 93387cf771f66f65
+$ rewind check --run ca143a58 --schedule-from 64287 --schedules 64 --all --no-narrow
+schedule   0: exited:1            64502 steps    run ca143a58325125d2
+schedule   1: exited:0            93684 steps  a50a5ab6d992  run 05a809a96a687c11
+schedule   2: exited:0            93718 steps  a50a5ab6d992  run 2adbc7531d27f545
 ...
-schedule  14: exited:1            64602 steps    run c7ca73646ac0f681
+schedule  37: exited:1            64518 steps    run 4e9e0537fc2ed3b9
 ...
-schedule  64: exited:0            93917 steps  a50a5ab6d992  run 980dd0bce166f950
-run c150b2dfda1a5b28 failed; 63 of 64 other schedules ended differently
+schedule  64: exited:0            94086 steps  a50a5ab6d992  run dba32f4c5a48242a
+run ca143a58325125d2 failed; 63 of 64 other schedules ended differently
 ```
 
-Perturbing only from step 64338, where the pipeline forks `printf`,
+Perturbing only from step 64287, where the pipeline forks `printf`,
 moves 63 of 64 schedules off the failing order. Schedule
-14 fails the same way: `head` exits between `printf`'s two
+37 fails the same way: `head` exits between `printf`'s two
 writes, and `printf`, process 479, dies of SIGPIPE.
 
 ```console
-$ rewind check --epoch 1792627200 --all --schedules 1024 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-gc-closure'
+$ rewind check --epoch 1793318400 --all --schedules 1024 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-gc-closure'
 rewind: packing 217 store paths for nix-functional-gc-closure-2.35.2
 ...
-schedule 154: exited:1            81977 steps    run 7f4c63eefdb79b69
+schedule 196: exited:1            82660 steps    run a03d37e0a716aefa
 ...
-schedule 229: exited:1            42284 steps    run ea68ef404c97a3a7
+schedule 650: exited:1            62884 steps    run 2a4579dc8e14fd70
 ...
-schedule 524: exited:1            62925 steps    run 5fcbaba85fe7ff61
+schedule 741: exited:1            82209 steps    run 7e7ff2067ad9d371
 ...
-schedule 540: exited:1            41817 steps    run d4b55fbbf7e653f2
+schedule 904: exited:1            82121 steps    run cb695778aee3c5ad
 ...
-schedule 597: exited:1            82017 steps    run 4749fa9a8079583f
+schedule 935: exited:1            82500 steps    run 87be2b02f02e12a6
 ...
-schedule 879: exited:1            63288 steps    run 14366dc173354094
-...
-schedule 975: exited:1            81916 steps    run 4fe36df4fd20b7b9
-...
-7 of 1024 other schedules ended differently
+5 of 1024 other schedules ended differently
 ...
 ```
 
-Nix 2.35.2 from nixpkgs has the same line, and 7 of its
+Nix 2.35.2 from nixpkgs has the same line, and 5 of its
 1025 runs fail, all with SIGPIPE.
 
 On the host it fails only when the writer is made the low-priority task on its
@@ -310,9 +305,9 @@ Line 16 needs no change: `tail` reads to the end. With the fix, all 65
 schedules pass:
 
 ```console
-$ rewind check --epoch 1792627200 --all 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-git-gc-closure-fixed'
-schedule   0: exited:0            79660 steps  a50a5ab6d992  run c0dca173b49d423e
-schedule   1: exited:0            94278 steps  a50a5ab6d992  run 20811ad52ab2d244
+$ rewind check --epoch 1793318400 --all 'github:fzakaria/rewindvm?dir=examples/case-studies#nix-git-gc-closure-fixed'
+schedule   0: exited:0            79680 steps  a50a5ab6d992  run f015240c164ff130
+schedule   1: exited:0            94146 steps  a50a5ab6d992  run 28db6f952bb16e0a
 ...
 0 of 64 other schedules ended differently
 same result under all 65 schedules
@@ -324,16 +319,16 @@ Both files are in the
 [case-studies release](https://github.com/fzakaria/rewindvm/releases/tag/case-studies):
 
 - [nix-gc-closure-sigpipe.rwd](https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-gc-closure-sigpipe.rwd)
-  (320.0 KB), the trace, for `rewind events`, `rewind log` and the app; the
+  (320.8 KB), the trace, for `rewind events`, `rewind log` and the app; the
   [viewer](https://rewindvm.dev/viewer/?url=examples/nix-gc-closure.rwd) opens it in a browser.
 - [nix-gc-closure-sigpipe-replayable.rwd](https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-gc-closure-sigpipe-replayable.rwd)
-  (516.7 MB), with the kernel, input image and keyframes, for `rewind replay`
+  (608.2 MB), with the kernel, input image and keyframes, for `rewind replay`
   and `rewind shell` on an AMD Zen 2 or later.
 
 ```console
 $ rewind import https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-gc-closure-sigpipe-replayable.rwd
-$ rewind replay c150b2df
-$ rewind shell c150b2df <step>
+$ rewind replay ca143a58
+$ rewind shell ca143a58 <step>
 $ rewind-app https://github.com/fzakaria/rewindvm/releases/download/case-studies/nix-gc-closure-sigpipe.rwd
 ```
 

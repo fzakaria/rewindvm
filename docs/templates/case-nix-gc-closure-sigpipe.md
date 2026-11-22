@@ -1,6 +1,6 @@
 # Case study: a SIGPIPE in Nix's gc-closure test
 
-<!-- let epoch = 1792627200 -->
+<!-- let epoch = 1793318400 -->
 <!-- let flake = github:fzakaria/rewindvm?dir=examples/case-studies -->
 
 Nix's functional test `gc-closure.sh` can fail with exit status 141. Rewind VM
@@ -93,28 +93,29 @@ exits 141.
 ## Count the writes
 
 <!-- set before: rewind threads {{run}} --from {{fork_writer}} --to {{head_exit}} | awk '$3 == "{{writer}}/{{writer}}" {print $1}' | sed -n 2p | awk '{print $1 - 1}' -->
-<!-- set wchar_after: rewind cat {{run}} {{head_exit}} /proc/{{writer}}/io | awk '/^wchar/ {print $2}' -->
-<!-- set head_after: rewind cat {{run}} {{head_exit}} /proc/{{head}}/io | awk '/^wchar/ {print $2}' -->
-<!-- set head_before: rewind cat {{run}} {{before}} /proc/{{head}}/io | awk '/^wchar/ {print $2}' -->
-<!-- set first_line: echo $(( {{head_after}} - {{head_before}} )) -->
+<!-- set printed: echo $(( {{head_exit}} - 1 )) -->
+<!-- assert: test {{before}} -lt {{printed}} -->
+<!-- set wchar_after: rewind cat {{run}} {{printed}} /proc/{{writer}}/io | awk '/^wchar/ {print $2}' -->
+<!-- set first_line: grep -m1 '^+(gc-closure.sh:15) input2_out=' {{out:log}} | sed 's/^[^=]*=//' | awk '{print length($0) + 1}' -->
 
 `rewind cat` reads a file in a fork of the run at any step. `/proc/<pid>/io`
 counts each process's writes:
 
 ```console run name=writes
-$ for step in {{before}} {{head_exit}} {{sigpipe}}; do echo "step $step"; rewind cat {{run|short}} $step /proc/{{writer}}/io | grep -E '^(wchar|syscw)' | sed 's/^/  {{writer}} /'; rewind cat {{run|short}} $step /proc/{{head}}/io | grep -E '^(wchar|syscw)' | sed 's/^/  {{head}} /'; done
+$ for step in {{before}} {{printed}} {{sigpipe}}; do echo "step $step"; rewind cat {{run|short}} $step /proc/{{writer}}/io | grep -E '^(wchar|syscw)' | sed 's/^/  {{writer}} /'; rewind cat {{run|short}} $step /proc/{{head}}/io | grep -E '^(wchar|syscw)' | sed 's/^/  {{head}} /'; done
 ```
 
 <!-- assert: test "$(grep -A4 '^step {{before}}$' {{out:writes}} | grep syscw | tr -s ' ' | cut -d' ' -f4 | tr '\n' ' ')" = '0 1 ' -->
-<!-- assert: test "$(grep -A4 '^step {{head_exit}}$' {{out:writes}} | grep syscw | tr -s ' ' | cut -d' ' -f4 | tr '\n' ' ')" = '2 2 ' -->
+<!-- assert: test "$(grep -A4 '^step {{printed}}$' {{out:writes}} | grep syscw | tr -s ' ' | cut -d' ' -f4 | tr '\n' ' ')" = '2 1 ' -->
 <!-- assert: grep -A3 '^step {{sigpipe}}$' {{out:writes}} | grep -q '  {{writer}} syscw: 3' && grep -A3 '^step {{sigpipe}}$' {{out:writes}} | grep -q '  {{writer}} wchar: {{wchar_after}}' && grep -q 'rewind: /proc/{{head}}/io: no such file at this step' {{out:writes}} -->
 
 The first write of each is its `bash -x` trace line. At {{before}} only
-`head`'s has been made; `printf` has written nothing yet. By {{head_exit}}
-`printf` has made its trace line and written the first store path, and
-`head` has echoed that store path, {{first_line}} bytes, and exited. At
-{{sigpipe}} `printf`'s third write adds no bytes: the pipe has no reader
-left.
+`head`'s has been made; `printf` has written nothing yet. By {{printed}}
+`printf` has made its trace line and written the first store path. In the
+next step, {{head_exit}}, `head` echoes that store path, the
+{{first_line}} bytes `input2_out` holds with its newline, and exits, so no
+step shows its count after the echo. At {{sigpipe}} `printf`'s third write
+adds no bytes: the pipe has no reader left.
 
 ## Root cause
 
