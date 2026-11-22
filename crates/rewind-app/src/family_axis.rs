@@ -100,8 +100,9 @@ pub struct Track {
     pub same: Option<Span>,
     /// Thick: from where the machine first differs to the run's end.
     pub own: Option<Span>,
-    /// The steps the run's schedule was confined to, for a run `rewind
-    /// check` made narrowing a schedule down.
+    /// The steps the run's schedule perturbed: to its end for a whole
+    /// schedule or a fork, a window for a run `rewind check` made
+    /// narrowing a schedule down.
     pub perturbed: Option<Span>,
     pub machine: Option<f32>,
     pub behaves: Option<f32>,
@@ -117,9 +118,9 @@ impl Track {
         let span = |from: u64, to: u64| span_in(window, from, to);
         let point = |step: u64| window.at(step);
 
-        // The steps a narrowed schedule perturbed, whatever else is known.
+        // The steps the run's schedule perturbed, whatever else is known.
         let perturbed = run
-            .window
+            .perturbs
             .and_then(|(from, until)| span(from, until.min(last)));
 
         // Where the machine first differs, and where the failing program
@@ -158,6 +159,48 @@ impl Track {
             machine: machine.and_then(point),
             behaves: behaves.and_then(point),
             end: point(last),
+        }
+    }
+}
+
+/// Whether `window` shows every step of runs whose longest ends at `last`.
+pub fn shows_every_step(window: Window, last: u64) -> bool {
+    window.from() == 0 && window.to() >= last
+}
+
+/// What the step axis's playhead link does to the window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToPlayhead {
+    /// Centers it on the playhead at its width.
+    Center(Window),
+    /// Zooms in around the playhead: a window that shows every step
+    /// cannot move, so centering it would do nothing.
+    Zoom(Window),
+}
+
+impl ToPlayhead {
+    /// The link's move for `window` over runs whose longest ends at
+    /// `last`, with the playhead at `step`; a zoom in narrows the window
+    /// to `zoomed_half` steps either side.
+    pub fn of(window: Window, step: u64, last: u64, zoomed_half: u64) -> ToPlayhead {
+        if shows_every_step(window, last) {
+            return ToPlayhead::Zoom(Window::around(step, zoomed_half.min(window.half), last));
+        }
+        ToPlayhead::Center(Window::around(step, window.half, last))
+    }
+
+    /// The window the link moves to.
+    pub fn window(self) -> Window {
+        match self {
+            ToPlayhead::Center(w) | ToPlayhead::Zoom(w) => w,
+        }
+    }
+
+    /// The link's words.
+    pub fn words(self) -> &'static str {
+        match self {
+            ToPlayhead::Center(_) => "Center on playhead",
+            ToPlayhead::Zoom(_) => "Zoom to playhead",
         }
     }
 }
@@ -225,6 +268,7 @@ mod tests {
             shares: None,
             cores: 1,
             window: None,
+            perturbs: None,
             imported: false,
             inputs: Some(INPUTS.to_string()),
             created: 0,
@@ -283,6 +327,7 @@ mod tests {
         // an export has in the browser, still shows its perturbed steps.
         let mut narrowed = run("w", None, 8);
         narrowed.window = Some((30, 45));
+        narrowed.perturbs = Some((30, 45));
         let alone = Track::of(&narrowed, Parted::Root, window());
         assert_eq!(
             alone.perturbed,
@@ -310,6 +355,7 @@ mod tests {
         // first behaves differently at 60.
         let mut narrowed = run("w", None, 8);
         narrowed.window = Some((30, 45));
+        narrowed.perturbs = Some((30, 45));
         let track = Track::of(&narrowed, known(Some(PARTS), Some(60)), window());
         assert_eq!(
             track.perturbed,
@@ -319,6 +365,51 @@ mod tests {
             })
         );
         assert_eq!(track.behaves, Some(at(60)));
+    }
+
+    #[test]
+    fn a_whole_schedule_and_a_fork_show_the_steps_they_perturb() {
+        // A run from boot under schedule 3 perturbs from where the job
+        // started, step 14, to its end; a fork from its fork step to its
+        // end. A schedule 0 run perturbs nothing.
+        let mut whole = run("c", None, 3);
+        whole.perturbs = Some((14, u64::MAX));
+        let track = Track::of(&whole, known(Some(PARTS), None), window());
+        assert_eq!(
+            track.perturbed,
+            Some(Span {
+                from: at(14),
+                to: at(LAST)
+            })
+        );
+
+        let mut fork = run("f", Some("base"), 1);
+        fork.perturbs = Some((FORK_STEP, u64::MAX));
+        let track = Track::of(&fork, known(Some(PARTS), None), window());
+        assert_eq!(track.perturbed.map(|s| s.from), Some(at(FORK_STEP)));
+
+        let base = Track::of(&run("base", None, 0), Parted::Root, window());
+        assert_eq!(base.perturbed, None);
+    }
+
+    #[test]
+    fn the_playhead_link_centers_the_window_or_zooms_in_when_it_shows_everything() {
+        // Over part of the runs the window centers on the playhead at its
+        // width; over all of them centering cannot move it, so the link
+        // zooms in around the playhead instead.
+        let last = 1000;
+        let part = Window::around(100, 50, last);
+        assert_eq!(
+            ToPlayhead::of(part, 600, last, 20),
+            ToPlayhead::Center(Window::around(600, 50, last))
+        );
+        let whole = Window::around(0, 500, last);
+        assert_eq!(
+            ToPlayhead::of(whole, 600, last, 20),
+            ToPlayhead::Zoom(Window::around(600, 20, last))
+        );
+        assert!(shows_every_step(whole, last));
+        assert!(!shows_every_step(part, last));
     }
 
     #[test]

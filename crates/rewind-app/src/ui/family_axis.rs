@@ -21,7 +21,7 @@ use rewind_trace::manifest::TRACE;
 
 use crate::describe::thousands;
 use crate::family::RunEntry;
-use crate::family_axis::{Parted, Track, partings};
+use crate::family_axis::{Parted, ToPlayhead, Track, partings, shows_every_step};
 use crate::lanes::{MIN_HALF, Window};
 use crate::theme::{self, size};
 use crate::ui::bookmarks::link;
@@ -63,6 +63,11 @@ const END_MARK: f32 = 7.0;
 const BEHAVES_WIDTH: f32 = 2.0;
 const PLAYHEAD_WIDTH: f32 = 1.0;
 
+/// The narrowest the band of perturbed steps is drawn: wider than the
+/// mark where the machine first differs, which sits inside a narrow
+/// window rewind check made.
+const PERTURBED_MIN_WIDTH: f32 = 13.0;
+
 /// The band where a schedule perturbed a run: the compared run's blue,
 /// faint.
 const PERTURBED_A: u32 = 0x7fb2ff2e;
@@ -72,13 +77,11 @@ const ZOOM_IN_NOTE: &str =
     "Zoom in: fewer steps, each wider. Ctrl and the wheel zoom around the pointer.";
 const ZOOM_OUT_NOTE: &str =
     "Zoom out: more steps, each narrower. Ctrl and the wheel zoom around the pointer.";
-const SAME_NOTE: &str = "A thin line is steps where the run's machine is still the machine of the run it hangs under: a fork's parent, or the run recorded without a schedule. A step of two runs is the same moment only there.";
-const OWN_NOTE: &str = "A thick line is the run's own steps, from where its machine first differs to its end, green for a run that passed and red for one that failed.";
-const MACHINE_NOTE: &str =
-    "Where the run's machine first differs from the run it hangs under, as rewind diff finds it.";
-const BEHAVES_NOTE: &str = "Where the program that failed in one of the two runs first behaves differently, as rewind check reports it.";
-const PERTURBED_NOTE: &str =
-    "The steps rewind check confined the run's schedule to, as it narrowed a schedule down.";
+const SAME_NOTE: &str = "A thin line: steps where the run is still exactly its parent, the run it hangs under in the tree. A fork's parent is the run it was forked from; a run from boot under another schedule hangs under the run recorded without one. Step N of the two runs is the same moment only here.";
+const OWN_NOTE: &str = "A thick line: the run after it first differs from its parent, to its end, green for a run that passed and red for one that failed. From here on its step numbers are its own; step N of two runs is no longer the same moment.";
+const MACHINE_NOTE: &str = "The first step where the run's trace differs from its parent's, as rewind diff finds it. A perturbed schedule makes the machine differ within a few steps of where it starts perturbing, so for most runs this sits at the left edge of the blue band.";
+const BEHAVES_NOTE: &str = "Where the program that failed in one of the two runs first behaves differently, as rewind check reports it. Drawn only when one of the run and its parent failed and the other passed.";
+const PERTURBED_NOTE: &str = "The steps the run's thread schedule perturbed: from where the job started for a run from boot, from the fork step for a fork, and the window rewind check confined a schedule to as it narrowed it down.";
 const WORKING_NOTE: &str = "Comparing each run's trace with the run it hangs under.";
 
 impl Scrubber {
@@ -270,10 +273,17 @@ impl Scrubber {
             .text_color(rgb(theme::SOFT))
             .tooltip(tooltip(ZOOM_NOTE))
             .child(format!("\u{b1}{} steps", thousands(axis.half)));
-        let whole = link("runs-axis-whole", "Whole runs")
-            .on_click(cx.listener(|this, _, _, cx| this.show_whole_runs(cx)));
-        let recenter = link("runs-axis-center", "Center on playhead")
-            .on_click(cx.listener(|this, _, _, cx| this.center_family_axis_on_playhead(cx)));
+        // "Whole runs" only while some steps are out of view; the playhead
+        // link zooms in where centering could not move the window.
+        let last = self.family_axis_last();
+        let whole = (!shows_every_step(axis, last)).then(|| {
+            link("runs-axis-whole", "Whole runs")
+                .on_click(cx.listener(|this, _, _, cx| this.show_whole_runs(cx)))
+        });
+        let to_playhead = ToPlayhead::of(axis, self.step, last, OPEN_HALF);
+        let recenter = link("runs-axis-center", to_playhead.words()).on_click(
+            cx.listener(move |this, _, _, cx| this.move_family_axis(to_playhead.window(), cx)),
+        );
         let working = matches!(self.runs.work, Work::Working | Work::WorkingStale);
         let controls = div()
             .flex()
@@ -319,7 +329,7 @@ impl Scrubber {
                                 .child("comparing\u{2026}"),
                         )
                     })
-                    .child(whole)
+                    .children(whole)
                     .child(recenter),
             );
 
@@ -354,13 +364,13 @@ impl Scrubber {
             .child(item(
                 "runs-legend-same",
                 line(SAME_HEIGHT, theme::GRAPH_LINE),
-                "same machine",
+                "same as parent",
                 SAME_NOTE,
             ))
             .child(item(
                 "runs-legend-own",
                 line(OWN_HEIGHT, theme::GREEN_SOFT),
-                "its own steps",
+                "diverged",
                 OWN_NOTE,
             ))
             .child(item(
@@ -370,7 +380,7 @@ impl Scrubber {
                     .size(px(MACHINE_MARK))
                     .border_1()
                     .border_color(rgb(theme::SOFT)),
-                "machine differs",
+                "first difference",
                 MACHINE_NOTE,
             ))
             .child(item(
@@ -380,7 +390,7 @@ impl Scrubber {
                     .w(px(BEHAVES_WIDTH))
                     .h(px(BEHAVES_HEIGHT * 0.75))
                     .bg(rgb(theme::RED_SOFT)),
-                "program differs",
+                "failing program differs",
                 BEHAVES_NOTE,
             ))
             .child(item(
@@ -390,7 +400,7 @@ impl Scrubber {
                     .w(px(MACHINE_MARK * 3.0))
                     .h(px(PERTURBED_HEIGHT * 0.75))
                     .bg(rgba(PERTURBED_A)),
-                "perturbed",
+                "schedule perturbed",
                 PERTURBED_NOTE,
             ));
 
@@ -441,8 +451,11 @@ impl Scrubber {
             Parted::Unknown => words.push("not compared yet".to_string()),
             Parted::Known(p) => {
                 match p.machine {
-                    Some(step) => words.push(format!("machine differs at {}", thousands(step))),
-                    None => words.push("the same machine to the end".to_string()),
+                    Some(step) => words.push(format!(
+                        "first differs from its parent at {}",
+                        thousands(step)
+                    )),
+                    None => words.push("the same as its parent to the end".to_string()),
                 }
                 if let Some(step) = p.behaves {
                     words.push(format!("failing program differs at {}", thousands(step)));
@@ -483,12 +496,16 @@ pub(super) fn track_cell(track: Track, failed: bool, playhead: Option<f32>) -> i
                 gpui::Bounds::new(point(x(at) - w / 2.0, mid - h / 2.0), gpui::size(w, h))
             };
 
-            // The band of perturbed steps under the lines.
+            // The band of perturbed steps under the lines, widened about
+            // its middle when it is narrower than the marks over it.
             if let Some(s) = track.perturbed {
-                window.paint_quad(fill(
-                    band(s.from, s.to, PERTURBED_HEIGHT),
-                    rgba(PERTURBED_A),
-                ));
+                let mut b = band(s.from, s.to, PERTURBED_HEIGHT);
+                let min = px(PERTURBED_MIN_WIDTH);
+                if b.size.width < min {
+                    b.origin.x -= (min - b.size.width) / 2.0;
+                    b.size.width = min;
+                }
+                window.paint_quad(fill(b, rgba(PERTURBED_A)));
             }
 
             // The steps shared with the run it hangs under, thin, then its

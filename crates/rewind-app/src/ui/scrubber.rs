@@ -932,8 +932,16 @@ impl Scrubber {
     }
 
     /// Opens a run of the family, compared with the run
-    /// [`Family::compare_with`] names unless another comparison is pinned.
-    pub(super) fn open_family_run(&mut self, run: RunEntry, cx: &mut Context<Self>) {
+    /// [`Family::compare_with`] names unless another comparison is pinned,
+    /// with the playhead at `step` when one is given: the step the user
+    /// clicked on the run's track. A run already on screen only moves its
+    /// playhead there.
+    pub(super) fn open_family_run(
+        &mut self,
+        run: RunEntry,
+        step: Option<u64>,
+        cx: &mut Context<Self>,
+    ) {
         // A run the engine is still executing has no trace to open yet.
         if run.progress == Progress::Running {
             self.notify_user(
@@ -950,9 +958,25 @@ impl Scrubber {
         let in_memory =
             |s: &Session| s.run.origin == Origin::Example || cfg!(target_family = "wasm");
         if let Some(session) = self.session.as_ref().filter(|s| in_memory(s)) {
-            if own_run_click(session, &run.id) == OwnRunClick::ShowCompared {
-                self.show_other_run(None, cx);
+            match own_run_click(session, &run.id) {
+                OwnRunClick::ShowCompared => self.show_other_run(step, cx),
+                OwnRunClick::OnScreen => {
+                    if let Some(step) = step {
+                        self.jump_to(step, cx);
+                    }
+                }
             }
+            return;
+        }
+
+        // The run on screen stays; only the playhead moves.
+        let on_screen = self
+            .session
+            .as_ref()
+            .and_then(|s| s.run.id())
+            .is_some_and(|id| id.as_str() == run.id);
+        if let (true, Some(step)) = (on_screen, step) {
+            self.jump_to(step, cx);
             return;
         }
         // The chosen comparison holds, except against the run itself.
@@ -972,7 +996,7 @@ impl Scrubber {
             .clone()
             .filter(|pinned| *pinned != run.dir)
             .or(above);
-        self.open(run.dir, compare, cx);
+        self.open_at(run.dir, compare, step, cx);
     }
 
     /// The Runs panel's rows as it draws them, folded as the user left
@@ -2112,6 +2136,18 @@ impl Scrubber {
     /// Reads a run, and the run to compare it with, on a background
     /// thread and shows them.
     pub(super) fn open(&mut self, path: PathBuf, compare: Option<PathBuf>, cx: &mut Context<Self>) {
+        self.open_at(path, compare, None, cx);
+    }
+
+    /// Opens `path` as [`Scrubber::open`] does, with the playhead at
+    /// `step` when one is given.
+    pub(super) fn open_at(
+        &mut self,
+        path: PathBuf,
+        compare: Option<PathBuf>,
+        step: Option<u64>,
+        cx: &mut Context<Self>,
+    ) {
         let request = self.requests.issue();
         self.opening = Some(request);
         self.loading = Some(path.clone());
@@ -2142,7 +2178,7 @@ impl Scrubber {
                 this.loading = None;
                 this.loading_compare = None;
                 match result {
-                    Ok(session) => this.show(session, None, cx),
+                    Ok(session) => this.show(session, step, cx),
                     Err(e) => this.notify_user(
                         NoticeTone::Error,
                         "Could not open the run",

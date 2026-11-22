@@ -98,6 +98,11 @@ pub struct RunEntry {
     /// The steps its schedule was confined to, for the runs rewind check
     /// makes as it narrows a schedule down.
     pub window: Option<(u64, u64)>,
+    /// The steps its own schedule perturbs, `from..until`, with until
+    /// u64::MAX for a schedule that runs to the run's end: from where the
+    /// job started for a run from boot, from the fork step for a fork.
+    /// None for a run under schedule 0.
+    pub perturbs: Option<(u64, u64)>,
     /// Whether it came from an export made on another machine.
     pub imported: bool,
     /// Its inputs less its schedule, which tie a run from boot under a
@@ -192,6 +197,7 @@ impl RunEntry {
             }),
             cores: u64::from(spec.cores),
             window: spec.window(),
+            perturbs: (spec.schedule != 0).then_some((spec.schedule_from, spec.schedule_until)),
             imported: imported(manifest),
             inputs: Some(inputs_key(manifest)),
             created: manifest.created,
@@ -1150,6 +1156,7 @@ mod tests {
             shares: None,
             cores: ONE_CORE,
             window: None,
+            perturbs: None,
             imported: false,
             inputs: Some(INPUTS.to_string()),
             created: 0,

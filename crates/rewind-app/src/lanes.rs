@@ -207,6 +207,14 @@ impl Window {
         1.0 / (2 * self.half + 1) as f32
     }
 
+    /// The step under the point `fraction` of the way across the window,
+    /// held to the window's first and last steps.
+    pub fn step_across(&self, fraction: f32) -> u64 {
+        let width = 2 * self.half + 1;
+        let along = (fraction.clamp(0.0, 1.0) as f64 * width as f64).floor() as u64;
+        self.from() + along.min(width - 1)
+    }
+
     /// This window's step at `offset` steps from its center, when there is
     /// one.
     pub fn step_at(&self, offset: i64) -> Option<u64> {
@@ -608,6 +616,19 @@ mod tests {
             wide.zoomed_within(0.5, 2.0, MAX_HALF),
             wide.zoomed(0.5, 2.0)
         );
+    }
+
+    /// The step under a point across the window: the window's first step
+    /// at its left edge, its last at its right edge, and the edges for a
+    /// point past either.
+    #[test]
+    fn the_step_across_a_window_is_the_one_under_the_point() {
+        let window = Window::around(100, 50, 1000);
+        assert_eq!(window.step_across(0.0), 50);
+        assert_eq!(window.step_across(0.5), 100);
+        assert_eq!(window.step_across(0.999), 150);
+        assert_eq!(window.step_across(1.0), 150);
+        assert_eq!(window.step_across(-0.2), 50);
     }
 
     /// Panning moves the center by a share of the window's width, and

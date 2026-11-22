@@ -2520,7 +2520,16 @@ impl Scrubber {
                                     this.toggle_fold(&run.id, cx);
                                     return;
                                 }
-                                this.open_family_run(run.clone(), cx)
+                                // On the step axis, a click on the track
+                                // opens the run at the step under it.
+                                let step = axis.and_then(|axis| {
+                                    let b = this.measured.runs_axis.get()?;
+                                    let x = (e.position().x - b.origin.x) / b.size.width;
+                                    let step =
+                                        axis.step_across((0.0..=1.0).contains(&x).then_some(x)?);
+                                    Some(step.min(run.last_step.unwrap_or(step)))
+                                });
+                                this.open_family_run(run.clone(), step, cx)
                             }))
                     })
                     .collect::<Vec<_>>()
