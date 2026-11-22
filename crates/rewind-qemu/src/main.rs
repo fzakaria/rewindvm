@@ -133,7 +133,7 @@ fn main() -> Result<()> {
     // The initrd with the job appended, as the KVM machine boots it.
     let config = spec.config()?;
     if let Some(dir) = &args.bundle {
-        return bundle(&run, &config, model, vendor, dir);
+        return bundle(&run, &config, model, vendor, dir, &args.qemu);
     }
 
     let work = match (&args.prepare, &args.work) {
@@ -208,6 +208,7 @@ fn main() -> Result<()> {
         perturbed,
         resumed: resumed.is_some(),
         inspects: args.cat.is_some(),
+        image: ImageUse::Whole,
         config: &config,
     };
 
@@ -318,6 +319,21 @@ const SCHEDULE: &str = "schedule";
 const LOG: &str = "steps.log";
 const STATE: &str = "state";
 const REQUEST: &str = "request";
+const IMAGE_PAGES: &str = "image-pages";
+const SPARSE: &str = "image.sparse";
+
+/// The first bytes of a sparse image, as the QEMU machine reads it.
+const SPARSE_MAGIC: &[u8; 8] = b"rwqimg1\0";
+
+/// How the machine holds the input image: whole, as ROM; whole, noting
+/// each page the guest reads; or only the pages a bundle carries, failing
+/// on a read of any other.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ImageUse {
+    Whole,
+    Tracked,
+    Sparse,
+}
 
 /// What QEMU's arguments are made from.
 struct Launch<'a> {
@@ -331,6 +347,8 @@ struct Launch<'a> {
     resumed: bool,
     /// Whether the machine asks the guest for a file at the until step.
     inspects: bool,
+    /// How the machine holds the input image.
+    image: ImageUse,
     config: &'a rewind_vmm::Config,
 }
 
@@ -355,8 +373,22 @@ impl Launch<'_> {
             path(LOG),
             self.until,
         );
-        if config.image.is_some() {
-            let _ = write!(machine, ",image={}", path(IMAGE));
+        match (self.image, config.image.is_some()) {
+            (_, false) => {}
+            (ImageUse::Whole, true) => {
+                let _ = write!(machine, ",image={}", path(IMAGE));
+            }
+            (ImageUse::Tracked, true) => {
+                let _ = write!(
+                    machine,
+                    ",image={},image-pages={}",
+                    path(IMAGE),
+                    path(IMAGE_PAGES)
+                );
+            }
+            (ImageUse::Sparse, true) => {
+                let _ = write!(machine, ",image-sparse={}", path(SPARSE));
+            }
         }
         if self.perturbed {
             let _ = write!(machine, ",schedule={}", path(SCHEDULE));
@@ -414,8 +446,11 @@ fn bundle(
     model: &'static str,
     vendor: Vendor,
     dir: &std::path::Path,
+    qemu: &std::path::Path,
 ) -> Result<()> {
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let work = dir.join(".work");
+    std::fs::create_dir_all(&work)?;
     let last = run
         .manifest
         .outcome
@@ -426,17 +461,17 @@ fn bundle(
     let perturbed = schedule.len() > schedule::MAGIC.len();
     if perturbed {
         std::fs::write(dir.join(SCHEDULE), &schedule)?;
-    }
-    if let Some(image) = &config.image {
-        link(image, &dir.join(IMAGE))?;
+        std::fs::write(work.join(SCHEDULE), &schedule)?;
     }
 
-    // Every keyframe, the recording's and the ones looks kept.
+    // Every keyframe, the recording's and the ones looks kept, gzipped
+    // for the page, which unpacks them with the browser's own gzip.
     let keyframes = run.keyframes()?;
     let home = rewind_core::home::Home::open()?;
     let store = rewind_core::run::Store::open(&home.store())?;
     let span = rewind_vmm::layout::ram_span(config.mem_bytes) as usize;
     let mut steps = Vec::new();
+    let mut pages = std::collections::BTreeSet::new();
     for step in keyframes.steps() {
         let chain = keyframes.chain(step)?;
         let state = rewind_vmm::portable::encode(
@@ -444,10 +479,55 @@ fn bundle(
             &rewind_core::keyframes::ReadPages(&store),
             span / rewind_vmm::layout::PAGE_SIZE,
         )?;
-        std::fs::write(dir.join(format!("{STATE}-{step}")), &state)?;
-        eprintln!("keyframe at step {step}: {} bytes", state.len());
+        let packed = gzip(&state)?;
+        std::fs::write(dir.join(format!("{STATE}-{step}.gz")), &packed)?;
+        eprintln!(
+            "keyframe at step {step}: {} bytes, {} gzipped",
+            state.len(),
+            packed.len()
+        );
+
+        // The image pages a replay from the keyframe to the run's end
+        // reads, on this host's QEMU, which also checks the replay.
+        if config.image.is_some() {
+            std::fs::write(work.join(STATE), &state)?;
+            pages.extend(track_image(run, config, model, vendor, &work, qemu, step)?);
+        }
         steps.push(step);
     }
+
+    // The image as the pages those replays read.
+    let image = match &config.image {
+        Some(path) => {
+            let whole =
+                std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+            let mut sparse = SPARSE_MAGIC.to_vec();
+            sparse.extend_from_slice(&(whole.len() as u64).to_le_bytes());
+            sparse.extend_from_slice(&(pages.len() as u32).to_le_bytes());
+            for page in &pages {
+                let at = *page as usize * rewind_vmm::layout::PAGE_SIZE;
+                let mut bytes = [0u8; rewind_vmm::layout::PAGE_SIZE];
+                let end = whole.len().min(at + bytes.len());
+                if at < end {
+                    bytes[..end - at].copy_from_slice(&whole[at..end]);
+                }
+                sparse.extend_from_slice(&page.to_le_bytes());
+                sparse.extend_from_slice(&bytes);
+            }
+            let packed = gzip(&sparse)?;
+            eprintln!(
+                "image: {} bytes whole, {} pages read, {} bytes sparse, {} gzipped",
+                whole.len(),
+                pages.len(),
+                sparse.len(),
+                packed.len()
+            );
+            std::fs::write(dir.join(format!("{SPARSE}.gz")), &packed)?;
+            true
+        }
+        None => false,
+    };
+    let _ = std::fs::remove_dir_all(&work);
 
     let launch = Launch {
         model,
@@ -456,6 +536,7 @@ fn bundle(
         perturbed,
         resumed: true,
         inspects: true,
+        image: ImageUse::Sparse,
         config,
     };
     let args = launch.args(&|name: &str| format!("{BROWSER_DIR}/{name}"));
@@ -464,12 +545,83 @@ fn bundle(
         "{{\"args\":{},\"keyframes\":[{}],\"image\":{},\"schedule\":{}}}\n",
         json_strings(&args).trim_end(),
         keyframes.join(","),
-        config.image.is_some(),
+        image,
         perturbed,
     );
     std::fs::write(dir.join("manifest.json"), manifest)?;
     eprintln!("wrote {}", dir.display());
     Ok(())
+}
+
+/// Replays `run` on this host's QEMU from the keyframe at `from`, whose
+/// portable form is in `work`, to the run's end, noting the image pages
+/// the guest reads; fails unless the replay's trace is the recording's.
+fn track_image(
+    run: &Run,
+    config: &rewind_vmm::Config,
+    model: &'static str,
+    vendor: Vendor,
+    work: &std::path::Path,
+    qemu: &std::path::Path,
+    from: u64,
+) -> Result<Vec<u32>> {
+    let launch = Launch {
+        model,
+        vendor,
+        until: "0".to_string(),
+        perturbed: work.join(SCHEDULE).exists(),
+        resumed: true,
+        inspects: false,
+        image: ImageUse::Tracked,
+        config,
+    };
+    let image = config.image.clone().context("the run has no image")?;
+    let args = launch.args(&|name: &str| {
+        match name {
+            IMAGE => image.clone(),
+            _ => work.join(name),
+        }
+        .display()
+        .to_string()
+    });
+    let status = Command::new(qemu)
+        .args(&args)
+        .stderr(std::process::Stdio::null())
+        .status()
+        .with_context(|| format!("starting {}", qemu.display()))?;
+    if !status.success() {
+        bail!("{} failed: {status}", qemu.display());
+    }
+
+    // The replay must be the recording, or its pages are another run's.
+    let log = std::fs::read(work.join(LOG))?;
+    let encoded = step_log::encode(&log, run.records()?)?;
+    let recorded = run.records()?;
+    let mut records = recorded[..recorded.partition_point(|(s, _)| *s <= from)].to_vec();
+    records.extend(encoded.records);
+    let mut trace = TraceWriter::new(Vec::new());
+    for (step, record) in &records {
+        trace.record(*step, record)?;
+    }
+    let hash = blake3::hash(&trace.finish()?).to_hex().to_string();
+    if run.manifest.trace_hash.as_deref() != Some(hash.as_str()) {
+        bail!("the replay from the keyframe at step {from} is not the recording");
+    }
+    let listed = std::fs::read(work.join(IMAGE_PAGES))?;
+    Ok(listed
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| u32::from_le_bytes(*b))
+        .collect())
+}
+
+/// `bytes` gzipped.
+fn gzip(bytes: &[u8]) -> Result<Vec<u8>> {
+    use std::io::Write as _;
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(bytes)?;
+    Ok(encoder.finish()?)
 }
 
 /// Links `to` at `at`, replacing what was there.

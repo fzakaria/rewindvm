@@ -1,0 +1,265 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Farid Zakaria <farid.m.zakaria@gmail.com>
+Date: Sat, 21 Nov 2026 20:50:42 -0800
+Subject: [PATCH] hw/i386: rewind: track and hold a sparse image
+
+With image-pages=, the machine reads the input image through itself and
+writes, at its stop, the pages the guest read. With image-sparse=, it
+holds only the pages a file lists, and stops with an error naming the
+page and step when the guest reads any other, so a replay from a
+partial image never goes on with zeros where the image had bytes.
+---
+ hw/i386/rewind.c | 191 ++++++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 190 insertions(+), 1 deletion(-)
+
+diff --git a/hw/i386/rewind.c b/hw/i386/rewind.c
+index 2d4bfe5..6005f00 100644
+--- a/hw/i386/rewind.c
++++ b/hw/i386/rewind.c
+@@ -168,6 +168,8 @@ struct RewindMachineState {
+     char *inspect_path;
+     char *stop_mark;
+     char *state_path;
++    char *image_pages_path;
++    char *image_sparse_path;
+ 
+     uint8_t seed[32];
+     RewindCpuModel model;
+@@ -179,6 +181,20 @@ struct RewindMachineState {
+     MemoryRegion ram_high;
+     MemoryRegion pmem;
+     uint64_t pmem_len;
++
++    /*
++     * The image as memory the machine reads itself, when it tracks the
++     * pages the guest reads (image-pages=) or holds only some of them
++     * (image-sparse=): its bytes, and a bit per page, set for a page
++     * read or a page present.
++     */
++    uint8_t *image_data;
++    unsigned long *image_bits;
++
++    /* A sparse image: its present pages as ROM, and a trap over each run
++     * of pages it leaves out. */
++    MemoryRegion pmem_rom;
++    struct ImageHole *pmem_holes;
+     MemoryRegion extras_mr;
+     MemoryRegion ports;
+     MemoryRegion mmio;
+@@ -347,6 +363,7 @@ static Perturbation perturbation(RewindMachineState *s)
+ /* Stopping. */
+ 
+ static void stop_machine(RewindMachineState *s, enum RewindStop why);
++static void write_image_pages(RewindMachineState *s);
+ 
+ /*
+  * Takes the read and write records the guest buffered since the step
+@@ -547,6 +564,7 @@ static void stop_machine(RewindMachineState *s, enum RewindStop why)
+         drain_io(s);
+     }
+     fflush(s->log);
++    write_image_pages(s);
+ 
+ #ifdef __EMSCRIPTEN__
+     /*
+@@ -755,6 +773,99 @@ static const MemoryRegionOps extras_ops = {
+     .impl = { .min_access_size = 1, .max_access_size = 8 },
+ };
+ 
++/*
++ * The image, read through the machine instead of as ROM: each read either
++ * marks its pages (image-pages=), or must find them present
++ * (image-sparse=), which stops the machine loudly when they are not. A
++ * write is an exit, as on KVM's read-only slot.
++ */
++#define SPARSE_MAGIC "rwqimg1\0"
++
++static uint64_t image_read(void *opaque, hwaddr addr, unsigned size)
++{
++    RewindMachineState *s = opaque;
++    uint64_t value = 0;
++    uint64_t first = addr / REWIND_PAGE, last = (addr + size - 1) / REWIND_PAGE;
++
++    for (uint64_t page = first; page <= last; page++) {
++        if (s->image_sparse_path && !test_bit(page, s->image_bits)) {
++            error_report("rewind: the guest read image page %" PRIu64
++                         " at step %" PRIu64 ", which the sparse image "
++                         "leaves out", page, s->step);
++            exit(1);
++        }
++        set_bit(page, s->image_bits);
++    }
++    memcpy(&value, s->image_data + addr, size);
++    return le64_to_cpu(value);
++}
++
++static const MemoryRegionOps image_ops = {
++    .read = image_read,
++    .write = mmio_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++    .valid = { .min_access_size = 1, .max_access_size = 8 },
++    .impl = { .min_access_size = 1, .max_access_size = 8 },
++};
++
++/* A run of pages a sparse image leaves out, from page base on. */
++typedef struct ImageHole {
++    RewindMachineState *s;
++    uint64_t base;
++    MemoryRegion mr;
++} ImageHole;
++
++/* A read in a hole stops the machine: the replay would go on with zeros
++ * where the image had bytes. */
++static uint64_t hole_read(void *opaque, hwaddr addr, unsigned size)
++{
++    ImageHole *hole = opaque;
++
++    error_report("rewind: the guest read image page %" PRIu64 " at step %"
++                 PRIu64 ", which the sparse image leaves out",
++                 hole->base + addr / REWIND_PAGE, hole->s->step);
++    exit(1);
++}
++
++static void hole_write(void *opaque, hwaddr addr, uint64_t value,
++                       unsigned size)
++{
++    ImageHole *hole = opaque;
++
++    mmio_write(hole->s, addr, value, size);
++}
++
++static const MemoryRegionOps hole_ops = {
++    .read = hole_read,
++    .write = hole_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++    .valid = { .min_access_size = 1, .max_access_size = 8 },
++    .impl = { .min_access_size = 1, .max_access_size = 8 },
++};
++
++/* Writes the image pages the guest read, each a u32, in order. */
++static void write_image_pages(RewindMachineState *s)
++{
++    FILE *f;
++    uint64_t pages = s->pmem_len / REWIND_PAGE;
++
++    if (!s->image_pages_path) {
++        return;
++    }
++    f = fopen(s->image_pages_path, "wb");
++    if (!f) {
++        error_report("rewind: opening %s: %s", s->image_pages_path,
++                     strerror(errno));
++        exit(1);
++    }
++    for (uint64_t page = find_first_bit(s->image_bits, pages); page < pages;
++         page = find_next_bit(s->image_bits, pages, page + 1)) {
++        uint32_t le = cpu_to_le32(page);
++        fwrite(&le, 4, 1, f);
++    }
++    fclose(f);
++}
++
+ /* The CPU model: cpu.rs baseline. */
+ 
+ /* x86-64-v3, plus AES, PCLMULQDQ, ERMS, PREFETCHW, FSGSBASE and INVPCID. */
+@@ -1912,7 +2023,79 @@ static void rewind_machine_init(MachineState *ms)
+     }
+ 
+     /* The input image, read-only, rounded up to 2 MiB with zeros. */
+-    if (s->image) {
++    if (s->image_sparse_path) {
++        size_t len;
++        uint8_t *file = read_file(s->image_sparse_path, &len);
++        StateReader r = { file, file + len, s->image_sparse_path };
++        uint32_t count;
++
++        if (memcmp(state_take(&r, 8), SPARSE_MAGIC, 8)) {
++            error_report("rewind: %s is not a sparse image",
++                         s->image_sparse_path);
++            exit(1);
++        }
++        s->pmem_len = ROUND_UP(state_u64(&r), REWIND_PMEM_ALIGN);
++        s->image_data = g_malloc0(s->pmem_len);
++        s->image_bits = bitmap_new(s->pmem_len / REWIND_PAGE);
++        count = state_u32(&r);
++        for (uint32_t i = 0; i < count; i++) {
++            uint64_t page = state_u32(&r);
++            if (page >= s->pmem_len / REWIND_PAGE) {
++                error_report("rewind: %s holds a page past its end",
++                             s->image_sparse_path);
++                exit(1);
++            }
++            memcpy(s->image_data + page * REWIND_PAGE,
++                   state_take(&r, REWIND_PAGE), REWIND_PAGE);
++            set_bit(page, s->image_bits);
++        }
++        g_free(file);
++
++        /*
++         * The present pages as ROM, as fast to read as a whole image, and
++         * each run of absent pages as a trap over it: reading through the
++         * machine for every access took three times as long in a browser.
++         */
++        {
++            uint64_t pages = s->pmem_len / REWIND_PAGE;
++            uint64_t holes = 0;
++
++            memory_region_init(&s->pmem, OBJECT(s), "rewind.pmem", s->pmem_len);
++            memory_region_init_rom(&s->pmem_rom, NULL, "rewind.pmem-rom",
++                                   s->pmem_len, &error_fatal);
++            memcpy(memory_region_get_ram_ptr(&s->pmem_rom), s->image_data,
++                   s->pmem_len);
++            memory_region_add_subregion(&s->pmem, 0, &s->pmem_rom);
++            s->pmem_holes = g_new0(ImageHole, pages);
++            for (uint64_t page = find_first_zero_bit(s->image_bits, pages);
++                 page < pages;) {
++                uint64_t end = find_next_bit(s->image_bits, pages, page);
++                ImageHole *hole = &s->pmem_holes[holes++];
++
++                hole->s = s;
++                hole->base = page;
++                memory_region_init_io(&hole->mr, OBJECT(s), &hole_ops, hole,
++                                      "rewind.pmem-hole",
++                                      (end - page) * REWIND_PAGE);
++                memory_region_add_subregion_overlap(&s->pmem,
++                                                    page * REWIND_PAGE,
++                                                    &hole->mr, 1);
++                page = find_next_zero_bit(s->image_bits, pages, end);
++            }
++        }
++        memory_region_add_subregion(sysmem, pmem_start(span), &s->pmem);
++    } else if (s->image && s->image_pages_path) {
++        size_t len;
++
++        s->image_data = read_file(s->image, &len);
++        s->pmem_len = ROUND_UP(len, REWIND_PMEM_ALIGN);
++        s->image_data = g_realloc(s->image_data, s->pmem_len);
++        memset(s->image_data + len, 0, s->pmem_len - len);
++        s->image_bits = bitmap_new(s->pmem_len / REWIND_PAGE);
++        memory_region_init_io(&s->pmem, OBJECT(s), &image_ops, s,
++                              "rewind.pmem", s->pmem_len);
++        memory_region_add_subregion(sysmem, pmem_start(span), &s->pmem);
++    } else if (s->image) {
+         int fd = open(s->image, O_RDONLY);
+         struct stat st;
+         uint8_t *dest;
+@@ -1997,6 +2180,8 @@ STR_PROP(schedule_path, "schedule")
+ STR_PROP(inspect_path, "inspect")
+ STR_PROP(stop_mark, "stop-mark")
+ STR_PROP(state_path, "state")
++STR_PROP(image_pages_path, "image-pages")
++STR_PROP(image_sparse_path, "image-sparse")
+ #undef STR_PROP
+ 
+ static bool get_extras(Object *o, Error **e)
+@@ -2051,6 +2236,10 @@ static void rewind_machine_class_init(ObjectClass *oc, void *data)
+                                   set_stop_mark);
+     object_class_property_add_str(oc, "state", get_state_path,
+                                   set_state_path);
++    object_class_property_add_str(oc, "image-pages", get_image_pages_path,
++                                  set_image_pages_path);
++    object_class_property_add_str(oc, "image-sparse", get_image_sparse_path,
++                                  set_image_sparse_path);
+     object_class_property_add_bool(oc, "extras", get_extras, set_extras);
+ }
+ 

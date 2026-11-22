@@ -19,5 +19,7 @@ rewind-trace = { path = "../rewind-trace" }
 rewind-vmm = { path = "../rewind-vmm" }
 anyhow = "1"
 blake3 = "1"
+# The browser bundle's keyframes and image, which the page unpacks with
+# the browser's own gzip.
+flate2 = "1"
 clap = { version = "4", features = ["derive", "env", "wrap_help"] }
-tempfile = "3"
