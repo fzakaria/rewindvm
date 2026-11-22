@@ -91,7 +91,8 @@ impl Scrubber {
             RightTab::Source => self.source_playhead_moved(cx),
             RightTab::Threads => self.lanes_playhead_moved(cx),
             RightTab::Time => self.ensure_time(cx),
-            RightTab::AtStep | RightTab::Compare | RightTab::Runs | RightTab::Bookmarks => {}
+            RightTab::Runs => self.family_axis_playhead_moved(cx),
+            RightTab::AtStep | RightTab::Compare | RightTab::Bookmarks => {}
         }
         cx.notify();
     }

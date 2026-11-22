@@ -16,6 +16,7 @@ use gpui::{
 
 use crate::describe::{self, EventTone, short_store_paths, thousands};
 use crate::family::{Family, Progress, Row, RowKind as RunsRowKind, RunEntry};
+use crate::family_axis::Track;
 use crate::model::{FileOp, FileTone, LogFilter, Motion, RowKind, Tone};
 use crate::proc_card::Pick;
 use crate::run::{Agreement, Session, Verdict, short_id};
@@ -25,7 +26,9 @@ use crate::theme::{self, layout, size};
 use crate::tour::Anchor;
 use crate::ui::ansi::penned;
 use crate::ui::chrome::client_tiling;
+use crate::ui::family_axis::{LABEL_WIDTH as STEPS_LABEL_WIDTH, other_layout, track_cell};
 use crate::ui::icons::Icon;
+use crate::ui::runs::Layout as RunsLayout;
 use crate::ui::scrubber::{ForkState, NoticeAction, NoticeTone, Scrub, Scrubber};
 use crate::ui::selectable::{PID_CHARS, mapped, process_row, selectable, selects};
 use crate::ui::splits::{Edge, grip, measure};
@@ -33,7 +36,7 @@ use crate::ui::tabs::RightTab;
 use crate::ui::toolbar::{ToolbarFit, ToolbarMemory, clip_label, next_fit};
 use crate::ui::tour::explore_button;
 use crate::ui::widgets::{
-    Availability, ButtonStyle, PillTone, button, icon, panel_title, pill, pulsing, readout,
+    Availability, ButtonStyle, Fonts, PillTone, button, icon, panel_title, pill, pulsing, readout,
     spinner, tooltip,
 };
 use crate::ui::{
@@ -2372,6 +2375,13 @@ impl Scrubber {
         let columns = rows.iter().map(|r| r.depth + 1).max().unwrap_or(1);
         let fonts = self.fonts.clone();
         let selected = self.selected_range(Surface::Runs);
+
+        // The step axis, when the panel draws runs along their steps.
+        let axis = match self.runs.layout {
+            RunsLayout::Steps => self.runs.axis,
+            RunsLayout::List => None,
+        };
+        let playhead = self.step;
         let list = uniform_list(
             "runs",
             count,
@@ -2420,28 +2430,67 @@ impl Scrubber {
                             .when(is_picked, |d| d.bg(rgb(theme::ROW_PICKED)))
                             .hover(|s| s.bg(rgb(theme::RAISED_HOVER)))
                             .child(graph_cell(row, columns, shown, compared))
-                            .child({
-                                // A run the engine is executing pulses.
-                                let ending =
-                                    pill(row.run.ending.clone(), ending_tone(&row.run), &fonts);
-                                match row.run.progress {
-                                    Progress::Running => {
-                                        pulsing(("running", i), ending).into_any_element()
-                                    }
-                                    Progress::Ended | Progress::Interrupted => {
-                                        ending.into_any_element()
-                                    }
-                                }
+                            .when(axis.is_none(), |d| {
+                                d.child(ending_pill(row, i, &fonts)).child(
+                                    div()
+                                        .min_w_0()
+                                        .truncate()
+                                        .font_family(fonts.mono.clone())
+                                        .text_size(px(size::TEXT_SMALL))
+                                        .text_color(rgb(theme::MUTED))
+                                        .child(text),
+                                )
                             })
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .truncate()
-                                    .font_family(fonts.mono.clone())
-                                    .text_size(px(size::TEXT_SMALL))
-                                    .text_color(rgb(theme::MUTED))
-                                    .child(text),
-                            )
+                            // On the step axis, the id in a column as wide
+                            // in every row, then the run along its steps,
+                            // with the words the list shows on hover.
+                            .when_some(axis, |d, axis| {
+                                let id = if is_run {
+                                    short_id(&row.run.id)
+                                } else {
+                                    row.detail()
+                                };
+                                let note = if is_run {
+                                    format!(
+                                        "{}\n{}",
+                                        row.detail(),
+                                        this.family_axis_words(&row.run)
+                                    )
+                                } else {
+                                    row.detail()
+                                };
+                                let track = if is_run {
+                                    Track::of(&row.run, this.runs.parted(&row.run), axis)
+                                } else {
+                                    Track::default()
+                                };
+                                d.tooltip(tooltip(note))
+                                    .on_scroll_wheel(cx.listener(
+                                        |this, e: &ScrollWheelEvent, _, cx| {
+                                            this.family_axis_wheel(e, cx)
+                                        },
+                                    ))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_none()
+                                            .items_center()
+                                            .gap(px(size::CONTROL_GAP))
+                                            .w(px(STEPS_LABEL_WIDTH))
+                                            .overflow_hidden()
+                                            .child(ending_pill(row, i, &fonts))
+                                            .child(
+                                                div()
+                                                    .min_w_0()
+                                                    .truncate()
+                                                    .font_family(fonts.mono.clone())
+                                                    .text_size(px(size::TEXT_SMALL))
+                                                    .text_color(rgb(id_color))
+                                                    .child(id),
+                                            ),
+                                    )
+                                    .child(track_cell(track, row.run.failed, axis.at(playhead)))
+                            })
                             // Ctrl and Shift pick runs; a plain press goes on
                             // to start a text selection.
                             .on_mouse_down(
@@ -2482,6 +2531,11 @@ impl Scrubber {
         .min_h_0()
         .py(px(size::LIST_PAD_Y));
 
+        // The link that switches between the list and the step axis.
+        let (other, words) = other_layout(self.runs.layout);
+        let layout_toggle = crate::ui::bookmarks::link("runs-layout", words)
+            .on_click(cx.listener(move |this, _, _, cx| this.set_runs_layout(other, cx)));
+
         div()
             .relative()
             .flex()
@@ -2498,9 +2552,13 @@ impl Scrubber {
                         .gap(px(size::CONTROL_GAP))
                         .child(legend)
                         .children(prune)
+                        .child(layout_toggle)
                         .into_any_element(),
                 ),
             ))
+            .when(axis.is_some(), |d| {
+                d.child(self.render_family_axis_header(columns, cx))
+            })
             .child(selects(
                 div()
                     .flex()
@@ -2762,6 +2820,16 @@ fn graph_cell(row: &Row, columns: usize, shown: bool, compared: bool) -> impl In
     .flex_none()
     .w(px(size::GRAPH_LANE * columns as f32))
     .h_full()
+}
+
+/// How a row's run ended, as a pill; a run the engine is executing
+/// pulses.
+fn ending_pill(row: &Row, index: usize, fonts: &Fonts) -> AnyElement {
+    let ending = pill(row.run.ending.clone(), ending_tone(&row.run), fonts);
+    match row.run.progress {
+        Progress::Running => pulsing(("running", index), ending).into_any_element(),
+        Progress::Ended | Progress::Interrupted => ending.into_any_element(),
+    }
 }
 
 /// Which way a folding row's chevron points.

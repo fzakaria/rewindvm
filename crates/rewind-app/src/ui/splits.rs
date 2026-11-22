@@ -220,6 +220,8 @@ pub struct Measured {
     pub frames: Cell<Option<Bounds<Pixels>>>,
     /// The Threads tab's plot, the width its lanes span.
     pub lanes_plot: Cell<Option<Bounds<Pixels>>>,
+    /// The Runs panel's step axis, the width its tracks span.
+    pub runs_axis: Cell<Option<Bounds<Pixels>>>,
 }
 
 /// The narrowest a panel drags to, and the terminal's least and greatest

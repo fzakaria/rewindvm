@@ -760,6 +760,7 @@ impl Scrubber {
         // The engine's runs are read after the run is on screen, for its
         // family and the forks it has.
         self.session = Some(session);
+        self.work_out_partings(cx);
         if let Some(file) = replayable.filter(|_| !cfg!(target_family = "wasm")) {
             self.bring_in(file, cx);
         }
@@ -875,6 +876,7 @@ impl Scrubber {
                 .map(ToString::to_string);
             self.runs
                 .set_family(shown.and_then(|id| family_of(runs.clone(), &id)));
+            self.work_out_partings(cx);
         }
         self.recent = families(runs);
         if running {
@@ -1401,11 +1403,8 @@ impl Scrubber {
             RightTab::FileDiff => self.file_diff_playhead_moved(cx),
             RightTab::Source => self.source_playhead_moved(cx),
             RightTab::Threads => self.lanes_playhead_moved(cx),
-            RightTab::AtStep
-            | RightTab::Compare
-            | RightTab::Runs
-            | RightTab::Bookmarks
-            | RightTab::Time => {}
+            RightTab::Runs => self.family_axis_playhead_moved(cx),
+            RightTab::AtStep | RightTab::Compare | RightTab::Bookmarks | RightTab::Time => {}
         }
         cx.notify();
     }
