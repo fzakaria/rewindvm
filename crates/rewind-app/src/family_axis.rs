@@ -1,8 +1,8 @@
 //! The Runs panel's step axis: a family's runs drawn along their own
 //! steps over one window, as the Threads tab draws threads. A run is
-//! dotted while its machine is still the machine of the run it is
+//! thin while its machine is still the machine of the run it is
 //! measured against, a fork's parent or the schedule 0 run a run from
-//! boot hangs under, and solid from the step where the machine first
+//! boot hangs under, and thick from the step where the machine first
 //! differs to its last step. A run is also marked where the program that
 //! failed in one of the two first behaves differently, the place
 //! `rewind check` prints.
@@ -119,9 +119,9 @@ pub struct Span {
 /// window's width and None where it falls outside the window.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Track {
-    /// Dotted: the steps where the machine is still the other run's.
+    /// Thin: the steps where the machine is still the other run's.
     pub same: Option<Span>,
-    /// Solid: from where the machine first differs to the run's end.
+    /// Thick: from where the machine first differs to the run's end.
     pub own: Option<Span>,
     /// The steps the run's schedule was confined to, for a run `rewind
     /// check` made narrowing a schedule down.
@@ -140,6 +140,11 @@ impl Track {
         let span = |from: u64, to: u64| span_in(window, from, to);
         let point = |step: u64| window.at(step);
 
+        // The steps a narrowed schedule perturbed, whatever else is known.
+        let perturbed = run
+            .window
+            .and_then(|(from, until)| span(from, until.min(last)));
+
         // Where the machine first differs, and where the failing program
         // first behaves differently. Until the traces are compared, a
         // fork has where its manifest says it first differs from its
@@ -148,6 +153,7 @@ impl Track {
             Parted::Root => {
                 return Track {
                     own: span(0, last),
+                    perturbed,
                     end: point(last),
                     ..Track::default()
                 };
@@ -157,6 +163,7 @@ impl Track {
                 Some(step) => (Some(step), None),
                 None => {
                     return Track {
+                        perturbed,
                         end: point(last),
                         ..Track::default()
                     };
@@ -164,15 +171,13 @@ impl Track {
             },
         };
 
-        // Dotted to where the machine differs, solid from there; a run
-        // that never differs is dotted to its end.
+        // Thin to where the machine differs, thick from there; a run that
+        // never differs is thin to its end.
         let parts = machine.unwrap_or(last).min(last);
         Track {
             same: span(0, parts),
             own: machine.and_then(|m| span(m.min(last), last)),
-            perturbed: run
-                .window
-                .and_then(|(from, until)| span(from, until.min(last))),
+            perturbed,
             machine: machine.and_then(point),
             behaves: behaves.and_then(point),
             end: point(last),
@@ -255,9 +260,9 @@ mod tests {
     }
 
     #[test]
-    fn a_run_is_dotted_until_its_machine_differs_then_solid_to_its_end() {
+    fn a_run_is_thin_until_its_machine_differs_then_thick_to_its_end() {
         // A run whose machine first differs at step 40 and ends at 90:
-        // dotted 0 to 40, solid 40 to 90, marks at 40 and 90.
+        // thin 0 to 40, thick 40 to 90, marks at 40 and 90.
         let track = Track::of(
             &run("f", Some("base"), 1),
             known(Some(PARTS), None),
@@ -283,7 +288,7 @@ mod tests {
     }
 
     #[test]
-    fn the_first_run_is_solid_from_step_0_and_an_identical_run_dotted_to_its_end() {
+    fn the_first_run_is_thick_from_step_0_and_an_identical_run_thin_to_its_end() {
         // The run measured against nothing is all its own; a run the same
         // machine as its parent to the end is all its parent's.
         let first = Track::of(&run("base", None, 0), Parted::Root, window());
@@ -295,6 +300,19 @@ mod tests {
             })
         );
         assert_eq!((first.same, first.machine), (None, None));
+
+        // A narrowed run with nothing to measure against, as the pair of
+        // an export has in the browser, still shows its perturbed steps.
+        let mut narrowed = run("w", None, 8);
+        narrowed.window = Some((30, 45));
+        let alone = Track::of(&narrowed, Parted::Root, window());
+        assert_eq!(
+            alone.perturbed,
+            Some(Span {
+                from: at(30),
+                to: at(45)
+            })
+        );
 
         let same = Track::of(&run("f", Some("base"), 1), known(None, None), window());
         assert_eq!(
@@ -328,7 +346,7 @@ mod tests {
     #[test]
     fn what_falls_outside_the_window_is_clipped_or_left_out() {
         // Over steps 50 to 150 a run that parts at 40 and ends at 90 is
-        // solid from the left edge; neither its dotted steps nor the mark
+        // thick from the left edge; neither its thin steps nor the mark
         // where it parts show.
         let later = Window::around(100, HALF, 200);
         let track = Track::of(&run("f", Some("base"), 1), known(Some(PARTS), None), later);
