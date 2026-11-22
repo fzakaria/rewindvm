@@ -12,9 +12,9 @@ trace.
  configs/devices/i386-softmmu/default.mak |    1 +
  hw/i386/Kconfig                          |    4 +
  hw/i386/meson.build                      |    1 +
- hw/i386/rewind.c                         | 1294 ++++++++++++++++++++++
- include/hw/i386/rewind.h                 |   67 ++
- 5 files changed, 1367 insertions(+)
+ hw/i386/rewind.c                         | 1566 ++++++++++++++++++++++
+ include/hw/i386/rewind.h                 |   67 +
+ 5 files changed, 1639 insertions(+)
  create mode 100644 hw/i386/rewind.c
  create mode 100644 include/hw/i386/rewind.h
 
@@ -53,10 +53,10 @@ index 369c6bf..25b9cb8 100644
  i386_ss.add(when: 'CONFIG_VMMOUSE', if_true: files('vmmouse.c'))
 diff --git a/hw/i386/rewind.c b/hw/i386/rewind.c
 new file mode 100644
-index 0000000..93f257d
+index 0000000..fbe70f1
 --- /dev/null
 +++ b/hw/i386/rewind.c
-@@ -0,0 +1,1294 @@
+@@ -0,0 +1,1566 @@
 +/*
 + * Rewind VM's machine on TCG.
 + *
@@ -242,6 +242,15 @@ index 0000000..93f257d
 +    uint32_t record_len;
 +    bool record_pending;
 +    uint8_t *io_buf;
++
++    /* MSRs KVM keeps and TCG does not (rewind_msr). */
++    uint64_t mce_banks[4 * 32];
++    uint64_t mcg_status;
++    uint64_t tsc_adjust;
++    uint64_t power_ctl;
++    uint64_t vm_hsave;
++    uint64_t de_cfg;
++    uint64_t hwcr;
 +};
 +
 +static RewindMachineState *rewind_machine;
@@ -850,19 +859,282 @@ index 0000000..93f257d
 +}
 +
 +/*
-+ * An MSR TCG has no case for. KVM refuses one it does not know with #GP,
-+ * where TCG reads 0 and drops writes; the guest's rdmsr_safe then sees an
-+ * MSR KVM never gave it.
++ * MSRs, as KVM on AMD answers them (arch/x86/kvm/msrs.c
++ * kvm_get_msr_common and kvm_set_msr_common, svm/svm.c svm_get_msr and
++ * svm_set_msr) for a vCPU shown this model: no PMU, no RDTSCP or RDPID,
++ * no speculation controls, OSVW or XSAVES. KVM refuses an MSR it does
++ * not know with #GP, where TCG reads 0 and drops writes, and answers
++ * some MSRs TCG does not know with fixed values. The ones both keep as
++ * state the same way go to TCG.
 + */
-+static bool rewind_unknown_msr(CPUX86State *env, uint32_t msr, bool write,
-+                               uint64_t value)
++#define MSR_TSC                 0x10
++#define MSR_PLATFORM_ID         0x17
++#define MSR_APICBASE            0x1b
++#define MSR_EBL_CR_POWERON      0x2a
++#define MSR_EBC_FREQUENCY_ID    0x2c
++#define MSR_SMI_COUNT           0x34
++#define MSR_TSC_ADJUST_INDEX          0x3b
++#define MSR_UCODE_WRITE         0x79
++#define MSR_UCODE_REV           0x8b
++#define MSR_P6_PERFCTR0         0xc1
++#define MSR_P6_PERFCTR1         0xc2
++#define MSR_MTRRCAP             0xfe
++#define MSR_BBL_CR_CTL3         0x11e
++#define MSR_MISC_FEATURES       0x140
++#define MSR_SYSENTER_CS         0x174
++#define MSR_SYSENTER_EIP        0x176
++#define MSR_MCG_CAP             0x179
++#define MSR_MCG_STATUS          0x17a
++#define MSR_P6_EVNTSEL0         0x186
++#define MSR_P6_EVNTSEL1         0x187
++#define MSR_PERF_STATUS         0x198
++#define MSR_PERF_CTL            0x199
++#define MSR_MISC_ENABLE         0x1a0
++#define MSR_POWER_CTL           0x1fc
++#define MSR_DEBUGCTL            0x1d9
++#define MSR_LASTBRANCH_FIRST    0x1db
++#define MSR_LASTBRANCH_LAST     0x1de
++#define MSR_MTRR_VAR_FIRST      0x200
++#define MSR_MTRR_VAR_LAST       0x20f
++#define MSR_MTRR_FIX64K         0x250
++#define MSR_MTRR_FIX16K_80000   0x258
++#define MSR_MTRR_FIX16K_A0000   0x259
++#define MSR_MTRR_FIX4K_FIRST    0x268
++#define MSR_MTRR_FIX4K_LAST     0x26f
++#define MSR_PAT                 0x277
++#define MSR_MTRR_DEF_TYPE       0x2ff
++#define MSR_MC_FIRST            0x400
++#define MSR_RAPL_POWER_UNIT     0x606
++#define MSR_PKG_ENERGY_STATUS   0x611
++#define MSR_DRAM_ENERGY_STATUS  0x619
++#define MSR_PP0_ENERGY_STATUS   0x639
++#define MSR_PP1_ENERGY_STATUS   0x641
++#define MSR_TSC_DEADLINE        0x6e0
++#define MSR_X2APIC_FIRST        0x800
++#define MSR_X2APIC_LAST         0x8ff
++#define MSR_EFER_INDEX          0xc0000080
++#define MSR_STAR_INDEX          0xc0000081
++#define MSR_SFMASK_INDEX        0xc0000084
++#define MSR_FS_BASE_INDEX       0xc0000100
++#define MSR_KERNEL_GS_INDEX     0xc0000102
++#define MSR_K7_EVNTSEL0         0xc0010000
++#define MSR_K7_PERFCTR3         0xc0010007
++#define MSR_SYSCFG              0xc0010010
++#define MSR_K7_HWCR             0xc0010015
++#define MSR_K7_CLK_CTL          0xc001001b
++#define MSR_NB_CFG              0xc001001f
++#define MSR_PATCH_LOADER        0xc0010020
++#define MSR_K8_INT_PENDING      0xc0010055
++#define MSR_MMIO_CONF_BASE      0xc0010058
++#define MSR_TSEG_ADDR           0xc0010112
++#define MSR_TSEG_MASK           0xc0010113
++#define MSR_VM_CR_INDEX         0xc0010114
++#define MSR_VM_HSAVE_INDEX      0xc0010117
++#define MSR_F15H_IC_CFG         0xc0011021
++#define MSR_DC_CFG              0xc0011022
++#define MSR_TW_CFG              0xc0011023
++#define MSR_DE_CFG              0xc0011029
++#define MSR_BU_CFG2             0xc001102a
++#define MSR_F15H_EX_CFG         0xc001102c
++
++/* KVM's machine-check banks: KVM_MAX_MCE_BANKS, and no MCG_CTL. */
++#define MCE_BANKS               32
++
++/* The DE_CFG bits a guest may set: LFENCE serializing, which every host
++ * of the fixed models has. */
++#define DE_CFG_LFENCE           (1ULL << 1)
++
++/* HWCR's McStatusWrEn, the one bit KVM keeps. */
++#define HWCR_MCSTATUS_WREN      (1ULL << 18)
++
++/* HWCR bits KVM drops on a write: flush filter, IGNNE and TLB cache. */
++#define HWCR_IGNORED            (0x40ULL | 0x100ULL | 0x8ULL)
++
++/* What a few MSRs read under KVM, whatever was written. */
++#define PERF_STATUS_VALUE       1000ULL
++#define EBC_FREQUENCY_VALUE     (1ULL << 24)
++#define K7_CLK_CTL_VALUE        0x20000000ULL
++#define BBL_CR_CTL3_VALUE       0xbe702111ULL
++
++/* MSRs whose state TCG keeps as KVM does. */
++static bool tcg_keeps(uint32_t msr)
 +{
-+    if (getenv("REWIND_QEMU_MSRS")) {
-+        fprintf(stderr, "rewind: step %" PRIu64 " %s unknown MSR 0x%x = 0x%"
-+                PRIx64 ": #GP\n", rewind_machine->step,
-+                write ? "wrmsr" : "rdmsr", msr, value);
++    return msr == MSR_TSC || msr == MSR_APICBASE ||
++           (msr >= MSR_SYSENTER_CS && msr <= MSR_SYSENTER_EIP) ||
++           msr == MSR_MTRRCAP || msr == MSR_MISC_ENABLE ||
++           msr == MSR_UCODE_REV ||
++           (msr >= MSR_MTRR_VAR_FIRST && msr <= MSR_MTRR_VAR_LAST) ||
++           msr == MSR_MTRR_FIX64K || msr == MSR_MTRR_FIX16K_80000 ||
++           msr == MSR_MTRR_FIX16K_A0000 ||
++           (msr >= MSR_MTRR_FIX4K_FIRST && msr <= MSR_MTRR_FIX4K_LAST) ||
++           msr == MSR_PAT || msr == MSR_MTRR_DEF_TYPE ||
++           msr == MSR_TSC_DEADLINE ||
++           (msr >= MSR_X2APIC_FIRST && msr <= MSR_X2APIC_LAST) ||
++           (msr >= MSR_EFER_INDEX && msr <= MSR_SFMASK_INDEX) ||
++           (msr >= MSR_FS_BASE_INDEX && msr <= MSR_KERNEL_GS_INDEX);
++}
++
++/* MSRs KVM reads as 0 and lets the guest write without effect. */
++static bool kvm_zero(uint32_t msr)
++{
++    switch (msr) {
++    case MSR_PLATFORM_ID:
++    case MSR_EBL_CR_POWERON:
++    case MSR_SYSCFG:
++    case MSR_TSEG_ADDR:
++    case MSR_TSEG_MASK:
++    case MSR_K8_INT_PENDING:
++    case MSR_NB_CFG:
++    case MSR_BU_CFG2:
++    case MSR_PERF_CTL:
++    case MSR_DC_CFG:
++    case MSR_TW_CFG:
++    case MSR_F15H_EX_CFG:
++    case MSR_RAPL_POWER_UNIT:
++    case MSR_PP0_ENERGY_STATUS:
++    case MSR_PP1_ENERGY_STATUS:
++    case MSR_PKG_ENERGY_STATUS:
++    case MSR_DRAM_ENERGY_STATUS:
++    case MSR_P6_PERFCTR0:
++    case MSR_P6_PERFCTR1:
++    case MSR_P6_EVNTSEL0:
++    case MSR_P6_EVNTSEL1:
++    case MSR_F15H_IC_CFG:
++    case MSR_VM_CR_INDEX:
++        return true;
++    default:
++        return (msr >= MSR_K7_EVNTSEL0 && msr <= MSR_K7_PERFCTR3) ||
++               (msr >= MSR_LASTBRANCH_FIRST && msr <= MSR_LASTBRANCH_LAST);
 +    }
-+    return true;
++}
++
++static X86MSRAnswer msr_read(RewindMachineState *s, uint32_t msr,
++                             uint64_t *value)
++{
++    if (tcg_keeps(msr)) {
++        return X86_MSR_TCG;
++    }
++    if (kvm_zero(msr)) {
++        *value = 0;
++        return X86_MSR_DONE;
++    }
++    if (msr >= MSR_MC_FIRST && msr < MSR_MC_FIRST + 4 * MCE_BANKS) {
++        *value = s->mce_banks[msr - MSR_MC_FIRST];
++        return X86_MSR_DONE;
++    }
++    switch (msr) {
++    case MSR_MCG_CAP:
++        *value = MCE_BANKS;
++        return X86_MSR_DONE;
++    case MSR_MCG_STATUS:
++        *value = s->mcg_status;
++        return X86_MSR_DONE;
++    case MSR_PERF_STATUS:
++        *value = PERF_STATUS_VALUE;
++        return X86_MSR_DONE;
++    case MSR_EBC_FREQUENCY_ID:
++        *value = EBC_FREQUENCY_VALUE;
++        return X86_MSR_DONE;
++    case MSR_K7_CLK_CTL:
++        *value = K7_CLK_CTL_VALUE;
++        return X86_MSR_DONE;
++    case MSR_BBL_CR_CTL3:
++        *value = BBL_CR_CTL3_VALUE;
++        return X86_MSR_DONE;
++    case MSR_SMI_COUNT:
++    case MSR_MISC_FEATURES:
++    case MSR_DEBUGCTL:
++        *value = 0;
++        return X86_MSR_DONE;
++    case MSR_TSC_ADJUST_INDEX:
++        *value = s->tsc_adjust;
++        return X86_MSR_DONE;
++    case MSR_POWER_CTL:
++        *value = s->power_ctl;
++        return X86_MSR_DONE;
++    case MSR_VM_HSAVE_INDEX:
++        *value = s->vm_hsave;
++        return X86_MSR_DONE;
++    case MSR_DE_CFG:
++        *value = s->de_cfg;
++        return X86_MSR_DONE;
++    case MSR_K7_HWCR:
++        *value = s->hwcr;
++        return X86_MSR_DONE;
++    default:
++        return X86_MSR_GP;
++    }
++}
++
++static X86MSRAnswer msr_write(RewindMachineState *s, uint32_t msr,
++                              uint64_t value)
++{
++    if (tcg_keeps(msr)) {
++        return X86_MSR_TCG;
++    }
++    if (kvm_zero(msr)) {
++        return X86_MSR_DONE;
++    }
++    if (msr >= MSR_MC_FIRST && msr < MSR_MC_FIRST + 4 * MCE_BANKS) {
++        s->mce_banks[msr - MSR_MC_FIRST] = value;
++        return X86_MSR_DONE;
++    }
++    switch (msr) {
++    case MSR_UCODE_WRITE:
++    case MSR_PATCH_LOADER:
++    case MSR_K7_CLK_CTL:
++    case MSR_BBL_CR_CTL3:
++        return X86_MSR_DONE;
++    case MSR_MCG_STATUS:
++        s->mcg_status = value;
++        return X86_MSR_DONE;
++    case MSR_TSC_ADJUST_INDEX:
++        s->tsc_adjust = value;
++        return X86_MSR_DONE;
++    case MSR_POWER_CTL:
++        s->power_ctl = value;
++        return X86_MSR_DONE;
++    case MSR_VM_HSAVE_INDEX:
++        s->vm_hsave = value;
++        return X86_MSR_DONE;
++    case MSR_MMIO_CONF_BASE:
++        return value ? X86_MSR_GP : X86_MSR_DONE;
++    case MSR_DEBUGCTL:
++        return value ? X86_MSR_GP : X86_MSR_DONE;
++    case MSR_MISC_FEATURES:
++        return value ? X86_MSR_GP : X86_MSR_DONE;
++    case MSR_DE_CFG:
++        if (value & ~DE_CFG_LFENCE) {
++            return X86_MSR_GP;
++        }
++        s->de_cfg = value;
++        return X86_MSR_DONE;
++    case MSR_K7_HWCR:
++        value &= ~HWCR_IGNORED;
++        if (value != 0 && value != HWCR_MCSTATUS_WREN) {
++            return X86_MSR_GP;
++        }
++        s->hwcr = value;
++        return X86_MSR_DONE;
++    default:
++        return X86_MSR_GP;
++    }
++}
++
++static X86MSRAnswer rewind_msr(CPUX86State *env, uint32_t msr, bool write,
++                               uint64_t *value)
++{
++    RewindMachineState *s = rewind_machine;
++    X86MSRAnswer answer = write ? msr_write(s, msr, *value)
++                                : msr_read(s, msr, value);
++
++    if (getenv("REWIND_QEMU_MSRS")) {
++        static const char *const names[] = { "tcg", "answered", "#GP" };
++        fprintf(stderr, "rewind: step %" PRIu64 " %s 0x%x = 0x%" PRIx64
++                ": %s\n", s->step, write ? "wrmsr" : "rdmsr", msr,
++                answer == X86_MSR_TCG && !write ? 0 : *value, names[answer]);
++    }
++    return answer;
 +}
 +
 +/*
@@ -1265,7 +1537,7 @@ index 0000000..93f257d
 +    object_unref(cpu);
 +    check_features(s, s->cpu);
 +    x86_cpuid_hook = rewind_cpuid;
-+    x86_unknown_msr_hook = rewind_unknown_msr;
++    x86_msr_hook = rewind_msr;
 +
 +    qemu_register_reset(rewind_reset, s);
 +    qemu_register_shutdown_notifier(&rewind_shutdown_notifier);

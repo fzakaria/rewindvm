@@ -1,0 +1,115 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Farid Zakaria <farid.m.zakaria@gmail.com>
+Date: Sat, 21 Nov 2026 17:36:50 -0800
+Subject: [PATCH 2/3] target/i386: let a machine answer CPUID and MSRs
+
+A machine that must show the guest what another hypervisor shows can
+answer CPUID itself, and can see every RDMSR and WRMSR first: answer
+it, refuse it with #GP as KVM refuses an MSR it does not know, or hand
+it to TCG, which reads 0 and drops writes for MSRs it has no case for.
+---
+ target/i386/cpu.c                    |  8 ++++++++
+ target/i386/cpu.h                    | 21 +++++++++++++++++++++
+ target/i386/tcg/sysemu/misc_helper.c | 24 ++++++++++++++++++++++++
+ 3 files changed, 53 insertions(+)
+
+diff --git a/target/i386/cpu.c b/target/i386/cpu.c
+index c2cd319..841cd67 100644
+--- a/target/i386/cpu.c
++++ b/target/i386/cpu.c
+@@ -6004,6 +6004,9 @@ uint32_t cpu_x86_virtual_addr_width(CPUX86State *env)
+     }
+ }
+ 
++X86CPUIDHook x86_cpuid_hook;
++X86MSRHook x86_msr_hook;
++
+ void cpu_x86_cpuid(CPUX86State *env, uint32_t index, uint32_t count,
+                    uint32_t *eax, uint32_t *ebx,
+                    uint32_t *ecx, uint32_t *edx)
+@@ -6015,6 +6018,11 @@ void cpu_x86_cpuid(CPUX86State *env, uint32_t index, uint32_t count,
+     uint32_t signature[3];
+     X86CPUTopoInfo topo_info;
+ 
++    if (x86_cpuid_hook) {
++        x86_cpuid_hook(env, index, count, eax, ebx, ecx, edx);
++        return;
++    }
++
+     topo_info.dies_per_pkg = env->nr_dies;
+     topo_info.cores_per_die = cs->nr_cores / env->nr_dies;
+     topo_info.threads_per_core = cs->nr_threads;
+diff --git a/target/i386/cpu.h b/target/i386/cpu.h
+index ef987f3..8fde8a6 100644
+--- a/target/i386/cpu.h
++++ b/target/i386/cpu.h
+@@ -2258,6 +2258,27 @@ static inline AddressSpace *cpu_addressspace(CPUState *cs, MemTxAttrs attrs)
+  * checks with cpuid bits?
+  */
+ void cpu_load_efer(CPUX86State *env, uint64_t val);
++
++/*
++ * A machine that answers CPUID itself sets x86_cpuid_hook, which then
++ * answers every CPUID the guest executes. A machine that decides MSRs
++ * itself sets x86_msr_hook, which sees every RDMSR and WRMSR first and
++ * answers it, refuses it with #GP, or hands it to TCG's own handling.
++ * hw/i386/rewind.c sets both, to answer as KVM does.
++ */
++typedef void (*X86CPUIDHook)(CPUX86State *env, uint32_t index,
++                             uint32_t count, uint32_t *eax, uint32_t *ebx,
++                             uint32_t *ecx, uint32_t *edx);
++typedef enum X86MSRAnswer {
++    X86_MSR_TCG,
++    X86_MSR_DONE,
++    X86_MSR_GP,
++} X86MSRAnswer;
++/* For a read, the hook sets *value when it answers X86_MSR_DONE. */
++typedef X86MSRAnswer (*X86MSRHook)(CPUX86State *env, uint32_t msr,
++                                   bool write, uint64_t *value);
++extern X86CPUIDHook x86_cpuid_hook;
++extern X86MSRHook x86_msr_hook;
+ uint8_t x86_ldub_phys(CPUState *cs, hwaddr addr);
+ uint32_t x86_lduw_phys(CPUState *cs, hwaddr addr);
+ uint32_t x86_ldl_phys(CPUState *cs, hwaddr addr);
+diff --git a/target/i386/tcg/sysemu/misc_helper.c b/target/i386/tcg/sysemu/misc_helper.c
+index 67d6058..57e4a2e 100644
+--- a/target/i386/tcg/sysemu/misc_helper.c
++++ b/target/i386/tcg/sysemu/misc_helper.c
+@@ -147,6 +147,17 @@ void helper_wrmsr(CPUX86State *env)
+     val = ((uint32_t)env->regs[R_EAX]) |
+         ((uint64_t)((uint32_t)env->regs[R_EDX]) << 32);
+ 
++    if (x86_msr_hook) {
++        switch (x86_msr_hook(env, (uint32_t)env->regs[R_ECX], true, &val)) {
++        case X86_MSR_DONE:
++            return;
++        case X86_MSR_GP:
++            goto error;
++        case X86_MSR_TCG:
++            break;
++        }
++    }
++
+     switch ((uint32_t)env->regs[R_ECX]) {
+     case MSR_IA32_SYSENTER_CS:
+         env->sysenter_cs = val & 0xffff;
+@@ -315,6 +326,19 @@ void helper_rdmsr(CPUX86State *env)
+ 
+     cpu_svm_check_intercept_param(env, SVM_EXIT_MSR, 0, GETPC());
+ 
++    if (x86_msr_hook) {
++        switch (x86_msr_hook(env, (uint32_t)env->regs[R_ECX], false, &val)) {
++        case X86_MSR_DONE:
++            env->regs[R_EAX] = (uint32_t)(val);
++            env->regs[R_EDX] = (uint32_t)(val >> 32);
++            return;
++        case X86_MSR_GP:
++            raise_exception_err_ra(env, EXCP0D_GPF, 0, GETPC());
++        case X86_MSR_TCG:
++            break;
++        }
++    }
++
+     switch ((uint32_t)env->regs[R_ECX]) {
+     case MSR_IA32_SYSENTER_CS:
+         val = env->sysenter_cs;
