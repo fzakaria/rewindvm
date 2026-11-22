@@ -13,7 +13,7 @@ machine applies each at its step as rewind-vmm's after_step does.
  1 file changed, 74 insertions(+), 4 deletions(-)
 
 diff --git a/hw/i386/rewind.c b/hw/i386/rewind.c
-index fbe70f1..afbcb85 100644
+index 20803b0..61fe068 100644
 --- a/hw/i386/rewind.c
 +++ b/hw/i386/rewind.c
 @@ -105,6 +105,12 @@
@@ -151,7 +151,7 @@ index fbe70f1..afbcb85 100644
      s->io_buf = g_malloc(IO_BUF_MAX);
  
      /* RAM below the MMIO hole, and past 4 GiB the rest. */
-@@ -1501,6 +1568,7 @@ STR_PROP(cpu_model, "cpu-model")
+@@ -1519,6 +1586,7 @@ STR_PROP(cpu_model, "cpu-model")
  STR_PROP(vendor, "vendor")
  STR_PROP(image, "image")
  STR_PROP(log_path, "log")
@@ -159,7 +159,7 @@ index fbe70f1..afbcb85 100644
  #undef STR_PROP
  
  static bool get_extras(Object *o, Error **e)
-@@ -1547,6 +1615,8 @@ static void rewind_machine_class_init(ObjectClass *oc, void *data)
+@@ -1565,6 +1633,8 @@ static void rewind_machine_class_init(ObjectClass *oc, void *data)
      object_class_property_add_str(oc, "vendor", get_vendor, set_vendor);
      object_class_property_add_str(oc, "image", get_image, set_image);
      object_class_property_add_str(oc, "log", get_log_path, set_log_path);

@@ -12,9 +12,9 @@ trace.
  configs/devices/i386-softmmu/default.mak |    1 +
  hw/i386/Kconfig                          |    4 +
  hw/i386/meson.build                      |    1 +
- hw/i386/rewind.c                         | 1566 ++++++++++++++++++++++
+ hw/i386/rewind.c                         | 1584 ++++++++++++++++++++++
  include/hw/i386/rewind.h                 |   67 +
- 5 files changed, 1639 insertions(+)
+ 5 files changed, 1657 insertions(+)
  create mode 100644 hw/i386/rewind.c
  create mode 100644 include/hw/i386/rewind.h
 
@@ -53,10 +53,10 @@ index 369c6bf..25b9cb8 100644
  i386_ss.add(when: 'CONFIG_VMMOUSE', if_true: files('vmmouse.c'))
 diff --git a/hw/i386/rewind.c b/hw/i386/rewind.c
 new file mode 100644
-index 0000000..fbe70f1
+index 0000000..20803b0
 --- /dev/null
 +++ b/hw/i386/rewind.c
-@@ -0,0 +1,1566 @@
+@@ -0,0 +1,1584 @@
 +/*
 + * Rewind VM's machine on TCG.
 + *
@@ -1498,14 +1498,32 @@ index 0000000..fbe70f1
 +
 +    /* The input image, read-only, rounded up to 2 MiB with zeros. */
 +    if (s->image) {
-+        size_t len;
-+        uint8_t *data = read_file(s->image, &len);
++        int fd = open(s->image, O_RDONLY);
++        struct stat st;
++        uint8_t *dest;
++        size_t done = 0;
 +
-+        s->pmem_len = ROUND_UP(len, REWIND_PMEM_ALIGN);
++        if (fd < 0 || fstat(fd, &st) < 0) {
++            error_report("rewind: opening %s: %s", s->image, strerror(errno));
++            exit(1);
++        }
++        s->pmem_len = ROUND_UP(st.st_size, REWIND_PMEM_ALIGN);
 +        memory_region_init_rom(&s->pmem, NULL, "rewind.pmem", s->pmem_len,
 +                               &error_fatal);
-+        memcpy(memory_region_get_ram_ptr(&s->pmem), data, len);
-+        g_free(data);
++
++        /* Read straight into the region, which a browser's memory holds
++         * once rather than twice. */
++        dest = memory_region_get_ram_ptr(&s->pmem);
++        while (done < st.st_size) {
++            ssize_t n = read(fd, dest + done, st.st_size - done);
++            if (n <= 0) {
++                error_report("rewind: reading %s: %s", s->image,
++                             n ? strerror(errno) : "short file");
++                exit(1);
++            }
++            done += n;
++        }
++        close(fd);
 +        memory_region_add_subregion(sysmem, pmem_start(span), &s->pmem);
 +    }
 +    if (s->extras) {
