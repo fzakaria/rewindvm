@@ -7,7 +7,9 @@
 //
 // Beside an export X.rwd, X.replay/ holds what `rewind-qemu RUN --bundle`
 // writes: manifest.json, with QEMU's arguments and the steps of the run's
-// keyframes, state-<step> for each keyframe, and the image and schedule.
+// keyframes, state-<step>.gz for each keyframe, the schedule, and the
+// image as the pages replays of the run read, image.sparse.gz. A replay
+// that reads a page the bundle left out stops and says so.
 // A replay starts from the latest keyframe at or before the step, runs
 // to the step, asks the guest what the app asks, and stops once the
 // guest has answered.
@@ -37,6 +39,16 @@ async function fetchBytes(url) {
   return new Uint8Array(await response.arrayBuffer());
 }
 
+// A gzipped file of the bundle, unpacked with the browser's own gzip.
+async function fetchGzipped(url) {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`${url}: ${response.status} ${response.statusText}`);
+  }
+  const unpacked = response.body.pipeThrough(new DecompressionStream("gzip"));
+  return new Uint8Array(await new Response(unpacked).arrayBuffer());
+}
+
 async function loadBundle(base) {
   if (!bundles.has(base)) {
     bundles.set(
@@ -50,7 +62,7 @@ async function loadBundle(base) {
         }
         const manifest = await response.json();
         const [image, schedule] = await Promise.all([
-          manifest.image ? fetchBytes(`${base}image.erofs`) : null,
+          manifest.image ? fetchGzipped(`${base}image.sparse.gz`) : null,
           manifest.schedule ? fetchBytes(`${base}schedule`) : null,
         ]);
         return { manifest, image, schedule };
@@ -102,10 +114,10 @@ export async function replay(url, step, request) {
   if (from === undefined) {
     throw new Error(`the run has no keyframe at or before step ${step}`);
   }
-  const state = await fetchBytes(`${base}state-${from}`);
+  const state = await fetchGzipped(`${base}state-${from}.gz`);
   const args = manifest.args.map((arg) => arg.replace(UNTIL, String(step)));
   const log = await runMachine(args, {
-    "image.erofs": image,
+    "image.sparse": image,
     schedule,
     state,
     request,

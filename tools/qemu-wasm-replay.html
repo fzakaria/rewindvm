@@ -11,7 +11,15 @@
   // Where the prepared files go in emscripten's file system, as
   // rewind-qemu --prepare names them in args.json.
   const DIR = "/rewind";
-  const INPUTS = ["vmlinux", "initrd", "image.erofs", "schedule", "state", "request"];
+  const INPUTS = [
+    "vmlinux",
+    "initrd",
+    "image.erofs",
+    "schedule",
+    "state",
+    "request",
+    "image.sparse",
+  ];
   const LOG = `${DIR}/steps.log`;
 
   const post = (path, body) => fetch(path, { method: "POST", body });
