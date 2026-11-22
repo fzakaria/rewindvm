@@ -64,7 +64,7 @@ pub use event::{
 pub use lines::Line;
 /// Init's marks, which every trace holds, for readers that do not depend
 /// on the init themselves.
-pub use rewind_init::Mark;
+pub use rewind_init::{InspectStatus, Mark};
 /// A directory's listing as init answers it and `rewind files --json`
 /// prints it, for the same readers.
 pub use rewind_init::{Listed, ListedAll, ListedKind, Listing};

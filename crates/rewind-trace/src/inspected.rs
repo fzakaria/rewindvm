@@ -24,6 +24,22 @@ pub struct Inspected {
     pub stderr: Vec<u8>,
 }
 
+/// The request for `path`'s bytes as process `pid` sees it, or as the
+/// job does without one, as the guest kernel takes a request from the
+/// shared page: each argument and a NUL.
+pub fn cat_request(pid: Option<u32>, path: &str) -> Vec<u8> {
+    let request = rewind_init::InspectRequest::Cat {
+        pid,
+        path: path.to_string(),
+    };
+    let mut bytes = Vec::new();
+    for arg in request.args() {
+        bytes.extend_from_slice(arg.as_bytes());
+        bytes.push(0);
+    }
+    bytes
+}
+
 /// The answer the inspection among `records` gave, or None when the
 /// records end before its end mark.
 pub fn answer(records: &[(u64, Vec<u8>)]) -> Option<Inspected> {
@@ -103,6 +119,13 @@ mod tests {
                 stderr: Vec::new(),
             })
         );
+    }
+
+    /// A read of a file is its words, each ending in NUL.
+    #[test]
+    fn a_cat_request_is_its_words() {
+        assert_eq!(cat_request(None, "/build/a"), b"cat\x000\x00/build/a\x00");
+        assert_eq!(cat_request(Some(7), "b"), b"cat\x007\x00b\x00");
     }
 
     /// Records that end before the end mark hold no answer.
