@@ -1,6 +1,8 @@
 //! A `.rwd` export: a zstd-compressed tar of a run's directory. Every
 //! export carries the manifest and trace, the run's summary in plain text,
-//! and the bookmarks the desktop app made; one written with answers also
+//! the bookmarks the desktop app made, and where the run parts from the
+//! run it hangs under when that run was on the exporting machine (see
+//! [`crate::parting`]); one written with answers also
 //! carries them (see [`crate::answers`]); a replayable one also carries the keyframes, the pages they
 //! name and the VM's inputs. `rewind export` writes them, and `rewind
 //! import` and the app read them through [`walk`].
@@ -11,6 +13,7 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::answers::{ANSWERS, ANSWERS_DIR};
 use crate::manifest::{BOOKMARKS, KEYFRAMES_DIR, MANIFEST, TRACE};
+use crate::parting::PARTING;
 use crate::summary::SUMMARY;
 
 /// The file extension of an export.
@@ -59,6 +62,8 @@ pub enum Member {
     Summary,
     /// The desktop app's bookmarks.
     Bookmarks,
+    /// Where the run parts from the run it hangs under.
+    Parting,
     /// The index of the answers packed into the export.
     Answers,
     /// The bytes of a file the answers carry.
@@ -87,6 +92,9 @@ impl Member {
         }
         if path == Path::new(BOOKMARKS) {
             return Member::Bookmarks;
+        }
+        if path == Path::new(PARTING) {
+            return Member::Parting;
         }
         if path == Path::new(ANSWERS) {
             return Member::Answers;
@@ -260,6 +268,7 @@ mod tests {
             ("manifest.json", b"{}"),
             ("summary.txt", b"run"),
             ("bookmarks.json", b"[]"),
+            ("parting.json", b"{}"),
         ]);
         let (seen, contents) = walked(&view);
         assert_eq!(contents, Contents::View);
@@ -278,6 +287,7 @@ mod tests {
                     Member::Bookmarks,
                     b"[]".to_vec()
                 ),
+                ("parting.json".to_string(), Member::Parting, b"{}".to_vec()),
             ]
         );
 

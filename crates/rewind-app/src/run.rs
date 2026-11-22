@@ -15,6 +15,7 @@ use rewind_trace::answers::Carried;
 use rewind_trace::ending::{self, ExitStatus};
 use rewind_trace::io_records::{self, IoLog};
 use rewind_trace::manifest::{MANIFEST, Manifest, Parent, RunId, Source, Spec, TRACE, executing};
+use rewind_trace::parting::{Parting, PartsFrom};
 use rewind_trace::schedule::{Schedule, stall_words};
 use rewind_trace::stop::Stop;
 use rewind_trace::verdict::Verdict as RecordedVerdict;
@@ -81,6 +82,10 @@ pub struct Run {
     /// The bookmarks file an export opened from memory carried; a run on
     /// disk keeps its bookmarks in its directory instead.
     pub carried_bookmarks: Option<Vec<u8>>,
+    /// Where the run parts from the run it hangs under, as the export it
+    /// came from said: read from the export in memory, or from the run's
+    /// directory.
+    pub parts_from: Option<Parting>,
     /// What a replay found at some steps, which an export opened from
     /// memory carried when it was written with answers: the browser
     /// viewer reads files and source there without an engine.
@@ -180,6 +185,11 @@ impl Run {
             .with_context(|| format!("reading the trace in {name}"))?;
         let mut run = Run::with_trace(path, origin, manifest, manifest_warning, trace, io);
         run.carried_bookmarks = export.bookmarks;
+        run.parts_from = export
+            .parting
+            .as_deref()
+            .and_then(PartsFrom::parse)
+            .map(|p| p.parting);
         run.answers = export.answers.map(Arc::new);
         Ok(run)
     }
@@ -205,6 +215,7 @@ impl Run {
             timeline,
             io,
             carried_bookmarks: None,
+            parts_from: None,
             answers: None,
         }
     }
@@ -235,14 +246,18 @@ impl Run {
         let (trace, io) = rewind_trace::records(&trace_path)
             .and_then(|records| decode(&records))
             .with_context(|| format!("reading {}", trace_path.display()))?;
-        Ok(Run::with_trace(
+        let mut run = Run::with_trace(
             path.to_path_buf(),
             origin,
             manifest,
             manifest_warning,
             trace,
             io,
-        ))
+        );
+        run.parts_from = Some(path)
+            .filter(|p| p.is_dir())
+            .and_then(crate::family::read_parting);
+        Ok(run)
     }
 
     /// A short name: the manifest's, else the directory or file name.

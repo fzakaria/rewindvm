@@ -33,6 +33,7 @@ pub mod lines;
 pub mod located;
 pub mod machine;
 pub mod manifest;
+pub mod parting;
 pub mod perfetto;
 pub mod properties;
 pub mod prune;

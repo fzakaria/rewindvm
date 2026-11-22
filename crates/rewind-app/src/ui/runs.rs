@@ -120,20 +120,23 @@ impl RunsPanel {
         })
     }
 
-    /// What the step axis knows of where `run` parts: nothing to part
-    /// from for a run measured against no run, else its parting once
-    /// worked out.
+    /// What the step axis knows of where `run` parts: its parting once
+    /// worked out, else what its export carried, else nothing to part
+    /// from for a run measured against no run here.
     pub fn parted(&self, run: &RunEntry) -> Parted {
+        if let Some(parting) = self.partings.get(&run.id) {
+            return Parted::Known(*parting);
+        }
+        if let Some(parting) = run.parts_from {
+            return Parted::Known(parting);
+        }
         let Some(family) = &self.family else {
             return Parted::Unknown;
         };
         if family.tree_parent(run).is_none() {
             return Parted::Root;
         }
-        match self.partings.get(&run.id) {
-            Some(parting) => Parted::Known(*parting),
-            None => Parted::Unknown,
-        }
+        Parted::Unknown
     }
 
     /// Whether a run that has ended, and its run to measure against, has
@@ -435,6 +438,40 @@ mod tests {
         runs.push(entry("f3", Some("base")));
         panel.set_family(Some(Family { runs }));
         assert!(panel.needs_partings());
+    }
+
+    #[test]
+    fn a_run_takes_the_parting_its_export_carried_until_one_is_worked_out() {
+        // A run whose export said where it parts: alone, as the pair of
+        // an export is in the browser, it is known by what it carried, not
+        // drawn as the family's first run; with the run it hangs under
+        // here, what is carried stands until the panel works out its own.
+        let carried = Parting {
+            machine: Some(4692),
+            behaves: Some(4705),
+        };
+        let mut alone = entry("x", None);
+        alone.schedule = 8;
+        alone.parts_from = Some(carried);
+        let mut panel = RunsPanel::default();
+        panel.set_family(Some(Family {
+            runs: vec![alone.clone()],
+        }));
+        assert_eq!(panel.parted(&alone), Parted::Known(carried));
+
+        let mut base = entry("base", None);
+        base.schedule = 0;
+        let mut panel = RunsPanel::default();
+        panel.set_family(Some(Family {
+            runs: vec![base, alone.clone()],
+        }));
+        assert_eq!(panel.parted(&alone), Parted::Known(carried));
+        let worked_out = Parting {
+            machine: Some(4690),
+            behaves: Some(4705),
+        };
+        panel.partings.insert("x".to_string(), worked_out);
+        assert_eq!(panel.parted(&alone), Parted::Known(worked_out));
     }
 
     #[test]

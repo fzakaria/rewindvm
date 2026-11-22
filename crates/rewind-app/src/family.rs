@@ -12,6 +12,7 @@ use std::time::{Duration, SystemTime};
 
 use rewind_trace::ending;
 use rewind_trace::manifest::{KEYFRAMES_DIR, MANIFEST, Manifest, Source, executing};
+use rewind_trace::parting::{MAX_PARTING, PARTING, Parting, PartsFrom};
 use rewind_trace::prune::{self, Forks, Member, Reads};
 
 use crate::describe::{ago, thousands};
@@ -85,6 +86,9 @@ pub struct RunEntry {
     pub first_difference: Option<u64>,
     /// The step the run ended at; None until it has.
     pub last_step: Option<u64>,
+    /// Where the run parts from the run it hangs under, as the export it
+    /// came from said, for a run whose export carried it.
+    pub parts_from: Option<Parting>,
     pub trace_hash: Option<String>,
     pub progress: Progress,
     /// The run it reads keyframes from, and up to which step.
@@ -120,6 +124,7 @@ impl RunEntry {
         };
         let mut entry = RunEntry::from_manifest(dir, &manifest, modified, running);
         entry.has_keyframes = dir.join(KEYFRAMES_DIR).is_dir();
+        entry.parts_from = read_parting(dir);
         Some(entry)
     }
 
@@ -178,6 +183,7 @@ impl RunEntry {
             passed: verdict.passed(),
             first_difference: manifest.first_difference,
             last_step: manifest.outcome.as_ref().map(|o| o.step),
+            parts_from: None,
             trace_hash: manifest.trace_hash.clone(),
             progress,
             shares: manifest.shared_keyframes.as_ref().map(|s| Reads {
@@ -193,6 +199,18 @@ impl RunEntry {
             modified,
         }
     }
+}
+
+/// Where the run in `dir` parts from the run it hangs under, from the
+/// parting.json its export carried; None without one, or with one that
+/// is larger than an export writes or does not parse.
+pub fn read_parting(dir: &Path) -> Option<Parting> {
+    let path = dir.join(PARTING);
+    if std::fs::metadata(&path).ok()?.len() > MAX_PARTING {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    PartsFrom::parse(&bytes).map(|p| p.parting)
 }
 
 /// Whether the run came from an export: `rewind import` keeps an imported
@@ -1126,6 +1144,7 @@ mod tests {
             passed: ending == "exited:0",
             first_difference: None,
             last_step: Some(LAST_STEP),
+            parts_from: None,
             trace_hash: Some(format!("hash-{id}")),
             progress: Progress::Ended,
             shares: None,
@@ -1353,6 +1372,35 @@ mod tests {
         );
         assert_eq!(entry.ending, "timed-out");
         assert!(entry.failed);
+    }
+
+    #[test]
+    fn a_run_read_from_its_directory_has_the_parting_its_export_carried() {
+        // A run imported from an export keeps parting.json beside its
+        // manifest; one without the file, or with a file that does not
+        // parse, has none.
+        let dir = std::env::temp_dir().join(format!("rewind-app-parting-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let manifest = crate::examples::manifest_of(crate::examples::FAILING);
+        std::fs::write(dir.join(MANIFEST), serde_json::to_vec(&manifest).unwrap()).unwrap();
+        assert_eq!(RunEntry::read(&dir).unwrap().parts_from, None);
+
+        let parting = rewind_trace::parting::PARTING;
+        std::fs::write(
+            dir.join(parting),
+            br#"{"run":"1def0466c25329db","machine":4692,"behaves":4705}"#,
+        )
+        .unwrap();
+        let expected = crate::family_axis::Parting {
+            machine: Some(4692),
+            behaves: Some(4705),
+        };
+        assert_eq!(RunEntry::read(&dir).unwrap().parts_from, Some(expected));
+
+        std::fs::write(dir.join(parting), b"not json").unwrap();
+        assert_eq!(RunEntry::read(&dir).unwrap().parts_from, None);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

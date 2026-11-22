@@ -740,18 +740,21 @@ impl Scrubber {
         };
         // The example's two runs are its family, for the tour; they are
         // not among the engine's runs. In the browser, where there are no
-        // engine's runs, every session's runs are its family.
+        // engine's runs, every session's runs are its family, each with
+        // the parting its export carried.
         if session.run.origin == Origin::Example || cfg!(target_family = "wasm") {
             let now = crate::clock::now();
             let runs = std::iter::once(&session.run)
                 .chain(session.other.as_ref())
                 .filter_map(|run| {
-                    Some(RunEntry::from_manifest(
+                    let mut entry = RunEntry::from_manifest(
                         &run.path,
                         run.manifest.as_ref()?,
                         now,
                         Executing::No,
-                    ))
+                    );
+                    entry.parts_from = run.parts_from;
+                    Some(entry)
                 })
                 .collect();
             self.runs.set_family(Some(Family { runs }));

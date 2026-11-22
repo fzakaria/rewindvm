@@ -1,11 +1,12 @@
 //! Exported runs: `.rwd` files.
 //!
 //! `rewind export` writes a run as one file: a tar archive compressed with
-//! zstd holding `manifest.json`, `summary.txt`, `trace.bin` and any
-//! `bookmarks.json`, and
+//! zstd holding `manifest.json`, `summary.txt`, `trace.bin`, any
+//! `bookmarks.json` and any `parting.json`, and
 //! for a replayable export also keyframes, memory pages and the run's
 //! inputs (see crates/rewind-core/src/export.rs). The scrubber needs only
-//! the manifest, the trace and the bookmarks, so the app unpacks those into
+//! the manifest, the trace, the bookmarks and the parting, so the app
+//! unpacks those into
 //! the user's cache, under the run's id, and opens that directory like any
 //! other run. The rest stays in the file for `rewind import`, which can
 //! replay it.
@@ -25,6 +26,7 @@ use rewind_trace::Trace;
 use rewind_trace::answers::{self, Carried};
 use rewind_trace::export::{self, Contents, Flow, Member};
 use rewind_trace::manifest::{MANIFEST, Manifest, RunId, TRACE};
+use rewind_trace::parting::{MAX_PARTING, PARTING};
 use rewind_trace::summary::{self, Recording, SUMMARY};
 
 /// The binary units sizes are said in.
@@ -349,6 +351,9 @@ pub struct InMemory {
     pub summary: Option<Vec<u8>>,
     /// The bookmarks the desktop app made, when the export carries them.
     pub bookmarks: Option<Vec<u8>>,
+    /// Where the run parts from the run it hangs under, when the export
+    /// carries it.
+    pub parting: Option<Vec<u8>>,
     /// What a replay found at the steps the export answers, when it was
     /// written with answers.
     pub answers: Option<Carried>,
@@ -429,10 +434,11 @@ fn read_within(reader: impl Read, limits: MemberLimits) -> Result<InMemory> {
     let mut trace = None;
     let mut summary = None;
     let mut bookmarks = None;
+    let mut parting = None;
     let mut answers = AnswerMembers::default();
 
-    // The manifest, the trace, and the summary and the bookmarks as
-    // regular files no larger than the engine writes, are kept; every other member is
+    // The manifest, the trace, and the summary, the bookmarks and the
+    // parting as regular files no larger than the engine writes, are kept; every other member is
     // skipped, and the members only replay needs are not read. A manifest
     // or trace past its limit refuses the export before any of the member
     // is read into memory.
@@ -451,6 +457,7 @@ fn read_within(reader: impl Read, limits: MemberLimits) -> Result<InMemory> {
             Member::Trace => &mut trace,
             Member::Summary if size <= export::MAX_SUMMARY => &mut summary,
             Member::Bookmarks if size <= BOOKMARKS_MAX_BYTES => &mut bookmarks,
+            Member::Parting if size <= MAX_PARTING => &mut parting,
             _ => return Ok(Flow::Continue),
         };
         let mut bytes = Vec::new();
@@ -469,6 +476,7 @@ fn read_within(reader: impl Read, limits: MemberLimits) -> Result<InMemory> {
         trace,
         summary,
         bookmarks,
+        parting,
         answers,
         replayable: contents == Contents::Replayable,
     })
@@ -699,8 +707,8 @@ fn unique() -> u64 {
 /// path that is not plain names inside the archive is refused, and so is
 /// a manifest or trace larger than `limits` allow.
 fn unpack(reader: impl Read, staging: &Path, limits: MemberLimits) -> Result<bool> {
-    // The run's bookmarks come too, as a regular file no larger than the
-    // engine writes. A manifest or trace past its limit refuses the export
+    // The run's bookmarks and parting come too, each as a regular file no
+    // larger than the engine writes. A manifest or trace past its limit refuses the export
     // before any of the member is written to the cache. The first member
     // only a replay needs ends the walk once the manifest and the trace
     // are staged, as it ends the browser's read (see [`read_within`]).
@@ -712,6 +720,7 @@ fn unpack(reader: impl Read, staging: &Path, limits: MemberLimits) -> Result<boo
         let wanted = match member {
             Member::Manifest | Member::Trace => true,
             Member::Bookmarks => size <= BOOKMARKS_MAX_BYTES,
+            Member::Parting => size <= MAX_PARTING,
             _ => false,
         };
         if !wanted {
@@ -735,21 +744,23 @@ fn unpack(reader: impl Read, staging: &Path, limits: MemberLimits) -> Result<boo
     Ok(contents == Contents::Replayable)
 }
 
-/// Gives `dir`, a copy of the run unpacked before, the bookmarks the
-/// export staged in `staging` carried, when the copy has none: the copy
-/// may be from an export made before the run was bookmarked. Bookmarks
-/// the copy has are the user's latest and stay. The link fails where a
-/// bookmarks file exists, so a file saved at the same moment is not
-/// replaced.
+/// Gives `dir`, a copy of the run unpacked before, the bookmarks and the
+/// parting the export staged in `staging` carried, each when the copy has
+/// none: the copy may be from an export made before the run was
+/// bookmarked, or without the run it hangs under. Bookmarks the copy has
+/// are the user's latest and stay. The link fails where the file exists,
+/// so a file saved at the same moment is not replaced.
 fn carry_bookmarks(staging: &Path, dir: &Path) {
-    let staged = staging.join(BOOKMARKS_FILE);
-    if staged.is_file() {
-        let _ = fs::hard_link(&staged, dir.join(BOOKMARKS_FILE));
+    for name in [BOOKMARKS_FILE, PARTING] {
+        let staged = staging.join(name);
+        if staged.is_file() {
+            let _ = fs::hard_link(&staged, dir.join(name));
+        }
     }
 }
 
 /// Moves a staged run to `<into>/<id>`, or keeps the copy already there,
-/// with the staged bookmarks when that copy has none.
+/// with the staged bookmarks and parting when that copy has none.
 fn place(staging: &Path, into: &Path) -> Result<PathBuf> {
     let manifest: Value = serde_json::from_slice(&fs::read(staging.join(MANIFEST))?)
         .context("the archive's manifest.json is not JSON")?;
@@ -1238,6 +1249,37 @@ mod tests {
         ]);
         let run = import(&bytes[..], &dir).unwrap().dir;
         assert!(!run.join(crate::bookmarks::BOOKMARKS_FILE).exists());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_export_s_parting_comes_with_it_unpacked_and_in_memory() {
+        // Where the run parts from the run it hangs under is unpacked
+        // beside the trace and read with the trace into memory; a file
+        // larger than an export writes is left in the archive.
+        let dir = temp_dir("parting");
+        let parting = br#"{"run":"1def0466c25329db","machine":4692,"behaves":4705}"#;
+        let bytes = archive(&[
+            ("manifest.json", br#"{"id": "000000000000000c"}"#),
+            ("trace.bin", b"trace"),
+            (PARTING, parting),
+        ]);
+        let run = import(&bytes[..], &dir).unwrap().dir;
+        assert_eq!(fs::read(run.join(PARTING)).unwrap(), parting);
+        assert_eq!(
+            read_bytes(&bytes).unwrap().parting.as_deref(),
+            Some(&parting[..])
+        );
+
+        let huge = vec![b' '; MAX_PARTING as usize + 1];
+        let bytes = archive(&[
+            ("manifest.json", br#"{"id": "000000000000000d"}"#),
+            ("trace.bin", b"trace"),
+            (PARTING, &huge),
+        ]);
+        let run = import(&bytes[..], &dir).unwrap().dir;
+        assert!(!run.join(PARTING).exists());
+        assert_eq!(read_bytes(&bytes).unwrap().parting, None);
         fs::remove_dir_all(&dir).unwrap();
     }
 

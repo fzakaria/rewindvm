@@ -4,7 +4,9 @@
 //! run's `manifest.json` and `trace.bin`, which is everything the scrubber
 //! needs to show the run, `summary.txt`, the run in plain text as `rewind
 //! summary` prints it, for a person or a program without the scrubber, and
-//! the desktop app's bookmarks of the run when it has any. An export
+//! the desktop app's bookmarks of the run when it has any, and where the
+//! run parts from the run it hangs under when that run is in the home
+//! (see [`rewind_trace::parting`]). An export
 //! written with answers carries what a replay found at the run's failing
 //! step, its broken assertions and its bookmarks (see
 //! [`rewind_trace::answers`]). A replayable export adds what another
@@ -17,6 +19,7 @@
 //! summary.txt
 //! trace.bin
 //! bookmarks.json               when the run has bookmarks
+//! parting.json                 when the run it hangs under is here
 //! answers.json                 with answers only: the index
 //! answers/<n>                  with answers only: a file's bytes
 //! keyframes/<step>.kf          replayable only
@@ -42,6 +45,7 @@ pub use rewind_trace::export::Contents;
 use rewind_trace::export::{
     COMPRESSION_LEVEL, Flow, IMAGE, INITRD, INPUTS_DIR, KERNEL, MAX_BOOKMARKS, Member, PAGES_DIR,
 };
+use rewind_trace::parting::{Endings, MAX_PARTING, PARTING, Parting, PartsFrom};
 use rewind_trace::summary::{self, Recording, SUMMARY};
 
 const PAGE_SIZE: usize = 4096;
@@ -133,6 +137,12 @@ fn write_export(
         tar.append_path_with_name(&bookmarks, BOOKMARKS)?;
     }
 
+    // Where the run parts from the run it hangs under, for a reader that
+    // will have this run alone, as the browser viewer does.
+    if let Some(parts) = parts_from(home, run) {
+        append_bytes(&mut tar, PARTING, &serde_json::to_vec(&parts)?)?;
+    }
+
     // The answers, before anything only a replay needs, where a reader
     // that stops at the first of those still finds them.
     if let Some(packed) = answers {
@@ -193,6 +203,32 @@ fn write_export(
 
     tar.into_inner()?.finish()?.sync_all()?;
     Ok(())
+}
+
+/// Where `run` parts from the run it hangs under in its family, a fork's
+/// parent or for a run from boot under another schedule the schedule 0
+/// run of its inputs, when that run is in `home` and both have ended.
+/// None for any run that hangs under nothing, and when the other run is
+/// not here or does not read: the export goes out without it.
+fn parts_from(home: &Home, run: &Run) -> Option<PartsFrom> {
+    let manifest = &run.manifest;
+    let against = match &manifest.parent {
+        Some(parent) => parent.run.clone(),
+        None if manifest.spec.schedule != 0 => manifest.spec.unscheduled().id(),
+        None => return None,
+    };
+    let other = Run::open(&home.runs().join(&against)).ok()?;
+    let (last, other_last) = (
+        manifest.outcome.as_ref()?.step,
+        other.manifest.outcome.as_ref()?.step,
+    );
+    let (trace, other_trace) = (run.trace().ok()?, other.trace().ok()?);
+    let endings = Endings::of(manifest.verdict.failed(), other.manifest.verdict.failed());
+    let parting = Parting::of(trace, last, other_trace, other_last, endings);
+    Some(PartsFrom {
+        run: against,
+        parting,
+    })
 }
 
 /// Adds a file with these contents, its metadata fixed so the same run
@@ -271,6 +307,12 @@ fn unpack_and_place(home: &Home, reader: impl Read, source: &str, staging: &Path
         // Bookmarks are notes, never larger than MAX_BOOKMARKS.
         if member == Member::Bookmarks && size > MAX_BOOKMARKS {
             bail!("{source} holds bookmarks over {MAX_BOOKMARKS} bytes");
+        }
+
+        // A parting is a run id and two steps, never larger than
+        // MAX_PARTING.
+        if member == Member::Parting && size > MAX_PARTING {
+            bail!("{source} holds a parting over {MAX_PARTING} bytes");
         }
 
         // A page is PAGE_SIZE bytes, so nothing longer is read into memory.
@@ -359,6 +401,7 @@ fn unpack_and_place(home: &Home, reader: impl Read, source: &str, staging: &Path
     if let Some(mut local) = recorded {
         take_keyframes(staging, &dir)?;
         take_bookmarks(staging, &dir)?;
+        take_parting(staging, &dir)?;
         if staging.join(INPUTS_DIR).exists() && !has_inputs(&local.manifest) {
             place_inputs(home, staging, &mut local.manifest)?;
             write_manifest(home, &dir, &local.manifest)?;
@@ -367,13 +410,14 @@ fn unpack_and_place(home: &Home, reader: impl Read, source: &str, staging: &Path
     }
 
     // A run that is new here, or that never finished here: its inputs,
-    // its trace, its keyframes and its bookmarks.
+    // its trace, its keyframes, its bookmarks and its parting.
     if staging.join(INPUTS_DIR).exists() {
         place_inputs(home, staging, &mut manifest)?;
     }
     fs::rename(&staged_trace, dir.join(TRACE))?;
     take_keyframes(staging, &dir)?;
     take_bookmarks(staging, &dir)?;
+    take_parting(staging, &dir)?;
 
     // The manifest goes last, whole or not at all.
     manifest.trace_hash = Some(trace_hash);
@@ -485,6 +529,17 @@ fn take_keyframes(staging: &Path, dir: &Path) -> Result<()> {
 fn take_bookmarks(staging: &Path, dir: &Path) -> Result<()> {
     let staged = staging.join(BOOKMARKS);
     let local = dir.join(BOOKMARKS);
+    if staged.is_file() && !local.exists() {
+        fs::rename(&staged, &local)?;
+    }
+    Ok(())
+}
+
+/// Moves the parting staged in `staging` into the run directory `dir`,
+/// unless the run has one already, which stays.
+fn take_parting(staging: &Path, dir: &Path) -> Result<()> {
+    let staged = staging.join(PARTING);
+    let local = dir.join(PARTING);
     if staged.is_file() && !local.exists() {
         fs::rename(&staged, &local)?;
     }
@@ -1038,6 +1093,53 @@ mod tests {
         export(&from, &Run::open(&dir).unwrap(), Contents::View, &out).unwrap();
         let run = import(&to, &out).unwrap();
         assert_eq!(fs::read(run.dir.join(BOOKMARKS)).unwrap(), bookmarks);
+        fs::remove_dir_all(from.root()).unwrap();
+        fs::remove_dir_all(to.root()).unwrap();
+    }
+
+    #[test]
+    fn an_export_carries_where_its_run_parts_from_the_run_it_hangs_under() {
+        // A run from boot under schedule 8 and the schedule 0 run of its
+        // inputs, both with the same empty trace. The run's export carries
+        // parting.json naming the schedule 0 run, the same machine to the
+        // end, and an import keeps the file. The schedule 0 run hangs
+        // under nothing and its export carries none, and neither does the
+        // run's once the schedule 0 run is gone.
+        let from = home("parting-from");
+        let to = home("parting-to");
+        let mut perturbed: Manifest = serde_json::from_slice(&finished(ID)).unwrap();
+        perturbed.spec.schedule = 8;
+        perturbed.id = perturbed.spec.id();
+        let mut base = perturbed.clone();
+        base.spec = perturbed.spec.unscheduled();
+        base.id = base.spec.id();
+        let place = |m: &Manifest| {
+            let dir = from.runs().join(&m.id);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join(MANIFEST), serde_json::to_vec_pretty(m).unwrap()).unwrap();
+            fs::write(dir.join(TRACE), empty_trace()).unwrap();
+            dir
+        };
+        let (dir, base_dir) = (place(&perturbed), place(&base));
+        let out = from.root().join("run.rwd");
+
+        // The run's export, and its import.
+        export(&from, &Run::open(&dir).unwrap(), Contents::View, &out).unwrap();
+        let carried = member(&out, PARTING).expect("the export carries parting.json");
+        let expected = PartsFrom {
+            run: base.id.clone(),
+            parting: Parting::default(),
+        };
+        assert_eq!(PartsFrom::parse(&carried), Some(expected));
+        let run = import(&to, &out).unwrap();
+        assert_eq!(fs::read(run.dir.join(PARTING)).unwrap(), carried);
+
+        // The schedule 0 run's export, and the run's without it.
+        export(&from, &Run::open(&base_dir).unwrap(), Contents::View, &out).unwrap();
+        assert_eq!(member(&out, PARTING), None);
+        fs::remove_dir_all(&base_dir).unwrap();
+        export(&from, &Run::open(&dir).unwrap(), Contents::View, &out).unwrap();
+        assert_eq!(member(&out, PARTING), None);
         fs::remove_dir_all(from.root()).unwrap();
         fs::remove_dir_all(to.root()).unwrap();
     }

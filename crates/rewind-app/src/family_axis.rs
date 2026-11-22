@@ -22,84 +22,11 @@ use std::borrow::Borrow;
 use std::collections::{HashMap, HashSet};
 
 use rewind_trace::Trace;
-use rewind_trace::compare::Comparison;
 
 use crate::family::{Family, RunEntry};
 use crate::lanes::Window;
 
-/// Where a run parts from the run it is measured against.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Parting {
-    /// The step of this run where the machine first differs; None when
-    /// the two runs are the same machine to the end.
-    pub machine: Option<u64>,
-    /// The step of this run where the program that failed in one of the
-    /// two runs, and not in the other, first behaves differently. None
-    /// when the two runs end alike.
-    pub behaves: Option<u64>,
-}
-
-/// Whether two runs end alike: both failing, or neither.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Endings {
-    Alike,
-    /// One run failed and the other did not, as the pair `rewind check`
-    /// reports.
-    Differ,
-}
-
-impl Endings {
-    pub fn of(run: &RunEntry, other: &RunEntry) -> Endings {
-        if run.failed == other.failed {
-            Endings::Alike
-        } else {
-            Endings::Differ
-        }
-    }
-}
-
-impl Parting {
-    /// Where `run`, which ended at step `run_last`, parts from `against`,
-    /// which ended at `against_last`.
-    pub fn of(
-        run: &Trace,
-        run_last: u64,
-        against: &Trace,
-        against_last: u64,
-        endings: Endings,
-    ) -> Parting {
-        // Record for record, as rewind diff compares two runs.
-        let machine = against.divergence(run).map(|d| d.right_step);
-
-        // Two runs that end alike have no failing program to follow. A
-        // program inside either can still fail in one and not the other,
-        // as a configure probe of a Nix build does from schedule to
-        // schedule, and marking it would point at noise. Skipping the
-        // comparison is also most of the cost: on 64 runs of GNU hello's
-        // build, 170,000 steps each, it took 2.7 s of 3.6 s.
-        if endings == Endings::Alike {
-            return Parting {
-                machine,
-                behaves: None,
-            };
-        }
-
-        // The failing program's own events, as rewind check compares the
-        // two runs it reports, when that program's events part. Without
-        // a program whose events part there is no mark: a comparison of
-        // every event tells only that the machine differs.
-        let program = run
-            .culprit_against(against)
-            .or_else(|| against.culprit_against(run))
-            .filter(|argv| run.divergence_in(against, argv).is_some());
-        let behaves = program.and_then(|argv| {
-            Comparison::about(run, run_last, against, against_last, Some(argv))
-                .point
-                .map(|p| p.step)
-        });
-        Parting { machine, behaves }
-    }
-}
+pub use rewind_trace::parting::{Endings, Parting};
 
 /// The partings of `family`'s runs that are not in `known`, each against
 /// the run it is measured against, with traces read by `read`. A run
@@ -139,7 +66,7 @@ pub fn partings<T: Borrow<Trace>>(
             let (Some(trace), Some(last)) = (read(run), run.last_step) else {
                 continue;
             };
-            let endings = Endings::of(run, against);
+            let endings = Endings::of(run.failed, against.failed);
             let parting = Parting::of(trace.borrow(), last, other.borrow(), other_last, endings);
             found.insert(run.id.clone(), parting);
         }
@@ -292,6 +219,7 @@ mod tests {
             passed: true,
             first_difference: None,
             last_step: Some(LAST),
+            parts_from: None,
             trace_hash: Some(format!("hash-{id}")),
             progress: Progress::Ended,
             shares: None,
@@ -499,70 +427,6 @@ mod tests {
             events,
             ..Default::default()
         }
-    }
-
-    #[test]
-    fn a_failing_run_parts_where_its_machine_differs_and_its_program_behaves_differently() {
-        // The base writes "one" at 10 and "two" at 20. The failing run
-        // writes "one" two steps later, so its machine differs at 12,
-        // then writes "boom" where the base wrote "two": the program
-        // behaves differently at 22.
-        let base = test_run(&[(10, "one\n"), (20, "two\n")], 30, 0);
-        let failing = test_run(&[(12, "one\n"), (22, "boom\n")], 32, 2 << 8);
-        let parting = Parting::of(&failing, 32, &base, 30, Endings::Differ);
-        assert_eq!(parting.machine, Some(12));
-        assert_eq!(parting.behaves, Some(22));
-    }
-
-    #[test]
-    fn two_runs_that_pass_part_with_no_program_mark() {
-        // A run that writes the base's lines later passes as the base
-        // did: its machine differs, but no program failed to follow.
-        let base = test_run(&[(10, "one\n"), (20, "two\n")], 30, 0);
-        let later = test_run(&[(12, "one\n"), (22, "two\n")], 32, 0);
-        assert_eq!(
-            Parting::of(&later, 32, &base, 30, Endings::Alike),
-            Parting {
-                machine: Some(12),
-                behaves: None
-            }
-        );
-        assert_eq!(
-            Parting::of(&base, 30, &base, 30, Endings::Alike),
-            Parting {
-                machine: None,
-                behaves: None
-            }
-        );
-    }
-
-    #[test]
-    fn runs_that_end_alike_get_no_program_mark_though_a_program_failed_in_one() {
-        // Both runs pass, as two schedules of a build do, but a program
-        // inside one exits 2 where the other's exited 0, as a configure
-        // probe can: the machine differs and no program mark is drawn.
-        let base = test_run(&[(10, "one\n"), (20, "two\n")], 30, 0);
-        let probe_failed = test_run(&[(12, "one\n"), (22, "boom\n")], 32, 2 << 8);
-        assert_eq!(
-            Parting::of(&probe_failed, 32, &base, 30, Endings::Alike),
-            Parting {
-                machine: Some(12),
-                behaves: None
-            }
-        );
-    }
-
-    #[test]
-    fn endings_differ_when_one_run_failed_and_the_other_did_not() {
-        // Two passing runs, and two failing ones, end alike.
-        let pass = run("p", None, 0);
-        let mut fail = run("f", None, 1);
-        fail.failed = true;
-        fail.passed = false;
-        assert_eq!(Endings::of(&pass, &pass), Endings::Alike);
-        assert_eq!(Endings::of(&fail, &fail), Endings::Alike);
-        assert_eq!(Endings::of(&fail, &pass), Endings::Differ);
-        assert_eq!(Endings::of(&pass, &fail), Endings::Differ);
     }
 
     #[test]
