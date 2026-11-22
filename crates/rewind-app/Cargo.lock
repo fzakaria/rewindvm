@@ -4829,6 +4829,7 @@ dependencies = [
  "ureq",
  "vte",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "web-sys",
  "web-time",
  "zstd",

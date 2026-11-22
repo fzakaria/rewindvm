@@ -239,11 +239,15 @@ impl Scrubber {
         // directory's files come from the trace, which needs none, and at
         // a step an export with answers answers, a file comes from them.
         let listed = session.run.timeline.has_files_under(&path);
-        if cfg!(target_family = "wasm") && !listed && !self.answered_here() {
+        let replays = self.browser_replays();
+        if cfg!(target_family = "wasm") && !listed && !self.answered_here() && !replays {
             self.replay_in_desktop_app(READING_A_FILE, RightColumn::AtStep, cx);
             return;
         }
-        let unavailable = unavailable(session);
+        let Some(session) = &self.session else {
+            return;
+        };
+        let unavailable = if replays { None } else { unavailable(session) };
         self.right_tab = RightTab::File;
         self.shown.viewer = Some(FileViewer {
             path,
@@ -270,10 +274,13 @@ impl Scrubber {
     /// viewer that said the run was still being imported reads its path
     /// through the engine now.
     pub(super) fn viewer_run_imported(&mut self, cx: &mut Context<Self>) {
+        let replays = self.browser_replays();
         let (Some(viewer), Some(session)) = (&mut self.shown.viewer, &self.session) else {
             return;
         };
-        viewer.unavailable = unavailable(session);
+        if !replays {
+            viewer.unavailable = unavailable(session);
+        }
         self.read_viewer(cx);
     }
 
@@ -318,8 +325,21 @@ impl Scrubber {
         // directory, whose files come from the trace, from the answers
         // an export carries.
         self.session.as_ref().is_some_and(|session| {
-            session.run.answers.is_some() && !session.run.timeline.has_files_under(&viewer.path)
+            (session.run.answers.is_some() || self.browser_replays())
+                && !session.run.timeline.has_files_under(&viewer.path)
         })
+    }
+
+    /// Whether the browser viewer reads the run's files by replaying it
+    /// in the browser: an export opened from a link, whose replay bundle
+    /// the page looks for beside it. The page says when there is none.
+    pub(super) fn browser_replays(&self) -> bool {
+        cfg!(target_family = "wasm")
+            && self.address_bar.address.url.is_some()
+            && self
+                .session
+                .as_ref()
+                .is_some_and(|session| !session.run.records.is_empty())
     }
 
     /// Shows the files the trace has under the viewer's path at the
@@ -583,6 +603,46 @@ impl Scrubber {
         } else {
             Expect::File
         };
+        // In the browser, a file the export carries no answer for is read
+        // by replaying the run there, from the replay bundle beside the
+        // export: the page runs the QEMU machine, and the answer comes
+        // back as a promise, where the engine's would block.
+        #[cfg(target_family = "wasm")]
+        if expect == Expect::File
+            && !session.run.answers_at(step)
+            && self.browser_replays()
+            && let Some(url) = self.address_bar.address.url.clone()
+        {
+            let records = session.run.records.clone();
+            let (pid, path) = (at.pid, at.path.clone());
+            let Some(viewer) = &mut self.shown.viewer else {
+                return;
+            };
+            viewer.in_flight = None;
+            cx.notify();
+            cx.spawn(async move |this, cx| {
+                let result = crate::web::replay_file(url, records, step, pid, path)
+                    .await
+                    .map(Looked::File);
+                let _ = this.update(cx, |this, cx| {
+                    if this
+                        .shown
+                        .viewer
+                        .as_ref()
+                        .is_none_or(|v| v.request != request)
+                    {
+                        return;
+                    }
+                    if let Ok(Looked::File(answer)) = &result {
+                        this.file_answers.insert(key, answer.clone());
+                    }
+                    this.show_looked(step, result, cx);
+                });
+            })
+            .detach();
+            return;
+        }
+
         let engine = self.engine_for_run();
         let Some(viewer) = &mut self.shown.viewer else {
             return;

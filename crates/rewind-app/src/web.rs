@@ -124,6 +124,65 @@ extern "C" {
     /// Puts `query` in the address bar, without a new history entry.
     #[wasm_bindgen(js_namespace = rewindPage, js_name = showAddress)]
     fn page_show_address(query: &str);
+
+    /// Replays the export at `url` to `step` on Rewind's QEMU machine,
+    /// built as a WebAssembly module of its own beside the page, from the
+    /// replay bundle beside the export, and asks the guest there what
+    /// `request` asks: resolves to the machine's step log, or rejects
+    /// with why it could not.
+    #[wasm_bindgen(js_namespace = rewindPage, js_name = replay)]
+    fn page_replay(url: &str, step: f64, request: &[u8]) -> js_sys::Promise;
+}
+
+/// Reads `path` inside the VM at `step`, as process `pid` saw it, by
+/// replaying the export at `url` in the browser: the page runs the QEMU
+/// machine from the export's keyframe nearest before the step, and the
+/// machine's step log is encoded against `records`, the export's trace,
+/// and read for the guest's answer, as the engine reads a fork's.
+pub async fn replay_file(
+    url: String,
+    records: std::sync::Arc<Vec<(u64, Vec<u8>)>>,
+    step: u64,
+    pid: Option<u32>,
+    path: String,
+) -> crate::engine::EngineResult<crate::engine::FileAtStep> {
+    use crate::engine::{EngineError, FileAtStep};
+    use rewind_trace::inspected;
+
+    let failed = |what: String| EngineError::Unanswered { message: what };
+    let request = inspected::cat_request(pid, &path);
+    let log = wasm_bindgen_futures::JsFuture::from(page_replay(&url, step as f64, &request))
+        .await
+        .map_err(|e| {
+            failed(format!(
+                "Replaying step {step} in the browser failed: {}",
+                e.as_string().unwrap_or_else(|| format!("{e:?}"))
+            ))
+        })?;
+    let log = js_sys::Uint8Array::new(&log).to_vec();
+    let encoded = rewind_trace::step_log::encode(&log, &records).map_err(|e| {
+        failed(format!(
+            "The browser's replay of step {step} does not read: {e}"
+        ))
+    })?;
+    let answer = inspected::answer(&encoded.records).ok_or_else(|| {
+        failed(format!(
+            "The browser's replay stopped before the VM answered at step {step}."
+        ))
+    })?;
+    match answer.status {
+        rewind_trace::InspectStatus::Done => Ok(FileAtStep::Exists {
+            bytes: answer.stdout,
+            complete: crate::viewer::FetchedAll::Yes,
+        }),
+        rewind_trace::InspectStatus::NotFound => Ok(FileAtStep::Missing),
+        rewind_trace::InspectStatus::Failed => {
+            let why = String::from_utf8_lossy(&answer.stderr).trim().to_string();
+            Err(failed(format!(
+                "The VM could not read {path} at step {step}: {why}"
+            )))
+        }
+    }
 }
 
 /// Asks the page for a file to open.

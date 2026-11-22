@@ -85,6 +85,11 @@ pub struct Run {
     /// memory carried when it was written with answers: the browser
     /// viewer reads files and source there without an engine.
     pub answers: Option<Arc<Carried>>,
+    /// The trace's records as they are on disk, for an export opened
+    /// from memory: a replay in the browser encodes what its machine
+    /// did after a keyframe against the records up to it. Empty for a
+    /// run read from disk, which the engine replays instead.
+    pub records: Arc<Vec<(u64, Vec<u8>)>>,
 }
 
 impl Run {
@@ -175,10 +180,12 @@ impl Run {
             Some(manifest) => Path::new(manifest.id.as_str()).join(&opened_from),
             None => opened_from,
         };
-        let (trace, io) = rewind_trace::records_from(&export.trace[..])
-            .and_then(|records| decode(&records))
+        let records = rewind_trace::records_from(&export.trace[..])
             .with_context(|| format!("reading the trace in {name}"))?;
+        let (trace, io) =
+            decode(&records).with_context(|| format!("reading the trace in {name}"))?;
         let mut run = Run::with_trace(path, origin, manifest, manifest_warning, trace, io);
+        run.records = Arc::new(records);
         run.carried_bookmarks = export.bookmarks;
         run.answers = export.answers.map(Arc::new);
         Ok(run)
@@ -206,6 +213,7 @@ impl Run {
             io,
             carried_bookmarks: None,
             answers: None,
+            records: Arc::new(Vec::new()),
         }
     }
 

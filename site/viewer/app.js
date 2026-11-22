@@ -13,6 +13,7 @@
 // against this page, so the examples beside it open as
 // ?url=examples/philosophers.rwd.
 
+import { replay } from "./replay.js";
 import { ZipRefusal, isZip, rwdFromZip } from "./zip.js";
 
 // The app's module, loaded once the frame is wide enough for the app, or
@@ -474,6 +475,11 @@ window.rewindPage = {
   pickFile: () => pick.click(),
   fetchRuns,
   showAddress,
+  // A promise the app awaits: rejected with the reason as a string.
+  replay: (url, step, request) =>
+    replay(url, step, request).catch((error) => {
+      throw String(error.message ?? error);
+    }),
 };
 
 pick.addEventListener("change", () => {

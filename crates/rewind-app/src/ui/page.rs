@@ -2,6 +2,10 @@
 //! scrubber, the links it could not fetch, and the address bar kept on the
 //! exports on screen. `crate::web` is the page's side.
 
+/// The process an inspection names for the job's view of the files
+/// (rewind-init's JOBS_VIEW).
+const JOBS_VIEW: u32 = 0;
+
 use std::path::PathBuf;
 
 use futures::StreamExt;
@@ -131,6 +135,11 @@ impl Scrubber {
             Some(RightTab::Bookmarks) => self.select_tab(RightTab::Bookmarks, cx),
             _ => {}
         }
+        // A file in the viewer opens in the job's view, which an
+        // inspection asks for with process 0.
+        if let Some(path) = &address.file {
+            self.open_file(path.clone(), JOBS_VIEW, cx);
+        }
         if let Some(text) = &address.search {
             self.open_search(window, cx);
             if let Some(search) = &self.shown.search {
@@ -178,6 +187,7 @@ impl Scrubber {
             tab: self.right_tab.linked(),
             thread: self.shown.picked_row.map(|pick| pick.tid),
             search,
+            file: self.shown.viewer.as_ref().map(|viewer| viewer.path.clone()),
             ..self.address_bar.address.clone()
         })
     }

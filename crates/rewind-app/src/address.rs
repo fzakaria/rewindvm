@@ -14,6 +14,7 @@ const STEP: &str = "step";
 const TAB: &str = "tab";
 const THREAD: &str = "thread";
 const SEARCH: &str = "search";
+const FILE: &str = "file";
 
 /// The tabs of the right column a link can name: those the viewer opens
 /// from the recording alone. "At this step" is the tab a link without one
@@ -61,6 +62,8 @@ pub struct Address {
     pub thread: Option<u32>,
     /// The text to search for, with the search box open.
     pub search: Option<String>,
+    /// The path to open in the file viewer, as the job sees it.
+    pub file: Option<String>,
 }
 
 impl Address {
@@ -85,6 +88,7 @@ impl Address {
                 TAB => address.tab = Tab::parse(&value),
                 THREAD => address.thread = value.parse().ok(),
                 SEARCH => address.search = Some(value),
+                FILE => address.file = Some(value),
                 _ => {}
             }
         }
@@ -113,6 +117,9 @@ impl Address {
         }
         if let Some(search) = &self.search {
             query.push_str(&format!("&{SEARCH}={}", encode(search)));
+        }
+        if let Some(file) = &self.file {
+            query.push_str(&format!("&{FILE}={}", encode(file)));
         }
         query
     }
@@ -443,6 +450,24 @@ mod tests {
     }
 
     #[test]
+    fn the_address_carries_the_file_in_the_viewer() {
+        // The file open in the viewer goes into the link, its slashes as
+        // they are, and reads back.
+        let address = Address {
+            url: Some("examples/bank.rwd".into()),
+            step: Some(4000),
+            file: Some("/build/bank/bank.c".into()),
+            ..Address::default()
+        };
+        let query = address.query();
+        assert_eq!(
+            query,
+            "?url=examples/bank.rwd&step=4000&file=/build/bank/bank.c"
+        );
+        assert_eq!(Address::parse(&query), address);
+    }
+
+    #[test]
     fn the_address_carries_the_tab_the_thread_and_the_search() {
         // The tab on screen, the thread picked in the tree and the text in
         // the search box go into the link and read back. An address with
@@ -456,6 +481,7 @@ mod tests {
             tab: Some(Tab::Threads),
             thread: Some(12),
             search: Some("deposit 5".into()),
+            file: None,
         };
         let query = address.query();
         assert_eq!(
