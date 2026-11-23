@@ -68,14 +68,15 @@ const PLAYHEAD_WIDTH: f32 = 1.0;
 const CLUSTER_MARK: f32 = 5.0;
 const CLUSTER_OPACITY: f32 = 0.55;
 
-/// How see-through a folding row's line is where one of its runs runs or
-/// has diverged: the line darkens from here to solid as the share of its
-/// runs grows, so a step where one of 79 runs runs still shows.
+/// How see-through a folding row's thin line is where one of its runs
+/// runs: the line darkens from here to solid as the share of its runs
+/// grows, so a step where one of 79 runs runs still shows.
 const SPREAD_MIN_OPACITY: f32 = 0.25;
 
-/// The height of a folding row's thick line: a run's own steps' line,
-/// with room for a red half over a green one.
-const SPREAD_HEIGHT: f32 = 4.0;
+/// The tallest a folding row's bar is drawn, where every run it hides has
+/// diverged: taller than a run's own line, short of the perturbed band,
+/// so a fold of many runs does not outweigh the runs shown one by one.
+const SPREAD_TALLEST: f32 = 8.0;
 
 /// The narrowest the band of perturbed steps is drawn: wider than the
 /// mark where the machine first differs, which sits inside a narrow
@@ -574,8 +575,9 @@ pub(super) fn track_cell(track: Track, failed: bool, playhead: Option<f32>) -> i
     .h_full()
 }
 
-/// A folding row's track: a line drawn like a run's, thin where its runs
-/// run and thick where they have diverged, darker the more of them do;
+/// A folding row's track: a thin line where its runs run, darker the more
+/// of them do, and a bar where they have diverged, taller the more of
+/// them have, red for those that failed over green for those that passed;
 /// over it a small mark where each run it hides ended, green for a run
 /// that passed and red for one that failed, and a tick where each one's
 /// failing program first behaves differently, faint enough that a pile
@@ -600,10 +602,10 @@ pub(super) fn cluster_cell(
                 gpui::Bounds::new(point(x(at) - w / 2.0, mid - h / 2.0), gpui::size(w, h))
             };
 
-            // How many of the runs run, thin, and how many of those have
-            // diverged, thick, a column a pixel wide. The thick line is
-            // red for the diverged runs that failed and green for those
-            // that passed, split in two halves where there are both.
+            // How many of the runs run, a thin line more solid the more of
+            // them do, and over it how many of those have diverged, a bar
+            // as tall as their share, red for those that failed over
+            // green for those that passed; a column a pixel wide.
             let columns = f32::from(width).round().max(1.0) as usize;
             for s in cluster.spread.across(axis, columns) {
                 let band = |top: f32, height: f32| {
@@ -616,30 +618,13 @@ pub(super) fn cluster_cell(
                     band(-SAME_HEIGHT / 2.0, SAME_HEIGHT),
                     rgb(theme::GRAPH_LINE).opacity(share(s.running)),
                 ));
-                let passed = s.diverged - s.failed;
-                let halves = match (s.failed, passed) {
-                    (0, 0) => vec![],
-                    (failed, 0) => vec![(theme::RED, failed, -SPREAD_HEIGHT / 2.0, SPREAD_HEIGHT)],
-                    (0, passed) => {
-                        vec![(
-                            theme::GREEN_SOFT,
-                            passed,
-                            -SPREAD_HEIGHT / 2.0,
-                            SPREAD_HEIGHT,
-                        )]
-                    }
-                    (failed, passed) => vec![
-                        (
-                            theme::RED,
-                            failed,
-                            -SPREAD_HEIGHT / 2.0,
-                            SPREAD_HEIGHT / 2.0,
-                        ),
-                        (theme::GREEN_SOFT, passed, 0.0, SPREAD_HEIGHT / 2.0),
-                    ],
-                };
-                for (color, n, top, height) in halves {
-                    window.paint_quad(fill(band(top, height), rgb(color).opacity(share(n))));
+                let (red, green) = cluster.spread.bar(&s, SPREAD_TALLEST, OWN_HEIGHT);
+                let top = -(red + green) / 2.0;
+                if red > 0.0 {
+                    window.paint_quad(fill(band(top, red), rgb(theme::RED)));
+                }
+                if green > 0.0 {
+                    window.paint_quad(fill(band(top + red, green), rgb(theme::GREEN_SOFT)));
                 }
             }
 

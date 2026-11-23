@@ -221,6 +221,20 @@ impl Stretch {
 }
 
 impl Spread {
+    /// The heights of a stretch's bar, red over green: as tall, of
+    /// `tallest`, as the share of the runs that have diverged, never
+    /// shorter than `least` while any has, and split between the diverged
+    /// runs that failed and those that passed.
+    pub fn bar(&self, stretch: &Stretch, tallest: f32, least: f32) -> (f32, f32) {
+        if stretch.diverged == 0 {
+            return (0.0, 0.0);
+        }
+        let share = stretch.diverged as f32 / self.count.max(1) as f32;
+        let height = (tallest * share).max(least);
+        let red = height * stretch.failed as f32 / stretch.diverged as f32;
+        (red, height - red)
+    }
+
     /// The stretch from `from` to `to` counted at `step`.
     fn counted(&self, from: f32, to: f32, step: u64) -> Stretch {
         let mut stretch = Stretch {
@@ -643,6 +657,31 @@ mod tests {
         // A run with nothing to part from is its own from step 0.
         let root = Cluster::of([&a], |_| Parted::Root, window()).spread;
         assert_eq!(counts(&root), vec![(at(0), at(91), 1, 1, 0)]);
+    }
+
+    #[test]
+    fn a_folding_row_s_bar_is_as_tall_as_the_share_of_its_runs_that_diverged() {
+        // Of 81 hidden runs, 72 have diverged at the failure, 33 of them
+        // failing: a bar of 72/81 of the tallest, red for 33/72 of it and
+        // green for the rest. Where 1 of 81 has diverged the bar is still
+        // as tall as a run's own line, and where none has there is none.
+        let stretch = |diverged, failed| Stretch {
+            from: 0.0,
+            to: 1.0,
+            running: 81,
+            diverged,
+            failed,
+        };
+        let (tallest, least) = (14.0, 3.0);
+        let spread = Spread {
+            count: 81,
+            ..Spread::default()
+        };
+        let (red, green) = spread.bar(&stretch(72, 33), tallest, least);
+        assert!((red + green - 14.0 * 72.0 / 81.0).abs() < 1e-4);
+        assert!((red - (red + green) * 33.0 / 72.0).abs() < 1e-4);
+        assert_eq!(spread.bar(&stretch(1, 0), tallest, least), (0.0, least));
+        assert_eq!(spread.bar(&stretch(0, 0), tallest, least), (0.0, 0.0));
     }
 
     #[test]
