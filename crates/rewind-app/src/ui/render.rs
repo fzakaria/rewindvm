@@ -15,7 +15,7 @@ use gpui::{
 };
 
 use crate::describe::{self, EventTone, short_store_paths, thousands};
-use crate::family::{Family, Progress, Row, RowKind as RunsRowKind, RunEntry};
+use crate::family::{Family, FoldEnding, Progress, Row, RowKind as RunsRowKind, RunEntry};
 use crate::family_axis::{Cluster, Track};
 use crate::model::{FileOp, FileTone, LogFilter, Motion, RowKind, Tone};
 use crate::proc_card::Pick;
@@ -2398,6 +2398,17 @@ impl Scrubber {
                         let is_picked = is_run && picked.contains(&row.run.id);
                         let run = row.run.clone();
 
+                        // For a row that folds runs, open or closed, the
+                        // runs it stands for, and how they ended.
+                        let hidden: Vec<&RunEntry> = this
+                            .runs
+                            .family
+                            .iter()
+                            .flat_map(|f| &f.runs)
+                            .filter(|r| row.stands_for.contains(&r.id))
+                            .collect();
+                        let fold_ending = FoldEnding::of(&hidden);
+
                         // The id and how the run came to be, one line of
                         // text to select and copy, the id in its color.
                         let line = runs_line(row);
@@ -2433,7 +2444,7 @@ impl Scrubber {
                             .hover(|s| s.bg(rgb(theme::RAISED_HOVER)))
                             .child(graph_cell(row, columns, shown, compared))
                             .when(axis.is_none(), |d| {
-                                d.child(ending_pill(row, i, &fonts)).child(
+                                d.child(ending_pill(row, fold_ending, i, &fonts)).child(
                                     div()
                                         .min_w_0()
                                         .truncate()
@@ -2461,26 +2472,21 @@ impl Scrubber {
                                 } else {
                                     row.detail()
                                 };
-                                // A run's track, or for a folded row the
-                                // ends and program marks of the runs it
-                                // hides.
+                                // A run's track, or for a row that folds
+                                // runs the ends and program marks of the
+                                // runs it stands for, still drawn once
+                                // they show below it.
                                 let cell = if is_run {
                                     let track =
                                         Track::of(&row.run, this.runs.parted(&row.run), axis);
                                     track_cell(track, row.run.failed, axis.at(playhead))
                                         .into_any_element()
                                 } else {
-                                    let hidden = match row.kind {
-                                        RunsRowKind::Folded { .. } => row.stands_for.as_slice(),
-                                        RunsRowKind::Run | RunsRowKind::Unfolded { .. } => &[],
-                                    };
-                                    let runs = this
-                                        .runs
-                                        .family
-                                        .iter()
-                                        .flat_map(|f| &f.runs)
-                                        .filter(|r| hidden.contains(&r.id));
-                                    let cluster = Cluster::of(runs, |r| this.runs.parted(r), axis);
+                                    let cluster = Cluster::of(
+                                        hidden.iter().copied(),
+                                        |r| this.runs.parted(r),
+                                        axis,
+                                    );
                                     cluster_cell(cluster, axis.at(playhead)).into_any_element()
                                 };
                                 d.tooltip(tooltip(note))
@@ -2497,7 +2503,7 @@ impl Scrubber {
                                             .gap(px(size::CONTROL_GAP))
                                             .w(px(STEPS_LABEL_WIDTH))
                                             .overflow_hidden()
-                                            .child(ending_pill(row, i, &fonts))
+                                            .child(ending_pill(row, fold_ending, i, &fonts))
                                             .child(
                                                 div()
                                                     .min_w_0()
@@ -2852,8 +2858,21 @@ fn graph_cell(row: &Row, columns: usize, shown: bool, compared: bool) -> impl In
 
 /// How a row's run ended, as a pill; a run the engine is executing
 /// pulses.
-fn ending_pill(row: &Row, index: usize, fonts: &Fonts) -> AnyElement {
-    let ending = pill(row.run.ending.clone(), ending_tone(&row.run), fonts);
+/// A row's pill: how its run ended, or for a row that folds runs, how
+/// the runs it stands for ended, from `fold`.
+fn ending_pill(row: &Row, fold: Option<FoldEnding>, index: usize, fonts: &Fonts) -> AnyElement {
+    let ending = match fold {
+        Some(FoldEnding::Like(run)) => pill(run.ending.clone(), ending_tone(run), fonts),
+        Some(mixed @ FoldEnding::Mixed { failed, .. }) => {
+            let tone = if failed > 0 {
+                PillTone::Failed
+            } else {
+                PillTone::Quiet
+            };
+            pill(mixed.words(), tone, fonts)
+        }
+        None => pill(row.run.ending.clone(), ending_tone(&row.run), fonts),
+    };
     match row.run.progress {
         Progress::Running => pulsing(("running", index), ending).into_any_element(),
         Progress::Ended | Progress::Interrupted => ending.into_any_element(),

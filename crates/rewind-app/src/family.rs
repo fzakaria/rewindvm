@@ -318,6 +318,46 @@ pub enum Folds {
     Windows,
 }
 
+/// How the runs a folding row stands for ended, for the row's pill: the
+/// row's own run is the one they hang under, which can have ended
+/// another way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FoldEnding<'a> {
+    /// Every run ended as this one did.
+    Like(&'a RunEntry),
+    /// The runs ended more than one way, `failed` of the `count` failing.
+    Mixed { failed: usize, count: usize },
+}
+
+impl<'a> FoldEnding<'a> {
+    /// How `runs` ended; None when there are none.
+    pub fn of(runs: &[&'a RunEntry]) -> Option<FoldEnding<'a>> {
+        let first = *runs.first()?;
+
+        // One ending for all, said as a run's own pill says it.
+        let alike = |r: &&RunEntry| {
+            r.ending == first.ending && r.failed == first.failed && r.progress == first.progress
+        };
+        if runs.iter().all(alike) {
+            return Some(FoldEnding::Like(first));
+        }
+
+        // Otherwise how many of them failed.
+        Some(FoldEnding::Mixed {
+            failed: runs.iter().filter(|r| r.failed).count(),
+            count: runs.len(),
+        })
+    }
+
+    /// The words of the row's pill.
+    pub fn words(&self) -> String {
+        match self {
+            FoldEnding::Like(run) => run.ending.clone(),
+            FoldEnding::Mixed { failed, count } => format!("{failed} of {count} fail"),
+        }
+    }
+}
+
 /// The fewest runs from boot a row folds: one run is shown as itself.
 const MIN_FOLD: usize = 2;
 
@@ -1897,6 +1937,43 @@ mod tests {
             rows[3].detail(),
             "hide the 3 runs of schedule 5 on fewer steps"
         );
+    }
+
+    #[test]
+    fn a_folding_row_tells_how_the_runs_it_hides_ended() {
+        // The windows of schedule 5 that fold end two ways, two of the
+        // three failing, so the row says so rather than how s5 ended;
+        // the runs that ended like r all passed, and the row ends as
+        // they did. Opened, the row still names the runs it stands for.
+        let f = narrowed();
+        let hidden = |row: &Row| -> Vec<&RunEntry> {
+            f.runs
+                .iter()
+                .filter(|r| row.stands_for.contains(&r.id))
+                .collect()
+        };
+        let rows = f.rows_folded(&HashSet::new(), &[]);
+
+        let windows = FoldEnding::of(&hidden(&rows[3]));
+        assert_eq!(
+            windows,
+            Some(FoldEnding::Mixed {
+                failed: 2,
+                count: 3
+            })
+        );
+        assert_eq!(windows.unwrap().words(), "2 of 3 fail");
+
+        let ended_like = FoldEnding::of(&hidden(&rows[1]));
+        assert!(matches!(ended_like, Some(FoldEnding::Like(r)) if r.ending == "exited:0"));
+        assert_eq!(ended_like.unwrap().words(), "exited:0");
+        assert_eq!(FoldEnding::of(&[]), None);
+
+        let open = HashSet::from(["s5".to_string()]);
+        let rows = f.rows_folded(&open, &[]);
+        let mut named = rows[3].stands_for.clone();
+        named.sort();
+        assert_eq!(named, vec!["w1", "w2", "w3"]);
     }
 
     #[test]
