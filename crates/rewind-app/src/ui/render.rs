@@ -2487,7 +2487,8 @@ impl Scrubber {
                                         |r| this.runs.parted(r),
                                         axis,
                                     );
-                                    cluster_cell(cluster, axis.at(playhead)).into_any_element()
+                                    cluster_cell(cluster, axis, axis.at(playhead))
+                                        .into_any_element()
                                 };
                                 d.tooltip(tooltip(note))
                                     .on_scroll_wheel(cx.listener(

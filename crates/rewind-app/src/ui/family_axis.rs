@@ -68,6 +68,15 @@ const PLAYHEAD_WIDTH: f32 = 1.0;
 const CLUSTER_MARK: f32 = 5.0;
 const CLUSTER_OPACITY: f32 = 0.55;
 
+/// How see-through a folding row's line is where one of its runs runs or
+/// has diverged: the line darkens from here to solid as the share of its
+/// runs grows, so a step where one of 79 runs runs still shows.
+const SPREAD_MIN_OPACITY: f32 = 0.25;
+
+/// The height of a folding row's thick line: a run's own steps' line,
+/// with room for a red half over a green one.
+const SPREAD_HEIGHT: f32 = 4.0;
+
 /// The narrowest the band of perturbed steps is drawn: wider than the
 /// mark where the machine first differs, which sits inside a narrow
 /// window rewind check made.
@@ -565,11 +574,21 @@ pub(super) fn track_cell(track: Track, failed: bool, playhead: Option<f32>) -> i
     .h_full()
 }
 
-/// A folding row's track: a small mark where each run it hides ended,
-/// green for a run that passed and red for one that failed, and a tick
-/// where each one's failing program first behaves differently, faint
-/// enough that a pile of them reads as where the runs gather.
-pub(super) fn cluster_cell(cluster: Cluster, playhead: Option<f32>) -> impl IntoElement {
+/// A folding row's track: a line drawn like a run's, thin where its runs
+/// run and thick where they have diverged, darker the more of them do;
+/// over it a small mark where each run it hides ended, green for a run
+/// that passed and red for one that failed, and a tick where each one's
+/// failing program first behaves differently, faint enough that a pile
+/// of them reads as where the runs gather.
+pub(super) fn cluster_cell(
+    cluster: Cluster,
+    axis: Window,
+    playhead: Option<f32>,
+) -> impl IntoElement {
+    // How solid the line is where `n` of the row's runs are counted.
+    let count = cluster.spread.count.max(1);
+    let share =
+        move |n: usize| SPREAD_MIN_OPACITY + (1.0 - SPREAD_MIN_OPACITY) * n as f32 / count as f32;
     canvas(
         |_, _, _| (),
         move |bounds, _, window, _| {
@@ -580,6 +599,49 @@ pub(super) fn cluster_cell(cluster: Cluster, playhead: Option<f32>) -> impl Into
                 let (w, h): (Pixels, Pixels) = (px(w), px(h));
                 gpui::Bounds::new(point(x(at) - w / 2.0, mid - h / 2.0), gpui::size(w, h))
             };
+
+            // How many of the runs run, thin, and how many of those have
+            // diverged, thick, a column a pixel wide. The thick line is
+            // red for the diverged runs that failed and green for those
+            // that passed, split in two halves where there are both.
+            let columns = f32::from(width).round().max(1.0) as usize;
+            for s in cluster.spread.across(axis, columns) {
+                let band = |top: f32, height: f32| {
+                    gpui::Bounds::new(
+                        point(x(s.from), mid + px(top)),
+                        gpui::size(x(s.to) - x(s.from), px(height)),
+                    )
+                };
+                window.paint_quad(fill(
+                    band(-SAME_HEIGHT / 2.0, SAME_HEIGHT),
+                    rgb(theme::GRAPH_LINE).opacity(share(s.running)),
+                ));
+                let passed = s.diverged - s.failed;
+                let halves = match (s.failed, passed) {
+                    (0, 0) => vec![],
+                    (failed, 0) => vec![(theme::RED, failed, -SPREAD_HEIGHT / 2.0, SPREAD_HEIGHT)],
+                    (0, passed) => {
+                        vec![(
+                            theme::GREEN_SOFT,
+                            passed,
+                            -SPREAD_HEIGHT / 2.0,
+                            SPREAD_HEIGHT,
+                        )]
+                    }
+                    (failed, passed) => vec![
+                        (
+                            theme::RED,
+                            failed,
+                            -SPREAD_HEIGHT / 2.0,
+                            SPREAD_HEIGHT / 2.0,
+                        ),
+                        (theme::GREEN_SOFT, passed, 0.0, SPREAD_HEIGHT / 2.0),
+                    ],
+                };
+                for (color, n, top, height) in halves {
+                    window.paint_quad(fill(band(top, height), rgb(color).opacity(share(n))));
+                }
+            }
 
             // Each program mark, then each end over them.
             for at in &cluster.behaves {

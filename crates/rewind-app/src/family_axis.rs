@@ -170,14 +170,104 @@ pub struct End {
     pub failed: bool,
 }
 
-/// What a folding row draws over a window for the runs it hides: a mark
-/// where each ended, and one where each one's failing program first
-/// behaves differently, so the spread of a schedule's runs shows without
-/// a row for each.
+/// What a folding row draws over a window for the runs it hides: a line
+/// of how many run and how many have diverged, a mark where each ended,
+/// and one where each one's failing program first behaves differently,
+/// so the spread of a schedule's runs shows without a row for each.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Cluster {
+    pub spread: Spread,
     pub ends: Vec<End>,
     pub behaves: Vec<f32>,
+}
+
+/// Where a run a folding row hides first differs, its last step, and
+/// whether it failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Life {
+    parts: Option<u64>,
+    last: u64,
+    failed: bool,
+}
+
+/// The runs a folding row hides as one line: at each step, how many are
+/// still running, how many of those have diverged from the run each
+/// hangs under, and how many of the diverged ones failed. The line shows
+/// runs that go through a window where none of them ends.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Spread {
+    /// The runs the line stands for: those that have ended.
+    pub count: usize,
+    lives: Vec<Life>,
+}
+
+/// A stretch of the window, as fractions of its width, over which the
+/// same number of a folding row's runs run, have diverged, and of those
+/// failed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Stretch {
+    pub from: f32,
+    pub to: f32,
+    pub running: usize,
+    pub diverged: usize,
+    pub failed: usize,
+}
+
+impl Stretch {
+    /// Whether `other` counts the same runs as this stretch.
+    fn counts_as(&self, other: &Stretch) -> bool {
+        (self.running, self.diverged, self.failed) == (other.running, other.diverged, other.failed)
+    }
+}
+
+impl Spread {
+    /// The stretch from `from` to `to` counted at `step`.
+    fn counted(&self, from: f32, to: f32, step: u64) -> Stretch {
+        let mut stretch = Stretch {
+            from,
+            to,
+            running: 0,
+            diverged: 0,
+            failed: 0,
+        };
+        for life in self.lives.iter().filter(|l| step <= l.last) {
+            stretch.running += 1;
+            if !life.parts.is_some_and(|p| p <= step) {
+                continue;
+            }
+            stretch.diverged += 1;
+            stretch.failed += usize::from(life.failed);
+        }
+        stretch
+    }
+
+    /// The stretches of `window`, split into `columns` columns of equal
+    /// width, each counted at its middle step; adjacent columns with
+    /// the same counts join, and columns where no run is running are
+    /// left out.
+    pub fn across(&self, window: Window, columns: usize) -> Vec<Stretch> {
+        let mut stretches: Vec<Stretch> = Vec::new();
+        let width = columns as f32;
+        for column in 0..columns {
+            let (from, to) = (column as f32 / width, (column + 1) as f32 / width);
+            let step = window.step_across((column as f32 + 0.5) / width);
+            let stretch = self.counted(from, to, step);
+
+            // Carry on the stretch before when the counts hold.
+            if let Some(before) = stretches.last_mut()
+                && before.to == from
+                && before.counts_as(&stretch)
+            {
+                before.to = to;
+                continue;
+            }
+            if stretch.running == 0 {
+                continue;
+            }
+            stretches.push(stretch);
+        }
+        stretches
+    }
 }
 
 impl Cluster {
@@ -194,6 +284,22 @@ impl Cluster {
             let Some(last) = run.last_step else {
                 continue;
             };
+
+            // Where the run first differs, as its own track has it: a run
+            // with nothing to part from is its own from step 0, and one
+            // not yet compared has what its manifest says, if anything.
+            let parts = match parted(run) {
+                Parted::Root => Some(0),
+                Parted::Known(p) => p.machine,
+                Parted::Unknown => run.first_difference,
+            };
+            cluster.spread.lives.push(Life {
+                parts,
+                last,
+                failed: run.failed,
+            });
+            cluster.spread.count += 1;
+
             if let Some(at) = window.at(last) {
                 cluster.ends.push(End {
                     at,
@@ -493,6 +599,50 @@ mod tests {
             ]
         );
         assert_eq!(cluster.behaves, vec![at(70)]);
+    }
+
+    #[test]
+    fn a_folding_row_draws_how_many_of_its_runs_run_and_have_diverged() {
+        // Three hidden runs: a parts at 20 and ends at 90, b fails,
+        // parting at 40 and ending at 50, and c, not yet compared, ends
+        // at 80. Across steps 0 to 100, a column a step wide, the counts
+        // change where a run parts and after a run's last step, b counts
+        // among the diverged runs that failed while it runs, and past
+        // every run's end nothing is drawn.
+        let a = run("a", None, 3);
+        let mut b = run("b", None, 4);
+        b.last_step = Some(50);
+        b.failed = true;
+        let mut c = run("c", None, 5);
+        c.last_step = Some(80);
+        let parted = |r: &RunEntry| match r.id.as_str() {
+            "a" => known(Some(20), None),
+            "b" => known(Some(PARTS), None),
+            _ => Parted::Unknown,
+        };
+        let spread = Cluster::of([&a, &b, &c], parted, window()).spread;
+        assert_eq!(spread.count, 3);
+        let counts = |spread: &Spread| -> Vec<(f32, f32, usize, usize, usize)> {
+            spread
+                .across(window(), 101)
+                .iter()
+                .map(|s| (s.from, s.to, s.running, s.diverged, s.failed))
+                .collect()
+        };
+        assert_eq!(
+            counts(&spread),
+            vec![
+                (at(0), at(20), 3, 0, 0),
+                (at(20), at(PARTS), 3, 1, 0),
+                (at(PARTS), at(51), 3, 2, 1),
+                (at(51), at(81), 2, 1, 0),
+                (at(81), at(91), 1, 1, 0),
+            ]
+        );
+
+        // A run with nothing to part from is its own from step 0.
+        let root = Cluster::of([&a], |_| Parted::Root, window()).spread;
+        assert_eq!(counts(&root), vec![(at(0), at(91), 1, 1, 0)]);
     }
 
     #[test]
