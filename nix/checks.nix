@@ -2607,6 +2607,37 @@ in
     assert wrapped.rewindSandbox == "uid-range";
     inRewindForCI { inherit machine flags; } derivation;
 
+  # checks.in-rewind-uid-range-cores: a derivation that asks for uid-range
+  # builds in `inRewind` with 4 cores. The builder is root of its own user
+  # namespace, with a proc and a sysfs of its own, and the affinity system
+  # call, the sysfs list and /proc/cpuinfo all say 4, as for a build
+  # without uid-range. Boots the VM, so it needs /dev/kvm.
+  in-rewind-uid-range-cores =
+    let
+      machine = {
+        epoch = 1790985600;
+        clock = "exits";
+        cores = 4;
+      };
+      flags = "--epoch 1790985600 --seed 0 --schedule 0 --cpu v3-compat --clock exits --cores 4 --mem 1024";
+    in
+    inRewindForCI { inherit machine flags; } (
+      pkgs.runCommand "rewind-in-rewind-uid-range-cores"
+        {
+          requiredSystemFeatures = [ "uid-range" ];
+        }
+        ''
+          test "$(id -u)" = 0
+          read -r inside outside count < /proc/self/uid_map
+          test "$inside $outside $count" = "0 872415232 65536"
+          test "$NIX_BUILD_CORES" = 4
+          test "$(nproc)" = 4
+          test "$(cat /sys/devices/system/cpu/online)" = 0-3
+          test "$(grep -c ^processor /proc/cpuinfo)" = 4
+          touch $out
+        ''
+    );
+
   # checks.external-builder: Nix hands a build for the platform
   # x86_64-rewind-<vendor> to `rewind build --external-builder`, and takes
   # the output the command copied into the store. A Nix inside the check

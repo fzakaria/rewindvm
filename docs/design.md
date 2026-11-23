@@ -1462,7 +1462,9 @@ Two examples, each under 64 schedules:
 | A pthread pool sized by `sysconf`, with an unlocked shared total | 0 end differently | unperturbed passes, 64 fail |
 
 A job that mounts its own `/proc` or sysfs sees the kernel's files again,
-which say one CPU, while the affinity calls still say N.
+which say one CPU, while the affinity calls still say N. The exception is
+the `/proc` and sysfs that init mounts for a `uid-range` build: init binds
+the N-CPU versions over them again.
 
 `check --run RUN` checks a run already recorded instead of a job. Each
 schedule is a fork of the run at `--schedule-from`, made with the same
