@@ -334,7 +334,9 @@ fn spawn_and_reap(job: &Job, root: &str) -> Result<i32> {
                 }
             };
             if sandbox == Sandbox::UidRange {
-                enter_uid_range()?;
+                // The spawner gets only an errno, and none for an error
+                // made here, so the message goes to the job's stderr.
+                enter_uid_range().inspect_err(|e| eprintln!("rewind-init: {e}"))?;
             }
             check(libc::chroot(root_c.as_ptr()))?;
             check(libc::chdir(cwd_c.as_ptr()))?;
@@ -440,6 +442,26 @@ fn enter_uid_range() -> std::io::Result<()> {
     // cgroup is the root of the namespace unshared below.
     fs::write(format!("{JOB_CGROUP}/cgroup.procs"), "0")?;
 
+    // The kernel refuses a new proc or sysfs to a user namespace that sees
+    // one with a file mounted over a file in it, as report_cpus mounts.
+    // Still root of init's user namespace, the process takes a mount
+    // namespace of its own and removes them there: in the job's namespace
+    // they are locked. The job's process binds them again over its own
+    // proc and sysfs.
+    let reported = Path::new(REPORTED_CPUS_DIR).exists();
+    if reported {
+        // SAFETY: a plain system call.
+        let rc = unsafe { libc::unshare(libc::CLONE_NEWNS) };
+        check(rc, "unsharing a mount namespace")?;
+        mount_io("none", "/", "", libc::MS_REC | libc::MS_PRIVATE, "")?;
+        for (target, _) in reported_cpu_files() {
+            let target_c = CString::new(target)?;
+            // SAFETY: a valid NUL-terminated path.
+            let rc = unsafe { libc::umount2(target_c.as_ptr(), libc::MNT_DETACH) };
+            check(rc, &format!("unmounting {target}"))?;
+        }
+    }
+
     // The helper waits for one byte, the sign that the namespaces exist,
     // then writes the maps of its parent, the job's process.
     let mut fds = [0; 2];
@@ -512,6 +534,11 @@ fn enter_uid_range() -> std::io::Result<()> {
     mount_io("proc", "/proc", "proc", 0, "")?;
     mount_io("sysfs", "/sys", "sysfs", 0, "")?;
     mount_io("cgroup2", "/sys/fs/cgroup", "cgroup2", 0, "")?;
+    if reported {
+        for (target, source) in reported_cpu_files() {
+            mount_io(&source, target, "", libc::MS_BIND, "")?;
+        }
+    }
     loopback_up().map_err(std::io::Error::other)?;
 
     // A root the job owns, with init's directories bound in and copies of
@@ -1793,20 +1820,32 @@ fn report_cpus() -> Result<()> {
 
     // Each file's replacement, written beside the others and bound over it.
     mkdir(REPORTED_CPUS_DIR)?;
-    let files = CPU_LIST_FILES
-        .iter()
-        .map(|target| (*target, cpu_list(cpus)))
-        .chain(std::iter::once((CPUINFO_FILE, cpuinfo(&one, cpus))));
-    for (target, contents) in files {
-        let name = Path::new(target)
-            .file_name()
-            .expect("every reported file has a name")
-            .to_string_lossy();
-        let source = format!("{REPORTED_CPUS_DIR}/{name}");
+    for (target, source) in reported_cpu_files() {
+        let contents = if target == CPUINFO_FILE {
+            cpuinfo(&one, cpus)
+        } else {
+            cpu_list(cpus)
+        };
         fs::write(&source, contents).map_err(|e| format!("writing {source}: {e}"))?;
         mount(&source, target, "", libc::MS_BIND, "")?;
     }
     Ok(())
+}
+
+/// Each file report_cpus mounts over, with the file in REPORTED_CPUS_DIR
+/// it mounts there.
+fn reported_cpu_files() -> impl Iterator<Item = (&'static str, String)> {
+    CPU_LIST_FILES
+        .iter()
+        .copied()
+        .chain(std::iter::once(CPUINFO_FILE))
+        .map(|target| {
+            let name = Path::new(target)
+                .file_name()
+                .expect("every reported file has a name")
+                .to_string_lossy();
+            (target, format!("{REPORTED_CPUS_DIR}/{name}"))
+        })
 }
 
 /// How many CPUs the kernel's sched_getaffinity reports.
