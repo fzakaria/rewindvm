@@ -2094,7 +2094,7 @@ in
       '';
 
   # checks.cores: with --cores 4, the affinity system call busybox's nproc
-  # reads, the sysfs list glibc reads and /proc/cpuinfo all say 4. Pinning to one of the four succeeds and to
+  # reads, the sysfs lists glibc and lscpu read and /proc/cpuinfo all say 4. Pinning to one of the four succeeds and to
   # a fifth fails, as on a machine with four. A pinned task reads back the
   # CPUs it was pinned to, and so does a child it starts, as libuv's
   # thread_affinity test expects. With the default, all say 1.
@@ -2109,7 +2109,9 @@ in
         export REWIND_HOME=$TMPDIR/rewind
         probe='
           echo "nproc $(nproc)"
-          echo "online $(cat /sys/devices/system/cpu/online)"
+          for list in online possible present enabled; do
+            echo "$list $(cat /sys/devices/system/cpu/$list)"
+          done
           echo "cpuinfo $(grep -c ^processor /proc/cpuinfo)"
           taskset -c 3 echo "pinned 3" || echo "refused 3"
           taskset -c 4 echo "pinned 4" || echo "refused 4"
@@ -2119,7 +2121,9 @@ in
         rewind run -q --name four --cores 4 --root ${busyboxRoot} -- sh -c "$probe"
         rewind log four | tee four
         grep -qx 'nproc 4' four
-        grep -qx 'online 0-3' four
+        for list in online possible present enabled; do
+          grep -qx "$list 0-3" four
+        done
         grep -qx 'cpuinfo 4' four
         grep -qx 'pinned 3' four
         grep -qx 'refused 4' four
@@ -2129,7 +2133,9 @@ in
         rewind run -q --name one --root ${busyboxRoot} -- sh -c "$probe"
         rewind log one | tee one
         grep -qx 'nproc 1' one
-        grep -qx 'online 0' one
+        for list in online possible present enabled; do
+          grep -qx "$list 0" one
+        done
         grep -qx 'cpuinfo 1' one
         grep -qx 'refused 3' one
         grep -qx 'refused 1,2' one
