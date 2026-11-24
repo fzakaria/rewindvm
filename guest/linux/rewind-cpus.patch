@@ -1,0 +1,127 @@
+diff --git a/arch/x86/include/asm/hypervisor.h b/arch/x86/include/asm/hypervisor.h
+index 1b1c9e3b1..edb20dbc9 100644
+--- a/arch/x86/include/asm/hypervisor.h
++++ b/arch/x86/include/asm/hypervisor.h
+@@ -82,6 +82,7 @@ struct task_struct;
+ void rewind_remember_cpus(struct task_struct *p, const struct cpumask *mask);
+ void rewind_report_cpus(const struct task_struct *p, struct cpumask *mask);
+ const struct cpumask *rewind_fold_cpus(const struct cpumask *mask);
++unsigned int rewind_user_cpus(void);
+ void rewind_yield(void);
+ void rewind_switch(struct task_struct *next, struct task_struct *prev);
+ #endif
+diff --git a/arch/x86/kernel/cpu/proc.c b/arch/x86/kernel/cpu/proc.c
+index 6571d432c..52856f257 100644
+--- a/arch/x86/kernel/cpu/proc.c
++++ b/arch/x86/kernel/cpu/proc.c
+@@ -8,6 +8,9 @@
+ #include <linux/proc_fs.h>
+ 
+ #include "cpu.h"
++#ifdef CONFIG_REWIND_GUEST
++#include <asm/hypervisor.h>
++#endif
+ 
+ #ifdef CONFIG_X86_VMX_FEATURE_NAMES
+ extern const char * const x86_vmx_flags[NVMXINTS*32];
+@@ -63,16 +66,25 @@ static void show_cpuinfo_misc(struct seq_file *m, struct cpuinfo_x86 *c)
+ static int show_cpuinfo(struct seq_file *m, void *v)
+ {
+ 	struct cpuinfo_x86 *c = v;
+-	unsigned int cpu;
++	unsigned int cpu, processor;
+ 	int i;
+ 
+ 	cpu = c->cpu_index;
++	processor = cpu;
++#ifdef CONFIG_REWIND_GUEST
++	/*
++	 * A Rewind guest may tell user space of more CPUs than it has: each
++	 * block is CPU 0's, numbered by its place in the file.
++	 */
++	if (rewind_user_cpus() > 1)
++		processor = m->index;
++#endif
+ 	seq_printf(m, "processor\t: %u\n"
+ 		   "vendor_id\t: %s\n"
+ 		   "cpu family\t: %d\n"
+ 		   "model\t\t: %u\n"
+ 		   "model name\t: %s\n",
+-		   cpu,
++		   processor,
+ 		   c->x86_vendor_id[0] ? c->x86_vendor_id : "unknown",
+ 		   c->x86,
+ 		   c->x86_model,
+@@ -158,6 +170,11 @@ static int show_cpuinfo(struct seq_file *m, void *v)
+ 
+ static void *c_start(struct seq_file *m, loff_t *pos)
+ {
++#ifdef CONFIG_REWIND_GUEST
++	/* A Rewind guest may tell user space of more CPUs than it has. */
++	if (rewind_user_cpus() > 1)
++		return *pos < rewind_user_cpus() ? &cpu_data(0) : NULL;
++#endif
+ 	*pos = cpumask_next(*pos - 1, cpu_online_mask);
+ 	if ((*pos) < nr_cpu_ids)
+ 		return &cpu_data(*pos);
+diff --git a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
+index 9d0897f36..01b5b28ee 100644
+--- a/arch/x86/kernel/cpu/rewind.c
++++ b/arch/x86/kernel/cpu/rewind.c
+@@ -797,9 +797,10 @@ static struct console rewind_console = {
+  * line. The machine has one vCPU and this kernel is uniprocessor, so a
+  * count above one changes nothing the kernel does: programs that size
+  * their thread pools by the count start more threads, and those threads
+- * interleave on the one vCPU. Only the affinity system calls answer with
+- * the count here; init writes the sysfs and /proc/cpuinfo files to match.
+- * An affinity mask is one unsigned long on this kernel, so the count is at
++ * interleave on the one vCPU. The affinity system calls, /proc/cpuinfo
++ * and the online, possible and present lists in sysfs answer with the
++ * count, so every proc and sysfs mounted in the guest, in any namespace,
++ * says the same. An affinity mask is one unsigned long on this kernel, so the count is at
+  * most BITS_PER_LONG.
+  */
+ static unsigned int rewind_cpus __ro_after_init = 1;
+@@ -817,6 +818,12 @@ static int __init rewind_parse_cpus(char *arg)
+ }
+ __setup("rewind.cpus=", rewind_parse_cpus);
+ 
++/* /proc/cpuinfo and sysfs: how many CPUs user space is told of. */
++unsigned int rewind_user_cpus(void)
++{
++	return rewind_cpus;
++}
++
+ /* sched_setaffinity: the CPUs user space is told of that @mask names. */
+ void rewind_remember_cpus(struct task_struct *p, const struct cpumask *mask)
+ {
+diff --git a/drivers/base/cpu.c b/drivers/base/cpu.c
+index 19d288a3c..d0ee2bb5e 100644
+--- a/drivers/base/cpu.c
++++ b/drivers/base/cpu.c
+@@ -23,6 +23,9 @@
+ #include <linux/sched/isolation.h>
+ 
+ #include "base.h"
++#ifdef CONFIG_REWIND_GUEST
++#include <asm/hypervisor.h>
++#endif
+ 
+ static DEFINE_PER_CPU(struct device *, cpu_sys_devices);
+ 
+@@ -218,6 +221,15 @@ static ssize_t show_cpus_attr(struct device *dev,
+ {
+ 	struct cpu_attr *ca = container_of(attr, struct cpu_attr, attr);
+ 
++#ifdef CONFIG_REWIND_GUEST
++	/*
++	 * A Rewind guest may tell user space of more CPUs than it has: all
++	 * of them are online, possible and present.
++	 */
++	if (rewind_user_cpus() > 1)
++		return sysfs_emit(buf, "0-%u\n", rewind_user_cpus() - 1);
++#endif
++
+ 	return cpumap_print_to_pagebuf(true, buf, ca->map);
+ }
+ 

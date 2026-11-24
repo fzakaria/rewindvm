@@ -1448,11 +1448,15 @@ them. Programs count CPUs in two ways, and both answer N:
   with N CPUs.
 - **Files.** glibc's `sysconf`, and so Python's `os.cpu_count` and C++'s
   `hardware_concurrency`, read `/sys/devices/system/cpu/online`, and older
-  build scripts count the blocks in `/proc/cpuinfo`. Init writes versions
-  of `online`, `possible`, `present` and `cpuinfo` for N CPUs and
-  bind-mounts them over the real ones before it makes the job's root, so
-  a Nix build and an image root both see them. Doing this in init rather
-  than the kernel keeps the patch out of sysfs and procfs.
+  build scripts count the blocks in `/proc/cpuinfo`. The kernel patch
+  prints `0-(N-1)` for `online`, `possible` and `present`, and CPU 0's
+  block of `cpuinfo` N times, each under its own processor number. Every
+  proc and sysfs says N, including one a job mounts in a user namespace
+  of its own, as a `uid-range` build, rootless podman and bubblewrap do.
+  Init used to bind-mount N-CPU files over the real ones instead, but the
+  kernel refuses a new proc or sysfs to a user namespace while a file in
+  every visible one is covered (`mount_too_revealing`), so those jobs
+  failed with more than one core.
 
 Two examples, each under 64 schedules:
 
@@ -1460,11 +1464,6 @@ Two examples, each under 64 schedules:
 | ---------------------------------------------------------------- | ----------------- | --------------------------- |
 | A Makefile whose `main.o` includes a generated `gen.h` unlisted  | 0 end differently | unperturbed builds, 58 fail |
 | A pthread pool sized by `sysconf`, with an unlocked shared total | 0 end differently | unperturbed passes, 64 fail |
-
-A job that mounts its own `/proc` or sysfs sees the kernel's files again,
-which say one CPU, while the affinity calls still say N. The exception is
-the `/proc` and sysfs that init mounts for a `uid-range` build: init binds
-the N-CPU versions over them again.
 
 `check --run RUN` checks a run already recorded instead of a job. Each
 schedule is a fork of the run at `--schedule-from`, made with the same

@@ -2520,9 +2520,9 @@ in
   # in and rejects port 81, where nginx also listens. The client reaches
   # port 80, and curl is refused on port 81 (exit 7) rather than timed out
   # (exit 28), which a dropped packet would give. A unit in the client
-  # with `PrivateUsers=` starts, so the guest has user namespaces. The
-  # clock is exit time, which needs no counter. Boots the VM, so it needs
-  # /dev/kvm.
+  # with `PrivateUsers=` starts, so the guest has user namespaces. With 4
+  # cores, the client's /proc/cpuinfo says 4. The clock is exit time,
+  # which needs no counter. Boots the VM, so it needs /dev/kvm.
   in-rewind-containers =
     let
       inherit (pkgs) lib;
@@ -2530,8 +2530,9 @@ in
         epoch = 1790985600;
         clock = "exits";
         mem = 3072;
+        cores = 4;
       };
-      flags = "--epoch 1790985600 --seed 0 --schedule 0 --cpu v3-compat --clock exits --cores 1 --mem 3072";
+      flags = "--epoch 1790985600 --seed 0 --schedule 0 --cpu v3-compat --clock exits --cores 4 --mem 3072";
 
       test = pkgs.testers.runNixOSTest {
         name = "rewind-in-rewind-containers";
@@ -2593,6 +2594,7 @@ in
           assert "tcp dport 80 accept" in server.succeed("nft list ruleset")
           client.wait_for_unit("multi-user.target")
           client.wait_for_unit("private-users.service")
+          assert client.succeed("grep -c ^processor /proc/cpuinfo").strip() == "4"
           assert client.succeed("curl --fail --silent http://server/") == "served"
           refused, _ = client.execute("curl --silent --max-time 5 http://server:81/")
           assert refused == 7, f"curl on the closed port exited {refused}"
@@ -2607,11 +2609,36 @@ in
     assert wrapped.rewindSandbox == "uid-range";
     inRewindForCI { inherit machine flags; } derivation;
 
+  # checks.in-rewind-cores: a derivation that asks for nothing builds in
+  # `inRewind` with 4 cores, and a user namespace inside the build, as
+  # rootless podman or bubblewrap makes, mounts a proc and a sysfs of its
+  # own that say 4. Boots the VM, so it needs /dev/kvm.
+  in-rewind-cores =
+    let
+      machine = {
+        epoch = 1790985600;
+        clock = "exits";
+        cores = 4;
+      };
+      flags = "--epoch 1790985600 --seed 0 --schedule 0 --cpu v3-compat --clock exits --cores 4 --mem 1024";
+    in
+    inRewindForCI { inherit machine flags; } (
+      pkgs.runCommand "rewind-in-rewind-cores" { } ''
+        test "$(${pkgs.util-linux}/bin/unshare -U -r -m -p -f --mount-proc \
+          grep -c ^processor /proc/cpuinfo)" = 4
+        test "$(${pkgs.util-linux}/bin/unshare -U -r -m -n sh -c \
+          '${pkgs.util-linux}/bin/mount -t sysfs sysfs /sys && cat /sys/devices/system/cpu/online')" = 0-3
+        touch $out
+      ''
+    );
+
   # checks.in-rewind-uid-range-cores: a derivation that asks for uid-range
   # builds in `inRewind` with 4 cores. The builder is root of its own user
   # namespace, with a proc and a sysfs of its own, and the affinity system
   # call, the sysfs list and /proc/cpuinfo all say 4, as for a build
-  # without uid-range. Boots the VM, so it needs /dev/kvm.
+  # without uid-range. A user namespace inside the build, as rootless
+  # podman or bubblewrap makes, mounts a proc and a sysfs of its own that
+  # say 4 too. Boots the VM, so it needs /dev/kvm.
   in-rewind-uid-range-cores =
     let
       machine = {
@@ -2634,6 +2661,10 @@ in
           test "$(nproc)" = 4
           test "$(cat /sys/devices/system/cpu/online)" = 0-3
           test "$(grep -c ^processor /proc/cpuinfo)" = 4
+          test "$(${pkgs.util-linux}/bin/unshare -U -r -m -p -f --mount-proc \
+            grep -c ^processor /proc/cpuinfo)" = 4
+          test "$(${pkgs.util-linux}/bin/unshare -U -r -m -n sh -c \
+            '${pkgs.util-linux}/bin/mount -t sysfs sysfs /sys && cat /sys/devices/system/cpu/online')" = 0-3
           touch $out
         ''
     );
