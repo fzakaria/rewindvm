@@ -104,19 +104,6 @@ const SHELL_PROMPT: &str = "[rewind] \\w \\$ ";
 /// How far up the process tree to look for a live environment.
 const MAX_ANCESTORS: usize = 64;
 
-/// The files besides the affinity system calls that say how many CPUs
-/// there are, and the directory init writes its own versions of them to.
-const CPU_LIST_FILES: [&str; 3] = [
-    "/sys/devices/system/cpu/online",
-    "/sys/devices/system/cpu/possible",
-    "/sys/devices/system/cpu/present",
-];
-const CPUINFO_FILE: &str = "/proc/cpuinfo";
-const REPORTED_CPUS_DIR: &str = "/rewind/cpus";
-
-/// The line that opens CPU 0's block in /proc/cpuinfo.
-const CPUINFO_FIRST: &str = "processor\t: 0";
-
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some(SELFTEST_ARG) {
@@ -142,7 +129,6 @@ fn run() -> Result<()> {
 
     mount("proc", "/proc", "proc", 0, "")?;
     mount("sysfs", "/sys", "sysfs", 0, "")?;
-    report_cpus()?;
     mkdir("/dev/pts")?;
     mount("devpts", "/dev/pts", "devpts", 0, "ptmxmode=0666,mode=0620")?;
     mkdir("/dev/shm")?;
@@ -442,26 +428,6 @@ fn enter_uid_range() -> std::io::Result<()> {
     // cgroup is the root of the namespace unshared below.
     fs::write(format!("{JOB_CGROUP}/cgroup.procs"), "0")?;
 
-    // The kernel refuses a new proc or sysfs to a user namespace that sees
-    // one with a file mounted over a file in it, as report_cpus mounts.
-    // Still root of init's user namespace, the process takes a mount
-    // namespace of its own and removes them there: in the job's namespace
-    // they are locked. The job's process binds them again over its own
-    // proc and sysfs.
-    let reported = Path::new(REPORTED_CPUS_DIR).exists();
-    if reported {
-        // SAFETY: a plain system call.
-        let rc = unsafe { libc::unshare(libc::CLONE_NEWNS) };
-        check(rc, "unsharing a mount namespace")?;
-        mount_io("none", "/", "", libc::MS_REC | libc::MS_PRIVATE, "")?;
-        for (target, _) in reported_cpu_files() {
-            let target_c = CString::new(target)?;
-            // SAFETY: a valid NUL-terminated path.
-            let rc = unsafe { libc::umount2(target_c.as_ptr(), libc::MNT_DETACH) };
-            check(rc, &format!("unmounting {target}"))?;
-        }
-    }
-
     // The helper waits for one byte, the sign that the namespaces exist,
     // then writes the maps of its parent, the job's process.
     let mut fds = [0; 2];
@@ -534,11 +500,6 @@ fn enter_uid_range() -> std::io::Result<()> {
     mount_io("proc", "/proc", "proc", 0, "")?;
     mount_io("sysfs", "/sys", "sysfs", 0, "")?;
     mount_io("cgroup2", "/sys/fs/cgroup", "cgroup2", 0, "")?;
-    if reported {
-        for (target, source) in reported_cpu_files() {
-            mount_io(&source, target, "", libc::MS_BIND, "")?;
-        }
-    }
     loopback_up().map_err(std::io::Error::other)?;
 
     // A root the job owns, with init's directories bound in and copies of
@@ -1804,82 +1765,6 @@ fn dev_links() -> Result<()> {
     Ok(())
 }
 
-/// Makes sysfs and /proc/cpuinfo report as many CPUs as the kernel's
-/// affinity system calls do (rewind.cpus=), by bind-mounting files init
-/// writes over them. Runs before the job's root is made, so an image root's
-/// recursive binds of /proc and /sys carry these mounts along.
-fn report_cpus() -> Result<()> {
-    let cpus = reported_cpus()?;
-    if cpus == 1 {
-        return Ok(());
-    }
-
-    // CPU 0's block of /proc/cpuinfo, read before anything covers it.
-    let one =
-        fs::read_to_string(CPUINFO_FILE).map_err(|e| format!("reading {CPUINFO_FILE}: {e}"))?;
-
-    // Each file's replacement, written beside the others and bound over it.
-    mkdir(REPORTED_CPUS_DIR)?;
-    for (target, source) in reported_cpu_files() {
-        let contents = if target == CPUINFO_FILE {
-            cpuinfo(&one, cpus)
-        } else {
-            cpu_list(cpus)
-        };
-        fs::write(&source, contents).map_err(|e| format!("writing {source}: {e}"))?;
-        mount(&source, target, "", libc::MS_BIND, "")?;
-    }
-    Ok(())
-}
-
-/// Each file report_cpus mounts over, with the file in REPORTED_CPUS_DIR
-/// it mounts there.
-fn reported_cpu_files() -> impl Iterator<Item = (&'static str, String)> {
-    CPU_LIST_FILES
-        .iter()
-        .copied()
-        .chain(std::iter::once(CPUINFO_FILE))
-        .map(|target| {
-            let name = Path::new(target)
-                .file_name()
-                .expect("every reported file has a name")
-                .to_string_lossy();
-            (target, format!("{REPORTED_CPUS_DIR}/{name}"))
-        })
-}
-
-/// How many CPUs the kernel's sched_getaffinity reports.
-fn reported_cpus() -> Result<usize> {
-    // SAFETY: an all-zero cpu_set_t is a valid empty set.
-    let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
-    // SAFETY: the kernel writes at most the size it is given into `set`.
-    let rc = unsafe { libc::sched_getaffinity(0, size_of_val(&set), &mut set) };
-    if rc != 0 {
-        return Err(format!(
-            "sched_getaffinity: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-    // SAFETY: `set` is a cpu_set_t the kernel filled.
-    Ok(unsafe { libc::CPU_COUNT(&set) } as usize)
-}
-
-/// A sysfs CPU list naming CPUs 0 to `cpus` - 1.
-fn cpu_list(cpus: usize) -> String {
-    if cpus == 1 {
-        return "0\n".into();
-    }
-    format!("0-{}\n", cpus - 1)
-}
-
-/// /proc/cpuinfo for `cpus` CPUs: CPU 0's block once per CPU, each with
-/// its own processor number.
-fn cpuinfo(one: &str, cpus: usize) -> String {
-    (0..cpus)
-        .map(|cpu| one.replacen(CPUINFO_FIRST, &format!("processor\t: {cpu}"), 1))
-        .collect()
-}
-
 /// Points init's own output at the Rewind devices, so its errors reach the
 /// trace. Best effort: nowhere else to report a failure here.
 fn redirect_own_output() {
@@ -2328,26 +2213,6 @@ mod tests {
         assert_eq!(case("empty", Some("")).as_deref(), Some(LOCALHOST_HOSTS));
         assert_eq!(case("own", Some("10.0.0.1 db\n")), None);
         fs::remove_dir_all(&base).unwrap();
-    }
-
-    #[test]
-    fn a_cpu_list_names_every_cpu_reported() {
-        // sysfs's online, possible and present files: a range from CPU 0.
-        assert_eq!(cpu_list(1), "0\n");
-        assert_eq!(cpu_list(4), "0-3\n");
-    }
-
-    #[test]
-    fn cpuinfo_repeats_the_one_cpu_for_each_cpu_reported() {
-        // Each copy of CPU 0's block carries its own processor number, so
-        // `grep -c ^processor /proc/cpuinfo` counts the CPUs reported.
-        let one = "processor\t: 0\nvendor_id\t: AuthenticAMD\n\n";
-        assert_eq!(
-            cpuinfo(one, 3),
-            "processor\t: 0\nvendor_id\t: AuthenticAMD\n\n\
-             processor\t: 1\nvendor_id\t: AuthenticAMD\n\n\
-             processor\t: 2\nvendor_id\t: AuthenticAMD\n\n"
-        );
     }
 
     #[test]
