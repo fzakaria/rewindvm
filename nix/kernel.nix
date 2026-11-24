@@ -49,8 +49,8 @@ let
     # For rewind time: why the thread that left the CPU left it, and a
     # wake record for every wakeup, in the buffer the monitor drains
     ../guest/linux/rewind-time.patch
-    # rewind.cpus=N in /proc/cpuinfo and sysfs's online, possible and
-    # present lists, so every proc and sysfs a job mounts says N, in any
+    # rewind.cpus=N in /proc/cpuinfo and sysfs's online, possible,
+    # present and enabled lists, so every proc and sysfs a job mounts says N, in any
     # user namespace
     ../guest/linux/rewind-cpus.patch
   ];

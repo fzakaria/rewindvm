@@ -1449,10 +1449,11 @@ them. Programs count CPUs in two ways, and both answer N:
 - **Files.** glibc's `sysconf`, and so Python's `os.cpu_count` and C++'s
   `hardware_concurrency`, read `/sys/devices/system/cpu/online`, and older
   build scripts count the blocks in `/proc/cpuinfo`. The kernel patch
-  prints `0-(N-1)` for `online`, `possible` and `present`, and CPU 0's
-  block of `cpuinfo` N times, each under its own processor number. Every
-  proc and sysfs says N, including one a job mounts in a user namespace
-  of its own, as a `uid-range` build, rootless podman and bubblewrap do.
+  prints `0-(N-1)` for `online`, `possible`, `present` and `enabled`, and
+  CPU 0's block of `cpuinfo` N times, each under its own processor number.
+  Every proc and sysfs says N, including one a job mounts in a user
+  namespace of its own, as a `uid-range` build, rootless podman and
+  bubblewrap do.
   Init used to bind-mount N-CPU files over the real ones instead, but the
   kernel refuses a new proc or sysfs to a user namespace while a file in
   every visible one is covered (`mount_too_revealing`), so those jobs
@@ -1739,6 +1740,12 @@ trace.
 - **One vCPU.** Threads interleave but never run at the same instant, even
   with `--cores` reporting more CPUs. Throughput comes from running many
   machines at once: `check` runs one per core.
+- **`--cores` gives a count, not a topology.** The guest kernel is
+  uniprocessor, so `/sys/devices/system/cpu/` has only `cpu0/`, and
+  `kernel_max` is `0`. `lscpu` prints N CPUs but one core, one socket and
+  one cache instance, and `lscpu -e` lists only CPU 0. Programs that read
+  `cpuN/topology` or `cpuN/cache`, mostly hwloc and the HPC stacks on it,
+  see one CPU.
 - **Where the time went is on the VM's clock.** `rewind time` counts the
   branches programs retire and the timers they sleep on, not the host's
   wall time, so starting a process is nearly free and a lock is never

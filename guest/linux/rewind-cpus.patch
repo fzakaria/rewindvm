@@ -68,7 +68,7 @@ diff --git a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
 index 9d0897f36..01b5b28ee 100644
 --- a/arch/x86/kernel/cpu/rewind.c
 +++ b/arch/x86/kernel/cpu/rewind.c
-@@ -797,9 +797,10 @@ static struct console rewind_console = {
+@@ -797,9 +797,11 @@ static struct console rewind_console = {
   * line. The machine has one vCPU and this kernel is uniprocessor, so a
   * count above one changes nothing the kernel does: programs that size
   * their thread pools by the count start more threads, and those threads
@@ -76,13 +76,14 @@ index 9d0897f36..01b5b28ee 100644
 - * the count here; init writes the sysfs and /proc/cpuinfo files to match.
 - * An affinity mask is one unsigned long on this kernel, so the count is at
 + * interleave on the one vCPU. The affinity system calls, /proc/cpuinfo
-+ * and the online, possible and present lists in sysfs answer with the
-+ * count, so every proc and sysfs mounted in the guest, in any namespace,
-+ * says the same. An affinity mask is one unsigned long on this kernel, so the count is at
++ * and the online, possible, present and enabled lists in sysfs answer
++ * with the count, so every proc and sysfs mounted in the guest, in any
++ * namespace, says the same. An affinity mask is one unsigned long on this
++ * kernel, so the count is at
   * most BITS_PER_LONG.
   */
  static unsigned int rewind_cpus __ro_after_init = 1;
-@@ -817,6 +818,12 @@ static int __init rewind_parse_cpus(char *arg)
+@@ -817,6 +819,12 @@ static int __init rewind_parse_cpus(char *arg)
  }
  __setup("rewind.cpus=", rewind_parse_cpus);
  
@@ -96,7 +97,7 @@ index 9d0897f36..01b5b28ee 100644
  void rewind_remember_cpus(struct task_struct *p, const struct cpumask *mask)
  {
 diff --git a/drivers/base/cpu.c b/drivers/base/cpu.c
-index 19d288a3c..d0ee2bb5e 100644
+index 19d288a..fde58a7 100644
 --- a/drivers/base/cpu.c
 +++ b/drivers/base/cpu.c
 @@ -23,6 +23,9 @@
@@ -125,3 +126,16 @@ index 19d288a3c..d0ee2bb5e 100644
  	return cpumap_print_to_pagebuf(true, buf, ca->map);
  }
  
+@@ -277,6 +289,12 @@ static DEVICE_ATTR(offline, 0444, print_cpus_offline, NULL);
+ static ssize_t print_cpus_enabled(struct device *dev,
+ 				  struct device_attribute *attr, char *buf)
+ {
++#ifdef CONFIG_REWIND_GUEST
++	/* As show_cpus_attr: all the CPUs user space is told of are enabled. */
++	if (rewind_user_cpus() > 1)
++		return sysfs_emit(buf, "0-%u\n", rewind_user_cpus() - 1);
++#endif
++
+ 	return sysfs_emit(buf, "%*pbl\n", cpumask_pr_args(cpu_enabled_mask));
+ }
+ static DEVICE_ATTR(enabled, 0444, print_cpus_enabled, NULL);
