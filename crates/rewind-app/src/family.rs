@@ -265,6 +265,9 @@ pub struct Row {
     pub apart: Option<String>,
     pub graph: Graph,
     pub kind: RowKind,
+    /// For a row that folds runs, the ids of the runs it stands for; none
+    /// for a run's row.
+    pub stands_for: Vec<String>,
 }
 
 /// What a Runs panel row is.
@@ -286,6 +289,46 @@ pub enum Folds {
     /// Runs under a schedule that perturb it only in a window of steps,
     /// as rewind check makes them narrowing the schedule down.
     Windows,
+}
+
+/// How the runs a folding row stands for ended, for the row's pill: the
+/// row's own run is the one they hang under, which can have ended
+/// another way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FoldEnding<'a> {
+    /// Every run ended as this one did.
+    Like(&'a RunEntry),
+    /// The runs ended more than one way, `failed` of the `count` failing.
+    Mixed { failed: usize, count: usize },
+}
+
+impl<'a> FoldEnding<'a> {
+    /// How `runs` ended; None when there are none.
+    pub fn of(runs: &[&'a RunEntry]) -> Option<FoldEnding<'a>> {
+        let first = *runs.first()?;
+
+        // One ending for all, said as a run's own pill says it.
+        let alike = |r: &&RunEntry| {
+            r.ending == first.ending && r.failed == first.failed && r.progress == first.progress
+        };
+        if runs.iter().all(alike) {
+            return Some(FoldEnding::Like(first));
+        }
+
+        // Otherwise how many of them failed.
+        Some(FoldEnding::Mixed {
+            failed: runs.iter().filter(|r| r.failed).count(),
+            count: runs.len(),
+        })
+    }
+
+    /// The words of the row's pill.
+    pub fn words(&self) -> String {
+        match self {
+            FoldEnding::Like(run) => run.ending.clone(),
+            FoldEnding::Mixed { failed, count } => format!("{failed} of {count} fail"),
+        }
+    }
 }
 
 /// The fewest runs from boot a row folds: one run is shown as itself.
@@ -663,7 +706,7 @@ impl Family {
             }
         }
         let mut folded: HashSet<&str> = HashSet::new();
-        let mut placeholders: Vec<(RunEntry, RowKind)> = Vec::new();
+        let mut placeholders: Vec<(RunEntry, RowKind, Vec<&str>)> = Vec::new();
         for (under, (folds, runs)) in groups {
             if runs.len() < MIN_FOLD {
                 continue;
@@ -672,7 +715,7 @@ impl Family {
             let kind = if fold.as_ref().is_some_and(|f| f.unfolded.contains(under)) {
                 RowKind::Unfolded { count, folds }
             } else {
-                folded.extend(runs);
+                folded.extend(runs.iter().copied());
                 RowKind::Folded { count, folds }
             };
             let Some(under) = by_id.get(under).copied() else {
@@ -683,7 +726,7 @@ impl Family {
                 trace_hash: None,
                 ..under.clone()
             };
-            placeholders.push((placeholder, kind));
+            placeholders.push((placeholder, kind, runs));
         }
 
         let mut children: HashMap<&str, Vec<&RunEntry>> = HashMap::new();
@@ -726,8 +769,8 @@ impl Family {
         // Each folding row comes first among the runs from boot under the
         // run its runs are under, after the real forks, so it stays where
         // it is as it opens and closes.
-        let mut stands_for: HashMap<&str, (&RunEntry, RowKind)> = HashMap::new();
-        for (placeholder, kind) in &placeholders {
+        let mut stands_for: HashMap<&str, (&RunEntry, RowKind, &[&str])> = HashMap::new();
+        for (placeholder, kind, runs) in &placeholders {
             let Some(under) = placeholder
                 .id
                 .strip_suffix(FOLD_ID_SUFFIX)
@@ -741,7 +784,7 @@ impl Family {
                 .position(|r| r.parent.is_none())
                 .unwrap_or(list.len());
             list.insert(at, placeholder);
-            stands_for.insert(placeholder.id.as_str(), (under, *kind));
+            stands_for.insert(placeholder.id.as_str(), (under, *kind, runs));
         }
 
         // Depth first, each row tagged with the root it is under and its
@@ -799,7 +842,7 @@ impl Family {
         order
             .into_iter()
             .map(|(run, depth, _, graph)| {
-                if let Some((under, kind)) = stands_for.get(run.id.as_str()) {
+                if let Some((under, kind, runs)) = stands_for.get(run.id.as_str()) {
                     return Row {
                         run: (*under).clone(),
                         depth,
@@ -807,6 +850,7 @@ impl Family {
                         apart: None,
                         graph,
                         kind: *kind,
+                        stands_for: runs.iter().map(ToString::to_string).collect(),
                     };
                 }
                 let identical_to = repeats.get(&run.id).map(|r| r.same_as.clone());
@@ -817,6 +861,7 @@ impl Family {
                     apart: apart(run),
                     graph,
                     kind: RowKind::Run,
+                    stands_for: Vec::new(),
                 }
             })
             .collect()
@@ -1813,6 +1858,16 @@ mod tests {
         let w1 = f.runs.iter().find(|r| r.id == "w1").unwrap();
         assert_eq!(f.tree_parent(w1).map(|r| r.id.as_str()), Some("r"));
 
+        // Each folding row names the runs it stands for, for its pill to
+        // tell how they ended; a run's row names none.
+        let mut hidden = rows[3].stands_for.clone();
+        hidden.sort();
+        assert_eq!(hidden, vec!["w1", "w2", "w3"]);
+        let mut ended = rows[1].stands_for.clone();
+        ended.sort();
+        assert_eq!(ended, vec!["s6", "s7"]);
+        assert!(rows[0].stands_for.is_empty());
+
         // Unfolded, every window is there after the row that folds them.
         let open = HashSet::from(["s5".to_string()]);
         let rows = f.rows_folded(&open, &[]);
@@ -1821,6 +1876,43 @@ mod tests {
             rows[3].detail(),
             "hide the 3 runs of schedule 5 on fewer steps"
         );
+    }
+
+    #[test]
+    fn a_folding_row_tells_how_the_runs_it_hides_ended() {
+        // The windows of schedule 5 that fold end two ways, two of the
+        // three failing, so the row says so rather than how s5 ended;
+        // the runs that ended like r all passed, and the row ends as
+        // they did. Opened, the row still names the runs it stands for.
+        let f = narrowed();
+        let hidden = |row: &Row| -> Vec<&RunEntry> {
+            f.runs
+                .iter()
+                .filter(|r| row.stands_for.contains(&r.id))
+                .collect()
+        };
+        let rows = f.rows_folded(&HashSet::new(), &[]);
+
+        let windows = FoldEnding::of(&hidden(&rows[3]));
+        assert_eq!(
+            windows,
+            Some(FoldEnding::Mixed {
+                failed: 2,
+                count: 3
+            })
+        );
+        assert_eq!(windows.unwrap().words(), "2 of 3 fail");
+
+        let ended_like = FoldEnding::of(&hidden(&rows[1]));
+        assert!(matches!(ended_like, Some(FoldEnding::Like(r)) if r.ending == "exited:0"));
+        assert_eq!(ended_like.unwrap().words(), "exited:0");
+        assert_eq!(FoldEnding::of(&[]), None);
+
+        let open = HashSet::from(["s5".to_string()]);
+        let rows = f.rows_folded(&open, &[]);
+        let mut named = rows[3].stands_for.clone();
+        named.sort();
+        assert_eq!(named, vec!["w1", "w2", "w3"]);
     }
 
     #[test]

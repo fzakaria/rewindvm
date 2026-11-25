@@ -15,7 +15,7 @@ use gpui::{
 };
 
 use crate::describe::{self, EventTone, short_store_paths, thousands};
-use crate::family::{Family, Progress, Row, RowKind as RunsRowKind, RunEntry};
+use crate::family::{Family, FoldEnding, Progress, Row, RowKind as RunsRowKind, RunEntry};
 use crate::model::{FileOp, FileTone, LogFilter, Motion, RowKind, Tone};
 use crate::proc_card::Pick;
 use crate::run::{Agreement, Session, Verdict, short_id};
@@ -2386,6 +2386,17 @@ impl Scrubber {
                         let is_picked = is_run && picked.contains(&row.run.id);
                         let run = row.run.clone();
 
+                        // For a row that folds runs, open or closed, the
+                        // runs it stands for, and how they ended.
+                        let hidden: Vec<&RunEntry> = this
+                            .runs
+                            .family
+                            .iter()
+                            .flat_map(|f| &f.runs)
+                            .filter(|r| row.stands_for.contains(&r.id))
+                            .collect();
+                        let fold_ending = FoldEnding::of(&hidden);
+
                         // The id and how the run came to be, one line of
                         // text to select and copy, the id in its color.
                         let line = runs_line(row);
@@ -2421,9 +2432,25 @@ impl Scrubber {
                             .hover(|s| s.bg(rgb(theme::RAISED_HOVER)))
                             .child(graph_cell(row, columns, shown, compared))
                             .child({
-                                // A run the engine is executing pulses.
-                                let ending =
-                                    pill(row.run.ending.clone(), ending_tone(&row.run), &fonts);
+                                // How the run ended, or for a row that folds
+                                // runs how they ended; a run the engine is
+                                // executing pulses.
+                                let ending = match fold_ending {
+                                    Some(FoldEnding::Like(run)) => {
+                                        pill(run.ending.clone(), ending_tone(run), &fonts)
+                                    }
+                                    Some(mixed @ FoldEnding::Mixed { failed, .. }) => {
+                                        let tone = if failed > 0 {
+                                            PillTone::Failed
+                                        } else {
+                                            PillTone::Quiet
+                                        };
+                                        pill(mixed.words(), tone, &fonts)
+                                    }
+                                    None => {
+                                        pill(row.run.ending.clone(), ending_tone(&row.run), &fonts)
+                                    }
+                                };
                                 match row.run.progress {
                                     Progress::Running => {
                                         pulsing(("running", i), ending).into_any_element()
