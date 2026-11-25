@@ -50,8 +50,8 @@ let
     # wake record for every wakeup, in the buffer the monitor drains
     ../guest/linux/rewind-time.patch
     # rewind.cpus=N in /proc/cpuinfo and sysfs's online, possible,
-    # present and enabled lists, so every proc and sysfs a job mounts says N, in any
-    # user namespace
+    # present and enabled lists, so every proc and sysfs a job mounts
+    # says N, in any user namespace
     ../guest/linux/rewind-cpus.patch
   ];
 in
