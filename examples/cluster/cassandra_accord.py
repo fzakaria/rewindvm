@@ -1,28 +1,41 @@
 #!/usr/bin/env python3
-"""Deterministic 3-node Apache Cassandra 6.0 (CEP-15 Accord) cluster test.
+"""Deterministic 3-node Apache Cassandra 6.0 (CEP-15 Accord) protocol stress test.
 
 Boots three real Apache Cassandra 6.0-alpha2 VMs with Accord enabled
 (`accord.enabled: true`, `storage_compatibility_mode: NONE`, `RF=3`) and slight
-inter-node clock skew (`0ms`, `+15ms`, `-10ms`), plus a zero-dependency Python
-CQLv4 driver node that exercises strict-serializable multi-partition Accord
-transactions (`BEGIN TRANSACTION ... LET ... IF ... UPDATE ... COMMIT TRANSACTION`):
+inter-node clock skew (`0ms`, `+15ms`, `-10ms`) + clock drift (`0`, `+200ppm`,
+`-200ppm`), plus a zero-dependency multi-threaded Python CQLv4 driver that
+exercises strict-serializable, conflicting, 3-partition Accord transactions
+across two tables (`bank.accounts` + `bank.txlog`):
 
-  Phase 1 — 3-node Accord fast path:
-      Creates `bank.accounts` with `transactional_mode = 'full'`, seeds
-      alice/bob/carol = 1000 each (across 3 partitions), runs multi-partition
-      conditional transfers rotating coordinators across all 3 nodes, and
-      verifies strict conservation of money (`total == 3000`, no overdrafts).
+  Setup (paid once, then snapshotted):
+      Creates `bank.accounts` and `bank.txlog` with `transactional_mode = 'full'`,
+      seeds alice/bob/carol = 1000 each, and captures a whole-cluster snapshot
+      (`cluster-ready`) of all 3 JVMs, the driver VM, and the virtual L2 switch.
 
-  Phase 2 — Minority partition (Accord slow-path quorum):
-      Snapshots the live cluster, isolates `node3` from `[node1, node2, client]`,
-      and verifies multi-partition Accord transactions continue committing on
-      the 2-node quorum while preserving `total == 3000`.
+  Concurrent Conflicting Accord Storm (3 worker threads + linearizable auditor):
+      Three concurrent workers pinned to `node1`, `node2`, and `node3`
+      simultaneously submit overlapping 3-partition conditional transfers
+      (`IF seen IS NULL AND s.balance >= amt THEN INSERT txlog ... UPDATE +/-`)
+      while a 4th thread runs continuous multi-partition Accord reads asserting
+      strict conservation (`total == 3000`, zero overdrafts) on every read.
 
-  Phase 3 — Partition heal & linearizable recovery:
-      Heals `node3`, waits for catch-up, and runs an Accord read transaction
-      directly on `node3` to verify it observes the exact committed state.
+  Branch A (from `cluster-ready`) — Mid-flight minority partition + lossy link + heal:
+      Isolates `node3` and injects 5% packet loss, 2% duplication, and 3 ms
+      jitter on `node1 <-> node2` *while transactions are actively in flight*,
+      verifies the 2-node slow-path quorum keeps committing, heals mid-storm,
+      and verifies linearizable catch-up directly on `node3` (`nodes=3`).
 
-Requires `nix` on PATH (for `.#cassandra6` and `nixpkgs#python3`). Run with:
+  Branch B (`c.restore("cluster-ready")`, zero JVM reboot) — Mid-flight
+      asymmetric partition -> hard coordinator crash:
+      Rewinds all 3 JVMs and the virtual switch back to `cluster-ready`,
+      injects an asymmetric partition (`node1 -> node2` blocked while
+      `node2 -> node1` stays open) mid-storm, then hard-crashes `node3`
+      mid-flight and verifies the surviving 2-node Accord quorum completes all
+      transactions with exact conservation (`total == 3000`, `nodes=2`).
+
+Requires `nix` on PATH (for `.#cassandra6` and `nixpkgs#python3`), or prebuilt
+EROFS images via `REWIND_CASSANDRA_EROFS` and `REWIND_PYTHON_EROFS`. Run with:
     python3 examples/cluster/cassandra_accord.py
 
 Or explore perturbed schedules/nemesis faults automatically:
@@ -32,6 +45,7 @@ Or explore perturbed schedules/nemesis faults automatically:
 import os
 import sys
 import textwrap
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "sdk" / "python"))
@@ -41,9 +55,9 @@ from rewind_cluster import Cluster
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 NODES = [
-    ("node1", "10.0.0.1", "-9223372036854775808", 0),
-    ("node2", "10.0.0.2", "-3074457345618258603", 15),
-    ("node3", "10.0.0.3", "3074457345618258602", -10),
+    ("node1", "10.0.0.1", "-9223372036854775808", 0, 0),
+    ("node2", "10.0.0.2", "-3074457345618258603", 15, 200),
+    ("node3", "10.0.0.3", "3074457345618258602", -10, -200),
 ]
 
 LOGBACK_XML = """\
@@ -132,14 +146,17 @@ def cassandra_yaml(ip: str, token: str, seeds: str) -> str:
     )
 
 
-# Embedded stdlib-only CQL native protocol v4 client + Accord invariant checker.
+# Embedded stdlib-only multi-threaded CQLv4 client + concurrent Accord invariant checker.
 DRIVER_SCRIPT = r'''
 import socket
 import struct
 import sys
+import threading
 import time
 
 NODES = ["10.0.0.1", "10.0.0.2", "10.0.0.3"]
+ACCOUNTS = ["alice", "bob", "carol"]
+TXS_PER_WORKER = 10  # 3 workers * 10 = 30 conflicting 3-partition Accord txns
 
 # CQL Native Protocol v4 opcodes
 OP_ERROR = 0x00
@@ -199,7 +216,6 @@ class CqlConn:
         return rop, rbody
 
     def _startup(self) -> None:
-        # String map: {"CQL_VERSION": "3.0.0"}
         body = (
             struct.pack("!H", 1)
             + struct.pack("!H", 11)
@@ -230,14 +246,14 @@ class CqlConn:
     def _skip_type(self, buf: bytes, off: int) -> int:
         tid = struct.unpack_from("!H", buf, off)[0]
         off += 2
-        if tid == 0x0000:  # custom
+        if tid == 0x0000:
             _, off = self._read_short_str(buf, off)
-        elif tid in (0x0020, 0x0022):  # list / set
+        elif tid in (0x0020, 0x0022):
             off = self._skip_type(buf, off)
-        elif tid == 0x0021:  # map
+        elif tid == 0x0021:
             off = self._skip_type(buf, off)
             off = self._skip_type(buf, off)
-        elif tid == 0x0030:  # UDT
+        elif tid == 0x0030:
             _, off = self._read_short_str(buf, off)
             _, off = self._read_short_str(buf, off)
             n = struct.unpack_from("!H", buf, off)[0]
@@ -245,7 +261,7 @@ class CqlConn:
             for _ in range(n):
                 _, off = self._read_short_str(buf, off)
                 off = self._skip_type(buf, off)
-        elif tid == 0x0031:  # tuple
+        elif tid == 0x0031:
             n = struct.unpack_from("!H", buf, off)[0]
             off += 2
             for _ in range(n):
@@ -255,10 +271,10 @@ class CqlConn:
     def _parse_rows(self, buf: bytes, off: int) -> list[list[bytes | None]]:
         flags, col_count = struct.unpack_from("!ii", buf, off)
         off += 8
-        if flags & 0x0002:  # Has_more_pages
+        if flags & 0x0002:
             plen = struct.unpack_from("!i", buf, off)[0]
             off += 4 + max(plen, 0)
-        if not (flags & 0x0004):  # Metadata present
+        if not (flags & 0x0004):
             global_spec = bool(flags & 0x0001)
             if global_spec:
                 _, off = self._read_short_str(buf, off)
@@ -291,11 +307,11 @@ def decode_int(cell: bytes | None) -> int:
     return struct.unpack("!i", cell)[0]
 
 
-def connect_with_retry(host: str, deadline: float) -> CqlConn:
+def connect_with_retry(host: str, deadline: float, timeout: float = 15.0) -> CqlConn:
     last_err = None
     while time.monotonic() < deadline:
         try:
-            return CqlConn(host, timeout=15.0)
+            return CqlConn(host, timeout=timeout)
         except Exception as e:
             last_err = e
             time.sleep(0.5)
@@ -339,36 +355,33 @@ def accord_read_all(conn: CqlConn) -> dict[str, int]:
     }
 
 
-def accord_transfer(
-    conn: CqlConn,
-    src: str,
-    dst: str,
-    amount: int,
-    expected_src: int,
-    expected_dst: int,
+def accord_idempotent_transfer(
+    conn: CqlConn, tx_id: str, src: str, dst: str, amount: int
 ) -> None:
-    """Idempotent, strictly serializable multi-partition Accord transfer.
+    """Strictly serializable, idempotent 3-partition Accord transfer across 2 tables.
 
-    Guarding on `(expected_src, expected_dst)` makes retrying after an
-    ambiguous `WRITE_TIMEOUT` (e.g. while Accord falls back from fast-path to
-    2-node quorum during a partition) safe with exact-once semantics.
+    Guards on `bank.txlog[tx_id]` and `s.balance >= amount` inside a single
+    Accord transaction so concurrent conflicting writers and retries after
+    ambiguous timeouts/partitions/crashes have exact-once semantics.
     """
     cql = f"""
     BEGIN TRANSACTION
+      LET seen = (SELECT applied FROM bank.txlog WHERE tx_id = '{tx_id}');
       LET s = (SELECT balance FROM bank.accounts WHERE id = '{src}');
-      LET d = (SELECT balance FROM bank.accounts WHERE id = '{dst}');
-      IF s.balance = {expected_src} AND d.balance = {expected_dst} THEN
-        UPDATE bank.accounts SET balance = {expected_src - amount} WHERE id = '{src}';
-        UPDATE bank.accounts SET balance = {expected_dst + amount} WHERE id = '{dst}';
+      IF seen IS NULL AND s.balance >= {amount} THEN
+        INSERT INTO bank.txlog (tx_id, applied) VALUES ('{tx_id}', 1);
+        UPDATE bank.accounts SET balance -= {amount} WHERE id = '{src}';
+        UPDATE bank.accounts SET balance += {amount} WHERE id = '{dst}';
       END IF
     COMMIT TRANSACTION
     """
     conn.query(cql, CL_QUORUM)
 
 
-def check_invariant(label: str, balances: dict[str, int]) -> None:
+def check_invariant(label: str, balances: dict[str, int], log: bool = True) -> None:
     total = sum(balances.values())
-    print(f"{label}: balances={balances} total={total}", flush=True)
+    if log:
+        print(f"{label}: balances={balances} total={total}", flush=True)
     for acct, bal in balances.items():
         if bal < 0:
             raise AssertionError(f"OVERDRAFT on {acct}: {balances}")
@@ -376,7 +389,7 @@ def check_invariant(label: str, balances: dict[str, int]) -> None:
         raise AssertionError(f"CONSERVATION VIOLATION: total={total} balances={balances}")
 
 
-def run_with_retry(fn, attempts: int = 8, delay: float = 0.5):
+def run_with_retry(fn, attempts: int = 10, delay: float = 0.5):
     last_err = None
     for _ in range(attempts):
         try:
@@ -407,7 +420,13 @@ def main() -> None:
         ") WITH transactional_mode = 'full'",
         CL_QUORUM,
     )
-    # Seed 3 distinct partitions via Accord transaction.
+    c1.query(
+        "CREATE TABLE IF NOT EXISTS bank.txlog ("
+        "  tx_id text PRIMARY KEY,"
+        "  applied int"
+        ") WITH transactional_mode = 'full'",
+        CL_QUORUM,
+    )
     run_with_retry(
         lambda: c1.query(
             "BEGIN TRANSACTION "
@@ -418,65 +437,151 @@ def main() -> None:
             CL_QUORUM,
         )
     )
-    expected = {"alice": 1000, "bob": 1000, "carol": 1000}
     check_invariant("INIT", run_with_retry(lambda: accord_read_all(c2)))
-
-    # Phase 1: 3-node Accord fast-path transfers rotating across all 3 coordinators.
-    phase1_transfers = [
-        (c1, "alice", "bob", 150),
-        (c2, "bob", "carol", 200),
-        (c3, "carol", "alice", 75),
-        (c1, "alice", "carol", 125),
-    ]
-    for conn, src, dst, amt in phase1_transfers:
-        es, ed = expected[src], expected[dst]
-        run_with_retry(
-            lambda c=conn, s=src, d=dst, a=amt, es=es, ed=ed: accord_transfer(
-                c, s, d, a, es, ed
-            )
-        )
-        expected[src] -= amt
-        expected[dst] += amt
-    b1 = run_with_retry(lambda: accord_read_all(c3))
-    check_invariant("PHASE1", b1)
-    assert b1 == expected == {"alice": 800, "bob": 950, "carol": 1250}, b1
-    print("PHASE1_OK", flush=True)
-
-    # Give the host orchestrator a clean virtual-time window to snapshot & partition node3.
-    time.sleep(0.5)
-
-    # Phase 2: node3 is partitioned away — Accord must still commit via 2-node quorum!
-    phase2_transfers = [
-        (c1, "carol", "alice", 250),
-        (c2, "bob", "alice", 50),
-    ]
-    for conn, src, dst, amt in phase2_transfers:
-        es, ed = expected[src], expected[dst]
-        run_with_retry(
-            lambda c=conn, s=src, d=dst, a=amt, es=es, ed=ed: accord_transfer(
-                c, s, d, a, es, ed
-            )
-        )
-        expected[src] -= amt
-        expected[dst] += amt
-    b2 = run_with_retry(lambda: accord_read_all(c1))
-    check_invariant("PHASE2", b2)
-    assert b2 == expected == {"alice": 1100, "bob": 900, "carol": 1000}, b2
-    print("PHASE2_OK", flush=True)
-
-    # Give the host orchestrator time to heal node3 and let gossip/Accord catch up.
-    time.sleep(3.0)
-
-    # Phase 3: Reconnect to healed node3 and verify linearizable Accord read.
-    c3.close()
-    c3 = connect_with_retry(NODES[2], time.monotonic() + 30.0)
-    b3 = run_with_retry(lambda: accord_read_all(c3), attempts=15, delay=0.5)
-    check_invariant("PHASE3_NODE3", b3)
-    assert b3 == b2, f"node3 stale after heal: {b3} != {b2}"
-    print("PHASE3_OK", flush=True)
-
-    for c in (c1, c2, c3):
+    for c in conns:
         c.close()
+
+    # Signal the host orchestrator to snapshot the warm 3-node Accord cluster.
+    print("CLUSTER_READY", flush=True)
+    time.sleep(0.1)
+
+    # Concurrent conflicting multi-partition Accord storm:
+    # 3 workers targeting node1, node2, node3 simultaneously + 1 linearizable auditor.
+    lock = threading.Lock()
+    committed_count = 0
+    in_flight_emitted = False
+    mid_emitted = False
+    audit_count = 0
+    errors: list[BaseException] = []
+    stop_audit = threading.Event()
+
+    def worker(wid: int) -> None:
+        nonlocal committed_count, in_flight_emitted, mid_emitted
+        # Each worker prefers its own coordinator but fails over round-robin
+        # if that coordinator is partitioned or hard-crashed mid-storm.
+        hosts = [NODES[(wid + k) % 3] for k in range(3)]
+        conn: CqlConn | None = None
+        host_idx = 0
+        try:
+            for seq in range(TXS_PER_WORKER):
+                tx_id = f"w{wid}-{seq}"
+                src = ACCOUNTS[(wid + seq) % 3]
+                dst = ACCOUNTS[(wid + seq + 1) % 3]
+                amt = 15 + ((wid * 7 + seq * 11) % 45)
+                ok = False
+                last_err: Exception | None = None
+                for attempt in range(24):
+                    if conn is None:
+                        target = hosts[host_idx % len(hosts)]
+                        try:
+                            conn = CqlConn(target, timeout=3.5)
+                        except Exception as e:
+                            last_err = e
+                            host_idx += 1
+                            time.sleep(0.15)
+                            continue
+                    try:
+                        accord_idempotent_transfer(conn, tx_id, src, dst, amt)
+                        ok = True
+                        break
+                    except Exception as e:
+                        last_err = e
+                        conn.close()
+                        conn = None
+                        host_idx += 1
+                        time.sleep(0.2)
+                if not ok:
+                    raise RuntimeError(f"worker {wid} tx {tx_id} failed: {last_err}")
+
+                with lock:
+                    committed_count += 1
+                    cur = committed_count
+                    if cur >= 3 and not in_flight_emitted:
+                        in_flight_emitted = True
+                        print(f"STORM_IN_FLIGHT committed={cur}", flush=True)
+                    if cur >= 15 and not mid_emitted:
+                        mid_emitted = True
+                        print(f"STORM_MID committed={cur}", flush=True)
+        except BaseException as e:
+            with lock:
+                errors.append(e)
+        finally:
+            if conn is not None:
+                conn.close()
+
+    def auditor() -> None:
+        nonlocal audit_count
+        idx = 0
+        while not stop_audit.is_set():
+            host = NODES[idx % 3]
+            idx += 1
+            conn: CqlConn | None = None
+            try:
+                conn = CqlConn(host, timeout=3.0)
+                bal = accord_read_all(conn)
+                check_invariant("AUDIT", bal, log=False)
+                with lock:
+                    audit_count += 1
+            except AssertionError as e:
+                with lock:
+                    errors.append(e)
+                return
+            except Exception:
+                # Expected when probing a partitioned or crashed coordinator.
+                pass
+            finally:
+                if conn is not None:
+                    conn.close()
+            time.sleep(0.15)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(3)]
+    aud = threading.Thread(target=auditor)
+    aud.start()
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    stop_audit.set()
+    aud.join()
+
+    if errors:
+        raise errors[0]
+
+    print(f"STORM_DONE committed={committed_count} audits={audit_count}", flush=True)
+
+    # Give any healed node a short catch-up window, then verify linearizable
+    # convergence across every reachable node.
+    time.sleep(2.0)
+    observed: dict[str, dict[str, int]] = {}
+    ledger_count = None
+    for ip in NODES:
+        conn = None
+        try:
+            conn = CqlConn(ip, timeout=4.0)
+            bal = run_with_retry(lambda c=conn: accord_read_all(c), attempts=6, delay=0.4)
+            check_invariant(f"FINAL_{ip}", bal)
+            observed[ip] = bal
+            if ledger_count is None:
+                rows = conn.query("SELECT tx_id FROM bank.txlog", CL_QUORUM)
+                ledger_count = len(rows)
+        except Exception as e:
+            print(f"UNREACHABLE {ip}: {e}", flush=True)
+        finally:
+            if conn is not None:
+                conn.close()
+
+    assert len(observed) >= 2, f"expected >=2 reachable nodes, got {observed!r}"
+    vals = list(observed.values())
+    for ip, bal in observed.items():
+        assert bal == vals[0], f"DIVERGENCE on {ip}: {bal} != {vals[0]}"
+    assert ledger_count == TXS_PER_WORKER * 3, (
+        f"expected {TXS_PER_WORKER * 3} applied txns in txlog, got {ledger_count}"
+    )
+    print(
+        f"CONVERGENCE nodes={len(observed)} applied={ledger_count} "
+        f"audits={audit_count} balances={vals[0]}",
+        flush=True,
+    )
     print("ACCORD_ALL_OK", flush=True)
 
 
@@ -487,8 +592,11 @@ if __name__ == "__main__":
 
 def main() -> None:
     cassandra_pkg = os.environ.get("REWIND_CASSANDRA_PKG", f"{REPO_ROOT}#cassandra6")
+    cassandra_erofs = os.environ.get("REWIND_CASSANDRA_EROFS")
+    python_erofs = os.environ.get("REWIND_PYTHON_EROFS")
     seeds = "10.0.0.1:7000"
 
+    t0 = time.perf_counter()
     with Cluster(
         "cassandra6-accord-3node",
         latency_ms=2,
@@ -499,7 +607,7 @@ def main() -> None:
         slice_us=250,
     ) as c:
         node_handles = []
-        for idx, (name, ip, token, skew_ms) in enumerate(NODES):
+        for idx, (name, ip, token, skew_ms, drift_ppm) in enumerate(NODES):
             # Stagger joins cleanly (Cassandra CEP-21 TCM forbids concurrent
             # bootstraps): node2 waits for node1:9042, node3 waits for node2:9042.
             if idx == 0:
@@ -509,37 +617,49 @@ def main() -> None:
                 cmd = [
                     "/bin/sh",
                     "-c",
-                    f"until nc -z {prev_ip} 9042 2>/dev/null; do sleep 0.5; done; "
+                    f"until (nc -z {prev_ip} 9042 2>/dev/null || "
+                    f"bash -c 'exec 3<>/dev/tcp/{prev_ip}/9042' 2>/dev/null); "
+                    "do sleep 0.5; done; "
                     "exec cassandra-node /build /build/data",
                 ]
+            node_kwargs = {}
+            if cassandra_erofs:
+                node_kwargs["root"] = cassandra_erofs
+            else:
+                node_kwargs["packages"] = [cassandra_pkg]
             h = c.add_node(
                 name,
                 cmd,
                 ip=ip,
                 role="service",
-                packages=[cassandra_pkg],
                 mem_mib=1024,
                 clock_skew_ms=skew_ms,
+                clock_drift_ppm=drift_ppm,
                 files={
                     "/build/cassandra.yaml": cassandra_yaml(ip, token, seeds),
                     "/build/logback.xml": LOGBACK_XML,
                 },
+                **node_kwargs,
             )
             node_handles.append(h)
 
+        client_kwargs = {}
+        if python_erofs:
+            client_kwargs["root"] = python_erofs
+        else:
+            client_kwargs["packages"] = ["nixpkgs#python3"]
         client = c.add_node(
             "client",
             ["python3", "-u", "/build/driver.py"],
             ip="10.0.0.4",
             role="driver",
-            packages=["nixpkgs#python3"],
             mem_mib=256,
             files={"/build/driver.py": DRIVER_SCRIPT},
+            **client_kwargs,
         )
 
         c.start()
         try:
-            # Wait for all 3 Cassandra 6.0 nodes to open CQL native transport.
             for h in node_handles:
                 h.wait_for(
                     "Starting listening for CQL clients",
@@ -548,25 +668,73 @@ def main() -> None:
                 )
 
             client.wait_for("CLUSTER_3_NODES_JOINED", from_start=True, timeout_ms=60_000)
-            client.wait_for("PHASE1_OK", from_start=True, timeout_ms=60_000)
+            client.wait_for("CLUSTER_READY", from_start=True, timeout_ms=60_000)
+            t_boot = time.perf_counter()
 
-            # Snapshot pre-partition cluster state, then isolate node3 from quorum.
-            c.snapshot("before-partition")
+            # Snapshot the warm 3-node Accord cluster (VMs + full virtual switch)
+            # so we can branch into multiple mid-flight fault timelines without rebooting!
+            snap_ready = c.snapshot("cluster-ready")
+            t_snap = time.perf_counter()
+
+            # === Branch A: Mid-flight minority partition + lossy/jittery quorum link + heal ===
+            client.wait_for("STORM_IN_FLIGHT", from_start=True, timeout_ms=60_000)
             c.partition(["node3"], ["node1", "node2", "client"])
+            c.set_link(
+                "node1",
+                "node2",
+                latency_ms=8,
+                jitter_ms=3,
+                drop_ppm=50_000,
+                duplicate_ppm=20_000,
+            )
 
-            client.wait_for("PHASE2_OK", from_start=True, timeout_ms=60_000)
-
-            # Heal node3 and verify linearizable Accord recovery.
+            client.wait_for("STORM_MID", from_start=True, timeout_ms=90_000)
             c.heal()
-            client.wait_for("PHASE3_OK", from_start=True, timeout_ms=60_000)
-            client.wait_for("ACCORD_ALL_OK", from_start=True, timeout_ms=30_000)
+            c.set_link(
+                "node1",
+                "node2",
+                latency_ms=2,
+                jitter_us=300,
+                drop_ppm=0,
+                duplicate_ppm=0,
+            )
 
+            conv_a = client.wait_for("CONVERGENCE", from_start=True, timeout_ms=90_000)
+            assert "nodes=3 " in (conv_a.line or ""), f"Branch A expected 3 converged nodes: {conv_a.line}"
+            client.wait_for("ACCORD_ALL_OK", from_start=True, timeout_ms=30_000)
+            t_branch_a = time.perf_counter()
+            print(f"[Branch A] {conv_a.line} ({t_branch_a - t_snap:.2f}s wall)", flush=True)
+
+            # === Rewind to `cluster-ready` (zero JVM reboot!) ===
+            c.restore(snap_ready)
+            t_restore = time.perf_counter()
+
+            # === Branch B: Mid-flight asymmetric partition -> hard crash of node3 ===
+            client.wait_for("STORM_IN_FLIGHT", from_start=True, timeout_ms=60_000)
+            c.partition(["node1"], ["node2"], symmetric=False)
+
+            client.wait_for("STORM_MID", from_start=True, timeout_ms=90_000)
+            c.heal()
+            node_handles[2].crash()
+
+            conv_b = client.wait_for("CONVERGENCE", from_start=True, timeout_ms=90_000)
+            assert "nodes=2 " in (conv_b.line or ""), f"Branch B expected 2 surviving nodes: {conv_b.line}"
+            client.wait_for("ACCORD_ALL_OK", from_start=True, timeout_ms=30_000)
             res = client.wait_exit(timeout_ms=10_000)
             assert res["exited"] and res["exit_code"] == 0, res
+            t_branch_b = time.perf_counter()
+            print(
+                f"[Branch B] {conv_b.line} ({t_branch_b - t_restore:.2f}s wall; "
+                f"restore={t_restore - t_branch_a:.2f}s)",
+                flush=True,
+            )
+
             fin = c.finish()
             print(
                 f"recorded cluster {fin['id']} ({fin['verdict']}) "
-                f"at {res['cluster_ns'] / 1e6:.1f}ms virtual time"
+                f"at {res['cluster_ns'] / 1e6:.1f}ms virtual time "
+                f"(boot={t_boot - t0:.1f}s, branch_a={t_branch_a - t_snap:.1f}s, "
+                f"branch_b={t_branch_b - t_restore:.1f}s)"
             )
         except Exception:
             for h in [*node_handles, client]:
