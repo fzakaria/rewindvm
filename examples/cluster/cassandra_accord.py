@@ -339,15 +339,27 @@ def accord_read_all(conn: CqlConn) -> dict[str, int]:
     }
 
 
-def accord_transfer(conn: CqlConn, src: str, dst: str, amount: int) -> None:
-    """Strictly serializable multi-partition Accord conditional transfer."""
+def accord_transfer(
+    conn: CqlConn,
+    src: str,
+    dst: str,
+    amount: int,
+    expected_src: int,
+    expected_dst: int,
+) -> None:
+    """Idempotent, strictly serializable multi-partition Accord transfer.
+
+    Guarding on `(expected_src, expected_dst)` makes retrying after an
+    ambiguous `WRITE_TIMEOUT` (e.g. while Accord falls back from fast-path to
+    2-node quorum during a partition) safe with exact-once semantics.
+    """
     cql = f"""
     BEGIN TRANSACTION
       LET s = (SELECT balance FROM bank.accounts WHERE id = '{src}');
       LET d = (SELECT balance FROM bank.accounts WHERE id = '{dst}');
-      IF s.balance >= {amount} THEN
-        UPDATE bank.accounts SET balance -= {amount} WHERE id = '{src}';
-        UPDATE bank.accounts SET balance += {amount} WHERE id = '{dst}';
+      IF s.balance = {expected_src} AND d.balance = {expected_dst} THEN
+        UPDATE bank.accounts SET balance = {expected_src - amount} WHERE id = '{src}';
+        UPDATE bank.accounts SET balance = {expected_dst + amount} WHERE id = '{dst}';
       END IF
     COMMIT TRANSACTION
     """
@@ -406,6 +418,7 @@ def main() -> None:
             CL_QUORUM,
         )
     )
+    expected = {"alice": 1000, "bob": 1000, "carol": 1000}
     check_invariant("INIT", run_with_retry(lambda: accord_read_all(c2)))
 
     # Phase 1: 3-node Accord fast-path transfers rotating across all 3 coordinators.
@@ -416,10 +429,17 @@ def main() -> None:
         (c1, "alice", "carol", 125),
     ]
     for conn, src, dst, amt in phase1_transfers:
-        run_with_retry(lambda c=conn, s=src, d=dst, a=amt: accord_transfer(c, s, d, a))
+        es, ed = expected[src], expected[dst]
+        run_with_retry(
+            lambda c=conn, s=src, d=dst, a=amt, es=es, ed=ed: accord_transfer(
+                c, s, d, a, es, ed
+            )
+        )
+        expected[src] -= amt
+        expected[dst] += amt
     b1 = run_with_retry(lambda: accord_read_all(c3))
     check_invariant("PHASE1", b1)
-    assert b1 == {"alice": 800, "bob": 950, "carol": 1250}, b1
+    assert b1 == expected == {"alice": 800, "bob": 950, "carol": 1250}, b1
     print("PHASE1_OK", flush=True)
 
     # Give the host orchestrator a clean virtual-time window to snapshot & partition node3.
@@ -431,10 +451,17 @@ def main() -> None:
         (c2, "bob", "alice", 50),
     ]
     for conn, src, dst, amt in phase2_transfers:
-        run_with_retry(lambda c=conn, s=src, d=dst, a=amt: accord_transfer(c, s, d, a))
+        es, ed = expected[src], expected[dst]
+        run_with_retry(
+            lambda c=conn, s=src, d=dst, a=amt, es=es, ed=ed: accord_transfer(
+                c, s, d, a, es, ed
+            )
+        )
+        expected[src] -= amt
+        expected[dst] += amt
     b2 = run_with_retry(lambda: accord_read_all(c1))
     check_invariant("PHASE2", b2)
-    assert b2 == {"alice": 1100, "bob": 900, "carol": 1000}, b2
+    assert b2 == expected == {"alice": 1100, "bob": 900, "carol": 1000}, b2
     print("PHASE2_OK", flush=True)
 
     # Give the host orchestrator time to heal node3 and let gossip/Accord catch up.
