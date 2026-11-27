@@ -134,6 +134,7 @@ impl SpecExt for Spec {
             clock: self.clock,
             preemption: self.preemption,
             extras: self.extras,
+            net: None,
         })
     }
 }
@@ -428,7 +429,9 @@ impl Arrival {
             return Arrival::Reached;
         }
         match outcome {
-            Outcome::Paused | Outcome::Interrupted => Arrival::Cancelled,
+            Outcome::Paused | Outcome::Interrupted | Outcome::Idle | Outcome::TxReady => {
+                Arrival::Cancelled
+            }
             Outcome::Stopped(_) | Outcome::Debug(_) => Arrival::StoppedShort,
         }
     }
@@ -3023,6 +3026,7 @@ pub(crate) mod tests {
                 outputs: Vec::new(),
                 output: rewind_init::Output::Plain,
                 sandbox: rewind_init::Sandbox::Shared,
+                net: None,
             },
         }
     }

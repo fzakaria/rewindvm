@@ -268,11 +268,19 @@ pub(crate) struct LogArgs {
     /// Prefix each line with its step and pid.
     #[arg(long, short)]
     pub(crate) steps: bool,
+    /// Select a node inside a multi-node cluster run.
+    #[arg(long, value_name = "NAME")]
+    pub(crate) node: Option<String>,
 }
 
 pub(crate) fn log(home: &Home, args: LogArgs) -> Result<ExitCode> {
-    let LogArgs { run, step, steps } = args;
-    let run = Run::find(home, &run)?;
+    let LogArgs {
+        run,
+        step,
+        steps,
+        node,
+    } = args;
+    let run = crate::cmd::cluster::resolve_run_or_node(home, &run, node.as_deref())?;
 
     // Each line is printed as the trace file's records complete it, so
     // the log of a run's first steps reads the run's first records, and
@@ -302,6 +310,9 @@ pub(crate) struct PsArgs {
     /// threads.
     #[arg(long)]
     pub(crate) json: bool,
+    /// Select a node inside a multi-node cluster run.
+    #[arg(long, value_name = "NAME")]
+    pub(crate) node: Option<String>,
 }
 
 pub(crate) fn ps(home: &Home, args: PsArgs) -> Result<ExitCode> {
@@ -310,8 +321,9 @@ pub(crate) fn ps(home: &Home, args: PsArgs) -> Result<ExitCode> {
         step,
         all,
         json,
+        node,
     } = args;
-    let run = Run::find(home, &run)?;
+    let run = crate::cmd::cluster::resolve_run_or_node(home, &run, node.as_deref())?;
     let at = step.map(|s| run.check_step(s)).transpose()?;
     let trace = run.trace()?;
     let at = at.unwrap_or(trace.last_step());
@@ -342,6 +354,9 @@ pub(crate) struct EventsArgs {
     /// One JSON object per line.
     #[arg(long)]
     pub(crate) json: bool,
+    /// Select a node inside a multi-node cluster run.
+    #[arg(long, value_name = "NAME")]
+    pub(crate) node: Option<String>,
 }
 
 pub(crate) fn events(home: &Home, args: EventsArgs) -> Result<ExitCode> {
@@ -350,8 +365,9 @@ pub(crate) fn events(home: &Home, args: EventsArgs) -> Result<ExitCode> {
         from,
         to,
         json,
+        node,
     } = args;
-    let run = Run::find(home, &run)?;
+    let run = crate::cmd::cluster::resolve_run_or_node(home, &run, node.as_deref())?;
     let from = from.map(|s| run.check_step(s)).transpose()?;
     let to = to.map(|s| run.check_step(s)).transpose()?;
     let trace = run.trace()?;

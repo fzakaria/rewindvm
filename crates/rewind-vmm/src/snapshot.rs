@@ -203,7 +203,96 @@ fn put_pages(
     Ok(stored)
 }
 
+/// Raw captured VM state + dirty page contents, produced on a node's vCPU
+/// thread so [`finish_keyframe`] can hash and store the pages into a
+/// non-`Send` [`Pages`] store on the coordinator thread.
+#[derive(Debug)]
+pub struct PreparedKeyframe {
+    step: u64,
+    parent: Option<u64>,
+    cpu: CpuState,
+    irqchips: Vec<Vec<u8>>,
+    devices: DeviceState,
+    indices: Vec<usize>,
+    /// Contiguous raw bytes of each page in `indices` (`indices.len() * PAGE_SIZE`).
+    data: Vec<u8>,
+}
+
+/// Finishes a [`PreparedKeyframe`] by hashing and storing its captured pages
+/// into `pages`.
+pub fn finish_keyframe(prepared: PreparedKeyframe, pages: &mut dyn Pages) -> Result<Keyframe> {
+    let mut stored = Vec::new();
+    for (batch_idx, batch) in prepared.indices.chunks(PUT_AT_ONCE).enumerate() {
+        let base = batch_idx * PUT_AT_ONCE;
+        let contents: Vec<&[u8]> = (0..batch.len())
+            .map(|offset| {
+                let start = (base + offset) * PAGE_SIZE;
+                &prepared.data[start..start + PAGE_SIZE]
+            })
+            .collect();
+        let hashes = pages.put_all(&contents)?;
+        if hashes.len() != batch.len() {
+            bail!(
+                "{} pages were put and {} hashes came back",
+                batch.len(),
+                hashes.len()
+            );
+        }
+        for (&i, hash) in batch.iter().zip(hashes) {
+            if prepared.parent.is_some() || hash != ZERO_PAGE {
+                stored.push((i as u32, hash));
+            }
+        }
+    }
+    Ok(Keyframe {
+        step: prepared.step,
+        parent: prepared.parent,
+        cpu: prepared.cpu,
+        irqchips: prepared.irqchips,
+        devices: prepared.devices,
+        pages: stored,
+    })
+}
+
 impl Machine {
+    /// Captures all KVM/vCPU state and dirty page bytes on the vCPU's own
+    /// thread without touching a [`Pages`] store, so a parallel cluster worker
+    /// never leaves its pinned thread to take a keyframe.
+    pub fn prepare_keyframe(&mut self, parent: Option<u64>) -> Result<PreparedKeyframe> {
+        self.complete_pending_exit()?;
+
+        let dirty = self.dirty_pages()?;
+        let mut indices: Vec<usize> = match parent {
+            None => self.dev.ram.written_pages(),
+            Some(_) => dirty,
+        };
+        if let Some(shared) = self.dev.shared {
+            indices.push(shared as usize / PAGE_SIZE);
+        }
+        indices.append(&mut self.dev.monitor_dirty_pages);
+        if !indices.is_empty() {
+            indices.sort_unstable();
+            indices.dedup();
+        }
+
+        let ram = self.dev.ram.as_slice();
+        let mut data = Vec::with_capacity(indices.len() * PAGE_SIZE);
+        for &i in &indices {
+            data.extend_from_slice(&ram[i * PAGE_SIZE..(i + 1) * PAGE_SIZE]);
+        }
+
+        let (cpu, irqchips, devices) = self.state()?;
+        Ok(PreparedKeyframe {
+            step: self.dev.step,
+            parent,
+            cpu,
+            irqchips,
+            devices,
+            indices,
+            data,
+        })
+    }
+
     /// Captures the machine at its current step. With a parent, only the
     /// pages written since the parent was captured are stored; without
     /// one, every page written since the machine was made, by boot, the
@@ -229,10 +318,13 @@ impl Machine {
             None => self.dev.ram.written_pages(),
             Some(_) => dirty,
         };
-        // The monitor writes the shared page itself, and the dirty log only
-        // sees the guest's writes.
+        // The monitor writes the shared page and any RX ring slots itself,
+        // and the dirty log only sees the guest's writes.
         if let Some(shared) = self.dev.shared {
             indices.push(shared as usize / PAGE_SIZE);
+        }
+        indices.append(&mut self.dev.monitor_dirty_pages);
+        if !indices.is_empty() {
             indices.sort_unstable();
             indices.dedup();
         }
@@ -243,6 +335,34 @@ impl Machine {
         Ok(Keyframe {
             step: self.dev.step,
             parent,
+            cpu,
+            irqchips,
+            devices,
+            pages: stored,
+        })
+    }
+
+    /// Captures a full standalone keyframe WITHOUT reading or clearing KVM's
+    /// dirty-page log. Used for zero-perturbation live inspection (cloning a
+    /// running cluster node into a throwaway VM while leaving the live node's
+    /// delta keyframe chain intact).
+    pub fn snapshot_non_destructive(&mut self, pages: &mut dyn Pages) -> Result<Keyframe> {
+        self.complete_pending_exit()?;
+
+        let ram = self.dev.ram.as_slice();
+        let page_count = ram.len() / PAGE_SIZE;
+        let mut indices = Vec::new();
+        for i in 0..page_count {
+            let chunk = &ram[i * PAGE_SIZE..(i + 1) * PAGE_SIZE];
+            if chunk.iter().any(|&b| b != 0) {
+                indices.push(i);
+            }
+        }
+        let stored = put_pages(pages, ram, &indices, None)?;
+        let (cpu, irqchips, devices) = self.state()?;
+        Ok(Keyframe {
+            step: self.dev.step,
+            parent: None,
             cpu,
             irqchips,
             devices,
@@ -450,9 +570,30 @@ impl Machine {
         self.dev.shared = d.shared;
         // A keyframe taken after setup restores the interface the guest
         // kernel named then, which must be one this monitor speaks.
+        self.dev.net_rx_ring = None;
+        self.dev.net_rx_slots = 0;
         if let Some(shared) = self.dev.shared {
             crate::pv::check_interface(self.dev.guest_interface(shared)?)?;
+            if self.config.net.is_some() {
+                let mut ring_b = [0u8; 8];
+                let mut slots_b = [0u8; 4];
+                self.dev
+                    .ram
+                    .read(shared + crate::pv::SHARED_NET_RX_RING, &mut ring_b)?;
+                self.dev
+                    .ram
+                    .read(shared + crate::pv::SHARED_NET_RX_SLOTS, &mut slots_b)?;
+                let ring = u64::from_le_bytes(ring_b);
+                let slots = u32::from_le_bytes(slots_b);
+                if ring != 0 && (1..=crate::pv::NET_RX_SLOTS_MAX).contains(&slots) {
+                    self.dev.net_rx_ring = Some(ring);
+                    self.dev.net_rx_slots = slots;
+                }
+            }
         }
+        self.dev.tx_queue.clear();
+        self.dev.net_rx_pending = false;
+        self.dev.monitor_dirty_pages.clear();
         self.dev.epoch = d.epoch;
         self.dev.step = d.step;
         self.dev.stop = None;

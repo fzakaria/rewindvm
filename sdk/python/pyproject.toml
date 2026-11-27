@@ -17,3 +17,4 @@ rewind = "rewind_sdk.pytest_plugin"
 
 [tool.setuptools]
 packages = ["rewind_sdk"]
+py-modules = ["rewind_cluster"]

@@ -551,6 +551,7 @@ fn selftest_spec(guest: &Guest) -> Spec {
             outputs: Vec::new(),
             output: rewind_init::Output::Plain,
             sandbox: rewind_init::Sandbox::Shared,
+            net: None,
         },
     }
 }

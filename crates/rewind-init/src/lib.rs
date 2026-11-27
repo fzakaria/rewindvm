@@ -397,6 +397,27 @@ pub struct Job {
     /// run, stays as it was before sandboxes existed.
     #[serde(default, skip_serializing_if = "Sandbox::is_shared")]
     pub sandbox: Sandbox,
+    /// Optional network interface configuration for multi-node clusters.
+    /// Absent on single-node runs so their job files stay unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub net: Option<NetConfig>,
+}
+
+/// Network interface and peer hostname configuration for a node in a cluster.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetConfig {
+    /// Interface name inside the guest (e.g. `"eth0"`).
+    pub interface: String,
+    /// IPv4 address (e.g. `"10.0.0.1"`).
+    pub ip: String,
+    /// IPv4 prefix length (e.g. `24`).
+    pub prefix_len: u8,
+    /// Optional IPv4 default gateway.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway: Option<String>,
+    /// Peer `(ip, hostname)` entries to install into `/etc/hosts`.
+    #[serde(default)]
+    pub hosts: Vec<(String, String)>,
 }
 
 /// The namespaces a job runs in.
@@ -1184,6 +1205,7 @@ mod tests {
             outputs: Vec::new(),
             output: Output::Plain,
             sandbox,
+            net: None,
         }
     }
 

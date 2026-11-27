@@ -67,7 +67,7 @@ pub struct Alone {
     _lock: File,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Home {
     root: PathBuf,
 }
@@ -111,6 +111,7 @@ impl Home {
     pub fn at(root: PathBuf) -> Result<Home> {
         let home = Home { root };
         fs::create_dir_all(home.runs())?;
+        fs::create_dir_all(home.clusters())?;
         fs::create_dir_all(home.images())?;
         Ok(home)
     }
@@ -121,6 +122,11 @@ impl Home {
 
     pub fn runs(&self) -> PathBuf {
         self.root.join("runs")
+    }
+
+    /// Multi-node cluster runs, one directory per cluster run id.
+    pub fn clusters(&self) -> PathBuf {
+        self.root.join("clusters")
     }
 
     /// Where images are cached, by what went into them. The directory is
@@ -249,7 +255,7 @@ pub fn bytes_under(dir: &Path) -> u64 {
 }
 
 /// The guest pieces named by the environment.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Guest {
     pub kernel: PathBuf,
     pub initrd: PathBuf,

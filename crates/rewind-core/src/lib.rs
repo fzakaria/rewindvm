@@ -7,6 +7,9 @@
 pub mod accesses;
 pub mod bisect;
 pub mod check;
+pub mod cluster;
+pub mod cluster_rpc;
+pub mod cluster_session;
 pub mod compare;
 pub mod cpio;
 pub mod debug;

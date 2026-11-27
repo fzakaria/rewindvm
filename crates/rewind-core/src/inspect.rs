@@ -143,11 +143,22 @@ pub enum Inspection {
 /// process is gone by then.
 pub fn cat(home: &Home, run: &Run, step: u64, pid: Option<u32>, path: &str) -> Result<Inspection> {
     let (mut machine, step) = fork_at(home, run, step)?;
+    cat_on_machine(&mut machine, step, pid, path)
+}
+
+/// [`cat`] executed directly on a `machine` already positioned at `step`
+/// (used for inspecting a node inside a multi-VM cluster run).
+pub fn cat_on_machine(
+    machine: &mut Machine,
+    step: u64,
+    pid: Option<u32>,
+    path: &str,
+) -> Result<Inspection> {
     let path = path.to_string();
     machine.request_inspection(&InspectRequest::Cat { pid, path }.args())?;
 
     let mut answer = Answer::default();
-    let status = finish(&mut machine, step, &mut answer, "the file could be read")?;
+    let status = finish(machine, step, &mut answer, "the file could be read")?;
     Ok(answer.into_inspection(status))
 }
 
@@ -158,12 +169,22 @@ pub fn cat(home: &Home, run: &Run, step: u64, pid: Option<u32>, path: &str) -> R
 /// than a directory or the run's guest is from before listings.
 pub fn list(home: &Home, run: &Run, step: u64, pid: Option<u32>, path: &str) -> Result<Inspection> {
     let (mut machine, step) = fork_at(home, run, step)?;
+    list_on_machine(&mut machine, step, pid, path)
+}
+
+/// [`list`] executed directly on a `machine` already positioned at `step`.
+pub fn list_on_machine(
+    machine: &mut Machine,
+    step: u64,
+    pid: Option<u32>,
+    path: &str,
+) -> Result<Inspection> {
     let path = path.to_string();
     machine.request_inspection(&InspectRequest::List { pid, path }.args())?;
 
     let mut answer = Answer::default();
     let status = finish(
-        &mut machine,
+        machine,
         step,
         &mut answer,
         "the directory could be listed",
@@ -364,12 +385,23 @@ pub fn shell(
     input: Box<dyn Input>,
     console: Console,
 ) -> Result<()> {
+    let (mut machine, step) = fork_at(home, run, step)?;
+    shell_on_machine(&mut machine, step, session, input, console)
+}
+
+/// [`shell`] executed directly on a `machine` already positioned at `step`.
+pub fn shell_on_machine(
+    machine: &mut Machine,
+    step: u64,
+    session: Session,
+    input: Box<dyn Input>,
+    console: Console,
+) -> Result<()> {
     let Session {
         pid,
         size: (cols, rows),
         extras,
     } = session;
-    let (mut machine, step) = fork_at(home, run, step)?;
     if let Some(extras) = &extras {
         machine.attach_extras(&extras.image)?;
     }
@@ -388,7 +420,7 @@ pub fn shell(
         input,
         done: answer.done.clone(),
     }));
-    match finish(&mut machine, step, &mut answer, "the shell started")? {
+    match finish(machine, step, &mut answer, "the shell started")? {
         InspectStatus::Done => Ok(()),
         _ => bail!("{}", String::from_utf8_lossy(&answer.stderr).trim()),
     }

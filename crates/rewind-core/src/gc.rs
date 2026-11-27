@@ -246,6 +246,11 @@ pub fn unused_images(home: &Home) -> Result<Vec<Image>> {
             named.insert(image);
         }
     }
+    for dir in cluster_dirs(home)? {
+        for image in cluster_named_images(&dir)? {
+            named.insert(image);
+        }
+    }
     let used: HashSet<(u64, u64)> = named
         .iter()
         .filter_map(|path| fs::metadata(path).ok())
@@ -433,7 +438,74 @@ fn live_pages(home: &Home) -> Result<(PageSet, usize)> {
             }
         }
     }
+    for dir in cluster_dirs(home)? {
+        let kf_dir = dir.join(rewind_trace::cluster::CLUSTER_KEYFRAMES_DIR);
+        let entries = match fs::read_dir(&kf_dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e).with_context(|| format!("reading {}", kf_dir.display())),
+        };
+        for entry in entries {
+            let path = entry?.path();
+            let is_ckf = path
+                .extension()
+                .is_some_and(|e| e == rewind_trace::cluster::CLUSTER_KEYFRAME_EXT);
+            if !is_ckf {
+                continue;
+            }
+            let bytes = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+            let Ok(ckf) = crate::cluster::decode_keyframe(&bytes) else {
+                unreadable += 1;
+                continue;
+            };
+            for node in ckf.nodes {
+                if let Some(kf) = node.keyframe {
+                    live.extend(
+                        kf.pages
+                            .into_iter()
+                            .map(|(_, hash)| hash)
+                            .filter(|hash| *hash != ZERO_PAGE),
+                    );
+                }
+            }
+        }
+    }
     Ok((live, unreadable))
+}
+
+fn cluster_dirs(home: &Home) -> Result<Vec<PathBuf>> {
+    let mut dirs = Vec::new();
+    let entries = match fs::read_dir(home.clusters()) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(dirs),
+        Err(e) => return Err(e.into()),
+    };
+    for entry in entries {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            dirs.push(entry.path());
+        }
+    }
+    Ok(dirs)
+}
+
+fn cluster_named_images(dir: &Path) -> Result<Vec<PathBuf>> {
+    let nodes_dir = dir.join(rewind_trace::cluster::CLUSTER_NODES_DIR);
+    let mut images = Vec::new();
+    let entries = match fs::read_dir(&nodes_dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(images),
+        Err(e) => return Err(e.into()),
+    };
+    for entry in entries {
+        let entry = entry?;
+        if entry.file_type()?.is_dir()
+            && let Some(image) = named_image(&entry.path())?
+        {
+            images.push(image);
+        }
+    }
+    Ok(images)
 }
 
 #[cfg(test)]

@@ -746,6 +746,7 @@ name = "rewind-vmm"
 version = "0.18.0"
 dependencies = [
  "anyhow",
+ "bincode",
  "kvm-bindings",
  "kvm-ioctls",
  "libc",

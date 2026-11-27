@@ -2449,6 +2449,7 @@ fn prepare_image(home: &Home, args: &ImageArgs) -> Result<(String, Source, Optio
             Output::Plain
         },
         sandbox: rewind_init::Sandbox::Shared,
+        net: None,
     };
     let source = Source::Image {
         root: root.display().to_string(),

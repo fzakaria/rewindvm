@@ -272,6 +272,7 @@ pub(crate) mod tests {
             outputs: Vec::new(),
             output: Output::Plain,
             sandbox: rewind_init::Sandbox::Shared,
+            net: None,
         }
     }
 

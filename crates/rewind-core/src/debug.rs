@@ -2540,7 +2540,9 @@ impl<'h> BlockingEventLoop for EventLoop<'h> {
                     let reason = target.tell(&writes, exited).map_err(target_error)?;
                     return Ok(Event::TargetStopped(reason));
                 }
-                Outcome::Paused => target.arrived(None).map_err(target_error)?,
+                Outcome::Paused | Outcome::Idle | Outcome::TxReady => {
+                    target.arrived(None).map_err(target_error)?;
+                }
                 // The connection watch stopped the fork between two
                 // instructions for what gdb sent, which is read below. A
                 // connection that closed instead ends the session. The

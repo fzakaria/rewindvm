@@ -264,7 +264,7 @@ pub enum SwitchError {
 }
 
 /// A task as the table keeps it: what tells one task from another.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 struct Task<'a> {
     pid: u32,
     tid: u32,
@@ -288,7 +288,7 @@ impl Task<'_> {
 /// order they were defined in, and the step and time of the switch
 /// before. An encoder and a decoder that have seen the same switches hold
 /// the same.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 struct Tables {
     tasks: HashMap<Task<'static>, u64>,
     last_step: u64,
@@ -365,7 +365,7 @@ impl Tables {
 /// A switch the guest reported at `step`, waiting for the clock that step
 /// leaves: the monitor knows the time of a step only once the step is
 /// over, so the switch is encoded at the next step ([`Encoder::stamp`]).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct Staged {
     step: u64,
     sched: u64,
@@ -375,14 +375,14 @@ struct Staged {
 /// A staged switch's task: an index into the tables, or a task they do
 /// not hold yet. Nothing defines a task between a switch's staging and its
 /// encoding, so the index stays right.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 enum StagedTask {
     Known(u64),
     New(Task<'static>),
 }
 
 /// Turns the guest's switch records into trace records, a batch at a time.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Encoder {
     tables: Tables,
     /// The entries encoded since the last batch was written.

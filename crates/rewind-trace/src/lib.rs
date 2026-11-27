@@ -19,6 +19,7 @@
 
 pub mod answers;
 pub mod blamed;
+pub mod cluster;
 pub mod compare;
 pub mod contents;
 pub mod critical;

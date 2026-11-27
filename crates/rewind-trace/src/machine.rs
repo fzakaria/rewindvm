@@ -98,6 +98,13 @@ pub enum Extras {
     Reserved,
 }
 
+/// Paravirtual Ethernet NIC attached to a VM in a multi-node cluster.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetDeviceConfig {
+    /// 6-byte Ethernet MAC address programmed into the guest's `eth0`.
+    pub mac: [u8; 6],
+}
+
 #[cfg(test)]
 mod tests {
     // How the CPU models are spelled in a manifest, by serializing each

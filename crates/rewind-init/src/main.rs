@@ -17,9 +17,10 @@ use std::process::{Command, Stdio};
 
 use rewind_init::{
     IMAGE_ROOT, INSPECT_ARG, InspectRequest, InspectStatus, JOB_PATH, Job, Listed, ListedAll,
-    ListedKind, Listing, MAX_LISTED, MAX_TREE_NAME, Mark, Output, Placement, Probe, RESIZE_ESCAPE,
-    RESIZE_LEN, RESIZE_TAG, RUNNING_ENV, Root, SECTION_MAPS, SECTION_PID, SELFTEST_ARG, Sandbox,
-    TreeEntry, UID_RANGE_COUNT, UID_RANGE_FIRST, nar_hash, placement, section_header,
+    ListedKind, Listing, MAX_LISTED, MAX_TREE_NAME, Mark, NetConfig, Output, Placement, Probe,
+    RESIZE_ESCAPE, RESIZE_LEN, RESIZE_TAG, RUNNING_ENV, Root, SECTION_MAPS, SECTION_PID,
+    SELFTEST_ARG, Sandbox, TreeEntry, UID_RANGE_COUNT, UID_RANGE_FIRST, nar_hash, placement,
+    section_header,
 };
 
 /// The image the monitor maps as persistent memory.
@@ -142,6 +143,10 @@ fn run() -> Result<()> {
 
     set_hostname(&job.hostname)?;
     loopback_up()?;
+    if let Some(net) = &job.net {
+        net_up(net)?;
+        write_hosts(Path::new("/"), &net.hosts)?;
+    }
 
     if job.root != Root::Initramfs {
         wait_for(IMAGE_DEVICE)?;
@@ -156,6 +161,9 @@ fn run() -> Result<()> {
         }
         Root::Image => {
             image_root()?;
+            if let Some(net) = &job.net {
+                write_hosts(Path::new(IMAGE_ROOT), &net.hosts)?;
+            }
             IMAGE_ROOT
         }
         Root::Initramfs => "/",
@@ -215,9 +223,11 @@ fn store_root(job: &Job) -> Result<()> {
     let (uid, gid) = job.host_ids();
     chown("/nix/store", 0, gid)?;
     chmod("/nix/store", 0o1775)?;
-    mkdir(&job.cwd)?;
-    chown(&job.cwd, uid, gid)?;
-    chmod(&job.cwd, 0o700)?;
+    if job.cwd != "/" {
+        mkdir(&job.cwd)?;
+        chown(&job.cwd, uid, gid)?;
+        chmod(&job.cwd, 0o700)?;
+    }
     Ok(())
 }
 
@@ -1863,6 +1873,133 @@ fn loopback_up() -> Result<()> {
     Ok(())
 }
 
+/// Configures a cluster node's paravirtual Ethernet interface (`eth0`) with
+/// its IPv4 address, netmask, UP flag, and optional default route.
+fn net_up(net: &NetConfig) -> Result<()> {
+    let ip: std::net::Ipv4Addr = net
+        .ip
+        .parse()
+        .map_err(|e| format!("parsing IPv4 address {:?}: {e}", net.ip))?;
+    if net.prefix_len > 32 {
+        return Err(format!("invalid prefix_len {}", net.prefix_len));
+    }
+    let mask_bits: u32 = if net.prefix_len == 0 {
+        0
+    } else {
+        !0u32 << (32 - net.prefix_len)
+    };
+    let mask = std::net::Ipv4Addr::from(mask_bits);
+    let ifname = net.interface.as_bytes();
+    if ifname.is_empty() || ifname.len() >= libc::IFNAMSIZ {
+        return Err(format!("invalid interface name {:?}", net.interface));
+    }
+
+    let make_sockaddr = |addr: std::net::Ipv4Addr| -> libc::sockaddr {
+        // SAFETY: sockaddr_in fits inside sockaddr and both are plain C structs.
+        unsafe {
+            let mut sa: libc::sockaddr = std::mem::zeroed();
+            let sin = (&raw mut sa).cast::<libc::sockaddr_in>();
+            (*sin).sin_family = libc::AF_INET as libc::sa_family_t;
+            (*sin).sin_addr.s_addr = u32::from_ne_bytes(addr.octets());
+            sa
+        }
+    };
+
+    let mut req: libc::ifreq = // SAFETY: zeroed C ifreq struct.
+        unsafe { std::mem::zeroed() };
+    for (i, b) in ifname.iter().enumerate() {
+        req.ifr_name[i] = *b as libc::c_char;
+    }
+
+    // SAFETY: plain socket and ioctl calls on valid zero-initialized structs.
+    unsafe {
+        let sock = libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0);
+        if sock < 0 {
+            return Err(format!("socket: {}", std::io::Error::last_os_error()));
+        }
+        let mut set_addr = req;
+        set_addr.ifr_ifru.ifru_addr = make_sockaddr(ip);
+        if libc::ioctl(sock, libc::SIOCSIFADDR as libc::Ioctl, &set_addr) != 0 {
+            let e = std::io::Error::last_os_error();
+            libc::close(sock);
+            return Err(format!("setting address on {}: {e}", net.interface));
+        }
+
+        let mut set_mask = req;
+        set_mask.ifr_ifru.ifru_netmask = make_sockaddr(mask);
+        if libc::ioctl(sock, libc::SIOCSIFNETMASK as libc::Ioctl, &set_mask) != 0 {
+            let e = std::io::Error::last_os_error();
+            libc::close(sock);
+            return Err(format!("setting netmask on {}: {e}", net.interface));
+        }
+
+        let mut flags_req = req;
+        let ok = libc::ioctl(sock, libc::SIOCGIFFLAGS as libc::Ioctl, &mut flags_req) == 0 && {
+            flags_req.ifr_ifru.ifru_flags |= (libc::IFF_UP | libc::IFF_RUNNING) as libc::c_short;
+            libc::ioctl(sock, libc::SIOCSIFFLAGS as libc::Ioctl, &flags_req) == 0
+        };
+        if !ok {
+            let e = std::io::Error::last_os_error();
+            libc::close(sock);
+            return Err(format!("bringing up {}: {e}", net.interface));
+        }
+
+        if let Some(gw_str) = &net.gateway {
+            let gw: std::net::Ipv4Addr = gw_str
+                .parse()
+                .map_err(|e| format!("parsing gateway {gw_str:?}: {e}"))?;
+            let dev_c = CString::new(net.interface.as_str()).map_err(|e| e.to_string())?;
+            let mut rt: libc::rtentry = std::mem::zeroed();
+            rt.rt_dst = make_sockaddr(std::net::Ipv4Addr::UNSPECIFIED);
+            rt.rt_genmask = make_sockaddr(std::net::Ipv4Addr::UNSPECIFIED);
+            rt.rt_gateway = make_sockaddr(gw);
+            rt.rt_flags = (libc::RTF_UP | libc::RTF_GATEWAY) as libc::c_ushort;
+            rt.rt_dev = dev_c.as_ptr().cast_mut();
+            if libc::ioctl(sock, libc::SIOCADDRT as libc::Ioctl, &rt) != 0 {
+                let e = std::io::Error::last_os_error();
+                libc::close(sock);
+                return Err(format!("setting default gateway {gw_str}: {e}"));
+            }
+        }
+        libc::close(sock);
+    }
+    Ok(())
+}
+
+/// Appends cluster peer entries to `<root>/etc/hosts` so nodes resolve each
+/// other by hostname without DNS.
+fn write_hosts(root: &Path, hosts: &[(String, String)]) -> Result<()> {
+    if hosts.is_empty() {
+        return Ok(());
+    }
+    let path = root.join(HOSTS_FILE);
+    if let Some(etc) = path.parent() {
+        mkdir(&etc.to_string_lossy())?;
+    }
+    let mut content = fs::read_to_string(&path).unwrap_or_else(|_| LOCALHOST_HOSTS.to_string());
+    if content.is_empty() {
+        content = LOCALHOST_HOSTS.to_string();
+    }
+    if !content.ends_with('\n') {
+        content.push('\n');
+    }
+    for (ip, name) in hosts {
+        let line = format!("{ip} {name}\n");
+        if !content.contains(&line) {
+            content.push_str(&line);
+        }
+    }
+    fs::write(&path, content).map_err(|e| format!("writing {}: {e}", path.display()))?;
+    // Ensure glibc-linked binaries (such as Nix packages) consult /etc/hosts
+    // directly without waiting on an unreachable local DNS resolver.
+    let nsswitch = root.join("etc/nsswitch.conf");
+    if !nsswitch.exists() {
+        fs::write(&nsswitch, "hosts: files dns\n")
+            .map_err(|e| format!("writing {}: {e}", nsswitch.display()))?;
+    }
+    Ok(())
+}
+
 fn mount(source: &str, target: &str, fstype: &str, flags: libc::c_ulong, data: &str) -> Result<()> {
     let c = |s: &str| CString::new(s).map_err(|e| format!("mounting {source} on {target}: {e}"));
     let (source_c, target_c, fstype_c, data_c) = (c(source)?, c(target)?, c(fstype)?, c(data)?);
@@ -1956,6 +2093,7 @@ mod tests {
             outputs: vec![],
             output: Output::Terminal,
             sandbox: Sandbox::Shared,
+            net: None,
         };
         assert_eq!(
             resolve(&job, "/").unwrap(),

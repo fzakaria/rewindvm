@@ -1405,6 +1405,7 @@ impl Debuggee<'_> {
                 Outcome::Stopped(_) => return Ok(Ended::Stopped),
                 Outcome::Debug(stop) => self.note_hit(scan, at, stop)?,
                 Outcome::Interrupted => bail!("a scan for hits was interrupted"),
+                Outcome::Idle | Outcome::TxReady => {}
             }
         }
     }
