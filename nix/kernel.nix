@@ -1,28 +1,34 @@
 # `nix build .#kernel`: the guest kernel. Upstream Linux from nixpkgs, with
-# the Rewind platform patch (guest/linux/rewind-guest.patch) and a config of
-# our own (guest/linux/config) merged over x86_64_defconfig.
+# the Rewind platform patches and a config of our own:
+#   - x86_64: `guest/linux/config` merged over `x86_64_defconfig` (boots `vmlinux`)
+#   - aarch64: `guest/linux/config-arm64` merged over `allnoconfig` with the
+#     ARM64 Rewind platform (`guest/linux/arm64/rewind.c`, boots `Image` and
+#     ships `vmlinux` alongside it for `rewind gdb`)
 #
 # A plain derivation rather than nixpkgs' kernel builder: that builder is
 # shaped around distribution configs with thousands of modules, and this
 # kernel has no modules at all.
 #
 # Two outputs of one build, so they describe the same code. `out` is what
-# runs and `rewind gdb` start from: vmlinux, which the VM boots and gdb
-# reads the symbol table of, with no DWARF, System.map, the final .config and the
-# kernel's gdb scripts (lx-ps, lx-dmesg and the rest). `debug` is
-# nixpkgs' separateDebugInfo output: vmlinux's DWARF under
-# lib/debug/.build-id, which gdb and debuginfod servers such as
-# nixseparatedebuginfod2 find by build ID, with links to the source and
-# the files the Rewind patch changes. Runs depend on `out` only, so the
-# DWARF is fetched only by someone who debugs.
+# runs and `rewind gdb` start from: `vmlinux` (and `Image` on aarch64),
+# `System.map`, `.config` and the kernel's gdb scripts (`lx-ps`, `lx-dmesg`
+# and the rest). `debug` is nixpkgs' separateDebugInfo output: `vmlinux`'s
+# DWARF under `lib/debug/.build-id`.
 { pkgs }:
 let
   inherit (pkgs) lib;
+  isAarch64 = pkgs.stdenv.hostPlatform.isAarch64;
+
+  # On macOS Apple Silicon (`aarch64-darwin`), build the guest Linux kernel
+  # via the aarch64-linux cross package set.
+  kernelPkgs =
+    if pkgs.stdenv.hostPlatform.isLinux then pkgs else pkgs.pkgsCross.aarch64-multiplatform;
+
   # A named series rather than linux_latest, so updating nixpkgs never
   # moves the guest to a new major version without the patch being ported.
-  upstream = pkgs.linux_7_2;
+  upstream = kernelPkgs.linux_7_2;
 
-  patches = [
+  x86Patches = [
     ../guest/linux/rewind-guest.patch
     # rewind.dirents=N: directories listed in the order of a SipHash of
     # each name keyed by N, as an ext4 made with another hash seed would
@@ -54,28 +60,38 @@ let
     # says N, in any user namespace
     ../guest/linux/rewind-cpus.patch
   ];
+
+  # Only the guest/linux/ subtree is needed to patch the ARM64 kernel, keeping
+  # the derivation hash independent of Rust edits.
+  guestLinuxSrc = lib.fileset.toSource {
+    root = ../.;
+    fileset = ../guest/linux;
+  };
 in
-pkgs.stdenv.mkDerivation {
+kernelPkgs.stdenv.mkDerivation {
   pname = "rewind-guest-kernel";
   separateDebugInfo = true;
   inherit (upstream) version src;
-  inherit patches;
+  patches = lib.optionals (!isAarch64) x86Patches;
 
-  depsBuildBuild = [ pkgs.buildPackages.stdenv.cc ];
+  depsBuildBuild = [ kernelPkgs.buildPackages.stdenv.cc ];
   nativeBuildInputs = [
-    pkgs.bison
-    pkgs.flex
-    pkgs.perl
-    pkgs.bc
-    pkgs.openssl
-    pkgs.elfutils
-    pkgs.zstd
-    pkgs.python3
-    pkgs.hexdump
+    kernelPkgs.buildPackages.bison
+    kernelPkgs.buildPackages.flex
+    kernelPkgs.buildPackages.perl
+    kernelPkgs.buildPackages.bc
+    kernelPkgs.buildPackages.openssl
+    kernelPkgs.buildPackages.elfutils
+    kernelPkgs.buildPackages.zstd
+    kernelPkgs.buildPackages.python3
+    kernelPkgs.buildPackages.hexdump
   ];
 
   # The kernel's own Makefiles hardcode /bin/pwd and friends.
   postPatch = ''
+    ${lib.optionalString isAarch64 ''
+      python3 ${guestLinuxSrc}/guest/linux/arm64/patch-kernel.py ${guestLinuxSrc} .
+    ''}
     patchShebangs scripts
   '';
 
@@ -87,34 +103,63 @@ pkgs.stdenv.mkDerivation {
     KBUILD_BUILD_TIMESTAMP = "1970-01-01";
   };
 
-  configurePhase = ''
-    runHook preConfigure
-    make x86_64_defconfig
-    scripts/kconfig/merge_config.sh -m .config ${../guest/linux/config}
-    make olddefconfig
+  makeFlags = lib.optionals (
+    isAarch64 && kernelPkgs.stdenv.buildPlatform != kernelPkgs.stdenv.hostPlatform
+  ) [
+    "ARCH=arm64"
+    "CROSS_COMPILE=${kernelPkgs.stdenv.cc.targetPrefix}"
+  ];
 
-    # merge_config warns and carries on when a symbol does not take. Here
-    # that would mean a kernel that boots somewhere else than intended, so
-    # every symbol the fragment sets must come out exactly as written.
-    failed=0
-    while IFS= read -r line; do
-      case "$line" in
-        CONFIG_*=*)
-          grep -qxF "$line" .config || { echo "config did not take: $line"; failed=1; } ;;
-        "# CONFIG_"*" is not set")
-          sym=''${line#\# }; sym=''${sym%% *}
-          if grep -q "^$sym=" .config; then echo "config did not take: $line"; failed=1; fi ;;
-      esac
-    done < ${../guest/linux/config}
-    [ "$failed" = 0 ]
-    runHook postConfigure
-  '';
+  configurePhase =
+    if isAarch64 then
+      ''
+        runHook preConfigure
+        make $makeFlags allnoconfig
+        scripts/kconfig/merge_config.sh -m .config ${../guest/linux/config-arm64}
+        make $makeFlags olddefconfig
 
-  buildPhase = ''
-    runHook preBuild
-    make -j$NIX_BUILD_CORES vmlinux scripts_gdb
-    runHook postBuild
-  '';
+        grep -qxF "CONFIG_REWIND_GUEST=y" .config
+        grep -qxF "CONFIG_OF_PMEM=y" .config
+        grep -qxF "CONFIG_EVENT_TRACING=y" .config
+        runHook postConfigure
+      ''
+    else
+      ''
+        runHook preConfigure
+        make x86_64_defconfig
+        scripts/kconfig/merge_config.sh -m .config ${../guest/linux/config}
+        make olddefconfig
+
+        # merge_config warns and carries on when a symbol does not take. Here
+        # that would mean a kernel that boots somewhere else than intended, so
+        # every symbol the fragment sets must come out exactly as written.
+        failed=0
+        while IFS= read -r line; do
+          case "$line" in
+            CONFIG_*=*)
+              grep -qxF "$line" .config || { echo "config did not take: $line"; failed=1; } ;;
+            "# CONFIG_"*" is not set")
+              sym=''${line#\# }; sym=''${sym%% *}
+              if grep -q "^$sym=" .config; then echo "config did not take: $line"; failed=1; fi ;;
+          esac
+        done < ${../guest/linux/config}
+        [ "$failed" = 0 ]
+        runHook postConfigure
+      '';
+
+  buildPhase =
+    if isAarch64 then
+      ''
+        runHook preBuild
+        make $makeFlags -j$NIX_BUILD_CORES Image vmlinux scripts_gdb
+        runHook postBuild
+      ''
+    else
+      ''
+        runHook preBuild
+        make -j$NIX_BUILD_CORES vmlinux scripts_gdb
+        runHook postBuild
+      '';
 
   # vmlinux goes in whole: the separateDebugInfo hook moves its DWARF to
   # `debug` in the fixup phase, and the strip after it, told about
@@ -123,6 +168,9 @@ pkgs.stdenv.mkDerivation {
     runHook preInstall
     mkdir -p $out
     cp .config System.map vmlinux $out/
+    ${lib.optionalString isAarch64 ''
+      cp arch/arm64/boot/Image $out/Image
+    ''}
     # The gdb scripts are the Python files in scripts/gdb, some of them
     # generated, next to the build's own files there.
     (cd scripts/gdb && find . -name '*.py' -exec install -D -m 444 {} $out/scripts/gdb/{} \;)
@@ -132,24 +180,53 @@ pkgs.stdenv.mkDerivation {
   stripDebugList = [ "vmlinux" ];
 
   # The hook's source overlay holds the files that differ from the
-  # tarball, for gdb to show as built. It finds them by checksum, so it
-  # misses the files the patches add, rewind.c among them, and takes in
-  # the scripts patchShebangs changed, which would make `debug` depend on
-  # perl and python. The overlay is made the patches' files instead.
-  postFixup = ''
-    overlay=$debug/src/overlay/$sourceRoot
-    rm -rf "$overlay"
-    sed -n 's|^+++ b/||p' ${
-      lib.concatMapStringsSep " " (patch: "${patch}") patches
-    } | cut -f1 | sort -u |
-      while read -r file; do
-        install -D -m 444 "$file" "$overlay/$file"
-      done
-  '';
+  # tarball, for gdb to show as built.
+  postFixup =
+    if isAarch64 then
+      ''
+        overlay=$debug/src/overlay/$sourceRoot
+        rm -rf "$overlay"
+        for file in \
+          arch/arm64/kernel/rewind.c \
+          arch/arm64/include/asm/rewind.h \
+          arch/arm64/include/asm/hypervisor.h \
+          arch/arm64/include/asm/fixmap.h \
+          arch/arm64/include/asm/timex.h \
+          arch/arm64/include/asm/irq_work.h \
+          arch/arm64/kernel/setup.c \
+          arch/arm64/kernel/irq.c \
+          arch/arm64/kernel/time.c \
+          arch/arm64/kernel/idle.c \
+          arch/arm64/kernel/traps.c \
+          arch/arm64/kernel/process.c \
+          arch/arm64/kernel/cpuinfo.c \
+          arch/arm64/kernel/smp.c; do
+          install -D -m 444 "$file" "$overlay/$file"
+        done
+      ''
+    else
+      ''
+        overlay=$debug/src/overlay/$sourceRoot
+        rm -rf "$overlay"
+        sed -n 's|^+++ b/||p' ${
+          lib.concatMapStringsSep " " (patch: "${patch}") x86Patches
+        } | cut -f1 | sort -u |
+          while read -r file; do
+            install -D -m 444 "$file" "$overlay/$file"
+          done
+      '';
+
+  passthru = {
+    bootImage = if isAarch64 then "Image" else "vmlinux";
+  };
 
   meta = {
     description = "Linux for the Rewind VM guest";
     license = lib.licenses.gpl2Only;
-    platforms = [ "x86_64-linux" ];
+    platforms = [
+      "x86_64-linux"
+      "aarch64-linux"
+      "aarch64-darwin"
+    ];
   };
 }

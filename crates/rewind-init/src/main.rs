@@ -656,6 +656,7 @@ fn measure(fd: i32, mark: &[u8], probe: Probe, iterations: u64, pages: *mut u8) 
 /// down a register and ends in `dec; jnz`, its backward branch. The
 /// conditional branches an iteration retires must match
 /// [`Probe::branches_per_iteration`].
+#[cfg(target_arch = "x86_64")]
 fn probe_loop(probe: Probe, iterations: u64, fd: i32, pages: *mut u8) {
     use std::arch::asm;
 
@@ -764,6 +765,15 @@ fn probe_loop(probe: Probe, iterations: u64, fd: i32, pages: *mut u8) {
                 options(nostack),
             )
         },
+    }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn probe_loop(_probe: Probe, iterations: u64, _fd: i32, _pages: *mut u8) {
+    let mut x = iterations;
+    while x > 0 {
+        std::hint::black_box(&mut x);
+        x -= 1;
     }
 }
 

@@ -68,7 +68,7 @@ mod tests {
         // through a root's prefix is too, and only with that prefix. A
         // path through `..` or `.`, the store itself, and a path outside
         // the store are none.
-        let exe = std::fs::read_link("/proc/self/exe").unwrap();
+        let exe = std::env::current_exe().unwrap();
         let exe = exe.to_str().unwrap();
         if !exe.starts_with(NIX_STORE) {
             eprintln!("the test runs from outside the store; skipped");

@@ -152,6 +152,83 @@ pub fn setup_msrs(vcpu: &VcpuFd) -> Result<()> {
     Ok(())
 }
 
+/// IA32_PERF_CAPABILITIES, which tells a guest what its performance
+/// counters can do.
+pub(crate) const IA32_PERF_CAPABILITIES: u32 = 0x345;
+
+/// IA32_ARCH_CAPABILITIES, which tells a guest the speculation bugs the
+/// CPU does not have and the mitigations it does.
+pub(crate) const IA32_ARCH_CAPABILITIES: u32 = 0x10a;
+
+/// CPUID leaf 7 EDX bit 29: the CPU has IA32_ARCH_CAPABILITIES.
+const ARCH_CAPABILITIES: u32 = 1 << 29;
+
+/// The MSRs that describe the CPU to the guest, each with the value the
+/// CPU that `cpuid` shows has, of the ones KVM lists in `listed`. A Linux
+/// before 6.13 starts every one at the most the host supports, whatever
+/// the VM was given, and a later one does so for an MSR CPUID shows. A
+/// keyframe holds what KVM reads back, so without these values a keyframe
+/// would hold the host's.
+///
+/// IA32_PERF_CAPABILITIES is 0: the VM has no counters (see
+/// kvm::turn_off_counters). On an Intel host KVM starts the MSR at the
+/// host's LBR format and full-width counter bits all the same, and a
+/// Linux before 6.13 refuses to be given any value but 0 for a vCPU
+/// without counters, the value it started the MSR at included. A
+/// keyframe would hold that value, and no restore could set it.
+///
+/// IA32_ARCH_CAPABILITIES is 0 for a CPU whose CPUID hides the MSR, as
+/// the v3 model's does. A Linux before 6.13 reads back the host's value
+/// there, and a later one reads back 0 and takes nothing else, so a
+/// keyframe from the first would not restore on the second. A CPU whose
+/// CPUID shows the MSR, as the host model's can, keeps the host's value.
+fn capability_msrs(listed: &[u32], cpuid: &[kvm_cpuid_entry2]) -> Vec<(u32, u64)> {
+    const STRUCTURED_FEATURES: u32 = 7;
+
+    let mut msrs = vec![(IA32_PERF_CAPABILITIES, 0)];
+    let arch_capabilities_shown = cpuid.iter().any(|leaf| {
+        leaf.function == STRUCTURED_FEATURES && leaf.index == 0 && leaf.edx & ARCH_CAPABILITIES != 0
+    });
+    if !arch_capabilities_shown {
+        msrs.push((IA32_ARCH_CAPABILITIES, 0));
+    }
+
+    // A KVM that does not list an MSR has no such MSR to set.
+    msrs.retain(|(index, _)| listed.contains(index));
+    msrs
+}
+
+/// Sets the MSRs that describe the CPU to what the CPU that `cpuid` shows
+/// has, on a vCPU that has not run: KVM takes no other value for them
+/// once the vCPU has. A machine that boots and one restored from a
+/// keyframe both start here, so a keyframe holds these values on every
+/// host.
+pub fn setup_capability_msrs(kvm: &Kvm, vcpu: &VcpuFd, cpuid: &[kvm_cpuid_entry2]) -> Result<()> {
+    let listed = kvm.get_msr_index_list()?;
+    let entries: Vec<kvm_msr_entry> = capability_msrs(listed.as_slice(), cpuid)
+        .into_iter()
+        .map(|(index, data)| kvm_msr_entry {
+            index,
+            data,
+            ..Default::default()
+        })
+        .collect();
+    if entries.is_empty() {
+        return Ok(());
+    }
+
+    let msrs = Msrs::from_entries(&entries).context("building MSR list")?;
+    let n = vcpu.set_msrs(&msrs)?;
+    if n != entries.len() {
+        anyhow::bail!(
+            "KVM refused {} as {:#x} on a new vCPU",
+            crate::state::msr_name(entries[n].index),
+            entries[n].data
+        );
+    }
+    Ok(())
+}
+
 /// LINT0 as ExtINT and LINT1 as NMI, the way firmware leaves the local APIC
 /// for an operating system.
 pub fn setup_lapic(vcpu: &VcpuFd) -> Result<()> {
@@ -773,6 +850,57 @@ mod tests {
         ext1_ecx: PREFETCHW,
         ..NOTHING
     };
+
+    #[test]
+    fn a_vm_without_counters_reports_no_perf_capabilities() {
+        // Where KVM lists IA32_PERF_CAPABILITIES, a new vCPU's is set to
+        // 0, what a VM with no counters has. Where KVM does not list the
+        // MSR, nothing is set.
+        const LSTAR: u32 = 0xc000_0082;
+        let cpuid = [arch_capabilities_leaf(Shown::Yes)];
+        assert_eq!(
+            capability_msrs(&[LSTAR, IA32_PERF_CAPABILITIES], &cpuid),
+            [(IA32_PERF_CAPABILITIES, 0)]
+        );
+        assert_eq!(capability_msrs(&[LSTAR], &cpuid), []);
+    }
+
+    /// Whether a CPUID shows the guest IA32_ARCH_CAPABILITIES.
+    enum Shown {
+        Yes,
+        No,
+    }
+
+    /// CPUID leaf 7 with or without the bit for IA32_ARCH_CAPABILITIES.
+    fn arch_capabilities_leaf(shown: Shown) -> kvm_cpuid_entry2 {
+        kvm_cpuid_entry2 {
+            function: 7,
+            edx: match shown {
+                Shown::Yes => ARCH_CAPABILITIES,
+                Shown::No => 0,
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn arch_capabilities_are_zero_for_a_cpu_that_hides_them() {
+        // A CPUID without the bit for IA32_ARCH_CAPABILITIES, as the v3
+        // model's is, and one with no leaf 7 at all: the MSR is set to 0.
+        // A CPUID with the bit, as the host model's can be: the MSR is
+        // left as KVM started it, at the host's.
+        let listed = [IA32_ARCH_CAPABILITIES, IA32_PERF_CAPABILITIES];
+        let both = [(IA32_PERF_CAPABILITIES, 0), (IA32_ARCH_CAPABILITIES, 0)];
+        assert_eq!(
+            capability_msrs(&listed, &[arch_capabilities_leaf(Shown::No)]),
+            both
+        );
+        assert_eq!(capability_msrs(&listed, &[]), both);
+        assert_eq!(
+            capability_msrs(&listed, &[arch_capabilities_leaf(Shown::Yes)]),
+            [(IA32_PERF_CAPABILITIES, 0)]
+        );
+    }
 
     #[test]
     fn the_v3_model_is_pinned() {

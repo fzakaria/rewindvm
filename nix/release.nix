@@ -18,6 +18,8 @@
 }:
 let
   inherit (pkgs) lib;
+  system = pkgs.stdenv.hostPlatform.system;
+  bootImage = kernel.bootImage or "vmlinux";
 
   # The engine built against musl, with dependencies of its own: the
   # dynamically linked package's are for another target.
@@ -62,9 +64,9 @@ let
     here=$(dirname "$(readlink -f "$0")")
     PATH="$here/../libexec/rewind-tools:$PATH"
     export PATH
-    : "''${REWIND_KERNEL:=$here/../share/rewind/vmlinux}"
+    : "''${REWIND_KERNEL:=$here/../share/rewind/${bootImage}}"
     : "''${REWIND_INITRD:=$here/../share/rewind/initrd}"
-    debug=$(readlink -f "$here/../../rewind-debug-x86_64-linux")
+    debug=$(readlink -f "$here/../../rewind-debug-${system}")
     if [ -z "''${REWIND_KERNEL_DEBUG:-}" ] && [ -e "$debug/lib/debug/vmlinux" ]; then
       REWIND_KERNEL_DEBUG=$debug
     fi
@@ -75,14 +77,15 @@ let
   '';
 in
 pkgs.runCommand "rewind-release" { } ''
-  dir=rewind-x86_64-linux
+  dir=rewind-${system}
   mkdir -p $dir/bin $dir/libexec $dir/share/rewind
   cp ${static}/bin/rewind $dir/libexec/rewind
   mkdir -p $dir/libexec/rewind-tools
   cp ${pkgs.pkgsStatic.erofs-utils}/bin/mkfs.erofs ${pkgs.pkgsStatic.erofs-utils}/bin/dump.erofs \
     ${staticTar}/bin/tar $dir/libexec/rewind-tools/
   install -m 755 ${launcher} $dir/bin/rewind
-  cp -r ${kernel}/vmlinux ${kernel}/vmlinux-gdb.py ${kernel}/scripts \
+  cp -r ${kernel}/vmlinux ${lib.optionalString (bootImage != "vmlinux") "${kernel}/${bootImage}"} \
+    ${kernel}/vmlinux-gdb.py ${kernel}/scripts \
     ${guest.initrd}/initrd $dir/share/rewind/
   chmod -R u+w $dir/share/rewind
   cp ${../LICENSE} $dir/LICENSE

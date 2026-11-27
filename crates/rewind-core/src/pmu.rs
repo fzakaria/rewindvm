@@ -51,21 +51,35 @@ pub enum Vendor {
 
 impl Vendor {
     pub fn detect() -> Result<Vendor> {
-        let info = fs::read_to_string("/proc/cpuinfo")?;
-        let field = |name: &str| {
-            info.lines()
-                .find(|l| l.starts_with(name))
-                .and_then(|l| l.split(':').nth(1))
-                .map(|v| v.trim().to_string())
-                .unwrap_or_default()
-        };
-        Ok(match field("vendor_id").as_str() {
-            "GenuineIntel" => Vendor::Intel,
-            "AuthenticAMD" => Vendor::Amd {
-                family: field("cpu family").parse().unwrap_or(0),
-            },
-            other => Vendor::Other(other.to_string()),
-        })
+        #[cfg(target_os = "macos")]
+        {
+            Ok(Vendor::Other("Apple Silicon".into()))
+        }
+        #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+        {
+            Ok(Vendor::Other("ARM64".into()))
+        }
+        #[cfg(not(any(
+            target_os = "macos",
+            all(target_os = "linux", target_arch = "aarch64")
+        )))]
+        {
+            let info = fs::read_to_string("/proc/cpuinfo")?;
+            let field = |name: &str| {
+                info.lines()
+                    .find(|l| l.starts_with(name))
+                    .and_then(|l| l.split(':').nth(1))
+                    .map(|v| v.trim().to_string())
+                    .unwrap_or_default()
+            };
+            Ok(match field("vendor_id").as_str() {
+                "GenuineIntel" => Vendor::Intel,
+                "AuthenticAMD" => Vendor::Amd {
+                    family: field("cpu family").parse().unwrap_or(0),
+                },
+                other => Vendor::Other(other.to_string()),
+            })
+        }
     }
 
     /// The counter this vendor's cores count retired conditional branches
@@ -271,6 +285,13 @@ fn inexact_reason(vendor: &Vendor) -> &'static str {
 
 /// The warning a run made with exit time prints, and the app shows.
 pub fn exit_time_warning(vendor: &Vendor) -> String {
+    if vendor.event().is_none() {
+        return format!(
+            "recording with exit time on {vendor}: hardware branch-counter time is not available \
+             on this platform. Computation will not move the VM's clock, so a timer set during a \
+             long computation fires late. Why: {DOCS_URL}"
+        );
+    }
     let why = inexact_reason(vendor);
     format!(
         "recording with exit time: {why}. Computation will not move the VM's clock, so a \

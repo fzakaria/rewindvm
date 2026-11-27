@@ -493,9 +493,14 @@ pub(crate) fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
     if let Some(file) = &properties_file {
         properties.extend(Property::read_file(file)?);
     }
-    let jobs = jobs
-        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
-        .max(1);
+    // Hypervisor.framework allows only one VM per process, so in-process
+    // search runs sequentially on macOS.
+    let jobs = if cfg!(target_os = "macos") {
+        1
+    } else {
+        jobs.unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
+            .max(1)
+    };
     // Exploring compares runs; only the unperturbed run, which every
     // other run starts from, and the two reported get keyframes.
     machine.no_keyframes = true;
@@ -586,7 +591,11 @@ pub(crate) fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
                     shares,
                 )
             };
-            let (base, first_batch) = match batch_alongside(0, dirents, schedules) {
+            let (base, first_batch) = match if cfg!(target_os = "macos") {
+                Alongside::No
+            } else {
+                batch_alongside(0, dirents, schedules)
+            } {
                 Alongside::No => (first(Shares::ALONE)?, None),
 
                 // The first batch starts once the unperturbed run hands
@@ -807,7 +816,11 @@ pub(crate) fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
                     // of them starts right away beside it.
                     let fork =
                         || fork_window(home, run, &machine, window, Some(&reseed), &store, None);
-                    let seed_base = match batch_alongside(i, dirents, schedules) {
+                    let seed_base = match if cfg!(target_os = "macos") {
+                        Alongside::No
+                    } else {
+                        batch_alongside(i, dirents, schedules)
+                    } {
                         Alongside::No => fork(),
                         Alongside::Yes => std::thread::scope(|scope| {
                             let from = reseed.step;
@@ -856,7 +869,11 @@ pub(crate) fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
                     // The seed's first batch starts once the seed's
                     // unperturbed run hands off. The time limit is known
                     // by now.
-                    let seed_base = match batch_alongside(i, dirents, schedules) {
+                    let seed_base = match if cfg!(target_os = "macos") {
+                        Alongside::No
+                    } else {
+                        batch_alongside(i, dirents, schedules)
+                    } {
                         Alongside::No => first(Shares::ALONE),
                         Alongside::Yes => {
                             let batch = |live: Arc<Live>| {
@@ -1314,11 +1331,15 @@ pub(crate) fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
         }
     };
 
-    let (worst, partner) = std::thread::scope(|scope| {
-        let worst = scope.spawn(|| worst.add_keyframes(home));
-        let partner = partner.add_keyframes(home);
-        (worst.join().expect("taking keyframes panicked"), partner)
-    });
+    let (worst, partner) = if cfg!(target_os = "macos") {
+        (worst.add_keyframes(home), partner.add_keyframes(home))
+    } else {
+        std::thread::scope(|scope| {
+            let worst = scope.spawn(|| worst.add_keyframes(home));
+            let partner = partner.add_keyframes(home);
+            (worst.join().expect("taking keyframes panicked"), partner)
+        })
+    };
     let (worst, partner) = (worst?, partner?);
     let found_key = dirents_of(&worst.manifest.spec.cmdline);
 
@@ -1477,16 +1498,20 @@ pub(crate) fn check(home: &Home, args: CheckArgs) -> Result<ExitCode> {
 /// or it is not deterministic on this host. Either way no schedule, seed
 /// or directory order decides how it ends.
 fn replays_exactly(runs: &[(&str, &Run)]) -> Result<()> {
-    let replays: Vec<_> = std::thread::scope(|scope| {
-        let handles: Vec<_> = runs
-            .iter()
-            .map(|(_, run)| scope.spawn(move || run.replay()))
-            .collect();
-        handles
-            .into_iter()
-            .map(|h| h.join().expect("replaying a run panicked"))
-            .collect()
-    });
+    let replays: Vec<_> = if cfg!(target_os = "macos") {
+        runs.iter().map(|(_, run)| run.replay()).collect()
+    } else {
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = runs
+                .iter()
+                .map(|(_, run)| scope.spawn(move || run.replay()))
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("replaying a run panicked"))
+                .collect()
+        })
+    };
     for ((words, run), replayed) in runs.iter().zip(replays) {
         let Some(d) = replayed? else {
             continue;

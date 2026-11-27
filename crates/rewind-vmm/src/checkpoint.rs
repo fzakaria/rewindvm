@@ -21,7 +21,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use anyhow::{Context, Result, bail};
 
-use crate::layout::PAGE_SIZE;
+use crate::layout::{PAGE_SIZE, RAM_BASE};
 use crate::snapshot::{CpuState, DeviceState, Pages};
 use crate::{Machine, Origin};
 
@@ -178,7 +178,7 @@ impl Machine {
         if self.dirty_log == crate::DirtyLog::Off {
             bail!("the machine runs without a dirty log");
         }
-        let pages = crate::read_dirty_log(&self.vm, self.dev.ram.len())?;
+        let pages = self.drain_dirty_log()?;
         self.checkpoints
             .since
             .extend(pages.iter().map(|&i| i as Page));
@@ -191,7 +191,10 @@ impl Machine {
     /// The page the monitor writes into itself, which the dirty log does
     /// not see, once the guest has named it.
     fn shared_page(&self) -> Option<Page> {
-        self.dev.shared.map(|s| (s as usize / PAGE_SIZE) as Page)
+        self.dev
+            .shared
+            .and_then(|s| s.checked_sub(RAM_BASE))
+            .map(|off| (off as usize / PAGE_SIZE) as Page)
     }
 
     /// Keeps the machine as it is now, at a step's start, its pending exit
@@ -206,7 +209,7 @@ impl Machine {
         let mut pages = KeptPages::with_capacity(written.len());
         let mut bytes = [0u8; PAGE_SIZE];
         for &page in &written {
-            let at = page as u64 * PAGE_SIZE as u64;
+            let at = RAM_BASE + page as u64 * PAGE_SIZE as u64;
             self.read_physical(at, &mut bytes)?;
             pages.insert(page, &bytes);
         }
@@ -263,7 +266,11 @@ impl Machine {
         );
         back.extend(self.shared_page());
         let target_shared = self.checkpoints.taken[id.0].devices.shared;
-        back.extend(target_shared.map(|s| (s as usize / PAGE_SIZE) as Page));
+        back.extend(
+            target_shared
+                .and_then(|s| s.checked_sub(RAM_BASE))
+                .map(|off| (off as usize / PAGE_SIZE) as Page),
+        );
         for page in back {
             let source = self.checkpoints.tree.source(id, page);
             if source == Source::Origin {
@@ -343,7 +350,8 @@ impl Machine {
         written.extend(
             last.devices
                 .shared
-                .map(|s| (s as usize / PAGE_SIZE) as Page),
+                .and_then(|s| s.checked_sub(RAM_BASE))
+                .map(|off| (off as usize / PAGE_SIZE) as Page),
         );
 
         // Those pages and the ones the keyframes hold differently, with
@@ -374,7 +382,7 @@ impl Machine {
         // The checkpoints were over the old origin; the dirty log starts
         // afresh from the keyframe's memory.
         self.checkpoints = Checkpoints::default();
-        crate::read_dirty_log(&self.vm, self.dev.ram.len())?;
+        self.drain_dirty_log()?;
         self.apply_state(&last.cpu, &last.irqchips, &last.devices)?;
         self.resume_records(trace, last.devices.step)?;
         Ok(())

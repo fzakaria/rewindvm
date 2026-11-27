@@ -852,7 +852,7 @@ impl<'a> Window<'a> {
                 let tasks = Tasks::new(&self.machine, layout);
                 let (_, thread) = tasks.current_thread()?;
                 let syscall = match after_pc >= USER_END {
-                    true => Some(tasks.user_registers(thread.task)?[pt_regs::ORIG_RAX]),
+                    true => Some(pt_regs::syscall_number(&tasks.user_registers(thread.task)?)),
                     false => None,
                 };
                 (thread.tid, thread.name, syscall)

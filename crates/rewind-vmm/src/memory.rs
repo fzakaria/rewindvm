@@ -50,16 +50,20 @@ const WORD_BITS: usize = u64::BITS as usize;
 unsafe impl Send for Mapping {}
 
 impl Mapping {
-    /// Zeroed anonymous memory. MAP_NORESERVE so a large guest costs only
-    /// what it touches.
+    /// Zeroed anonymous memory. MAP_NORESERVE on Linux so a large guest costs
+    /// only what it touches.
     pub fn anonymous(len: usize) -> Result<Self> {
+        #[cfg(target_os = "linux")]
+        let flags = libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE;
+        #[cfg(not(target_os = "linux"))]
+        let flags = libc::MAP_PRIVATE | libc::MAP_ANON;
         // SAFETY: a fresh anonymous mapping aliases nothing.
         let ptr = unsafe {
             libc::mmap(
                 std::ptr::null_mut(),
                 len,
                 libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE,
+                flags,
                 -1,
                 0,
             )
@@ -159,10 +163,17 @@ impl Mapping {
     /// transparent huge pages, or a sandbox that refuses the advice,
     /// leaves the mapping as it was, in 4 KiB pages.
     pub fn prefer_huge_pages(&self) -> HugePages {
-        // SAFETY: advice on our own live mapping changes no contents.
-        let advised =
-            unsafe { libc::madvise(self.ptr.as_ptr().cast(), self.len, libc::MADV_HUGEPAGE) };
-        huge_pages(advised, std::io::Error::last_os_error())
+        #[cfg(target_os = "linux")]
+        {
+            // SAFETY: advice on our own live mapping changes no contents.
+            let advised =
+                unsafe { libc::madvise(self.ptr.as_ptr().cast(), self.len, libc::MADV_HUGEPAGE) };
+            huge_pages(advised, std::io::Error::last_os_error())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            huge_pages(-1, std::io::Error::from_raw_os_error(libc::ENOSYS))
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -186,6 +197,22 @@ impl Mapping {
         // SAFETY: the mapping is live, `len` bytes long, and we hold it
         // exclusively.
         unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
+    }
+
+    /// Reads guest memory at guest physical address `gpa` (subtracting `RAM_BASE`).
+    pub fn read_gpa(&self, gpa: u64, buf: &mut [u8]) -> Result<()> {
+        let Some(off) = gpa.checked_sub(crate::layout::RAM_BASE) else {
+            bail!("guest physical address {gpa:#x} is below RAM_BASE");
+        };
+        self.read(off, buf)
+    }
+
+    /// Writes guest memory at guest physical address `gpa` (subtracting `RAM_BASE`).
+    pub fn write_gpa(&mut self, gpa: u64, buf: &[u8]) -> Result<()> {
+        let Some(off) = gpa.checked_sub(crate::layout::RAM_BASE) else {
+            bail!("guest physical address {gpa:#x} is below RAM_BASE");
+        };
+        self.write(off, buf)
     }
 
     /// Reads guest memory at `offset`, failing rather than reading past the

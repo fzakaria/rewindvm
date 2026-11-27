@@ -44,11 +44,15 @@ use gdbstub::target::ext::breakpoints::{
 use gdbstub::target::ext::libraries::{LibrariesSvr4, LibrariesSvr4Ops};
 use gdbstub::target::ext::thread_extra_info::{ThreadExtraInfo, ThreadExtraInfoOps};
 use gdbstub::target::{Target, TargetError, TargetResult};
+#[cfg(target_arch = "x86_64")]
 use gdbstub_arch::x86::reg::X86_64CoreRegs;
 use rewind_vmm::debug::{Access, DebugStop, MAX_TRAPS, Stepping, Trap, TrapSet};
 use rewind_vmm::pv::{TaskLayout, pt_regs};
 use rewind_vmm::{Machine, Observer, Outcome};
 
+#[cfg(target_arch = "aarch64")]
+use crate::gdb_regs::{AArch64, AArch64CoreRegs};
+#[cfg(target_arch = "x86_64")]
 use crate::gdb_regs::{RegsWithBases, X86_64WithBases};
 
 use crate::threads::{Memory, Tasks, Thread};
@@ -64,6 +68,7 @@ const CHUNK_STEPS: u64 = 10_000;
 
 /// The order gdb's x86-64 description lists the general purpose
 /// registers in.
+#[cfg(target_arch = "x86_64")]
 const GPR_COUNT: usize = 16;
 
 /// The most bytes one debug register watches.
@@ -73,17 +78,20 @@ const MAX_PIECE: u64 = 8;
 /// piece.
 pub(crate) const MAX_WATCH_LEN: u64 = MAX_TRAPS as u64 * MAX_PIECE;
 
-/// CR3's page table base, bits 12 to 51, which names an address space;
-/// the bits below are the PCID, which changes as the kernel switches. The
-/// guest boots with mitigations off, so a process has one page table, not
-/// a user and a kernel one.
+/// Page table base bits (x86-64 CR3 bits 12..51, ARM64 TTBR0_EL1 bits 12..47).
+#[cfg(target_arch = "x86_64")]
 const CR3_PAGE_TABLE: u64 = 0x000f_ffff_ffff_f000;
+#[cfg(target_arch = "aarch64")]
+const CR3_PAGE_TABLE: u64 = 0x0000_ffff_ffff_f000;
 
 /// The size of a page, which the vDSO is a whole number of.
 const PAGE_SIZE: u64 = 4096;
 
-/// Where x86-64's lower half, user space, ends.
+/// Where user space's lower half ends.
+#[cfg(target_arch = "x86_64")]
 pub(crate) const USER_END: u64 = 0x0000_8000_0000_0000;
+#[cfg(target_arch = "aarch64")]
+pub(crate) const USER_END: u64 = 0x0001_0000_0000_0000;
 
 /// The CPU's thread id for gdb, the same at every stop whichever task is
 /// on it, so a step of the CPU stops the thread gdb stepped. One past
@@ -95,17 +103,32 @@ const CPU_TID: usize = 4_194_305;
 const SELECTOR_RPL: u64 = 0b11;
 const USER_RPL: u64 = 0b11;
 
-/// x86-64's `syscall` instruction. It leaves the address after it in rcx,
-/// which the kernel's entry saves in the thread's struct pt_regs with the
-/// rest of its user registers.
+/// Syscall instruction bytes (`syscall` on x86-64, `svc #0` on ARM64).
+#[cfg(target_arch = "x86_64")]
 const SYSCALL: [u8; 2] = [0x0f, 0x05];
+#[cfg(target_arch = "aarch64")]
+const SYSCALL: [u8; 4] = [0x01, 0x00, 0x00, 0xd4];
 
-/// x86-64 system calls after which the thread never runs the debugged
-/// program's user space again: exec runs another program, and exit none.
+/// System calls after which the thread never runs the debugged program's
+/// user space again: exec runs another program, and exit none.
+#[cfg(target_arch = "x86_64")]
 const SYS_EXECVE: u64 = 59;
+#[cfg(target_arch = "x86_64")]
 const SYS_EXIT: u64 = 60;
+#[cfg(target_arch = "x86_64")]
 const SYS_EXIT_GROUP: u64 = 231;
+#[cfg(target_arch = "x86_64")]
 const SYS_EXECVEAT: u64 = 322;
+
+#[cfg(target_arch = "aarch64")]
+const SYS_EXECVE: u64 = 221;
+#[cfg(target_arch = "aarch64")]
+const SYS_EXIT: u64 = 93;
+#[cfg(target_arch = "aarch64")]
+const SYS_EXIT_GROUP: u64 = 94;
+#[cfg(target_arch = "aarch64")]
+const SYS_EXECVEAT: u64 = 281;
+
 const NO_RETURN: [u64; 4] = [SYS_EXECVE, SYS_EXIT, SYS_EXIT_GROUP, SYS_EXECVEAT];
 
 /// How long the kernel's variable for the running task is, a pointer.
@@ -224,6 +247,7 @@ fn thread_number(threads: &[Seen], tid: u32) -> Option<usize> {
 
 /// gdb's registers from a struct pt_regs: the user registers a thread
 /// saved, with the data segments user space runs with, which are 0.
+#[cfg(target_arch = "x86_64")]
 fn saved_registers(words: &[u64; pt_regs::WORDS]) -> X86_64CoreRegs {
     let segments = gdbstub_arch::x86::reg::X86SegmentRegs {
         cs: words[pt_regs::CS] as u16 as u32,
@@ -257,21 +281,39 @@ fn saved_registers(words: &[u64; pt_regs::WORDS]) -> X86_64CoreRegs {
     }
 }
 
+/// gdb's AArch64 registers from a Linux ARM64 `struct pt_regs`.
+#[cfg(target_arch = "aarch64")]
+fn saved_registers(words: &[u64; pt_regs::WORDS]) -> AArch64CoreRegs {
+    let mut x = [0u64; 31];
+    x.copy_from_slice(&words[..31]);
+    AArch64CoreRegs {
+        x,
+        sp: words[pt_regs::SP],
+        pc: words[pt_regs::PC],
+        cpsr: words[pt_regs::PSTATE] as u32,
+        ..Default::default()
+    }
+}
+
 /// Where the kernel's syscall entry keeps the user rsp while it switches
 /// to the task's stack, before pushing it: the TSS's sp2 word, 20 bytes
 /// into the TSS that TR names.
+#[cfg(target_arch = "x86_64")]
 const TSS_SP2: u64 = 20;
 
 /// Where the TSS keeps sp0, the stack the CPU switches to for an
 /// exception or interrupt from user space: in Linux the CPU's entry
 /// stack, which error_entry copies the registers from to the task's.
+#[cfg(target_arch = "x86_64")]
 const TSS_SP0: u64 = 4;
 
 /// The size of Linux's entry stack, one page.
+#[cfg(target_arch = "x86_64")]
 const ENTRY_STACK_BYTES: u64 = 4096;
 
 /// Where the kernel may be saving the user registers of the thread on the
 /// CPU, and what it may still hold of them.
+#[cfg(target_arch = "x86_64")]
 #[derive(Debug)]
 struct Saving {
     /// The thread's struct pt_regs, at the top of its stack, and its
@@ -299,6 +341,7 @@ struct Saving {
 /// words below rsp are not pushed yet, or popped already, and are the
 /// CPU's, the user rsp in the syscall entry's scratch word when it has
 /// stashed it. Anywhere else the task's struct holds them all.
+#[cfg(target_arch = "x86_64")]
 fn being_saved(saving: &Saving, cpu: &rewind_vmm::debug::kvm_regs) -> [u64; pt_regs::WORDS] {
     let size = (pt_regs::WORDS * size_of::<u64>()) as u64;
     let (task, saved) = saving.task;
@@ -697,17 +740,63 @@ fn switched_by_exec(now: Option<u64>, space: Option<u64>) -> bool {
 
 /// Whether a thread entered the kernel by a syscall instruction, from
 /// `saved`, the user registers it saved on the way in, and `code`, the
-/// two bytes before its saved pc when they could be read. The instruction
-/// leaves the address after it in rcx, so rcx and the pc agree; an
-/// interrupt or exception saves the thread's own rcx.
+/// bytes before its saved pc when they could be read.
+#[cfg(target_arch = "x86_64")]
 fn entered_by_syscall(saved: &[u64; pt_regs::WORDS], code: Option<[u8; 2]>) -> bool {
     saved[pt_regs::RCX] == saved[pt_regs::RIP] && code == Some(SYSCALL)
+}
+
+#[cfg(target_arch = "aarch64")]
+fn entered_by_syscall(saved: &[u64; pt_regs::WORDS], code: Option<[u8; 4]>) -> bool {
+    pt_regs::syscallno(saved) >= 0 && code == Some(SYSCALL)
+}
+
+/// Holds the debuggee's `Machine` so replacing it during reverse execution
+/// drops the old VM before creating a new one (required on macOS HVF, which
+/// allows only one VM per process).
+#[derive(Debug)]
+struct MachineSlot(Option<Machine>);
+
+impl MachineSlot {
+    fn new(machine: Machine) -> Self {
+        Self(Some(machine))
+    }
+
+    fn replace(&mut self, make: impl FnOnce() -> Result<Machine>) -> Result<()> {
+        self.0 = None;
+        self.0 = Some(make()?);
+        Ok(())
+    }
+}
+
+impl std::ops::Deref for MachineSlot {
+    type Target = Machine;
+
+    fn deref(&self) -> &Machine {
+        self.0
+            .as_ref()
+            .expect("MachineSlot is only empty during a failed replace")
+    }
+}
+
+impl std::ops::DerefMut for MachineSlot {
+    fn deref_mut(&mut self) -> &mut Machine {
+        self.0
+            .as_mut()
+            .expect("MachineSlot is only empty during a failed replace")
+    }
+}
+
+impl Memory for MachineSlot {
+    fn read(&self, address: u64, buf: &mut [u8]) -> Result<()> {
+        (**self).read(address, buf)
+    }
 }
 
 /// A forked machine under gdb.
 #[derive(Debug)]
 pub struct Debuggee<'h> {
-    machine: Machine,
+    machine: MachineSlot,
     traps: Traps,
     mode: Mode,
     /// The thread gdb asked to step, which it expects the step to stop.
@@ -917,7 +1006,7 @@ impl<'h> Debuggee<'h> {
         };
         let position = Position::start(machine.step());
         let mut debuggee = Debuggee {
-            machine,
+            machine: MachineSlot::new(machine),
             traps: Traps::default(),
             mode: Mode::Continue,
             stepped: None,
@@ -995,7 +1084,7 @@ impl<'h> Debuggee<'h> {
         let Some(layout) = self.layout else {
             return Ok(seen(None, &[]));
         };
-        let tasks = Tasks::new(&self.machine, layout);
+        let tasks = Tasks::new(&*self.machine, layout);
         let current = tasks.current()?;
         let cpu = Thread {
             tid: tasks.tid(current)?,
@@ -1111,7 +1200,7 @@ impl<'h> Debuggee<'h> {
         let (Some(pid), Some(layout)) = (self.process, self.layout) else {
             return Ok(true);
         };
-        let tasks = Tasks::new(&self.machine, layout);
+        let tasks = Tasks::new(&*self.machine, layout);
         let Some(task) = tasks.process(pid)? else {
             return Ok(false);
         };
@@ -1127,7 +1216,7 @@ impl<'h> Debuggee<'h> {
         let (Some(pid), Some(layout)) = (self.process, self.layout) else {
             return Ok(false);
         };
-        let tasks = Tasks::new(&self.machine, layout);
+        let tasks = Tasks::new(&*self.machine, layout);
         let Some(task) = tasks.process(pid)? else {
             return Ok(false);
         };
@@ -1139,6 +1228,7 @@ impl<'h> Debuggee<'h> {
     /// the CPU, given `task`, its struct pt_regs and the struct's words:
     /// with the CPU's entry stack, the syscall entry's scratch word, both
     /// found from the TSS, and whether error_entry has yet to store rdi.
+    #[cfg(target_arch = "x86_64")]
     fn saving(&self, task: (u64, [u64; pt_regs::WORDS])) -> Result<Saving> {
         let tr = self.machine.special_registers()?.tr.base;
         let word = |at: u64| -> Result<Option<u64>> {
@@ -1252,7 +1342,7 @@ impl<'h> Debuggee<'h> {
         {
             return Ok(None);
         }
-        let tasks = Tasks::new(&self.machine, layout);
+        let tasks = Tasks::new(&*self.machine, layout);
         let pc = Watch {
             address: tasks.user_register_address(task, pt_regs::RIP)?,
             len: POINTER_LEN,
@@ -1337,7 +1427,7 @@ impl<'h> Debuggee<'h> {
         let (Some(pid), Some(layout)) = (self.process, self.layout) else {
             return Ok(None);
         };
-        let tasks = Tasks::new(&self.machine, layout);
+        let tasks = Tasks::new(&*self.machine, layout);
         let task = tasks.current()?;
         if tasks.tgid(task)? != pid {
             return Ok(None);
@@ -1351,10 +1441,14 @@ impl<'h> Debuggee<'h> {
         };
         let mut code = [0u8; SYSCALL.len()];
         let code = self.read_process(address, &mut code).ok().map(|()| code);
+        #[cfg(target_arch = "x86_64")]
+        let number = saved[pt_regs::ORIG_RAX];
+        #[cfg(target_arch = "aarch64")]
+        let number = pt_regs::syscallno(&saved) as u64;
         Ok(entered_by_syscall(&saved, code).then_some(SystemCall {
             task,
             address,
-            number: saved[pt_regs::ORIG_RAX],
+            number,
         }))
     }
 
@@ -1375,7 +1469,10 @@ impl<'h> Debuggee<'h> {
 }
 
 impl Target for Debuggee<'_> {
+    #[cfg(target_arch = "x86_64")]
     type Arch = X86_64WithBases;
+    #[cfg(target_arch = "aarch64")]
+    type Arch = AArch64;
     type Error = String;
 
     fn base_ops(&mut self) -> BaseOps<'_, Self::Arch, Self::Error> {
@@ -1504,6 +1601,7 @@ fn fatal<E: std::fmt::Display>(e: E) -> TargetError<String> {
 }
 
 impl MultiThreadBase for Debuggee<'_> {
+    #[cfg(target_arch = "x86_64")]
     fn read_registers(&mut self, regs: &mut RegsWithBases, tid: Tid) -> TargetResult<(), Self> {
         // A thread off the CPU, or in the kernel on it: the user registers
         // it saved in its pt_regs. A thread whose registers do not read,
@@ -1513,7 +1611,7 @@ impl MultiThreadBase for Debuggee<'_> {
             && !(on == OnCpu::Yes && self.running().map_err(fatal)? == Running::UserSpace)
         {
             let layout = self.layout.ok_or(TargetError::NonFatal)?;
-            let tasks = Tasks::new(&self.machine, layout);
+            let tasks = Tasks::new(&*self.machine, layout);
             let not_read = |e: anyhow::Error| {
                 eprintln!("rewind: {e:#}");
                 TargetError::NonFatal
@@ -1576,6 +1674,34 @@ impl MultiThreadBase for Debuggee<'_> {
         Ok(())
     }
 
+    #[cfg(target_arch = "aarch64")]
+    fn read_registers(&mut self, regs: &mut AArch64CoreRegs, tid: Tid) -> TargetResult<(), Self> {
+        if let Some(Source::Task(task, on)) = self.source(tid)
+            && !(on == OnCpu::Yes && self.running().map_err(fatal)? == Running::UserSpace)
+        {
+            let layout = self.layout.ok_or(TargetError::NonFatal)?;
+            let tasks = Tasks::new(&*self.machine, layout);
+            let not_read = |e: anyhow::Error| {
+                eprintln!("rewind: {e:#}");
+                TargetError::NonFatal
+            };
+            let words = tasks.user_registers(task).map_err(not_read)?;
+            *regs = saved_registers(&words);
+            return Ok(());
+        }
+
+        let r = self.machine.arm64_registers().map_err(fatal)?;
+        regs.x = r.x;
+        regs.sp = r.sp;
+        regs.pc = r.pc;
+        regs.cpsr = r.cpsr;
+        regs.v = r.v;
+        regs.fpcr = r.fpcr;
+        regs.fpsr = r.fpsr;
+        Ok(())
+    }
+
+    #[cfg(target_arch = "x86_64")]
     fn write_registers(&mut self, regs: &RegsWithBases, tid: Tid) -> TargetResult<(), Self> {
         // Only the CPU's registers can be changed.
         if let Some(Source::Task(..)) = self.source(tid) {
@@ -1593,6 +1719,24 @@ impl MultiThreadBase for Debuggee<'_> {
         r.rflags = regs.eflags.into();
         self.altered = true;
         self.machine.set_registers(&r).map_err(fatal)
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    fn write_registers(&mut self, regs: &AArch64CoreRegs, tid: Tid) -> TargetResult<(), Self> {
+        // Only the CPU's registers can be changed.
+        if let Some(Source::Task(..)) = self.source(tid) {
+            return Err(TargetError::NonFatal);
+        }
+        let mut r = self.machine.arm64_registers().map_err(fatal)?;
+        r.x = regs.x;
+        r.sp = regs.sp;
+        r.pc = regs.pc;
+        r.cpsr = regs.cpsr;
+        r.v = regs.v;
+        r.fpcr = regs.fpcr;
+        r.fpsr = regs.fpsr;
+        self.altered = true;
+        self.machine.set_arm64_registers(&r).map_err(fatal)
     }
 
     fn read_addrs(&mut self, start: u64, data: &mut [u8], tid: Tid) -> TargetResult<usize, Self> {
@@ -2488,6 +2632,7 @@ mod tests {
     /// with the bytes before its pc a syscall instruction, unread, or
     /// other code, then of a thread an interrupt stopped there, whose rcx
     /// is its own.
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn a_system_call_is_told_from_other_kernel_entries() {
         let mut saved = [0u64; pt_regs::WORDS];
@@ -2497,6 +2642,19 @@ mod tests {
         assert!(!entered_by_syscall(&saved, None));
         assert!(!entered_by_syscall(&saved, Some([0x89, 0xc7])));
         saved[pt_regs::RCX] = 7;
+        assert!(!entered_by_syscall(&saved, Some(SYSCALL)));
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn a_system_call_is_told_from_other_kernel_entries() {
+        let mut saved = [0u64; pt_regs::WORDS];
+        saved[pt_regs::PC] = 0x40_1938;
+        saved[pt_regs::SYSCALLNO_PMR] = 64; // SYS_write on arm64
+        assert!(entered_by_syscall(&saved, Some(SYSCALL)));
+        assert!(!entered_by_syscall(&saved, None));
+        assert!(!entered_by_syscall(&saved, Some([0x1f, 0x20, 0x03, 0xd5])));
+        saved[pt_regs::SYSCALLNO_PMR] = (-1i32 as u32) as u64;
         assert!(!entered_by_syscall(&saved, Some(SYSCALL)));
     }
 
@@ -2640,6 +2798,7 @@ mod tests {
     /// it is all saved. At the exit's iretq, the words below its frame are
     /// popped and the CPU's, but orig_rax stays as saved. Checked with a stale struct of 1000s, a CPU of
     /// 2000s, a struct on a kernel stack and the scratch word 0x7ff0.
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn registers_being_saved_come_from_the_cpu() {
         const BASE: u64 = 0xffff_c900_0013_7e00;
@@ -2705,6 +2864,7 @@ mod tests {
     /// pushed where rdi's word is, rdi is the CPU's. Checked with the
     /// task's stale struct of 1000s, the entry frame's of 3000s, and a CPU
     /// of 2000s.
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn registers_on_the_entry_stack_come_from_its_frame() {
         const TASK: u64 = 0xffff_c900_0013_7e00;
@@ -2740,6 +2900,7 @@ mod tests {
 
     /// A saved thread's registers are its pt_regs words in gdb's order,
     /// with the selectors it saved and data segments of 0.
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn saved_registers_follow_gdbs_order() {
         let mut words = [0u64; pt_regs::WORDS];
@@ -2757,6 +2918,22 @@ mod tests {
         assert_eq!(regs.segments.cs, 0x33);
         assert_eq!(regs.segments.ss, 0x2b);
         assert_eq!(regs.segments.fs, 0);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn saved_registers_follow_gdbs_order() {
+        let mut words = [0u64; pt_regs::WORDS];
+        for (i, w) in words.iter_mut().enumerate() {
+            *w = 0x1000 + i as u64;
+        }
+        words[pt_regs::PSTATE] = 0x6000_0000;
+        let regs = saved_registers(&words);
+        assert_eq!(regs.x[0], 0x1000);
+        assert_eq!(regs.x[30], 0x1000 + 30);
+        assert_eq!(regs.sp, 0x1000 + pt_regs::SP as u64);
+        assert_eq!(regs.pc, 0x1000 + pt_regs::PC as u64);
+        assert_eq!(regs.cpsr, 0x6000_0000);
     }
 
     /// Splits watched ranges as the CPU needs them: the largest aligned

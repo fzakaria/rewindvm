@@ -258,7 +258,7 @@ impl<'a> Watch<'a> {
     ) -> Result<Vec<PageDifference>> {
         let frames: BTreeSet<u64> = pages
             .iter()
-            .map(|(page, _)| *page as u64 * PAGE_SIZE as u64)
+            .map(|(page, _)| rewind_vmm::layout::RAM_BASE + *page as u64 * PAGE_SIZE as u64)
             .collect();
         let mut places: HashMap<u64, Vec<Place>> = HashMap::new();
         for (frame, place) in process_places(machine, &frames) {
@@ -267,7 +267,7 @@ impl<'a> Watch<'a> {
 
         let mut described = Vec::new();
         for (page, recorded_hash) in pages {
-            let frame = *page as u64 * PAGE_SIZE as u64;
+            let frame = rewind_vmm::layout::RAM_BASE + *page as u64 * PAGE_SIZE as u64;
             let mut replayed = vec![0u8; PAGE_SIZE];
             machine.read_physical(frame, &mut replayed)?;
             let recorded = self.recorded_page(recorded_hash);

@@ -169,10 +169,16 @@ mod tests {
         let set = unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &lowered) };
         assert_eq!(set, 0, "setrlimit: {}", std::io::Error::last_os_error());
 
-        // Raise it again, and check it reached the hard limit, which stays.
+        // Raise it again, and check it reached the hard limit (or UNLIMITED_CAP
+        // when the hard limit is RLIM_INFINITY), while the hard limit stays.
         raise_limit();
         let after = limits();
         assert_eq!(after.rlim_max, before.rlim_max);
-        assert_eq!(after.rlim_cur, before.rlim_max);
+        let expected = if before.rlim_max == libc::RLIM_INFINITY {
+            UNLIMITED_CAP
+        } else {
+            before.rlim_max
+        };
+        assert_eq!(after.rlim_cur, expected);
     }
 }

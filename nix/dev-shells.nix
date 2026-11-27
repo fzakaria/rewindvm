@@ -11,26 +11,37 @@
   gdb,
   app,
 }:
+let
+  inherit (pkgs) lib;
+  isLinux = pkgs.stdenv.hostPlatform.isLinux;
+  bootImage = kernel.bootImage or "vmlinux";
+in
 {
-  default = pkgs.mkShell {
-    packages = [
-      pkgs.cargo
-      pkgs.rustc
-      pkgs.rustfmt
-      pkgs.clippy
-      pkgs.pkg-config
-      pkgs.erofs-utils
-      pkgs.gnutar
-      pkgs.cpio
-      pkgs.python3
-    ];
+  default = pkgs.mkShell (
+    {
+      packages = [
+        pkgs.cargo
+        pkgs.rustc
+        pkgs.rustfmt
+        pkgs.clippy
+        pkgs.pkg-config
+        pkgs.gnutar
+        pkgs.cpio
+        pkgs.python3
+      ]
+      ++ lib.optionals isLinux [ pkgs.erofs-utils ];
 
-    REWIND_KERNEL = "${kernel}/vmlinux";
-    REWIND_INITRD = "${guest.initrd}/initrd";
-    REWIND_KERNEL_DEBUG = "${kernel.debug}";
-    REWIND_DEBUGINFOD = pkgs.lib.getExe nixseparatedebuginfod2;
-    REWIND_GDB = "${gdb}/bin/gdb";
-  };
+      REWIND_KERNEL = "${kernel}/${bootImage}";
+      REWIND_INITRD = "${guest.initrd}/initrd";
+      REWIND_KERNEL_DEBUG = "${kernel.debug}";
+    }
+    // lib.optionalAttrs (nixseparatedebuginfod2 != null) {
+      REWIND_DEBUGINFOD = lib.getExe nixseparatedebuginfod2;
+    }
+    // lib.optionalAttrs (gdb != null) {
+      REWIND_GDB = "${gdb}/bin/gdb";
+    }
+  );
 
   # `nix develop .#web`: the toolchain for the desktop app built for the
   # browser, the site's viewer (nix/web.nix). nixpkgs' rustc carries the
@@ -64,6 +75,8 @@
     RUSTC_BOOTSTRAP = "1";
   };
 
+}
+// lib.optionalAttrs (app != null) {
   # `nix develop .#app`: the desktop app's toolchain and libraries, for
   # `cargo run` and `cargo test` in crates/rewind-app. A cargo build is not
   # patched like the packaged one, so the libraries wgpu and Wayland open

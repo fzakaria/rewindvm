@@ -101,6 +101,9 @@ pub const EXTRAS_ADDRESS_BITS: u32 = u64::BITS - (EXTRAS_START + EXTRAS_LEN - 1)
 pub const APIC_BASE: u64 = 0xfee0_0000;
 pub const CALLBACK_VECTOR: u32 = 0xf3;
 
+/// Where guest RAM starts in guest physical memory (0 on x86-64).
+pub const RAM_BASE: u64 = 0;
+
 /// Page size, for dirty logging and the page store.
 pub const PAGE_SIZE: usize = 4096;
 

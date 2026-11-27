@@ -92,7 +92,20 @@ pub(crate) struct Watchdog {
 
 impl Watchdog {
     /// Watches the calling thread until `deadline`.
+    #[cfg_attr(
+        target_os = "macos",
+        allow(dead_code, reason = "used by Linux KVM backend and unit tests")
+    )]
     pub(crate) fn start(deadline: Deadline) -> Watchdog {
+        Self::start_with_interrupter(deadline, None)
+    }
+
+    /// Watches the calling thread until `deadline`, interrupting `interrupter`
+    /// as well as signaling the thread when the deadline passes.
+    pub(crate) fn start_with_interrupter(
+        deadline: Deadline,
+        interrupter: Option<crate::Interrupter>,
+    ) -> Watchdog {
         install_signal_handler();
         let expired = Arc::new(AtomicBool::new(false));
         // SAFETY: pthread_self has no preconditions.
@@ -115,6 +128,9 @@ impl Watchdog {
             }
             mark.store(true, Ordering::Relaxed);
             loop {
+                if let Some(ref intr) = interrupter {
+                    intr.interrupt();
+                }
                 target.signal();
                 if stopped.recv_timeout(RESIGNAL) != Err(RecvTimeoutError::Timeout) {
                     return;
