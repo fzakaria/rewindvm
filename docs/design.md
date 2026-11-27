@@ -117,7 +117,10 @@ the TSC MSR, which CPUID and CR4.TSD keep from the guest; three Hyper-V MSRs of
 host time and the host's TSC frequency, which a guest shown no Hyper-V leaves
 never reads; the local APIC timer's current count, which KVM computes from host
 time and the guest never arms; and the performance counters' MSRs, which the
-VM has none of, and which KVM lists by the host's CPU. KVM leaves the vector
+VM has none of, and which KVM lists by the host's CPU. Which other MSRs KVM
+lists depends on the host's CPU and on its Linux: KVM lists the CET MSRs only
+from Linux 6.18 on. An MSR that one keyframe holds as 0 and the other's KVM
+did not list is the same machine, and is no difference. KVM leaves the vector
 and error code of the last exception it delivered in the pending event fields,
 so those are compared only while an event is injected or pending. Each entry
 was found as a replay whose machine differed while its events did not.
@@ -728,6 +731,10 @@ have, so the monitor sets it to 0 on a new vCPU, before a boot or a restore. On
 an Intel host KVM starts it at the host's LBR format and full-width counter
 bits. A Linux before 6.13 then refuses that same value for a vCPU without
 counters, so a keyframe that held it could not be restored.
+`IA32_ARCH_CAPABILITIES` is set to 0 the same way when the model's CPUID hides
+it, as `v3` does. A Linux before 6.13 reads the host's value back for such a
+vCPU, and a later one reads 0 and takes nothing else, so a keyframe recorded on
+the first did not restore on the second.
 
 ### The monitor
 

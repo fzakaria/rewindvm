@@ -85,12 +85,16 @@ pub(crate) fn host_only_msr(index: u32) -> bool {
     counter_msr(index) || ignored(&msr_name(index))
 }
 
+/// How the name of every MSR starts, as [`msr_name`] gives it.
+const MSR_PREFIX: &str = "MSR ";
+
 /// The x86 MSRs a keyframe holds that have names worth showing.
 const MSR_NAMES: &[(u32, &str)] = &[
     (0x10, "TSC"),
     (0x1b, "APIC_BASE"),
     (0x3a, "FEATURE_CONTROL"),
     (0x8b, "microcode revision"),
+    (0x10a, "ARCH_CAPABILITIES"),
     (0x174, "SYSENTER_CS"),
     (0x175, "SYSENTER_ESP"),
     (0x176, "SYSENTER_EIP"),
@@ -163,7 +167,8 @@ const XSAVE_END: usize = XSAVE_YMM_HIGH + XSAVE_VECTORS * XSAVE_VECTOR;
 impl Keyframe {
     /// Where this keyframe's machine state besides memory differs from
     /// `other`'s, by name, in the order the machine holds it, less what
-    /// [`IGNORED`] leaves out.
+    /// [`IGNORED`] leaves out and less an MSR that is 0 in one keyframe
+    /// and unlisted in the other (see [`unlisted_zero_msr`]).
     pub fn state_differences(&self, other: &Keyframe) -> Result<Vec<StateDifference>> {
         let (left, right) = (self.fields()?, other.fields()?);
         let lookup = |fields: &[Field]| -> std::collections::HashMap<String, Vec<u8>> {
@@ -186,7 +191,7 @@ impl Keyframe {
                 ours.get(name).map_or(&[][..], Vec::as_slice),
                 theirs.get(name).map_or(&[][..], Vec::as_slice),
             );
-            if a == b || ignored(name) {
+            if a == b || ignored(name) || unlisted_zero_msr(name, a, b) {
                 continue;
             }
             differences.push(StateDifference {
@@ -246,6 +251,21 @@ impl Keyframe {
 /// Whether state of this name is left out of the comparison.
 fn ignored(name: &str) -> bool {
     IGNORED.iter().any(|(prefix, _)| name.starts_with(prefix))
+}
+
+/// Whether a piece of state, held as `a` in one keyframe and as `b` in
+/// the other, is an MSR that one host's KVM lists and the other's does
+/// not, and that is 0 where it is listed. Which MSRs KVM lists depends on
+/// the host's CPU and on its Linux: one from 6.18 on lists the CET MSRs,
+/// and an older one does not. A vCPU that never had an MSR stands for 0,
+/// so the two keyframes hold the same machine. A restore leaves such an
+/// MSR out for the same reason (see snapshot::msrs_to_restore).
+fn unlisted_zero_msr(name: &str, a: &[u8], b: &[u8]) -> bool {
+    if !name.starts_with(MSR_PREFIX) {
+        return false;
+    }
+    let zero = |bytes: &[u8]| !bytes.is_empty() && bytes.iter().all(|byte| *byte == 0);
+    (a.is_empty() && zero(b)) || (zero(a) && b.is_empty())
 }
 
 fn push(fields: &mut Vec<Field>, name: &str, value: u64) {
@@ -427,8 +447,8 @@ fn events(e: &kvm_vcpu_events, fields: &mut Vec<Field>) {
 /// An MSR's name: its index, with what it is when that is known.
 pub fn msr_name(index: u32) -> String {
     match MSR_NAMES.iter().find(|(i, _)| *i == index) {
-        Some((_, name)) => format!("MSR {index:#x} ({name})"),
-        None => format!("MSR {index:#x}"),
+        Some((_, name)) => format!("{MSR_PREFIX}{index:#x} ({name})"),
+        None => format!("{MSR_PREFIX}{index:#x}"),
     }
 }
 
@@ -550,6 +570,26 @@ mod tests {
             .map(|d| d.name)
             .collect();
         assert_eq!(names, ["MSR 0xc0000082 (LSTAR)"]);
+    }
+
+    #[test]
+    fn an_msr_only_one_host_lists_is_no_difference_while_it_is_zero() {
+        // A keyframe from a host whose KVM lists IA32_U_CET, held as 0,
+        // and one from a host whose KVM does not list the MSR: no
+        // difference, whichever side lacks it. The same MSR with a value
+        // on one side and unlisted on the other is a difference, as is a
+        // zero against a value.
+        const U_CET: u32 = 0x6a0;
+        let regs = kvm_regs::default();
+        let zero = with_cpu(&regs, &[(U_CET, 0)]);
+        let unlisted = with_cpu(&regs, &[]);
+        assert!(zero.state_differences(&unlisted).unwrap().is_empty());
+        assert!(unlisted.state_differences(&zero).unwrap().is_empty());
+
+        let set = with_cpu(&regs, &[(U_CET, 1)]);
+        assert_eq!(set.state_differences(&unlisted).unwrap().len(), 1);
+        assert_eq!(unlisted.state_differences(&set).unwrap().len(), 1);
+        assert_eq!(set.state_differences(&zero).unwrap().len(), 1);
     }
 
     #[test]

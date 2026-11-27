@@ -538,8 +538,9 @@ impl Machine {
         };
 
         let mut vcpu = vm.create_vcpu(0).context("creating the vCPU")?;
-        vcpu.set_cpuid2(&cpu::cpuid(&kvm, config.cpu)?)?;
-        cpu::setup_capability_msrs(&kvm, &vcpu)?;
+        let cpuid = cpu::cpuid(&kvm, config.cpu)?;
+        vcpu.set_cpuid2(&cpuid)?;
+        cpu::setup_capability_msrs(&kvm, &vcpu, cpuid.as_slice())?;
         let immediate_exit = std::ptr::addr_of_mut!(vcpu.get_kvm_run().immediate_exit);
 
         Ok(Machine {
@@ -2032,28 +2033,36 @@ mod machine_tests {
 
     /// A machine that has not run takes back the state read from it, and
     /// its vCPU reports no performance counter capabilities, under the
-    /// default CPU model and the host's. A keyframe holds every MSR KVM
-    /// reads, and a restore sets each one, so an MSR that KVM starts at a
-    /// value it then refuses to be given fails every restore: an Intel
-    /// host's IA32_PERF_CAPABILITIES on a Linux before 6.13 is one. Needs
-    /// /dev/kvm; without one the test says so and passes.
+    /// default CPU model and the host's. Under the default model the vCPU
+    /// reports no IA32_ARCH_CAPABILITIES either. A keyframe holds every
+    /// MSR KVM reads, and a restore sets each one, so an MSR that KVM
+    /// starts at a value it then refuses to be given fails every restore:
+    /// an Intel host's IA32_PERF_CAPABILITIES on a Linux before 6.13 is
+    /// one. Needs /dev/kvm; without one the test says so and passes.
     #[test]
     fn a_new_machine_takes_back_the_state_read_from_it() {
         let Ok(kvm) = kvm::open() else {
             eprintln!("skipped: /dev/kvm does not open");
             return;
         };
-        for model in [cpu::default_model(&kvm).unwrap(), CpuModel::Host] {
+        let default = cpu::default_model(&kvm).unwrap();
+        for model in [default, CpuModel::Host] {
             let mut m = Machine::create(&config(model), DirtyLog::Off).unwrap();
             let (cpu, irqchips, devices) = m.state().unwrap();
+            let msr = |wanted: u32| {
+                let found = cpu.msrs.iter().find(|(index, _)| *index == wanted);
+                found.map(|(_, value)| *value)
+            };
 
             // The VM has no counters, so the MSR is 0 wherever KVM reads it.
-            let capabilities = cpu
-                .msrs
-                .iter()
-                .find(|(index, _)| *index == cpu::IA32_PERF_CAPABILITIES);
-            if let Some((_, value)) = capabilities {
-                assert_eq!(*value, 0, "{model:?}");
+            if let Some(value) = msr(cpu::IA32_PERF_CAPABILITIES) {
+                assert_eq!(value, 0, "{model:?}");
+            }
+
+            // The default model's CPUID hides IA32_ARCH_CAPABILITIES, so
+            // the MSR is 0 there too. The host model's may show the MSR.
+            if let (true, Some(value)) = (model == default, msr(cpu::IA32_ARCH_CAPABILITIES)) {
+                assert_eq!(value, 0, "{model:?}");
             }
 
             m.apply_state(&cpu, &irqchips, &devices)
