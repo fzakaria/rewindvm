@@ -314,12 +314,9 @@ fn named_image(dir: &Path) -> Result<Option<PathBuf>> {
     Ok(uses.spec.image)
 }
 
-/// Where Linux lists the processes that are alive, each under its id.
-const PROC: &str = "/proc";
-
 /// Whether a process with id `pid` is alive.
 pub(crate) fn alive(pid: u32) -> bool {
-    Path::new(PROC).join(pid.to_string()).exists()
+    rewind_vmm::process_alive(pid)
 }
 
 /// What rewind processes that are gone left half made in the home: the

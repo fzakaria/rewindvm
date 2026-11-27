@@ -949,7 +949,7 @@ fn machine_words(
             let recorded = bytes
                 .recorded
                 .as_deref()
-                .map_or_else(|| "not in the page store".to_string(), &hex);
+                .map_or_else(|| "not in the page store".to_string(), hex);
             let _ = writeln!(
                 out,
                 "    {:#06x}  {}  {}\n            {}  {}",

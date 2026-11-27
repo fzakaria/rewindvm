@@ -2267,6 +2267,7 @@ impl Debuginfod {
         // SAFETY: prctl, getppid, dup2 and fcntl are async-signal-safe.
         unsafe {
             cmd.pre_exec(move || {
+                #[cfg(target_os = "linux")]
                 if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) < 0 {
                     return Err(std::io::Error::last_os_error());
                 }

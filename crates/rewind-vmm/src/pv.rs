@@ -14,6 +14,8 @@ pub const PORT_IDLE: u16 = 0x5f0;
 pub const PORT_EXIT: u16 = 0x5f4;
 /// outl: guest physical address of the shared page.
 pub const PORT_SETUP: u16 = 0x5f8;
+/// ARM64 HVC only: acknowledge the monitor's level-triggered virtual IRQ.
+pub const HVC_IRQ_ACK: u16 = 0x5fc;
 
 /// The first serial port. Only the early console uses it, and only when
 /// the command line asks for `earlyprintk`.

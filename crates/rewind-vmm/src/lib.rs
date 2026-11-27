@@ -11,19 +11,43 @@
 //! the guest stops, reporting each record the guest emits to an
 //! [`Observer`] along with the step it arrived on.
 
+#[cfg(target_arch = "aarch64")]
+pub mod arm64;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub mod boot;
 pub mod checkpoint;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub mod cpu;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub mod debug;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub mod hvf;
 pub mod interrupt;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub mod kvm;
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+pub mod kvm_arm64;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub mod layout;
 pub mod memory;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub mod pmu;
 pub mod pv;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub mod snapshot;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub mod state;
 mod watchdog;
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub use hvf::machine::{Machine, extras_for};
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub use hvf::{boot, cpu, debug, kvm, layout, pmu, snapshot, state};
+
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+pub use kvm_arm64::machine::{Machine, extras_for};
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+pub use kvm_arm64::{boot, cpu, debug, kvm, layout, pmu, snapshot, state};
 
 #[cfg(test)]
 mod test_alloc;
@@ -31,13 +55,38 @@ mod test_alloc;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use kvm_bindings::{
     KVM_MEM_LOG_DIRTY_PAGES, KVM_MEM_READONLY, kvm_msi, kvm_userspace_memory_region,
 };
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use kvm_ioctls::{Kvm, VcpuExit, VcpuFd, VmFd};
 
 pub use interrupt::Interrupter;
+
+/// Whether a host process with id `pid` is alive.
+pub fn process_alive(pid: u32) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        std::path::Path::new("/proc").join(pid.to_string()).exists()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let Ok(pid) = libc::pid_t::try_from(pid) else {
+            return false;
+        };
+        if pid <= 0 {
+            return false;
+        }
+        // SAFETY: signal 0 tests process existence without delivering a signal.
+        let rc = unsafe { libc::kill(pid, 0) };
+        rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+}
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use layout::*;
+#[cfg(target_arch = "aarch64")]
+use layout::RAM_BASE;
 use memory::Mapping;
 use pv::{Clock, GuestExit, Schedule};
 pub use rewind_trace::machine::{ClockSource, CounterEvent, CpuModel, Extras, Preemption};
@@ -45,13 +94,18 @@ pub use watchdog::{Deadline, LateLimit};
 
 /// The memory slots of guest RAM below and above the MMIO hole, and of the
 /// input image.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const SLOT_RAM: u32 = 0;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const SLOT_PMEM: u32 = 1;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const SLOT_EXTRAS: u32 = 2;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const SLOT_RAM_HIGH: u32 = 3;
 
 /// The KVM slots of guest RAM of span `span` ([`ram_span`]), as (slot,
 /// (start, length)) pairs, without the high slot when it is empty.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn ram_slots(span: usize) -> impl Iterator<Item = (u32, (u64, u64))> {
     [SLOT_RAM, SLOT_RAM_HIGH]
         .into_iter()
@@ -61,6 +115,7 @@ fn ram_slots(span: usize) -> impl Iterator<Item = (u32, (u64, u64))> {
 
 /// Reads, and so clears, the dirty log of guest RAM of span `span`: the
 /// written pages, as page numbers from guest physical address 0.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub(crate) fn read_dirty_log(vm: &VmFd, span: usize) -> Result<Vec<usize>> {
     let mut pages = Vec::new();
     for (slot, (start, len)) in ram_slots(span) {
@@ -79,15 +134,18 @@ pub(crate) fn read_dirty_log(vm: &VmFd, span: usize) -> Result<Vec<usize>> {
 
 /// Where KVM places the TSS the vCPU needs for real-mode emulation. Any
 /// three pages the guest never uses; this is the address other monitors use.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const TSS_ADDRESS: usize = 0xfffb_d000;
 
 /// The persistent memory region is sized in 2 MiB steps, which is what the
 /// kernel's memory hotplug code expects of it.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const PMEM_ALIGN: usize = 2 << 20;
 
 /// Whether a run on this host reserves the extras slot. The slot ends past
 /// what a CPU with 36 physical address bits reaches, such as an Ivy Bridge
 /// or a VM shown 36 bits, and KVM refuses a memory slot there.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub fn extras_for(cpu: CpuModel) -> Result<Extras> {
     let kvm = kvm::open()?;
     extras_for_bits(cpu, cpu::address_bits(&kvm)?)
@@ -98,6 +156,7 @@ pub fn extras_for(cpu: CpuModel) -> Result<Extras> {
 /// cannot reach the slot. The fixed models, v3 and v3-compat, promise the
 /// guest the same machine on every host, slot included, so a narrower host
 /// refuses them.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn extras_for_bits(cpu: CpuModel, bits: u32) -> Result<Extras> {
     if bits >= EXTRAS_ADDRESS_BITS {
         return Ok(Extras::Reserved);
@@ -114,6 +173,7 @@ fn extras_for_bits(cpu: CpuModel, bits: u32) -> Result<Extras> {
 /// Fails, saying where the run replays, when a recorded run reserves the
 /// extras slot and this host's CPU reaches only `bits` physical address
 /// bits, short of the slot.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn recorded_slot_fits(bits: u32) -> Result<()> {
     if bits >= EXTRAS_ADDRESS_BITS {
         return Ok(());
@@ -162,6 +222,7 @@ pub enum DirtyLog {
     Off,
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 impl DirtyLog {
     /// The RAM slot's KVM flags.
     fn slot_flags(self) -> u32 {
@@ -181,6 +242,7 @@ pub(crate) enum BootInto {
 
 /// Whether a step adds the per-exit quantum: an exit does, a step the
 /// monitor forced at the timer's branch count does not.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Quantum {
     Add,
@@ -192,6 +254,7 @@ enum Quantum {
 pub const PS_PER_BRANCH: u64 = 1000;
 
 /// The guest's work so far, when virtual time follows it.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub(crate) struct Work {
     counter: pmu::Counter,
     overflow: pmu::Overflow,
@@ -212,8 +275,10 @@ pub(crate) struct Work {
 /// to 73 branches over a hundred preemptions, with one outlier of 1269. A
 /// count that ever lands past the target stops the run rather than let it
 /// go on unrepeatably.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const PREEMPT_MARGIN: u64 = 256;
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 impl Work {
     fn open(event: CounterEvent, base: u64) -> Result<Work> {
         Ok(Work {
@@ -274,6 +339,7 @@ pub enum CpuMode {
 }
 
 /// The privilege level of user code, in the code segment's DPL.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const USER_DPL: u8 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -323,7 +389,7 @@ pub trait Input: Send {
 
 /// How often, in steps, a busy VM's input is checked without waiting, so
 /// that typing reaches a shell that is running something.
-const INPUT_POLL_STEPS: u64 = 4096;
+pub(crate) const INPUT_POLL_STEPS: u64 = 4096;
 
 /// Device state: everything the monitor keeps besides KVM's own.
 pub(crate) struct Devices {
@@ -359,15 +425,16 @@ pub(crate) struct Devices {
     /// once a guest kernel that makes them has set up.
     pub switches: Option<rewind_trace::switches::Encoder>,
     /// Scratch space reused for guest records emitted through the port.
-    record_buffer: Vec<u8>,
+    pub(crate) record_buffer: Vec<u8>,
     /// Whether the record buffer holds an event the guest emitted on
     /// this step, which is written once the step has moved the clock.
-    event_pending: bool,
+    pub(crate) event_pending: bool,
     /// Scratch space reused for an event's record with the clock stamped
     /// in, as the trace holds it.
-    event_buffer: Vec<u8>,
+    pub(crate) event_buffer: Vec<u8>,
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub struct Machine {
     pub(crate) kvm: Kvm,
     pub(crate) vm: VmFd,
@@ -424,6 +491,7 @@ pub struct Machine {
     pub(crate) interrupt: std::sync::Arc<interrupt::Shared>,
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 impl Drop for Machine {
     /// Forgets the vCPU's kvm_run page before the vCPU, and the page with
     /// it, goes, so an interrupter that outlives the machine writes
@@ -444,6 +512,7 @@ pub(crate) enum Origin {
 
 /// The machine's configuration and how far it has run; its devices and
 /// memory are the guest's whole state.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 impl std::fmt::Debug for Machine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Machine")
@@ -453,6 +522,7 @@ impl std::fmt::Debug for Machine {
     }
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 impl Machine {
     /// Creates the VM with its memory and devices, but no guest state:
     /// either [`Machine::boot`] or a snapshot restore supplies that.
@@ -634,6 +704,11 @@ impl Machine {
                 Ok(entry)
             }
         }
+    }
+
+    /// Reads and clears KVM's dirty log for guest RAM.
+    pub(crate) fn drain_dirty_log(&mut self) -> Result<Vec<usize>> {
+        read_dirty_log(&self.vm, self.dev.ram.len())
     }
 
     /// The number of exits so far.
@@ -1205,12 +1280,28 @@ impl Machine {
 }
 
 impl Devices {
+    /// Reads guest RAM at guest physical address `gpa`.
+    pub(crate) fn ram_read(&self, gpa: u64, buf: &mut [u8]) -> Result<()> {
+        let Some(off) = gpa.checked_sub(RAM_BASE) else {
+            bail!("guest physical address {gpa:#x} is below RAM_BASE");
+        };
+        self.ram.read(off, buf)
+    }
+
+    /// Writes guest RAM at guest physical address `gpa`.
+    pub(crate) fn ram_write(&mut self, gpa: u64, buf: &[u8]) -> Result<()> {
+        let Some(off) = gpa.checked_sub(RAM_BASE) else {
+            bail!("guest physical address {gpa:#x} is below RAM_BASE");
+        };
+        self.ram.write(off, buf)
+    }
+
     /// Stops the machine as stalled when the guest's last exit said
     /// nothing is runnable with no timer armed and nothing has been sent
     /// to wake it since: a request still waiting for the APIC goes again
     /// at the exit the guest makes, and one the APIC took is taken right
     /// after that exit. None when the guest can run on.
-    fn stall_if_idle(&mut self, obs: &mut dyn Observer) -> Result<Option<Stop>> {
+    pub(crate) fn stall_if_idle(&mut self, obs: &mut dyn Observer) -> Result<Option<Stop>> {
         if !self.idle {
             return Ok(None);
         }
@@ -1224,18 +1315,31 @@ impl Devices {
         Ok(Some(stop))
     }
 
+    #[cfg_attr(target_arch = "aarch64", allow(dead_code, reason = "used by x86 KVM port exits and unit tests"))]
     fn io_out(&mut self, port: u16, data: &[u8], obs: &mut dyn Observer) -> Result<()> {
-        let value = port_value(data);
+        if port == pv::PORT_COM1 {
+            obs.serial(self.step, data[0]);
+            return Ok(());
+        }
+        self.io_out_u64(port, port_value(data) as u64, obs)
+    }
+
+    pub(crate) fn io_out_u64(
+        &mut self,
+        port: u16,
+        value: u64,
+        obs: &mut dyn Observer,
+    ) -> Result<()> {
         match port {
             pv::PORT_EMIT => {
                 let mut len = [0u8; 4];
-                self.ram.read(value as u64, &mut len)?;
+                self.ram.read_gpa(value, &mut len)?;
                 let len = u32::from_le_bytes(len) as usize;
                 if !(pv::RECORD_HEADER..=pv::RECORD_MAX).contains(&len) {
                     bail!("VM record at step {} has length {len}", self.step);
                 }
                 self.record_buffer.resize(len, 0);
-                self.ram.read(value as u64, &mut self.record_buffer)?;
+                self.ram.read_gpa(value, &mut self.record_buffer)?;
                 let record = &self.record_buffer;
                 // A switch joins the pending batch, which is written first
                 // when it had no room for the switch.
@@ -1255,7 +1359,7 @@ impl Devices {
                 self.event_pending = true;
             }
             pv::PORT_TIMER => {
-                let delta = value as u64;
+                let delta = value;
                 let slack = if delta == 0 {
                     0
                 } else {
@@ -1289,18 +1393,17 @@ impl Devices {
                 }
             }
             pv::PORT_EXIT => {
-                self.stop = Some(Stop::Guest(GuestExit::from_port(value)));
+                self.stop = Some(Stop::Guest(GuestExit::from_port(value as u32)));
             }
             pv::PORT_SETUP => {
-                let shared = value as u64;
+                let shared = value;
                 pv::check_interface(self.guest_interface(shared)?)?;
-                self.ram
-                    .write(shared + pv::SHARED_EPOCH, &self.epoch.to_le_bytes())?;
+                self.ram_write(shared + pv::SHARED_EPOCH, &self.epoch.to_le_bytes())?;
                 self.shared = Some(shared);
                 self.io = Some(rewind_trace::io_records::Encoder::new());
                 self.switches = Some(rewind_trace::switches::Encoder::new());
             }
-            pv::PORT_COM1 => obs.serial(self.step, data[0]),
+            pv::PORT_COM1 => obs.serial(self.step, value as u8),
             _ => {}
         }
         Ok(())
@@ -1311,7 +1414,7 @@ impl Devices {
     /// moved the clock, so the stamp is the clock as the step left it:
     /// what the guest computed since the step before is counted in the
     /// time of the event that ended it.
-    fn write_event(&mut self, obs: &mut dyn Observer) {
+    pub(crate) fn write_event(&mut self, obs: &mut dyn Observer) {
         if !std::mem::take(&mut self.event_pending) {
             return;
         }
@@ -1333,7 +1436,7 @@ impl Devices {
 
     /// Writes the switches still pending at the run's end as a batch at
     /// this step.
-    fn finish_switches(&mut self, obs: &mut dyn Observer) {
+    pub(crate) fn finish_switches(&mut self, obs: &mut dyn Observer) {
         if let Some(encoder) = self.switches.as_mut() {
             for batch in encoder.finish(self.clock.now) {
                 obs.record(self.step, &batch);
@@ -1345,7 +1448,7 @@ impl Devices {
     /// a machine stops. The trace holds what the inputs decide up to the
     /// last step, so a replay that pauses at that step and finishes its
     /// switches ([`Machine::finish_switches`]) makes the same trace.
-    fn end_trace(&mut self, stop: Stop, obs: &mut dyn Observer) -> Result<()> {
+    pub(crate) fn end_trace(&mut self, stop: Stop, obs: &mut dyn Observer) -> Result<()> {
         // A guest that stopped by itself did so at the same instruction in
         // every execution, so the trace takes what the guest buffered since
         // the last step. The time limit lands wherever the host's signal
@@ -1367,34 +1470,34 @@ impl Devices {
     /// step, and sets both back to 0 for the guest to go on from, after
     /// the switches an earlier window left pending. Nothing for a guest
     /// kernel that buffers none.
-    fn drain_io(&mut self, obs: &mut dyn Observer) -> Result<()> {
+    pub(crate) fn drain_io(&mut self, obs: &mut dyn Observer) -> Result<()> {
         self.flush_switches(obs);
         let (Some(shared), Some(encoder)) = (self.shared, self.io.as_mut()) else {
             return Ok(());
         };
         let read_u32 = |ram: &Mapping, at: u64| -> Result<u32> {
             let mut bytes = [0u8; 4];
-            ram.read(shared + at, &mut bytes)?;
+            ram.read_gpa(at, &mut bytes)?;
             Ok(u32::from_le_bytes(bytes))
         };
-        let head = read_u32(&self.ram, pv::SHARED_IO_HEAD)?;
-        let lost = read_u32(&self.ram, pv::SHARED_IO_LOST)?;
+        let head = read_u32(&self.ram, shared + pv::SHARED_IO_HEAD)?;
+        let lost = read_u32(&self.ram, shared + pv::SHARED_IO_LOST)?;
         if head == 0 && lost == 0 {
             return Ok(());
         }
 
         // The buffer, up to its fill, which the guest never sets past its
         // size.
-        let size = read_u32(&self.ram, pv::SHARED_IO_SIZE)?;
+        let size = read_u32(&self.ram, shared + pv::SHARED_IO_SIZE)?;
         let mut at = [0u8; 8];
-        self.ram.read(shared + pv::SHARED_IO_BUF, &mut at)?;
+        self.ram.read_gpa(shared + pv::SHARED_IO_BUF, &mut at)?;
         let len = head.min(size) as usize;
         let mut buffered = vec![0u8; len.min(pv::IO_BUF_MAX)];
-        self.ram.read(u64::from_le_bytes(at), &mut buffered)?;
+        self.ram.read_gpa(u64::from_le_bytes(at), &mut buffered)?;
         self.ram
-            .write(shared + pv::SHARED_IO_HEAD, &0u32.to_le_bytes())?;
+            .write_gpa(shared + pv::SHARED_IO_HEAD, &0u32.to_le_bytes())?;
         self.ram
-            .write(shared + pv::SHARED_IO_LOST, &0u32.to_le_bytes())?;
+            .write_gpa(shared + pv::SHARED_IO_LOST, &0u32.to_le_bytes())?;
 
         let mut wakes = Vec::new();
         for record in encoder.encode(self.step, &buffered, lost, &mut wakes) {
@@ -1418,17 +1521,17 @@ impl Devices {
     /// `shared`.
     pub(crate) fn guest_interface(&self, shared: u64) -> Result<u32> {
         let mut version = [0u8; 4];
-        self.ram.read(shared + pv::SHARED_INTERFACE, &mut version)?;
+        self.ram_read(shared + pv::SHARED_INTERFACE, &mut version)?;
         Ok(u32::from_le_bytes(version))
     }
 
+    #[cfg_attr(target_arch = "aarch64", allow(dead_code, reason = "used by x86 KVM port exits and unit tests"))]
     fn io_in(&mut self, port: u16, data: &mut [u8]) -> Result<()> {
         match port {
             pv::PORT_CLOCK => {
                 let shared = self.shared.context("the VM read the clock before setup")?;
                 let now = self.clock.now;
-                self.ram
-                    .write(shared + pv::SHARED_NOW, &now.to_le_bytes())?;
+                self.ram_write(shared + pv::SHARED_NOW, &now.to_le_bytes())?;
 
                 // A string read (`rep insl`) asks for several reads in one
                 // exit, and each gets the clock's low 32 bits.
@@ -1448,7 +1551,7 @@ impl Devices {
 /// a NUL. Refused when the guest kernel would not pass all of it on: more
 /// bytes than it reads, or more arguments than it hands init, the rest of
 /// which it drops without a word.
-fn encode_request(args: &[String]) -> Result<Vec<u8>> {
+pub(crate) fn encode_request(args: &[String]) -> Result<Vec<u8>> {
     if args.len() > pv::REQUEST_ARGS_MAX {
         bail!(
             "the inspection request has {} arguments; the guest kernel passes on {}",
@@ -1475,6 +1578,7 @@ fn encode_request(args: &[String]) -> Result<Vec<u8>> {
 }
 
 /// A port write's value, zero-extended from however many bytes it wrote.
+#[cfg_attr(target_arch = "aarch64", allow(dead_code, reason = "used by x86 KVM port exits and unit tests"))]
 fn port_value(data: &[u8]) -> u32 {
     let mut bytes = [0u8; 4];
     bytes[..data.len().min(4)].copy_from_slice(&data[..data.len().min(4)]);
@@ -1514,7 +1618,7 @@ mod tests {
         record.extend_from_slice(&NO_SYSCALL.to_le_bytes());
         record.extend_from_slice(TASK_NAME);
         dev.ram.write(IO_BUF, &record).unwrap();
-        let pointer = (IO_BUF as u32).to_le_bytes();
+        let pointer = (IO_BUF_GPA as u32).to_le_bytes();
         let mut kept = Kept::default();
         for step in 1..=WARM_STEPS {
             dev.step = step;
@@ -1531,6 +1635,7 @@ mod tests {
         assert!(kept.0.is_empty());
     }
 
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     #[test]
     fn the_extras_slot_is_reserved_only_where_the_host_reaches_it() {
         // Address widths on both sides of the slot's 39 bits: 36 is an Ivy
@@ -1555,6 +1660,7 @@ mod tests {
         );
     }
 
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     #[test]
     fn a_recorded_slot_past_the_host_says_where_it_replays() {
         // A recorded run that reserves the extras slot, rebuilt on hosts on
@@ -1571,7 +1677,7 @@ mod tests {
         );
     }
 
-    /// The devices of a machine that has set up its shared page at 0,
+    /// The devices of a machine that has set up its shared page at RAM_BASE,
     /// with a page after it for the guest's record buffer.
     fn devices(now: u64) -> Devices {
         let mut clock = Clock::new(QUANTUM);
@@ -1580,7 +1686,7 @@ mod tests {
             ram: Mapping::anonymous(2 * PAGE).unwrap(),
             clock,
             schedule: Schedule::default(),
-            shared: Some(0),
+            shared: Some(RAM_BASE),
             epoch: 0,
             step: 0,
             stop: None,
@@ -1600,6 +1706,7 @@ mod tests {
 
     /// Where the tests' guest keeps its record buffer, and how big it is.
     const IO_BUF: u64 = PAGE as u64;
+    const IO_BUF_GPA: u64 = RAM_BASE + IO_BUF;
     const IO_SIZE: u32 = PAGE as u32;
 
     /// Lays `buffered` into the record buffer as the guest would, with
@@ -1607,7 +1714,7 @@ mod tests {
     fn buffer(dev: &mut Devices, buffered: &[u8], lost: u32) {
         dev.ram.write(IO_BUF, buffered).unwrap();
         dev.ram
-            .write(pv::SHARED_IO_BUF, &IO_BUF.to_le_bytes())
+            .write(pv::SHARED_IO_BUF, &IO_BUF_GPA.to_le_bytes())
             .unwrap();
         dev.ram
             .write(pv::SHARED_IO_SIZE, &IO_SIZE.to_le_bytes())
@@ -1681,7 +1788,7 @@ mod tests {
         let mut dev = devices(BEGAN_AT);
         dev.step = STEP;
         dev.ram.write(IO_BUF, &guest_mark(b"hello")).unwrap();
-        let pointer = (IO_BUF as u32).to_le_bytes();
+        let pointer = (IO_BUF_GPA as u32).to_le_bytes();
         let mut kept = Kept::default();
         dev.io_out(pv::PORT_EMIT, &pointer, &mut kept).unwrap();
         assert!(kept.0.is_empty());
@@ -1776,7 +1883,7 @@ mod tests {
     fn devices_with_pending_switches(steps: &[u64]) -> Devices {
         let mut dev = devices(0);
         dev.switches = Some(rewind_trace::switches::Encoder::new());
-        let pointer = (IO_BUF as u32).to_le_bytes();
+        let pointer = (IO_BUF_GPA as u32).to_le_bytes();
         let mut kept = Kept::default();
         for (i, step) in steps.iter().enumerate() {
             dev.step = *step;
@@ -1979,7 +2086,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
 mod machine_tests {
     use super::*;
 

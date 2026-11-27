@@ -27,7 +27,7 @@ pub(crate) fn size(fd: RawFd) -> Option<(u16, u16)> {
     // SAFETY: winsize is four integers, for which all zeroes is a value.
     let mut size: libc::winsize = unsafe { std::mem::zeroed() };
     // SAFETY: a valid out pointer for TIOCGWINSZ.
-    let rc = unsafe { libc::ioctl(fd, libc::TIOCGWINSZ as libc::Ioctl, &mut size) };
+    let rc = unsafe { libc::ioctl(fd, libc::TIOCGWINSZ as _, &mut size) };
     (rc == 0 && size.ws_col > 0 && size.ws_row > 0).then_some((size.ws_col, size.ws_row))
 }
 

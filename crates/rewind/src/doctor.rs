@@ -126,6 +126,14 @@ const ENV_DEBUGINFOD: &str = "REWIND_DEBUGINFOD";
 const DEBUGINFOD_PROGRAM: &str = "nixseparatedebuginfod2";
 
 fn kvm() -> Finding {
+    #[cfg(target_os = "macos")]
+    {
+        match rewind_vmm::kvm::open() {
+            Ok(_) => Finding::new(Level::Ok, "hvf", "Hypervisor.framework available"),
+            Err(e) => Finding::new(Level::Fail, "hvf", format!("{e:#}")),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
     match rewind_vmm::kvm::open() {
         Ok(_) => Finding::new(Level::Ok, "kvm", "/dev/kvm opens"),
         Err(e) => Finding::new(Level::Fail, "kvm", format!("{e:#}")),
@@ -155,6 +163,24 @@ fn cpu() -> Option<Finding> {
 /// why, or only `--cpu host`, with the bits the fixed models need and this
 /// CPU lacks.
 fn cpu_finding(default: &DefaultModel) -> Finding {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = default;
+        Finding::new(
+            Level::Ok,
+            "cpu",
+            "Apple Silicon host CPU via Hypervisor.framework",
+        )
+    }
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    {
+        let _ = default;
+        Finding::new(Level::Ok, "cpu", "ARM64 host CPU via KVM")
+    }
+    #[cfg(not(any(
+        target_os = "macos",
+        all(target_os = "linux", target_arch = "aarch64")
+    )))]
     match default {
         DefaultModel::V3 => Finding::new(
             Level::Ok,
@@ -450,6 +476,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn the_cpu_finding_names_the_model_a_run_gets() {
         // The three kinds of host, from the model a run without --cpu gets

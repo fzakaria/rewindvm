@@ -11,10 +11,13 @@
 //! guest's: the vCPU stops between two instructions, nothing is recorded,
 //! and the next run goes on from exactly there.
 
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicUsize, Ordering};
+#[cfg(target_os = "linux")]
+use std::sync::atomic::AtomicU8;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
 use crate::pmu::{install_signal_handler, overflow_signal};
 
 /// The machines this process has, from their making to their dropping,
@@ -32,13 +35,16 @@ const NO_PIPE: i32 = -1;
 
 /// The vCPU's `immediate_exit` byte, written from any thread. Null once
 /// the machine, whose kvm_run page the byte is in, is gone.
+#[cfg(target_os = "linux")]
 struct ImmediateExit(*mut u8);
 
 // SAFETY: the pointer names a byte of the vCPU's kvm_run page, which stays
 // mapped until the machine is dropped, and the machine nulls the pointer
 // first; every access goes through the mutex that holds it, as an atomic.
+#[cfg(target_os = "linux")]
 unsafe impl Send for ImmediateExit {}
 
+#[cfg(target_os = "linux")]
 impl ImmediateExit {
     fn store(&self, value: u8) {
         if self.0.is_null() {
@@ -55,7 +61,10 @@ impl ImmediateExit {
 pub(crate) struct Shared {
     /// Set by an interruption, taken by the run loop.
     asked: AtomicBool,
+    #[cfg(target_os = "linux")]
     immediate_exit: Mutex<ImmediateExit>,
+    #[cfg(target_os = "macos")]
+    vcpu: Mutex<Option<crate::hvf::sys::hv_vcpu_t>>,
     /// The thread running the vCPU, as a pthread_t, while one is in
     /// [`crate::Machine::run`]; 0 when none is.
     thread: AtomicUsize,
@@ -67,6 +76,7 @@ const NO_THREAD: usize = 0;
 impl Shared {
     /// What a machine about to be made shares with its interrupters,
     /// noted among the process's machines.
+    #[cfg(target_os = "linux")]
     pub(crate) fn new(immediate_exit: *mut u8) -> Arc<Shared> {
         let shared = Arc::new(Shared {
             asked: AtomicBool::new(STOP_ASKED.load(Ordering::SeqCst)),
@@ -78,7 +88,22 @@ impl Shared {
         shared
     }
 
+    /// What an HVF machine shares with its interrupters: the vCPU handle
+    /// passed to `hv_vcpus_exit`.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn new(vcpu: crate::hvf::sys::hv_vcpu_t) -> Arc<Shared> {
+        let shared = Arc::new(Shared {
+            asked: AtomicBool::new(STOP_ASKED.load(Ordering::SeqCst)),
+            vcpu: Mutex::new(Some(vcpu)),
+            thread: AtomicUsize::new(NO_THREAD),
+        });
+        let mut machines = MACHINES.lock().unwrap_or_else(|e| e.into_inner());
+        machines.push(shared.clone());
+        shared
+    }
+
     /// Sets or clears the vCPU's `immediate_exit`.
+    #[cfg(target_os = "linux")]
     pub(crate) fn set_immediate_exit(&self, value: u8) {
         let byte = self
             .immediate_exit
@@ -87,17 +112,25 @@ impl Shared {
         byte.store(value);
     }
 
-    /// Forgets the vCPU's `immediate_exit` byte, before its page goes,
-    /// and the machine among the process's.
+    /// Forgets the vCPU handle before the vCPU is destroyed, and removes the
+    /// machine from the process-wide list.
     pub(crate) fn forget(self: &Arc<Shared>) {
         let mut machines = MACHINES.lock().unwrap_or_else(|e| e.into_inner());
         machines.retain(|shared| !Arc::ptr_eq(shared, self));
         drop(machines);
-        let mut byte = self
-            .immediate_exit
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        byte.0 = std::ptr::null_mut();
+        #[cfg(target_os = "linux")]
+        {
+            let mut byte = self
+                .immediate_exit
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            byte.0 = std::ptr::null_mut();
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let mut vcpu = self.vcpu.lock().unwrap_or_else(|e| e.into_inner());
+            *vcpu = None;
+        }
     }
 
     /// Notes the calling thread as the one running the vCPU. A stop asked
@@ -120,6 +153,7 @@ impl Shared {
     /// it, with `immediate_exit` cleared first so that an interruption
     /// asked for between the two is still seen by the next KVM_RUN.
     pub(crate) fn take(&self) -> bool {
+        #[cfg(target_os = "linux")]
         self.set_immediate_exit(0);
         self.asked.swap(false, Ordering::SeqCst)
     }
@@ -142,23 +176,34 @@ impl std::fmt::Debug for Interrupter {
 impl Interrupter {
     /// Stops the machine's run, now if one is under way, else the next
     /// one as it begins: [`crate::Machine::run`] returns
-    /// [`crate::Outcome::Interrupted`]. The ask comes first, then the
-    /// flag KVM_RUN returns at once for, then the signal that pulls the
-    /// vCPU thread out of the guest; the run loop clears the flag before
-    /// looking at the ask, so no interruption is lost between the two.
+    /// [`crate::Outcome::Interrupted`].
     pub fn interrupt(&self) {
-        install_signal_handler();
         self.0.asked.store(true, Ordering::SeqCst);
-        self.0.set_immediate_exit(1);
-        let thread = self.0.thread.load(Ordering::SeqCst);
-        if thread == NO_THREAD {
-            return;
+        #[cfg(target_os = "linux")]
+        {
+            install_signal_handler();
+            self.0.set_immediate_exit(1);
+            let thread = self.0.thread.load(Ordering::SeqCst);
+            if thread == NO_THREAD {
+                return;
+            }
+            // SAFETY: the thread noted itself as running the vCPU, and clears
+            // the note before it leaves the run; a thread that runs a machine
+            // outlives the threads that interrupt it, as the watchdog's and
+            // a debugger's connection watch are joined by the thread itself.
+            unsafe { libc::pthread_kill(thread as libc::pthread_t, overflow_signal()) };
         }
-        // SAFETY: the thread noted itself as running the vCPU, and clears
-        // the note before it leaves the run; a thread that runs a machine
-        // outlives the threads that interrupt it, as the watchdog's and
-        // a debugger's connection watch are joined by the thread itself.
-        unsafe { libc::pthread_kill(thread as libc::pthread_t, overflow_signal()) };
+        #[cfg(target_os = "macos")]
+        {
+            let guard = self.0.vcpu.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(mut id) = *guard {
+                // SAFETY: `id` is a live HVF vCPU handle guarded until `Machine::drop`
+                // calls `forget()`.
+                unsafe {
+                    let _ = crate::hvf::sys::hv_vcpus_exit(&mut id, 1);
+                }
+            }
+        }
     }
 }
 
@@ -186,15 +231,35 @@ impl std::fmt::Debug for FdWatch {
     }
 }
 
+/// Raw close-on-exec pipe descriptors.
+fn pipe_raw() -> std::io::Result<[i32; 2]> {
+    let mut fds = [0i32; 2];
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: a two-element array, as pipe2 writes.
+        if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // SAFETY: a two-element array, as pipe writes.
+        if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        for fd in fds {
+            // SAFETY: setting FD_CLOEXEC on an fd we just created.
+            unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+        }
+    }
+    Ok(fds)
+}
+
 /// The two ends of a pipe, made close-on-exec.
 fn pipe() -> std::io::Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)> {
     use std::os::fd::FromRawFd;
-    let mut fds = [0i32; 2];
-    // SAFETY: a two-element array, as pipe2 writes.
-    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    // SAFETY: pipe2 made both descriptors, and nothing else owns them.
+    let fds = pipe_raw()?;
+    // SAFETY: pipe_raw made both descriptors, and nothing else owns them.
     Ok(unsafe {
         (
             std::os::fd::OwnedFd::from_raw_fd(fds[0]),
@@ -293,12 +358,7 @@ pub fn stop_all() -> usize {
 /// writes a byte to a pipe, which is all a handler may do; a thread of
 /// its own does the rest.
 pub fn stop_on_signal(signal: i32, grace: Duration, exit_code: i32) -> std::io::Result<()> {
-    let mut fds = [0i32; 2];
-    // SAFETY: a two-element array, as pipe2 writes.
-    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    let [read, write] = fds;
+    let [read, write] = pipe_raw()?;
     STOP_PIPE.store(write, Ordering::SeqCst);
 
     extern "C" fn tell(_: i32) {
@@ -348,7 +408,7 @@ pub fn stop_on_signal(signal: i32, grace: Duration, exit_code: i32) -> std::io::
         .map(|_| ())
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     // The protocol between an interrupter and the run loop over a byte of
     // this test's own in place of the vCPU's.

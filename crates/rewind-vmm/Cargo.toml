@@ -9,11 +9,13 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-# The KVM ioctls and the structures they pass, from rust-vmm.
-kvm-ioctls = "0.25"
-kvm-bindings = "0.14"
 libc = "0.2"
 # The machine a run's spec describes, in the types its manifest records.
 rewind-trace = { path = "../rewind-trace" }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# The KVM ioctls and the structures they pass, from rust-vmm.
+kvm-ioctls = "0.25"
+kvm-bindings = "0.14"

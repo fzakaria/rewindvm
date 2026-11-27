@@ -165,6 +165,9 @@ fn units_of(live: &[(u64, Vec<(u32, u32)>)]) -> Vec<Unit> {
 /// [`WORKERS_ENV`] gives, else one for every two cores, no more than the
 /// GiB of memory free, and at least one.
 fn workers(units: usize) -> usize {
+    if cfg!(target_os = "macos") {
+        return 1;
+    }
     let asked = std::env::var(WORKERS_ENV)
         .ok()
         .and_then(|n| n.parse::<usize>().ok());
