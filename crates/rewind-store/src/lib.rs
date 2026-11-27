@@ -1035,6 +1035,11 @@ fn check_format(dir: &Path) -> Result<()> {
 }
 
 impl Store {
+    /// Directory holding this page store's packs and index.
+    pub fn path(&self) -> &Path {
+        &self.dir
+    }
+
     /// The index, locked. Only a thread that panicked while holding the
     /// lock leaves it poisoned, and that panic is the failure to report.
     fn index(&self) -> MutexGuard<'_, Index> {

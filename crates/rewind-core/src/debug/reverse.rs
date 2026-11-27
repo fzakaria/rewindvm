@@ -116,6 +116,9 @@ impl Pages for StorePages {
     fn get(&self, hash: &[u8; 32], out: &mut [u8]) -> Result<()> {
         keyframes::ReadPages(&self.0).get(hash, out)
     }
+    fn store_path(&self) -> Option<&std::path::Path> {
+        Some(self.0.path())
+    }
 }
 
 /// Where a fork is in its run: the start of a step, then what it did.

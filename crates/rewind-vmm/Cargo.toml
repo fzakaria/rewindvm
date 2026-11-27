@@ -10,6 +10,9 @@ workspace = true
 
 [dependencies]
 libc = "0.2"
+# Content-addressed page store, opened directly by cluster workers during
+# parallel snapshot capture and restore instead of copying raw pages over IPC.
+rewind-store = { path = "../rewind-store" }
 # The machine a run's spec describes, in the types its manifest records.
 rewind-trace = { path = "../rewind-trace" }
 anyhow = "1"

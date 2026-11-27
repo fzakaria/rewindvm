@@ -31,6 +31,12 @@ pub trait Pages {
     fn put_all(&mut self, pages: &[&[u8]]) -> Result<Vec<[u8; 32]>>;
     /// Reads the page with this hash into `out`.
     fn get(&self, hash: &[u8; 32], out: &mut [u8]) -> Result<()>;
+    /// Optional path to a `rewind-store` directory backing these pages.
+    /// Cluster workers can open it directly in parallel instead of copying raw
+    /// page bytes across IPC channels.
+    fn store_path(&self) -> Option<&std::path::Path> {
+        None
+    }
 }
 
 /// The hash the all-zero page goes by; see rewind-store.
@@ -330,6 +336,9 @@ impl Machine {
         }
 
         let stored = put_pages(pages, self.dev.ram.as_slice(), &indices, parent)?;
+        if parent.is_none() && self.dirty_log == DirtyLog::On {
+            self.set_keyframe_origin(stored.clone());
+        }
 
         let (cpu, irqchips, devices) = self.state()?;
         Ok(Keyframe {
@@ -592,8 +601,13 @@ impl Machine {
             }
         }
         self.dev.tx_queue.clear();
+        self.dev.tx_pending = None;
+        self.dev.idle = false;
         self.dev.net_rx_pending = false;
         self.dev.monitor_dirty_pages.clear();
+        self.dev.record_buffer.clear();
+        self.dev.event_buffer.clear();
+        self.dev.event_pending = false;
         self.dev.epoch = d.epoch;
         self.dev.step = d.step;
         self.dev.stop = None;

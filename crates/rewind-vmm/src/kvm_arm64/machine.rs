@@ -437,6 +437,7 @@ impl Machine {
             let last_page = ((off as usize) + 4 + frame.len().saturating_sub(1)) / PAGE_SIZE;
             for p in first_page..=last_page {
                 self.dev.monitor_dirty_pages.push(p);
+                self.checkpoints.since.insert(p as u32);
             }
         }
 

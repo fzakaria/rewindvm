@@ -53,6 +53,9 @@ impl Pages for StorePages<'_> {
     fn get(&self, hash: &[u8; 32], out: &mut [u8]) -> Result<()> {
         self.0.get(hash, out)
     }
+    fn store_path(&self) -> Option<&Path> {
+        Some(self.0.path())
+    }
 }
 
 /// Read-only access, for restoring.
@@ -65,6 +68,9 @@ impl Pages for ReadPages<'_> {
     }
     fn get(&self, hash: &[u8; 32], out: &mut [u8]) -> Result<()> {
         self.0.get(hash, out)
+    }
+    fn store_path(&self) -> Option<&Path> {
+        Some(self.0.path())
     }
 }
 

@@ -1097,8 +1097,9 @@ impl ClusterSession {
             .as_ref()
             .context("page store is not open for snapshot restore")?;
 
-        // Restore VMs FIRST using sliced trace views so a fallible restore
-        // never leaves the live session recorder truncated.
+        // Roll back the live cluster in place (rewriting only pages dirtied
+        // since the snapshot on nodes whose boot_count matches) BEFORE
+        // truncating the session recorder.
         let truncated_records: Vec<Vec<(u64, Vec<u8>)>> = self
             .recorder
             .node_records
@@ -1107,16 +1108,14 @@ impl ClusterSession {
             .map(|(recs, &len)| recs[..len.min(recs.len())].to_vec())
             .collect();
         let pages = ReadPages(store);
-        let mut restored = Cluster::restore(
-            self.prepared.cluster_config.clone(),
+        let _stats = self.cluster.restore_in_place(
             &snap.keyframes,
             &pages,
             &truncated_records,
-            DirtyLog::On,
         )?;
-        restored.set_node_encoders(&snap.node_encoders);
+        self.cluster.set_node_encoders(&snap.node_encoders);
 
-        // Commit the rewound session state only after Cluster::restore succeeded.
+        // Commit the rewound session state only after restore succeeded.
         for (i, &len) in snap.node_records_lens.iter().enumerate() {
             self.recorder.node_records[i].truncate(len);
         }
@@ -1128,7 +1127,6 @@ impl ClusterSession {
         self.node_kf_parents = snap.node_kf_parents;
         self.node_kf_boots = snap.node_kf_boots;
         self.next_kf_ns = snap.next_kf_ns;
-        self.cluster = restored;
         self.last_stop = ClusterStop::Paused;
         Ok((snap.cluster_ns, snap.cluster_step))
     }

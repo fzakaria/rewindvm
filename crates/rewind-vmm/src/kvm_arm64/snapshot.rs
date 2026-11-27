@@ -20,6 +20,12 @@ use crate::{Config, DirtyLog, Machine};
 pub trait Pages {
     fn put_all(&mut self, pages: &[&[u8]]) -> Result<Vec<[u8; 32]>>;
     fn get(&self, hash: &[u8; 32], out: &mut [u8]) -> Result<()>;
+    /// Optional path to a `rewind-store` directory backing these pages.
+    /// Cluster workers open it directly in parallel instead of copying raw
+    /// page bytes across IPC channels.
+    fn store_path(&self) -> Option<&std::path::Path> {
+        None
+    }
 }
 
 /// The hash the all-zero page goes by; see rewind-store.
@@ -154,16 +160,57 @@ pub(crate) fn final_pages<'a>(
     Ok(map.into_iter().collect())
 }
 
+const MAX_PAGE_READERS: usize = 16;
+const PAGES_PER_READER: usize = 4096;
+
 pub(crate) fn read_pages(
     ram: &mut [u8],
     restored: &[(u32, &[u8; 32])],
     pages: &(dyn Pages + Sync),
 ) -> Result<()> {
-    for &(page, hash) in restored {
-        let start = page as usize * PAGE_SIZE;
-        pages.get(hash, &mut ram[start..start + PAGE_SIZE])?;
+    if restored.is_empty() {
+        return Ok(());
     }
-    Ok(())
+    let threads = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .min(MAX_PAGE_READERS)
+        .min(restored.len().div_ceil(PAGES_PER_READER))
+        .max(1);
+    if threads == 1 {
+        for &(page, hash) in restored {
+            let start = page as usize * PAGE_SIZE;
+            pages.get(hash, &mut ram[start..start + PAGE_SIZE])?;
+        }
+        return Ok(());
+    }
+
+    let mut slots: Vec<Option<&mut [u8]>> = ram.chunks_mut(PAGE_SIZE).map(Some).collect();
+    let mut work = Vec::with_capacity(restored.len());
+    for &(index, hash) in restored {
+        let slot = slots
+            .get_mut(index as usize)
+            .and_then(Option::take)
+            .with_context(|| format!("page {index} is restored twice or past the memory"))?;
+        work.push((slot, hash));
+    }
+    let share = work.len().div_ceil(threads).max(1);
+    std::thread::scope(|scope| {
+        let readers: Vec<_> = work
+            .chunks_mut(share)
+            .map(|part| {
+                scope.spawn(move || -> Result<()> {
+                    for (out, hash) in part.iter_mut() {
+                        pages.get(hash, out)?;
+                    }
+                    Ok(())
+                })
+            })
+            .collect();
+        for reader in readers {
+            reader.join().expect("a page reader panicked")?;
+        }
+        Ok(())
+    })
 }
 
 /// CPU, device, and copied dirty guest memory pages captured from a live
@@ -277,6 +324,9 @@ impl Machine {
         }
 
         let stored = put_pages(pages, self.dev.ram.as_slice(), &indices, parent)?;
+        if parent.is_none() && self.dirty_log == DirtyLog::On {
+            self.set_keyframe_origin(stored.clone());
+        }
         let (cpu, irqchips, devices) = self.state()?;
         Ok(Keyframe {
             step: self.dev.step,
@@ -485,6 +535,11 @@ impl Machine {
         self.dev.tx_queue.clear();
         self.dev.tx_pending = None;
         self.dev.monitor_dirty_pages.clear();
+        self.dev.record_buffer.clear();
+        self.dev.event_buffer.clear();
+        self.dev.event_pending = false;
+        self.dev.inspect = false;
+        self.dev.input_sent = false;
         self.dev.timer_armed_at = None;
         self.passing_breakpoint = false;
         self.watching_step = None;

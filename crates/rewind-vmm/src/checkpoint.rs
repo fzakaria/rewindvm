@@ -307,6 +307,23 @@ impl Machine {
         Ok(())
     }
 
+    /// Anchors a machine's memory origin to a just-captured full keyframe's
+    /// non-zero pages (sorted by page index) when no debugger checkpoints are
+    /// active, allowing subsequent [`Machine::restore_in_place`] calls to
+    /// rewrite only the pages modified since that keyframe.
+    pub(crate) fn set_keyframe_origin(&mut self, pages: Vec<(u32, [u8; 32])>) {
+        if self.checkpoints.taken.is_empty() {
+            self.origin = Origin::Restored(pages);
+            self.checkpoints.since.clear();
+        }
+    }
+
+    /// Whether [`Machine::restore_in_place`] can roll this machine back without
+    /// rebuilding the VM from scratch.
+    pub(crate) fn can_restore_in_place(&self) -> bool {
+        self.dirty_log == crate::DirtyLog::On && matches!(self.origin, Origin::Restored(_))
+    }
+
     /// Puts the machine at the keyframe `chain` ends with, in place: the
     /// full keyframe first, as for [`Machine::restore`], and `trace` the
     /// run's records, which the encoders go on from at the last one's
@@ -317,14 +334,26 @@ impl Machine {
     /// a large guest's memory for keyframes a few hundred steps apart,
     /// where a new machine reads every page. Checkpoints are dropped,
     /// since their pages are over the old origin, and the debugger's int3s
-    /// taken out. Fails on a machine that booted, which has no keyframe
-    /// memory to compare.
+    /// taken out. Fails on a machine that booted without an anchored keyframe
+    /// origin, which has no keyframe memory to compare.
     pub fn restore_in_place(
         &mut self,
         chain: &[&crate::snapshot::Keyframe],
         pages: &(dyn Pages + Sync),
         trace: &[(u64, Vec<u8>)],
     ) -> Result<()> {
+        let _ = self.restore_in_place_count(chain, pages, trace)?;
+        Ok(())
+    }
+
+    /// Same as [`Machine::restore_in_place`], returning how many guest pages
+    /// were rewritten (read from `pages` or zeroed).
+    pub(crate) fn restore_in_place_count(
+        &mut self,
+        chain: &[&crate::snapshot::Keyframe],
+        pages: &(dyn Pages + Sync),
+        trace: &[(u64, Vec<u8>)],
+    ) -> Result<usize> {
         let last = chain.last().context("restoring from no keyframes")?;
         if chain[0].parent.is_some() {
             anyhow::bail!("a keyframe chain must start with a full keyframe");
@@ -340,12 +369,13 @@ impl Machine {
         self.dirty_pages()?;
 
         // Every page written since the old origin: by each checkpoint's
-        // stretch, since the anchor, and by the monitor into the shared
-        // page, now's and the keyframe's.
+        // stretch, since the anchor, by monitor RX ring writes, and by the
+        // monitor into the shared page, now's and the keyframe's.
         let mut written = self.checkpoints.since.clone();
         for stretch in &self.checkpoints.tree.written {
             written.extend(stretch);
         }
+        written.extend(self.dev.monitor_dirty_pages.drain(..).map(|p| p as Page));
         written.extend(self.shared_page());
         written.extend(
             last.devices
@@ -362,6 +392,7 @@ impl Machine {
             unreachable!("checked to be restored above");
         };
         let rewrite = to_rewrite(old, &new, &written);
+        let rewritten = rewrite.len();
         for (page, _) in &rewrite {
             self.dev.ram.mark_page(*page as usize);
         }
@@ -385,7 +416,7 @@ impl Machine {
         self.drain_dirty_log()?;
         self.apply_state(&last.cpu, &last.irqchips, &last.devices)?;
         self.resume_records(trace, last.devices.step)?;
-        Ok(())
+        Ok(rewritten)
     }
 
     /// Keeps page `page` as the machine's origin had it, once: from the

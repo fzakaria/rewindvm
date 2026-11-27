@@ -750,6 +750,7 @@ dependencies = [
  "kvm-bindings",
  "kvm-ioctls",
  "libc",
+ "rewind-store",
  "rewind-trace",
  "serde",
 ]

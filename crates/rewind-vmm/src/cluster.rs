@@ -24,6 +24,7 @@
 //!   causally-exact seeking, node inspection, and cluster forking.
 
 use std::collections::{HashMap, VecDeque};
+use std::path::{Path, PathBuf};
 #[cfg(not(target_os = "macos"))]
 use std::sync::mpsc::SyncSender;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -298,6 +299,202 @@ type EncodersPair = (
     Option<rewind_trace::switches::Encoder>,
 );
 
+/// Summary of how [`Cluster::restore_in_place`] restored each node.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RestoreStats {
+    /// Nodes rolled back in place by rewriting only pages dirtied since the
+    /// snapshot (zero VM teardown / child respawn).
+    pub in_place_nodes: usize,
+    /// Nodes restored by rebuilding a fresh [`Machine`] inside the existing
+    /// worker (e.g. nodes that were crashed or on a different `boot_count`).
+    pub full_restore_nodes: usize,
+    /// Nodes that are crashed in the target snapshot.
+    pub crashed_nodes: usize,
+    /// Total 4 KiB guest pages rewritten across in-place restored nodes.
+    pub pages_rewritten: usize,
+}
+
+/// How a cluster worker obtains snapshot pages during `Restore` /
+/// `RestoreInPlace`: directly from a `rewind-store` directory on disk (zero
+/// page-byte IPC) or inline via [`MemPages`] for in-memory test stores.
+#[derive(Debug, Serialize, Deserialize)]
+enum PageSource {
+    StorePath(PathBuf),
+    Inline(MemPages),
+}
+
+struct StoreRefPages<'a>(&'a rewind_store::Store);
+
+impl Pages for StoreRefPages<'_> {
+    fn put_all(&mut self, _pages: &[&[u8]]) -> Result<Vec<[u8; 32]>> {
+        bail!("read-only worker store does not store pages")
+    }
+    fn get(&self, hash: &[u8; 32], out: &mut [u8]) -> Result<()> {
+        self.0.get(hash, out)
+    }
+    fn store_path(&self) -> Option<&Path> {
+        Some(self.0.path())
+    }
+}
+
+struct StoreMutPages<'a>(&'a mut rewind_store::Store);
+
+impl Pages for StoreMutPages<'_> {
+    fn put_all(&mut self, pages: &[&[u8]]) -> Result<Vec<[u8; 32]>> {
+        self.0.put_all(pages)
+    }
+    fn get(&self, hash: &[u8; 32], out: &mut [u8]) -> Result<()> {
+        self.0.get(hash, out)
+    }
+    fn store_path(&self) -> Option<&Path> {
+        Some(self.0.path())
+    }
+}
+
+#[derive(Default)]
+struct WorkerStoreCache(Option<(PathBuf, rewind_store::Store)>);
+
+impl WorkerStoreCache {
+    fn open(&mut self, path: &Path) -> Result<&mut rewind_store::Store> {
+        let needs_open = self
+            .0
+            .as_ref()
+            .is_none_or(|(cached, _)| cached.as_path() != path);
+        if needs_open {
+            self.0 = None;
+            let store = rewind_store::Store::open(path)?;
+            self.0 = Some((path.to_path_buf(), store));
+        }
+        Ok(&mut self.0.as_mut().expect("opened above").1)
+    }
+}
+
+fn extract_node_chain(chain: &[ClusterKeyframe], idx: usize, boot_count: u32) -> Vec<Keyframe> {
+    let mut node_chain = Vec::new();
+    for ck in chain {
+        let nk = &ck.nodes[idx];
+        if nk.boot_count == boot_count
+            && let Some(kf) = &nk.keyframe
+        {
+            if kf.parent.is_none() {
+                node_chain.clear();
+            }
+            node_chain.push(kf.clone());
+        }
+    }
+    node_chain
+}
+
+fn build_page_source(chain: &[Keyframe], pages: &(dyn Pages + Sync)) -> Result<PageSource> {
+    if let Some(path) = pages.store_path() {
+        return Ok(PageSource::StorePath(path.to_path_buf()));
+    }
+    let mut page_hashes: std::collections::BTreeMap<u32, [u8; 32]> =
+        std::collections::BTreeMap::new();
+    for kf in chain {
+        for &(page, hash) in &kf.pages {
+            if hash == crate::snapshot::ZERO_PAGE {
+                page_hashes.remove(&page);
+            } else {
+                page_hashes.insert(page, hash);
+            }
+        }
+    }
+    let mut mem_pages = MemPages::default();
+    let mut buf = vec![0u8; crate::layout::PAGE_SIZE];
+    for hash in page_hashes.into_values() {
+        if let std::collections::hash_map::Entry::Vacant(e) = mem_pages.pages.entry(hash) {
+            pages.get(&hash, &mut buf)?;
+            e.insert(buf.clone());
+        }
+    }
+    Ok(PageSource::Inline(mem_pages))
+}
+
+#[allow(clippy::too_many_arguments, reason = "worker restore helper")]
+fn worker_restore_full(
+    machine: &mut Option<Machine>,
+    shared_intr: &Arc<Mutex<Option<Interrupter>>>,
+    store_cache: &mut WorkerStoreCache,
+    config: &Config,
+    chain: &[Keyframe],
+    pages: PageSource,
+    trace: &[(u64, Vec<u8>)],
+    dirty_log: DirtyLog,
+    idle: bool,
+    net_rx_pending: bool,
+) -> Result<NodeMeta> {
+    if let Ok(mut g) = shared_intr.lock() {
+        *g = None;
+    }
+    drop(machine.take());
+    let mut m = match pages {
+        PageSource::StorePath(path) => {
+            let store = store_cache.open(&path)?;
+            let rp = StoreRefPages(store);
+            Machine::restore(config, chain, &rp, trace, dirty_log)?
+        }
+        PageSource::Inline(mem_pages) => {
+            Machine::restore(config, chain, &mem_pages, trace, dirty_log)?
+        }
+    };
+    m.set_cluster_mode(true);
+    m.set_idle(idle, net_rx_pending);
+    let meta = NodeMeta::from_machine(&m);
+    if let Ok(mut g) = shared_intr.lock() {
+        *g = Some(m.interrupter());
+    }
+    *machine = Some(m);
+    Ok(meta)
+}
+
+#[allow(clippy::too_many_arguments, reason = "worker in-place restore helper")]
+fn worker_restore_in_place(
+    machine: &mut Option<Machine>,
+    shared_intr: &Arc<Mutex<Option<Interrupter>>>,
+    store_cache: &mut WorkerStoreCache,
+    config: &Config,
+    chain: &[Keyframe],
+    pages: PageSource,
+    trace: &[(u64, Vec<u8>)],
+    dirty_log: DirtyLog,
+    idle: bool,
+    net_rx_pending: bool,
+) -> Result<(NodeMeta, bool, usize)> {
+    if dirty_log == DirtyLog::On
+        && machine.as_ref().is_some_and(Machine::can_restore_in_place)
+    {
+        let m = machine.as_mut().expect("checked live above");
+        let chain_refs: Vec<&Keyframe> = chain.iter().collect();
+        let rewritten = match pages {
+            PageSource::StorePath(path) => {
+                let store = store_cache.open(&path)?;
+                let rp = StoreRefPages(store);
+                m.restore_in_place_count(&chain_refs, &rp, trace)?
+            }
+            PageSource::Inline(mem_pages) => {
+                m.restore_in_place_count(&chain_refs, &mem_pages, trace)?
+            }
+        };
+        m.set_cluster_mode(true);
+        m.set_idle(idle, net_rx_pending);
+        return Ok((NodeMeta::from_machine(m), true, rewritten));
+    }
+    let meta = worker_restore_full(
+        machine,
+        shared_intr,
+        store_cache,
+        config,
+        chain,
+        pages,
+        trace,
+        dirty_log,
+        idle,
+        net_rx_pending,
+    )?;
+    Ok((meta, false, 0))
+}
+
 enum WorkerReq {
     Boot {
         config: Box<Config>,
@@ -306,11 +503,19 @@ enum WorkerReq {
     },
     #[cfg(not(target_os = "macos"))]
     Attach(Box<Machine>),
-    #[cfg(target_os = "macos")]
     Restore {
         config: Box<Config>,
         chain: Vec<Keyframe>,
-        pages: MemPages,
+        pages: PageSource,
+        trace: Vec<(u64, Vec<u8>)>,
+        dirty_log: DirtyLog,
+        idle: bool,
+        net_rx_pending: bool,
+    },
+    RestoreInPlace {
+        config: Box<Config>,
+        chain: Vec<Keyframe>,
+        pages: PageSource,
         trace: Vec<(u64, Vec<u8>)>,
         dirty_log: DirtyLog,
         idle: bool,
@@ -328,9 +533,14 @@ enum WorkerReq {
     AdvanceIdleTo {
         target_local: u64,
     },
+    KeyframeDirect {
+        parent: Option<u64>,
+        store_path: PathBuf,
+    },
     PrepareKeyframe {
         parent: Option<u64>,
     },
+    SetKeyframeOrigin(Vec<(u32, [u8; 32])>),
     SnapshotNonDestructive,
     Encoders,
     SetEncoders(Box<EncodersPair>),
@@ -343,8 +553,10 @@ enum WorkerReq {
 
 enum WorkerResp {
     Meta(Result<NodeMeta>),
+    RestoredInPlace(Result<(NodeMeta, bool, usize)>),
     Slice(Box<Result<SliceReply>>),
     DeliverRx(Result<(bool, NodeMeta)>),
+    Keyframe(Box<Result<Option<Keyframe>>>),
     PreparedKeyframe(Box<Result<Option<PreparedKeyframe>>>),
     NonDestructive(Box<Result<(Keyframe, MemPages, NodeEncoders)>>),
     Encoders(Box<NodeEncoders>),
@@ -429,6 +641,7 @@ fn worker_loop(
     shared_intr: Arc<Mutex<Option<Interrupter>>>,
 ) {
     let mut machine: Option<Machine> = None;
+    let mut store_cache = WorkerStoreCache::default();
 
     while let Ok(req) = req_rx.recv() {
         let resp = match req {
@@ -459,6 +672,52 @@ fn worker_loop(
                 }
                 machine = Some(*m);
                 WorkerResp::Meta(Ok(meta))
+            }
+            WorkerReq::Restore {
+                config,
+                chain,
+                pages,
+                trace,
+                dirty_log,
+                idle,
+                net_rx_pending,
+            } => {
+                let res = worker_restore_full(
+                    &mut machine,
+                    &shared_intr,
+                    &mut store_cache,
+                    &config,
+                    &chain,
+                    pages,
+                    &trace,
+                    dirty_log,
+                    idle,
+                    net_rx_pending,
+                );
+                WorkerResp::Meta(res)
+            }
+            WorkerReq::RestoreInPlace {
+                config,
+                chain,
+                pages,
+                trace,
+                dirty_log,
+                idle,
+                net_rx_pending,
+            } => {
+                let res = worker_restore_in_place(
+                    &mut machine,
+                    &shared_intr,
+                    &mut store_cache,
+                    &config,
+                    &chain,
+                    pages,
+                    &trace,
+                    dirty_log,
+                    idle,
+                    net_rx_pending,
+                );
+                WorkerResp::RestoredInPlace(res)
             }
             WorkerReq::RunSlice {
                 horizon_local,
@@ -507,12 +766,30 @@ fn worker_loop(
                 };
                 WorkerResp::Meta(res)
             }
+            WorkerReq::KeyframeDirect { parent, store_path } => {
+                let res = match machine.as_mut() {
+                    Some(m) => store_cache.open(&store_path).and_then(|store| {
+                        let mut sp = StoreMutPages(store);
+                        let kf = m.keyframe(&mut sp, parent)?;
+                        sp.0.sync()?;
+                        Ok(Some(kf))
+                    }),
+                    None => Ok(None),
+                };
+                WorkerResp::Keyframe(Box::new(res))
+            }
             WorkerReq::PrepareKeyframe { parent } => {
                 let res = match machine.as_mut() {
                     Some(m) => m.prepare_keyframe(parent).map(Some),
                     None => Ok(None),
                 };
                 WorkerResp::PreparedKeyframe(Box::new(res))
+            }
+            WorkerReq::SetKeyframeOrigin(origin_pages) => {
+                if let Some(m) = machine.as_mut() {
+                    m.set_keyframe_origin(origin_pages);
+                }
+                WorkerResp::Unit
             }
             WorkerReq::SnapshotNonDestructive => {
                 let res = match machine.as_mut() {
@@ -591,7 +868,16 @@ mod proc_worker {
         Restore {
             config: Box<Config>,
             chain: Vec<Keyframe>,
-            pages: MemPages,
+            pages: PageSource,
+            trace: Vec<(u64, Vec<u8>)>,
+            dirty_log: DirtyLog,
+            idle: bool,
+            net_rx_pending: bool,
+        },
+        RestoreInPlace {
+            config: Box<Config>,
+            chain: Vec<Keyframe>,
+            pages: PageSource,
             trace: Vec<(u64, Vec<u8>)>,
             dirty_log: DirtyLog,
             idle: bool,
@@ -609,9 +895,14 @@ mod proc_worker {
         AdvanceIdleTo {
             target_local: u64,
         },
+        KeyframeDirect {
+            parent: Option<u64>,
+            store_path: PathBuf,
+        },
         PrepareKeyframe {
             parent: Option<u64>,
         },
+        SetKeyframeOrigin(Vec<(u32, [u8; 32])>),
         SnapshotNonDestructive,
         Encoders,
         SetEncoders(Box<EncodersPair>),
@@ -623,8 +914,10 @@ mod proc_worker {
     #[derive(Serialize, Deserialize)]
     pub(super) enum WireResp {
         Meta(std::result::Result<NodeMeta, String>),
+        RestoredInPlace(std::result::Result<(NodeMeta, bool, usize), String>),
         Slice(Box<std::result::Result<SliceReply, String>>),
         DeliverRx(std::result::Result<(bool, NodeMeta), String>),
+        Keyframe(Box<std::result::Result<Option<Keyframe>, String>>),
         PreparedKeyframe(Box<std::result::Result<Option<PreparedKeyframe>, String>>),
         NonDestructive(Box<std::result::Result<(Keyframe, MemPages, NodeEncoders), String>>),
         Encoders(Box<NodeEncoders>),
@@ -668,7 +961,7 @@ mod proc_worker {
     impl NodeWorker {
         pub(super) fn spawn(idx: usize, name: String) -> Result<NodeWorker> {
             let exe = match std::env::var_os("REWIND_CLUSTER_WORKER_BIN") {
-                Some(p) if !p.is_empty() => std::path::PathBuf::from(p),
+                Some(p) if !p.is_empty() => PathBuf::from(p),
                 _ => std::env::current_exe().context("locating current rewind executable")?,
             };
             let mut child = Command::new(&exe)
@@ -701,11 +994,17 @@ mod proc_worker {
                     while let Ok(Some(wire)) = read_frame::<_, WireResp>(&mut r) {
                         let resp = match wire {
                             WireResp::Meta(r) => WorkerResp::Meta(r.map_err(|e| anyhow!(e))),
+                            WireResp::RestoredInPlace(r) => {
+                                WorkerResp::RestoredInPlace(r.map_err(|e| anyhow!(e)))
+                            }
                             WireResp::Slice(r) => {
                                 WorkerResp::Slice(Box::new((*r).map_err(|e| anyhow!(e))))
                             }
                             WireResp::DeliverRx(r) => {
                                 WorkerResp::DeliverRx(r.map_err(|e| anyhow!(e)))
+                            }
+                            WireResp::Keyframe(r) => {
+                                WorkerResp::Keyframe(Box::new((*r).map_err(|e| anyhow!(e))))
                             }
                             WireResp::PreparedKeyframe(r) => {
                                 WorkerResp::PreparedKeyframe(Box::new((*r).map_err(|e| anyhow!(e))))
@@ -761,6 +1060,23 @@ mod proc_worker {
                     idle,
                     net_rx_pending,
                 },
+                WorkerReq::RestoreInPlace {
+                    config,
+                    chain,
+                    pages,
+                    trace,
+                    dirty_log,
+                    idle,
+                    net_rx_pending,
+                } => WireReq::RestoreInPlace {
+                    config,
+                    chain,
+                    pages,
+                    trace,
+                    dirty_log,
+                    idle,
+                    net_rx_pending,
+                },
                 WorkerReq::RunSlice {
                     horizon_local,
                     max_steps,
@@ -776,7 +1092,11 @@ mod proc_worker {
                 WorkerReq::AdvanceIdleTo { target_local } => {
                     WireReq::AdvanceIdleTo { target_local }
                 }
+                WorkerReq::KeyframeDirect { parent, store_path } => {
+                    WireReq::KeyframeDirect { parent, store_path }
+                }
                 WorkerReq::PrepareKeyframe { parent } => WireReq::PrepareKeyframe { parent },
+                WorkerReq::SetKeyframeOrigin(p) => WireReq::SetKeyframeOrigin(p),
                 WorkerReq::SnapshotNonDestructive => WireReq::SnapshotNonDestructive,
                 WorkerReq::Encoders => WireReq::Encoders,
                 WorkerReq::SetEncoders(p) => WireReq::SetEncoders(p),
@@ -866,6 +1186,7 @@ mod proc_worker {
 
         let mut stdout = BufWriter::new(std::io::stdout().lock());
         let mut machine: Option<Machine> = None;
+        let mut store_cache = WorkerStoreCache::default();
 
         while let Ok(req) = req_rx.recv() {
             let resp = match req {
@@ -903,22 +1224,42 @@ mod proc_worker {
                     idle,
                     net_rx_pending,
                 } => {
-                    if let Ok(mut g) = shared_intr.lock() {
-                        *g = None;
-                    }
-                    drop(machine.take());
-                    let res = (|| -> Result<NodeMeta> {
-                        let mut m = Machine::restore(&config, &chain, &pages, &trace, dirty_log)?;
-                        m.set_cluster_mode(true);
-                        m.set_idle(idle, net_rx_pending);
-                        let meta = NodeMeta::from_machine(&m);
-                        if let Ok(mut g) = shared_intr.lock() {
-                            *g = Some(m.interrupter());
-                        }
-                        machine = Some(m);
-                        Ok(meta)
-                    })();
+                    let res = worker_restore_full(
+                        &mut machine,
+                        &shared_intr,
+                        &mut store_cache,
+                        &config,
+                        &chain,
+                        pages,
+                        &trace,
+                        dirty_log,
+                        idle,
+                        net_rx_pending,
+                    );
                     WireResp::Meta(res.map_err(|e| format!("{e:#}")))
+                }
+                WireReq::RestoreInPlace {
+                    config,
+                    chain,
+                    pages,
+                    trace,
+                    dirty_log,
+                    idle,
+                    net_rx_pending,
+                } => {
+                    let res = worker_restore_in_place(
+                        &mut machine,
+                        &shared_intr,
+                        &mut store_cache,
+                        &config,
+                        &chain,
+                        pages,
+                        &trace,
+                        dirty_log,
+                        idle,
+                        net_rx_pending,
+                    );
+                    WireResp::RestoredInPlace(res.map_err(|e| format!("{e:#}")))
                 }
                 WireReq::RunSlice {
                     horizon_local,
@@ -967,12 +1308,30 @@ mod proc_worker {
                     };
                     WireResp::Meta(res.map_err(|e| format!("{e:#}")))
                 }
+                WireReq::KeyframeDirect { parent, store_path } => {
+                    let res = match machine.as_mut() {
+                        Some(m) => store_cache.open(&store_path).and_then(|store| {
+                            let mut sp = StoreMutPages(store);
+                            let kf = m.keyframe(&mut sp, parent)?;
+                            sp.0.sync()?;
+                            Ok(Some(kf))
+                        }),
+                        None => Ok(None),
+                    };
+                    WireResp::Keyframe(Box::new(res.map_err(|e| format!("{e:#}"))))
+                }
                 WireReq::PrepareKeyframe { parent } => {
                     let res = match machine.as_mut() {
                         Some(m) => m.prepare_keyframe(parent).map(Some),
                         None => Ok(None),
                     };
                     WireResp::PreparedKeyframe(Box::new(res.map_err(|e| format!("{e:#}"))))
+                }
+                WireReq::SetKeyframeOrigin(origin_pages) => {
+                    if let Some(m) = machine.as_mut() {
+                        m.set_keyframe_origin(origin_pages);
+                    }
+                    WireResp::Unit
                 }
                 WireReq::SnapshotNonDestructive => {
                     let res = match machine.as_mut() {
@@ -1656,49 +2015,17 @@ impl Cluster {
                 let last_nk = &last.nodes[idx];
                 let worker = NodeWorker::spawn(idx, node_cfg.name.clone())?;
                 if last_nk.keyframe.is_some() {
-                    let mut node_chain = Vec::new();
-                    for ck in chain {
-                        let nk = &ck.nodes[idx];
-                        if nk.boot_count == last_nk.boot_count
-                            && let Some(kf) = &nk.keyframe
-                        {
-                            if kf.parent.is_none() {
-                                node_chain.clear();
-                            }
-                            node_chain.push(kf.clone());
-                        }
-                    }
+                    let node_chain = extract_node_chain(chain, idx, last_nk.boot_count);
                     let mut m_cfg = node_cfg.config.clone();
                     if last_nk.boot_count > 1 {
                         m_cfg.seed = reboot_seed(node_cfg.base_seed, last_nk.boot_count);
                     }
-                    // Pre-fetch the final unique non-zero pages for this node's chain.
-                    let mut page_hashes: std::collections::BTreeMap<u32, [u8; 32]> =
-                        std::collections::BTreeMap::new();
-                    for kf in &node_chain {
-                        for &(page, hash) in &kf.pages {
-                            if hash == crate::snapshot::ZERO_PAGE {
-                                page_hashes.remove(&page);
-                            } else {
-                                page_hashes.insert(page, hash);
-                            }
-                        }
-                    }
-                    let mut mem_pages = MemPages::default();
-                    let mut buf = vec![0u8; crate::layout::PAGE_SIZE];
-                    for hash in page_hashes.into_values() {
-                        if let std::collections::hash_map::Entry::Vacant(e) =
-                            mem_pages.pages.entry(hash)
-                        {
-                            pages.get(&hash, &mut buf)?;
-                            e.insert(buf.clone());
-                        }
-                    }
+                    let page_source = build_page_source(&node_chain, pages)?;
                     let trace = node_traces.get(idx).cloned().unwrap_or_default();
                     worker.send(WorkerReq::Restore {
                         config: Box::new(m_cfg),
                         chain: node_chain,
-                        pages: mem_pages,
+                        pages: page_source,
                         trace,
                         dirty_log,
                         idle: last_nk.idle,
@@ -1767,18 +2094,7 @@ impl Cluster {
             if last_nk.keyframe.is_none() {
                 return Ok(None);
             }
-            let mut node_chain = Vec::new();
-            for ck in chain {
-                let nk = &ck.nodes[idx];
-                if nk.boot_count == last_nk.boot_count
-                    && let Some(kf) = &nk.keyframe
-                {
-                    if kf.parent.is_none() {
-                        node_chain.clear();
-                    }
-                    node_chain.push(kf.clone());
-                }
-            }
+            let node_chain = extract_node_chain(chain, idx, last_nk.boot_count);
             let mut m_cfg = node_cfg.config.clone();
             if last_nk.boot_count > 1 {
                 m_cfg.seed = reboot_seed(node_cfg.base_seed, last_nk.boot_count);
@@ -1862,63 +2178,293 @@ impl Cluster {
         })
     }
 
+    /// Rolls the live cluster back in place to the state at the end of `chain`
+    /// (full cluster keyframe first, target last).
+    ///
+    /// Live nodes whose `boot_count` matches the target snapshot and whose VM
+    /// has dirty logging enabled roll back in place via
+    /// [`Machine::restore_in_place`], rewriting only pages dirtied since the
+    /// snapshot without tearing down the VM or respawning worker processes.
+    /// Nodes that were crashed or on a different `boot_count` perform a full
+    /// restore inside their existing worker.
+    pub fn restore_in_place(
+        &mut self,
+        chain: &[ClusterKeyframe],
+        pages: &(dyn Pages + Sync),
+        node_traces: &[Vec<(u64, Vec<u8>)>],
+    ) -> Result<RestoreStats> {
+        let last = chain.last().context("restoring from no cluster keyframes")?;
+        if last.nodes.len() != self.nodes.len() {
+            bail!(
+                "cluster keyframe has {} nodes, cluster has {}",
+                last.nodes.len(),
+                self.nodes.len()
+            );
+        }
+
+        enum PendingRestore {
+            InPlace,
+            Full,
+            Crash,
+        }
+
+        let mut stats = RestoreStats::default();
+        let mut pending: Vec<(usize, PendingRestore)> = Vec::new();
+
+        // Dispatch all worker restores concurrently first.
+        for (idx, node) in self.nodes.iter().enumerate() {
+            if let NodeBackend::Worker(w) = &node.backend {
+                let last_nk = &last.nodes[idx];
+                if last_nk.keyframe.is_some() {
+                    let node_chain = extract_node_chain(chain, idx, last_nk.boot_count);
+                    let mut m_cfg = node.cfg.config.clone();
+                    if last_nk.boot_count > 1 {
+                        m_cfg.seed = reboot_seed(node.cfg.base_seed, last_nk.boot_count);
+                    }
+                    let page_source = build_page_source(&node_chain, pages)?;
+                    let trace = node_traces.get(idx).cloned().unwrap_or_default();
+                    let can_reuse = self.dirty_log == DirtyLog::On
+                        && node.meta.is_some()
+                        && node.boot_count == last_nk.boot_count;
+                    if can_reuse {
+                        w.send(WorkerReq::RestoreInPlace {
+                            config: Box::new(m_cfg),
+                            chain: node_chain,
+                            pages: page_source,
+                            trace,
+                            dirty_log: self.dirty_log,
+                            idle: last_nk.idle,
+                            net_rx_pending: last_nk.net_rx_pending,
+                        })?;
+                        pending.push((idx, PendingRestore::InPlace));
+                    } else {
+                        w.send(WorkerReq::Restore {
+                            config: Box::new(m_cfg),
+                            chain: node_chain,
+                            pages: page_source,
+                            trace,
+                            dirty_log: self.dirty_log,
+                            idle: last_nk.idle,
+                            net_rx_pending: last_nk.net_rx_pending,
+                        })?;
+                        pending.push((idx, PendingRestore::Full));
+                    }
+                } else {
+                    w.send(WorkerReq::Crash)?;
+                    pending.push((idx, PendingRestore::Crash));
+                }
+            }
+        }
+
+        // Handle inline (Local) nodes while workers run concurrently.
+        for (idx, node) in self.nodes.iter_mut().enumerate() {
+            let NodeBackend::Local(opt) = &mut node.backend else {
+                continue;
+            };
+            let last_nk = &last.nodes[idx];
+            if last_nk.keyframe.is_some() {
+                let node_chain = extract_node_chain(chain, idx, last_nk.boot_count);
+                let mut m_cfg = node.cfg.config.clone();
+                if last_nk.boot_count > 1 {
+                    m_cfg.seed = reboot_seed(node.cfg.base_seed, last_nk.boot_count);
+                }
+                let trace = node_traces.get(idx).map_or(&[][..], Vec::as_slice);
+                let can_reuse = self.dirty_log == DirtyLog::On
+                    && node.boot_count == last_nk.boot_count
+                    && opt.as_ref().is_some_and(|m| m.can_restore_in_place());
+                if can_reuse {
+                    let m = opt.as_mut().expect("checked live above");
+                    let chain_refs: Vec<&Keyframe> = node_chain.iter().collect();
+                    let rewritten = m
+                        .restore_in_place_count(&chain_refs, pages, trace)
+                        .with_context(|| {
+                            format!("restoring cluster node {} in place", node.cfg.name)
+                        })?;
+                    m.set_cluster_mode(true);
+                    m.set_idle(last_nk.idle, last_nk.net_rx_pending);
+                    node.meta = Some(NodeMeta::from_machine(m));
+                    stats.in_place_nodes += 1;
+                    stats.pages_rewritten += rewritten;
+                } else {
+                    *opt = None;
+                    let mut m = Machine::restore(&m_cfg, &node_chain, pages, trace, self.dirty_log)
+                        .with_context(|| format!("restoring cluster node {}", node.cfg.name))?;
+                    m.set_cluster_mode(true);
+                    m.set_idle(last_nk.idle, last_nk.net_rx_pending);
+                    node.meta = Some(NodeMeta::from_machine(&m));
+                    *opt = Some(Box::new(m));
+                    stats.full_restore_nodes += 1;
+                }
+            } else {
+                *opt = None;
+                node.meta = None;
+                stats.crashed_nodes += 1;
+            }
+        }
+
+        // Collect all worker replies.
+        for (idx, kind) in pending {
+            let node = &mut self.nodes[idx];
+            let NodeBackend::Worker(w) = &node.backend else {
+                unreachable!("pending entry is always a worker");
+            };
+            match kind {
+                PendingRestore::InPlace => match w.recv()? {
+                    WorkerResp::RestoredInPlace(res) => {
+                        let (meta, used_in_place, rewritten) = res.with_context(|| {
+                            format!("restoring cluster node {} in place", node.cfg.name)
+                        })?;
+                        node.meta = Some(meta);
+                        if used_in_place {
+                            stats.in_place_nodes += 1;
+                            stats.pages_rewritten += rewritten;
+                        } else {
+                            stats.full_restore_nodes += 1;
+                        }
+                    }
+                    _ => bail!(
+                        "unexpected response to RestoreInPlace from node {}",
+                        node.cfg.name
+                    ),
+                },
+                PendingRestore::Full => match w.recv()? {
+                    WorkerResp::Meta(res) => {
+                        let meta = res.with_context(|| {
+                            format!("restoring cluster node {}", node.cfg.name)
+                        })?;
+                        node.meta = Some(meta);
+                        stats.full_restore_nodes += 1;
+                    }
+                    _ => bail!("unexpected response to Restore from node {}", node.cfg.name),
+                },
+                PendingRestore::Crash => match w.recv()? {
+                    WorkerResp::Crashed(_) => {
+                        node.meta = None;
+                        stats.crashed_nodes += 1;
+                    }
+                    _ => bail!("unexpected response to Crash from node {}", node.cfg.name),
+                },
+            }
+        }
+
+        // Update cluster-level metadata on every node and restore the switch.
+        for (idx, node) in self.nodes.iter_mut().enumerate() {
+            let last_nk = &last.nodes[idx];
+            node.cluster_ns = last_nk.cluster_ns;
+            node.boot_cluster_ns = last_nk.boot_cluster_ns;
+            node.local_base_ns = last_nk.local_base_ns;
+            node.boot_count = last_nk.boot_count;
+            node.step_base = last_nk.step_base;
+            node.exited = last_nk.exited;
+            node.last_stop = None;
+            node.pending_rx = last_nk.pending_rx.iter().cloned().collect();
+        }
+        self.switch = NetSwitch::restore(self.config.network.clone(), last.switch.clone());
+        self.cluster_ns = last.cluster_ns;
+        self.cluster_step = last.cluster_step;
+        Ok(stats)
+    }
+
     /// Captures a synchronized keyframe of the entire cluster (every live node
-    /// and the virtual switch). In parallel mode, worker threads capture dirty
-    /// pages and KVM state concurrently on their pinned vCPU threads.
+    /// and the virtual switch). In parallel mode, workers capture dirty pages
+    /// and VM state concurrently; when `pages` is backed by a `rewind-store`
+    /// directory, workers write pages directly to the store in parallel without
+    /// copying raw page bytes over IPC.
     pub fn keyframe(
         &mut self,
         pages: &mut dyn Pages,
         parent: Option<u64>,
         node_parents: &[Option<u64>],
     ) -> Result<ClusterKeyframe> {
-        let mut prepared: Vec<Option<PreparedKeyframe>> = Vec::with_capacity(self.nodes.len());
+        let store_path = pages.store_path().map(Path::to_path_buf);
 
-        // Kick off worker keyframe captures concurrently first.
-        let mut worker_indices = Vec::new();
-        for (idx, node) in self.nodes.iter().enumerate() {
-            if let NodeBackend::Worker(w) = &node.backend {
-                let np = node_parents.get(idx).copied().flatten();
-                w.send(WorkerReq::PrepareKeyframe { parent: np })?;
-                worker_indices.push(idx);
+        let mut node_kfs_opt: Vec<Option<Keyframe>> = vec![None; self.nodes.len()];
+
+        if let Some(store_path) = store_path {
+            // Fast path: every worker hashes, compresses, and writes its own
+            // pages directly into the shared rewind-store in parallel.
+            let mut worker_indices = Vec::new();
+            for (idx, node) in self.nodes.iter().enumerate() {
+                if let NodeBackend::Worker(w) = &node.backend {
+                    let np = node_parents.get(idx).copied().flatten();
+                    w.send(WorkerReq::KeyframeDirect {
+                        parent: np,
+                        store_path: store_path.clone(),
+                    })?;
+                    worker_indices.push(idx);
+                }
             }
-        }
-
-        let mut worker_results: HashMap<usize, Option<PreparedKeyframe>> =
-            HashMap::with_capacity(worker_indices.len());
-        for idx in worker_indices {
-            if let NodeBackend::Worker(w) = &self.nodes[idx].backend {
-                match w.recv()? {
-                    WorkerResp::PreparedKeyframe(res) => {
-                        worker_results.insert(idx, (*res)?);
+            for (idx, node) in self.nodes.iter_mut().enumerate() {
+                if let NodeBackend::Local(Some(m)) = &mut node.backend {
+                    let np = node_parents.get(idx).copied().flatten();
+                    node_kfs_opt[idx] = Some(m.keyframe(pages, np)?);
+                }
+            }
+            for idx in worker_indices {
+                if let NodeBackend::Worker(w) = &self.nodes[idx].backend {
+                    match w.recv()? {
+                        WorkerResp::Keyframe(res) => {
+                            node_kfs_opt[idx] = (*res)?;
+                        }
+                        _ => bail!(
+                            "unexpected response to KeyframeDirect from node {}",
+                            self.nodes[idx].cfg.name
+                        ),
                     }
-                    _ => bail!(
-                        "unexpected response to PrepareKeyframe from node {}",
-                        self.nodes[idx].cfg.name
-                    ),
+                }
+            }
+        } else {
+            // In-memory Pages fallback (e.g. unit tests with MemPages).
+            let mut worker_indices = Vec::new();
+            for (idx, node) in self.nodes.iter().enumerate() {
+                if let NodeBackend::Worker(w) = &node.backend {
+                    let np = node_parents.get(idx).copied().flatten();
+                    w.send(WorkerReq::PrepareKeyframe { parent: np })?;
+                    worker_indices.push(idx);
+                }
+            }
+            for (idx, node) in self.nodes.iter_mut().enumerate() {
+                if let NodeBackend::Local(Some(m)) = &mut node.backend {
+                    let np = node_parents.get(idx).copied().flatten();
+                    node_kfs_opt[idx] = Some(m.keyframe(pages, np)?);
+                }
+            }
+            let mut origin_acks = Vec::new();
+            for idx in worker_indices {
+                if let NodeBackend::Worker(w) = &self.nodes[idx].backend {
+                    let prep = match w.recv()? {
+                        WorkerResp::PreparedKeyframe(res) => (*res)?,
+                        _ => bail!(
+                            "unexpected response to PrepareKeyframe from node {}",
+                            self.nodes[idx].cfg.name
+                        ),
+                    };
+                    if let Some(p) = prep {
+                        let is_full = p.parent.is_none();
+                        let kf = finish_keyframe(p, pages)?;
+                        if is_full && self.dirty_log == DirtyLog::On {
+                            w.send(WorkerReq::SetKeyframeOrigin(kf.pages.clone()))?;
+                            origin_acks.push(idx);
+                        }
+                        node_kfs_opt[idx] = Some(kf);
+                    }
+                }
+            }
+            for idx in origin_acks {
+                if let NodeBackend::Worker(w) = &self.nodes[idx].backend {
+                    match w.recv()? {
+                        WorkerResp::Unit => {}
+                        _ => bail!(
+                            "unexpected response to SetKeyframeOrigin from node {}",
+                            self.nodes[idx].cfg.name
+                        ),
+                    }
                 }
             }
         }
 
-        for (idx, node) in self.nodes.iter_mut().enumerate() {
-            let prep = match &mut node.backend {
-                NodeBackend::Local(opt) => match opt.as_mut() {
-                    Some(m) => {
-                        let np = node_parents.get(idx).copied().flatten();
-                        Some(m.prepare_keyframe(np)?)
-                    }
-                    None => None,
-                },
-                NodeBackend::Worker(_) => worker_results.remove(&idx).flatten(),
-            };
-            prepared.push(prep);
-        }
-
         let mut node_kfs = Vec::with_capacity(self.nodes.len());
-        for (node, prep) in self.nodes.iter().zip(prepared) {
-            let kf = match prep {
-                Some(p) => Some(finish_keyframe(p, pages)?),
-                None => None,
-            };
+        for (node, kf) in self.nodes.iter().zip(node_kfs_opt) {
             node_kfs.push(ClusterNodeKeyframe {
                 keyframe: kf,
                 idle: node.meta.as_ref().is_some_and(|m| m.is_idle),
@@ -2927,7 +3473,7 @@ impl Cluster {
 /// Ephemeral in-memory page map used by [`Cluster::clone_node_machine`] for
 /// zero-perturbation live file inspection. Uses monotonic non-zero page IDs
 /// to avoid hashing overhead while keeping zero pages distinct.
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 struct MemPages {
     next_id: u64,
     pages: HashMap<[u8; 32], Vec<u8>>,

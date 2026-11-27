@@ -538,3 +538,133 @@ fn snapshot_fault_snapshot_restore_and_standalone_replay() {
         .expect("seek_node");
     assert_eq!(actual_step, target_step);
 }
+
+#[test]
+fn in_place_dirty_page_restore_and_crash_fallback() {
+    let Some((guest, cpu)) = require_kvm_and_guest() else {
+        return;
+    };
+
+    let tmp = TempHome::new("in-place-restore");
+    let spec = three_node_tcp_spec(Vec::new(), 1_500);
+    let spec_src = serde_json::to_string(&spec).unwrap();
+    let opts = ClusterRunOptions {
+        seed: 99,
+        schedule: 0,
+        epoch: Some(1_700_000_000),
+        cpu,
+        clock: ClockSource::Exits,
+        keyframes: Keyframes::Take,
+        ..ClusterRunOptions::default()
+    };
+    let mut prep =
+        prepare_cluster(&tmp.home, &guest, &spec, PathBuf::from(".").as_path(), &spec_src, &opts)
+            .expect("prepare");
+    prep.cluster_config.parallel = true;
+
+    let mut store = rewind_store::Store::open(&tmp.home.store()).expect("open store");
+    let mut cluster =
+        Cluster::boot(prep.cluster_config.clone(), DirtyLog::On).expect("boot cluster");
+
+    // Advance past kernel + server startup, then capture a full cluster keyframe
+    // directly into the page store (anchoring each node's origin for in-place rollback).
+    let mut boot_obs = CaptureObserver {
+        records: vec![Vec::new(); 3],
+        net: Vec::new(),
+    };
+    let paused = cluster
+        .run(&mut boot_obs, Some(180_000_000), None)
+        .expect("advance to boot");
+    assert_eq!(paused.stop, ClusterStop::Paused);
+
+    let kf0 = {
+        let mut sp = rewind_core::keyframes::StorePages(&mut store);
+        cluster
+            .keyframe(&mut sp, None, &[None, None, None])
+            .expect("capture full keyframe")
+    };
+    let encoders_kf0 = cluster.node_encoders();
+    let total_kf0_pages: usize = kf0
+        .nodes
+        .iter()
+        .filter_map(|n| n.keyframe.as_ref().map(|k| k.pages.len()))
+        .sum();
+    assert!(total_kf0_pages > 1000, "expected full keyframe pages");
+
+    // Branch 1: run to completion.
+    let mut obs1 = CaptureObserver {
+        records: vec![Vec::new(); 3],
+        net: Vec::new(),
+    };
+    let out1 = cluster.run(&mut obs1, None, None).expect("run branch 1");
+    assert_eq!(out1.stop, ClusterStop::Completed);
+
+    // Roll back in place to kf0: all 3 nodes must use in-place dirty-page rollback
+    // and rewrite strictly fewer pages than a full restore!
+    let stats1 = cluster
+        .restore_in_place(
+            std::slice::from_ref(&kf0),
+            &rewind_core::keyframes::ReadPages(&store),
+            &boot_obs.records,
+        )
+        .expect("in-place restore 1");
+    cluster.set_node_encoders(&encoders_kf0);
+    assert_eq!(stats1.in_place_nodes, 3, "expected all 3 nodes in place: {stats1:?}");
+    assert_eq!(stats1.full_restore_nodes, 0, "unexpected full restore: {stats1:?}");
+    assert_eq!(stats1.crashed_nodes, 0);
+    assert!(stats1.pages_rewritten > 0, "expected dirty pages rewritten");
+    assert!(
+        stats1.pages_rewritten < total_kf0_pages,
+        "in-place restore rewrote {} pages vs {} full pages",
+        stats1.pages_rewritten,
+        total_kf0_pages
+    );
+
+    // Branch 2: must produce bit-for-bit identical execution to Branch 1!
+    let mut obs2 = CaptureObserver {
+        records: vec![Vec::new(); 3],
+        net: Vec::new(),
+    };
+    let out2 = cluster.run(&mut obs2, None, None).expect("run branch 2");
+    assert_eq!(out1.stop, out2.stop);
+    assert_eq!(out1.cluster_ns, out2.cluster_ns);
+    assert_eq!(out1.cluster_step, out2.cluster_step);
+    assert_eq!(out1.nodes, out2.nodes);
+    assert_eq!(obs1.records, obs2.records, "branch 2 records diverged after in-place restore");
+    assert_eq!(obs1.net, obs2.net, "branch 2 net events diverged after in-place restore");
+
+    // Now crash node 1 (s2) and restore kf0 again: live nodes (0, 2) must roll
+    // back in place while crashed node 1 seamlessly falls back to a full restore
+    // inside its existing worker!
+    let mut crash_obs = CaptureObserver {
+        records: vec![Vec::new(); 3],
+        net: Vec::new(),
+    };
+    cluster
+        .apply_fault_now(&rewind_vmm::net::FaultKind::Crash { node: 1 }, &mut crash_obs)
+        .expect("crash s2");
+    let stats2 = cluster
+        .restore_in_place(
+            std::slice::from_ref(&kf0),
+            &rewind_core::keyframes::ReadPages(&store),
+            &boot_obs.records,
+        )
+        .expect("in-place restore after crash");
+    cluster.set_node_encoders(&encoders_kf0);
+    assert_eq!(stats2.in_place_nodes, 2, "expected 2 live nodes in place: {stats2:?}");
+    assert_eq!(stats2.full_restore_nodes, 1, "expected 1 crashed node full restore: {stats2:?}");
+    assert_eq!(stats2.crashed_nodes, 0);
+
+    // Branch 3: must STILL be bit-for-bit identical to Branch 1!
+    let mut obs3 = CaptureObserver {
+        records: vec![Vec::new(); 3],
+        net: Vec::new(),
+    };
+    let out3 = cluster.run(&mut obs3, None, None).expect("run branch 3");
+    assert_eq!(out1.stop, out3.stop);
+    assert_eq!(out1.cluster_ns, out3.cluster_ns);
+    assert_eq!(out1.cluster_step, out3.cluster_step);
+    assert_eq!(out1.nodes, out3.nodes);
+    assert_eq!(obs1.records, obs3.records, "branch 3 records diverged after crash+restore");
+    assert_eq!(obs1.net, obs3.net, "branch 3 net events diverged after crash+restore");
+}
