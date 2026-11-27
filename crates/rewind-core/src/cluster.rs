@@ -51,7 +51,17 @@ pub(crate) const CLUSTER_KEYFRAME_INTERVAL_NS: u64 = 500_000_000;
 
 /// Magic header for `.ckf` cluster keyframe files.
 const CKF_MAGIC: &[u8; 8] = b"rwckeyf\0";
-const CKF_VERSION: u32 = 1;
+const CKF_VERSION: u32 = 2;
+
+/// Whether multi-node parallel execution across host threads is enabled
+/// (defaults to `true`; set `REWIND_CLUSTER_PARALLEL=0` to run the exact same
+/// deterministic lookahead schedule sequentially on one thread).
+pub fn cluster_parallel_enabled() -> bool {
+    !matches!(
+        std::env::var("REWIND_CLUSTER_PARALLEL").as_deref(),
+        Ok("0" | "false" | "no" | "off")
+    )
+}
 
 /// Options controlling how a cluster spec is resolved and executed.
 #[derive(Clone, Debug)]
@@ -699,6 +709,7 @@ pub fn prepare_cluster(
         max_virtual_ns,
         stop_at_step: None,
         slice_ns,
+        parallel: cluster_parallel_enabled(),
     };
 
     Ok(PreparedCluster {
@@ -760,6 +771,7 @@ pub fn config_from_manifest(manifest: &ClusterManifest) -> Result<ClusterConfig>
         max_virtual_ns: manifest.max_virtual_ns,
         stop_at_step: manifest.stop_at_step,
         slice_ns: manifest.slice_ns,
+        parallel: cluster_parallel_enabled(),
     })
 }
 
@@ -1483,6 +1495,7 @@ impl ClusterRun {
                 max_virtual_ns: self.manifest.max_virtual_ns,
                 stop_at_step: None,
                 slice_ns: self.manifest.slice_ns,
+                parallel: cluster_parallel_enabled(),
             },
         };
         ClusterRun::record(home, &prepared, keyframes, echo, None)
@@ -1544,6 +1557,10 @@ impl ClusterObserver for SeekNodeObserver {
 
     fn stop_mid_slice(&self) -> bool {
         self.reached
+    }
+
+    fn node_step_limit(&self, node: usize) -> Option<u64> {
+        (node == self.target_node).then_some(self.target_step)
     }
 }
 

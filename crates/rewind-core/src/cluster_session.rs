@@ -1097,7 +1097,26 @@ impl ClusterSession {
             .as_ref()
             .context("page store is not open for snapshot restore")?;
 
-        // Rewind recorder state back to the snapshot point before restoring VMs.
+        // Restore VMs FIRST using sliced trace views so a fallible restore
+        // never leaves the live session recorder truncated.
+        let truncated_records: Vec<Vec<(u64, Vec<u8>)>> = self
+            .recorder
+            .node_records
+            .iter()
+            .zip(snap.node_records_lens.iter())
+            .map(|(recs, &len)| recs[..len.min(recs.len())].to_vec())
+            .collect();
+        let pages = ReadPages(store);
+        let mut restored = Cluster::restore(
+            self.prepared.cluster_config.clone(),
+            &snap.keyframes,
+            &pages,
+            &truncated_records,
+            DirtyLog::On,
+        )?;
+        restored.set_node_encoders(&snap.node_encoders);
+
+        // Commit the rewound session state only after Cluster::restore succeeded.
         for (i, &len) in snap.node_records_lens.iter().enumerate() {
             self.recorder.node_records[i].truncate(len);
         }
@@ -1109,16 +1128,7 @@ impl ClusterSession {
         self.node_kf_parents = snap.node_kf_parents;
         self.node_kf_boots = snap.node_kf_boots;
         self.next_kf_ns = snap.next_kf_ns;
-
-        let pages = ReadPages(store);
-        self.cluster = Cluster::restore(
-            self.prepared.cluster_config.clone(),
-            &self.keyframes,
-            &pages,
-            &self.recorder.node_records,
-            DirtyLog::On,
-        )?;
-        self.cluster.set_node_encoders(&snap.node_encoders);
+        self.cluster = restored;
         self.last_stop = ClusterStop::Paused;
         Ok((snap.cluster_ns, snap.cluster_step))
     }
@@ -1191,18 +1201,23 @@ impl ClusterSession {
             net_log.finish()?;
         }
         if self.keyframes_mode == Keyframes::Take {
+            let mut pinned_faults: Vec<&ScheduledFault> = net_cfg
+                .faults
+                .iter()
+                .filter(|f| f.at_step.is_some())
+                .collect();
+            pinned_faults.sort_by_key(|f| (f.at_step.unwrap_or(0), f.at_ns));
+
             for ckf in &mut self.keyframes {
-                // Advance `next_fault_idx` to match the faults already applied
-                // at this keyframe's `(cluster_ns, cluster_step)` so both
-                // standalone replay and mid-run seeking (`rewind cat/files`)
-                // start from the exact post-fault switch cursor.
-                ckf.switch.next_fault_idx = net_cfg
-                    .faults
+                // `next_timed_fault_idx` was already tracked live on the switch.
+                // Advance `next_pinned_fault_idx` to the count of interactive
+                // faults whose `at_step < ckf.cluster_step` (each `apply_fault_now`
+                // records `at_step = S` and immediately bumps `cluster_step` to
+                // `S + 1`, so strictly `<` is exact even for snapshot -> fault ->
+                // snapshot sequences).
+                ckf.switch.next_pinned_fault_idx = pinned_faults
                     .iter()
-                    .take_while(|f| match f.at_step {
-                        Some(s) => ckf.cluster_ns >= f.at_ns && ckf.cluster_step >= s,
-                        None => f.at_ns <= ckf.cluster_ns,
-                    })
+                    .take_while(|f| f.at_step.is_some_and(|s| s < ckf.cluster_step))
                     .count();
                 save_cluster_keyframe(&dir, ckf)?;
             }

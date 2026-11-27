@@ -450,10 +450,16 @@ pub(crate) struct Devices {
     pub net_rx_ring: Option<u64>,
     /// Slot count of `rewind_net_rx` (published at setup).
     pub net_rx_slots: u32,
-    /// Outbound Ethernet frames written by the guest via `PORT_NET_TX`.
-    pub tx_queue: std::collections::VecDeque<Vec<u8>>,
-    /// When true, `PORT_IDLE` yields `Outcome::Idle` and `PORT_NET_TX`
-    /// yields `Outcome::TxReady` to the multi-VM cluster coordinator.
+    /// Outbound Ethernet frames written by the guest via `PORT_NET_TX`,
+    /// paired with the guest virtual timestamp (`clock.now`) after the TX
+    /// exit's step completed.
+    pub tx_queue: std::collections::VecDeque<(u64, Vec<u8>)>,
+    /// Frame written via `PORT_NET_TX` on the current step, awaiting stamping
+    /// with `clock.now` once `after_step` finishes (just like `event_pending`).
+    pub tx_pending: Option<Vec<u8>>,
+    /// When true, `PORT_IDLE` yields `Outcome::Idle` (or skips to an earlier
+    /// local timer within the safe lookahead horizon) and `PORT_NET_TX`
+    /// buffers timestamped frames for the multi-VM cluster coordinator.
     pub cluster_mode: bool,
     /// An RX frame was placed in guest RAM whose MSI was not yet accepted.
     pub net_rx_pending: bool,
@@ -669,6 +675,7 @@ impl Machine {
                 net_rx_ring: None,
                 net_rx_slots: 0,
                 tx_queue: std::collections::VecDeque::new(),
+                tx_pending: None,
                 cluster_mode: false,
                 net_rx_pending: false,
                 monitor_dirty_pages: Vec::new(),
@@ -832,12 +839,13 @@ impl Machine {
     /// another machine between two calls, as `rewind gdb` runs the forks
     /// it inspects the process with before the fork it debugs goes on.
     pub fn run(&mut self, until: Option<u64>, obs: &mut dyn Observer) -> Result<Outcome> {
-        self.run_bounded(until, None, obs)
+        self.run_bounded(until, None, false, obs)
     }
 
     /// Enables or disables cluster mode on this machine. In cluster mode,
-    /// `PORT_IDLE` yields [`Outcome::Idle`] instead of jumping the clock or
-    /// stalling, and `PORT_NET_TX` yields [`Outcome::TxReady`].
+    /// `PORT_IDLE` yields [`Outcome::Idle`] instead of stalling, and
+    /// `PORT_NET_TX` buffers timestamped Ethernet frames for the cluster
+    /// coordinator.
     pub fn set_cluster_mode(&mut self, enabled: bool) {
         self.dev.cluster_mode = enabled;
     }
@@ -866,21 +874,29 @@ impl Machine {
     }
 
     /// Runs a cluster time-slice: executes until `self.now() >= horizon_ns`,
-    /// `max_steps` steps have elapsed, the guest transmits a frame
-    /// ([`Outcome::TxReady`]), goes idle ([`Outcome::Idle`]), or stops.
+    /// `max_steps` steps have elapsed, the guest goes idle ([`Outcome::Idle`]),
+    /// is interrupted, or stops.
+    ///
+    /// Outbound Ethernet frames written via `PORT_NET_TX` are stamped with the
+    /// post-step virtual clock and buffered in `tx_queue` so a node can execute
+    /// across its entire causally-safe lookahead window without breaking early.
+    /// When `allow_idle_skip` is true and the guest goes idle with a local timer
+    /// strictly before `horizon_ns`, the slice advances directly to that timer
+    /// and continues running inside the same window.
     pub fn run_cluster_slice(
         &mut self,
         horizon_ns: u64,
         max_steps: u64,
+        allow_idle_skip: bool,
         obs: &mut dyn Observer,
     ) -> Result<Outcome> {
         let until_step = self.dev.step.saturating_add(max_steps);
-        self.run_bounded(Some(until_step), Some(horizon_ns), obs)
+        self.run_bounded(Some(until_step), Some(horizon_ns), allow_idle_skip, obs)
     }
 
     /// Takes all outbound Ethernet frames transmitted by the guest since the
-    /// last call.
-    pub fn take_tx_frames(&mut self) -> Vec<Vec<u8>> {
+    /// last call, each paired with its guest virtual clock timestamp (`now`).
+    pub fn take_tx_frames(&mut self) -> Vec<(u64, Vec<u8>)> {
         self.dev.tx_queue.drain(..).collect()
     }
 
@@ -921,10 +937,13 @@ impl Machine {
 
         // Track pages modified directly by the monitor so delta keyframes
         // capture them even though KVM's dirty log only tracks guest writes.
-        let first_page = (slot_addr as usize) / PAGE_SIZE;
-        let last_page = ((slot_addr as usize) + 4 + frame.len().saturating_sub(1)) / PAGE_SIZE;
-        for p in first_page..=last_page {
-            self.dev.monitor_dirty_pages.push(p);
+        if self.dirty_log == DirtyLog::On {
+            let first_page = (slot_addr as usize) / PAGE_SIZE;
+            let last_page =
+                ((slot_addr as usize) + 4 + frame.len().saturating_sub(1)) / PAGE_SIZE;
+            for p in first_page..=last_page {
+                self.dev.monitor_dirty_pages.push(p);
+            }
         }
 
         self.dev.net_rx_pending = !self.inject(pv::PENDING_NET)?;
@@ -993,11 +1012,12 @@ impl Machine {
         &mut self,
         until: Option<u64>,
         until_ns: Option<u64>,
+        allow_idle_skip: bool,
         obs: &mut dyn Observer,
     ) -> Result<Outcome> {
         self.resume_counting()?;
         self.interrupt.entered();
-        let outcome = self.run_counted(until, until_ns, obs);
+        let outcome = self.run_counted(until, until_ns, allow_idle_skip, obs);
         self.interrupt.left();
         let paused = self.pause_counting();
         let outcome = outcome?;
@@ -1051,6 +1071,7 @@ impl Machine {
         &mut self,
         until: Option<u64>,
         until_ns: Option<u64>,
+        allow_idle_skip: bool,
         obs: &mut dyn Observer,
     ) -> Result<Outcome> {
         self.skipped.clear();
@@ -1062,9 +1083,6 @@ impl Machine {
         }
         if self.dev.cluster_mode && self.dev.idle {
             return Ok(Outcome::Idle);
-        }
-        if self.dev.cluster_mode && !self.dev.tx_queue.is_empty() {
-            return Ok(Outcome::TxReady);
         }
         if until_ns.is_some_and(|h| self.dev.clock.now >= h) {
             return Ok(Outcome::Paused);
@@ -1216,14 +1234,22 @@ impl Machine {
             }
             self.after_step(Quantum::Add)?;
             self.dev.write_event(obs);
+            if let Some(frame) = self.dev.tx_pending.take() {
+                self.dev.tx_queue.push_back((self.dev.clock.now, frame));
+            }
 
-            if self.dev.cluster_mode {
-                if !self.dev.tx_queue.is_empty() {
-                    return Ok(Outcome::TxReady);
+            if self.dev.cluster_mode && self.dev.idle {
+                if allow_idle_skip
+                    && let (Some(deadline), Some(horizon)) = (self.dev.clock.deadline, until_ns)
+                    && deadline < horizon
+                {
+                    self.advance_idle_to(deadline)?;
+                    if until.is_some_and(|u| self.dev.step >= u) || obs.stop() {
+                        return Ok(Outcome::Paused);
+                    }
+                    continue;
                 }
-                if self.dev.idle {
-                    return Ok(Outcome::Idle);
-                }
+                return Ok(Outcome::Idle);
             }
 
             if until.is_some_and(|u| self.dev.step >= u)
@@ -1600,7 +1626,7 @@ impl Devices {
                 if (14..=pv::NET_FRAME_MAX).contains(&len) {
                     let mut frame = vec![0u8; len];
                     self.ram.read_gpa(addr + 4, &mut frame)?;
-                    self.tx_queue.push_back(frame);
+                    self.tx_pending = Some(frame);
                 }
             }
             pv::PORT_TIMER => {
@@ -1975,6 +2001,7 @@ mod tests {
             net_rx_ring: None,
             net_rx_slots: 0,
             tx_queue: std::collections::VecDeque::new(),
+            tx_pending: None,
             cluster_mode: false,
             net_rx_pending: false,
             monitor_dirty_pages: Vec::new(),

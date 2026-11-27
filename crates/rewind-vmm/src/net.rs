@@ -157,13 +157,18 @@ impl NetSwitchConfig {
 }
 
 /// One Ethernet frame currently in flight on the virtual switch.
+///
+/// Fields are ordered so derived [`Ord`] provides a canonical, commit-order-
+/// independent tie-breaking order: earliest `deliver_at_ns`, then earliest
+/// `tx_at_ns`, then `(src, tx_seq, dst, dup)`.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct InFlightFrame {
     pub deliver_at_ns: u64,
-    pub seq: u64,
-    pub src: usize,
-    pub dst: usize,
     pub tx_at_ns: u64,
+    pub src: usize,
+    pub tx_seq: u64,
+    pub dst: usize,
+    pub dup: u8,
     pub frame: Vec<u8>,
 }
 
@@ -265,9 +270,12 @@ pub struct NetSwitchState {
     pub crashed: BTreeSet<usize>,
     #[serde(default)]
     pub links: BTreeMap<(usize, usize), LinkOverride>,
-    pub next_seq: u64,
-    pub prng_state: u64,
-    pub next_fault_idx: usize,
+    /// Per-source monotonic TX sequence counters (drives stateless link RNG).
+    pub src_tx_seq: Vec<u64>,
+    /// Cursor into time-scheduled (`at_step.is_none()`) faults.
+    pub next_timed_fault_idx: usize,
+    /// Cursor into step-pinned (`at_step.is_some()`) interactive faults.
+    pub next_pinned_fault_idx: usize,
     pub next_nemesis_ns: u64,
     pub stats: NetStats,
 }
@@ -277,56 +285,117 @@ pub struct NetSwitchState {
 pub struct NetSwitch {
     config: NetSwitchConfig,
     macs: Vec<[u8; 6]>,
-    in_flight: BinaryHeap<Reverse<InFlightFrame>>,
+    /// Per-destination min-heaps of in-flight frames (`in_flight[dst]`).
+    in_flight: Vec<BinaryHeap<Reverse<InFlightFrame>>>,
     blocked: BTreeSet<(usize, usize)>,
     crashed: BTreeSet<usize>,
     links: BTreeMap<(usize, usize), LinkOverride>,
-    next_seq: u64,
-    prng_state: u64,
-    next_fault_idx: usize,
+    /// Per-source monotonic TX sequence counters.
+    src_tx_seq: Vec<u64>,
+    timed_faults: Vec<ScheduledFault>,
+    pinned_faults: Vec<ScheduledFault>,
+    next_timed_fault_idx: usize,
+    next_pinned_fault_idx: usize,
     next_nemesis_ns: u64,
     stats: NetStats,
 }
 
-fn splitmix64(state: &mut u64) -> u64 {
-    *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
-    let mut z = *state;
+const PURPOSE_DROP: u64 = 1;
+const PURPOSE_JITTER: u64 = 2;
+const PURPOSE_DUP: u64 = 3;
+const PURPOSE_DUP_DELAY: u64 = 4;
+
+const NEMESIS_PART_ROLL: u64 = 1;
+const NEMESIS_PART_VICTIM: u64 = 2;
+const NEMESIS_HEAL_ROLL: u64 = 3;
+const NEMESIS_RESTART_ROLL: u64 = 4;
+const NEMESIS_RESTART_PICK: u64 = 5;
+const NEMESIS_CRASH_ROLL: u64 = 6;
+const NEMESIS_CRASH_PICK: u64 = 7;
+
+fn mix64(mut z: u64) -> u64 {
+    z = z.wrapping_add(0x9e37_79b9_7f4a_7c15);
     z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
     z ^ (z >> 31)
 }
 
+/// Stateless, commit-order-independent deterministic draw for a single
+/// `(src, tx_seq) -> dst` link decision.
+fn link_draw(seed: u64, src: usize, tx_seq: u64, dst: usize, purpose: u64) -> u64 {
+    let mut h = mix64(seed ^ 0x5257_4c49_4e4b_0001);
+    h = mix64(h ^ (src as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15));
+    h = mix64(h ^ tx_seq.wrapping_mul(0xbf58_476d_1ce4_e5b9));
+    h = mix64(h ^ (dst as u64).wrapping_mul(0x94d0_49bb_1331_11eb));
+    mix64(h ^ purpose)
+}
+
+/// Stateless deterministic draw for a nemesis tick at `tick_ns`, independent
+/// of earlier ticks or `fault_window` bounds.
+fn nemesis_draw(seed: u64, tick_ns: u64, purpose: u64) -> u64 {
+    let mut h = mix64(seed ^ 0x5257_4e45_4d45_0001);
+    h = mix64(h ^ tick_ns);
+    mix64(h ^ purpose)
+}
+
+fn split_faults(faults: &[ScheduledFault]) -> (Vec<ScheduledFault>, Vec<ScheduledFault>) {
+    let mut timed = Vec::new();
+    let mut pinned = Vec::new();
+    for f in faults {
+        if f.at_step.is_some() {
+            pinned.push(f.clone());
+        } else {
+            timed.push(f.clone());
+        }
+    }
+    timed.sort_by_key(|f| f.at_ns);
+    pinned.sort_by_key(|f| (f.at_step.unwrap_or(0), f.at_ns));
+    (timed, pinned)
+}
+
 impl NetSwitch {
     /// Creates a new virtual switch for `config`.
-    pub fn new(mut config: NetSwitchConfig) -> NetSwitch {
-        config.faults.sort_by_key(|f| (f.at_ns, f.at_step.unwrap_or(0)));
+    pub fn new(config: NetSwitchConfig) -> NetSwitch {
+        let (timed_faults, pinned_faults) = split_faults(&config.faults);
         let macs = (0..config.node_count).map(mac_for_node).collect();
         let mut links = BTreeMap::new();
         for l in &config.links {
             links.insert((l.from, l.to), l.clone());
         }
-        let next_nemesis_ns = config.nemesis.as_ref().map_or(u64::MAX, |n| n.tick_ns.max(1));
-        let prng_state = config.seed ^ 0x5257_4e45_5400_0001;
+        let next_nemesis_ns = config
+            .nemesis
+            .as_ref()
+            .map_or(u64::MAX, |n| n.tick_ns.max(1));
+        let node_count = config.node_count;
         NetSwitch {
             config,
             macs,
-            in_flight: BinaryHeap::new(),
+            in_flight: (0..node_count).map(|_| BinaryHeap::new()).collect(),
             blocked: BTreeSet::new(),
             crashed: BTreeSet::new(),
             links,
-            next_seq: 1,
-            prng_state,
-            next_fault_idx: 0,
+            src_tx_seq: vec![0; node_count],
+            timed_faults,
+            pinned_faults,
+            next_timed_fault_idx: 0,
+            next_pinned_fault_idx: 0,
             next_nemesis_ns,
             stats: NetStats::default(),
         }
     }
 
     /// Restores a switch from a keyframe snapshot.
-    pub fn restore(mut config: NetSwitchConfig, state: NetSwitchState) -> NetSwitch {
-        config.faults.sort_by_key(|f| (f.at_ns, f.at_step.unwrap_or(0)));
+    pub fn restore(config: NetSwitchConfig, state: NetSwitchState) -> NetSwitch {
+        let (timed_faults, pinned_faults) = split_faults(&config.faults);
         let macs = (0..config.node_count).map(mac_for_node).collect();
-        let in_flight = state.in_flight.into_iter().map(Reverse).collect();
+        let node_count = config.node_count;
+        let mut in_flight: Vec<BinaryHeap<Reverse<InFlightFrame>>> =
+            (0..node_count).map(|_| BinaryHeap::new()).collect();
+        for frame in state.in_flight {
+            if frame.dst < node_count {
+                in_flight[frame.dst].push(Reverse(frame));
+            }
+        }
         let links = if state.links.is_empty() && !config.links.is_empty() {
             config
                 .links
@@ -336,6 +405,8 @@ impl NetSwitch {
         } else {
             state.links
         };
+        let mut src_tx_seq = state.src_tx_seq;
+        src_tx_seq.resize(node_count, 0);
         NetSwitch {
             config,
             macs,
@@ -343,9 +414,11 @@ impl NetSwitch {
             blocked: state.blocked,
             crashed: state.crashed,
             links,
-            next_seq: state.next_seq,
-            prng_state: state.prng_state,
-            next_fault_idx: state.next_fault_idx,
+            src_tx_seq,
+            timed_faults,
+            pinned_faults,
+            next_timed_fault_idx: state.next_timed_fault_idx,
+            next_pinned_fault_idx: state.next_pinned_fault_idx,
             next_nemesis_ns: state.next_nemesis_ns,
             stats: state.stats,
         }
@@ -353,17 +426,20 @@ impl NetSwitch {
 
     /// Captures the switch's full state for a cluster keyframe.
     pub fn snapshot(&self) -> NetSwitchState {
-        let mut in_flight: Vec<InFlightFrame> =
-            self.in_flight.iter().map(|r| r.0.clone()).collect();
+        let mut in_flight: Vec<InFlightFrame> = self
+            .in_flight
+            .iter()
+            .flat_map(|h| h.iter().map(|r| r.0.clone()))
+            .collect();
         in_flight.sort();
         NetSwitchState {
             in_flight,
             blocked: self.blocked.clone(),
             crashed: self.crashed.clone(),
             links: self.links.clone(),
-            next_seq: self.next_seq,
-            prng_state: self.prng_state,
-            next_fault_idx: self.next_fault_idx,
+            src_tx_seq: self.src_tx_seq.clone(),
+            next_timed_fault_idx: self.next_timed_fault_idx,
+            next_pinned_fault_idx: self.next_pinned_fault_idx,
             next_nemesis_ns: self.next_nemesis_ns,
             stats: self.stats,
         }
@@ -383,6 +459,28 @@ impl NetSwitch {
         min.max(MIN_LINK_LATENCY_NS)
     }
 
+    /// Minimum delivery latency of directed link `src -> dst`, clamped to at
+    /// least [`MIN_LINK_LATENCY_NS`].
+    pub fn link_min_latency_ns(&self, src: usize, dst: usize) -> u64 {
+        self.links
+            .get(&(src, dst))
+            .and_then(|l| l.latency_ns)
+            .unwrap_or(self.config.latency_ns)
+            .max(MIN_LINK_LATENCY_NS)
+    }
+
+    /// Maximum base delivery latency across the default link and all link
+    /// overrides, clamped to at least [`MIN_LINK_LATENCY_NS`].
+    pub fn max_link_latency_ns(&self) -> u64 {
+        let mut max = self.config.latency_ns;
+        for link in self.links.values() {
+            if let Some(l) = link.latency_ns {
+                max = max.max(l);
+            }
+        }
+        max.max(MIN_LINK_LATENCY_NS)
+    }
+
     pub fn active_partitions(&self) -> Vec<(usize, usize)> {
         self.blocked.iter().copied().collect()
     }
@@ -399,9 +497,11 @@ impl NetSwitch {
         frame: Vec<u8>,
         events: &mut Vec<NetEvent>,
     ) {
-        if frame.len() < 14 {
+        if frame.len() < 14 || src >= self.config.node_count {
             return;
         }
+        let tx_seq = self.src_tx_seq[src];
+        self.src_tx_seq[src] = tx_seq.wrapping_add(1);
         self.stats.tx_frames += 1;
         let dst_mac: [u8; 6] = [frame[0], frame[1], frame[2], frame[3], frame[4], frame[5]];
         events.push(NetEvent::Tx {
@@ -428,7 +528,7 @@ impl NetSwitch {
         };
 
         let in_window = self.config.fault_window.contains(&now_ns);
-        let min_lat = self.min_latency_ns();
+        let seed = self.config.seed;
 
         for dst in destinations {
             if self.crashed.contains(&dst) {
@@ -458,7 +558,7 @@ impl NetSwitch {
             let base_latency = link
                 .and_then(|l| l.latency_ns)
                 .unwrap_or(self.config.latency_ns)
-                .max(min_lat);
+                .max(MIN_LINK_LATENCY_NS);
             let jitter = if in_window {
                 link.and_then(|l| l.jitter_ns)
                     .unwrap_or(self.config.jitter_ns)
@@ -479,7 +579,8 @@ impl NetSwitch {
             };
 
             if drop_ppm > 0 {
-                let draw = (splitmix64(&mut self.prng_state) % u64::from(PPM_SCALE)) as u32;
+                let draw = (link_draw(seed, src, tx_seq, dst, PURPOSE_DROP)
+                    % u64::from(PPM_SCALE)) as u32;
                 if draw < drop_ppm {
                     self.stats.dropped_frames += 1;
                     events.push(NetEvent::Drop {
@@ -494,32 +595,33 @@ impl NetSwitch {
             }
 
             let jitter_draw = if jitter > 0 {
-                splitmix64(&mut self.prng_state) % (jitter + 1)
+                link_draw(seed, src, tx_seq, dst, PURPOSE_JITTER) % (jitter + 1)
             } else {
                 0
             };
-            let deliver_at_ns = now_ns.saturating_add(base_latency).saturating_add(jitter_draw);
-            let seq = self.next_seq;
-            self.next_seq += 1;
-            self.in_flight.push(Reverse(InFlightFrame {
+            let deliver_at_ns = now_ns
+                .saturating_add(base_latency)
+                .saturating_add(jitter_draw);
+            self.in_flight[dst].push(Reverse(InFlightFrame {
                 deliver_at_ns,
-                seq,
-                src,
-                dst,
                 tx_at_ns: now_ns,
+                src,
+                tx_seq,
+                dst,
+                dup: 0,
                 frame: frame.clone(),
             }));
 
             if dup_ppm > 0 {
-                let draw = (splitmix64(&mut self.prng_state) % u64::from(PPM_SCALE)) as u32;
+                let draw = (link_draw(seed, src, tx_seq, dst, PURPOSE_DUP)
+                    % u64::from(PPM_SCALE)) as u32;
                 if draw < dup_ppm {
                     let extra = if jitter > 0 {
-                        (splitmix64(&mut self.prng_state) % (jitter + 1)).max(1)
+                        (link_draw(seed, src, tx_seq, dst, PURPOSE_DUP_DELAY) % (jitter + 1))
+                            .max(1)
                     } else {
-                        min_lat
+                        base_latency
                     };
-                    let dup_seq = self.next_seq;
-                    self.next_seq += 1;
                     self.stats.duplicated_frames += 1;
                     events.push(NetEvent::Duplicate {
                         ns: now_ns,
@@ -528,12 +630,13 @@ impl NetSwitch {
                         len: frame.len(),
                         extra_delay_ns: extra,
                     });
-                    self.in_flight.push(Reverse(InFlightFrame {
+                    self.in_flight[dst].push(Reverse(InFlightFrame {
                         deliver_at_ns: deliver_at_ns.saturating_add(extra),
-                        seq: dup_seq,
-                        src,
-                        dst,
                         tx_at_ns: now_ns,
+                        src,
+                        tx_seq,
+                        dst,
+                        dup: 1,
                         frame: frame.clone(),
                     }));
                 }
@@ -541,45 +644,75 @@ impl NetSwitch {
         }
     }
 
-    /// Earliest delivery timestamp of any in-flight frame.
+    /// Earliest delivery timestamp of any in-flight frame across all destinations.
     pub fn next_delivery_ns(&self) -> Option<u64> {
-        self.in_flight.peek().map(|r| r.0.deliver_at_ns)
-    }
-
-    /// Earliest delivery timestamp of any in-flight frame addressed to `dst`.
-    pub fn next_delivery_for(&self, dst: usize) -> Option<u64> {
         self.in_flight
             .iter()
-            .filter(|r| r.0.dst == dst)
-            .map(|r| r.0.deliver_at_ns)
+            .filter_map(|h| h.peek().map(|r| r.0.deliver_at_ns))
             .min()
     }
 
-    /// Pops all frames whose `deliver_at_ns <= up_to_ns`, in deterministic
-    /// `(deliver_at_ns, seq)` order.
-    pub fn pop_due_frames(&mut self, up_to_ns: u64) -> Vec<InFlightFrame> {
+    /// Earliest delivery timestamp of any in-flight frame addressed to `dst` ($O(1)$).
+    pub fn next_delivery_for(&self, dst: usize) -> Option<u64> {
+        self.in_flight.get(dst)?.peek().map(|r| r.0.deliver_at_ns)
+    }
+
+    /// Pops all frames addressed to `dst` whose `deliver_at_ns <= up_to_ns`,
+    /// in canonical [`InFlightFrame`] order.
+    pub fn pop_due_frames_for(&mut self, dst: usize, up_to_ns: u64) -> Vec<InFlightFrame> {
         let mut due = Vec::new();
-        while let Some(Reverse(top)) = self.in_flight.peek() {
+        let Some(heap) = self.in_flight.get_mut(dst) else {
+            return due;
+        };
+        while let Some(Reverse(top)) = heap.peek() {
             if top.deliver_at_ns > up_to_ns {
                 break;
             }
-            if let Some(Reverse(frame)) = self.in_flight.pop() {
+            if let Some(Reverse(frame)) = heap.pop() {
                 due.push(frame);
             }
         }
         due
     }
 
-    /// Records a successful delivery in stats & events.
-    pub fn note_delivered(&mut self, frame: &InFlightFrame, events: &mut Vec<NetEvent>) {
+    /// Pops all frames across all destinations whose `deliver_at_ns <= up_to_ns`,
+    /// sorted in canonical [`InFlightFrame`] order.
+    pub fn pop_due_frames(&mut self, up_to_ns: u64) -> Vec<InFlightFrame> {
+        let mut due = Vec::new();
+        for heap in &mut self.in_flight {
+            while let Some(Reverse(top)) = heap.peek() {
+                if top.deliver_at_ns > up_to_ns {
+                    break;
+                }
+                if let Some(Reverse(frame)) = heap.pop() {
+                    due.push(frame);
+                }
+            }
+        }
+        due.sort();
+        due
+    }
+
+    /// Records a successful delivery at `delivered_at_ns` in stats & events.
+    pub fn note_delivered_at(
+        &mut self,
+        delivered_at_ns: u64,
+        frame: &InFlightFrame,
+        events: &mut Vec<NetEvent>,
+    ) {
         self.stats.delivered_frames += 1;
         events.push(NetEvent::Deliver {
-            ns: frame.deliver_at_ns,
+            ns: delivered_at_ns,
             src: frame.src,
             dst: frame.dst,
             len: frame.frame.len(),
-            latency_ns: frame.deliver_at_ns.saturating_sub(frame.tx_at_ns),
+            latency_ns: delivered_at_ns.saturating_sub(frame.tx_at_ns),
         });
+    }
+
+    /// Records a successful delivery at the frame's scheduled timestamp.
+    pub fn note_delivered(&mut self, frame: &InFlightFrame, events: &mut Vec<NetEvent>) {
+        self.note_delivered_at(frame.deliver_at_ns, frame, events);
     }
 
     /// Records a drop of an already in-flight frame (e.g., destination crashed
@@ -606,13 +739,13 @@ impl NetSwitch {
         self.blocked.contains(&(src, dst))
     }
 
-    /// Earliest timestamp of any upcoming time-scheduled fault (skipping
-    /// step-pinned interactive faults so replay preserves the original live
-    /// scheduling horizons) or nemesis tick.
-    pub fn next_fault_ns(&self) -> Option<u64> {
-        let scripted = self.config.faults[self.next_fault_idx..]
-            .iter()
-            .find(|f| f.at_step.is_none())
+    /// Earliest timestamp of any upcoming time-scheduled fault (`at_step.is_none()`)
+    /// or active nemesis tick. Step-pinned interactive faults are tracked on a
+    /// separate cursor so they never alter replay horizons.
+    pub fn next_timed_fault_ns(&self) -> Option<u64> {
+        let scripted = self
+            .timed_faults
+            .get(self.next_timed_fault_idx)
             .map(|f| f.at_ns);
         let nemesis = self
             .config
@@ -627,64 +760,87 @@ impl NetSwitch {
         }
     }
 
-    /// Earliest timestamp of any upcoming fault whose step prerequisite is
-    /// already satisfied (or has none), used when all nodes are idle so
-    /// virtual time advances to wake for interactive faults like `restart`.
-    pub fn next_any_fault_ns(&self, cluster_step: u64) -> Option<u64> {
-        let scripted = self.config.faults.get(self.next_fault_idx).and_then(|f| {
-            if f.at_step.is_none_or(|s| cluster_step >= s) {
-                Some(f.at_ns)
-            } else {
-                None
-            }
-        });
-        let nemesis = self
-            .config
-            .nemesis
-            .as_ref()
-            .filter(|_| self.next_nemesis_ns < self.config.fault_window.end)
-            .map(|_| self.next_nemesis_ns);
-        match (scripted, nemesis) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (Some(a), None) | (None, Some(a)) => Some(a),
-            (None, None) => None,
-        }
+    /// Timestamp of the next step-pinned interactive fault whose step
+    /// prerequisite (`cluster_step >= at_step`) is already satisfied.
+    pub fn next_ready_pinned_fault_ns(&self, cluster_step: u64) -> Option<u64> {
+        self.pinned_faults
+            .get(self.next_pinned_fault_idx)
+            .filter(|f| f.at_step.is_some_and(|s| cluster_step >= s))
+            .map(|f| f.at_ns)
     }
 
-    /// Fires all scripted, interactive, and nemesis faults due at or before
-    /// `(event_vt, cluster_ns, cluster_step)`.
-    pub fn fire_due_faults(
+    /// Whether the next step-pinned interactive fault is due at
+    /// `(cluster_ns, cluster_step)`.
+    pub fn has_due_pinned_fault(&self, cluster_ns: u64, cluster_step: u64) -> bool {
+        self.pinned_faults
+            .get(self.next_pinned_fault_idx)
+            .is_some_and(|f| {
+                f.at_step.is_some_and(|s| cluster_step >= s) && cluster_ns >= f.at_ns
+            })
+    }
+
+    /// Fires at most one due step-pinned interactive fault at
+    /// `(cluster_ns, cluster_step)`, returning its timestamp and any VM actions.
+    pub fn fire_next_pinned_fault(
         &mut self,
-        event_vt: u64,
         cluster_ns: u64,
         cluster_step: u64,
         events: &mut Vec<NetEvent>,
-    ) -> Vec<FaultAction> {
+    ) -> Option<(u64, Vec<FaultAction>)> {
+        let fault = self.pinned_faults.get(self.next_pinned_fault_idx)?.clone();
+        let step = fault.at_step?;
+        if cluster_step < step || cluster_ns < fault.at_ns {
+            return None;
+        }
+        self.next_pinned_fault_idx += 1;
+        let mut actions = Vec::new();
+        self.apply_fault(fault.at_ns, &fault.kind, events, &mut actions);
+        Some((fault.at_ns, actions))
+    }
+
+    /// Fires all time-scheduled faults and nemesis ticks due at or before
+    /// `up_to_ns`, returning `(at_ns, FaultAction)` pairs for VM crash/restart.
+    pub fn fire_due_timed_faults(
+        &mut self,
+        up_to_ns: u64,
+        events: &mut Vec<NetEvent>,
+    ) -> Vec<(u64, FaultAction)> {
         let mut actions = Vec::new();
 
-        // 1. Scripted and recorded interactive faults
-        while let Some(fault) = self.config.faults.get(self.next_fault_idx).cloned() {
-            let due = match fault.at_step {
-                Some(step) => cluster_ns >= fault.at_ns && cluster_step >= step,
-                None => fault.at_ns <= event_vt,
-            };
-            if !due {
+        // 1. Time-scheduled scripted faults
+        while let Some(fault) = self.timed_faults.get(self.next_timed_fault_idx).cloned() {
+            if fault.at_ns > up_to_ns {
                 break;
             }
-            self.next_fault_idx += 1;
-            self.apply_fault(fault.at_ns, &fault.kind, events, &mut actions);
+            self.next_timed_fault_idx += 1;
+            let mut fault_actions = Vec::new();
+            self.apply_fault(fault.at_ns, &fault.kind, events, &mut fault_actions);
+            for a in fault_actions {
+                actions.push((fault.at_ns, a));
+            }
         }
 
         // 2. Schedule-driven nemesis ticks
         if let Some(nem) = self.config.nemesis.clone() {
             let tick = nem.tick_ns.max(1);
-            while self.next_nemesis_ns <= event_vt {
+            while self.next_nemesis_ns <= up_to_ns {
                 let t = self.next_nemesis_ns;
-                self.next_nemesis_ns = self.next_nemesis_ns.saturating_add(tick);
+                if t >= self.config.fault_window.end {
+                    self.next_nemesis_ns = u64::MAX;
+                    break;
+                }
+                self.next_nemesis_ns = t.saturating_add(tick);
                 if !self.config.fault_window.contains(&t) {
                     continue;
                 }
-                self.run_nemesis_tick(t, &nem, events, &mut actions);
+                let mut tick_actions = Vec::new();
+                self.run_nemesis_tick(t, &nem, events, &mut tick_actions);
+                for a in tick_actions {
+                    actions.push((t, a));
+                }
+                if self.next_nemesis_ns == u64::MAX {
+                    break;
+                }
             }
         }
 
@@ -832,14 +988,16 @@ impl NetSwitch {
         events: &mut Vec<NetEvent>,
         actions: &mut Vec<FaultAction>,
     ) {
+        let seed = self.config.seed;
         // Partition or heal
         if self.blocked.is_empty() {
             if nem.partition_prob_ppm > 0 && self.config.node_count >= 2 {
-                let draw = (splitmix64(&mut self.prng_state) % u64::from(PPM_SCALE)) as u32;
+                let draw = (nemesis_draw(seed, at_ns, NEMESIS_PART_ROLL) % u64::from(PPM_SCALE))
+                    as u32;
                 if draw < nem.partition_prob_ppm {
                     // Isolate one random node from the rest (classic minority/majority split).
-                    let victim =
-                        (splitmix64(&mut self.prng_state) as usize) % self.config.node_count;
+                    let victim = (nemesis_draw(seed, at_ns, NEMESIS_PART_VICTIM) as usize)
+                        % self.config.node_count;
                     let others: Vec<usize> = (0..self.config.node_count)
                         .filter(|&i| i != victim)
                         .collect();
@@ -854,7 +1012,8 @@ impl NetSwitch {
                 }
             }
         } else if nem.heal_prob_ppm > 0 {
-            let draw = (splitmix64(&mut self.prng_state) % u64::from(PPM_SCALE)) as u32;
+            let draw =
+                (nemesis_draw(seed, at_ns, NEMESIS_HEAL_ROLL) % u64::from(PPM_SCALE)) as u32;
             if draw < nem.heal_prob_ppm {
                 self.apply_fault(at_ns, &FaultKind::Heal, events, actions);
             }
@@ -876,10 +1035,12 @@ impl NetSwitch {
                 .collect();
 
             if !crashed_eligible.is_empty() && nem.restart_prob_ppm > 0 {
-                let draw = (splitmix64(&mut self.prng_state) % u64::from(PPM_SCALE)) as u32;
+                let draw = (nemesis_draw(seed, at_ns, NEMESIS_RESTART_ROLL)
+                    % u64::from(PPM_SCALE)) as u32;
                 if draw < nem.restart_prob_ppm {
-                    let pick = crashed_eligible
-                        [(splitmix64(&mut self.prng_state) as usize) % crashed_eligible.len()];
+                    let pick = crashed_eligible[(nemesis_draw(seed, at_ns, NEMESIS_RESTART_PICK)
+                        as usize)
+                        % crashed_eligible.len()];
                     self.apply_fault(at_ns, &FaultKind::Restart { node: pick }, events, actions);
                     return;
                 }
@@ -889,10 +1050,12 @@ impl NetSwitch {
                 && !live_eligible.is_empty()
                 && nem.crash_prob_ppm > 0
             {
-                let draw = (splitmix64(&mut self.prng_state) % u64::from(PPM_SCALE)) as u32;
+                let draw = (nemesis_draw(seed, at_ns, NEMESIS_CRASH_ROLL) % u64::from(PPM_SCALE))
+                    as u32;
                 if draw < nem.crash_prob_ppm {
-                    let pick = live_eligible
-                        [(splitmix64(&mut self.prng_state) as usize) % live_eligible.len()];
+                    let pick = live_eligible[(nemesis_draw(seed, at_ns, NEMESIS_CRASH_PICK)
+                        as usize)
+                        % live_eligible.len()];
                     self.apply_fault(at_ns, &FaultKind::Crash { node: pick }, events, actions);
                 }
             }
@@ -1489,8 +1652,8 @@ mod tests {
 
         for i in 0..20u64 {
             let t = i * 600_000;
-            a.fire_due_faults(t, t, i, &mut ev_a);
-            b.fire_due_faults(t, t, i, &mut ev_b);
+            a.fire_due_timed_faults(t, &mut ev_a);
+            b.fire_due_timed_faults(t, &mut ev_b);
             let f = eth_frame(mac_for_node(1), mac_for_node(0), &[i as u8; 32]);
             a.on_tx(t, 0, f.clone(), &mut ev_a);
             b.on_tx(t, 0, f, &mut ev_b);
@@ -1584,5 +1747,72 @@ mod tests {
 
         // Bad magic is refused.
         assert!(NetLogReader::new(std::io::Cursor::new(b"notanetlog12")).is_err());
+    }
+
+    #[test]
+    fn stateless_link_rng_is_independent_of_cross_link_commit_order() {
+        let cfg = NetSwitchConfig {
+            node_count: 3,
+            latency_ns: 1_000_000,
+            jitter_ns: 500_000,
+            drop_ppm: 200_000,
+            duplicate_ppm: 200_000,
+            seed: 999,
+            fault_window: 0..u64::MAX,
+            links: Vec::new(),
+            faults: Vec::new(),
+            nemesis: None,
+        };
+        let mut ab = NetSwitch::new(cfg.clone());
+        let mut ba = NetSwitch::new(cfg);
+        let mut ev_ab = Vec::new();
+        let mut ev_ba = Vec::new();
+
+        let f0 = eth_frame(mac_for_node(2), mac_for_node(0), &[1u8; 32]);
+        let f1 = eth_frame(mac_for_node(2), mac_for_node(1), &[2u8; 32]);
+
+        // Commit node 0 then node 1 in `ab`, and reverse in `ba`.
+        ab.on_tx(1_000_000, 0, f0.clone(), &mut ev_ab);
+        ab.on_tx(1_000_000, 1, f1.clone(), &mut ev_ab);
+
+        ba.on_tx(1_000_000, 1, f1, &mut ev_ba);
+        ba.on_tx(1_000_000, 0, f0, &mut ev_ba);
+
+        assert_eq!(ab.pop_due_frames(u64::MAX), ba.pop_due_frames(u64::MAX));
+    }
+
+    #[test]
+    fn separate_timed_and_pinned_fault_cursors_do_not_block_each_other() {
+        let cfg = NetSwitchConfig {
+            node_count: 2,
+            latency_ns: 1_000_000,
+            faults: vec![
+                // Scripted fault at 5ms
+                ScheduledFault {
+                    at_ns: 5_000_000,
+                    at_step: None,
+                    kind: FaultKind::Heal,
+                },
+                // Interactive pinned fault at 2ms, step 3
+                ScheduledFault {
+                    at_ns: 2_000_000,
+                    at_step: Some(3),
+                    kind: FaultKind::Partition {
+                        groups: vec![vec![0], vec![1]],
+                    },
+                },
+            ],
+            ..NetSwitchConfig::default()
+        };
+        let mut sw = NetSwitch::new(cfg);
+        let mut ev = Vec::new();
+        assert_eq!(sw.next_timed_fault_ns(), Some(5_000_000));
+        assert_eq!(sw.next_ready_pinned_fault_ns(2), None);
+        assert_eq!(sw.next_ready_pinned_fault_ns(3), Some(2_000_000));
+        assert!(sw.fire_next_pinned_fault(2_000_000, 3, &mut ev).is_some());
+        assert!(sw.is_blocked(0, 1));
+        assert_eq!(sw.next_timed_fault_ns(), Some(5_000_000));
+        sw.fire_due_timed_faults(5_000_000, &mut ev);
+        assert!(!sw.is_blocked(0, 1));
     }
 }
