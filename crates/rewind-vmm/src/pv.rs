@@ -6,6 +6,8 @@
 pub const PORT_EMIT: u16 = 0x5e0;
 /// inl: write the virtual clock into the shared page.
 pub const PORT_CLOCK: u16 = 0x5e4;
+/// outl: guest physical address of a `rewind_net_slot` frame to transmit.
+pub const PORT_NET_TX: u16 = 0x5e8;
 /// outl: arm the timer this many nanoseconds from now; 0 disarms it.
 pub const PORT_TIMER: u16 = 0x5ec;
 /// outl: nothing in the guest is runnable.
@@ -161,7 +163,9 @@ pub const SHARED_TASKS: u64 = (SHARED_STALL_NS + 4).next_multiple_of(8);
 /// any other version is refused, and its runs are recorded again. Version
 /// 7 added to the switch record why the task that left the CPU left it,
 /// and the wake records in the read and write records' buffer.
-pub const INTERFACE_VERSION: u32 = 7;
+/// Version 8 added the paravirtual Ethernet NIC (`PORT_NET_TX`,
+/// `PENDING_NET`, and the `net_*` fields in `struct rewind_shared`).
+pub const INTERFACE_VERSION: u32 = 8;
 pub const SHARED_INTERFACE: u64 = SHARED_TASKS + 8 * TASK_LAYOUT_FIELDS as u64;
 
 /// Where a task off the CPU saved its user FS and GS bases, as offsets in
@@ -188,6 +192,33 @@ pub const SHARED_IO_LOST: u64 = SHARED_IO_HEAD + 4;
 /// The most the monitor reads from the buffer at one step: the guest
 /// kernel's buffer size.
 pub const IO_BUF_MAX: usize = 1 << 20;
+
+/// Paravirtual Ethernet NIC (multi-node clusters):
+/// - `PENDING_NET` wakes the guest to drain frames from `net_rx_ring`.
+/// - The guest publishes `net_rx_ring` (physical address) and `net_rx_slots`
+///   before `PORT_SETUP`.
+/// - The monitor writes `net_enabled = 1` and `net_mac` during `PORT_SETUP`
+///   only when the machine has a NIC attached.
+pub const PENDING_NET: u32 = 1 << 6;
+pub const SHARED_NET_ENABLED: u64 = SHARED_IO_LOST + 4;
+pub const SHARED_NET_RX_RING: u64 = SHARED_NET_ENABLED + 4;
+pub const SHARED_NET_RX_SLOTS: u64 = SHARED_NET_RX_RING + 8;
+pub const SHARED_NET_RX_PROD: u64 = SHARED_NET_RX_SLOTS + 4;
+pub const SHARED_NET_RX_CONS: u64 = SHARED_NET_RX_PROD + 4;
+pub const SHARED_NET_MAC: u64 = SHARED_NET_RX_CONS + 4;
+
+/// Maximum Ethernet frame length (bytes) accepted on TX/RX.
+pub const NET_FRAME_MAX: usize = 1536;
+/// Size of one slot in `rewind_net_rx` / `rewind_net_tx` (`u32 len` + data).
+pub const NET_SLOT_SIZE: usize = 2048;
+/// Upper bound on guest-advertised RX ring slots.
+pub const NET_RX_SLOTS_MAX: u32 = 1024;
+
+// Verify natural 8-byte alignment of `net_rx_ring` and that `struct rewind_shared`
+// fits comfortably inside one 4 KiB page.
+const _: () = assert!(SHARED_NET_ENABLED == 3292);
+const _: () = assert!(SHARED_NET_RX_RING.is_multiple_of(8));
+const _: () = assert!(SHARED_NET_MAC + 8 <= crate::layout::PAGE_SIZE as u64);
 
 /// Whether a guest kernel that names interface `version` is one this
 /// monitor runs: its own, and no other.
@@ -371,7 +402,7 @@ mod interface_tests {
     /// one of the interface before is told to record again.
     #[test]
     fn the_monitor_runs_only_its_own_interface() {
-        assert_eq!(INTERFACE_VERSION, 7);
+        assert_eq!(INTERFACE_VERSION, 8);
         check_interface(INTERFACE_VERSION).unwrap();
         let none = format!("{:#}", check_interface(0).unwrap_err());
         assert!(none.contains("before rewind 1.0"), "{none}");

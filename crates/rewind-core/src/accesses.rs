@@ -369,7 +369,7 @@ pub fn run_to_access(machine: &mut Machine, pid: u32, step: u64, sought: Sought)
                 return Err(crate::internal_error("looking for an access", other));
             }
             Outcome::Interrupted => bail!("looking for an access was interrupted"),
-            Outcome::Paused | Outcome::Stopped(_) => break false,
+            Outcome::Paused | Outcome::Stopped(_) | Outcome::Idle | Outcome::TxReady => break false,
         }
     };
     machine.clear_debug()?;
@@ -826,6 +826,7 @@ impl<'a> Window<'a> {
                 Outcome::Debug(other) => {
                     return Err(crate::internal_error("a search for accesses", other));
                 }
+                Outcome::Idle | Outcome::TxReady => {}
             }
         }
         self.machine.clear_debug()?;

@@ -229,10 +229,13 @@ impl Machine {
             None => self.dev.ram.written_pages(),
             Some(_) => dirty,
         };
-        // The monitor writes the shared page itself, and the dirty log only
-        // sees the guest's writes.
+        // The monitor writes the shared page and any RX ring slots itself,
+        // and the dirty log only sees the guest's writes.
         if let Some(shared) = self.dev.shared {
             indices.push(shared as usize / PAGE_SIZE);
+        }
+        indices.append(&mut self.dev.monitor_dirty_pages);
+        if !indices.is_empty() {
             indices.sort_unstable();
             indices.dedup();
         }
@@ -243,6 +246,34 @@ impl Machine {
         Ok(Keyframe {
             step: self.dev.step,
             parent,
+            cpu,
+            irqchips,
+            devices,
+            pages: stored,
+        })
+    }
+
+    /// Captures a full standalone keyframe WITHOUT reading or clearing KVM's
+    /// dirty-page log. Used for zero-perturbation live inspection (cloning a
+    /// running cluster node into a throwaway VM while leaving the live node's
+    /// delta keyframe chain intact).
+    pub fn snapshot_non_destructive(&mut self, pages: &mut dyn Pages) -> Result<Keyframe> {
+        self.complete_pending_exit()?;
+
+        let ram = self.dev.ram.as_slice();
+        let page_count = ram.len() / PAGE_SIZE;
+        let mut indices = Vec::new();
+        for i in 0..page_count {
+            let chunk = &ram[i * PAGE_SIZE..(i + 1) * PAGE_SIZE];
+            if chunk.iter().any(|&b| b != 0) {
+                indices.push(i);
+            }
+        }
+        let stored = put_pages(pages, ram, &indices, None)?;
+        let (cpu, irqchips, devices) = self.state()?;
+        Ok(Keyframe {
+            step: self.dev.step,
+            parent: None,
             cpu,
             irqchips,
             devices,
@@ -450,9 +481,30 @@ impl Machine {
         self.dev.shared = d.shared;
         // A keyframe taken after setup restores the interface the guest
         // kernel named then, which must be one this monitor speaks.
+        self.dev.net_rx_ring = None;
+        self.dev.net_rx_slots = 0;
         if let Some(shared) = self.dev.shared {
             crate::pv::check_interface(self.dev.guest_interface(shared)?)?;
+            if self.config.net.is_some() {
+                let mut ring_b = [0u8; 8];
+                let mut slots_b = [0u8; 4];
+                self.dev
+                    .ram
+                    .read(shared + crate::pv::SHARED_NET_RX_RING, &mut ring_b)?;
+                self.dev
+                    .ram
+                    .read(shared + crate::pv::SHARED_NET_RX_SLOTS, &mut slots_b)?;
+                let ring = u64::from_le_bytes(ring_b);
+                let slots = u32::from_le_bytes(slots_b);
+                if ring != 0 && (1..=crate::pv::NET_RX_SLOTS_MAX).contains(&slots) {
+                    self.dev.net_rx_ring = Some(ring);
+                    self.dev.net_rx_slots = slots;
+                }
+            }
         }
+        self.dev.tx_queue.clear();
+        self.dev.net_rx_pending = false;
+        self.dev.monitor_dirty_pages.clear();
         self.dev.epoch = d.epoch;
         self.dev.step = d.step;
         self.dev.stop = None;

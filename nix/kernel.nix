@@ -59,6 +59,8 @@ let
     # present and enabled lists, so every proc and sysfs a job mounts
     # says N, in any user namespace
     ../guest/linux/rewind-cpus.patch
+    # Paravirtual Ethernet NIC (eth0) for multi-node cluster runs
+    ../guest/linux/rewind-net.patch
   ];
 
   # Only the guest/linux/ subtree is needed to patch the ARM64 kernel, keeping

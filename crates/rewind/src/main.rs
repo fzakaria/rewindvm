@@ -127,6 +127,8 @@ enum Generate {
 enum Command {
     /// Run a command in a root filesystem.
     Run(cmd::record::RunArgs),
+    /// Run, check, replay, fork, and inspect a multi-node networked cluster.
+    Cluster(cmd::cluster::ClusterArgs),
     /// Build a Nix derivation in the deterministic VM.
     Nix(cmd::record::NixArgs),
     /// Run one build for Nix in the deterministic VM, and copy its outputs
@@ -398,6 +400,7 @@ impl Command {
             // `check` draws a status line of its own, and the others
             // execute runs or replay to compare traces.
             Command::Run(_)
+            | Command::Cluster(_)
             | Command::Nix(_)
             | Command::Build(_)
             | Command::Check(_)
@@ -444,8 +447,10 @@ impl Command {
             | Command::Import(_) => HomeHold::InUse,
             // Reading files boots each run's VM, as `cat` does.
             Command::Diff(args) if args.reads_files() => HomeHold::InUse,
+            Command::Cluster(args) if args.holds_home() => HomeHold::InUse,
             // `build` holds the home it picks for itself.
             Command::Build(_)
+            | Command::Cluster(_)
             | Command::Prune(_)
             | Command::Remove(_)
             | Command::Gc(_)
@@ -537,6 +542,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
     };
     match command {
         Command::Run(args) => cmd::record::run_command(&home, args),
+        Command::Cluster(args) => cmd::cluster::dispatch(&home, args),
         Command::Nix(args) => cmd::record::nix(&home, args),
         Command::Build(args) => cmd::build::build(args),
         Command::Check(args) => cmd::record::check(&home, args),

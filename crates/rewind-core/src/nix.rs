@@ -605,6 +605,7 @@ impl Build {
                 .map(|(_, p)| p.to_string_lossy().into_owned())
                 .collect(),
             sandbox: self.sandbox,
+            net: None,
         }
     }
 }
@@ -964,15 +965,31 @@ fn rewrite(s: &str, rewrites: &[(String, String)]) -> String {
         .fold(s.to_string(), |s, (from, to)| s.replace(from, to))
 }
 
-/// Builds or substitutes `installables` and returns their outputs and the
-/// closure of those outputs, sorted.
+/// Builds or substitutes `installables` (flake references, `.drv` paths, or
+/// existing `/nix/store/...` paths) and returns their outputs and the sorted
+/// recursive closure of those outputs.
 pub fn packages(installables: &[String]) -> Result<(Vec<PathBuf>, Vec<PathBuf>)> {
-    let mut args = vec!["build", "--no-link", "--print-out-paths"];
-    args.extend(installables.iter().map(String::as_str));
-    let outputs: Vec<PathBuf> = nix(&args)?
-        .lines()
-        .map(|l| PathBuf::from(l.trim()))
-        .collect();
+    let mut outputs: Vec<PathBuf> = Vec::new();
+    let mut to_build: Vec<&str> = Vec::new();
+
+    for item in installables {
+        let p = Path::new(item);
+        if item.starts_with(STORE) && !item.ends_with(".drv") && p.exists() {
+            outputs.push(p.to_path_buf());
+        } else {
+            to_build.push(item.as_str());
+        }
+    }
+
+    if !to_build.is_empty() {
+        let mut args = vec!["build", "--no-link", "--print-out-paths"];
+        args.extend(to_build);
+        outputs.extend(nix(&args)?.lines().map(|l| PathBuf::from(l.trim())));
+    }
+
+    if outputs.is_empty() {
+        bail!("nix packages resolved to no store paths");
+    }
 
     let mut args = vec!["path-info", "--recursive"];
     let names: Vec<String> = outputs.iter().map(|p| p.display().to_string()).collect();

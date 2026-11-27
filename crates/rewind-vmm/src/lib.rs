@@ -16,6 +16,7 @@ pub mod arm64;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub mod boot;
 pub mod checkpoint;
+pub mod cluster;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub mod cpu;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -30,6 +31,7 @@ pub mod kvm_arm64;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub mod layout;
 pub mod memory;
+pub mod net;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub mod pmu;
 pub mod pv;
@@ -89,7 +91,9 @@ use layout::*;
 use layout::RAM_BASE;
 use memory::Mapping;
 use pv::{Clock, GuestExit, Schedule};
-pub use rewind_trace::machine::{ClockSource, CounterEvent, CpuModel, Extras, Preemption};
+pub use rewind_trace::machine::{
+    ClockSource, CounterEvent, CpuModel, Extras, NetDeviceConfig, Preemption,
+};
 pub use watchdog::{Deadline, LateLimit};
 
 /// The memory slots of guest RAM below and above the MMIO hole, and of the
@@ -210,6 +214,8 @@ pub struct Config {
     pub preemption: Preemption,
     /// Whether the machine reserves the extras slot (layout::EXTRAS_START).
     pub extras: Extras,
+    /// Optional paravirtual Ethernet NIC for multi-node cluster runs.
+    pub net: Option<NetDeviceConfig>,
 }
 
 /// Whether KVM logs the pages the guest writes, which keyframes and
@@ -354,6 +360,12 @@ pub enum Outcome {
     /// A debugged machine hit a breakpoint or finished a single step
     /// (debug.rs); it can run on from here.
     Debug(debug::DebugStop),
+    /// In cluster mode, the guest went idle (executed `PORT_IDLE`) and is
+    /// waiting for either its local timer or an incoming network frame.
+    Idle,
+    /// In cluster mode, the guest transmitted one or more Ethernet frames
+    /// ready to be routed by the virtual switch.
+    TxReady,
 }
 
 /// Receives what the guest reports, with the step it arrived on.
@@ -432,6 +444,23 @@ pub(crate) struct Devices {
     /// Scratch space reused for an event's record with the clock stamped
     /// in, as the trace holds it.
     pub(crate) event_buffer: Vec<u8>,
+    /// Paravirtual Ethernet NIC configuration, if attached.
+    pub net_config: Option<NetDeviceConfig>,
+    /// Guest physical address of `rewind_net_rx` (published at setup).
+    pub net_rx_ring: Option<u64>,
+    /// Slot count of `rewind_net_rx` (published at setup).
+    pub net_rx_slots: u32,
+    /// Outbound Ethernet frames written by the guest via `PORT_NET_TX`.
+    pub tx_queue: std::collections::VecDeque<Vec<u8>>,
+    /// When true, `PORT_IDLE` yields `Outcome::Idle` and `PORT_NET_TX`
+    /// yields `Outcome::TxReady` to the multi-VM cluster coordinator.
+    pub cluster_mode: bool,
+    /// An RX frame was placed in guest RAM whose MSI was not yet accepted.
+    pub net_rx_pending: bool,
+    /// Pages written directly by the monitor (outside guest execution, such
+    /// as `net_rx_ring` slots) since the last keyframe, so delta keyframes
+    /// capture them even though KVM's dirty log only tracks guest writes.
+    pub monitor_dirty_pages: Vec<usize>,
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -636,6 +665,13 @@ impl Machine {
                 record_buffer: Vec::new(),
                 event_pending: false,
                 event_buffer: Vec::new(),
+                net_config: config.net,
+                net_rx_ring: None,
+                net_rx_slots: 0,
+                tx_queue: std::collections::VecDeque::new(),
+                cluster_mode: false,
+                net_rx_pending: false,
+                monitor_dirty_pages: Vec::new(),
             },
             pmem,
             extras,
@@ -796,9 +832,172 @@ impl Machine {
     /// another machine between two calls, as `rewind gdb` runs the forks
     /// it inspects the process with before the fork it debugs goes on.
     pub fn run(&mut self, until: Option<u64>, obs: &mut dyn Observer) -> Result<Outcome> {
+        self.run_bounded(until, None, obs)
+    }
+
+    /// Enables or disables cluster mode on this machine. In cluster mode,
+    /// `PORT_IDLE` yields [`Outcome::Idle`] instead of jumping the clock or
+    /// stalling, and `PORT_NET_TX` yields [`Outcome::TxReady`].
+    pub fn set_cluster_mode(&mut self, enabled: bool) {
+        self.dev.cluster_mode = enabled;
+    }
+
+    /// Clones the in-memory I/O and context-switch trace encoders so an
+    /// in-progress interactive snapshot can restore pending/staged switch
+    /// batches that have not yet been flushed to the trace.
+    pub fn encoders(
+        &self,
+    ) -> (
+        Option<rewind_trace::io_records::Encoder>,
+        Option<rewind_trace::switches::Encoder>,
+    ) {
+        (self.dev.io.clone(), self.dev.switches.clone())
+    }
+
+    /// Replaces the in-memory I/O and context-switch trace encoders after a
+    /// live snapshot restore.
+    pub fn set_encoders(
+        &mut self,
+        io: Option<rewind_trace::io_records::Encoder>,
+        switches: Option<rewind_trace::switches::Encoder>,
+    ) {
+        self.dev.io = io;
+        self.dev.switches = switches;
+    }
+
+    /// Runs a cluster time-slice: executes until `self.now() >= horizon_ns`,
+    /// `max_steps` steps have elapsed, the guest transmits a frame
+    /// ([`Outcome::TxReady`]), goes idle ([`Outcome::Idle`]), or stops.
+    pub fn run_cluster_slice(
+        &mut self,
+        horizon_ns: u64,
+        max_steps: u64,
+        obs: &mut dyn Observer,
+    ) -> Result<Outcome> {
+        let until_step = self.dev.step.saturating_add(max_steps);
+        self.run_bounded(Some(until_step), Some(horizon_ns), obs)
+    }
+
+    /// Takes all outbound Ethernet frames transmitted by the guest since the
+    /// last call.
+    pub fn take_tx_frames(&mut self) -> Vec<Vec<u8>> {
+        self.dev.tx_queue.drain(..).collect()
+    }
+
+    /// Delivers one inbound Ethernet frame to the guest's RX ring and raises
+    /// `PENDING_NET`. Returns `Ok(false)` if the guest's RX ring is currently
+    /// full or the guest has not completed `PORT_SETUP` yet.
+    pub fn deliver_rx_frame(&mut self, frame: &[u8]) -> Result<bool> {
+        let (Some(shared), Some(ring)) = (self.dev.shared, self.dev.net_rx_ring) else {
+            return Ok(false);
+        };
+        let slots = self.dev.net_rx_slots;
+        if slots == 0 || frame.len() > pv::NET_FRAME_MAX {
+            return Ok(false);
+        }
+        let mut prod_b = [0u8; 4];
+        let mut cons_b = [0u8; 4];
+        self.dev
+            .ram
+            .read(shared + pv::SHARED_NET_RX_PROD, &mut prod_b)?;
+        self.dev
+            .ram
+            .read(shared + pv::SHARED_NET_RX_CONS, &mut cons_b)?;
+        let prod = u32::from_le_bytes(prod_b);
+        let cons = u32::from_le_bytes(cons_b);
+        if prod.wrapping_sub(cons) >= slots {
+            return Ok(false);
+        }
+        let slot_idx = u64::from(prod % slots);
+        let slot_addr = ring + slot_idx * pv::NET_SLOT_SIZE as u64;
+        self.dev
+            .ram
+            .write(slot_addr, &(frame.len() as u32).to_le_bytes())?;
+        self.dev.ram.write(slot_addr + 4, frame)?;
+        let next_prod = prod.wrapping_add(1);
+        self.dev
+            .ram
+            .write(shared + pv::SHARED_NET_RX_PROD, &next_prod.to_le_bytes())?;
+
+        // Track pages modified directly by the monitor so delta keyframes
+        // capture them even though KVM's dirty log only tracks guest writes.
+        let first_page = (slot_addr as usize) / PAGE_SIZE;
+        let last_page = ((slot_addr as usize) + 4 + frame.len().saturating_sub(1)) / PAGE_SIZE;
+        for p in first_page..=last_page {
+            self.dev.monitor_dirty_pages.push(p);
+        }
+
+        self.dev.net_rx_pending = !self.inject(pv::PENDING_NET)?;
+        self.dev.idle = false;
+        Ok(true)
+    }
+
+    /// Advances an idle cluster node's local clock to `target_local_ns`,
+    /// refreshes `SHARED_NOW`, and injects `PENDING_TIMER` if its armed timer
+    /// is now due.
+    pub fn advance_idle_to(&mut self, target_local_ns: u64) -> Result<()> {
+        if target_local_ns > self.dev.clock.now {
+            self.dev.clock.now = target_local_ns;
+        }
+        if let Some(shared) = self.dev.shared {
+            let now = self.dev.clock.now.to_le_bytes();
+            self.dev.ram.write(shared + pv::SHARED_NOW, &now)?;
+        }
+        if self.dev.clock.due() {
+            if self.inject(pv::PENDING_TIMER)? {
+                self.dev.clock.deadline = None;
+            }
+            self.dev.idle = false;
+        }
+        Ok(())
+    }
+
+    /// Whether the guest is currently idle (waiting on timer or network).
+    pub fn is_idle(&self) -> bool {
+        self.dev.idle
+    }
+
+    /// Sets the guest's idle flag (used when restoring a cluster keyframe).
+    pub(crate) fn set_idle(&mut self, idle: bool, net_rx_pending: bool) {
+        self.dev.idle = idle;
+        self.dev.net_rx_pending = net_rx_pending;
+    }
+
+    /// Whether an RX interrupt is pending re-delivery.
+    pub(crate) fn net_rx_pending(&self) -> bool {
+        self.dev.net_rx_pending
+    }
+
+    /// The armed local timer deadline in guest virtual nanoseconds, if any.
+    pub fn timer_deadline(&self) -> Option<u64> {
+        self.dev.clock.deadline
+    }
+
+    /// The reason the machine stopped, if it has stopped.
+    pub fn stopped(&self) -> Option<Stop> {
+        self.dev.stop
+    }
+
+    /// Sets the machine's initial virtual clock (for cluster clock skew).
+    pub fn set_initial_now(&mut self, now: u64) -> Result<()> {
+        self.dev.clock.now = now;
+        if let Some(shared) = self.dev.shared {
+            self.dev
+                .ram
+                .write(shared + pv::SHARED_NOW, &now.to_le_bytes())?;
+        }
+        Ok(())
+    }
+
+    fn run_bounded(
+        &mut self,
+        until: Option<u64>,
+        until_ns: Option<u64>,
+        obs: &mut dyn Observer,
+    ) -> Result<Outcome> {
         self.resume_counting()?;
         self.interrupt.entered();
-        let outcome = self.run_counted(until, obs);
+        let outcome = self.run_counted(until, until_ns, obs);
         self.interrupt.left();
         let paused = self.pause_counting();
         let outcome = outcome?;
@@ -848,12 +1047,26 @@ impl Machine {
         Ok(())
     }
 
-    fn run_counted(&mut self, until: Option<u64>, obs: &mut dyn Observer) -> Result<Outcome> {
+    fn run_counted(
+        &mut self,
+        until: Option<u64>,
+        until_ns: Option<u64>,
+        obs: &mut dyn Observer,
+    ) -> Result<Outcome> {
         self.skipped.clear();
         if let Some(stop) = self.dev.stop {
             return Ok(Outcome::Stopped(stop));
         }
         if until.is_some_and(|u| u <= self.dev.step) {
+            return Ok(Outcome::Paused);
+        }
+        if self.dev.cluster_mode && self.dev.idle {
+            return Ok(Outcome::Idle);
+        }
+        if self.dev.cluster_mode && !self.dev.tx_queue.is_empty() {
+            return Ok(Outcome::TxReady);
+        }
+        if until_ns.is_some_and(|h| self.dev.clock.now >= h) {
             return Ok(Outcome::Paused);
         }
 
@@ -1004,7 +1217,19 @@ impl Machine {
             self.after_step(Quantum::Add)?;
             self.dev.write_event(obs);
 
-            if until.is_some_and(|u| self.dev.step >= u) || obs.stop() {
+            if self.dev.cluster_mode {
+                if !self.dev.tx_queue.is_empty() {
+                    return Ok(Outcome::TxReady);
+                }
+                if self.dev.idle {
+                    return Ok(Outcome::Idle);
+                }
+            }
+
+            if until.is_some_and(|u| self.dev.step >= u)
+                || until_ns.is_some_and(|h| self.dev.clock.now >= h)
+                || obs.stop()
+            {
                 return Ok(Outcome::Paused);
             }
         }
@@ -1062,6 +1287,9 @@ impl Machine {
         if self.dev.input.is_some() && self.deliver_input()? {
             reasons |= pv::PENDING_INPUT;
         }
+        if self.dev.net_rx_pending {
+            reasons |= pv::PENDING_NET;
+        }
         if reasons != 0 && self.inject(reasons)? {
             // A timer or a request counts as delivered once the APIC takes
             // it; until then it stays pending and goes again at the next
@@ -1071,6 +1299,12 @@ impl Machine {
             }
             self.dev.inspect = false;
             self.dev.input_sent = false;
+            self.dev.net_rx_pending = false;
+        }
+        if self.dev.cluster_mode
+            && (reasons & (pv::PENDING_TIMER | pv::PENDING_NET | pv::PENDING_PREEMPT) != 0)
+        {
+            self.dev.idle = false;
         }
         Ok(())
     }
@@ -1302,7 +1536,7 @@ impl Devices {
     /// at the exit the guest makes, and one the APIC took is taken right
     /// after that exit. None when the guest can run on.
     pub(crate) fn stall_if_idle(&mut self, obs: &mut dyn Observer) -> Result<Option<Stop>> {
-        if !self.idle {
+        if !self.idle || self.cluster_mode {
             return Ok(None);
         }
         self.idle = false;
@@ -1358,6 +1592,17 @@ impl Devices {
                 // written in between and nothing stops the machine.
                 self.event_pending = true;
             }
+            pv::PORT_NET_TX => {
+                let addr = value;
+                let mut len_b = [0u8; 4];
+                self.ram.read_gpa(addr, &mut len_b)?;
+                let len = u32::from_le_bytes(len_b) as usize;
+                if (14..=pv::NET_FRAME_MAX).contains(&len) {
+                    let mut frame = vec![0u8; len];
+                    self.ram.read_gpa(addr + 4, &mut frame)?;
+                    self.tx_queue.push_back(frame);
+                }
+            }
             pv::PORT_TIMER => {
                 let delta = value;
                 let slack = if delta == 0 {
@@ -1369,6 +1614,10 @@ impl Devices {
                 self.clock.arm(delta + slack);
             }
             pv::PORT_IDLE => {
+                if self.cluster_mode {
+                    self.idle = true;
+                    return Ok(());
+                }
                 // With a person typing, idle time passes in real time: wait
                 // for input until the next timer is due, and only jump to
                 // the timer when none came.
@@ -1399,6 +1648,27 @@ impl Devices {
                 let shared = value;
                 pv::check_interface(self.guest_interface(shared)?)?;
                 self.ram_write(shared + pv::SHARED_EPOCH, &self.epoch.to_le_bytes())?;
+                if let Some(net) = self.net_config {
+                    let mut ring_b = [0u8; 8];
+                    let mut slots_b = [0u8; 4];
+                    self.ram
+                        .read_gpa(shared + pv::SHARED_NET_RX_RING, &mut ring_b)?;
+                    self.ram
+                        .read_gpa(shared + pv::SHARED_NET_RX_SLOTS, &mut slots_b)?;
+                    let ring = u64::from_le_bytes(ring_b);
+                    let slots = u32::from_le_bytes(slots_b);
+                    if ring == 0 || !(1..=pv::NET_RX_SLOTS_MAX).contains(&slots) {
+                        bail!(
+                            "guest advertised invalid net_rx_ring={ring:#x} slots={slots}"
+                        );
+                    }
+                    self.ram_write(shared + pv::SHARED_NET_ENABLED, &1u32.to_le_bytes())?;
+                    self.ram_write(shared + pv::SHARED_NET_MAC, &net.mac)?;
+                    self.net_rx_ring = Some(ring);
+                    self.net_rx_slots = slots;
+                } else {
+                    self.ram_write(shared + pv::SHARED_NET_ENABLED, &0u32.to_le_bytes())?;
+                }
                 self.shared = Some(shared);
                 self.io = Some(rewind_trace::io_records::Encoder::new());
                 self.switches = Some(rewind_trace::switches::Encoder::new());
@@ -1701,6 +1971,13 @@ mod tests {
             record_buffer: Vec::new(),
             event_pending: false,
             event_buffer: Vec::new(),
+            net_config: None,
+            net_rx_ring: None,
+            net_rx_slots: 0,
+            tx_queue: std::collections::VecDeque::new(),
+            cluster_mode: false,
+            net_rx_pending: false,
+            monitor_dirty_pages: Vec::new(),
         }
     }
 
@@ -2114,6 +2391,7 @@ mod machine_tests {
             clock: ClockSource::Exits,
             preemption: Preemption::AtExits,
             extras: Extras::Absent,
+            net: None,
         }
     }
 

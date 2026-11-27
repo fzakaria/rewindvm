@@ -1,0 +1,227 @@
+diff --git a/arch/x86/kernel/cpu/rewind.c b/arch/x86/kernel/cpu/rewind.c
+--- a/arch/x86/kernel/cpu/rewind.c
++++ b/arch/x86/kernel/cpu/rewind.c
+@@ -40,6 +40,7 @@
+ #include <linux/clocksource.h>
+ #include <linux/console.h>
+ #include <linux/cpumask.h>
++#include <linux/etherdevice.h>
+ #include <linux/fcntl.h>
+ #include <linux/file.h>
+ #include <linux/fs.h>
+@@ -51,6 +52,7 @@
+ #include <linux/mm.h>
+ #include <linux/mutex.h>
+ #include <linux/namei.h>
++#include <linux/netdevice.h>
+ #include <linux/pm.h>
+ #include <linux/poll.h>
+ #include <linux/random.h>
+@@ -97,6 +99,7 @@
+ /* Ports the monitor traps. Each access is one exit, and one step. */
+ #define REWIND_PORT_EMIT	0x5e0	/* outl: physical address of a record */
+ #define REWIND_PORT_CLOCK	0x5e4	/* inl: refresh rewind_shared.now */
++#define REWIND_PORT_NET_TX	0x5e8	/* outl: physical address of a frame */
+ #define REWIND_PORT_TIMER	0x5ec	/* outl: arm the timer, ns from now */
+ #define REWIND_PORT_IDLE	0x5f0	/* outl: nothing is runnable */
+ #define REWIND_PORT_EXIT	0x5f4	/* outl: stop the machine */
+@@ -114,9 +117,10 @@
+  * a process exits when its last thread does. Interface 7 added to each
+  * switch record the thread that left the CPU, whether it could still run
+  * and the system call it was in, and a wake record to the read and write
+- * records' buffer.
++ * records' buffer. Interface 8 added the paravirtual Ethernet NIC
++ * (REWIND_PORT_NET_TX, REWIND_PENDING_NET, and rewind_shared.net_*).
+  */
+-#define REWIND_INTERFACE	7
++#define REWIND_INTERFACE	8
+ 
+ /* Values written to REWIND_PORT_EXIT. */
+ enum rewind_exit {
+@@ -254,6 +258,19 @@
+ 	u32 io_size;
+ 	u32 io_head;
+ 	u32 io_lost;
++	/*
++	 * Paravirtual Ethernet NIC for multi-node clusters. The guest
++	 * publishes net_rx_ring and net_rx_slots before setup; the monitor
++	 * writes net_enabled = 1 and net_mac during setup when a virtual
++	 * switch is attached, and leaves net_enabled = 0 on single-node runs.
++	 */
++	u32 net_enabled;
++	u64 net_rx_ring;	/* physical address of rewind_net_rx */
++	u32 net_rx_slots;
++	u32 net_rx_prod;	/* monitor advances as it places RX frames */
++	u32 net_rx_cons;	/* guest advances as it drains RX frames */
++	u8 net_mac[6];
++	u8 net_pad[2];
+ };
+ 
+ /* Reasons for an interrupt, in rewind_shared.pending. */
+@@ -263,6 +280,7 @@
+ #define REWIND_PENDING_INPUT	BIT(3)	/* input for /dev/rewind-console */
+ #define REWIND_PENDING_STALL	BIT(4)	/* stall the running task stall_ns */
+ #define REWIND_PENDING_RESEED	BIT(5)	/* reseed the RNG from reseed */
++#define REWIND_PENDING_NET	BIT(6)	/* frames waiting in rewind_net_rx */
+ 
+ /*
+  * /dev/rewind-console's input: bytes the monitor sends, in arrival order.
+@@ -655,6 +673,118 @@
+ }
+ 
+ /*
++ * Paravirtual Ethernet NIC (eth0) for multi-node cluster runs.
++ *
++ * Transmitting a frame copies it into rewind_net_tx and writes its physical
++ * address to REWIND_PORT_NET_TX, so every transmission is an exact step at
++ * an exact virtual timestamp. Incoming frames are placed by the monitor in
++ * rewind_net_rx and signalled with REWIND_PENDING_NET on the monitor's one
++ * interrupt, so reception is equally deterministic.
++ */
++#define REWIND_NET_FRAME_MAX	1536
++#define REWIND_NET_SLOT_SIZE	2048
++#define REWIND_NET_RX_SLOTS	256
++
++struct rewind_net_slot {
++	u32 len;
++	u8 data[REWIND_NET_SLOT_SIZE - sizeof(u32)];
++} __packed;
++
++static struct rewind_net_slot rewind_net_tx __aligned(PAGE_SIZE);
++static struct rewind_net_slot rewind_net_rx[REWIND_NET_RX_SLOTS] __aligned(PAGE_SIZE);
++static struct net_device *rewind_netdev;
++
++static void rewind_net_rx_irq(void)
++{
++	u32 prod = READ_ONCE(rewind_shared.net_rx_prod);
++	u32 cons = READ_ONCE(rewind_shared.net_rx_cons);
++	struct net_device *dev = READ_ONCE(rewind_netdev);
++
++	while (cons != prod) {
++		struct rewind_net_slot *slot =
++			&rewind_net_rx[cons % REWIND_NET_RX_SLOTS];
++		u32 len = READ_ONCE(slot->len);
++
++		if (dev && netif_running(dev) &&
++		    len >= ETH_HLEN && len <= REWIND_NET_FRAME_MAX) {
++			struct sk_buff *skb = netdev_alloc_skb_ip_align(dev, len);
++
++			if (skb) {
++				memcpy(skb_put(skb, len), slot->data, len);
++				skb->protocol = eth_type_trans(skb, dev);
++				dev->stats.rx_packets++;
++				dev->stats.rx_bytes += len;
++				netif_rx(skb);
++			} else {
++				dev->stats.rx_dropped++;
++			}
++		}
++		cons++;
++		WRITE_ONCE(rewind_shared.net_rx_cons, cons);
++	}
++}
++
++static int rewind_net_open(struct net_device *dev)
++{
++	netif_start_queue(dev);
++	return 0;
++}
++
++static int rewind_net_stop(struct net_device *dev)
++{
++	netif_stop_queue(dev);
++	return 0;
++}
++
++static netdev_tx_t rewind_net_xmit(struct sk_buff *skb, struct net_device *dev)
++{
++	unsigned long irqflags;
++	u32 len = skb->len;
++
++	if (len < ETH_HLEN || len > REWIND_NET_FRAME_MAX || skb_linearize(skb)) {
++		dev->stats.tx_dropped++;
++		dev_kfree_skb_any(skb);
++		return NETDEV_TX_OK;
++	}
++
++	local_irq_save(irqflags);
++	rewind_net_tx.len = len;
++	memcpy(rewind_net_tx.data, skb->data, len);
++	outl(__pa_symbol(&rewind_net_tx), REWIND_PORT_NET_TX);
++	local_irq_restore(irqflags);
++
++	dev->stats.tx_packets++;
++	dev->stats.tx_bytes += len;
++	dev_kfree_skb_any(skb);
++	return NETDEV_TX_OK;
++}
++
++static const struct net_device_ops rewind_netdev_ops = {
++	.ndo_open	= rewind_net_open,
++	.ndo_stop	= rewind_net_stop,
++	.ndo_start_xmit	= rewind_net_xmit,
++};
++
++static int __init rewind_net_init(void)
++{
++	struct net_device *dev = alloc_etherdev(0);
++	int err;
++
++	if (!dev)
++		return -ENOMEM;
++	eth_hw_addr_set(dev, rewind_shared.net_mac);
++	dev->netdev_ops = &rewind_netdev_ops;
++	dev->mtu = ETH_DATA_LEN;
++	err = register_netdev(dev);
++	if (err) {
++		free_netdev(dev);
++		return err;
++	}
++	WRITE_ONCE(rewind_netdev, dev);
++	return 0;
++}
++
++/*
+  * The monitor's one interrupt. A timer that is due runs the clock event
+  * handler. A preemption request marks the current task for rescheduling,
+  * so the scheduler picks again on the way back to user space: this is how
+@@ -687,6 +814,9 @@
+ 		rewind_rng_reseed(rewind_shared.reseed,
+ 				  sizeof(rewind_shared.reseed));
+ 
++	if (pending & REWIND_PENDING_NET)
++		rewind_net_rx_irq();
++
+ 	if (pending & REWIND_PENDING_INSPECT) {
+ 		WRITE_ONCE(rewind_inspecting, true);
+ 		WRITE_ONCE(rewind_inspect_running,
+@@ -904,10 +1034,16 @@
+ static void __init rewind_init_platform(void)
+ {
+ 	rewind_running = true;
++	BUILD_BUG_ON(sizeof(struct rewind_shared) > PAGE_SIZE);
++	BUILD_BUG_ON(offsetof(struct rewind_shared, net_enabled) != 3292);
++	BUILD_BUG_ON(offsetof(struct rewind_shared, net_rx_ring) != 3296);
++	BUILD_BUG_ON(offsetof(struct rewind_shared, net_mac) != 3316);
+ 	rewind_publish_tasks();
+ 	rewind_shared.interface = REWIND_INTERFACE;
+ 	rewind_shared.io_buf = __pa_symbol(rewind_io_buf);
+ 	rewind_shared.io_size = REWIND_IO_BUF_SIZE;
++	rewind_shared.net_rx_ring = __pa_symbol(rewind_net_rx);
++	rewind_shared.net_rx_slots = REWIND_NET_RX_SLOTS;
+ 	outl(__pa_symbol(&rewind_shared), REWIND_PORT_SETUP);
+ 
+ 	/*
+@@ -1861,6 +1997,12 @@
+ 	err = rewind_tty_init();
+ 	if (err)
+ 		return err;
++
++	if (READ_ONCE(rewind_shared.net_enabled)) {
++		err = rewind_net_init();
++		if (err)
++			return err;
++	}
+ 
+ 	WARN_ON(register_trace_sched_process_exec(rewind_probe_exec, NULL));
+ 	WARN_ON(register_trace_sched_process_fork(rewind_probe_fork, NULL));

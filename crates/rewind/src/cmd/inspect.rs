@@ -45,6 +45,9 @@ pub(crate) struct CatArgs {
     /// In a shell pipeline, use `set -o pipefail`.
     #[arg(long, value_enum, value_name = "FORMAT")]
     pub(crate) archive: Option<ArchiveFormat>,
+    /// Select a node inside a multi-node cluster run.
+    #[arg(long, value_name = "NAME")]
+    pub(crate) node: Option<String>,
 }
 
 /// The archives `rewind cat --archive` writes.
@@ -61,7 +64,36 @@ pub(crate) fn cat(home: &Home, args: CatArgs) -> Result<ExitCode> {
         path,
         pid,
         archive,
+        node,
     } = args;
+    if let Some(node_name) = node {
+        if archive.is_some() {
+            bail!("--archive is not yet supported with --node");
+        }
+        let cluster = rewind_core::cluster::ClusterRun::find(home, &run)?;
+        let (mut machine, actual_step) = cluster.seek_node(home, &node_name, step)?;
+        match rewind_core::inspect::cat_on_machine(&mut machine, actual_step, pid, &path)? {
+            Inspection::Contents(bytes) => {
+                use std::io::Write;
+                std::io::stdout().write_all(&bytes)?;
+                return Ok(ExitCode::SUCCESS);
+            }
+            Inspection::NotFound(message) => {
+                eprintln!("{} {message}", crate::color::stderr().prefix());
+                return Ok(ExitCode::from(CAT_NOT_FOUND));
+            }
+            Inspection::Failed(message) if names_a_directory(&message) => {
+                eprintln!(
+                    "{} {path} is a directory at step {actual_step}; `rewind files --node {node_name}` lists it",
+                    crate::color::stderr().prefix()
+                );
+                return Ok(ExitCode::from(CAT_DIRECTORY));
+            }
+            Inspection::Failed(message) => {
+                bail!("reading {path} on node {node_name} at step {actual_step}: {message}")
+            }
+        }
+    }
     let run = Run::find(home, &run)?;
     let step = run.check_step(step)?;
     warn_of_machine(&run, step);
@@ -203,6 +235,9 @@ pub(crate) struct FilesArgs {
     /// line `{"cut":true}`.
     #[arg(long)]
     pub(crate) json: bool,
+    /// Select a node inside a multi-node cluster run.
+    #[arg(long, value_name = "NAME")]
+    pub(crate) node: Option<String>,
 }
 
 pub(crate) fn files(home: &Home, args: FilesArgs) -> Result<ExitCode> {
@@ -212,33 +247,63 @@ pub(crate) fn files(home: &Home, args: FilesArgs) -> Result<ExitCode> {
         path,
         pid,
         json,
+        node,
     } = args;
-    let run = Run::find(home, &run)?;
-    let step = run.check_step(step)?;
-    warn_of_machine(&run, step);
     let paint = crate::color::stderr();
-    let bytes = match rewind_core::inspect::list(home, &run, step, pid, &path)? {
-        Inspection::Contents(bytes) => bytes,
-        Inspection::NotFound(message) => {
-            eprintln!("{} {message}", paint.prefix());
-            return Ok(ExitCode::from(CAT_NOT_FOUND));
-        }
-        Inspection::Failed(message) if names_no_directory(&message) => {
-            eprintln!(
-                "{} {path} is not a directory at step {step}",
-                paint.prefix()
-            );
-            return Ok(ExitCode::from(FILES_NOT_A_DIRECTORY));
-        }
-        Inspection::Failed(message) if message.starts_with(UNKNOWN_REQUEST) => bail!(
-            "run {} was recorded with a guest from before `rewind files`; record it again to \
-             list its directories",
-            run.manifest.id
-        ),
-        Inspection::Failed(message) => bail!("listing {path} at step {step}: {message}"),
+    let (bytes, resolved_step) = if let Some(node_name) = node {
+        let cluster = rewind_core::cluster::ClusterRun::find(home, &run)?;
+        let (mut machine, actual_step) = cluster.seek_node(home, &node_name, step)?;
+        let bytes = match rewind_core::inspect::list_on_machine(
+            &mut machine,
+            actual_step,
+            pid,
+            &path,
+        )? {
+            Inspection::Contents(bytes) => bytes,
+            Inspection::NotFound(message) => {
+                eprintln!("{} {message}", paint.prefix());
+                return Ok(ExitCode::from(CAT_NOT_FOUND));
+            }
+            Inspection::Failed(message) if names_no_directory(&message) => {
+                eprintln!(
+                    "{} {path} is not a directory at step {actual_step}",
+                    paint.prefix()
+                );
+                return Ok(ExitCode::from(FILES_NOT_A_DIRECTORY));
+            }
+            Inspection::Failed(message) => {
+                bail!("listing {path} on node {node_name} at step {actual_step}: {message}")
+            }
+        };
+        (bytes, actual_step)
+    } else {
+        let run = Run::find(home, &run)?;
+        let step = run.check_step(step)?;
+        warn_of_machine(&run, step);
+        let bytes = match rewind_core::inspect::list(home, &run, step, pid, &path)? {
+            Inspection::Contents(bytes) => bytes,
+            Inspection::NotFound(message) => {
+                eprintln!("{} {message}", paint.prefix());
+                return Ok(ExitCode::from(CAT_NOT_FOUND));
+            }
+            Inspection::Failed(message) if names_no_directory(&message) => {
+                eprintln!(
+                    "{} {path} is not a directory at step {step}",
+                    paint.prefix()
+                );
+                return Ok(ExitCode::from(FILES_NOT_A_DIRECTORY));
+            }
+            Inspection::Failed(message) if message.starts_with(UNKNOWN_REQUEST) => bail!(
+                "run {} was recorded with a guest from before `rewind files`; record it again to \
+                 list its directories",
+                run.manifest.id
+            ),
+            Inspection::Failed(message) => bail!("listing {path} at step {step}: {message}"),
+        };
+        (bytes, step)
     };
     let Some(mut listing) = Listing::parse(&bytes) else {
-        bail!("listing {path} at step {step}: the VM's answer is not a listing");
+        bail!("listing {path} at step {resolved_step}: the VM's answer is not a listing");
     };
 
     // By path, as `find` piped through `sort` prints a tree.
@@ -324,6 +389,9 @@ pub(crate) struct ShellArgs {
     /// Repeat for several.
     #[arg(long = "with", value_name = "INSTALLABLE")]
     pub(crate) with: Vec<String>,
+    /// Select a node inside a multi-node cluster run.
+    #[arg(long, value_name = "NAME")]
+    pub(crate) node: Option<String>,
 }
 
 pub(crate) fn shell(home: &Home, args: ShellArgs) -> Result<ExitCode> {
@@ -332,9 +400,52 @@ pub(crate) fn shell(home: &Home, args: ShellArgs) -> Result<ExitCode> {
         step,
         pid,
         with,
+        node,
     } = args;
     use std::io::Write;
     use std::os::fd::AsRawFd;
+
+    if let Some(node_name) = node {
+        rewind_vmm::kvm::open()?;
+        let cluster = rewind_core::cluster::ClusterRun::find(home, &run)?;
+        let (mut machine, actual_step) = cluster.seek_node(home, &node_name, step)?;
+        let extras = if with.is_empty() {
+            None
+        } else {
+            Some(rewind_core::inspect::Extras::build(home, &with)?)
+        };
+        let size = terminal::size(std::io::stdout().as_raw_fd()).unwrap_or(terminal::DEFAULT_SIZE);
+        eprintln!(
+            "{} a shell on node {node_name} at step {actual_step} of cluster {}; exit it to leave",
+            crate::color::stderr().prefix(),
+            cluster.manifest.id
+        );
+        terminal::wake_on_resize();
+        let raw = terminal::RawMode::enter();
+        let result = rewind_core::inspect::shell_on_machine(
+            &mut machine,
+            actual_step,
+            rewind_core::inspect::Session { pid, size, extras },
+            Box::new(terminal::Keyboard::new(size)),
+            Box::new({
+                // SAFETY: isatty only inspects the descriptor.
+                let tty = unsafe { libc::isatty(std::io::stdout().as_raw_fd()) } == 1;
+                let mut plain = terminal::Unterminal::default();
+                move |bytes: &[u8]| {
+                    let mut out = std::io::stdout().lock();
+                    let _ = if tty {
+                        out.write_all(bytes)
+                    } else {
+                        out.write_all(&plain.convert(bytes))
+                    };
+                    let _ = out.flush();
+                }
+            }),
+        );
+        drop(raw);
+        result?;
+        return Ok(ExitCode::SUCCESS);
+    }
 
     let run = Run::find(home, &run)?;
     let step = run.check_step(step)?;
