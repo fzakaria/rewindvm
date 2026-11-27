@@ -148,6 +148,7 @@
               null;
           site = import ./nix/site.nix { inherit pkgs web; };
           examples = import ./nix/examples.nix { inherit pkgs; };
+          cassandra6 = import ./nix/cassandra6.nix { inherit pkgs; };
           benchInputs = if isLinux then import ./nix/bench { inherit pkgs; } else null;
           license =
             if isLinux then
@@ -231,6 +232,10 @@
           # a program stamped with a random id and the time of its build,
           # another on every build outside Rewind (nix/examples.nix)
           stamp = p.examples.stamp;
+
+          # Apache Cassandra 6.0-alpha2 with CEP-15 Accord transactions
+          # (nix/cassandra6.nix)
+          cassandra6 = p.cassandra6;
         }
         // nixpkgs.lib.optionalAttrs p.isLinux {
           # the command's release asset, for people without Nix
