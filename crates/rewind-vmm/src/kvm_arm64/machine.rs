@@ -211,6 +211,14 @@ impl Machine {
                 record_buffer: Vec::new(),
                 event_pending: false,
                 event_buffer: Vec::new(),
+                net_config: config.net,
+                net_rx_ring: None,
+                net_rx_slots: 0,
+                tx_queue: std::collections::VecDeque::new(),
+                tx_pending: None,
+                cluster_mode: false,
+                net_rx_pending: false,
+                monitor_dirty_pages: Vec::new(),
             },
             pmem,
             extras,
@@ -356,20 +364,166 @@ impl Machine {
     }
 
     pub fn run(&mut self, until: Option<u64>, obs: &mut dyn Observer) -> Result<Outcome> {
+        self.run_bounded(until, None, false, obs)
+    }
+
+    pub fn set_cluster_mode(&mut self, enabled: bool) {
+        self.dev.cluster_mode = enabled;
+    }
+
+    pub fn encoders(
+        &self,
+    ) -> (
+        Option<rewind_trace::io_records::Encoder>,
+        Option<rewind_trace::switches::Encoder>,
+    ) {
+        (self.dev.io.clone(), self.dev.switches.clone())
+    }
+
+    pub fn set_encoders(
+        &mut self,
+        io: Option<rewind_trace::io_records::Encoder>,
+        switches: Option<rewind_trace::switches::Encoder>,
+    ) {
+        self.dev.io = io;
+        self.dev.switches = switches;
+    }
+
+    pub fn run_cluster_slice(
+        &mut self,
+        horizon_ns: u64,
+        max_steps: u64,
+        allow_idle_skip: bool,
+        obs: &mut dyn Observer,
+    ) -> Result<Outcome> {
+        let until_step = self.dev.step.saturating_add(max_steps);
+        self.run_bounded(Some(until_step), Some(horizon_ns), allow_idle_skip, obs)
+    }
+
+    pub fn take_tx_frames(&mut self) -> Vec<(u64, Vec<u8>)> {
+        self.dev.tx_queue.drain(..).collect()
+    }
+
+    pub fn deliver_rx_frame(&mut self, frame: &[u8]) -> Result<bool> {
+        let (Some(shared), Some(ring)) = (self.dev.shared, self.dev.net_rx_ring) else {
+            return Ok(false);
+        };
+        let slots = self.dev.net_rx_slots;
+        if slots == 0 || frame.len() > pv::NET_FRAME_MAX {
+            return Ok(false);
+        }
+        let mut prod_b = [0u8; 4];
+        let mut cons_b = [0u8; 4];
+        self.dev.ram_read(shared + pv::SHARED_NET_RX_PROD, &mut prod_b)?;
+        self.dev.ram_read(shared + pv::SHARED_NET_RX_CONS, &mut cons_b)?;
+        let prod = u32::from_le_bytes(prod_b);
+        let cons = u32::from_le_bytes(cons_b);
+        if prod.wrapping_sub(cons) >= slots {
+            return Ok(false);
+        }
+        let slot_idx = u64::from(prod % slots);
+        let slot_addr = ring + slot_idx * pv::NET_SLOT_SIZE as u64;
+        self.dev
+            .ram_write(slot_addr, &(frame.len() as u32).to_le_bytes())?;
+        self.dev.ram_write(slot_addr + 4, frame)?;
+        let next_prod = prod.wrapping_add(1);
+        self.dev
+            .ram_write(shared + pv::SHARED_NET_RX_PROD, &next_prod.to_le_bytes())?;
+
+        if self.dirty_log == DirtyLog::On
+            && let Some(off) = slot_addr.checked_sub(RAM_BASE)
+        {
+            let first_page = (off as usize) / PAGE_SIZE;
+            let last_page = ((off as usize) + 4 + frame.len().saturating_sub(1)) / PAGE_SIZE;
+            for p in first_page..=last_page {
+                self.dev.monitor_dirty_pages.push(p);
+            }
+        }
+
+        self.dev.net_rx_pending = !self.inject(pv::PENDING_NET)?;
+        self.dev.idle = false;
+        Ok(true)
+    }
+
+    pub fn advance_idle_to(&mut self, target_local_ns: u64) -> Result<()> {
+        if target_local_ns > self.dev.clock.now {
+            self.dev.clock.now = target_local_ns;
+        }
+        if let Some(shared) = self.dev.shared {
+            let now = self.dev.clock.now.to_le_bytes();
+            self.dev.ram_write(shared + pv::SHARED_NOW, &now)?;
+        }
+        if self.dev.clock.due() {
+            if self.inject(pv::PENDING_TIMER)? {
+                self.dev.clock.deadline = None;
+            }
+            self.dev.idle = false;
+        }
+        Ok(())
+    }
+
+    pub fn is_idle(&self) -> bool {
+        self.dev.idle
+    }
+
+    pub(crate) fn set_idle(&mut self, idle: bool, net_rx_pending: bool) {
+        self.dev.idle = idle;
+        self.dev.net_rx_pending = net_rx_pending;
+    }
+
+    pub(crate) fn net_rx_pending(&self) -> bool {
+        self.dev.net_rx_pending
+    }
+
+    pub fn timer_deadline(&self) -> Option<u64> {
+        self.dev.clock.deadline
+    }
+
+    pub fn stopped(&self) -> Option<Stop> {
+        self.dev.stop
+    }
+
+    pub fn set_initial_now(&mut self, now: u64) -> Result<()> {
+        self.dev.clock.now = now;
+        if let Some(shared) = self.dev.shared {
+            self.dev.ram_write(shared + pv::SHARED_NOW, &now.to_le_bytes())?;
+        }
+        Ok(())
+    }
+
+    fn run_bounded(
+        &mut self,
+        until: Option<u64>,
+        until_ns: Option<u64>,
+        allow_idle_skip: bool,
+        obs: &mut dyn Observer,
+    ) -> Result<Outcome> {
         cpu::pin_homogeneous_cores();
         self.interrupt.entered();
-        let outcome = self.run_loop(until, obs);
+        let outcome = self.run_loop(until, until_ns, allow_idle_skip, obs);
         self.interrupt.left();
         outcome
     }
 
-    fn run_loop(&mut self, until: Option<u64>, obs: &mut dyn Observer) -> Result<Outcome> {
+    fn run_loop(
+        &mut self,
+        until: Option<u64>,
+        until_ns: Option<u64>,
+        allow_idle_skip: bool,
+        obs: &mut dyn Observer,
+    ) -> Result<Outcome> {
         const MMIO_PORT: u16 = 0xffff;
 
         if let Some(stop) = self.dev.stop {
             return Ok(Outcome::Stopped(stop));
         }
         if until.is_some_and(|u| u <= self.dev.step) {
+            return Ok(Outcome::Paused);
+        }
+        if self.dev.cluster_mode && self.dev.idle {
+            return Ok(Outcome::Idle);
+        }
+        if until_ns.is_some_and(|h| self.dev.clock.now >= h) {
             return Ok(Outcome::Paused);
         }
 
@@ -568,6 +722,9 @@ impl Machine {
             }
             self.after_step()?;
             self.dev.write_event(obs);
+            if let Some(frame) = self.dev.tx_pending.take() {
+                self.dev.tx_queue.push_back((self.dev.clock.now, frame));
+            }
 
             if self.passing_breakpoint {
                 self.complete_pending_exit()?;
@@ -592,7 +749,24 @@ impl Machine {
                 return Ok(Outcome::Debug(DebugStop::Step));
             }
 
-            if until.is_some_and(|u| self.dev.step >= u) || obs.stop() {
+            if self.dev.cluster_mode && self.dev.idle {
+                if allow_idle_skip
+                    && let (Some(deadline), Some(horizon)) = (self.dev.clock.deadline, until_ns)
+                    && deadline < horizon
+                {
+                    self.advance_idle_to(deadline)?;
+                    if until.is_some_and(|u| self.dev.step >= u) || obs.stop() {
+                        return Ok(Outcome::Paused);
+                    }
+                    continue;
+                }
+                return Ok(Outcome::Idle);
+            }
+
+            if until.is_some_and(|u| self.dev.step >= u)
+                || until_ns.is_some_and(|h| self.dev.clock.now >= h)
+                || obs.stop()
+            {
                 return Ok(Outcome::Paused);
             }
         }
@@ -631,9 +805,15 @@ impl Machine {
         if self.dev.input.is_some() && self.deliver_input()? {
             reasons |= pv::PENDING_INPUT;
         }
+        if self.dev.net_rx_pending {
+            reasons |= pv::PENDING_NET;
+        }
         if reasons != 0 && self.inject(reasons)? {
             if reasons & pv::PENDING_TIMER != 0 {
                 self.dev.clock.deadline = None;
+            }
+            if reasons & pv::PENDING_NET != 0 {
+                self.dev.net_rx_pending = false;
             }
             self.dev.inspect = false;
             self.dev.input_sent = false;
@@ -776,6 +956,7 @@ mod tests {
             clock: crate::ClockSource::Exits,
             preemption: crate::Preemption::AtExits,
             extras: crate::Extras::Absent,
+            net: None,
         }
     }
 

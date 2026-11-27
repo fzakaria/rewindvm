@@ -267,7 +267,7 @@ pub enum Timer {
 /// A fork of a fork keeps the perturbations of the runs it came from, each
 /// over its own window, in `earlier`, so it is its parent exit for exit up
 /// to its own window.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Schedule {
     /// 0 for the unperturbed schedule.
     pub seed: u64,
@@ -297,7 +297,7 @@ pub const RESEED_BYTES: usize = 32;
 
 /// One seed over one window of steps, with the longest stall it asks for
 /// there.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Segment {
     pub seed: u64,
     pub window: std::ops::Range<u64>,

@@ -15,6 +15,7 @@
 #include <linux/console.h>
 #include <linux/cpumask.h>
 #include <linux/delay.h>
+#include <linux/etherdevice.h>
 #include <linux/fcntl.h>
 #include <linux/file.h>
 #include <linux/fs.h>
@@ -28,6 +29,7 @@
 #include <linux/mm.h>
 #include <linux/mutex.h>
 #include <linux/namei.h>
+#include <linux/netdevice.h>
 #include <linux/of.h>
 #include <linux/of_fdt.h>
 #include <linux/pm.h>
@@ -93,6 +95,7 @@ static inline void __iomem *rewind_io_base(void)
 #define REWIND_MMIO_SETUP	0x28
 #define REWIND_MMIO_IRQ_ACK	0x30
 #define REWIND_MMIO_SERIAL	0x38
+#define REWIND_MMIO_NET_TX	0x40
 
 static inline void rewind_hvc_emit(u64 pa)
 {
@@ -140,7 +143,13 @@ static inline void rewind_hvc_serial(u8 ch)
 	writeq_relaxed(ch, rewind_io_base() + REWIND_MMIO_SERIAL);
 }
 
-#define REWIND_INTERFACE	7
+static inline void rewind_hvc_net_tx(u64 pa)
+{
+	writeq_relaxed(pa, rewind_io_base() + REWIND_MMIO_NET_TX);
+	isb();
+}
+
+#define REWIND_INTERFACE	8
 
 enum rewind_exit {
 	REWIND_EXIT_POWER_OFF = 0,
@@ -220,6 +229,19 @@ struct rewind_shared {
 	u32 io_size;
 	u32 io_head;
 	u32 io_lost;
+	/*
+	 * Paravirtual Ethernet NIC for multi-node clusters. The guest
+	 * publishes net_rx_ring and net_rx_slots before setup; the monitor
+	 * writes net_enabled = 1 and net_mac during setup when a virtual
+	 * switch is attached, and leaves net_enabled = 0 on single-node runs.
+	 */
+	u32 net_enabled;
+	u64 net_rx_ring;	/* physical address of rewind_net_rx */
+	u32 net_rx_slots;
+	u32 net_rx_prod;	/* monitor advances as it places RX frames */
+	u32 net_rx_cons;	/* guest advances as it drains RX frames */
+	u8 net_mac[6];
+	u8 net_pad[2];
 };
 
 #define REWIND_PENDING_TIMER	BIT(0)
@@ -228,6 +250,7 @@ struct rewind_shared {
 #define REWIND_PENDING_INPUT	BIT(3)
 #define REWIND_PENDING_STALL	BIT(4)
 #define REWIND_PENDING_RESEED	BIT(5)
+#define REWIND_PENDING_NET	BIT(6)
 
 static DEFINE_KFIFO(rewind_input, u8, 4096);
 static DECLARE_WAIT_QUEUE_HEAD(rewind_input_wait);
@@ -523,6 +546,112 @@ static void rewind_take_input(void)
 	wake_up_interruptible(&rewind_input_wait);
 }
 
+/*
+ * Paravirtual Ethernet NIC (eth0) for multi-node cluster runs.
+ */
+#define REWIND_NET_FRAME_MAX	1536
+#define REWIND_NET_SLOT_SIZE	2048
+#define REWIND_NET_RX_SLOTS	256
+
+struct rewind_net_slot {
+	u32 len;
+	u8 data[REWIND_NET_SLOT_SIZE - sizeof(u32)];
+} __packed;
+
+static struct rewind_net_slot rewind_net_tx __aligned(PAGE_SIZE);
+static struct rewind_net_slot rewind_net_rx[REWIND_NET_RX_SLOTS] __aligned(PAGE_SIZE);
+static struct net_device *rewind_netdev;
+
+static void rewind_net_rx_irq(void)
+{
+	u32 prod = READ_ONCE(rewind_shared.net_rx_prod);
+	u32 cons = READ_ONCE(rewind_shared.net_rx_cons);
+	struct net_device *dev = READ_ONCE(rewind_netdev);
+
+	while (cons != prod) {
+		struct rewind_net_slot *slot =
+			&rewind_net_rx[cons % REWIND_NET_RX_SLOTS];
+		u32 len = READ_ONCE(slot->len);
+
+		if (dev && netif_running(dev) &&
+		    len >= ETH_HLEN && len <= REWIND_NET_FRAME_MAX) {
+			struct sk_buff *skb = netdev_alloc_skb_ip_align(dev, len);
+
+			if (skb) {
+				memcpy(skb_put(skb, len), slot->data, len);
+				skb->protocol = eth_type_trans(skb, dev);
+				dev->stats.rx_packets++;
+				dev->stats.rx_bytes += len;
+				netif_rx(skb);
+			} else {
+				dev->stats.rx_dropped++;
+			}
+		}
+		cons++;
+		WRITE_ONCE(rewind_shared.net_rx_cons, cons);
+	}
+}
+
+static int rewind_net_open(struct net_device *dev)
+{
+	netif_start_queue(dev);
+	return 0;
+}
+
+static int rewind_net_stop(struct net_device *dev)
+{
+	netif_stop_queue(dev);
+	return 0;
+}
+
+static netdev_tx_t rewind_net_xmit(struct sk_buff *skb, struct net_device *dev)
+{
+	unsigned long irqflags;
+	u32 len = skb->len;
+
+	if (len < ETH_HLEN || len > REWIND_NET_FRAME_MAX || skb_linearize(skb)) {
+		dev->stats.tx_dropped++;
+		dev_kfree_skb_any(skb);
+		return NETDEV_TX_OK;
+	}
+
+	local_irq_save(irqflags);
+	rewind_net_tx.len = len;
+	memcpy(rewind_net_tx.data, skb->data, len);
+	rewind_hvc_net_tx(__pa_symbol(&rewind_net_tx));
+	local_irq_restore(irqflags);
+
+	dev->stats.tx_packets++;
+	dev->stats.tx_bytes += len;
+	dev_kfree_skb_any(skb);
+	return NETDEV_TX_OK;
+}
+
+static const struct net_device_ops rewind_netdev_ops = {
+	.ndo_open	= rewind_net_open,
+	.ndo_stop	= rewind_net_stop,
+	.ndo_start_xmit	= rewind_net_xmit,
+};
+
+static int __init rewind_net_init(void)
+{
+	struct net_device *dev = alloc_etherdev(0);
+	int err;
+
+	if (!dev)
+		return -ENOMEM;
+	eth_hw_addr_set(dev, rewind_shared.net_mac);
+	dev->netdev_ops = &rewind_netdev_ops;
+	dev->mtu = ETH_DATA_LEN;
+	err = register_netdev(dev);
+	if (err) {
+		free_netdev(dev);
+		return err;
+	}
+	WRITE_ONCE(rewind_netdev, dev);
+	return 0;
+}
+
 static void rewind_handle_irq(struct pt_regs *regs)
 {
 	u32 pending;
@@ -548,6 +677,9 @@ static void rewind_handle_irq(struct pt_regs *regs)
 	if (pending & REWIND_PENDING_RESEED)
 		rewind_rng_reseed(rewind_shared.reseed,
 				  sizeof(rewind_shared.reseed));
+
+	if (pending & REWIND_PENDING_NET)
+		rewind_net_rx_irq();
 
 	if (pending & REWIND_PENDING_INSPECT) {
 		WRITE_ONCE(rewind_inspecting, true);
@@ -707,10 +839,16 @@ void __init rewind_init_platform(void)
 		return;
 
 	rewind_running = true;
+	BUILD_BUG_ON(sizeof(struct rewind_shared) > PAGE_SIZE);
+	BUILD_BUG_ON(offsetof(struct rewind_shared, net_enabled) != 3292);
+	BUILD_BUG_ON(offsetof(struct rewind_shared, net_rx_ring) != 3296);
+	BUILD_BUG_ON(offsetof(struct rewind_shared, net_mac) != 3316);
 	rewind_publish_tasks();
 	rewind_shared.interface = REWIND_INTERFACE;
 	rewind_shared.io_buf = __pa_symbol(rewind_io_buf);
 	rewind_shared.io_size = REWIND_IO_BUF_SIZE;
+	rewind_shared.net_rx_ring = __pa_symbol(rewind_net_rx);
+	rewind_shared.net_rx_slots = REWIND_NET_RX_SLOTS;
 	rewind_hvc_setup(__pa_symbol(&rewind_shared));
 
 	pm_power_off = rewind_power_off;
@@ -1366,6 +1504,12 @@ static int __init rewind_events_init(void)
 	err = rewind_tty_init();
 	if (err)
 		return err;
+
+	if (READ_ONCE(rewind_shared.net_enabled)) {
+		err = rewind_net_init();
+		if (err)
+			return err;
+	}
 
 	WARN_ON(register_trace_sched_process_exec(rewind_probe_exec, NULL));
 	WARN_ON(register_trace_sched_process_fork(rewind_probe_fork, NULL));

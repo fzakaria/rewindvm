@@ -91,6 +91,9 @@ impl Default for ClusterRunOptions {
             fault_window_from_ns: 0,
             fault_window_until_ns: u64::MAX,
             epoch: None,
+            #[cfg(target_arch = "aarch64")]
+            cpu: CpuModel::Host,
+            #[cfg(not(target_arch = "aarch64"))]
             cpu: CpuModel::V3,
             clock: ClockSource::Exits,
             mem_mib_override: None,

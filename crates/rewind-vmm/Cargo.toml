@@ -19,3 +19,8 @@ serde = { version = "1", features = ["derive"] }
 # The KVM ioctls and the structures they pass, from rust-vmm.
 kvm-ioctls = "0.25"
 kvm-bindings = "0.14"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# IPC framing between the cluster coordinator and per-node HVF worker processes
+# (Hypervisor.framework allows at most one VM per OS process).
+bincode = "1"

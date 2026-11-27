@@ -24,7 +24,10 @@
 //!   causally-exact seeking, node inspection, and cluster forking.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
+#[cfg(not(target_os = "macos"))]
+use std::sync::mpsc::SyncSender;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -213,8 +216,8 @@ pub type NodeEncoders = Option<(
 
 /// Cached metadata mirrored from a node's [`Machine`] so coordinator queries
 /// (`is_runnable`, `local_now`, `next_timer_cluster_ns`, `node_steps`, etc.)
-/// require zero cross-thread round-trips.
-#[derive(Clone, Debug)]
+/// require zero cross-thread or cross-process round-trips.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct NodeMeta {
     step: u64,
     now: u64,
@@ -222,7 +225,6 @@ struct NodeMeta {
     net_rx_pending: bool,
     timer_deadline: Option<u64>,
     stopped: Option<Stop>,
-    interrupter: Interrupter,
 }
 
 impl NodeMeta {
@@ -234,13 +236,33 @@ impl NodeMeta {
             net_rx_pending: m.net_rx_pending(),
             timer_deadline: m.timer_deadline(),
             stopped: m.stopped(),
-            interrupter: m.interrupter(),
+        }
+    }
+}
+
+/// Serializable subset of [`Outcome`] returned by a cluster slice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+enum SliceOutcome {
+    Paused,
+    Idle,
+    Interrupted,
+    Stopped(Stop),
+}
+
+impl SliceOutcome {
+    fn from_outcome(outcome: Outcome) -> Result<SliceOutcome> {
+        match outcome {
+            Outcome::Paused | Outcome::TxReady => Ok(SliceOutcome::Paused),
+            Outcome::Idle => Ok(SliceOutcome::Idle),
+            Outcome::Interrupted => Ok(SliceOutcome::Interrupted),
+            Outcome::Stopped(stop) => Ok(SliceOutcome::Stopped(stop)),
+            Outcome::Debug(d) => bail!("unexpected debug stop during cluster slice: {d:?}"),
         }
     }
 }
 
 /// Buffered trace records and serial bytes produced by one node during a slice.
-#[derive(Default)]
+#[derive(Default, Serialize, Deserialize)]
 struct SliceEvents {
     records: Vec<(u64, Vec<u8>)>,
     serial: Vec<(u64, u8)>,
@@ -263,8 +285,9 @@ impl Observer for BufferingObserver {
     }
 }
 
+#[derive(Serialize, Deserialize)]
 struct SliceReply {
-    outcome: Outcome,
+    outcome: SliceOutcome,
     meta: NodeMeta,
     events: SliceEvents,
     tx_frames: Vec<(u64, Vec<u8>)>,
@@ -281,7 +304,18 @@ enum WorkerReq {
         dirty_log: DirtyLog,
         initial_local: u64,
     },
+    #[cfg(not(target_os = "macos"))]
     Attach(Box<Machine>),
+    #[cfg(target_os = "macos")]
+    Restore {
+        config: Box<Config>,
+        chain: Vec<Keyframe>,
+        pages: MemPages,
+        trace: Vec<(u64, Vec<u8>)>,
+        dirty_log: DirtyLog,
+        idle: bool,
+        net_rx_pending: bool,
+    },
     RunSlice {
         horizon_local: u64,
         max_steps: u64,
@@ -300,8 +334,10 @@ enum WorkerReq {
     SnapshotNonDestructive,
     Encoders,
     SetEncoders(Box<EncodersPair>),
+    #[cfg(not(target_os = "macos"))]
     TakeMachine,
     Crash,
+    #[cfg(not(target_os = "macos"))]
     Shutdown,
 }
 
@@ -313,6 +349,7 @@ enum WorkerResp {
     NonDestructive(Box<Result<(Keyframe, MemPages, NodeEncoders)>>),
     Encoders(Box<NodeEncoders>),
     Unit,
+    #[cfg(not(target_os = "macos"))]
     Machine(Option<Box<Machine>>),
     Crashed(u64),
 }
@@ -320,26 +357,32 @@ enum WorkerResp {
 /// Dedicated OS thread owning one cluster node's [`Machine`] for its entire
 /// lifetime so KVM vCPU execution and thread-bound PMU branch counters stay
 /// permanently pinned to the same thread.
+#[cfg(not(target_os = "macos"))]
 struct NodeWorker {
     name: String,
     req_tx: SyncSender<WorkerReq>,
     resp_rx: Receiver<WorkerResp>,
+    interrupter: Arc<Mutex<Option<Interrupter>>>,
     handle: Option<JoinHandle<()>>,
 }
 
+#[cfg(not(target_os = "macos"))]
 impl NodeWorker {
     fn spawn(idx: usize, name: String) -> Result<NodeWorker> {
         let (req_tx, req_rx) = mpsc::sync_channel::<WorkerReq>(1);
         let (resp_tx, resp_rx) = mpsc::sync_channel::<WorkerResp>(1);
+        let interrupter = Arc::new(Mutex::new(None));
+        let intr_worker = interrupter.clone();
         let thread_name = format!("rewind-node-{idx}");
         let handle = std::thread::Builder::new()
             .name(thread_name)
-            .spawn(move || worker_loop(req_rx, resp_tx))
+            .spawn(move || worker_loop(req_rx, resp_tx, intr_worker))
             .with_context(|| format!("spawning worker thread for cluster node {name}"))?;
         Ok(NodeWorker {
             name,
             req_tx,
             resp_rx,
+            interrupter,
             handle: Some(handle),
         })
     }
@@ -359,8 +402,17 @@ impl NodeWorker {
     fn recv_timeout(&self, timeout: Duration) -> std::result::Result<WorkerResp, RecvTimeoutError> {
         self.resp_rx.recv_timeout(timeout)
     }
+
+    fn interrupt(&self) {
+        if let Ok(guard) = self.interrupter.lock()
+            && let Some(intr) = guard.as_ref()
+        {
+            intr.interrupt();
+        }
+    }
 }
 
+#[cfg(not(target_os = "macos"))]
 impl Drop for NodeWorker {
     fn drop(&mut self) {
         let _ = self.req_tx.send(WorkerReq::Shutdown);
@@ -370,7 +422,12 @@ impl Drop for NodeWorker {
     }
 }
 
-fn worker_loop(req_rx: Receiver<WorkerReq>, resp_tx: SyncSender<WorkerResp>) {
+#[cfg(not(target_os = "macos"))]
+fn worker_loop(
+    req_rx: Receiver<WorkerReq>,
+    resp_tx: SyncSender<WorkerResp>,
+    shared_intr: Arc<Mutex<Option<Interrupter>>>,
+) {
     let mut machine: Option<Machine> = None;
 
     while let Ok(req) = req_rx.recv() {
@@ -387,6 +444,9 @@ fn worker_loop(req_rx: Receiver<WorkerReq>, resp_tx: SyncSender<WorkerResp>) {
                         m.set_initial_now(initial_local)?;
                     }
                     let meta = NodeMeta::from_machine(&m);
+                    if let Ok(mut g) = shared_intr.lock() {
+                        *g = Some(m.interrupter());
+                    }
                     machine = Some(m);
                     Ok(meta)
                 })();
@@ -394,6 +454,9 @@ fn worker_loop(req_rx: Receiver<WorkerReq>, resp_tx: SyncSender<WorkerResp>) {
             }
             WorkerReq::Attach(m) => {
                 let meta = NodeMeta::from_machine(&m);
+                if let Ok(mut g) = shared_intr.lock() {
+                    *g = Some(m.interrupter());
+                }
                 machine = Some(*m);
                 WorkerResp::Meta(Ok(meta))
             }
@@ -410,15 +473,16 @@ fn worker_loop(req_rx: Receiver<WorkerReq>, resp_tx: SyncSender<WorkerResp>) {
                             events: SliceEvents::default(),
                         };
                         m.run_cluster_slice(horizon_local, max_steps, allow_idle_skip, &mut obs)
-                            .map(|outcome| {
+                            .and_then(|outcome| {
+                                let outcome = SliceOutcome::from_outcome(outcome)?;
                                 let tx_frames = m.take_tx_frames();
                                 let meta = NodeMeta::from_machine(m);
-                                SliceReply {
+                                Ok(SliceReply {
                                     outcome,
                                     meta,
                                     events: obs.events,
                                     tx_frames,
-                                }
+                                })
                             })
                     }
                     None => Err(anyhow!("worker has no live Machine for RunSlice")),
@@ -473,6 +537,9 @@ fn worker_loop(req_rx: Receiver<WorkerReq>, resp_tx: SyncSender<WorkerResp>) {
                 WorkerResp::Unit
             }
             WorkerReq::TakeMachine => {
+                if let Ok(mut g) = shared_intr.lock() {
+                    *g = None;
+                }
                 let taken = machine.take().map(|mut m| {
                     m.release_counters();
                     Box::new(m)
@@ -480,10 +547,16 @@ fn worker_loop(req_rx: Receiver<WorkerReq>, resp_tx: SyncSender<WorkerResp>) {
                 WorkerResp::Machine(taken)
             }
             WorkerReq::Crash => {
+                if let Ok(mut g) = shared_intr.lock() {
+                    *g = None;
+                }
                 let steps = machine.take().map_or(0, |m| m.step());
                 WorkerResp::Crashed(steps)
             }
             WorkerReq::Shutdown => {
+                if let Ok(mut g) = shared_intr.lock() {
+                    *g = None;
+                }
                 drop(machine.take());
                 break;
             }
@@ -492,6 +565,472 @@ fn worker_loop(req_rx: Receiver<WorkerReq>, resp_tx: SyncSender<WorkerResp>) {
             break;
         }
     }
+}
+
+/// Runs a single cluster node's VM inside a dedicated child worker process
+/// communicating over stdin/stdout (used on macOS Hypervisor.framework where
+/// each OS process may hold at most one VM).
+#[cfg(not(target_os = "macos"))]
+pub fn run_process_worker_stdio() -> Result<()> {
+    bail!("cluster _worker is only used on macOS Hypervisor.framework")
+}
+
+#[cfg(target_os = "macos")]
+mod proc_worker {
+    use super::*;
+    use std::io::{BufReader, BufWriter, Read, Write};
+    use std::process::{Child, ChildStdin, Command, Stdio};
+
+    #[derive(Serialize, Deserialize)]
+    pub(super) enum WireReq {
+        Boot {
+            config: Box<Config>,
+            dirty_log: DirtyLog,
+            initial_local: u64,
+        },
+        Restore {
+            config: Box<Config>,
+            chain: Vec<Keyframe>,
+            pages: MemPages,
+            trace: Vec<(u64, Vec<u8>)>,
+            dirty_log: DirtyLog,
+            idle: bool,
+            net_rx_pending: bool,
+        },
+        RunSlice {
+            horizon_local: u64,
+            max_steps: u64,
+            step_base: u64,
+            allow_idle_skip: bool,
+        },
+        DeliverRx {
+            frame: Vec<u8>,
+        },
+        AdvanceIdleTo {
+            target_local: u64,
+        },
+        PrepareKeyframe {
+            parent: Option<u64>,
+        },
+        SnapshotNonDestructive,
+        Encoders,
+        SetEncoders(Box<EncodersPair>),
+        Crash,
+        Interrupt,
+        Shutdown,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    pub(super) enum WireResp {
+        Meta(std::result::Result<NodeMeta, String>),
+        Slice(Box<std::result::Result<SliceReply, String>>),
+        DeliverRx(std::result::Result<(bool, NodeMeta), String>),
+        PreparedKeyframe(Box<std::result::Result<Option<PreparedKeyframe>, String>>),
+        NonDestructive(Box<std::result::Result<(Keyframe, MemPages, NodeEncoders), String>>),
+        Encoders(Box<NodeEncoders>),
+        Unit,
+        Crashed(u64),
+    }
+
+    fn write_frame<W: Write, T: Serialize>(w: &mut W, msg: &T) -> Result<()> {
+        let bytes = bincode::serialize(msg).context("serializing cluster worker IPC message")?;
+        let len = u32::try_from(bytes.len()).context("cluster worker IPC message exceeds 4 GiB")?;
+        w.write_all(&len.to_le_bytes())?;
+        w.write_all(&bytes)?;
+        w.flush()?;
+        Ok(())
+    }
+
+    fn read_frame<R: Read, T: for<'de> Deserialize<'de>>(r: &mut R) -> Result<Option<T>> {
+        let mut len_b = [0u8; 4];
+        match r.read_exact(&mut len_b) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+            Err(e) => return Err(e).context("reading cluster worker IPC length"),
+        }
+        let len = u32::from_le_bytes(len_b) as usize;
+        let mut buf = vec![0u8; len];
+        r.read_exact(&mut buf)
+            .context("reading cluster worker IPC payload")?;
+        let msg = bincode::deserialize(&buf).context("deserializing cluster worker IPC message")?;
+        Ok(Some(msg))
+    }
+
+    /// Per-node child process owning one HVF [`Machine`] on macOS.
+    pub(super) struct NodeWorker {
+        name: String,
+        stdin: Mutex<BufWriter<ChildStdin>>,
+        resp_rx: Receiver<WorkerResp>,
+        reader_handle: Option<JoinHandle<()>>,
+        child: Option<Child>,
+    }
+
+    impl NodeWorker {
+        pub(super) fn spawn(idx: usize, name: String) -> Result<NodeWorker> {
+            let exe = match std::env::var_os("REWIND_CLUSTER_WORKER_BIN") {
+                Some(p) if !p.is_empty() => std::path::PathBuf::from(p),
+                _ => std::env::current_exe().context("locating current rewind executable")?,
+            };
+            let mut child = Command::new(&exe)
+                .args(["cluster", "_worker"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .with_context(|| {
+                    format!(
+                        "spawning macOS HVF worker process ({}) for cluster node {name}",
+                        exe.display()
+                    )
+                })?;
+            let child_stdin = child
+                .stdin
+                .take()
+                .context("capturing cluster worker stdin")?;
+            let child_stdout = child
+                .stdout
+                .take()
+                .context("capturing cluster worker stdout")?;
+
+            let (resp_tx, resp_rx) = mpsc::sync_channel::<WorkerResp>(1);
+            let reader_name = format!("rewind-node-{idx}-rx");
+            let reader_handle = std::thread::Builder::new()
+                .name(reader_name)
+                .spawn(move || {
+                    let mut r = BufReader::new(child_stdout);
+                    while let Ok(Some(wire)) = read_frame::<_, WireResp>(&mut r) {
+                        let resp = match wire {
+                            WireResp::Meta(r) => WorkerResp::Meta(r.map_err(|e| anyhow!(e))),
+                            WireResp::Slice(r) => {
+                                WorkerResp::Slice(Box::new((*r).map_err(|e| anyhow!(e))))
+                            }
+                            WireResp::DeliverRx(r) => {
+                                WorkerResp::DeliverRx(r.map_err(|e| anyhow!(e)))
+                            }
+                            WireResp::PreparedKeyframe(r) => {
+                                WorkerResp::PreparedKeyframe(Box::new((*r).map_err(|e| anyhow!(e))))
+                            }
+                            WireResp::NonDestructive(r) => {
+                                WorkerResp::NonDestructive(Box::new((*r).map_err(|e| anyhow!(e))))
+                            }
+                            WireResp::Encoders(e) => WorkerResp::Encoders(e),
+                            WireResp::Unit => WorkerResp::Unit,
+                            WireResp::Crashed(s) => WorkerResp::Crashed(s),
+                        };
+                        if resp_tx.send(resp).is_err() {
+                            break;
+                        }
+                    }
+                })
+                .with_context(|| format!("spawning IPC reader thread for cluster node {name}"))?;
+
+            Ok(NodeWorker {
+                name,
+                stdin: Mutex::new(BufWriter::new(child_stdin)),
+                resp_rx,
+                reader_handle: Some(reader_handle),
+                child: Some(child),
+            })
+        }
+
+        pub(super) fn send(&self, req: WorkerReq) -> Result<()> {
+            let wire = match req {
+                WorkerReq::Boot {
+                    config,
+                    dirty_log,
+                    initial_local,
+                } => WireReq::Boot {
+                    config,
+                    dirty_log,
+                    initial_local,
+                },
+                WorkerReq::Restore {
+                    config,
+                    chain,
+                    pages,
+                    trace,
+                    dirty_log,
+                    idle,
+                    net_rx_pending,
+                } => WireReq::Restore {
+                    config,
+                    chain,
+                    pages,
+                    trace,
+                    dirty_log,
+                    idle,
+                    net_rx_pending,
+                },
+                WorkerReq::RunSlice {
+                    horizon_local,
+                    max_steps,
+                    step_base,
+                    allow_idle_skip,
+                } => WireReq::RunSlice {
+                    horizon_local,
+                    max_steps,
+                    step_base,
+                    allow_idle_skip,
+                },
+                WorkerReq::DeliverRx { frame } => WireReq::DeliverRx { frame },
+                WorkerReq::AdvanceIdleTo { target_local } => {
+                    WireReq::AdvanceIdleTo { target_local }
+                }
+                WorkerReq::PrepareKeyframe { parent } => WireReq::PrepareKeyframe { parent },
+                WorkerReq::SnapshotNonDestructive => WireReq::SnapshotNonDestructive,
+                WorkerReq::Encoders => WireReq::Encoders,
+                WorkerReq::SetEncoders(p) => WireReq::SetEncoders(p),
+                WorkerReq::Crash => WireReq::Crash,
+            };
+            let mut stdin = self
+                .stdin
+                .lock()
+                .map_err(|_| anyhow!("cluster worker stdin lock poisoned for {}", self.name))?;
+            write_frame(&mut *stdin, &wire).with_context(|| {
+                format!("sending request to HVF worker process for node {}", self.name)
+            })
+        }
+
+        pub(super) fn recv(&self) -> Result<WorkerResp> {
+            self.resp_rx.recv().map_err(|_| {
+                anyhow!(
+                    "HVF worker process for node {} exited or disconnected unexpectedly",
+                    self.name
+                )
+            })
+        }
+
+        pub(super) fn recv_timeout(
+            &self,
+            timeout: Duration,
+        ) -> std::result::Result<WorkerResp, RecvTimeoutError> {
+            self.resp_rx.recv_timeout(timeout)
+        }
+
+        pub(super) fn interrupt(&self) {
+            if let Ok(mut stdin) = self.stdin.lock() {
+                let _ = write_frame(&mut *stdin, &WireReq::Interrupt);
+            }
+        }
+    }
+
+    impl Drop for NodeWorker {
+        fn drop(&mut self) {
+            if let Ok(mut stdin) = self.stdin.lock() {
+                let _ = write_frame(&mut *stdin, &WireReq::Shutdown);
+            }
+            if let Some(mut child) = self.child.take() {
+                let deadline = Instant::now() + Duration::from_millis(500);
+                loop {
+                    match child.try_wait() {
+                        Ok(Some(_)) => break,
+                        Ok(None) if Instant::now() < deadline => {
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        _ => {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            break;
+                        }
+                    }
+                }
+            }
+            if let Some(h) = self.reader_handle.take() {
+                let _ = h.join();
+            }
+        }
+    }
+
+    pub(super) fn run_stdio() -> Result<()> {
+        let shared_intr: Arc<Mutex<Option<Interrupter>>> = Arc::new(Mutex::new(None));
+        let intr_reader = shared_intr.clone();
+        let (req_tx, req_rx) = mpsc::sync_channel::<WireReq>(1);
+
+        let reader = std::thread::spawn(move || {
+            let mut stdin = BufReader::new(std::io::stdin().lock());
+            while let Ok(Some(req)) = read_frame::<_, WireReq>(&mut stdin) {
+                if matches!(req, WireReq::Interrupt) {
+                    if let Ok(g) = intr_reader.lock()
+                        && let Some(intr) = g.as_ref()
+                    {
+                        intr.interrupt();
+                    }
+                    continue;
+                }
+                let is_shutdown = matches!(req, WireReq::Shutdown);
+                if req_tx.send(req).is_err() || is_shutdown {
+                    break;
+                }
+            }
+        });
+
+        let mut stdout = BufWriter::new(std::io::stdout().lock());
+        let mut machine: Option<Machine> = None;
+
+        while let Ok(req) = req_rx.recv() {
+            let resp = match req {
+                WireReq::Boot {
+                    config,
+                    dirty_log,
+                    initial_local,
+                } => {
+                    // Destroy any previous VM before creating a new one (HVF 1-VM limit).
+                    if let Ok(mut g) = shared_intr.lock() {
+                        *g = None;
+                    }
+                    drop(machine.take());
+                    let res = (|| -> Result<NodeMeta> {
+                        let mut m = Machine::boot(&config, dirty_log)?;
+                        m.set_cluster_mode(true);
+                        if initial_local > 0 {
+                            m.set_initial_now(initial_local)?;
+                        }
+                        let meta = NodeMeta::from_machine(&m);
+                        if let Ok(mut g) = shared_intr.lock() {
+                            *g = Some(m.interrupter());
+                        }
+                        machine = Some(m);
+                        Ok(meta)
+                    })();
+                    WireResp::Meta(res.map_err(|e| format!("{e:#}")))
+                }
+                WireReq::Restore {
+                    config,
+                    chain,
+                    pages,
+                    trace,
+                    dirty_log,
+                    idle,
+                    net_rx_pending,
+                } => {
+                    if let Ok(mut g) = shared_intr.lock() {
+                        *g = None;
+                    }
+                    drop(machine.take());
+                    let res = (|| -> Result<NodeMeta> {
+                        let mut m = Machine::restore(&config, &chain, &pages, &trace, dirty_log)?;
+                        m.set_cluster_mode(true);
+                        m.set_idle(idle, net_rx_pending);
+                        let meta = NodeMeta::from_machine(&m);
+                        if let Ok(mut g) = shared_intr.lock() {
+                            *g = Some(m.interrupter());
+                        }
+                        machine = Some(m);
+                        Ok(meta)
+                    })();
+                    WireResp::Meta(res.map_err(|e| format!("{e:#}")))
+                }
+                WireReq::RunSlice {
+                    horizon_local,
+                    max_steps,
+                    step_base,
+                    allow_idle_skip,
+                } => {
+                    let res = match machine.as_mut() {
+                        Some(m) => {
+                            let mut obs = BufferingObserver {
+                                step_base,
+                                events: SliceEvents::default(),
+                            };
+                            m.run_cluster_slice(horizon_local, max_steps, allow_idle_skip, &mut obs)
+                                .and_then(|outcome| {
+                                    let outcome = SliceOutcome::from_outcome(outcome)?;
+                                    let tx_frames = m.take_tx_frames();
+                                    let meta = NodeMeta::from_machine(m);
+                                    Ok(SliceReply {
+                                        outcome,
+                                        meta,
+                                        events: obs.events,
+                                        tx_frames,
+                                    })
+                                })
+                        }
+                        None => Err(anyhow!("worker has no live Machine for RunSlice")),
+                    };
+                    WireResp::Slice(Box::new(res.map_err(|e| format!("{e:#}"))))
+                }
+                WireReq::DeliverRx { frame } => {
+                    let res = match machine.as_mut() {
+                        Some(m) => m
+                            .deliver_rx_frame(&frame)
+                            .map(|ok| (ok, NodeMeta::from_machine(m))),
+                        None => Err(anyhow!("worker has no live Machine for DeliverRx")),
+                    };
+                    WireResp::DeliverRx(res.map_err(|e| format!("{e:#}")))
+                }
+                WireReq::AdvanceIdleTo { target_local } => {
+                    let res = match machine.as_mut() {
+                        Some(m) => m
+                            .advance_idle_to(target_local)
+                            .map(|()| NodeMeta::from_machine(m)),
+                        None => Err(anyhow!("worker has no live Machine for AdvanceIdleTo")),
+                    };
+                    WireResp::Meta(res.map_err(|e| format!("{e:#}")))
+                }
+                WireReq::PrepareKeyframe { parent } => {
+                    let res = match machine.as_mut() {
+                        Some(m) => m.prepare_keyframe(parent).map(Some),
+                        None => Ok(None),
+                    };
+                    WireResp::PreparedKeyframe(Box::new(res.map_err(|e| format!("{e:#}"))))
+                }
+                WireReq::SnapshotNonDestructive => {
+                    let res = match machine.as_mut() {
+                        Some(m) => {
+                            let enc = m.encoders();
+                            let mut mem_pages = MemPages::default();
+                            m.snapshot_non_destructive(&mut mem_pages)
+                                .map(|kf| (kf, mem_pages, Some(enc)))
+                        }
+                        None => Err(anyhow!("node is currently crashed")),
+                    };
+                    WireResp::NonDestructive(Box::new(res.map_err(|e| format!("{e:#}"))))
+                }
+                WireReq::Encoders => {
+                    WireResp::Encoders(Box::new(machine.as_ref().map(Machine::encoders)))
+                }
+                WireReq::SetEncoders(pair) => {
+                    let (io, switches) = *pair;
+                    if let Some(m) = machine.as_mut() {
+                        m.set_encoders(io, switches);
+                    }
+                    WireResp::Unit
+                }
+                WireReq::Crash => {
+                    if let Ok(mut g) = shared_intr.lock() {
+                        *g = None;
+                    }
+                    let steps = machine.take().map_or(0, |m| m.step());
+                    WireResp::Crashed(steps)
+                }
+                WireReq::Interrupt => continue,
+                WireReq::Shutdown => {
+                    if let Ok(mut g) = shared_intr.lock() {
+                        *g = None;
+                    }
+                    drop(machine.take());
+                    break;
+                }
+            };
+            if write_frame(&mut stdout, &resp).is_err() {
+                break;
+            }
+        }
+        drop(machine.take());
+        let _ = reader.join();
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
+use proc_worker::NodeWorker;
+
+/// Runs a single cluster node's VM inside a dedicated child worker process
+/// communicating over stdin/stdout (used on macOS Hypervisor.framework where
+/// each OS process may hold at most one VM).
+#[cfg(target_os = "macos")]
+pub fn run_process_worker_stdio() -> Result<()> {
+    proc_worker::run_stdio()
 }
 
 /// Where a node's [`Machine`] lives: inline on the calling thread (sequential
@@ -796,13 +1335,42 @@ impl LiveNode {
         let taken = match &mut self.backend {
             NodeBackend::Local(opt) => opt.take().map(|m| *m),
             NodeBackend::Worker(w) => {
-                w.send(WorkerReq::TakeMachine)?;
-                match w.recv()? {
-                    WorkerResp::Machine(m) => m.map(|m| *m),
-                    _ => bail!(
-                        "unexpected response to TakeMachine from node {}",
-                        self.cfg.name
-                    ),
+                #[cfg(not(target_os = "macos"))]
+                {
+                    w.send(WorkerReq::TakeMachine)?;
+                    match w.recv()? {
+                        WorkerResp::Machine(m) => m.map(|m| *m),
+                        _ => bail!(
+                            "unexpected response to TakeMachine from node {}",
+                            self.cfg.name
+                        ),
+                    }
+                }
+                #[cfg(target_os = "macos")]
+                {
+                    if self.meta.is_none() {
+                        None
+                    } else {
+                        w.send(WorkerReq::SnapshotNonDestructive)?;
+                        let (kf, mem_pages, enc) = match w.recv()? {
+                            WorkerResp::NonDestructive(res) => (*res)?,
+                            _ => bail!(
+                                "unexpected response to SnapshotNonDestructive from node {}",
+                                self.cfg.name
+                            ),
+                        };
+                        w.send(WorkerReq::Crash)?;
+                        let _ = w.recv()?;
+                        let mut cfg = self.cfg.config.clone();
+                        if self.boot_count > 1 {
+                            cfg.seed = reboot_seed(self.cfg.base_seed, self.boot_count);
+                        }
+                        let mut m = Machine::restore(&cfg, &[kf], &mem_pages, &[], DirtyLog::Off)?;
+                        if let Some((io, switches)) = enc {
+                            m.set_encoders(io, switches);
+                        }
+                        Some(m)
+                    }
                 }
             }
         };
@@ -946,7 +1514,16 @@ impl std::fmt::Debug for Cluster {
 
 impl Cluster {
     fn use_workers(config: &ClusterConfig) -> bool {
-        config.parallel && config.nodes.len() > 1
+        #[cfg(target_os = "macos")]
+        {
+            // macOS Hypervisor.framework allows at most one VM per OS process,
+            // so multi-node clusters always isolate each VM in a child process.
+            config.nodes.len() > 1
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            config.parallel && config.nodes.len() > 1
+        }
     }
 
     /// Boots all nodes of `config` at cluster time 0 (concurrently across
@@ -1069,9 +1646,120 @@ impl Cluster {
             .min(0);
 
         let parallel_workers = Self::use_workers(&config);
+        let mut nodes = Vec::with_capacity(config.nodes.len());
 
-        // Restore each live node's Machine (in parallel across threads when
-        // parallel mode is enabled; Machine::restore never runs KVM_RUN or
+        #[cfg(target_os = "macos")]
+        if parallel_workers {
+            let mut workers = Vec::with_capacity(config.nodes.len());
+            let mut live_flags = Vec::with_capacity(config.nodes.len());
+            for (idx, node_cfg) in config.nodes.iter().enumerate() {
+                let last_nk = &last.nodes[idx];
+                let worker = NodeWorker::spawn(idx, node_cfg.name.clone())?;
+                if last_nk.keyframe.is_some() {
+                    let mut node_chain = Vec::new();
+                    for ck in chain {
+                        let nk = &ck.nodes[idx];
+                        if nk.boot_count == last_nk.boot_count
+                            && let Some(kf) = &nk.keyframe
+                        {
+                            if kf.parent.is_none() {
+                                node_chain.clear();
+                            }
+                            node_chain.push(kf.clone());
+                        }
+                    }
+                    let mut m_cfg = node_cfg.config.clone();
+                    if last_nk.boot_count > 1 {
+                        m_cfg.seed = reboot_seed(node_cfg.base_seed, last_nk.boot_count);
+                    }
+                    // Pre-fetch the final unique non-zero pages for this node's chain.
+                    let mut page_hashes: std::collections::BTreeMap<u32, [u8; 32]> =
+                        std::collections::BTreeMap::new();
+                    for kf in &node_chain {
+                        for &(page, hash) in &kf.pages {
+                            if hash == crate::snapshot::ZERO_PAGE {
+                                page_hashes.remove(&page);
+                            } else {
+                                page_hashes.insert(page, hash);
+                            }
+                        }
+                    }
+                    let mut mem_pages = MemPages::default();
+                    let mut buf = vec![0u8; crate::layout::PAGE_SIZE];
+                    for hash in page_hashes.into_values() {
+                        if let std::collections::hash_map::Entry::Vacant(e) =
+                            mem_pages.pages.entry(hash)
+                        {
+                            pages.get(&hash, &mut buf)?;
+                            e.insert(buf.clone());
+                        }
+                    }
+                    let trace = node_traces.get(idx).cloned().unwrap_or_default();
+                    worker.send(WorkerReq::Restore {
+                        config: Box::new(m_cfg),
+                        chain: node_chain,
+                        pages: mem_pages,
+                        trace,
+                        dirty_log,
+                        idle: last_nk.idle,
+                        net_rx_pending: last_nk.net_rx_pending,
+                    })?;
+                    live_flags.push(true);
+                } else {
+                    live_flags.push(false);
+                }
+                workers.push(worker);
+            }
+
+            for ((idx, node_cfg), (worker, is_live)) in config
+                .nodes
+                .iter()
+                .enumerate()
+                .zip(workers.into_iter().zip(live_flags))
+            {
+                let last_nk = &last.nodes[idx];
+                let meta = if is_live {
+                    match worker.recv()? {
+                        WorkerResp::Meta(res) => Some(res.with_context(|| {
+                            format!("restoring cluster node {}", node_cfg.name)
+                        })?),
+                        _ => bail!(
+                            "unexpected response to Restore from node {}",
+                            node_cfg.name
+                        ),
+                    }
+                } else {
+                    None
+                };
+                nodes.push(LiveNode {
+                    cfg: node_cfg.clone(),
+                    backend: NodeBackend::Worker(worker),
+                    meta,
+                    cluster_ns: last_nk.cluster_ns,
+                    boot_cluster_ns: last_nk.boot_cluster_ns,
+                    local_base_ns: last_nk.local_base_ns,
+                    boot_count: last_nk.boot_count,
+                    step_base: last_nk.step_base,
+                    exited: last_nk.exited,
+                    last_stop: None,
+                    pending_rx: last_nk.pending_rx.iter().cloned().collect(),
+                });
+            }
+
+            let switch = NetSwitch::restore(config.network.clone(), last.switch.clone());
+            return Ok(Cluster {
+                config,
+                dirty_log,
+                nodes,
+                switch,
+                cluster_ns: last.cluster_ns,
+                cluster_step: last.cluster_step,
+                min_skew_ns,
+            });
+        }
+
+        // Restore each live node's Machine (in parallel across threads on Linux
+        // when parallel mode is enabled; Machine::restore never runs KVM_RUN or
         // opens thread-bound PMU counters).
         let restore_one = |idx: usize| -> Result<Option<Machine>> {
             let node_cfg = &config.nodes[idx];
@@ -1122,9 +1810,9 @@ impl Cluster {
                 .collect::<Result<Vec<_>>>()?
         };
 
-        let mut nodes = Vec::with_capacity(config.nodes.len());
         for (idx, (node_cfg, machine)) in config.nodes.iter().zip(machines).enumerate() {
             let last_nk = &last.nodes[idx];
+            #[cfg(not(target_os = "macos"))]
             let (backend, meta) = if parallel_workers {
                 let worker = NodeWorker::spawn(idx, node_cfg.name.clone())?;
                 let meta = if let Some(m) = machine {
@@ -1138,6 +1826,11 @@ impl Cluster {
                 };
                 (NodeBackend::Worker(worker), meta)
             } else {
+                let meta = machine.as_ref().map(NodeMeta::from_machine);
+                (NodeBackend::Local(machine.map(Box::new)), meta)
+            };
+            #[cfg(target_os = "macos")]
+            let (backend, meta) = {
                 let meta = machine.as_ref().map(NodeMeta::from_machine);
                 (NodeBackend::Local(machine.map(Box::new)), meta)
             };
@@ -1638,11 +2331,11 @@ impl Cluster {
                 let next_fault = self.switch.next_timed_fault_ns().unwrap_or(u64::MAX);
                 let mut woke_any = false;
 
-                for idx in 0..n {
+                for (idx, &bound) in incoming_bound.iter().enumerate() {
                     if !self.nodes[idx].is_alive() {
                         continue;
                     }
-                    let local_safe = incoming_bound[idx].min(next_fault).min(max_frontier);
+                    let local_safe = bound.min(next_fault).min(max_frontier);
                     if self.nodes[idx].is_runnable() {
                         let deliver_up_to = self.nodes[idx].cluster_ns.min(local_safe);
                         self.deliver_due_frames_for(idx, deliver_up_to, &mut net_events)?;
@@ -1678,11 +2371,11 @@ impl Cluster {
             let next_fault = self.switch.next_timed_fault_ns().unwrap_or(u64::MAX);
 
             let mut batch: Vec<(usize, u64, u64, bool)> = Vec::new();
-            for idx in 0..n {
+            for (idx, &bound) in incoming_bound.iter().enumerate() {
                 if !self.nodes[idx].is_runnable() {
                     continue;
                 }
-                let horizon_cns = incoming_bound[idx]
+                let horizon_cns = bound
                     .min(self.switch.next_delivery_for(idx).unwrap_or(u64::MAX))
                     .min(next_fault)
                     .min(cap)
@@ -1737,7 +2430,7 @@ impl Cluster {
             // interruption before committing partial rounds.
             let any_interrupted = replies
                 .iter()
-                .any(|(_, r)| r.outcome == Outcome::Interrupted);
+                .any(|(_, r)| r.outcome == SliceOutcome::Interrupted);
             if any_interrupted {
                 if deadline.is_some_and(|d| Instant::now() >= d) {
                     return Ok(self.outcome(ClusterStop::TimedOut));
@@ -1770,7 +2463,7 @@ impl Cluster {
                 if self.nodes[idx].total_steps() > prev_steps
                     || after_local > prev_local
                     || after_idle != prev_idle
-                    || matches!(reply.outcome, Outcome::Stopped(_))
+                    || matches!(reply.outcome, SliceOutcome::Stopped(_))
                 {
                     made_progress = true;
                 }
@@ -1784,7 +2477,7 @@ impl Cluster {
                 // nodes that freed ring slots and went idle in the same slice.
                 self.drain_pending_rx(idx, &mut net_events)?;
 
-                if let Outcome::Stopped(stop) = reply.outcome {
+                if let SliceOutcome::Stopped(stop) = reply.outcome {
                     self.nodes[idx].exited = true;
                     self.nodes[idx].last_stop = Some(stop);
                 }
@@ -1818,96 +2511,169 @@ impl Cluster {
         batch: &[(usize, u64, u64, bool)],
         deadline: Option<Instant>,
     ) -> Result<Vec<(usize, SliceReply)>> {
-        // Dispatch all worker-backed nodes concurrently first.
-        let mut dispatched_workers: Vec<(usize, Interrupter)> = Vec::new();
-        for &(idx, horizon_local, max_steps, allow_idle_skip) in batch {
-            let step_base = self.nodes[idx].step_base;
-            if let NodeBackend::Worker(w) = &self.nodes[idx].backend {
-                w.send(WorkerReq::RunSlice {
-                    horizon_local,
-                    max_steps,
-                    step_base,
-                    allow_idle_skip,
-                })?;
-                if let Some(meta) = &self.nodes[idx].meta {
-                    dispatched_workers.push((idx, meta.interrupter.clone()));
-                }
-            }
-        }
-
-        // Run any local-backed nodes inline.
         let mut results: HashMap<usize, SliceReply> = HashMap::with_capacity(batch.len());
-        for &(idx, horizon_local, max_steps, allow_idle_skip) in batch {
-            let step_base = self.nodes[idx].step_base;
-            if let NodeBackend::Local(opt) = &mut self.nodes[idx].backend {
-                let m = opt.as_mut().expect("runnable node has a live Machine");
-                let mut buf = BufferingObserver {
-                    step_base,
-                    events: SliceEvents::default(),
-                };
-                let outcome =
-                    m.run_cluster_slice(horizon_local, max_steps, allow_idle_skip, &mut buf)?;
-                let tx_frames = m.take_tx_frames();
-                let meta = NodeMeta::from_machine(m);
-                results.insert(
-                    idx,
-                    SliceReply {
-                        outcome,
-                        meta,
-                        events: buf.events,
-                        tx_frames,
-                    },
-                );
-            }
-        }
 
-        // Collect all worker replies, interrupting active workers if `deadline` expires.
-        let mut timed_out = false;
-        for &(idx, _) in &dispatched_workers {
-            let w = match &self.nodes[idx].backend {
-                NodeBackend::Worker(w) => w,
-                NodeBackend::Local(_) => unreachable!(),
-            };
-            let resp = if let Some(d) = deadline
-                && !timed_out
-            {
-                let rem = d.saturating_duration_since(Instant::now());
-                match w.recv_timeout(rem) {
-                    Ok(r) => r,
-                    Err(RecvTimeoutError::Timeout) => {
-                        timed_out = true;
-                        for (_, intr) in &dispatched_workers {
-                            intr.interrupt();
-                        }
-                        w.recv()?
-                    }
-                    Err(RecvTimeoutError::Disconnected) => {
-                        bail!(
-                            "cluster worker for node {} panicked or disconnected",
-                            self.nodes[idx].cfg.name
-                        );
-                    }
+        if self.config.parallel {
+            // Dispatch all worker-backed nodes concurrently first.
+            let mut dispatched_workers: Vec<usize> = Vec::new();
+            for &(idx, horizon_local, max_steps, allow_idle_skip) in batch {
+                let step_base = self.nodes[idx].step_base;
+                if let NodeBackend::Worker(w) = &self.nodes[idx].backend {
+                    w.send(WorkerReq::RunSlice {
+                        horizon_local,
+                        max_steps,
+                        step_base,
+                        allow_idle_skip,
+                    })?;
+                    dispatched_workers.push(idx);
                 }
-            } else {
-                w.recv()?
-            };
-            let reply = match resp {
-                WorkerResp::Slice(res) => (*res)?,
-                _ => bail!(
-                    "unexpected response to RunSlice from node {}",
-                    self.nodes[idx].cfg.name
-                ),
-            };
-            results.insert(idx, reply);
+            }
+
+            // Run any local-backed nodes inline.
+            for &(idx, horizon_local, max_steps, allow_idle_skip) in batch {
+                let step_base = self.nodes[idx].step_base;
+                if let NodeBackend::Local(opt) = &mut self.nodes[idx].backend {
+                    let m = opt.as_mut().expect("runnable node has a live Machine");
+                    let mut buf = BufferingObserver {
+                        step_base,
+                        events: SliceEvents::default(),
+                    };
+                    let outcome = SliceOutcome::from_outcome(m.run_cluster_slice(
+                        horizon_local,
+                        max_steps,
+                        allow_idle_skip,
+                        &mut buf,
+                    )?)?;
+                    let tx_frames = m.take_tx_frames();
+                    let meta = NodeMeta::from_machine(m);
+                    results.insert(
+                        idx,
+                        SliceReply {
+                            outcome,
+                            meta,
+                            events: buf.events,
+                            tx_frames,
+                        },
+                    );
+                }
+            }
+
+            // Collect all worker replies, interrupting active workers if `deadline` expires.
+            let mut timed_out = false;
+            for &idx in &dispatched_workers {
+                let w = match &self.nodes[idx].backend {
+                    NodeBackend::Worker(w) => w,
+                    NodeBackend::Local(_) => unreachable!(),
+                };
+                let resp = if let Some(d) = deadline
+                    && !timed_out
+                {
+                    let rem = d.saturating_duration_since(Instant::now());
+                    match w.recv_timeout(rem) {
+                        Ok(r) => r,
+                        Err(RecvTimeoutError::Timeout) => {
+                            timed_out = true;
+                            for &widx in &dispatched_workers {
+                                if let NodeBackend::Worker(worker) = &self.nodes[widx].backend {
+                                    worker.interrupt();
+                                }
+                            }
+                            w.recv()?
+                        }
+                        Err(RecvTimeoutError::Disconnected) => {
+                            bail!(
+                                "cluster worker for node {} panicked or disconnected",
+                                self.nodes[idx].cfg.name
+                            );
+                        }
+                    }
+                } else {
+                    w.recv()?
+                };
+                let reply = match resp {
+                    WorkerResp::Slice(res) => (*res)?,
+                    _ => bail!(
+                        "unexpected response to RunSlice from node {}",
+                        self.nodes[idx].cfg.name
+                    ),
+                };
+                results.insert(idx, reply);
+            }
+        } else {
+            // Sequential execution: run one node at a time even when nodes are
+            // isolated in worker processes (macOS HVF).
+            for &(idx, horizon_local, max_steps, allow_idle_skip) in batch {
+                let step_base = self.nodes[idx].step_base;
+                let reply = match &mut self.nodes[idx].backend {
+                    NodeBackend::Local(opt) => {
+                        let m = opt.as_mut().expect("runnable node has a live Machine");
+                        let mut buf = BufferingObserver {
+                            step_base,
+                            events: SliceEvents::default(),
+                        };
+                        let outcome = SliceOutcome::from_outcome(m.run_cluster_slice(
+                            horizon_local,
+                            max_steps,
+                            allow_idle_skip,
+                            &mut buf,
+                        )?)?;
+                        let tx_frames = m.take_tx_frames();
+                        let meta = NodeMeta::from_machine(m);
+                        SliceReply {
+                            outcome,
+                            meta,
+                            events: buf.events,
+                            tx_frames,
+                        }
+                    }
+                    NodeBackend::Worker(w) => {
+                        w.send(WorkerReq::RunSlice {
+                            horizon_local,
+                            max_steps,
+                            step_base,
+                            allow_idle_skip,
+                        })?;
+                        let resp = if let Some(d) = deadline {
+                            let rem = d.saturating_duration_since(Instant::now());
+                            match w.recv_timeout(rem) {
+                                Ok(r) => r,
+                                Err(RecvTimeoutError::Timeout) => {
+                                    w.interrupt();
+                                    w.recv()?
+                                }
+                                Err(RecvTimeoutError::Disconnected) => {
+                                    bail!(
+                                        "cluster worker for node {} panicked or disconnected",
+                                        self.nodes[idx].cfg.name
+                                    );
+                                }
+                            }
+                        } else {
+                            w.recv()?
+                        };
+                        match resp {
+                            WorkerResp::Slice(res) => (*res)?,
+                            _ => bail!(
+                                "unexpected response to RunSlice from node {}",
+                                self.nodes[idx].cfg.name
+                            ),
+                        }
+                    }
+                };
+                let interrupted = reply.outcome == SliceOutcome::Interrupted;
+                results.insert(idx, reply);
+                if interrupted {
+                    break;
+                }
+            }
         }
 
         // Return replies in strict `batch` (ascending node index) order.
-        let mut ordered = Vec::with_capacity(batch.len());
+        let mut ordered = Vec::with_capacity(results.len());
         for &(idx, _, _, _) in batch {
-            let reply = results
-                .remove(&idx)
-                .expect("every dispatched node produced a reply");
-            ordered.push((idx, reply));
+            if let Some(reply) = results.remove(&idx) {
+                ordered.push((idx, reply));
+            }
         }
         Ok(ordered)
     }
@@ -2161,7 +2927,7 @@ impl Cluster {
 /// Ephemeral in-memory page map used by [`Cluster::clone_node_machine`] for
 /// zero-perturbation live file inspection. Uses monotonic non-zero page IDs
 /// to avoid hashing overhead while keeping zero pages distinct.
-#[derive(Default)]
+#[derive(Default, Serialize, Deserialize)]
 struct MemPages {
     next_id: u64,
     pages: HashMap<[u8; 32], Vec<u8>>,

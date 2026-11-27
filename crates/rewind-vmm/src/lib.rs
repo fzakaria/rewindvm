@@ -192,7 +192,7 @@ fn recorded_slot_fits(bits: u32) -> Result<()> {
 
 /// Everything that determines a run. Two machines built from equal configs
 /// run identically.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Config {
     pub kernel: PathBuf,
     pub initrd: Vec<u8>,
@@ -222,7 +222,7 @@ pub struct Config {
 /// checkpoints read to list the pages that changed. Logging makes KVM map
 /// the guest's RAM in 4 KiB pages, so a run that takes neither keyframes
 /// nor checkpoints runs faster without the log, in 2 MiB pages.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DirtyLog {
     On,
     Off,
@@ -311,7 +311,7 @@ impl Work {
 }
 
 /// Why a run stopped.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Stop {
     /// The guest stopped the machine itself.
     Guest(GuestExit),
@@ -326,7 +326,7 @@ pub enum Stop {
 }
 
 /// Where a guest was when its run reached its time limit.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Stall {
     /// The instruction the vCPU was at.
     pub rip: u64,
@@ -338,7 +338,7 @@ pub struct Stall {
 }
 
 /// The privilege the vCPU was running at.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CpuMode {
     User,
     Kernel,

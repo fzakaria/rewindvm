@@ -52,6 +52,9 @@ pub(crate) enum ClusterAction {
     Pcap(ClusterPcapArgs),
     /// Remove recorded cluster runs.
     Remove(ClusterRemoveArgs),
+    /// Internal per-node HVF worker process (spawned automatically on macOS).
+    #[command(name = "_worker", hide = true)]
+    Worker,
 }
 
 #[derive(clap::Args)]
@@ -284,6 +287,10 @@ pub(crate) fn dispatch(home: &Home, args: ClusterArgs) -> Result<ExitCode> {
         ClusterAction::Net(a) => cmd_net(home, a),
         ClusterAction::Pcap(a) => cmd_pcap(home, a),
         ClusterAction::Remove(a) => cmd_remove(home, a),
+        ClusterAction::Worker => {
+            rewind_vmm::cluster::run_process_worker_stdio()?;
+            Ok(ExitCode::SUCCESS)
+        }
     }
 }
 

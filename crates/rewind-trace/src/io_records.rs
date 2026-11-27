@@ -195,7 +195,7 @@ pub fn divergence(left: &[(u64, Vec<u8>)], right: &[(u64, Vec<u8>)]) -> Option<D
 }
 
 /// Turns what the guest buffered between two steps into trace records.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Encoder {
     tables: Tables,
 }
@@ -344,7 +344,7 @@ impl<'a> GuestRecord<'a> {
 /// where each file's last write ended, the last path defined and the last
 /// record's thread. An encoder and a decoder that have seen the same
 /// records hold the same tables.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 struct Tables {
     files: HashMap<(u32, u64), FileId>,
     ends: Vec<u64>,

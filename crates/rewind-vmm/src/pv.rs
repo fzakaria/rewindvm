@@ -36,7 +36,7 @@ pub const SHARED_EPOCH: u64 = 8;
 pub use rewind_trace::{HEADER_LEN as RECORD_HEADER, RECORD_MAX};
 
 /// Values the guest writes to [`PORT_EXIT`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum GuestExit {
     PowerOff,
     Restart,
