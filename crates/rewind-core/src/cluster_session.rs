@@ -12,7 +12,6 @@
 
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -31,7 +30,7 @@ use rewind_vmm::DirtyLog;
 use rewind_vmm::cluster::{
     Cluster, ClusterKeyframe, ClusterObserver, ClusterStop, NodeEncoders,
 };
-use rewind_vmm::net::{FaultKind, NetEvent, NetStats, NetSwitchConfig, ScheduledFault};
+use rewind_vmm::net::{FaultKind, NetEvent, NetLogWriter, NetStats, NetSwitchConfig, ScheduledFault};
 
 use crate::cluster::{
     CLUSTER_KEYFRAME_INTERVAL_NS, ClusterRun, ClusterRunOptions, PreparedCluster,
@@ -1172,7 +1171,7 @@ impl ClusterSession {
         }
         fs::create_dir_all(&dir)?;
 
-        // Write per-node trace.bin files and network.jsonl.
+        // Write per-node trace.bin files and binary network.bin.
         for (idx, name) in self.node_names.iter().enumerate() {
             let ndir = dir.join(CLUSTER_NODES_DIR).join(name);
             fs::create_dir_all(&ndir)?;
@@ -1185,11 +1184,11 @@ impl ClusterSession {
             writer.finish()?;
         }
         {
-            let mut net_log = BufWriter::new(File::create(dir.join(CLUSTER_NETWORK_LOG))?);
+            let mut net_log = NetLogWriter::new(File::create(dir.join(CLUSTER_NETWORK_LOG))?);
             for ev in &self.recorder.net_events {
-                writeln!(net_log, "{}", serde_json::to_string(ev)?)?;
+                net_log.record(ev)?;
             }
-            net_log.flush()?;
+            net_log.finish()?;
         }
         if self.keyframes_mode == Keyframes::Take {
             for ckf in &mut self.keyframes {

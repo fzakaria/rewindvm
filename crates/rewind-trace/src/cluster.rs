@@ -12,8 +12,9 @@ use crate::verdict::Verdict;
 /// The manifest file inside a cluster run directory (`clusters/<id>/cluster.json`).
 pub const CLUSTER_MANIFEST: &str = "cluster.json";
 
-/// The network & fault event log inside a cluster run directory.
-pub const CLUSTER_NETWORK_LOG: &str = "network.jsonl";
+/// The binary network & fault event log inside a cluster run directory
+/// (`clusters/<id>/network.bin`).
+pub const CLUSTER_NETWORK_LOG: &str = "network.bin";
 
 /// The directory holding per-node run directories inside a cluster run directory.
 pub const CLUSTER_NODES_DIR: &str = "nodes";

@@ -135,6 +135,9 @@ pub trait ClusterObserver {
     fn node_record(&mut self, _node: usize, _step: u64, _record: &[u8]) {}
     fn node_serial(&mut self, _node: usize, _step: u64, _byte: u8) {}
     fn net_event(&mut self, _event: &NetEvent) {}
+    /// Raw Ethernet frame transmitted by `src` at cluster virtual time `ns`
+    /// (used for on-demand `.pcap` export during replay).
+    fn net_tx_frame(&mut self, _ns: u64, _src: usize, _frame: &[u8]) {}
     /// Return true to pause the cluster loop at the end of the current slice.
     fn stop(&self) -> bool {
         false
@@ -784,6 +787,7 @@ impl Cluster {
                     .map_or_else(Vec::new, Machine::take_tx_frames);
                 let tx_ns = self.nodes[idx].cluster_ns;
                 for frame in tx_frames {
+                    obs.net_tx_frame(tx_ns, idx, &frame);
                     self.switch.on_tx(tx_ns, idx, frame, &mut net_events);
                 }
                 self.flush_net_events(&mut net_events, obs);

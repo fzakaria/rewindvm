@@ -48,6 +48,8 @@ pub(crate) enum ClusterAction {
     Show(ClusterShowArgs),
     /// Show the deterministic network packet & fault timeline of a cluster run.
     Net(ClusterNetArgs),
+    /// Reconstruct a full Ethernet `.pcap` capture (for Wireshark/tshark) by replaying a cluster run.
+    Pcap(ClusterPcapArgs),
     /// Remove recorded cluster runs.
     Remove(ClusterRemoveArgs),
 }
@@ -232,6 +234,24 @@ pub(crate) struct ClusterNetArgs {
 }
 
 #[derive(clap::Args)]
+pub(crate) struct ClusterPcapArgs {
+    /// Cluster run id, prefix, name, or `@N`.
+    pub(crate) cluster: String,
+    /// Output `.pcap` file path (or `-` to write raw pcap bytes to stdout).
+    #[arg(short, long, value_name = "PATH")]
+    pub(crate) output: PathBuf,
+    /// Only include frames sent by, addressed to, or broadcast to this node.
+    #[arg(long)]
+    pub(crate) node: Option<String>,
+    /// Start of virtual-time window in ms (fast-forwards via nearest keyframe).
+    #[arg(long = "from-ms")]
+    pub(crate) from_ms: Option<u64>,
+    /// End of virtual-time window in ms.
+    #[arg(long = "to-ms")]
+    pub(crate) to_ms: Option<u64>,
+}
+
+#[derive(clap::Args)]
 pub(crate) struct ClusterRemoveArgs {
     /// Cluster run ids, prefixes, names, or `@N`.
     #[arg(required = true)]
@@ -247,6 +267,7 @@ impl ClusterArgs {
                 | ClusterAction::Check(_)
                 | ClusterAction::Replay(_)
                 | ClusterAction::Fork(_)
+                | ClusterAction::Pcap(_)
         )
     }
 }
@@ -261,6 +282,7 @@ pub(crate) fn dispatch(home: &Home, args: ClusterArgs) -> Result<ExitCode> {
         ClusterAction::Ls(a) => cmd_ls(home, a),
         ClusterAction::Show(a) => cmd_show(home, a),
         ClusterAction::Net(a) => cmd_net(home, a),
+        ClusterAction::Pcap(a) => cmd_pcap(home, a),
         ClusterAction::Remove(a) => cmd_remove(home, a),
     }
 }
@@ -861,6 +883,45 @@ fn cmd_net(home: &Home, args: ClusterNetArgs) -> Result<ExitCode> {
         } else {
             println!("{}", format_net_event(ev, &names));
         }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn cmd_pcap(home: &Home, args: ClusterPcapArgs) -> Result<ExitCode> {
+    rewind_vmm::kvm::open()?;
+    let run = ClusterRun::find(home, &args.cluster)?;
+    let to_stdout = args.output.as_os_str() == "-";
+    let stats = if to_stdout {
+        let stdout = std::io::stdout();
+        let mut out = std::io::BufWriter::new(stdout.lock());
+        run.export_pcap(
+            home,
+            &mut out,
+            args.from_ms,
+            args.to_ms,
+            args.node.as_deref(),
+        )?
+    } else {
+        let file = std::fs::File::create(&args.output)
+            .with_context(|| format!("creating {}", args.output.display()))?;
+        let mut out = std::io::BufWriter::new(file);
+        run.export_pcap(
+            home,
+            &mut out,
+            args.from_ms,
+            args.to_ms,
+            args.node.as_deref(),
+        )?
+    };
+    if !to_stdout {
+        eprintln!(
+            "wrote {} ({} packets, {} bytes, {:.3}ms..{:.3}ms)",
+            args.output.display(),
+            stats.packets,
+            stats.bytes,
+            stats.from_ns as f64 / 1_000_000.0,
+            stats.to_ns as f64 / 1_000_000.0,
+        );
     }
     Ok(ExitCode::SUCCESS)
 }

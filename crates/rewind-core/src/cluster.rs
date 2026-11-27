@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{BufReader, Write};
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -28,8 +28,8 @@ use rewind_vmm::cluster::{
     DEFAULT_SLICE_NS, NodeRole, StopWhen,
 };
 use rewind_vmm::net::{
-    DEFAULT_LATENCY_NS, FaultKind, LinkOverride, NemesisConfig, NetEvent, NetSwitchConfig,
-    ScheduledFault, mac_for_node,
+    DEFAULT_LATENCY_NS, FaultKind, LinkOverride, NemesisConfig, NetEvent, NetLogReader,
+    NetLogWriter, NetSwitchConfig, ScheduledFault, mac_for_node,
 };
 use rewind_vmm::{ClockSource, CpuModel, DirtyLog, Machine, NetDeviceConfig, Preemption};
 
@@ -763,12 +763,12 @@ pub fn config_from_manifest(manifest: &ClusterManifest) -> Result<ClusterConfig>
     })
 }
 
-/// Recorder that writes per-node `trace.bin` files and `network.jsonl`.
+/// Recorder that writes per-node `trace.bin` files and binary `network.bin`.
 struct ClusterRecorder {
     node_names: Vec<String>,
     traces: Vec<TraceWriter<File>>,
     statuses: Vec<Option<i32>>,
-    net_log: BufWriter<File>,
+    net_log: NetLogWriter<File>,
     echo: bool,
     error: Option<anyhow::Error>,
 }
@@ -787,20 +787,20 @@ impl ClusterRecorder {
             statuses: vec![None; node_names.len()],
             node_names,
             traces,
-            net_log: BufWriter::new(net_file),
+            net_log: NetLogWriter::new(net_file),
             echo,
             error: None,
         })
     }
 
-    fn flush(mut self) -> Result<Vec<Option<i32>>> {
+    fn flush(self) -> Result<Vec<Option<i32>>> {
         if let Some(err) = self.error {
             return Err(err);
         }
         for t in self.traces {
             t.finish()?;
         }
-        self.net_log.flush()?;
+        self.net_log.finish()?;
         Ok(self.statuses)
     }
 }
@@ -835,9 +835,7 @@ impl ClusterObserver for ClusterRecorder {
     }
 
     fn net_event(&mut self, event: &NetEvent) {
-        if let Ok(line) = serde_json::to_string(event)
-            && let Err(e) = writeln!(self.net_log, "{line}")
-        {
+        if let Err(e) = self.net_log.record(event) {
             self.error.get_or_insert(e.into());
         }
     }
@@ -942,17 +940,103 @@ impl ClusterRun {
         Run::open(&ndir)
     }
 
-    /// Reads all recorded [`NetEvent`]s from `network.jsonl`.
+    /// Reads all recorded [`NetEvent`]s from binary `network.bin`.
     pub fn net_events(&self) -> Result<Vec<NetEvent>> {
         let file = File::open(self.dir.join(CLUSTER_NETWORK_LOG))?;
+        let reader = NetLogReader::new(BufReader::new(file))?;
         let mut events = Vec::new();
-        for line in BufReader::new(file).lines() {
-            let line = line?;
-            if !line.trim().is_empty() {
-                events.push(serde_json::from_str(&line)?);
-            }
+        for item in reader {
+            events.push(item?);
         }
         Ok(events)
+    }
+
+    /// Replays this cluster run (from the nearest keyframe at or before
+    /// `from_ms`, or from boot) and writes every raw transmitted Ethernet
+    /// frame in `[from_ms, to_ms]` as a standard nanosecond-resolution `.pcap`
+    /// (`LINKTYPE_ETHERNET`) readable by Wireshark, `tshark`, and `tcpdump`.
+    pub fn export_pcap(
+        &self,
+        home: &Home,
+        out: &mut dyn Write,
+        from_ms: Option<u64>,
+        to_ms: Option<u64>,
+        node_filter: Option<&str>,
+    ) -> Result<PcapStats> {
+        let from_ns = from_ms.map_or(0, |ms| ms.saturating_mul(1_000_000));
+        let to_ns = to_ms.map(|ms| ms.saturating_mul(1_000_000));
+        let filter = match node_filter {
+            Some(name) => {
+                let idx = self
+                    .manifest
+                    .nodes
+                    .iter()
+                    .position(|n| n.name == name)
+                    .with_context(|| {
+                        format!("cluster {} has no node {name:?}", self.manifest.id)
+                    })?;
+                Some((idx, self.manifest.nodes[idx].mac))
+            }
+            None => None,
+        };
+
+        let cfg = config_from_manifest(&self.manifest)?;
+        let epoch_secs = self
+            .manifest
+            .nodes
+            .first()
+            .map_or(0, |n| n.spec.epoch);
+
+        // When a start time is given, fast-forward by restoring from the latest
+        // cluster keyframe at or before `from_ns`.
+        let mut cluster = if from_ns > 0 {
+            let keyframes = load_cluster_keyframes(&self.dir)?;
+            let best_idx = keyframes.iter().rposition(|ckf| ckf.cluster_ns <= from_ns);
+            if let Some(idx) = best_idx {
+                let store = Store::open(&home.store())?;
+                let pages = ReadPages(&store);
+                let mut node_traces = Vec::with_capacity(self.manifest.nodes.len());
+                for n in &self.manifest.nodes {
+                    let tp = self
+                        .dir
+                        .join(CLUSTER_NODES_DIR)
+                        .join(&n.name)
+                        .join(rewind_trace::manifest::TRACE);
+                    node_traces.push(
+                        rewind_trace::Records::new(BufReader::new(File::open(&tp)?))?
+                            .collect::<std::io::Result<Vec<_>>>()?,
+                    );
+                }
+                Cluster::restore(cfg, &keyframes[..=idx], &pages, &node_traces, DirtyLog::Off)?
+            } else {
+                Cluster::boot(cfg, DirtyLog::Off)?
+            }
+        } else {
+            Cluster::boot(cfg, DirtyLog::Off)?
+        };
+
+        write_pcap_header(out)?;
+        let mut observer = PcapObserver {
+            out,
+            epoch_secs,
+            from_ns,
+            to_ns,
+            filter,
+            packets: 0,
+            bytes: 0,
+            error: None,
+        };
+        let _outcome = cluster.run(&mut observer, to_ns, None)?;
+        if let Some(err) = observer.error {
+            return Err(err);
+        }
+        observer.out.flush()?;
+        Ok(PcapStats {
+            packets: observer.packets,
+            bytes: observer.bytes,
+            from_ns,
+            to_ns: to_ns.unwrap_or_else(|| cluster.cluster_ns()),
+        })
     }
 
     /// Executes and records a [`PreparedCluster`] into `home`.
@@ -1784,6 +1868,91 @@ pub fn check_cluster(
     })
 }
 
+/// Summary returned by [`ClusterRun::export_pcap`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PcapStats {
+    pub packets: u64,
+    pub bytes: u64,
+    pub from_ns: u64,
+    pub to_ns: u64,
+}
+
+/// Nanosecond-resolution libpcap magic (`0xa1b23c4d`, little-endian).
+const PCAP_MAGIC_NSEC: u32 = 0xa1b2_3c4d;
+const PCAP_VERSION_MAJOR: u16 = 2;
+const PCAP_VERSION_MINOR: u16 = 4;
+const PCAP_SNAPLEN: u32 = 65_535;
+const PCAP_LINKTYPE_ETHERNET: u32 = 1;
+
+fn write_pcap_header(out: &mut dyn Write) -> std::io::Result<()> {
+    let mut hdr = [0u8; 24];
+    hdr[0..4].copy_from_slice(&PCAP_MAGIC_NSEC.to_le_bytes());
+    hdr[4..6].copy_from_slice(&PCAP_VERSION_MAJOR.to_le_bytes());
+    hdr[6..8].copy_from_slice(&PCAP_VERSION_MINOR.to_le_bytes());
+    // thiszone = 0, sigfigs = 0
+    hdr[16..20].copy_from_slice(&PCAP_SNAPLEN.to_le_bytes());
+    hdr[20..24].copy_from_slice(&PCAP_LINKTYPE_ETHERNET.to_le_bytes());
+    out.write_all(&hdr)
+}
+
+fn write_pcap_packet(
+    out: &mut dyn Write,
+    epoch_secs: u64,
+    cluster_ns: u64,
+    frame: &[u8],
+) -> std::io::Result<()> {
+    let ts_sec = epoch_secs.saturating_add(cluster_ns / 1_000_000_000) as u32;
+    let ts_nsec = (cluster_ns % 1_000_000_000) as u32;
+    let orig_len = frame.len() as u32;
+    let incl_len = frame.len().min(PCAP_SNAPLEN as usize) as u32;
+    let mut rec = [0u8; 16];
+    rec[0..4].copy_from_slice(&ts_sec.to_le_bytes());
+    rec[4..8].copy_from_slice(&ts_nsec.to_le_bytes());
+    rec[8..12].copy_from_slice(&incl_len.to_le_bytes());
+    rec[12..16].copy_from_slice(&orig_len.to_le_bytes());
+    out.write_all(&rec)?;
+    out.write_all(&frame[..incl_len as usize])
+}
+
+struct PcapObserver<'a> {
+    out: &'a mut dyn Write,
+    epoch_secs: u64,
+    from_ns: u64,
+    to_ns: Option<u64>,
+    filter: Option<(usize, [u8; 6])>,
+    packets: u64,
+    bytes: u64,
+    error: Option<anyhow::Error>,
+}
+
+impl ClusterObserver for PcapObserver<'_> {
+    fn net_tx_frame(&mut self, ns: u64, src: usize, frame: &[u8]) {
+        if self.error.is_some() || frame.len() < 14 {
+            return;
+        }
+        if ns < self.from_ns || self.to_ns.is_some_and(|t| ns > t) {
+            return;
+        }
+        if let Some((f_idx, f_mac)) = self.filter {
+            let dst_mac = &frame[0..6];
+            let is_bcast = dst_mac == [0xff; 6] || (dst_mac[0] & 1) != 0;
+            if src != f_idx && dst_mac != f_mac && !is_bcast {
+                return;
+            }
+        }
+        if let Err(e) = write_pcap_packet(self.out, self.epoch_secs, ns, frame) {
+            self.error = Some(e.into());
+        } else {
+            self.packets += 1;
+            self.bytes += frame.len() as u64;
+        }
+    }
+
+    fn stop(&self) -> bool {
+        self.error.is_some()
+    }
+}
+
 /// Formats a `NetEvent` as one readable line using node names from `names`.
 pub fn format_net_event(event: &NetEvent, names: &[String]) -> String {
     let name = |idx: usize| {
@@ -1798,13 +1967,15 @@ pub fn format_net_event(event: &NetEvent, names: &[String]) -> String {
             src,
             dst_mac,
             len,
+            frame_hash,
             summary,
         } => format!(
-            "{:>10.3}ms  TX       {} -> {}  ({} B)  {}",
+            "{:>10.3}ms  TX       {} -> {}  ({} B, #{:016x})  {}",
             *ns as f64 / 1_000_000.0,
             name(*src),
             dst_mac,
             len,
+            frame_hash,
             summary
         ),
         NetEvent::Deliver {
@@ -1904,4 +2075,33 @@ pub fn node_index_map(manifest: &ClusterManifest) -> BTreeMap<String, usize> {
         .enumerate()
         .map(|(i, n)| (n.name.clone(), i))
         .collect()
+}
+
+#[cfg(test)]
+mod pcap_tests {
+    use super::*;
+
+    #[test]
+    fn pcap_header_and_packet_format_match_libpcap_nsec() {
+        let mut buf = Vec::new();
+        write_pcap_header(&mut buf).unwrap();
+        let frame = [0xffu8; 60];
+        write_pcap_packet(&mut buf, 1_700_000_000, 1_234_567_890, &frame).unwrap();
+        assert_eq!(buf.len(), 24 + 16 + 60);
+        assert_eq!(u32::from_le_bytes(buf[0..4].try_into().unwrap()), 0xa1b2_3c4d);
+        assert_eq!(u16::from_le_bytes(buf[4..6].try_into().unwrap()), 2);
+        assert_eq!(u16::from_le_bytes(buf[6..8].try_into().unwrap()), 4);
+        assert_eq!(u32::from_le_bytes(buf[20..24].try_into().unwrap()), 1);
+        assert_eq!(
+            u32::from_le_bytes(buf[24..28].try_into().unwrap()),
+            1_700_000_001
+        );
+        assert_eq!(
+            u32::from_le_bytes(buf[28..32].try_into().unwrap()),
+            234_567_890
+        );
+        assert_eq!(u32::from_le_bytes(buf[32..36].try_into().unwrap()), 60);
+        assert_eq!(u32::from_le_bytes(buf[36..40].try_into().unwrap()), 60);
+        assert_eq!(&buf[40..], &frame);
+    }
 }

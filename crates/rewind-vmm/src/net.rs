@@ -11,6 +11,7 @@
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
+use std::io::Write;
 
 use serde::{Deserialize, Serialize};
 
@@ -176,7 +177,7 @@ pub enum DropReason {
     RxOverflow,
 }
 
-/// A deterministic cluster network or fault event, recorded to `network.jsonl`.
+/// A deterministic cluster network or fault event, recorded to `network.bin`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum NetEvent {
@@ -185,6 +186,7 @@ pub enum NetEvent {
         src: usize,
         dst_mac: String,
         len: usize,
+        frame_hash: u64,
         summary: String,
     },
     Deliver {
@@ -407,6 +409,7 @@ impl NetSwitch {
             src,
             dst_mac: format_mac(dst_mac),
             len: frame.len(),
+            frame_hash: hash_frame(&frame),
             summary: summarize_frame(&frame),
         });
 
@@ -961,6 +964,483 @@ fn summarize_frame(frame: &[u8]) -> String {
     }
 }
 
+/// Deterministic 64-bit hash of a raw Ethernet frame (FNV-1a mixed with
+/// SplitMix64 finalizer) so `network.bin` catches any single-bit wire
+/// divergence on replay without storing full payloads on disk.
+pub fn hash_frame(frame: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in frame {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    h ^= (frame.len() as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    h = (h ^ (h >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    h = (h ^ (h >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    h ^ (h >> 31)
+}
+
+/// Magic header for binary `network.bin` files, matching `rwtrace\0` / `rwckf01\0`.
+pub const NET_LOG_MAGIC: &[u8; 8] = b"rwnet01\0";
+/// Binary format version of `network.bin`.
+pub const NET_LOG_VERSION: u32 = 1;
+const NET_LOG_HEADER_LEN: usize = NET_LOG_MAGIC.len() + 4;
+const NET_RECORD_MAX: usize = 64 * 1024;
+
+const TAG_TX: u8 = 1;
+const TAG_DELIVER: u8 = 2;
+const TAG_DROP: u8 = 3;
+const TAG_DUPLICATE: u8 = 4;
+const TAG_PARTITION: u8 = 5;
+const TAG_HEAL: u8 = 6;
+const TAG_NODE_CRASH: u8 = 7;
+const TAG_NODE_RESTART: u8 = 8;
+const TAG_LINK_UPDATED: u8 = 9;
+
+fn put_varint(buf: &mut Vec<u8>, mut v: u64) {
+    loop {
+        let mut byte = (v & 0x7f) as u8;
+        v >>= 7;
+        if v != 0 {
+            byte |= 0x80;
+        }
+        buf.push(byte);
+        if v == 0 {
+            break;
+        }
+    }
+}
+
+fn get_varint(slice: &mut &[u8]) -> std::io::Result<u64> {
+    let mut out = 0u64;
+    let mut shift = 0u32;
+    loop {
+        let Some((&b, rest)) = slice.split_first() else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "truncated varint in network.bin",
+            ));
+        };
+        *slice = rest;
+        if shift >= 64 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "varint overflow in network.bin",
+            ));
+        }
+        out |= u64::from(b & 0x7f) << shift;
+        if b & 0x80 == 0 {
+            return Ok(out);
+        }
+        shift += 7;
+    }
+}
+
+fn zigzag_encode(v: i64) -> u64 {
+    ((v << 1) ^ (v >> 63)) as u64
+}
+
+fn zigzag_decode(v: u64) -> i64 {
+    ((v >> 1) as i64) ^ -((v & 1) as i64)
+}
+
+fn parse_mac(s: &str) -> Option<[u8; 6]> {
+    let mut out = [0u8; 6];
+    let mut parts = s.split(':');
+    for slot in &mut out {
+        let hex = parts.next()?;
+        *slot = u8::from_str_radix(hex, 16).ok()?;
+    }
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(out)
+}
+
+fn get_bytes<'a>(slice: &mut &'a [u8], n: usize) -> std::io::Result<&'a [u8]> {
+    if slice.len() < n {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "truncated field in network.bin",
+        ));
+    }
+    let (head, tail) = slice.split_at(n);
+    *slice = tail;
+    Ok(head)
+}
+
+fn get_u8(slice: &mut &[u8]) -> std::io::Result<u8> {
+    Ok(get_bytes(slice, 1)?[0])
+}
+
+fn get_string(slice: &mut &[u8]) -> std::io::Result<String> {
+    let len = get_varint(slice)? as usize;
+    let bytes = get_bytes(slice, len)?;
+    std::str::from_utf8(bytes)
+        .map(str::to_string)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
+fn encode_event_body(ev: &NetEvent, prev_ns: &mut u64, out: &mut Vec<u8>) {
+    out.clear();
+    let ns = match ev {
+        NetEvent::Tx { ns, .. }
+        | NetEvent::Deliver { ns, .. }
+        | NetEvent::Drop { ns, .. }
+        | NetEvent::Duplicate { ns, .. }
+        | NetEvent::Partition { ns, .. }
+        | NetEvent::Heal { ns }
+        | NetEvent::NodeCrash { ns, .. }
+        | NetEvent::NodeRestart { ns, .. }
+        | NetEvent::LinkUpdated { ns, .. } => *ns,
+    };
+    let delta = (ns as i64).wrapping_sub(*prev_ns as i64);
+    *prev_ns = ns;
+
+    match ev {
+        NetEvent::Tx {
+            src,
+            dst_mac,
+            len,
+            frame_hash,
+            summary,
+            ..
+        } => {
+            out.push(TAG_TX);
+            put_varint(out, zigzag_encode(delta));
+            put_varint(out, *src as u64);
+            let mac = parse_mac(dst_mac).unwrap_or([0; 6]);
+            out.extend_from_slice(&mac);
+            put_varint(out, *len as u64);
+            out.extend_from_slice(&frame_hash.to_le_bytes());
+            put_varint(out, summary.len() as u64);
+            out.extend_from_slice(summary.as_bytes());
+        }
+        NetEvent::Deliver {
+            src,
+            dst,
+            len,
+            latency_ns,
+            ..
+        } => {
+            out.push(TAG_DELIVER);
+            put_varint(out, zigzag_encode(delta));
+            put_varint(out, *src as u64);
+            put_varint(out, *dst as u64);
+            put_varint(out, *len as u64);
+            put_varint(out, *latency_ns);
+        }
+        NetEvent::Drop {
+            src,
+            dst,
+            len,
+            reason,
+            ..
+        } => {
+            out.push(TAG_DROP);
+            put_varint(out, zigzag_encode(delta));
+            put_varint(out, *src as u64);
+            put_varint(out, *dst as u64);
+            put_varint(out, *len as u64);
+            out.push(match reason {
+                DropReason::Partitioned => 0,
+                DropReason::RandomDrop => 1,
+                DropReason::NodeCrashed => 2,
+                DropReason::RxOverflow => 3,
+            });
+        }
+        NetEvent::Duplicate {
+            src,
+            dst,
+            len,
+            extra_delay_ns,
+            ..
+        } => {
+            out.push(TAG_DUPLICATE);
+            put_varint(out, zigzag_encode(delta));
+            put_varint(out, *src as u64);
+            put_varint(out, *dst as u64);
+            put_varint(out, *len as u64);
+            put_varint(out, *extra_delay_ns);
+        }
+        NetEvent::Partition {
+            blocked_pairs,
+            asymmetric,
+            ..
+        } => {
+            out.push(TAG_PARTITION);
+            put_varint(out, zigzag_encode(delta));
+            put_varint(out, *blocked_pairs as u64);
+            out.push(u8::from(*asymmetric));
+        }
+        NetEvent::Heal { .. } => {
+            out.push(TAG_HEAL);
+            put_varint(out, zigzag_encode(delta));
+        }
+        NetEvent::NodeCrash { node, .. } => {
+            out.push(TAG_NODE_CRASH);
+            put_varint(out, zigzag_encode(delta));
+            put_varint(out, *node as u64);
+        }
+        NetEvent::NodeRestart {
+            node, boot_count, ..
+        } => {
+            out.push(TAG_NODE_RESTART);
+            put_varint(out, zigzag_encode(delta));
+            put_varint(out, *node as u64);
+            put_varint(out, u64::from(*boot_count));
+        }
+        NetEvent::LinkUpdated {
+            from,
+            to,
+            latency_ns,
+            jitter_ns,
+            drop_ppm,
+            duplicate_ppm,
+            ..
+        } => {
+            out.push(TAG_LINK_UPDATED);
+            put_varint(out, zigzag_encode(delta));
+            put_varint(out, *from as u64);
+            put_varint(out, *to as u64);
+            put_varint(out, *latency_ns);
+            put_varint(out, *jitter_ns);
+            put_varint(out, u64::from(*drop_ppm));
+            put_varint(out, u64::from(*duplicate_ppm));
+        }
+    }
+}
+
+fn decode_event_body(mut s: &[u8], prev_ns: &mut u64) -> std::io::Result<NetEvent> {
+    let tag = get_u8(&mut s)?;
+    let delta = zigzag_decode(get_varint(&mut s)?);
+    let ns = (*prev_ns as i64).wrapping_add(delta) as u64;
+    *prev_ns = ns;
+
+    let ev = match tag {
+        TAG_TX => {
+            let src = get_varint(&mut s)? as usize;
+            let mac_b = get_bytes(&mut s, 6)?;
+            let mac = [mac_b[0], mac_b[1], mac_b[2], mac_b[3], mac_b[4], mac_b[5]];
+            let len = get_varint(&mut s)? as usize;
+            let hash_b = get_bytes(&mut s, 8)?;
+            let frame_hash = u64::from_le_bytes(hash_b.try_into().expect("8 bytes"));
+            let summary = get_string(&mut s)?;
+            NetEvent::Tx {
+                ns,
+                src,
+                dst_mac: format_mac(mac),
+                len,
+                frame_hash,
+                summary,
+            }
+        }
+        TAG_DELIVER => NetEvent::Deliver {
+            ns,
+            src: get_varint(&mut s)? as usize,
+            dst: get_varint(&mut s)? as usize,
+            len: get_varint(&mut s)? as usize,
+            latency_ns: get_varint(&mut s)?,
+        },
+        TAG_DROP => {
+            let src = get_varint(&mut s)? as usize;
+            let dst = get_varint(&mut s)? as usize;
+            let len = get_varint(&mut s)? as usize;
+            let reason = match get_u8(&mut s)? {
+                0 => DropReason::Partitioned,
+                1 => DropReason::RandomDrop,
+                2 => DropReason::NodeCrashed,
+                3 => DropReason::RxOverflow,
+                other => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("unknown drop reason {other} in network.bin"),
+                    ));
+                }
+            };
+            NetEvent::Drop {
+                ns,
+                src,
+                dst,
+                len,
+                reason,
+            }
+        }
+        TAG_DUPLICATE => NetEvent::Duplicate {
+            ns,
+            src: get_varint(&mut s)? as usize,
+            dst: get_varint(&mut s)? as usize,
+            len: get_varint(&mut s)? as usize,
+            extra_delay_ns: get_varint(&mut s)?,
+        },
+        TAG_PARTITION => NetEvent::Partition {
+            ns,
+            blocked_pairs: get_varint(&mut s)? as usize,
+            asymmetric: get_u8(&mut s)? != 0,
+        },
+        TAG_HEAL => NetEvent::Heal { ns },
+        TAG_NODE_CRASH => NetEvent::NodeCrash {
+            ns,
+            node: get_varint(&mut s)? as usize,
+        },
+        TAG_NODE_RESTART => NetEvent::NodeRestart {
+            ns,
+            node: get_varint(&mut s)? as usize,
+            boot_count: get_varint(&mut s)? as u32,
+        },
+        TAG_LINK_UPDATED => NetEvent::LinkUpdated {
+            ns,
+            from: get_varint(&mut s)? as usize,
+            to: get_varint(&mut s)? as usize,
+            latency_ns: get_varint(&mut s)?,
+            jitter_ns: get_varint(&mut s)?,
+            drop_ppm: get_varint(&mut s)? as u32,
+            duplicate_ppm: get_varint(&mut s)? as u32,
+        },
+        other => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("unknown event tag {other} in network.bin"),
+            ));
+        }
+    };
+    if !s.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{} trailing bytes in network.bin record", s.len()),
+        ));
+    }
+    Ok(ev)
+}
+
+/// Streaming binary writer for `clusters/<id>/network.bin`, matching
+/// `rewind_trace::TraceWriter` (versioned magic header + length-prefixed
+/// binary records, cut-off-safe if killed mid-run).
+#[derive(Debug)]
+pub struct NetLogWriter<W: Write> {
+    out: std::io::BufWriter<W>,
+    headed: bool,
+    prev_ns: u64,
+    scratch: Vec<u8>,
+}
+
+impl<W: Write> NetLogWriter<W> {
+    pub fn new(out: W) -> Self {
+        NetLogWriter {
+            out: std::io::BufWriter::new(out),
+            headed: false,
+            prev_ns: 0,
+            scratch: Vec::with_capacity(128),
+        }
+    }
+
+    fn head(&mut self) -> std::io::Result<()> {
+        if self.headed {
+            return Ok(());
+        }
+        self.out.write_all(NET_LOG_MAGIC)?;
+        self.out.write_all(&NET_LOG_VERSION.to_le_bytes())?;
+        self.headed = true;
+        Ok(())
+    }
+
+    pub fn record(&mut self, event: &NetEvent) -> std::io::Result<()> {
+        self.head()?;
+        encode_event_body(event, &mut self.prev_ns, &mut self.scratch);
+        let len = self.scratch.len() as u32;
+        self.out.write_all(&len.to_le_bytes())?;
+        self.out.write_all(&self.scratch)
+    }
+
+    pub fn finish(mut self) -> std::io::Result<W> {
+        self.head()?;
+        self.out.flush()?;
+        self.out.into_inner().map_err(|e| e.into_error())
+    }
+}
+
+/// Streaming binary reader for `clusters/<id>/network.bin`, cut-off-safe on
+/// `UnexpectedEof` just like `rewind_trace::Records`.
+#[derive(Debug)]
+pub struct NetLogReader<R: std::io::Read> {
+    reader: R,
+    prev_ns: u64,
+    ended: bool,
+}
+
+impl<R: std::io::Read> NetLogReader<R> {
+    pub fn new(mut reader: R) -> std::io::Result<Self> {
+        let mut header = [0u8; NET_LOG_HEADER_LEN];
+        match reader.read_exact(&mut header) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                return Ok(NetLogReader {
+                    reader,
+                    prev_ns: 0,
+                    ended: true,
+                });
+            }
+            Err(e) => return Err(e),
+        }
+        let (magic, ver_b) = header.split_at(NET_LOG_MAGIC.len());
+        if magic != NET_LOG_MAGIC {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "not a valid Rewind network.bin log",
+            ));
+        }
+        let version = u32::from_le_bytes(ver_b.try_into().expect("four bytes"));
+        if version != NET_LOG_VERSION {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "network.bin version {version} is not supported (expected {NET_LOG_VERSION})"
+                ),
+            ));
+        }
+        Ok(NetLogReader {
+            reader,
+            prev_ns: 0,
+            ended: false,
+        })
+    }
+
+    fn read_one(&mut self) -> std::io::Result<Option<NetEvent>> {
+        let mut len_b = [0u8; 4];
+        match self.reader.read_exact(&mut len_b) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+            Err(e) => return Err(e),
+        }
+        let len = u32::from_le_bytes(len_b) as usize;
+        if len == 0 || len > NET_RECORD_MAX {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid network.bin record length {len}"),
+            ));
+        }
+        let mut buf = vec![0u8; len];
+        match self.reader.read_exact(&mut buf) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+            Err(e) => return Err(e),
+        }
+        Ok(Some(decode_event_body(&buf, &mut self.prev_ns)?))
+    }
+}
+
+impl<R: std::io::Read> Iterator for NetLogReader<R> {
+    type Item = std::io::Result<NetEvent>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.ended {
+            return None;
+        }
+        let res = self.read_one();
+        self.ended = !matches!(res, Ok(Some(_)));
+        res.transpose()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1021,5 +1501,88 @@ mod tests {
         }
         assert_eq!(ev_a, ev_b);
         assert_eq!(a.pop_due_frames(u64::MAX), b.pop_due_frames(u64::MAX));
+    }
+
+    #[test]
+    fn binary_net_log_roundtrip_and_cutoff_safety() {
+        let events = vec![
+            NetEvent::Tx {
+                ns: 1_000_000,
+                src: 0,
+                dst_mac: "02:52:57:00:00:02".into(),
+                len: 74,
+                frame_hash: hash_frame(b"hello-world-frame"),
+                summary: "TCP 10.0.0.1:7000 -> 10.0.0.2:41234 [S]".into(),
+            },
+            NetEvent::Deliver {
+                ns: 3_120_000,
+                src: 0,
+                dst: 1,
+                len: 74,
+                latency_ns: 2_120_000,
+            },
+            NetEvent::Drop {
+                ns: 3_000_000, // intentionally out-of-order to test signed zigzag delta
+                src: 1,
+                dst: 2,
+                len: 120,
+                reason: DropReason::Partitioned,
+            },
+            NetEvent::Duplicate {
+                ns: 4_000_000,
+                src: 0,
+                dst: 1,
+                len: 64,
+                extra_delay_ns: 500_000,
+            },
+            NetEvent::Partition {
+                ns: 5_000_000,
+                blocked_pairs: 2,
+                asymmetric: true,
+            },
+            NetEvent::Heal { ns: 6_000_000 },
+            NetEvent::NodeCrash {
+                ns: 7_000_000,
+                node: 2,
+            },
+            NetEvent::NodeRestart {
+                ns: 8_000_000,
+                node: 2,
+                boot_count: 2,
+            },
+            NetEvent::LinkUpdated {
+                ns: 9_000_000,
+                from: 0,
+                to: 1,
+                latency_ns: 5_000_000,
+                jitter_ns: 250_000,
+                drop_ppm: 10_000,
+                duplicate_ppm: 1_000,
+            },
+        ];
+
+        let mut writer = NetLogWriter::new(Vec::new());
+        for ev in &events {
+            writer.record(ev).unwrap();
+        }
+        let bytes = writer.finish().unwrap();
+        assert_eq!(&bytes[..NET_LOG_MAGIC.len()], NET_LOG_MAGIC);
+
+        let decoded: Vec<NetEvent> = NetLogReader::new(std::io::Cursor::new(&bytes))
+            .unwrap()
+            .collect::<std::io::Result<_>>()
+            .unwrap();
+        assert_eq!(decoded, events);
+
+        // Truncating mid-record yields all preceding complete records cleanly.
+        let truncated = &bytes[..bytes.len() - 5];
+        let partial: Vec<NetEvent> = NetLogReader::new(std::io::Cursor::new(truncated))
+            .unwrap()
+            .collect::<std::io::Result<_>>()
+            .unwrap();
+        assert_eq!(partial, events[..events.len() - 1]);
+
+        // Bad magic is refused.
+        assert!(NetLogReader::new(std::io::Cursor::new(b"notanetlog12")).is_err());
     }
 }
